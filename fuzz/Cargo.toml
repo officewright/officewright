@@ -39,6 +39,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "package"
+path = "fuzz_targets/package.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "pdf_embed"
 path = "fuzz_targets/pdf_embed.rs"
 test = false

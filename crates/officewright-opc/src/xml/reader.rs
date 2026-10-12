@@ -30,6 +30,7 @@ pub struct Reader<'a> {
     state: State,
     max_depth: usize,
     max_attributes: usize,
+    max_mce_names: usize,
     uris: Vec<Box<str>>,
     ids: HashMap<Box<str>, NsId>,
     /// The namespaces each prefix is bound to, innermost last; `""` is the default
@@ -67,6 +68,7 @@ impl<'a> Reader<'a> {
             state: State::Start,
             max_depth: limits.max_xml_depth(),
             max_attributes: limits.max_xml_attributes(),
+            max_mce_names: limits.max_mce_names(),
             uris: Vec::new(),
             ids: HashMap::new(),
             bindings: HashMap::new(),
@@ -751,10 +753,18 @@ impl<'a> Reader<'a> {
         })
     }
 
-    fn limit(&self, limit: Limit, offset: usize) -> Error {
+    /// [`Limits::max_mce_names`] of the limits this reader was made with.
+    pub(crate) fn max_mce_names(&self) -> usize {
+        self.max_mce_names
+    }
+
+    /// An [`Error::LimitExceeded`] for one of the limits on a part's XML, at a byte
+    /// offset of this document.
+    pub(crate) fn limit(&self, limit: Limit, offset: usize) -> Error {
         let (line, column) = location(self.text, offset);
         let maximum = match limit {
             Limit::XmlDepth => self.max_depth,
+            Limit::MceNames => self.max_mce_names,
             _ => self.max_attributes,
         };
         Error::LimitExceeded {
