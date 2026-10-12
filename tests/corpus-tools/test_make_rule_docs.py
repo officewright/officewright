@@ -1,0 +1,175 @@
+"""Checks scripts/make-rule-docs.py and the documents it committed to tests/corpus/word-rules/.
+
+The documents' markup is checked against the ECMA-376 schemas by hand (see the script's
+pull request); these tests keep the committed files, the generator and SOURCES.md in step
+and check the package structure that Word needs to open a file at all.
+"""
+
+import importlib.util
+import shutil
+import sys
+import tempfile
+import unittest
+import zipfile
+from pathlib import Path
+from xml.etree import ElementTree
+
+SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
+W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+CT = "{http://schemas.openxmlformats.org/package/2006/content-types}"
+PR = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+
+
+def load(name):
+    spec = importlib.util.spec_from_file_location(name.replace("-", "_"), SCRIPTS / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+rules = load("make-rule-docs")
+
+
+def part(parts, name):
+    return ElementTree.fromstring(dict(parts)[name])
+
+
+class CommittedDocuments(unittest.TestCase):
+    def test_match_the_generator_and_sources(self):
+        self.assertEqual(rules.check(rules.documents()), [])
+
+
+class Check(unittest.TestCase):
+    """check() itself: it must notice every way the committed files can drift."""
+
+    def setUp(self):
+        self.temp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.temp)
+        self.out = self.temp / "word-rules"
+        shutil.copytree(rules.OUT_DIR, self.out)
+        self.sources = self.temp / "SOURCES.md"
+        shutil.copyfile(rules.SOURCES, self.sources)
+        for name, value in (("OUT_DIR", self.out), ("SOURCES", self.sources)):
+            original = getattr(rules, name)
+            setattr(rules, name, value)
+            self.addCleanup(setattr, rules, name, original)
+        self.docs = rules.documents()
+
+    def test_clean_copy_passes(self):
+        self.assertEqual(rules.check(self.docs), [])
+
+    def test_changed_part_is_reported(self):
+        path = self.out / "E-line-exact.docx"
+        parts = rules.stored_parts(path)
+        with zipfile.ZipFile(path, "w") as archive:
+            for name, data in parts:
+                if name == "word/document.xml":
+                    data = data.replace(b"exact 8 pt", b"exact 9 pt")
+                archive.writestr(name, data)
+        self.assertEqual(
+            rules.check(self.docs),
+            ["tests/corpus/word-rules/E-line-exact.docx differs from what this script writes"],
+        )
+
+    def test_missing_and_unknown_files_are_reported(self):
+        (self.out / "E-line-exact.docx").unlink()
+        (self.out / "stray.docx").write_bytes(b"")
+        self.assertEqual(
+            rules.check(self.docs),
+            [
+                "tests/corpus/word-rules/stray.docx is not written by this script",
+                "tests/corpus/word-rules/E-line-exact.docx is missing",
+            ],
+        )
+
+    def test_missing_sources_row_is_reported(self):
+        text = self.sources.read_text(encoding="utf-8")
+        self.sources.write_text(text.replace("| word-rules/E-line-exact.docx |", "|"), "utf-8")
+        self.assertEqual(
+            rules.check(self.docs),
+            ["tests/corpus/SOURCES.md has no row for word-rules/E-line-exact.docx"],
+        )
+
+
+class Packages(unittest.TestCase):
+    def setUp(self):
+        self.docs = rules.documents()
+
+    def test_names_are_unique(self):
+        names = [doc.name for doc in self.docs]
+        self.assertEqual(len(names), len(set(names)))
+
+    def test_bytes_do_not_depend_on_the_run(self):
+        for doc in self.docs:
+            self.assertEqual(rules.package(doc), rules.package(doc), doc.name)
+
+    def test_entries_are_stored_with_a_fixed_date(self):
+        for doc in self.docs:
+            with zipfile.ZipFile(rules.OUT_DIR / f"{doc.name}.docx") as archive:
+                for info in archive.infolist():
+                    self.assertEqual(info.compress_type, zipfile.ZIP_STORED, info.filename)
+                    self.assertEqual(info.date_time, (1980, 1, 1, 0, 0, 0), info.filename)
+
+    def test_every_part_is_typed_and_every_relationship_resolves(self):
+        for doc in self.docs:
+            parts = rules.parts(doc)
+            names = {name for name, _ in parts}
+            types = part(parts, "[Content_Types].xml")
+            overrides = {e.get("PartName") for e in types.iter(f"{CT}Override")}
+            defaults = {e.get("Extension") for e in types.iter(f"{CT}Default")}
+            for name in names - {"[Content_Types].xml"}:
+                typed = f"/{name}" in overrides or name.rsplit(".", 1)[-1] in defaults
+                self.assertTrue(typed, f"{doc.name}: {name} has no content type")
+            for override in overrides:
+                self.assertIn(override[1:], names, f"{doc.name}: {override} does not exist")
+            for rels, base in (("_rels/.rels", ""), ("word/_rels/document.xml.rels", "word/")):
+                for rel in part(parts, rels).iter(f"{PR}Relationship"):
+                    self.assertIn(base + rel.get("Target"), names, f"{doc.name}: {rels}")
+
+    def test_font_table_lists_every_font_the_document_names(self):
+        for doc in self.docs:
+            parts = rules.parts(doc)
+            table = {f.get(f"{W}name") for f in part(parts, "word/fontTable.xml")}
+            named = set()
+            for name in ("word/document.xml", "word/styles.xml"):
+                for fonts in part(parts, name).iter(f"{W}rFonts"):
+                    named.update(fonts.attrib.values())
+            self.assertEqual(table, named, doc.name)
+
+    def test_compatibility_settings_match_the_name(self):
+        for doc in self.docs:
+            compat = part(rules.parts(doc), "word/settings.xml").find(f"{W}compat")
+            modes = [
+                int(s.get(f"{W}val"))
+                for s in compat.iter(f"{W}compatSetting")
+                if s.get(f"{W}name") == "compatibilityMode"
+            ]
+            if doc.name.endswith("-12"):
+                self.assertEqual(modes, [], doc.name)
+            elif doc.name.endswith("-14"):
+                self.assertEqual(modes, [14], doc.name)
+            else:
+                self.assertEqual(modes, [15], doc.name)
+            flags = {
+                child.tag.replace(W, "") for child in compat if child.tag != f"{W}compatSetting"
+            }
+            expected = {
+                "E-autospacing-nohtml": {"doNotUseHTMLParagraphAutoSpacing"},
+                "E-tab-hanging-noindenttab": {"doNotUseIndentAsNumberingTabStop"},
+            }.get(doc.name, set())
+            self.assertEqual(flags, expected, doc.name)
+
+    def test_lists_only_use_defined_numbering(self):
+        for doc in self.docs:
+            parts = rules.parts(doc)
+            used = {n.get(f"{W}val") for n in part(parts, "word/document.xml").iter(f"{W}numId")}
+            if not used:
+                continue
+            numbering = part(parts, "word/numbering.xml")
+            defined = {n.get(f"{W}numId") for n in numbering.iter(f"{W}num")}
+            self.assertLessEqual(used, defined, doc.name)
+
+
+if __name__ == "__main__":
+    unittest.main()

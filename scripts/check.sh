@@ -123,6 +123,10 @@ shellcheck scripts/*.sh .githooks/pre-commit
 step "actionlint"
 actionlint
 
+step "corpus tools (tests/corpus-tools)"
+# The committed rule documents must be what scripts/make-rule-docs.py writes.
+"$python" -B -m unittest discover -s tests/corpus-tools -v
+
 step "C library (cargo cinstall)"
 # The same layout the release archives ship; scripts/check-capi.sh tests it as a user would.
 rm -rf target/capi
