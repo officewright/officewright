@@ -142,6 +142,7 @@ impl Package {
         };
         let types = ContentTypes::parse(&read(content_types)?, limits)?;
         let mut relationships = HashMap::new();
+        let mut relationship_count = 0;
         for part in &mut parts {
             part.content_type = types.get(&part.name).map(str::to_owned);
             let Some(source) = part.name.relationships_source() else {
@@ -153,7 +154,13 @@ impl Package {
             let (key, folder) = source
                 .as_ref()
                 .map_or(("", ""), |source| (source.key(), source.folder()));
-            let parsed = Relationships::parse(&read(item)?, limits, part.name.as_str(), folder)?;
+            let parsed = Relationships::parse(
+                &read(item)?,
+                limits,
+                part.name.as_str(),
+                folder,
+                &mut relationship_count,
+            )?;
             relationships.insert(key.to_owned(), parsed);
         }
         Ok(Self {

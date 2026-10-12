@@ -423,3 +423,56 @@ fn keeps_relationships_without_an_id_or_a_target() {
     assert_eq!(a.id(), "");
     assert_eq!(a.target_part().map(PartName::as_str), Some("/a.xml"));
 }
+
+#[test]
+fn bounds_the_relationships_of_a_package() {
+    // Every relationship costs memory beyond its XML, so a relationships part of the
+    // largest allowed size must not hold millions of them.
+    let two: String = (0..2)
+        .map(|n| format!("<Relationship Id='r{n}' Type='t' Target='{n}'/>"))
+        .collect();
+    let entries = [
+        types(""),
+        rels("_rels/.rels", &two),
+        TestEntry::stored("a.xml", b""),
+        rels("_rels/a.xml.rels", &two),
+    ];
+    let at_the_limit = Limits::new().with_max_relationships(4);
+    assert!(Package::from_bytes(zip(&entries), &at_the_limit).is_ok());
+    let over = Limits::new().with_max_relationships(3);
+    match Package::from_bytes(zip(&entries), &over) {
+        Err(
+            err @ Error::LimitExceeded {
+                limit: Limit::Relationships,
+                maximum: 3,
+                ..
+            },
+        ) => assert_eq!(
+            err.to_string(),
+            "/_rels/a.xml.rels: number of relationships in the package exceeds the limit of 3"
+        ),
+        other => panic!("expected the relationships limit, got {other:?}"),
+    }
+}
+
+#[test]
+fn bounds_the_content_types() {
+    let body = "<Default Extension='a' ContentType='a/b'/><Default Extension='b' ContentType='a/b'/>\
+                <Override PartName='/c' ContentType='a/b'/>";
+    let at_the_limit = Limits::new().with_max_content_types(3);
+    assert!(Package::from_bytes(zip(&[types(body)]), &at_the_limit).is_ok());
+    let over = Limits::new().with_max_content_types(2);
+    match Package::from_bytes(zip(&[types(body)]), &over) {
+        Err(
+            err @ Error::LimitExceeded {
+                limit: Limit::ContentTypes,
+                maximum: 2,
+                ..
+            },
+        ) => assert_eq!(
+            err.to_string(),
+            "[Content_Types].xml: number of Default and Override elements exceeds the limit of 2"
+        ),
+        other => panic!("expected the content types limit, got {other:?}"),
+    }
+}

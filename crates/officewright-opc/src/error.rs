@@ -58,6 +58,10 @@ pub enum Limit {
     PartSize,
     /// [`Limits::max_total_size`](crate::Limits::max_total_size).
     TotalSize,
+    /// [`Limits::max_relationships`](crate::Limits::max_relationships).
+    Relationships,
+    /// [`Limits::max_content_types`](crate::Limits::max_content_types).
+    ContentTypes,
     /// [`Limits::max_xml_depth`](crate::Limits::max_xml_depth).
     XmlDepth,
     /// [`Limits::max_xml_attributes`](crate::Limits::max_xml_attributes).
@@ -135,6 +139,8 @@ impl fmt::Display for Limit {
             Self::Entries => "number of zip entries",
             Self::PartSize => "uncompressed size in bytes",
             Self::TotalSize => "total uncompressed size of the parts read in bytes",
+            Self::Relationships => "number of relationships in the package",
+            Self::ContentTypes => "number of Default and Override elements",
             Self::XmlDepth => "xml element nesting depth",
             Self::XmlAttributes => "number of attributes on an xml element",
             Self::MceNames => "number of names in a markup compatibility attribute",

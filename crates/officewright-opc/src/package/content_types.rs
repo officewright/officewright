@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use super::{PartName, read_flat_xml};
-use crate::{Limits, Result};
+use crate::{Error, Limit, Limits, Result};
 
 const NAMESPACE: &str = "http://schemas.openxmlformats.org/package/2006/content-types";
 
@@ -18,6 +18,7 @@ pub(crate) struct ContentTypes {
 impl ContentTypes {
     pub(crate) fn parse(bytes: &[u8], limits: &Limits) -> Result<Self> {
         let mut types = Self::default();
+        let mut count = 0;
         read_flat_xml(
             bytes,
             limits,
@@ -25,6 +26,14 @@ impl ContentTypes {
             NAMESPACE,
             "Types",
             |reader, tag| {
+                count += 1;
+                if count > limits.max_content_types() {
+                    return Err(Error::LimitExceeded {
+                        limit: Limit::ContentTypes,
+                        maximum: limits.max_content_types() as u64,
+                        context: "[Content_Types].xml".into(),
+                    });
+                }
                 let error = |message: String| reader.error(tag.offset(), message);
                 let attribute = |name: &str| {
                     tag.attribute(None, name).ok_or_else(|| {

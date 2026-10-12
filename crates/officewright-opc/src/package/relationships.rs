@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use super::part_name::resolve_target;
 use super::{PartName, read_flat_xml};
-use crate::{Limits, Result};
+use crate::{Error, Limit, Limits, Result};
 
 const NAMESPACE: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
 
@@ -34,7 +34,15 @@ pub enum TargetMode {
 }
 
 impl Relationships {
-    pub(crate) fn parse(bytes: &[u8], limits: &Limits, part: &str, folder: &str) -> Result<Self> {
+    /// Parses a relationships part; `count` is the number of relationships the
+    /// package's other relationships parts had.
+    pub(crate) fn parse(
+        bytes: &[u8],
+        limits: &Limits,
+        part: &str,
+        folder: &str,
+        count: &mut usize,
+    ) -> Result<Self> {
         let mut items = Vec::new();
         let mut ids = HashSet::new();
         read_flat_xml(
@@ -44,6 +52,14 @@ impl Relationships {
             NAMESPACE,
             "Relationships",
             |reader, tag| {
+                *count += 1;
+                if *count > limits.max_relationships() {
+                    return Err(Error::LimitExceeded {
+                        limit: Limit::Relationships,
+                        maximum: limits.max_relationships() as u64,
+                        context: part.to_owned(),
+                    });
+                }
                 let error = |message: String| reader.error(tag.offset(), message);
                 if tag.name().local() != "Relationship" {
                     return Err(error(format!(
