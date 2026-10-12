@@ -22,6 +22,7 @@ what this project is an alternative to.
 officewright text-to-pdf notes.txt notes.pdf
 officewright text-to-pdf --page-size letter --font-size 10 notes.txt notes.pdf
 officewright text-to-pdf --font DejaVuSans.ttf notes.txt notes.pdf
+officewright text-to-pdf --font "Times New Roman" --font-dir ./fonts notes.txt notes.pdf
 ```
 
 The text file must be UTF-8. Without `--font` it is set in Helvetica, which shows Latin
@@ -29,8 +30,12 @@ text only (WinAnsiEncoding). With `--font` the font is embedded, reduced to the 
 text uses, and shows the characters it has of the Latin, Greek, Cyrillic, Armenian,
 Georgian, Han, Hiragana and Katakana scripts and Hangul syllables. Text is not shaped
 yet, so scripts that need shaping or right-to-left layout (Arabic, Hebrew, the Indic
-scripts…) are refused. Characters a font cannot show are reported with their line and
-column; restrictions in the font's license are printed as warnings.
+scripts…) are refused. `--font` also takes a family name, looked up among the system fonts and the
+folders given with `--font-dir` (`--no-system-fonts` leaves the system out); when the family
+is missing, its metric-compatible substitute (Carlito for Calibri, Liberation for Arial,
+Times New Roman and Courier New) or a common font of the same kind is used. Characters a
+font cannot show are reported with their line and column; substitutions and restrictions in
+the font's license are printed as warnings.
 
 ## C library
 

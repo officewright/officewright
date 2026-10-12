@@ -1,12 +1,12 @@
 //! The `officewright` command-line tool.
 #![forbid(unsafe_code)]
 
-use std::error::Error as _;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Arg, ArgMatches, Command, value_parser};
+use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
+use officewright_font::{FontBook, FontRequest, FontResolver};
 use officewright_pdf::{Error, Font, PageSize, Pt, StandardFont, text_to_pdf};
 
 fn cli() -> Command {
@@ -27,8 +27,13 @@ fn cli() -> Command {
                      shows the characters it has of the Latin, Greek, Cyrillic, Armenian, \
                      Georgian, Han, Hiragana and Katakana scripts and Hangul syllables, one \
                      glyph per character; scripts that need shaping or right-to-left layout \
-                     are not supported yet. What the font's license restricts is printed as a \
-                     warning.",
+                     are not supported yet.\n\n\
+                     --font takes a font file, or a family name looked up among the system \
+                     fonts and the fonts in each --font-dir, as Word looks up fonts. When the \
+                     family is not there, its metric-compatible substitute (Carlito for \
+                     Calibri, Liberation Sans for Arial, ...) or a common font of the same \
+                     kind is used. Substitutions and what the font's license restricts are \
+                     printed as warnings.",
                 )
                 .arg(
                     Arg::new("input")
@@ -52,15 +57,25 @@ fn cli() -> Command {
                         .default_value("a4")
                         .help("Page size"),
                 )
+                .arg(Arg::new("font").long("font").value_name("NAME|FILE").help(
+                    "Font to embed: a family name, or a TrueType or OpenType font file \
+                             (the first font of a collection); Helvetica if not given",
+                ))
                 .arg(
-                    Arg::new("font")
-                        .long("font")
-                        .value_name("FILE")
+                    Arg::new("font-dir")
+                        .long("font-dir")
+                        .value_name("DIR")
                         .value_parser(value_parser!(PathBuf))
-                        .help(
-                            "TrueType or OpenType font file to embed (the first font of a \
-                             collection); Helvetica if not given",
-                        ),
+                        .action(ArgAction::Append)
+                        .requires("font")
+                        .help("Folder of fonts to look up a --font family name in; repeatable"),
+                )
+                .arg(
+                    Arg::new("no-system-fonts")
+                        .long("no-system-fonts")
+                        .action(ArgAction::SetTrue)
+                        .requires("font")
+                        .help("Look up a --font family name only in the --font-dir folders"),
                 )
                 .arg(
                     Arg::new("font-size")
@@ -121,8 +136,8 @@ fn run_text_to_pdf(args: &ArgMatches) -> Result<(), String> {
             err.utf8_error().valid_up_to()
         )
     })?;
-    let font = match args.get_one::<PathBuf>("font") {
-        Some(path) => Font::from_file(path, 0).map_err(|err| describe(&err))?,
+    let font = match args.get_one::<String>("font") {
+        Some(font) => font_arg(font, args)?,
         None => Font::standard(StandardFont::Helvetica),
     };
     for note in font.embedding_notes() {
@@ -138,6 +153,62 @@ fn run_text_to_pdf(args: &ArgMatches) -> Result<(), String> {
         err => describe(&err),
     })?;
     doc.save(output).map_err(|err| describe(&err))
+}
+
+/// The font `--font` names: a file if `value` names one, or looks like a path or a font
+/// file name; otherwise a family name, resolved among the system fonts and the
+/// `--font-dir` folders, with every substitution printed as a warning.
+fn font_arg(value: &str, args: &ArgMatches) -> Result<Font, String> {
+    let dirs: Vec<&PathBuf> = args
+        .get_many::<PathBuf>("font-dir")
+        .into_iter()
+        .flatten()
+        .collect();
+    let system = !args.get_flag("no-system-fonts");
+    let path = Path::new(value);
+    let is_file_name = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            ["ttf", "otf", "ttc", "otc"]
+                .iter()
+                .any(|known| ext.eq_ignore_ascii_case(known))
+        });
+    if path.is_file() || is_file_name || value.contains(['/', '\\']) {
+        if !dirs.is_empty() || !system {
+            return Err(
+                "--font-dir and --no-system-fonts apply to a font family name, not a font file"
+                    .to_owned(),
+            );
+        }
+        return Font::from_file(path, 0).map_err(|err| describe(&err));
+    }
+    let mut book = FontBook::new();
+    if system {
+        book.add_system_fonts();
+    }
+    for dir in dirs {
+        book.add_dir(dir).map_err(|err| describe(&err))?;
+    }
+    let mut resolver = FontResolver::new(&book);
+    let font = Font::resolve(&mut resolver, &FontRequest::new(value)).map_err(|err| match err {
+        Error::FontNotFound { .. } => {
+            let place = if system {
+                "the system font folders and --font-dir"
+            } else {
+                "--font-dir"
+            };
+            match book.len() {
+                0 => format!("{err}: no fonts were found in {place}"),
+                faces => format!("{err}: none of the {faces} fonts in {place} can stand in for it"),
+            }
+        }
+        err => describe(&err),
+    })?;
+    for substitution in resolver.substitutions() {
+        eprintln!("warning: font {substitution}");
+    }
+    Ok(font)
 }
 
 /// The 1-based line and column (in characters) of a byte offset, as an editor shows
@@ -163,7 +234,7 @@ fn position(text: &str, offset: usize) -> (usize, usize) {
 }
 
 /// An error message followed by its causes, such as the operating system's I/O error.
-fn describe(err: &Error) -> String {
+fn describe(err: &dyn std::error::Error) -> String {
     let mut message = err.to_string();
     let mut source = err.source();
     while let Some(cause) = source {

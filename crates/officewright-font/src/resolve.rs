@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::ops::Deref;
+use std::sync::Arc;
 
 use crate::book::{FaceId, FaceInfo, FontBook, FontOrigin, name_key};
 
@@ -576,16 +578,62 @@ fn origin_rank(origin: FontOrigin) -> u8 {
 ///     "\"Calibri\" → no font available"
 /// );
 /// ```
+///
+/// A resolver borrows its book; [`from_shared`](Self::from_shared) makes one that
+/// shares it instead, for a resolver that must outlive the borrow.
 #[derive(Debug)]
 pub struct FontResolver<'a> {
-    book: &'a FontBook,
+    book: BookRef<'a>,
     cache: HashMap<(String, bool, bool, Option<GenericFamily>), Resolution>,
     substitutions: Vec<Resolution>,
+}
+
+/// The book of a [`FontResolver`], borrowed or shared.
+#[derive(Debug)]
+enum BookRef<'a> {
+    Borrowed(&'a FontBook),
+    Shared(Arc<FontBook>),
+}
+
+impl Deref for BookRef<'_> {
+    type Target = FontBook;
+
+    fn deref(&self) -> &FontBook {
+        match self {
+            Self::Borrowed(book) => book,
+            Self::Shared(book) => book,
+        }
+    }
+}
+
+impl FontResolver<'static> {
+    /// A resolver with an empty report that shares `book` instead of borrowing it, so
+    /// it can be kept as long as needed, for example in a handle of the C ABI.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    ///
+    /// use officewright_font::{FontBook, FontRequest, FontResolver, ResolutionKind};
+    ///
+    /// let mut book = FontBook::new();
+    /// book.add_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data"))?;
+    /// let mut resolver = FontResolver::from_shared(Arc::new(book));
+    /// let resolution = resolver.resolve(&FontRequest::new("Officewright Test"));
+    /// assert_eq!(resolution.kind(), ResolutionKind::Exact);
+    /// # Ok::<(), officewright_font::Error>(())
+    /// ```
+    pub fn from_shared(book: Arc<FontBook>) -> Self {
+        Self::with(BookRef::Shared(book))
+    }
 }
 
 impl<'a> FontResolver<'a> {
     /// A resolver with an empty report.
     pub fn new(book: &'a FontBook) -> Self {
+        Self::with(BookRef::Borrowed(book))
+    }
+
+    fn with(book: BookRef<'a>) -> Self {
         Self {
             book,
             cache: HashMap::new(),
@@ -593,10 +641,16 @@ impl<'a> FontResolver<'a> {
         }
     }
 
+    /// The book the resolver resolves against, to [`load`](FontBook::load) the faces it
+    /// chooses.
+    pub fn book(&self) -> &FontBook {
+        &self.book
+    }
+
     /// Resolves a request like [`FontBook::resolve`]. A request that leads to a
     /// substitution is added to the report the first time it is resolved.
     pub fn resolve(&mut self, request: &FontRequest) -> &Resolution {
-        let book = self.book;
+        let book = &*self.book;
         let substitutions = &mut self.substitutions;
         self.cache.entry(request.key()).or_insert_with(|| {
             let resolution = book.resolve(request);
@@ -906,6 +960,26 @@ mod tests {
             book.resolve(&FontRequest::new("")).kind(),
             ResolutionKind::Missing
         );
+    }
+
+    #[test]
+    fn a_shared_resolver_answers_like_a_borrowing_one() {
+        let book = book(&[
+            system(TestFont::new("Liberation Sans")),
+            system(TestFont::new("Test Sans")),
+        ]);
+        let requests = [
+            FontRequest::new("Arial"),
+            FontRequest::new("Test Sans").bold(true),
+            FontRequest::new("Calibri"),
+        ];
+        let mut borrowing = FontResolver::new(&book);
+        let mut shared = FontResolver::from_shared(Arc::new(book.clone()));
+        for request in &requests {
+            assert_eq!(borrowing.resolve(request), shared.resolve(request));
+        }
+        assert_eq!(borrowing.substitutions(), shared.substitutions());
+        assert_eq!(shared.book().len(), 2);
     }
 
     #[test]

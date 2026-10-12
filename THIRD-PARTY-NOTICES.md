@@ -30,8 +30,9 @@ Adobe's terms, from `MustRead.html`:
 ## Test fonts
 
 Fonts in `tests/fonts/`, at the repository root and so outside every crate. They are
-read by `crates/officewright-font/tests/third_party_fonts.rs` and
-`crates/officewright-pdf/tests/embedded_fonts.rs`, which their crates exclude from their
+read by `crates/officewright-font/tests/third_party_fonts.rs`,
+`crates/officewright-pdf/tests/embedded_fonts.rs` and
+`crates/officewright-cli/tests/fonts.rs`, which their crates exclude from their
 packages, by the C ABI tests in `tests/c` and `tests/ffi-python` and the PDF output
 checks in `tests/pdf-output`, and they seed the fuzz targets in `fuzz/`. The tests embed
 them, reduced to some of their glyphs, in PDF files they write to temporary directories;

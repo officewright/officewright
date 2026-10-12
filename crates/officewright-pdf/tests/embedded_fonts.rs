@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use officewright_font::FontFace;
+use officewright_font::{FontBook, FontFace, FontRequest, FontResolver, ResolutionKind};
 use officewright_pdf::{
     Document, EmbeddingNote, Error, Font, PageSize, Pt, StandardFont, text_to_pdf,
 };
@@ -511,5 +511,94 @@ fn from_file_reads_the_same_font_as_from_bytes() -> TestResult {
     assert_eq!(from_file, Font::from_bytes(liberation_sans()?, 0)?);
     let face = FontFace::from_bytes(liberation_sans()?, 0)?;
     assert_eq!(from_file, Font::from_face(face)?);
+    Ok(())
+}
+
+/// A book of the fonts in tests/fonts, without the system fonts, so the results are the
+/// same on every machine.
+fn test_fonts() -> TestResult<FontBook> {
+    let mut book = FontBook::new();
+    book.add_dir(repository().join("tests/fonts"))?;
+    Ok(book)
+}
+
+#[test]
+fn resolves_families_and_reports_the_substitutions() -> TestResult {
+    let book = test_fonts()?;
+    let mut resolver = FontResolver::new(&book);
+    let liberation = Font::resolve(&mut resolver, &FontRequest::new("Liberation Sans"))?;
+    assert_eq!(liberation.name(), "LiberationSans");
+    // Windows compares family names without regard to case, and so does Word.
+    let noto = Font::resolve(&mut resolver, &FontRequest::new("noto sans"))?;
+    assert_eq!(noto.name(), "NotoSans-Regular");
+    assert!(resolver.substitutions().is_empty());
+
+    // Arial's metric-compatible substitute is the same font as Liberation Sans.
+    assert_eq!(
+        Font::resolve(&mut resolver, &FontRequest::new("Arial"))?,
+        liberation
+    );
+    let bold = Font::resolve(
+        &mut resolver,
+        &FontRequest::new("Liberation Sans").bold(true),
+    )?;
+    assert_eq!(bold, liberation);
+    let calibri = Font::resolve(&mut resolver, &FontRequest::new("Calibri"))?;
+    let report: Vec<String> = resolver
+        .substitutions()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        report.get(..2),
+        Some(
+            &[
+                "\"Arial\" → \"Liberation Sans\" (metric-compatible substitute)".to_owned(),
+                "\"Liberation Sans\" bold → \"Liberation Sans\" with synthetic bold".to_owned(),
+            ][..]
+        )
+    );
+    // Calibri's substitute, Carlito, is not in the book, so a common sans-serif font
+    // stands in, and the report says so.
+    let fallback = resolver.substitutions().get(2).ok_or("no Calibri")?;
+    assert_eq!(fallback.kind(), ResolutionKind::Fallback);
+    assert_eq!(fallback.uninstalled_substitute(), Some("Carlito"));
+    assert!([liberation, noto].contains(&calibri));
+    Ok(())
+}
+
+#[test]
+fn reports_a_family_nothing_stands_in_for() -> TestResult {
+    let book = FontBook::new();
+    let mut resolver = FontResolver::new(&book);
+    let err = Font::resolve(&mut resolver, &FontRequest::new("Calibri")).unwrap_err();
+    assert!(matches!(err, Error::FontNotFound { .. }), "{err:?}");
+    assert_eq!(err.to_string(), "no font found for family \"Calibri\"");
+    assert!(matches!(
+        officewright_core::Error::from(err),
+        officewright_core::Error::Unsupported(_)
+    ));
+    let report = resolver.substitutions().first().ok_or("no report")?;
+    assert_eq!(report.to_string(), "\"Calibri\" → no font available");
+    Ok(())
+}
+
+#[test]
+fn reports_a_chosen_font_file_that_went_away() -> TestResult {
+    let dir = std::env::temp_dir().join(format!("officewright-pdf-gone-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("minimal.ttf");
+    std::fs::write(&path, minimal()?)?;
+    let mut book = FontBook::new();
+    book.add_dir(&dir)?;
+    std::fs::remove_file(&path)?;
+    let mut resolver = FontResolver::new(&book);
+    let err = Font::resolve(&mut resolver, &FontRequest::new("Officewright Test")).unwrap_err();
+    std::fs::remove_dir_all(&dir)?;
+    assert!(matches!(err, Error::Font { path: Some(_), .. }), "{err:?}");
+    assert_eq!(
+        err.to_string(),
+        format!("cannot use the font in {}", path.display())
+    );
     Ok(())
 }

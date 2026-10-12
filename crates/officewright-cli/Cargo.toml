@@ -7,6 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 license-file.workspace = true
 repository.workspace = true
+# The test that reads the test fonts at the repository root, which keep their own
+# licenses (see THIRD-PARTY-NOTICES.md), stays in the repository.
+exclude = ["tests/fonts.rs"]
 
 [[bin]]
 name = "officewright"
@@ -23,6 +26,7 @@ clap = { version = "4.6.7", default-features = false, features = [
   "usage",
   "error-context",
 ] }
+officewright-font.workspace = true
 officewright-pdf.workspace = true
 
 [lints]

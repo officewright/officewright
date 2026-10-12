@@ -32,6 +32,7 @@ filename = "officewright"
 
 [dependencies]
 officewright-core.workspace = true
+officewright-font.workspace = true
 officewright-pdf.workspace = true
 
 [lints]

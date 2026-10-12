@@ -17,6 +17,16 @@ EXPECTED_ABI_VERSION = 1
 OK, NULL_ARGUMENT, INVALID_UTF8, INVALID_ARGUMENT, IO, UNSUPPORTED, PANIC = range(7)
 OW_STANDARD_FONT_HELVETICA = 0
 OW_FONT_NOTE_OTHER, OW_FONT_NOTE_PREVIEW_AND_PRINT, OW_FONT_NOTE_EDITABLE, OW_FONT_NOTE_WHOLE_FONT = range(4)
+(
+    OW_RESOLUTION_OTHER,
+    OW_RESOLUTION_EXACT,
+    OW_RESOLUTION_ALIAS,
+    OW_RESOLUTION_OTHER_NAME,
+    OW_RESOLUTION_VARIABLE_INSTANCE,
+    OW_RESOLUTION_METRIC_COMPATIBLE,
+    OW_RESOLUTION_FALLBACK,
+    OW_RESOLUTION_MISSING,
+) = range(8)
 
 # The OFL test fonts at the repository root.
 FONTS = Path(__file__).resolve().parent.parent / "fonts"
@@ -49,6 +59,20 @@ declare("ow_pdf_font_note_count", c_int, c_void_p, POINTER(c_size_t))
 declare("ow_pdf_font_note", c_int, c_void_p, c_size_t, POINTER(ctypes.c_int32), POINTER(c_char_p))
 declare("ow_pdf_font_text_width", c_int, c_void_p, c_char_p, c_double, POINTER(c_double))
 declare("ow_pdf_font_free", None, c_void_p)
+declare("ow_font_book_new", c_int, POINTER(c_void_p))
+declare("ow_font_book_add_system_fonts", c_int, c_void_p, POINTER(c_size_t))
+declare("ow_font_book_add_dir", c_int, c_void_p, c_char_p, POINTER(c_size_t))
+declare("ow_font_book_add_file", c_int, c_void_p, c_char_p, POINTER(c_size_t))
+declare("ow_font_book_add_bytes", c_int, c_void_p, c_char_p, c_size_t, POINTER(c_size_t))
+declare("ow_font_book_face_count", c_int, c_void_p, POINTER(c_size_t))
+declare("ow_font_book_skipped_count", c_int, c_void_p, POINTER(c_size_t))
+declare("ow_font_book_skipped", c_int, c_void_p, c_size_t, POINTER(c_char_p))
+declare("ow_font_book_free", None, c_void_p)
+declare("ow_font_resolver_new", c_int, c_void_p, POINTER(c_void_p))
+declare("ow_font_resolver_substitution_count", c_int, c_void_p, POINTER(c_size_t))
+declare("ow_font_resolver_substitution", c_int, c_void_p, c_size_t, POINTER(ctypes.c_int32), POINTER(c_char_p))
+declare("ow_font_resolver_free", None, c_void_p)
+declare("ow_pdf_font_resolve", c_int, c_void_p, c_char_p, ctypes.c_int32, ctypes.c_int32, POINTER(c_void_p))
 
 
 def with_fs_type(font, fs_type):
@@ -255,6 +279,99 @@ class AbiTest(unittest.TestCase):
         self.assertEqual(last_error(), "path is null")
         self.check(lib.ow_pdf_font_open_bytes(None, 0, 0, byref(font)), NULL_ARGUMENT)
         self.assertEqual(last_error(), "data is null")
+
+
+    def new_book(self):
+        book = c_void_p()
+        self.check(lib.ow_font_book_new(byref(book)))
+        self.addCleanup(lib.ow_font_book_free, book)
+        return book
+
+    def resolver(self, book):
+        resolver = c_void_p()
+        self.check(lib.ow_font_resolver_new(book, byref(resolver)))
+        self.addCleanup(lib.ow_font_resolver_free, resolver)
+        return resolver
+
+    def resolve(self, resolver, family, bold=0, expected=OK):
+        font = c_void_p(1)
+        self.check(lib.ow_pdf_font_resolve(resolver, family.encode(), bold, 0, byref(font)), expected)
+        if expected == OK:
+            self.addCleanup(lib.ow_pdf_font_free, font)
+        else:
+            self.assertFalse(font)
+        return font
+
+    def substitutions(self, resolver):
+        count = c_size_t(99)
+        self.check(lib.ow_font_resolver_substitution_count(resolver, byref(count)))
+        report = []
+        for index in range(count.value):
+            kind = ctypes.c_int32(-1)
+            message = c_char_p()
+            self.check(lib.ow_font_resolver_substitution(resolver, index, byref(kind), byref(message)))
+            report.append((kind.value, message.value.decode("utf-8")))
+        return report
+
+    def test_chooses_fonts_by_family_from_the_test_fonts(self):
+        # Only tests/fonts, not the system fonts, so the result is the same everywhere.
+        book = self.new_book()
+        added = c_size_t()
+        self.check(lib.ow_font_book_add_dir(book, str(FONTS).encode(), byref(added)))
+        self.assertEqual(added.value, 2)
+        resolver = self.resolver(book)
+
+        self.resolve(resolver, "Liberation Sans")
+        self.resolve(resolver, "noto sans")
+        self.assertEqual(self.substitutions(resolver), [])
+        arial = self.resolve(resolver, "Arial")
+        self.resolve(resolver, "Liberation Sans", bold=1)
+        self.assertEqual(
+            self.substitutions(resolver),
+            [
+                (OW_RESOLUTION_METRIC_COMPATIBLE, '"Arial" → "Liberation Sans" (metric-compatible substitute)'),
+                (OW_RESOLUTION_EXACT, '"Liberation Sans" bold → "Liberation Sans" with synthetic bold'),
+            ],
+        )
+        doc = c_void_p()
+        self.check(lib.ow_pdf_document_from_text("Привет".encode(), 595.0, 842.0, arial, 12.0, byref(doc)))
+        self.addCleanup(lib.ow_pdf_document_free, doc)
+        self.assertIn(b"+LiberationSans", self.save_bytes(doc))
+
+    def test_reports_a_family_nothing_stands_in_for(self):
+        resolver = self.resolver(self.new_book())
+        self.resolve(resolver, "Calibri", expected=UNSUPPORTED)
+        self.assertEqual(last_error(), 'no font found for family "Calibri"')
+        self.assertEqual(self.substitutions(resolver), [(OW_RESOLUTION_MISSING, '"Calibri" → no font available')])
+        self.resolve(resolver, "Calibri", bold=2, expected=INVALID_ARGUMENT)
+        self.assertEqual(last_error(), "bold is 2, not 0 or 1")
+
+    def test_adds_the_system_fonts_whatever_the_machine_has(self):
+        added = c_size_t(0)
+        self.check(lib.ow_font_book_add_system_fonts(self.new_book(), byref(added)))
+
+    def test_lists_what_a_font_book_skipped(self):
+        book = self.new_book()
+        added = c_size_t(7)
+        with tempfile.TemporaryDirectory() as directory:
+            broken = Path(directory) / "broken.ttf"
+            broken.write_bytes(b"not a font")
+            self.check(lib.ow_font_book_add_dir(book, directory.encode(), byref(added)))
+            self.assertEqual(added.value, 0)
+            count = c_size_t()
+            self.check(lib.ow_font_book_skipped_count(book, byref(count)))
+            self.assertEqual(count.value, 1)
+            message = c_char_p()
+            self.check(lib.ow_font_book_skipped(book, 0, byref(message)))
+            self.assertTrue(message.value.decode("utf-8").startswith(f"{broken}: data is not a TrueType"))
+            self.check(lib.ow_font_book_add_dir(book, f"{directory}/missing".encode(), byref(added)), IO)
+            self.assertEqual(added.value, 0)
+            data = LIBERATION_SANS.read_bytes()
+            self.check(lib.ow_font_book_add_bytes(book, data, len(data), byref(added)))
+            self.assertEqual(added.value, 1)
+            faces = c_size_t()
+            self.check(lib.ow_font_book_face_count(book, byref(faces)))
+            self.assertEqual(faces.value, 1)
 
 
 if __name__ == "__main__":

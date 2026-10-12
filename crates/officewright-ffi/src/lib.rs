@@ -22,7 +22,10 @@ use std::ffi::{CStr, CString, c_char};
 use std::panic::{self, AssertUnwindSafe};
 use std::ptr;
 
+use std::sync::Arc;
+
 use officewright_core::Error;
+use officewright_font::{FontBook, FontOrigin, FontRequest, FontResolver, ResolutionKind};
 use officewright_pdf::{Document, EmbeddingNote, Font, PageSize, Pt, StandardFont};
 
 /// Version of the C ABI described by `officewright.h`, bumped on every breaking
@@ -111,6 +114,74 @@ pub const OW_FONT_NOTE_WHOLE_FONT: i32 = 3;
 /// An embedding note: the font is a variable font; only its default instance is
 /// embedded. Later versions add notes with new values; existing values never change.
 pub const OW_FONT_NOTE_DEFAULT_INSTANCE: i32 = 4;
+
+/// The fonts that can be chosen by family name: fonts the caller adds and the fonts
+/// installed on the system.
+///
+/// Created by `ow_font_book_new` and released by `ow_font_book_free`. Adding fonts reads
+/// only their names and style; a font file is read again when a font is chosen from it.
+/// Used by one thread at a time; may be moved between threads.
+pub struct OwFontBook {
+    book: FontBook,
+    /// The messages of the skipped fonts, for `ow_font_book_skipped`.
+    skipped: Vec<CString>,
+}
+
+impl OwFontBook {
+    /// Renews the messages after the book changed.
+    fn refresh(&mut self) {
+        self.skipped = self
+            .book
+            .skipped()
+            .iter()
+            .map(|skipped| c_string(skipped.to_string()))
+            .collect();
+    }
+}
+
+/// Chooses fonts by family name from a font book, the way Word names fonts, and keeps
+/// the report of substitutions.
+///
+/// Created by `ow_font_resolver_new` and released by `ow_font_resolver_free`. Used by
+/// one thread at a time; may be moved between threads.
+pub struct OwFontResolver {
+    resolver: FontResolver<'static>,
+    /// The kinds and messages of the substitutions, for `ow_font_resolver_substitution`.
+    substitutions: Vec<(i32, CString)>,
+}
+
+/// The kind of a substitution, from `ow_font_resolver_substitution`, that this version
+/// of the header does not know; its message says what it is. Also the kind a failed
+/// `ow_font_resolver_substitution` returns. Later versions add kinds with new values;
+/// existing values never change.
+pub const OW_RESOLUTION_OTHER: i32 = 0;
+
+/// A face has the requested family name; the substitution is a synthetic style, a bold
+/// or italic the face lacks.
+pub const OW_RESOLUTION_EXACT: i32 = 1;
+
+/// Windows maps the requested name to another family, such as "Times New Roman CYR" to
+/// Times New Roman; reported only with a synthetic style.
+pub const OW_RESOLUTION_ALIAS: i32 = 2;
+
+/// No face has the requested family name, but one has it as its typographic family,
+/// full name or PostScript name.
+pub const OW_RESOLUTION_OTHER_NAME: i32 = 3;
+
+/// The requested name is a named instance of a variable font; its default instance is
+/// used.
+pub const OW_RESOLUTION_VARIABLE_INSTANCE: i32 = 4;
+
+/// A font with the same advance widths replaces the requested family, such as Carlito
+/// for Calibri, so text lays out the same.
+pub const OW_RESOLUTION_METRIC_COMPATIBLE: i32 = 5;
+
+/// A common font of the same kind replaces the requested family, and text lays out
+/// differently.
+pub const OW_RESOLUTION_FALLBACK: i32 = 6;
+
+/// No font could be found at all.
+pub const OW_RESOLUTION_MISSING: i32 = 7;
 
 /// Returns the C ABI version of the loaded library.
 ///
@@ -582,6 +653,416 @@ pub unsafe extern "C" fn ow_pdf_font_free(font: *mut OwPdfFont) {
     }));
 }
 
+/// Creates an empty font book. On success `*out_book` is a new handle for
+/// `ow_font_book_free`.
+///
+/// # Safety
+///
+/// `out_book` must be NULL or valid for writing a pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_font_book_new(out_book: *mut *mut OwFontBook) -> OwStatus {
+    guard(|| {
+        // SAFETY: the caller passes NULL or a pointer valid for writes.
+        unsafe { put(out_book, "out_book", ptr::null_mut()) }?;
+        let book = OwFontBook {
+            book: FontBook::new(),
+            skipped: Vec::new(),
+        };
+        let book = Box::into_raw(Box::new(book));
+        // SAFETY: as above.
+        unsafe { put(out_book, "out_book", book) }
+    })
+}
+
+/// Adds the fonts installed on the system and returns in `*out_added` the number of
+/// font faces added. Called again, it adds the fonts installed since. Folders that do
+/// not exist are left out; files that are not fonts are skipped and listed by
+/// `ow_font_book_skipped`.
+///
+/// # Safety
+///
+/// `book` must be NULL or a live handle not used by another thread during the call;
+/// `out_added` must be NULL or valid for writing a `size_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_font_book_add_system_fonts(
+    book: *mut OwFontBook,
+    out_added: *mut usize,
+) -> OwStatus {
+    guard(|| {
+        // SAFETY: the caller passes NULL or a pointer valid for writes.
+        unsafe { put(out_added, "out_added", 0) }?;
+        // SAFETY: the caller passes NULL or a live handle it does not share.
+        let book = unsafe { book_mut(book) }?;
+        let added = book.book.add_system_fonts();
+        book.refresh();
+        // SAFETY: as above.
+        unsafe { put(out_added, "out_added", added) }
+    })
+}
+
+/// Adds the fonts in the folder at `path` (UTF-8) and its subfolders, and returns in
+/// `*out_added` the number of font faces added. Files that are not fonts are skipped and
+/// listed by `ow_font_book_skipped`.
+///
+/// Fails with `OW_STATUS_IO` if the folder cannot be read.
+///
+/// # Safety
+///
+/// `book` must be NULL or a live handle not used by another thread during the call;
+/// `path` must be NULL or a NUL-terminated string; `out_added` must be NULL or valid for
+/// writing a `size_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_font_book_add_dir(
+    book: *mut OwFontBook,
+    path: *const c_char,
+    out_added: *mut usize,
+) -> OwStatus {
+    guard(|| {
+        // SAFETY: the caller passes NULL or a pointer valid for writes.
+        unsafe { put(out_added, "out_added", 0) }?;
+        // SAFETY: the caller passes NULL or a live handle it does not share.
+        let book = unsafe { book_mut(book) }?;
+        // SAFETY: the caller passes NULL or a NUL-terminated string.
+        let path = unsafe { str_arg(path, "path") }?;
+        let added = book.book.add_dir(path);
+        book.refresh();
+        // SAFETY: as above.
+        unsafe { put(out_added, "out_added", added?) }
+    })
+}
+
+/// Adds the font faces of the font file or collection at `path` (UTF-8), and returns in
+/// `*out_added` the number of faces added.
+///
+/// Fails with `OW_STATUS_IO` if the file cannot be read and `OW_STATUS_INVALID_ARGUMENT`
+/// if it is not a font or every face in it is damaged.
+///
+/// # Safety
+///
+/// `book` must be NULL or a live handle not used by another thread during the call;
+/// `path` must be NULL or a NUL-terminated string; `out_added` must be NULL or valid for
+/// writing a `size_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_font_book_add_file(
+    book: *mut OwFontBook,
+    path: *const c_char,
+    out_added: *mut usize,
+) -> OwStatus {
+    guard(|| {
+        // SAFETY: the caller passes NULL or a pointer valid for writes.
+        unsafe { put(out_added, "out_added", 0) }?;
+        // SAFETY: the caller passes NULL or a live handle it does not share.
+        let book = unsafe { book_mut(book) }?;
+        // SAFETY: the caller passes NULL or a NUL-terminated string.
+        let path = unsafe { str_arg(path, "path") }?;
+        let added = book.book.add_file(path);
+        book.refresh();
+        // SAFETY: as above.
+        unsafe { put(out_added, "out_added", added?) }
+    })
+}
+
+/// Adds the font faces of the font or font collection in the `len` bytes at `data`,
+/// and returns in `*out_added` the number of faces added. The bytes are copied; the
+/// caller keeps its buffer.
+///
+/// Fails with `OW_STATUS_INVALID_ARGUMENT` if the data is not a font or every face in
+/// it is damaged.
+///
+/// # Safety
+///
+/// `book` must be NULL or a live handle not used by another thread during the call;
+/// `data` must be NULL or valid for reading `len` bytes; `out_added` must be NULL or
+/// valid for writing a `size_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_font_book_add_bytes(
+    book: *mut OwFontBook,
+    data: *const u8,
+    len: usize,
+    out_added: *mut usize,
+) -> OwStatus {
+    guard(|| {
+        // SAFETY: the caller passes NULL or a pointer valid for writes.
+        unsafe { put(out_added, "out_added", 0) }?;
+        // SAFETY: the caller passes NULL or a live handle it does not share.
+        let book = unsafe { book_mut(book) }?;
+        if data.is_null() {
+            return Err(Failure::null("data"));
+        }
+        // SAFETY: not NULL, and the caller guarantees `len` readable bytes.
+        let bytes = unsafe { std::slice::from_raw_parts(data, len) };
+        let added = book.book.add_bytes(bytes, FontOrigin::User);
+        book.refresh();
+        // SAFETY: as above.
+        unsafe { put(out_added, "out_added", added?) }
+    })
+}
+
+/// Returns in `*out_count` the number of font faces in the book.
+///
+/// # Safety
+///
+/// `book` must be NULL or a live handle not modified by another thread during the call;
+/// `out_count` must be NULL or valid for writing a `size_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_font_book_face_count(
+    book: *const OwFontBook,
+    out_count: *mut usize,
+) -> OwStatus {
+    guard(|| {
+        // SAFETY: the caller passes NULL or a pointer valid for writes.
+        unsafe { put(out_count, "out_count", 0) }?;
+        // SAFETY: the caller passes NULL or a live handle.
+        let book = unsafe { book_ref(book) }?;
+        // SAFETY: as above.
+        unsafe { put(out_count, "out_count", book.book.len()) }
+    })
+}
+
+/// Returns in `*out_count` the number of folders, files and font faces the book could
+/// not read: why a font that should be there was not found.
+///
+/// # Safety
+///
+/// `book` must be NULL or a live handle not modified by another thread during the call;
+/// `out_count` must be NULL or valid for writing a `size_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_font_book_skipped_count(
+    book: *const OwFontBook,
+    out_count: *mut usize,
+) -> OwStatus {
+    guard(|| {
+        // SAFETY: the caller passes NULL or a pointer valid for writes.
+        unsafe { put(out_count, "out_count", 0) }?;
+        // SAFETY: the caller passes NULL or a live handle.
+        let book = unsafe { book_ref(book) }?;
+        // SAFETY: as above.
+        unsafe { put(out_count, "out_count", book.skipped.len()) }
+    })
+}
+
+/// Returns in `*out_message` what skipped entry `index` (counting from 0) is and why it
+/// was skipped, such as `fonts/broken.ttf: data is not a TrueType or OpenType font or
+/// font collection: the file is too short`. The string is UTF-8 and owned by the book:
+/// it stays valid until the book is changed by an `ow_font_book_add_*` call or freed.
+///
+/// Fails with `OW_STATUS_INVALID_ARGUMENT` if `index` is not below the count
+/// `ow_font_book_skipped_count` gives.
+///
+/// # Safety
+///
+/// `book` must be NULL or a live handle not modified by another thread during the call;
+/// `out_message` must be NULL or valid for writing a pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_font_book_skipped(
+    book: *const OwFontBook,
+    index: usize,
+    out_message: *mut *const c_char,
+) -> OwStatus {
+    guard(|| {
+        // SAFETY: the caller passes NULL or a pointer valid for writes.
+        unsafe { put(out_message, "out_message", ptr::null()) }?;
+        // SAFETY: the caller passes NULL or a live handle.
+        let book = unsafe { book_ref(book) }?;
+        let message = book.skipped.get(index).ok_or_else(|| Failure {
+            status: OwStatus::InvalidArgument,
+            message: format!(
+                "skipped index {index} is out of range for a font book with {} skipped",
+                book.skipped.len()
+            ),
+        })?;
+        // SAFETY: as above. The message lives until the book changes.
+        unsafe { put(out_message, "out_message", message.as_ptr()) }
+    })
+}
+
+/// Releases a font book. Does nothing if `book` is NULL. Resolvers made from it keep
+/// their own copy, so they may outlive it.
+///
+/// # Safety
+///
+/// `book` must be NULL or a live handle, not used afterwards.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_font_book_free(book: *mut OwFontBook) {
+    let _ = panic::catch_unwind(AssertUnwindSafe(|| {
+        if !book.is_null() {
+            // SAFETY: the handle came from `Box::into_raw` and is released only once.
+            drop(unsafe { Box::from_raw(book) });
+        }
+    }));
+}
+
+/// Creates a resolver that chooses fonts from the fonts `book` has now, with an empty
+/// substitution report. The resolver keeps its own copy of the book's index: fonts added
+/// to the book later are not seen by it, and the book may be freed first. On success
+/// `*out_resolver` is a new handle for `ow_font_resolver_free`.
+///
+/// # Safety
+///
+/// `book` must be NULL or a live handle not modified by another thread during the call;
+/// `out_resolver` must be NULL or valid for writing a pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_font_resolver_new(
+    book: *const OwFontBook,
+    out_resolver: *mut *mut OwFontResolver,
+) -> OwStatus {
+    guard(|| {
+        // SAFETY: the caller passes NULL or a pointer valid for writes.
+        unsafe { put(out_resolver, "out_resolver", ptr::null_mut()) }?;
+        // SAFETY: the caller passes NULL or a live handle.
+        let book = unsafe { book_ref(book) }?;
+        let resolver = OwFontResolver {
+            resolver: FontResolver::from_shared(Arc::new(book.book.clone())),
+            substitutions: Vec::new(),
+        };
+        let resolver = Box::into_raw(Box::new(resolver));
+        // SAFETY: as above.
+        unsafe { put(out_resolver, "out_resolver", resolver) }
+    })
+}
+
+/// Chooses a font by family name, the way Word names fonts (without regard to case),
+/// and returns it in `*out_font`, a new handle for `ow_pdf_font_free`, to embed like a
+/// font from `ow_pdf_font_open_path`.
+///
+/// `bold` and `italic` are 0 or 1. When the family is not in the book, the resolver
+/// takes its metric-compatible substitute (Carlito for Calibri, Caladea for Cambria,
+/// Liberation for Arial, Times New Roman and Courier New) or a common font of the same
+/// kind; a style the face lacks is synthetic. Every such substitution is added to the
+/// resolver's report (`ow_font_resolver_substitution`); synthetic styles are reported but
+/// not drawn yet.
+///
+/// Fails with `OW_STATUS_UNSUPPORTED` if no font could be found or the chosen font's
+/// license forbids embedding, `OW_STATUS_INVALID_ARGUMENT` if `bold` or `italic` is not
+/// 0 or 1 or the chosen font is damaged, and `OW_STATUS_IO` if its file cannot be read
+/// any more.
+///
+/// # Safety
+///
+/// `resolver` must be NULL or a live handle not used by another thread during the call;
+/// `family` must be NULL or a NUL-terminated string; `out_font` must be NULL or valid for
+/// writing a pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_pdf_font_resolve(
+    resolver: *mut OwFontResolver,
+    family: *const c_char,
+    bold: i32,
+    italic: i32,
+    out_font: *mut *mut OwPdfFont,
+) -> OwStatus {
+    guard(|| {
+        // SAFETY: the caller passes NULL or a pointer valid for writes.
+        unsafe { put(out_font, "out_font", ptr::null_mut()) }?;
+        // SAFETY: the caller passes NULL or a live handle it does not share.
+        let resolver = unsafe { resolver.as_mut() }.ok_or_else(|| Failure::null("resolver"))?;
+        // SAFETY: the caller passes NULL or a NUL-terminated string.
+        let family = unsafe { str_arg(family, "family") }?;
+        let request = FontRequest::new(family)
+            .bold(flag(bold, "bold")?)
+            .italic(flag(italic, "italic")?);
+        let font = Font::resolve(&mut resolver.resolver, &request);
+        // The report grows even when the font cannot be used.
+        let known = resolver.substitutions.len();
+        for substitution in resolver.resolver.substitutions().iter().skip(known) {
+            let kind = match substitution.kind() {
+                ResolutionKind::Exact => OW_RESOLUTION_EXACT,
+                ResolutionKind::Alias => OW_RESOLUTION_ALIAS,
+                ResolutionKind::OtherName => OW_RESOLUTION_OTHER_NAME,
+                ResolutionKind::VariableInstance => OW_RESOLUTION_VARIABLE_INSTANCE,
+                ResolutionKind::MetricCompatible => OW_RESOLUTION_METRIC_COMPATIBLE,
+                ResolutionKind::Fallback => OW_RESOLUTION_FALLBACK,
+                ResolutionKind::Missing => OW_RESOLUTION_MISSING,
+                _ => OW_RESOLUTION_OTHER,
+            };
+            resolver
+                .substitutions
+                .push((kind, c_string(substitution.to_string())));
+        }
+        let font = Box::into_raw(Box::new(OwPdfFont::new(font?)));
+        // SAFETY: as above.
+        unsafe { put(out_font, "out_font", font) }
+    })
+}
+
+/// Returns in `*out_count` the number of substitutions the resolver has reported: each
+/// family it could not give as requested, with what it took instead, each outcome once.
+///
+/// # Safety
+///
+/// `resolver` must be NULL or a live handle not modified by another thread during the
+/// call; `out_count` must be NULL or valid for writing a `size_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_font_resolver_substitution_count(
+    resolver: *const OwFontResolver,
+    out_count: *mut usize,
+) -> OwStatus {
+    guard(|| {
+        // SAFETY: the caller passes NULL or a pointer valid for writes.
+        unsafe { put(out_count, "out_count", 0) }?;
+        // SAFETY: the caller passes NULL or a live handle.
+        let resolver = unsafe { resolver.as_ref() }.ok_or_else(|| Failure::null("resolver"))?;
+        // SAFETY: as above.
+        unsafe { put(out_count, "out_count", resolver.substitutions.len()) }
+    })
+}
+
+/// Returns substitution `index` (counting from 0, in the order the families were first
+/// resolved): its kind, an `OW_RESOLUTION_*` value, in `*out_kind`, and a line for a
+/// report in `*out_message`, such as `"Calibri" → "Carlito" (metric-compatible
+/// substitute)`. The string is UTF-8 and owned by the resolver: it stays valid until the
+/// resolver is freed.
+///
+/// Fails with `OW_STATUS_INVALID_ARGUMENT` if `index` is not below the count
+/// `ow_font_resolver_substitution_count` gives.
+///
+/// # Safety
+///
+/// `resolver` must be NULL or a live handle not modified by another thread during the
+/// call; `out_kind` and `out_message` must each be NULL or valid for writing.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_font_resolver_substitution(
+    resolver: *const OwFontResolver,
+    index: usize,
+    out_kind: *mut i32,
+    out_message: *mut *const c_char,
+) -> OwStatus {
+    guard(|| {
+        // SAFETY: the caller passes NULL or pointers valid for writes.
+        unsafe { put(out_kind, "out_kind", OW_RESOLUTION_OTHER) }?;
+        // SAFETY: as above.
+        unsafe { put(out_message, "out_message", ptr::null()) }?;
+        // SAFETY: the caller passes NULL or a live handle.
+        let resolver = unsafe { resolver.as_ref() }.ok_or_else(|| Failure::null("resolver"))?;
+        let (kind, message) = resolver.substitutions.get(index).ok_or_else(|| Failure {
+            status: OwStatus::InvalidArgument,
+            message: format!(
+                "substitution index {index} is out of range for a resolver with {} \
+                 substitutions",
+                resolver.substitutions.len()
+            ),
+        })?;
+        // SAFETY: both pointers were checked above.
+        unsafe { put(out_kind, "out_kind", *kind) }?;
+        // SAFETY: as above. The message lives as long as the resolver.
+        unsafe { put(out_message, "out_message", message.as_ptr()) }
+    })
+}
+
+/// Releases a resolver. Does nothing if `resolver` is NULL. Fonts it chose stay valid.
+///
+/// # Safety
+///
+/// `resolver` must be NULL or a live handle, not used afterwards.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_font_resolver_free(resolver: *mut OwFontResolver) {
+    let _ = panic::catch_unwind(AssertUnwindSafe(|| {
+        if !resolver.is_null() {
+            // SAFETY: the handle came from `Box::into_raw` and is released only once.
+            drop(unsafe { Box::from_raw(resolver) });
+        }
+    }));
+}
+
 thread_local! {
     /// The message behind `ow_last_error_message`.
     static LAST_ERROR: RefCell<CString> = RefCell::new(CString::default());
@@ -622,6 +1103,12 @@ impl From<Error> for Failure {
     }
 }
 
+impl From<officewright_font::Error> for Failure {
+    fn from(err: officewright_font::Error) -> Self {
+        Error::from(err).into()
+    }
+}
+
 impl From<officewright_pdf::Error> for Failure {
     fn from(err: officewright_pdf::Error) -> Self {
         Error::from(err).into()
@@ -651,6 +1138,23 @@ fn panic_message(payload: &(dyn Any + Send)) -> &str {
         message
     } else {
         "no message"
+    }
+}
+
+/// A C string of `text`, with any NUL byte replaced by U+FFFD.
+fn c_string(text: String) -> CString {
+    CString::new(text.replace('\0', "\u{FFFD}")).unwrap_or_default()
+}
+
+/// Reads an `int32_t` flag argument, which must be 0 or 1.
+fn flag(value: i32, name: &str) -> Result<bool, Failure> {
+    match value {
+        0 => Ok(false),
+        1 => Ok(true),
+        other => Err(Failure {
+            status: OwStatus::InvalidArgument,
+            message: format!("{name} is {other}, not 0 or 1"),
+        }),
     }
 }
 
@@ -726,6 +1230,26 @@ unsafe fn font_handle<'a>(font: *const OwPdfFont) -> Result<&'a OwPdfFont, Failu
 unsafe fn font_ref<'a>(font: *const OwPdfFont) -> Result<&'a Font, Failure> {
     // SAFETY: the caller guarantees a live handle if not NULL.
     unsafe { font_handle(font) }.map(|font| &font.font)
+}
+
+/// Borrows a font book handle.
+///
+/// # Safety
+///
+/// `book` must be NULL or a live handle that is not modified during the borrow.
+unsafe fn book_ref<'a>(book: *const OwFontBook) -> Result<&'a OwFontBook, Failure> {
+    // SAFETY: the caller guarantees a live handle if not NULL.
+    unsafe { book.as_ref() }.ok_or_else(|| Failure::null("book"))
+}
+
+/// Borrows a font book handle mutably.
+///
+/// # Safety
+///
+/// `book` must be NULL or a live handle that nothing else uses during the borrow.
+unsafe fn book_mut<'a>(book: *mut OwFontBook) -> Result<&'a mut OwFontBook, Failure> {
+    // SAFETY: the caller guarantees a live, unshared handle if not NULL.
+    unsafe { book.as_mut() }.ok_or_else(|| Failure::null("book"))
 }
 
 /// Borrows a document handle mutably.
@@ -1293,6 +1817,265 @@ mod tests {
             }
             ow_pdf_font_free(font);
             ow_pdf_document_free(doc);
+        }
+    }
+
+    /// A new font book handle; the caller frees it.
+    fn new_book() -> *mut OwFontBook {
+        let mut book = ptr::null_mut();
+        // SAFETY: a valid out-pointer.
+        assert_eq!(unsafe { ow_font_book_new(&mut book) }, OwStatus::Ok);
+        book
+    }
+
+    /// A resolver for `book`; the caller frees it.
+    fn new_resolver(book: *const OwFontBook) -> *mut OwFontResolver {
+        let mut resolver = ptr::null_mut();
+        // SAFETY: a live handle and a valid out-pointer.
+        let status = unsafe { ow_font_resolver_new(book, &mut resolver) };
+        assert_eq!(status, OwStatus::Ok);
+        resolver
+    }
+
+    /// Resolves `family`; returns the status and the font, which the caller frees.
+    fn resolve(
+        resolver: *mut OwFontResolver,
+        family: &str,
+        bold: i32,
+    ) -> (OwStatus, *mut OwPdfFont) {
+        let family = c(family);
+        let mut font: *mut OwPdfFont = placeholder();
+        // SAFETY: a live handle, a NUL-terminated string and a valid out-pointer.
+        let status = unsafe { ow_pdf_font_resolve(resolver, family.as_ptr(), bold, 0, &mut font) };
+        (status, font)
+    }
+
+    /// The substitution report of `resolver`.
+    fn substitutions(resolver: *const OwFontResolver) -> Vec<(i32, String)> {
+        let mut count = 99;
+        // SAFETY: a live handle and valid out-pointers; messages are read while it lives.
+        unsafe {
+            assert_eq!(
+                ow_font_resolver_substitution_count(resolver, &mut count),
+                OwStatus::Ok
+            );
+            (0..count)
+                .map(|index| {
+                    let mut kind = -1;
+                    let mut message = ptr::null();
+                    assert_eq!(
+                        ow_font_resolver_substitution(resolver, index, &mut kind, &mut message),
+                        OwStatus::Ok
+                    );
+                    (kind, CStr::from_ptr(message).to_str().unwrap().to_owned())
+                })
+                .collect()
+        }
+    }
+
+    #[test]
+    fn chooses_fonts_by_family_and_reports_substitutions() {
+        let book = new_book();
+        let path = c(minimal_font_path().to_str().unwrap());
+        let data = fs::read(minimal_font_path()).unwrap();
+        let mut added = 7;
+        let mut faces = 0;
+        // SAFETY: live handles, a NUL-terminated path, a buffer of its length and valid
+        // out-pointers; each handle is freed once.
+        unsafe {
+            assert_eq!(
+                ow_font_book_add_file(book, path.as_ptr(), &mut added),
+                OwStatus::Ok
+            );
+            assert_eq!(added, 1);
+            assert_eq!(
+                ow_font_book_add_bytes(book, data.as_ptr(), data.len(), &mut added),
+                OwStatus::Ok
+            );
+            assert_eq!(ow_font_book_face_count(book, &mut faces), OwStatus::Ok);
+            assert_eq!(faces, 2);
+        }
+        let resolver = new_resolver(book);
+        // The resolver has its own copy of the book.
+        // SAFETY: a live handle, freed once.
+        unsafe { ow_font_book_free(book) };
+
+        let (status, font) = resolve(resolver, "Officewright Test", 0);
+        assert_eq!(status, OwStatus::Ok, "{}", last_error());
+        assert!(substitutions(resolver).is_empty());
+        let (status, bold) = resolve(resolver, "officewright test", 1);
+        assert_eq!(status, OwStatus::Ok, "{}", last_error());
+        let (status, missing) = resolve(resolver, "Calibri", 0);
+        assert_eq!(status, OwStatus::Unsupported);
+        assert_eq!(last_error(), "no font found for family \"Calibri\"");
+        assert!(missing.is_null());
+        assert_eq!(
+            substitutions(resolver),
+            [
+                (
+                    OW_RESOLUTION_EXACT,
+                    "\"officewright test\" bold → \"Officewright Test\" with synthetic bold"
+                        .to_owned()
+                ),
+                (
+                    OW_RESOLUTION_MISSING,
+                    "\"Calibri\" → no font available".to_owned()
+                ),
+            ]
+        );
+        let mut width = 0.0;
+        // SAFETY: live handles and valid pointers, each freed once.
+        unsafe {
+            assert_eq!(
+                ow_pdf_font_text_width(font, c("A").as_ptr(), 10.0, &mut width),
+                OwStatus::Ok
+            );
+            ow_pdf_font_free(font);
+            ow_pdf_font_free(bold);
+            ow_font_resolver_free(resolver);
+        }
+        assert_eq!(width, 6.0);
+    }
+
+    #[test]
+    fn a_resolver_sees_the_fonts_its_book_had_when_it_was_made() {
+        let book = new_book();
+        let resolver = new_resolver(book);
+        let path = c(minimal_font_path().to_str().unwrap());
+        let mut added = 0;
+        // SAFETY: a live handle, a NUL-terminated path and a valid out-pointer.
+        let status = unsafe { ow_font_book_add_file(book, path.as_ptr(), &mut added) };
+        assert_eq!((status, added), (OwStatus::Ok, 1));
+        let (status, font) = resolve(resolver, "Officewright Test", 0);
+        assert_eq!(status, OwStatus::Unsupported);
+        assert!(font.is_null());
+        let later = new_resolver(book);
+        let (status, font) = resolve(later, "Officewright Test", 0);
+        assert_eq!(status, OwStatus::Ok);
+        // SAFETY: live handles, each freed once.
+        unsafe {
+            ow_pdf_font_free(font);
+            ow_font_resolver_free(later);
+            ow_font_resolver_free(resolver);
+            ow_font_book_free(book);
+        }
+    }
+
+    #[test]
+    fn lists_what_a_font_book_skipped() {
+        let dir =
+            std::env::temp_dir().join(format!("officewright-ffi-book-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let broken = dir.join("broken.ttf");
+        fs::write(&broken, b"not a font").unwrap();
+        let c_dir = c(dir.to_str().unwrap());
+        let missing = c(dir.join("missing").to_str().unwrap());
+        let book = new_book();
+        let mut added = 7;
+        let mut count = 7;
+        let mut message: *const c_char = placeholder();
+        // SAFETY: a live handle, NUL-terminated paths and valid out-pointers; messages are
+        // read before the book changes; NULL where tested.
+        unsafe {
+            assert_eq!(
+                ow_font_book_add_dir(book, c_dir.as_ptr(), &mut added),
+                OwStatus::Ok
+            );
+            assert_eq!(added, 0);
+            assert_eq!(ow_font_book_skipped_count(book, &mut count), OwStatus::Ok);
+            assert_eq!(count, 1);
+            assert_eq!(ow_font_book_skipped(book, 0, &mut message), OwStatus::Ok);
+            let text = CStr::from_ptr(message).to_str().unwrap();
+            assert!(
+                text.starts_with(&format!("{}: data is not a TrueType", broken.display())),
+                "{text}"
+            );
+            assert_eq!(
+                ow_font_book_skipped(book, 1, &mut message),
+                OwStatus::InvalidArgument
+            );
+            assert_eq!(
+                last_error(),
+                "skipped index 1 is out of range for a font book with 1 skipped"
+            );
+            assert!(message.is_null());
+            added = 7;
+            assert_eq!(
+                ow_font_book_add_dir(book, missing.as_ptr(), &mut added),
+                OwStatus::Io
+            );
+            assert_eq!(added, 0);
+            assert_eq!(
+                ow_font_book_add_file(book, c(broken.to_str().unwrap()).as_ptr(), &mut added),
+                OwStatus::InvalidArgument
+            );
+            ow_font_book_free(book);
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn checks_the_arguments_of_the_font_book_and_resolver() {
+        let book = new_book();
+        let resolver = new_resolver(book);
+        let family = c("x");
+        let mut font: *mut OwPdfFont = placeholder();
+        let mut count = 7;
+        let mut handle: *mut OwFontResolver = placeholder();
+        // SAFETY: live handles and valid pointers; NULL is what is being tested.
+        unsafe {
+            assert_eq!(
+                ow_pdf_font_resolve(resolver, family.as_ptr(), 2, 0, &mut font),
+                OwStatus::InvalidArgument
+            );
+            assert_eq!(last_error(), "bold is 2, not 0 or 1");
+            assert!(font.is_null());
+            assert_eq!(
+                ow_pdf_font_resolve(resolver, family.as_ptr(), 0, -1, &mut font),
+                OwStatus::InvalidArgument
+            );
+            assert_eq!(last_error(), "italic is -1, not 0 or 1");
+            assert_eq!(
+                ow_pdf_font_resolve(ptr::null_mut(), family.as_ptr(), 0, 0, &mut font),
+                OwStatus::NullArgument
+            );
+            assert_eq!(last_error(), "resolver is null");
+            assert_eq!(
+                ow_pdf_font_resolve(resolver, ptr::null(), 0, 0, &mut font),
+                OwStatus::NullArgument
+            );
+            assert_eq!(last_error(), "family is null");
+            assert_eq!(
+                ow_font_resolver_new(ptr::null(), &mut handle),
+                OwStatus::NullArgument
+            );
+            assert_eq!(last_error(), "book is null");
+            assert!(handle.is_null());
+            assert_eq!(
+                ow_font_book_face_count(ptr::null(), &mut count),
+                OwStatus::NullArgument
+            );
+            assert_eq!(count, 0);
+            assert_eq!(
+                ow_font_book_add_bytes(book, ptr::null(), 0, &mut count),
+                OwStatus::NullArgument
+            );
+            assert_eq!(last_error(), "data is null");
+            assert_eq!(ow_font_book_new(ptr::null_mut()), OwStatus::NullArgument);
+            assert_eq!(last_error(), "out_book is null");
+            // Adding the system fonts works whatever the machine has.
+            assert_eq!(
+                ow_font_book_add_system_fonts(book, &mut count),
+                OwStatus::Ok
+            );
+            assert_eq!(
+                ow_font_book_add_system_fonts(ptr::null_mut(), &mut count),
+                OwStatus::NullArgument
+            );
+            ow_font_book_free(ptr::null_mut());
+            ow_font_resolver_free(ptr::null_mut());
+            ow_font_resolver_free(resolver);
+            ow_font_book_free(book);
         }
     }
 }

@@ -171,10 +171,11 @@ impl FaceInfo {
 
 /// A directory, font file or face of a font file that a [`FontBook`] could not read or
 /// index.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct SkippedFont {
     path: Option<PathBuf>,
-    error: Error,
+    /// Shared, so that a [`FontBook`] can be cloned: an I/O error cannot be.
+    error: Arc<Error>,
     /// The key in [`FontBook::failed`] this entry is listed under, so a later scan can
     /// replace or drop it; `None` for entries that stay, such as a damaged face of a
     /// collection that was added.
@@ -197,14 +198,14 @@ impl fmt::Display for SkippedFont {
     /// The file, the error and every reason behind it, such as `fonts/a.ttc: font face
     /// 64: the table directory is damaged: faces 64 to 1023 were not read: …`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match (&self.path, &self.error) {
+        match (&self.path, &*self.error) {
             // The error already names the file.
             (_, Error::Read { .. }) => {}
             (Some(path), _) => write!(f, "{}: ", path.display())?,
             (None, _) => f.write_str("font data: ")?,
         }
         self.error.fmt(f)?;
-        let mut source = error::Error::source(&self.error);
+        let mut source = error::Error::source(&*self.error);
         while let Some(cause) = source {
             write!(f, ": {cause}")?;
             source = cause.source();
@@ -218,7 +219,8 @@ impl fmt::Display for SkippedFont {
 ///
 /// Adding a font reads only its names and style; [`load`](Self::load) reads the face
 /// itself. Files that are not fonts or are damaged are skipped and listed in
-/// [`skipped`](Self::skipped). A `FontBook` is `Send` and `Sync`.
+/// [`skipped`](Self::skipped). A `FontBook` is `Send` and `Sync`; cloning it copies the
+/// index, not the font data.
 ///
 /// A book can scan the same directories again, for example after fonts were installed:
 /// [`add_dir`](Self::add_dir) and [`add_system_fonts`](Self::add_system_fonts) add the
@@ -241,7 +243,7 @@ impl fmt::Display for SkippedFont {
 /// assert_eq!(font.names().family(), Some("Officewright Test"));
 /// # Ok::<(), officewright_font::Error>(())
 /// ```
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct FontBook {
     faces: Vec<FaceInfo>,
     skipped: Vec<SkippedFont>,
@@ -471,14 +473,14 @@ impl FontBook {
                 if let (Error::Read { path, .. }, Some(first)) = (&mut error, &listed.path) {
                     path.clone_from(first);
                 }
-                listed.error = error;
+                listed.error = Arc::new(error);
                 return;
             }
         }
         self.forget_failure(&key);
         self.skipped.push(SkippedFont {
             path: Some(path),
-            error,
+            error: Arc::new(error),
             key: Some(key.clone()),
         });
         self.failed.insert(key, failure);
@@ -543,7 +545,7 @@ impl FontBook {
         self.skipped
             .extend(errors.into_iter().map(|error| SkippedFont {
                 path: path.clone(),
-                error,
+                error: Arc::new(error),
                 key: None,
             }));
         Ok(added)
@@ -685,6 +687,20 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn a_clone_is_a_book_of_its_own() {
+        let dir = TempDir::new("clone");
+        fs::write(dir.0.join("broken.ttf"), b"not a font").unwrap();
+        let mut book = FontBook::new();
+        book.add_dir(&dir.0).unwrap();
+        let copy = book.clone();
+        book.add_bytes(TestFont::new("Test Sans").build(), FontOrigin::User)
+            .unwrap();
+        assert_eq!((book.len(), copy.len()), (1, 0));
+        assert_eq!(copy.skipped().len(), 1);
+        assert_eq!(copy.skipped()[0].to_string(), book.skipped()[0].to_string());
     }
 
     #[test]
@@ -1071,7 +1087,7 @@ mod tests {
         assert!(matches!(err, Error::Read { .. }), "{err}");
         let skipped = SkippedFont {
             path: Some(file.clone()),
-            error: err,
+            error: Arc::new(err),
             key: None,
         };
         // The error names the file already; the I/O error says why it failed.
@@ -1087,10 +1103,10 @@ mod tests {
     fn skipped_fonts_say_why() {
         let budget = SkippedFont {
             path: None,
-            error: Error::MalformedFace {
+            error: Arc::new(Error::MalformedFace {
                 face: 64,
                 source: crate::error::Cause::new("faces 64 to 1023 were not read"),
-            },
+            }),
             key: None,
         };
         assert_eq!(
@@ -1100,10 +1116,10 @@ mod tests {
         );
         let read = SkippedFont {
             path: Some(PathBuf::from("a.ttf")),
-            error: Error::Read {
+            error: Arc::new(Error::Read {
                 path: PathBuf::from("a.ttf"),
                 source: io::Error::other("disk gone"),
-            },
+            }),
             key: None,
         };
         assert_eq!(read.to_string(), "cannot read a.ttf: disk gone");
