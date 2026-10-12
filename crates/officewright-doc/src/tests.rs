@@ -1467,3 +1467,355 @@ fn keeps_values_outside_the_ranges_of_the_prose_as_written() {
     assert_eq!(messages.len(), 1, "{messages:?}");
     assert!(messages[0].ends_with(r#"w:spacing w:lineRule="often" is not valid; it is ignored"#));
 }
+
+fn first_table(document: &Document) -> Table<'_> {
+    document
+        .sections()
+        .next()
+        .unwrap()
+        .blocks()
+        .find_map(|block| match block {
+            Block::Table(table) => Some(table),
+            _ => None,
+        })
+        .expect("no table")
+}
+
+fn messages(document: &Document) -> Vec<&str> {
+    document
+        .diagnostics()
+        .iter()
+        .map(Diagnostic::message)
+        .collect()
+}
+
+#[test]
+fn reads_the_properties_written_on_a_table() {
+    let document = open(
+        r#"<w:tbl><w:tblPr><w:tblStyle w:val="TableGrid"/><w:tblpPr w:leftFromText="180" w:rightFromText="180" w:topFromText="0" w:bottomFromText="144" w:vertAnchor="page" w:horzAnchor="margin" w:tblpXSpec="center" w:tblpY="-720"/><w:tblOverlap w:val="never"/><w:bidiVisual/><w:tblStyleRowBandSize w:val="2"/><w:tblStyleColBandSize w:val="1"/><w:tblW w:w="5000" w:type="pct"/><w:jc w:val="center"/><w:tblCellSpacing w:w="20" w:type="dxa"/><w:tblInd w:w="-108" w:type="dxa"/><w:tblBorders><w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:left w:val="double" w:sz="8" w:space="0" w:color="00FF00"/><w:insideH w:val="dashed" w:sz="2" w:space="0" w:color="auto"/><w:insideV w:val="nil"/></w:tblBorders><w:shd w:val="clear" w:color="auto" w:fill="EEEEEE"/><w:tblLayout w:type="fixed"/><w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:left w:w="108" w:type="dxa"/><w:right w:w="108" w:type="dxa"/></w:tblCellMar><w:tblLook w:val="04A0" w:firstRow="1" w:lastRow="0" w:firstColumn="1" w:lastColumn="0" w:noHBand="0" w:noVBand="1"/><w:tblCaption w:val="Prices"/><w:tblDescription w:val="Prices by year"/></w:tblPr><w:tblGrid><w:gridCol w:w="4680"/></w:tblGrid><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>"#,
+    );
+    assert!(messages(&document).is_empty(), "{:?}", messages(&document));
+    let properties = first_table(&document).properties();
+    assert_eq!(properties.style(), Some("TableGrid"));
+    let position = properties.position().unwrap();
+    assert_eq!(
+        (
+            position.left_from_text(),
+            position.top_from_text(),
+            position.bottom_from_text()
+        ),
+        (Some(Pt(9.0)), Some(Pt(0.0)), Some(Pt(7.2)))
+    );
+    assert_eq!(position.vertical_anchor(), Some(TableAnchor::Page));
+    assert_eq!(position.horizontal_anchor(), Some(TableAnchor::Margin));
+    assert_eq!(
+        position.horizontal_alignment(),
+        Some(HorizontalAlignment::Center)
+    );
+    assert_eq!((position.x(), position.y()), (None, Some(Pt(-36.0))));
+    assert_eq!(position.vertical_alignment(), None);
+    assert_eq!(properties.overlap(), Some(TableOverlap::Never));
+    assert_eq!(properties.right_to_left(), Some(true));
+    assert_eq!(
+        (properties.row_band_size(), properties.column_band_size()),
+        (Some(2), Some(1))
+    );
+    assert_eq!(properties.width(), Some(TableWidth::Percent(100.0)));
+    assert_eq!(properties.justification(), Some(TableJustification::Center));
+    assert_eq!(properties.cell_spacing(), Some(TableWidth::Length(Pt(1.0))));
+    assert_eq!(properties.indentation(), Some(TableWidth::Length(Pt(-5.4))));
+    let borders = properties.borders().unwrap();
+    assert_eq!(borders.top().unwrap().width(), Some(Pt(0.5)));
+    assert_eq!(borders.start().unwrap().style(), Some(BorderStyle::Double));
+    assert_eq!(
+        borders.inside_horizontal().unwrap().style(),
+        Some(BorderStyle::Dashed)
+    );
+    assert_eq!(
+        borders.inside_vertical().unwrap().style(),
+        Some(BorderStyle::Nil)
+    );
+    assert_eq!((borders.bottom(), borders.end()), (None, None));
+    assert_eq!(
+        properties.shading().unwrap().fill().value(),
+        Some(ColorValue::Rgb(0xEE, 0xEE, 0xEE))
+    );
+    assert_eq!(properties.layout(), Some(TableLayout::Fixed));
+    let margins = properties.cell_margins().unwrap();
+    assert_eq!(margins.top(), Some(TableWidth::Length(Pt(0.0))));
+    assert_eq!(margins.start(), Some(TableWidth::Length(Pt(5.4))));
+    assert_eq!(margins.end(), Some(TableWidth::Length(Pt(5.4))));
+    assert_eq!(margins.bottom(), None);
+    let look = properties.look().unwrap();
+    assert_eq!(
+        (
+            look.first_row(),
+            look.last_row(),
+            look.first_column(),
+            look.last_column()
+        ),
+        (Some(true), Some(false), Some(true), Some(false))
+    );
+    assert_eq!(
+        (look.no_horizontal_bands(), look.no_vertical_bands()),
+        (Some(false), Some(true))
+    );
+    assert_eq!(properties.caption(), Some("Prices"));
+    assert_eq!(properties.description(), Some("Prices by year"));
+    // A table without w:tblPr sets nothing.
+    let plain = open("<w:tbl><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>");
+    assert_eq!(first_table(&plain).properties(), TableProperties::default());
+}
+
+#[test]
+fn reads_the_properties_of_rows_and_cells() {
+    let document = open(
+        r#"<w:tbl><w:tr><w:tblPrEx><w:tblW w:w="2500" w:type="pct"/><w:tblLook w:val="0600"/></w:tblPrEx><w:trPr><w:gridBefore w:val="1"/><w:gridAfter w:val="2"/><w:wBefore w:w="426" w:type="dxa"/><w:wAfter w:w="0" w:type="auto"/><w:cantSplit/><w:trHeight w:val="567" w:hRule="exact"/><w:tblHeader/><w:tblCellSpacing w:w="0" w:type="nil"/><w:jc w:val="end"/><w:hidden w:val="0"/></w:trPr><w:tc><w:tcPr><w:tcW w:w="1440" w:type="dxa"/><w:gridSpan w:val="2"/><w:vMerge w:val="restart"/><w:tcBorders><w:start w:val="single" w:sz="12" w:space="0" w:color="auto"/><w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:tl2br w:val="single" w:sz="4" w:space="0" w:color="FF0000"/></w:tcBorders><w:shd w:val="pct25" w:color="auto" w:fill="auto"/><w:noWrap/><w:tcMar><w:start w:w="0" w:type="dxa"/><w:bottom w:w="57" w:type="dxa"/></w:tcMar><w:textDirection w:val="btLr"/><w:tcFitText/><w:vAlign w:val="center"/><w:hideMark/></w:tcPr><w:p/></w:tc></w:tr><w:tr><w:trPr><w:trHeight w:val="300"/></w:trPr><w:tc><w:tcPr><w:vMerge/><w:hMerge w:val="restart"/></w:tcPr><w:p/></w:tc></w:tr></w:tbl>"#,
+    );
+    assert!(messages(&document).is_empty(), "{:?}", messages(&document));
+    let rows: Vec<TableRow> = first_table(&document).rows().collect();
+    let exceptions = rows[0].table_property_exceptions();
+    assert_eq!(exceptions.width(), Some(TableWidth::Percent(50.0)));
+    let look = exceptions.look().unwrap();
+    assert_eq!(
+        (
+            look.first_row(),
+            look.no_horizontal_bands(),
+            look.no_vertical_bands()
+        ),
+        (Some(false), Some(true), Some(true))
+    );
+    let row = rows[0].properties();
+    assert_eq!((row.grid_before(), row.grid_after()), (Some(1), Some(2)));
+    assert_eq!(row.width_before(), Some(TableWidth::Length(Pt(21.3))));
+    assert_eq!(row.width_after(), Some(TableWidth::Auto));
+    assert_eq!(row.cant_split(), Some(true));
+    let height = row.height().unwrap();
+    assert_eq!(
+        (height.height(), height.rule()),
+        (Some(Pt(28.35)), Some(HeightRule::Exact))
+    );
+    assert_eq!(row.header(), Some(true));
+    assert_eq!(row.cell_spacing(), Some(TableWidth::Nil));
+    assert_eq!(row.justification(), Some(TableJustification::End));
+    assert_eq!(row.hidden(), Some(false));
+    // Without w:hRule the rule is not set; Word reads it as at least.
+    let second = rows[1].properties();
+    assert_eq!(second.height().unwrap().rule(), None);
+    assert_eq!(
+        rows[1].table_property_exceptions(),
+        TableProperties::default()
+    );
+
+    let cell = rows[0].cells().next().unwrap().properties();
+    assert_eq!(cell.width(), Some(TableWidth::Length(Pt(72.0))));
+    assert_eq!(cell.grid_span(), Some(2));
+    assert_eq!(cell.vertical_merge(), Some(Merge::Restart));
+    assert_eq!(cell.horizontal_merge(), None);
+    let borders = cell.borders().unwrap();
+    assert_eq!(borders.sides().start().unwrap().width(), Some(Pt(1.5)));
+    assert!(borders.sides().inside_horizontal().is_some());
+    assert_eq!(
+        borders.top_left_to_bottom_right().unwrap().color().value(),
+        Some(ColorValue::Rgb(0xFF, 0, 0))
+    );
+    assert_eq!(borders.top_right_to_bottom_left(), None);
+    assert_eq!(
+        cell.shading().unwrap().pattern(),
+        Some(ShadingPattern::Percent25)
+    );
+    assert_eq!(cell.no_wrap(), Some(true));
+    let margins = cell.margins().unwrap();
+    assert_eq!(margins.start(), Some(TableWidth::Length(Pt(0.0))));
+    assert_eq!(margins.bottom(), Some(TableWidth::Length(Pt(2.85))));
+    assert_eq!(
+        cell.text_direction(),
+        Some(TextDirection::BottomToTopLeftToRight)
+    );
+    assert_eq!(cell.fit_text(), Some(true));
+    assert_eq!(
+        cell.vertical_justification(),
+        Some(VerticalJustification::Center)
+    );
+    assert_eq!(cell.hide_mark(), Some(true));
+    // w:vMerge without w:val continues the merge above.
+    let merged = rows[1].cells().next().unwrap().properties();
+    assert_eq!(merged.vertical_merge(), Some(Merge::Continue));
+    assert_eq!(merged.horizontal_merge(), Some(Merge::Restart));
+}
+
+#[test]
+fn reads_table_widths_as_word_does() {
+    let width = |attributes: &str| {
+        let document = open(&format!(
+            "<w:tbl><w:tblPr><w:tblW {attributes}/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>"
+        ));
+        let width = first_table(&document).properties().width();
+        (width, messages(&document).len())
+    };
+    // pct without a percent sign is in fiftieths of a percent (MS-OI29500 §17.4.87(a)).
+    assert_eq!(
+        width(r#"w:w="4625" w:type="pct""#),
+        (Some(TableWidth::Percent(92.5)), 0)
+    );
+    // A percent sign makes a percentage whatever the type (§17.4.87(b)).
+    assert_eq!(
+        width(r#"w:w="50%" w:type="pct""#),
+        (Some(TableWidth::Percent(50.0)), 0)
+    );
+    assert_eq!(
+        width(r#"w:w="9%" w:type="dxa""#),
+        (Some(TableWidth::Percent(9.0)), 0)
+    );
+    assert_eq!(width(r#"w:w="9%""#), (Some(TableWidth::Percent(9.0)), 0));
+    // dxa is the type assumed when none is written (§17.4.87).
+    assert_eq!(width(r#"w:w="70""#), (Some(TableWidth::Length(Pt(3.5))), 0));
+    assert_eq!(
+        width(r#"w:w="1in" w:type="dxa""#),
+        (Some(TableWidth::Length(Pt(72.0))), 0)
+    );
+    assert_eq!(
+        width(r#"w:w="81.85pt""#),
+        (Some(TableWidth::Length(Pt(81.85))), 0)
+    );
+    assert_eq!(
+        width(r#"w:w="0" w:type="auto""#),
+        (Some(TableWidth::Auto), 0)
+    );
+    assert_eq!(width(r#"w:type="nil""#), (Some(TableWidth::Nil), 0));
+    // Not valid: read as not set, with a diagnostic.
+    assert_eq!(width(r#"w:w="4625.5" w:type="pct""#), (None, 1));
+    assert_eq!(width(r#"w:w="5cm" w:type="pct""#), (None, 1));
+    assert_eq!(width(r#"w:w="wide" w:type="dxa""#), (None, 1));
+    assert_eq!(width(r#"w:w="x%""#), (None, 1));
+    assert_eq!(width(r#"w:w="100" w:type="twips""#), (None, 1));
+    // dxa without a width gives none.
+    assert_eq!(width(r#"w:type="dxa""#), (None, 0));
+}
+
+#[test]
+fn reads_the_look_of_a_table_as_word_does() {
+    let look = |attributes: &str| {
+        let document = open(&format!(
+            "<w:tbl><w:tblPr><w:tblLook {attributes}/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>"
+        ));
+        let look = *first_table(&document).properties().look().unwrap();
+        (
+            [
+                look.first_row(),
+                look.last_row(),
+                look.first_column(),
+                look.last_column(),
+                look.no_horizontal_bands(),
+                look.no_vertical_bands(),
+            ],
+            messages(&document).len(),
+        )
+    };
+    let (yes, no) = (Some(true), Some(false));
+    // The bit mask alone is read (lower case too, as Word writes it at times).
+    assert_eq!(look(r#"w:val="04A0""#), ([yes, no, yes, no, no, yes], 0));
+    assert_eq!(look(r#"w:val="01e0""#), ([yes, yes, yes, yes, no, no], 0));
+    assert_eq!(look(r#"w:val="0000""#), ([no; 6], 0));
+    // With any of the attributes the mask is not read (MS-OI29500 §17.4.55(c)).
+    assert_eq!(
+        look(r#"w:val="04A0" w:firstRow="0""#),
+        ([no, None, None, None, None, None], 0)
+    );
+    // Not four hexadecimal digits: nothing is set.
+    assert_eq!(look(r#"w:val="4A0""#), ([None; 6], 1));
+    assert_eq!(look(r#"w:val="04G0""#), ([None; 6], 1));
+    assert_eq!(look(r#"w:firstRow="yes""#), ([None; 6], 1));
+}
+
+#[test]
+fn reads_invalid_table_values_as_not_set() {
+    let document = open(
+        r#"<w:tbl><w:tblPr><w:jc w:val="both"/><w:tblLayout w:type="loose"/><w:tblOverlap w:val="maybe"/><w:tblpPr w:vertAnchor="paragraph" w:tblpX="far"/><w:tblStyleRowBandSize w:val="two"/></w:tblPr><w:tr><w:tblPrEx><w:jc w:val="middle"/></w:tblPrEx><w:trPr><w:trHeight w:val="-5" w:hRule="exactly"/><w:gridBefore w:val="x"/></w:trPr><w:tc><w:tcPr><w:vMerge w:val="start"/><w:vAlign w:val="middle"/><w:textDirection w:val="up"/><w:noWrap w:val="no"/></w:tcPr><w:p/></w:tc></w:tr></w:tbl>"#,
+    );
+    let table = first_table(&document);
+    let properties = table.properties();
+    assert_eq!(properties.justification(), None);
+    assert_eq!(properties.layout(), None);
+    assert_eq!(properties.overlap(), None);
+    let position = properties.position().unwrap();
+    assert_eq!((position.vertical_anchor(), position.x()), (None, None));
+    assert_eq!(properties.row_band_size(), None);
+    let row = table.rows().next().unwrap();
+    assert_eq!(row.table_property_exceptions().justification(), None);
+    let height = *row.properties().height().unwrap();
+    assert_eq!((height.height(), height.rule()), (None, None));
+    let cell = row.cells().next().unwrap().properties();
+    assert_eq!(cell.vertical_merge(), None);
+    assert_eq!(cell.vertical_justification(), None);
+    assert_eq!(cell.text_direction(), None);
+    assert_eq!(cell.no_wrap(), None);
+    let messages = messages(&document);
+    assert_eq!(messages.len(), 14, "{messages:?}");
+    assert!(messages[0].ends_with(r#": w:jc w:val="both" is not valid; it is ignored"#));
+    assert!(messages[7].ends_with(r#": w:trHeight w:val="-5" is not valid; it is ignored"#));
+    assert!(messages[13].ends_with(r#": w:noWrap w:val="no" is not valid; it is ignored"#));
+}
+
+#[test]
+fn reads_the_table_properties_of_styles() {
+    let styles = format!(
+        r#"<w:styles xmlns:w="{W}"><w:style w:type="table" w:styleId="Grid"><w:tblPr><w:tblBorders><w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/></w:tblBorders><w:tblCellMar><w:left w:w="108" w:type="dxa"/></w:tblCellMar><w:jc w:val="left"/><w:tblLayout w:type="x"/></w:tblPr><w:trPr><w:cantSplit/><w:jc w:val="right"/><w:hidden w:val="maybe"/></w:trPr><w:tcPr><w:vAlign w:val="bottom"/><w:shd w:val="nope"/></w:tcPr></w:style></w:styles>"#
+    );
+    let document = with_styles("<w:p/>", &styles);
+    let style = document.styles().get("Grid").unwrap();
+    let table = style.table_properties();
+    assert!(table.borders().unwrap().inside_vertical().is_some());
+    assert_eq!(
+        table.cell_margins().unwrap().start(),
+        Some(TableWidth::Length(Pt(5.4)))
+    );
+    assert_eq!(table.justification(), Some(TableJustification::Left));
+    assert_eq!(style.row_properties().cant_split(), Some(true));
+    assert_eq!(
+        style.row_properties().justification(),
+        Some(TableJustification::Right)
+    );
+    let cell = style.cell_properties();
+    assert_eq!(
+        cell.vertical_justification(),
+        Some(VerticalJustification::Bottom)
+    );
+    assert_eq!(cell.shading().unwrap().pattern(), None);
+    // The values that are not valid are reported where the style is.
+    let messages = messages(&document);
+    assert_eq!(messages.len(), 3, "{messages:?}");
+    assert!(messages[0].starts_with("/word/styles.xml, line 1, column "));
+    assert!(messages[0].ends_with(r#"w:tblLayout w:type="x" is not valid; it is ignored"#));
+    assert!(messages[1].ends_with(r#"w:hidden w:val="maybe" is not valid; it is ignored"#));
+    assert!(messages[2].ends_with(r#"w:shd w:val="nope" is not valid; it is ignored"#));
+    // A style without them sets none.
+    let plain = format!(r#"<w:styles xmlns:w="{W}"><w:style w:styleId="P"/></w:styles>"#);
+    let plain = with_styles("<w:p/>", &plain);
+    let style = plain.styles().get("P").unwrap();
+    assert_eq!(style.table_properties(), TableProperties::default());
+    assert_eq!(style.row_properties(), TableRowProperties::default());
+    assert_eq!(style.cell_properties(), TableCellProperties::default());
+}
+
+#[test]
+fn reads_strict_table_properties() {
+    let xml = r#"<w:document xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main" conformance="strict"><w:body><w:tbl><w:tblPr><w:tblW w:w="50%" w:type="pct"/><w:tblInd w:w="0.5in" w:type="dxa"/><w:tblCellMar><w:start w:w="0.1in" w:type="dxa"/><w:end w:w="0.1in" w:type="dxa"/></w:tblCellMar><w:jc w:val="start"/></w:tblPr><w:tr><w:tc><w:tcPr><w:tcBorders><w:end w:val="single" w:sz="4"/></w:tcBorders></w:tcPr><w:p/></w:tc></w:tr></w:tbl></w:body></w:document>"#;
+    let document = Document::from_bytes(package(DOCUMENT, xml, &[])).unwrap();
+    assert!(messages(&document).is_empty(), "{:?}", messages(&document));
+    let table = first_table(&document);
+    let properties = table.properties();
+    assert_eq!(properties.width(), Some(TableWidth::Percent(50.0)));
+    assert_eq!(properties.indentation(), Some(TableWidth::Length(Pt(36.0))));
+    let margins = properties.cell_margins().unwrap();
+    assert_eq!(
+        (margins.start(), margins.end()),
+        (
+            Some(TableWidth::Length(Pt(7.2))),
+            Some(TableWidth::Length(Pt(7.2)))
+        )
+    );
+    assert_eq!(properties.justification(), Some(TableJustification::Start));
+    let cell = table.rows().next().unwrap().cells().next().unwrap();
+    assert!(cell.properties().borders().unwrap().sides().end().is_some());
+}

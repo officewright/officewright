@@ -24,6 +24,11 @@ fuzz_target!(|data: &[u8]| {
     for style in styles.iter() {
         let _ = (style.name(), style.based_on(), style.run_properties());
         let _ = style.paragraph_properties();
+        let _ = (
+            style.table_properties(),
+            style.row_properties(),
+            style.cell_properties(),
+        );
         assert!(styles.get(style.id()).is_some());
     }
     let mut blocks: Vec<Block<'_>> = document.sections().flat_map(|s| s.blocks()).collect();
@@ -65,8 +70,11 @@ fuzz_target!(|data: &[u8]| {
             Block::Table(table) => {
                 assert!(document.table(table.id()).is_some());
                 let _ = table.grid_columns().count();
+                let _ = table.properties();
                 for row in table.rows() {
+                    let _ = (row.properties(), row.table_property_exceptions());
                     for cell in row.cells() {
+                        let _ = cell.properties();
                         blocks.extend(cell.blocks());
                     }
                 }

@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use super::Document;
 use super::properties::{ParagraphProperties, RunProperties};
+use super::table_properties::{TableCellProperties, TableProperties, TableRowProperties};
 use super::xml::Span;
 
 /// The styles of a document as stored: each with its typed attributes and its element
@@ -176,11 +177,7 @@ impl<'a> Style<'a> {
     /// the styles it is based on.
     pub fn paragraph_properties(self) -> ParagraphProperties {
         let document = self.document;
-        document
-            .element(self.data.element)
-            .children_through_fallback(document.names.mc)
-            .into_iter()
-            .find(|child| child.is(&document.names.w, "pPr"))
+        self.child("pPr")
             .map_or_else(ParagraphProperties::default, |p_pr| {
                 crate::docx::properties::paragraph_properties(
                     p_pr,
@@ -190,15 +187,58 @@ impl<'a> Style<'a> {
             })
     }
 
-    /// The run properties the style sets itself (its `w:rPr`), without those of the
-    /// styles it is based on.
-    pub fn run_properties(self) -> RunProperties {
+    /// The table properties a table style sets itself (its `w:tblPr`), without those of
+    /// the styles it is based on or of its conditional formats.
+    pub fn table_properties(self) -> TableProperties {
+        self.child("tblPr")
+            .map_or_else(TableProperties::default, |tbl_pr| {
+                crate::docx::table_properties::table_properties(
+                    tbl_pr,
+                    &self.document.names,
+                    &mut |_, _, _| {},
+                )
+            })
+    }
+
+    /// The row properties a table style sets itself (its `w:trPr`).
+    pub fn row_properties(self) -> TableRowProperties {
+        self.child("trPr")
+            .map_or_else(TableRowProperties::default, |tr_pr| {
+                crate::docx::table_properties::row_properties(
+                    tr_pr,
+                    &self.document.names,
+                    &mut |_, _, _| {},
+                )
+            })
+    }
+
+    /// The cell properties a table style sets itself (its `w:tcPr`).
+    pub fn cell_properties(self) -> TableCellProperties {
+        self.child("tcPr")
+            .map_or_else(TableCellProperties::default, |tc_pr| {
+                crate::docx::table_properties::cell_properties(
+                    tc_pr,
+                    &self.document.names,
+                    &mut |_, _, _| {},
+                )
+            })
+    }
+
+    /// The child of the `w:style` element with this local name.
+    fn child(self, local: &str) -> Option<super::xml::Element<'a>> {
         let document = self.document;
         document
             .element(self.data.element)
             .children_through_fallback(document.names.mc)
             .into_iter()
-            .find(|child| child.is(&document.names.w, "rPr"))
+            .find(|child| child.is(&document.names.w, local))
+    }
+
+    /// The run properties the style sets itself (its `w:rPr`), without those of the
+    /// styles it is based on.
+    pub fn run_properties(self) -> RunProperties {
+        let document = self.document;
+        self.child("rPr")
             .map_or_else(RunProperties::default, |r_pr| {
                 crate::docx::properties::run_properties(r_pr, &document.names, &mut |_, _, _| {})
             })

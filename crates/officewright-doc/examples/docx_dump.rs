@@ -6,11 +6,14 @@
 //! cargo run --release -p officewright-doc --example docx_dump -- --summary FILE.docx...
 //! ```
 //!
-//! With one file it prints the sections, their page setup and their blocks, and with
-//! `--runs` also the style, alignment and list of each paragraph and every run with the
-//! properties written on it. With
-//! `--summary` it opens every file and prints a line for each that does not open, then
-//! how many did and how much text they hold, and the errors by kind.
+//! With one file it prints the sections, their page setup and their blocks. With
+//! `--runs` it also prints:
+//! - the style, alignment and list of each paragraph;
+//! - every run, with the properties written on it;
+//! - the style, width and layout of each table, and the width and merging of its cells.
+//!
+//! With `--summary` it opens every file and prints a line for each that does not open,
+//! then how many did and how much text they hold, and the errors by kind.
 
 use std::collections::BTreeMap;
 use std::process::ExitCode;
@@ -116,9 +119,29 @@ fn print_block(block: Block<'_>, depth: usize, runs: bool) {
         }
         Block::Table(table) => {
             println!("{indent}table, {} grid columns", table.grid_columns().len());
+            if runs {
+                let properties = table.properties();
+                println!(
+                    "{indent}  properties: style={:?} width={:?} layout={:?} floating={}",
+                    properties.style(),
+                    properties.width(),
+                    properties.layout(),
+                    properties.position().is_some()
+                );
+            }
             for (r, row) in table.rows().enumerate() {
                 for (c, cell) in row.cells().enumerate() {
-                    println!("{indent}  cell {r},{c}");
+                    if runs {
+                        let properties = cell.properties();
+                        println!(
+                            "{indent}  cell {r},{c}: width={:?} span={:?} vertical merge={:?}",
+                            properties.width(),
+                            properties.grid_span(),
+                            properties.vertical_merge()
+                        );
+                    } else {
+                        println!("{indent}  cell {r},{c}");
+                    }
                     for block in cell.blocks() {
                         print_block(block, depth + 2, runs);
                     }

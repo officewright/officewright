@@ -38,6 +38,7 @@ macro_rules! xml_enum {
         }
     };
 }
+pub(crate) use xml_enum;
 
 xml_enum! {
     /// A font of the document's theme (ST_Theme), which a

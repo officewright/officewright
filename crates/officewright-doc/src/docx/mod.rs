@@ -5,6 +5,7 @@ mod capture;
 pub(crate) mod properties;
 mod section;
 mod styles;
+pub(crate) mod table_properties;
 
 use officewright_opc::{Package, Part};
 
