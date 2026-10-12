@@ -66,8 +66,8 @@ pub struct OwPdfDocument(Document);
 
 /// A font to draw and measure text with.
 ///
-/// Created by `ow_pdf_font_new_standard`, `ow_pdf_font_open_path` or
-/// `ow_pdf_font_open_bytes` and released by `ow_pdf_font_free`. A document keeps what it
+/// Created by `ow_pdf_font_new_standard`, `ow_pdf_font_open_path`,
+/// `ow_pdf_font_open_bytes` or `ow_pdf_font_resolve` and released by `ow_pdf_font_free`. A document keeps what it
 /// needs from the fonts drawn with it, so a font may be freed before the document. Used
 /// by one thread at a time; may be moved between threads.
 pub struct OwPdfFont {
@@ -128,14 +128,19 @@ pub struct OwFontBook {
 }
 
 impl OwFontBook {
-    /// Renews the messages after the book changed.
+    /// Renews the messages if the book's list of skipped entries changed. An unchanged
+    /// list keeps its strings, which `ow_font_book_skipped` promises callers; a call that
+    /// fails usually changes nothing.
     fn refresh(&mut self) {
-        self.skipped = self
+        let skipped: Vec<CString> = self
             .book
             .skipped()
             .iter()
             .map(|skipped| c_string(skipped.to_string()))
             .collect();
+        if skipped != self.skipped {
+            self.skipped = skipped;
+        }
     }
 }
 
@@ -844,7 +849,9 @@ pub unsafe extern "C" fn ow_font_book_skipped_count(
 /// Returns in `*out_message` what skipped entry `index` (counting from 0) is and why it
 /// was skipped, such as `fonts/broken.ttf: data is not a TrueType or OpenType font or
 /// font collection: the file is too short`. The string is UTF-8 and owned by the book:
-/// it stays valid until the book is changed by an `ow_font_book_add_*` call or freed.
+/// it stays valid until an `ow_font_book_add_*` call changes the list of skipped entries
+/// (one that skips another file, or reads a skipped one after all) or the book is freed.
+/// A call that changes nothing, such as a failed one, leaves the strings valid.
 ///
 /// Fails with `OW_STATUS_INVALID_ARGUMENT` if `index` is not below the count
 /// `ow_font_book_skipped_count` gives.
@@ -1985,7 +1992,8 @@ mod tests {
             assert_eq!(ow_font_book_skipped_count(book, &mut count), OwStatus::Ok);
             assert_eq!(count, 1);
             assert_eq!(ow_font_book_skipped(book, 0, &mut message), OwStatus::Ok);
-            let text = CStr::from_ptr(message).to_str().unwrap();
+            let kept = message;
+            let text = CStr::from_ptr(kept).to_str().unwrap().to_owned();
             assert!(
                 text.starts_with(&format!("{}: data is not a TrueType", broken.display())),
                 "{text}"
@@ -2009,9 +2017,38 @@ mod tests {
                 ow_font_book_add_file(book, c(broken.to_str().unwrap()).as_ptr(), &mut added),
                 OwStatus::InvalidArgument
             );
+            assert_eq!(
+                ow_font_book_add_bytes(book, b"junk".as_ptr(), 4, &mut added),
+                OwStatus::InvalidArgument
+            );
+            // A scan that finds nothing new changes nothing either. Calls that change
+            // nothing keep the message valid; Miri would report a read of freed memory.
+            assert_eq!(
+                ow_font_book_add_dir(book, c_dir.as_ptr(), &mut added),
+                OwStatus::Ok
+            );
+            assert_eq!(CStr::from_ptr(kept).to_str().unwrap(), text);
             ow_font_book_free(book);
         }
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The only test that reads the machine's fonts, so the others stay hermetic.
+    #[test]
+    fn adds_the_system_fonts_whatever_the_machine_has() {
+        let book = new_book();
+        let mut added = 0;
+        let mut faces = 7;
+        // SAFETY: a live handle and valid out-pointers; the handle is freed once.
+        unsafe {
+            assert_eq!(
+                ow_font_book_add_system_fonts(book, &mut added),
+                OwStatus::Ok
+            );
+            assert_eq!(ow_font_book_face_count(book, &mut faces), OwStatus::Ok);
+            ow_font_book_free(book);
+        }
+        assert_eq!(faces, added);
     }
 
     #[test]
@@ -2063,11 +2100,6 @@ mod tests {
             assert_eq!(last_error(), "data is null");
             assert_eq!(ow_font_book_new(ptr::null_mut()), OwStatus::NullArgument);
             assert_eq!(last_error(), "out_book is null");
-            // Adding the system fonts works whatever the machine has.
-            assert_eq!(
-                ow_font_book_add_system_fonts(book, &mut count),
-                OwStatus::Ok
-            );
             assert_eq!(
                 ow_font_book_add_system_fonts(ptr::null_mut(), &mut count),
                 OwStatus::NullArgument

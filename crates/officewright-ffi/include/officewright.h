@@ -170,8 +170,8 @@ typedef struct OwPdfDocument OwPdfDocument;
 /**
  * A font to draw and measure text with.
  *
- * Created by `ow_pdf_font_new_standard`, `ow_pdf_font_open_path` or
- * `ow_pdf_font_open_bytes` and released by `ow_pdf_font_free`. A document keeps what it
+ * Created by `ow_pdf_font_new_standard`, `ow_pdf_font_open_path`,
+ * `ow_pdf_font_open_bytes` or `ow_pdf_font_resolve` and released by `ow_pdf_font_free`. A document keeps what it
  * needs from the fonts drawn with it, so a font may be freed before the document. Used
  * by one thread at a time; may be moved between threads.
  */
@@ -535,7 +535,9 @@ enum OwStatus ow_font_book_skipped_count(const struct OwFontBook *book, size_t *
  * Returns in `*out_message` what skipped entry `index` (counting from 0) is and why it
  * was skipped, such as `fonts/broken.ttf: data is not a TrueType or OpenType font or
  * font collection: the file is too short`. The string is UTF-8 and owned by the book:
- * it stays valid until the book is changed by an `ow_font_book_add_*` call or freed.
+ * it stays valid until an `ow_font_book_add_*` call changes the list of skipped entries
+ * (one that skips another file, or reads a skipped one after all) or the book is freed.
+ * A call that changes nothing, such as a failed one, leaves the strings valid.
  *
  * Fails with `OW_STATUS_INVALID_ARGUMENT` if `index` is not below the count
  * `ow_font_book_skipped_count` gives.

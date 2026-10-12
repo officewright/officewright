@@ -1,6 +1,7 @@
 //! The `officewright` command-line tool.
 #![forbid(unsafe_code)]
 
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -57,10 +58,16 @@ fn cli() -> Command {
                         .default_value("a4")
                         .help("Page size"),
                 )
-                .arg(Arg::new("font").long("font").value_name("NAME|FILE").help(
-                    "Font to embed: a family name, or a TrueType or OpenType font file \
-                             (the first font of a collection); Helvetica if not given",
-                ))
+                .arg(
+                    Arg::new("font")
+                        .long("font")
+                        .value_name("NAME|FILE")
+                        .value_parser(value_parser!(OsString))
+                        .help(
+                            "Font to embed: a family name, or a TrueType or OpenType font \
+                             file (the first font of a collection); Helvetica if not given",
+                        ),
+                )
                 .arg(
                     Arg::new("font-dir")
                         .long("font-dir")
@@ -136,7 +143,7 @@ fn run_text_to_pdf(args: &ArgMatches) -> Result<(), String> {
             err.utf8_error().valid_up_to()
         )
     })?;
-    let font = match args.get_one::<String>("font") {
+    let font = match args.get_one::<OsString>("font") {
         Some(font) => font_arg(font, args)?,
         None => Font::standard(StandardFont::Helvetica),
     };
@@ -158,7 +165,7 @@ fn run_text_to_pdf(args: &ArgMatches) -> Result<(), String> {
 /// The font `--font` names: a file if `value` names one, or looks like a path or a font
 /// file name; otherwise a family name, resolved among the system fonts and the
 /// `--font-dir` folders, with every substitution printed as a warning.
-fn font_arg(value: &str, args: &ArgMatches) -> Result<Font, String> {
+fn font_arg(value: &OsStr, args: &ArgMatches) -> Result<Font, String> {
     let dirs: Vec<&PathBuf> = args
         .get_many::<PathBuf>("font-dir")
         .into_iter()
@@ -174,7 +181,9 @@ fn font_arg(value: &str, args: &ArgMatches) -> Result<Font, String> {
                 .iter()
                 .any(|known| ext.eq_ignore_ascii_case(known))
         });
-    if path.is_file() || is_file_name || value.contains(['/', '\\']) {
+    // A file path need not be UTF-8; a family name must be.
+    let looks_like_path = value.to_string_lossy().contains(['/', '\\']);
+    if path.is_file() || is_file_name || looks_like_path {
         if !dirs.is_empty() || !system {
             return Err(
                 "--font-dir and --no-system-fonts apply to a font family name, not a font file"
@@ -183,6 +192,12 @@ fn font_arg(value: &str, args: &ArgMatches) -> Result<Font, String> {
         }
         return Font::from_file(path, 0).map_err(|err| describe(&err));
     }
+    let Some(family) = value.to_str() else {
+        return Err(format!(
+            "font family name {} is not valid UTF-8",
+            value.to_string_lossy()
+        ));
+    };
     let mut book = FontBook::new();
     if system {
         book.add_system_fonts();
@@ -191,20 +206,23 @@ fn font_arg(value: &str, args: &ArgMatches) -> Result<Font, String> {
         book.add_dir(dir).map_err(|err| describe(&err))?;
     }
     let mut resolver = FontResolver::new(&book);
-    let font = Font::resolve(&mut resolver, &FontRequest::new(value)).map_err(|err| match err {
-        Error::FontNotFound { .. } => {
-            let place = if system {
-                "the system font folders and --font-dir"
-            } else {
-                "--font-dir"
-            };
-            match book.len() {
-                0 => format!("{err}: no fonts were found in {place}"),
-                faces => format!("{err}: none of the {faces} fonts in {place} can stand in for it"),
+    let font =
+        Font::resolve(&mut resolver, &FontRequest::new(family)).map_err(|err| match err {
+            Error::FontNotFound { .. } => {
+                let place = if system {
+                    "the system font folders and --font-dir"
+                } else {
+                    "--font-dir"
+                };
+                match book.len() {
+                    0 => format!("{err}: no fonts were found in {place}"),
+                    faces => {
+                        format!("{err}: none of the {faces} fonts in {place} can stand in for it")
+                    }
+                }
             }
-        }
-        err => describe(&err),
-    })?;
+            err => describe(&err),
+        })?;
     for substitution in resolver.substitutions() {
         eprintln!("warning: font {substitution}");
     }

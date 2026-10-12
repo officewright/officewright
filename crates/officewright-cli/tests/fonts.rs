@@ -257,14 +257,28 @@ fn reports_a_family_nothing_stands_in_for() -> io::Result<()> {
         String::from_utf8_lossy(&out.stderr),
         "error: --font-dir and --no-system-fonts apply to a font family name, not a font file\n"
     );
-    // A name that looks like a font file is taken as one.
-    let missing = dir.join("missing.ttf");
-    let out = officewright(&[&"text-to-pdf", &"--font", &missing, &input, &output])?;
-    assert!(
-        String::from_utf8_lossy(&out.stderr)
-            .starts_with(&format!("error: cannot read {}: ", missing.display())),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    fs::remove_dir_all(&dir)
+}
+
+#[test]
+fn takes_a_font_file_name_or_relative_path_as_a_file() -> io::Result<()> {
+    let dir = scratch("file-names")?;
+    fs::write(dir.join("in.txt"), "A")?;
+    // Run in the scratch directory, so these are relative names: one that ends like a
+    // font file, and one that is a path without an extension. Neither exists, and neither
+    // is taken as a family name.
+    for (font, message) in [
+        ("missing.ttf", "error: cannot read missing.ttf: "),
+        ("MISSING.OTC", "error: cannot read MISSING.OTC: "),
+        ("sub/missing", "error: cannot read sub/missing: "),
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_officewright"))
+            .current_dir(&dir)
+            .args(["text-to-pdf", "--font", font, "in.txt", "out.pdf"])
+            .output()?;
+        assert_eq!(out.status.code(), Some(1), "{font}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.starts_with(message), "{font}: {stderr}");
+    }
     fs::remove_dir_all(&dir)
 }

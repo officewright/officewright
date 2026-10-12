@@ -32,8 +32,8 @@ Georgian, Han, Hiragana and Katakana scripts and Hangul syllables. Text is not s
 yet, so scripts that need shaping or right-to-left layout (Arabic, Hebrew, the Indic
 scripts…) are refused. `--font` also takes a family name, looked up among the system fonts and the
 folders given with `--font-dir` (`--no-system-fonts` leaves the system out); when the family
-is missing, its metric-compatible substitute (Carlito for Calibri, Liberation for Arial,
-Times New Roman and Courier New) or a common font of the same kind is used. Characters a
+is missing, its metric-compatible substitute (Carlito for Calibri, Caladea for Cambria,
+Liberation for Arial, Times New Roman and Courier New) or a common font of the same kind is used. Characters a
 font cannot show are reported with their line and column; substitutions and restrictions in
 the font's license are printed as warnings.
 

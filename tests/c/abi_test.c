@@ -422,6 +422,11 @@ static void fonts_by_name(const char *fonts, const char *dir) {
     EXPECT(ow_font_book_add_dir(empty, path, &added), OW_STATUS_IO, "cannot read ");
     CHECK(added == 0);
     EXPECT(ow_font_book_add_bytes(empty, NULL, 0, &added), OW_STATUS_NULL_ARGUMENT, "data is null");
+    EXPECT(ow_font_book_add_bytes(empty, (const uint8_t *)"junk", 4, &added),
+           OW_STATUS_INVALID_ARGUMENT, "not a TrueType");
+    /* Calls that change nothing leave the message valid (AddressSanitizer would report a
+     * read of freed memory here). */
+    CHECK(message != NULL && strstr(message, "broken.ttf") != NULL);
     ow_font_book_free(empty);
     ow_font_book_free(NULL);
     ow_font_resolver_free(NULL);
