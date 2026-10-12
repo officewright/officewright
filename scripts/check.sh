@@ -56,6 +56,7 @@ macos)
 	need codesign "xcode-select --install"
 	;;
 windows)
+	need powershell.exe "Windows PowerShell 5.1 ships with Windows; check that C:\\Windows\\System32\\WindowsPowerShell\\v1.0 is on PATH"
 	need cl "run from a Visual Studio Developer Command Prompt (vcvars64.bat)"
 	need dumpbin "run from a Visual Studio Developer Command Prompt (vcvars64.bat)"
 	need cygpath "run from Git Bash"
@@ -126,6 +127,12 @@ actionlint
 step "corpus tools (tests/corpus-tools)"
 # The committed rule documents must be what scripts/make-rule-docs.py writes.
 "$python" -B -m unittest discover -s tests/corpus-tools -v
+
+# make-reference.ps1 is written for Windows PowerShell 5.1, which exists only on Windows.
+if [ "$os" = windows ]; then
+	step "make-reference.ps1 without Word (Windows PowerShell)"
+	powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tests/corpus-tools/test_make_reference.ps1
+fi
 
 step "C library (cargo cinstall)"
 # The same layout the release archives ship; scripts/check-capi.sh tests it as a user would.

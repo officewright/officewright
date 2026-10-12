@@ -12,21 +12,32 @@
       3. reopens that re-saved file and exports <name>.pdf from it;
       4. checks both files for the Windows and Office user names, the computer name and
          the user profile path, and refuses them if any appears;
-      5. writes <name>.json: hashes, Word version and build, page count, compatibility
-         mode, and the fonts the document asks for that neither Windows nor Word has.
+      5. writes <name>.json: hashes, Word version and build, the printer, page count,
+         compatibility mode, and the fonts the document asks for that neither Windows nor
+         Word has.
     scripts/corpus-import.py, run on the Linux side, checks these files again and copies
     them into tests/corpus/.
+
+    Word lays documents out with the metrics of its printer, so references are made with
+    Microsoft Print to PDF; the script prints the default printer and Word's printer and
+    warns when either is another one.
+
+    All calls into Word run in a worker thread that this script watches. When Word gives
+    no answer within -TimeoutSeconds, the script stops the Word instance it started (a
+    WINWORD.EXE started by COM, with /Automation on its command line, after the script
+    began), checks that the process is gone, and says which step Word was in. If Word
+    cannot be stopped, the script says so and exits with code 2 instead of waiting.
 
     The script never touches a Word session the user has open: it refuses to start while
     any WINWORD process runs. Do not open Word documents while it runs: Windows may hand
     them to the invisible Word instance. If that happens, the script stops before the next
     document, makes its Word instance visible and leaves it running instead of closing
-    it. It changes no Word option, adds nothing to Word's recent files, and stops the Word
-    instance it started (and only that one) when it is done or when a document takes
-    longer than -TimeoutSeconds. Existing results are kept unless -Overwrite is given, so
-    an interrupted run can simply be started again.
+    it. It changes no Word option and adds nothing to Word's recent files. Existing
+    results are kept unless -Overwrite is given, so an interrupted run can simply be
+    started again.
 
     Run it from Windows PowerShell 5.1 on the machine that has Word, not from WSL.
+    tests/corpus-tools/test_make_reference.ps1 tests the parts that need no Word.
 
 .PARAMETER InputPath
     Documents to render, or folders whose documents (matching -Pattern) are rendered.
@@ -34,9 +45,12 @@
 .PARAMETER OutputDir
     Local folder for the results. Not a network path and not inside OneDrive.
 
+.PARAMETER TimeoutSeconds
+    How long Word may take to start, or to save and export one document.
+
 .PARAMETER DryRun
-    Check the inputs, the output folder and the fonts, print what would be rendered, and
-    stop before Word starts.
+    Check the inputs, the output folder, the fonts and the printer, print what would be
+    rendered, and stop before Word starts.
 
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File C:\officewright-ref\make-reference.ps1 -InputPath C:\officewright-ref\word-rules -OutputDir C:\officewright-ref\out
@@ -63,21 +77,10 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 # Bumped whenever the output files change shape; corpus-import.py checks it.
-$ScriptVersion = 1
+$ScriptVersion = 2
 
-# Word constants (Word VBA reference).
-$wdAlertsNone = 0
-$msoAutomationSecurityForceDisable = 3
-$wdFormatXMLDocument = 12
-$wdDoNotSaveChanges = 0
-$wdStatisticPages = 2
-$wdExportFormatPDF = 17
-$wdExportOptimizeForPrint = 0
-$wdExportAllDocument = 0
-$wdExportDocumentContent = 0
-$wdExportCreateNoBookmarks = 0
-
-$WordNs = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+# The printer the references are made with.
+$ReferencePrinter = 'Microsoft Print to PDF'
 
 function Stop-WithError([string] $Message) {
     Write-Host "make-reference: $Message" -ForegroundColor Red
@@ -120,15 +123,16 @@ function Read-ZipEntries([string] $Path) {
 
 function Get-DocumentFonts([string] $Path) {
     # The font names in word/fontTable.xml, which lists every font a document asks for.
+    $wordNs = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
     $names = @()
     foreach ($entry in (Read-ZipEntries $Path)) {
         if ($entry.Name -ne 'word/fontTable.xml') { continue }
         $xml = New-Object System.Xml.XmlDocument
         $xml.LoadXml($entry.Text)
         $ns = New-Object System.Xml.XmlNamespaceManager($xml.NameTable)
-        $ns.AddNamespace('w', $WordNs)
+        $ns.AddNamespace('w', $wordNs)
         foreach ($font in $xml.SelectNodes('/w:fonts/w:font', $ns)) {
-            $names += $font.GetAttribute('name', $WordNs)
+            $names += $font.GetAttribute('name', $wordNs)
         }
     }
     return @($names | Sort-Object -Unique)
@@ -200,26 +204,231 @@ function Find-PersonalData([string] $DocxPath, [string] $PdfPath, $Tokens) {
     return @($found | Sort-Object -Unique)
 }
 
-function Set-Deadline([string] $File, [int] $Seconds) {
-    $ticks = 0
-    if ($Seconds -gt 0) { $ticks = [DateTime]::UtcNow.AddSeconds($Seconds).Ticks }
-    # The watchdog may be reading the file at this moment; try again briefly.
-    for ($attempt = 1; ; $attempt++) {
-        try {
-            [System.IO.File]::WriteAllText($File, [string]$ticks)
-            return
-        } catch [System.IO.IOException] {
-            if ($attempt -ge 20) { throw }
-            Start-Sleep -Milliseconds 50
-        }
-    }
+function Get-PrinterName([string] $Printer) {
+    # Word's ActivePrinter reads "<name> on <port>:"; keep the name.
+    if ($Printer -match '^(.*) on [^ ]+:$') { return $Matches[1] }
+    return $Printer
 }
 
-function Release-Com($Object) {
-    if ($null -ne $Object) {
-        [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($Object)
+function Get-DefaultPrinter {
+    # The Windows default printer, from the registry ("<name>,winspool,<port>:"). Reading it
+    # asks no printer driver, so it cannot hang.
+    $key = Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Windows' -ErrorAction SilentlyContinue
+    if ($key -and ($key.PSObject.Properties.Name -contains 'Device') -and $key.Device) {
+        return ([string]$key.Device).Split(',')[0]
     }
+    return ''
 }
+
+function Get-OwnWordProcess([DateTime] $Since) {
+    # The WINWORD processes COM started (/Automation on the command line) since $Since. The
+    # script refuses to start while Word runs, so these belong to it; a Word the user opens
+    # has no /Automation and is never stopped.
+    $ids = @()
+    $all = @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'WINWORD.EXE'" -ErrorAction SilentlyContinue)
+    foreach ($process in $all) {
+        if ($process.CreationDate -ge $Since -and ([string]$process.CommandLine) -match '[/-]Automation') {
+            $ids += [int]$process.ProcessId
+        }
+    }
+    return $ids
+}
+
+function Wait-ProcessExit([int] $Id, [int] $Seconds) {
+    $until = (Get-Date).AddSeconds($Seconds)
+    while (Get-Process -Id $Id -ErrorAction SilentlyContinue) {
+        if ((Get-Date) -gt $until) { return $false }
+        Start-Sleep -Milliseconds 200
+    }
+    return $true
+}
+
+function Stop-ProcessVerified([int] $Id, [int] $GraceSeconds = 10) {
+    # Stops a process and checks that it is gone; returns Stopped and what was tried, with
+    # every error. An unchecked Stop-Process that failed silently once let a hung Word
+    # outlive the time-out.
+    if (-not (Get-Process -Id $Id -ErrorAction SilentlyContinue)) {
+        return New-Object PSObject -Property @{ Stopped = $true; Detail = "process $Id had already exited" }
+    }
+    $tried = @()
+    try {
+        Stop-Process -Id $Id -Force -ErrorAction Stop
+        $tried += 'Stop-Process ok'
+    } catch {
+        $tried += "Stop-Process failed: $($_.Exception.Message)"
+    }
+    if (Wait-ProcessExit $Id $GraceSeconds) {
+        return New-Object PSObject -Property @{ Stopped = $true; Detail = "stopped process $Id ($($tried -join '; '))" }
+    }
+    $taskkill = Join-Path $env:SystemRoot 'System32\taskkill.exe'
+    $output = (& $taskkill /PID $Id /F /T 2>&1 | Out-String).Trim()
+    $tried += "taskkill: $output"
+    if (Wait-ProcessExit $Id $GraceSeconds) {
+        return New-Object PSObject -Property @{ Stopped = $true; Detail = "stopped process $Id ($($tried -join '; '))" }
+    }
+    return New-Object PSObject -Property @{ Stopped = $false; Detail = "process $Id is still running ($($tried -join '; '))" }
+}
+
+function New-WordWorker($Progress) {
+    # A single-threaded apartment of its own for Word's COM objects, so that this thread
+    # never waits on Word without a time limit.
+    $runspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+    $runspace.ApartmentState = [System.Threading.ApartmentState]::STA
+    $runspace.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
+    $runspace.Open()
+    $runspace.SessionStateProxy.SetVariable('progress', $Progress)
+    $worker = [PowerShell]::Create()
+    $worker.Runspace = $runspace
+    return $worker
+}
+
+function Get-InnerMessage($Exception) {
+    while ($null -ne $Exception.InnerException) { $Exception = $Exception.InnerException }
+    return $Exception.Message
+}
+
+function Invoke-WordStep($Worker, [string] $Script, [object[]] $Arguments, [int] $TimeoutSeconds, [scriptblock] $Targets, $Progress) {
+    # Runs $Script in the worker and waits at most $TimeoutSeconds. The result's Status is
+    #   'done'    with Output;
+    #   'error'   with Message: the script failed;
+    #   'timeout' with Message: no answer in time, the processes $Targets lists were stopped
+    #             and the worker gave up;
+    #   'stuck'   with Message: the worker is still blocked after that; only ending this
+    #             process frees it.
+    $Worker.Commands.Clear()
+    $Worker.Streams.ClearStreams()
+    [void]$Worker.AddScript($Script)
+    foreach ($argument in $Arguments) { [void]$Worker.AddArgument($argument) }
+    $Progress.Step = ''
+    $handle = $Worker.BeginInvoke()
+    if ($handle.AsyncWaitHandle.WaitOne($TimeoutSeconds * 1000)) {
+        try {
+            $output = $Worker.EndInvoke($handle)
+            return New-Object PSObject -Property @{ Status = 'done'; Output = $output; Message = '' }
+        } catch {
+            return New-Object PSObject -Property @{ Status = 'error'; Output = $null; Message = (Get-InnerMessage $_.Exception) }
+        }
+    }
+    $details = @()
+    foreach ($id in @(& $Targets)) { $details += (Stop-ProcessVerified $id).Detail }
+    if ($details.Count -eq 0) { $details += 'found no Word process of this script to stop' }
+    $message = "no answer within $TimeoutSeconds seconds, during: $($Progress.Step); $($details -join '; ')"
+    if ($handle.AsyncWaitHandle.WaitOne(15000)) {
+        try { [void]$Worker.EndInvoke($handle) } catch { }
+        return New-Object PSObject -Property @{ Status = 'timeout'; Output = $null; Message = $message }
+    }
+    return New-Object PSObject -Property @{ Status = 'stuck'; Output = $null; Message = $message }
+}
+
+function Exit-Stuck([string] $Message, [string] $Staging) {
+    Write-Host "make-reference: Word does not answer and could not be stopped: $Message" -ForegroundColor Red
+    Write-Host 'End WINWORD.EXE in Task Manager. Results of the documents that finished are in the output folder; start the script again to render the rest.' -ForegroundColor Red
+    if ($Staging -and (Test-Path -LiteralPath $Staging)) {
+        Remove-Item -LiteralPath $Staging -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # The worker thread is blocked in a call into Word; only ending the process frees it.
+    [Environment]::Exit(2)
+}
+
+# Scripts the worker runs. Word's objects stay in the worker's session ($global:word); the
+# shared $progress.Step names the call in progress for the time-out message.
+
+$StartWordScript = @'
+$ErrorActionPreference = 'Stop'
+$progress.Step = 'starting Word'
+$global:word = New-Object -ComObject Word.Application
+$progress.Step = 'setting up Word'
+$global:word.Visible = $false
+$global:word.DisplayAlerts = 0            # wdAlertsNone
+$global:word.AutomationSecurity = 3       # msoAutomationSecurityForceDisable, this session only
+$progress.Step = 'reading Word''s font list'
+$fonts = New-Object 'System.Collections.Generic.List[string]'
+foreach ($name in $global:word.FontNames) { $fonts.Add([string]$name) }
+$progress.Step = 'reading Word''s printer'
+New-Object PSObject -Property @{
+    Version = [string]$global:word.Version
+    Build = [string]$global:word.Build
+    ActivePrinter = [string]$global:word.ActivePrinter
+    UserName = [string]$global:word.UserName
+    Fonts = $fonts.ToArray()
+}
+'@
+
+$RenderScript = @'
+param($Staged, $Resaved, $Pdf)
+$ErrorActionPreference = 'Stop'
+$word = $global:word
+$progress.Step = 'counting open documents'
+if ($word.Documents.Count -gt 0) {
+    # Not ours: every document this script opens is closed again. Windows handed a
+    # document the user opened to this instance.
+    return New-Object PSObject -Property @{ Foreign = $true; Pages = 0; Mode = 0 }
+}
+# Documents.Open has 16 parameters and COM calls from PowerShell are positional:
+# FileName, ConfirmConversions, ReadOnly, AddToRecentFiles; the rest keep their defaults.
+$progress.Step = 'Documents.Open'
+$doc = $word.Documents.Open($Staged, $false, $true, $false)
+try {
+    if ($word.ProtectedViewWindows.Count -gt 0) { throw 'Word opened the document in Protected View' }
+    $doc.RemovePersonalInformation = $true
+    # Lay the document out first: w:lastRenderedPageBreak records the pagination at the
+    # time of saving.
+    $progress.Step = 'Repaginate before saving'
+    $doc.Repaginate()
+    # SaveAs2: FileName, FileFormat (wdFormatXMLDocument), LockComments, Password,
+    # AddToRecentFiles. CompatibilityMode is left out, which keeps the document's mode.
+    $progress.Step = 'SaveAs2'
+    $doc.SaveAs2($Resaved, 12, $false, '', $false)
+} finally {
+    $progress.Step = 'closing the document'
+    $doc.Close(0)                         # wdDoNotSaveChanges
+    [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($doc)
+}
+# Export from the bytes that will be committed.
+$progress.Step = 'Documents.Open (re-saved copy)'
+$doc = $word.Documents.Open($Resaved, $false, $true, $false)
+try {
+    $progress.Step = 'Repaginate before exporting'
+    $doc.Repaginate()
+    $progress.Step = 'ComputeStatistics'
+    $pages = [int]$doc.ComputeStatistics(2)       # wdStatisticPages
+    $mode = [int]$doc.CompatibilityMode
+    # ExportAsFixedFormat: OutputFileName, ExportFormat (wdExportFormatPDF), OpenAfterExport,
+    # OptimizeFor (print), Range (whole document), From, To (both ignored), Item (content),
+    # IncludeDocProps, KeepIRM, CreateBookmarks (none), DocStructureTags (off keeps the
+    # content stream in reading order for pdftotext), BitmapMissingFonts (off references
+    # fonts that forbid embedding instead of drawing them as bitmaps), UseISO19005_1.
+    $progress.Step = 'ExportAsFixedFormat'
+    $doc.ExportAsFixedFormat($Pdf, 17, $false, 0, 0, 1, 1, 0, $false, $false, 0, $false, $false, $false)
+} finally {
+    $progress.Step = 'closing the re-saved copy'
+    $doc.Close(0)
+    [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($doc)
+}
+New-Object PSObject -Property @{ Foreign = $false; Pages = $pages; Mode = $mode }
+'@
+
+$CloseWordScript = @'
+$ErrorActionPreference = 'Stop'
+$result = 'not started'
+if ($null -ne $global:word) {
+    $progress.Step = 'counting open documents'
+    if ($global:word.Documents.Count -gt 0) {
+        # Documents the user opened in this instance: quitting would discard them.
+        $global:word.Visible = $true
+        $result = 'left running'
+    } else {
+        $progress.Step = 'Quit'
+        $global:word.Quit(0)              # wdDoNotSaveChanges
+        $result = 'quit'
+    }
+    [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($global:word)
+    $global:word = $null
+}
+[System.GC]::Collect()
+[System.GC]::WaitForPendingFinalizers()
+$result
+'@
 
 # 1. Inputs and output folder.
 
@@ -305,77 +514,64 @@ foreach ($entry in $plan) {
         Write-Host ("  {0,-34} fonts not installed in Windows: {1}" -f '', ($entry.NotInWindows -join ', ')) -ForegroundColor Yellow
     }
 }
+# 3. Printer. Word lays documents out with its printer's metrics, and a printer that does
+# not answer can stall Word.
+
+$defaultPrinter = Get-DefaultPrinter
+Write-Host "Default printer: $defaultPrinter"
+if ($defaultPrinter -ne $ReferencePrinter) {
+    Write-Host "Warning: the default printer is not $ReferencePrinter. Word lays documents out with the printer's metrics; make $ReferencePrinter the default printer (Settings, Bluetooth & devices, Printers & scanners) before making references." -ForegroundColor Yellow
+}
+$spooler = Get-Service -Name Spooler -ErrorAction SilentlyContinue
+if (-not $spooler -or $spooler.Status -ne 'Running') {
+    Write-Host 'Warning: the Print Spooler service is not running; Word may wait for it.' -ForegroundColor Yellow
+}
+
 if ($DryRun) {
     Write-Host 'Dry run: Word was not started. Fonts not installed in Windows may still be Office cloud fonts that Word has.'
     exit 0
 }
 
-# 3. Render.
+# 4. Render.
 
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 $staging = Join-Path $outDir '.staging'
 if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
 New-Item -ItemType Directory -Path $staging | Out-Null
-$deadlineFile = Join-Path $staging 'deadline'
-$stopFile = Join-Path $staging 'stop'
-$timeoutFile = Join-Path $staging 'timed-out'
-Set-Deadline $deadlineFile 0
 
 $osKey = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction SilentlyContinue
 $windowsVersion = [Environment]::OSVersion.Version.ToString()
 $windowsDisplay = ''
 if ($osKey -and ($osKey.PSObject.Properties.Name -contains 'DisplayVersion')) { $windowsDisplay = [string]$osKey.DisplayVersion }
 
-$word = $null
-$wordPid = 0
-$watchdog = $null
+# Every WINWORD with /Automation started from now on is the instance this script starts.
+$since = (Get-Date).AddSeconds(-1)
+$targets = { Get-OwnWordProcess $since }
+$progress = [hashtable]::Synchronized(@{ Step = '' })
+$worker = New-WordWorker $progress
 $results = @()
 $aborted = $false
 $userDocuments = $false
+$leftRunning = $false
 try {
-    $word = New-Object -ComObject Word.Application
-    $wordProcesses = @(Get-Process -Name WINWORD -ErrorAction SilentlyContinue)
-    if ($wordProcesses.Count -ne 1) {
-        throw "expected the one Word process this script started, found $($wordProcesses.Count)"
+    $start = Invoke-WordStep $worker $StartWordScript @() $TimeoutSeconds $targets $progress
+    if ($start.Status -eq 'stuck') { Exit-Stuck $start.Message $staging }
+    if ($start.Status -ne 'done') { throw "Word did not start: $($start.Message)" }
+    $info = $start.Output[0]
+    $wordIds = @(Get-OwnWordProcess $since)
+    $printer = Get-PrinterName $info.ActivePrinter
+    Write-Host "Word $($info.Version), build $($info.Build), process $($wordIds -join ', '); Windows $windowsVersion $windowsDisplay"
+    Write-Host "Word's printer: $printer"
+    if ($printer -ne $ReferencePrinter) {
+        Write-Host "Warning: Word lays the documents out for $printer, not $ReferencePrinter." -ForegroundColor Yellow
     }
-    $wordPid = $wordProcesses[0].Id
-
-    # A document that hangs Word (a modal dialog nobody can see) is stopped by a watchdog in
-    # a separate process: COM calls block this one. It is armed from here on, so a first-run
-    # dialog during the setup below cannot hang the script either.
-    $watchdog = Start-Job -ArgumentList $wordPid, $deadlineFile, $stopFile, $timeoutFile -ScriptBlock {
-        param($WordPid, $DeadlineFile, $StopFile, $TimeoutFile)
-        while (-not (Test-Path -LiteralPath $StopFile)) {
-            $deadline = [int64]0
-            try {
-                # Shared for writing, so the main script can update the file meanwhile.
-                $stream = [System.IO.File]::Open($DeadlineFile, 'Open', 'Read', 'ReadWrite')
-                try {
-                    $deadline = [int64](New-Object System.IO.StreamReader($stream)).ReadToEnd()
-                } finally {
-                    $stream.Dispose()
-                }
-            } catch { }
-            if ($deadline -gt 0 -and [DateTime]::UtcNow.Ticks -gt $deadline) {
-                [System.IO.File]::WriteAllText($TimeoutFile, 'timeout')
-                Stop-Process -Id $WordPid -Force -ErrorAction SilentlyContinue
-                return
-            }
-            Start-Sleep -Milliseconds 500
-        }
+    if ($wordIds.Count -ne 1) {
+        Write-Host "Warning: expected one Word process started by this script, found $($wordIds.Count)." -ForegroundColor Yellow
     }
-    Set-Deadline $deadlineFile $TimeoutSeconds
-
-    $word.Visible = $false
-    $word.DisplayAlerts = $wdAlertsNone
-    $word.AutomationSecurity = $msoAutomationSecurityForceDisable
-    $wordVersion = [string]$word.Version
-    $wordBuild = [string]$word.Build
-    Write-Host "Word $wordVersion, build $wordBuild; Windows $windowsVersion $windowsDisplay; printer: $($word.ActivePrinter)"
 
     $wordFonts = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     foreach ($name in $windowsFonts) { [void]$wordFonts.Add($name) }
-    foreach ($name in $word.FontNames) { [void]$wordFonts.Add([string]$name) }
+    foreach ($name in $info.Fonts) { [void]$wordFonts.Add([string]$name) }
 
     # Personal strings that must not reach the repository, with a description that may.
     # Names are always searched for. Machine names are skipped when the input contains
@@ -383,7 +579,7 @@ try {
     $candidates = @(
         @($env:USERNAME, 'the Windows user name', $true),
         @($env:USERPROFILE, 'the user profile path', $true),
-        @([string]$word.UserName, 'the Office user name', $true),
+        @([string]$info.UserName, 'the Office user name', $true),
         @($env:COMPUTERNAME, 'the computer name', $false),
         @($env:USERDOMAIN, 'the Windows domain', $false)
     )
@@ -406,17 +602,9 @@ try {
             $tokens += New-Object PSObject -Property @{ Value = $value.Trim(); Kind = $candidate[1]; Always = $candidate[2] }
         }
     }
-    Set-Deadline $deadlineFile 0
 
     foreach ($entry in $plan) {
         $file = $entry.File
-        if ($word.Documents.Count -gt 0) {
-            # Not ours: the script closes every document it opens. Windows handed a document
-            # the user opened to this instance.
-            $userDocuments = $true
-            Write-Host 'Stopping: a document was opened in the Word instance this script uses. Word stays open and visible; save your work there, close Word, and start the script again.' -ForegroundColor Red
-            break
-        }
         if ($entry.Skip) {
             $results += New-Object PSObject -Property @{ File = $file.Name; Status = 'skipped'; Missing = @() }
             continue
@@ -447,54 +635,27 @@ try {
             fonts = @($entry.Fonts)
             fonts_missing = @()
             privacy_findings = @()
-            word_version = $wordVersion
-            word_build = $wordBuild
+            word_version = [string]$info.Version
+            word_build = [string]$info.Build
+            printer = $printer
+            default_printer = $defaultPrinter
             windows_version = $windowsVersion
             windows_display_version = $windowsDisplay
             rendered = (Get-Date).ToString('yyyy-MM-dd')
             export_seconds = 0
         }
         Write-Host "Rendering $($file.Name) ..."
-        $doc = $null
         $started = Get-Date
-        try {
-            Set-Deadline $deadlineFile $TimeoutSeconds
-            # Documents.Open has 16 parameters and COM calls from PowerShell are positional:
-            # FileName, ConfirmConversions, ReadOnly, AddToRecentFiles; the rest keep their defaults.
-            $doc = $word.Documents.Open($staged, $false, $true, $false)
-            if ($word.ProtectedViewWindows.Count -gt 0) {
-                throw 'Word opened the document in Protected View'
-            }
-            $doc.RemovePersonalInformation = $true
-            # Lay the document out first: w:lastRenderedPageBreak records the pagination at
-            # the time of saving.
-            $doc.Repaginate()
-            # SaveAs2: FileName, FileFormat, LockComments, Password, AddToRecentFiles. The
-            # compatibility mode is left alone (CompatibilityMode defaults to keeping it).
-            $doc.SaveAs2($resaved, $wdFormatXMLDocument, $false, '', $false)
-            $doc.Close($wdDoNotSaveChanges)
-            Release-Com $doc
-            $doc = $null
-
-            # Export from the bytes that will be committed.
-            $doc = $word.Documents.Open($resaved, $false, $true, $false)
-            $doc.Repaginate()
-            $record.pages = [int]$doc.ComputeStatistics($wdStatisticPages)
-            $record.compatibility_mode = [int]$doc.CompatibilityMode
-            # ExportAsFixedFormat: OutputFileName, ExportFormat, OpenAfterExport, OptimizeFor,
-            # Range, From, To (ignored for the whole document), Item, IncludeDocProps, KeepIRM,
-            # CreateBookmarks, DocStructureTags, BitmapMissingFonts, UseISO19005_1.
-            # DocStructureTags off keeps the content stream in reading order for pdftotext;
-            # BitmapMissingFonts off references fonts that forbid embedding instead of
-            # drawing them as bitmaps.
-            $doc.ExportAsFixedFormat($pdf, $wdExportFormatPDF, $false, $wdExportOptimizeForPrint,
-                $wdExportAllDocument, 1, 1, $wdExportDocumentContent, $false, $false,
-                $wdExportCreateNoBookmarks, $false, $false, $false)
-            $doc.Close($wdDoNotSaveChanges)
-            Release-Com $doc
-            $doc = $null
-            Set-Deadline $deadlineFile 0
-
+        $step = Invoke-WordStep $worker $RenderScript @($staged, $resaved, $pdf) $TimeoutSeconds $targets $progress
+        if ($step.Status -eq 'done' -and $step.Output[0].Foreign) {
+            $userDocuments = $true
+            Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
+            Write-Host 'Stopping: a document was opened in the Word instance this script uses. Word stays open and visible; save your work there, close Word, and start the script again.' -ForegroundColor Red
+            break
+        }
+        if ($step.Status -eq 'done') {
+            $record.pages = [int]$step.Output[0].Pages
+            $record.compatibility_mode = [int]$step.Output[0].Mode
             $record.export_seconds = [math]::Round(((Get-Date) - $started).TotalSeconds, 1)
             $record.resaved_sha256 = Get-Sha256 $resaved
             $record.pdf_sha256 = Get-Sha256 $pdf
@@ -510,26 +671,20 @@ try {
             } else {
                 $record.status = 'rendered'
             }
-        } catch {
-            $record.error = $_.Exception.Message
-            if (Test-Path -LiteralPath $timeoutFile) {
-                $record.error = "Word did not finish within $TimeoutSeconds seconds and was stopped"
-                $aborted = $true
-            } elseif (-not (Get-Process -Id $wordPid -ErrorAction SilentlyContinue)) {
-                $record.error = "Word exited: $($record.error)"
+        } elseif ($step.Status -eq 'error') {
+            $record.error = $step.Message
+            if (@(Get-OwnWordProcess $since).Count -eq 0) {
+                $record.error = "Word exited: $($step.Message)"
                 $aborted = $true
             }
-        } finally {
-            if (-not $aborted) { Set-Deadline $deadlineFile 0 }
-            if ($null -ne $doc -and -not $aborted) {
-                try { $doc.Close($wdDoNotSaveChanges) } catch { }
-            }
-            Release-Com $doc
-            if (Test-Path -LiteralPath $staged) {
-                Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
-            }
+        } else {
+            $record.error = "Word stopped: $($step.Message)"
+            $aborted = $true
         }
+        Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
         Write-JsonFile $jsonPath $record
+        if ($step.Status -eq 'stuck') { Exit-Stuck $step.Message $staging }
+
         $color = 'Green'
         if ($record.status -ne 'rendered') { $color = 'Red' }
         $detail = "$($record.pages) pages, compatibility mode $($record.compatibility_mode)"
@@ -546,40 +701,25 @@ try {
         }
     }
 } finally {
-    $leaveWord = $false
-    if ($null -ne $word) {
-        try {
-            if ($word.Documents.Count -gt 0) {
-                # Documents the user opened in this instance: quitting would discard them.
-                $leaveWord = $true
-                $word.Visible = $true
-            }
-        } catch { }
-        if (-not $leaveWord) {
-            try { $word.Quit($wdDoNotSaveChanges) } catch { }
-        }
-        Release-Com $word
-        $word = $null
-    }
-    [System.GC]::Collect()
-    [System.GC]::WaitForPendingFinalizers()
-    if ($leaveWord) {
+    $close = Invoke-WordStep $worker $CloseWordScript @() 60 $targets $progress
+    if ($close.Status -eq 'stuck') { Exit-Stuck $close.Message $staging }
+    if ($close.Status -eq 'done' -and $close.Output[0] -eq 'left running') {
+        $leftRunning = $true
         Write-Host 'Word was left running because it holds documents this script did not open.' -ForegroundColor Yellow
-    } elseif ($wordPid -ne 0) {
-        $process = Get-Process -Id $wordPid -ErrorAction SilentlyContinue
-        if ($process -and -not $process.WaitForExit(10000)) {
-            Stop-Process -Id $wordPid -Force -ErrorAction SilentlyContinue
+    } else {
+        # Word exits by itself after Quit; one that does not within ten seconds is stopped.
+        foreach ($id in @(Get-OwnWordProcess $since)) {
+            if (-not (Wait-ProcessExit $id 10)) {
+                Write-Host "Word did not exit after Quit: $((Stop-ProcessVerified $id).Detail)" -ForegroundColor Yellow
+            }
         }
     }
-    if ($null -ne $watchdog) {
-        [System.IO.File]::WriteAllText($stopFile, 'stop')
-        Stop-Job -Job $watchdog -ErrorAction SilentlyContinue
-        Remove-Job -Job $watchdog -Force -ErrorAction SilentlyContinue
-    }
+    $worker.Runspace.Dispose()
+    $worker.Dispose()
     if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
-# 4. Summary.
+# 5. Summary.
 
 $rendered = @($results | Where-Object { $_.Status -eq 'rendered' }).Count
 $skipped = @($results | Where-Object { $_.Status -eq 'skipped' }).Count

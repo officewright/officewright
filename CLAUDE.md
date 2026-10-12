@@ -59,7 +59,8 @@ tests/corpus/           small curated real documents (committed) + SOURCES.md + 
 tests/corpus/word-rules/  documents written by scripts/make-rule-docs.py, one undocumented Word rule each
 tests/corpus/reference/ ground-truth PDFs rendered by Microsoft Word/Excel/PowerPoint (app version in SOURCES.md)
 tests/corpus/resaved/   the copy Word saved of each document before exporting its reference PDF
-tests/corpus-tools/     Python tests of make-rule-docs.py and corpus-import.py
+tests/corpus-tools/     tests of make-rule-docs.py and corpus-import.py (Python) and of make-reference.ps1
+                        without Word (Windows PowerShell, Windows only)
 tests/fonts/            unmodified OFL test fonts with their license files, listed in THIRD-PARTY-NOTICES.md;
                         outside every crate, so never published
 tools/corpus-runner/    workspace member, publish = false: runs the library over a corpus, writes a JSON report
@@ -116,7 +117,7 @@ Unit and snapshot tests (`insta`) cover small handcrafted inputs. Real-world cor
   - pdf.js `test/pdfs` (Apache-2.0), qpdf test files (Apache-2.0), PDFium testing corpus (BSD-3-Clause): broken and unusual PDFs.
   - LibreOffice `sw/qa`, `sc/qa`, `sd/qa` documents (MPL-2.0): used as test input only, never copied into the repo.
   - Digital Corpora GovDocs1 and the Common Crawl PDF corpus: large-scale robustness runs (samples of 10k–100k files).
-- Ground truth for rendering, `tests/corpus/reference/`: PDFs exported by Microsoft Word/Excel/PowerPoint from the corpus files (`scripts/windows/make-reference.ps1`, COM automation, run by the maintainer on Windows). Word saves each document again first and exports from that copy, which goes to `tests/corpus/resaved/` (its `w:lastRenderedPageBreak` marks are Word's page breaks); `scripts/corpus-import.py` brings the results in and refuses any that carry a person's or company's name or a user profile path. LibreOffice exports are a secondary reference, marked as such. Never use output of Spire or Aspose as reference.
+- Ground truth for rendering, `tests/corpus/reference/`: PDFs exported by Microsoft Word/Excel/PowerPoint from the corpus files (`scripts/windows/make-reference.ps1`, COM automation, run by the maintainer on Windows). Word's printer is Microsoft Print to PDF (Word lays documents out with the printer's metrics; the script warns otherwise). Word saves each document again first and exports from that copy, which goes to `tests/corpus/resaved/` (its `w:lastRenderedPageBreak` marks are Word's page breaks); `scripts/corpus-import.py` brings the results in and refuses any that carry a person's or company's name or a user profile path. LibreOffice exports are a secondary reference, marked as such. Never use output of Spire or Aspose as reference.
 - Undocumented Word rules get a generated document each in `tests/corpus/word-rules/` (`scripts/make-rule-docs.py`, written from ECMA-376 markup), so a reference render isolates one rule.
 
 ### What runs against the corpora
@@ -238,6 +239,7 @@ cargo deny check && cargo machete
 cargo package --list -p officewright-pdf, -p officewright-font: no third-party data in the published crates
 typos && taplo fmt --check && shellcheck scripts/*.sh .githooks/pre-commit && actionlint
 tests/corpus-tools (Python unittest): committed rule documents equal make-rule-docs.py output; corpus-import.py refusals
+tests/corpus-tools/test_make_reference.ps1 (Windows): a Word step that hangs is stopped, checked and never waited on forever
 scripts/install-capi.sh target/capi --debug, copy the header, git diff --exit-code crates/officewright-ffi/include/officewright.h
 scripts/check-capi.sh target/capi (release.yml runs the same script on every unpacked archive):
   installed files; officewright.pc is relocatable; macOS install name is @rpath/...
