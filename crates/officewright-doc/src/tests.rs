@@ -1093,7 +1093,7 @@ fn reads_styles_and_the_document_defaults() {
 }
 
 #[test]
-fn repairs_styles_as_word_does() {
+fn repairs_damaged_style_lists() {
     let styles = format!(
         r#"<w:styles xmlns:w="{W}"><w:style w:styleId="A"><w:name w:val="first"/></w:style><w:style w:styleId="A"><w:name w:val="second"/></w:style><w:style w:type="paragraph" w:styleId=""><w:name w:val="no id"/></w:style><w:style w:type="list" w:styleId="B"><w:rPr><w:sz w:val="x"/></w:rPr></w:style></w:styles>"#
     );
@@ -1135,5 +1135,88 @@ fn repairs_styles_as_word_does() {
     assert_eq!(
         err.to_string(),
         "/word/styles.xml, line 1, column 1: the root element is <x>, not w:styles"
+    );
+}
+
+#[test]
+fn shares_the_node_limit_between_parts() {
+    // From the review of #38: 100 paragraphs cost 100 nodes, 100 one-attribute styles
+    // 300, and both count against one limit.
+    let body = "<w:p/>".repeat(100);
+    let mut styles = format!(r#"<w:styles xmlns:w="{W}">"#);
+    for n in 0..100 {
+        styles.push_str(&format!(r#"<w:style w:styleId="s{n}"/>"#));
+    }
+    styles.push_str("</w:styles>");
+    let data = package(
+        DOCUMENT,
+        &document_xml(&body),
+        &[
+            (
+                "word/_rels/document.xml.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#,
+            ),
+            ("word/styles.xml", &styles),
+        ],
+    );
+    let options = LoadOptions::new().with_limits(Limits::new().with_max_nodes(350));
+    match options.open_bytes(data.clone()).unwrap_err() {
+        Error::LimitExceeded {
+            limit: Limit::Nodes,
+            context,
+            ..
+        } => {
+            assert!(context.starts_with("/word/styles.xml"), "{context}");
+        }
+        other => panic!("{other}"),
+    }
+    let options = LoadOptions::new().with_limits(Limits::new().with_max_nodes(400));
+    assert!(options.open_bytes(data).is_ok());
+}
+
+#[test]
+fn reads_a_zero_text_scale_as_not_set() {
+    // As in LibreOffice's tdf106001.docx, which Word shows at normal width.
+    let document = open(r#"<w:p><w:r><w:rPr><w:w w:val="0"/></w:rPr><w:t>x</w:t></w:r></w:p>"#);
+    assert_eq!(first_run(&document).properties().scale(), None);
+    assert_eq!(document.diagnostics().len(), 1);
+}
+
+#[test]
+fn reports_damage_to_style_flags_and_defaults() {
+    let styles = format!(
+        r#"<w:styles xmlns:w="{W}"><w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="20"/></w:rPr></w:rPrDefault></w:docDefaults><w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="40"/></w:rPr></w:rPrDefault></w:docDefaults><w:latentStyles/><w:latentStyles/><w:style w:styleId="A" w:default="yes" w:customStyle="x"/></w:styles>"#
+    );
+    let document = with_styles("<w:p/>", &styles);
+    // The first of two document defaults is the one read, as for styles.
+    assert_eq!(
+        document.styles().default_run_properties().size(),
+        Some(Pt(10.0))
+    );
+    let style = document.styles().get("A").unwrap();
+    assert!(!style.is_default() && !style.is_custom());
+    let messages: Vec<&str> = document
+        .diagnostics()
+        .iter()
+        .map(Diagnostic::message)
+        .collect();
+    assert_eq!(messages.len(), 4, "{messages:?}");
+    assert!(messages[0].ends_with("a second w:docDefaults is ignored"));
+    assert!(messages[1].ends_with("a second w:latentStyles is ignored"));
+    assert!(messages[2].ends_with(r#"w:style w:default="yes" is not valid; it is read as off"#));
+    assert!(messages[3].ends_with(r#"w:style w:customStyle="x" is not valid; it is read as off"#));
+}
+
+#[test]
+fn counts_invalid_values_past_the_diagnostic_limit() {
+    let r_pr = r#"<w:b w:val="x"/>"#.repeat(1500);
+    let document = open(&format!(
+        "<w:p><w:r><w:rPr>{r_pr}</w:rPr><w:t>x</w:t></w:r></w:p>"
+    ));
+    let diagnostics = document.diagnostics();
+    assert_eq!(diagnostics.len(), 1001);
+    assert_eq!(
+        diagnostics[1000].message(),
+        "500 more diagnostics are not kept"
     );
 }

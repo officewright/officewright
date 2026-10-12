@@ -5,7 +5,7 @@ use officewright_opc::mce::{Disposition, Processor};
 use officewright_opc::xml::{Event, Input, NsId};
 
 use super::capture::{Budget, Capture};
-use super::properties::run_properties;
+use super::properties::{on_off_attribute, run_properties};
 use super::{R, R_STRICT, W, W_STRICT, shorten};
 use crate::diagnostic::{DiagnosticKind, Diagnostics};
 use crate::model::styles::{StyleData, StyleKind};
@@ -54,13 +54,29 @@ pub(super) fn read(
                 let local = tag.name().local();
                 let span = c.capture(&mut reader, &mut mce, tag)?;
                 match local {
-                    "docDefaults" if understood && c.document.styles.defaults.is_none() => {
-                        c.document.styles.defaults = Some(span);
-                        check_run_properties(&mut c, &names, span, &["rPrDefault", "rPr"], offset);
+                    "docDefaults" | "latentStyles" if understood => {
+                        let defaults = local == "docDefaults";
+                        let slot = if defaults {
+                            &mut c.document.styles.defaults
+                        } else {
+                            &mut c.document.styles.latent
+                        };
+                        if slot.is_some() {
+                            c.diagnose(offset, DiagnosticKind::UnexpectedContent, || {
+                                format!("a second w:{local} is ignored")
+                            });
+                        } else {
+                            *slot = Some(span);
+                            if defaults {
+                                let path = ["rPrDefault", "rPr"];
+                                check_run_properties(&mut c, &names, span, &path, offset);
+                            }
+                        }
                     }
-                    "latentStyles" if understood => c.document.styles.latent = Some(span),
                     "style" if understood => style(&mut c, &names, span, offset),
-                    // Kept with the document's tokens for writing; nothing refers to it.
+                    // Kept with the document's tokens for writing; nothing refers to it. An
+                    // mc:AlternateContent here is kept whole too, so a style in it is not
+                    // read; no document of the corpus has one.
                     _ => {}
                 }
             }
@@ -87,7 +103,13 @@ fn style(c: &mut Capture<'_, '_, '_>, names: &Names, span: Span, offset: usize) 
         Some("numbering") => Ok(StyleKind::Numbering),
         Some(other) => Err(other.to_owned()),
     };
-    let on = |attribute| matches!(element.attribute(w, attribute), Some("1" | "true" | "on"));
+    let mut invalid: Vec<(String, String)> = Vec::new();
+    let mut on = |attribute| {
+        on_off_attribute(element, names, attribute, &mut |_, attribute, value| {
+            invalid.push((attribute.into(), value.into()));
+        })
+        .unwrap_or(false)
+    };
     let child = |local| {
         element
             .children()
@@ -110,6 +132,14 @@ fn style(c: &mut Capture<'_, '_, '_>, names: &Names, span: Span, offset: usize) 
         is_custom: on("customStyle"),
         element: span,
     });
+    for (attribute, value) in invalid {
+        c.diagnose(offset, DiagnosticKind::InvalidValue, || {
+            format!(
+                "w:style w:{attribute}=\"{}\" is not valid; it is read as off",
+                shorten(&value)
+            )
+        });
+    }
     if let Err(other) = kind {
         c.diagnose(offset, DiagnosticKind::InvalidValue, || {
             format!(
@@ -150,6 +180,10 @@ pub(super) fn check_run_properties(
     path: &[&str],
     offset: usize,
 ) {
+    // Values are collected only while diagnostics have room for them; the rest are
+    // counted, so damage that is not reported costs no memory.
+    let room = c.diagnostics.room();
+    let mut omitted = 0u64;
     let mut invalid: Vec<(String, String, String)> = Vec::new();
     {
         let mut element: Option<Element<'_>> = Some(c.document.element(span));
@@ -163,10 +197,15 @@ pub(super) fn check_run_properties(
         }
         if let Some(r_pr) = element {
             run_properties(r_pr, names, &mut |element, attribute, value| {
-                invalid.push((element.into(), attribute.into(), value.into()));
+                if invalid.len() < room {
+                    invalid.push((element.into(), attribute.into(), value.into()));
+                } else {
+                    omitted += 1;
+                }
             });
         }
     }
+    c.diagnostics.omit(omitted);
     for (element, attribute, value) in invalid {
         c.diagnose(offset, DiagnosticKind::InvalidValue, || {
             format!(

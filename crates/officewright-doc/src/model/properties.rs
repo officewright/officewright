@@ -7,13 +7,17 @@ use officewright_core::Pt;
 /// Defines a public enum of the values of a simple type of WordprocessingML, with each
 /// variant documented by the value it is written as, and the function that reads it.
 macro_rules! xml_enum {
-    ($(#[$meta:meta])* $name:ident { $($variant:ident = $value:literal,)* }) => {
+    (
+        $(#[$meta:meta])*
+        $name:ident { $($(#[$variant_meta:meta])* $variant:ident = $value:literal,)* }
+    ) => {
         $(#[$meta])*
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
         #[non_exhaustive]
         pub enum $name {
             $(
                 #[doc = concat!("`", $value, "`")]
+                $(#[$variant_meta])*
                 $variant,
             )*
         }
@@ -70,6 +74,7 @@ xml_enum! {
         Accent6 = "accent6",
         Hyperlink = "hyperlink",
         FollowedHyperlink = "followedHyperlink",
+        /// No theme colour.
         None = "none",
         Background1 = "background1",
         Text1 = "text1",
@@ -82,6 +87,7 @@ xml_enum! {
     /// How text is underlined (ST_Underline).
     UnderlineStyle {
         Single = "single",
+        /// Under words only, not under the spaces between them.
         Words = "words",
         Double = "double",
         Thick = "thick",
@@ -98,6 +104,7 @@ xml_enum! {
         Wave = "wave",
         WavyHeavy = "wavyHeavy",
         WavyDouble = "wavyDouble",
+        /// No underline.
         None = "none",
     }
 }
@@ -131,6 +138,7 @@ xml_enum! {
         DarkYellow = "darkYellow",
         DarkGray = "darkGray",
         LightGray = "lightGray",
+        /// No highlight.
         None = "none",
     }
 }
@@ -138,6 +146,7 @@ xml_enum! {
 xml_enum! {
     /// The pattern of a shading, laid in its colour over its fill (ST_Shd).
     ShadingPattern {
+        /// No pattern: the fill alone.
         Clear = "clear",
         Solid = "solid",
         HorizontalStripe = "horzStripe",
@@ -175,6 +184,7 @@ xml_enum! {
         Percent87 = "pct87",
         Percent90 = "pct90",
         Percent95 = "pct95",
+        /// No shading at all, not even a fill.
         Nil = "nil",
     }
 }
@@ -182,6 +192,7 @@ xml_enum! {
 /// A colour as written: a value, a theme colour, or both, the theme colour then taking
 /// precedence (ECMA-376 Part 1, §17.3.2.6).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Color {
     pub(crate) value: Option<ColorValue>,
     pub(crate) theme: Option<ThemeColor>,
@@ -190,7 +201,8 @@ pub struct Color {
 }
 
 impl Color {
-    /// The colour value (`w:val`, `w:color` or `w:fill`).
+    /// The colour value (`w:val`, `w:color` or `w:fill`). Word writes theme colours
+    /// without one (LibreOffice's `tdf149200.docx`); that is not damage.
     pub fn value(&self) -> Option<ColorValue> {
         self.value
     }
@@ -227,13 +239,16 @@ pub enum ColorValue {
 
 /// An underline: its style and colour.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Underline {
     pub(crate) style: Option<UnderlineStyle>,
     pub(crate) color: Color,
 }
 
 impl Underline {
-    /// The style; `None` when the element gives none.
+    /// The style; `None` when the element gives none. Word writes underlines with only
+    /// a colour (POI's `57312.docx`): the style then comes from the styles below, the
+    /// colour from here.
     pub fn style(&self) -> Option<UnderlineStyle> {
         self.style
     }
@@ -246,6 +261,7 @@ impl Underline {
 
 /// A shading: a pattern in a colour over a fill.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Shading {
     pub(crate) pattern: Option<ShadingPattern>,
     pub(crate) color: Color,
@@ -271,6 +287,7 @@ impl Shading {
 
 /// The fonts a run names, by the script of the characters.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RunFonts {
     pub(crate) ascii: Option<String>,
     pub(crate) high_ansi: Option<String>,
@@ -333,6 +350,7 @@ impl RunFonts {
 
 /// The languages of a run's text, as BCP 47 tags such as `en-US`, by script.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Language {
     pub(crate) latin: Option<String>,
     pub(crate) east_asia: Option<String>,
@@ -364,6 +382,7 @@ impl Language {
 /// layout, borders around runs, …) are kept with the document as written.
 #[doc(alias = "CharacterFormat")]
 #[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct RunProperties {
     pub(crate) style: Option<String>,
     pub(crate) fonts: RunFonts,
@@ -511,7 +530,8 @@ impl RunProperties {
         self.underline.as_ref()
     }
 
-    /// The font size (`w:sz`).
+    /// The font size (`w:sz`). Word writes `0` in some linked character styles; it is
+    /// not a size to lay text out with.
     pub fn size(&self) -> Option<Pt> {
         self.size
     }
@@ -536,12 +556,13 @@ impl RunProperties {
         self.spacing
     }
 
-    /// The width of the characters in percent of their normal width (`w:w`).
+    /// The width of the characters in percent of their normal width, 1 to 600 (`w:w`).
     pub fn scale(&self) -> Option<u16> {
         self.scale
     }
 
-    /// The smallest font size kerned (`w:kern`).
+    /// The smallest font size kerned (`w:kern`); `0`, which Word writes often, means no
+    /// kerning.
     pub fn kerning(&self) -> Option<Pt> {
         self.kerning
     }

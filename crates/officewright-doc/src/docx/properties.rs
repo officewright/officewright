@@ -97,13 +97,30 @@ pub(crate) fn run_properties(
 /// `off` or `0` clears it.
 fn on_off(element: Element<'_>, names: &Names, report: Report<'_>) -> Option<bool> {
     match element.attribute(&names.w, "val") {
-        None | Some("true" | "on" | "1") => Some(true),
-        Some("false" | "off" | "0") => Some(false),
-        Some(other) => {
-            report(element.local_name(), "val", other);
-            None
-        }
+        None => Some(true),
+        Some(_) => on_off_attribute(element, names, "val", report),
     }
+}
+
+/// An on/off attribute (ST_OnOff), reported when its value is not one; `None` when the
+/// attribute is absent or not valid.
+pub(crate) fn on_off_attribute(
+    element: Element<'_>,
+    names: &Names,
+    attribute: &str,
+    report: Report<'_>,
+) -> Option<bool> {
+    value(
+        element,
+        names,
+        attribute,
+        |v| match v {
+            "true" | "on" | "1" => Some(true),
+            "false" | "off" | "0" => Some(false),
+            _ => None,
+        },
+        report,
+    )
 }
 
 /// An attribute read with `parse`, reported when it does not parse.
@@ -187,8 +204,11 @@ fn hex_byte(value: &str) -> Option<u8> {
     digits.then(|| u8::from_str_radix(value, 16).ok())?
 }
 
-/// ST_TextScale: a percentage from 0 to 600, written with or without `%`.
+/// ST_TextScale: a percentage from 1 to 600, written with or without `%`. The schema
+/// allows 0 as well, but Word shows such text at its normal width: LibreOffice's
+/// `tdf106001.docx` has `w:w w:val="0"`, and its public bug report (tdf#106001) shows
+/// it in Word 2010 at normal width. So 0 reads as not set, with a diagnostic.
 fn scale(value: &str) -> Option<u16> {
     let number: u16 = value.strip_suffix('%').unwrap_or(value).parse().ok()?;
-    (number <= 600).then_some(number)
+    (1..=600).contains(&number).then_some(number)
 }

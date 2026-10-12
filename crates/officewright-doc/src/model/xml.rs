@@ -149,9 +149,10 @@ impl<'d> Element<'d> {
     }
 
     /// The child elements, with each `mc:AlternateContent` replaced by the children of
-    /// its `mc:Fallback`. Property elements are read through the fallback: Office puts
-    /// its extensions (w14, w15) in the choice, and the fallback is the branch a reader
-    /// that does not implement them takes.
+    /// its `mc:Fallback`, the branch a consumer takes when no `mc:Choice` is selectable
+    /// (ECMA-376 Part 3, §10.2). A choice that requires only namespaces officewright
+    /// implements would be selectable, but the prefixes `Requires` names are not kept
+    /// with the tokens, so property elements are always read through the fallback.
     pub(crate) fn children_through_fallback(self, mc: Option<Sym>) -> Vec<Element<'d>> {
         let mut out = Vec::new();
         let mut pending: Vec<Element<'d>> = self.children().collect();
