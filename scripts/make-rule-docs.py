@@ -400,6 +400,9 @@ def space_before_top() -> Doc:
     def case_in_table(label: str) -> str:
         return table([case(label)], [TEXT_W])
 
+    # Cases 2, 6 and 7 rely on mode 15 keeping the paragraph mark that follows a page break
+    # on the page of the break; in earlier modes (w:splitPgBreakAndParaMark) an empty
+    # paragraph would start the next page. A variant in another mode must say so.
     filler = [f"Filler line {n}" for n in range(1, 34)]
     body = [
         case("Case 1: first paragraph of the document, space before 24 pt"),
@@ -633,7 +636,8 @@ def styles_xml() -> str:
         "<w:docDefaults>"
         "<w:rPrDefault><w:rPr>"
         '<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="Calibri" w:cs="Calibri"/>'
-        '<w:sz w:val="22"/><w:szCs w:val="22"/><w:lang w:val="en-US" w:eastAsia="en-US"/>'
+        '<w:sz w:val="22"/><w:szCs w:val="22"/>'
+        '<w:lang w:val="en-US" w:eastAsia="en-US" w:bidi="ar-SA"/>'
         "</w:rPr></w:rPrDefault>"
         "<w:pPrDefault><w:pPr><w:widowControl/>"
         '<w:spacing w:after="0" w:line="240" w:lineRule="auto"/>'
@@ -680,6 +684,9 @@ def settings_xml(doc: Doc) -> str:
         '<w:defaultTabStop w:val="720"/>'
         '<w:characterSpacingControl w:val="doNotCompress"/>'
         f"<w:compat>{flags}{settings}</w:compat>"
+        # The languages and number format are set, so that a re-saved copy that names the
+        # language or locale of the machine Word ran on stands out (corpus-import.py).
+        '<w:themeFontLang w:val="en-US" w:eastAsia="en-US" w:bidi="ar-SA"/>'
         '<w:decimalSymbol w:val="."/>'
         '<w:listSeparator w:val=","/>'
         "</w:settings>"
@@ -814,8 +821,13 @@ def check(docs: list[Doc]) -> list[str]:
         path = OUT_DIR / name
         if name not in present:
             problems.append(f"tests/corpus/word-rules/{name} is missing")
-        elif stored_parts(path) != parts(doc):
-            problems.append(f"tests/corpus/word-rules/{name} differs from what this script writes")
+        elif path.read_bytes() != package(doc):
+            # The bytes are what Word renders and corpus-import.py checks by SHA-256.
+            committed = f"tests/corpus/word-rules/{name}"
+            if stored_parts(path) != parts(doc):
+                problems.append(f"{committed} differs from what this script writes")
+            else:
+                problems.append(f"{committed} has the parts this script writes in other ZIP bytes")
         if f"| word-rules/{name} |" not in sources:
             problems.append(f"tests/corpus/SOURCES.md has no row for word-rules/{name}")
     return problems

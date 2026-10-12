@@ -72,6 +72,24 @@ class Check(unittest.TestCase):
             ["tests/corpus/word-rules/E-line-exact.docx differs from what this script writes"],
         )
 
+    def test_other_zip_bytes_with_the_same_parts_are_reported(self):
+        # The bytes are what Word renders and what corpus-import.py checks by hash.
+        path = self.out / "E-line-exact.docx"
+        parts = rules.stored_parts(path)
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as archive:
+            for name, data in parts:
+                info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+                info.external_attr = 0o644 << 16
+                archive.writestr(info, data)
+            archive.comment = b"rezipped"
+        self.assertEqual(
+            rules.check(self.docs),
+            [
+                "tests/corpus/word-rules/E-line-exact.docx has the parts this script writes "
+                "in other ZIP bytes"
+            ],
+        )
+
     def test_missing_and_unknown_files_are_reported(self):
         (self.out / "E-line-exact.docx").unlink()
         (self.out / "stray.docx").write_bytes(b"")
