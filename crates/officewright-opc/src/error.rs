@@ -33,7 +33,11 @@ pub enum Error {
         message: String,
     },
     /// The package breaks a rule of the Open Packaging Conventions.
-    Package(String),
+    #[non_exhaustive]
+    Package {
+        /// What is wrong, naming the part.
+        message: String,
+    },
     /// The input exceeds one of the configured [`Limits`](crate::Limits).
     #[non_exhaustive]
     LimitExceeded {
@@ -58,6 +62,8 @@ pub enum Limit {
     PartSize,
     /// [`Limits::max_total_size`](crate::Limits::max_total_size).
     TotalSize,
+    /// [`Limits::max_part_name_length`](crate::Limits::max_part_name_length).
+    PartNameLength,
     /// [`Limits::max_relationships`](crate::Limits::max_relationships).
     Relationships,
     /// [`Limits::max_content_types`](crate::Limits::max_content_types).
@@ -123,7 +129,7 @@ impl fmt::Display for Error {
                 }
                 write!(f, "line {line}, column {column}: {message}")
             }
-            Self::Package(message) | Self::Unsupported(message) => f.write_str(message),
+            Self::Package { message } | Self::Unsupported(message) => f.write_str(message),
             Self::LimitExceeded {
                 limit,
                 maximum,
@@ -139,6 +145,7 @@ impl fmt::Display for Limit {
             Self::Entries => "number of zip entries",
             Self::PartSize => "uncompressed size in bytes",
             Self::TotalSize => "total uncompressed size of the parts read in bytes",
+            Self::PartNameLength => "length of a part name in bytes",
             Self::Relationships => "number of relationships in the package",
             Self::ContentTypes => "number of Default and Override elements",
             Self::XmlDepth => "xml element nesting depth",
@@ -160,7 +167,7 @@ impl From<Error> for officewright_core::Error {
             Error::Zip { .. }
             | Error::Entry { .. }
             | Error::Xml { .. }
-            | Error::Package(_)
+            | Error::Package { .. }
             | Error::LimitExceeded { .. } => Self::InvalidArgument(message),
         }
     }
@@ -226,6 +233,36 @@ mod tests {
         assert!(matches!(
             malformed,
             officewright_core::Error::InvalidArgument(ref m) if m == "zip archive: bad signature at byte 4"
+        ));
+        let xml: officewright_core::Error = Error::Xml {
+            part: Some("/a.xml".into()),
+            line: 1,
+            column: 2,
+            message: "expected a name".into(),
+        }
+        .into();
+        assert!(matches!(
+            xml,
+            officewright_core::Error::InvalidArgument(ref m) if m == "/a.xml, line 1, column 2: expected a name"
+        ));
+        let limit: officewright_core::Error = Error::LimitExceeded {
+            limit: Limit::PartSize,
+            maximum: 10,
+            context: "zip entry a.xml".into(),
+        }
+        .into();
+        assert!(matches!(
+            limit,
+            officewright_core::Error::InvalidArgument(ref m)
+                if m == "zip entry a.xml: uncompressed size in bytes exceeds the limit of 10"
+        ));
+        let package: officewright_core::Error = Error::Package {
+            message: "two parts are named /a.xml, ignoring case".into(),
+        }
+        .into();
+        assert!(matches!(
+            package,
+            officewright_core::Error::InvalidArgument(ref m) if m == "two parts are named /a.xml, ignoring case"
         ));
     }
 }

@@ -2,7 +2,8 @@
 ///
 /// The defaults are far above what real documents need and low enough that a hostile
 /// file cannot exhaust memory: across the Apache POI and LibreOffice test documents,
-/// packages have at most about 1,700 entries, 1,500 relationships and 500 content types,
+/// packages have at most about 1,700 entries, part names of 81 bytes, 1,500
+/// relationships and 500 content types,
 /// XML nests at most about 50 elements deep, no element has more than 25 attributes and
 /// no Markup Compatibility attribute lists more than about 10 names.
 ///
@@ -17,6 +18,7 @@
 pub struct Limits {
     entries: u64,
     part_size: u64,
+    part_name_length: usize,
     relationships: usize,
     content_types: usize,
     total_size: u64,
@@ -27,13 +29,14 @@ pub struct Limits {
 
 impl Limits {
     /// The default limits: 65,536 ZIP entries, 256 MiB per part, 1 GiB for all parts
-    /// read from one package, 262,144 relationships, 65,536 content types, XML nesting
-    /// 256 elements deep, 256 attributes per element and 256 names per Markup
-    /// Compatibility attribute.
+    /// read from one package, part names of 1,024 bytes, 262,144 relationships, 65,536
+    /// content types, XML nesting 256 elements deep, 256 attributes per element and 256
+    /// names per Markup Compatibility attribute.
     pub const fn new() -> Self {
         Self {
             entries: 1 << 16,
             part_size: 256 << 20,
+            part_name_length: 1024,
             relationships: 1 << 18,
             content_types: 1 << 16,
             total_size: 1 << 30,
@@ -78,6 +81,20 @@ impl Limits {
     #[must_use]
     pub const fn with_max_total_size(mut self, value: u64) -> Self {
         self.total_size = value;
+        self
+    }
+
+    /// The longest part name, in bytes, as written in the ZIP archive or in an
+    /// `Override`. Relationship targets are resolved against the folder of their part,
+    /// so this also bounds the work of resolving one.
+    pub const fn max_part_name_length(&self) -> usize {
+        self.part_name_length
+    }
+
+    /// Sets [`max_part_name_length`](Self::max_part_name_length).
+    #[must_use]
+    pub const fn with_max_part_name_length(mut self, value: usize) -> Self {
+        self.part_name_length = value;
         self
     }
 

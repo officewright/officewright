@@ -99,7 +99,7 @@ fn check(bytes: Vec<u8>, limits: &Limits) -> Result<usize, Error> {
 fn targets(relationships: &Relationships) -> Vec<PartName> {
     relationships
         .iter()
-        .filter_map(|relationship| relationship.target_part().cloned())
+        .filter_map(|relationship| relationship.target_part())
         .collect()
 }
 
@@ -122,7 +122,7 @@ fn kind(err: &Error) -> &'static str {
         Error::Zip { .. } => "zip",
         Error::Entry { .. } => "zip entry",
         Error::Xml { .. } => "xml",
-        Error::Package(_) => "package",
+        Error::Package { .. } => "package",
         Error::LimitExceeded { .. } => "limit exceeded",
         Error::Unsupported(_) => "unsupported",
         _ => "other",

@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::xml::{Event, Input, Reader, StartTag};
@@ -29,6 +30,9 @@ const OLE_SIGNATURE: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 /// relationships part. Other parts are decompressed only when [read](Part::read), so a
 /// document whose images are never needed costs only their compressed size.
 ///
+/// A package is `Send` and `Sync`: its parts can be read from several threads at once,
+/// and they share one [`Limits::max_total_size`] budget.
+///
 /// ```
 /// use officewright_opc::{Limits, Package};
 ///
@@ -37,7 +41,7 @@ const OLE_SIGNATURE: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 /// let main = package
 ///     .relationships()
 ///     .of_type("http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument")
-///     .find_map(|relationship| package.part(relationship.target_part()?))
+///     .find_map(|relationship| package.part(&relationship.target_part()?))
 ///     .expect("the test document has a main part");
 /// assert_eq!(main.name().as_str(), "/word/document.xml");
 /// assert_eq!(
@@ -63,7 +67,8 @@ pub struct Package {
 struct PartEntry {
     name: PartName,
     entry: usize,
-    content_type: Option<String>,
+    /// Shared with every part of the same content type.
+    content_type: Option<Arc<str>>,
 }
 
 /// A part of a [`Package`].
@@ -106,9 +111,9 @@ impl Package {
             }
             if name.eq_ignore_ascii_case("[Content_Types].xml") {
                 if content_types.replace(item).is_some() {
-                    return Err(Error::Package(
-                        "the package has two [Content_Types].xml entries".into(),
-                    ));
+                    return Err(Error::Package {
+                        message: "the package has two [Content_Types].xml entries".into(),
+                    });
                 }
                 continue;
             }
@@ -117,11 +122,12 @@ impl Package {
                     "interleaved parts such as {name} are not supported"
                 )));
             }
+            check_part_name_length(&name, limits)?;
             let name = PartName::new(&format!("/{name}"))?;
             if index.insert(name.key().to_owned(), parts.len()).is_some() {
-                return Err(Error::Package(format!(
-                    "two parts are named {name}, ignoring case"
-                )));
+                return Err(Error::Package {
+                    message: format!("two parts are named {name}, ignoring case"),
+                });
             }
             parts.push(PartEntry {
                 name,
@@ -129,10 +135,8 @@ impl Package {
                 content_type: None,
             });
         }
-        let content_types = content_types.ok_or_else(|| {
-            Error::Package(
-                "[Content_Types].xml is missing: the input is not an OOXML package".into(),
-            )
+        let content_types = content_types.ok_or_else(|| Error::Package {
+            message: "[Content_Types].xml is missing: the input is not an OOXML package".into(),
         })?;
 
         let mut read_size = 0;
@@ -144,7 +148,7 @@ impl Package {
         let mut relationships = HashMap::new();
         let mut relationship_count = 0;
         for part in &mut parts {
-            part.content_type = types.get(&part.name).map(str::to_owned);
+            part.content_type = types.get(&part.name).cloned();
             let Some(source) = part.name.relationships_source() else {
                 continue;
             };
@@ -236,9 +240,9 @@ impl<'p> Part<'p> {
     /// [`Error::LimitExceeded`] once the parts read from the package exceed
     /// [`Limits::max_total_size`], and the errors of [`Entry::read`].
     pub fn read(&self) -> Result<Vec<u8>> {
-        let entry = self
-            .archive_entry()
-            .ok_or_else(|| Error::Package(format!("part {} has no zip entry", self.entry.name)))?;
+        let entry = self.archive_entry().ok_or_else(|| Error::Package {
+            message: format!("part {} has no zip entry", self.entry.name),
+        })?;
         let max = self.package.max_total_size;
         let mut used = self.package.read_size.load(Ordering::Relaxed);
         loop {
@@ -268,6 +272,36 @@ impl fmt::Debug for Part<'_> {
             .field("content_type", &self.entry.content_type)
             .finish_non_exhaustive()
     }
+}
+
+// Parts are read from shared references on purpose; a field that is not `Send` or
+// `Sync` would silently take that away.
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Package>();
+};
+
+/// At most `max` characters of `text`, with `…` when there are more, so that error
+/// messages stay short whatever a file holds.
+pub(crate) fn shorten(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((end, _)) => format!("{}…", text.get(..end).unwrap_or_default()),
+        None => text.to_owned(),
+    }
+}
+
+/// Refuses a part name longer than [`Limits::max_part_name_length`] bytes, not counting
+/// the leading `/` of a ZIP item name.
+pub(crate) fn check_part_name_length(name: &str, limits: &Limits) -> Result<()> {
+    let length = name.strip_prefix('/').unwrap_or(name).len();
+    if length <= limits.max_part_name_length() {
+        return Ok(());
+    }
+    Err(Error::LimitExceeded {
+        limit: Limit::PartNameLength,
+        maximum: limits.max_part_name_length() as u64,
+        context: format!("part name {} ({length} bytes)", shorten(name, 40)),
+    })
 }
 
 /// Adds an entry's size to the bytes read so far, within [`Limits::max_total_size`].

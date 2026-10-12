@@ -1,4 +1,5 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use super::part_name::resolve_target;
 use super::{PartName, read_flat_xml};
@@ -11,16 +12,23 @@ const NAMESPACE: &str = "http://schemas.openxmlformats.org/package/2006/relation
 #[derive(Clone, Debug, Default)]
 pub struct Relationships {
     items: Vec<Relationship>,
+    /// Index into `items` by Id, for relationships that have one.
+    by_id: HashMap<Box<str>, usize>,
 }
 
 /// A link from a part, or from the package, to a part or to an external resource.
+///
+/// The memory a relationship takes is that of its own attributes: the folder its target
+/// is resolved against is shared by all relationships of a part, and so is each
+/// relationship type.
 #[derive(Clone, Debug)]
 pub struct Relationship {
     id: String,
-    relationship_type: String,
+    relationship_type: Arc<str>,
     target: String,
     target_mode: TargetMode,
-    target_part: Option<PartName>,
+    /// The folder of the source part, `""` for the package.
+    folder: Arc<str>,
 }
 
 /// Whether a relationship points into the package or outside it.
@@ -44,7 +52,9 @@ impl Relationships {
         count: &mut usize,
     ) -> Result<Self> {
         let mut items = Vec::new();
-        let mut ids = HashSet::new();
+        let mut by_id = HashMap::new();
+        let mut types: HashMap<String, Arc<str>> = HashMap::new();
+        let folder: Arc<str> = folder.into();
         read_flat_xml(
             bytes,
             limits,
@@ -102,31 +112,30 @@ impl Relationships {
                 let relationship_type = relationship_type
                     .filter(|kind| !kind.is_empty())
                     .ok_or_else(|| missing("Type"))?;
-                if !id.is_empty() && !ids.insert(id.to_owned()) {
+                if !id.is_empty() && by_id.insert(id.into(), items.len()).is_some() {
                     return Err(error(format!("a second relationship with Id {id}")));
                 }
+                let relationship_type = Arc::clone(
+                    types
+                        .entry(relationship_type.to_owned())
+                        .or_insert_with(|| relationship_type.into()),
+                );
                 items.push(Relationship {
                     id: id.to_owned(),
-                    relationship_type: relationship_type.to_owned(),
+                    relationship_type,
                     target: target.to_owned(),
                     target_mode,
-                    target_part: match target_mode {
-                        TargetMode::Internal => resolve_target(folder, target),
-                        TargetMode::External => None,
-                    },
+                    folder: Arc::clone(&folder),
                 });
                 Ok(())
             },
         )?;
-        Ok(Self { items })
+        Ok(Self { items, by_id })
     }
 
     /// The relationship with this Id.
     pub fn get(&self, id: &str) -> Option<&Relationship> {
-        if id.is_empty() {
-            return None;
-        }
-        self.items.iter().find(|relationship| relationship.id == id)
+        self.items.get(*self.by_id.get(id)?)
     }
 
     /// The relationships of one type, such as
@@ -137,7 +146,7 @@ impl Relationships {
     ) -> impl Iterator<Item = &'r Relationship> {
         self.items
             .iter()
-            .filter(move |relationship| relationship.relationship_type == relationship_type)
+            .filter(move |relationship| &*relationship.relationship_type == relationship_type)
     }
 
     /// All relationships in document order.
@@ -188,10 +197,14 @@ impl Relationship {
         self.target_mode
     }
 
-    /// The part an internal target names, resolved against the source part. `None` for
-    /// external targets and for internal ones that cannot name a part, such as targets
-    /// that climb out of the package. The part may still be missing from the package.
-    pub fn target_part(&self) -> Option<&PartName> {
-        self.target_part.as_ref()
+    /// The part an internal target names, resolved against the source part when asked
+    /// for. `None` for external targets and for internal ones that cannot name a part,
+    /// such as targets that climb out of the package or are only a fragment. The part may
+    /// still be missing from the package.
+    pub fn target_part(&self) -> Option<PartName> {
+        match self.target_mode {
+            TargetMode::Internal => resolve_target(&self.folder, &self.target),
+            TargetMode::External => None,
+        }
     }
 }

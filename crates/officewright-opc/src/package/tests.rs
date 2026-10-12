@@ -10,7 +10,7 @@ fn open(entries: &[TestEntry]) -> Result<Package> {
 
 fn package_message(result: Result<Package>) -> String {
     match result {
-        Err(Error::Package(message)) => message,
+        Err(Error::Package { message, .. }) => message,
         other => panic!("expected a package error, got {other:?}"),
     }
 }
@@ -59,7 +59,7 @@ fn opens_a_package_and_finds_its_main_part() {
     assert_eq!(relationship.relationship_type(), OFFICE_DOCUMENT);
     assert_eq!(relationship.target(), "word/document.xml");
     assert_eq!(relationship.target_mode(), TargetMode::Internal);
-    let main = package.part(relationship.target_part().unwrap()).unwrap();
+    let main = package.part(&relationship.target_part().unwrap()).unwrap();
     assert_eq!(
         main.content_type(),
         Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml")
@@ -225,6 +225,9 @@ fn resolves_relationship_targets() {
         "a.xml?x",
         "a//b.xml",
         "media/",
+        // An Internal target that is only a fragment: Excel's drawing hyperlinks in POI's
+        // test-data/spreadsheet/ConditionalFormattingSamples.xlsx.
+        "#Home!A1",
     ] {
         assert_eq!(resolve("/word", target), None, "{target}");
     }
@@ -250,9 +253,13 @@ fn reads_relationships_of_parts() {
     assert_eq!(relationships.len(), 3);
     let styles: Vec<_> = relationships
         .of_type("urn:styles")
-        .map(|relationship| relationship.target_part().map(PartName::as_str))
+        .map(|relationship| {
+            relationship
+                .target_part()
+                .map(|part| part.as_str().to_owned())
+        })
         .collect();
-    assert_eq!(styles, [Some("/word/styles.xml"), None]);
+    assert_eq!(styles, [Some("/word/styles.xml".to_owned()), None]);
     let link = relationships.get("rId2").unwrap();
     assert_eq!(link.target_mode(), TargetMode::External);
     assert_eq!(link.target(), "https://example.com/");
@@ -421,7 +428,7 @@ fn keeps_relationships_without_an_id_or_a_target() {
     assert!(relationships.get("").is_none());
     let a = relationships.of_type("urn:a").next().unwrap();
     assert_eq!(a.id(), "");
-    assert_eq!(a.target_part().map(PartName::as_str), Some("/a.xml"));
+    assert_eq!(a.target_part(), Some(name("/a.xml")));
 }
 
 #[test]
@@ -475,4 +482,118 @@ fn bounds_the_content_types() {
         ),
         other => panic!("expected the content types limit, got {other:?}"),
     }
+}
+
+#[test]
+fn looks_up_overrides_and_relationships_ignoring_case() {
+    let package = open(&[
+        types("<Override PartName='/Word/Document.XML' ContentType='a/b'/>"),
+        TestEntry::stored("word/document.xml", b"<a/>"),
+        rels(
+            "word/_rels/Document.XML.rels",
+            "<Relationship Id='rId1' Type='t' Target='styles.xml'/>",
+        ),
+    ])
+    .unwrap();
+    let document = package.part(&name("/word/document.xml")).unwrap();
+    assert_eq!(document.content_type(), Some("a/b"));
+    assert_eq!(
+        document.relationships().get("rId1").unwrap().target_part(),
+        Some(name("/word/styles.xml"))
+    );
+}
+
+#[test]
+fn keeps_one_copy_of_each_content_type() {
+    // A reviewer of #4 built a 382 KB package: one Default whose content type had a
+    // 16 MiB subtype, and 4,000 parts of that type, each of which copied the string, for
+    // 64 GiB in all. Type and subtype are at most 127 characters long (RFC 6838,
+    // section 4.2), so that content type is refused...
+    let parts = |content_type: &str| -> Vec<TestEntry> {
+        std::iter::once(types(&format!(
+            "<Default Extension='x' ContentType='{content_type}'/>"
+        )))
+        .chain((0..4000).map(|i| TestEntry::stored(&format!("p{i}.x"), b"")))
+        .collect()
+    };
+    let error = xml_message(open(&parts(&format!("a/{}", "b".repeat(16 << 20)))));
+    assert!(
+        error.ends_with(
+            "invalid content type \"a/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb…\""
+        ),
+        "{error}"
+    );
+    // ...and a long one that is valid, with a long parameter, is kept once and shared by
+    // all its parts.
+    let package = open(&parts(&format!("a/b; x={}", "y".repeat(4 << 20)))).unwrap();
+    let first = package.parts().next().unwrap().content_type().unwrap();
+    assert_eq!(first.len(), 4 + 4 + (4 << 20) - 1);
+    assert!(
+        package
+            .parts()
+            .all(|part| std::ptr::eq(part.content_type().unwrap(), first))
+    );
+}
+
+#[test]
+fn bounds_the_length_of_part_names() {
+    // A reviewer of #4 put a relationships part in a 60,000-byte folder; every one of its
+    // relationships repeated the folder in its resolved target, 590 MB for 5,000 of them.
+    // Targets are now resolved only when asked, and part names are bounded.
+    let folder = "a".repeat(60_000);
+    let result = open(&[
+        types(""),
+        rels(
+            &format!("{folder}/_rels/x.rels"),
+            "<Relationship Id='r' Type='t' Target='b'/>",
+        ),
+    ]);
+    assert!(
+        matches!(
+            result,
+            Err(Error::LimitExceeded {
+                limit: Limit::PartNameLength,
+                maximum: 1024,
+                ref context,
+            }) if context == "part name aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa… (60013 bytes)"
+        ),
+        "{result:?}"
+    );
+    let limits = Limits::new().with_max_part_name_length(10);
+    let at_the_limit = [types(""), TestEntry::stored("word/a.xml", b"")];
+    assert!(Package::from_bytes(zip(&at_the_limit), &limits).is_ok());
+    let over = [types(""), TestEntry::stored("word/ab.xml", b"")];
+    assert!(matches!(
+        Package::from_bytes(zip(&over), &limits),
+        Err(Error::LimitExceeded {
+            limit: Limit::PartNameLength,
+            maximum: 10,
+            ..
+        })
+    ));
+    let long_override = [types(
+        "<Override PartName='/word/ab.xml' ContentType='a/b'/>",
+    )];
+    assert!(matches!(
+        Package::from_bytes(zip(&long_override), &limits),
+        Err(Error::LimitExceeded {
+            limit: Limit::PartNameLength,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn resolves_many_relationships_in_a_long_folder() {
+    let folder = "a".repeat(1000);
+    let body: String = (0..20_000)
+        .map(|n| format!("<Relationship Id='r{n}' Type='t' Target='b{n}'/>"))
+        .collect();
+    let package = open(&[types(""), rels(&format!("{folder}/_rels/x.rels"), &body)]).unwrap();
+    let x = package
+        .part(&name(&format!("/{folder}/_rels/x.rels")))
+        .unwrap();
+    assert!(x.relationships().is_empty());
+    let source = PartName::new(&format!("/{folder}/x")).unwrap();
+    assert!(package.part(&source).is_none());
 }

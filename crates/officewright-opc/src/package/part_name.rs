@@ -36,7 +36,9 @@ impl PartName {
     ///
     /// [`Error::Package`] for a name that breaks one of the rules above.
     pub fn new(name: &str) -> Result<Self> {
-        let invalid = |why: &str| Error::Package(format!("invalid part name {name:?}: {why}"));
+        let invalid = |why: &str| Error::Package {
+            message: format!("invalid part name {name:?}: {why}"),
+        };
         let Some(path) = name.strip_prefix('/') else {
             return Err(invalid("it does not start with '/'"));
         };
