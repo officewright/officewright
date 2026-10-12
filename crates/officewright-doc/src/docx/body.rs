@@ -463,6 +463,8 @@ impl Reading<'_, '_, '_> {
 
     fn push(&mut self, frame: Frame) {
         let defining = match frame {
+            // The root element is pushed first, so a transparent frame always has one
+            // below it; the fallback only keeps this total.
             Frame::Alternate { .. } | Frame::Transparent => {
                 self.defining.last().copied().unwrap_or(self.stack.len())
             }
