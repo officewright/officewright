@@ -204,34 +204,51 @@ fn resolves_arial_to_liberation_sans() {
 
 #[test]
 fn refuses_cff_reals_the_subsetter_cannot_write() -> TestResult {
+    /// `data` with the bytes `from` replaced by `to`, which are as long.
+    fn patch(mut data: Vec<u8>, from: &[u8], to: &[u8]) -> TestResult<Vec<u8>> {
+        let at = data
+            .windows(from.len())
+            .position(|window| window == from)
+            .ok_or("bytes not found")?;
+        data.get_mut(at..at + to.len())
+            .ok_or("short font")?
+            .copy_from_slice(to);
+        Ok(data)
+    }
     // Noto Sans with the first real number of its Private DICT, 46875E-6 (bytes 1e 46
     // 87 5c 6f), replaced by 1E99999 (1e 1b 99 99 9f), which is infinite as an f32.
     // subsetter 0.2.6 panics writing it back; the face is refused before that.
-    let mut data = read("noto/NotoSans-Regular.otf")?;
-    let real = [0x1e, 0x46, 0x87, 0x5c, 0x6f];
-    let at = data
-        .windows(real.len())
-        .position(|window| window == real)
-        .ok_or("no such real number")?;
-    data.get_mut(at..at + real.len())
-        .ok_or("short font")?
-        .copy_from_slice(&[0x1e, 0x1b, 0x99, 0x99, 0x9f]);
-    let font = FontFace::from_bytes(data, 0)?;
-    let err = font.subset([]).err().ok_or("the subset succeeded")?;
-    assert!(
-        matches!(
-            err,
-            officewright_font::Error::MalformedTable { table: "CFF ", .. }
-        ),
-        "{err}"
-    );
-    assert_eq!(
-        format!(
-            "{err}: {}",
-            std::error::Error::source(&err).ok_or("no cause")?
-        ),
-        "font face 0: table 'CFF ' is damaged: the real number 1E99999 in a DICT is too large \
-         to subset"
-    );
+    let infinite = patch(
+        read("noto/NotoSans-Regular.otf")?,
+        &[0x1e, 0x46, 0x87, 0x5c, 0x6f],
+        &[0x1e, 0x1b, 0x99, 0x99, 0x9f],
+    )?;
+    // The same, with the Top DICT's "36 190208 Private" giving the offset as the real
+    // number 190208 (1e 19 02 08 ff) instead of an integer (1d 00 02 e7 00), which the
+    // subsetter reads as well.
+    let real_offset = patch(
+        infinite.clone(),
+        &[0xaf, 0x1d, 0x00, 0x02, 0xe7, 0x00, 0x12],
+        &[0xaf, 0x1e, 0x19, 0x02, 0x08, 0xff, 0x12],
+    )?;
+    for data in [infinite, real_offset] {
+        let font = FontFace::from_bytes(data, 0)?;
+        let err = font.subset([]).err().ok_or("the subset succeeded")?;
+        assert!(
+            matches!(
+                err,
+                officewright_font::Error::MalformedTable { table: "CFF ", .. }
+            ),
+            "{err}"
+        );
+        assert_eq!(
+            format!(
+                "{err}: {}",
+                std::error::Error::source(&err).ok_or("no cause")?
+            ),
+            "font face 0: table 'CFF ' is damaged: the real number 1E99999 in a DICT is too \
+             large to subset"
+        );
+    }
     Ok(())
 }
