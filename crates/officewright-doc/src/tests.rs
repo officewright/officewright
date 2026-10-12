@@ -874,7 +874,9 @@ fn breaks_sections_under_nested_content_controls_in_linear_time() {
 }
 
 #[test]
-fn breaks_sections_under_nested_alternate_content_in_linear_time() {
+fn reads_under_nested_alternate_content_in_linear_time() {
+    // Each element looked past every mc:AlternateContent open around it for where its
+    // children go: 40,000 paragraphs under 40,000 of them took minutes.
     let n = 40_000;
     let body = format!(
         "{}{}{}",
