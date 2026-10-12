@@ -31,6 +31,7 @@ Adobe's terms, from `MustRead.html`:
 
 Fonts in `tests/fonts/`, at the repository root and so outside every crate. They are
 read by `crates/officewright-font/tests/third_party_fonts.rs`,
+`crates/officewright-font/tests/metric_compatible.rs`,
 `crates/officewright-pdf/tests/embedded_fonts.rs` and
 `crates/officewright-cli/tests/fonts.rs`, which their crates exclude from their
 packages, by the C ABI tests in `tests/c` and `tests/ffi-python` and the PDF output
@@ -39,10 +40,14 @@ them, reduced to some of their glyphs, in PDF files they write to temporary dire
 those files are not committed or published. Each font is unmodified and sits next to the
 license file it was distributed with, byte for byte.
 
-### Liberation Sans
+### Liberation Sans, Serif and Mono
 
 - Files: `tests/fonts/liberation/LiberationSans-Regular.ttf`
-  (SHA-256 `76d04c18ea243f426b7de1f3ad208e927008f961dc5945e5aad352d0dfde8ee8`) and
+  (SHA-256 `76d04c18ea243f426b7de1f3ad208e927008f961dc5945e5aad352d0dfde8ee8`),
+  `tests/fonts/liberation/LiberationSerif-Regular.ttf`
+  (SHA-256 `058ea80864aef09a23f45cbec2bb5400bc3dfbdea01c3f10538a21fcb497fb74`),
+  `tests/fonts/liberation/LiberationMono-Regular.ttf`
+  (SHA-256 `f2b83c763e8afd21709333370bed4774337fae82267937e2b5aea7e2fbd922c1`) and
   `tests/fonts/liberation/LICENSE`
   (SHA-256 `93fed46019c38bbe566b479d22148e2e8a1e85ada614accb0211c37b2c61c19b`), from
   `liberation-fonts-ttf-2.1.5.tar.gz` of the Liberation Fonts 2.1.5 release:
@@ -51,8 +56,23 @@ license file it was distributed with, byte for byte.
 - License: SIL Open Font License 1.1. Digitized data copyright (c) 2010 Google
   Corporation with Reserved Font Arimo, Tinos and Cousine; copyright (c) 2012 Red Hat,
   Inc. with Reserved Font Name Liberation.
-- Why: a hinted TrueType font with composite glyphs and Cyrillic, metric-compatible
-  with Arial.
+- Why: hinted TrueType fonts with composite glyphs and Cyrillic, metric-compatible
+  with Arial, Times New Roman and Courier New; `metric_compatible.rs` measures them
+  against Word's rendering of those fonts.
+
+### Carlito
+
+- Files: `tests/fonts/carlito/Carlito-Regular.ttf`
+  (SHA-256 `f6418f708baede9789daef5d458c0f53d2a888af9820e8062934e504fedc6595`) and
+  `tests/fonts/carlito/OFL.txt`
+  (SHA-256 `58402f82a7c332a700294988fe7554fbb0a63a8d27ccc1ee3bbc640311990a00`), the files
+  `fonts/ttf/Carlito-Regular.ttf` and `OFL.txt` of
+  <https://github.com/googlefonts/carlito> at commit
+  `3a810cab78ebd6e2e4eed42af9e8453c4f9b850a` (Carlito 1.104).
+- License: SIL Open Font License 1.1. Copyright 2013 The Carlito Project Authors, with
+  Reserved Font Name "Carlito".
+- Why: metric-compatible with Calibri; `metric_compatible.rs` measures it against
+  Word's rendering of Calibri.
 
 ### Noto Sans
 

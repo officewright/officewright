@@ -29,7 +29,7 @@ Office does not follow ECMA-376/ISO 29500 literally, and users judge us against 
 - Markup Compatibility (ECMA-376 Part 3): honour `mc:Ignorable`, pick `mc:Choice` only for namespaces we implement, otherwise `mc:Fallback`. Unknown extension elements are preserved on round-trip, never dropped.
 - Layout depends on `w:compatSetting` `compatibilityMode` (11 = Word 2003, 12 = 2007, 14 = 2010, 15 = 2013+) and legacy `w:compat` flags. Treat the mode as an input to the layout engine; the corpus must contain documents saved in each mode.
 - Much of Word's layout (line breaking, table autofit, spacing rounding, widow/orphan control) is not documented anywhere. It is learned empirically from the Word reference renders; every such rule gets a corpus file that demonstrates it.
-- Fonts: Office fonts (Calibri, Cambria, Aptos…) cannot be bundled. Use the document's embedded fonts if present, then system fonts, then metric-compatible substitutes (Carlito for Calibri, Caladea for Cambria, Liberation for Arial/Times New Roman/Courier New), and report every substitution so users know why output differs.
+- Fonts: Office fonts (Calibri, Cambria, Aptos…) cannot be bundled. Use the document's embedded fonts if present, then system fonts, then metric-compatible substitutes (Carlito for Calibri, Liberation for Arial/Times New Roman/Courier New), then fallbacks, preferring one of similar design (Caladea for Cambria, which lays out differently), and report every substitution so users know why output differs. A font counts as metric-compatible only when a measurement against Word's reference render confirms it (`tests/corpus/word-rules/E-line-fonts.docx`); Caladea does not, so documents in Cambria, like those in Aptos, get no strict position comparison on CI: the layout engine's unit tests check the line-height formula against Cambria's measured numbers, and Cambria's metrics are never copied into library code.
 
 ## Workspace layout
 
@@ -54,9 +54,10 @@ fuzz/                   cargo-fuzz targets, one per parser; a cargo workspace of
 tests/c/                C tests compiled against the generated header and the static library
 tests/ffi-python/       Python ctypes tests loading the shared library — proves the ABI is usable
                         from a non-C language with no build step
-tests/pdf-output/       checks text-to-pdf output, in Helvetica and with the fonts in tests/fonts embedded,
-                        with qpdf, pdftotext, pdffonts and pdftoppm (Linux, macOS; Windows has no official
-                        poppler build, and the golden snapshot proves the bytes are the same)
+tests/pdf-output/       checks text-to-pdf output, in Helvetica and with Liberation Sans (TrueType) and Noto Sans
+                        (CFF) from tests/fonts embedded, with qpdf, pdftotext, pdffonts and pdftoppm (Linux,
+                        macOS; Windows has no official poppler build, and the golden snapshot proves the bytes
+                        are the same)
 tests/corpus/           small curated real documents (committed) + SOURCES.md + baseline.json
 tests/corpus/word-rules/  documents written by scripts/make-rule-docs.py, one undocumented Word rule each
 tests/corpus/reference/ ground truth from PDFs of Microsoft Word/Excel/PowerPoint, one folder per document: every page
@@ -251,9 +252,9 @@ scripts/check-capi.sh target/capi (release.yml runs the same script on every unp
   tests/c against the static library: C99, C++17, ASan+UBSan (glibc Linux, macOS); MSVC C17 and C++17 (Windows)
   tests/ffi-python against the shared library
 PDF output of officewright text-to-pdf (tests/pdf-output): qpdf --check without warnings, pdftotext reads the input back;
-  with each font of tests/fonts embedded: pdffonts lists it embedded, subset and with a ToUnicode map, pdftotext reads back
-  every Latin, Greek and Cyrillic character the fonts have, pdftoppm renders a subset exactly as the whole font; characters
-  that share a glyph read back through ActualText (Linux, macOS)
+  with Liberation Sans and Noto Sans of tests/fonts embedded: pdffonts lists each embedded, subset and with a ToUnicode map,
+  pdftotext reads back every Latin, Greek and Cyrillic character both fonts have, pdftoppm renders a subset exactly as the
+  whole font; characters that share a glyph read back through ActualText (Linux, macOS)
 corpus-runner over tests/corpus (committed corpus), compared with baseline.json   (from Milestone 4)
 ```
 
