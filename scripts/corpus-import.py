@@ -13,12 +13,24 @@ under WSL). For every <name>.json there the script checks that
     (a second check, independent of the one on Windows);
   - the re-saved copy names no language and no number format the input did not have
     (they would say where Word ran), unless --allow-locale accepts them;
-  - Word kept the compatibility mode of the input, and pdfinfo counts the pages Word counted;
+  - Word embedded no font in the re-saved copy;
+  - Word kept the compatibility mode of the input, and pdfinfo and pdftotext count the pages
+    Word counted.
 
-and then copies the PDF to tests/corpus/reference/<group>/<name>.pdf, the re-saved DOCX to
-tests/corpus/resaved/<group>/<name>.docx, and writes the document's row in the "Reference
-renders" table of tests/corpus/SOURCES.md, with the fonts pdffonts reports as not embedded.
-Nothing is copied unless every document passes. Needs pdfinfo and pdffonts (poppler-utils).
+The PDF itself is not committed: it holds subsets of the fonts Word used, Microsoft's among
+them. It stays with the maintainer, and its SHA-256 goes into SOURCES.md. Into
+tests/corpus/reference/<group>/<name>/ go instead
+
+  - page-001.png, ...: every page rasterized by pdftoppm at 110 dpi in 8-bit grey, the
+    resolution and colour model the SSIM comparison uses;
+  - geometry.json: page sizes and the position of every line and word (pdftotext
+    -bbox-layout, in points from the top left of the page), the page count, Word's own page
+    breaks (the w:lastRenderedPageBreak marks of the re-saved copy), and the fonts the PDF
+    references without embedding them, whose pages poppler rasterizes with substitutes.
+
+The re-saved DOCX goes to tests/corpus/resaved/<group>/<name>.docx, and the document's row to
+the "Reference renders" table of tests/corpus/SOURCES.md. Nothing is written unless every
+document passes. Needs pdfinfo, pdffonts, pdftoppm and pdftotext (poppler-utils).
 """
 
 from __future__ import annotations
@@ -28,9 +40,12 @@ import hashlib
 import json
 import re
 import shutil
+import struct
 import subprocess
 import sys
+import tempfile
 import zipfile
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -38,6 +53,14 @@ from xml.etree import ElementTree
 
 ROOT = Path(__file__).resolve().parent.parent
 CORPUS = ROOT / "tests" / "corpus"
+
+# Raster resolution, as CLAUDE.md prescribes for the SSIM comparison.
+RASTER_DPI = 110
+
+# The geometry.json format this script writes.
+GEOMETRY_FORMAT = 1
+
+XHTML = "{http://www.w3.org/1999/xhtml}"
 
 # The make-reference.ps1 output format this script reads.
 SCRIPT_VERSION = 2
@@ -98,6 +121,12 @@ class Tools:
     info: Callable[[Path], str]
     xmp: Callable[[Path], str]
     fonts: Callable[[Path], str]
+    # Writes one PGM file per page into the directory and returns them in page order.
+    raster: Callable[[Path, Path], list[Path]]
+    # pdftotext -bbox-layout output.
+    bbox: Callable[[Path], str]
+    # The poppler version, for the provenance notes.
+    version: Callable[[], str]
 
 
 def run_tool(*args: str) -> str:
@@ -111,10 +140,28 @@ def run_tool(*args: str) -> str:
     return done.stdout.decode("utf-8", errors="replace")
 
 
+def poppler_raster(pdf: Path, directory: Path) -> list[Path]:
+    run_tool("pdftoppm", "-r", str(RASTER_DPI), "-gray", str(pdf), str(directory / "page"))
+    pages = list(directory.glob("page-*.pgm"))
+    return sorted(pages, key=lambda path: int(path.stem.rsplit("-", 1)[1]))
+
+
+def poppler_version() -> str:
+    try:
+        done = subprocess.run(["pdftoppm", "-v"], capture_output=True, check=False)
+    except FileNotFoundError as error:
+        raise Refused("pdftoppm is not installed (apt install poppler-utils)") from error
+    match = re.search(r"version ([0-9.]+)", done.stderr.decode(errors="replace"))
+    return match.group(1) if match else "unknown"
+
+
 POPPLER = Tools(
     info=lambda path: run_tool("pdfinfo", str(path)),
     xmp=lambda path: run_tool("pdfinfo", "-meta", str(path)),
     fonts=lambda path: run_tool("pdffonts", str(path)),
+    raster=poppler_raster,
+    bbox=lambda path: run_tool("pdftotext", "-bbox-layout", str(path), "-"),
+    version=poppler_version,
 )
 
 
@@ -263,6 +310,115 @@ def locale_problems(original: dict[str, bytes], resaved: dict[str, bytes]) -> li
     return problems
 
 
+def embedded_font_problems(parts: dict[str, bytes]) -> list[str]:
+    """Fonts Word embedded in a package: they must not reach the repository."""
+    problems = [f"{name} is an embedded font" for name in parts if name.startswith("word/fonts/")]
+    for name in ("word/fontTable.xml", "word/settings.xml"):
+        if name not in parts:
+            continue
+        for element in ElementTree.fromstring(parts[name]).iter():
+            if local_name(element.tag) in (
+                "embedRegular", "embedBold", "embedItalic", "embedBoldItalic",
+                "embedTrueTypeFonts",
+            ):
+                problems.append(f"{name} has {local_name(element.tag)}")
+    return problems
+
+
+def png_from_pgm(data: bytes) -> bytes:
+    """An 8-bit grey PNG from a binary PGM (P5) with a maximum value of 255."""
+    fields = []
+    position = 0
+    while len(fields) < 4:
+        while data[position : position + 1].isspace():
+            position += 1
+        if data[position : position + 1] == b"#":
+            position = data.index(b"\n", position) + 1
+            continue
+        end = position
+        while not data[end : end + 1].isspace():
+            end += 1
+        fields.append(data[position:end])
+        position = end
+    magic, width, height, maximum = fields[0], int(fields[1]), int(fields[2]), int(fields[3])
+    if magic != b"P5" or maximum != 255:
+        raise Refused(f"pdftoppm wrote an unexpected image ({magic!r}, maximum {maximum})")
+    pixels = data[position + 1 :]
+    if len(pixels) != width * height:
+        raise Refused("pdftoppm wrote an image of the wrong size")
+    rows = b"".join(b"\x00" + pixels[y * width : (y + 1) * width] for y in range(height))
+
+    def chunk(kind: bytes, body: bytes) -> bytes:
+        crc = zlib.crc32(kind + body) & 0xFFFFFFFF
+        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", crc)
+
+    header = struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(rows, 9))
+        + chunk(b"IEND", b"")
+    )
+
+
+def box(element: ElementTree.Element) -> list[float]:
+    return [round(float(element.get(key, "0")), 3) for key in ("xMin", "yMin", "xMax", "yMax")]
+
+
+def page_geometry(bbox: str) -> list[dict]:
+    """Pages, lines and words from pdftotext -bbox-layout output."""
+    root = ElementTree.fromstring(bbox)
+    pages = []
+    for number, page in enumerate(root.iter(f"{XHTML}page"), 1):
+        lines = []
+        for line in page.iter(f"{XHTML}line"):
+            words = [
+                {"text": word.text or "", "box": box(word)} for word in line.iter(f"{XHTML}word")
+            ]
+            text = " ".join(word["text"] for word in words)
+            lines.append({"text": text, "box": box(line), "words": words})
+        pages.append(
+            {
+                "number": number,
+                "width": round(float(page.get("width", "0")), 3),
+                "height": round(float(page.get("height", "0")), 3),
+                "lines": lines,
+            }
+        )
+    return pages
+
+
+def rendered_page_breaks(parts: dict[str, bytes]) -> list[dict]:
+    """Word's page breaks: the w:lastRenderedPageBreak marks of a saved document.
+
+    Paragraphs are counted in document order from 0, table cells included; the offset is
+    the number of characters of the paragraph's text before the mark.
+    """
+    root = ElementTree.fromstring(parts["word/document.xml"])
+    breaks = []
+    for index, paragraph in enumerate(root.iter(f"{W}p")):
+        text = ""
+        marks = []
+        for element in paragraph.iter():
+            name = local_name(element.tag)
+            if name == "t":
+                text += element.text or ""
+            elif name == "tab":
+                text += "\t"
+            elif name == "lastRenderedPageBreak":
+                marks.append(len(text))
+        for offset in marks:
+            breaks.append(
+                {
+                    "paragraph": index,
+                    "offset": offset,
+                    "text_before": text[max(0, offset - 30) : offset],
+                    "text_after": text[offset : offset + 30],
+                }
+            )
+    return breaks
+
+
 def pdf_privacy_problems(info: str, xmp: str, data: bytes) -> list[str]:
     """Personal data in a PDF: the Author entry, XMP creator fields, profile paths."""
     problems = []
@@ -310,7 +466,7 @@ def not_embedded(pdffonts: str) -> list[str]:
     return sorted(set(names))
 
 
-def reference_row(group: str, record: dict, missing_embeds: list[str]) -> str:
+def reference_row(group: str, record: dict, missing_embeds: list[str], poppler: str) -> str:
     base = Path(record["file"]).stem
     windows = record["windows_version"]
     display = record.get("windows_display_version") or ""
@@ -324,11 +480,14 @@ def reference_row(group: str, record: dict, missing_embeds: list[str]) -> str:
         f"{record['pages']} pages",
         printer,
         "fonts Word substituted: " + (", ".join(record["fonts_missing"]) or "none"),
-        "fonts not embedded: " + (", ".join(missing_embeds) or "none"),
         "fields as saved",
+        f"PDF not committed, SHA-256 {record['pdf_sha256']}",
+        f"rasters and geometry by poppler {poppler} at {RASTER_DPI} dpi, grey",
+        "fonts the PDF does not embed, rasterized with poppler's substitutes: "
+        + (", ".join(missing_embeds) or "none"),
     ]
     return (
-        f"| reference/{group}/{base}.pdf "
+        f"| reference/{group}/{base}/ "
         f"| {group}/{record['file']}, re-saved by Word as resaved/{group}/{base}.docx "
         f"| Microsoft Word {record['word_version']}, build {record['word_build']}, "
         f"Windows {windows} "
@@ -361,6 +520,7 @@ class Checked:
     pdf: Path
     resaved: Path
     row: str
+    geometry: dict
 
 
 def check_result(
@@ -385,11 +545,13 @@ def check_result(
         original_parts = read_parts(original)
         resaved_parts = read_parts(resaved)
         problems = docx_privacy_problems(resaved)
+        problems += embedded_font_problems(resaved_parts)
         if not allow_locale:
             problems += locale_problems(original_parts, resaved_parts)
         mode = compatibility_mode(original_parts)
         resaved_mode = compatibility_mode(resaved_parts)
-    except (zipfile.BadZipFile, ElementTree.ParseError, ValueError) as error:
+        page_breaks = rendered_page_breaks(resaved_parts)
+    except (zipfile.BadZipFile, ElementTree.ParseError, ValueError, KeyError) as error:
         raise Refused(f"{record['file']}: cannot read a package: {error}") from error
     problems += pdf_privacy_problems(info, tools.xmp(pdf), pdf.read_bytes())
     if problems:
@@ -407,8 +569,27 @@ def check_result(
         raise Refused(
             f"{record['file']}: Word counted {record['pages']} pages, the PDF has {pages}"
         )
-    row = reference_row(group, record, not_embedded(tools.fonts(pdf)))
-    return Checked(record, pdf, resaved, row)
+    try:
+        geometry_pages = page_geometry(tools.bbox(pdf))
+    except (ElementTree.ParseError, ValueError) as error:
+        raise Refused(f"{record['file']}: cannot read pdftotext's output: {error}") from error
+    if len(geometry_pages) != pages:
+        raise Refused(f"{record['file']}: pdftotext found {len(geometry_pages)} pages, not {pages}")
+    missing_embeds = not_embedded(tools.fonts(pdf))
+    poppler = tools.version()
+    geometry = {
+        "format": GEOMETRY_FORMAT,
+        "document": f"{group}/{record['file']}",
+        "pdf_sha256": record["pdf_sha256"],
+        "made_with": f"pdftotext {poppler} -bbox-layout",
+        "units": "points, origin at the top left of the page, y downwards",
+        "page_count": pages,
+        "fonts_not_embedded": missing_embeds,
+        "page_breaks": page_breaks,
+        "pages": geometry_pages,
+    }
+    row = reference_row(group, record, missing_embeds, poppler)
+    return Checked(record, pdf, resaved, row, geometry)
 
 
 def import_results(
@@ -435,15 +616,33 @@ def import_results(
         raise Refused("nothing imported:\n  " + "\n  ".join(errors))
     if dry_run:
         return checked
+    # Rasterize everything before writing anything, so a failure leaves the corpus as it was.
+    rasters = {}
+    with tempfile.TemporaryDirectory() as scratch:
+        for item in checked:
+            directory = Path(scratch) / Path(item.record["file"]).stem
+            directory.mkdir()
+            pages = [png_from_pgm(page.read_bytes()) for page in tools.raster(item.pdf, directory)]
+            if len(pages) != item.geometry["page_count"]:
+                raise Refused(
+                    f"{item.record['file']}: pdftoppm wrote {len(pages)} pages, "
+                    f"not {item.geometry['page_count']}"
+                )
+            rasters[item.record["file"]] = pages
     sources_path = corpus / "SOURCES.md"
     sources = sources_path.read_text(encoding="utf-8")
     for item in checked:
         base = Path(item.record["file"]).stem
-        reference = corpus / "reference" / group / f"{base}.pdf"
+        reference = corpus / "reference" / group / base
+        if reference.exists():
+            shutil.rmtree(reference)
+        reference.mkdir(parents=True)
+        for number, png in enumerate(rasters[item.record["file"]], 1):
+            (reference / f"page-{number:03}.png").write_bytes(png)
+        geometry = json.dumps(item.geometry, indent=1, ensure_ascii=False) + "\n"
+        (reference / "geometry.json").write_text(geometry, encoding="utf-8")
         resaved = corpus / "resaved" / group / f"{base}.docx"
-        reference.parent.mkdir(parents=True, exist_ok=True)
         resaved.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(item.pdf, reference)
         shutil.copyfile(item.resaved, resaved)
         sources = upsert_reference_row(sources, item.row)
     sources_path.write_text(sources, encoding="utf-8")

@@ -1,6 +1,6 @@
 """Checks scripts/corpus-import.py with fake make-reference.ps1 results.
 
-pdfinfo and pdffonts are replaced by fixed output, so the checks run where poppler is not
+The poppler tools are replaced by fixed output, so the checks run where poppler is not
 installed (Windows) and do not depend on its version.
 """
 
@@ -8,10 +8,12 @@ import hashlib
 import importlib.util
 import json
 import shutil
+import struct
 import sys
 import tempfile
 import unittest
 import zipfile
+import zlib
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
@@ -35,6 +37,49 @@ name                                 type              encoding         emb sub 
 ABCDEF+Calibri                       CID TrueType      Identity-H       yes yes yes      9  0
 Garamond                             TrueType          WinAnsi          no  no  no      12  0
 """
+
+# pdftotext -bbox-layout output for three pages, one line on the first.
+BBOX = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title></title></head>
+<body>
+<doc>
+  <page width="595.320000" height="841.920000">
+    <flow><block xMin="72.024000" yMin="79.820000" xMax="135.000000" yMax="90.860000">
+      <line xMin="72.024000" yMin="79.820000" xMax="135.000000" yMax="90.860000">
+        <word xMin="72.024000" yMin="79.820000" xMax="93.011000" yMax="90.860000">Case</word>
+        <word xMin="95.429000" yMin="79.820000" xMax="135.000000" yMax="90.860000">one</word>
+      </line>
+    </block></flow>
+  </page>
+  <page width="595.320000" height="841.920000"></page>
+  <page width="595.320000" height="841.920000"></page>
+</doc>
+</body>
+</html>
+"""
+
+
+def pixels_of(page, width=4, height=2):
+    """Distinct grey values per pixel, so a test sees any reordering."""
+    return bytes((10 * page + index) % 256 for index in range(width * height))
+
+
+def pgm(width, height, pixels):
+    return f"P5\n{width} {height}\n255\n".encode() + pixels
+
+
+def png_pixels(data):
+    """Width, height and grey values of a PNG written by png_from_pgm."""
+    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+    width, height, depth, colour = struct.unpack(">IIBB", data[16:26])
+    assert (depth, colour) == (8, 0)
+    idat = data[data.index(b"IDAT") + 4 : data.index(b"IEND") - 8]
+    rows = zlib.decompress(idat)
+    stride = width + 1
+    return width, height, b"".join(rows[y * stride + 1 : (y + 1) * stride] for y in range(height))
+
 
 SOURCES = """\
 # Corpus sources
@@ -74,8 +119,15 @@ class Import(unittest.TestCase):
         (self.corpus / "SOURCES.md").write_text(SOURCES, encoding="utf-8")
         self.info = "Producer:        Microsoft Word\nAuthor:          \nPages:           3\n"
         self.xmp = ""
+        self.bbox = BBOX
+        self.raster_pages = 3
         self.tools = importer.Tools(
-            info=lambda path: self.info, xmp=lambda path: self.xmp, fonts=lambda path: PDFFONTS
+            info=lambda path: self.info,
+            xmp=lambda path: self.xmp,
+            fonts=lambda path: PDFFONTS,
+            raster=self.raster,
+            bbox=lambda path: self.bbox,
+            version=lambda: "24.02.0",
         )
         for doc in rules.documents()[:2]:
             self.add_result(doc)
@@ -115,6 +167,14 @@ class Import(unittest.TestCase):
         (self.results / f"{doc.name}.json").write_text(json.dumps(record), encoding="utf-8")
         return record
 
+    def raster(self, pdf, directory):
+        pages = []
+        for number in range(1, self.raster_pages + 1):
+            page = directory / f"page-{number}.pgm"
+            page.write_bytes(pgm(4, 2, pixels_of(number)))
+            pages.append(page)
+        return pages
+
     def save_record(self, record):
         name = record["file"][: -len(".docx")]
         (self.results / f"{name}.json").write_text(json.dumps(record), encoding="utf-8")
@@ -137,31 +197,102 @@ class Import(unittest.TestCase):
         self.assertFalse((self.corpus / "reference").exists(), "nothing may be copied")
         return str(caught.exception)
 
-    def test_imports_files_and_sources_rows(self):
+    def test_imports_rasters_geometry_and_sources_rows_but_no_pdf(self):
         checked = self.run_import()
         self.assertEqual(len(checked), 2)
         reference = self.corpus / "reference" / "word-rules"
         resaved = self.corpus / "resaved" / "word-rules"
-        self.assertEqual(sorted(p.name for p in reference.iterdir()),
-                         ["E-line-exact.pdf", "E-line-fonts.pdf"])
+        self.assertEqual(
+            sorted(p.name for p in reference.iterdir()), ["E-line-exact", "E-line-fonts"]
+        )
+        self.assertEqual(
+            sorted(p.name for p in (reference / "E-line-fonts").iterdir()),
+            ["geometry.json", "page-001.png", "page-002.png", "page-003.png"],
+        )
+        self.assertEqual(list(self.corpus.rglob("*.pdf")), [])
         self.assertEqual(sorted(p.name for p in resaved.iterdir()),
                          ["E-line-exact.docx", "E-line-fonts.docx"])
         sources = (self.corpus / "SOURCES.md").read_text(encoding="utf-8")
+        pdf_sha256 = sha256(b"%PDF-1.7\n%%EOF\n")
         self.assertIn(
-            "| reference/word-rules/E-line-fonts.pdf | word-rules/E-line-fonts.docx, re-saved by "
+            "| reference/word-rules/E-line-fonts/ | word-rules/E-line-fonts.docx, re-saved by "
             "Word as resaved/word-rules/E-line-fonts.docx | Microsoft Word 16.0, build 16.0.1, "
             "Windows 10.0.26100.0 (24H2) | 2026-10-13 | compatibility mode 15; 3 pages; printer "
-            "Microsoft Print to PDF; fonts Word substituted: none; fonts not embedded: Garamond; "
-            "fields as saved |",
+            "Microsoft Print to PDF; fonts Word substituted: none; fields as saved; PDF not "
+            f"committed, SHA-256 {pdf_sha256}; rasters and geometry by poppler 24.02.0 at 110 dpi, "
+            "grey; fonts the PDF does not embed, rasterized with poppler's substitutes: Garamond |",
             sources,
         )
 
-    def test_importing_again_replaces_the_rows(self):
+    def test_rasters_are_grey_pngs_of_each_page(self):
         self.run_import()
+        pages = self.corpus / "reference" / "word-rules" / "E-line-fonts"
+        for number in (1, 2, 3):
+            width, height, pixels = png_pixels((pages / f"page-{number:03}.png").read_bytes())
+            self.assertEqual((width, height, pixels), (4, 2, pixels_of(number)))
+
+    def test_geometry_holds_pages_lines_words_and_word_page_breaks(self):
+        doc = rules.documents()[0]
+        record = self.add_result(doc)
+        # Word marks a page break before the first line of the first paragraph.
+        first = b'<w:t xml:space="preserve">Calibri 11 pt, line 01'
+        self.change_resaved(record, {"word/document.xml": [
+            (first, b"<w:lastRenderedPageBreak/>" + first),
+        ]})
+        self.run_import()
+        geometry = json.loads(
+            (self.corpus / "reference" / "word-rules" / doc.name / "geometry.json")
+            .read_text(encoding="utf-8")
+        )
+        self.assertEqual(geometry["page_count"], 3)
+        self.assertEqual(geometry["document"], f"word-rules/{doc.name}.docx")
+        self.assertEqual(geometry["fonts_not_embedded"], ["Garamond"])
+        page = geometry["pages"][0]
+        self.assertEqual((page["number"], page["width"], page["height"]), (1, 595.32, 841.92))
+        self.assertEqual(page["lines"][0]["text"], "Case one")
+        self.assertEqual(page["lines"][0]["box"], [72.024, 79.82, 135.0, 90.86])
+        self.assertEqual(
+            page["lines"][0]["words"][1], {"text": "one", "box": [95.429, 79.82, 135.0, 90.86]}
+        )
+        self.assertEqual(len(geometry["page_breaks"]), 1)
+        self.assertEqual(geometry["page_breaks"][0]["offset"], 0)
+        self.assertEqual(geometry["page_breaks"][0]["paragraph"], 0)
+        self.assertTrue(geometry["page_breaks"][0]["text_after"].startswith("Calibri 11 pt"))
+
+    def test_importing_again_replaces_rows_and_old_pages(self):
+        self.run_import()
+        stale = self.corpus / "reference" / "word-rules" / "E-line-fonts" / "page-009.png"
+        stale.write_bytes(b"stale")
         self.run_import()
         sources = (self.corpus / "SOURCES.md").read_text(encoding="utf-8")
-        self.assertEqual(sources.count("| reference/word-rules/E-line-fonts.pdf |"), 1)
-        self.assertEqual(sources.count("| reference/word-rules/E-line-exact.pdf |"), 1)
+        self.assertEqual(sources.count("| reference/word-rules/E-line-fonts/ |"), 1)
+        self.assertEqual(sources.count("| reference/word-rules/E-line-exact/ |"), 1)
+        self.assertFalse(stale.exists())
+
+    def test_refuses_fonts_word_embedded(self):
+        record = self.add_result(rules.documents()[0])
+        resaved = self.results / record["resaved_file"]
+        with zipfile.ZipFile(resaved, "a") as archive:
+            archive.writestr("word/fonts/font1.odttf", b"font")
+        self.change_resaved(record, {"word/fontTable.xml": [
+            (b'<w:font w:name="Calibri"/>',
+             b'<w:font w:name="Calibri"><w:embedRegular w:fontKey="{0}" r:id="rId1" '
+             b'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/>'
+             b"</w:font>"),
+        ]})
+        message = self.refused()
+        self.assertIn("word/fonts/font1.odttf is an embedded font", message)
+        self.assertIn("word/fontTable.xml has embedRegular", message)
+
+    def test_refuses_a_page_count_pdftotext_does_not_find(self):
+        self.bbox = BBOX.replace('<page width="595.320000" height="841.920000"></page>', "", 1)
+        self.assertIn("pdftotext found 2 pages, not 3", self.refused())
+
+    def test_refuses_rasters_of_another_page_count_and_writes_nothing(self):
+        self.raster_pages = 2
+        message = self.refused()
+        self.assertIn("pdftoppm wrote 2 pages, not 3", message)
+        self.assertEqual((self.corpus / "SOURCES.md").read_text(encoding="utf-8"), SOURCES)
 
     def test_dry_run_copies_nothing(self):
         self.assertEqual(len(self.run_import(dry_run=True)), 2)

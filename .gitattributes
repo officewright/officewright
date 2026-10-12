@@ -5,6 +5,7 @@
 *.doc binary
 *.docx binary
 *.pdf binary
+*.png binary
 *.ppt binary
 *.pptx binary
 *.rtf binary

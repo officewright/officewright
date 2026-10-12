@@ -31,17 +31,25 @@ writes.
 
 ## Reference renders (`reference/`)
 
-PDFs exported by Microsoft Word, Excel or PowerPoint from the documents above
+Made from PDFs exported by Microsoft Word, Excel or PowerPoint from the documents above
 (`scripts/windows/make-reference.ps1`). A LibreOffice export is a secondary reference
 and says so in the Application column.
 
+The PDFs are not committed: they hold subsets of the fonts the application used,
+Microsoft's among them. The maintainer keeps them; each row gives the PDF's SHA-256. For
+every document `scripts/corpus-import.py` writes a folder `reference/<group>/<name>/` with
+`page-001.png`, ... (every page rasterized by poppler's `pdftoppm` at 110 dpi in 8-bit
+grey) and `geometry.json` (page sizes, the boxes of every line and word from
+`pdftotext -bbox-layout` in points from the top left of the page, the page count, and Word's
+page breaks). Poppler rasterizes fonts the PDF does not embed with substitutes, so the Notes
+list them: their glyphs in the PNG files are not Word's, their positions in `geometry.json` are.
+
 Word saves each document again before it exports it, and the PDF is made from that saved
 copy, which is kept under `resaved/` with the same path: its `w:lastRenderedPageBreak`
-marks are Word's page breaks for that PDF. `scripts/corpus-import.py` copies both files
-here and writes the row; its Notes give the compatibility mode Word used, the page count,
-Word's printer (Microsoft Print to PDF, or a note that another printer was used, without its
-name), the fonts Word did not have and substituted, the fonts the PDF references without
-embedding them, and how fields were rendered.
+marks are Word's page breaks for that PDF. The Notes give the compatibility mode Word used,
+the page count, Word's printer (Microsoft Print to PDF, or a note that another printer was
+used, without its name), the fonts Word did not have and substituted, how fields were
+rendered, the PDF's SHA-256 and the poppler version.
 
 | File | Rendered from | Application and version | Date | Notes |
 |------|---------------|-------------------------|------|-------|
