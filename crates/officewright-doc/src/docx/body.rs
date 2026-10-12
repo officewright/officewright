@@ -17,20 +17,25 @@ use super::{Names, R, R_STRICT, W, W_STRICT, section, shorten};
 use crate::diagnostic::{DiagnosticKind, Diagnostics};
 use crate::model::xml::{Span, Sym, Token, XmlAttribute, XmlName};
 use crate::model::{
-    Break, BreakClear, BreakKind, Conformance, Document, FieldCharKind, Kind, Node, RunItem,
-    SectionData, SectionProperties,
+    Break, BreakClear, BreakKind, Conformance, Document, FieldCharKind, HyperlinkData, Kind, Node,
+    RevisionData, RevisionKind, RunItem, SectionData, SectionProperties,
 };
+use crate::units::twips_measure;
 use crate::{Error, Limit, Limits, Result};
 
 /// Where the children of an element go, and what they may be.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Level {
-    /// Paragraphs.
+    /// Paragraphs, tables and block-level content controls.
     Block,
-    /// Runs and other content of a paragraph.
+    /// Runs, hyperlinks and other content of a paragraph.
     Inline,
     /// The content of a run.
     Run,
+    /// The rows of a table.
+    Row,
+    /// The cells of a row.
+    Cell,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,6 +50,8 @@ enum Frame {
     Root,
     /// An element whose children are read at `level` into `parent`.
     Container { parent: Parent, level: Level },
+    /// A content control (`w:sdt`): its properties, then its content at `level`.
+    ContentControl { node: u32, level: Level },
     /// An `mc:AlternateContent`, and whether one of its branches was taken.
     Alternate { taken: bool },
     /// An element whose children belong to its parent: the branch of an
@@ -68,10 +75,12 @@ enum TextKind {
 
 struct Reading<'d, 'p> {
     document: &'d mut Document,
+    part: &'p Part<'p>,
     part_name: &'p str,
     names: Names,
     /// The reader's ids of the namespaces read into the model.
     w: [NsId; 2],
+    r: [NsId; 2],
     mc: NsId,
     uris: HashMap<NsId, Sym>,
     body: Vec<u32>,
@@ -103,9 +112,11 @@ pub(super) fn read(
     let names = Names::new(&mut document.strings);
     let mut reading = Reading {
         document,
+        part,
         part_name,
         names,
         w,
+        r,
         mc,
         uris: HashMap::new(),
         body: Vec::new(),
@@ -243,6 +254,17 @@ impl Reading<'_, '_> {
                 });
                 self.skip(reader, mce)
             }
+            Context::ContentControl { node, level } => match local {
+                "sdtPr" | "sdtEndPr" => self.property(reader, mce, tag, node),
+                "sdtContent" => {
+                    self.stack.push(Frame::Container {
+                        parent: Parent::Node(node),
+                        level,
+                    });
+                    Ok(())
+                }
+                _ => self.keep(reader, mce, tag),
+            },
             Context::Container { parent, level } => self.child(reader, mce, tag, parent, level),
         }
     }
@@ -264,7 +286,11 @@ impl Reading<'_, '_> {
         // Properties of the parent element come first in it.
         let property = matches!(
             (parent_kind, local),
-            (Some(Kind::Paragraph), "pPr") | (Some(Kind::Run { .. }), "rPr")
+            (Some(Kind::Paragraph), "pPr")
+                | (Some(Kind::Run { .. }), "rPr")
+                | (Some(Kind::Table { .. }), "tblPr" | "tblGrid")
+                | (Some(Kind::Row), "trPr" | "tblPrEx")
+                | (Some(Kind::Cell), "tcPr")
         );
         if property {
             if let Parent::Node(node) = parent {
@@ -273,6 +299,13 @@ impl Reading<'_, '_> {
         }
         match (level, local) {
             (Level::Block, "p") => self.open(parent, Kind::Paragraph, Level::Inline),
+            (Level::Block, "tbl") => self.open(
+                parent,
+                Kind::Table {
+                    columns: Vec::new(),
+                },
+                Level::Row,
+            ),
             (Level::Block, "sectPr") if parent == Parent::Body => {
                 let span = self.capture(reader, mce, tag)?;
                 let element = span.of(&self.document.tokens, &self.document.strings);
@@ -281,6 +314,17 @@ impl Reading<'_, '_> {
                 self.last_section = Some(properties);
                 Ok(())
             }
+            (Level::Row, "tr") => self.open(parent, Kind::Row, Level::Cell),
+            (Level::Cell, "tc") => self.open(parent, Kind::Cell, Level::Block),
+            (Level::Block | Level::Inline | Level::Row | Level::Cell, "sdt") => {
+                let node = self.add(parent, Kind::ContentControl)?;
+                self.stack.push(Frame::ContentControl { node, level });
+                Ok(())
+            }
+            (Level::Block | Level::Row | Level::Cell, "customXml")
+            | (Level::Inline, "customXml" | "smartTag" | "dir" | "bdo") => {
+                self.open(parent, Kind::Wrapper, level)
+            }
             (Level::Inline, "r") => self.open(
                 parent,
                 Kind::Run {
@@ -288,6 +332,28 @@ impl Reading<'_, '_> {
                 },
                 Level::Run,
             ),
+            (Level::Inline, "hyperlink") => {
+                let data = self.hyperlink(reader, &tag);
+                self.open(parent, Kind::Hyperlink(Box::new(data)), Level::Inline)
+            }
+            (Level::Inline, "ins" | "del" | "moveFrom" | "moveTo") => {
+                let kind = match local {
+                    "ins" => RevisionKind::Insertion,
+                    "del" => RevisionKind::Deletion,
+                    "moveFrom" => RevisionKind::MoveFrom,
+                    _ => RevisionKind::MoveTo,
+                };
+                let data = RevisionData {
+                    kind,
+                    author: self.w_attribute(&tag, "author").map(Into::into),
+                    date: self.w_attribute(&tag, "date").map(Into::into),
+                };
+                self.open(parent, Kind::Revision(Box::new(data)), Level::Inline)
+            }
+            (Level::Inline, "fldSimple") => {
+                let instruction = self.w_attribute(&tag, "instr").unwrap_or_default().into();
+                self.open(parent, Kind::SimpleField { instruction }, Level::Inline)
+            }
             (Level::Run, _) => match parent {
                 Parent::Node(run) => self.run_content(reader, mce, tag, run),
                 Parent::Body => self.keep(reader, mce, tag),
@@ -432,6 +498,10 @@ impl Reading<'_, '_> {
                     parent: *parent,
                     level: *level,
                 },
+                Frame::ContentControl { node, level } => Context::ContentControl {
+                    node: *node,
+                    level: *level,
+                },
                 Frame::Text { .. } => Context::Text,
                 Frame::Alternate { .. } | Frame::Transparent => continue,
             };
@@ -495,8 +565,23 @@ impl Reading<'_, '_> {
         node: u32,
     ) -> Result<()> {
         let span = self.capture(reader, mce, tag)?;
-        if let Some(Kind::Paragraph) = self.document.node(node).map(|node| &node.kind) {
+        let kind = self.document.node(node).map(|node| &node.kind);
+        let (paragraph, table) = (
+            matches!(kind, Some(Kind::Paragraph)),
+            matches!(kind, Some(Kind::Table { .. })),
+        );
+        if paragraph {
             self.section_break(span);
+        }
+        if table && self.document.element(span).is(&self.names.w, "tblGrid") {
+            let columns = self.grid(span);
+            if let Some(Node {
+                kind: Kind::Table { columns: table },
+                ..
+            }) = self.document.nodes.get_mut(node as usize)
+            {
+                *table = columns;
+            }
         }
         if let Some(node) = self.document.nodes.get_mut(node as usize) {
             node.properties.push(span);
@@ -504,16 +589,72 @@ impl Reading<'_, '_> {
         Ok(())
     }
 
-    /// A `w:sectPr` in the properties of a paragraph of the body ends a section after
-    /// that paragraph. (Tables are kept without being read, so a paragraph in a table
-    /// cell, where Word does not use `w:sectPr`, never gets here.)
+    /// A `w:sectPr` in the properties of a paragraph ends a section after the block of
+    /// the body the paragraph is in. Word uses it only in paragraphs of the body, not in
+    /// table cells.
     fn section_break(&mut self, p_pr: Span) {
         let p_pr = p_pr.of(&self.document.tokens, &self.document.strings);
         let Some(sect_pr) = p_pr.children().find(|c| c.is(&self.names.w, "sectPr")) else {
             return;
         };
+        let in_table = self.stack.iter().any(|frame| {
+            matches!(
+                frame,
+                Frame::Container {
+                    level: Level::Row | Level::Cell,
+                    ..
+                }
+            ) || matches!(frame, Frame::Container { parent: Parent::Node(node), .. }
+                    if matches!(self.document.node(*node).map(|n| &n.kind), Some(Kind::Cell)))
+        });
+        if in_table {
+            return;
+        }
         let properties = section::read(sect_pr, &self.names, self.part_name, &mut self.diagnostics);
         self.breaks.push((self.body.len(), properties));
+    }
+
+    /// The widths of the columns of a `w:tblGrid`.
+    fn grid(&mut self, tbl_grid: Span) -> Vec<Option<officewright_core::Pt>> {
+        let w = self.names.w;
+        let mut columns = Vec::new();
+        for col in tbl_grid
+            .of(&self.document.tokens, &self.document.strings)
+            .children()
+        {
+            if !col.is(&w, "gridCol") {
+                continue;
+            }
+            let width = col.attribute(&w, "w");
+            let length = width.and_then(|width| twips_measure(width, false));
+            if let (Some(width), None) = (width, length) {
+                section::invalid(&mut self.diagnostics, self.part_name, col, "w", width);
+            }
+            columns.push(length);
+        }
+        columns
+    }
+
+    fn hyperlink(&mut self, reader: &Reader<'_>, tag: &StartTag<'_>) -> HyperlinkData {
+        let id = self.r.iter().find_map(|&r| tag.attribute(Some(r), "id"));
+        let target = id.and_then(|id| {
+            let relationship = self.part.relationships().get(id);
+            if relationship.is_none() {
+                self.diagnose(reader, tag.offset(), DiagnosticKind::InvalidValue, || {
+                    format!(
+                        "hyperlink r:id=\"{}\" names no relationship; the link is ignored",
+                        shorten(id)
+                    )
+                });
+            }
+            let relationship = relationship?;
+            (relationship.target_mode() == officewright_opc::TargetMode::External)
+                .then(|| relationship.target().into())
+        });
+        HyperlinkData {
+            target,
+            anchor: self.w_attribute(tag, "anchor").map(Into::into),
+        }
     }
 
     /// Keeps an element without understanding it, where it is.
@@ -530,6 +671,9 @@ impl Reading<'_, '_> {
                 level: Level::Run,
             } => self.push_item(run, RunItem::Other(span)),
             Context::Container { parent, .. } => self.add(parent, Kind::Other(span)).map(drop),
+            Context::ContentControl { node, .. } => {
+                self.add(Parent::Node(node), Kind::Other(span)).map(drop)
+            }
             Context::Root | Context::Text => Ok(()),
         }
     }
@@ -674,5 +818,6 @@ impl Reading<'_, '_> {
 enum Context {
     Root,
     Container { parent: Parent, level: Level },
+    ContentControl { node: u32, level: Level },
     Text,
 }

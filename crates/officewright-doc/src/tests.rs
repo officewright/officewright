@@ -102,6 +102,8 @@ fn outline(document: &Document) -> Vec<String> {
         for block in section.blocks() {
             out.push(match block {
                 Block::Paragraph(p) => format!("p {:?}", p.text()),
+                Block::Table(t) => format!("table {} rows", t.rows().count()),
+                Block::ContentControl(c) => format!("sdt {} blocks", c.blocks().count()),
                 Block::Other(o) => format!("other {}", o.local_name()),
             });
         }
@@ -191,6 +193,93 @@ fn a_document_without_a_body_has_one_empty_section() {
         document.sections().next().unwrap().properties(),
         &SectionProperties::default()
     );
+}
+
+#[test]
+fn a_section_break_in_a_table_cell_ends_no_section() {
+    // Word uses w:sectPr only in paragraphs of the body.
+    let document = open(
+        r#"<w:tbl><w:tr><w:tc><w:p><w:pPr><w:sectPr/></w:pPr></w:p></w:tc></w:tr></w:tbl><w:p/>"#,
+    );
+    assert_eq!(document.sections().len(), 1);
+}
+
+#[test]
+fn reads_tables_through_content_controls() {
+    let document = open(
+        r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="bad"/></w:tblGrid><w:tr><w:tc><w:tcPr/><w:p><w:r><w:t>a</w:t></w:r></w:p><w:p><w:r><w:t>b</w:t></w:r></w:p></w:tc><w:sdt><w:sdtPr/><w:sdtContent><w:tc><w:tbl><w:tr><w:tc><w:p><w:r><w:t>inner</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/></w:tc></w:sdtContent></w:sdt></w:tr><w:customXml w:element="row"><w:tr><w:tc><w:p><w:r><w:t>c</w:t></w:r></w:p></w:tc></w:tr></w:customXml></w:tbl>"#,
+    );
+    let Some(Block::Table(table)) = document.sections().next().unwrap().blocks().next() else {
+        panic!("no table");
+    };
+    assert_eq!(
+        table.grid_columns().collect::<Vec<_>>(),
+        [Some(Pt(100.0)), None]
+    );
+    let rows: Vec<TableRow<'_>> = table.rows().collect();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].cells().count(), 2);
+    assert_eq!(document.text(), "a\nb\tinner\n\nc\n");
+    assert_eq!(
+        document.diagnostics().len(),
+        1,
+        "{:?}",
+        document.diagnostics()
+    );
+    assert_eq!(
+        document.diagnostics()[0].kind(),
+        DiagnosticKind::InvalidValue
+    );
+}
+
+#[test]
+fn reads_inline_containers() {
+    let document = Document::from_bytes(package(
+        DOCUMENT,
+        &document_xml(
+            r#"<w:p><w:hyperlink r:id="rId7" w:anchor="top"><w:r><w:t>link</w:t></w:r></w:hyperlink><w:ins w:author="A" w:date="2024-01-02T03:04:05Z"><w:r><w:t> new</w:t></w:r></w:ins><w:del w:author="B"><w:r><w:delText> old</w:delText></w:r></w:del><w:moveFrom><w:r><w:t> moved</w:t></w:r></w:moveFrom><w:fldSimple w:instr=" PAGE "><w:r><w:t>3</w:t></w:r></w:fldSimple><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> DATE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>today</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:sdt><w:sdtContent><w:r><w:t>!</w:t></w:r></w:sdtContent></w:sdt><w:smartTag w:element="x"><w:r><w:t>?</w:t></w:r></w:smartTag></w:p>"#,
+        ),
+        &[(
+            "word/_rels/document.xml.rels",
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId7" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/" TargetMode="External"/></Relationships>"#,
+        )],
+    ))
+    .unwrap();
+    assert_eq!(document.text(), "link new3today!?\n");
+    let Some(Block::Paragraph(paragraph)) = document.sections().next().unwrap().blocks().next()
+    else {
+        panic!("no paragraph");
+    };
+    let kinds: Vec<String> = paragraph
+        .inlines()
+        .map(|inline| match inline {
+            Inline::Run(r) => format!("run {:?}", r.text()),
+            Inline::Hyperlink(h) => format!("link {:?} {:?}", h.target(), h.anchor()),
+            Inline::Revision(r) => format!("{:?} {:?} {:?}", r.kind(), r.author(), r.date()),
+            Inline::SimpleField(f) => format!("field {:?}", f.instruction()),
+            Inline::ContentControl(c) => format!("sdt {}", c.inlines().count()),
+            Inline::Other(o) => format!("other {}", o.local_name()),
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "link Some(\"https://example.com/\") Some(\"top\")",
+            "Insertion Some(\"A\") Some(\"2024-01-02T03:04:05Z\")",
+            "Deletion Some(\"B\") None",
+            "MoveFrom None None",
+            "field \" PAGE \"",
+            "run \"\"",
+            "run \"\"",
+            "run \"\"",
+            "run \"today\"",
+            "run \"\"",
+            "sdt 1",
+            // The smart tag is seen through.
+            "run \"?\"",
+        ]
+    );
+    assert_eq!(paragraph.runs().count(), 12);
 }
 
 #[test]
@@ -311,6 +400,22 @@ fn refuses_what_is_not_a_word_document() {
 }
 
 #[test]
+fn an_id_finds_its_node_only_in_its_own_document() {
+    let first = open("<w:p/><w:tbl><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>");
+    let second = open("<w:p/><w:tbl><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>");
+    let mut blocks = first.sections().next().unwrap().blocks();
+    let (Some(Block::Paragraph(paragraph)), Some(Block::Table(table))) =
+        (blocks.next(), blocks.next())
+    else {
+        panic!("unexpected blocks");
+    };
+    assert!(first.paragraph(paragraph.id()).is_some());
+    assert!(first.table(table.id()).is_some());
+    assert!(second.paragraph(paragraph.id()).is_none());
+    assert!(second.table(table.id()).is_none());
+}
+
+#[test]
 fn keeps_unknown_content_and_reports_stray_text() {
     let document = open(
         r#"<w:bookmarkStart w:id="0" w:name="a"/><w:p>stray<w:r><w:t>x</w:t><w:drawing/></w:r></w:p>"#,
@@ -398,6 +503,22 @@ fn bounds_the_size_of_the_file() {
 }
 
 #[test]
+fn walks_deeply_nested_tables_without_recursion() {
+    // 3,000 tables in tables: 9,000 elements deep, far beyond what the call stack of a
+    // recursive walk would allow in a test thread.
+    let depth = 3000;
+    let body = format!(
+        "{}<w:p><w:r><w:t>deep</w:t></w:r></w:p>{}",
+        "<w:tbl><w:tr><w:tc>".repeat(depth),
+        "</w:tc></w:tr></w:tbl>".repeat(depth)
+    );
+    let options = LoadOptions::new().with_limits(Limits::new().with_max_xml_depth(20_000));
+    let document = options.open_bytes(docx(&body)).unwrap();
+    assert_eq!(document.text(), "deep\n");
+    drop(document);
+}
+
+#[test]
 fn opens_files_and_converts_errors_into_core_errors() {
     let document = Document::open(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -417,37 +538,6 @@ fn opens_files_and_converts_errors_into_core_errors() {
         officewright_core::Error::from(malformed),
         officewright_core::Error::InvalidArgument(_)
     ));
-}
-
-#[test]
-fn keeps_tables_and_inline_containers_as_written() {
-    let document = open(
-        r#"<w:tbl><w:tr><w:tc><w:p><w:r><w:t>cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p><w:hyperlink w:anchor="a"><w:r><w:t>link</w:t></w:r></w:hyperlink><w:r><w:t>text</w:t></w:r></w:p>"#,
-    );
-    assert_eq!(outline(&document), ["section 0", "other tbl", "p \"text\""]);
-    let Some(Block::Paragraph(paragraph)) = document.sections().next().unwrap().blocks().nth(1)
-    else {
-        panic!("no paragraph");
-    };
-    let inlines: Vec<String> = paragraph
-        .inlines()
-        .map(|inline| match inline {
-            Inline::Run(run) => format!("run {:?}", run.text()),
-            Inline::Other(other) => format!("other {}", other.local_name()),
-        })
-        .collect();
-    assert_eq!(inlines, ["other hyperlink", "run \"text\""]);
-}
-
-#[test]
-fn an_id_finds_its_node_only_in_its_own_document() {
-    let first = open("<w:p/>");
-    let second = open("<w:p/>");
-    let Some(Block::Paragraph(paragraph)) = first.sections().next().unwrap().blocks().next() else {
-        panic!("no paragraph");
-    };
-    assert!(first.paragraph(paragraph.id()).is_some());
-    assert!(second.paragraph(paragraph.id()).is_none());
 }
 
 #[test]

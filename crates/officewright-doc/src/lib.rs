@@ -2,8 +2,8 @@
 //!
 //! The first reader is for DOCX: [`Document::open`] reads a WordprocessingML package
 //! (`.docx`, `.docm`, `.dotx`, `.dotm`, Transitional or Strict) into a [`Document`] of
-//! [`Section`]s, each with its [`SectionProperties`] and its [`Block`]s: paragraphs, and
-//! in paragraphs runs of text.
+//! [`Section`]s, each with its [`SectionProperties`] and its [`Block`]s: paragraphs,
+//! tables and content controls, and in paragraphs runs of text.
 //!
 //! ```
 //! # fn main() -> officewright_doc::Result<()> {
@@ -22,9 +22,9 @@
 //! # }
 //! ```
 //!
-//! What the model does not represent yet (tables, hyperlinks, drawings, equations,
-//! bookmarks, and the properties of paragraphs and runs) is kept as it was read; such
-//! content shows as `Other` with an [`Opaque`] view.
+//! What the model does not represent yet (drawings, equations, bookmarks, and the
+//! properties of paragraphs and runs) is kept as it was read; such content shows as
+//! `Other` with an [`Opaque`] view.
 //!
 //! Opening never panics on a damaged file: it either returns an [`Error`], or opens the
 //! document and lists in [`Document::diagnostics`] what it repaired, as Word does.
@@ -41,9 +41,10 @@ mod units;
 pub use diagnostic::{Diagnostic, DiagnosticKind};
 pub use error::{Error, Limit, Result};
 pub use model::{
-    Block, Break, BreakClear, BreakKind, Conformance, Document, DocumentKind, FieldCharKind,
-    Inline, Opaque, Orientation, PageMargins, Paragraph, ParagraphId, Run, RunContent, Section,
-    SectionProperties, SectionStart,
+    Block, Break, BreakClear, BreakKind, Conformance, ContentControl, Document, DocumentKind,
+    FieldCharKind, Hyperlink, Inline, Opaque, Orientation, PageMargins, Paragraph, ParagraphId,
+    Revision, RevisionKind, Run, RunContent, Section, SectionProperties, SectionStart, SimpleField,
+    Table, TableCell, TableId, TableRow,
 };
 pub use options::{Limits, LoadOptions};
 
