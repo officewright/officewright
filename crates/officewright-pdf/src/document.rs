@@ -30,7 +30,25 @@ pub struct Document {
 #[derive(Clone, Debug)]
 pub struct Page {
     size: PageSize,
-    content: Vec<u8>,
+    /// The fonts the page uses, in the order of first use; the first is the page's font
+    /// resource `/F1`.
+    fonts: Vec<Font>,
+    /// The content stream. Text stays text until the document is written, when the text
+    /// of every page is known.
+    content: Vec<Content>,
+}
+
+/// A piece of a page's content stream.
+#[derive(Clone, Debug)]
+enum Content {
+    /// Operators, ready to write.
+    Operators(Vec<u8>),
+    /// Text that has been checked against its font, to show with one string operator.
+    Text {
+        /// The font's index in the page's fonts.
+        font: usize,
+        text: String,
+    },
 }
 
 impl Document {
@@ -54,6 +72,7 @@ impl Document {
         let index = self.pages.len();
         self.pages.push(Page {
             size,
+            fonts: Vec::new(),
             content: Vec::new(),
         });
         #[allow(clippy::indexing_slicing)] // reason: the page was just pushed at `index`
@@ -81,10 +100,39 @@ impl Document {
         if self.pages.is_empty() {
             return Err(Error::NoPages);
         }
-        // Objects: 1 catalog, 2 page tree, 3 font, then page and content stream per page.
-        let page_object = |i: usize| 4 + 2 * i;
+        // Each font is written once, in the order the pages first use it. For each page,
+        // `page_fonts` has the document's index of each of its font resources.
+        let mut fonts: Vec<&Font> = Vec::new();
+        let page_fonts: Vec<Vec<usize>> = self
+            .pages
+            .iter()
+            .map(|page| {
+                page.fonts
+                    .iter()
+                    .map(|font| match fonts.iter().position(|known| *known == font) {
+                        Some(index) => index,
+                        None => {
+                            fonts.push(font);
+                            fonts.len() - 1
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        // Encoded before anything is written, so an error leaves `out` untouched.
+        let contents = self
+            .pages
+            .iter()
+            .map(Page::content_stream)
+            .collect::<Result<Vec<_>>>()?;
+
+        // Objects: 1 catalog, 2 page tree, then a font dictionary per font, then a page
+        // and its content stream per page.
+        let font_object = |i: usize| 3 + i;
+        let first_page = 3 + fonts.len();
+        let page_object = |i: usize| first_page + 2 * i;
         let mut out = CountingWriter::new(out);
-        let mut offsets = Vec::with_capacity(3 + 2 * self.pages.len());
+        let mut offsets = Vec::with_capacity(2 + fonts.len() + 2 * self.pages.len());
 
         // The comment's bytes above 127 tell transfer tools the file is binary (§7.5.2).
         out.put(b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n")?;
@@ -105,19 +153,36 @@ impl Document {
             .as_bytes(),
         )?;
 
-        offsets.push(out.written);
-        out.put(
-            b"3 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica \
-              /Encoding /WinAnsiEncoding >>\nendobj\n",
-        )?;
+        for (i, font) in fonts.iter().enumerate() {
+            offsets.push(out.written);
+            out.put(format!("{} 0 obj\n", font_object(i)).as_bytes())?;
+            out.put(font.dictionary())?;
+            out.put(b"\nendobj\n")?;
+        }
 
-        for (i, page) in self.pages.iter().enumerate() {
+        for (i, ((page, resources), content)) in self
+            .pages
+            .iter()
+            .zip(&page_fonts)
+            .zip(&contents)
+            .enumerate()
+        {
             let page_id = page_object(i);
+            let fonts: Vec<String> = resources
+                .iter()
+                .enumerate()
+                .map(|(resource, &font)| format!("/F{} {} 0 R", resource + 1, font_object(font)))
+                .collect();
+            let resources = if fonts.is_empty() {
+                "<< >>".to_owned()
+            } else {
+                format!("<< /Font << {} >> >>", fonts.join(" "))
+            };
             offsets.push(out.written);
             out.put(
                 format!(
                     "{page_id} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] \
-                     /Resources << /Font << /F1 3 0 R >> >> /Contents {} 0 R >>\nendobj\n",
+                     /Resources {resources} /Contents {} 0 R >>\nendobj\n",
                     number(page.size.width().0),
                     number(page.size.height().0),
                     page_id + 1
@@ -130,11 +195,11 @@ impl Document {
                 format!(
                     "{} 0 obj\n<< /Length {} >>\nstream\n",
                     page_id + 1,
-                    page.content.len()
+                    content.len()
                 )
                 .as_bytes(),
             )?;
-            out.put(&page.content)?;
+            out.put(content)?;
             // The end-of-line before `endstream` is not part of /Length (§7.3.8.1).
             out.put(b"\nendstream\nendobj\n")?;
         }
@@ -212,14 +277,61 @@ impl Page {
         if !positions.contains(&x.0) || !positions.contains(&y.0) {
             return Err(Error::InvalidPosition { x, y });
         }
-        let encoded = font.encode(text)?;
-        let content = &mut self.content;
-        // Helvetica, the only font so far, is the page resource /F1 (object 3).
-        content.extend_from_slice(format!("BT\n/F1 {} Tf\n", number(font_size.0)).as_bytes());
-        content.extend_from_slice(format!("{} {} Td\n", number(x.0), number(y.0)).as_bytes());
-        push_string(content, &encoded);
-        content.extend_from_slice(b" Tj\nET\n");
+        font.check(text)?;
+        let font = self.font_index(font);
+        self.push_operators(
+            format!(
+                "BT\n/F{} {} Tf\n{} {} Td\n",
+                font + 1,
+                number(font_size.0),
+                number(x.0),
+                number(y.0)
+            )
+            .as_bytes(),
+        );
+        self.content.push(Content::Text {
+            font,
+            text: text.to_owned(),
+        });
+        self.push_operators(b"\nET\n");
         Ok(())
+    }
+
+    /// The index of `font` in the page's fonts, adding it on its first use. The font at
+    /// index `i` is the page's font resource `/F(i + 1)`.
+    fn font_index(&mut self, font: &Font) -> usize {
+        match self.fonts.iter().position(|known| known == font) {
+            Some(index) => index,
+            None => {
+                self.fonts.push(font.clone());
+                self.fonts.len() - 1
+            }
+        }
+    }
+
+    fn push_operators(&mut self, operators: &[u8]) {
+        match self.content.last_mut() {
+            Some(Content::Operators(last)) => last.extend_from_slice(operators),
+            _ => self.content.push(Content::Operators(operators.to_vec())),
+        }
+    }
+
+    /// Writes the content stream, encoding the text.
+    fn content_stream(&self) -> Result<Vec<u8>> {
+        let mut stream = Vec::new();
+        for piece in &self.content {
+            match piece {
+                Content::Operators(operators) => stream.extend_from_slice(operators),
+                Content::Text { font, text } => {
+                    // reason: `font` came from font_index, and a page's fonts are never removed
+                    #[allow(clippy::indexing_slicing)]
+                    let font = &self.fonts[*font];
+                    push_string(&mut stream, &font.encode(text)?);
+                    stream.extend_from_slice(b" Tj");
+                }
+            }
+        }
+        Ok(stream)
     }
 }
 
@@ -414,6 +526,86 @@ mod tests {
             "{err:?}"
         );
         assert!(page.content.is_empty());
+        assert!(page.fonts.is_empty());
+    }
+
+    /// The object `id` of `pdf`, from `obj` to `endobj`.
+    fn object(pdf: &str, id: usize) -> &str {
+        let start = pdf.find(&format!("\n{id} 0 obj\n")).unwrap() + 1;
+        let end = start + pdf[start..].find("endobj\n").unwrap();
+        &pdf[start..end]
+    }
+
+    #[test]
+    fn writes_each_font_once_for_the_pages_that_use_it() {
+        let mut doc = Document::new();
+        doc.add_page(PageSize::A4)
+            .unwrap()
+            .add_text(Pt(72.0), Pt(700.0), &helvetica(), Pt(12.0), "one")
+            .unwrap();
+        doc.add_page(PageSize::A4).unwrap();
+        let page = doc.add_page(PageSize::A4).unwrap();
+        for (y, text) in [(700.0, "three"), (680.0, "again")] {
+            page.add_text(Pt(72.0), Pt(y), &helvetica(), Pt(12.0), text)
+                .unwrap();
+        }
+        let pdf = String::from_utf8_lossy(&doc.to_bytes().unwrap()).into_owned();
+
+        // 1 catalog, 2 page tree, 3 Helvetica, then each page and its content stream.
+        assert_eq!(pdf.matches("/Type /Font").count(), 1, "{pdf}");
+        assert!(object(&pdf, 3).contains("/BaseFont /Helvetica"), "{pdf}");
+        assert!(
+            object(&pdf, 2).contains("/Kids [4 0 R 6 0 R 8 0 R]"),
+            "{pdf}"
+        );
+        for page in [4, 8] {
+            assert!(
+                object(&pdf, page).contains("/Resources << /Font << /F1 3 0 R >> >>"),
+                "{pdf}"
+            );
+        }
+        assert!(object(&pdf, 6).contains("/Resources << >>"), "{pdf}");
+        assert!(
+            object(&pdf, 9).contains(
+                "BT\n/F1 12 Tf\n72 700 Td\n(three) Tj\nET\nBT\n/F1 12 Tf\n72 680 Td\n(again) Tj\nET\n"
+            ),
+            "{pdf}"
+        );
+    }
+
+    #[test]
+    fn writes_nothing_when_text_cannot_be_encoded() {
+        // add_text rejects such text, so it is planted directly.
+        let mut doc = hello();
+        doc.page_mut(0).unwrap().content.push(Content::Text {
+            font: 0,
+            text: "Ж".to_owned(),
+        });
+        let mut out = Vec::new();
+        let err = doc.write_to(&mut out).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::Unencodable {
+                    ch: 'Ж', offset: 0
+                }
+            ),
+            "{err:?}"
+        );
+        assert!(out.is_empty(), "{} bytes were written", out.len());
+    }
+
+    #[test]
+    fn a_document_without_text_has_no_font() {
+        let mut doc = Document::new();
+        doc.add_page(PageSize::A4).unwrap();
+        let pdf = String::from_utf8_lossy(&doc.to_bytes().unwrap()).into_owned();
+        assert!(!pdf.contains("/Font"), "{pdf}");
+        assert!(
+            object(&pdf, 3).contains("/Resources << >> /Contents 4 0 R"),
+            "{pdf}"
+        );
+        assert!(pdf.contains("xref\n0 5\n"), "{pdf}");
     }
 
     #[test]
