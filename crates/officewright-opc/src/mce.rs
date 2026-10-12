@@ -5,18 +5,20 @@
 //! consumer, for each element and attribute, whether it is [understood](Disposition),
 //! declared ignorable, or neither:
 //!
-//! - **Understood**: from a namespace the consumer implements, or the
-//!   Markup Compatibility, `xml` and no namespace.
+//! - **Understood**: an element from a namespace the consumer implements or from the
+//!   Markup Compatibility namespace; an attribute from such a namespace, from `xml`, or
+//!   without a prefix (it belongs to its element).
 //! - **Ignore**: from a namespace declared in `mc:Ignorable`. The consumer does not
 //!   interpret it, but keeps it to write it back unchanged.
 //! - **Process content**: an ignorable element listed in `mc:ProcessContent`. Its
 //!   children belong to its parent.
-//! - **Not understood**: from a namespace that is neither. Part 3 asks consumers to
-//!   reject such content; officewright keeps it as unknown content instead, the way
-//!   Office keeps content it does not know.
+//! - **Not understood**: from a namespace that is neither (an element without a
+//!   namespace included). Part 3 asks consumers to reject such content; officewright
+//!   keeps it as unknown content instead, the way Office keeps content it does not know.
 //!
 //! In `mc:AlternateContent`, the consumer reads the first `mc:Choice` that
-//! [`is_selectable`](Processor::is_selectable), or the `mc:Fallback` if none is.
+//! [`is_selectable`](Processor::is_selectable), or the `mc:Fallback` if none is, and
+//! skips the others; [`Processor`] describes how to skip.
 //!
 //! ```
 //! use officewright_opc::Limits;
@@ -36,26 +38,51 @@
 //! let mut reader = input.reader(&Limits::new());
 //! let mut mce = Processor::new(&mut reader);
 //! let w = reader.intern("urn:w");
+//! let mc = reader.intern(officewright_opc::mce::NAMESPACE);
 //! mce.understand(w);
-//! let mut choices = Vec::new();
+//! // Whether a branch of each open mc:AlternateContent has been taken.
+//! let mut alternates = Vec::new();
+//! let mut read = Vec::new();
 //! while let Some(event) = reader.read_event()? {
 //!     match event {
 //!         Event::Start(tag) => {
-//!             mce.start(&reader, &tag)?;
-//!             if tag.name().is(w, "p") {
+//!             let disposition = mce.start(&reader, &tag)?;
+//!             let name = tag.name();
+//!             let take = if name.is(mc, "AlternateContent") {
+//!                 alternates.push(false);
+//!                 true
+//!             } else if name.is(mc, "Choice") || name.is(mc, "Fallback") {
+//!                 let taken = alternates.last_mut().expect("inside mc:AlternateContent");
+//!                 let take = !*taken
+//!                     && (name.is(mc, "Fallback") || mce.is_selectable(&reader, &tag)?);
+//!                 *taken |= take;
+//!                 take
+//!             } else {
+//!                 disposition == Disposition::Understood
+//!             };
+//!             if !take {
+//!                 // Skipped content is kept, not interpreted: no start() inside it.
+//!                 reader.skip_element()?;
+//!                 mce.end();
+//!                 continue;
+//!             }
+//!             if name.is(w, "p") {
 //!                 let para_id = tag.attributes()[0].name();
 //!                 assert_eq!(mce.attribute(para_id), Disposition::Ignore);
 //!             }
-//!             if tag.name().local() == "Choice" {
-//!                 choices.push(mce.is_selectable(&reader, &tag)?);
-//!             }
+//!             read.push(name.local().to_owned());
 //!         }
-//!         Event::End(_) => mce.end(),
+//!         Event::End(tag) => {
+//!             if tag.name().is(mc, "AlternateContent") {
+//!                 alternates.pop();
+//!             }
+//!             mce.end();
+//!         }
 //!         _ => {}
 //!     }
 //! }
 //! // w14 is not understood, so the fallback is read.
-//! assert_eq!(choices, [false]);
+//! assert_eq!(read, ["document", "p", "AlternateContent", "Fallback", "picture"]);
 //! # Ok::<(), officewright_opc::Error>(())
 //! ```
 
@@ -82,6 +109,14 @@ pub enum Disposition {
 }
 
 /// Follows the Markup Compatibility attributes of one part; see the [module docs](self).
+///
+/// The consumer calls [`start`](Self::start) for every start tag it reads into, and it
+/// returns what to do with that element. For an element the consumer reads into
+/// (understood, or ignorable with its content processed), it calls [`end`](Self::end) at
+/// the end tag. For an element it skips (ignored, not understood, an `mc:Choice` that is
+/// not selected, an `mc:Fallback` after a selected Choice), it calls
+/// [`Reader::skip_element`] and then `end` once, and never `start` for anything inside:
+/// skipped content is kept, not interpreted, so its `mc:MustUnderstand` does not apply.
 ///
 /// Every lookup takes constant time and a name that an attribute repeats, or that an
 /// outer element already declared, is kept once, so the work grows with the size of
@@ -130,18 +165,21 @@ impl Processor {
         self.understood.insert(namespace);
     }
 
-    /// Takes in the compatibility attributes of a start tag the reader just returned.
-    /// Call [`end`](Self::end) at its end tag.
+    /// Takes in the compatibility attributes of a start tag the reader just returned and
+    /// tells what to do with its element; the element's own `mc:Ignorable` and
+    /// `mc:ProcessContent` count. See [`Processor`] for when to call
+    /// [`end`](Self::end).
     ///
     /// # Errors
     ///
     /// [`Error::Xml`] for an attribute that names an undeclared prefix or is not a
     /// Markup Compatibility attribute, [`Error::LimitExceeded`] for an attribute that
     /// lists more than [`Limits::max_mce_names`](crate::Limits::max_mce_names) names,
-    /// and [`Error::Unsupported`] when `mc:MustUnderstand` names a namespace the
-    /// consumer does not understand.
-    pub fn start(&mut self, reader: &Reader<'_>, tag: &StartTag<'_>) -> Result<()> {
+    /// and [`Error::Unsupported`] when the element is to be read and its
+    /// `mc:MustUnderstand` names a namespace the consumer does not understand.
+    pub fn start(&mut self, reader: &Reader<'_>, tag: &StartTag<'_>) -> Result<Disposition> {
         self.frames.push(self.added.len());
+        let mut must_understand = None;
         for attribute in tag.attributes() {
             if attribute.name().namespace() != Some(self.mc) {
                 continue;
@@ -160,16 +198,11 @@ impl Processor {
                     }
                 }
                 "MustUnderstand" => {
+                    let mut namespaces = Vec::new();
                     for prefix in names {
-                        let namespace = resolve(reader, tag, "MustUnderstand", prefix)?;
-                        if !self.is_understood(namespace) {
-                            return Err(Error::Unsupported(format!(
-                                "the document requires namespace {} (mc:MustUnderstand), \
-                                 which officewright does not implement",
-                                reader.namespace_uri(namespace)
-                            )));
-                        }
+                        namespaces.push(resolve(reader, tag, "MustUnderstand", prefix)?);
                     }
+                    must_understand = Some(namespaces);
                 }
                 "ProcessContent" => {
                     for name in names {
@@ -206,7 +239,22 @@ impl Processor {
                 }
             }
         }
-        Ok(())
+        let disposition = self.element(tag.name());
+        if matches!(
+            disposition,
+            Disposition::Understood | Disposition::ProcessContent
+        ) {
+            for namespace in must_understand.unwrap_or_default() {
+                if !self.is_understood(namespace) {
+                    return Err(Error::Unsupported(format!(
+                        "the document requires namespace {} (mc:MustUnderstand), which \
+                         officewright does not implement",
+                        reader.namespace_uri(namespace)
+                    )));
+                }
+            }
+        }
+        Ok(disposition)
     }
 
     /// Leaves the element [`start`](Self::start) was last called for.
@@ -234,7 +282,7 @@ impl Processor {
 
     /// What to do with an element, inside the scope of the start tags taken in so far
     /// (its own included).
-    pub fn element(&self, name: Name<'_>) -> Disposition {
+    fn element(&self, name: Name<'_>) -> Disposition {
         let Some(namespace) = name.namespace() else {
             return Disposition::NotUnderstood;
         };

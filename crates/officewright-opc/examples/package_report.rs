@@ -1,5 +1,6 @@
 //! Opens OOXML packages and reads every XML part they reach through relationships, as a
-//! document reader would, for checking officewright-opc by hand and over a corpus.
+//! document reader would (following Markup Compatibility, skipping what it does not
+//! read), for checking officewright-opc by hand and over a corpus.
 //!
 //! ```text
 //! cargo run -p officewright-opc --example package_report -- [--verbose] FILE...
@@ -13,7 +14,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use officewright_opc::mce::Processor;
+use officewright_opc::mce::{Disposition, Processor};
 use officewright_opc::xml::{Event, Input};
 use officewright_opc::{Error, Limits, Package, PartName, Relationships};
 
@@ -103,14 +104,93 @@ fn targets(relationships: &Relationships) -> Vec<PartName> {
         .collect()
 }
 
+/// The namespaces of ECMA-376, Transitional and Strict, that a document reader
+/// implements. Office's extensions (w14, w15 and the like) are left to Markup
+/// Compatibility, which documents declare them ignorable for.
+const UNDERSTOOD: &[&str] = &[
+    "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+    "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+    "http://schemas.openxmlformats.org/presentationml/2006/main",
+    "http://schemas.openxmlformats.org/drawingml/2006/main",
+    "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
+    "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing",
+    "http://schemas.openxmlformats.org/drawingml/2006/picture",
+    "http://schemas.openxmlformats.org/drawingml/2006/chart",
+    "http://schemas.openxmlformats.org/drawingml/2006/diagram",
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+    "http://schemas.openxmlformats.org/officeDocument/2006/math",
+    "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties",
+    "http://schemas.openxmlformats.org/officeDocument/2006/custom-properties",
+    "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes",
+    "http://schemas.openxmlformats.org/package/2006/metadata/core-properties",
+    "http://purl.org/dc/elements/1.1/",
+    "http://purl.org/dc/terms/",
+    "urn:schemas-microsoft-com:vml",
+    "urn:schemas-microsoft-com:office:office",
+    "urn:schemas-microsoft-com:office:word",
+    "urn:schemas-microsoft-com:office:excel",
+    "urn:schemas-microsoft-com:office:powerpoint",
+    "http://purl.oclc.org/ooxml/wordprocessingml/main",
+    "http://purl.oclc.org/ooxml/spreadsheetml/main",
+    "http://purl.oclc.org/ooxml/presentationml/main",
+    "http://purl.oclc.org/ooxml/drawingml/main",
+    "http://purl.oclc.org/ooxml/drawingml/wordprocessingDrawing",
+    "http://purl.oclc.org/ooxml/drawingml/spreadsheetDrawing",
+    "http://purl.oclc.org/ooxml/drawingml/picture",
+    "http://purl.oclc.org/ooxml/drawingml/chart",
+    "http://purl.oclc.org/ooxml/drawingml/diagram",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships",
+    "http://purl.oclc.org/ooxml/officeDocument/math",
+];
+
+/// Reads a part the way a document reader does: it reads into elements of the
+/// namespaces above, takes one branch of each `mc:AlternateContent`, and skips the rest,
+/// as [`Processor`] describes.
 fn read_xml(data: &[u8], limits: &Limits) -> Result<(), Error> {
     let input = Input::decode(data)?;
     let mut reader = input.reader(limits);
     let mut mce = Processor::new(&mut reader);
+    for uri in UNDERSTOOD {
+        let namespace = reader.intern(uri);
+        mce.understand(namespace);
+    }
+    let mc = reader.intern(officewright_opc::mce::NAMESPACE);
+    // Whether a branch of each open mc:AlternateContent has been taken.
+    let mut alternates: Vec<bool> = Vec::new();
     while let Some(event) = reader.read_event()? {
         match event {
-            Event::Start(tag) => mce.start(&reader, &tag)?,
-            Event::End(_) => mce.end(),
+            Event::Start(tag) => {
+                let disposition = mce.start(&reader, &tag)?;
+                let name = tag.name();
+                let read = if name.is(mc, "AlternateContent") {
+                    alternates.push(false);
+                    true
+                } else if name.is(mc, "Choice") || name.is(mc, "Fallback") {
+                    let selectable = name.is(mc, "Fallback") || mce.is_selectable(&reader, &tag)?;
+                    match alternates.last_mut() {
+                        Some(taken) if !*taken && selectable => {
+                            *taken = true;
+                            true
+                        }
+                        _ => false,
+                    }
+                } else {
+                    matches!(
+                        disposition,
+                        Disposition::Understood | Disposition::ProcessContent
+                    )
+                };
+                if !read {
+                    reader.skip_element()?;
+                    mce.end();
+                }
+            }
+            Event::End(tag) => {
+                if tag.name().is(mc, "AlternateContent") {
+                    alternates.pop();
+                }
+                mce.end();
+            }
             _ => {}
         }
     }

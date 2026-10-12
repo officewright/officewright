@@ -168,7 +168,6 @@ fn read(input: &Input<'_>, limits: &Limits) -> Result<Vec<Node>, Error> {
                 // Markup Compatibility errors are not XML errors, which is all roxmltree
                 // checks, so they only must not panic.
                 if mce.start(&reader, &tag).is_ok() {
-                    let _ = mce.element(tag.name());
                     for attribute in tag.attributes() {
                         let _ = mce.attribute(attribute.name());
                     }

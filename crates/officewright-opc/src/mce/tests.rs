@@ -19,15 +19,13 @@ fn walk(body: &str, understood: &[&str]) -> Result<Vec<String>> {
     while let Some(event) = reader.read_event()? {
         match event {
             Event::Start(tag) => {
-                mce.start(&reader, &tag)?;
+                // Every element is passed to start() here, skipped or not, to see what
+                // it says about each of them.
+                let disposition = mce.start(&reader, &tag)?;
                 if tag.name().local() == "root" {
                     continue;
                 }
-                out.push(format!(
-                    "{}={:?}",
-                    tag.name().local(),
-                    mce.element(tag.name())
-                ));
+                out.push(format!("{}={disposition:?}", tag.name().local()));
                 for attribute in tag.attributes() {
                     out.push(format!(
                         "@{}={:?}",
@@ -189,21 +187,41 @@ fn repeated_ignorable(names: usize, elements: usize) -> String {
     xml
 }
 
-/// Reads a document with the processor, understanding `urn:w`; returns how many
-/// elements are not understood.
+/// The longest the probe below may take. It reads in about a second in a debug build;
+/// with names kept in a list, as before 3e43585, it takes hours, so this bound is what
+/// fails the test rather than a hung test run.
+const LINEAR_TIME: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Reads a document as a consumer does, understanding `urn:w` and skipping everything
+/// else; returns how many elements are not understood. Fails once reading has taken
+/// longer than [`LINEAR_TIME`].
 fn count_not_understood(xml: &str, limits: &Limits) -> Result<usize> {
+    let started = std::time::Instant::now();
     let input = Input::decode(xml.as_bytes())?;
     let mut reader = input.reader(limits);
     let mut mce = Processor::new(&mut reader);
     let w = reader.intern("urn:w");
     mce.understand(w);
     let mut not_understood = 0;
+    let mut elements = 0_u64;
     while let Some(event) = reader.read_event()? {
         match event {
             Event::Start(tag) => {
-                mce.start(&reader, &tag)?;
-                if mce.element(tag.name()) == Disposition::NotUnderstood {
+                elements += 1;
+                if elements % 4096 == 0 {
+                    assert!(
+                        started.elapsed() < LINEAR_TIME,
+                        "{elements} elements took {:?}: reading is no longer linear",
+                        started.elapsed()
+                    );
+                }
+                let disposition = mce.start(&reader, &tag)?;
+                if disposition == Disposition::NotUnderstood {
                     not_understood += 1;
+                }
+                if disposition != Disposition::Understood {
+                    reader.skip_element()?;
+                    mce.end();
                 }
             }
             Event::End(_) => mce.end(),
@@ -281,7 +299,7 @@ fn limits_every_list_of_names() {
         let mut result = Ok(());
         while let Some(event) = reader.read_event().unwrap() {
             if let Event::Start(tag) = event {
-                result = mce.start(&reader, &tag);
+                result = mce.start(&reader, &tag).map(|_| ());
                 if result.is_ok() && tag.name().local() == "Choice" {
                     result = mce.is_selectable(&reader, &tag).map(|_| ());
                 }
@@ -302,4 +320,23 @@ fn limits_every_list_of_names() {
             "{body}: {result:?}"
         );
     }
+}
+
+#[test]
+fn checks_must_understand_only_on_elements_that_are_read() {
+    // An ignored element, and an element nobody reads into, are kept as they are, so
+    // what they must have understood does not matter (ECMA-376 Part 3, MustUnderstand
+    // applies to the element as processed).
+    assert_eq!(
+        walk(
+            r#"<a:x mc:Ignorable="a" mc:MustUnderstand="b"/><b:y mc:MustUnderstand="b"/>"#,
+            &["urn:w"]
+        )
+        .unwrap()[..1],
+        ["x=Ignore"]
+    );
+    assert!(matches!(
+        walk(r#"<w:p mc:Ignorable="a" mc:MustUnderstand="b"/>"#, &["urn:w"]),
+        Err(Error::Unsupported(message)) if message.starts_with("the document requires namespace urn:b")
+    ));
 }
