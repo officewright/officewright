@@ -113,8 +113,21 @@ class Import(unittest.TestCase):
         (self.results / f"{doc.name}.json").write_text(json.dumps(record), encoding="utf-8")
         return record
 
-    def run_import(self, dry_run=False):
-        return importer.import_results(self.results, "word-rules", self.corpus, self.tools, dry_run)
+    def save_record(self, record):
+        name = record["file"][: -len(".docx")]
+        (self.results / f"{name}.json").write_text(json.dumps(record), encoding="utf-8")
+
+    def change_resaved(self, record, changes):
+        """Edit the re-saved copy and record its new hash, as if Word had written it."""
+        resaved = self.results / record["resaved_file"]
+        rewrite(resaved, changes)
+        record["resaved_sha256"] = sha256(resaved.read_bytes())
+        self.save_record(record)
+
+    def run_import(self, dry_run=False, allow_locale=False):
+        return importer.import_results(
+            self.results, "word-rules", self.corpus, self.tools, dry_run, allow_locale
+        )
 
     def refused(self):
         with self.assertRaises(importer.Refused) as caught:
@@ -187,23 +200,98 @@ class Import(unittest.TestCase):
         doc = rules.documents()[0]
         record = self.add_result(doc)
         resaved = self.results / record["resaved_file"]
-        rewrite(resaved, {
+        with zipfile.ZipFile(resaved, "a") as archive:
+            app = "<Properties><Company>Example Corp</Company><Manager>Joe</Manager></Properties>"
+            archive.writestr("docProps/app.xml", app)
+        self.change_resaved(record, {
             "docProps/core.xml": [
+                (b"<dc:creator>Officewright", b"<dc:creator>John Doe"),
                 (b"<cp:lastModifiedBy>Officewright", b"<cp:lastModifiedBy>Jane Roe"),
             ],
             "word/settings.xml": [
                 (b"<w:zoom", b"<!-- C:\\Users\\jroe\\Normal.dotm --><w:zoom"),
             ],
         })
-        with zipfile.ZipFile(resaved, "a") as archive:
-            app = "<Properties><Company>Example Corp</Company></Properties>"
-            archive.writestr("docProps/app.xml", app)
-        record["resaved_sha256"] = sha256(resaved.read_bytes())
-        (self.results / f"{doc.name}.json").write_text(json.dumps(record), encoding="utf-8")
         message = self.refused()
+        self.assertIn("docProps/core.xml: creator is 'John Doe'", message)
         self.assertIn("docProps/core.xml: lastModifiedBy is 'Jane Roe'", message)
         self.assertIn("docProps/app.xml: Company is 'Example Corp'", message)
+        self.assertIn("docProps/app.xml: Manager is 'Joe'", message)
         self.assertIn("word/settings.xml contains a user profile path", message)
+
+    def test_refuses_a_profile_path_in_the_pdf(self):
+        doc = rules.documents()[0]
+        record = self.add_result(doc)
+        pdf = self.results / record["pdf_file"]
+        pdf.write_bytes(b"%PDF-1.7\n% C:\\Users\\jroe\\file.docx\n%%EOF\n")
+        record["pdf_sha256"] = sha256(pdf.read_bytes())
+        self.save_record(record)
+        self.assertIn("PDF contains a user profile path", self.refused())
+
+    def test_refuses_findings_even_when_the_status_says_rendered(self):
+        self.add_result(rules.documents()[0], privacy_findings=["pdf: the Windows user name"])
+        self.assertIn("personal data: pdf: the Windows user name", self.refused())
+
+    def test_refuses_a_missing_output(self):
+        record = self.add_result(rules.documents()[0])
+        (self.results / record["resaved_file"]).unlink()
+        self.assertIn(f"{record['resaved_file']} is missing", self.refused())
+
+    def test_refuses_a_document_that_is_not_committed(self):
+        doc = rules.documents()[0]
+        self.add_result(doc)
+        (self.corpus / "word-rules" / f"{doc.name}.docx").unlink()
+        self.assertIn("tests/corpus/word-rules/ has no such document", self.refused())
+
+    def test_refuses_outputs_of_another_document(self):
+        for key, value in (("pdf_file", "E-line-exact.pdf"),
+                           ("resaved_file", "E-line-exact.resaved.docx")):
+            with self.subTest(key=key):
+                self.add_result(rules.documents()[0], **{key: value})
+                self.assertIn(f"{key} must be 'E-line-fonts", self.refused())
+
+    def test_refuses_a_compatibility_mode_word_did_not_keep(self):
+        mode_12 = next(d for d in rules.documents() if d.name.endswith("-12"))
+        self.add_result(mode_12)
+        self.assertIn("Word reported compatibility mode 15, the input asks for 12", self.refused())
+
+    def test_refuses_a_resaved_copy_in_another_mode(self):
+        record = self.add_result(rules.documents()[0])
+        self.change_resaved(record, {
+            "word/settings.xml": [(b'w:name="compatibilityMode" w:uri="http://schemas.'
+                                   b'microsoft.com/office/word" w:val="15"',
+                                   b'w:name="compatibilityMode" w:uri="http://schemas.'
+                                   b'microsoft.com/office/word" w:val="14"')],
+        })
+        self.assertIn("the re-saved copy has compatibility mode 14", self.refused())
+
+    def test_refuses_languages_and_number_formats_word_added(self):
+        record = self.add_result(rules.documents()[0])
+        self.change_resaved(record, {
+            "word/settings.xml": [
+                (b'<w:themeFontLang w:val="en-US"', b'<w:themeFontLang w:val="xx-YY"'),
+                (b'<w:decimalSymbol w:val="."/>', b'<w:decimalSymbol w:val=","/>'),
+            ],
+        })
+        message = self.refused()
+        self.assertIn("the re-saved copy names the language xx-YY", message)
+        self.assertIn("the re-saved copy has decimalSymbol ','", message)
+
+    def test_allow_locale_accepts_them(self):
+        record = self.add_result(rules.documents()[0])
+        self.change_resaved(record, {
+            "word/settings.xml": [
+                (b'<w:listSeparator w:val=","/>', b'<w:listSeparator w:val=";"/>'),
+            ],
+        })
+        self.assertEqual(len(self.run_import(allow_locale=True)), 2)
+
+    def test_refuses_values_that_would_break_the_table(self):
+        for key, value in (("word_build", "16.0 | x"), ("rendered", "today"),
+                           ("windows_display_version", "24H2|"), ("fonts_missing", ["A|B"])):
+            with self.subTest(key=key):
+                self.add_result(rules.documents()[0], **{key: value})
+                self.assertIn("E-line-fonts.json", self.refused())
 
     def test_refuses_an_author_in_the_pdf(self):
         self.info = "Author:          Jane Roe\nPages:           3\n"
@@ -226,10 +314,10 @@ class Import(unittest.TestCase):
         self.assertIn("format 2", self.refused())
 
     def test_refuses_a_path_instead_of_a_file_name(self):
-        for path in ("..\\elsewhere.pdf", "../elsewhere.pdf", ".."):
+        for path in ("..\\elsewhere.docx", "../elsewhere.docx", "sub/E-line-fonts.docx", ".docx"):
             with self.subTest(path=path):
-                self.add_result(rules.documents()[0], pdf_file=path)
-                self.assertIn("pdf_file must be a file name", self.refused())
+                self.add_result(rules.documents()[0], file=path)
+                self.assertIn("file must be the name of a .docx file", self.refused())
 
 
 class Pdffonts(unittest.TestCase):

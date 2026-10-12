@@ -11,7 +11,9 @@ under WSL). For every <name>.json there the script checks that
   - the PDF and the re-saved DOCX are the files the JSON describes;
   - neither file names a person, a company or a user profile path in its metadata
     (a second check, independent of the one on Windows);
-  - pdfinfo counts the pages Word counted;
+  - the re-saved copy names no language and no number format the input did not have
+    (they would say where Word ran), unless --allow-locale accepts them;
+  - Word kept the compatibility mode of the input, and pdfinfo counts the pages Word counted;
 
 and then copies the PDF to tests/corpus/reference/<group>/<name>.pdf, the re-saved DOCX to
 tests/corpus/resaved/<group>/<name>.docx, and writes the document's row in the "Reference
@@ -47,6 +49,15 @@ ALLOWED_NAMES = {"", "Officewright"}
 PROFILE_PATH = re.compile(rb"(?i)(\\|/)(users|documents and settings)(\\|/)")
 
 REFERENCE_HEADER = "| File | Rendered from | Application and version | Date | Notes |"
+
+W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+WORD_URI = "http://schemas.microsoft.com/office/word"
+
+# Values written into the Markdown table: nothing that could break a row.
+VERSION = re.compile(r"^[0-9][0-9.]*$")
+DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+WORD = re.compile(r"^[0-9A-Za-z]*$")
+FONT = re.compile(r"^[^|\x00-\x1f]{1,64}$")
 
 REQUIRED = {
     "script_version": int,
@@ -133,10 +144,27 @@ def load_record(path: Path) -> dict:
     if record["privacy_findings"]:
         findings = ", ".join(record["privacy_findings"])
         raise Refused(f"{record['file']}: personal data: {findings}")
-    for key in ("file", "resaved_file", "pdf_file"):
-        value = record[key]
-        if re.search(r"[\\/:]", value) or value in ("", ".", ".."):
-            raise Refused(f"{path.name}: {key} must be a file name, not {value!r}")
+    file = record["file"]
+    if re.search(r"[\\/:]", file) or not file.endswith(".docx") or file == ".docx":
+        raise Refused(f"{path.name}: file must be the name of a .docx file, not {file!r}")
+    stem = file[: -len(".docx")]
+    for key, expected in (("pdf_file", f"{stem}.pdf"), ("resaved_file", f"{stem}.resaved.docx")):
+        if record[key] != expected:
+            raise Refused(f"{path.name}: {key} must be {expected!r}, not {record[key]!r}")
+    checks = [
+        ("word_version", VERSION),
+        ("word_build", VERSION),
+        ("windows_version", VERSION),
+        ("rendered", DATE),
+    ]
+    for key, pattern in checks:
+        if not pattern.match(record[key]):
+            raise Refused(f"{path.name}: {key} {record[key]!r} is not in the expected form")
+    if not WORD.match(str(record.get("windows_display_version") or "")):
+        raise Refused(f"{path.name}: windows_display_version is not in the expected form")
+    for font in record["fonts_missing"]:
+        if not isinstance(font, str) or not FONT.match(font):
+            raise Refused(f"{path.name}: fonts_missing holds {font!r}, which is not a font name")
     return record
 
 
@@ -165,6 +193,63 @@ def docx_privacy_problems(path: Path) -> list[str]:
                         problems.append(f"{info.filename}: {name} is {value!r}")
                     if name in ("Company", "Manager") and value:
                         problems.append(f"{info.filename}: {name} is {value!r}")
+    return problems
+
+
+def read_parts(path: Path) -> dict[str, bytes]:
+    with zipfile.ZipFile(path) as archive:
+        return {info.filename: archive.read(info) for info in archive.infolist()}
+
+
+def settings_root(parts: dict[str, bytes]) -> ElementTree.Element | None:
+    data = parts.get("word/settings.xml")
+    return ElementTree.fromstring(data) if data else None
+
+
+def compatibility_mode(parts: dict[str, bytes]) -> int:
+    """The compatibility mode a package asks for; 12 when it names none ([MS-DOCX] 2.3.5)."""
+    root = settings_root(parts)
+    if root is not None:
+        for setting in root.iter(f"{W}compatSetting"):
+            if (
+                setting.get(f"{W}name") == "compatibilityMode"
+                and setting.get(f"{W}uri") == WORD_URI
+            ):
+                return int(setting.get(f"{W}val", "12"))
+    return 12
+
+
+def locale_marks(parts: dict[str, bytes]) -> tuple[set[str], dict[str, str]]:
+    """The language tags a package names, and its decimal symbol and list separator."""
+    languages = set()
+    for name, data in parts.items():
+        if not (name.startswith("word/") and name.endswith(".xml")):
+            continue
+        root = ElementTree.fromstring(data)
+        for element in root.iter():
+            if local_name(element.tag) in ("lang", "themeFontLang"):
+                languages.update(v for v in element.attrib.values() if v and v != "x-none")
+    numbers = {}
+    root = settings_root(parts)
+    if root is not None:
+        for key in ("decimalSymbol", "listSeparator"):
+            element = root.find(f"{W}{key}")
+            if element is not None:
+                numbers[key] = element.get(f"{W}val", "")
+    return languages, numbers
+
+
+def locale_problems(original: dict[str, bytes], resaved: dict[str, bytes]) -> list[str]:
+    """Languages and number formats Word added: they tell where Word ran."""
+    before_languages, before_numbers = locale_marks(original)
+    after_languages, after_numbers = locale_marks(resaved)
+    problems = [
+        f"the re-saved copy names the language {tag}"
+        for tag in sorted(after_languages - before_languages)
+    ]
+    for key, value in sorted(after_numbers.items()):
+        if before_numbers.get(key) != value:
+            problems.append(f"the re-saved copy has {key} {value!r}")
     return problems
 
 
@@ -264,7 +349,9 @@ class Checked:
     row: str
 
 
-def check_result(json_path: Path, group: str, corpus: Path, tools: Tools) -> Checked:
+def check_result(
+    json_path: Path, group: str, corpus: Path, tools: Tools, allow_locale: bool = False
+) -> Checked:
     record = load_record(json_path)
     results = json_path.parent
     original = corpus / group / record["file"]
@@ -280,10 +367,23 @@ def check_result(json_path: Path, group: str, corpus: Path, tools: Tools) -> Che
         if sha256(path) != record[key]:
             raise Refused(f"{record['file']}: {path.name} changed after Word wrote it")
     info = tools.info(pdf)
+    original_parts = read_parts(original)
+    resaved_parts = read_parts(resaved)
     problems = docx_privacy_problems(resaved)
     problems += pdf_privacy_problems(info, tools.xmp(pdf), pdf.read_bytes())
+    if not allow_locale:
+        problems += locale_problems(original_parts, resaved_parts)
     if problems:
         raise Refused(f"{record['file']}: {'; '.join(problems)}")
+    mode = compatibility_mode(original_parts)
+    for source, value in (
+        ("Word reported", record["compatibility_mode"]),
+        ("the re-saved copy has", compatibility_mode(resaved_parts)),
+    ):
+        if value != mode:
+            raise Refused(
+                f"{record['file']}: {source} compatibility mode {value}, the input asks for {mode}"
+            )
     pages = pdf_pages(info)
     if pages != record["pages"]:
         raise Refused(
@@ -294,7 +394,12 @@ def check_result(json_path: Path, group: str, corpus: Path, tools: Tools) -> Che
 
 
 def import_results(
-    results: Path, group: str, corpus: Path, tools: Tools, dry_run: bool
+    results: Path,
+    group: str,
+    corpus: Path,
+    tools: Tools,
+    dry_run: bool,
+    allow_locale: bool = False,
 ) -> list[Checked]:
     if not (corpus / group).is_dir():
         raise Refused(f"tests/corpus/{group} does not exist")
@@ -305,7 +410,7 @@ def import_results(
     errors = []
     for path in records:
         try:
-            checked.append(check_result(path, group, corpus, tools))
+            checked.append(check_result(path, group, corpus, tools, allow_locale))
         except Refused as error:
             errors.append(str(error))
     if errors:
@@ -334,9 +439,16 @@ def main() -> int:
         "--group", required=True, help="the folder under tests/corpus/, e.g. word-rules"
     )
     parser.add_argument("--dry-run", action="store_true", help="check everything, copy nothing")
+    parser.add_argument(
+        "--allow-locale",
+        action="store_true",
+        help="accept language tags and number formats Word added (the maintainer decides)",
+    )
     args = parser.parse_args()
     try:
-        checked = import_results(args.results, args.group, CORPUS, POPPLER, args.dry_run)
+        checked = import_results(
+            args.results, args.group, CORPUS, POPPLER, args.dry_run, args.allow_locale
+        )
     except Refused as error:
         print(f"corpus-import.py: {error}", file=sys.stderr)
         return 1
