@@ -62,6 +62,16 @@ class TextToPdfTest(unittest.TestCase):
                 result = subprocess.run(["qpdf", "--check", str(pdf)], capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_qpdf_accepts_a_page_without_text(self):
+        # An empty file gives one blank page, which uses no font and has empty resources.
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "empty.txt"
+            source.write_bytes(b"")
+            pdf = self.convert(directory, [], source)
+            result = subprocess.run(["qpdf", "--check", str(pdf)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn(b"/Font", pdf.read_bytes())
+
     def test_pdftotext_reads_back_the_input(self):
         expected = characters(SAMPLE.read_text(encoding="utf-8"))
         for options in OPTIONS:

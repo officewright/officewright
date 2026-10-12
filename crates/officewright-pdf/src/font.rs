@@ -63,6 +63,24 @@ impl Font {
         Ok(Pt(units as f64 * font_size.0 / 1000.0))
     }
 
+    /// Fails unless the font's encoding has every character of `text`.
+    pub(crate) fn check(&self, text: &str) -> Result<()> {
+        match text.char_indices().find(|&(_, ch)| self.code(ch).is_none()) {
+            Some((offset, ch)) => Err(Error::Unencodable { ch, offset }),
+            None => Ok(()),
+        }
+    }
+
+    /// The font dictionary, the font's object in the PDF file.
+    pub(crate) fn dictionary(&self) -> &'static [u8] {
+        match self.standard {
+            StandardFont::Helvetica => {
+                b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica \
+                  /Encoding /WinAnsiEncoding >>"
+            }
+        }
+    }
+
     /// Encodes `text` in the font's encoding.
     pub(crate) fn encode(&self, text: &str) -> Result<Vec<u8>> {
         text.char_indices()
