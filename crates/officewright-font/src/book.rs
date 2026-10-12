@@ -1,8 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, BufReader, Cursor};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 use std::{error, fmt};
 
 use crate::error::{Error, Result};
@@ -168,11 +169,16 @@ impl FaceInfo {
     }
 }
 
-/// A font file, or face of one, that a [`FontBook`] could not index.
+/// A directory, font file or face of a font file that a [`FontBook`] could not read or
+/// index.
 #[derive(Debug)]
 pub struct SkippedFont {
     path: Option<PathBuf>,
     error: Error,
+    /// The key in [`FontBook::failed`] this entry is listed under, so a later scan can
+    /// replace or drop it; `None` for entries that stay, such as a damaged face of a
+    /// collection that was added.
+    key: Option<PathBuf>,
 }
 
 impl SkippedFont {
@@ -214,6 +220,15 @@ impl fmt::Display for SkippedFont {
 /// itself. Files that are not fonts or are damaged are skipped and listed in
 /// [`skipped`](Self::skipped). A `FontBook` is `Send` and `Sync`.
 ///
+/// A book can scan the same directories again, for example after fonts were installed:
+/// [`add_dir`](Self::add_dir) and [`add_system_fonts`](Self::add_system_fonts) add the
+/// fonts that appeared since. A file that was added is not read again, even if it
+/// changed. A file that was skipped is read again once its size or modification time
+/// changes, so a font that was still being copied during one scan is found by the next.
+/// Links, font files that could not be resolved and directories that could not be read
+/// are tried on every scan. Each skipped path is listed once, with the error of its
+/// latest attempt, and leaves the list when it is read.
+///
 /// ```
 /// use officewright_font::{FontBook, FontRequest, FontResolver};
 ///
@@ -232,9 +247,33 @@ pub struct FontBook {
     /// Canonical paths of the files already added, so a font reachable through
     /// several directories or links is indexed once.
     files: HashSet<PathBuf>,
-    /// Canonical paths of the files that could not be indexed, and the paths of font
-    /// files that could not be resolved.
-    failed: HashSet<PathBuf>,
+    /// The paths a directory scan could not add, each listed once in `skipped`: the
+    /// canonical paths of files that could not be indexed, and the canonical directory
+    /// and name of font files and directories that could not be resolved or read.
+    failed: HashMap<PathBuf, Failure>,
+}
+
+/// How a path that a directory scan could not add looked, so the next scan tries it
+/// again only when that changed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Failure {
+    /// The path could not be resolved or read, such as a link to a removed file or a
+    /// directory without permission. Trying again reads no font data.
+    Unreachable,
+    /// The file could not be indexed when it had this size and modification time.
+    File {
+        len: u64,
+        modified: Option<SystemTime>,
+    },
+}
+
+impl Failure {
+    fn file(metadata: &fs::Metadata) -> Self {
+        Self::File {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+        }
+    }
 }
 
 /// How deep [`FontBook::add_dir`] descends; font directories are rarely more than a
@@ -249,6 +288,9 @@ impl FontBook {
 
     /// Adds the fonts in [`system_font_dirs`] and their subdirectories, and returns
     /// the number of faces added. Directories that do not exist are left out.
+    ///
+    /// Called again, it adds the fonts installed since and tries the skipped files
+    /// again as the [`FontBook`] documentation describes.
     pub fn add_system_fonts(&mut self) -> usize {
         let mut added = 0;
         for dir in system_font_dirs() {
@@ -261,6 +303,9 @@ impl FontBook {
 
     /// Adds the fonts in a directory and its subdirectories, and returns the number of
     /// faces added.
+    ///
+    /// Called again, it adds the fonts that appeared since and tries the skipped files
+    /// again as the [`FontBook`] documentation describes.
     ///
     /// # Errors
     ///
@@ -276,6 +321,9 @@ impl FontBook {
     }
 
     /// Adds the faces of a font file, and returns the number of faces added.
+    ///
+    /// The file is read even if a directory scan skipped it before. If it cannot be
+    /// added, the error is returned rather than listed in [`skipped`](Self::skipped).
     ///
     /// # Errors
     ///
@@ -332,7 +380,8 @@ impl FontBook {
         self.faces.is_empty()
     }
 
-    /// The files and faces that could not be indexed.
+    /// The directories, files and faces that could not be read or indexed, each path
+    /// with the error of its latest attempt.
     pub fn skipped(&self) -> &[SkippedFont] {
         &self.skipped
     }
@@ -392,11 +441,31 @@ impl FontBook {
                 source: io::Error::new(io::ErrorKind::InvalidInput, "not a regular file"),
             })
         };
-        match result {
-            Ok(_) => self.files.insert(canonical),
-            Err(_) => self.failed.insert(canonical),
-        };
+        if result.is_ok() {
+            self.forget_failure(&canonical);
+            self.files.insert(canonical);
+        }
         result
+    }
+
+    /// Lists a path that a directory scan could not add, replacing what was listed for
+    /// it before.
+    fn list_failure(&mut self, key: PathBuf, failure: Failure, path: PathBuf, error: Error) {
+        self.forget_failure(&key);
+        self.skipped.push(SkippedFont {
+            path: Some(path),
+            error,
+            key: Some(key.clone()),
+        });
+        self.failed.insert(key, failure);
+    }
+
+    /// Drops what was listed for a path that has now been read.
+    fn forget_failure(&mut self, key: &Path) {
+        if self.failed.remove(key).is_some() {
+            self.skipped
+                .retain(|skipped| skipped.key.as_deref() != Some(key));
+        }
     }
 
     fn index_file(&mut self, path: &Path, origin: FontOrigin) -> Result<usize> {
@@ -451,6 +520,7 @@ impl FontBook {
             .extend(errors.into_iter().map(|error| SkippedFont {
                 path: path.clone(),
                 error,
+                key: None,
             }));
         Ok(added)
     }
@@ -469,12 +539,18 @@ impl FontBook {
                 continue;
             }
             let entries = match fs::read_dir(&dir) {
-                Ok(entries) => entries,
+                Ok(entries) => {
+                    self.forget_failure(&canonical_dir);
+                    entries
+                }
                 Err(source) => {
-                    self.skipped.push(SkippedFont {
-                        path: Some(dir.clone()),
-                        error: Error::Read { path: dir, source },
-                    });
+                    if self.failed.get(&canonical_dir) != Some(&Failure::Unreachable) {
+                        let error = Error::Read {
+                            path: dir.clone(),
+                            source,
+                        };
+                        self.list_failure(canonical_dir, Failure::Unreachable, dir, error);
+                    }
                     continue;
                 }
             };
@@ -496,40 +572,43 @@ impl FontBook {
                 if !is_font_file(&path) {
                     continue;
                 }
+                // Where the entry is, however its directory was reached.
+                let location = path
+                    .file_name()
+                    .map_or_else(|| path.clone(), |name| canonical_dir.join(name));
                 let resolved =
                     metadata.and_then(|metadata| Ok((fs::canonicalize(&path)?, metadata)));
                 let (canonical, metadata) = match resolved {
                     Ok(resolved) => resolved,
                     // A font file that cannot be resolved, such as a link to a removed
-                    // file, is listed, once: it is remembered under its canonical
-                    // directory, however the directory was reached.
+                    // file, is listed under its location, once.
                     Err(source) => {
-                        let key = path
-                            .file_name()
-                            .map_or_else(|| path.clone(), |name| canonical_dir.join(name));
-                        if self.failed.insert(key) {
-                            self.skipped.push(SkippedFont {
-                                path: Some(path.clone()),
-                                error: Error::Read { path, source },
-                            });
+                        if self.failed.get(&location) != Some(&Failure::Unreachable) {
+                            let error = Error::Read {
+                                path: path.clone(),
+                                source,
+                            };
+                            self.list_failure(location, Failure::Unreachable, path, error);
                         }
                         continue;
                     }
                 };
+                // It resolves now, so it is no longer unreachable.
+                if self.failed.get(&location) == Some(&Failure::Unreachable) {
+                    self.forget_failure(&location);
+                }
                 // Sockets, FIFOs and devices are not fonts, whatever their names.
                 if !metadata.is_file() {
                     continue;
                 }
-                // A file that failed before is not read and reported again.
-                if self.failed.contains(&canonical) {
+                // A file that failed before is read again only once it has changed.
+                let failure = Failure::file(&metadata);
+                if self.failed.get(&canonical) == Some(&failure) {
                     continue;
                 }
-                match self.add_resolved_file(&path, canonical, &metadata, origin) {
+                match self.add_resolved_file(&path, canonical.clone(), &metadata, origin) {
                     Ok(count) => added += count,
-                    Err(error) => self.skipped.push(SkippedFont {
-                        path: Some(path),
-                        error,
-                    }),
+                    Err(error) => self.list_failure(canonical, failure, path, error),
                 }
             }
             stack.extend(subdirs.into_iter().rev());
@@ -689,6 +768,135 @@ mod tests {
         );
     }
 
+    /// Writes `data` to `path` and gives the file the modification time `modified`.
+    fn write_with_time(path: &Path, data: &[u8], modified: SystemTime) {
+        fs::write(path, data).unwrap();
+        File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+    }
+
+    #[test]
+    fn reads_a_skipped_file_again_once_it_changes() {
+        let dir = TempDir::new("retry");
+        let path = dir.0.join("sans.ttf");
+        let font = TestFont::new("Test Sans").build();
+        // A copy still in progress: the font's size, but no font data yet.
+        fs::write(&path, vec![0; font.len()]).unwrap();
+        let mut book = FontBook::new();
+        assert_eq!(book.add_dir(&dir.0).unwrap(), 0);
+        assert_eq!(book.skipped().len(), 1);
+
+        // Same size and modification time: the file is taken as unchanged, not read.
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        write_with_time(&path, &font, modified);
+        assert_eq!(book.add_dir(&dir.0).unwrap(), 0);
+        assert_eq!(book.skipped().len(), 1);
+
+        // Once its modification time changes it is read, and it leaves the list.
+        let later = modified + std::time::Duration::from_secs(2);
+        write_with_time(&path, &font, later);
+        assert_eq!(book.add_dir(&dir.0).unwrap(), 1);
+        assert!(book.skipped().is_empty(), "{:?}", book.skipped());
+        assert_eq!(book.faces().next().unwrap().1.path(), Some(path.as_path()));
+    }
+
+    #[test]
+    fn lists_a_skipped_file_once_with_its_latest_error() {
+        let dir = TempDir::new("latest");
+        let path = dir.0.join("sans.ttf");
+        fs::write(&path, b"not a font").unwrap();
+        let mut book = FontBook::new();
+        book.add_dir(&dir.0).unwrap();
+        assert!(matches!(book.skipped()[0].error(), Error::NotAFont { .. }));
+
+        let damaged = TestFont::new("Test Sans").without_table(b"hmtx").build();
+        fs::write(&path, damaged).unwrap();
+        book.add_dir(&dir.0).unwrap();
+        assert_eq!(book.skipped().len(), 1, "{:?}", book.skipped());
+        assert!(
+            matches!(
+                book.skipped()[0].error(),
+                Error::MissingTable { table: "hmtx", .. }
+            ),
+            "{}",
+            book.skipped()[0]
+        );
+    }
+
+    #[test]
+    fn a_scan_lists_a_file_that_add_file_could_not_add() {
+        let dir = TempDir::new("explicit");
+        let path = dir.0.join("broken.ttf");
+        fs::write(&path, b"not a font").unwrap();
+        let mut book = FontBook::new();
+        assert!(book.add_file(&path).is_err());
+        assert!(book.skipped().is_empty());
+        book.add_dir(&dir.0).unwrap();
+        assert_eq!(book.skipped().len(), 1);
+        assert_eq!(book.skipped()[0].path(), Some(path.as_path()));
+        // add_file reads a skipped file again; once it is added it leaves the list.
+        fs::write(&path, TestFont::new("Test Sans").build()).unwrap();
+        assert_eq!(book.add_file(&path).unwrap(), 1);
+        assert!(book.skipped().is_empty(), "{:?}", book.skipped());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn adds_font_links_once_they_resolve() {
+        let dir = TempDir::new("resolve");
+        let fonts = dir.0.join("fonts");
+        let elsewhere = dir.0.join("elsewhere");
+        fs::create_dir(&fonts).unwrap();
+        fs::create_dir(&elsewhere).unwrap();
+        // A link to a font that is not there yet.
+        let target = elsewhere.join("sans.ttf");
+        std::os::unix::fs::symlink(&target, fonts.join("link.ttf")).unwrap();
+        // A dangling link that a real font file replaces.
+        let replaced = fonts.join("serif.ttf");
+        std::os::unix::fs::symlink(elsewhere.join("removed.ttf"), &replaced).unwrap();
+
+        let mut book = FontBook::new();
+        assert_eq!(book.add_dir(&fonts).unwrap(), 0);
+        assert_eq!(book.skipped().len(), 2, "{:?}", book.skipped());
+
+        fs::write(&target, TestFont::new("Test Sans").build()).unwrap();
+        fs::remove_file(&replaced).unwrap();
+        fs::write(&replaced, TestFont::new("Test Serif").build()).unwrap();
+        assert_eq!(book.add_dir(&fonts).unwrap(), 2);
+        assert!(book.skipped().is_empty(), "{:?}", book.skipped());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn lists_an_unreadable_directory_once_and_reads_it_when_it_can() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new("locked");
+        let locked = dir.0.join("locked");
+        fs::create_dir(&locked).unwrap();
+        fs::write(locked.join("sans.ttf"), TestFont::new("Test Sans").build()).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = fs::read_dir(&locked).is_ok();
+        let mut book = FontBook::new();
+        let scans = [book.add_dir(&dir.0), book.add_dir(&dir.0)];
+        let skipped = book.skipped().len();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        // Root reads every directory, so this has to run as an ordinary user.
+        assert!(
+            !readable,
+            "run the tests as a user who cannot read mode 000"
+        );
+        assert_eq!(scans.map(Result::unwrap), [0, 0]);
+        assert_eq!(skipped, 1);
+
+        assert_eq!(book.add_dir(&dir.0).unwrap(), 1);
+        assert!(book.skipped().is_empty(), "{:?}", book.skipped());
+    }
+
     #[test]
     fn descends_at_most_16_directories() {
         let dir = TempDir::new("depth");
@@ -732,6 +940,7 @@ mod tests {
         let skipped = SkippedFont {
             path: Some(file.clone()),
             error: err,
+            key: None,
         };
         // The error names the file already; the I/O error says why it failed.
         let text = skipped.to_string();
@@ -750,6 +959,7 @@ mod tests {
                 face: 64,
                 source: crate::error::Cause::new("faces 64 to 1023 were not read"),
             },
+            key: None,
         };
         assert_eq!(
             budget.to_string(),
@@ -762,6 +972,7 @@ mod tests {
                 path: PathBuf::from("a.ttf"),
                 source: io::Error::other("disk gone"),
             },
+            key: None,
         };
         assert_eq!(read.to_string(), "cannot read a.ttf: disk gone");
     }
