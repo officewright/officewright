@@ -554,3 +554,104 @@ fn computes_the_zip_crc32() {
     assert_eq!(crc32(b""), 0);
     assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
 }
+
+/// The archive with its central directory records in reverse order, as some writers
+/// order the directory differently from the data.
+fn reverse_central_directory(layout: &Layout) -> Vec<u8> {
+    let mut bounds = layout.central.clone();
+    bounds.push(layout.end);
+    let records: Vec<&[u8]> = bounds
+        .windows(2)
+        .map(|pair| &layout.bytes[pair[0]..pair[1]])
+        .collect();
+    let mut bytes = layout.bytes[..layout.central[0]].to_vec();
+    for record in records.iter().rev() {
+        bytes.extend_from_slice(record);
+    }
+    bytes.extend_from_slice(&layout.bytes[layout.end..]);
+    bytes
+}
+
+#[test]
+fn reads_a_central_directory_in_another_order_than_the_entries() {
+    let layout = build(
+        &[
+            TestEntry::stored("a", b"1"),
+            TestEntry::deflated("b", TEXT),
+            TestEntry::stored("c", b"3"),
+        ],
+        b"",
+    );
+    let archive = open(&reverse_central_directory(&layout)).unwrap();
+    assert_eq!(
+        read_all(&archive).unwrap(),
+        [
+            ("c".to_owned(), b"3".to_vec()),
+            ("b".to_owned(), TEXT.to_vec()),
+            ("a".to_owned(), b"1".to_vec())
+        ]
+    );
+}
+
+#[test]
+fn finds_overlaps_whatever_the_order_of_the_central_directory() {
+    let mut layout = build(
+        &[
+            TestEntry::stored("a", b"a"),
+            TestEntry::stored("b", b"b"),
+            TestEntry::stored("c", b"c"),
+        ],
+        b"",
+    );
+    let covering = (layout.local[1] + 31 - data_offset(&layout, 0, "a")) as u32;
+    set_sizes(&mut layout, 0, covering, covering);
+    assert_eq!(
+        zip_message(open(&reverse_central_directory(&layout))),
+        "entries a and b overlap"
+    );
+}
+
+#[test]
+fn rejects_entries_on_another_disk() {
+    let mut layout = build(&[TestEntry::stored("a", b"a")], b"");
+    set16(&mut layout.bytes, layout.central[0] + 34, 1);
+    assert!(matches!(
+        open(&layout.bytes),
+        Err(Error::Unsupported(message)) if message.contains("several disks")
+    ));
+    for (at, value) in [(4, 1), (16, 2)] {
+        let mut layout = build(&[TestEntry::stored("a", b"a").zip64()], b"");
+        let locator = layout.end - 20;
+        set32(&mut layout.bytes, locator + at, value);
+        assert!(
+            matches!(
+                open(&layout.bytes),
+                Err(Error::Unsupported(ref message)) if message.contains("several disks")
+            ),
+            "zip64 locator field at {at}"
+        );
+    }
+}
+
+#[test]
+fn opens_as_many_entries_as_the_default_limit_allows() {
+    let entries = |count: usize| -> Vec<TestEntry> {
+        (0..count)
+            .map(|i| {
+                let entry = TestEntry::stored(&i.to_string(), b"");
+                // More than 65,535 entries need the zip64 end records.
+                if i == 0 { entry.zip64() } else { entry }
+            })
+            .collect()
+    };
+    let limit = Limits::new().max_entries() as usize;
+    assert_eq!(open(&zip(&entries(limit))).unwrap().entries().len(), limit);
+    assert!(matches!(
+        open(&zip(&entries(limit + 1))),
+        Err(Error::LimitExceeded {
+            limit: Limit::Entries,
+            maximum: 65_536,
+            ..
+        })
+    ));
+}
