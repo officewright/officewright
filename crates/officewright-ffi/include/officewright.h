@@ -102,6 +102,19 @@
 #define OW_RESOLUTION_MISSING 7
 
 /**
+ * For `ow_pdf_document_set_compression`: page content and embedded fonts are stored as
+ * they are, so the page content can be read in a text editor.
+ */
+#define OW_COMPRESSION_NONE 0
+
+/**
+ * For `ow_pdf_document_set_compression`: page content and embedded fonts are
+ * compressed with the Flate filter wherever that makes them smaller. Every PDF reader
+ * decompresses Flate, so this is the default.
+ */
+#define OW_COMPRESSION_FLATE 1
+
+/**
  * The result of a fallible `ow_*` function.
  *
  * New values may be added in later versions; treat any value other than
@@ -286,6 +299,17 @@ enum OwStatus ow_pdf_document_add_text(struct OwPdfDocument *doc,
                                        const struct OwPdfFont *font,
                                        double font_size_pt,
                                        const char *text);
+
+/**
+ * Sets how the document stores page content and embedded fonts when it is saved:
+ * `OW_COMPRESSION_FLATE`, the default, or `OW_COMPRESSION_NONE`. Fails with
+ * `OW_STATUS_INVALID_ARGUMENT` for any other value, leaving the document unchanged.
+ *
+ * # Safety
+ *
+ * `doc` must be NULL or a live handle not used by another thread during the call.
+ */
+enum OwStatus ow_pdf_document_set_compression(struct OwPdfDocument *doc, int32_t compression);
 
 /**
  * Writes the document as a PDF file at `path` (UTF-8), replacing any existing file.

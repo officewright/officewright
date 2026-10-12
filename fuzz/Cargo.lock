@@ -156,6 +156,7 @@ dependencies = [
 name = "officewright-pdf"
 version = "0.1.0"
 dependencies = [
+ "miniz_oxide",
  "officewright-core",
  "officewright-font",
  "unicode-script",

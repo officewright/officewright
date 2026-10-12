@@ -126,6 +126,46 @@ static void text_layout_and_width(void) {
     ow_pdf_font_free(font);
 }
 
+static void compression(void) {
+    OwPdfFont *font = helvetica();
+    OwPdfDocument *doc = NULL;
+    uint8_t *compressed = NULL;
+    uint8_t *plain = NULL;
+    size_t compressed_len = 0;
+    size_t plain_len = 0;
+    char text[14 * 40 + 1] = "";
+    int i;
+
+    for (i = 0; i < 40; i++) {
+        strcat(text, "Hello, world\n");
+    }
+    EXPECT(ow_pdf_document_from_text(text, 595.0, 842.0, font, 11.0, &doc), OW_STATUS_OK, NULL);
+    ow_pdf_font_free(font);
+    /* Compressed unless set otherwise. */
+    EXPECT(ow_pdf_document_save_bytes(doc, &compressed, &compressed_len), OW_STATUS_OK, NULL);
+    CHECK(contains(compressed, compressed_len, "/Filter /FlateDecode"));
+    CHECK(!contains(compressed, compressed_len, "(Hello, world) Tj"));
+
+    EXPECT(ow_pdf_document_set_compression(doc, OW_COMPRESSION_NONE), OW_STATUS_OK, NULL);
+    EXPECT(ow_pdf_document_save_bytes(doc, &plain, &plain_len), OW_STATUS_OK, NULL);
+    CHECK(!contains(plain, plain_len, "/Filter"));
+    CHECK(contains(plain, plain_len, "(Hello, world) Tj"));
+    CHECK(plain_len > compressed_len);
+    ow_bytes_free(plain, plain_len);
+
+    EXPECT(ow_pdf_document_set_compression(doc, 2), OW_STATUS_INVALID_ARGUMENT,
+           "compression is 2, not OW_COMPRESSION_NONE (0) or OW_COMPRESSION_FLATE (1)");
+    EXPECT(ow_pdf_document_set_compression(doc, OW_COMPRESSION_FLATE), OW_STATUS_OK, NULL);
+    EXPECT(ow_pdf_document_save_bytes(doc, &plain, &plain_len), OW_STATUS_OK, NULL);
+    CHECK(plain_len == compressed_len && memcmp(plain, compressed, plain_len) == 0);
+    ow_bytes_free(plain, plain_len);
+    ow_bytes_free(compressed, compressed_len);
+
+    EXPECT(ow_pdf_document_set_compression(NULL, OW_COMPRESSION_NONE), OW_STATUS_NULL_ARGUMENT,
+           "doc is null");
+    ow_pdf_document_free(doc);
+}
+
 static void errors(void) {
     /* Failing calls must reset their out-parameters, so these start as non-NULL
      * placeholders that are never dereferenced. */
@@ -445,6 +485,7 @@ int main(int argc, char **argv) {
     }
     build_and_save(argv[1]);
     text_layout_and_width();
+    compression();
     errors();
     embedded_fonts(argv[2]);
     fonts_by_name(argv[2], argv[1]);
