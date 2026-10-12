@@ -238,7 +238,7 @@ fn twentieths(twips: i64) -> officewright_core::Pt {
 
 /// `w:footnotePr` or, with `endnotes`, `w:endnotePr`, whose positions are only the
 /// section's or the document's end.
-fn notes(
+pub(super) fn notes(
     element: Element<'_>,
     names: &Names,
     endnotes: bool,

@@ -2110,3 +2110,188 @@ fn reports_repeated_section_properties() {
     assert!(messages[1].ends_with(": a second w:pgSz is ignored"));
     assert!(messages[2].ends_with(": a second w:type is ignored"));
 }
+
+fn with_settings(settings_xml: &str) -> Document {
+    Document::from_bytes(package(
+        DOCUMENT,
+        &document_xml("<w:p/>"),
+        &[
+            (
+                "word/_rels/document.xml.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/></Relationships>"#,
+            ),
+            ("word/settings.xml", settings_xml),
+        ],
+    ))
+    .unwrap()
+}
+
+#[test]
+fn reads_the_settings_that_bear_on_layout() {
+    let document = with_settings(&format!(
+        r#"<w:settings xmlns:w="{W}" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" mc:Ignorable="w14"><w:zoom w:percent="100"/><w:mirrorMargins/><w:bordersDoNotSurroundHeader/><w:bordersDoNotSurroundFooter w:val="0"/><w:gutterAtTop/><w:defaultTabStop w:val="708"/><w14:defaultTabStop w:val="999"/><w14:docId w14:val="1A2B3C4D"/><w:autoHyphenation/><w:consecutiveHyphenLimit w:val="2"/><w:hyphenationZone w:val="425"/><w:doNotHyphenateCaps/><w:evenAndOddHeaders/><w:defaultTableStyle w:val="TableGrid"/><w:footnotePr><w:pos w:val="beneathText"/><w:footnote w:id="-1"/><w:footnote w:id="0"/></w:footnotePr><w:endnotePr><w:numFmt w:val="lowerRoman"/><w:endnote w:id="-1"/><w:endnote w:id="0"/></w:endnotePr><w:compat><w:useFELayout/><w:doNotExpandShiftReturn w:val="0"/><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="14"/><w:compatSetting w:name="overrideTableStyleFontSizeAndJustification" w:uri="http://schemas.microsoft.com/office/word" w:val="1"/><w:useFELayout w:val="false"/></w:compat><w:themeFontLang w:val="ru-RU" w:eastAsia="ja-JP" w:bidi="ar-SA"/><w:clrSchemeMapping w:bg1="light1" w:t1="dark1" w:bg2="light2" w:t2="dark2" w:accent1="accent1" w:accent2="accent2" w:accent3="accent3" w:accent4="accent4" w:accent5="accent5" w:accent6="accent6" w:hyperlink="hyperlink" w:followedHyperlink="followedHyperlink"/><w:decimalSymbol w:val=","/><w:listSeparator w:val=";"/></w:settings>"#
+    ));
+    assert!(messages(&document).is_empty(), "{:?}", messages(&document));
+    let settings = document.settings();
+    assert_eq!(
+        settings.compatibility_mode(),
+        Some(CompatibilityMode::WORD_2010)
+    );
+    assert_eq!(settings.effective_compatibility_mode().value(), 14);
+    let names: Vec<(&str, Option<&str>)> = settings
+        .compatibility_settings()
+        .iter()
+        .map(|setting| (setting.name(), setting.value()))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            ("compatibilityMode", Some("14")),
+            ("overrideTableStyleFontSizeAndJustification", Some("1"))
+        ]
+    );
+    // The last of an option written twice counts.
+    assert_eq!(
+        settings.compatibility_option(CompatibilityOption::UseFELayout),
+        Some(false)
+    );
+    assert_eq!(
+        settings.compatibility_option(CompatibilityOption::DoNotExpandShiftReturn),
+        Some(false)
+    );
+    assert_eq!(
+        settings.compatibility_option(CompatibilityOption::NoLeading),
+        None
+    );
+    assert_eq!(settings.compatibility_options().len(), 3);
+    // Only elements of the main namespace are settings; the w14 ones are kept.
+    assert_eq!(settings.default_tab_stop(), Some(Pt(35.4)));
+    assert_eq!(settings.mirror_margins(), Some(true));
+    assert_eq!(settings.gutter_at_top(), Some(true));
+    assert_eq!(settings.borders_do_not_surround_header(), Some(true));
+    assert_eq!(settings.borders_do_not_surround_footer(), Some(false));
+    assert_eq!(settings.auto_hyphenation(), Some(true));
+    assert_eq!(settings.consecutive_hyphen_limit(), Some(2));
+    assert_eq!(settings.hyphenation_zone(), Some(Pt(21.25)));
+    assert_eq!(settings.do_not_hyphenate_caps(), Some(true));
+    assert_eq!(settings.even_and_odd_headers(), Some(true));
+    assert_eq!(settings.default_table_style(), Some("TableGrid"));
+    assert_eq!(
+        settings.footnotes().unwrap().position(),
+        Some(NotePosition::BeneathText)
+    );
+    assert_eq!(settings.footnote_separators(), [-1, 0]);
+    assert_eq!(
+        settings.endnotes().unwrap().number_format(),
+        Some(NumberFormat::LowerRoman)
+    );
+    assert_eq!(settings.endnote_separators(), [-1, 0]);
+    let languages = settings.theme_font_languages().unwrap();
+    assert_eq!(
+        (languages.latin(), languages.east_asia(), languages.bidi()),
+        (Some("ru-RU"), Some("ja-JP"), Some("ar-SA"))
+    );
+    let mapping = settings.color_scheme_mapping().unwrap();
+    assert_eq!(mapping.background1(), Some(ColorSchemeIndex::Light1));
+    assert_eq!(mapping.text1(), Some(ColorSchemeIndex::Dark1));
+    assert_eq!(mapping.text2(), Some(ColorSchemeIndex::Dark2));
+    assert_eq!(mapping.accent(1), Some(ColorSchemeIndex::Accent1));
+    assert_eq!(mapping.accent(6), Some(ColorSchemeIndex::Accent6));
+    assert_eq!((mapping.accent(0), mapping.accent(7)), (None, None));
+    assert_eq!(
+        mapping.followed_hyperlink(),
+        Some(ColorSchemeIndex::FollowedHyperlink)
+    );
+    assert_eq!(settings.decimal_symbol(), Some(","));
+    assert_eq!(settings.list_separator(), Some(";"));
+}
+
+#[test]
+fn takes_word_2007_as_the_mode_of_a_document_without_one() {
+    // [MS-DOCX] 2.3.5: 12 is the mode when none is written.
+    let without = open("<w:p/>");
+    assert_eq!(without.settings().compatibility_mode(), None);
+    assert_eq!(
+        without.settings().effective_compatibility_mode(),
+        CompatibilityMode::WORD_2007
+    );
+    // A setting named compatibilityMode in another namespace is not Word's mode.
+    let other = with_settings(&format!(
+        r#"<w:settings xmlns:w="{W}"><w:compat><w:compatSetting w:name="compatibilityMode" w:uri="urn:other" w:val="15"/></w:compat></w:settings>"#
+    ));
+    assert_eq!(other.settings().compatibility_mode(), None);
+    assert_eq!(other.settings().compatibility_settings().len(), 1);
+    // A later Word's mode is kept as a number.
+    let later = with_settings(&format!(
+        r#"<w:settings xmlns:w="{W}"><w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="16"/></w:compat></w:settings>"#
+    ));
+    assert_eq!(
+        later.settings().compatibility_mode(),
+        Some(CompatibilityMode::new(16))
+    );
+    assert!(CompatibilityMode::new(16) > CompatibilityMode::WORD_2013);
+}
+
+#[test]
+fn reads_invalid_settings_as_not_set() {
+    let document = with_settings(&format!(
+        r#"<w:settings xmlns:w="{W}"><w:defaultTabStop w:val="-720"/><w:evenAndOddHeaders w:val="yes"/><w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="fifteen"/><w:noLeading w:val="sometimes"/></w:compat><w:clrSchemeMapping w:bg1="white"/><w:footnotePr><w:footnote w:id="x"/></w:footnotePr></w:settings>"#
+    ));
+    let settings = document.settings();
+    assert_eq!(settings.default_tab_stop(), None);
+    assert_eq!(settings.even_and_odd_headers(), None);
+    assert_eq!(settings.compatibility_mode(), None);
+    assert_eq!(
+        settings.compatibility_option(CompatibilityOption::NoLeading),
+        None
+    );
+    assert_eq!(settings.color_scheme_mapping().unwrap().background1(), None);
+    assert!(settings.footnote_separators().is_empty());
+    let messages = messages(&document);
+    assert_eq!(messages.len(), 6, "{messages:?}");
+    assert!(messages[0].starts_with("/word/settings.xml, line 1, column "));
+    assert!(messages[0].ends_with(r#"w:defaultTabStop w:val="-720" is not valid; it is ignored"#));
+    assert!(messages[5].ends_with(r#"w:footnote w:id="x" is not valid; it is ignored"#));
+    // A settings part that is not w:settings refuses the document, as for styles.
+    let data = package(
+        DOCUMENT,
+        &document_xml("<w:p/>"),
+        &[
+            (
+                "word/_rels/document.xml.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/></Relationships>"#,
+            ),
+            ("word/settings.xml", "<x/>"),
+        ],
+    );
+    let err = Document::from_bytes(data).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "/word/settings.xml, line 1, column 1: the root element is <x>, not w:settings"
+    );
+}
+
+#[test]
+fn reads_strict_settings() {
+    let settings_xml = r#"<w:settings xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main"><w:defaultTabStop w:val="0.5in"/><w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/></w:compat></w:settings>"#;
+    let xml = r#"<w:document xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main" conformance="strict"><w:body><w:p/></w:body></w:document>"#;
+    let document = Document::from_bytes(package(
+        DOCUMENT,
+        xml,
+        &[
+            (
+                "word/_rels/document.xml.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://purl.oclc.org/ooxml/officeDocument/relationships/settings" Target="settings.xml"/></Relationships>"#,
+            ),
+            ("word/settings.xml", settings_xml),
+        ],
+    ))
+    .unwrap();
+    assert!(messages(&document).is_empty(), "{:?}", messages(&document));
+    let settings = document.settings();
+    assert_eq!(settings.default_tab_stop(), Some(Pt(36.0)));
+    assert_eq!(
+        settings.compatibility_mode(),
+        Some(CompatibilityMode::WORD_2013)
+    );
+}

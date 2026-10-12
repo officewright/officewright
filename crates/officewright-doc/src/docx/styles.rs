@@ -10,7 +10,7 @@ use super::table_properties::{cell_properties, row_properties, table_properties}
 use super::{R, R_STRICT, W, W_STRICT, shorten};
 use crate::diagnostic::{DiagnosticKind, Diagnostics};
 use crate::model::styles::{StyleData, StyleKind};
-use crate::model::xml::{Element, Span};
+use crate::model::xml::Span;
 use crate::model::{Document, Names};
 use crate::{Error, Limits, Result};
 
@@ -217,13 +217,8 @@ pub(super) fn check_properties(
     which: Properties,
     offset: usize,
 ) {
-    // Values are collected only while diagnostics have room for them; the rest are
-    // counted, so damage that is not reported costs no memory.
-    let room = c.diagnostics.room();
-    let mut omitted = 0u64;
-    let mut invalid: Vec<(String, String, String)> = Vec::new();
-    {
-        let mut element: Option<Element<'_>> = Some(c.document.element(span));
+    c.check(span, offset, |element, report| {
+        let mut element = Some(element);
         for local in path {
             element = element.and_then(|parent| {
                 parent
@@ -232,30 +227,15 @@ pub(super) fn check_properties(
                     .find(|child| child.is(&names.w, local))
             });
         }
-        let mut report = |element: &str, attribute: &str, value: &str| {
-            if invalid.len() < room {
-                invalid.push((element.into(), attribute.into(), value.into()));
-            } else {
-                omitted += 1;
-            }
+        let Some(element) = element else {
+            return;
         };
-        if let Some(element) = element {
-            match which {
-                Properties::Run => drop(run_properties(element, names, &mut report)),
-                Properties::Paragraph => drop(paragraph_properties(element, names, &mut report)),
-                Properties::Table => drop(table_properties(element, names, &mut report)),
-                Properties::Row => drop(row_properties(element, names, &mut report)),
-                Properties::Cell => drop(cell_properties(element, names, &mut report)),
-            }
+        match which {
+            Properties::Run => drop(run_properties(element, names, report)),
+            Properties::Paragraph => drop(paragraph_properties(element, names, report)),
+            Properties::Table => drop(table_properties(element, names, report)),
+            Properties::Row => drop(row_properties(element, names, report)),
+            Properties::Cell => drop(cell_properties(element, names, report)),
         }
-    }
-    c.diagnostics.omit(omitted);
-    for (element, attribute, value) in invalid {
-        c.diagnose(offset, DiagnosticKind::InvalidValue, || {
-            format!(
-                "w:{element} w:{attribute}=\"{}\" is not valid; it is ignored",
-                shorten(&value)
-            )
-        });
-    }
+    });
 }

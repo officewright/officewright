@@ -183,6 +183,39 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
     }
 
     /// The part, line and column of an offset, as errors name them.
+    /// Runs `read` over the element of `span` and reports the values it finds not valid
+    /// as diagnostics at `offset`. Values are collected only while diagnostics have room
+    /// for them; the rest are counted, so damage that is not reported costs no memory.
+    pub(super) fn check(
+        &mut self,
+        span: Span,
+        offset: usize,
+        read: impl FnOnce(crate::model::xml::Element<'_>, super::properties::Report<'_>),
+    ) {
+        let room = self.diagnostics.room();
+        let mut omitted = 0u64;
+        let mut invalid: Vec<(String, String, String)> = Vec::new();
+        read(
+            self.document.element(span),
+            &mut |element, attribute, value| {
+                if invalid.len() < room {
+                    invalid.push((element.into(), attribute.into(), value.into()));
+                } else {
+                    omitted += 1;
+                }
+            },
+        );
+        self.diagnostics.omit(omitted);
+        for (element, attribute, value) in invalid {
+            self.diagnose(offset, DiagnosticKind::InvalidValue, || {
+                format!(
+                    "w:{element} w:{attribute}=\"{}\" is not valid; it is ignored",
+                    super::shorten(&value)
+                )
+            });
+        }
+    }
+
     pub(super) fn place(&mut self, offset: usize) -> String {
         let (line, column) = self.locator.locate(offset);
         format!("{}, line {line}, column {column}", self.part)
