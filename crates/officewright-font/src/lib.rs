@@ -8,14 +8,16 @@
 //! - [`FontBook`] indexes the fonts a document embeds, fonts the caller adds and the
 //!   fonts installed on the system. [`FontResolver`] finds the face for each family a
 //!   document asks for, the way Word names fonts; when the family is not installed it
-//!   takes a metric-compatible substitute (Carlito for Calibri, Caladea for Cambria,
-//!   Liberation for Arial, Times New Roman and Courier New) or a fallback, and reports
-//!   every substitution so users know why the output differs.
+//!   takes a metric-compatible substitute (Carlito for Calibri, Liberation for Arial,
+//!   Times New Roman and Courier New) or a fallback, preferring one of similar design
+//!   (Caladea for Cambria), and reports every substitution so users know why the
+//!   output differs.
 //!
 //! All metrics are in font design units; [`FontFace::units_per_em`] of them make one em.
 #![forbid(unsafe_code)]
 
 mod book;
+mod cff;
 mod error;
 mod face;
 mod font;

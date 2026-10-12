@@ -40,6 +40,8 @@ case $os in
 linux)
 	need qpdf "apt install qpdf"
 	need pdftotext "apt install poppler-utils"
+	need pdffonts "apt install poppler-utils"
+	need pdftoppm "apt install poppler-utils"
 	need cc "apt install gcc"
 	need c++ "apt install g++"
 	need nm "apt install binutils"
@@ -48,6 +50,8 @@ linux)
 macos)
 	need qpdf "brew install qpdf"
 	need pdftotext "brew install poppler"
+	need pdffonts "brew install poppler"
+	need pdftoppm "brew install poppler"
 	need cc "xcode-select --install"
 	need c++ "xcode-select --install"
 	need nm "xcode-select --install"
@@ -56,6 +60,7 @@ macos)
 	need codesign "xcode-select --install"
 	;;
 windows)
+	need powershell.exe "Windows PowerShell 5.1 ships with Windows; check that C:\\Windows\\System32\\WindowsPowerShell\\v1.0 is on PATH"
 	need cl "run from a Visual Studio Developer Command Prompt (vcvars64.bat)"
 	need dumpbin "run from a Visual Studio Developer Command Prompt (vcvars64.bat)"
 	need cygpath "run from Git Bash"
@@ -103,12 +108,16 @@ step "published crates leave out third-party data"
 # Adobe's AFM files, the test fonts and the tests that read them are not under
 # Officewright's license; see THIRD-PARTY-NOTICES.md. The test fonts live outside every crate.
 packaged=$(cargo package --list --allow-dirty --quiet -p officewright-pdf)
-if printf '%s\n' "$packaged" | grep -E '^(data/afm/|tests/helvetica_afm\.rs$)'; then
+if printf '%s\n' "$packaged" | grep -E '^(data/afm/|tests/helvetica_afm\.rs$|tests/embedded_fonts\.rs$)'; then
 	fail "officewright-pdf would publish the files above"
 fi
 packaged=$(cargo package --list --allow-dirty --quiet -p officewright-font)
 if printf '%s\n' "$packaged" | grep -E '^tests/third_party_fonts\.rs$'; then
 	fail "officewright-font would publish the file above"
+fi
+packaged=$(cargo package --list --allow-dirty --quiet -p officewright-cli)
+if printf '%s\n' "$packaged" | grep -E '^tests/fonts\.rs$'; then
+	fail "officewright-cli would publish the file above"
 fi
 
 step "typos"
@@ -122,6 +131,16 @@ shellcheck scripts/*.sh .githooks/pre-commit
 
 step "actionlint"
 actionlint
+
+step "corpus tools (tests/corpus-tools)"
+# The committed rule documents must be what scripts/make-rule-docs.py writes.
+"$python" -B -m unittest discover -s tests/corpus-tools -v
+
+# make-reference.ps1 is written for Windows PowerShell 5.1, which exists only on Windows.
+if [ "$os" = windows ]; then
+	step "make-reference.ps1 without Word (Windows PowerShell)"
+	powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tests/corpus-tools/test_make_reference.ps1
+fi
 
 step "C library (cargo cinstall)"
 # The same layout the release archives ship; scripts/check-capi.sh tests it as a user would.
@@ -139,7 +158,7 @@ scripts/check-capi.sh target/capi
 # The PDF bytes do not depend on the platform (the golden snapshot test checks them on
 # every OS), and Windows has no official poppler build, so this runs on Linux and macOS.
 if [ "$os" != windows ]; then
-	step "PDF output (qpdf, pdftotext)"
+	step "PDF output (qpdf, pdftotext, pdffonts, pdftoppm)"
 	cargo build -p officewright-cli
 	OW_CLI=${CARGO_TARGET_DIR:-target}/debug/officewright "$python" -B -m unittest discover -s tests/pdf-output -v
 fi

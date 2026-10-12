@@ -8,8 +8,8 @@ shipped as prebuilt libraries with a C header, so any language with an FFI can c
 it without a Rust toolchain.
 
 > **Status: pre-alpha.** A minimal PDF writer works from Rust, C and the command line;
-> it shows Latin text only (the standard Helvetica font with WinAnsiEncoding). See the
-> roadmap below.
+> it embeds TrueType and OpenType fonts for Latin, Greek, Cyrillic and the other scripts
+> that need no shaping. See the roadmap below.
 
 Officewright is a source-available alternative to Spire.Office and Aspose. It is not
 affiliated with, endorsed by or connected to the makers of either product; the
@@ -21,10 +21,22 @@ what this project is an alternative to.
 ```sh
 officewright text-to-pdf notes.txt notes.pdf
 officewright text-to-pdf --page-size letter --font-size 10 notes.txt notes.pdf
+officewright text-to-pdf --font DejaVuSans.ttf notes.txt notes.pdf
+officewright text-to-pdf --font "Times New Roman" --font-dir ./fonts notes.txt notes.pdf
 ```
 
-The text file must be UTF-8. Characters outside WinAnsiEncoding (Cyrillic, Greek, CJK…)
-are reported with their line and column; they need font embedding, planned next.
+The text file must be UTF-8. Without `--font` it is set in Helvetica, which shows Latin
+text only (WinAnsiEncoding). With `--font` the font is embedded, reduced to the glyphs the
+text uses, and shows the characters it has of the Latin, Greek, Cyrillic, Armenian,
+Georgian, Han, Hiragana and Katakana scripts and Hangul syllables. Text is not shaped yet,
+so scripts that need shaping or right-to-left layout (Arabic, Hebrew, the Indic scripts…)
+are refused. `--font` also takes a family name, looked up among the system fonts and the
+folders given with `--font-dir` (`--no-system-fonts` leaves the system out); when the
+family is missing, its metric-compatible substitute (Carlito for Calibri, Liberation for
+Arial, Times New Roman and Courier New) is used, else a font of similar design (Caladea
+for Cambria, which lays out differently than Cambria in Word) or a common font of the same
+kind. Characters a font cannot show are reported with their line and column; substitutions
+and restrictions in the font's license are printed as warnings.
 
 ## C library
 

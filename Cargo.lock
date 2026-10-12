@@ -144,6 +144,7 @@ name = "officewright"
 version = "0.1.0"
 dependencies = [
  "officewright-doc",
+ "officewright-font",
  "officewright-pdf",
  "officewright-slides",
  "officewright-xls",
@@ -154,6 +155,7 @@ name = "officewright-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "officewright-font",
  "officewright-pdf",
 ]
 
@@ -170,6 +172,7 @@ name = "officewright-ffi"
 version = "0.1.0"
 dependencies = [
  "officewright-core",
+ "officewright-font",
  "officewright-pdf",
 ]
 
@@ -200,6 +203,8 @@ version = "0.1.0"
 dependencies = [
  "insta",
  "officewright-core",
+ "officewright-font",
+ "unicode-script",
 ]
 
 [[package]]
@@ -342,6 +347,12 @@ name = "unicode-ident"
 version = "1.0.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
+
+[[package]]
+name = "unicode-script"
+version = "0.5.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "383ad40bb927465ec0ce7720e033cb4ca06912855fc35db31b5755d0de75b1ee"
 
 [[package]]
 name = "windows-link"

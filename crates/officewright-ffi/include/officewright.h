@@ -23,6 +23,85 @@
 #define OW_STANDARD_FONT_HELVETICA 0
 
 /**
+ * An embedding note this version of the header does not know, from `ow_pdf_font_note`;
+ * its message says what it is. Also the kind a failed `ow_pdf_font_note` returns.
+ */
+#define OW_FONT_NOTE_OTHER 0
+
+/**
+ * An embedding note, from `ow_pdf_font_note`: the font's license lets it be used only
+ * to view and print the document ("Preview & Print" embedding).
+ */
+#define OW_FONT_NOTE_PREVIEW_AND_PRINT 1
+
+/**
+ * An embedding note: the font's license lets it be used to view, print and edit the
+ * document, but not installed ("Editable" embedding).
+ */
+#define OW_FONT_NOTE_EDITABLE 2
+
+/**
+ * An embedding note: the font's license forbids subsetting, so the whole font is
+ * embedded and the file is larger.
+ */
+#define OW_FONT_NOTE_WHOLE_FONT 3
+
+/**
+ * An embedding note: the font is a variable font; only its default instance is
+ * embedded. Later versions add notes with new values; existing values never change.
+ */
+#define OW_FONT_NOTE_DEFAULT_INSTANCE 4
+
+/**
+ * The kind of a substitution, from `ow_font_resolver_substitution`, that this version
+ * of the header does not know; its message says what it is. Also the kind a failed
+ * `ow_font_resolver_substitution` returns. Later versions add kinds with new values;
+ * existing values never change.
+ */
+#define OW_RESOLUTION_OTHER 0
+
+/**
+ * A face has the requested family name; the substitution is a synthetic style, a bold
+ * or italic the face lacks.
+ */
+#define OW_RESOLUTION_EXACT 1
+
+/**
+ * Windows maps the requested name to another family, such as "Times New Roman CYR" to
+ * Times New Roman; reported only with a synthetic style.
+ */
+#define OW_RESOLUTION_ALIAS 2
+
+/**
+ * No face has the requested family name, but one has it as its typographic family,
+ * full name or PostScript name.
+ */
+#define OW_RESOLUTION_OTHER_NAME 3
+
+/**
+ * The requested name is a named instance of a variable font; its default instance is
+ * used.
+ */
+#define OW_RESOLUTION_VARIABLE_INSTANCE 4
+
+/**
+ * A font with the same advance widths replaces the requested family, such as Carlito
+ * for Calibri, so text lays out the same.
+ */
+#define OW_RESOLUTION_METRIC_COMPATIBLE 5
+
+/**
+ * A font of similar design, such as Caladea for Cambria, or a common font of the same
+ * kind replaces the requested family, and text lays out differently.
+ */
+#define OW_RESOLUTION_FALLBACK 6
+
+/**
+ * No font could be found at all.
+ */
+#define OW_RESOLUTION_MISSING 7
+
+/**
  * The result of a fallible `ow_*` function.
  *
  * New values may be added in later versions; treat any value other than
@@ -62,6 +141,25 @@ typedef enum OwStatus {
 } OwStatus;
 
 /**
+ * The fonts that can be chosen by family name: fonts the caller adds and the fonts
+ * installed on the system.
+ *
+ * Created by `ow_font_book_new` and released by `ow_font_book_free`. Adding fonts reads
+ * only their names and style; a font file is read again when a font is chosen from it.
+ * Used by one thread at a time; may be moved between threads.
+ */
+typedef struct OwFontBook OwFontBook;
+
+/**
+ * Chooses fonts by family name from a font book, the way Word names fonts, and keeps
+ * the report of substitutions.
+ *
+ * Created by `ow_font_resolver_new` and released by `ow_font_resolver_free`. Used by
+ * one thread at a time; may be moved between threads.
+ */
+typedef struct OwFontResolver OwFontResolver;
+
+/**
  * A PDF document being built.
  *
  * Created by `ow_pdf_document_new` or `ow_pdf_document_from_text` and released by
@@ -72,9 +170,10 @@ typedef struct OwPdfDocument OwPdfDocument;
 /**
  * A font to draw and measure text with.
  *
- * Created by `ow_pdf_font_new_standard` and released by `ow_pdf_font_free`. A document
- * keeps what it needs from the fonts drawn with it, so a font may be freed before the
- * document. Used by one thread at a time; may be moved between threads.
+ * Created by `ow_pdf_font_new_standard`, `ow_pdf_font_open_path`,
+ * `ow_pdf_font_open_bytes` or `ow_pdf_font_resolve` and released by `ow_pdf_font_free`. A document keeps what it
+ * needs from the fonts drawn with it, so a font may be freed before the document. Used
+ * by one thread at a time; may be moved between threads.
  */
 typedef struct OwPdfFont OwPdfFont;
 
@@ -126,9 +225,9 @@ enum OwStatus ow_pdf_document_new(struct OwPdfDocument **out_doc);
  *
  * Margins are 72 pt and baselines 1.2 times the font size apart. `\n`, `\r\n` and `\r`
  * end a line, a form feed starts a new page, tabs stop every 8 characters, a leading
- * byte order mark is dropped, and long lines wrap at spaces. Fails with
- * `OW_STATUS_UNSUPPORTED` for characters the font cannot show (Helvetica: anything
- * outside WinAnsiEncoding, such as non-Latin text) and with `OW_STATUS_INVALID_ARGUMENT`
+ * byte order mark is dropped, and long lines wrap at spaces, measured with the font's
+ * advance widths. Fails with `OW_STATUS_UNSUPPORTED` for characters the font cannot
+ * show (as `ow_pdf_document_add_text` describes) and with `OW_STATUS_INVALID_ARGUMENT`
  * for sizes PDF does not allow or a page not larger than its margins.
  *
  * # Safety
@@ -166,11 +265,14 @@ enum OwStatus ow_pdf_document_add_page(struct OwPdfDocument *doc,
  * the first character starts. The text is not wrapped or clipped;
  * `ow_pdf_font_text_width` measures it.
  *
- * Fails with `OW_STATUS_UNSUPPORTED` if `text` has a character the font cannot show
- * (Helvetica: anything outside WinAnsiEncoding, such as non-Latin text, and control
- * characters such as newline and tab), and with `OW_STATUS_INVALID_ARGUMENT` for a page
- * index out of range, a font size outside 0.01 to 32767 pt, or a position outside
- * -32767 to 32767 pt. On failure the page is unchanged.
+ * Each character is drawn with its own glyph, without kerning or shaping. Fails with
+ * `OW_STATUS_UNSUPPORTED` if `text` has a character the font cannot show: for Helvetica
+ * anything outside WinAnsiEncoding, such as non-Latin text; for an embedded font a
+ * character it has no glyph for, or one of a script that needs shaping or right-to-left
+ * layout (see `ow_pdf_font_open_path`); for both, control characters such as newline
+ * and tab. Fails with `OW_STATUS_INVALID_ARGUMENT` for a page index out of range, a font
+ * size outside 0.01 to 32767 pt, or a position outside -32767 to 32767 pt. On failure
+ * the page is unchanged.
  *
  * # Safety
  *
@@ -238,6 +340,79 @@ void ow_pdf_document_free(struct OwPdfDocument *doc);
 enum OwStatus ow_pdf_font_new_standard(int32_t standard_font, struct OwPdfFont **out_font);
 
 /**
+ * Opens face `face_index` of a TrueType or OpenType font file or collection at `path`
+ * (UTF-8) for embedding; use 0 for a file with one font. The file is read once; it may
+ * change or go away afterwards.
+ *
+ * The fonts the documents drawn with it embed are reduced to the glyphs they use. It
+ * shows the Latin, Greek, Cyrillic, Armenian, Georgian, Han, Hiragana and Katakana
+ * scripts, precomposed Hangul syllables, and the punctuation, digits and symbols every
+ * script shares, one glyph per character; text in scripts that need shaping or
+ * right-to-left layout is refused. Restrictions in the font's license that do not stop
+ * embedding are listed by `ow_pdf_font_note_count` and `ow_pdf_font_note`.
+ *
+ * Fails with `OW_STATUS_IO` if the file cannot be read, `OW_STATUS_INVALID_ARGUMENT` if
+ * it is not a font, has no such face or is damaged, and `OW_STATUS_UNSUPPORTED` if its
+ * license forbids embedding or its outlines cannot be embedded (CFF2). On success
+ * `*out_font` is a new handle for `ow_pdf_font_free`.
+ *
+ * # Safety
+ *
+ * `path` must be NULL or a NUL-terminated string; `out_font` must be NULL or valid for
+ * writing a pointer.
+ */
+enum OwStatus ow_pdf_font_open_path(const char *path,
+                                    uint32_t face_index,
+                                    struct OwPdfFont **out_font);
+
+/**
+ * Opens face `face_index` of a TrueType or OpenType font or font collection in the
+ * `len` bytes at `data`, as `ow_pdf_font_open_path` opens a file. The bytes are copied;
+ * the caller keeps its buffer.
+ *
+ * Fails as `ow_pdf_font_open_path`, apart from reading the file.
+ *
+ * # Safety
+ *
+ * `data` must be NULL or valid for reading `len` bytes; `out_font` must be NULL or valid
+ * for writing a pointer.
+ */
+enum OwStatus ow_pdf_font_open_bytes(const uint8_t *data,
+                                     size_t len,
+                                     uint32_t face_index,
+                                     struct OwPdfFont **out_font);
+
+/**
+ * Returns in `*out_count` the number of embedding notes of `font`: what its user should
+ * know about the font's license and format, such as a license that forbids subsetting.
+ * None of them stops the font from being used. A standard font has none.
+ *
+ * # Safety
+ *
+ * `font` must be NULL or a live handle; `out_count` must be NULL or valid for writing a
+ * `size_t`.
+ */
+enum OwStatus ow_pdf_font_note_count(const struct OwPdfFont *font, size_t *out_count);
+
+/**
+ * Returns embedding note `index` (counting from 0) of `font`: its kind, an
+ * `OW_FONT_NOTE_*` value, in `*out_kind`, and a sentence that describes it in
+ * `*out_message`, UTF-8 and owned by the font: it stays valid until the font is freed.
+ *
+ * Fails with `OW_STATUS_INVALID_ARGUMENT` if `index` is not below the count
+ * `ow_pdf_font_note_count` gives.
+ *
+ * # Safety
+ *
+ * `font` must be NULL or a live handle; `out_kind` and `out_message` must each be NULL
+ * or valid for writing.
+ */
+enum OwStatus ow_pdf_font_note(const struct OwPdfFont *font,
+                               size_t index,
+                               int32_t *out_kind,
+                               const char **out_message);
+
+/**
  * Returns in `*out_width_pt` the width of `text` drawn in `font` at `font_size_pt`, as
  * `ow_pdf_document_add_text` draws it (no kerning).
  *
@@ -262,6 +437,213 @@ enum OwStatus ow_pdf_font_text_width(const struct OwPdfFont *font,
  * `font` must be NULL or a live handle, not used afterwards.
  */
 void ow_pdf_font_free(struct OwPdfFont *font);
+
+/**
+ * Creates an empty font book. On success `*out_book` is a new handle for
+ * `ow_font_book_free`.
+ *
+ * # Safety
+ *
+ * `out_book` must be NULL or valid for writing a pointer.
+ */
+enum OwStatus ow_font_book_new(struct OwFontBook **out_book);
+
+/**
+ * Adds the fonts installed on the system and returns in `*out_added` the number of
+ * font faces added. Called again, it adds the fonts installed since. Folders that do
+ * not exist are left out; files that are not fonts are skipped and listed by
+ * `ow_font_book_skipped`.
+ *
+ * # Safety
+ *
+ * `book` must be NULL or a live handle not used by another thread during the call;
+ * `out_added` must be NULL or valid for writing a `size_t`.
+ */
+enum OwStatus ow_font_book_add_system_fonts(struct OwFontBook *book, size_t *out_added);
+
+/**
+ * Adds the fonts in the folder at `path` (UTF-8) and its subfolders, and returns in
+ * `*out_added` the number of font faces added. Files that are not fonts are skipped and
+ * listed by `ow_font_book_skipped`.
+ *
+ * Fails with `OW_STATUS_IO` if the folder cannot be read.
+ *
+ * # Safety
+ *
+ * `book` must be NULL or a live handle not used by another thread during the call;
+ * `path` must be NULL or a NUL-terminated string; `out_added` must be NULL or valid for
+ * writing a `size_t`.
+ */
+enum OwStatus ow_font_book_add_dir(struct OwFontBook *book, const char *path, size_t *out_added);
+
+/**
+ * Adds the font faces of the font file or collection at `path` (UTF-8), and returns in
+ * `*out_added` the number of faces added.
+ *
+ * Fails with `OW_STATUS_IO` if the file cannot be read and `OW_STATUS_INVALID_ARGUMENT`
+ * if it is not a font or every face in it is damaged.
+ *
+ * # Safety
+ *
+ * `book` must be NULL or a live handle not used by another thread during the call;
+ * `path` must be NULL or a NUL-terminated string; `out_added` must be NULL or valid for
+ * writing a `size_t`.
+ */
+enum OwStatus ow_font_book_add_file(struct OwFontBook *book, const char *path, size_t *out_added);
+
+/**
+ * Adds the font faces of the font or font collection in the `len` bytes at `data`,
+ * and returns in `*out_added` the number of faces added. The bytes are copied; the
+ * caller keeps its buffer.
+ *
+ * Fails with `OW_STATUS_INVALID_ARGUMENT` if the data is not a font or every face in
+ * it is damaged.
+ *
+ * # Safety
+ *
+ * `book` must be NULL or a live handle not used by another thread during the call;
+ * `data` must be NULL or valid for reading `len` bytes; `out_added` must be NULL or
+ * valid for writing a `size_t`.
+ */
+enum OwStatus ow_font_book_add_bytes(struct OwFontBook *book,
+                                     const uint8_t *data,
+                                     size_t len,
+                                     size_t *out_added);
+
+/**
+ * Returns in `*out_count` the number of font faces in the book.
+ *
+ * # Safety
+ *
+ * `book` must be NULL or a live handle not modified by another thread during the call;
+ * `out_count` must be NULL or valid for writing a `size_t`.
+ */
+enum OwStatus ow_font_book_face_count(const struct OwFontBook *book, size_t *out_count);
+
+/**
+ * Returns in `*out_count` the number of folders, files and font faces the book could
+ * not read: why a font that should be there was not found.
+ *
+ * # Safety
+ *
+ * `book` must be NULL or a live handle not modified by another thread during the call;
+ * `out_count` must be NULL or valid for writing a `size_t`.
+ */
+enum OwStatus ow_font_book_skipped_count(const struct OwFontBook *book, size_t *out_count);
+
+/**
+ * Returns in `*out_message` what skipped entry `index` (counting from 0) is and why it
+ * was skipped, such as `fonts/broken.ttf: data is not a TrueType or OpenType font or
+ * font collection: the file is too short`. The string is UTF-8 and owned by the book:
+ * it stays valid until an `ow_font_book_add_*` call changes the list of skipped entries
+ * (one that skips another file, or reads a skipped one after all) or the book is freed.
+ * A call that changes nothing, such as a failed one, leaves the strings valid.
+ *
+ * Fails with `OW_STATUS_INVALID_ARGUMENT` if `index` is not below the count
+ * `ow_font_book_skipped_count` gives.
+ *
+ * # Safety
+ *
+ * `book` must be NULL or a live handle not modified by another thread during the call;
+ * `out_message` must be NULL or valid for writing a pointer.
+ */
+enum OwStatus ow_font_book_skipped(const struct OwFontBook *book,
+                                   size_t index,
+                                   const char **out_message);
+
+/**
+ * Releases a font book. Does nothing if `book` is NULL. Resolvers made from it keep
+ * their own copy, so they may outlive it.
+ *
+ * # Safety
+ *
+ * `book` must be NULL or a live handle, not used afterwards.
+ */
+void ow_font_book_free(struct OwFontBook *book);
+
+/**
+ * Creates a resolver that chooses fonts from the fonts `book` has now, with an empty
+ * substitution report. The resolver keeps its own copy of the book's index: fonts added
+ * to the book later are not seen by it, and the book may be freed first. On success
+ * `*out_resolver` is a new handle for `ow_font_resolver_free`.
+ *
+ * # Safety
+ *
+ * `book` must be NULL or a live handle not modified by another thread during the call;
+ * `out_resolver` must be NULL or valid for writing a pointer.
+ */
+enum OwStatus ow_font_resolver_new(const struct OwFontBook *book,
+                                   struct OwFontResolver **out_resolver);
+
+/**
+ * Chooses a font by family name, the way Word names fonts (without regard to case),
+ * and returns it in `*out_font`, a new handle for `ow_pdf_font_free`, to embed like a
+ * font from `ow_pdf_font_open_path`.
+ *
+ * `bold` and `italic` are 0 or 1. When the family is not in the book, the resolver
+ * takes its metric-compatible substitute (Carlito for Calibri, Liberation for Arial,
+ * Times New Roman and Courier New), else a font of similar design (Caladea for
+ * Cambria, which lays out differently) or a common font of the same kind; a style the
+ * face lacks is synthetic. Every such substitution is added to the resolver's report
+ * (`ow_font_resolver_substitution`); synthetic styles are reported but not drawn yet.
+ *
+ * Fails with `OW_STATUS_UNSUPPORTED` if no font could be found or the chosen font's
+ * license forbids embedding, `OW_STATUS_INVALID_ARGUMENT` if `bold` or `italic` is not
+ * 0 or 1 or the chosen font is damaged, and `OW_STATUS_IO` if its file cannot be read
+ * any more.
+ *
+ * # Safety
+ *
+ * `resolver` must be NULL or a live handle not used by another thread during the call;
+ * `family` must be NULL or a NUL-terminated string; `out_font` must be NULL or valid for
+ * writing a pointer.
+ */
+enum OwStatus ow_pdf_font_resolve(struct OwFontResolver *resolver,
+                                  const char *family,
+                                  int32_t bold,
+                                  int32_t italic,
+                                  struct OwPdfFont **out_font);
+
+/**
+ * Returns in `*out_count` the number of substitutions the resolver has reported: each
+ * family it could not give as requested, with what it took instead, each outcome once.
+ *
+ * # Safety
+ *
+ * `resolver` must be NULL or a live handle not modified by another thread during the
+ * call; `out_count` must be NULL or valid for writing a `size_t`.
+ */
+enum OwStatus ow_font_resolver_substitution_count(const struct OwFontResolver *resolver,
+                                                  size_t *out_count);
+
+/**
+ * Returns substitution `index` (counting from 0, in the order the families were first
+ * resolved): its kind, an `OW_RESOLUTION_*` value, in `*out_kind`, and a line for a
+ * report in `*out_message`, such as `"Calibri" → "Carlito" (metric-compatible
+ * substitute)`. The string is UTF-8 and owned by the resolver: it stays valid until the
+ * resolver is freed.
+ *
+ * Fails with `OW_STATUS_INVALID_ARGUMENT` if `index` is not below the count
+ * `ow_font_resolver_substitution_count` gives.
+ *
+ * # Safety
+ *
+ * `resolver` must be NULL or a live handle not modified by another thread during the
+ * call; `out_kind` and `out_message` must each be NULL or valid for writing.
+ */
+enum OwStatus ow_font_resolver_substitution(const struct OwFontResolver *resolver,
+                                            size_t index,
+                                            int32_t *out_kind,
+                                            const char **out_message);
+
+/**
+ * Releases a resolver. Does nothing if `resolver` is NULL. Fonts it chose stay valid.
+ *
+ * # Safety
+ *
+ * `resolver` must be NULL or a live handle, not used afterwards.
+ */
+void ow_font_resolver_free(struct OwFontResolver *resolver);
 
 #ifdef __cplusplus
 }  // extern "C"

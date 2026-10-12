@@ -118,21 +118,21 @@ windows)
 		-Fo"$c_dir/abi_c17.obj" -Fe"$c_dir/abi_c17.exe"
 	cl "${msvc[@]}" -std:c++17 -EHsc -Tp tests/c/abi_test.c "$static" "${win_libs[@]}" \
 		-Fo"$c_dir/abi_cxx17.obj" -Fe"$c_dir/abi_cxx17.exe"
-	"$c_out/abi_c17.exe" "$c_dir"
-	"$c_out/abi_cxx17.exe" "$c_dir"
+	"$c_out/abi_c17.exe" "$c_dir" tests/fonts
+	"$c_out/abi_cxx17.exe" "$c_dir" tests/fonts
 	;;
 *)
 	strict=(-Wall -Wextra -Wpedantic -Werror "-I$prefix/include")
 	cc -std=c99 "${strict[@]}" tests/c/abi_test.c "$static" "${libs[@]}" -o "$c_out/abi_c99"
 	c++ -x c++ -std=c++17 "${strict[@]}" tests/c/abi_test.c -x none "$static" "${libs[@]}" -o "$c_out/abi_cxx17"
-	"$c_out/abi_c99" "$c_out"
-	"$c_out/abi_cxx17" "$c_out"
+	"$c_out/abi_c99" "$c_out" tests/fonts
+	"$c_out/abi_cxx17" "$c_out" tests/fonts
 	if [ "$sanitizers" = 0 ]; then
 		echo "skipping the ASan+UBSan build: $(cc -dumpmachine) has no sanitizer runtimes"
 	else
 		cc -std=c99 "${strict[@]}" -g -fsanitize=address,undefined -fno-sanitize-recover=all \
 			tests/c/abi_test.c "$static" "${libs[@]}" -o "$c_out/abi_sanitized"
-		"$c_out/abi_sanitized" "$c_out"
+		"$c_out/abi_sanitized" "$c_out" tests/fonts
 	fi
 	;;
 esac

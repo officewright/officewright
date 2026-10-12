@@ -12,6 +12,10 @@ pub use officewright_doc as doc;
 #[cfg(feature = "pdf")]
 pub use officewright_pdf as pdf;
 
+/// Font loading, font files for embedding, and finding the fonts a document asks for.
+#[cfg(feature = "pdf")]
+pub use officewright_font as font;
+
 /// PPT and PPTX presentations.
 #[cfg(feature = "slides")]
 pub use officewright_slides as slides;
