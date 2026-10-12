@@ -39,6 +39,8 @@ crates/
   officewright-core     units (Pt, twips, EMU), PageSize, Error/Result; later colour
   officewright-font     font loading (TrueType/OpenType, collections), metrics, cmap, subsetting for
                         embedding, system font index and font substitution with a report
+  officewright-opc      ZIP, XML, OPC packages and Markup Compatibility (ECMA-376 Parts 2 and 3) shared
+                        by the OOXML readers; ZIP and XML are our own code, DEFLATE is miniz_oxide
   officewright-layout   page layout engine (shaping, text flow, line breaking, tables) — the core of DOCX→PDF
   officewright-doc      DOC/DOCX/RTF          (counterpart of Spire.Doc)
   officewright-pdf      PDF read/write        (counterpart of Spire.PDF)

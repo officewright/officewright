@@ -1,0 +1,19 @@
+[package]
+name = "officewright-opc"
+description = "ZIP, XML, Open Packaging Conventions and Markup Compatibility for the officewright OOXML readers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# DEFLATE for ZIP entries. The ZIP container itself is read by this crate: OOXML allows
+# only a small part of ZIP, and every check on it is ours to fuzz.
+miniz_oxide = { version = "0.9.1", default-features = false, features = [
+  "with-alloc",
+] }
+officewright-core.workspace = true
+
+[lints]
+workspace = true
