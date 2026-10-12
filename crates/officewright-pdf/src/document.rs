@@ -44,7 +44,11 @@ enum Content {
     /// Operators, ready to write.
     Operators(Vec<u8>),
     /// Text that has been checked against its font, to show with one string operator.
-    Text { font: Font, text: String },
+    Text {
+        /// The font's index in the page's fonts.
+        font: usize,
+        text: String,
+    },
 }
 
 impl Document {
@@ -274,10 +278,11 @@ impl Page {
             return Err(Error::InvalidPosition { x, y });
         }
         font.check(text)?;
-        let resource = self.font_resource(font);
+        let font = self.font_index(font);
         self.push_operators(
             format!(
-                "BT\n/F{resource} {} Tf\n{} {} Td\n",
+                "BT\n/F{} {} Tf\n{} {} Td\n",
+                font + 1,
                 number(font_size.0),
                 number(x.0),
                 number(y.0)
@@ -285,24 +290,23 @@ impl Page {
             .as_bytes(),
         );
         self.content.push(Content::Text {
-            font: font.clone(),
+            font,
             text: text.to_owned(),
         });
         self.push_operators(b"\nET\n");
         Ok(())
     }
 
-    /// The number of the page's font resource for `font` (`/F1` is 1), adding the font
-    /// on its first use.
-    fn font_resource(&mut self, font: &Font) -> usize {
-        let index = match self.fonts.iter().position(|known| known == font) {
+    /// The index of `font` in the page's fonts, adding it on its first use. The font at
+    /// index `i` is the page's font resource `/F(i + 1)`.
+    fn font_index(&mut self, font: &Font) -> usize {
+        match self.fonts.iter().position(|known| known == font) {
             Some(index) => index,
             None => {
                 self.fonts.push(font.clone());
                 self.fonts.len() - 1
             }
-        };
-        index + 1
+        }
     }
 
     fn push_operators(&mut self, operators: &[u8]) {
@@ -319,6 +323,9 @@ impl Page {
             match piece {
                 Content::Operators(operators) => stream.extend_from_slice(operators),
                 Content::Text { font, text } => {
+                    // reason: `font` came from font_index, and a page's fonts are never removed
+                    #[allow(clippy::indexing_slicing)]
+                    let font = &self.fonts[*font];
                     push_string(&mut stream, &font.encode(text)?);
                     stream.extend_from_slice(b" Tj");
                 }
@@ -564,6 +571,28 @@ mod tests {
             ),
             "{pdf}"
         );
+    }
+
+    #[test]
+    fn writes_nothing_when_text_cannot_be_encoded() {
+        // add_text rejects such text, so it is planted directly.
+        let mut doc = hello();
+        doc.page_mut(0).unwrap().content.push(Content::Text {
+            font: 0,
+            text: "Ж".to_owned(),
+        });
+        let mut out = Vec::new();
+        let err = doc.write_to(&mut out).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::Unencodable {
+                    ch: 'Ж', offset: 0
+                }
+            ),
+            "{err:?}"
+        );
+        assert!(out.is_empty(), "{} bytes were written", out.len());
     }
 
     #[test]
