@@ -640,8 +640,8 @@ xml_enum! {
 }
 
 xml_enum! {
-    /// The line style of a border (ST_Border). The art borders of pages are not read
-    /// yet: a border that names one reads as having no style.
+    /// The line style of a border (ST_Border). The art borders, rows of small pictures
+    /// that Word offers for pages, are read by [`Border::art`] instead.
     BorderStyle {
         Nil = "nil",
         None = "none",
@@ -678,6 +678,7 @@ xml_enum! {
 #[non_exhaustive]
 pub struct Border {
     pub(crate) style: Option<BorderStyle>,
+    pub(crate) art: Option<ArtBorder>,
     pub(crate) color: Color,
     pub(crate) width: Option<Pt>,
     pub(crate) space: Option<Pt>,
@@ -691,12 +692,18 @@ impl Border {
         self.style
     }
 
+    /// The art border, when the element names one instead of a line style.
+    pub fn art(&self) -> Option<ArtBorder> {
+        self.art
+    }
+
     /// The colour.
     pub fn color(&self) -> &Color {
         &self.color
     }
 
-    /// The width of the line (`w:sz`, eighths of a point).
+    /// The width of the line (`w:sz`, written in eighths of a point), or of an art
+    /// border's pictures (written in points).
     pub fn width(&self) -> Option<Pt> {
         self.width
     }
@@ -1076,5 +1083,268 @@ impl ParagraphProperties {
     /// empty one or its list label, is to be measured.
     pub fn mark_run_properties(&self) -> &RunProperties {
         &self.mark
+    }
+}
+
+/// An art border (ST_Border): a row of small pictures, such as `apples`, that Word offers
+/// around pages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ArtBorder(u8);
+
+impl ArtBorder {
+    /// The name the document writes, such as `apples`.
+    pub fn name(self) -> &'static str {
+        ART_BORDERS
+            .get(usize::from(self.0))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// The art border written as `value`, if it is one.
+    pub(crate) fn from_xml(value: &str) -> Option<Self> {
+        let index = ART_BORDERS.iter().position(|name| *name == value)?;
+        u8::try_from(index).ok().map(Self)
+    }
+}
+
+/// The art borders of ST_Border, in the order of the schema.
+const ART_BORDERS: [&str; 166] = [
+    "apples",
+    "archedScallops",
+    "babyPacifier",
+    "babyRattle",
+    "balloons3Colors",
+    "balloonsHotAir",
+    "basicBlackDashes",
+    "basicBlackDots",
+    "basicBlackSquares",
+    "basicThinLines",
+    "basicWhiteDashes",
+    "basicWhiteDots",
+    "basicWhiteSquares",
+    "basicWideInline",
+    "basicWideMidline",
+    "basicWideOutline",
+    "bats",
+    "birds",
+    "birdsFlight",
+    "cabins",
+    "cakeSlice",
+    "candyCorn",
+    "celticKnotwork",
+    "certificateBanner",
+    "chainLink",
+    "champagneBottle",
+    "checkedBarBlack",
+    "checkedBarColor",
+    "checkered",
+    "christmasTree",
+    "circlesLines",
+    "circlesRectangles",
+    "classicalWave",
+    "clocks",
+    "compass",
+    "confetti",
+    "confettiGrays",
+    "confettiOutline",
+    "confettiStreamers",
+    "confettiWhite",
+    "cornerTriangles",
+    "couponCutoutDashes",
+    "couponCutoutDots",
+    "crazyMaze",
+    "creaturesButterfly",
+    "creaturesFish",
+    "creaturesInsects",
+    "creaturesLadyBug",
+    "crossStitch",
+    "cup",
+    "decoArch",
+    "decoArchColor",
+    "decoBlocks",
+    "diamondsGray",
+    "doubleD",
+    "doubleDiamonds",
+    "earth1",
+    "earth2",
+    "earth3",
+    "eclipsingSquares1",
+    "eclipsingSquares2",
+    "eggsBlack",
+    "fans",
+    "film",
+    "firecrackers",
+    "flowersBlockPrint",
+    "flowersDaisies",
+    "flowersModern1",
+    "flowersModern2",
+    "flowersPansy",
+    "flowersRedRose",
+    "flowersRoses",
+    "flowersTeacup",
+    "flowersTiny",
+    "gems",
+    "gingerbreadMan",
+    "gradient",
+    "handmade1",
+    "handmade2",
+    "heartBalloon",
+    "heartGray",
+    "hearts",
+    "heebieJeebies",
+    "holly",
+    "houseFunky",
+    "hypnotic",
+    "iceCreamCones",
+    "lightBulb",
+    "lightning1",
+    "lightning2",
+    "mapPins",
+    "mapleLeaf",
+    "mapleMuffins",
+    "marquee",
+    "marqueeToothed",
+    "moons",
+    "mosaic",
+    "musicNotes",
+    "northwest",
+    "ovals",
+    "packages",
+    "palmsBlack",
+    "palmsColor",
+    "paperClips",
+    "papyrus",
+    "partyFavor",
+    "partyGlass",
+    "pencils",
+    "people",
+    "peopleWaving",
+    "peopleHats",
+    "poinsettias",
+    "postageStamp",
+    "pumpkin1",
+    "pushPinNote2",
+    "pushPinNote1",
+    "pyramids",
+    "pyramidsAbove",
+    "quadrants",
+    "rings",
+    "safari",
+    "sawtooth",
+    "sawtoothGray",
+    "scaredCat",
+    "seattle",
+    "shadowedSquares",
+    "sharksTeeth",
+    "shorebirdTracks",
+    "skyrocket",
+    "snowflakeFancy",
+    "snowflakes",
+    "sombrero",
+    "southwest",
+    "stars",
+    "starsTop",
+    "stars3d",
+    "starsBlack",
+    "starsShadowed",
+    "sun",
+    "swirligig",
+    "tornPaper",
+    "tornPaperBlack",
+    "trees",
+    "triangleParty",
+    "triangles",
+    "triangle1",
+    "triangle2",
+    "triangleCircle1",
+    "triangleCircle2",
+    "shapes1",
+    "shapes2",
+    "twistedLines1",
+    "twistedLines2",
+    "vine",
+    "waveline",
+    "weavingAngles",
+    "weavingBraid",
+    "weavingRibbon",
+    "weavingStrips",
+    "whiteFlowers",
+    "woodwork",
+    "xIllusions",
+    "zanyTriangles",
+    "zigZag",
+    "zigZagStitch",
+    "custom",
+];
+
+xml_enum! {
+    /// How numbers are written (ST_NumberFormat): of pages, notes and list items.
+    NumberFormat {
+        Decimal = "decimal",
+        UpperRoman = "upperRoman",
+        LowerRoman = "lowerRoman",
+        UpperLetter = "upperLetter",
+        LowerLetter = "lowerLetter",
+        Ordinal = "ordinal",
+        CardinalText = "cardinalText",
+        OrdinalText = "ordinalText",
+        Hex = "hex",
+        Chicago = "chicago",
+        IdeographDigital = "ideographDigital",
+        JapaneseCounting = "japaneseCounting",
+        Aiueo = "aiueo",
+        Iroha = "iroha",
+        DecimalFullWidth = "decimalFullWidth",
+        DecimalHalfWidth = "decimalHalfWidth",
+        JapaneseLegal = "japaneseLegal",
+        JapaneseDigitalTenThousand = "japaneseDigitalTenThousand",
+        DecimalEnclosedCircle = "decimalEnclosedCircle",
+        DecimalFullWidth2 = "decimalFullWidth2",
+        AiueoFullWidth = "aiueoFullWidth",
+        IrohaFullWidth = "irohaFullWidth",
+        DecimalZero = "decimalZero",
+        /// A bullet, not a number.
+        Bullet = "bullet",
+        Ganada = "ganada",
+        Chosung = "chosung",
+        DecimalEnclosedFullstop = "decimalEnclosedFullstop",
+        DecimalEnclosedParen = "decimalEnclosedParen",
+        DecimalEnclosedCircleChinese = "decimalEnclosedCircleChinese",
+        IdeographEnclosedCircle = "ideographEnclosedCircle",
+        IdeographTraditional = "ideographTraditional",
+        IdeographZodiac = "ideographZodiac",
+        IdeographZodiacTraditional = "ideographZodiacTraditional",
+        TaiwaneseCounting = "taiwaneseCounting",
+        IdeographLegalTraditional = "ideographLegalTraditional",
+        TaiwaneseCountingThousand = "taiwaneseCountingThousand",
+        TaiwaneseDigital = "taiwaneseDigital",
+        ChineseCounting = "chineseCounting",
+        ChineseLegalSimplified = "chineseLegalSimplified",
+        ChineseCountingThousand = "chineseCountingThousand",
+        KoreanDigital = "koreanDigital",
+        KoreanCounting = "koreanCounting",
+        KoreanLegal = "koreanLegal",
+        KoreanDigital2 = "koreanDigital2",
+        VietnameseCounting = "vietnameseCounting",
+        RussianLower = "russianLower",
+        RussianUpper = "russianUpper",
+        /// No number.
+        None = "none",
+        NumberInDash = "numberInDash",
+        Hebrew1 = "hebrew1",
+        Hebrew2 = "hebrew2",
+        ArabicAlpha = "arabicAlpha",
+        ArabicAbjad = "arabicAbjad",
+        HindiVowels = "hindiVowels",
+        HindiConsonants = "hindiConsonants",
+        HindiNumbers = "hindiNumbers",
+        HindiCounting = "hindiCounting",
+        ThaiLetters = "thaiLetters",
+        ThaiNumbers = "thaiNumbers",
+        ThaiCounting = "thaiCounting",
+        BahtText = "bahtText",
+        DollarText = "dollarText",
+        /// A format of the document's own, given by `w:format`.
+        Custom = "custom",
     }
 }

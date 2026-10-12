@@ -3,10 +3,10 @@
 
 use crate::model::Names;
 use crate::model::properties::{
-    Border, BorderStyle, Color, ColorValue, FontHint, Highlight, Indentation, Justification,
-    Language, LineSpacing, NumberingReference, ParagraphBorders, ParagraphProperties, RunFonts,
-    RunProperties, Shading, ShadingPattern, Spacing, TabKind, TabLeader, TabStop, ThemeColor,
-    ThemeFont, Toggle, Underline, UnderlineStyle, VerticalPosition,
+    ArtBorder, Border, BorderStyle, Color, ColorValue, FontHint, Highlight, Indentation,
+    Justification, Language, LineSpacing, NumberingReference, ParagraphBorders,
+    ParagraphProperties, RunFonts, RunProperties, Shading, ShadingPattern, Spacing, TabKind,
+    TabLeader, TabStop, ThemeColor, ThemeFont, Toggle, Underline, UnderlineStyle, VerticalPosition,
 };
 use crate::model::xml::Element;
 use crate::units::{half_points_measure, twips_measure};
@@ -298,23 +298,32 @@ fn borders(element: Element<'_>, names: &Names, report: Report<'_>) -> Paragraph
 
 /// One border (CT_Border): style, colour, width in eighths of a point, space in points.
 pub(super) fn border(element: Element<'_>, names: &Names, report: Report<'_>) -> Border {
-    // The width of an art border (page borders only) is in points, not eighths; this
-    // reads line borders, and art borders read as having no style.
+    // An art border is no line style, and its width is in points, not eighths
+    // (§17.3.4).
+    let art = element
+        .attribute(&names.w, "val")
+        .and_then(ArtBorder::from_xml);
     let points = |eighths: f64| {
         move |value: &str| -> Option<officewright_core::Pt> {
             let number: u32 = value.parse().ok()?;
             Some(officewright_core::Pt(f64::from(number) / eighths))
         }
     };
+    let style = match art {
+        Some(_) => None,
+        None => value(element, names, "val", BorderStyle::from_xml, report),
+    };
+    let per_point = if art.is_some() { 1.0 } else { 8.0 };
     Border {
-        style: value(element, names, "val", BorderStyle::from_xml, report),
+        style,
+        art,
         color: color(
             element,
             names,
             ["color", "themeColor", "themeTint", "themeShade"],
             report,
         ),
-        width: value(element, names, "sz", points(8.0), report),
+        width: value(element, names, "sz", points(per_point), report),
         space: value(element, names, "space", points(1.0), report),
         shadow: on_off_attribute(element, names, "shadow", report),
         frame: on_off_attribute(element, names, "frame", report),

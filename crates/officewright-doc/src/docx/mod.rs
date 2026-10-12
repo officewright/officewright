@@ -34,6 +34,7 @@ impl Names {
     fn new(strings: &mut Strings) -> Self {
         Self {
             w: [Some(strings.intern(W)), Some(strings.intern(W_STRICT))],
+            r: [Some(strings.intern(R)), Some(strings.intern(R_STRICT))],
             mc: Some(strings.intern(officewright_opc::mce::NAMESPACE)),
         }
     }
