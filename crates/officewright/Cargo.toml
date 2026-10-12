@@ -14,12 +14,13 @@ workspace = true
 [features]
 default = ["doc", "pdf", "slides", "xls"]
 doc = ["dep:officewright-doc"]
-pdf = ["dep:officewright-pdf"]
+pdf = ["dep:officewright-font", "dep:officewright-pdf"]
 slides = ["dep:officewright-slides"]
 xls = ["dep:officewright-xls"]
 
 [dependencies]
 officewright-doc = { workspace = true, optional = true }
+officewright-font = { workspace = true, optional = true }
 officewright-pdf = { workspace = true, optional = true }
 officewright-slides = { workspace = true, optional = true }
 officewright-xls = { workspace = true, optional = true }

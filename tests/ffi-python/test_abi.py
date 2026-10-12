@@ -13,9 +13,15 @@ from pathlib import Path
 # The ABI version these tests were written against, as a binding would pin it.
 EXPECTED_ABI_VERSION = 1
 
-# OwStatus values and the standard font from officewright.h.
+# OwStatus values, the standard font and the embedding notes from officewright.h.
 OK, NULL_ARGUMENT, INVALID_UTF8, INVALID_ARGUMENT, IO, UNSUPPORTED, PANIC = range(7)
 OW_STANDARD_FONT_HELVETICA = 0
+OW_FONT_NOTE_OTHER, OW_FONT_NOTE_PREVIEW_AND_PRINT, OW_FONT_NOTE_EDITABLE, OW_FONT_NOTE_WHOLE_FONT = range(4)
+
+# The OFL test fonts at the repository root.
+FONTS = Path(__file__).resolve().parent.parent / "fonts"
+LIBERATION_SANS = FONTS / "liberation" / "LiberationSans-Regular.ttf"
+NOTO_SANS = FONTS / "noto" / "NotoSans-Regular.otf"
 
 lib = ctypes.CDLL(os.environ["OW_LIB"])
 
@@ -37,8 +43,24 @@ declare("ow_pdf_document_save_path", c_int, c_void_p, c_char_p)
 declare("ow_pdf_document_save_bytes", c_int, c_void_p, POINTER(POINTER(c_uint8)), POINTER(c_size_t))
 declare("ow_pdf_document_free", None, c_void_p)
 declare("ow_pdf_font_new_standard", c_int, ctypes.c_int32, POINTER(c_void_p))
+declare("ow_pdf_font_open_path", c_int, c_char_p, c_uint32, POINTER(c_void_p))
+declare("ow_pdf_font_open_bytes", c_int, c_char_p, c_size_t, c_uint32, POINTER(c_void_p))
+declare("ow_pdf_font_note_count", c_int, c_void_p, POINTER(c_size_t))
+declare("ow_pdf_font_note", c_int, c_void_p, c_size_t, POINTER(ctypes.c_int32), POINTER(c_char_p))
 declare("ow_pdf_font_text_width", c_int, c_void_p, c_char_p, c_double, POINTER(c_double))
 declare("ow_pdf_font_free", None, c_void_p)
+
+
+def with_fs_type(font, fs_type):
+    """The font with fsType in its OS/2 table, what its license allows, set to fs_type."""
+    font = bytearray(font)
+    tables = int.from_bytes(font[4:6], "big")
+    for record in range(12, 12 + 16 * tables, 16):
+        if font[record : record + 4] == b"OS/2":
+            os2 = int.from_bytes(font[record + 8 : record + 12], "big")
+            font[os2 + 8 : os2 + 10] = fs_type.to_bytes(2, "big")
+            return bytes(font)
+    raise ValueError("no OS/2 table")
 
 
 def last_error():
@@ -155,6 +177,84 @@ class AbiTest(unittest.TestCase):
         lib.ow_pdf_document_free(None)
         lib.ow_pdf_font_free(None)
         lib.ow_bytes_free(None, 0)
+
+    def open_font(self, data):
+        font = c_void_p()
+        self.check(lib.ow_pdf_font_open_bytes(data, len(data), 0, byref(font)))
+        self.addCleanup(lib.ow_pdf_font_free, font)
+        return font
+
+    def notes(self, font):
+        count = c_size_t(99)
+        self.check(lib.ow_pdf_font_note_count(font, byref(count)))
+        notes = []
+        for index in range(count.value):
+            kind = ctypes.c_int32(-1)
+            message = c_char_p()
+            self.check(lib.ow_pdf_font_note(font, index, byref(kind), byref(message)))
+            notes.append((kind.value, message.value.decode("utf-8")))
+        return notes
+
+    def test_embeds_fonts_from_a_path_and_from_memory(self):
+        liberation = c_void_p()
+        self.check(lib.ow_pdf_font_open_path(str(LIBERATION_SANS).encode(), 0, byref(liberation)))
+        self.addCleanup(lib.ow_pdf_font_free, liberation)
+        noto = self.open_font(NOTO_SANS.read_bytes())
+        self.assertEqual(self.notes(liberation), [])
+
+        doc = c_void_p()
+        self.check(lib.ow_pdf_document_from_text("Привет, мир".encode(), 595.0, 842.0, liberation, 12.0, byref(doc)))
+        self.addCleanup(lib.ow_pdf_document_free, doc)
+        self.check(lib.ow_pdf_document_add_text(doc, 0, 72.0, 600.0, noto, 12.0, "Καλημέρα".encode()))
+        pdf = self.save_bytes(doc)
+        self.assertIn(b"/FontFile2", pdf)
+        self.assertIn(b"/Subtype /CIDFontType0C", pdf)
+        self.assertEqual(pdf.count(b"/ToUnicode"), 2)
+
+        width = c_double()
+        self.check(lib.ow_pdf_font_text_width(noto, "Жж".encode(), 10.0, byref(width)))
+        self.assertGreater(width.value, 0.0)
+        self.check(lib.ow_pdf_document_add_text(doc, 0, 0.0, 0.0, liberation, 10.0, "aש".encode()), UNSUPPORTED)
+        self.assertIn("is in the Hebrew script", last_error())
+        self.check(lib.ow_pdf_document_add_text(doc, 0, 0.0, 0.0, liberation, 10.0, "漢".encode()), UNSUPPORTED)
+        self.assertEqual(last_error(), "font LiberationSans has no glyph for character U+6F22 '漢' at byte 0")
+
+    def test_lists_what_the_font_license_restricts(self):
+        whole = self.open_font(with_fs_type(LIBERATION_SANS.read_bytes(), 0x0104))
+        self.assertEqual(
+            self.notes(whole),
+            [
+                (
+                    OW_FONT_NOTE_PREVIEW_AND_PRINT,
+                    "its license allows the embedded font only for viewing and printing the document",
+                ),
+                (OW_FONT_NOTE_WHOLE_FONT, "its license forbids subsetting, so the whole font is embedded"),
+            ],
+        )
+        kind = ctypes.c_int32(-1)
+        message = c_char_p(b"placeholder")
+        self.check(lib.ow_pdf_font_note(whole, 2, byref(kind), byref(message)), INVALID_ARGUMENT)
+        self.assertEqual(kind.value, OW_FONT_NOTE_OTHER)
+        self.assertIsNone(message.value)
+
+        restricted = with_fs_type(LIBERATION_SANS.read_bytes(), 0x0002)
+        font = c_void_p(1)
+        self.check(lib.ow_pdf_font_open_bytes(restricted, len(restricted), 0, byref(font)), UNSUPPORTED)
+        self.assertEqual(last_error(), "the license of font LiberationSans does not allow embedding it")
+        self.assertFalse(font)
+
+    def test_reports_fonts_it_cannot_open(self):
+        font = c_void_p(1)
+        self.check(lib.ow_pdf_font_open_bytes(b"not a font", 10, 0, byref(font)), INVALID_ARGUMENT)
+        self.assertTrue(last_error().startswith("cannot use the font data: data is not a TrueType"), last_error())
+        self.assertFalse(font)
+        missing = FONTS / "no-such-font.ttf"
+        self.check(lib.ow_pdf_font_open_path(str(missing).encode(), 0, byref(font)), IO)
+        self.assertTrue(last_error().startswith(f"cannot read {missing}: "), last_error())
+        self.check(lib.ow_pdf_font_open_path(None, 0, byref(font)), NULL_ARGUMENT)
+        self.assertEqual(last_error(), "path is null")
+        self.check(lib.ow_pdf_font_open_bytes(None, 0, 0, byref(font)), NULL_ARGUMENT)
+        self.assertEqual(last_error(), "data is null")
 
 
 if __name__ == "__main__":

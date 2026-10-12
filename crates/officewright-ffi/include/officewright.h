@@ -23,6 +23,36 @@
 #define OW_STANDARD_FONT_HELVETICA 0
 
 /**
+ * An embedding note this version of the header does not know, from `ow_pdf_font_note`;
+ * its message says what it is. Also the kind a failed `ow_pdf_font_note` returns.
+ */
+#define OW_FONT_NOTE_OTHER 0
+
+/**
+ * An embedding note, from `ow_pdf_font_note`: the font's license lets it be used only
+ * to view and print the document ("Preview & Print" embedding).
+ */
+#define OW_FONT_NOTE_PREVIEW_AND_PRINT 1
+
+/**
+ * An embedding note: the font's license lets it be used to view, print and edit the
+ * document, but not installed ("Editable" embedding).
+ */
+#define OW_FONT_NOTE_EDITABLE 2
+
+/**
+ * An embedding note: the font's license forbids subsetting, so the whole font is
+ * embedded and the file is larger.
+ */
+#define OW_FONT_NOTE_WHOLE_FONT 3
+
+/**
+ * An embedding note: the font is a variable font; only its default instance is
+ * embedded. Later versions add notes with new values; existing values never change.
+ */
+#define OW_FONT_NOTE_DEFAULT_INSTANCE 4
+
+/**
  * The result of a fallible `ow_*` function.
  *
  * New values may be added in later versions; treat any value other than
@@ -72,9 +102,10 @@ typedef struct OwPdfDocument OwPdfDocument;
 /**
  * A font to draw and measure text with.
  *
- * Created by `ow_pdf_font_new_standard` and released by `ow_pdf_font_free`. A document
- * keeps what it needs from the fonts drawn with it, so a font may be freed before the
- * document. Used by one thread at a time; may be moved between threads.
+ * Created by `ow_pdf_font_new_standard`, `ow_pdf_font_open_path` or
+ * `ow_pdf_font_open_bytes` and released by `ow_pdf_font_free`. A document keeps what it
+ * needs from the fonts drawn with it, so a font may be freed before the document. Used
+ * by one thread at a time; may be moved between threads.
  */
 typedef struct OwPdfFont OwPdfFont;
 
@@ -126,9 +157,9 @@ enum OwStatus ow_pdf_document_new(struct OwPdfDocument **out_doc);
  *
  * Margins are 72 pt and baselines 1.2 times the font size apart. `\n`, `\r\n` and `\r`
  * end a line, a form feed starts a new page, tabs stop every 8 characters, a leading
- * byte order mark is dropped, and long lines wrap at spaces. Fails with
- * `OW_STATUS_UNSUPPORTED` for characters the font cannot show (Helvetica: anything
- * outside WinAnsiEncoding, such as non-Latin text) and with `OW_STATUS_INVALID_ARGUMENT`
+ * byte order mark is dropped, and long lines wrap at spaces, measured with the font's
+ * advance widths. Fails with `OW_STATUS_UNSUPPORTED` for characters the font cannot
+ * show (as `ow_pdf_document_add_text` describes) and with `OW_STATUS_INVALID_ARGUMENT`
  * for sizes PDF does not allow or a page not larger than its margins.
  *
  * # Safety
@@ -166,11 +197,14 @@ enum OwStatus ow_pdf_document_add_page(struct OwPdfDocument *doc,
  * the first character starts. The text is not wrapped or clipped;
  * `ow_pdf_font_text_width` measures it.
  *
- * Fails with `OW_STATUS_UNSUPPORTED` if `text` has a character the font cannot show
- * (Helvetica: anything outside WinAnsiEncoding, such as non-Latin text, and control
- * characters such as newline and tab), and with `OW_STATUS_INVALID_ARGUMENT` for a page
- * index out of range, a font size outside 0.01 to 32767 pt, or a position outside
- * -32767 to 32767 pt. On failure the page is unchanged.
+ * Each character is drawn with its own glyph, without kerning or shaping. Fails with
+ * `OW_STATUS_UNSUPPORTED` if `text` has a character the font cannot show: for Helvetica
+ * anything outside WinAnsiEncoding, such as non-Latin text; for an embedded font a
+ * character it has no glyph for, or one of a script that needs shaping or right-to-left
+ * layout (see `ow_pdf_font_open_path`); for both, control characters such as newline
+ * and tab. Fails with `OW_STATUS_INVALID_ARGUMENT` for a page index out of range, a font
+ * size outside 0.01 to 32767 pt, or a position outside -32767 to 32767 pt. On failure
+ * the page is unchanged.
  *
  * # Safety
  *
@@ -236,6 +270,79 @@ void ow_pdf_document_free(struct OwPdfDocument *doc);
  * `out_font` must be NULL or valid for writing a pointer.
  */
 enum OwStatus ow_pdf_font_new_standard(int32_t standard_font, struct OwPdfFont **out_font);
+
+/**
+ * Opens face `face_index` of a TrueType or OpenType font file or collection at `path`
+ * (UTF-8) for embedding; use 0 for a file with one font. The file is read once; it may
+ * change or go away afterwards.
+ *
+ * The fonts the documents drawn with it embed are reduced to the glyphs they use. It
+ * shows the Latin, Greek, Cyrillic, Armenian, Georgian, Han, Hiragana and Katakana
+ * scripts, precomposed Hangul syllables, and the punctuation, digits and symbols every
+ * script shares, one glyph per character; text in scripts that need shaping or
+ * right-to-left layout is refused. Restrictions in the font's license that do not stop
+ * embedding are listed by `ow_pdf_font_note_count` and `ow_pdf_font_note`.
+ *
+ * Fails with `OW_STATUS_IO` if the file cannot be read, `OW_STATUS_INVALID_ARGUMENT` if
+ * it is not a font, has no such face or is damaged, and `OW_STATUS_UNSUPPORTED` if its
+ * license forbids embedding or its outlines cannot be embedded (CFF2). On success
+ * `*out_font` is a new handle for `ow_pdf_font_free`.
+ *
+ * # Safety
+ *
+ * `path` must be NULL or a NUL-terminated string; `out_font` must be NULL or valid for
+ * writing a pointer.
+ */
+enum OwStatus ow_pdf_font_open_path(const char *path,
+                                    uint32_t face_index,
+                                    struct OwPdfFont **out_font);
+
+/**
+ * Opens face `face_index` of a TrueType or OpenType font or font collection in the
+ * `len` bytes at `data`, as `ow_pdf_font_open_path` opens a file. The bytes are copied;
+ * the caller keeps its buffer.
+ *
+ * Fails as `ow_pdf_font_open_path`, apart from reading the file.
+ *
+ * # Safety
+ *
+ * `data` must be NULL or valid for reading `len` bytes; `out_font` must be NULL or valid
+ * for writing a pointer.
+ */
+enum OwStatus ow_pdf_font_open_bytes(const uint8_t *data,
+                                     size_t len,
+                                     uint32_t face_index,
+                                     struct OwPdfFont **out_font);
+
+/**
+ * Returns in `*out_count` the number of embedding notes of `font`: what its user should
+ * know about the font's license and format, such as a license that forbids subsetting.
+ * None of them stops the font from being used. A standard font has none.
+ *
+ * # Safety
+ *
+ * `font` must be NULL or a live handle; `out_count` must be NULL or valid for writing a
+ * `size_t`.
+ */
+enum OwStatus ow_pdf_font_note_count(const struct OwPdfFont *font, size_t *out_count);
+
+/**
+ * Returns embedding note `index` (counting from 0) of `font`: its kind, an
+ * `OW_FONT_NOTE_*` value, in `*out_kind`, and a sentence that describes it in
+ * `*out_message`, UTF-8 and owned by the font: it stays valid until the font is freed.
+ *
+ * Fails with `OW_STATUS_INVALID_ARGUMENT` if `index` is not below the count
+ * `ow_pdf_font_note_count` gives.
+ *
+ * # Safety
+ *
+ * `font` must be NULL or a live handle; `out_kind` and `out_message` must each be NULL
+ * or valid for writing.
+ */
+enum OwStatus ow_pdf_font_note(const struct OwPdfFont *font,
+                               size_t index,
+                               int32_t *out_kind,
+                               const char **out_message);
 
 /**
  * Returns in `*out_width_pt` the width of `text` drawn in `font` at `font_size_pt`, as

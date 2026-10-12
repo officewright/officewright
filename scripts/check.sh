@@ -40,6 +40,8 @@ case $os in
 linux)
 	need qpdf "apt install qpdf"
 	need pdftotext "apt install poppler-utils"
+	need pdffonts "apt install poppler-utils"
+	need pdftoppm "apt install poppler-utils"
 	need cc "apt install gcc"
 	need c++ "apt install g++"
 	need nm "apt install binutils"
@@ -48,6 +50,8 @@ linux)
 macos)
 	need qpdf "brew install qpdf"
 	need pdftotext "brew install poppler"
+	need pdffonts "brew install poppler"
+	need pdftoppm "brew install poppler"
 	need cc "xcode-select --install"
 	need c++ "xcode-select --install"
 	need nm "xcode-select --install"
@@ -104,7 +108,7 @@ step "published crates leave out third-party data"
 # Adobe's AFM files, the test fonts and the tests that read them are not under
 # Officewright's license; see THIRD-PARTY-NOTICES.md. The test fonts live outside every crate.
 packaged=$(cargo package --list --allow-dirty --quiet -p officewright-pdf)
-if printf '%s\n' "$packaged" | grep -E '^(data/afm/|tests/helvetica_afm\.rs$)'; then
+if printf '%s\n' "$packaged" | grep -E '^(data/afm/|tests/helvetica_afm\.rs$|tests/embedded_fonts\.rs$)'; then
 	fail "officewright-pdf would publish the files above"
 fi
 packaged=$(cargo package --list --allow-dirty --quiet -p officewright-font)
@@ -150,7 +154,7 @@ scripts/check-capi.sh target/capi
 # The PDF bytes do not depend on the platform (the golden snapshot test checks them on
 # every OS), and Windows has no official poppler build, so this runs on Linux and macOS.
 if [ "$os" != windows ]; then
-	step "PDF output (qpdf, pdftotext)"
+	step "PDF output (qpdf, pdftotext, pdffonts, pdftoppm)"
 	cargo build -p officewright-cli
 	OW_CLI=${CARGO_TARGET_DIR:-target}/debug/officewright "$python" -B -m unittest discover -s tests/pdf-output -v
 fi

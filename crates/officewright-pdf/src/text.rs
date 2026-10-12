@@ -2,7 +2,7 @@ use std::{iter, mem};
 
 use officewright_core::{PageSize, Pt};
 
-use crate::font::check_font_size;
+use crate::font::{Lookup, check_font_size};
 use crate::{Document, Error, Font, Result};
 
 /// Margin on every side of the page.
@@ -16,7 +16,8 @@ const TAB_STOP: usize = 8;
 
 /// Lays out plain text on pages of `page_size`, in `font` at `font_size`.
 ///
-/// Margins are 72 pt on every side and baselines are 1.2 × `font_size` apart.
+/// Margins are 72 pt on every side and baselines are 1.2 × `font_size` apart. Lines are
+/// measured with the font's advance widths, as [`Font::text_width`] measures them.
 ///
 /// - `\n`, `\r\n` and `\r` end a line; a form feed (`\f`) ends a line and starts a new
 ///   page. A line break at the very end of the text adds no empty line or page.
@@ -38,9 +39,10 @@ const TAB_STOP: usize = 8;
 ///
 /// # Errors
 ///
-/// [`Error::Unencodable`] for any other character the font's encoding lacks, with its
-/// byte offset in `text`; [`Error::InvalidFontSize`], [`Error::InvalidPageSize`], and
-/// [`Error::NoRoomForText`] if the page is not larger than its margins.
+/// For any other character the font cannot show, the errors of
+/// [`Page::add_text`](crate::Page::add_text) with the character's byte offset in `text`;
+/// [`Error::InvalidFontSize`], [`Error::InvalidPageSize`], and [`Error::NoRoomForText`]
+/// if the page is not larger than its margins.
 pub fn text_to_pdf(
     text: &str,
     page_size: PageSize,
@@ -63,8 +65,9 @@ pub fn text_to_pdf(
     let max_units = line_width * 1000.0 / font_size.0;
     let mut y = top;
     let mut page_has_lines = false;
-    for paragraph in paragraphs(text, font)? {
-        for (i, line) in wrap(&paragraph.text, font, max_units)
+    let lookup = font.lookup();
+    for paragraph in paragraphs(text, &lookup)? {
+        for (i, line) in wrap(&paragraph.text, &lookup, max_units)
             .into_iter()
             .enumerate()
         {
@@ -93,7 +96,7 @@ struct Paragraph {
 }
 
 /// Splits `text` into lines, expands tabs and checks every character.
-fn paragraphs(text: &str, font: &Font) -> Result<Vec<Paragraph>> {
+fn paragraphs(text: &str, lookup: &Lookup<'_>) -> Result<Vec<Paragraph>> {
     let (body, base) = match text.strip_prefix('\u{FEFF}') {
         Some(body) => (body, '\u{FEFF}'.len_utf8()),
         None => (text, 0),
@@ -120,15 +123,10 @@ fn paragraphs(text: &str, font: &Font) -> Result<Vec<Paragraph>> {
                 current.text.extend(iter::repeat_n(' ', spaces));
                 column += spaces;
             }
-            _ if font.code(ch).is_some() => {
+            _ => {
+                lookup.glyph(ch, base + offset)?;
                 current.text.push(ch);
                 column += 1;
-            }
-            _ => {
-                return Err(Error::Unencodable {
-                    ch,
-                    offset: base + offset,
-                });
             }
         }
     }
@@ -141,7 +139,7 @@ fn paragraphs(text: &str, font: &Font) -> Result<Vec<Paragraph>> {
 
 /// Breaks `line` into pieces no wider than `max_units` (1/1000 em), preferring spaces.
 /// Returns at least one piece.
-fn wrap<'a>(line: &'a str, font: &Font, max_units: f64) -> Vec<&'a str> {
+fn wrap<'a>(line: &'a str, lookup: &Lookup<'_>, max_units: f64) -> Vec<&'a str> {
     let mut pieces = Vec::new();
     let mut rest = line;
     loop {
@@ -150,7 +148,7 @@ fn wrap<'a>(line: &'a str, font: &Font, max_units: f64) -> Vec<&'a str> {
         let mut last_space = None;
         let mut has_text = false;
         for (i, ch) in rest.char_indices() {
-            let advance = units(font, ch);
+            let advance = units(lookup, ch);
             // The first character always fits, so every piece makes progress.
             if i > 0 && width + advance > max_units {
                 overflow = Some(i);
@@ -179,9 +177,8 @@ fn wrap<'a>(line: &'a str, font: &Font, max_units: f64) -> Vec<&'a str> {
 }
 
 /// The advance width of `ch` in 1/1000 em; 0 for characters the font cannot show.
-fn units(font: &Font, ch: char) -> f64 {
-    font.code(ch)
-        .map_or(0.0, |code| f64::from(font.width(code)))
+fn units(lookup: &Lookup<'_>, ch: char) -> f64 {
+    lookup.glyph(ch, 0).map_or(0.0, |glyph| glyph.advance)
 }
 
 #[cfg(test)]
@@ -194,7 +191,10 @@ mod tests {
     }
 
     fn width(piece: &str) -> f64 {
-        piece.chars().map(|ch| units(&helvetica(), ch)).sum()
+        piece
+            .chars()
+            .map(|ch| units(&helvetica().lookup(), ch))
+            .sum()
     }
 
     fn paragraph(text: &str, new_page: bool) -> Paragraph {
@@ -207,7 +207,7 @@ mod tests {
     #[test]
     fn splits_lines_on_every_kind_of_break() {
         assert_eq!(
-            paragraphs("a\nb\r\nc\rd\u{C}e\n", &helvetica()).unwrap(),
+            paragraphs("a\nb\r\nc\rd\u{C}e\n", &helvetica().lookup()).unwrap(),
             [
                 paragraph("a", false),
                 paragraph("b", false),
@@ -221,16 +221,16 @@ mod tests {
     #[test]
     fn keeps_empty_lines_but_not_a_final_break() {
         assert_eq!(
-            paragraphs("a\n\nb\n", &helvetica()).unwrap(),
+            paragraphs("a\n\nb\n", &helvetica().lookup()).unwrap(),
             [
                 paragraph("a", false),
                 paragraph("", false),
                 paragraph("b", false)
             ]
         );
-        assert_eq!(paragraphs("", &helvetica()).unwrap(), []);
+        assert_eq!(paragraphs("", &helvetica().lookup()).unwrap(), []);
         assert_eq!(
-            paragraphs("a\u{C}", &helvetica()).unwrap(),
+            paragraphs("a\u{C}", &helvetica().lookup()).unwrap(),
             [paragraph("a", false)]
         );
     }
@@ -238,7 +238,7 @@ mod tests {
     #[test]
     fn expands_tabs_to_multiples_of_eight() {
         assert_eq!(
-            paragraphs("ab\tc\t\td", &helvetica()).unwrap(),
+            paragraphs("ab\tc\t\td", &helvetica().lookup()).unwrap(),
             [paragraph(
                 &format!("ab{}c{}d", " ".repeat(6), " ".repeat(15)),
                 false
@@ -249,10 +249,10 @@ mod tests {
     #[test]
     fn drops_a_leading_byte_order_mark_and_reports_offsets_in_the_input() {
         assert_eq!(
-            paragraphs("\u{FEFF}a", &helvetica()).unwrap(),
+            paragraphs("\u{FEFF}a", &helvetica().lookup()).unwrap(),
             [paragraph("a", false)]
         );
-        let err = paragraphs("\u{FEFF}ab\nЖ", &helvetica()).unwrap_err();
+        let err = paragraphs("\u{FEFF}ab\nЖ", &helvetica().lookup()).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -263,7 +263,7 @@ mod tests {
             "{err:?}"
         );
         assert!(matches!(
-            paragraphs("a\u{1}", &helvetica()).unwrap_err(),
+            paragraphs("a\u{1}", &helvetica().lookup()).unwrap_err(),
             Error::Unencodable {
                 ch: '\u{1}',
                 offset: 1
@@ -276,7 +276,7 @@ mod tests {
         let line = "The quick brown fox jumps over the lazy dog. ".repeat(5);
         let line = line.trim_end();
         let max = 10_000.0;
-        let pieces = wrap(line, &helvetica(), max);
+        let pieces = wrap(line, &helvetica().lookup(), max);
         assert!(pieces.len() > 1);
         for piece in &pieces {
             assert!(width(piece) <= max, "{piece:?}");
@@ -290,23 +290,23 @@ mod tests {
 
     #[test]
     fn breaks_a_word_longer_than_a_line() {
-        let pieces = wrap("WWWWWWWWWW", &helvetica(), 3000.0);
+        let pieces = wrap("WWWWWWWWWW", &helvetica().lookup(), 3000.0);
         assert_eq!(pieces, ["WWW", "WWW", "WWW", "W"]);
     }
 
     #[test]
     fn puts_at_least_one_character_on_each_line() {
-        assert_eq!(wrap("WW", &helvetica(), 1.0), ["W", "W"]);
-        assert_eq!(wrap("", &helvetica(), 1.0), [""]);
+        assert_eq!(wrap("WW", &helvetica().lookup(), 1.0), ["W", "W"]);
+        assert_eq!(wrap("", &helvetica().lookup(), 1.0), [""]);
     }
 
     #[test]
     fn keeps_indentation_and_drops_spaces_at_a_wrap() {
         assert_eq!(
-            wrap("    aaa bbb", &helvetica(), 3000.0),
+            wrap("    aaa bbb", &helvetica().lookup(), 3000.0),
             ["    aaa", "bbb"]
         );
-        assert_eq!(wrap("aaa      ", &helvetica(), 1700.0), ["aaa"]);
+        assert_eq!(wrap("aaa      ", &helvetica().lookup(), 1700.0), ["aaa"]);
     }
 
     #[test]

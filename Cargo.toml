@@ -14,6 +14,7 @@ repository = "https://github.com/officewright/officewright"
 [workspace.dependencies]
 officewright-core = { path = "crates/officewright-core", version = "0.1.0" }
 officewright-doc = { path = "crates/officewright-doc", version = "0.1.0" }
+officewright-font = { path = "crates/officewright-font", version = "0.1.0" }
 officewright-pdf = { path = "crates/officewright-pdf", version = "0.1.0" }
 officewright-slides = { path = "crates/officewright-slides", version = "0.1.0" }
 officewright-xls = { path = "crates/officewright-xls", version = "0.1.0" }

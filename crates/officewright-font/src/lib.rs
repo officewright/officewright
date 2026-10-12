@@ -16,6 +16,7 @@
 #![forbid(unsafe_code)]
 
 mod book;
+mod cff;
 mod error;
 mod face;
 mod font;
