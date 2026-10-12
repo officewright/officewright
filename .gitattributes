@@ -1,0 +1,19 @@
+* text=auto eol=lf
+
+# Test documents must stay byte-exact. PDF and RTF can be pure ASCII, so git would
+# otherwise treat them as text and normalize their line endings.
+*.doc binary
+*.docx binary
+*.pdf binary
+*.ppt binary
+*.pptx binary
+*.rtf binary
+*.xls binary
+*.xlsx binary
+
+# Third-party data is kept byte for byte as published (Helvetica.afm has CRLF endings).
+crates/officewright-pdf/data/afm/* -text
+tests/fonts/** -text
+
+# Exact bytes matter: the fixture has a CRLF line ending and a form feed.
+tests/pdf-output/sample.txt -text

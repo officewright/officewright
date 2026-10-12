@@ -1,0 +1,23 @@
+[package]
+name = "officewright-font"
+description = "Font loading, metrics, subsetting and font resolution for officewright"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+license-file.workspace = true
+repository.workspace = true
+# The test fonts under tests/fonts/ at the repository root keep their own licenses (see
+# THIRD-PARTY-NOTICES.md) and are not part of this crate, so the test that reads them
+# stays in the repository too.
+exclude = ["tests/third_party_fonts.rs"]
+
+[dependencies]
+officewright-core.workspace = true
+skrifa = { version = "0.48.0", default-features = false, features = ["std"] }
+# Without `variable-fonts`: that feature pulls an older skrifa, a second copy of the
+# parser that `cargo deny` rejects.
+subsetter = { version = "0.2.6", default-features = false }
+
+[lints]
+workspace = true

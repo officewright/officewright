@@ -1,0 +1,33 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "BUSL-1.1"
+# Published crates carry the license text: the BSL requires it on every copy.
+license-file = "LICENSE"
+repository = "https://github.com/officewright/officewright"
+
+[workspace.dependencies]
+officewright-core = { path = "crates/officewright-core", version = "0.1.0" }
+officewright-doc = { path = "crates/officewright-doc", version = "0.1.0" }
+officewright-pdf = { path = "crates/officewright-pdf", version = "0.1.0" }
+officewright-slides = { path = "crates/officewright-slides", version = "0.1.0" }
+officewright-xls = { path = "crates/officewright-xls", version = "0.1.0" }
+
+[workspace.lints.rust]
+missing_docs = "warn"
+
+# Library code must not panic on input: malformed documents produce `Err`.
+# clippy.toml allows these lints in tests.
+[workspace.lints.clippy]
+expect_used = "warn"
+indexing_slicing = "warn"
+panic = "warn"
+todo = "warn"
+undocumented_unsafe_blocks = "warn"
+unimplemented = "warn"
+unwrap_used = "warn"

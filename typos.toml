@@ -1,0 +1,12 @@
+[default]
+# MSVC's object-file option, used in scripts/check.sh.
+extend-ignore-re = ['-Fo"']
+
+[files]
+# Test documents are third-party content; only our own text is spell-checked.
+extend-exclude = ["tests/corpus/*", "!tests/corpus/SOURCES.md"]
+
+[default.extend-words]
+# OpenType tags, not misspellings: the glyph location table and the width axis.
+loca = "loca"
+wdth = "wdth"

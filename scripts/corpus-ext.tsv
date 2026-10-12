@@ -1,0 +1,11 @@
+# External test corpora fetched into corpus-ext/ by scripts/fetch-corpus.sh. Never committed.
+# Tab-separated: name, kind, url, pin, detail, license.
+#   git:     pin is the commit SHA; detail is a space-separated sparse-checkout list ("." = all).
+#   archive: pin is the SHA-256 of the zip; detail is its size in bytes (checked by --check).
+poi	git	https://github.com/apache/poi.git	f3688f45b0de8934fb32736ba14efc5bbca4a580	test-data/document test-data/spreadsheet test-data/slideshow	Apache-2.0
+pdfjs	git	https://github.com/mozilla/pdf.js.git	e0b4f473cf6bc0aff8a35632c8ecec60776af543	test/pdfs	Apache-2.0
+qpdf	git	https://github.com/qpdf/qpdf.git	4eba95899886e851cc41d76886483b347612f2a8	qpdf/qtest/qpdf	Apache-2.0
+pdfium	git	https://pdfium.googlesource.com/pdfium_tests	86219637fec25a23f5f87252b3bd156ff9ca848e	.	BSD-3-Clause
+libreoffice	git	https://github.com/LibreOffice/core.git	016fd5d049256dc849111f60870f15201fcd1526	sw/qa sc/qa sd/qa	MPL-2.0
+govdocs1-000	archive	https://downloads.digitalcorpora.org/corpora/files/govdocs1/zipfiles/000.zip	7fb4673ac1905a3ed16a9c5780a70c729c3abc575b06c155b7042b91fa5946aa	486762106	research use, see digitalcorpora.org
+cc-pdf-0000	archive	https://downloads.digitalcorpora.org/corpora/files/CC-MAIN-2021-31-PDF-UNTRUNCATED/zipfiles/0000-0999/0000.zip	a6b28286550f6dcfdebec0454d57cb9797ca4c5792c85a09cb89b207f3f407fb	1266879273	research use, see digitalcorpora.org

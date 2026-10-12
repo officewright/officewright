@@ -1,0 +1,34 @@
+[package]
+name = "officewright-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "BUSL-1.1"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+officewright-font = { path = "../crates/officewright-font" }
+# The version officewright-font uses, to read the name table for typst/subsetter#30.
+skrifa = { version = "0.48.0", default-features = false, features = ["std"] }
+
+# A workspace of its own, as cargo-fuzz lays it out: the targets build with nightly-only
+# flags, and libfuzzer-sys bundles LLVM's libFuzzer (NCSA license), which officewright
+# never ships, so the workspace-wide checks and `cargo deny` leave it out.
+[workspace]
+
+[[bin]]
+name = "font_parse"
+path = "fuzz_targets/font_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "font_subset"
+path = "fuzz_targets/font_subset.rs"
+test = false
+doc = false
+bench = false

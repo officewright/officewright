@@ -1,0 +1,73 @@
+[graph]
+all-features = true
+
+[advisories]
+yanked = "deny"
+
+[licenses]
+allow = [
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "MIT",
+  "Unicode-3.0",
+  "Zlib",
+]
+# The list is policy, not an inventory of what is in use today.
+unused-allowed-license = "allow"
+# Our own crates are under the Business Source License (see LICENSE). It is allowed
+# for them by name only, so a third-party BUSL-1.1 dependency is still rejected.
+# Every new crate in crates/ gets an entry here. officewright-opc arrives with the
+# OPC pull requests; until then cargo deny warns that its exception is unused.
+[[licenses.exceptions]]
+allow = ["BUSL-1.1"]
+crate = "officewright"
+
+[[licenses.exceptions]]
+allow = ["BUSL-1.1"]
+crate = "officewright-cli"
+
+[[licenses.exceptions]]
+allow = ["BUSL-1.1"]
+crate = "officewright-core"
+
+[[licenses.exceptions]]
+allow = ["BUSL-1.1"]
+crate = "officewright-doc"
+
+[[licenses.exceptions]]
+allow = ["BUSL-1.1"]
+crate = "officewright-ffi"
+
+[[licenses.exceptions]]
+allow = ["BUSL-1.1"]
+crate = "officewright-font"
+
+[[licenses.exceptions]]
+allow = ["BUSL-1.1"]
+crate = "officewright-layout"
+
+[[licenses.exceptions]]
+allow = ["BUSL-1.1"]
+crate = "officewright-opc"
+
+[[licenses.exceptions]]
+allow = ["BUSL-1.1"]
+crate = "officewright-pdf"
+
+[[licenses.exceptions]]
+allow = ["BUSL-1.1"]
+crate = "officewright-slides"
+
+[[licenses.exceptions]]
+allow = ["BUSL-1.1"]
+crate = "officewright-xls"
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

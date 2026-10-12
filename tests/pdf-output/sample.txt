@@ -1,0 +1,86 @@
+Officewright text-to-pdf sample
+
+This paragraph is a single long line, so text-to-pdf has to wrap it at spaces to fit between the margins. It repeats a few sentences to span several lines on an A4 page and more on a narrow one: the quick brown fox jumps over the lazy dog, while Zwölf Boxkämpfer jagen Viktor quer über den großen Sylter Deich, and « Voix ambiguë d’un cœur qui au zéphyr préfère les jattes de kiwis » — “quoted” text costs €5 or £3, 50‰ of the time…
+
+	Indented with a tab,	and a tab in the middle.
+Parentheses (nested (deeply)) and a backslash \ and unbalanced ) ( must survive.
+Windows line ending follows.
+
+Every character of WinAnsiEncoding, separated by spaces:
+  ! " # $ % & ' ( ) * + , - . /
+0 1 2 3 4 5 6 7 8 9 : ; < = > ?
+@ A B C D E F G H I J K L M N O
+P Q R S T U V W X Y Z [ \ ] ^ _
+` a b c d e f g h i j k l m n o
+p q r s t u v w x y z { | } ~ €
+‚ ƒ „ … † ‡ ˆ ‰ Š ‹ Œ Ž ‘ ’ “ ”
+• – — ˜ ™ š › œ ž Ÿ   ¡ ¢ £ ¤ ¥
+¦ § ¨ © ª « ¬ ­ ® ¯ ° ± ² ³ ´ µ
+¶ · ¸ ¹ º » ¼ ½ ¾ ¿ À Á Â Ã Ä Å
+Æ Ç È É Ê Ë Ì Í Î Ï Ð Ñ Ò Ó Ô Õ
+Ö × Ø Ù Ú Û Ü Ý Þ ß à á â ã ä å
+æ ç è é ê ë ì í î ï ð ñ ò ó ô õ
+ö ÷ ø ù ú û ü ý þ ÿ
+
+Numbered line 001 to fill the first page and continue on the next one.
+Numbered line 002 to fill the first page and continue on the next one.
+Numbered line 003 to fill the first page and continue on the next one.
+Numbered line 004 to fill the first page and continue on the next one.
+Numbered line 005 to fill the first page and continue on the next one.
+Numbered line 006 to fill the first page and continue on the next one.
+Numbered line 007 to fill the first page and continue on the next one.
+Numbered line 008 to fill the first page and continue on the next one.
+Numbered line 009 to fill the first page and continue on the next one.
+Numbered line 010 to fill the first page and continue on the next one.
+Numbered line 011 to fill the first page and continue on the next one.
+Numbered line 012 to fill the first page and continue on the next one.
+Numbered line 013 to fill the first page and continue on the next one.
+Numbered line 014 to fill the first page and continue on the next one.
+Numbered line 015 to fill the first page and continue on the next one.
+Numbered line 016 to fill the first page and continue on the next one.
+Numbered line 017 to fill the first page and continue on the next one.
+Numbered line 018 to fill the first page and continue on the next one.
+Numbered line 019 to fill the first page and continue on the next one.
+Numbered line 020 to fill the first page and continue on the next one.
+Numbered line 021 to fill the first page and continue on the next one.
+Numbered line 022 to fill the first page and continue on the next one.
+Numbered line 023 to fill the first page and continue on the next one.
+Numbered line 024 to fill the first page and continue on the next one.
+Numbered line 025 to fill the first page and continue on the next one.
+Numbered line 026 to fill the first page and continue on the next one.
+Numbered line 027 to fill the first page and continue on the next one.
+Numbered line 028 to fill the first page and continue on the next one.
+Numbered line 029 to fill the first page and continue on the next one.
+Numbered line 030 to fill the first page and continue on the next one.
+Numbered line 031 to fill the first page and continue on the next one.
+Numbered line 032 to fill the first page and continue on the next one.
+Numbered line 033 to fill the first page and continue on the next one.
+Numbered line 034 to fill the first page and continue on the next one.
+Numbered line 035 to fill the first page and continue on the next one.
+Numbered line 036 to fill the first page and continue on the next one.
+Numbered line 037 to fill the first page and continue on the next one.
+Numbered line 038 to fill the first page and continue on the next one.
+Numbered line 039 to fill the first page and continue on the next one.
+Numbered line 040 to fill the first page and continue on the next one.
+Numbered line 041 to fill the first page and continue on the next one.
+Numbered line 042 to fill the first page and continue on the next one.
+Numbered line 043 to fill the first page and continue on the next one.
+Numbered line 044 to fill the first page and continue on the next one.
+Numbered line 045 to fill the first page and continue on the next one.
+Numbered line 046 to fill the first page and continue on the next one.
+Numbered line 047 to fill the first page and continue on the next one.
+Numbered line 048 to fill the first page and continue on the next one.
+Numbered line 049 to fill the first page and continue on the next one.
+Numbered line 050 to fill the first page and continue on the next one.
+Numbered line 051 to fill the first page and continue on the next one.
+Numbered line 052 to fill the first page and continue on the next one.
+Numbered line 053 to fill the first page and continue on the next one.
+Numbered line 054 to fill the first page and continue on the next one.
+Numbered line 055 to fill the first page and continue on the next one.
+Numbered line 056 to fill the first page and continue on the next one.
+Numbered line 057 to fill the first page and continue on the next one.
+Numbered line 058 to fill the first page and continue on the next one.
+Numbered line 059 to fill the first page and continue on the next one.
+Numbered line 060 to fill the first page and continue on the next one.
+This line starts a new page after a form feed.
+This paragraph is a single long line, so text-to-pdf has to wrap it at spaces to fit between the margins. It repeats a few sentences to span several lines on an A4 page and more on a narrow one: the quick brown fox jumps over the lazy dog, while Zwölf Boxkämpfer jagen Viktor quer über den großen Sylter Deich, and « Voix ambiguë d’un cœur qui au zéphyr préfère les jattes de kiwis » — “quoted” text costs €5 or £3, 50‰ of the time…

@@ -1,0 +1,2 @@
+# Third-party TOML in the external corpus is not ours to format.
+exclude = ["corpus-ext/**", "target/**"]

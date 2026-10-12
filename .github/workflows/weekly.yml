@@ -1,0 +1,19 @@
+name: Weekly
+
+on:
+  schedule:
+    - cron: "41 4 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  corpus:
+    name: fetch every external corpus
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      # Downloads every source from scratch and verifies every pin and SHA-256.
+      - run: scripts/fetch-corpus.sh all

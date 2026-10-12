@@ -1,0 +1,12 @@
+[package]
+name = "officewright-core"
+description = "Units, geometry and error types shared by the officewright crates"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+license-file.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true

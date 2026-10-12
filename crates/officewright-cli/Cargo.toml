@@ -1,0 +1,29 @@
+[package]
+name = "officewright-cli"
+description = "Command-line tool for officewright"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+license-file.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "officewright"
+path = "src/main.rs"
+# A binary has no API to document, and its rustdoc output would overwrite the
+# `officewright` facade docs, which share the crate name.
+doc = false
+
+[dependencies]
+# Without default features: no colour or suggestions, so no Windows console crates.
+clap = { version = "4.6.7", default-features = false, features = [
+  "std",
+  "help",
+  "usage",
+  "error-context",
+] }
+officewright-pdf.workspace = true
+
+[lints]
+workspace = true

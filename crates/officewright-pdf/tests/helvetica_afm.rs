@@ -1,0 +1,273 @@
+//! Checks the Helvetica widths against `Helvetica.afm` from Adobe's Core 14 AFM files.
+//!
+//! This test and `data/afm` are excluded from the published crate; see
+//! THIRD-PARTY-NOTICES.md.
+
+use std::collections::HashMap;
+
+use officewright_pdf::{Font, Pt, StandardFont};
+
+/// The characters of WinAnsiEncoding with their glyph names (ISO 32000-1, Annex D.2).
+/// Annex D shows the no-break space (U+00A0) with the `space` glyph and the soft hyphen
+/// (U+00AD) with `hyphen`; both are escaped below because they are invisible.
+const GLYPHS: [(char, &str); 218] = [
+    (' ', "space"),
+    ('!', "exclam"),
+    ('"', "quotedbl"),
+    ('#', "numbersign"),
+    ('$', "dollar"),
+    ('%', "percent"),
+    ('&', "ampersand"),
+    ('\'', "quotesingle"),
+    ('(', "parenleft"),
+    (')', "parenright"),
+    ('*', "asterisk"),
+    ('+', "plus"),
+    (',', "comma"),
+    ('-', "hyphen"),
+    ('.', "period"),
+    ('/', "slash"),
+    ('0', "zero"),
+    ('1', "one"),
+    ('2', "two"),
+    ('3', "three"),
+    ('4', "four"),
+    ('5', "five"),
+    ('6', "six"),
+    ('7', "seven"),
+    ('8', "eight"),
+    ('9', "nine"),
+    (':', "colon"),
+    (';', "semicolon"),
+    ('<', "less"),
+    ('=', "equal"),
+    ('>', "greater"),
+    ('?', "question"),
+    ('@', "at"),
+    ('A', "A"),
+    ('B', "B"),
+    ('C', "C"),
+    ('D', "D"),
+    ('E', "E"),
+    ('F', "F"),
+    ('G', "G"),
+    ('H', "H"),
+    ('I', "I"),
+    ('J', "J"),
+    ('K', "K"),
+    ('L', "L"),
+    ('M', "M"),
+    ('N', "N"),
+    ('O', "O"),
+    ('P', "P"),
+    ('Q', "Q"),
+    ('R', "R"),
+    ('S', "S"),
+    ('T', "T"),
+    ('U', "U"),
+    ('V', "V"),
+    ('W', "W"),
+    ('X', "X"),
+    ('Y', "Y"),
+    ('Z', "Z"),
+    ('[', "bracketleft"),
+    ('\\', "backslash"),
+    (']', "bracketright"),
+    ('^', "asciicircum"),
+    ('_', "underscore"),
+    ('`', "grave"),
+    ('a', "a"),
+    ('b', "b"),
+    ('c', "c"),
+    ('d', "d"),
+    ('e', "e"),
+    ('f', "f"),
+    ('g', "g"),
+    ('h', "h"),
+    ('i', "i"),
+    ('j', "j"),
+    ('k', "k"),
+    ('l', "l"),
+    ('m', "m"),
+    ('n', "n"),
+    ('o', "o"),
+    ('p', "p"),
+    ('q', "q"),
+    ('r', "r"),
+    ('s', "s"),
+    ('t', "t"),
+    ('u', "u"),
+    ('v', "v"),
+    ('w', "w"),
+    ('x', "x"),
+    ('y', "y"),
+    ('z', "z"),
+    ('{', "braceleft"),
+    ('|', "bar"),
+    ('}', "braceright"),
+    ('~', "asciitilde"),
+    ('€', "Euro"),
+    ('‚', "quotesinglbase"),
+    ('ƒ', "florin"),
+    ('„', "quotedblbase"),
+    ('…', "ellipsis"),
+    ('†', "dagger"),
+    ('‡', "daggerdbl"),
+    ('ˆ', "circumflex"),
+    ('‰', "perthousand"),
+    ('Š', "Scaron"),
+    ('‹', "guilsinglleft"),
+    ('Œ', "OE"),
+    ('Ž', "Zcaron"),
+    ('‘', "quoteleft"),
+    ('’', "quoteright"),
+    ('“', "quotedblleft"),
+    ('”', "quotedblright"),
+    ('•', "bullet"),
+    ('–', "endash"),
+    ('—', "emdash"),
+    ('˜', "tilde"),
+    ('™', "trademark"),
+    ('š', "scaron"),
+    ('›', "guilsinglright"),
+    ('œ', "oe"),
+    ('ž', "zcaron"),
+    ('Ÿ', "Ydieresis"),
+    ('\u{A0}', "space"),
+    ('¡', "exclamdown"),
+    ('¢', "cent"),
+    ('£', "sterling"),
+    ('¤', "currency"),
+    ('¥', "yen"),
+    ('¦', "brokenbar"),
+    ('§', "section"),
+    ('¨', "dieresis"),
+    ('©', "copyright"),
+    ('ª', "ordfeminine"),
+    ('«', "guillemotleft"),
+    ('¬', "logicalnot"),
+    ('\u{AD}', "hyphen"),
+    ('®', "registered"),
+    ('¯', "macron"),
+    ('°', "degree"),
+    ('±', "plusminus"),
+    ('²', "twosuperior"),
+    ('³', "threesuperior"),
+    ('´', "acute"),
+    ('µ', "mu"),
+    ('¶', "paragraph"),
+    ('·', "periodcentered"),
+    ('¸', "cedilla"),
+    ('¹', "onesuperior"),
+    ('º', "ordmasculine"),
+    ('»', "guillemotright"),
+    ('¼', "onequarter"),
+    ('½', "onehalf"),
+    ('¾', "threequarters"),
+    ('¿', "questiondown"),
+    ('À', "Agrave"),
+    ('Á', "Aacute"),
+    ('Â', "Acircumflex"),
+    ('Ã', "Atilde"),
+    ('Ä', "Adieresis"),
+    ('Å', "Aring"),
+    ('Æ', "AE"),
+    ('Ç', "Ccedilla"),
+    ('È', "Egrave"),
+    ('É', "Eacute"),
+    ('Ê', "Ecircumflex"),
+    ('Ë', "Edieresis"),
+    ('Ì', "Igrave"),
+    ('Í', "Iacute"),
+    ('Î', "Icircumflex"),
+    ('Ï', "Idieresis"),
+    ('Ð', "Eth"),
+    ('Ñ', "Ntilde"),
+    ('Ò', "Ograve"),
+    ('Ó', "Oacute"),
+    ('Ô', "Ocircumflex"),
+    ('Õ', "Otilde"),
+    ('Ö', "Odieresis"),
+    ('×', "multiply"),
+    ('Ø', "Oslash"),
+    ('Ù', "Ugrave"),
+    ('Ú', "Uacute"),
+    ('Û', "Ucircumflex"),
+    ('Ü', "Udieresis"),
+    ('Ý', "Yacute"),
+    ('Þ', "Thorn"),
+    ('ß', "germandbls"),
+    ('à', "agrave"),
+    ('á', "aacute"),
+    ('â', "acircumflex"),
+    ('ã', "atilde"),
+    ('ä', "adieresis"),
+    ('å', "aring"),
+    ('æ', "ae"),
+    ('ç', "ccedilla"),
+    ('è', "egrave"),
+    ('é', "eacute"),
+    ('ê', "ecircumflex"),
+    ('ë', "edieresis"),
+    ('ì', "igrave"),
+    ('í', "iacute"),
+    ('î', "icircumflex"),
+    ('ï', "idieresis"),
+    ('ð', "eth"),
+    ('ñ', "ntilde"),
+    ('ò', "ograve"),
+    ('ó', "oacute"),
+    ('ô', "ocircumflex"),
+    ('õ', "otilde"),
+    ('ö', "odieresis"),
+    ('÷', "divide"),
+    ('ø', "oslash"),
+    ('ù', "ugrave"),
+    ('ú', "uacute"),
+    ('û', "ucircumflex"),
+    ('ü', "udieresis"),
+    ('ý', "yacute"),
+    ('þ', "thorn"),
+    ('ÿ', "ydieresis"),
+];
+
+#[test]
+fn widths_match_the_afm() {
+    // Advance widths by glyph name, from the `C` lines of the AFM file.
+    let afm: HashMap<&str, f64> = include_str!("../data/afm/Helvetica.afm")
+        .lines()
+        .filter(|line| line.starts_with("C "))
+        .map(|line| {
+            let field = |key: &str| {
+                line.split(';')
+                    .find_map(|part| part.trim().strip_prefix(key))
+                    .unwrap()
+            };
+            (field("N "), field("WX ").parse().unwrap())
+        })
+        .collect();
+    let helvetica = Font::standard(StandardFont::Helvetica);
+    for (ch, name) in GLYPHS {
+        assert_eq!(
+            helvetica.text_width(&ch.to_string(), Pt(1000.0)).unwrap(),
+            Pt(afm[name]),
+            "{ch:?} ({name})"
+        );
+    }
+}
+
+#[test]
+fn only_the_annex_d_characters_are_encodable() {
+    let helvetica = Font::standard(StandardFont::Helvetica);
+    let encodable: Vec<char> = (0..=0x10FFFF)
+        .filter_map(char::from_u32)
+        .filter(|ch| {
+            helvetica
+                .text_width(ch.encode_utf8(&mut [0; 4]), Pt(1.0))
+                .is_ok()
+        })
+        .collect();
+    let mut expected: Vec<char> = GLYPHS.iter().map(|&(ch, _)| ch).collect();
+    expected.sort_unstable();
+    assert_eq!(encodable, expected);
+}

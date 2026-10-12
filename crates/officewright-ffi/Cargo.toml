@@ -1,0 +1,38 @@
+[package]
+name = "officewright-ffi"
+description = "C ABI for officewright"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+license-file.workspace = true
+repository.workspace = true
+
+# Built with cargo-c (`cargo cbuild`, `cargo cinstall`) into the native library
+# `officewright` with its header and pkg-config file.
+[features]
+# Marks the package for cargo-c, which builds it with this feature enabled.
+capi = []
+
+[package.metadata.capi.library]
+name = "officewright"
+# SONAME libofficewright.so.0 while the crate is 0.x; breaking changes within 0.x
+# are signalled by ow_abi_version().
+version_suffix_components = 1
+
+[package.metadata.capi.header]
+name = "officewright"
+subdirectory = false
+# The header is committed; crate version constants would change it on every release.
+emit_version_constants = false
+
+[package.metadata.capi.pkg_config]
+name = "officewright"
+filename = "officewright"
+
+[dependencies]
+officewright-core.workspace = true
+officewright-pdf.workspace = true
+
+[lints]
+workspace = true

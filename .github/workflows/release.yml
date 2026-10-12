@@ -1,0 +1,210 @@
+name: Release
+
+# A tag v<version> builds the native library archive for every target, checks each one
+# from the unpacked archive on a fresh runner of its own platform, and drafts a GitHub
+# release with them. Pull requests that touch the packaging, and manual runs, do all of
+# that except the release.
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - Cargo.toml
+      - Cargo.lock
+      - crates/officewright-core/**
+      - crates/officewright-ffi/**
+      - crates/officewright-pdf/**
+      - scripts/check-capi.sh
+      - scripts/install-capi.sh
+      - scripts/install-cargo-c.sh
+      - scripts/package.sh
+      - scripts/release-in-container.sh
+      - tests/c/**
+      - tests/ffi-python/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Release builds use a fixed compiler, so building a tag again gives the same library.
+  RUST_TOOLCHAIN: "1.95.0"
+
+jobs:
+  version:
+    name: Version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - id: version
+        name: Read the version and match it against the tag
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)
+          [ -n "$version" ] || { echo "::error::no version in Cargo.toml"; exit 1; }
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match the crate version $version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux libraries are built in containers: manylinux_2_28 makes them run on
+          # glibc 2.28 and later (RHEL 8+, Debian 10+, Ubuntu 20.04+), Alpine on musl.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+            image: quay.io/pypa/manylinux_2_28_x86_64@sha256:4131ddd7acb9c6c966af02fe7e71edc51e078c2d41f475966697676430bfa2ae
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            image: quay.io/pypa/manylinux_2_28_aarch64@sha256:abd1230aa9e4058a74b89d27cd14ba18c0db036d7bfe6e6f219a29ea63c24eb6
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-24.04
+            image: docker.io/library/alpine:3.22@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
+          - target: x86_64-pc-windows-msvc
+            os: windows-2025
+            msvc: x64
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+            msvc: arm64
+          # cargo-c ships no x86_64 macOS build, so this one is cross-compiled on arm64;
+          # the verify job runs it on an Intel Mac.
+          - target: x86_64-apple-darwin
+            os: macos-15
+          - target: aarch64-apple-darwin
+            os: macos-15
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: Build in a container
+        if: matrix.image
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: >-
+          docker run --rm -v "$PWD:/src" -w /src -e RUST_TOOLCHAIN "$IMAGE"
+          sh scripts/release-in-container.sh "$VERSION" dist "$TARGET"
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        if: ${{ !matrix.image }}
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        if: matrix.msvc
+        with:
+          arch: ${{ matrix.msvc }}
+      - name: Build
+        if: ${{ !matrix.image }}
+        shell: bash
+        run: |
+          tools=$RUNNER_TEMP/tools
+          # A Windows path (D:\a\_temp) would break PATH, which bash splits at colons.
+          [ "$RUNNER_OS" != Windows ] || tools=$(cygpath -u "$tools")
+          scripts/install-cargo-c.sh "$tools"
+          PATH=$tools:$PATH scripts/package.sh "$VERSION" dist "$TARGET"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  verify:
+    name: Verify ${{ matrix.target }}
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-24.04
+            image: docker.io/library/alpine:3.22@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
+          - target: x86_64-pc-windows-msvc
+            os: windows-2025
+            msvc: x64
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+            msvc: arm64
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          - target: aarch64-apple-darwin
+            os: macos-15
+    runs-on: ${{ matrix.os }}
+    steps:
+      # Only the tests and scripts are used; nothing is built on this runner.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ matrix.target }}
+          path: dist
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: ${{ !matrix.image }}
+        with:
+          python-version: "3.13"
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        if: matrix.msvc
+        with:
+          arch: ${{ matrix.msvc }}
+      - name: Unpack and check
+        if: ${{ !matrix.image }}
+        shell: bash
+        run: |
+          prefix=$RUNNER_TEMP/officewright
+          [ "$RUNNER_OS" != Windows ] || prefix=$(cygpath -u "$prefix")
+          mkdir -p "$prefix"
+          for archive in dist/*; do
+            case $archive in
+              *.zip) unzip -q "$archive" -d "$prefix" ;;
+              *) tar -xzf "$archive" -C "$prefix" ;;
+            esac
+          done
+          scripts/check-capi.sh "$prefix"
+      - name: Unpack and check in a container
+        if: matrix.image
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: >-
+          docker run --rm -v "$PWD:/src:ro" -w /src "$IMAGE" sh -c
+          'apk add --no-cache bash gcc g++ musl-dev binutils python3
+          && mkdir /officewright && tar -xzf dist/*.tar.gz -C /officewright
+          && bash scripts/check-capi.sh /officewright'
+
+  publish:
+    name: Draft the release
+    if: github.ref_type == 'tag'
+    needs: [version, verify]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Draft the release with the archives and their checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          cd dist
+          sha256sum officewright-* > SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" ./* --repo "$GITHUB_REPOSITORY" \
+            --draft --verify-tag --title "officewright $VERSION" --generate-notes
