@@ -63,7 +63,6 @@ pub struct Package {
     read_size: AtomicU64,
 }
 
-#[derive(Debug)]
 struct PartEntry {
     name: PartName,
     entry: usize,
@@ -267,9 +266,18 @@ impl<'p> Part<'p> {
 
 impl fmt::Debug for Part<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.entry, f)
+    }
+}
+
+impl fmt::Debug for PartEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // A content type is kept once for all the parts that have it; printed in full for
+        // each of them, the output would grow with parts times its length.
+        let content_type = self.content_type.as_deref().map(|value| shorten(value, 64));
         f.debug_struct("Part")
-            .field("name", &self.entry.name)
-            .field("content_type", &self.entry.content_type)
+            .field("name", &self.name)
+            .field("content_type", &content_type)
             .finish_non_exhaustive()
     }
 }

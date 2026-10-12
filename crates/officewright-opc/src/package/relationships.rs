@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 
 use super::part_name::resolve_target;
@@ -21,7 +22,7 @@ pub struct Relationships {
 /// The memory a relationship takes is that of its own attributes: the folder its target
 /// is resolved against is shared by all relationships of a part, and so is each
 /// relationship type.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Relationship {
     id: String,
     relationship_type: Arc<str>,
@@ -171,6 +172,19 @@ impl<'r> IntoIterator for &'r Relationships {
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
+    }
+}
+
+impl fmt::Debug for Relationship {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The folder is shared by all relationships of a part and left out, so that the
+        // output grows with the relationships part, not with the relationships times it.
+        f.debug_struct("Relationship")
+            .field("id", &self.id)
+            .field("relationship_type", &self.relationship_type)
+            .field("target", &self.target)
+            .field("target_mode", &self.target_mode)
+            .finish_non_exhaustive()
     }
 }
 

@@ -11,14 +11,34 @@ fn open(entries: &[TestEntry]) -> Result<Package> {
 fn package_message(result: Result<Package>) -> String {
     match result {
         Err(Error::Package { message, .. }) => message,
-        other => panic!("expected a package error, got {other:?}"),
+        other => panic!("expected a package error, got {}", describe(&other)),
     }
 }
 
 fn xml_message(result: Result<Package>) -> String {
     match result {
         Err(err @ Error::Xml { .. }) => err.to_string(),
-        other => panic!("expected an xml error, got {other:?}"),
+        other => panic!("expected an xml error, got {}", describe(&other)),
+    }
+}
+
+/// A short description of a result for a failing assertion. A package is described by
+/// its parts' names, not printed whole, so that a test that goes wrong on a large package
+/// fails instead of running out of memory.
+fn describe(result: &Result<Package>) -> String {
+    match result {
+        Ok(package) => {
+            let names: Vec<&str> = package
+                .parts()
+                .take(5)
+                .map(|part| part.name().as_str())
+                .collect();
+            format!(
+                "a package of {} parts, first {names:?}",
+                package.parts().len()
+            )
+        }
+        Err(err) => format!("error {err}"),
     }
 }
 
@@ -458,7 +478,7 @@ fn bounds_the_relationships_of_a_package() {
             err.to_string(),
             "/_rels/a.xml.rels: number of relationships in the package exceeds the limit of 3"
         ),
-        other => panic!("expected the relationships limit, got {other:?}"),
+        other => panic!("expected the relationships limit, got {}", describe(&other)),
     }
 }
 
@@ -480,7 +500,7 @@ fn bounds_the_content_types() {
             err.to_string(),
             "[Content_Types].xml: number of Default and Override elements exceeds the limit of 2"
         ),
-        other => panic!("expected the content types limit, got {other:?}"),
+        other => panic!("expected the content types limit, got {}", describe(&other)),
     }
 }
 
@@ -508,12 +528,13 @@ fn keeps_one_copy_of_each_content_type() {
     // A reviewer of #4 built a 382 KB package: one Default whose content type had a
     // 16 MiB subtype, and 4,000 parts of that type, each of which copied the string, for
     // 64 GiB in all. Type and subtype are at most 127 characters long (RFC 6838,
-    // section 4.2), so that content type is refused...
+    // section 4.2), so that content type is refused... (100 parts show the sharing as
+    // well as 4,000, and keep a regression at 400 MB instead of 16 GiB.)
     let parts = |content_type: &str| -> Vec<TestEntry> {
         std::iter::once(types(&format!(
             "<Default Extension='x' ContentType='{content_type}'/>"
         )))
-        .chain((0..4000).map(|i| TestEntry::stored(&format!("p{i}.x"), b"")))
+        .chain((0..100).map(|i| TestEntry::stored(&format!("p{i}.x"), b"")))
         .collect()
     };
     let error = xml_message(open(&parts(&format!("a/{}", "b".repeat(16 << 20)))));
@@ -557,7 +578,8 @@ fn bounds_the_length_of_part_names() {
                 ref context,
             }) if context == "part name aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa… (60013 bytes)"
         ),
-        "{result:?}"
+        "{}",
+        describe(&result)
     );
     let limits = Limits::new().with_max_part_name_length(10);
     let at_the_limit = [types(""), TestEntry::stored("word/a.xml", b"")];
@@ -596,4 +618,54 @@ fn resolves_many_relationships_in_a_long_folder() {
     assert!(x.relationships().is_empty());
     let source = PartName::new(&format!("/{folder}/x")).unwrap();
     assert!(package.part(&source).is_none());
+}
+
+/// The length of a value's `Debug` output, counted without keeping it.
+fn debug_length(value: &dyn std::fmt::Debug) -> usize {
+    struct Length(usize);
+    impl std::fmt::Write for Length {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            self.0 += text.len();
+            Ok(())
+        }
+    }
+    let mut length = Length(0);
+    std::fmt::write(&mut length, format_args!("{value:?}")).unwrap();
+    length.0
+}
+
+#[test]
+fn keeps_debug_output_in_proportion_to_the_input() {
+    // A content type is shared by every part with its extension, and a folder by every
+    // relationship of a part. Printed once per part or relationship, they made the Debug
+    // output of a 4 MB package with 4,000 parts 16 GiB, enough to take a machine down
+    // from a log line; 100 parts already printed 400 MB.
+    let content_type = format!("a/b; x={}", "y".repeat(4 << 20));
+    let parts: Vec<TestEntry> = std::iter::once(types(&format!(
+        "<Default Extension='x' ContentType='{content_type}'/>"
+    )))
+    .chain((0..100).map(|i| TestEntry::stored(&format!("p{i}.x"), b"")))
+    .collect();
+    let package = open(&parts).unwrap();
+    let length = debug_length(&package);
+    assert!(length < content_type.len(), "{length} bytes");
+
+    let folder = "a".repeat(1000);
+    let body: String = (0..20_000)
+        .map(|n| format!("<Relationship Id='r{n}' Type='t' Target='b{n}'/>"))
+        .collect();
+    let package = open(&[
+        types(""),
+        TestEntry::stored(&format!("{folder}/x"), b""),
+        rels(&format!("{folder}/_rels/x.rels"), &body),
+    ])
+    .unwrap();
+    let source = package.part(&name(&format!("/{folder}/x"))).unwrap();
+    assert_eq!(source.relationships().len(), 20_000);
+    let length = debug_length(source.relationships());
+    assert!(
+        length < 4 * body.len(),
+        "{length} bytes for {} bytes",
+        body.len()
+    );
 }
