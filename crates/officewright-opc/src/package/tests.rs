@@ -213,8 +213,25 @@ fn finds_the_source_of_relationships_parts() {
 #[test]
 fn resolves_relationship_targets() {
     let resolve = |folder: &str, target: &str| {
-        part_name::resolve_target(folder, target).map(|name| name.as_str().to_owned())
+        part_name::resolve_target(folder, target, 1024).map(|name| name.as_str().to_owned())
     };
+    // A target with a scheme names no part, even one without "//".
+    assert_eq!(resolve("/word", "urn:x"), None);
+    assert_eq!(resolve("/word", "mailto:x@example.com"), None);
+    // Joined to the folder, a name may have up to 1,024 bytes; a longer target is not
+    // resolved at all.
+    let folder = format!("/{}", "f".repeat(19));
+    assert_eq!(
+        resolve(&folder, &"t".repeat(1004)).map(|name| name.len()),
+        Some(1025)
+    );
+    assert_eq!(resolve(&folder, &"t".repeat(1005)), None);
+    assert_eq!(
+        resolve(&folder, &format!("/{}", "t".repeat(1024))).map(|name| name.len()),
+        Some(1025)
+    );
+    assert_eq!(resolve(&folder, &format!("/{}", "t".repeat(1025))), None);
+    assert_eq!(resolve("/word", &"a".repeat(100 << 20)), None);
     assert_eq!(
         resolve("/word", "media/a.png").as_deref(),
         Some("/word/media/a.png")
@@ -606,18 +623,33 @@ fn bounds_the_length_of_part_names() {
 }
 
 #[test]
-fn resolves_many_relationships_in_a_long_folder() {
+fn resolves_the_relationships_of_a_part_in_a_long_folder() {
     let folder = "a".repeat(1000);
     let body: String = (0..20_000)
         .map(|n| format!("<Relationship Id='r{n}' Type='t' Target='b{n}'/>"))
         .collect();
-    let package = open(&[types(""), rels(&format!("{folder}/_rels/x.rels"), &body)]).unwrap();
-    let x = package
-        .part(&name(&format!("/{folder}/_rels/x.rels")))
-        .unwrap();
-    assert!(x.relationships().is_empty());
-    let source = PartName::new(&format!("/{folder}/x")).unwrap();
-    assert!(package.part(&source).is_none());
+    let package = open(&[
+        types(""),
+        TestEntry::stored(&format!("{folder}/x"), b""),
+        rels(&format!("{folder}/_rels/x.rels"), &body),
+    ])
+    .unwrap();
+    let source = package.part(&name(&format!("/{folder}/x"))).unwrap();
+    let relationships = source.relationships();
+    assert_eq!(relationships.len(), 20_000);
+    for (n, relationship) in relationships.iter().enumerate() {
+        assert_eq!(
+            relationship.target_part(),
+            Some(name(&format!("/{folder}/b{n}")))
+        );
+    }
+    // A relationships part whose source part is missing is still read, as a plain part.
+    let orphan = open(&[types(""), rels(&format!("{folder}/_rels/y.rels"), &body)]).unwrap();
+    assert!(
+        orphan
+            .part(&name(&format!("/{folder}/_rels/y.rels")))
+            .is_some()
+    );
 }
 
 /// The length of a value's `Debug` output, counted without keeping it.
@@ -668,4 +700,53 @@ fn keeps_debug_output_in_proportion_to_the_input() {
         "{length} bytes for {} bytes",
         body.len()
     );
+}
+
+#[test]
+fn finds_defaults_by_the_decoded_extension() {
+    // Part names are compared decoded, so /word/a.x%6Dl is /word/a.xml and has the
+    // default for xml; a Default may encode its extension too.
+    let package = open(&[
+        types(
+            "<Default Extension='xml' ContentType='a/xml'/>\
+             <Default Extension='p%6Eg' ContentType='image/png'/>",
+        ),
+        TestEntry::stored("word/a.x%6Dl", b""),
+        TestEntry::stored("media/b.PNG", b""),
+    ])
+    .unwrap();
+    assert_eq!(
+        package.part(&name("/word/a.xml")).unwrap().content_type(),
+        Some("a/xml")
+    );
+    assert_eq!(
+        package.part(&name("/media/b.png")).unwrap().content_type(),
+        Some("image/png")
+    );
+    let message = xml_message(open(&[types(
+        "<Default Extension='a%2Eb' ContentType='a/b'/>",
+    )]));
+    assert!(
+        message.ends_with("invalid extension \"a%2Eb\""),
+        "{message}"
+    );
+}
+
+#[test]
+fn keeps_error_messages_short() {
+    let long = "x".repeat(10_000);
+    let shortened = format!("{}…", "x".repeat(64));
+    for (body, expected) in [
+        (
+            format!("<Relationship Id='{long}' Type='t'/><Relationship Id='{long}' Type='t'/>"),
+            format!("a second relationship with Id {shortened}"),
+        ),
+        (
+            format!("<Relationship Type='t' TargetMode='{long}'/>"),
+            format!("invalid TargetMode \"{shortened}\""),
+        ),
+    ] {
+        let message = xml_message(open(&[types(""), rels("_rels/.rels", &body)]));
+        assert!(message.ends_with(&expected), "{message}");
+    }
 }

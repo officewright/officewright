@@ -1,9 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::iter::FusedIterator;
 use std::sync::Arc;
 
 use super::part_name::resolve_target;
-use super::{PartName, read_flat_xml};
+use super::{PartName, read_flat_xml, shorten};
 use crate::{Error, Limit, Limits, Result};
 
 const NAMESPACE: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
@@ -28,8 +29,16 @@ pub struct Relationship {
     relationship_type: Arc<str>,
     target: String,
     target_mode: TargetMode,
+    folder: Arc<Folder>,
+}
+
+/// What resolving a target needs from the source part, shared by its relationships.
+#[derive(Debug)]
+struct Folder {
     /// The folder of the source part, `""` for the package.
-    folder: Arc<str>,
+    path: Box<str>,
+    /// [`Limits::max_part_name_length`].
+    max_part_name_length: usize,
 }
 
 /// Whether a relationship points into the package or outside it.
@@ -54,8 +63,11 @@ impl Relationships {
     ) -> Result<Self> {
         let mut items = Vec::new();
         let mut by_id = HashMap::new();
-        let mut types: HashMap<String, Arc<str>> = HashMap::new();
-        let folder: Arc<str> = folder.into();
+        let mut types: HashSet<Arc<str>> = HashSet::new();
+        let folder = Arc::new(Folder {
+            path: folder.into(),
+            max_part_name_length: limits.max_part_name_length(),
+        });
         read_flat_xml(
             bytes,
             limits,
@@ -75,7 +87,7 @@ impl Relationships {
                 if tag.name().local() != "Relationship" {
                     return Err(error(format!(
                         "unexpected element <{}>",
-                        tag.name().qname().as_str()
+                        shorten(tag.name().qname().as_str(), 64)
                     )));
                 }
                 let mut id = None;
@@ -92,13 +104,18 @@ impl Relationships {
                             target_mode = match value {
                                 "Internal" => TargetMode::Internal,
                                 "External" => TargetMode::External,
-                                _ => return Err(error(format!("invalid TargetMode {value:?}"))),
+                                _ => {
+                                    return Err(error(format!(
+                                        "invalid TargetMode {:?}",
+                                        shorten(value, 64)
+                                    )));
+                                }
                             };
                         }
                         _ => {
                             return Err(error(format!(
                                 "unexpected attribute {} on <Relationship>",
-                                attribute.name().qname().as_str()
+                                shorten(attribute.name().qname().as_str(), 64)
                             )));
                         }
                     }
@@ -114,13 +131,19 @@ impl Relationships {
                     .filter(|kind| !kind.is_empty())
                     .ok_or_else(|| missing("Type"))?;
                 if !id.is_empty() && by_id.insert(id.into(), items.len()).is_some() {
-                    return Err(error(format!("a second relationship with Id {id}")));
+                    return Err(error(format!(
+                        "a second relationship with Id {}",
+                        shorten(id, 64)
+                    )));
                 }
-                let relationship_type = Arc::clone(
-                    types
-                        .entry(relationship_type.to_owned())
-                        .or_insert_with(|| relationship_type.into()),
-                );
+                let relationship_type = match types.get(relationship_type) {
+                    Some(shared) => Arc::clone(shared),
+                    None => {
+                        let shared: Arc<str> = relationship_type.into();
+                        types.insert(Arc::clone(&shared));
+                        shared
+                    }
+                };
                 items.push(Relationship {
                     id: id.to_owned(),
                     relationship_type,
@@ -151,8 +174,8 @@ impl Relationships {
     }
 
     /// All relationships in document order.
-    pub fn iter(&self) -> std::slice::Iter<'_, Relationship> {
-        self.items.iter()
+    pub fn iter(&self) -> RelationshipIter<'_> {
+        RelationshipIter(self.items.iter())
     }
 
     /// How many relationships there are.
@@ -168,12 +191,39 @@ impl Relationships {
 
 impl<'r> IntoIterator for &'r Relationships {
     type Item = &'r Relationship;
-    type IntoIter = std::slice::Iter<'r, Relationship>;
+    type IntoIter = RelationshipIter<'r>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
     }
 }
+
+/// The relationships of a [`Relationships`] in document order, from
+/// [`Relationships::iter`].
+#[derive(Clone, Debug)]
+pub struct RelationshipIter<'r>(std::slice::Iter<'r, Relationship>);
+
+impl<'r> Iterator for RelationshipIter<'r> {
+    type Item = &'r Relationship;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.0.size_hint()
+    }
+}
+
+impl DoubleEndedIterator for RelationshipIter<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.0.next_back()
+    }
+}
+
+impl ExactSizeIterator for RelationshipIter<'_> {}
+
+impl FusedIterator for RelationshipIter<'_> {}
 
 impl fmt::Debug for Relationship {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -212,12 +262,21 @@ impl Relationship {
     }
 
     /// The part an internal target names, resolved against the source part when asked
-    /// for. `None` for external targets and for internal ones that cannot name a part,
-    /// such as targets that climb out of the package or are only a fragment. The part may
-    /// still be missing from the package.
+    /// for. `None` for external targets and for internal ones that cannot name a part:
+    /// targets that climb out of the package or are only a fragment, and targets so long
+    /// that the name would be over [`Limits::max_part_name_length`]. The part may still be
+    /// missing from the package.
+    ///
+    /// Each call builds a new name of up to that many bytes, so resolve targets as they
+    /// are needed and keep only the names of parts that exist, rather than collecting the
+    /// targets of all relationships.
     pub fn target_part(&self) -> Option<PartName> {
         match self.target_mode {
-            TargetMode::Internal => resolve_target(&self.folder, &self.target),
+            TargetMode::Internal => resolve_target(
+                &self.folder.path,
+                &self.target,
+                self.folder.max_part_name_length,
+            ),
             TargetMode::External => None,
         }
     }

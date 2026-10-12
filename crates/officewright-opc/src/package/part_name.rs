@@ -8,8 +8,10 @@ use crate::{Error, Result};
 /// Names are compared as ECMA-376 Part 2 requires: ASCII letters without regard to case,
 /// and percent-encoded characters as the characters they encode.
 ///
-/// The checks keep names unambiguous and safe to use as paths: no empty, `.` or `..`
+/// The checks keep names unambiguous and inside the package: no empty, `.` or `..`
 /// segments, no segment ending in a dot, no `\`, no encoded `/`, no control characters.
+/// They do not make a name a valid file name on every system (Windows refuses `C:` or
+/// `CON`, for example); code that writes parts to disk has to check that itself.
 /// The Open Packaging Conventions are stricter still (IRI characters only), but Office
 /// packages in the wild contain names such as `/[trash]/0000.dat`, which Office opens.
 ///
@@ -129,7 +131,7 @@ impl fmt::Display for PartName {
 }
 
 /// Decodes `%XX` escapes; `None` for a malformed escape or bytes that are not UTF-8.
-fn percent_decode(segment: &str) -> Option<String> {
+pub(crate) fn percent_decode(segment: &str) -> Option<String> {
     if !segment.contains('%') {
         return Some(segment.to_owned());
     }
@@ -150,9 +152,19 @@ fn percent_decode(segment: &str) -> Option<String> {
 
 /// Resolves an internal relationship target against the folder of its source part
 /// (RFC 3986, section 5.2). `None` when the target cannot name a part: it is empty, has
-/// a scheme, a query or a fragment, or climbs out of the package.
-pub(crate) fn resolve_target(folder: &str, target: &str) -> Option<PartName> {
+/// a scheme, a query or a fragment, climbs out of the package, or is so long that joined
+/// to the folder it is over `max_length` bytes, the longest part name a package may have,
+/// which keeps the work of resolving it bounded.
+pub(crate) fn resolve_target(folder: &str, target: &str, max_length: usize) -> Option<PartName> {
     if target.is_empty() || target.contains(['#', '?']) {
+        return None;
+    }
+    let joined_length = if target.starts_with('/') {
+        target.len() - 1
+    } else {
+        folder.len() + target.len()
+    };
+    if joined_length > max_length {
         return None;
     }
     if target

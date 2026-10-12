@@ -340,3 +340,24 @@ fn checks_must_understand_only_on_elements_that_are_read() {
         Err(Error::Unsupported(message)) if message.starts_with("the document requires namespace urn:b")
     ));
 }
+
+#[test]
+fn understood_beats_ignorable() {
+    // A namespace the consumer understands is read even where mc:Ignorable lists it
+    // (ECMA-376 Part 3, section 10.1.1): Ignorable applies to what is not understood.
+    assert_eq!(
+        walk(
+            r#"<w:p mc:Ignorable="w a" w:val="1" a:val="2"><w:r/><a:x/></w:p>"#,
+            &["urn:w"]
+        )
+        .unwrap(),
+        [
+            "p=Understood",
+            "@Ignorable=Understood",
+            "@val=Understood",
+            "@val=Ignore",
+            "r=Understood",
+            "x=Ignore",
+        ]
+    );
+}

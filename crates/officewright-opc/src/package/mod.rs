@@ -17,7 +17,7 @@ mod tests;
 
 use content_types::ContentTypes;
 pub use part_name::PartName;
-pub use relationships::{Relationship, Relationships, TargetMode};
+pub use relationships::{Relationship, RelationshipIter, Relationships, TargetMode};
 
 /// The first bytes of an OLE compound file: a binary Office document, or an OOXML
 /// document encrypted with a password ([MS-OFFCRYPTO]).
@@ -116,12 +116,12 @@ impl Package {
                 }
                 continue;
             }
+            check_part_name_length(&name, limits)?;
             if is_piece(&name) {
                 return Err(Error::Unsupported(format!(
                     "interleaved parts such as {name} are not supported"
                 )));
             }
-            check_part_name_length(&name, limits)?;
             let name = PartName::new(&format!("/{name}"))?;
             if index.insert(name.key().to_owned(), parts.len()).is_some() {
                 return Err(Error::Package {
@@ -378,7 +378,7 @@ fn read_children(
                         tag.offset(),
                         format!(
                             "the root element is <{}>, not {root} in {}",
-                            tag.name().qname().as_str(),
+                            shorten(tag.name().qname().as_str(), 64),
                             reader.namespace_uri(namespace)
                         ),
                     ));
@@ -389,7 +389,10 @@ fn read_children(
                 if tag.name().namespace() != Some(namespace) {
                     return Err(reader.error(
                         tag.offset(),
-                        format!("unexpected element <{}>", tag.name().qname().as_str()),
+                        format!(
+                            "unexpected element <{}>",
+                            shorten(tag.name().qname().as_str(), 64)
+                        ),
                     ));
                 }
                 let offset = tag.offset();
@@ -401,7 +404,8 @@ fn read_children(
                         Some(Event::Text(text)) if is_whitespace(&text) => {}
                         Some(Event::Comment(_) | Event::ProcessingInstruction(_)) => {}
                         _ => {
-                            return Err(reader.error(offset, format!("<{name}> must be empty")));
+                            return Err(reader
+                                .error(offset, format!("<{}> must be empty", shorten(name, 64))));
                         }
                     }
                 }

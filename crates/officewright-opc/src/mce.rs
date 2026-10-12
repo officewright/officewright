@@ -88,6 +88,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::package::shorten;
 use crate::xml::{Name, NsId, Reader, StartTag};
 use crate::{Error, Limit, Result};
 
@@ -234,7 +235,10 @@ impl Processor {
                 other => {
                     return Err(reader.error(
                         tag.offset(),
-                        format!("unknown markup compatibility attribute {other}"),
+                        format!(
+                            "unknown markup compatibility attribute {}",
+                            shorten(other, 64)
+                        ),
                     ));
                 }
             }
@@ -249,7 +253,7 @@ impl Processor {
                     return Err(Error::Unsupported(format!(
                         "the document requires namespace {} (mc:MustUnderstand), which \
                          officewright does not implement",
-                        reader.namespace_uri(namespace)
+                        shorten(reader.namespace_uri(namespace), 64)
                     )));
                 }
             }
@@ -343,7 +347,10 @@ fn resolve(reader: &Reader<'_>, tag: &StartTag<'_>, attribute: &str, prefix: &st
     declared(reader, prefix).ok_or_else(|| {
         reader.error(
             tag.offset(),
-            format!("{attribute} names the undeclared prefix {prefix}"),
+            format!(
+                "{attribute} names the undeclared prefix {}",
+                shorten(prefix, 64)
+            ),
         )
     })
 }
@@ -382,7 +389,10 @@ fn qualified<'v>(
         .ok_or_else(|| {
             reader.error(
                 tag.offset(),
-                format!("{attribute} lists {name}, which is not a qualified name"),
+                format!(
+                    "{attribute} lists {}, which is not a qualified name",
+                    shorten(name, 64)
+                ),
             )
         })
 }

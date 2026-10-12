@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use super::part_name::percent_decode;
 use super::{PartName, check_part_name_length, read_flat_xml, shorten};
 use crate::{Error, Limit, Limits, Result};
 
@@ -10,8 +11,9 @@ const NAMESPACE: &str = "http://schemas.openxmlformats.org/package/2006/content-
 /// part name (ECMA-376 Part 2).
 #[derive(Debug, Default)]
 pub(crate) struct ContentTypes {
-    /// By extension in ASCII lower case. Equal content types share one allocation, and
-    /// parts share it too, so a long content type costs its length once.
+    /// By extension, decoded and in ASCII lower case, as part names are compared. Equal
+    /// content types share one allocation, and parts share it too, so a long content type
+    /// costs its length once.
     defaults: HashMap<String, Arc<str>>,
     /// By [`PartName::key`].
     overrides: HashMap<String, Arc<str>>,
@@ -21,7 +23,7 @@ impl ContentTypes {
     pub(crate) fn parse(bytes: &[u8], limits: &Limits) -> Result<Self> {
         let mut types = Self::default();
         let mut count = 0;
-        let mut interned: HashMap<String, Arc<str>> = HashMap::new();
+        let mut interned: HashSet<Arc<str>> = HashSet::new();
         read_flat_xml(
             bytes,
             limits,
@@ -42,16 +44,20 @@ impl ContentTypes {
                     tag.attribute(None, name).ok_or_else(|| {
                         error(format!(
                             "<{}> lacks the {name} attribute",
-                            tag.name().qname().as_str()
+                            shorten(tag.name().qname().as_str(), 64)
                         ))
                     })
                 };
                 let (key, content_type, map) = match tag.name().local() {
                     "Default" => {
-                        let extension = attribute("Extension")?;
-                        if extension.is_empty() || extension.contains(['.', '/', '\\']) {
-                            return Err(error(format!("invalid extension {extension:?}")));
-                        }
+                        let written = attribute("Extension")?;
+                        let extension = percent_decode(written)
+                            .filter(|extension| {
+                                !extension.is_empty() && !extension.contains(['.', '/', '\\'])
+                            })
+                            .ok_or_else(|| {
+                                error(format!("invalid extension {:?}", shorten(written, 64)))
+                            })?;
                         (
                             extension.to_ascii_lowercase(),
                             attribute("ContentType")?,
@@ -68,12 +74,17 @@ impl ContentTypes {
                             &mut types.overrides,
                         )
                     }
-                    other => return Err(error(format!("unexpected element <{other}>"))),
+                    other => {
+                        return Err(error(format!(
+                            "unexpected element <{}>",
+                            shorten(other, 64)
+                        )));
+                    }
                 };
                 if tag.attributes().len() != 2 {
                     return Err(error(format!(
                         "unexpected attributes on <{}>",
-                        tag.name().qname().as_str()
+                        shorten(tag.name().qname().as_str(), 64)
                     )));
                 }
                 if !is_media_type(content_type) {
@@ -82,11 +93,14 @@ impl ContentTypes {
                         shorten(content_type, 60)
                     )));
                 }
-                let shared = Arc::clone(
-                    interned
-                        .entry(content_type.to_owned())
-                        .or_insert_with(|| content_type.into()),
-                );
+                let shared = match interned.get(content_type) {
+                    Some(shared) => Arc::clone(shared),
+                    None => {
+                        let shared: Arc<str> = content_type.into();
+                        interned.insert(Arc::clone(&shared));
+                        shared
+                    }
+                };
                 if map.insert(key, shared).is_some() {
                     return Err(error(format!(
                         "a second <{}> for the same {}",
@@ -105,10 +119,14 @@ impl ContentTypes {
     }
 
     /// The content type of a part: its override, or else the default for its extension.
+    /// Both are found by the decoded name in ASCII lower case, so `/word/a.x%6Dl` has the
+    /// default for `xml`, as it is the same name as `/word/a.xml`.
     pub(crate) fn get(&self, part: &PartName) -> Option<&Arc<str>> {
-        self.overrides
-            .get(part.key())
-            .or_else(|| self.defaults.get(&part.extension()?.to_ascii_lowercase()))
+        self.overrides.get(part.key()).or_else(|| {
+            let file = part.key().rsplit('/').next()?;
+            let (_, extension) = file.rsplit_once('.')?;
+            self.defaults.get(extension)
+        })
     }
 }
 

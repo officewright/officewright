@@ -21,4 +21,6 @@ pub mod zip;
 
 pub use error::{Error, Limit, Result};
 pub use limits::Limits;
-pub use package::{Package, Part, PartName, Relationship, Relationships, TargetMode};
+pub use package::{
+    Package, Part, PartName, Relationship, RelationshipIter, Relationships, TargetMode,
+};

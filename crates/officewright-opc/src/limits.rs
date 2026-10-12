@@ -85,8 +85,9 @@ impl Limits {
     }
 
     /// The longest part name, in bytes, as written in the ZIP archive or in an
-    /// `Override`. Relationship targets are resolved against the folder of their part,
-    /// so this also bounds the work of resolving one.
+    /// `Override`. A relationship target whose name, joined to the folder of its part,
+    /// would be longer resolves to no part, so this also bounds the work of resolving
+    /// one.
     pub const fn max_part_name_length(&self) -> usize {
         self.part_name_length
     }
