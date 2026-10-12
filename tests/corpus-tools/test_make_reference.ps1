@@ -41,6 +41,12 @@ function Stop-Dummy($Process) {
     if (-not $Process.HasExited) { Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue }
 }
 
+function Stop-Tree($Process) {
+    # cmd.exe with its ping.exe child.
+    $taskkill = Join-Path $env:SystemRoot 'System32\taskkill.exe'
+    if (-not $Process.HasExited) { & $taskkill /PID $Process.Id /F /T 2>&1 | Out-Null }
+}
+
 $temp = Join-Path ([System.IO.Path]::GetTempPath()) ("make-reference-test-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $temp | Out-Null
 try {
@@ -48,6 +54,9 @@ try {
     Check 'Word printer name loses its port' ((Get-PrinterName 'Microsoft Print to PDF on Ne01:') -eq 'Microsoft Print to PDF')
     Check 'printer name without a port stays' ((Get-PrinterName 'Microsoft Print to PDF') -eq 'Microsoft Print to PDF')
     Check 'network printer name loses its port' ((Get-PrinterName '\\print01\Floor 3 on Ne02:') -eq '\\print01\Floor 3')
+    Check 'German Word printer name loses its port' ((Get-PrinterName 'Microsoft Print to PDF auf Ne01:') -eq 'Microsoft Print to PDF')
+    $russianOn = -join ([char]0x043D, [char]0x0430)
+    Check 'Russian Word printer name loses its port' ((Get-PrinterName "Microsoft Print to PDF $russianOn Ne03:") -eq 'Microsoft Print to PDF')
     Check 'default printer is read without error' ((Get-DefaultPrinter) -is [string])
 
     # Whole-word matching of personal strings.
@@ -74,8 +83,25 @@ try {
     Check 'a name in the package is found' ($found -contains 'docProps/core.xml: the Office user name') ($found -join '; ')
     Check 'a UTF-16 name in the PDF is found' ($found -contains 'pdf: the Office user name') ($found -join '; ')
 
-    # No WINWORD started after now.
+    # Which processes count as this script's Word: started since the given time, with the
+    # marker on the command line. cmd.exe plays WINWORD.EXE, "rem /Automation" the marker.
     Check 'no Word process of this script exists yet' (@(Get-OwnWordProcess (Get-Date)).Count -eq 0)
+    $cmd = Join-Path $env:SystemRoot 'System32\cmd.exe'
+    $marker = 'rem officewright-test-' + [guid]::NewGuid().ToString('N') + ' /Automation'
+    $before = Start-Process -FilePath $cmd -ArgumentList '/c', "ping -n 600 127.0.0.1 & $marker" -WindowStyle Hidden -PassThru
+    Start-Sleep -Seconds 2
+    $since = Get-Date
+    $marked = Start-Process -FilePath $cmd -ArgumentList '/c', "ping -n 600 127.0.0.1 & $marker" -WindowStyle Hidden -PassThru
+    $unmarked = Start-Process -FilePath $cmd -ArgumentList '/c', 'ping -n 600 127.0.0.1' -WindowStyle Hidden -PassThru
+    try {
+        $pattern = [regex]::Escape($marker)
+        $own = @(Get-OwnWordProcess $since 'cmd.exe' $pattern)
+        Check 'a process started since then with the marker is selected' ($own -contains $marked.Id) ($own -join ', ')
+        Check 'a process started before is not selected' (-not ($own -contains $before.Id)) ($own -join ', ')
+        Check 'a process without the marker is not selected' (-not ($own -contains $unmarked.Id)) ($own -join ', ')
+    } finally {
+        foreach ($process in @($before, $marked, $unmarked)) { Stop-Tree $process }
+    }
 
     # Verified stops.
     $dummy = Start-Dummy

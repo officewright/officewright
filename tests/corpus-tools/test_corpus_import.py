@@ -268,6 +268,16 @@ class Import(unittest.TestCase):
         })
         self.assertIn("the re-saved copy has compatibility mode 14", self.refused())
 
+    def test_refuses_a_resaved_copy_it_cannot_read(self):
+        for part, old, new in (
+            ("word/settings.xml", b'w:val="15"', b'w:val="fifteen"'),
+            ("word/document.xml", b"</w:body>", b"</w:bod>"),
+        ):
+            with self.subTest(part=part):
+                record = self.add_result(rules.documents()[0])
+                self.change_resaved(record, {part: [(old, new)]})
+                self.assertIn("cannot read a package", self.refused())
+
     def test_refuses_languages_and_number_formats_word_added(self):
         record = self.add_result(rules.documents()[0])
         self.change_resaved(record, {

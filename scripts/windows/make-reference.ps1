@@ -18,8 +18,9 @@
     scripts/corpus-import.py, run on the Linux side, checks these files again and copies
     them into tests/corpus/.
 
-    Word lays documents out with the metrics of its printer, so references are made with
-    Microsoft Print to PDF; the script prints the default printer and Word's printer and
+    References are made with Microsoft Print to PDF as Word's printer: a printer that does
+    not answer can stall Word, and Word uses a printer's metrics for layout when a document
+    sets w:usePrinterMetrics. The script prints the default printer and Word's printer and
     warns when either is another one.
 
     All calls into Word run in a worker thread that this script watches. When Word gives
@@ -205,8 +206,9 @@ function Find-PersonalData([string] $DocxPath, [string] $PdfPath, $Tokens) {
 }
 
 function Get-PrinterName([string] $Printer) {
-    # Word's ActivePrinter reads "<name> on <port>:"; keep the name.
-    if ($Printer -match '^(.*) on [^ ]+:$') { return $Matches[1] }
+    # Word's ActivePrinter reads "<name> on <port>:", with "on" in Word's own language (a
+    # German Word writes "auf"); the port is the last word. Keep the name.
+    if ($Printer -match '^(.*) \S+ [^ :]+:$') { return $Matches[1] }
     return $Printer
 }
 
@@ -220,14 +222,14 @@ function Get-DefaultPrinter {
     return ''
 }
 
-function Get-OwnWordProcess([DateTime] $Since) {
+function Get-OwnWordProcess([DateTime] $Since, [string] $Name = 'WINWORD.EXE', [string] $Pattern = '[/-]Automation') {
     # The WINWORD processes COM started (/Automation on the command line) since $Since. The
     # script refuses to start while Word runs, so these belong to it; a Word the user opens
-    # has no /Automation and is never stopped.
+    # has no /Automation and is never stopped. -Name and -Pattern exist for the tests.
     $ids = @()
-    $all = @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'WINWORD.EXE'" -ErrorAction SilentlyContinue)
+    $all = @(Get-CimInstance -ClassName Win32_Process -Filter "Name = '$Name'" -ErrorAction SilentlyContinue)
     foreach ($process in $all) {
-        if ($process.CreationDate -ge $Since -and ([string]$process.CommandLine) -match '[/-]Automation') {
+        if ($process.CreationDate -ge $Since -and ([string]$process.CommandLine) -match $Pattern) {
             $ids += [int]$process.ProcessId
         }
     }
@@ -514,13 +516,13 @@ foreach ($entry in $plan) {
         Write-Host ("  {0,-34} fonts not installed in Windows: {1}" -f '', ($entry.NotInWindows -join ', ')) -ForegroundColor Yellow
     }
 }
-# 3. Printer. Word lays documents out with its printer's metrics, and a printer that does
-# not answer can stall Word.
+# 3. Printer. A printer that does not answer can stall Word, and Word uses the printer's
+# metrics for layout when a document sets w:usePrinterMetrics.
 
 $defaultPrinter = Get-DefaultPrinter
 Write-Host "Default printer: $defaultPrinter"
 if ($defaultPrinter -ne $ReferencePrinter) {
-    Write-Host "Warning: the default printer is not $ReferencePrinter. Word lays documents out with the printer's metrics; make $ReferencePrinter the default printer (Settings, Bluetooth & devices, Printers & scanners) before making references." -ForegroundColor Yellow
+    Write-Host "Warning: the default printer is not $ReferencePrinter. A printer that does not answer can stall Word; make $ReferencePrinter the default printer (Settings, Bluetooth & devices, Printers & scanners) before making references." -ForegroundColor Yellow
 }
 $spooler = Get-Service -Name Spooler -ErrorAction SilentlyContinue
 if (-not $spooler -or $spooler.Status -ne 'Running') {
@@ -563,9 +565,13 @@ try {
     Write-Host "Word $($info.Version), build $($info.Build), process $($wordIds -join ', '); Windows $windowsVersion $windowsDisplay"
     Write-Host "Word's printer: $printer"
     if ($printer -ne $ReferencePrinter) {
-        Write-Host "Warning: Word lays the documents out for $printer, not $ReferencePrinter." -ForegroundColor Yellow
+        Write-Host "Warning: Word's printer is $printer, not $ReferencePrinter." -ForegroundColor Yellow
     }
-    if ($wordIds.Count -ne 1) {
+    if ($wordIds.Count -eq 1) {
+        # From now on only this process is stopped, not another Word that some other COM
+        # client starts meanwhile.
+        $targets = { $wordIds }
+    } else {
         Write-Host "Warning: expected one Word process started by this script, found $($wordIds.Count)." -ForegroundColor Yellow
     }
 

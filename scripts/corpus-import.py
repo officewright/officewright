@@ -381,18 +381,22 @@ def check_result(
         if sha256(path) != record[key]:
             raise Refused(f"{record['file']}: {path.name} changed after Word wrote it")
     info = tools.info(pdf)
-    original_parts = read_parts(original)
-    resaved_parts = read_parts(resaved)
-    problems = docx_privacy_problems(resaved)
+    try:
+        original_parts = read_parts(original)
+        resaved_parts = read_parts(resaved)
+        problems = docx_privacy_problems(resaved)
+        if not allow_locale:
+            problems += locale_problems(original_parts, resaved_parts)
+        mode = compatibility_mode(original_parts)
+        resaved_mode = compatibility_mode(resaved_parts)
+    except (zipfile.BadZipFile, ElementTree.ParseError, ValueError) as error:
+        raise Refused(f"{record['file']}: cannot read a package: {error}") from error
     problems += pdf_privacy_problems(info, tools.xmp(pdf), pdf.read_bytes())
-    if not allow_locale:
-        problems += locale_problems(original_parts, resaved_parts)
     if problems:
         raise Refused(f"{record['file']}: {'; '.join(problems)}")
-    mode = compatibility_mode(original_parts)
     for source, value in (
         ("Word reported", record["compatibility_mode"]),
-        ("the re-saved copy has", compatibility_mode(resaved_parts)),
+        ("the re-saved copy has", resaved_mode),
     ):
         if value != mode:
             raise Refused(
