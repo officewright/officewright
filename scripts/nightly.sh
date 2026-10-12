@@ -18,11 +18,22 @@ printf '==> %s\n' "external corpus pins"
 scripts/fetch-corpus.sh --check all
 
 printf '==> %s\n' "fuzzing (30 min per target)"
-# Seeded with the test fonts; libFuzzer keeps the inputs it finds in fuzz/corpus/<target>
-# and writes crashing inputs to fuzz/artifacts/<target>, which nightly.yml uploads.
-# The limits are the corpus rules of CLAUDE.md: 30 s per input, 1 GiB of memory. A crash
-# in one target does not stop the others. The targets are listed in a statement of their
-# own, so that `set -e` stops the script if listing them fails.
+# Each target is seeded with files of the format it reads; libFuzzer keeps the inputs it
+# finds in fuzz/corpus/<target> and writes crashing inputs to fuzz/artifacts/<target>,
+# which nightly.yml uploads. The limits are the corpus rules of CLAUDE.md: 30 s per
+# input, 1 GiB of memory. A crash in one target does not stop the others. The targets
+# and their seeds are looked up in statements of their own, so that `set -e` stops the
+# script if either fails.
+seeds() {
+	case $1 in
+	font_*) echo tests/fonts crates/officewright-font/tests/data ;;
+	zip_archive) echo crates/officewright-opc/tests/data ;;
+	*)
+		echo "nightly.sh: no seed directories for fuzz target $1; add them to seeds()" >&2
+		return 1
+		;;
+	esac
+}
 targets=$(cargo +nightly fuzz list)
 if [ -z "$targets" ]; then
 	echo "nightly.sh: cargo fuzz list found no targets" >&2
@@ -31,8 +42,9 @@ fi
 crashed=
 for target in $targets; do
 	mkdir -p "fuzz/corpus/$target"
-	cargo +nightly fuzz run "$target" "fuzz/corpus/$target" \
-		tests/fonts crates/officewright-font/tests/data -- \
+	target_seeds=$(seeds "$target")
+	read -r -a dirs <<<"$target_seeds"
+	cargo +nightly fuzz run "$target" "fuzz/corpus/$target" "${dirs[@]}" -- \
 		-max_total_time=1800 -timeout=30 -rss_limit_mb=1024 ||
 		crashed="$crashed $target"
 done
