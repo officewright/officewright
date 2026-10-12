@@ -73,7 +73,7 @@ enum TextKind {
     DeletedFieldCode,
 }
 
-struct Reading<'d, 'p> {
+struct Reading<'d, 'p, 't> {
     document: &'d mut Document,
     part: &'p Part<'p>,
     part_name: &'p str,
@@ -91,6 +91,9 @@ struct Reading<'d, 'p> {
     nodes_left: usize,
     max_nodes: usize,
     stack: Vec<Frame>,
+    locator: Locator<'t>,
+    /// The offset of the event read last, where a limit is exceeded.
+    at: usize,
 }
 
 pub(super) fn read(
@@ -126,6 +129,8 @@ pub(super) fn read(
         nodes_left: limits.max_nodes(),
         max_nodes: limits.max_nodes(),
         stack: Vec::new(),
+        locator: Locator::new(input.as_str()),
+        at: 0,
     };
     reading
         .run(&mut reader, &mut mce)
@@ -139,7 +144,7 @@ pub(super) fn read(
     Ok(())
 }
 
-impl Reading<'_, '_> {
+impl Reading<'_, '_, '_> {
     fn run(&mut self, reader: &mut Reader<'_>, mce: &mut Processor) -> Result<()> {
         let opc = |err: officewright_opc::Error, part: &str| Error::from(err.in_part(part));
         while let Some(event) = reader
@@ -148,6 +153,7 @@ impl Reading<'_, '_> {
         {
             match event {
                 Event::Start(tag) => {
+                    self.at = tag.offset();
                     let disposition = mce
                         .start(reader, &tag)
                         .map_err(|err| opc(err, self.part_name))?;
@@ -162,8 +168,11 @@ impl Reading<'_, '_> {
                     _ if text.trim().is_empty() => {}
                     _ => {
                         let offset = reader.offset();
-                        self.diagnose(reader, offset, DiagnosticKind::UnexpectedContent, || {
-                            format!("text {:?} outside any run is ignored", shorten(text.trim()))
+                        self.diagnose(offset, DiagnosticKind::UnexpectedContent, || {
+                            format!(
+                                "text {:?} outside a text element is ignored",
+                                shorten(text.trim())
+                            )
                         });
                     }
                 },
@@ -246,7 +255,7 @@ impl Reading<'_, '_> {
             }
             Context::Text => {
                 let offset = tag.offset();
-                self.diagnose(reader, offset, DiagnosticKind::UnexpectedContent, || {
+                self.diagnose(offset, DiagnosticKind::UnexpectedContent, || {
                     format!(
                         "element <{}> inside text is ignored",
                         shorten(name.qname().as_str())
@@ -307,10 +316,10 @@ impl Reading<'_, '_> {
                 Level::Row,
             ),
             (Level::Block, "sectPr") if parent == Parent::Body => {
+                let place = self.place(tag.offset());
                 let span = self.capture(reader, mce, tag)?;
                 let element = span.of(&self.document.tokens, &self.document.strings);
-                let properties =
-                    section::read(element, &self.names, self.part_name, &mut self.diagnostics);
+                let properties = section::read(element, &self.names, &place, &mut self.diagnostics);
                 self.last_section = Some(properties);
                 Ok(())
             }
@@ -333,7 +342,7 @@ impl Reading<'_, '_> {
                 Level::Run,
             ),
             (Level::Inline, "hyperlink") => {
-                let data = self.hyperlink(reader, &tag);
+                let data = self.hyperlink(&tag);
                 self.open(parent, Kind::Hyperlink(Box::new(data)), Level::Inline)
             }
             (Level::Inline, "ins" | "del" | "moveFrom" | "moveTo") => {
@@ -391,7 +400,7 @@ impl Reading<'_, '_> {
                     Some("page") => BreakKind::Page,
                     Some("column") => BreakKind::Column,
                     Some(other) => {
-                        self.invalid(reader, &tag, "type", other);
+                        self.invalid(&tag, "type", other);
                         BreakKind::Line
                     }
                 };
@@ -401,21 +410,26 @@ impl Reading<'_, '_> {
                     Some("right") => BreakClear::Right,
                     Some("all") => BreakClear::All,
                     Some(other) => {
-                        self.invalid(reader, &tag, "clear", other);
+                        self.invalid(&tag, "clear", other);
                         BreakClear::None
                     }
                 };
                 RunItem::Break(Break::new(kind, clear))
             }
-            "fldChar" => match self.w_attribute(&tag, "fldCharType") {
-                Some("begin") => RunItem::FieldChar(FieldCharKind::Begin),
-                Some("separate") => RunItem::FieldChar(FieldCharKind::Separate),
-                Some("end") => RunItem::FieldChar(FieldCharKind::End),
-                other => {
-                    self.invalid(reader, &tag, "fldCharType", other.unwrap_or_default());
-                    return self.keep(reader, mce, tag);
-                }
-            },
+            "fldChar" => {
+                let kind = match self.w_attribute(&tag, "fldCharType") {
+                    Some("begin") => FieldCharKind::Begin,
+                    Some("separate") => FieldCharKind::Separate,
+                    Some("end") => FieldCharKind::End,
+                    other => {
+                        self.invalid(&tag, "fldCharType", other.unwrap_or_default());
+                        return self.keep(reader, mce, tag);
+                    }
+                };
+                // The element is kept whole: it may hold form field data (w:ffData).
+                let element = self.capture(reader, mce, tag)?;
+                return self.push_item(run, RunItem::FieldChar { kind, element });
+            }
             "sym" => {
                 let char = self
                     .w_attribute(&tag, "char")
@@ -426,7 +440,7 @@ impl Reading<'_, '_> {
                         .w_attribute(&tag, "char")
                         .unwrap_or_default()
                         .to_owned();
-                    self.invalid(reader, &tag, "char", &value);
+                    self.invalid(&tag, "char", &value);
                     return self.keep(reader, mce, tag);
                 };
                 let font = self.w_attribute(&tag, "font").map(Into::into);
@@ -435,7 +449,7 @@ impl Reading<'_, '_> {
             local @ ("footnoteReference" | "endnoteReference" | "commentReference") => {
                 let Some(id) = self.w_attribute(&tag, "id").and_then(|id| id.parse().ok()) else {
                     let value = self.w_attribute(&tag, "id").unwrap_or_default().to_owned();
-                    self.invalid(reader, &tag, "id", &value);
+                    self.invalid(&tag, "id", &value);
                     return self.keep(reader, mce, tag);
                 };
                 match local {
@@ -564,6 +578,7 @@ impl Reading<'_, '_> {
         tag: StartTag<'_>,
         node: u32,
     ) -> Result<()> {
+        let offset = tag.offset();
         let span = self.capture(reader, mce, tag)?;
         let kind = self.document.node(node).map(|node| &node.kind);
         let (paragraph, table) = (
@@ -571,10 +586,10 @@ impl Reading<'_, '_> {
             matches!(kind, Some(Kind::Table { .. })),
         );
         if paragraph {
-            self.section_break(span);
+            self.section_break(span, offset);
         }
         if table && self.document.element(span).is(&self.names.w, "tblGrid") {
-            let columns = self.grid(span);
+            let columns = self.grid(span, offset);
             if let Some(Node {
                 kind: Kind::Table { columns: table },
                 ..
@@ -592,7 +607,8 @@ impl Reading<'_, '_> {
     /// A `w:sectPr` in the properties of a paragraph ends a section after the block of
     /// the body the paragraph is in. Word uses it only in paragraphs of the body, not in
     /// table cells.
-    fn section_break(&mut self, p_pr: Span) {
+    fn section_break(&mut self, p_pr: Span, offset: usize) {
+        let place = self.place(offset);
         let p_pr = p_pr.of(&self.document.tokens, &self.document.strings);
         let Some(sect_pr) = p_pr.children().find(|c| c.is(&self.names.w, "sectPr")) else {
             return;
@@ -610,13 +626,14 @@ impl Reading<'_, '_> {
         if in_table {
             return;
         }
-        let properties = section::read(sect_pr, &self.names, self.part_name, &mut self.diagnostics);
+        let properties = section::read(sect_pr, &self.names, &place, &mut self.diagnostics);
         self.breaks.push((self.body.len(), properties));
     }
 
     /// The widths of the columns of a `w:tblGrid`.
-    fn grid(&mut self, tbl_grid: Span) -> Vec<Option<officewright_core::Pt>> {
+    fn grid(&mut self, tbl_grid: Span, offset: usize) -> Vec<Option<officewright_core::Pt>> {
         let w = self.names.w;
+        let place = self.place(offset);
         let mut columns = Vec::new();
         for col in tbl_grid
             .of(&self.document.tokens, &self.document.strings)
@@ -628,19 +645,19 @@ impl Reading<'_, '_> {
             let width = col.attribute(&w, "w");
             let length = width.and_then(|width| twips_measure(width, false));
             if let (Some(width), None) = (width, length) {
-                section::invalid(&mut self.diagnostics, self.part_name, col, "w", width);
+                section::invalid(&mut self.diagnostics, &place, col, "w", width);
             }
             columns.push(length);
         }
         columns
     }
 
-    fn hyperlink(&mut self, reader: &Reader<'_>, tag: &StartTag<'_>) -> HyperlinkData {
+    fn hyperlink(&mut self, tag: &StartTag<'_>) -> HyperlinkData {
         let id = self.r.iter().find_map(|&r| tag.attribute(Some(r), "id"));
         let target = id.and_then(|id| {
             let relationship = self.part.relationships().get(id);
             if relationship.is_none() {
-                self.diagnose(reader, tag.offset(), DiagnosticKind::InvalidValue, || {
+                self.diagnose(tag.offset(), DiagnosticKind::InvalidValue, || {
                     format!(
                         "hyperlink r:id=\"{}\" names no relationship; the link is ignored",
                         shorten(id)
@@ -693,6 +710,7 @@ impl Reading<'_, '_> {
         let mut depth = 1usize;
         while depth > 0 {
             self.spend(1)?;
+            self.at = reader.offset();
             let event = reader
                 .read_event()
                 .map_err(|err| Error::from(err.in_part(self.part_name)))?;
@@ -707,6 +725,15 @@ impl Reading<'_, '_> {
                     depth -= 1;
                 }
                 Some(Event::Text(text)) => self.document.tokens.push(Token::Text(text.into())),
+                Some(Event::Comment(text)) => {
+                    self.document.tokens.push(Token::Comment(text.into()))
+                }
+                Some(Event::ProcessingInstruction(pi)) => {
+                    self.document.tokens.push(Token::ProcessingInstruction {
+                        target: pi.target().into(),
+                        data: pi.data().into(),
+                    });
+                }
                 Some(_) => {}
                 None => break,
             }
@@ -769,7 +796,7 @@ impl Reading<'_, '_> {
             None => Err(Error::LimitExceeded {
                 limit: Limit::Nodes,
                 maximum: self.max_nodes as u64,
-                context: self.part_name.to_owned(),
+                context: self.place(self.at),
             }),
         }
     }
@@ -784,9 +811,9 @@ impl Reading<'_, '_> {
         self.w.iter().find_map(|&w| tag.attribute(Some(w), local))
     }
 
-    fn invalid(&mut self, reader: &Reader<'_>, tag: &StartTag<'_>, attribute: &str, value: &str) {
+    fn invalid(&mut self, tag: &StartTag<'_>, attribute: &str, value: &str) {
         let element = tag.name().local();
-        self.diagnose(reader, tag.offset(), DiagnosticKind::InvalidValue, || {
+        self.diagnose(tag.offset(), DiagnosticKind::InvalidValue, || {
             format!(
                 "w:{element} w:{attribute}=\"{}\" is not valid; it is ignored",
                 shorten(value)
@@ -795,17 +822,21 @@ impl Reading<'_, '_> {
     }
 
     /// Records a diagnostic at a position in the part, which it names as errors do.
-    fn diagnose(
-        &mut self,
-        reader: &Reader<'_>,
-        offset: usize,
-        kind: DiagnosticKind,
-        message: impl FnOnce() -> String,
-    ) {
-        let part = self.part_name;
-        self.diagnostics.push(kind, || {
-            reader.error(offset, message()).in_part(part).to_string()
-        });
+    fn diagnose(&mut self, offset: usize, kind: DiagnosticKind, message: impl FnOnce() -> String) {
+        if self.diagnostics.is_full() {
+            // Counted, not kept: the position is not worth finding.
+            self.diagnostics.push(kind, String::new);
+            return;
+        }
+        let place = self.place(offset);
+        self.diagnostics
+            .push(kind, || format!("{place}: {}", message()));
+    }
+
+    /// The part, line and column of an offset, as errors name them.
+    fn place(&mut self, offset: usize) -> String {
+        let (line, column) = self.locator.locate(offset);
+        format!("{}, line {line}, column {column}", self.part_name)
     }
 
     fn malformed(&self, reader: &Reader<'_>, tag: &StartTag<'_>, message: String) -> Error {
@@ -820,4 +851,51 @@ enum Context {
     Container { parent: Parent, level: Level },
     ContentControl { node: u32, level: Level },
     Text,
+}
+
+/// Lines and columns of offsets in a part. Each position is found by reading on from the
+/// one asked for before, so that positions asked for in document order, as a reader asks
+/// for them, cost one pass over the part together, not one each.
+struct Locator<'t> {
+    text: &'t str,
+    offset: usize,
+    line: u64,
+    column: u64,
+}
+
+impl<'t> Locator<'t> {
+    fn new(text: &'t str) -> Self {
+        Self {
+            text,
+            offset: 0,
+            line: 1,
+            column: 1,
+        }
+    }
+
+    /// The line and the column, in characters, of a byte offset, both counted from 1.
+    fn locate(&mut self, offset: usize) -> (u64, u64) {
+        let mut offset = offset.min(self.text.len());
+        while !self.text.is_char_boundary(offset) {
+            offset -= 1;
+        }
+        if offset < self.offset {
+            *self = Self::new(self.text);
+        }
+        for c in self
+            .text
+            .get(self.offset..offset)
+            .unwrap_or_default()
+            .chars()
+        {
+            if c == '\n' {
+                self.line += 1;
+                self.column = 1;
+            } else {
+                self.column += 1;
+            }
+        }
+        self.offset = offset;
+        (self.line, self.column)
+    }
 }

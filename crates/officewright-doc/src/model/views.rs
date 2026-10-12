@@ -253,7 +253,8 @@ impl<'a> Run<'a> {
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub enum RunContent<'a> {
-    /// Text (`w:t`).
+    /// Text (`w:t`), as written: white space at its ends is kept whether or not the
+    /// element says `xml:space="preserve"`.
     Text(&'a str),
     /// Text deleted with change tracking on (`w:delText`).
     DeletedText(&'a str),
@@ -308,7 +309,7 @@ impl<'a> RunContent<'a> {
                 font: font.as_deref(),
                 char: *char,
             },
-            RunItem::FieldChar(kind) => Self::FieldChar(*kind),
+            RunItem::FieldChar { kind, .. } => Self::FieldChar(*kind),
             RunItem::NoBreakHyphen => Self::NoBreakHyphen,
             RunItem::SoftHyphen => Self::SoftHyphen,
             RunItem::FootnoteReference(id) => Self::FootnoteReference(*id),

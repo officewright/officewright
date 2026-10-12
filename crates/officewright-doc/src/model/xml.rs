@@ -58,6 +58,11 @@ pub(crate) enum Token {
     },
     End,
     Text(Box<str>),
+    Comment(Box<str>),
+    ProcessingInstruction {
+        target: Box<str>,
+        data: Box<str>,
+    },
 }
 
 /// The tokens of one element and everything in it, in a document's token list.
@@ -159,7 +164,7 @@ impl<'d> Element<'d> {
                     }
                     None
                 }
-                Token::Text(_) => None,
+                Token::Text(_) | Token::Comment(_) | Token::ProcessingInstruction { .. } => None,
             })
     }
 
@@ -235,6 +240,20 @@ impl<'d> Element<'d> {
                     }
                 }
                 Token::Text(text) => escape(&mut out, text, false),
+                Token::Comment(text) => {
+                    out.push_str("<!--");
+                    out.push_str(text);
+                    out.push_str("-->");
+                }
+                Token::ProcessingInstruction { target, data } => {
+                    out.push_str("<?");
+                    out.push_str(target);
+                    if !data.is_empty() {
+                        out.push(' ');
+                        out.push_str(data);
+                    }
+                    out.push_str("?>");
+                }
             }
         }
         out
