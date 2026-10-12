@@ -16,17 +16,20 @@
 pub struct Limits {
     entries: u64,
     part_size: u64,
+    total_size: u64,
     xml_depth: usize,
     xml_attributes: usize,
 }
 
 impl Limits {
-    /// The default limits: 65,536 ZIP entries, 256 MiB per part, XML nesting 256
-    /// elements deep and 256 attributes per element.
+    /// The default limits: 65,536 ZIP entries, 256 MiB per part, 1 GiB for all parts
+    /// read from one package, XML nesting 256 elements deep and 256 attributes per
+    /// element.
     pub const fn new() -> Self {
         Self {
             entries: 1 << 16,
             part_size: 256 << 20,
+            total_size: 1 << 30,
             xml_depth: 256,
             xml_attributes: 256,
         }
@@ -53,6 +56,20 @@ impl Limits {
     #[must_use]
     pub const fn with_max_part_size(mut self, value: u64) -> Self {
         self.part_size = value;
+        self
+    }
+
+    /// The largest total uncompressed size of all parts read from one package, in
+    /// bytes. Parts that are never read, such as images when only text is needed, do
+    /// not count.
+    pub const fn max_total_size(&self) -> u64 {
+        self.total_size
+    }
+
+    /// Sets [`max_total_size`](Self::max_total_size).
+    #[must_use]
+    pub const fn with_max_total_size(mut self, value: u64) -> Self {
+        self.total_size = value;
         self
     }
 

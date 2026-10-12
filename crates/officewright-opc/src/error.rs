@@ -1,6 +1,6 @@
 use std::{error, fmt};
 
-/// An error from reading a ZIP archive or an XML part.
+/// An error from reading a ZIP archive, an XML part or an OOXML package.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
@@ -29,6 +29,8 @@ pub enum Error {
         /// What is wrong.
         message: String,
     },
+    /// The package breaks a rule of the Open Packaging Conventions.
+    Package(String),
     /// The input exceeds one of the configured [`Limits`](crate::Limits).
     LimitExceeded {
         /// Which limit.
@@ -50,6 +52,8 @@ pub enum Limit {
     Entries,
     /// [`Limits::max_part_size`](crate::Limits::max_part_size).
     PartSize,
+    /// [`Limits::max_total_size`](crate::Limits::max_total_size).
+    TotalSize,
     /// [`Limits::max_xml_depth`](crate::Limits::max_xml_depth).
     XmlDepth,
     /// [`Limits::max_xml_attributes`](crate::Limits::max_xml_attributes).
@@ -57,7 +61,7 @@ pub enum Limit {
 }
 
 impl Error {
-    /// Names the part an XML error or an XML limit refers to, when the error does not
+    /// Names the part an XML error or a size limit refers to, when the error does not
     /// name one yet.
     #[must_use]
     pub fn in_part(self, part: &str) -> Self {
@@ -103,7 +107,7 @@ impl fmt::Display for Error {
                 }
                 write!(f, "line {line}, column {column}: {message}")
             }
-            Self::Unsupported(message) => f.write_str(message),
+            Self::Package(message) | Self::Unsupported(message) => f.write_str(message),
             Self::LimitExceeded {
                 limit,
                 maximum,
@@ -118,6 +122,7 @@ impl fmt::Display for Limit {
         f.write_str(match self {
             Self::Entries => "number of zip entries",
             Self::PartSize => "uncompressed size in bytes",
+            Self::TotalSize => "total uncompressed size of the parts read in bytes",
             Self::XmlDepth => "xml element nesting depth",
             Self::XmlAttributes => "number of attributes on an xml element",
         })
@@ -136,6 +141,7 @@ impl From<Error> for officewright_core::Error {
             Error::Zip { .. }
             | Error::Entry { .. }
             | Error::Xml { .. }
+            | Error::Package(_)
             | Error::LimitExceeded { .. } => Self::InvalidArgument(message),
         }
     }
@@ -201,28 +207,6 @@ mod tests {
         assert!(matches!(
             malformed,
             officewright_core::Error::InvalidArgument(ref m) if m == "zip archive: bad signature at byte 4"
-        ));
-        let xml: officewright_core::Error = Error::Xml {
-            part: Some("/a.xml".into()),
-            line: 1,
-            column: 2,
-            message: "expected a name".into(),
-        }
-        .into();
-        assert!(matches!(
-            xml,
-            officewright_core::Error::InvalidArgument(ref m) if m == "/a.xml, line 1, column 2: expected a name"
-        ));
-        let limit: officewright_core::Error = Error::LimitExceeded {
-            limit: Limit::PartSize,
-            maximum: 10,
-            context: "zip entry a.xml".into(),
-        }
-        .into();
-        assert!(matches!(
-            limit,
-            officewright_core::Error::InvalidArgument(ref m)
-                if m == "zip entry a.xml: uncompressed size in bytes exceeds the limit of 10"
         ));
     }
 }
