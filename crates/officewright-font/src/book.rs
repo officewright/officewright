@@ -182,7 +182,7 @@ pub struct SkippedFont {
 }
 
 impl SkippedFont {
-    /// The file, `None` for a font added from memory.
+    /// The file or directory, `None` for a font added from memory.
     pub fn path(&self) -> Option<&Path> {
         self.path.as_deref()
     }
@@ -227,7 +227,8 @@ impl fmt::Display for SkippedFont {
 /// changes, so a font that was still being copied during one scan is found by the next.
 /// Links, font files that could not be resolved and directories that could not be read
 /// are tried on every scan. Each skipped path is listed once, with the error of its
-/// latest attempt, and leaves the list when it is read.
+/// latest attempt, and leaves the list when it is read. A path that is removed stays
+/// listed; a process that wants a fresh list starts a new book.
 ///
 /// ```
 /// use officewright_font::{FontBook, FontRequest, FontResolver};
@@ -418,7 +419,14 @@ impl FontBook {
         };
         let canonical = fs::canonicalize(path).map_err(read_error)?;
         let metadata = fs::metadata(&canonical).map_err(read_error)?;
-        self.add_resolved_file(path, canonical, &metadata, origin)
+        let result = self.add_resolved_file(path, canonical, &metadata, origin);
+        // A scan may have listed the path itself, such as a link that did not resolve.
+        if result.is_ok() {
+            if let Some(location) = location(path) {
+                self.forget_failure(&location);
+            }
+        }
+        result
     }
 
     /// Adds a file whose canonical path and metadata the caller has read.
@@ -448,9 +456,21 @@ impl FontBook {
         result
     }
 
-    /// Lists a path that a directory scan could not add, replacing what was listed for
-    /// it before.
+    /// Lists a path that a directory scan could not add, with the error of this attempt.
+    /// A path that was already unreachable keeps its place in the list and the path it
+    /// was first reached by, so reaching it through another alias of its directory does
+    /// not change the entry; anything else listed for it before is replaced.
     fn list_failure(&mut self, key: PathBuf, failure: Failure, path: PathBuf, error: Error) {
+        if failure == Failure::Unreachable && self.failed.get(&key) == Some(&failure) {
+            let listed = self
+                .skipped
+                .iter_mut()
+                .find(|skipped| skipped.key.as_ref() == Some(&key));
+            if let Some(listed) = listed {
+                listed.error = error;
+                return;
+            }
+        }
         self.forget_failure(&key);
         self.skipped.push(SkippedFont {
             path: Some(path),
@@ -544,13 +564,11 @@ impl FontBook {
                     entries
                 }
                 Err(source) => {
-                    if self.failed.get(&canonical_dir) != Some(&Failure::Unreachable) {
-                        let error = Error::Read {
-                            path: dir.clone(),
-                            source,
-                        };
-                        self.list_failure(canonical_dir, Failure::Unreachable, dir, error);
-                    }
+                    let error = Error::Read {
+                        path: dir.clone(),
+                        source,
+                    };
+                    self.list_failure(canonical_dir, Failure::Unreachable, dir, error);
                     continue;
                 }
             };
@@ -583,18 +601,21 @@ impl FontBook {
                     // A font file that cannot be resolved, such as a link to a removed
                     // file, is listed under its location, once.
                     Err(source) => {
-                        if self.failed.get(&location) != Some(&Failure::Unreachable) {
-                            let error = Error::Read {
-                                path: path.clone(),
-                                source,
-                            };
-                            self.list_failure(location, Failure::Unreachable, path, error);
-                        }
+                        let error = Error::Read {
+                            path: path.clone(),
+                            source,
+                        };
+                        self.list_failure(location, Failure::Unreachable, path, error);
                         continue;
                     }
                 };
-                // It resolves now, so it is no longer unreachable.
-                if self.failed.get(&location) == Some(&Failure::Unreachable) {
+                // What was listed under the location is out of date if the entry was
+                // unresolvable and resolves now, or is now a link to another file. A
+                // regular file is listed under its location, which is its canonical path,
+                // and is compared below.
+                if canonical != location
+                    || self.failed.get(&location) == Some(&Failure::Unreachable)
+                {
                     self.forget_failure(&location);
                 }
                 // Sockets, FIFOs and devices are not fonts, whatever their names.
@@ -615,6 +636,16 @@ impl FontBook {
         }
         added
     }
+}
+
+/// Where a directory entry is: its canonical directory and its name, however the
+/// directory was reached. A scan lists a font file that cannot be resolved under it.
+fn location(path: &Path) -> Option<PathBuf> {
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    Some(fs::canonicalize(dir).ok()?.join(path.file_name()?))
 }
 
 /// Whether a file's extension is one of a TrueType or OpenType font or collection.
@@ -805,6 +836,22 @@ mod tests {
     }
 
     #[test]
+    fn reads_a_skipped_file_again_once_its_size_changes() {
+        let dir = TempDir::new("size");
+        let path = dir.0.join("sans.ttf");
+        let font = TestFont::new("Test Sans").build();
+        fs::write(&path, &font[..font.len() / 2]).unwrap();
+        let mut book = FontBook::new();
+        assert_eq!(book.add_dir(&dir.0).unwrap(), 0);
+        assert_eq!(book.skipped().len(), 1);
+        // Within the file system's timestamp resolution the time can stay the same.
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        write_with_time(&path, &font, modified);
+        assert_eq!(book.add_dir(&dir.0).unwrap(), 1);
+        assert!(book.skipped().is_empty(), "{:?}", book.skipped());
+    }
+
+    #[test]
     fn lists_a_skipped_file_once_with_its_latest_error() {
         let dir = TempDir::new("latest");
         let path = dir.0.join("sans.ttf");
@@ -868,6 +915,85 @@ mod tests {
         fs::write(&replaced, TestFont::new("Test Serif").build()).unwrap();
         assert_eq!(book.add_dir(&fonts).unwrap(), 2);
         assert!(book.skipped().is_empty(), "{:?}", book.skipped());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_broken_file_replaced_by_a_link_leaves_the_list_or_is_listed_once() {
+        let dir = TempDir::new("relinked");
+        let fonts = dir.0.join("fonts");
+        let elsewhere = dir.0.join("elsewhere");
+        fs::create_dir(&fonts).unwrap();
+        fs::create_dir(&elsewhere).unwrap();
+        let (good, bad) = (fonts.join("good.ttf"), fonts.join("bad.ttf"));
+        fs::write(&good, b"not a font").unwrap();
+        fs::write(&bad, b"not a font").unwrap();
+        let mut book = FontBook::new();
+        book.add_dir(&fonts).unwrap();
+        assert_eq!(book.skipped().len(), 2);
+
+        // A package upgrade replaces each file with a link into a shared directory: one
+        // to a font, one to a file that is broken in another way.
+        let font = elsewhere.join("sans.ttf");
+        let damaged = elsewhere.join("damaged.ttf");
+        fs::write(&font, TestFont::new("Test Sans").build()).unwrap();
+        let without_hmtx = TestFont::new("Test Serif").without_table(b"hmtx").build();
+        fs::write(&damaged, without_hmtx).unwrap();
+        for (path, target) in [(&good, &font), (&bad, &damaged)] {
+            fs::remove_file(path).unwrap();
+            std::os::unix::fs::symlink(target, path).unwrap();
+        }
+        assert_eq!(book.add_dir(&fonts).unwrap(), 1);
+        assert_eq!(book.skipped().len(), 1, "{:?}", book.skipped());
+        assert_eq!(book.skipped()[0].path(), Some(bad.as_path()));
+        assert!(
+            matches!(
+                book.skipped()[0].error(),
+                Error::MissingTable { table: "hmtx", .. }
+            ),
+            "{}",
+            book.skipped()[0]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn add_file_drops_a_link_that_a_scan_could_not_resolve() {
+        let dir = TempDir::new("add-link");
+        let fonts = dir.0.join("fonts");
+        fs::create_dir(&fonts).unwrap();
+        let target = dir.0.join("sans.ttf");
+        let link = fonts.join("link.ttf");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let mut book = FontBook::new();
+        book.add_dir(&fonts).unwrap();
+        assert_eq!(book.skipped().len(), 1);
+        fs::write(&target, TestFont::new("Test Sans").build()).unwrap();
+        assert_eq!(book.add_file(&link).unwrap(), 1);
+        assert!(book.skipped().is_empty(), "{:?}", book.skipped());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_unresolvable_file_shows_the_error_of_its_latest_attempt() {
+        let read_error = |skipped: &SkippedFont| match skipped.error() {
+            Error::Read { source, .. } => source.kind(),
+            error => panic!("{error}"),
+        };
+        let dir = TempDir::new("loop-link");
+        let link = dir.0.join("sans.ttf");
+        std::os::unix::fs::symlink(dir.0.join("removed.ttf"), &link).unwrap();
+        let mut book = FontBook::new();
+        book.add_dir(&dir.0).unwrap();
+        assert_eq!(read_error(&book.skipped()[0]), io::ErrorKind::NotFound);
+
+        // Now a link to itself, which cannot be resolved for another reason.
+        fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&link, &link).unwrap();
+        book.add_dir(&dir.0).unwrap();
+        assert_eq!(book.skipped().len(), 1, "{:?}", book.skipped());
+        assert_eq!(book.skipped()[0].path(), Some(link.as_path()));
+        assert_ne!(read_error(&book.skipped()[0]), io::ErrorKind::NotFound);
     }
 
     #[test]
