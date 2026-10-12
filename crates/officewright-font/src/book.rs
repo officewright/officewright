@@ -462,10 +462,10 @@ impl FontBook {
         let mut stack = vec![(root.to_owned(), 0)];
         while let Some((dir, depth)) = stack.pop() {
             // Following links can lead back to a directory already searched.
-            let Ok(canonical) = fs::canonicalize(&dir) else {
+            let Ok(canonical_dir) = fs::canonicalize(&dir) else {
                 continue;
             };
-            if !visited.insert(canonical) {
+            if !visited.insert(canonical_dir.clone()) {
                 continue;
             }
             let entries = match fs::read_dir(&dir) {
@@ -501,9 +501,13 @@ impl FontBook {
                 let (canonical, metadata) = match resolved {
                     Ok(resolved) => resolved,
                     // A font file that cannot be resolved, such as a link to a removed
-                    // file, is listed, once.
+                    // file, is listed, once: it is remembered under its canonical
+                    // directory, however the directory was reached.
                     Err(source) => {
-                        if self.failed.insert(path.clone()) {
+                        let key = path
+                            .file_name()
+                            .map_or_else(|| path.clone(), |name| canonical_dir.join(name));
+                        if self.failed.insert(key) {
                             self.skipped.push(SkippedFont {
                                 path: Some(path.clone()),
                                 error: Error::Read { path, source },
@@ -790,13 +794,19 @@ mod tests {
     #[cfg(unix)]
     fn lists_font_files_that_cannot_be_resolved_once() {
         let dir = TempDir::new("dangling");
-        let link = dir.0.join("gone.ttf");
-        std::os::unix::fs::symlink(dir.0.join("removed.ttf"), &link).unwrap();
+        let fonts = dir.0.join("fonts");
+        fs::create_dir(&fonts).unwrap();
+        let link = fonts.join("gone.ttf");
+        std::os::unix::fs::symlink(fonts.join("removed.ttf"), &link).unwrap();
         // A dangling link with another name is not a font file and is not listed.
-        std::os::unix::fs::symlink(dir.0.join("removed.txt"), dir.0.join("gone.txt")).unwrap();
+        std::os::unix::fs::symlink(fonts.join("removed.txt"), fonts.join("gone.txt")).unwrap();
+        // The same directory reached through a link to it.
+        let alias = dir.0.join("alias");
+        std::os::unix::fs::symlink(&fonts, &alias).unwrap();
         let mut book = FontBook::new();
-        book.add_dir(&dir.0).unwrap();
-        book.add_dir(&dir.0).unwrap();
+        book.add_dir(&fonts).unwrap();
+        book.add_dir(&fonts).unwrap();
+        book.add_dir(&alias).unwrap();
         assert_eq!(book.skipped().len(), 1, "{:?}", book.skipped());
         assert_eq!(book.skipped()[0].path(), Some(link.as_path()));
         assert!(matches!(book.skipped()[0].error(), Error::Read { .. }));
