@@ -13,15 +13,16 @@ use officewright_opc::Part;
 use officewright_opc::mce::{Disposition, Processor};
 use officewright_opc::xml::{Event, Input, NsId, Reader, StartTag};
 
+use super::capture::{Budget, Capture};
 use super::{Names, R, R_STRICT, W, W_STRICT, section, shorten};
 use crate::diagnostic::{DiagnosticKind, Diagnostics};
-use crate::model::xml::{Span, Sym, Token, XmlAttribute, XmlName};
+use crate::model::xml::{Span, Sym};
 use crate::model::{
     Break, BreakClear, BreakKind, Conformance, ControlLevel, Document, FieldCharKind,
     HyperlinkData, Kind, Node, RevisionData, RevisionKind, RunItem, SectionData, SectionProperties,
 };
 use crate::units::twips_measure;
-use crate::{Error, Limit, Limits, Result};
+use crate::{Error, Limits, Result};
 
 /// Where the children of an element go, and what they may be.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,29 +85,21 @@ enum TextKind {
 }
 
 struct Reading<'d, 'p, 't> {
-    document: &'d mut Document,
+    c: Capture<'d, 'p, 't>,
     part: &'p Part<'p>,
-    part_name: &'p str,
     names: Names,
     /// The reader's ids of the namespaces read into the model.
     w: [NsId; 2],
     r: [NsId; 2],
     mc: NsId,
-    uris: HashMap<NsId, Sym>,
     body: Vec<u32>,
     /// Where sections end: after this many blocks of the body, with these properties.
     breaks: Vec<(usize, SectionProperties)>,
     last_section: Option<SectionProperties>,
-    diagnostics: Diagnostics,
-    nodes_left: usize,
-    max_nodes: usize,
     stack: Vec<Frame>,
     /// For each frame, the index of the frame that says where its children go: its own,
     /// or for a transparent frame that of the frame it hands its children to.
     defining: Vec<usize>,
-    locator: Locator<'t>,
-    /// The offset of the event read last, where a limit is exceeded.
-    at: usize,
     /// How many tables are open around the element read now.
     tables_open: usize,
     /// A paragraph whose properties end a section, with the section's properties: the
@@ -128,6 +121,8 @@ pub(super) fn read(
     xml: &[u8],
     part: &Part<'_>,
     limits: &Limits,
+    diagnostics: &mut Diagnostics,
+    budget: &mut Budget,
 ) -> Result<()> {
     let part_name = part.name().as_str();
     let input = Input::decode(xml).map_err(|err| Error::from(err.in_part(part_name)))?;
@@ -141,24 +136,17 @@ pub(super) fn read(
     let mc = reader.intern(officewright_opc::mce::NAMESPACE);
     let names = Names::new(&mut document.strings);
     let mut reading = Reading {
-        document,
+        c: Capture::new(document, part_name, input.as_str(), diagnostics, budget),
         part,
-        part_name,
         names,
         w,
         r,
         mc,
-        uris: HashMap::new(),
         body: Vec::new(),
         breaks: Vec::new(),
         last_section: None,
-        diagnostics: Diagnostics::default(),
-        nodes_left: limits.max_nodes(),
-        max_nodes: limits.max_nodes(),
         stack: Vec::new(),
         defining: Vec::new(),
-        locator: Locator::new(input.as_str()),
-        at: 0,
         tables_open: 0,
         pending_break: None,
         open_blocks: Vec::new(),
@@ -180,16 +168,13 @@ pub(super) fn read(
 impl Reading<'_, '_, '_> {
     fn run(&mut self, reader: &mut Reader<'_>, mce: &mut Processor) -> Result<()> {
         let opc = |err: officewright_opc::Error, part: &str| Error::from(err.in_part(part));
-        while let Some(event) = reader
-            .read_event()
-            .map_err(|err| opc(err, self.part_name))?
-        {
+        while let Some(event) = reader.read_event().map_err(|err| opc(err, self.c.part))? {
             match event {
                 Event::Start(tag) => {
-                    self.at = tag.offset();
+                    self.c.at = tag.offset();
                     let disposition = mce
                         .start(reader, &tag)
-                        .map_err(|err| opc(err, self.part_name))?;
+                        .map_err(|err| opc(err, self.c.part))?;
                     self.start(reader, mce, tag, disposition)?;
                 }
                 Event::End(_) => {
@@ -201,12 +186,13 @@ impl Reading<'_, '_, '_> {
                     _ if text.trim().is_empty() => {}
                     _ => {
                         let offset = reader.offset();
-                        self.diagnose(offset, DiagnosticKind::UnexpectedContent, || {
-                            format!(
-                                "text {:?} outside a text element is ignored",
-                                shorten(text.trim())
-                            )
-                        });
+                        self.c
+                            .diagnose(offset, DiagnosticKind::UnexpectedContent, || {
+                                format!(
+                                    "text {:?} outside a text element is ignored",
+                                    shorten(text.trim())
+                                )
+                            });
                     }
                 },
                 Event::Comment(_) | Event::ProcessingInstruction(_) => {}
@@ -239,7 +225,7 @@ impl Reading<'_, '_, '_> {
                     ),
                 ));
             };
-            self.document.conformance = conformance;
+            self.c.document.conformance = conformance;
             self.push(Frame::Root);
             return Ok(());
         }
@@ -250,12 +236,12 @@ impl Reading<'_, '_, '_> {
                     || (choice
                         && mce
                             .is_selectable(reader, &tag)
-                            .map_err(|err| Error::from(err.in_part(self.part_name)))?));
+                            .map_err(|err| Error::from(err.in_part(self.c.part)))?));
             if take {
                 *taken = true;
                 self.push(Frame::Transparent);
             } else {
-                return self.skip(reader, mce);
+                return self.c.skip(reader, mce);
             }
             return Ok(());
         }
@@ -283,18 +269,19 @@ impl Reading<'_, '_, '_> {
                     Ok(())
                 } else {
                     // w:background and the like: kept for writing in a later version.
-                    self.capture(reader, mce, tag).map(drop)
+                    self.c.capture(reader, mce, tag).map(drop)
                 }
             }
             Context::Text => {
                 let offset = tag.offset();
-                self.diagnose(offset, DiagnosticKind::UnexpectedContent, || {
-                    format!(
-                        "element <{}> inside text is ignored",
-                        shorten(name.qname().as_str())
-                    )
-                });
-                self.skip(reader, mce)
+                self.c
+                    .diagnose(offset, DiagnosticKind::UnexpectedContent, || {
+                        format!(
+                            "element <{}> inside text is ignored",
+                            shorten(name.qname().as_str())
+                        )
+                    });
+                self.c.skip(reader, mce)
             }
             Context::ContentControl { node, level } => match local {
                 "sdtPr" | "sdtEndPr" => self.property(reader, mce, tag, node),
@@ -328,7 +315,7 @@ impl Reading<'_, '_, '_> {
     ) -> Result<()> {
         let local = tag.name().local();
         let parent_kind = match parent {
-            Parent::Node(node) => self.document.node(node).map(|node| &node.kind),
+            Parent::Node(node) => self.c.document.node(node).map(|node| &node.kind),
             Parent::Body => None,
         };
         // Properties of the parent element come first in it.
@@ -358,10 +345,10 @@ impl Reading<'_, '_, '_> {
                 Level::Row,
             ),
             (Level::Block, "sectPr") if parent == Parent::Body => {
-                let place = self.place(tag.offset());
-                let span = self.capture(reader, mce, tag)?;
-                let element = span.of(&self.document.tokens, &self.document.strings);
-                let properties = section::read(element, &self.names, &place, &mut self.diagnostics);
+                let place = self.c.place(tag.offset());
+                let span = self.c.capture(reader, mce, tag)?;
+                let element = span.of(&self.c.document.tokens, &self.c.document.strings);
+                let properties = section::read(element, &self.names, &place, self.c.diagnostics);
                 self.last_section = Some(properties);
                 Ok(())
             }
@@ -419,9 +406,10 @@ impl Reading<'_, '_, '_> {
             }
             (Level::Inline, "fldSimple") => {
                 if self.w_attribute(&tag, "instr").is_none() {
-                    self.diagnose(tag.offset(), DiagnosticKind::InvalidValue, || {
-                        "w:fldSimple has no w:instr; its instruction is empty".into()
-                    });
+                    self.c
+                        .diagnose(tag.offset(), DiagnosticKind::InvalidValue, || {
+                            "w:fldSimple has no w:instr; its instruction is empty".into()
+                        });
                 }
                 let instruction = self.w_attribute(&tag, "instr").unwrap_or_default().into();
                 self.open(parent, Kind::SimpleField { instruction }, Level::Inline)
@@ -490,7 +478,7 @@ impl Reading<'_, '_, '_> {
                     }
                 };
                 // The element is kept whole: it may hold form field data (w:ffData).
-                let element = self.capture(reader, mce, tag)?;
+                let element = self.c.capture(reader, mce, tag)?;
                 return self.push_item(run, RunItem::FieldChar { kind, element });
             }
             "sym" => {
@@ -525,7 +513,7 @@ impl Reading<'_, '_, '_> {
         };
         self.push_item(run, item)?;
         // The element is read; whatever it contains is not part of the model.
-        self.skip(reader, mce)
+        self.c.skip(reader, mce)
     }
 
     fn end(&mut self) -> Result<()> {
@@ -551,7 +539,7 @@ impl Reading<'_, '_, '_> {
                 if let Some(Node {
                     kind: Kind::Run { content },
                     ..
-                }) = self.document.nodes.get_mut(run as usize)
+                }) = self.c.document.nodes.get_mut(run as usize)
                 {
                     content.push(item);
                 }
@@ -560,7 +548,7 @@ impl Reading<'_, '_, '_> {
                 parent: Parent::Node(node),
                 level,
             }) => {
-                let kind = self.document.node(node).map(|node| &node.kind);
+                let kind = self.c.document.node(node).map(|node| &node.kind);
                 let (table, wrapper) = (
                     matches!(kind, Some(Kind::Table { .. })),
                     matches!(kind, Some(Kind::Wrapper)),
@@ -602,7 +590,7 @@ impl Reading<'_, '_, '_> {
             else {
                 break;
             };
-            let Some(source) = self.document.node(original) else {
+            let Some(source) = self.c.document.node(original) else {
                 continue;
             };
             let kind = match source.kind {
@@ -611,7 +599,7 @@ impl Reading<'_, '_, '_> {
             };
             let properties = source.properties.clone();
             let copy = self.add(parent, kind)?;
-            if let Some(node) = self.document.nodes.get_mut(copy as usize) {
+            if let Some(node) = self.c.document.nodes.get_mut(copy as usize) {
                 node.properties = properties;
             }
             // The paragraph that ends the section is inside the original, so it is not
@@ -652,6 +640,7 @@ impl Reading<'_, '_, '_> {
             return;
         };
         if self
+            .c
             .document
             .node(node)
             .is_some_and(|node| !node.children.is_empty())
@@ -660,7 +649,7 @@ impl Reading<'_, '_, '_> {
         }
         let siblings = match parent {
             Parent::Body => &mut self.body,
-            Parent::Node(parent) => match self.document.nodes.get_mut(parent as usize) {
+            Parent::Node(parent) => match self.c.document.nodes.get_mut(parent as usize) {
                 Some(parent) => &mut parent.children,
                 None => return,
             },
@@ -683,8 +672,7 @@ impl Reading<'_, '_, '_> {
             properties: self.last_section.take().unwrap_or_default(),
             blocks: self.body.get(start..).unwrap_or_default().to_vec(),
         });
-        self.document.sections = sections;
-        self.document.diagnostics = self.diagnostics.finish();
+        self.c.document.sections = sections;
     }
 
     /// The innermost frame that says where children go; transparent frames and the
@@ -738,9 +726,9 @@ impl Reading<'_, '_, '_> {
     }
 
     fn add(&mut self, parent: Parent, kind: Kind) -> Result<u32> {
-        self.spend(1)?;
-        let index = self.document.nodes.len() as u32;
-        self.document.nodes.push(Node {
+        self.c.spend(1)?;
+        let index = self.c.document.nodes.len() as u32;
+        self.c.document.nodes.push(Node {
             kind,
             properties: Vec::new(),
             children: Vec::new(),
@@ -748,7 +736,7 @@ impl Reading<'_, '_, '_> {
         match parent {
             Parent::Body => self.body.push(index),
             Parent::Node(parent) => {
-                if let Some(parent) = self.document.nodes.get_mut(parent as usize) {
+                if let Some(parent) = self.c.document.nodes.get_mut(parent as usize) {
                     parent.children.push(index);
                 }
             }
@@ -757,11 +745,11 @@ impl Reading<'_, '_, '_> {
     }
 
     fn push_item(&mut self, run: u32, item: RunItem) -> Result<()> {
-        self.spend(1)?;
+        self.c.spend(1)?;
         if let Some(Node {
             kind: Kind::Run { content },
             ..
-        }) = self.document.nodes.get_mut(run as usize)
+        }) = self.c.document.nodes.get_mut(run as usize)
         {
             content.push(item);
         }
@@ -769,7 +757,7 @@ impl Reading<'_, '_, '_> {
     }
 
     fn push_frame(&mut self, frame: Frame) -> Result<()> {
-        self.spend(1)?;
+        self.c.spend(1)?;
         self.push(frame);
         Ok(())
     }
@@ -783,8 +771,8 @@ impl Reading<'_, '_, '_> {
         node: u32,
     ) -> Result<()> {
         let offset = tag.offset();
-        let span = self.capture(reader, mce, tag)?;
-        let kind = self.document.node(node).map(|node| &node.kind);
+        let span = self.c.capture(reader, mce, tag)?;
+        let kind = self.c.document.node(node).map(|node| &node.kind);
         let (paragraph, table) = (
             matches!(kind, Some(Kind::Paragraph)),
             matches!(kind, Some(Kind::Table { .. })),
@@ -792,17 +780,17 @@ impl Reading<'_, '_, '_> {
         if paragraph {
             self.section_break(node, span, offset);
         }
-        if table && self.document.element(span).is(&self.names.w, "tblGrid") {
+        if table && self.c.document.element(span).is(&self.names.w, "tblGrid") {
             let columns = self.grid(span, offset);
             if let Some(Node {
                 kind: Kind::Table { columns: table },
                 ..
-            }) = self.document.nodes.get_mut(node as usize)
+            }) = self.c.document.nodes.get_mut(node as usize)
             {
                 *table = columns;
             }
         }
-        if let Some(node) = self.document.nodes.get_mut(node as usize) {
+        if let Some(node) = self.c.document.nodes.get_mut(node as usize) {
             node.properties.push(span);
         }
         Ok(())
@@ -816,22 +804,22 @@ impl Reading<'_, '_, '_> {
         if self.tables_open > 0 {
             return;
         }
-        let place = self.place(offset);
-        let p_pr = p_pr.of(&self.document.tokens, &self.document.strings);
+        let place = self.c.place(offset);
+        let p_pr = p_pr.of(&self.c.document.tokens, &self.c.document.strings);
         let Some(sect_pr) = p_pr.children().find(|c| c.is(&self.names.w, "sectPr")) else {
             return;
         };
-        let properties = section::read(sect_pr, &self.names, &place, &mut self.diagnostics);
+        let properties = section::read(sect_pr, &self.names, &place, self.c.diagnostics);
         self.pending_break = Some((paragraph, properties));
     }
 
     /// The widths of the columns of a `w:tblGrid`.
     fn grid(&mut self, tbl_grid: Span, offset: usize) -> Vec<Option<officewright_core::Pt>> {
         let w = self.names.w;
-        let place = self.place(offset);
+        let place = self.c.place(offset);
         let mut columns = Vec::new();
         for col in tbl_grid
-            .of(&self.document.tokens, &self.document.strings)
+            .of(&self.c.document.tokens, &self.c.document.strings)
             .children()
         {
             if !col.is(&w, "gridCol") {
@@ -840,7 +828,7 @@ impl Reading<'_, '_, '_> {
             let width = col.attribute(&w, "w");
             let length = width.and_then(|width| twips_measure(width, false));
             if let (Some(width), None) = (width, length) {
-                section::invalid(&mut self.diagnostics, &place, col, "w", width);
+                section::invalid(self.c.diagnostics, &place, col, "w", width);
             }
             columns.push(length);
         }
@@ -865,16 +853,17 @@ impl Reading<'_, '_, '_> {
             return target;
         }
         let Some(relationship) = self.part.relationships().get(id) else {
-            self.diagnose(tag.offset(), DiagnosticKind::InvalidValue, || {
-                format!(
-                    "hyperlink r:id=\"{}\" names no relationship; the link is ignored",
-                    shorten(id)
-                )
-            });
+            self.c
+                .diagnose(tag.offset(), DiagnosticKind::InvalidValue, || {
+                    format!(
+                        "hyperlink r:id=\"{}\" names no relationship; the link is ignored",
+                        shorten(id)
+                    )
+                });
             return None;
         };
         let target = (relationship.target_mode() == officewright_opc::TargetMode::External)
-            .then(|| self.document.strings.intern(relationship.target()));
+            .then(|| self.c.document.strings.intern(relationship.target()));
         self.link_targets.insert(id.into(), target);
         target
     }
@@ -886,7 +875,7 @@ impl Reading<'_, '_, '_> {
         mce: &mut Processor,
         tag: StartTag<'_>,
     ) -> Result<()> {
-        let span = self.capture(reader, mce, tag)?;
+        let span = self.c.capture(reader, mce, tag)?;
         match self.context() {
             Context::Container {
                 parent: Parent::Node(run),
@@ -897,112 +886,6 @@ impl Reading<'_, '_, '_> {
                 self.add(Parent::Node(node), Kind::Other(span)).map(drop)
             }
             Context::Root | Context::Text => Ok(()),
-        }
-    }
-
-    /// Reads an element and everything in it into a fragment. Only the element itself
-    /// went through Markup Compatibility: what is inside is kept as written.
-    fn capture(
-        &mut self,
-        reader: &mut Reader<'_>,
-        mce: &mut Processor,
-        tag: StartTag<'_>,
-    ) -> Result<Span> {
-        self.spend(1)?;
-        let start = self.document.tokens.len();
-        let token = self.start_token(reader, &tag)?;
-        self.document.tokens.push(token);
-        let mut depth = 1usize;
-        while depth > 0 {
-            self.spend(1)?;
-            self.at = reader.offset();
-            let event = reader
-                .read_event()
-                .map_err(|err| Error::from(err.in_part(self.part_name)))?;
-            match event {
-                Some(Event::Start(tag)) => {
-                    let token = self.start_token(reader, &tag)?;
-                    self.document.tokens.push(token);
-                    depth += 1;
-                }
-                Some(Event::End(_)) => {
-                    self.document.tokens.push(Token::End);
-                    depth -= 1;
-                }
-                Some(Event::Text(text)) => self.document.tokens.push(Token::Text(text.into())),
-                Some(Event::Comment(text)) => {
-                    self.document.tokens.push(Token::Comment(text.into()))
-                }
-                Some(Event::ProcessingInstruction(pi)) => {
-                    self.document.tokens.push(Token::ProcessingInstruction {
-                        target: pi.target().into(),
-                        data: pi.data().into(),
-                    });
-                }
-                Some(_) => {}
-                None => break,
-            }
-        }
-        mce.end();
-        Ok(Span::new(start, self.document.tokens.len()))
-    }
-
-    /// A start tag as a token, its names interned in the document. Its attributes count
-    /// against the node limit, as each costs memory of its own.
-    fn start_token(&mut self, reader: &Reader<'_>, tag: &StartTag<'_>) -> Result<Token> {
-        self.spend(tag.attributes().len())?;
-        let name = self.name(reader, tag.name());
-        let attributes = tag
-            .attributes()
-            .iter()
-            .map(|attribute| XmlAttribute {
-                name: self.name(reader, attribute.name()),
-                value: attribute.value().into(),
-            })
-            .collect();
-        Ok(Token::Start { name, attributes })
-    }
-
-    fn name(&mut self, reader: &Reader<'_>, name: officewright_opc::xml::Name<'_>) -> XmlName {
-        XmlName {
-            namespace: name.namespace().map(|ns| self.uri(reader, ns)),
-            qname: self.document.strings.intern(name.qname().as_str()),
-        }
-    }
-
-    /// A namespace of the reader as a namespace of the document, which outlives it.
-    fn uri(&mut self, reader: &Reader<'_>, namespace: NsId) -> Sym {
-        if let Some(&uri) = self.uris.get(&namespace) {
-            return uri;
-        }
-        let uri = self
-            .document
-            .strings
-            .intern(reader.namespace_uri(namespace));
-        self.uris.insert(namespace, uri);
-        uri
-    }
-
-    /// Skips an element the model reads nothing more from.
-    fn skip(&mut self, reader: &mut Reader<'_>, mce: &mut Processor) -> Result<()> {
-        reader
-            .skip_element()
-            .map_err(|err| Error::from(err.in_part(self.part_name)))?;
-        mce.end();
-        Ok(())
-    }
-
-    fn spend(&mut self, nodes: usize) -> Result<()> {
-        match self.nodes_left.checked_sub(nodes) {
-            Some(left) => {
-                self.nodes_left = left;
-                Ok(())
-            }
-            None => Err(Error::LimitExceeded {
-                limit: Limit::Nodes,
-                maximum: self.max_nodes as u64,
-                context: self.place(self.at),
-            }),
         }
     }
 
@@ -1018,34 +901,17 @@ impl Reading<'_, '_, '_> {
 
     fn invalid(&mut self, tag: &StartTag<'_>, attribute: &str, value: &str) {
         let element = tag.name().local();
-        self.diagnose(tag.offset(), DiagnosticKind::InvalidValue, || {
-            format!(
-                "w:{element} w:{attribute}=\"{}\" is not valid; it is ignored",
-                shorten(value)
-            )
-        });
-    }
-
-    /// Records a diagnostic at a position in the part, which it names as errors do.
-    fn diagnose(&mut self, offset: usize, kind: DiagnosticKind, message: impl FnOnce() -> String) {
-        if self.diagnostics.is_full() {
-            // Counted, not kept: the position is not worth finding.
-            self.diagnostics.push(kind, String::new);
-            return;
-        }
-        let place = self.place(offset);
-        self.diagnostics
-            .push(kind, || format!("{place}: {}", message()));
-    }
-
-    /// The part, line and column of an offset, as errors name them.
-    fn place(&mut self, offset: usize) -> String {
-        let (line, column) = self.locator.locate(offset);
-        format!("{}, line {line}, column {column}", self.part_name)
+        self.c
+            .diagnose(tag.offset(), DiagnosticKind::InvalidValue, || {
+                format!(
+                    "w:{element} w:{attribute}=\"{}\" is not valid; it is ignored",
+                    shorten(value)
+                )
+            });
     }
 
     fn malformed(&self, reader: &Reader<'_>, tag: &StartTag<'_>, message: String) -> Error {
-        Error::from(reader.error(tag.offset(), message).in_part(self.part_name))
+        Error::from(reader.error(tag.offset(), message).in_part(self.c.part))
     }
 }
 
@@ -1056,51 +922,4 @@ enum Context {
     Container { parent: Parent, level: Level },
     ContentControl { node: u32, level: Level },
     Text,
-}
-
-/// Lines and columns of offsets in a part. Each position is found by reading on from the
-/// one asked for before, so that positions asked for in document order, as a reader asks
-/// for them, cost one pass over the part together, not one each.
-struct Locator<'t> {
-    text: &'t str,
-    offset: usize,
-    line: u64,
-    column: u64,
-}
-
-impl<'t> Locator<'t> {
-    fn new(text: &'t str) -> Self {
-        Self {
-            text,
-            offset: 0,
-            line: 1,
-            column: 1,
-        }
-    }
-
-    /// The line and the column, in characters, of a byte offset, both counted from 1.
-    fn locate(&mut self, offset: usize) -> (u64, u64) {
-        let mut offset = offset.min(self.text.len());
-        while !self.text.is_char_boundary(offset) {
-            offset -= 1;
-        }
-        if offset < self.offset {
-            *self = Self::new(self.text);
-        }
-        for c in self
-            .text
-            .get(self.offset..offset)
-            .unwrap_or_default()
-            .chars()
-        {
-            if c == '\n' {
-                self.line += 1;
-                self.column = 1;
-            } else {
-                self.column += 1;
-            }
-        }
-        self.offset = offset;
-        (self.line, self.column)
-    }
 }

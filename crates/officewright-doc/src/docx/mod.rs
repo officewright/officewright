@@ -1,13 +1,16 @@
 //! Reading WordprocessingML packages (`.docx`, `.docm`, `.dotx`, `.dotm`).
 
 mod body;
+mod capture;
 mod section;
 
 use officewright_opc::{Package, Part};
 
+use crate::diagnostic::Diagnostics;
 use crate::model::xml::{Strings, Sym};
 use crate::model::{Document, DocumentKind};
 use crate::{Error, Limits, Result};
+use capture::Budget;
 
 /// The main namespace of WordprocessingML, Transitional.
 const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
@@ -45,7 +48,17 @@ pub(crate) fn read(data: Vec<u8>, limits: &Limits) -> Result<Document> {
     let xml = main.read()?;
     let mut document = Document::new();
     document.kind = kind;
-    body::read(&mut document, &xml, &main, limits)?;
+    let mut diagnostics = Diagnostics::default();
+    let mut budget = Budget::new(limits.max_nodes());
+    body::read(
+        &mut document,
+        &xml,
+        &main,
+        limits,
+        &mut diagnostics,
+        &mut budget,
+    )?;
+    document.diagnostics = diagnostics.finish();
     Ok(document)
 }
 
