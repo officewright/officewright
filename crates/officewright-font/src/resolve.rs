@@ -184,7 +184,9 @@ impl Resolution {
     }
 
     /// For [`ResolutionKind::Fallback`], the metric-compatible substitute that would
-    /// have been used had it been installed, if the family has one.
+    /// have been used had it been installed, if the family has one. A family without one
+    /// may have a font of similar design instead:
+    /// [`uninstalled_similar_design`](Self::uninstalled_similar_design).
     pub fn uninstalled_substitute(&self) -> Option<&str> {
         match &self.uninstalled_substitute {
             Some((substitute, Likeness::Metrics)) => Some(substitute),
@@ -349,7 +351,7 @@ const METRIC_COMPATIBLE: [(&str, &str, GenericFamily); 4] = [
 /// fontconfig's `30-metric-aliases.conf` pairs Cambria with Caladea, wrongly for the
 /// Cambria Word uses. In Word's render of `tests/corpus/word-rules/E-line-fonts.docx`
 /// every word Word set in Cambria is narrower in Caladea, by 0.48 to 4.27 pt at 11 pt
-/// ("Hamburgefonts" by 2.72 pt, 3.7 %; Cambria's digits are 0.19 em wider). The line
+/// ("Hamburgefonts" by 2.72 pt, 3.7 %; Cambria's digits are up to 0.19 em wider). The line
 /// height differs too: computed from Caladea's tables, 12.65 pt at 11 pt by its
 /// typographic metrics (it sets `USE_TYPO_METRICS`, which Word honours for some fonts
 /// and not for others) or 14.30 pt by its Windows metrics, where Word spaces Cambria's
@@ -484,9 +486,6 @@ impl FontBook {
             return resolution(Some(face), ResolutionKind::MetricCompatible);
         }
         let similar_design = SIMILAR_DESIGNS.iter().find(|(name, _, _)| *name == family);
-        let uninstalled = substitute
-            .map(|name| (name, Likeness::Metrics))
-            .or(similar_design.map(|(_, name, _)| (*name, Likeness::Design)));
         if let Some(face) = similar_design.and_then(|(_, name, _)| self.find_any(name, request)) {
             return Resolution {
                 similar_design: true,
@@ -508,6 +507,10 @@ impl FontBook {
             .find(|(candidate, _)| *candidate == generic)
             .map(|(_, names)| names.as_slice())
             .unwrap_or_default();
+        // Neither substitute is installed; the report names the one there is.
+        let uninstalled = substitute
+            .map(|name| (name, Likeness::Metrics))
+            .or(similar_design.map(|(_, name, _)| (*name, Likeness::Design)));
         for name in fallbacks {
             if let Some(face) = self.find_any(name, request) {
                 return Resolution {
