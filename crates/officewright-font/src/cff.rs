@@ -12,7 +12,10 @@
 //! reads it (`Table::parse` in `src/cff/mod.rs`, `src/cff/index.rs` and `src/cff/dict/`)
 //! rather than with another parser, which could reject operands it accepts: the first
 //! DICT of the Top DICT INDEX, the Private DICT it points to, and each Font DICT of the
-//! FDArray with its Private DICT.
+//! FDArray with its Private DICT. That is a little more than the subsetter writes back:
+//! it rewrites only FontMatrix and FontBBox of the Top DICT, the top-level Private DICT
+//! only of a SID-keyed font and the FDArray only of a CID-keyed one. A real number past
+//! `f32::MAX` has no place in any of these, so finding one anywhere refuses the face.
 
 use std::ops::Range;
 
