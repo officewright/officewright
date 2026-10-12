@@ -23,8 +23,8 @@
 //! ```
 //!
 //! What the model does not represent yet (drawings, equations, bookmarks, and the
-//! properties of paragraphs and runs) is kept as it was read; such content shows as
-//! `Other` with an [`Opaque`] view.
+//! properties not typed yet) is kept as it was read; such content shows as `Other` with
+//! an [`Opaque`] view.
 //!
 //! Opening never panics on a damaged file: it either returns an [`Error`], or opens the
 //! document and lists in [`Document::diagnostics`] what it repaired, as Word does.

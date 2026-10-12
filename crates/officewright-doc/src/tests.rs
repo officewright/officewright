@@ -1364,7 +1364,7 @@ fn reads_line_spacing_rules_and_strict_indentation() {
 #[test]
 fn reads_invalid_paragraph_values_as_not_set() {
     let document = open(
-        r#"<w:p><w:pPr><w:jc w:val="middle"/><w:spacing w:before="much" w:line="240" w:lineRule="often"/><w:ind w:hanging="-5"/><w:outlineLvl w:val="12"/><w:tabs><w:tab w:val="left" w:pos="far"/><w:tab w:val="sideways" w:pos="10"/></w:tabs><w:pBdr><w:top w:val="zigzag" w:sz="-1"/></w:pBdr><w:keepNext w:val="maybe"/></w:pPr></w:p>"#,
+        r#"<w:p><w:pPr><w:jc w:val="middle"/><w:spacing w:before="much" w:line="240" w:lineRule="often"/><w:ind w:hanging="-5"/><w:outlineLvl w:val="twelve"/><w:tabs><w:tab w:val="left" w:pos="far"/><w:tab w:val="sideways" w:pos="10"/></w:tabs><w:pBdr><w:top w:val="zigzag" w:sz="-1"/></w:pBdr><w:keepNext w:val="maybe"/></w:pPr></w:p>"#,
     );
     let properties = first_paragraph(&document).properties();
     assert_eq!(properties.justification(), None);
@@ -1407,4 +1407,63 @@ fn reads_the_paragraph_properties_of_styles_and_defaults() {
     assert_eq!(heading.keep_next(), Some(true));
     assert_eq!(heading.outline_level(), Some(0));
     assert_eq!(heading.spacing().unwrap().before(), Some(Pt(12.0)));
+}
+
+#[test]
+fn reports_invalid_paragraph_values_of_styles_and_defaults() {
+    // From the review of #39: the paragraph properties of the document defaults and of
+    // a style are checked at load, like those of the body.
+    let styles = format!(
+        r#"<w:styles xmlns:w="{W}"><w:docDefaults><w:pPrDefault><w:pPr><w:spacing w:line="240" w:lineRule="often"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:styleId="X"><w:pPr><w:jc w:val="middle"/></w:pPr></w:style></w:styles>"#
+    );
+    let document = with_styles("<w:p/>", &styles);
+    let messages: Vec<&str> = document
+        .diagnostics()
+        .iter()
+        .map(Diagnostic::message)
+        .collect();
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert!(messages[0].starts_with("/word/styles.xml, line 1, column "));
+    assert!(messages[0].ends_with(r#"w:spacing w:lineRule="often" is not valid; it is ignored"#));
+    assert!(messages[1].starts_with("/word/styles.xml, line 1, column "));
+    assert!(messages[1].ends_with(r#"w:jc w:val="middle" is not valid; it is ignored"#));
+}
+
+#[test]
+fn keeps_values_outside_the_ranges_of_the_prose_as_written() {
+    // Negative line spacing, as in LibreOffice's tdf125469_singleSpacing.docx, and list
+    // and outline levels past those ECMA-376 names, as in tdf61309.docx.
+    let document = open(
+        r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="12"/><w:numId w:val="1"/></w:numPr><w:spacing w:line="-240"/><w:outlineLvl w:val="25"/></w:pPr></w:p><w:p><w:pPr><w:spacing w:line="-240" w:lineRule="exact"/></w:pPr></w:p><w:p><w:pPr><w:spacing w:lineRule="often"/></w:pPr></w:p>"#,
+    );
+    let paragraphs: Vec<ParagraphProperties> = document
+        .sections()
+        .next()
+        .unwrap()
+        .blocks()
+        .map(|block| match block {
+            Block::Paragraph(paragraph) => paragraph.properties(),
+            _ => panic!("not a paragraph"),
+        })
+        .collect();
+    let first = &paragraphs[0];
+    assert_eq!(first.numbering().unwrap().level(), Some(12));
+    assert_eq!(first.outline_level(), Some(25));
+    assert_eq!(
+        first.spacing().unwrap().line(),
+        Some(LineSpacing::Multiple(-1.0))
+    );
+    assert_eq!(
+        paragraphs[1].spacing().unwrap().line(),
+        Some(LineSpacing::Exact(Pt(-12.0)))
+    );
+    // A rule that is not valid is reported even without a w:line.
+    assert_eq!(paragraphs[2].spacing().unwrap().line(), None);
+    let messages: Vec<&str> = document
+        .diagnostics()
+        .iter()
+        .map(Diagnostic::message)
+        .collect();
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(messages[0].ends_with(r#"w:spacing w:lineRule="often" is not valid; it is ignored"#));
 }

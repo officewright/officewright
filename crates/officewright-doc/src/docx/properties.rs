@@ -258,13 +258,7 @@ pub(crate) fn paragraph_properties(
                     value(child, names, "val", Justification::from_xml, report);
             }
             "outlineLvl" => {
-                properties.outline_level = value(
-                    child,
-                    names,
-                    "val",
-                    |v| v.parse().ok().filter(|level| *level <= 9),
-                    report,
-                );
+                properties.outline_level = value(child, names, "val", integer, report);
             }
             "rPr" => properties.mark = run_properties(child, names, report),
             _ => {}
@@ -304,6 +298,8 @@ fn borders(element: Element<'_>, names: &Names, report: Report<'_>) -> Paragraph
 
 /// One border (CT_Border): style, colour, width in eighths of a point, space in points.
 fn border(element: Element<'_>, names: &Names, report: Report<'_>) -> Border {
+    // The width of an art border (page borders only) is in points, not eighths; this
+    // reads line borders, and art borders read as having no style.
     let points = |eighths: f64| {
         move |value: &str| -> Option<officewright_core::Pt> {
             let number: u32 = value.parse().ok()?;
@@ -355,23 +351,40 @@ fn spacing(element: Element<'_>, names: &Names, report: Report<'_>) -> Spacing {
         )
     };
     let line = value(element, names, "line", |v| twips_measure(v, true), report);
-    let rule = element.attribute(&names.w, "lineRule");
+    #[derive(Clone, Copy)]
+    enum Rule {
+        Auto,
+        Exact,
+        AtLeast,
+    }
+    // Auto is the default rule. An invalid rule is reported with or without a w:line.
+    let rule = match element.attribute(&names.w, "lineRule") {
+        None => Some(Rule::Auto),
+        Some(_) => value(
+            element,
+            names,
+            "lineRule",
+            |v| match v {
+                "auto" => Some(Rule::Auto),
+                "exact" => Some(Rule::Exact),
+                "atLeast" => Some(Rule::AtLeast),
+                _ => None,
+            },
+            report,
+        ),
+    };
     let line = match (line, rule) {
-        (None, _) => None,
-        // For auto, the default rule, w:line counts 240 to a line.
-        (Some(line), None | Some("auto")) => Some(LineSpacing::Multiple(line.0 * 20.0 / 240.0)),
-        (Some(line), Some("exact")) => Some(LineSpacing::Exact(line)),
-        (Some(line), Some("atLeast")) => Some(LineSpacing::AtLeast(line)),
-        (Some(_), Some(other)) => {
-            report(element.local_name(), "lineRule", other);
-            None
-        }
+        // For auto, w:line counts 240 to a line.
+        (Some(line), Some(Rule::Auto)) => Some(LineSpacing::Multiple(line.0 * 20.0 / 240.0)),
+        (Some(line), Some(Rule::Exact)) => Some(LineSpacing::Exact(line)),
+        (Some(line), Some(Rule::AtLeast)) => Some(LineSpacing::AtLeast(line)),
+        _ => None,
     };
     Spacing {
         before: twips("before", report),
         after: twips("after", report),
-        before_lines: value(element, names, "beforeLines", int32, report),
-        after_lines: value(element, names, "afterLines", int32, report),
+        before_lines: value(element, names, "beforeLines", integer, report),
+        after_lines: value(element, names, "afterLines", integer, report),
         before_auto: on_off_attribute(element, names, "beforeAutospacing", report),
         after_auto: on_off_attribute(element, names, "afterAutospacing", report),
         line,
@@ -397,7 +410,7 @@ fn indentation(element: Element<'_>, names: &Names, report: Report<'_>) -> Inden
             .iter()
             .copied()
             .find(|attribute| element.attribute(&names.w, attribute).is_some())?;
-        value(element, names, attribute, int32, report)
+        value(element, names, attribute, integer, report)
     };
     Indentation {
         start: length(&["start", "left"], true, report),
@@ -412,9 +425,5 @@ fn indentation(element: Element<'_>, names: &Names, report: Report<'_>) -> Inden
 }
 
 fn integer(value: &str) -> Option<i64> {
-    value.parse().ok()
-}
-
-fn int32(value: &str) -> Option<i32> {
     value.parse().ok()
 }

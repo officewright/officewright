@@ -1,6 +1,11 @@
 //! Formatting as written in a document: the properties a run, a paragraph or a style sets
 //! at its own level. A property the element does not set is `None`; what is in effect
 //! comes from resolving the style hierarchy, which this layer does not do.
+//!
+//! Values are checked against their type in the schema: one that does not fit it is read
+//! as not set, with a diagnostic. Ranges that only the prose of ECMA-376 gives (list
+//! levels 0 to 8, say) are not checked here; a value outside them is kept as written,
+//! for the resolution step to treat as Word does.
 
 use officewright_core::Pt;
 
@@ -760,7 +765,8 @@ pub struct TabStop {
 }
 
 impl TabStop {
-    /// What the stop does; [`TabKind::Clear`] removes a stop a style set.
+    /// What the stop does; [`TabKind::Clear`] removes a stop a style set. `None` when
+    /// `w:val` is absent or not valid.
     pub fn kind(&self) -> Option<TabKind> {
         self.kind
     }
@@ -779,6 +785,10 @@ impl TabStop {
 /// The spacing between lines.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
+///
+/// The value is kept as written, sign included: `w:line` may be negative by the schema,
+/// and some documents have it so (LibreOffice's `tdf125469_singleSpacing.docx`). What
+/// Word makes of a negative value is to be measured.
 pub enum LineSpacing {
     /// A multiple of the line height the fonts ask for: 1.0 is single.
     Multiple(f64),
@@ -793,8 +803,8 @@ pub enum LineSpacing {
 pub struct Spacing {
     pub(crate) before: Option<Pt>,
     pub(crate) after: Option<Pt>,
-    pub(crate) before_lines: Option<i32>,
-    pub(crate) after_lines: Option<i32>,
+    pub(crate) before_lines: Option<i64>,
+    pub(crate) after_lines: Option<i64>,
     pub(crate) before_auto: Option<bool>,
     pub(crate) after_auto: Option<bool>,
     pub(crate) line: Option<LineSpacing>,
@@ -813,12 +823,12 @@ impl Spacing {
 
     /// Space above, in hundredths of a line, which wins over [`before`](Self::before)
     /// (`w:beforeLines`).
-    pub fn before_lines(&self) -> Option<i32> {
+    pub fn before_lines(&self) -> Option<i64> {
         self.before_lines
     }
 
     /// Space below, in hundredths of a line (`w:afterLines`).
-    pub fn after_lines(&self) -> Option<i32> {
+    pub fn after_lines(&self) -> Option<i64> {
         self.after_lines
     }
 
@@ -846,10 +856,10 @@ pub struct Indentation {
     pub(crate) end: Option<Pt>,
     pub(crate) first_line: Option<Pt>,
     pub(crate) hanging: Option<Pt>,
-    pub(crate) start_chars: Option<i32>,
-    pub(crate) end_chars: Option<i32>,
-    pub(crate) first_line_chars: Option<i32>,
-    pub(crate) hanging_chars: Option<i32>,
+    pub(crate) start_chars: Option<i64>,
+    pub(crate) end_chars: Option<i64>,
+    pub(crate) first_line_chars: Option<i64>,
+    pub(crate) hanging_chars: Option<i64>,
 }
 
 impl Indentation {
@@ -876,22 +886,22 @@ impl Indentation {
 
     /// The start indentation in hundredths of a character, which wins over
     /// [`start`](Self::start) (`w:leftChars` or `w:startChars`).
-    pub fn start_chars(&self) -> Option<i32> {
+    pub fn start_chars(&self) -> Option<i64> {
         self.start_chars
     }
 
     /// The end indentation in hundredths of a character.
-    pub fn end_chars(&self) -> Option<i32> {
+    pub fn end_chars(&self) -> Option<i64> {
         self.end_chars
     }
 
     /// The first line indentation in hundredths of a character.
-    pub fn first_line_chars(&self) -> Option<i32> {
+    pub fn first_line_chars(&self) -> Option<i64> {
         self.first_line_chars
     }
 
     /// The hanging indentation in hundredths of a character.
-    pub fn hanging_chars(&self) -> Option<i32> {
+    pub fn hanging_chars(&self) -> Option<i64> {
         self.hanging_chars
     }
 }
@@ -910,7 +920,7 @@ impl NumberingReference {
         self.instance
     }
 
-    /// The level, 0 to 8 in valid documents (`w:ilvl`).
+    /// The level (`w:ilvl`): 0 to 8 by ECMA-376 §17.9.3, other values kept as written.
     pub fn level(&self) -> Option<i64> {
         self.level
     }
@@ -940,7 +950,7 @@ pub struct ParagraphProperties {
     pub(crate) spacing: Option<Spacing>,
     pub(crate) indentation: Option<Indentation>,
     pub(crate) justification: Option<Justification>,
-    pub(crate) outline_level: Option<u8>,
+    pub(crate) outline_level: Option<i64>,
     pub(crate) mark: RunProperties,
 }
 
@@ -1023,7 +1033,8 @@ impl ParagraphProperties {
         self.shading.as_ref()
     }
 
-    /// The tab stops set or cleared here (`w:tabs`), in document order.
+    /// The tab stops set or cleared here (`w:tabs`), in document order. A `w:tab`
+    /// without a valid `w:pos` cannot be placed and is left out.
     pub fn tabs(&self) -> &[TabStop] {
         &self.tabs
     }
@@ -1043,13 +1054,15 @@ impl ParagraphProperties {
         self.justification
     }
 
-    /// The outline level, 0 to 9 (9: body text) (`w:outlineLvl`).
-    pub fn outline_level(&self) -> Option<u8> {
+    /// The outline level (`w:outlineLvl`): 0 to 8, or 9 for body text, by ECMA-376
+    /// §17.3.1.20; other values kept as written.
+    pub fn outline_level(&self) -> Option<i64> {
         self.outline_level
     }
 
-    /// The run properties of the paragraph mark (the `w:rPr` in `w:pPr`), which decide
-    /// the height of an empty paragraph and the formatting of its list label.
+    /// The run properties of the paragraph mark (the `w:rPr` in `w:pPr`, ECMA-376
+    /// §17.3.1.29). How far they shape the paragraph in Word, such as the height of an
+    /// empty one or its list label, is to be measured.
     pub fn mark_run_properties(&self) -> &RunProperties {
         &self.mark
     }
