@@ -481,3 +481,125 @@ fn keeps_deeply_nested_elements_without_recursion() {
     );
     drop(document);
 }
+
+#[test]
+fn reads_complex_fields_deleted_text_and_references() {
+    let document = open(
+        r#"<w:p><w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:name w:val="Check1"/><w:checkBox><w:default w:val="1"/></w:checkBox></w:ffData></w:fldChar></w:r><w:r><w:instrText xml:space="preserve"> FORMCHECKBOX </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>result</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:delText>deleted</w:delText><w:delInstrText>DATE</w:delInstrText><w:br w:type="textWrapping" w:clear="all"/><w:footnoteReference w:id="2"/><w:endnoteReference w:id="-1"/><w:commentReference w:id="0"/><w:fldChar w:fldCharType="bad"/><w:footnoteReference w:id="x"/></w:r></w:p>"#,
+    );
+    // Field codes and deleted text are not text; the field's result and the break are.
+    assert_eq!(document.text(), "result\n\n");
+    let items: Vec<String> = document
+        .sections()
+        .flat_map(|s| s.blocks())
+        .filter_map(|block| match block {
+            Block::Paragraph(p) => Some(p),
+            _ => None,
+        })
+        .flat_map(|p| p.runs())
+        .flat_map(|r| r.content())
+        .map(|item| match item {
+            RunContent::Other(o) => format!("Other({})", o.local_name()),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        items,
+        [
+            "FieldChar(Begin)",
+            "FieldCode(\" FORMCHECKBOX \")",
+            "FieldChar(Separate)",
+            "Text(\"result\")",
+            "FieldChar(End)",
+            "DeletedText(\"deleted\")",
+            "DeletedFieldCode(\"DATE\")",
+            "Break(Break { kind: Line, clear: All })",
+            "FootnoteReference(2)",
+            "EndnoteReference(-1)",
+            "CommentReference(0)",
+            "Other(fldChar)",
+            "Other(footnoteReference)",
+        ]
+    );
+    // The form field data in the first w:fldChar is kept, not dropped.
+    let names: Vec<&str> = document
+        .tokens
+        .iter()
+        .filter_map(|token| match token {
+            model::xml::Token::Start { name, .. } => Some(document.strings.get(name.qname)),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        names.starts_with(&["w:fldChar", "w:ffData", "w:name", "w:checkBox", "w:default"]),
+        "{names:?}"
+    );
+    assert_eq!(
+        document.diagnostics().len(),
+        2,
+        "{:?}",
+        document.diagnostics()
+    );
+}
+
+#[test]
+fn finds_the_positions_of_diagnostics_in_one_pass() {
+    // 8 MiB of text, then 1,000 values to report: finding each position from the start
+    // of the part would read 8 GiB.
+    let body = format!(
+        "<w:p><w:r><w:t>{}</w:t></w:r></w:p><w:p><w:r>{}</w:r></w:p>",
+        "x".repeat(8 << 20),
+        r#"<w:br w:type="bad"/>"#.repeat(1000)
+    );
+    let start = std::time::Instant::now();
+    let document = open(&body);
+    let elapsed = start.elapsed();
+    assert_eq!(document.diagnostics().len(), 1000);
+    assert!(
+        document.diagnostics()[999]
+            .message()
+            .starts_with("/word/document.xml, line 1, column "),
+        "{}",
+        document.diagnostics()[999]
+    );
+    assert!(elapsed < std::time::Duration::from_secs(20), "{elapsed:?}");
+}
+
+#[test]
+fn places_section_diagnostics_and_the_node_limit() {
+    let document = open("<w:p/>\n<w:sectPr><w:pgSz w:w=\"wide\"/></w:sectPr>");
+    assert_eq!(
+        document.diagnostics()[0].message(),
+        "/word/document.xml, line 2, column 1: w:pgSz w:w=\"wide\" is not valid; it is ignored"
+    );
+    let options = LoadOptions::new().with_limits(Limits::new().with_max_nodes(3));
+    match options.open_bytes(docx("<w:p/><w:p/><w:p/><w:p/>")) {
+        Err(Error::LimitExceeded { context, .. }) => {
+            assert!(
+                context.starts_with("/word/document.xml, line 1, column "),
+                "{context}"
+            );
+        }
+        other => panic!("expected the node limit, got {other:?}"),
+    }
+    assert_eq!(
+        Limits::new().with_max_nodes(usize::MAX).max_nodes(),
+        u32::MAX as usize
+    );
+}
+
+#[test]
+fn keeps_comments_and_processing_instructions_in_kept_elements() {
+    let document = open("<w:p><w14:x><!-- note --><?pi data?></w14:x></w:p>");
+    let Some(Block::Paragraph(paragraph)) = document.sections().next().unwrap().blocks().next()
+    else {
+        panic!("no paragraph");
+    };
+    let Some(Inline::Other(other)) = paragraph.inlines().next() else {
+        panic!("not kept");
+    };
+    assert_eq!(
+        other.to_xml(),
+        r#"<w14:x xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><!-- note --><?pi data?></w14:x>"#
+    );
+}

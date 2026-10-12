@@ -104,10 +104,76 @@ impl Limits {
         self.nodes
     }
 
-    /// Sets [`max_nodes`](Self::max_nodes).
+    /// Sets [`max_nodes`](Self::max_nodes). Nodes are counted in 32 bits: a value above
+    /// 4,294,967,295 is read as that.
     #[must_use]
     pub const fn with_max_nodes(mut self, value: usize) -> Self {
-        self.nodes = value;
+        self.nodes = if value > u32::MAX as usize {
+            u32::MAX as usize
+        } else {
+            value
+        };
+        self
+    }
+
+    /// The longest part name, in bytes, the package may have.
+    pub const fn max_part_name_length(&self) -> usize {
+        self.package.max_part_name_length()
+    }
+
+    /// Sets [`max_part_name_length`](Self::max_part_name_length).
+    #[must_use]
+    pub const fn with_max_part_name_length(mut self, value: usize) -> Self {
+        self.package = self.package.with_max_part_name_length(value);
+        self
+    }
+
+    /// The most relationships the package may have, over all its relationships parts.
+    pub const fn max_relationships(&self) -> usize {
+        self.package.max_relationships()
+    }
+
+    /// Sets [`max_relationships`](Self::max_relationships).
+    #[must_use]
+    pub const fn with_max_relationships(mut self, value: usize) -> Self {
+        self.package = self.package.with_max_relationships(value);
+        self
+    }
+
+    /// The most `Default` and `Override` elements `[Content_Types].xml` may have.
+    pub const fn max_content_types(&self) -> usize {
+        self.package.max_content_types()
+    }
+
+    /// Sets [`max_content_types`](Self::max_content_types).
+    #[must_use]
+    pub const fn with_max_content_types(mut self, value: usize) -> Self {
+        self.package = self.package.with_max_content_types(value);
+        self
+    }
+
+    /// The most attributes one XML element may have.
+    pub const fn max_xml_attributes(&self) -> usize {
+        self.package.max_xml_attributes()
+    }
+
+    /// Sets [`max_xml_attributes`](Self::max_xml_attributes).
+    #[must_use]
+    pub const fn with_max_xml_attributes(mut self, value: usize) -> Self {
+        self.package = self.package.with_max_xml_attributes(value);
+        self
+    }
+
+    /// The most names one Markup Compatibility attribute (such as `mc:Ignorable`) may
+    /// list.
+    pub const fn max_mce_names(&self) -> usize {
+        self.package.max_mce_names()
+    }
+
+    /// Sets [`max_mce_names`](Self::max_mce_names).
+    #[must_use]
+    pub const fn with_max_mce_names(mut self, value: usize) -> Self {
+        self.package = self.package.with_max_mce_names(value);
         self
     }
 

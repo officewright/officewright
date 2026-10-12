@@ -55,6 +55,11 @@ pub(crate) struct Diagnostics {
 impl Diagnostics {
     const MAX: usize = 1000;
 
+    /// Whether no more diagnostics are kept, only counted.
+    pub(crate) fn is_full(&self) -> bool {
+        self.kept.len() >= Self::MAX
+    }
+
     pub(crate) fn push(&mut self, kind: DiagnosticKind, message: impl FnOnce() -> String) {
         if self.kept.len() < Self::MAX {
             self.kept.push(Diagnostic::new(kind, message()));

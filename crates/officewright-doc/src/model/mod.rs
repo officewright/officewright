@@ -154,7 +154,10 @@ impl Document {
     }
 
     /// The text of the document body: each paragraph followed by a line feed, without
-    /// deleted text and field codes.
+    /// deleted text and field codes. Text is given as written: white space at the ends
+    /// of a text element is kept whether or not it says `xml:space="preserve"`. Text
+    /// inside elements kept without being read (in this version tables, hyperlinks and
+    /// content controls among them) is left out.
     pub fn text(&self) -> String {
         let mut out = String::new();
         for section in &self.sections {
@@ -247,8 +250,16 @@ pub(crate) enum RunItem {
     Tab,
     Break(Break),
     CarriageReturn,
-    Symbol { font: Option<Box<str>>, char: char },
-    FieldChar(FieldCharKind),
+    Symbol {
+        font: Option<Box<str>>,
+        char: char,
+    },
+    FieldChar {
+        kind: FieldCharKind,
+        /// The element kept whole, as it may hold form field data (`w:ffData`).
+        #[allow(dead_code)] // reason: kept for the DOCX writer, which writes it back
+        element: Span,
+    },
     NoBreakHyphen,
     SoftHyphen,
     FootnoteReference(i64),

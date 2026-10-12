@@ -49,17 +49,17 @@ pub enum Limit {
     PartSize,
     /// [`Limits::max_total_size`](crate::Limits::max_total_size).
     TotalSize,
-    /// The longest part name the package may have.
+    /// [`Limits::max_part_name_length`](crate::Limits::max_part_name_length).
     PartNameLength,
-    /// The most relationships the package may have.
+    /// [`Limits::max_relationships`](crate::Limits::max_relationships).
     Relationships,
-    /// The most content types the package may declare.
+    /// [`Limits::max_content_types`](crate::Limits::max_content_types).
     ContentTypes,
     /// [`Limits::max_xml_depth`](crate::Limits::max_xml_depth).
     XmlDepth,
-    /// The most attributes one XML element may have.
+    /// [`Limits::max_xml_attributes`](crate::Limits::max_xml_attributes).
     XmlAttributes,
-    /// The most names one Markup Compatibility attribute may list.
+    /// [`Limits::max_mce_names`](crate::Limits::max_mce_names).
     MceNames,
     /// [`Limits::max_nodes`](crate::Limits::max_nodes).
     Nodes,
