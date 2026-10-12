@@ -35,8 +35,15 @@ PDFs exported by Microsoft Word, Excel or PowerPoint from the documents above
 (`scripts/windows/make-reference.ps1`). A LibreOffice export is a secondary reference
 and says so in the Application column.
 
-| File | Rendered from | Application and version | Date |
-|------|---------------|-------------------------|------|
+Word saves each document again before it exports it, and the PDF is made from that saved
+copy, which is kept under `resaved/` with the same path: its `w:lastRenderedPageBreak`
+marks are Word's page breaks for that PDF. `scripts/corpus-import.py` copies both files
+here and writes the row; its Notes give the compatibility mode Word used, the page count,
+the fonts Word did not have and substituted, the fonts the PDF references without
+embedding them, and how fields were rendered.
+
+| File | Rendered from | Application and version | Date | Notes |
+|------|---------------|-------------------------|------|-------|
 
 ## External corpora
 
