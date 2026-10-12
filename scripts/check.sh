@@ -112,7 +112,7 @@ if printf '%s\n' "$packaged" | grep -E '^(data/afm/|tests/helvetica_afm\.rs$|tes
 	fail "officewright-pdf would publish the files above"
 fi
 packaged=$(cargo package --list --allow-dirty --quiet -p officewright-font)
-if printf '%s\n' "$packaged" | grep -E '^tests/third_party_fonts\.rs$'; then
+if printf '%s\n' "$packaged" | grep -E '^tests/(metric_compatible|third_party_fonts)\.rs$'; then
 	fail "officewright-font would publish the file above"
 fi
 packaged=$(cargo package --list --allow-dirty --quiet -p officewright-cli)

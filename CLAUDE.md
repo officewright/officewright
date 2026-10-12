@@ -54,9 +54,10 @@ fuzz/                   cargo-fuzz targets, one per parser; a cargo workspace of
 tests/c/                C tests compiled against the generated header and the static library
 tests/ffi-python/       Python ctypes tests loading the shared library — proves the ABI is usable
                         from a non-C language with no build step
-tests/pdf-output/       checks text-to-pdf output, in Helvetica and with the fonts in tests/fonts embedded,
-                        with qpdf, pdftotext, pdffonts and pdftoppm (Linux, macOS; Windows has no official
-                        poppler build, and the golden snapshot proves the bytes are the same)
+tests/pdf-output/       checks text-to-pdf output, in Helvetica and with Liberation Sans (TrueType) and Noto Sans
+                        (CFF) from tests/fonts embedded, with qpdf, pdftotext, pdffonts and pdftoppm (Linux,
+                        macOS; Windows has no official poppler build, and the golden snapshot proves the bytes
+                        are the same)
 tests/corpus/           small curated real documents (committed) + SOURCES.md + baseline.json
 tests/corpus/word-rules/  documents written by scripts/make-rule-docs.py, one undocumented Word rule each
 tests/corpus/reference/ ground truth from PDFs of Microsoft Word/Excel/PowerPoint, one folder per document: every page
@@ -251,9 +252,9 @@ scripts/check-capi.sh target/capi (release.yml runs the same script on every unp
   tests/c against the static library: C99, C++17, ASan+UBSan (glibc Linux, macOS); MSVC C17 and C++17 (Windows)
   tests/ffi-python against the shared library
 PDF output of officewright text-to-pdf (tests/pdf-output): qpdf --check without warnings, pdftotext reads the input back;
-  with each font of tests/fonts embedded: pdffonts lists it embedded, subset and with a ToUnicode map, pdftotext reads back
-  every Latin, Greek and Cyrillic character the fonts have, pdftoppm renders a subset exactly as the whole font; characters
-  that share a glyph read back through ActualText (Linux, macOS)
+  with Liberation Sans and Noto Sans of tests/fonts embedded: pdffonts lists each embedded, subset and with a ToUnicode map,
+  pdftotext reads back every Latin, Greek and Cyrillic character both fonts have, pdftoppm renders a subset exactly as the
+  whole font; characters that share a glyph read back through ActualText (Linux, macOS)
 corpus-runner over tests/corpus (committed corpus), compared with baseline.json   (from Milestone 4)
 ```
 

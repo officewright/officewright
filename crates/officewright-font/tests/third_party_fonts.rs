@@ -187,16 +187,19 @@ fn reads_a_collection_of_real_fonts() -> TestResult {
 #[test]
 fn resolves_arial_to_liberation_sans() {
     let mut book = FontBook::new();
-    assert_eq!(book.add_dir(fonts_dir()).unwrap(), 2);
+    assert_eq!(book.add_dir(fonts_dir()).unwrap(), 5);
     assert!(book.skipped().is_empty(), "{:?}", book.skipped());
     let mut resolver = FontResolver::new(&book);
     let arial = resolver.resolve(&FontRequest::new("Arial")).clone();
     assert_eq!(arial.kind(), ResolutionKind::MetricCompatible);
     let font = book.load(arial.face().unwrap()).unwrap();
     assert_eq!(font.names().family(), Some("Liberation Sans"));
-    let georgia = resolver.resolve(&FontRequest::new("Georgia").generic(GenericFamily::Serif));
-    // No serif font in tests/fonts, so nothing fits.
-    assert_eq!(georgia.kind(), ResolutionKind::Missing);
+    // Georgia has no metric-compatible substitute; the common serif font stands in.
+    let georgia = resolver
+        .resolve(&FontRequest::new("Georgia").generic(GenericFamily::Serif))
+        .clone();
+    assert_eq!(georgia.kind(), ResolutionKind::Fallback);
+    assert_eq!(georgia.family(), Some("Liberation Serif"));
     let noto = resolver.resolve(&FontRequest::new("noto sans"));
     assert_eq!(noto.kind(), ResolutionKind::Exact);
     assert_eq!(resolver.substitutions().len(), 2);

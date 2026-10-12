@@ -318,7 +318,7 @@ class AbiTest(unittest.TestCase):
         book = self.new_book()
         added = c_size_t()
         self.check(lib.ow_font_book_add_dir(book, str(FONTS).encode(), byref(added)))
-        self.assertEqual(added.value, 2)
+        self.assertEqual(added.value, 5)
         resolver = self.resolver(book)
 
         self.resolve(resolver, "Liberation Sans")
