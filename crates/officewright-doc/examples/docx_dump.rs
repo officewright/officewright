@@ -5,9 +5,9 @@
 //! cargo run --release -p officewright-doc --example docx_dump -- --summary FILE.docx...
 //! ```
 //!
-//! With one file it prints the sections, their page setup and their paragraphs. With
-//! `--summary` it opens every file and prints a line for each that does not open,
-//! then how many did, by error.
+//! With one file it prints the sections, their page setup and their blocks. With
+//! `--summary` it opens every file and prints a line for each that does not open, then
+//! how many did and how much text they hold, and the errors by kind.
 
 use std::collections::BTreeMap;
 use std::process::ExitCode;
@@ -76,6 +76,23 @@ fn print_block(block: Block<'_>, depth: usize) {
             }
             println!("{indent}paragraph {:?}{note}", paragraph.text());
         }
+        Block::Table(table) => {
+            println!("{indent}table, {} grid columns", table.grid_columns().len());
+            for (r, row) in table.rows().enumerate() {
+                for (c, cell) in row.cells().enumerate() {
+                    println!("{indent}  cell {r},{c}");
+                    for block in cell.blocks() {
+                        print_block(block, depth + 2);
+                    }
+                }
+            }
+        }
+        Block::ContentControl(control) => {
+            println!("{indent}content control");
+            for block in control.blocks() {
+                print_block(block, depth + 1);
+            }
+        }
         Block::Other(other) => println!("{indent}kept as written: {}", other.local_name()),
         _ => println!("{indent}(a kind of block this example does not know)"),
     }
@@ -85,6 +102,7 @@ fn summary(files: &[String]) -> ExitCode {
     let mut opened = 0;
     let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
     let mut diagnostics = 0;
+    let mut characters = 0;
     let mut slowest = (Duration::ZERO, "");
     for file in files {
         let start = Instant::now();
@@ -98,7 +116,7 @@ fn summary(files: &[String]) -> ExitCode {
                 opened += 1;
                 diagnostics += document.diagnostics().len();
                 // Reading the text walks the whole tree.
-                let _ = document.text();
+                characters += document.text().chars().count();
             }
             Err(err) => {
                 println!("error {file}: {err}");
@@ -107,7 +125,7 @@ fn summary(files: &[String]) -> ExitCode {
         }
     }
     println!(
-        "\n{opened} of {} files opened, {diagnostics} diagnostics",
+        "\n{opened} of {} files opened, {characters} characters of text, {diagnostics} diagnostics",
         files.len()
     );
     for (kind, count) in &kinds {

@@ -1,8 +1,13 @@
 //! The public view of the document tree: borrowed, copyable handles onto the nodes of a
 //! [`Document`].
 
+use officewright_core::Pt;
+
 use super::xml::Span;
-use super::{Document, Kind, Node, ParagraphId, RunItem, SectionData, SectionProperties, text};
+use super::{
+    ControlLevel, Document, HyperlinkData, Kind, Node, ParagraphId, RevisionData, RunItem,
+    SectionData, SectionProperties, TableId, text,
+};
 
 /// A section of a document: its page setup and the blocks laid out with it.
 #[derive(Clone, Copy, Debug)]
@@ -21,13 +26,15 @@ impl<'a> Section<'a> {
         &self.data.properties
     }
 
-    /// The paragraphs, tables and other blocks of the section, in document order.
+    /// The paragraphs, tables and other blocks of the section, in document order. A
+    /// content control that a section break falls inside is split between the two
+    /// sections (see [`ContentControl`]).
     pub fn blocks(self) -> impl Iterator<Item = Block<'a>> + 'a {
         blocks(self.document, &self.data.blocks)
     }
 }
 
-/// Something that stacks vertically in a section.
+/// Something that stacks vertically in a section, a table cell or a content control.
 ///
 /// More kinds of block may be added; an element read as [`Block::Other`] today may get
 /// a variant of its own in a minor version.
@@ -36,11 +43,15 @@ impl<'a> Section<'a> {
 pub enum Block<'a> {
     /// A paragraph.
     Paragraph(Paragraph<'a>),
-    /// An element kept without being understood, such as a table or a bookmark.
+    /// A table.
+    Table(Table<'a>),
+    /// A content control (`w:sdt`) around blocks.
+    ContentControl(ContentControl<'a>),
+    /// An element kept without being understood, such as a bookmark.
     Other(Opaque<'a>),
 }
 
-/// A paragraph: runs of text and the content kept around them.
+/// A paragraph: runs of text and what surrounds them, such as hyperlinks.
 #[derive(Clone, Copy, Debug)]
 pub struct Paragraph<'a> {
     document: &'a Document,
@@ -63,16 +74,18 @@ impl<'a> Paragraph<'a> {
         self.document.paragraph_id(self.index)
     }
 
-    /// The runs and other inline content, in document order.
+    /// The runs, hyperlinks and other inline content, in document order.
     pub fn inlines(self) -> impl Iterator<Item = Inline<'a>> + 'a {
         inlines(self.document, &self.node.children)
     }
 
-    /// The runs of the paragraph, in document order.
+    /// Every run of the paragraph in document order, including the runs inside
+    /// hyperlinks, content controls, fields and tracked changes.
     pub fn runs(self) -> impl Iterator<Item = Run<'a>> + 'a {
-        self.inlines().filter_map(|inline| match inline {
-            Inline::Run(run) => Some(run),
-            _ => None,
+        let document = self.document;
+        descendants(document, &self.node.children).filter_map(move |index| {
+            let node = document.node(index)?;
+            matches!(node.kind, Kind::Run { .. }).then_some(Run { document, node })
         })
     }
 
@@ -81,6 +94,117 @@ impl<'a> Paragraph<'a> {
         let mut out = String::new();
         text::inlines(self.document, &self.node.children, &mut out);
         out
+    }
+}
+
+/// A table: rows of cells laid out on a grid of columns.
+#[derive(Clone, Copy, Debug)]
+pub struct Table<'a> {
+    document: &'a Document,
+    index: u32,
+    node: &'a Node,
+}
+
+impl<'a> Table<'a> {
+    pub(super) fn at(document: &'a Document, index: u32) -> Option<Self> {
+        let node = document.node(index)?;
+        matches!(node.kind, Kind::Table { .. }).then_some(Self {
+            document,
+            index,
+            node,
+        })
+    }
+
+    /// The table's id, to find it again with [`Document::table`].
+    pub fn id(self) -> TableId {
+        self.document.table_id(self.index)
+    }
+
+    /// The widths of the grid columns as written (`w:tblGrid`); `None` for a column
+    /// without a valid width.
+    pub fn grid_columns(self) -> impl ExactSizeIterator<Item = Option<Pt>> + 'a {
+        let columns: &'a [Option<Pt>] = match &self.node.kind {
+            Kind::Table { columns } => columns,
+            _ => &[],
+        };
+        columns.iter().copied()
+    }
+
+    /// The rows, in document order, including rows inside content controls around them.
+    pub fn rows(self) -> impl Iterator<Item = TableRow<'a>> + 'a {
+        let document = self.document;
+        through_containers(document, &self.node.children).filter_map(move |index| {
+            let node = document.node(index)?;
+            matches!(node.kind, Kind::Row).then_some(TableRow { document, node })
+        })
+    }
+}
+
+/// A row of a [`Table`].
+#[derive(Clone, Copy, Debug)]
+pub struct TableRow<'a> {
+    document: &'a Document,
+    node: &'a Node,
+}
+
+impl<'a> TableRow<'a> {
+    /// The cells, in document order, including cells inside content controls around
+    /// them.
+    pub fn cells(self) -> impl Iterator<Item = TableCell<'a>> + 'a {
+        let document = self.document;
+        through_containers(document, &self.node.children).filter_map(move |index| {
+            let node = document.node(index)?;
+            matches!(node.kind, Kind::Cell).then_some(TableCell { document, node })
+        })
+    }
+}
+
+/// A cell of a [`TableRow`].
+#[derive(Clone, Copy, Debug)]
+pub struct TableCell<'a> {
+    document: &'a Document,
+    node: &'a Node,
+}
+
+impl<'a> TableCell<'a> {
+    /// The paragraphs, tables and other blocks in the cell.
+    pub fn blocks(self) -> impl Iterator<Item = Block<'a>> + 'a {
+        blocks(self.document, &self.node.children)
+    }
+}
+
+/// A content control (`w:sdt`): a region of a document that a form or a template
+/// marks, around blocks or around inline content.
+///
+/// A section break inside a content control around blocks ends the section after its
+/// paragraph, as in Word, so such a control shows in both sections: once with the
+/// blocks before the break and once, with the same properties, with the rest.
+#[derive(Clone, Copy, Debug)]
+pub struct ContentControl<'a> {
+    document: &'a Document,
+    node: &'a Node,
+}
+
+impl<'a> ContentControl<'a> {
+    /// The blocks inside a content control that is a [`Block`]; nothing for one that
+    /// is an [`Inline`].
+    pub fn blocks(self) -> impl Iterator<Item = Block<'a>> + 'a {
+        let is_block = self.level() == Some(ControlLevel::Block);
+        blocks(self.document, &self.node.children).filter(move |_| is_block)
+    }
+
+    /// The inline content inside a content control that is an [`Inline`]; nothing for
+    /// one that is a [`Block`].
+    pub fn inlines(self) -> impl Iterator<Item = Inline<'a>> + 'a {
+        let is_inline = self.level() == Some(ControlLevel::Inline);
+        inlines(self.document, &self.node.children).filter(move |_| is_inline)
+    }
+
+    fn level(self) -> Option<ControlLevel> {
+        match self.node.kind {
+            Kind::ContentControl { level } => Some(level),
+            _ => None,
+        }
     }
 }
 
@@ -93,8 +217,15 @@ impl<'a> Paragraph<'a> {
 pub enum Inline<'a> {
     /// A run of text with one set of character properties.
     Run(Run<'a>),
-    /// An element kept without being understood, such as a hyperlink, a bookmark or an
-    /// equation.
+    /// A hyperlink around inline content.
+    Hyperlink(Hyperlink<'a>),
+    /// A content control around inline content.
+    ContentControl(ContentControl<'a>),
+    /// A tracked insertion, deletion or move around inline content.
+    Revision(Revision<'a>),
+    /// A simple field (`w:fldSimple`): an instruction and its last result.
+    SimpleField(SimpleField<'a>),
+    /// An element kept without being understood, such as a bookmark or an equation.
     Other(Opaque<'a>),
 }
 
@@ -266,6 +397,98 @@ pub enum FieldCharKind {
     End,
 }
 
+/// A hyperlink around inline content.
+#[derive(Clone, Copy, Debug)]
+pub struct Hyperlink<'a> {
+    document: &'a Document,
+    node: &'a Node,
+    data: &'a HyperlinkData,
+}
+
+impl<'a> Hyperlink<'a> {
+    /// Where the hyperlink leads outside the document, such as a web address, as
+    /// written in the relationship it names. officewright never follows it.
+    pub fn target(self) -> Option<&'a str> {
+        self.data
+            .target
+            .map(|target| self.document.strings.get(target))
+    }
+
+    /// The bookmark the hyperlink leads to inside the document.
+    pub fn anchor(self) -> Option<&'a str> {
+        self.data.anchor.as_deref()
+    }
+
+    /// The inline content the hyperlink spans.
+    pub fn inlines(self) -> impl Iterator<Item = Inline<'a>> + 'a {
+        inlines(self.document, &self.node.children)
+    }
+}
+
+/// A tracked change around inline content.
+#[derive(Clone, Copy, Debug)]
+pub struct Revision<'a> {
+    document: &'a Document,
+    node: &'a Node,
+    data: &'a RevisionData,
+}
+
+impl<'a> Revision<'a> {
+    /// What the change did.
+    pub fn kind(self) -> RevisionKind {
+        self.data.kind
+    }
+
+    /// Who made it, as written.
+    pub fn author(self) -> Option<&'a str> {
+        self.data.author.as_deref()
+    }
+
+    /// When, as written (an ISO 8601 date and time).
+    pub fn date(self) -> Option<&'a str> {
+        self.data.date.as_deref()
+    }
+
+    /// The inline content the change spans.
+    pub fn inlines(self) -> impl Iterator<Item = Inline<'a>> + 'a {
+        inlines(self.document, &self.node.children)
+    }
+}
+
+/// What a [`Revision`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RevisionKind {
+    /// Inserted content (`w:ins`).
+    Insertion,
+    /// Deleted content (`w:del`).
+    Deletion,
+    /// Content moved away from here (`w:moveFrom`).
+    MoveFrom,
+    /// Content moved here (`w:moveTo`).
+    MoveTo,
+}
+
+/// A simple field (`w:fldSimple`).
+#[derive(Clone, Copy, Debug)]
+pub struct SimpleField<'a> {
+    document: &'a Document,
+    node: &'a Node,
+    instruction: &'a str,
+}
+
+impl<'a> SimpleField<'a> {
+    /// The field instruction, such as `PAGE` or `DATE \@ "d MMMM yyyy"`.
+    pub fn instruction(self) -> &'a str {
+        self.instruction
+    }
+
+    /// The field's last result, as Word saved it.
+    pub fn inlines(self) -> impl Iterator<Item = Inline<'a>> + 'a {
+        inlines(self.document, &self.node.children)
+    }
+}
+
 /// An element kept as it was read, because officewright does not represent it (yet).
 #[derive(Clone, Copy, Debug)]
 pub struct Opaque<'a> {
@@ -296,7 +519,7 @@ impl<'a> Opaque<'a> {
 }
 
 fn blocks<'a>(document: &'a Document, children: &'a [u32]) -> impl Iterator<Item = Block<'a>> + 'a {
-    children.iter().filter_map(move |&index| {
+    through_wrappers(document, children).filter_map(move |index| {
         let node = document.node(index)?;
         Some(match &node.kind {
             Kind::Paragraph => Block::Paragraph(Paragraph {
@@ -304,8 +527,14 @@ fn blocks<'a>(document: &'a Document, children: &'a [u32]) -> impl Iterator<Item
                 index,
                 node,
             }),
+            Kind::Table { .. } => Block::Table(Table {
+                document,
+                index,
+                node,
+            }),
+            Kind::ContentControl { .. } => Block::ContentControl(ContentControl { document, node }),
             Kind::Other(span) => Block::Other(Opaque::new(document, *span)),
-            Kind::Run { .. } => return None,
+            _ => return None,
         })
     })
 }
@@ -314,12 +543,95 @@ fn inlines<'a>(
     document: &'a Document,
     children: &'a [u32],
 ) -> impl Iterator<Item = Inline<'a>> + 'a {
-    children.iter().filter_map(move |&index| {
+    through_wrappers(document, children).filter_map(move |index| {
         let node = document.node(index)?;
         Some(match &node.kind {
             Kind::Run { .. } => Inline::Run(Run { document, node }),
+            Kind::Hyperlink(data) => Inline::Hyperlink(Hyperlink {
+                document,
+                node,
+                data,
+            }),
+            Kind::ContentControl { .. } => {
+                Inline::ContentControl(ContentControl { document, node })
+            }
+            Kind::Revision(data) => Inline::Revision(Revision {
+                document,
+                node,
+                data,
+            }),
+            Kind::SimpleField { instruction } => Inline::SimpleField(SimpleField {
+                document,
+                node,
+                instruction,
+            }),
             Kind::Other(span) => Inline::Other(Opaque::new(document, *span)),
-            Kind::Paragraph => return None,
+            _ => return None,
         })
+    })
+}
+
+/// The nodes in `children`, with each wrapper replaced by its own children.
+fn through_wrappers<'a>(
+    document: &'a Document,
+    children: &'a [u32],
+) -> impl Iterator<Item = u32> + 'a {
+    walk(document, children, |kind| matches!(kind, Kind::Wrapper))
+}
+
+/// The nodes in `children`, with each wrapper and content control replaced by its own
+/// children: how a table sees rows and a row sees cells.
+pub(super) fn through_containers<'a>(
+    document: &'a Document,
+    children: &'a [u32],
+) -> impl Iterator<Item = u32> + 'a {
+    walk(document, children, |kind| {
+        matches!(kind, Kind::Wrapper | Kind::ContentControl { .. })
+    })
+}
+
+/// Every node below `children`, depth first in document order.
+fn descendants<'a>(document: &'a Document, children: &'a [u32]) -> impl Iterator<Item = u32> + 'a {
+    let mut stack = vec![children.iter()];
+    std::iter::from_fn(move || {
+        loop {
+            let next = stack.last_mut()?.next();
+            match next {
+                Some(&index) => {
+                    if let Some(node) = document.node(index) {
+                        stack.push(node.children.iter());
+                    }
+                    return Some(index);
+                }
+                None => {
+                    stack.pop();
+                }
+            }
+        }
+    })
+}
+
+/// The nodes in `children`, descending without recursion into the nodes `open` selects
+/// instead of yielding them.
+fn walk<'a>(
+    document: &'a Document,
+    children: &'a [u32],
+    open: impl Fn(&Kind) -> bool + 'a,
+) -> impl Iterator<Item = u32> + 'a {
+    let mut stack = vec![children.iter()];
+    std::iter::from_fn(move || {
+        loop {
+            let next = stack.last_mut()?.next();
+            match next {
+                Some(&index) => match document.node(index) {
+                    Some(node) if open(&node.kind) => stack.push(node.children.iter()),
+                    Some(_) => return Some(index),
+                    None => {}
+                },
+                None => {
+                    stack.pop();
+                }
+            }
+        }
     })
 }

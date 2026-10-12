@@ -8,10 +8,13 @@ pub(crate) mod xml;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use officewright_core::Pt;
+
 pub use section::{Orientation, PageMargins, SectionProperties, SectionStart};
 pub use views::{
-    Block, Break, BreakClear, BreakKind, FieldCharKind, Inline, Opaque, Paragraph, Run, RunContent,
-    Section,
+    Block, Break, BreakClear, BreakKind, ContentControl, FieldCharKind, Hyperlink, Inline, Opaque,
+    Paragraph, Revision, RevisionKind, Run, RunContent, Section, SimpleField, Table, TableCell,
+    TableRow,
 };
 use xml::{Element, Span, Strings, Token};
 
@@ -97,6 +100,13 @@ pub struct ParagraphId {
     index: u32,
 }
 
+/// Identifies a table of a [`Document`], and only of that document.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TableId {
+    document: DocumentId,
+    index: u32,
+}
+
 impl Document {
     pub(crate) fn new() -> Self {
         Self {
@@ -153,11 +163,19 @@ impl Document {
         Paragraph::at(self, id.index)
     }
 
-    /// The text of the document body: each paragraph followed by a line feed, without
-    /// deleted text and field codes. Text is given as written: white space at the ends
-    /// of a text element is kept whether or not it says `xml:space="preserve"`. Text
-    /// inside elements kept without being read (in this version tables, hyperlinks and
-    /// content controls among them) is left out.
+    /// The table with this id, or `None` for an id of another document.
+    pub fn table(&self, id: TableId) -> Option<Table<'_>> {
+        if id.document != self.id {
+            return None;
+        }
+        Table::at(self, id.index)
+    }
+
+    /// The text of the document body: each paragraph followed by a line feed, the cells
+    /// of a table row separated by tabs, without deleted text and field codes. Text is
+    /// given as written: white space at the ends of a text element is kept whether or
+    /// not it says `xml:space="preserve"`. Text inside elements kept without being read
+    /// (drawings and text boxes among them) is left out.
     pub fn text(&self) -> String {
         let mut out = String::new();
         for section in &self.sections {
@@ -191,6 +209,13 @@ impl Document {
 
     fn paragraph_id(&self, index: u32) -> ParagraphId {
         ParagraphId {
+            document: self.id,
+            index,
+        }
+    }
+
+    fn table_id(&self, index: u32) -> TableId {
+        TableId {
             document: self.id,
             index,
         }
@@ -236,8 +261,49 @@ pub(crate) struct Node {
 #[derive(Debug)]
 pub(crate) enum Kind {
     Paragraph,
-    Run { content: Vec<RunItem> },
+    Table {
+        columns: Vec<Option<Pt>>,
+    },
+    Row,
+    Cell,
+    ContentControl {
+        level: ControlLevel,
+    },
+    Run {
+        content: Vec<RunItem>,
+    },
+    Hyperlink(Box<HyperlinkData>),
+    Revision(Box<RevisionData>),
+    SimpleField {
+        instruction: Box<str>,
+    },
+    /// A container the model sees through, such as `w:customXml` or `w:smartTag`: its
+    /// children belong to its parent.
+    Wrapper,
     Other(Span),
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct HyperlinkData {
+    /// Interned: a target comes from the relationships part, and many links may name it.
+    pub(crate) target: Option<xml::Sym>,
+    pub(crate) anchor: Option<Box<str>>,
+}
+
+/// Where a content control sits, and so what it contains.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ControlLevel {
+    Block,
+    Inline,
+    Row,
+    Cell,
+}
+
+#[derive(Debug)]
+pub(crate) struct RevisionData {
+    pub(crate) kind: RevisionKind,
+    pub(crate) author: Option<Box<str>>,
+    pub(crate) date: Option<Box<str>>,
 }
 
 /// What a run contains, as stored.

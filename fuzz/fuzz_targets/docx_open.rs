@@ -1,6 +1,6 @@
 //! Opens the input as a Word document and walks everything the model read from it:
-//! sections, paragraphs, runs, the text, and the XML of every element kept without being
-//! understood, which must read back as XML.
+//! sections, blocks, tables, inline content and runs, the text, and the XML of every
+//! element kept without being understood, which must read back as XML.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
@@ -18,12 +18,14 @@ fuzz_target!(|data: &[u8]| {
     };
     let _ = document.text();
     let _ = document.diagnostics();
-    for block in document.sections().flat_map(|section| section.blocks()) {
+    let mut blocks: Vec<Block<'_>> = document.sections().flat_map(|s| s.blocks()).collect();
+    while let Some(block) = blocks.pop() {
         match block {
             Block::Paragraph(paragraph) => {
                 assert!(document.paragraph(paragraph.id()).is_some());
                 let _ = paragraph.text();
-                for inline in paragraph.inlines() {
+                let mut inlines: Vec<Inline<'_>> = paragraph.inlines().collect();
+                while let Some(inline) = inlines.pop() {
                     match inline {
                         Inline::Run(run) => {
                             for item in run.content() {
@@ -32,11 +34,34 @@ fuzz_target!(|data: &[u8]| {
                                 }
                             }
                         }
+                        Inline::Hyperlink(link) => {
+                            let _ = (link.target(), link.anchor());
+                            inlines.extend(link.inlines());
+                        }
+                        Inline::ContentControl(control) => inlines.extend(control.inlines()),
+                        Inline::Revision(revision) => {
+                            let _ = (revision.kind(), revision.author(), revision.date());
+                            inlines.extend(revision.inlines());
+                        }
+                        Inline::SimpleField(field) => {
+                            let _ = field.instruction();
+                            inlines.extend(field.inlines());
+                        }
                         Inline::Other(opaque) => check(opaque),
                         _ => {}
                     }
                 }
             }
+            Block::Table(table) => {
+                assert!(document.table(table.id()).is_some());
+                let _ = table.grid_columns().count();
+                for row in table.rows() {
+                    for cell in row.cells() {
+                        blocks.extend(cell.blocks());
+                    }
+                }
+            }
+            Block::ContentControl(control) => blocks.extend(control.blocks()),
             Block::Other(opaque) => check(opaque),
             _ => {}
         }
