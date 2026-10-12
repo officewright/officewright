@@ -40,7 +40,11 @@ ROOT = Path(__file__).resolve().parent.parent
 CORPUS = ROOT / "tests" / "corpus"
 
 # The make-reference.ps1 output format this script reads.
-SCRIPT_VERSION = 1
+SCRIPT_VERSION = 2
+
+# The printer references are made with. Another printer is noted without its name, which
+# can say where the machine is (a network printer).
+REFERENCE_PRINTER = "Microsoft Print to PDF"
 
 # Metadata values our own documents carry; anything else in a name field is refused.
 ALLOWED_NAMES = {"", "Officewright"}
@@ -58,6 +62,7 @@ VERSION = re.compile(r"^[0-9][0-9.]*$")
 DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 WORD = re.compile(r"^[0-9A-Za-z]*$")
 FONT = re.compile(r"^[^|\x00-\x1f]{1,64}$")
+PRINTER = re.compile(r"^[^|\x00-\x1f]{0,256}$")
 
 REQUIRED = {
     "script_version": int,
@@ -75,6 +80,8 @@ REQUIRED = {
     "privacy_findings": list,
     "word_version": str,
     "word_build": str,
+    "printer": str,
+    "default_printer": str,
     "windows_version": str,
     "rendered": str,
 }
@@ -160,6 +167,9 @@ def load_record(path: Path) -> dict:
     for key, pattern in checks:
         if not pattern.match(record[key]):
             raise Refused(f"{path.name}: {key} {record[key]!r} is not in the expected form")
+    for key in ("printer", "default_printer"):
+        if not PRINTER.match(record[key]):
+            raise Refused(f"{path.name}: {key} is not a printer name")
     if not WORD.match(str(record.get("windows_display_version") or "")):
         raise Refused(f"{path.name}: windows_display_version is not in the expected form")
     for font in record["fonts_missing"]:
@@ -306,9 +316,13 @@ def reference_row(group: str, record: dict, missing_embeds: list[str]) -> str:
     display = record.get("windows_display_version") or ""
     if display:
         windows = f"{windows} ({display})"
+    printer = f"printer {REFERENCE_PRINTER}"
+    if record["printer"] != REFERENCE_PRINTER:
+        printer = f"printer other than {REFERENCE_PRINTER}, name not recorded"
     notes = [
         f"compatibility mode {record['compatibility_mode']}",
         f"{record['pages']} pages",
+        printer,
         "fonts Word substituted: " + (", ".join(record["fonts_missing"]) or "none"),
         "fonts not embedded: " + (", ".join(missing_embeds) or "none"),
         "fields as saved",

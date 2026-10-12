@@ -88,7 +88,7 @@ class Import(unittest.TestCase):
         pdf = self.results / f"{doc.name}.pdf"
         pdf.write_bytes(b"%PDF-1.7\n%%EOF\n")
         record = {
-            "script_version": 1,
+            "script_version": 2,
             "file": f"{doc.name}.docx",
             "sha256": sha256(original),
             "resaved_file": resaved.name,
@@ -104,6 +104,8 @@ class Import(unittest.TestCase):
             "privacy_findings": [],
             "word_version": "16.0",
             "word_build": "16.0.1",
+            "printer": "Microsoft Print to PDF",
+            "default_printer": "Microsoft Print to PDF",
             "windows_version": "10.0.26100.0",
             "windows_display_version": "24H2",
             "rendered": "2026-10-13",
@@ -148,8 +150,9 @@ class Import(unittest.TestCase):
         self.assertIn(
             "| reference/word-rules/E-line-fonts.pdf | word-rules/E-line-fonts.docx, re-saved by "
             "Word as resaved/word-rules/E-line-fonts.docx | Microsoft Word 16.0, build 16.0.1, "
-            "Windows 10.0.26100.0 (24H2) | 2026-10-13 | compatibility mode 15; 3 pages; fonts "
-            "Word substituted: none; fonts not embedded: Garamond; fields as saved |",
+            "Windows 10.0.26100.0 (24H2) | 2026-10-13 | compatibility mode 15; 3 pages; printer "
+            "Microsoft Print to PDF; fonts Word substituted: none; fonts not embedded: Garamond; "
+            "fields as saved |",
             sources,
         )
 
@@ -288,7 +291,8 @@ class Import(unittest.TestCase):
 
     def test_refuses_values_that_would_break_the_table(self):
         for key, value in (("word_build", "16.0 | x"), ("rendered", "today"),
-                           ("windows_display_version", "24H2|"), ("fonts_missing", ["A|B"])):
+                           ("windows_display_version", "24H2|"), ("fonts_missing", ["A|B"]),
+                           ("printer", "PDF|x"), ("default_printer", "a\nb")):
             with self.subTest(key=key):
                 self.add_result(rules.documents()[0], **{key: value})
                 self.assertIn("E-line-fonts.json", self.refused())
@@ -310,8 +314,15 @@ class Import(unittest.TestCase):
         self.assertIn("Word counted 3 pages, the PDF has 4", self.refused())
 
     def test_refuses_another_format_version(self):
-        self.add_result(rules.documents()[0], script_version=2)
-        self.assertIn("format 2", self.refused())
+        self.add_result(rules.documents()[0], script_version=1)
+        self.assertIn("format 1", self.refused())
+
+    def test_notes_another_printer_without_its_name(self):
+        self.add_result(rules.documents()[0], printer="\\\\print01\\Floor 3")
+        self.run_import()
+        sources = (self.corpus / "SOURCES.md").read_text(encoding="utf-8")
+        self.assertIn("printer other than Microsoft Print to PDF, name not recorded;", sources)
+        self.assertNotIn("print01", sources)
 
     def test_refuses_a_path_instead_of_a_file_name(self):
         for path in ("..\\elsewhere.docx", "../elsewhere.docx", "sub/E-line-fonts.docx", ".docx"):
