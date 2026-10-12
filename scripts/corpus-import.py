@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Imports reference renders made by scripts/windows/make-reference.ps1 into tests/corpus/.
 
-    corpus-import.py RESULTS_DIR --group word-rules [--dry-run]
+    corpus-import.py RESULTS_DIR --group word-rules [--font-dir DIR]... [--dry-run]
 
 RESULTS_DIR is the -OutputDir of make-reference.ps1 (for example /mnt/c/officewright-ref/out
 under WSL). For every <name>.json there the script checks that
@@ -26,11 +26,20 @@ tests/corpus/reference/<group>/<name>/ go instead
   - geometry.json: page sizes and the position of every line and word (pdftotext
     -bbox-layout, in points from the top left of the page), the page count, Word's own page
     breaks (the w:lastRenderedPageBreak marks of the re-saved copy), and the fonts the PDF
-    references without embedding them, whose pages poppler rasterizes with substitutes.
+    references without embedding them.
+
+Word does not embed every font (Times New Roman and Arial, for example), and poppler would
+draw those with substitutes of its own. So before rasterizing, the script embeds the font
+Word used into a temporary copy of the PDF: the face in a --font-dir folder whose PostScript
+name is the PDF's font name (under WSL, /mnt/c/Windows/Fonts and the user font folder
+/mnt/c/Users/<name>/AppData/Local/Microsoft/Windows/Fonts). Only the glyph shapes come from
+that file; the positions stay those of the PDF. SOURCES.md and geometry.json name each such
+font with its version and SHA-256, never with its path.
 
 The re-saved DOCX goes to tests/corpus/resaved/<group>/<name>.docx, and the document's row to
 the "Reference renders" table of tests/corpus/SOURCES.md. Nothing is written unless every
-document passes. Needs pdfinfo, pdffonts, pdftoppm and pdftotext (poppler-utils).
+document passes. Needs pdfinfo, pdffonts, pdftoppm and pdftotext (poppler-utils) and, for a
+PDF that does not embed every font, qpdf 11 or later.
 """
 
 from __future__ import annotations
@@ -85,6 +94,7 @@ VERSION = re.compile(r"^[0-9][0-9.]*$")
 DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 WORD = re.compile(r"^[0-9A-Za-z]*$")
 FONT = re.compile(r"^[^|\x00-\x1f]{1,64}$")
+FONT_VERSION = re.compile(r"^[^|\x00-\x1f]{0,64}$")
 PRINTER = re.compile(r"^[^|\x00-\x1f]{0,256}$")
 
 REQUIRED = {
@@ -127,13 +137,19 @@ class Tools:
     bbox: Callable[[Path], str]
     # The poppler version, for the provenance notes.
     version: Callable[[], str]
+    # qpdf --json=2: the PDF's objects.
+    objects: Callable[[Path], str]
+    # qpdf --update-from-json: writes the PDF (first path) with the update (second) applied
+    # to a new file (third).
+    update: Callable[[Path, Path, Path], None]
 
 
 def run_tool(*args: str) -> str:
     try:
         done = subprocess.run(args, check=True, capture_output=True)
     except FileNotFoundError as error:
-        raise Refused(f"{args[0]} is not installed (apt install poppler-utils)") from error
+        package = "qpdf" if args[0] == "qpdf" else "poppler-utils"
+        raise Refused(f"{args[0]} is not installed (apt install {package})") from error
     except subprocess.CalledProcessError as error:
         message = error.stderr.decode(errors="replace").strip()
         raise Refused(f"{' '.join(args)} failed: {message}") from error
@@ -150,6 +166,10 @@ def poppler_raster(pdf: Path, directory: Path) -> list[Path]:
     return in_page_order(list(directory.glob("page-*.pgm")))
 
 
+def qpdf_update(pdf: Path, update: Path, copy: Path) -> None:
+    run_tool("qpdf", str(pdf), str(copy), f"--update-from-json={update}")
+
+
 def poppler_version() -> str:
     try:
         done = subprocess.run(["pdftoppm", "-v"], capture_output=True, check=False)
@@ -159,13 +179,15 @@ def poppler_version() -> str:
     return match.group(1) if match else "unknown"
 
 
-POPPLER = Tools(
+TOOLS = Tools(
     info=lambda path: run_tool("pdfinfo", str(path)),
     xmp=lambda path: run_tool("pdfinfo", "-meta", str(path)),
     fonts=lambda path: run_tool("pdffonts", str(path)),
     raster=poppler_raster,
     bbox=lambda path: run_tool("pdftotext", "-bbox-layout", str(path), "-"),
     version=poppler_version,
+    objects=lambda path: run_tool("qpdf", "--json=2", str(path)),
+    update=qpdf_update,
 )
 
 
@@ -493,8 +515,271 @@ def not_embedded(pdffonts: str) -> list[str]:
     return sorted(set(names))
 
 
+FONT_SUFFIXES = {".ttf", ".otf", ".ttc", ".otc"}
+SFNT_VERSIONS = {b"\x00\x01\x00\x00", b"OTTO", b"true"}
+
+
+class FontFormatError(ValueError):
+    """A file in a --font-dir folder that is not a font this script reads; it is skipped."""
+
+
+@dataclass(frozen=True)
+class FontFace:
+    """One face of a font file in a --font-dir folder."""
+
+    path: Path
+    # The face's index in a collection (.ttc), 0 in a single font.
+    index: int
+    collection: bool
+    postscript: str
+    full_name: str
+    version: str
+    # CFF outlines, which a PDF embeds as /FontFile3 /Subtype /OpenType.
+    cff: bool
+
+
+def name_strings(table: bytes) -> dict[int, str]:
+    """The strings of a name table by name ID, in US English where the font has it."""
+    if len(table) < 6:
+        raise FontFormatError("name table too short")
+    count, storage = struct.unpack(">HH", table[2:6])
+    best: dict[int, tuple[int, str]] = {}
+    for record in range(count):
+        start = 6 + 12 * record
+        if start + 12 > len(table):
+            raise FontFormatError("name records past the end of the table")
+        platform, encoding, language, name_id, length, offset = struct.unpack(
+            ">HHHHHH", table[start : start + 12]
+        )
+        data = table[storage + offset : storage + offset + length]
+        if len(data) != length:
+            continue
+        if platform == 3 and encoding in (0, 1, 10):
+            rank = 3 if language == 0x409 else 2
+            text = data.decode("utf-16-be", errors="replace")
+        elif platform == 1 and encoding == 0:
+            rank, text = 1, data.decode("mac_roman")
+        else:
+            continue
+        if rank > best.get(name_id, (0, ""))[0]:
+            best[name_id] = (rank, text.strip())
+    return {name_id: text for name_id, (_, text) in best.items()}
+
+
+def table_directory(read: Callable[[int, int], bytes], offset: int) -> dict[bytes, tuple[int, int]]:
+    """The tables of the face whose offset table is at offset: tag -> (offset, length)."""
+    if read(offset, 4) not in SFNT_VERSIONS:
+        raise FontFormatError("not a TrueType or OpenType font")
+    (count,) = struct.unpack(">H", read(offset + 4, 2))
+    records = read(offset + 12, 16 * count)
+    tables = {}
+    for start in range(0, len(records), 16):
+        tag, _, table_offset, length = struct.unpack(">4sIII", records[start : start + 16])
+        tables[tag] = (table_offset, length)
+    return tables
+
+
+def font_faces(path: Path) -> list[FontFace]:
+    """The faces of a font file, read from its table directories and name tables only."""
+    with path.open("rb") as file:
+
+        def read(offset: int, size: int) -> bytes:
+            file.seek(offset)
+            data = file.read(size)
+            if len(data) != size:
+                raise FontFormatError("truncated")
+            return data
+
+        collection = read(0, 4) == b"ttcf"
+        if collection:
+            (count,) = struct.unpack(">I", read(8, 4))
+            if count > 1024:
+                raise FontFormatError("implausible collection")
+            offsets = struct.unpack(f">{count}I", read(12, 4 * count))
+        else:
+            offsets = (0,)
+        faces = []
+        for index, offset in enumerate(offsets):
+            tables = table_directory(read, offset)
+            if b"name" not in tables:
+                continue
+            names = name_strings(read(*tables[b"name"]))
+            postscript = names.get(6, "")
+            if not postscript:
+                continue
+            faces.append(
+                FontFace(
+                    path=path,
+                    index=index,
+                    collection=collection,
+                    postscript=postscript,
+                    full_name=names.get(4, postscript),
+                    version=names.get(5, ""),
+                    cff=b"CFF " in tables or b"CFF2" in tables,
+                )
+            )
+        return faces
+
+
+def font_index(directories: list[Path]) -> dict[str, list[FontFace]]:
+    """The faces in the folders by PostScript name; files that are no fonts are skipped."""
+    index: dict[str, list[FontFace]] = {}
+    for directory in directories:
+        if not directory.is_dir():
+            raise Refused(f"--font-dir {directory} is not a folder")
+        for path in sorted(directory.iterdir()):
+            if path.suffix.lower() not in FONT_SUFFIXES or not path.is_file():
+                continue
+            try:
+                faces = font_faces(path)
+            except (OSError, FontFormatError, struct.error):
+                continue
+            for face in faces:
+                index.setdefault(face.postscript, []).append(face)
+    return index
+
+
+def face_bytes(face: FontFace) -> bytes:
+    """The face as a font file of its own: the file itself, or the face cut out of a
+    collection, with its tables copied after a new table directory."""
+    data = face.path.read_bytes()
+    if not face.collection:
+        return data
+    (offset,) = struct.unpack(">I", data[12 + 4 * face.index : 16 + 4 * face.index])
+
+    def read(start: int, size: int) -> bytes:
+        chunk = data[start : start + size]
+        if len(chunk) != size:
+            raise FontFormatError("truncated")
+        return chunk
+
+    tables = sorted(table_directory(read, offset).items())
+    count = len(tables)
+    power = 1 << (count.bit_length() - 1)
+    header = read(offset, 4) + struct.pack(
+        ">HHHH", count, power * 16, power.bit_length() - 1, count * 16 - power * 16
+    )
+    position = 12 + 16 * count
+    directory, body = b"", b""
+    for tag, (start, length) in tables:
+        padded = read(start, length).ljust((length + 3) // 4 * 4, b"\0")
+        checksum = sum(struct.unpack(f">{len(padded) // 4}I", padded)) & 0xFFFFFFFF
+        directory += struct.pack(">4sIII", tag, checksum, position + len(body), length)
+        body += padded
+    return header + directory + body
+
+
+@dataclass(frozen=True)
+class DrawnFont:
+    """A font the PDF does not embed, and the face the rasters draw it with."""
+
+    name: str
+    face: FontFace
+    data: bytes
+
+    def describe(self) -> dict:
+        entry = {
+            "font": self.name,
+            "full_name": self.face.full_name,
+            "version": self.face.version,
+            "sha256": hashlib.sha256(self.face.path.read_bytes()).hexdigest(),
+        }
+        if self.face.collection:
+            entry["face_in_collection"] = self.face.index
+        return entry
+
+
+def drawn_font(name: str, index: dict[str, list[FontFace]]) -> DrawnFont:
+    """The face for a font the PDF names without embedding it; refused unless exactly one."""
+    if "," in name:
+        raise Refused(
+            f"{name}: Word names a style it synthesizes after the comma, which an embedded "
+            "face would lose"
+        )
+    faces = index.get(name, [])
+    if not faces:
+        raise Refused(
+            f"{name} is not embedded in the PDF, and no --font-dir folder has a font with "
+            "that PostScript name (under WSL: /mnt/c/Windows/Fonts, and "
+            "/mnt/c/Users/<name>/AppData/Local/Microsoft/Windows/Fonts for fonts installed "
+            "for one user)"
+        )
+    by_content = {}
+    for face in faces:
+        by_content.setdefault(face_bytes(face), face)
+    if len(by_content) > 1:
+        files = ", ".join(sorted({face.path.name for face in faces}))
+        raise Refused(f"{name}: --font-dir folders hold different fonts of that name: {files}")
+    ((data, face),) = by_content.items()
+    if not FONT.match(face.full_name) or not FONT_VERSION.match(face.version):
+        raise Refused(
+            f"{name}: unexpected name or version in {face.path.name}: "
+            f"{face.full_name!r}, {face.version!r}"
+        )
+    return DrawnFont(name, face, data)
+
+
+def embedding_update(objects: dict, fonts: dict[str, Path], cff: dict[str, bool]) -> dict:
+    """A qpdf JSON update that embeds each font file into the font descriptors that name
+    the font and embed nothing; fonts maps the PDF font name to the file to embed."""
+    header, body = objects["qpdf"]
+    next_id = header["maxobjectid"]
+    update = {}
+    for key, value in sorted(body.items()):
+        descriptor = value.get("value") if isinstance(value, dict) else None
+        if not isinstance(descriptor, dict) or descriptor.get("/Type") != "/FontDescriptor":
+            continue
+        name = str(descriptor.get("/FontName", ""))[1:]
+        if name not in fonts or any(
+            k in descriptor for k in ("/FontFile", "/FontFile2", "/FontFile3")
+        ):
+            continue
+        next_id += 1
+        path = fonts[name]
+        if cff[name]:
+            stream, entry = {"/Subtype": "/OpenType"}, "/FontFile3"
+        else:
+            stream, entry = {"/Length1": path.stat().st_size}, "/FontFile2"
+        update[f"obj:{next_id} 0 R"] = {"stream": {"dict": stream, "datafile": str(path)}}
+        update[key] = {"value": {**descriptor, entry: f"{next_id} 0 R"}}
+    return {
+        "qpdf": [
+            {
+                "jsonversion": 2,
+                "pushedinheritedpageresources": False,
+                "calledgetallpages": False,
+                "maxobjectid": next_id,
+            },
+            update,
+        ]
+    }
+
+
+def with_fonts_embedded(pdf: Path, drawn: list[DrawnFont], directory: Path, tools: Tools) -> Path:
+    """A copy of the PDF in the directory with the drawn fonts embedded."""
+    files, cff = {}, {}
+    for number, font in enumerate(drawn):
+        path = directory / f"font-{number}.bin"
+        path.write_bytes(font.data)
+        files[font.name] = path
+        cff[font.name] = font.face.cff
+    try:
+        objects = json.loads(tools.objects(pdf))
+        update = embedding_update(objects, files, cff)
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+        raise Refused(f"{pdf.name}: cannot read qpdf's JSON: {error}") from error
+    update_path = directory / "embed.json"
+    update_path.write_text(json.dumps(update), encoding="utf-8")
+    copy = directory / "embedded.pdf"
+    tools.update(pdf, update_path, copy)
+    left = not_embedded(tools.fonts(copy))
+    if left:
+        raise Refused(f"{pdf.name}: still not embedded after embedding: {', '.join(left)}")
+    return copy
+
+
 def reference_row(
-    group: str, record: dict, missing_embeds: list[str], poppler: str, dropped: list[str]
+    group: str, record: dict, drawn: list[DrawnFont], poppler: str, dropped: list[str]
 ) -> str:
     base = Path(record["file"]).stem
     windows = record["windows_version"]
@@ -513,8 +798,15 @@ def reference_row(
         "fields as saved",
         f"PDF not committed, SHA-256 {record['pdf_sha256']}",
         f"rasters and geometry by poppler {poppler} at {RASTER_DPI} dpi, grey",
-        "fonts the PDF does not embed, rasterized with poppler's substitutes: "
-        + (", ".join(missing_embeds) or "none"),
+        "fonts the PDF does not embed, rasterized with the maintainer's installed copies: "
+        + (
+            ", ".join(
+                f"{font.name} ({font.face.full_name}, {font.face.version or 'no version'}, "
+                f"SHA-256 {font.describe()['sha256']})"
+                for font in drawn
+            )
+            or "none"
+        ),
     ]
     return (
         f"| reference/{group}/{base}/ "
@@ -551,10 +843,16 @@ class Checked:
     resaved: Path
     row: str
     geometry: dict
+    drawn: list[DrawnFont]
 
 
 def check_result(
-    json_path: Path, group: str, corpus: Path, tools: Tools, allow_locale: bool = False
+    json_path: Path,
+    group: str,
+    corpus: Path,
+    tools: Tools,
+    allow_locale: bool = False,
+    fonts: dict[str, list[FontFace]] | None = None,
 ) -> Checked:
     record = load_record(json_path)
     results = json_path.parent
@@ -611,6 +909,10 @@ def check_result(
     if len(geometry_pages) != pages:
         raise Refused(f"{record['file']}: pdftotext found {len(geometry_pages)} pages, not {pages}")
     missing_embeds = not_embedded(tools.fonts(pdf))
+    try:
+        drawn = [drawn_font(name, fonts or {}) for name in missing_embeds]
+    except Refused as error:
+        raise Refused(f"{record['file']}: {error}") from error
     poppler = tools.version()
     geometry = {
         "format": GEOMETRY_FORMAT,
@@ -620,13 +922,14 @@ def check_result(
         "units": "points, origin at the top left of the page, y downwards",
         "page_count": pages,
         "fonts_not_embedded": missing_embeds,
+        "fonts_rasterized_with": [font.describe() for font in drawn],
         "compat_flags_dropped": dropped,
         "compat_flags_added": added,
         "page_breaks": page_breaks,
         "pages": geometry_pages,
     }
-    row = reference_row(group, record, missing_embeds, poppler, dropped)
-    return Checked(record, pdf, resaved, row, geometry)
+    row = reference_row(group, record, drawn, poppler, dropped)
+    return Checked(record, pdf, resaved, row, geometry, drawn)
 
 
 def import_results(
@@ -636,9 +939,11 @@ def import_results(
     tools: Tools,
     dry_run: bool,
     allow_locale: bool = False,
+    font_dirs: list[Path] | None = None,
 ) -> list[Checked]:
     if not (corpus / group).is_dir():
         raise Refused(f"tests/corpus/{group} does not exist")
+    fonts = font_index(font_dirs or [])
     records = sorted(p for p in results.glob("*.json") if p.name != "run.json")
     if not records:
         raise Refused(f"no results in {results}")
@@ -646,7 +951,7 @@ def import_results(
     errors = []
     for path in records:
         try:
-            checked.append(check_result(path, group, corpus, tools, allow_locale))
+            checked.append(check_result(path, group, corpus, tools, allow_locale, fonts))
         except Refused as error:
             errors.append(str(error))
     if errors:
@@ -659,7 +964,10 @@ def import_results(
         for item in checked:
             directory = Path(scratch) / Path(item.record["file"]).stem
             directory.mkdir()
-            pages = [png_from_pgm(page.read_bytes()) for page in tools.raster(item.pdf, directory)]
+            pdf = item.pdf
+            if item.drawn:
+                pdf = with_fonts_embedded(item.pdf, item.drawn, directory, tools)
+            pages = [png_from_pgm(page.read_bytes()) for page in tools.raster(pdf, directory)]
             if len(pages) != item.geometry["page_count"]:
                 raise Refused(
                     f"{item.record['file']}: pdftoppm wrote {len(pages)} pages, "
@@ -692,6 +1000,13 @@ def main() -> int:
     parser.add_argument(
         "--group", required=True, help="the folder under tests/corpus/, e.g. word-rules"
     )
+    parser.add_argument(
+        "--font-dir",
+        type=Path,
+        action="append",
+        default=[],
+        help="a folder with the fonts Word used, for fonts the PDFs do not embed (repeatable)",
+    )
     parser.add_argument("--dry-run", action="store_true", help="check everything, copy nothing")
     parser.add_argument(
         "--allow-locale",
@@ -701,7 +1016,13 @@ def main() -> int:
     args = parser.parse_args()
     try:
         checked = import_results(
-            args.results, args.group, CORPUS, POPPLER, args.dry_run, args.allow_locale
+            args.results,
+            args.group,
+            CORPUS,
+            TOOLS,
+            args.dry_run,
+            args.allow_locale,
+            args.font_dir,
         )
     except Refused as error:
         print(f"corpus-import.py: {error}", file=sys.stderr)
@@ -712,6 +1033,11 @@ def main() -> int:
         print(f"{verb} {item.record['file']}: {pages} page{'s' if pages != 1 else ''}")
         for flag in item.geometry["compat_flags_dropped"]:
             print(f"  note: Word dropped the w:compat setting {flag} from the re-saved copy")
+        for font in item.drawn:
+            print(
+                f"  note: {font.name} is not embedded; rasterized with "
+                f"{font.face.full_name} {font.face.version}"
+            )
     print(f"corpus-import.py: {verb} {len(checked)} reference renders")
     return 0
 
