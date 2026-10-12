@@ -33,10 +33,14 @@ const PAIRS: [(&str, &str); 4] = [
 ];
 
 /// Word places lines on a grid of 1/600 inch in its PDF: the distances between the lines
-/// of one font in `geometry.json` are multiples of 0.12 pt, except at most one per
-/// paragraph that is 0.02 or 0.03 pt off. The mean distance over `n` lines is therefore
-/// known to about `GRID / (n - 1)`.
+/// of one font in `geometry.json` are multiples of `GRID`, except at most one per
+/// paragraph that is up to `OFF_GRID` off. The first and the last of `n` lines are each
+/// within half a step of where their line height puts them, so the mean distance is
+/// known to `(GRID + OFF_GRID) / (n - 1)`.
 const GRID: f64 = 0.12;
+
+/// How far the one distance per paragraph that is off the grid is off: 0.02 or 0.03 pt.
+const OFF_GRID: f64 = 0.03;
 
 /// The most that Word's boxes for a font in tests/fonts may be off from its advance
 /// widths before the comparison is taken to be broken (a font in tests/fonts that is not
@@ -164,7 +168,8 @@ enum Span {
 }
 
 /// How far a face's advance widths are from Word's boxes for the lines of a family:
-/// one entry per word and per line, with a description and the difference in pt.
+/// one entry per word and per line, with a description and the difference in pt. The
+/// lines of a size differ only in their numbers, so they share a description.
 fn width_differences(
     face: &FontFace,
     sizes: &BTreeMap<u32, Vec<Line>>,
@@ -179,7 +184,7 @@ fn width_differences(
                 differences.push((Span::Word, what, ours - word_width));
             }
             let ours = width(face, &line.text, size)?;
-            let what = format!("{size} pt, line {:?}", line.text);
+            let what = format!("{size} pt, whole lines");
             differences.push((Span::Line, what, ours - line.width));
         }
     }
@@ -229,7 +234,13 @@ fn substitutes_set_text_as_wide_as_word_set_the_original() -> TestResult {
     for family in ["Liberation Sans", "Noto Sans"] {
         let (kind, face) = resolve(&book, family)?;
         assert_eq!(kind, ResolutionKind::Exact, "{family}");
-        let differences = width_differences(&face, rows.get(family).ok_or(family)?)?;
+        let sizes = rows.get(family).ok_or(family)?;
+        assert_eq!(
+            sizes.keys().copied().collect::<Vec<_>>(),
+            [11, 12],
+            "{family}"
+        );
+        let differences = width_differences(&face, sizes)?;
         precision.0 = precision.0.max(largest(&differences, Span::Word));
         precision.1 = precision.1.max(largest(&differences, Span::Line));
     }
@@ -243,26 +254,35 @@ fn substitutes_set_text_as_wide_as_word_set_the_original() -> TestResult {
     );
 
     let mut failures = String::new();
-    for (family, substitute) in PAIRS {
+    for (family, _) in PAIRS {
         let (_, face) = resolve(&book, family)?;
+        let name = face.names().family().unwrap_or("?").to_owned();
         let sizes = rows.get(family).ok_or(family)?;
         assert_eq!(
             sizes.keys().copied().collect::<Vec<_>>(),
             [11, 12],
             "{family}"
         );
+        // Report the largest difference for each word and for the lines of each size.
+        let mut worst = BTreeMap::<String, (f64, f64)>::new();
         for (span, what, difference) in width_differences(&face, sizes)? {
             let limit = match span {
                 Span::Word => precision.0,
                 Span::Line => precision.1,
             };
             if difference.abs() > limit {
-                writeln!(
-                    failures,
-                    "{substitute} for {family}, {what}: {difference:+.3} pt (Word's own \
-                     fonts are within {limit:.3} pt)"
-                )?;
+                let entry = worst.entry(what).or_insert((difference, limit));
+                if difference.abs() > entry.0.abs() {
+                    entry.0 = difference;
+                }
             }
+        }
+        for (what, (difference, limit)) in worst {
+            writeln!(
+                failures,
+                "{name} for {family}, {what}: {difference:+.3} pt (Word's own fonts are \
+                 within {limit:.3} pt)"
+            )?;
         }
     }
     assert!(failures.is_empty(), "{failures}");
@@ -276,26 +296,32 @@ fn substitutes_space_lines_as_word_spaced_the_original() -> TestResult {
     let mut failures = String::new();
     // Word spaced Liberation Sans and Noto Sans by GDI's line height too, Noto Sans
     // although it asks for its typographic metrics (USE_TYPO_METRICS).
-    let measured = PAIRS
-        .iter()
-        .chain(&[
-            ("Liberation Sans", "Liberation Sans"),
-            ("Noto Sans", "Noto Sans"),
-        ])
-        .copied();
+    let substitutes = PAIRS.iter().map(|(family, _)| (*family, true));
+    let measured = substitutes.chain([("Liberation Sans", false), ("Noto Sans", false)]);
     for (family, substitute) in measured {
         let (_, face) = resolve(&book, family)?;
-        if family != substitute {
-            // Word honours USE_TYPO_METRICS for some fonts and not for others, so the
-            // line height of a substitute that sets it cannot be compared yet.
-            assert!(!face.metrics().use_typo_metrics(), "{substitute}");
-        }
-        for (&size, lines) in rows.get(family).ok_or(family)? {
+        let name = face.names().family().unwrap_or("?").to_owned();
+        // Word honours USE_TYPO_METRICS for some fonts and not for others, so the line
+        // height of a substitute that sets it cannot be compared yet.
+        assert!(
+            !(substitute && face.metrics().use_typo_metrics()),
+            "{name}, the substitute for {family}, sets USE_TYPO_METRICS: its line height \
+             cannot be compared with Word's until it is known whether Word honours that flag \
+             for it"
+        );
+        let sizes = rows.get(family).ok_or(family)?;
+        assert_eq!(
+            sizes.keys().copied().collect::<Vec<_>>(),
+            [11, 12],
+            "{family}"
+        );
+        for (&size, lines) in sizes {
             let mut pages = BTreeMap::<u32, Vec<f64>>::new();
             for line in lines {
                 pages.entry(line.page).or_default().push(line.top);
             }
             let ours = line_height(&face, f64::from(size))?;
+            let mut paragraphs = 0;
             for tops in pages.values() {
                 let (Some(first), Some(last)) = (tops.first(), tops.last()) else {
                     continue;
@@ -304,16 +330,21 @@ fn substitutes_space_lines_as_word_spaced_the_original() -> TestResult {
                 if intervals < 1.0 {
                     continue;
                 }
+                paragraphs += 1;
                 let words = (last - first) / intervals;
-                let limit = GRID / intervals;
+                let limit = (GRID + OFF_GRID) / intervals;
                 if (ours - words).abs() > limit {
                     writeln!(
                         failures,
-                        "{substitute} for {family} at {size} pt: lines {ours:.3} pt apart, \
-                         Word's {words:.3} pt (measured to {limit:.3} pt)"
+                        "{name} for {family} at {size} pt: lines {ours:.3} pt apart, Word's \
+                         {words:.3} pt (measured to {limit:.3} pt)"
                     )?;
                 }
             }
+            assert!(
+                paragraphs > 0,
+                "{family} at {size} pt: no page with two lines"
+            );
         }
     }
     assert!(failures.is_empty(), "{failures}");
