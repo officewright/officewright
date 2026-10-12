@@ -10,8 +10,7 @@ fn open(bytes: &[u8]) -> Result<Archive> {
 fn read_all(archive: &Archive) -> Result<Vec<(String, Vec<u8>)>> {
     archive
         .entries()
-        .iter()
-        .map(|entry| Ok((entry.name().to_owned(), archive.read(entry)?)))
+        .map(|entry| Ok((entry.name().to_owned(), entry.read()?)))
         .collect()
 }
 
@@ -29,9 +28,36 @@ fn entry_message(result: Result<Vec<u8>>) -> String {
     }
 }
 
+fn read_first(bytes: &[u8]) -> Result<Vec<u8>> {
+    let archive = open(bytes).unwrap();
+    archive.entry(0).unwrap().read()
+}
+
 /// Offset of an entry's data, after its 30-byte local header and name.
 fn data_offset(layout: &Layout, index: usize, name: &str) -> usize {
     layout.local[index] + 30 + name.len()
+}
+
+/// Sets an entry's compressed and uncompressed sizes in its local header and in the
+/// central directory, so that both agree.
+fn set_sizes(layout: &mut Layout, index: usize, compressed: u32, size: u32) {
+    let (local, central) = (layout.local[index], layout.central[index]);
+    set32(&mut layout.bytes, local + 18, compressed);
+    set32(&mut layout.bytes, local + 22, size);
+    set32(&mut layout.bytes, central + 20, compressed);
+    set32(&mut layout.bytes, central + 24, size);
+}
+
+/// Sets an entry's CRC-32 in its local header and in the central directory.
+fn set_crc(layout: &mut Layout, index: usize, crc: u32) {
+    let (local, central) = (layout.local[index], layout.central[index]);
+    set32(&mut layout.bytes, local + 14, crc);
+    set32(&mut layout.bytes, central + 16, crc);
+}
+
+fn central_u32(layout: &Layout, index: usize, at: usize) -> u32 {
+    let start = layout.central[index] + at;
+    u32::from_le_bytes(layout.bytes[start..start + 4].try_into().unwrap())
 }
 
 #[test]
@@ -48,9 +74,11 @@ fn reads_stored_and_deflated_entries() {
             ("dir/b.xml".to_owned(), TEXT.to_vec())
         ]
     );
-    let deflated = &archive.entries()[1];
+    let deflated = archive.entry(1).unwrap();
     assert_eq!(deflated.size(), TEXT.len() as u64);
     assert!(deflated.compressed_size() < deflated.size());
+    assert!(archive.entry(2).is_none());
+    assert_eq!(archive.entries().len(), 2);
 }
 
 #[test]
@@ -61,6 +89,15 @@ fn reads_empty_entries() {
         read_all(&archive).unwrap(),
         [("a".to_owned(), vec![]), ("b".to_owned(), vec![])]
     );
+}
+
+#[test]
+fn reads_a_deflated_entry_without_data() {
+    // Some writers give an empty file method 8 and no data at all; LibreOffice's
+    // sc/qa/unit/data/xlsx/tdf124525.xlsx has six such entries.
+    let mut layout = build(&[TestEntry::deflated("a", b"")], b"");
+    set_sizes(&mut layout, 0, 0, 0);
+    assert_eq!(read_first(&layout.bytes).unwrap(), b"");
 }
 
 #[test]
@@ -84,9 +121,15 @@ fn reads_entries_with_data_descriptors() {
     let bytes = zip(&[
         TestEntry::deflated("a.xml", TEXT).data_descriptor(),
         TestEntry::stored("b.xml", b"b").data_descriptor().zip64(),
+        TestEntry::deflated("c.xml", TEXT)
+            .data_descriptor()
+            .without_descriptor_signature(),
     ]);
     let archive = open(&bytes).unwrap();
-    assert_eq!(read_all(&archive).unwrap()[0].1, TEXT);
+    let all = read_all(&archive).unwrap();
+    assert_eq!(all[0].1, TEXT);
+    assert_eq!(all[1].1, b"b");
+    assert_eq!(all[2].1, TEXT);
 }
 
 #[test]
@@ -97,11 +140,34 @@ fn accepts_bytes_after_the_end_record() {
 }
 
 #[test]
-fn ignores_a_fake_end_record_in_the_comment() {
-    let mut comment = b"PK\x05\x06".to_vec();
-    comment.extend_from_slice(&[0xff; 18]);
+fn skips_a_fake_end_record_in_the_comment() {
+    // The comment holds a copy of the central directory that names "b" and an end
+    // record that points at it. That record is the last one in the file and its
+    // directory checks out, but its own comment would run past the end, so the real
+    // record before it is used.
+    let base = build(&[TestEntry::stored("a", b"a")], b"");
+    let mut fake_directory = base.bytes[base.central[0]..base.end].to_vec();
+    *fake_directory.last_mut().unwrap() = b'b';
+    let fake_directory_at = base.end + 22;
+    let mut comment = fake_directory.clone();
+    comment.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+    comment.extend_from_slice(&[0, 0, 0, 0, 1, 0, 1, 0]);
+    comment.extend_from_slice(&(fake_directory.len() as u32).to_le_bytes());
+    comment.extend_from_slice(&(fake_directory_at as u32).to_le_bytes());
+    comment.extend_from_slice(&u16::MAX.to_le_bytes());
     let layout = build(&[TestEntry::stored("a", b"a")], &comment);
-    assert_eq!(open(&layout.bytes).unwrap().entries()[0].name(), "a");
+    let archive = open(&layout.bytes).unwrap();
+    assert_eq!(archive.entry(0).unwrap().name(), "a");
+}
+
+#[test]
+fn rejects_a_comment_that_runs_past_the_end() {
+    let mut layout = build(&[TestEntry::stored("a", b"a")], b"abc");
+    set16(&mut layout.bytes, layout.end + 20, 10);
+    assert_eq!(
+        zip_message(open(&layout.bytes)),
+        "the archive comment runs past the end"
+    );
 }
 
 #[test]
@@ -139,6 +205,18 @@ fn rejects_a_central_directory_that_does_not_reach_the_end_record() {
 }
 
 #[test]
+fn rejects_data_before_the_first_entry() {
+    // Offsets are not shifted: a self-extracting stub or a concatenated file in front
+    // of the archive makes every offset wrong.
+    let mut bytes = vec![0; 100];
+    bytes.extend(zip(&[TestEntry::stored("a", b"a")]));
+    assert_eq!(
+        zip_message(open(&bytes)),
+        "the central directory does not end where the end of central directory record begins"
+    );
+}
+
+#[test]
 fn rejects_more_entries_than_the_directory_holds() {
     let mut layout = build(&[TestEntry::stored("a", b"a")], b"");
     set16(&mut layout.bytes, layout.end + 8, 2);
@@ -146,6 +224,56 @@ fn rejects_more_entries_than_the_directory_holds() {
     assert_eq!(
         zip_message(open(&layout.bytes)),
         "the central directory is too small for 2 entries"
+    );
+}
+
+#[test]
+fn rejects_bytes_after_the_last_central_record() {
+    let mut layout = build(&[TestEntry::stored("a", b"a")], b"");
+    layout.bytes.splice(layout.end..layout.end, [0; 3]);
+    let end = layout.end + 3;
+    let size = u32::from_le_bytes(layout.bytes[end + 12..][..4].try_into().unwrap());
+    set32(&mut layout.bytes, end + 12, size + 3);
+    assert_eq!(
+        zip_message(open(&layout.bytes)),
+        "unexpected bytes after the last central directory record"
+    );
+}
+
+#[test]
+fn rejects_a_central_record_that_runs_past_the_directory() {
+    let mut layout = build(&[TestEntry::stored("a", b"a")], b"");
+    set16(&mut layout.bytes, layout.central[0] + 28, 1000);
+    assert_eq!(
+        zip_message(open(&layout.bytes)),
+        "a central directory record runs past the end of the central directory"
+    );
+}
+
+#[test]
+fn rejects_bad_signatures() {
+    let mut layout = build(&[TestEntry::stored("a", b"a")], b"");
+    layout.bytes[layout.central[0]] = b'X';
+    assert_eq!(
+        zip_message(open(&layout.bytes)),
+        "bad central directory record signature"
+    );
+    let mut layout = build(&[TestEntry::stored("a", b"a")], b"");
+    layout.bytes[layout.local[0]] = b'X';
+    assert_eq!(
+        zip_message(open(&layout.bytes)),
+        "bad local header signature for entry a"
+    );
+}
+
+#[test]
+fn rejects_a_zip64_locator_that_points_out_of_range() {
+    let mut layout = build(&[TestEntry::stored("a", b"a").zip64()], b"");
+    let locator = layout.end - 20;
+    set32(&mut layout.bytes, locator + 8, 0xFFFF_FF00);
+    assert_eq!(
+        zip_message(open(&layout.bytes)),
+        "the zip64 end of central directory locator points out of range"
     );
 }
 
@@ -167,6 +295,53 @@ fn rejects_a_local_header_with_another_method() {
         zip_message(open(&layout.bytes)),
         "the local header of entry a gives compression method 8, the central directory 0"
     );
+}
+
+#[test]
+fn rejects_a_local_header_with_another_crc_or_size() {
+    // A reader that walks the local headers would see other bytes than one that reads
+    // the central directory.
+    let central_crc = crc32(b"hello world");
+    for (at, value) in [(14, 0xDEAD_BEEF), (18, 5), (22, 5)] {
+        let mut layout = build(&[TestEntry::stored("a", b"hello world")], b"");
+        set32(&mut layout.bytes, layout.local[0] + at, value);
+        let (crc, compressed, size) = match at {
+            14 => (0xDEAD_BEEF, 11, 11),
+            18 => (central_crc, 5, 11),
+            _ => (central_crc, 11, 5),
+        };
+        assert_eq!(
+            zip_message(open(&layout.bytes)),
+            format!(
+                "the local header of entry a gives crc-32 {crc:08x}, {compressed} compressed \
+                 and {size} uncompressed bytes, the central directory {central_crc:08x}, 11 \
+                 and 11"
+            )
+        );
+    }
+}
+
+#[test]
+fn rejects_a_zip64_local_header_with_other_sizes() {
+    let mut layout = build(&[TestEntry::stored("a", b"hello world").zip64()], b"");
+    // The local zip64 extra field follows the name: id, length, size, compressed size.
+    let extra = layout.local[0] + 30 + 1;
+    set32(&mut layout.bytes, extra + 4, 5);
+    assert!(zip_message(open(&layout.bytes)).starts_with("the local header of entry a gives"));
+}
+
+#[test]
+fn rejects_a_data_descriptor_that_disagrees() {
+    let layout = build(&[TestEntry::deflated("a", TEXT).data_descriptor()], b"");
+    let descriptor = data_offset(&layout, 0, "a") + central_u32(&layout, 0, 20) as usize;
+    for at in [4, 8, 12] {
+        let mut bytes = layout.bytes.clone();
+        bytes[descriptor + at] ^= 1;
+        assert_eq!(
+            zip_message(open(&bytes)),
+            "the data descriptor of entry a disagrees with the central directory"
+        );
+    }
 }
 
 #[test]
@@ -195,15 +370,14 @@ fn rejects_overlapping_entries() {
         b"",
     );
     let covering = (layout.local[1] + 31 - data_offset(&layout, 0, "a")) as u32;
-    set32(&mut layout.bytes, layout.central[0] + 20, covering);
-    set32(&mut layout.bytes, layout.central[0] + 24, covering);
+    set_sizes(&mut layout, 0, covering, covering);
     assert_eq!(zip_message(open(&layout.bytes)), "entries a and b overlap");
 }
 
 #[test]
 fn rejects_an_entry_that_runs_into_the_central_directory() {
     let mut layout = build(&[TestEntry::stored("a", b"a")], b"");
-    set32(&mut layout.bytes, layout.central[0] + 20, 100);
+    set_sizes(&mut layout, 0, 100, 100);
     assert_eq!(
         zip_message(open(&layout.bytes)),
         "entry a runs into the central directory"
@@ -247,7 +421,7 @@ fn rejects_a_zip64_entry_without_its_extra_field() {
 #[test]
 fn rejects_more_entries_than_the_limit() {
     let bytes = zip(&[TestEntry::stored("a", b"a"), TestEntry::stored("b", b"b")]);
-    let result = Archive::new(bytes.as_slice(), &Limits::new().with_max_entries(1));
+    let result = Archive::new(bytes, &Limits::new().with_max_entries(1));
     assert!(matches!(
         result,
         Err(Error::LimitExceeded {
@@ -262,8 +436,8 @@ fn rejects_more_entries_than_the_limit() {
 fn refuses_to_read_an_entry_larger_than_the_limit() {
     let bytes = zip(&[TestEntry::deflated("a", TEXT)]);
     let limits = Limits::new().with_max_part_size(TEXT.len() as u64 - 1);
-    let archive = Archive::new(bytes.as_slice(), &limits).unwrap();
-    let err = archive.read(&archive.entries()[0]).unwrap_err();
+    let archive = Archive::new(bytes, &limits).unwrap();
+    let err = archive.entry(0).unwrap().read().unwrap_err();
     assert_eq!(
         err.to_string(),
         format!(
@@ -278,9 +452,8 @@ fn rejects_unsupported_compression_methods_when_reading() {
     let mut layout = build(&[TestEntry::stored("a", b"a")], b"");
     set16(&mut layout.bytes, layout.local[0] + 8, 12);
     set16(&mut layout.bytes, layout.central[0] + 10, 12);
-    let archive = open(&layout.bytes).unwrap();
     assert!(matches!(
-        archive.read(&archive.entries()[0]),
+        read_first(&layout.bytes),
         Err(Error::Unsupported(message)) if message.starts_with("zip entry a uses compression method 12")
     ));
 }
@@ -288,10 +461,9 @@ fn rejects_unsupported_compression_methods_when_reading() {
 #[test]
 fn rejects_a_crc_mismatch() {
     let mut layout = build(&[TestEntry::stored("a", b"a")], b"");
-    set32(&mut layout.bytes, layout.central[0] + 16, 0x1234_5678);
-    let archive = open(&layout.bytes).unwrap();
+    set_crc(&mut layout, 0, 0x1234_5678);
     assert_eq!(
-        entry_message(archive.read(&archive.entries()[0])),
+        entry_message(read_first(&layout.bytes)),
         format!(
             "crc-32 is {:08x} but the archive declares 12345678",
             crc32(b"a")
@@ -302,10 +474,10 @@ fn rejects_a_crc_mismatch() {
 #[test]
 fn rejects_deflate_data_larger_than_declared() {
     let mut layout = build(&[TestEntry::deflated("a", TEXT)], b"");
-    set32(&mut layout.bytes, layout.central[0] + 24, 10);
-    let archive = open(&layout.bytes).unwrap();
+    let compressed = central_u32(&layout, 0, 20);
+    set_sizes(&mut layout, 0, compressed, 10);
     assert_eq!(
-        entry_message(archive.read(&archive.entries()[0])),
+        entry_message(read_first(&layout.bytes)),
         "inflates to more than the 10 bytes it declares"
     );
 }
@@ -313,14 +485,10 @@ fn rejects_deflate_data_larger_than_declared() {
 #[test]
 fn rejects_deflate_data_smaller_than_declared() {
     let mut layout = build(&[TestEntry::deflated("a", TEXT)], b"");
-    set32(
-        &mut layout.bytes,
-        layout.central[0] + 24,
-        TEXT.len() as u32 + 1,
-    );
-    let archive = open(&layout.bytes).unwrap();
+    let compressed = central_u32(&layout, 0, 20);
+    set_sizes(&mut layout, 0, compressed, TEXT.len() as u32 + 1);
     assert_eq!(
-        entry_message(archive.read(&archive.entries()[0])),
+        entry_message(read_first(&layout.bytes)),
         format!(
             "inflates to {} bytes but declares {}",
             TEXT.len(),
@@ -330,14 +498,22 @@ fn rejects_deflate_data_smaller_than_declared() {
 }
 
 #[test]
+fn rejects_deflate_data_that_ends_before_its_compressed_size() {
+    let bytes = zip(&[TestEntry::deflated("a", TEXT).trailing(b"junk")]);
+    assert_eq!(
+        entry_message(read_first(&bytes)),
+        "deflate data ends 4 bytes before its compressed size"
+    );
+}
+
+#[test]
 fn rejects_sizes_deflate_cannot_reach() {
     let mut layout = build(&[TestEntry::deflated("a", TEXT)], b"");
-    let compressed = open(&layout.bytes).unwrap().entries()[0].compressed_size();
-    let impossible = compressed * MAX_DEFLATE_RATIO + 1;
-    set32(&mut layout.bytes, layout.central[0] + 24, impossible as u32);
-    let archive = open(&layout.bytes).unwrap();
+    let compressed = central_u32(&layout, 0, 20);
+    let impossible = compressed * MAX_DEFLATE_RATIO as u32 + 1;
+    set_sizes(&mut layout, 0, compressed, impossible);
     assert_eq!(
-        entry_message(archive.read(&archive.entries()[0])),
+        entry_message(read_first(&layout.bytes)),
         format!(
             "declares {impossible} bytes, more than {compressed} bytes of deflate data can hold"
         )
@@ -349,18 +525,16 @@ fn rejects_corrupt_and_truncated_deflate_data() {
     let mut layout = build(&[TestEntry::deflated("a", TEXT)], b"");
     let start = data_offset(&layout, 0, "a");
     layout.bytes[start] = 0xff; // block type 3, which does not exist
-    let archive = open(&layout.bytes).unwrap();
     assert_eq!(
-        entry_message(archive.read(&archive.entries()[0])),
+        entry_message(read_first(&layout.bytes)),
         "deflate data is corrupt"
     );
 
     let mut layout = build(&[TestEntry::deflated("a", TEXT)], b"");
-    let compressed = open(&layout.bytes).unwrap().entries()[0].compressed_size() as u32;
-    set32(&mut layout.bytes, layout.central[0] + 20, compressed / 2);
-    let archive = open(&layout.bytes).unwrap();
+    let compressed = central_u32(&layout, 0, 20);
+    set_sizes(&mut layout, 0, compressed / 2, TEXT.len() as u32);
     assert_eq!(
-        entry_message(archive.read(&archive.entries()[0])),
+        entry_message(read_first(&layout.bytes)),
         "deflate data is truncated"
     );
 }
@@ -368,10 +542,9 @@ fn rejects_corrupt_and_truncated_deflate_data() {
 #[test]
 fn rejects_stored_entries_with_two_sizes() {
     let mut layout = build(&[TestEntry::stored("a", b"ab")], b"");
-    set32(&mut layout.bytes, layout.central[0] + 24, 1);
-    let archive = open(&layout.bytes).unwrap();
+    set_sizes(&mut layout, 0, 2, 1);
     assert_eq!(
-        entry_message(archive.read(&archive.entries()[0])),
+        entry_message(read_first(&layout.bytes)),
         "is stored in 2 bytes but declares 1 bytes"
     );
 }

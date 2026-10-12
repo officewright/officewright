@@ -10,7 +10,7 @@ fuzz_target!(|data: &[u8]| {
     let limits = Limits::new().with_max_part_size(1 << 20);
     if let Ok(archive) = Archive::new(data, &limits) {
         for entry in archive.entries() {
-            if let Ok(bytes) = archive.read(entry) {
+            if let Ok(bytes) = entry.read() {
                 assert_eq!(bytes.len() as u64, entry.size(), "{}", entry.name());
             }
         }
