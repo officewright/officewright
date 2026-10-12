@@ -551,6 +551,29 @@ mod tests {
     }
 
     #[test]
+    fn refusals_say_whether_the_file_or_the_budget_ran_out() {
+        let data = [0u8; 100];
+        let mut cursor = Cursor::new(&data[..]);
+        let mut file = BoundedReader {
+            reader: &mut cursor,
+            file_len: 100,
+            budget: 50,
+            exhausted: false,
+        };
+        assert_eq!(file.read_at(90, 10).unwrap().map(|d| d.len()), Some(10));
+        assert_eq!(file.read_at(95, 10).unwrap(), None);
+        assert_eq!(
+            file.refusal("the table"),
+            "the table is past the end of the file"
+        );
+        assert_eq!(file.read_at(0, 41).unwrap(), None);
+        assert_eq!(
+            file.refusal("the table"),
+            "the table is past the 64 MiB the index reads per file"
+        );
+    }
+
+    #[test]
     fn rejects_unknown_sfnt_versions() {
         let mut font = TestFont::new("Test Sans").build();
         font[..4].copy_from_slice(b"abcd");
