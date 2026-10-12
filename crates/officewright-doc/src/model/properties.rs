@@ -671,6 +671,7 @@ xml_enum! {
 
 /// One border: its line style, colour, width and distance from the text.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct Border {
     pub(crate) style: Option<BorderStyle>,
     pub(crate) color: Color,
@@ -714,6 +715,7 @@ impl Border {
 
 /// The borders of a paragraph (`w:pBdr`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct ParagraphBorders {
     pub(crate) top: Option<Border>,
     pub(crate) bottom: Option<Border>,
@@ -758,6 +760,7 @@ impl ParagraphBorders {
 
 /// A tab stop (`w:tab` in `w:tabs`).
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct TabStop {
     pub(crate) kind: Option<TabKind>,
     pub(crate) leader: Option<TabLeader>,
@@ -800,6 +803,7 @@ pub enum LineSpacing {
 
 /// The space around and between the lines of a paragraph (`w:spacing`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct Spacing {
     pub(crate) before: Option<Pt>,
     pub(crate) after: Option<Pt>,
@@ -851,6 +855,7 @@ impl Spacing {
 
 /// The indentation of a paragraph (`w:ind`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct Indentation {
     pub(crate) start: Option<Pt>,
     pub(crate) end: Option<Pt>,
@@ -908,6 +913,7 @@ impl Indentation {
 
 /// The list a paragraph is an item of (`w:numPr`): a numbering instance and a level.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct NumberingReference {
     pub(crate) instance: Option<i64>,
     pub(crate) level: Option<i64>,
@@ -930,6 +936,7 @@ impl NumberingReference {
 /// Part 1, §17.3.1): only what is set there.
 #[doc(alias = "ParagraphFormat")]
 #[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct ParagraphProperties {
     pub(crate) style: Option<String>,
     pub(crate) keep_next: Option<bool>,
