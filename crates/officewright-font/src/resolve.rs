@@ -305,7 +305,8 @@ const WINDOWS_ALIASES: [(&str, &str); 23] = [
 /// compatibility as usage of Times New Roman, Arial, Courier New",
 /// <https://github.com/liberationfonts/liberation-fonts>), and fontconfig's
 /// `conf.d/30-metric-aliases.conf`. The generic family is the fallback when neither
-/// font is installed and the request does not give one.
+/// font is installed and the request does not give one. `tests/metric_compatible.rs`
+/// measures each pair against Word's reference render of `E-line-fonts`.
 ///
 /// fontconfig also pairs Cambria with Caladea, wrongly for the Cambria Word uses. The
 /// Word reference renders in `tests/corpus/reference/word-rules/E-line-fonts`
@@ -946,6 +947,14 @@ mod tests {
             resolution.to_string(),
             "\"Calibri\" bold → \"Carlito\" (metric-compatible substitute)"
         );
+    }
+
+    #[test]
+    fn every_metric_compatible_pair_is_measured_against_word() {
+        // tests/metric_compatible.rs measures these pairs: a new one needs its Microsoft
+        // font in a Word reference render and its free font in tests/fonts there first.
+        let measured = ["calibri", "arial", "times new roman", "courier new"];
+        assert_eq!(METRIC_COMPATIBLE.map(|(family, _, _)| family), measured);
     }
 
     #[test]

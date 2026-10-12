@@ -358,9 +358,9 @@ static void fonts_by_name(const char *fonts, const char *dir) {
 
     EXPECT(ow_font_book_new(&book), OW_STATUS_OK, NULL);
     EXPECT(ow_font_book_add_dir(book, fonts, &added), OW_STATUS_OK, NULL);
-    CHECK(added == 2);
+    CHECK(added == 5);
     EXPECT(ow_font_book_face_count(book, &count), OW_STATUS_OK, NULL);
-    CHECK(count == 2);
+    CHECK(count == 5);
     EXPECT(ow_font_resolver_new(book, &resolver), OW_STATUS_OK, NULL);
     /* The resolver keeps its own copy of the book. */
     ow_font_book_free(book);

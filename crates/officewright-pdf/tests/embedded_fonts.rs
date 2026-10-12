@@ -544,26 +544,28 @@ fn resolves_families_and_reports_the_substitutions() -> TestResult {
     )?;
     assert_eq!(bold, liberation);
     let calibri = Font::resolve(&mut resolver, &FontRequest::new("Calibri"))?;
+    assert_eq!(calibri.name(), "Carlito-Regular");
+    // Verdana has no metric-compatible substitute, so a common sans-serif font stands
+    // in, and the report says so.
+    let verdana = Font::resolve(&mut resolver, &FontRequest::new("Verdana"))?;
+    assert_eq!(verdana, liberation);
     let report: Vec<String> = resolver
         .substitutions()
         .iter()
         .map(ToString::to_string)
         .collect();
     assert_eq!(
-        report.get(..2),
-        Some(
-            &[
-                "\"Arial\" → \"Liberation Sans\" (metric-compatible substitute)".to_owned(),
-                "\"Liberation Sans\" bold → \"Liberation Sans\" with synthetic bold".to_owned(),
-            ][..]
-        )
+        report,
+        [
+            "\"Arial\" → \"Liberation Sans\" (metric-compatible substitute)",
+            "\"Liberation Sans\" bold → \"Liberation Sans\" with synthetic bold",
+            "\"Calibri\" → \"Carlito\" (metric-compatible substitute)",
+            "\"Verdana\" → \"Liberation Sans\" (fallback; not installed)",
+        ]
     );
-    // Calibri's substitute, Carlito, is not in the book, so a common sans-serif font
-    // stands in, and the report says so.
-    let fallback = resolver.substitutions().get(2).ok_or("no Calibri")?;
+    let fallback = resolver.substitutions().get(3).ok_or("no Verdana")?;
     assert_eq!(fallback.kind(), ResolutionKind::Fallback);
-    assert_eq!(fallback.uninstalled_substitute(), Some("Carlito"));
-    assert!([liberation, noto].contains(&calibri));
+    assert_eq!(fallback.uninstalled_substitute(), None);
     Ok(())
 }
 
