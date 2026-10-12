@@ -124,6 +124,15 @@ pub enum ResolutionKind {
     Missing,
 }
 
+/// What a substitute has in common with the family it stands for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Likeness {
+    /// The same advance widths and line height: [`METRIC_COMPATIBLE`].
+    Metrics,
+    /// A similar design with other metrics: [`SIMILAR_DESIGNS`].
+    Design,
+}
+
 /// Which name of a face matched, for [`ResolutionKind::OtherName`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OtherName {
@@ -141,7 +150,7 @@ pub struct Resolution {
     kind: ResolutionKind,
     other_name: Option<OtherName>,
     instance: Option<String>,
-    uninstalled_substitute: Option<String>,
+    uninstalled_substitute: Option<(String, Likeness)>,
     similar_design: bool,
     synthetic_bold: bool,
     synthetic_italic: bool,
@@ -175,9 +184,24 @@ impl Resolution {
     }
 
     /// For [`ResolutionKind::Fallback`], the metric-compatible substitute that would
-    /// have been used had it been installed, if the family has one.
+    /// have been used had it been installed, if the family has one. A family without one
+    /// may have a font of similar design instead:
+    /// [`uninstalled_similar_design`](Self::uninstalled_similar_design).
     pub fn uninstalled_substitute(&self) -> Option<&str> {
-        self.uninstalled_substitute.as_deref()
+        match &self.uninstalled_substitute {
+            Some((substitute, Likeness::Metrics)) => Some(substitute),
+            _ => None,
+        }
+    }
+
+    /// For [`ResolutionKind::Fallback`], the font of similar design that would have been
+    /// used had it been installed, if the family has one, such as Caladea for Cambria.
+    /// It would lay out differently too, but look closer to the requested family.
+    pub fn uninstalled_similar_design(&self) -> Option<&str> {
+        match &self.uninstalled_substitute {
+            Some((substitute, Likeness::Design)) => Some(substitute),
+            _ => None,
+        }
     }
 
     /// Whether bold was requested but the face is not bold, so it has to be emboldened
@@ -249,9 +273,13 @@ impl fmt::Display for Resolution {
                  out differently than in Word)",
             )?,
             ResolutionKind::Fallback => match &self.uninstalled_substitute {
-                Some(substitute) => write!(
+                Some((substitute, Likeness::Metrics)) => write!(
                     f,
                     " (fallback; metric-compatible substitute \"{substitute}\" is not installed)"
+                )?,
+                Some((substitute, Likeness::Design)) => write!(
+                    f,
+                    " (fallback; \"{substitute}\", of similar design, is not installed)"
                 )?,
                 None => f.write_str(" (fallback; not installed)")?,
             },
@@ -297,23 +325,18 @@ const WINDOWS_ALIASES: [(&str, &str); 23] = [
     ("tms rmn", "MS Serif"),
 ];
 
-/// Families of Microsoft fonts and free fonts with the same advance widths, so a
-/// document lays out the same with either.
+/// Families of Microsoft fonts and free fonts with the same advance widths and line
+/// height, so a document lays out the same with either.
 ///
-/// Sources: the Carlito README ("metric-compatible with Calibri",
-/// <https://github.com/googlefonts/carlito>), the Liberation README ("metric
-/// compatibility as usage of Times New Roman, Arial, Courier New",
-/// <https://github.com/liberationfonts/liberation-fonts>), and fontconfig's
-/// `conf.d/30-metric-aliases.conf`. The generic family is the fallback when neither
-/// font is installed and the request does not give one. `tests/metric_compatible.rs`
-/// measures each pair against Word's reference render of `E-line-fonts`.
-///
-/// fontconfig also pairs Cambria with Caladea, wrongly for the Cambria Word uses. The
-/// Word reference renders in `tests/corpus/reference/word-rules/E-line-fonts`
-/// (`geometry.json`) show Caladea's advance widths differing from Cambria's by up to
-/// 0.19 em (Cambria's digits are wider), against at most 0.003 em between Carlito and
-/// Calibri, and a line of 11 pt text 14.30 pt high with Caladea's metrics where Word
-/// sets Cambria's 12.90 pt apart. Caladea is in [`SIMILAR_DESIGNS`] instead.
+/// A pair belongs here only when a measurement against Word's reference render
+/// confirms it, not because a README or fontconfig says so. `tests/metric_compatible.rs`
+/// measures each pair against Word's render of `tests/corpus/word-rules/E-line-fonts.docx`:
+/// the free font sets every word and line as wide as Word set them in the Microsoft
+/// font, within what the render resolves, and spaces the lines as far apart. That
+/// covers the characters of the document only; Carlito differs from Calibri in one
+/// cp1252 character, U+0192 ƒ (1020 units against 625, 0.19 em), which the document
+/// does not have. The generic family is the fallback when neither font is installed
+/// and the request does not give one.
 const METRIC_COMPATIBLE: [(&str, &str, GenericFamily); 4] = [
     ("calibri", "Carlito", GenericFamily::SansSerif),
     ("arial", "Liberation Sans", GenericFamily::SansSerif),
@@ -322,9 +345,17 @@ const METRIC_COMPATIBLE: [(&str, &str, GenericFamily); 4] = [
 ];
 
 /// Families of Microsoft fonts and free fonts of similar design that are not
-/// metric-compatible: the free font is the closest stand-in, but text lays out
-/// differently, so it is reported as a fallback. See [`METRIC_COMPATIBLE`] for why
-/// Caladea is here.
+/// metric-compatible: the free font is the closest stand-in and the first fallback, but
+/// text lays out differently, so it is reported as a fallback.
+///
+/// fontconfig's `30-metric-aliases.conf` pairs Cambria with Caladea, wrongly for the
+/// Cambria Word uses. In Word's render of `tests/corpus/word-rules/E-line-fonts.docx`
+/// every word Word set in Cambria is narrower in Caladea, by 0.48 to 4.27 pt at 11 pt
+/// ("Hamburgefonts" by 2.72 pt, 3.7 %; Cambria's digits are up to 0.19 em wider). The line
+/// height differs too: computed from Caladea's tables, 12.65 pt at 11 pt by its
+/// typographic metrics (it sets `USE_TYPO_METRICS`, which Word honours for some fonts
+/// and not for others) or 14.30 pt by its Windows metrics, where Word spaces Cambria's
+/// lines 12.90 pt apart.
 const SIMILAR_DESIGNS: [(&str, &str, GenericFamily); 1] =
     [("cambria", "Caladea", GenericFamily::Serif)];
 
@@ -476,10 +507,15 @@ impl FontBook {
             .find(|(candidate, _)| *candidate == generic)
             .map(|(_, names)| names.as_slice())
             .unwrap_or_default();
+        // Neither substitute is installed; the report names the one there is.
+        let uninstalled = substitute
+            .map(|name| (name, Likeness::Metrics))
+            .or(similar_design.map(|(_, name, _)| (*name, Likeness::Design)));
         for name in fallbacks {
             if let Some(face) = self.find_any(name, request) {
                 return Resolution {
-                    uninstalled_substitute: substitute.map(str::to_owned),
+                    uninstalled_substitute: uninstalled
+                        .map(|(name, likeness)| (name.to_owned(), likeness)),
                     ..resolution(Some(face), ResolutionKind::Fallback)
                 };
             }
@@ -967,21 +1003,27 @@ mod tests {
         assert_eq!(resolution.family(), Some("Liberation Sans"));
         assert_eq!(resolution.kind(), ResolutionKind::Fallback);
         assert_eq!(resolution.uninstalled_substitute(), Some("Carlito"));
+        assert_eq!(resolution.uninstalled_similar_design(), None);
         assert_eq!(
             resolution.to_string(),
             "\"Calibri\" → \"Liberation Sans\" (fallback; metric-compatible substitute \
              \"Carlito\" is not installed)"
         );
+        // Cambria has no metric-compatible substitute; the report names the font of
+        // similar design to install.
         let resolution = book.resolve(&FontRequest::new("Cambria"));
         assert_eq!(
             resolution.family(),
             Some("Liberation Serif"),
             "Cambria is a serif"
         );
+        assert_eq!(resolution.kind(), ResolutionKind::Fallback);
         assert_eq!(resolution.uninstalled_substitute(), None);
+        assert_eq!(resolution.uninstalled_similar_design(), Some("Caladea"));
         assert_eq!(
             resolution.to_string(),
-            "\"Cambria\" → \"Liberation Serif\" (fallback; not installed)"
+            "\"Cambria\" → \"Liberation Serif\" (fallback; \"Caladea\", of similar design, is \
+             not installed)"
         );
         let resolution = book.resolve(&FontRequest::new("Garamond").generic(GenericFamily::Serif));
         assert_eq!(resolution.family(), Some("Liberation Serif"));
@@ -1005,6 +1047,7 @@ mod tests {
         assert!(!resolution.synthetic_bold());
         assert!(resolution.is_substitution());
         assert_eq!(resolution.uninstalled_substitute(), None);
+        assert_eq!(resolution.uninstalled_similar_design(), None);
         assert_eq!(
             resolution.to_string(),
             "\"Cambria\" bold → \"Caladea\" (fallback of similar design; it is not \
@@ -1014,6 +1057,25 @@ mod tests {
         let resolution =
             book.resolve(&FontRequest::new("cambria").generic(GenericFamily::SansSerif));
         assert_eq!(resolution.family(), Some("Caladea"));
+        // Caladea stands in for Cambria only.
+        let resolution = book.resolve(&FontRequest::new("Garamond").generic(GenericFamily::Serif));
+        assert_eq!(resolution.family(), Some("Liberation Serif"));
+    }
+
+    #[test]
+    fn an_installed_family_comes_before_its_substitutes() {
+        let book = book(&[
+            system(TestFont::new("Caladea")),
+            system(TestFont::new("Cambria")),
+            system(TestFont::new("Carlito")),
+            system(TestFont::new("Calibri")),
+        ]);
+        for family in ["Cambria", "Calibri"] {
+            let resolution = book.resolve(&FontRequest::new(family));
+            assert_eq!(resolution.kind(), ResolutionKind::Exact, "{family}");
+            assert_eq!(resolution.family(), Some(family));
+            assert!(!resolution.is_substitution(), "{family}");
+        }
     }
 
     #[test]
