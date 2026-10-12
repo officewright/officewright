@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::xml::{Event, Input, Reader, StartTag};
@@ -84,8 +83,8 @@ impl Package {
     /// missing, a part name is invalid or two parts have the same name; and the errors
     /// of [`Archive::new`], and of reading `[Content_Types].xml` and the relationships
     /// parts.
-    pub fn from_bytes(data: impl Into<Arc<[u8]>>, limits: &Limits) -> Result<Self> {
-        let data: Arc<[u8]> = data.into();
+    pub fn from_bytes(data: impl Into<Vec<u8>>, limits: &Limits) -> Result<Self> {
+        let data = data.into();
         if data.starts_with(&OLE_SIGNATURE) {
             return Err(Error::Unsupported(
                 "the input is an OLE compound file, not a zip package: an encrypted OOXML \
@@ -97,7 +96,7 @@ impl Package {
         let mut content_types = None;
         let mut parts = Vec::new();
         let mut index = HashMap::new();
-        for (entry, item) in archive.entries().iter().enumerate() {
+        for (entry, item) in archive.entries().enumerate() {
             // Some writers separate folders with '\'; Office opens such packages (POI's
             // test-data/spreadsheet/49609.xlsx).
             let name = item.name().replace('\\', "/");
@@ -137,9 +136,9 @@ impl Package {
         })?;
 
         let mut read_size = 0;
-        let mut read = |entry: &Entry| {
-            read_size = reserve(read_size, entry, limits.max_total_size())?;
-            archive.read(entry)
+        let mut read = |entry: Entry<'_>| {
+            read_size = reserve(read_size, &entry, limits.max_total_size())?;
+            entry.read()
         };
         let types = ContentTypes::parse(&read(content_types)?, limits)?;
         let mut relationships = HashMap::new();
@@ -148,7 +147,7 @@ impl Package {
             let Some(source) = part.name.relationships_source() else {
                 continue;
             };
-            let Some(item) = archive.entries().get(part.entry) else {
+            let Some(item) = archive.entry(part.entry) else {
                 continue;
             };
             let (key, folder) = source
@@ -212,7 +211,7 @@ impl<'p> Part<'p> {
 
     /// The uncompressed size the archive declares, in bytes.
     pub fn size(&self) -> u64 {
-        self.archive_entry().map_or(0, Entry::size)
+        self.archive_entry().map_or(0, |entry| entry.size())
     }
 
     /// The relationships whose source is this part; empty if it has none.
@@ -228,7 +227,7 @@ impl<'p> Part<'p> {
     /// # Errors
     ///
     /// [`Error::LimitExceeded`] once the parts read from the package exceed
-    /// [`Limits::max_total_size`], and the errors of [`Archive::read`].
+    /// [`Limits::max_total_size`], and the errors of [`Entry::read`].
     pub fn read(&self) -> Result<Vec<u8>> {
         let entry = self
             .archive_entry()
@@ -236,7 +235,7 @@ impl<'p> Part<'p> {
         let max = self.package.max_total_size;
         let mut used = self.package.read_size.load(Ordering::Relaxed);
         loop {
-            let total = reserve(used, entry, max)?;
+            let total = reserve(used, &entry, max)?;
             match self.package.read_size.compare_exchange_weak(
                 used,
                 total,
@@ -247,11 +246,11 @@ impl<'p> Part<'p> {
                 Err(actual) => used = actual,
             }
         }
-        self.package.archive.read(entry)
+        entry.read()
     }
 
-    fn archive_entry(&self) -> Option<&'p Entry> {
-        self.package.archive.entries().get(self.entry.entry)
+    fn archive_entry(&self) -> Option<Entry<'p>> {
+        self.package.archive.entry(self.entry.entry)
     }
 }
 
@@ -265,13 +264,13 @@ impl fmt::Debug for Part<'_> {
 }
 
 /// Adds an entry's size to the bytes read so far, within [`Limits::max_total_size`].
-fn reserve(used: u64, entry: &Entry, max: u64) -> Result<u64> {
+fn reserve(used: u64, entry: &Entry<'_>, max: u64) -> Result<u64> {
     used.checked_add(entry.size())
         .filter(|&total| total <= max)
         .ok_or_else(|| total_size_error(entry, max))
 }
 
-fn total_size_error(entry: &Entry, max: u64) -> Error {
+fn total_size_error(entry: &Entry<'_>, max: u64) -> Error {
     Error::LimitExceeded {
         limit: Limit::TotalSize,
         maximum: max,

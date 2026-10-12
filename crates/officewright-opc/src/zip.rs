@@ -5,14 +5,17 @@
 //! size from the archive is checked against the input before use, and the archive is
 //! rejected when:
 //!
-//! - the central directory and a local header disagree on an entry's name or method, so
-//!   that every reader of the file sees the same entries;
+//! - the central directory disagrees with an entry's local header (name, method, CRC-32
+//!   and sizes) or with its data descriptor, so that a reader that walks the local
+//!   headers sees the same entries as one that reads the central directory;
 //! - two entries overlap, the trick behind non-recursive zip bombs;
 //! - two entries have the same name;
-//! - an entry decompresses to more or fewer bytes than it declares, or fails its CRC-32.
+//! - data comes before the first entry (self-extracting archives, concatenated files):
+//!   offsets are taken as they are written, not shifted to fit.
 //!
-//! Entries are decompressed only when [read](Archive::read), and never past their declared
-//! size or [`Limits::max_part_size`].
+//! An entry is decompressed only when it is [read](Entry::read), never past its declared
+//! size or [`Limits::max_part_size`], and its data must decompress to exactly the
+//! declared size, fill exactly the declared compressed size and match its CRC-32.
 //!
 //! ```
 //! use officewright_opc::{Limits, zip::Archive};
@@ -21,24 +24,23 @@
 //! let archive = Archive::new(bytes.as_slice(), &Limits::new())?;
 //! let entry = archive
 //!     .entries()
-//!     .iter()
 //!     .find(|entry| entry.name() == "word/document.xml")
 //!     .expect("the test document has a main part");
-//! let xml = archive.read(entry)?;
-//! assert!(xml.starts_with(b"<?xml"));
+//! assert!(entry.read()?.starts_with(b"<?xml"));
 //! # Ok::<(), officewright_opc::Error>(())
 //! ```
 
 use std::collections::HashSet;
 use std::fmt;
-use std::sync::Arc;
 
 use miniz_oxide::inflate::TINFLStatus;
+use miniz_oxide::inflate::core::{DecompressorOxide, decompress, inflate_flags};
 
 use crate::{Error, Limit, Limits, Result};
 
 const LOCAL_HEADER: u32 = 0x0403_4b50;
 const CENTRAL_HEADER: u32 = 0x0201_4b50;
+const DATA_DESCRIPTOR: u32 = 0x0807_4b50;
 const END_OF_CENTRAL_DIRECTORY: u32 = 0x0605_4b50;
 const ZIP64_END_OF_CENTRAL_DIRECTORY: u32 = 0x0606_4b50;
 const ZIP64_LOCATOR: u32 = 0x0706_4b50;
@@ -55,6 +57,7 @@ const STORED: u16 = 0;
 const DEFLATED: u16 = 8;
 
 const FLAG_ENCRYPTED: u16 = 1;
+const FLAG_DATA_DESCRIPTOR: u16 = 1 << 3;
 const FLAG_STRONG_ENCRYPTION: u16 = 1 << 6;
 
 /// DEFLATE cannot expand data more than 1032 times (a 258-byte match in 2 bits), so an
@@ -63,14 +66,21 @@ const MAX_DEFLATE_RATIO: u64 = 1032;
 
 /// A ZIP archive held in memory, with its central directory read and checked.
 pub struct Archive {
-    data: Arc<[u8]>,
-    entries: Vec<Entry>,
+    data: Vec<u8>,
+    records: Vec<Record>,
     max_entry_size: u64,
 }
 
-/// One entry of an [`Archive`].
-#[derive(Clone, Debug)]
-pub struct Entry {
+/// One entry of an [`Archive`], borrowed from it.
+#[derive(Clone, Copy)]
+pub struct Entry<'a> {
+    archive: &'a Archive,
+    record: &'a Record,
+}
+
+/// What the central directory says about an entry, checked against its local header.
+#[derive(Debug)]
+struct Record {
     name: String,
     method: u16,
     crc32: u32,
@@ -81,15 +91,15 @@ pub struct Entry {
 
 impl Archive {
     /// Reads the central directory of the archive in `data` and checks every entry's
-    /// local header.
+    /// local header and data descriptor. The archive keeps `data`; a slice is copied.
     ///
     /// # Errors
     ///
     /// [`Error::Zip`] if the archive is malformed, [`Error::Unsupported`] for encryption
     /// or archives split over several disks, and [`Error::LimitExceeded`] for more
     /// entries than [`Limits::max_entries`].
-    pub fn new(data: impl Into<Arc<[u8]>>, limits: &Limits) -> Result<Self> {
-        let data: Arc<[u8]> = data.into();
+    pub fn new(data: impl Into<Vec<u8>>, limits: &Limits) -> Result<Self> {
+        let data = data.into();
         let end = find_end(&data)?;
         if end.entries > limits.max_entries() {
             return Err(Error::LimitExceeded {
@@ -111,22 +121,22 @@ impl Archive {
             ));
         }
         let count = usize::try_from(end.entries).unwrap_or(usize::MAX);
-        let mut entries = Vec::with_capacity(count);
+        let mut records = Vec::with_capacity(count);
         let mut spans = Vec::with_capacity(count);
         let mut names = HashSet::with_capacity(count);
         let mut at = end.directory_offset;
         for _ in 0..count {
-            let record = read_central_record(&data, at, directory_end)?;
-            if !names.insert(record.entry.name.clone()) {
+            let central = read_central_record(&data, at, directory_end)?;
+            if !names.insert(central.record.name.clone()) {
                 return Err(zip_error(
                     at,
-                    format!("duplicate entry name {}", record.entry.name),
+                    format!("duplicate entry name {}", central.record.name),
                 ));
             }
-            let (entry, span) = check_local_header(&data, record, end.directory_offset)?;
-            entries.push(entry);
+            at = central.next_record;
+            let (record, span) = check_local_header(&data, central, end.directory_offset)?;
+            records.push(record);
             spans.push(span);
-            at = span.next_record;
         }
         if at != directory_end {
             return Err(zip_error(
@@ -134,74 +144,28 @@ impl Archive {
                 "unexpected bytes after the last central directory record",
             ));
         }
-        check_overlaps(&mut spans, &entries)?;
+        check_overlaps(&mut spans, &records)?;
         Ok(Self {
             data,
-            entries,
+            records,
             max_entry_size: limits.max_part_size(),
         })
     }
 
     /// The entries in the order of the central directory.
-    pub fn entries(&self) -> &[Entry] {
-        &self.entries
+    pub fn entries(&self) -> impl ExactSizeIterator<Item = Entry<'_>> {
+        self.records.iter().map(|record| Entry {
+            archive: self,
+            record,
+        })
     }
 
-    /// Decompresses an entry of this archive and checks its size and CRC-32.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::LimitExceeded`] if the entry is larger than [`Limits::max_part_size`],
-    /// [`Error::Entry`] if its data is corrupt, and [`Error::Unsupported`] for a
-    /// compression method other than stored or deflated.
-    pub fn read(&self, entry: &Entry) -> Result<Vec<u8>> {
-        if entry.size > self.max_entry_size {
-            return Err(Error::LimitExceeded {
-                limit: Limit::PartSize,
-                maximum: self.max_entry_size,
-                context: format!("zip entry {}", entry.name),
-            });
-        }
-        let raw = usize::try_from(entry.compressed_size)
-            .ok()
-            .and_then(|len| {
-                self.data
-                    .get(entry.data_offset..entry.data_offset.checked_add(len)?)
-            })
-            .ok_or_else(|| entry_error(entry, "data lies outside the archive"))?;
-        let data = match entry.method {
-            STORED => {
-                if entry.compressed_size != entry.size {
-                    return Err(entry_error(
-                        entry,
-                        format!(
-                            "is stored in {} bytes but declares {} bytes",
-                            entry.compressed_size, entry.size
-                        ),
-                    ));
-                }
-                raw.to_vec()
-            }
-            DEFLATED => inflate(entry, raw)?,
-            method => {
-                return Err(Error::Unsupported(format!(
-                    "zip entry {} uses compression method {method}; OOXML packages use only \
-                     stored and deflated entries",
-                    entry.name
-                )));
-            }
-        };
-        let crc = crc32(&data);
-        if crc != entry.crc32 {
-            return Err(entry_error(
-                entry,
-                format!(
-                    "crc-32 is {crc:08x} but the archive declares {:08x}",
-                    entry.crc32
-                ),
-            ));
-        }
-        Ok(data)
+    /// The entry at `index` in the order of the central directory.
+    pub fn entry(&self, index: usize) -> Option<Entry<'_>> {
+        Some(Entry {
+            archive: self,
+            record: self.records.get(index)?,
+        })
     }
 }
 
@@ -209,26 +173,94 @@ impl fmt::Debug for Archive {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Archive")
             .field("len", &self.data.len())
-            .field("entries", &self.entries)
+            .field("entries", &self.records)
             .finish_non_exhaustive()
     }
 }
 
-impl Entry {
+impl<'a> Entry<'a> {
     /// The entry name as stored in the archive, such as `word/document.xml`.
-    pub fn name(&self) -> &str {
-        &self.name
+    pub fn name(&self) -> &'a str {
+        &self.record.name
     }
 
-    /// The declared uncompressed size in bytes. [`Archive::read`] fails if the data
+    /// The declared uncompressed size in bytes. [`read`](Self::read) fails if the data
     /// does not match it.
     pub fn size(&self) -> u64 {
-        self.size
+        self.record.size
     }
 
     /// The size of the stored, possibly compressed, data in bytes.
     pub fn compressed_size(&self) -> u64 {
-        self.compressed_size
+        self.record.compressed_size
+    }
+
+    /// Decompresses the entry and checks its size and CRC-32.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::LimitExceeded`] if the entry is larger than [`Limits::max_part_size`],
+    /// [`Error::Entry`] if its data is corrupt, and [`Error::Unsupported`] for a
+    /// compression method other than stored or deflated.
+    pub fn read(&self) -> Result<Vec<u8>> {
+        let record = self.record;
+        if record.size > self.archive.max_entry_size {
+            return Err(Error::LimitExceeded {
+                limit: Limit::PartSize,
+                maximum: self.archive.max_entry_size,
+                context: format!("zip entry {}", record.name),
+            });
+        }
+        let raw = usize::try_from(record.compressed_size)
+            .ok()
+            .and_then(|len| {
+                let end = record.data_offset.checked_add(len)?;
+                self.archive.data.get(record.data_offset..end)
+            })
+            .ok_or_else(|| entry_error(record, "data lies outside the archive"))?;
+        let data = match record.method {
+            STORED => {
+                if record.compressed_size != record.size {
+                    return Err(entry_error(
+                        record,
+                        format!(
+                            "is stored in {} bytes but declares {} bytes",
+                            record.compressed_size, record.size
+                        ),
+                    ));
+                }
+                raw.to_vec()
+            }
+            DEFLATED => inflate(record, raw)?,
+            method => {
+                return Err(Error::Unsupported(format!(
+                    "zip entry {} uses compression method {method}; OOXML packages use only \
+                     stored and deflated entries",
+                    record.name
+                )));
+            }
+        };
+        let crc = crc32(&data);
+        if crc != record.crc32 {
+            return Err(entry_error(
+                record,
+                format!(
+                    "crc-32 is {crc:08x} but the archive declares {:08x}",
+                    record.crc32
+                ),
+            ));
+        }
+        Ok(data)
+    }
+}
+
+impl fmt::Debug for Entry<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Entry")
+            .field("name", &self.record.name)
+            .field("size", &self.record.size)
+            .field("compressed_size", &self.record.compressed_size)
+            .finish_non_exhaustive()
     }
 }
 
@@ -241,20 +273,22 @@ struct End {
 
 /// A central directory record before its local header is checked.
 struct CentralRecord<'a> {
-    entry: Entry,
+    record: Record,
     raw_name: &'a [u8],
     flags: u16,
+    /// Whether the record took a size or offset from its zip64 extra field.
+    zip64: bool,
     header_offset: usize,
     next_record: usize,
 }
 
-/// The bytes an entry occupies, from its local header to the end of its data.
+/// The bytes an entry occupies, from its local header to the end of its data or of its
+/// data descriptor.
 #[derive(Clone, Copy)]
 struct Span {
     start: usize,
     end: usize,
     index: usize,
-    next_record: usize,
 }
 
 /// Finds the end of central directory record, searching back from the end of the input
@@ -389,11 +423,11 @@ fn read_central_record(data: &[u8], at: usize, directory_end: usize) -> Result<C
     let mut header_offset = u64::from(header_offset);
     let mut disk = u32::from(disk);
     // Saturated fields are in the zip64 extra field, in this order (APPNOTE 4.5.3).
-    if size == u64::from(u32::MAX)
+    let zip64 = size == u64::from(u32::MAX)
         || compressed_size == u64::from(u32::MAX)
         || header_offset == u64::from(u32::MAX)
-        || disk == u32::from(u16::MAX)
-    {
+        || disk == u32::from(u16::MAX);
+    if zip64 {
         let missing = || zip_error(at, format!("entry {name} lacks its zip64 extra field"));
         let mut field = zip64_extra_field(extra).ok_or_else(missing)?;
         for value in [&mut size, &mut compressed_size, &mut header_offset] {
@@ -419,7 +453,7 @@ fn read_central_record(data: &[u8], at: usize, directory_end: usize) -> Result<C
         )
     })?;
     Ok(CentralRecord {
-        entry: Entry {
+        record: Record {
             name,
             method,
             crc32,
@@ -429,29 +463,31 @@ fn read_central_record(data: &[u8], at: usize, directory_end: usize) -> Result<C
         },
         raw_name,
         flags,
+        zip64,
         header_offset,
         next_record,
     })
 }
 
-/// Checks that the local header agrees with the central directory and returns the entry
-/// with its data offset, and the bytes it occupies.
+/// Checks that the local header and the data descriptor agree with the central
+/// directory, and returns the record with its data offset and the bytes it occupies.
 fn check_local_header(
     data: &[u8],
-    record: CentralRecord<'_>,
+    central: CentralRecord<'_>,
     directory_offset: usize,
-) -> Result<(Entry, Span)> {
+) -> Result<(Record, Span)> {
     let CentralRecord {
-        mut entry,
+        mut record,
         raw_name,
         flags,
+        zip64,
         header_offset: at,
-        next_record,
-    } = record;
+        next_record: _,
+    } = central;
     if read32(data, at)? != LOCAL_HEADER {
         return Err(zip_error(
             at,
-            format!("bad local header signature for entry {}", entry.name),
+            format!("bad local header signature for entry {}", record.name),
         ));
     }
     let local_flags = read16(data, at + 6)?;
@@ -463,49 +499,120 @@ fn check_local_header(
             at,
             format!(
                 "the local header of entry {} names a different entry",
-                entry.name
+                record.name
             ),
         ));
     }
-    if local_method != entry.method {
+    if local_method != record.method {
         return Err(zip_error(
             at,
             format!(
                 "the local header of entry {} gives compression method {local_method}, the \
                  central directory {}",
-                entry.name, entry.method
+                record.name, record.method
             ),
         ));
     }
     if (local_flags | flags) & (FLAG_ENCRYPTED | FLAG_STRONG_ENCRYPTION) != 0 {
-        return Err(encrypted(&entry.name));
+        return Err(encrypted(&record.name));
+    }
+    let descriptor = local_flags & FLAG_DATA_DESCRIPTOR != 0;
+    if !descriptor {
+        // Without a data descriptor the local header carries CRC-32 and sizes itself; a
+        // zip64 local header has both sizes in its extra field (APPNOTE 4.5.3).
+        let extra = slice(data, at + LOCAL_HEADER_LEN + name_len, extra_len)?;
+        let crc = read32(data, at + 14)?;
+        let mut compressed = u64::from(read32(data, at + 18)?);
+        let mut size = u64::from(read32(data, at + 22)?);
+        if compressed == u64::from(u32::MAX) || size == u64::from(u32::MAX) {
+            let field = zip64_extra_field(extra).unwrap_or_default();
+            size = le64(field, 0).unwrap_or(size);
+            compressed = le64(field, 8).unwrap_or(compressed);
+        }
+        if (crc, compressed, size) != (record.crc32, record.compressed_size, record.size) {
+            return Err(zip_error(
+                at,
+                format!(
+                    "the local header of entry {} gives crc-32 {crc:08x}, {compressed} \
+                     compressed and {size} uncompressed bytes, the central directory \
+                     {:08x}, {} and {}",
+                    record.name, record.crc32, record.compressed_size, record.size
+                ),
+            ));
+        }
     }
     let data_offset = at + LOCAL_HEADER_LEN + name_len + extra_len;
-    let end = usize::try_from(entry.compressed_size)
+    let data_end = usize::try_from(record.compressed_size)
         .ok()
         .and_then(|len| data_offset.checked_add(len))
         .filter(|&end| end <= directory_offset)
         .ok_or_else(|| {
             zip_error(
                 at,
-                format!("entry {} runs into the central directory", entry.name),
+                format!("entry {} runs into the central directory", record.name),
             )
         })?;
-    entry.data_offset = data_offset;
+    let end = if descriptor {
+        check_data_descriptor(data, &record, data_end, zip64)?
+    } else {
+        data_end
+    };
+    if end > directory_offset {
+        return Err(zip_error(
+            at,
+            format!("entry {} runs into the central directory", record.name),
+        ));
+    }
+    record.data_offset = data_offset;
     Ok((
-        entry,
+        record,
         Span {
             start: at,
             end,
             index: 0,
-            next_record,
         },
+    ))
+}
+
+/// Checks the data descriptor that follows an entry's data (APPNOTE 4.3.9): an optional
+/// signature, the CRC-32 and both sizes, 4 bytes each, or 8 bytes each in a zip64
+/// archive. Returns where the descriptor ends.
+fn check_data_descriptor(data: &[u8], record: &Record, at: usize, zip64: bool) -> Result<usize> {
+    let fields = if le32(data, at) == Some(DATA_DESCRIPTOR) {
+        at + 4
+    } else {
+        at
+    };
+    let crc = le32(data, fields);
+    let short = (
+        le32(data, fields + 4).map(u64::from),
+        le32(data, fields + 8).map(u64::from),
+    );
+    let long = (le64(data, fields + 4), le64(data, fields + 12));
+    let expected = (Some(record.compressed_size), Some(record.size));
+    if crc == Some(record.crc32) {
+        if !zip64 && short == expected {
+            return Ok(fields + 12);
+        }
+        if long == expected {
+            return Ok(fields + 20);
+        }
+        if short == expected {
+            return Ok(fields + 12);
+        }
+    }
+    Err(zip_error(
+        at,
+        format!(
+            "the data descriptor of entry {} disagrees with the central directory",
+            record.name
+        ),
     ))
 }
 
 /// Rejects entries whose bytes overlap. Overlapping entries let a small archive expand
 /// to far more data than it holds, and different readers disagree on them.
-fn check_overlaps(spans: &mut [Span], entries: &[Entry]) -> Result<()> {
+fn check_overlaps(spans: &mut [Span], records: &[Record]) -> Result<()> {
     for (index, span) in spans.iter_mut().enumerate() {
         span.index = index;
     }
@@ -513,7 +620,7 @@ fn check_overlaps(spans: &mut [Span], entries: &[Entry]) -> Result<()> {
     for pair in spans.windows(2) {
         if let [first, second] = pair {
             if first.end > second.start {
-                let name = |span: &Span| entries.get(span.index).map_or("", |e| e.name.as_str());
+                let name = |span: &Span| records.get(span.index).map_or("", |r| r.name.as_str());
                 return Err(zip_error(
                     second.start,
                     format!("entries {} and {} overlap", name(first), name(second)),
@@ -524,40 +631,71 @@ fn check_overlaps(spans: &mut [Span], entries: &[Entry]) -> Result<()> {
     Ok(())
 }
 
-fn inflate(entry: &Entry, raw: &[u8]) -> Result<Vec<u8>> {
-    if entry.size == 0 && raw.is_empty() {
+/// Inflates an entry's raw DEFLATE data, which must end exactly at its compressed size
+/// and produce exactly its declared size.
+fn inflate(record: &Record, raw: &[u8]) -> Result<Vec<u8>> {
+    if record.size == 0 && raw.is_empty() {
+        // Some writers store an empty file as a deflated entry without any data; two
+        // spreadsheets in LibreOffice's test documents have such entries.
         return Ok(Vec::new());
     }
-    if entry.size > entry.compressed_size.saturating_mul(MAX_DEFLATE_RATIO) {
+    if record.size > record.compressed_size.saturating_mul(MAX_DEFLATE_RATIO) {
         return Err(entry_error(
-            entry,
+            record,
             format!(
                 "declares {} bytes, more than {} bytes of deflate data can hold",
-                entry.size, entry.compressed_size
+                record.size, record.compressed_size
             ),
         ));
     }
-    let size = usize::try_from(entry.size)
-        .map_err(|_| entry_error(entry, "is too large for this platform"))?;
-    match miniz_oxide::inflate::decompress_to_vec_with_limit(raw, size) {
-        Ok(data) if data.len() == size => Ok(data),
-        Ok(data) => Err(entry_error(
-            entry,
-            format!("inflates to {} bytes but declares {size}", data.len()),
-        )),
-        Err(err) => Err(entry_error(
-            entry,
-            match err.status {
-                TINFLStatus::HasMoreOutput => {
-                    format!("inflates to more than the {size} bytes it declares")
-                }
-                TINFLStatus::NeedsMoreInput | TINFLStatus::FailedCannotMakeProgress => {
-                    "deflate data is truncated".into()
-                }
-                _ => "deflate data is corrupt".into(),
-            },
-        )),
+    let size = usize::try_from(record.size)
+        .map_err(|_| entry_error(record, "is too large for this platform"))?;
+    // The output grows as data comes, so a lying size costs no more memory than the data
+    // really holds.
+    let mut out = vec![0; raw.len().saturating_mul(2).min(size)];
+    let mut decompressor = Box::<DecompressorOxide>::default();
+    let flags = inflate_flags::TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF;
+    let mut input = raw;
+    let mut written = 0;
+    loop {
+        let (status, consumed, produced) =
+            decompress(&mut decompressor, input, &mut out, written, flags);
+        written += produced;
+        input = input.get(consumed..).unwrap_or_default();
+        match status {
+            TINFLStatus::Done => break,
+            TINFLStatus::HasMoreOutput if out.len() < size => {
+                out.resize(out.len().saturating_mul(2).max(1).min(size), 0);
+            }
+            TINFLStatus::HasMoreOutput => {
+                return Err(entry_error(
+                    record,
+                    format!("inflates to more than the {size} bytes it declares"),
+                ));
+            }
+            TINFLStatus::NeedsMoreInput | TINFLStatus::FailedCannotMakeProgress => {
+                return Err(entry_error(record, "deflate data is truncated"));
+            }
+            _ => return Err(entry_error(record, "deflate data is corrupt")),
+        }
     }
+    if written != size {
+        return Err(entry_error(
+            record,
+            format!("inflates to {written} bytes but declares {size}"),
+        ));
+    }
+    if !input.is_empty() {
+        return Err(entry_error(
+            record,
+            format!(
+                "deflate data ends {} bytes before its compressed size",
+                input.len()
+            ),
+        ));
+    }
+    out.truncate(written);
+    Ok(out)
 }
 
 /// The data of the zip64 extended information extra field, if present.
@@ -581,9 +719,9 @@ fn zip_error(offset: usize, message: impl Into<String>) -> Error {
     }
 }
 
-fn entry_error(entry: &Entry, message: impl Into<String>) -> Error {
+fn entry_error(record: &Record, message: impl Into<String>) -> Error {
     Error::Entry {
-        name: entry.name.clone(),
+        name: record.name.clone(),
         message: message.into(),
     }
 }
