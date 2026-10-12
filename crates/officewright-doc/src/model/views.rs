@@ -5,8 +5,8 @@ use officewright_core::Pt;
 
 use super::xml::Span;
 use super::{
-    ControlLevel, Document, HyperlinkData, Kind, Node, ParagraphId, RevisionData, RunItem,
-    RunProperties, SectionData, SectionProperties, TableId, text,
+    ControlLevel, Document, HyperlinkData, Kind, Node, ParagraphId, ParagraphProperties,
+    RevisionData, RunItem, RunProperties, SectionData, SectionProperties, TableId, text,
 };
 
 /// A section of a document: its page setup and the blocks laid out with it.
@@ -87,6 +87,24 @@ impl<'a> Paragraph<'a> {
             let node = document.node(index)?;
             matches!(node.kind, Kind::Run { .. }).then_some(Run { document, node })
         })
+    }
+
+    /// The paragraph properties written on the paragraph (its `w:pPr`), with those of
+    /// its mark, without those of its style or the document defaults.
+    pub fn properties(self) -> ParagraphProperties {
+        let document = self.document;
+        self.node
+            .properties
+            .iter()
+            .map(|&span| document.element(span))
+            .find(|element| element.is(&document.names.w, "pPr"))
+            .map_or_else(ParagraphProperties::default, |p_pr| {
+                crate::docx::properties::paragraph_properties(
+                    p_pr,
+                    &document.names,
+                    &mut |_, _, _| {},
+                )
+            })
     }
 
     /// The paragraph's text, as [`Document::text`] gives it, without the line feed.

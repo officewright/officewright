@@ -582,3 +582,475 @@ impl RunProperties {
         &self.language
     }
 }
+
+xml_enum! {
+    /// How the lines of a paragraph are aligned (ST_Jc). Transitional documents write
+    /// `left` and `right` where Strict ones write `start` and `end`; both are kept as
+    /// written.
+    Justification {
+        Start = "start",
+        Center = "center",
+        End = "end",
+        Both = "both",
+        MediumKashida = "mediumKashida",
+        Distribute = "distribute",
+        NumberTab = "numTab",
+        HighKashida = "highKashida",
+        LowKashida = "lowKashida",
+        ThaiDistribute = "thaiDistribute",
+        Left = "left",
+        Right = "right",
+    }
+}
+
+xml_enum! {
+    /// What a tab stop does to the text after it (ST_TabJc).
+    TabKind {
+        Clear = "clear",
+        Start = "start",
+        Center = "center",
+        End = "end",
+        Decimal = "decimal",
+        Bar = "bar",
+        Number = "num",
+        Left = "left",
+        Right = "right",
+    }
+}
+
+xml_enum! {
+    /// What fills the space before a tab stop (ST_TabTlc).
+    TabLeader {
+        None = "none",
+        Dot = "dot",
+        Hyphen = "hyphen",
+        Underscore = "underscore",
+        Heavy = "heavy",
+        MiddleDot = "middleDot",
+    }
+}
+
+xml_enum! {
+    /// The line style of a border (ST_Border). The art borders of pages are not read
+    /// yet: a border that names one reads as having no style.
+    BorderStyle {
+        Nil = "nil",
+        None = "none",
+        Single = "single",
+        Thick = "thick",
+        Double = "double",
+        Dotted = "dotted",
+        Dashed = "dashed",
+        DotDash = "dotDash",
+        DotDotDash = "dotDotDash",
+        Triple = "triple",
+        ThinThickSmallGap = "thinThickSmallGap",
+        ThickThinSmallGap = "thickThinSmallGap",
+        ThinThickThinSmallGap = "thinThickThinSmallGap",
+        ThinThickMediumGap = "thinThickMediumGap",
+        ThickThinMediumGap = "thickThinMediumGap",
+        ThinThickThinMediumGap = "thinThickThinMediumGap",
+        ThinThickLargeGap = "thinThickLargeGap",
+        ThickThinLargeGap = "thickThinLargeGap",
+        ThinThickThinLargeGap = "thinThickThinLargeGap",
+        Wave = "wave",
+        DoubleWave = "doubleWave",
+        DashSmallGap = "dashSmallGap",
+        DashDotStroked = "dashDotStroked",
+        ThreeDEmboss = "threeDEmboss",
+        ThreeDEngrave = "threeDEngrave",
+        Outset = "outset",
+        Inset = "inset",
+    }
+}
+
+/// One border: its line style, colour, width and distance from the text.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Border {
+    pub(crate) style: Option<BorderStyle>,
+    pub(crate) color: Color,
+    pub(crate) width: Option<Pt>,
+    pub(crate) space: Option<Pt>,
+    pub(crate) shadow: Option<bool>,
+    pub(crate) frame: Option<bool>,
+}
+
+impl Border {
+    /// The line style (`w:val`).
+    pub fn style(&self) -> Option<BorderStyle> {
+        self.style
+    }
+
+    /// The colour.
+    pub fn color(&self) -> &Color {
+        &self.color
+    }
+
+    /// The width of the line (`w:sz`, eighths of a point).
+    pub fn width(&self) -> Option<Pt> {
+        self.width
+    }
+
+    /// The distance between the border and the text (`w:space`, points).
+    pub fn space(&self) -> Option<Pt> {
+        self.space
+    }
+
+    /// Whether the border has a shadow (`w:shadow`).
+    pub fn shadow(&self) -> Option<bool> {
+        self.shadow
+    }
+
+    /// Whether the border looks raised or engraved (`w:frame`).
+    pub fn frame(&self) -> Option<bool> {
+        self.frame
+    }
+}
+
+/// The borders of a paragraph (`w:pBdr`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ParagraphBorders {
+    pub(crate) top: Option<Border>,
+    pub(crate) bottom: Option<Border>,
+    pub(crate) start: Option<Border>,
+    pub(crate) end: Option<Border>,
+    pub(crate) between: Option<Border>,
+    pub(crate) bar: Option<Border>,
+}
+
+impl ParagraphBorders {
+    /// Above the paragraph.
+    pub fn top(&self) -> Option<&Border> {
+        self.top.as_ref()
+    }
+
+    /// Below the paragraph.
+    pub fn bottom(&self) -> Option<&Border> {
+        self.bottom.as_ref()
+    }
+
+    /// At the start of the lines (`w:left` in Transitional documents, `w:start` in
+    /// Strict ones).
+    pub fn start(&self) -> Option<&Border> {
+        self.start.as_ref()
+    }
+
+    /// At the end of the lines (`w:right` or `w:end`).
+    pub fn end(&self) -> Option<&Border> {
+        self.end.as_ref()
+    }
+
+    /// Between this paragraph and the next one with the same borders.
+    pub fn between(&self) -> Option<&Border> {
+        self.between.as_ref()
+    }
+
+    /// A vertical bar beside the paragraph (`w:bar`).
+    pub fn bar(&self) -> Option<&Border> {
+        self.bar.as_ref()
+    }
+}
+
+/// A tab stop (`w:tab` in `w:tabs`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TabStop {
+    pub(crate) kind: Option<TabKind>,
+    pub(crate) leader: Option<TabLeader>,
+    pub(crate) position: Pt,
+}
+
+impl TabStop {
+    /// What the stop does; [`TabKind::Clear`] removes a stop a style set.
+    pub fn kind(&self) -> Option<TabKind> {
+        self.kind
+    }
+
+    /// What fills the space before the stop.
+    pub fn leader(&self) -> Option<TabLeader> {
+        self.leader
+    }
+
+    /// Where the stop is, from the start edge of the text.
+    pub fn position(&self) -> Pt {
+        self.position
+    }
+}
+
+/// The spacing between lines.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum LineSpacing {
+    /// A multiple of the line height the fonts ask for: 1.0 is single.
+    Multiple(f64),
+    /// Exactly this line height.
+    Exact(Pt),
+    /// At least this line height.
+    AtLeast(Pt),
+}
+
+/// The space around and between the lines of a paragraph (`w:spacing`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Spacing {
+    pub(crate) before: Option<Pt>,
+    pub(crate) after: Option<Pt>,
+    pub(crate) before_lines: Option<i32>,
+    pub(crate) after_lines: Option<i32>,
+    pub(crate) before_auto: Option<bool>,
+    pub(crate) after_auto: Option<bool>,
+    pub(crate) line: Option<LineSpacing>,
+}
+
+impl Spacing {
+    /// Space above the paragraph (`w:before`).
+    pub fn before(&self) -> Option<Pt> {
+        self.before
+    }
+
+    /// Space below the paragraph (`w:after`).
+    pub fn after(&self) -> Option<Pt> {
+        self.after
+    }
+
+    /// Space above, in hundredths of a line, which wins over [`before`](Self::before)
+    /// (`w:beforeLines`).
+    pub fn before_lines(&self) -> Option<i32> {
+        self.before_lines
+    }
+
+    /// Space below, in hundredths of a line (`w:afterLines`).
+    pub fn after_lines(&self) -> Option<i32> {
+        self.after_lines
+    }
+
+    /// Whether the application chooses the space above, as for HTML paragraphs
+    /// (`w:beforeAutospacing`).
+    pub fn before_auto(&self) -> Option<bool> {
+        self.before_auto
+    }
+
+    /// Whether the application chooses the space below (`w:afterAutospacing`).
+    pub fn after_auto(&self) -> Option<bool> {
+        self.after_auto
+    }
+
+    /// The spacing between lines (`w:line` with `w:lineRule`).
+    pub fn line(&self) -> Option<LineSpacing> {
+        self.line
+    }
+}
+
+/// The indentation of a paragraph (`w:ind`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Indentation {
+    pub(crate) start: Option<Pt>,
+    pub(crate) end: Option<Pt>,
+    pub(crate) first_line: Option<Pt>,
+    pub(crate) hanging: Option<Pt>,
+    pub(crate) start_chars: Option<i32>,
+    pub(crate) end_chars: Option<i32>,
+    pub(crate) first_line_chars: Option<i32>,
+    pub(crate) hanging_chars: Option<i32>,
+}
+
+impl Indentation {
+    /// From the start edge of the text area (`w:left` in Transitional documents,
+    /// `w:start` in Strict ones).
+    pub fn start(&self) -> Option<Pt> {
+        self.start
+    }
+
+    /// From the end edge (`w:right` or `w:end`).
+    pub fn end(&self) -> Option<Pt> {
+        self.end
+    }
+
+    /// How much further in the first line starts (`w:firstLine`).
+    pub fn first_line(&self) -> Option<Pt> {
+        self.first_line
+    }
+
+    /// How much less far in the first line starts (`w:hanging`).
+    pub fn hanging(&self) -> Option<Pt> {
+        self.hanging
+    }
+
+    /// The start indentation in hundredths of a character, which wins over
+    /// [`start`](Self::start) (`w:leftChars` or `w:startChars`).
+    pub fn start_chars(&self) -> Option<i32> {
+        self.start_chars
+    }
+
+    /// The end indentation in hundredths of a character.
+    pub fn end_chars(&self) -> Option<i32> {
+        self.end_chars
+    }
+
+    /// The first line indentation in hundredths of a character.
+    pub fn first_line_chars(&self) -> Option<i32> {
+        self.first_line_chars
+    }
+
+    /// The hanging indentation in hundredths of a character.
+    pub fn hanging_chars(&self) -> Option<i32> {
+        self.hanging_chars
+    }
+}
+
+/// The list a paragraph is an item of (`w:numPr`): a numbering instance and a level.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NumberingReference {
+    pub(crate) instance: Option<i64>,
+    pub(crate) level: Option<i64>,
+}
+
+impl NumberingReference {
+    /// The numbering instance (`w:numId`); 0 takes the paragraph out of a list its
+    /// style puts it in.
+    pub fn instance(&self) -> Option<i64> {
+        self.instance
+    }
+
+    /// The level, 0 to 8 in valid documents (`w:ilvl`).
+    pub fn level(&self) -> Option<i64> {
+        self.level
+    }
+}
+
+/// The paragraph properties written on a paragraph or in a style (`w:pPr`, ECMA-376
+/// Part 1, §17.3.1): only what is set there.
+#[doc(alias = "ParagraphFormat")]
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ParagraphProperties {
+    pub(crate) style: Option<String>,
+    pub(crate) keep_next: Option<bool>,
+    pub(crate) keep_lines: Option<bool>,
+    pub(crate) page_break_before: Option<bool>,
+    pub(crate) widow_control: Option<bool>,
+    pub(crate) suppress_line_numbers: Option<bool>,
+    pub(crate) suppress_auto_hyphens: Option<bool>,
+    pub(crate) contextual_spacing: Option<bool>,
+    pub(crate) mirror_indents: Option<bool>,
+    pub(crate) word_wrap: Option<bool>,
+    pub(crate) right_to_left: Option<bool>,
+    pub(crate) snap_to_grid: Option<bool>,
+    pub(crate) numbering: Option<NumberingReference>,
+    pub(crate) borders: Option<ParagraphBorders>,
+    pub(crate) shading: Option<Shading>,
+    pub(crate) tabs: Vec<TabStop>,
+    pub(crate) spacing: Option<Spacing>,
+    pub(crate) indentation: Option<Indentation>,
+    pub(crate) justification: Option<Justification>,
+    pub(crate) outline_level: Option<u8>,
+    pub(crate) mark: RunProperties,
+}
+
+impl ParagraphProperties {
+    /// The paragraph style (`w:pStyle`), by its id.
+    pub fn style(&self) -> Option<&str> {
+        self.style.as_deref()
+    }
+
+    /// Kept on the page of the next paragraph (`w:keepNext`).
+    pub fn keep_next(&self) -> Option<bool> {
+        self.keep_next
+    }
+
+    /// All lines kept on one page (`w:keepLines`).
+    pub fn keep_lines(&self) -> Option<bool> {
+        self.keep_lines
+    }
+
+    /// Starts a new page (`w:pageBreakBefore`).
+    pub fn page_break_before(&self) -> Option<bool> {
+        self.page_break_before
+    }
+
+    /// No single first or last line alone at the bottom or top of a page
+    /// (`w:widowControl`).
+    pub fn widow_control(&self) -> Option<bool> {
+        self.widow_control
+    }
+
+    /// Left out of line numbering (`w:suppressLineNumbers`).
+    pub fn suppress_line_numbers(&self) -> Option<bool> {
+        self.suppress_line_numbers
+    }
+
+    /// Not hyphenated automatically (`w:suppressAutoHyphens`).
+    pub fn suppress_auto_hyphens(&self) -> Option<bool> {
+        self.suppress_auto_hyphens
+    }
+
+    /// Space before and after left out between paragraphs of the same style
+    /// (`w:contextualSpacing`).
+    pub fn contextual_spacing(&self) -> Option<bool> {
+        self.contextual_spacing
+    }
+
+    /// Start and end indentation swapped on even pages (`w:mirrorIndents`).
+    pub fn mirror_indents(&self) -> Option<bool> {
+        self.mirror_indents
+    }
+
+    /// Whether Latin words are kept whole at the ends of lines; off lets lines break
+    /// inside them, as East Asian text does (`w:wordWrap`).
+    pub fn word_wrap(&self) -> Option<bool> {
+        self.word_wrap
+    }
+
+    /// A right-to-left paragraph (`w:bidi`).
+    pub fn right_to_left(&self) -> Option<bool> {
+        self.right_to_left
+    }
+
+    /// Laid out on the document grid when it has one (`w:snapToGrid`).
+    pub fn snap_to_grid(&self) -> Option<bool> {
+        self.snap_to_grid
+    }
+
+    /// The list the paragraph is an item of (`w:numPr`).
+    pub fn numbering(&self) -> Option<&NumberingReference> {
+        self.numbering.as_ref()
+    }
+
+    /// The borders (`w:pBdr`).
+    pub fn borders(&self) -> Option<&ParagraphBorders> {
+        self.borders.as_ref()
+    }
+
+    /// The shading behind the paragraph (`w:shd`).
+    pub fn shading(&self) -> Option<&Shading> {
+        self.shading.as_ref()
+    }
+
+    /// The tab stops set or cleared here (`w:tabs`), in document order.
+    pub fn tabs(&self) -> &[TabStop] {
+        &self.tabs
+    }
+
+    /// The spacing (`w:spacing`).
+    pub fn spacing(&self) -> Option<&Spacing> {
+        self.spacing.as_ref()
+    }
+
+    /// The indentation (`w:ind`).
+    pub fn indentation(&self) -> Option<&Indentation> {
+        self.indentation.as_ref()
+    }
+
+    /// The alignment of the lines (`w:jc`).
+    pub fn justification(&self) -> Option<Justification> {
+        self.justification
+    }
+
+    /// The outline level, 0 to 9 (9: body text) (`w:outlineLvl`).
+    pub fn outline_level(&self) -> Option<u8> {
+        self.outline_level
+    }
+
+    /// The run properties of the paragraph mark (the `w:rPr` in `w:pPr`), which decide
+    /// the height of an empty paragraph and the formatting of its list label.
+    pub fn mark_run_properties(&self) -> &RunProperties {
+        &self.mark
+    }
+}

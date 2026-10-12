@@ -1,10 +1,12 @@
-//! Properties read from kept elements: what a `w:rPr` of a run, a style or the document
-//! defaults sets (ECMA-376 Part 1, §17.3.2).
+//! Properties read from kept elements: what a `w:rPr` or `w:pPr` of a run, a paragraph,
+//! a style or the document defaults sets (ECMA-376 Part 1, §17.3.1 and §17.3.2).
 
 use crate::model::Names;
 use crate::model::properties::{
-    Color, ColorValue, FontHint, Highlight, Language, RunFonts, RunProperties, Shading,
-    ShadingPattern, ThemeColor, ThemeFont, Toggle, Underline, UnderlineStyle, VerticalPosition,
+    Border, BorderStyle, Color, ColorValue, FontHint, Highlight, Indentation, Justification,
+    Language, LineSpacing, NumberingReference, ParagraphBorders, ParagraphProperties, RunFonts,
+    RunProperties, Shading, ShadingPattern, Spacing, TabKind, TabLeader, TabStop, ThemeColor,
+    ThemeFont, Toggle, Underline, UnderlineStyle, VerticalPosition,
 };
 use crate::model::xml::Element;
 use crate::units::{half_points_measure, twips_measure};
@@ -211,4 +213,208 @@ fn hex_byte(value: &str) -> Option<u8> {
 fn scale(value: &str) -> Option<u16> {
     let number: u16 = value.strip_suffix('%').unwrap_or(value).parse().ok()?;
     (1..=600).contains(&number).then_some(number)
+}
+
+/// The properties a `w:pPr` sets, with those of its paragraph mark.
+pub(crate) fn paragraph_properties(
+    p_pr: Element<'_>,
+    names: &Names,
+    report: Report<'_>,
+) -> ParagraphProperties {
+    let mut properties = ParagraphProperties::default();
+    let w = &names.w;
+    for child in p_pr.children_through_fallback(names.mc) {
+        let Some(local) = child.local_in(w) else {
+            continue;
+        };
+        let flag = match local {
+            "keepNext" => Some(&mut properties.keep_next),
+            "keepLines" => Some(&mut properties.keep_lines),
+            "pageBreakBefore" => Some(&mut properties.page_break_before),
+            "widowControl" => Some(&mut properties.widow_control),
+            "suppressLineNumbers" => Some(&mut properties.suppress_line_numbers),
+            "suppressAutoHyphens" => Some(&mut properties.suppress_auto_hyphens),
+            "contextualSpacing" => Some(&mut properties.contextual_spacing),
+            "mirrorIndents" => Some(&mut properties.mirror_indents),
+            "wordWrap" => Some(&mut properties.word_wrap),
+            "bidi" => Some(&mut properties.right_to_left),
+            "snapToGrid" => Some(&mut properties.snap_to_grid),
+            _ => None,
+        };
+        if let Some(flag) = flag {
+            *flag = on_off(child, names, report);
+            continue;
+        }
+        match local {
+            "pStyle" => properties.style = child.attribute(w, "val").map(Into::into),
+            "numPr" => properties.numbering = Some(numbering(child, names, report)),
+            "pBdr" => properties.borders = Some(borders(child, names, report)),
+            "shd" => properties.shading = Some(shading(child, names, report)),
+            "tabs" => properties.tabs = tabs(child, names, report),
+            "spacing" => properties.spacing = Some(spacing(child, names, report)),
+            "ind" => properties.indentation = Some(indentation(child, names, report)),
+            "jc" => {
+                properties.justification =
+                    value(child, names, "val", Justification::from_xml, report);
+            }
+            "outlineLvl" => {
+                properties.outline_level = value(
+                    child,
+                    names,
+                    "val",
+                    |v| v.parse().ok().filter(|level| *level <= 9),
+                    report,
+                );
+            }
+            "rPr" => properties.mark = run_properties(child, names, report),
+            _ => {}
+        }
+    }
+    properties
+}
+
+fn numbering(element: Element<'_>, names: &Names, report: Report<'_>) -> NumberingReference {
+    let mut reference = NumberingReference::default();
+    for child in element.children_through_fallback(names.mc) {
+        match child.local_in(&names.w) {
+            Some("numId") => reference.instance = value(child, names, "val", integer, report),
+            Some("ilvl") => reference.level = value(child, names, "val", integer, report),
+            _ => {}
+        }
+    }
+    reference
+}
+
+fn borders(element: Element<'_>, names: &Names, report: Report<'_>) -> ParagraphBorders {
+    let mut borders = ParagraphBorders::default();
+    for child in element.children_through_fallback(names.mc) {
+        let slot = match child.local_in(&names.w) {
+            Some("top") => &mut borders.top,
+            Some("bottom") => &mut borders.bottom,
+            Some("left" | "start") => &mut borders.start,
+            Some("right" | "end") => &mut borders.end,
+            Some("between") => &mut borders.between,
+            Some("bar") => &mut borders.bar,
+            _ => continue,
+        };
+        *slot = Some(border(child, names, report));
+    }
+    borders
+}
+
+/// One border (CT_Border): style, colour, width in eighths of a point, space in points.
+fn border(element: Element<'_>, names: &Names, report: Report<'_>) -> Border {
+    let points = |eighths: f64| {
+        move |value: &str| -> Option<officewright_core::Pt> {
+            let number: u32 = value.parse().ok()?;
+            Some(officewright_core::Pt(f64::from(number) / eighths))
+        }
+    };
+    Border {
+        style: value(element, names, "val", BorderStyle::from_xml, report),
+        color: color(
+            element,
+            names,
+            ["color", "themeColor", "themeTint", "themeShade"],
+            report,
+        ),
+        width: value(element, names, "sz", points(8.0), report),
+        space: value(element, names, "space", points(1.0), report),
+        shadow: on_off_attribute(element, names, "shadow", report),
+        frame: on_off_attribute(element, names, "frame", report),
+    }
+}
+
+fn tabs(element: Element<'_>, names: &Names, report: Report<'_>) -> Vec<TabStop> {
+    let mut tabs = Vec::new();
+    for child in element.children_through_fallback(names.mc) {
+        if child.local_in(&names.w) != Some("tab") {
+            continue;
+        }
+        // A tab stop without a valid position cannot be placed; it is left out.
+        let Some(position) = value(child, names, "pos", |v| twips_measure(v, true), report) else {
+            continue;
+        };
+        tabs.push(TabStop {
+            kind: value(child, names, "val", TabKind::from_xml, report),
+            leader: value(child, names, "leader", TabLeader::from_xml, report),
+            position,
+        });
+    }
+    tabs
+}
+
+fn spacing(element: Element<'_>, names: &Names, report: Report<'_>) -> Spacing {
+    let twips = |attribute, report: Report<'_>| {
+        value(
+            element,
+            names,
+            attribute,
+            |v| twips_measure(v, false),
+            report,
+        )
+    };
+    let line = value(element, names, "line", |v| twips_measure(v, true), report);
+    let rule = element.attribute(&names.w, "lineRule");
+    let line = match (line, rule) {
+        (None, _) => None,
+        // For auto, the default rule, w:line counts 240 to a line.
+        (Some(line), None | Some("auto")) => Some(LineSpacing::Multiple(line.0 * 20.0 / 240.0)),
+        (Some(line), Some("exact")) => Some(LineSpacing::Exact(line)),
+        (Some(line), Some("atLeast")) => Some(LineSpacing::AtLeast(line)),
+        (Some(_), Some(other)) => {
+            report(element.local_name(), "lineRule", other);
+            None
+        }
+    };
+    Spacing {
+        before: twips("before", report),
+        after: twips("after", report),
+        before_lines: value(element, names, "beforeLines", int32, report),
+        after_lines: value(element, names, "afterLines", int32, report),
+        before_auto: on_off_attribute(element, names, "beforeAutospacing", report),
+        after_auto: on_off_attribute(element, names, "afterAutospacing", report),
+        line,
+    }
+}
+
+fn indentation(element: Element<'_>, names: &Names, report: Report<'_>) -> Indentation {
+    let length = |attributes: &[&str], signed: bool, report: Report<'_>| {
+        let attribute = attributes
+            .iter()
+            .copied()
+            .find(|attribute| element.attribute(&names.w, attribute).is_some())?;
+        value(
+            element,
+            names,
+            attribute,
+            |v| twips_measure(v, signed),
+            report,
+        )
+    };
+    let chars = |attributes: &[&str], report: Report<'_>| {
+        let attribute = attributes
+            .iter()
+            .copied()
+            .find(|attribute| element.attribute(&names.w, attribute).is_some())?;
+        value(element, names, attribute, int32, report)
+    };
+    Indentation {
+        start: length(&["start", "left"], true, report),
+        end: length(&["end", "right"], true, report),
+        first_line: length(&["firstLine"], false, report),
+        hanging: length(&["hanging"], false, report),
+        start_chars: chars(&["startChars", "leftChars"], report),
+        end_chars: chars(&["endChars", "rightChars"], report),
+        first_line_chars: chars(&["firstLineChars"], report),
+        hanging_chars: chars(&["hangingChars"], report),
+    }
+}
+
+fn integer(value: &str) -> Option<i64> {
+    value.parse().ok()
+}
+
+fn int32(value: &str) -> Option<i32> {
+    value.parse().ok()
 }
