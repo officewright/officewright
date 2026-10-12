@@ -82,6 +82,9 @@ struct Reading<'d, 'p, 't> {
     nodes_left: usize,
     max_nodes: usize,
     stack: Vec<Frame>,
+    /// For each frame, the index of the frame that says where its children go: its own,
+    /// or for a transparent frame that of the frame it hands its children to.
+    defining: Vec<usize>,
     locator: Locator<'t>,
     /// The offset of the event read last, where a limit is exceeded.
     at: usize,
@@ -118,6 +121,7 @@ pub(super) fn read(
         nodes_left: limits.max_nodes(),
         max_nodes: limits.max_nodes(),
         stack: Vec::new(),
+        defining: Vec::new(),
         locator: Locator::new(input.as_str()),
         at: 0,
     };
@@ -196,7 +200,7 @@ impl Reading<'_, '_, '_> {
                 ));
             };
             self.document.conformance = conformance;
-            self.stack.push(Frame::Root);
+            self.push(Frame::Root);
             return Ok(());
         }
         if let Some(Frame::Alternate { taken }) = self.stack.last_mut() {
@@ -209,19 +213,19 @@ impl Reading<'_, '_, '_> {
                             .map_err(|err| Error::from(err.in_part(self.part_name)))?));
             if take {
                 *taken = true;
-                self.stack.push(Frame::Transparent);
+                self.push(Frame::Transparent);
             } else {
                 return self.skip(reader, mce);
             }
             return Ok(());
         }
         if name.is(self.mc, "AlternateContent") {
-            self.stack.push(Frame::Alternate { taken: false });
+            self.push(Frame::Alternate { taken: false });
             return Ok(());
         }
         match disposition {
             Disposition::ProcessContent => {
-                self.stack.push(Frame::Transparent);
+                self.push(Frame::Transparent);
                 return Ok(());
             }
             Disposition::Understood if self.is_w(&tag) => {}
@@ -232,7 +236,7 @@ impl Reading<'_, '_, '_> {
         match frame {
             Context::Root => {
                 if local == "body" {
-                    self.stack.push(Frame::Container {
+                    self.push(Frame::Container {
                         parent: Parent::Body,
                         level: Level::Block,
                     });
@@ -400,6 +404,7 @@ impl Reading<'_, '_, '_> {
     }
 
     fn end(&mut self) {
+        self.defining.pop();
         if let Some(Frame::Text { run, kind, text }) = self.stack.pop() {
             let text = text.into_boxed_str();
             let item = match kind {
@@ -437,26 +442,40 @@ impl Reading<'_, '_, '_> {
     }
 
     /// The innermost frame that says where children go; transparent frames and the
-    /// branches of `mc:AlternateContent` hand their children to it.
+    /// branches of `mc:AlternateContent` hand their children to it. Found without
+    /// walking the stack, however many transparent frames are open.
     fn context(&self) -> Context {
-        for frame in self.stack.iter().rev() {
-            return match frame {
-                Frame::Root => Context::Root,
-                Frame::Container { parent, level } => Context::Container {
-                    parent: *parent,
-                    level: *level,
-                },
-                Frame::Text { .. } => Context::Text,
-                Frame::Alternate { .. } | Frame::Transparent => continue,
-            };
+        let frame = self
+            .defining
+            .last()
+            .and_then(|&index| self.stack.get(index));
+        match frame {
+            Some(Frame::Container { parent, level }) => Context::Container {
+                parent: *parent,
+                level: *level,
+            },
+            Some(Frame::Text { .. }) => Context::Text,
+            Some(Frame::Root | Frame::Alternate { .. } | Frame::Transparent) | None => {
+                Context::Root
+            }
         }
-        Context::Root
+    }
+
+    fn push(&mut self, frame: Frame) {
+        let defining = match frame {
+            Frame::Alternate { .. } | Frame::Transparent => {
+                self.defining.last().copied().unwrap_or(self.stack.len())
+            }
+            _ => self.stack.len(),
+        };
+        self.stack.push(frame);
+        self.defining.push(defining);
     }
 
     /// Adds a node to `parent` and reads its children at `level`.
     fn open(&mut self, parent: Parent, kind: Kind, level: Level) -> Result<()> {
         let node = self.add(parent, kind)?;
-        self.stack.push(Frame::Container {
+        self.push(Frame::Container {
             parent: Parent::Node(node),
             level,
         });
@@ -496,7 +515,7 @@ impl Reading<'_, '_, '_> {
 
     fn push_frame(&mut self, frame: Frame) -> Result<()> {
         self.spend(1)?;
-        self.stack.push(frame);
+        self.push(frame);
         Ok(())
     }
 

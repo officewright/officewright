@@ -603,3 +603,29 @@ fn keeps_comments_and_processing_instructions_in_kept_elements() {
         r#"<w14:x xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><!-- note --><?pi data?></w14:x>"#
     );
 }
+
+/// Opens `body` with a raised XML depth limit and fails if it takes more than 20 s, far
+/// above the second or so it takes when the work is linear.
+fn open_in_linear_time(body: &str) -> Document {
+    let options = LoadOptions::new().with_limits(Limits::new().with_max_xml_depth(1 << 20));
+    let start = std::time::Instant::now();
+    let document = options.open_bytes(docx(body)).unwrap();
+    let elapsed = start.elapsed();
+    assert!(elapsed < std::time::Duration::from_secs(20), "{elapsed:?}");
+    document
+}
+
+#[test]
+fn reads_under_nested_alternate_content_in_linear_time() {
+    // Each element looked past every mc:AlternateContent open around it for where its
+    // children go: 40,000 paragraphs under 40,000 of them took minutes.
+    let n = 40_000;
+    let body = format!(
+        "{}{}{}",
+        "<mc:AlternateContent><mc:Fallback>".repeat(n),
+        "<w:p><w:pPr><w:sectPr/></w:pPr></w:p>".repeat(n),
+        "</mc:Fallback></mc:AlternateContent>".repeat(n)
+    );
+    let document = open_in_linear_time(&body);
+    assert_eq!(document.sections().len(), n + 1);
+}
