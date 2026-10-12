@@ -90,6 +90,8 @@ static void build_and_save(const char *dir) {
            OW_STATUS_OK, NULL);
     /* The document keeps what it needs, so the font can go before the document. */
     ow_pdf_font_free(font);
+    /* Uncompressed, to read the page content. */
+    EXPECT(ow_pdf_document_set_compression(doc, OW_COMPRESSION_NONE), OW_STATUS_OK, NULL);
 
     EXPECT(ow_pdf_document_save_bytes(doc, &data, &len), OW_STATUS_OK, NULL);
     CHECK(data != NULL && len > 20);
@@ -114,6 +116,7 @@ static void text_layout_and_width(void) {
 
     EXPECT(ow_pdf_document_from_text("Hello,\nworld\fpage two", 612.0, 792.0, font, 11.0, &doc),
            OW_STATUS_OK, NULL);
+    EXPECT(ow_pdf_document_set_compression(doc, OW_COMPRESSION_NONE), OW_STATUS_OK, NULL);
     EXPECT(ow_pdf_document_save_bytes(doc, &data, &len), OW_STATUS_OK, NULL);
     CHECK(contains(data, len, "/Count 2"));
     CHECK(contains(data, len, "(page two) Tj"));
@@ -133,7 +136,7 @@ static void compression(void) {
     uint8_t *plain = NULL;
     size_t compressed_len = 0;
     size_t plain_len = 0;
-    char text[14 * 40 + 1] = "";
+    char text[13 * 40 + 1] = "";
     int i;
 
     for (i = 0; i < 40; i++) {

@@ -547,6 +547,16 @@ mod tests {
     }
 
     #[test]
+    fn writes_a_compressed_pdf() {
+        // The same bytes on every platform: CI runs this on Linux, macOS and Windows.
+        let text = "Hello, world\n".repeat(10);
+        let doc = crate::text_to_pdf(&text, PageSize::A4, &helvetica(), Pt(12.0)).unwrap();
+        let pdf = doc.to_bytes().unwrap();
+        assert!(String::from_utf8_lossy(&pdf).contains("/Filter /FlateDecode"));
+        insta::assert_snapshot!(readable(&pdf));
+    }
+
+    #[test]
     fn xref_offsets_point_at_their_objects() {
         let mut doc = hello();
         // Enough text on the first page for its content stream to be compressed.

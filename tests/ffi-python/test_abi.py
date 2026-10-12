@@ -134,6 +134,8 @@ class AbiTest(unittest.TestCase):
         # The document keeps what it needs, so the font can go before the document.
         lib.ow_pdf_font_free(font)
         self.assertEqual(last_error(), "")
+        # Uncompressed, to read the page content.
+        self.check(lib.ow_pdf_document_set_compression(doc, OW_COMPRESSION_NONE))
 
         pdf = self.save_bytes(doc)
         self.assertTrue(pdf.startswith(b"%PDF-1.4\n"))
@@ -151,6 +153,7 @@ class AbiTest(unittest.TestCase):
         doc = c_void_p()
         self.check(lib.ow_pdf_document_from_text(b"Hello,\nworld\fpage two", 612.0, 792.0, font, 11.0, byref(doc)))
         self.addCleanup(lib.ow_pdf_document_free, doc)
+        self.check(lib.ow_pdf_document_set_compression(doc, OW_COMPRESSION_NONE))
         pdf = self.save_bytes(doc)
         self.assertIn(b"/Count 2", pdf)
         self.assertIn(b"(page two) Tj", pdf)

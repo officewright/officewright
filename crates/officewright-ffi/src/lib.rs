@@ -1387,6 +1387,10 @@ mod tests {
     #[test]
     fn builds_and_saves_a_document() {
         let doc = hello();
+        // Uncompressed, to read the page content.
+        // SAFETY: a live handle.
+        let status = unsafe { ow_pdf_document_set_compression(doc, OW_COMPRESSION_NONE) };
+        assert_eq!(status, OwStatus::Ok);
         let pdf = save_bytes(doc);
         assert!(pdf.starts_with(b"%PDF-1.4\n"));
         assert!(pdf.ends_with(b"%%EOF\n"));
