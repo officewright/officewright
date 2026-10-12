@@ -13,6 +13,11 @@
 //! - data comes before the first entry (self-extracting archives, concatenated files):
 //!   offsets are taken as they are written, not shifted to fit.
 //!
+//! Entry names are read as UTF-8 whether or not general purpose bit 11 is set. Without
+//! it, APPNOTE (Appendix D) means code page 437, but ECMA-376 Part 2 derives ZIP item
+//! names from part names, which are ASCII with percent-encoding, so a name that is not
+//! UTF-8 cannot come from a package and is an error.
+//!
 //! An entry is decompressed only when it is [read](Entry::read), never past its declared
 //! size or [`Limits::max_part_size`], and its data must decompress to exactly the
 //! declared size, fill exactly the declared compressed size and match its CRC-32.
@@ -293,8 +298,10 @@ struct Span {
 
 /// Finds the end of central directory record, searching back from the end of the input
 /// over the at most 65,535 bytes of archive comment. Some writers leave bytes after the
-/// record (a real presentation in the POI corpus has one), so the last record whose
-/// central directory checks out wins.
+/// record (a real presentation in the POI corpus has one), so the last record that checks
+/// out on its own wins: its comment fits in the input, its zip64 locator points in range,
+/// and its central directory ends where it begins. The directory itself is read
+/// afterwards, and an error there is final.
 fn find_end(data: &[u8]) -> Result<End> {
     let Some(last) = data.len().checked_sub(END_LEN) else {
         return Err(zip_error(0, "the input is too short to be a zip archive"));
