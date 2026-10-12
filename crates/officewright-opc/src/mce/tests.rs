@@ -1,6 +1,6 @@
 use super::*;
-use crate::Limits;
 use crate::xml::{Event, Input};
+use crate::{Limit, Limits};
 
 const DECLARATIONS: &str = r#"xmlns:w="urn:w" xmlns:a="urn:a" xmlns:b="urn:b" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006""#;
 
@@ -171,4 +171,135 @@ fn skips_undeclared_prefixes_in_lists_of_names() {
         .unwrap()[4..],
         ["y=ProcessContent"]
     );
+}
+
+/// A document that a reviewer of #4 built: `names` copies of the prefix `b` in
+/// `mc:Ignorable`, then `elements` elements in namespace `urn:a`, which is neither
+/// understood nor ignorable. With 400,000 names and 1,000,000 elements it is byte for
+/// byte their probe file `mce-dos.xml`, on which the processor, scanning a list of all
+/// 400,000 names for every element, ran for more than 300 s.
+fn repeated_ignorable(names: usize, elements: usize) -> String {
+    let mut xml = String::from(
+        r#"<w:document xmlns:w="urn:w" xmlns:a="urn:a" xmlns:b="urn:b" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable=""#,
+    );
+    xml.push_str(&vec!["b"; names].join(" "));
+    xml.push_str(r#"">"#);
+    xml.push_str(&"<a:x/>".repeat(elements));
+    xml.push_str("</w:document>");
+    xml
+}
+
+/// Reads a document with the processor, understanding `urn:w`; returns how many
+/// elements are not understood.
+fn count_not_understood(xml: &str, limits: &Limits) -> Result<usize> {
+    let input = Input::decode(xml.as_bytes())?;
+    let mut reader = input.reader(limits);
+    let mut mce = Processor::new(&mut reader);
+    let w = reader.intern("urn:w");
+    mce.understand(w);
+    let mut not_understood = 0;
+    while let Some(event) = reader.read_event()? {
+        match event {
+            Event::Start(tag) => {
+                mce.start(&reader, &tag)?;
+                if mce.element(tag.name()) == Disposition::NotUnderstood {
+                    not_understood += 1;
+                }
+            }
+            Event::End(_) => mce.end(),
+            _ => {}
+        }
+    }
+    Ok(not_understood)
+}
+
+#[test]
+fn refuses_an_attribute_with_more_names_than_the_limit() {
+    let probe = repeated_ignorable(400_000, 1_000_000);
+    assert_eq!(probe.len(), 6_800_159);
+    assert!(matches!(
+        count_not_understood(&probe, &Limits::new()),
+        Err(Error::LimitExceeded {
+            limit: Limit::MceNames,
+            maximum: 256,
+            ref context,
+        }) if context == "line 1, column 1"
+    ));
+    let at_the_limit = repeated_ignorable(256, 10);
+    assert_eq!(
+        count_not_understood(&at_the_limit, &Limits::new()).unwrap(),
+        10
+    );
+}
+
+#[test]
+fn keeps_each_name_once_so_repeated_names_cost_nothing() {
+    // Without the limit the probe must still read in linear time: the repeated prefix is
+    // kept once, and an element's namespace is looked up in a set, not in a list.
+    let limits = Limits::new().with_max_mce_names(400_000);
+    let probe = repeated_ignorable(400_000, 1_000_000);
+    assert_eq!(count_not_understood(&probe, &limits).unwrap(), 1_000_000);
+}
+
+#[test]
+fn keeps_a_name_an_outer_element_declared_after_an_inner_one_ends() {
+    assert_eq!(
+        walk(
+            r#"<w:p mc:Ignorable="a" mc:ProcessContent="a:x"><w:r mc:Ignorable="a" mc:ProcessContent="a:x a:y"/><a:x/><a:y/></w:p>"#,
+            &["urn:w"]
+        )
+        .unwrap(),
+        [
+            "p=Understood",
+            "@Ignorable=Understood",
+            "@ProcessContent=Understood",
+            "r=Understood",
+            "@Ignorable=Understood",
+            "@ProcessContent=Understood",
+            "x=ProcessContent",
+            "y=Ignore",
+        ]
+    );
+}
+
+#[test]
+fn limits_every_list_of_names() {
+    let limits = Limits::new().with_max_mce_names(2);
+    let too_many = [
+        r#"<w:p mc:ProcessContent="a:x a:y a:z"/>"#,
+        r#"<w:p mc:PreserveElements="a:x a:y a:z"/>"#,
+        r#"<w:p mc:MustUnderstand="w w w"/>"#,
+        r#"<mc:AlternateContent><mc:Choice Requires="a b a"/></mc:AlternateContent>"#,
+    ];
+    for body in too_many {
+        let xml = format!("<w:root {DECLARATIONS}>{body}</w:root>");
+        let input = Input::decode(xml.as_bytes()).unwrap();
+        let mut reader = input.reader(&limits);
+        let mut mce = Processor::new(&mut reader);
+        let w = reader.intern("urn:w");
+        mce.understand(w);
+        let mut result = Ok(());
+        while let Some(event) = reader.read_event().unwrap() {
+            if let Event::Start(tag) = event {
+                result = mce.start(&reader, &tag);
+                if result.is_ok() && tag.name().local() == "Choice" {
+                    result = mce.is_selectable(&reader, &tag).map(|_| ());
+                }
+                if result.is_err() {
+                    break;
+                }
+            }
+        }
+        assert!(
+            matches!(
+                result,
+                Err(Error::LimitExceeded {
+                    limit: Limit::MceNames,
+                    maximum: 2,
+                    ..
+                })
+            ),
+            "{body}: {result:?}"
+        );
+    }
 }

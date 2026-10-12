@@ -59,8 +59,10 @@
 //! # Ok::<(), officewright_opc::Error>(())
 //! ```
 
+use std::collections::{HashMap, HashSet};
+
 use crate::xml::{Name, NsId, Reader, StartTag};
-use crate::{Error, Result};
+use crate::{Error, Limit, Result};
 
 /// The Markup Compatibility namespace. ISO/IEC 29500 Strict uses it too.
 pub const NAMESPACE: &str = "http://schemas.openxmlformats.org/markup-compatibility/2006";
@@ -80,17 +82,33 @@ pub enum Disposition {
 }
 
 /// Follows the Markup Compatibility attributes of one part; see the [module docs](self).
+///
+/// Every lookup takes constant time and a name that an attribute repeats, or that an
+/// outer element already declared, is kept once, so the work grows with the size of
+/// the part, however its attributes repeat themselves. Each attribute may list at most
+/// [`Limits::max_mce_names`](crate::Limits::max_mce_names) names.
 #[derive(Debug)]
 pub struct Processor {
     mc: NsId,
-    understood: Vec<NsId>,
-    /// Ignorable namespaces declared by the open elements, outermost first.
-    ignorable: Vec<NsId>,
-    /// Elements whose content is processed: a namespace and a local name, or `None` for
-    /// every element of the namespace.
-    process_content: Vec<(NsId, Option<Box<str>>)>,
-    /// The lengths of `ignorable` and `process_content` before each open element.
-    frames: Vec<(usize, usize)>,
+    understood: HashSet<NsId>,
+    /// The ignorable namespaces in scope.
+    ignorable: HashSet<NsId>,
+    /// Namespaces all of whose elements have their content processed (`p:*`).
+    process_all: HashSet<NsId>,
+    /// Elements whose content is processed, by namespace.
+    process_names: HashMap<NsId, HashSet<Box<str>>>,
+    /// What the open elements added to the sets above, outermost first, so that `end`
+    /// takes out exactly what its element put in.
+    added: Vec<Added>,
+    /// The length of `added` before each open element.
+    frames: Vec<usize>,
+}
+
+#[derive(Debug)]
+enum Added {
+    Ignorable(NsId),
+    ProcessAll(NsId),
+    ProcessName(NsId, Box<str>),
 }
 
 impl Processor {
@@ -98,18 +116,18 @@ impl Processor {
     pub fn new(reader: &mut Reader<'_>) -> Self {
         Self {
             mc: reader.intern(NAMESPACE),
-            understood: Vec::new(),
-            ignorable: Vec::new(),
-            process_content: Vec::new(),
+            understood: HashSet::new(),
+            ignorable: HashSet::new(),
+            process_all: HashSet::new(),
+            process_names: HashMap::new(),
+            added: Vec::new(),
             frames: Vec::new(),
         }
     }
 
     /// Declares that the consumer implements a namespace.
     pub fn understand(&mut self, namespace: NsId) {
-        if !self.understood.contains(&namespace) {
-            self.understood.push(namespace);
-        }
+        self.understood.insert(namespace);
     }
 
     /// Takes in the compatibility attributes of a start tag the reader just returned.
@@ -118,29 +136,31 @@ impl Processor {
     /// # Errors
     ///
     /// [`Error::Xml`] for an attribute that names an undeclared prefix or is not a
-    /// Markup Compatibility attribute, and [`Error::Unsupported`] when
-    /// `mc:MustUnderstand` names a namespace the consumer does not understand.
+    /// Markup Compatibility attribute, [`Error::LimitExceeded`] for an attribute that
+    /// lists more than [`Limits::max_mce_names`](crate::Limits::max_mce_names) names,
+    /// and [`Error::Unsupported`] when `mc:MustUnderstand` names a namespace the
+    /// consumer does not understand.
     pub fn start(&mut self, reader: &Reader<'_>, tag: &StartTag<'_>) -> Result<()> {
-        self.frames
-            .push((self.ignorable.len(), self.process_content.len()));
+        self.frames.push(self.added.len());
         for attribute in tag.attributes() {
             if attribute.name().namespace() != Some(self.mc) {
                 continue;
             }
-            let value = attribute.value();
+            let names = names(reader, tag, attribute.value())?;
             match attribute.name().local() {
                 // A prefix that is not declared cannot name any element or attribute, so
                 // the lists of ignorable and preserved names skip it rather than reject
                 // the part. LibreOffice's sw/qa/extras/layout/data/
                 // floattable-center-shift-down.docx lists an undeclared w14.
                 "Ignorable" => {
-                    let declared = value
-                        .split_ascii_whitespace()
-                        .filter_map(|prefix| declared(reader, prefix));
-                    self.ignorable.extend(declared);
+                    for namespace in names.filter_map(|prefix| declared(reader, prefix)) {
+                        if self.ignorable.insert(namespace) {
+                            self.added.push(Added::Ignorable(namespace));
+                        }
+                    }
                 }
                 "MustUnderstand" => {
-                    for prefix in value.split_ascii_whitespace() {
+                    for prefix in names {
                         let namespace = resolve(reader, tag, "MustUnderstand", prefix)?;
                         if !self.is_understood(namespace) {
                             return Err(Error::Unsupported(format!(
@@ -152,18 +172,29 @@ impl Processor {
                     }
                 }
                 "ProcessContent" => {
-                    for name in value.split_ascii_whitespace() {
+                    for name in names {
                         let (prefix, local) = qualified(reader, tag, "ProcessContent", name)?;
-                        if let Some(namespace) = declared(reader, prefix) {
-                            let local = (local != "*").then(|| local.into());
-                            self.process_content.push((namespace, local));
+                        let Some(namespace) = declared(reader, prefix) else {
+                            continue;
+                        };
+                        if local == "*" {
+                            if self.process_all.insert(namespace) {
+                                self.added.push(Added::ProcessAll(namespace));
+                            }
+                        } else if self
+                            .process_names
+                            .entry(namespace)
+                            .or_default()
+                            .insert(local.into())
+                        {
+                            self.added.push(Added::ProcessName(namespace, local.into()));
                         }
                     }
                 }
                 // Office keeps all content it does not understand, so these lists of
                 // what to keep change nothing; their names are only checked.
                 "PreserveElements" | "PreserveAttributes" => {
-                    for name in value.split_ascii_whitespace() {
+                    for name in names {
                         qualified(reader, tag, attribute.name().local(), name)?;
                     }
                 }
@@ -180,9 +211,24 @@ impl Processor {
 
     /// Leaves the element [`start`](Self::start) was last called for.
     pub fn end(&mut self) {
-        if let Some((ignorable, process_content)) = self.frames.pop() {
-            self.ignorable.truncate(ignorable);
-            self.process_content.truncate(process_content);
+        let Some(len) = self.frames.pop() else {
+            return;
+        };
+        while self.added.len() > len {
+            match self.added.pop() {
+                Some(Added::Ignorable(namespace)) => {
+                    self.ignorable.remove(&namespace);
+                }
+                Some(Added::ProcessAll(namespace)) => {
+                    self.process_all.remove(&namespace);
+                }
+                Some(Added::ProcessName(namespace, local)) => {
+                    if let Some(names) = self.process_names.get_mut(&namespace) {
+                        names.remove(&local);
+                    }
+                }
+                None => break,
+            }
         }
     }
 
@@ -196,9 +242,12 @@ impl Processor {
             Disposition::Understood
         } else if !self.ignorable.contains(&namespace) {
             Disposition::NotUnderstood
-        } else if self.process_content.iter().any(|(ns, local)| {
-            *ns == namespace && local.as_deref().is_none_or(|local| local == name.local())
-        }) {
+        } else if self.process_all.contains(&namespace)
+            || self
+                .process_names
+                .get(&namespace)
+                .is_some_and(|names| names.contains(name.local()))
+        {
             Disposition::ProcessContent
         } else {
             Disposition::Ignore
@@ -222,14 +271,16 @@ impl Processor {
     ///
     /// # Errors
     ///
-    /// [`Error::Xml`] when `Requires` is missing, empty, or names an undeclared prefix.
+    /// [`Error::Xml`] when `Requires` is missing, empty, or names an undeclared prefix,
+    /// and [`Error::LimitExceeded`] when it lists more than
+    /// [`Limits::max_mce_names`](crate::Limits::max_mce_names) prefixes.
     pub fn is_selectable(&self, reader: &Reader<'_>, choice: &StartTag<'_>) -> Result<bool> {
         let requires = choice
             .attribute(None, "Requires")
             .filter(|requires| !requires.trim_ascii().is_empty())
             .ok_or_else(|| reader.error(choice.offset(), "mc:Choice lacks Requires"))?;
         let mut selectable = true;
-        for prefix in requires.split_ascii_whitespace() {
+        for prefix in names(reader, choice, requires)? {
             selectable &= self.is_understood(resolve(reader, choice, "Requires", prefix)?);
         }
         Ok(selectable)
@@ -247,6 +298,23 @@ fn resolve(reader: &Reader<'_>, tag: &StartTag<'_>, attribute: &str, prefix: &st
             format!("{attribute} names the undeclared prefix {prefix}"),
         )
     })
+}
+
+/// The names of a Markup Compatibility attribute, at most
+/// [`Limits::max_mce_names`](crate::Limits::max_mce_names) of them.
+fn names<'v>(
+    reader: &Reader<'_>,
+    tag: &StartTag<'_>,
+    value: &'v str,
+) -> Result<std::str::SplitAsciiWhitespace<'v>> {
+    if value
+        .split_ascii_whitespace()
+        .nth(reader.max_mce_names())
+        .is_some()
+    {
+        return Err(reader.limit(Limit::MceNames, tag.offset()));
+    }
+    Ok(value.split_ascii_whitespace())
 }
 
 fn declared(reader: &Reader<'_>, prefix: &str) -> Option<NsId> {

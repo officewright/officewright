@@ -62,6 +62,8 @@ pub enum Limit {
     XmlDepth,
     /// [`Limits::max_xml_attributes`](crate::Limits::max_xml_attributes).
     XmlAttributes,
+    /// [`Limits::max_mce_names`](crate::Limits::max_mce_names).
+    MceNames,
 }
 
 impl Error {
@@ -85,11 +87,17 @@ impl Error {
                 limit,
                 maximum,
                 context,
-            } if limit == Limit::XmlDepth || limit == Limit::XmlAttributes => Self::LimitExceeded {
+            } if matches!(
                 limit,
-                maximum,
-                context: format!("{part}, {context}"),
-            },
+                Limit::XmlDepth | Limit::XmlAttributes | Limit::MceNames
+            ) =>
+            {
+                Self::LimitExceeded {
+                    limit,
+                    maximum,
+                    context: format!("{part}, {context}"),
+                }
+            }
             other => other,
         }
     }
@@ -129,6 +137,7 @@ impl fmt::Display for Limit {
             Self::TotalSize => "total uncompressed size of the parts read in bytes",
             Self::XmlDepth => "xml element nesting depth",
             Self::XmlAttributes => "number of attributes on an xml element",
+            Self::MceNames => "number of names in a markup compatibility attribute",
         })
     }
 }
