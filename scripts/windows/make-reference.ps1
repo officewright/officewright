@@ -18,10 +18,13 @@
     them into tests/corpus/.
 
     The script never touches a Word session the user has open: it refuses to start while
-    any WINWORD process runs. It changes no Word option, adds nothing to Word's recent
-    files, and stops the Word instance it started (and only that one) when it is done or
-    when a document takes longer than -TimeoutSeconds. Existing results are kept unless
-    -Overwrite is given, so an interrupted run can simply be started again.
+    any WINWORD process runs. Do not open Word documents while it runs: Windows may hand
+    them to the invisible Word instance. If that happens, the script stops before the next
+    document, makes its Word instance visible and leaves it running instead of closing
+    it. It changes no Word option, adds nothing to Word's recent files, and stops the Word
+    instance it started (and only that one) when it is done or when a document takes
+    longer than -TimeoutSeconds. Existing results are kept unless -Overwrite is given, so
+    an interrupted run can simply be started again.
 
     Run it from Windows PowerShell 5.1 on the machine that has Word, not from WSL.
 
@@ -145,6 +148,12 @@ function Get-PackageText([string] $Path) {
     return ((Read-ZipEntries $Path) | ForEach-Object { $_.Text }) -join "`n"
 }
 
+function Test-Token([string] $Text, [string] $Value) {
+    # A whole-word match: the user name "Cal" must not match "Calibri".
+    $pattern = '(?<![\p{L}\p{N}])' + [regex]::Escape($Value) + '(?![\p{L}\p{N}])'
+    return [regex]::IsMatch($Text, $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+}
+
 function Find-PersonalData([string] $DocxPath, [string] $PdfPath, $Tokens) {
     # Which parts of the outputs mention a personal token. Returns "part: kind" strings and
     # never the token itself, so the result can go into the JSON file.
@@ -152,7 +161,7 @@ function Find-PersonalData([string] $DocxPath, [string] $PdfPath, $Tokens) {
     $paths = @('\Users\', '/Users/')
     foreach ($entry in (Read-ZipEntries $DocxPath)) {
         foreach ($token in $Tokens) {
-            if ($entry.Text.IndexOf($token.Value, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            if (Test-Token $entry.Text $token.Value) {
                 $found += "$($entry.Name): $($token.Kind)"
             }
         }
@@ -169,18 +178,19 @@ function Find-PersonalData([string] $DocxPath, [string] $PdfPath, $Tokens) {
     foreach ($token in $Tokens) {
         $utf8 = [System.Text.Encoding]::UTF8.GetBytes($token.Value)
         $utf16 = [System.Text.Encoding]::BigEndianUnicode.GetBytes($token.Value)
-        $forms = @(
-            $latin1.GetString($utf8),
+        # Only the UTF-8 spelling is matched as a whole word: UTF-16 text has a NUL or a
+        # byte order mark before every character, and hex strings run on without
+        # boundaries. Both are specific enough to match as they are.
+        $plain = @(
             $latin1.GetString($utf16),
             [System.BitConverter]::ToString($utf8).Replace('-', ''),
             [System.BitConverter]::ToString($utf16).Replace('-', '')
         )
-        foreach ($form in $forms) {
-            if ($pdf.IndexOf($form, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
-                $found += "pdf: $($token.Kind)"
-                break
-            }
+        $hit = Test-Token $pdf $latin1.GetString($utf8)
+        foreach ($form in $plain) {
+            if ($pdf.IndexOf($form, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $hit = $true }
         }
+        if ($hit) { $found += "pdf: $($token.Kind)" }
     }
     foreach ($path in $paths) {
         if ($pdf.IndexOf($path, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
@@ -321,6 +331,7 @@ $wordPid = 0
 $watchdog = $null
 $results = @()
 $aborted = $false
+$userDocuments = $false
 try {
     $word = New-Object -ComObject Word.Application
     $wordProcesses = @(Get-Process -Name WINWORD -ErrorAction SilentlyContinue)
@@ -328,43 +339,10 @@ try {
         throw "expected the one Word process this script started, found $($wordProcesses.Count)"
     }
     $wordPid = $wordProcesses[0].Id
-    $word.Visible = $false
-    $word.DisplayAlerts = $wdAlertsNone
-    $word.AutomationSecurity = $msoAutomationSecurityForceDisable
-    $wordVersion = [string]$word.Version
-    $wordBuild = [string]$word.Build
-    Write-Host "Word $wordVersion, build $wordBuild; Windows $windowsVersion $windowsDisplay; printer: $($word.ActivePrinter)"
-
-    $wordFonts = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-    foreach ($name in $windowsFonts) { [void]$wordFonts.Add($name) }
-    foreach ($name in $word.FontNames) { [void]$wordFonts.Add([string]$name) }
-
-    # Personal strings that must not reach the repository, with a description that may.
-    $tokens = @()
-    $candidates = @(
-        @($env:USERNAME, 'the Windows user name'),
-        @($env:COMPUTERNAME, 'the computer name'),
-        @($env:USERDOMAIN, 'the Windows domain'),
-        @($env:USERPROFILE, 'the user profile path'),
-        @([string]$word.UserName, 'the Office user name'),
-        @([string]$word.UserInitials, 'the Office user initials')
-    )
-    if ($osKey) {
-        foreach ($property in @('RegisteredOwner', 'RegisteredOrganization')) {
-            if ($osKey.PSObject.Properties.Name -contains $property) {
-                $candidates += , @([string]$osKey.$property, "the Windows $property")
-            }
-        }
-    }
-    foreach ($candidate in $candidates) {
-        $value = [string]$candidate[0]
-        if ($value.Trim().Length -ge 3) {
-            $tokens += New-Object PSObject -Property @{ Value = $value.Trim(); Kind = $candidate[1] }
-        }
-    }
 
     # A document that hangs Word (a modal dialog nobody can see) is stopped by a watchdog in
-    # a separate process: COM calls block this one.
+    # a separate process: COM calls block this one. It is armed from here on, so a first-run
+    # dialog during the setup below cannot hang the script either.
     $watchdog = Start-Job -ArgumentList $wordPid, $deadlineFile, $stopFile, $timeoutFile -ScriptBlock {
         param($WordPid, $DeadlineFile, $StopFile, $TimeoutFile)
         while (-not (Test-Path -LiteralPath $StopFile)) {
@@ -386,9 +364,59 @@ try {
             Start-Sleep -Milliseconds 500
         }
     }
+    Set-Deadline $deadlineFile $TimeoutSeconds
+
+    $word.Visible = $false
+    $word.DisplayAlerts = $wdAlertsNone
+    $word.AutomationSecurity = $msoAutomationSecurityForceDisable
+    $wordVersion = [string]$word.Version
+    $wordBuild = [string]$word.Build
+    Write-Host "Word $wordVersion, build $wordBuild; Windows $windowsVersion $windowsDisplay; printer: $($word.ActivePrinter)"
+
+    $wordFonts = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($name in $windowsFonts) { [void]$wordFonts.Add($name) }
+    foreach ($name in $word.FontNames) { [void]$wordFonts.Add([string]$name) }
+
+    # Personal strings that must not reach the repository, with a description that may.
+    # Names are always searched for. Machine names are skipped when the input contains
+    # them, because then they are words of the document rather than something Word added.
+    $candidates = @(
+        @($env:USERNAME, 'the Windows user name', $true),
+        @($env:USERPROFILE, 'the user profile path', $true),
+        @([string]$word.UserName, 'the Office user name', $true),
+        @($env:COMPUTERNAME, 'the computer name', $false),
+        @($env:USERDOMAIN, 'the Windows domain', $false)
+    )
+    $officeUser = Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Office\Common\UserInfo' -ErrorAction SilentlyContinue
+    foreach ($source in @(
+            @($osKey, 'RegisteredOwner', 'the registered owner of Windows'),
+            @($osKey, 'RegisteredOrganization', 'the registered organization of Windows'),
+            @($officeUser, 'UserName', 'the Office user name'),
+            @($officeUser, 'Company', 'the Office company'))) {
+        $key = $source[0]
+        if ($key -and ($key.PSObject.Properties.Name -contains $source[1])) {
+            $candidates += , @([string]$key.($source[1]), $source[2], $true)
+        }
+    }
+    $tokens = @()
+    foreach ($candidate in $candidates) {
+        $value = [string]$candidate[0]
+        # Shorter strings (initials) match too much by chance to be useful.
+        if ($value.Trim().Length -ge 4) {
+            $tokens += New-Object PSObject -Property @{ Value = $value.Trim(); Kind = $candidate[1]; Always = $candidate[2] }
+        }
+    }
+    Set-Deadline $deadlineFile 0
 
     foreach ($entry in $plan) {
         $file = $entry.File
+        if ($word.Documents.Count -gt 0) {
+            # Not ours: the script closes every document it opens. Windows handed a document
+            # the user opened to this instance.
+            $userDocuments = $true
+            Write-Host 'Stopping: a document was opened in the Word instance this script uses. Word stays open and visible; save your work there, close Word, and start the script again.' -ForegroundColor Red
+            break
+        }
         if ($entry.Skip) {
             $results += New-Object PSObject -Property @{ File = $file.Name; Status = 'skipped'; Missing = @() }
             continue
@@ -438,6 +466,9 @@ try {
                 throw 'Word opened the document in Protected View'
             }
             $doc.RemovePersonalInformation = $true
+            # Lay the document out first: w:lastRenderedPageBreak records the pagination at
+            # the time of saving.
+            $doc.Repaginate()
             # SaveAs2: FileName, FileFormat, LockComments, Password, AddToRecentFiles. The
             # compatibility mode is left alone (CompatibilityMode defaults to keeping it).
             $doc.SaveAs2($resaved, $wdFormatXMLDocument, $false, '', $false)
@@ -469,11 +500,9 @@ try {
             $record.pdf_sha256 = Get-Sha256 $pdf
             $record.fonts = @(Get-DocumentFonts $resaved)
             $record.fonts_missing = @(Get-MissingFonts $record.fonts $wordFonts)
-            # A token the input already contains (a name in a third-party document, a word
-            # of the markup) is not something Word added.
+            # A machine name the input already contains is a word of the document.
             $inputText = Get-PackageText $staged
-            $docTokens = @($tokens | Where-Object {
-                    $inputText.IndexOf($_.Value, [StringComparison]::OrdinalIgnoreCase) -lt 0 })
+            $docTokens = @($tokens | Where-Object { $_.Always -or -not (Test-Token $inputText $_.Value) })
             $record.privacy_findings = @(Find-PersonalData $resaved $pdf $docTokens)
             if ($record.privacy_findings.Count -gt 0) {
                 $record.status = 'privacy-failed'
@@ -496,7 +525,9 @@ try {
                 try { $doc.Close($wdDoNotSaveChanges) } catch { }
             }
             Release-Com $doc
-            if (Test-Path -LiteralPath $staged) { Remove-Item -LiteralPath $staged -Force }
+            if (Test-Path -LiteralPath $staged) {
+                Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
+            }
         }
         Write-JsonFile $jsonPath $record
         $color = 'Green'
@@ -515,14 +546,26 @@ try {
         }
     }
 } finally {
+    $leaveWord = $false
     if ($null -ne $word) {
-        try { $word.Quit($wdDoNotSaveChanges) } catch { }
+        try {
+            if ($word.Documents.Count -gt 0) {
+                # Documents the user opened in this instance: quitting would discard them.
+                $leaveWord = $true
+                $word.Visible = $true
+            }
+        } catch { }
+        if (-not $leaveWord) {
+            try { $word.Quit($wdDoNotSaveChanges) } catch { }
+        }
         Release-Com $word
         $word = $null
     }
     [System.GC]::Collect()
     [System.GC]::WaitForPendingFinalizers()
-    if ($wordPid -ne 0) {
+    if ($leaveWord) {
+        Write-Host 'Word was left running because it holds documents this script did not open.' -ForegroundColor Yellow
+    } elseif ($wordPid -ne 0) {
         $process = Get-Process -Id $wordPid -ErrorAction SilentlyContinue
         if ($process -and -not $process.WaitForExit(10000)) {
             Stop-Process -Id $wordPid -Force -ErrorAction SilentlyContinue
@@ -553,5 +596,5 @@ if ($missing.Count -gt 0) {
     Write-Host 'Fonts Word substituted: none'
 }
 Write-Host "Results: $outDir"
-if ($failed.Count -gt 0 -or $notRun -gt 0) { exit 1 }
+if ($failed.Count -gt 0 -or $notRun -gt 0 -or $userDocuments) { exit 1 }
 exit 0
