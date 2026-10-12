@@ -14,10 +14,6 @@ pub const XML_NAMESPACE: &str = "http://www.w3.org/XML/1998/namespace";
 /// The namespace of `xmlns` attributes, which no prefix may be bound to.
 const XMLNS_NAMESPACE: &str = "http://www.w3.org/2000/xmlns/";
 
-/// Entity references are short: the five predefined entities and character references
-/// such as `&#x10FFFF;`. Longer ones are rejected without scanning further.
-const MAX_REFERENCE_LEN: usize = 32;
-
 /// A pull parser over one XML document, created by [`Input::reader`](super::Input::reader).
 ///
 /// It checks well-formedness (XML 1.0) and namespaces (Namespaces in XML 1.0) as it
@@ -91,7 +87,8 @@ impl<'a> Reader<'a> {
     ///
     /// # Errors
     ///
-    /// [`Error::Xml`] where the document is not well-formed, and
+    /// [`Error::Xml`] where the document is not well-formed, [`Error::Unsupported`] for
+    /// an XML declaration that names an encoding other than UTF-8 or UTF-16, and
     /// [`Error::LimitExceeded`] when an element nests deeper than
     /// [`Limits::max_xml_depth`] or has more attributes than
     /// [`Limits::max_xml_attributes`].
@@ -104,8 +101,9 @@ impl<'a> Reader<'a> {
         event
     }
 
-    /// Reads events up to the end tag of the element whose start tag was read last, so
-    /// that the next event is the one after it.
+    /// Reads events up to the end tag of the innermost open element, so that the next
+    /// event is the one after it. Right after a start tag that is the element of that
+    /// tag; after an end tag, its parent. Outside the root element it does nothing.
     ///
     /// # Errors
     ///
@@ -226,7 +224,10 @@ impl<'a> Reader<'a> {
                 .open
                 .last()
                 .map_or("", |open| open.name.qname().as_str());
-            return Err(self.error(self.pos, format!("unexpected end of input inside <{name}>")));
+            return Err(self.error(
+                self.pos,
+                format!("unexpected end of input inside <{}>", short(name)),
+            ));
         }
         if rest.starts_with("</") {
             self.end_tag()
@@ -264,13 +265,16 @@ impl<'a> Reader<'a> {
                 None => {
                     return Err(self.error(
                         self.pos,
-                        format!("unexpected end of input in <{}>", qname.as_str()),
+                        format!("unexpected end of input in <{}>", short(qname.as_str())),
                     ));
                 }
                 Some(_) if !spaced => {
                     return Err(self.error(
                         self.pos,
-                        format!("expected whitespace, '>' or '/>' in <{}>", qname.as_str()),
+                        format!(
+                            "expected whitespace, '>' or '/>' in <{}>",
+                            short(qname.as_str())
+                        ),
                     ));
                 }
                 Some(_) => {
@@ -294,8 +298,8 @@ impl<'a> Reader<'a> {
                 offset,
                 format!(
                     "duplicate attribute {} in <{}>",
-                    name.as_str(),
-                    qname.as_str()
+                    short(name.as_str()),
+                    short(qname.as_str())
                 ),
             ));
         }
@@ -347,8 +351,8 @@ impl<'a> Reader<'a> {
                 offset,
                 format!(
                     "duplicate attribute {} in <{}>",
-                    attribute.name.qname().as_str(),
-                    qname.as_str()
+                    short(attribute.name.qname().as_str()),
+                    short(qname.as_str())
                 ),
             ));
         }
@@ -381,8 +385,9 @@ impl<'a> Reader<'a> {
             return Err(self.error(
                 offset,
                 format!(
-                    "end tag </{}> does not match start tag <{open}>",
-                    qname.as_str()
+                    "end tag </{}> does not match start tag <{}>",
+                    short(qname.as_str()),
+                    short(open)
                 ),
             ));
         }
@@ -491,7 +496,10 @@ impl<'a> Reader<'a> {
         let version = self.pseudo_attribute("version")?;
         let digits = version.strip_prefix("1.").unwrap_or_default();
         if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(self.error(offset, format!("unsupported xml version {version}")));
+            return Err(self.error(
+                offset,
+                format!("unsupported xml version {}", short(version)),
+            ));
         }
         let mut spaced = self.skip_whitespace();
         if spaced && self.rest().starts_with("encoding") {
@@ -504,13 +512,16 @@ impl<'a> Reader<'a> {
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
             if !valid {
-                return Err(self.error(offset, format!("invalid encoding name {encoding}")));
+                return Err(
+                    self.error(offset, format!("invalid encoding name {}", short(encoding)))
+                );
             }
             // The bytes were decoded before reading; a UTF-8 or UTF-16 label is
             // accepted whichever of the two they turned out to be.
             if !encoding.eq_ignore_ascii_case("utf-8") && !encoding.eq_ignore_ascii_case("utf-16") {
                 return Err(Error::Unsupported(format!(
-                    "xml encoding {encoding}; OOXML parts are UTF-8 or UTF-16"
+                    "xml encoding {}; OOXML parts are UTF-8 or UTF-16",
+                    short(encoding)
                 )));
             }
             spaced = self.skip_whitespace();
@@ -520,7 +531,7 @@ impl<'a> Reader<'a> {
             if standalone != "yes" && standalone != "no" {
                 return Err(self.error(
                     offset,
-                    format!("standalone must be yes or no, not {standalone}"),
+                    format!("standalone must be yes or no, not {}", short(standalone)),
                 ));
             }
             self.skip_whitespace();
@@ -598,13 +609,15 @@ impl<'a> Reader<'a> {
     /// The character a reference at `at` stands for, and the reference's length.
     fn reference(&self, at: usize) -> Result<(char, usize)> {
         let body = self.text.get(at + 1..).unwrap_or_default();
+        // Production 66 puts no bound on the digits of a character reference, so neither
+        // does this: the scan reads each byte once, and the number is parsed with checked
+        // arithmetic.
         let len = body
             .bytes()
-            .take(MAX_REFERENCE_LEN + 1)
             .take_while(|&b| b.is_ascii_alphanumeric() || b == b'#')
             .count();
         let name = body.get(..len).unwrap_or_default();
-        if len > MAX_REFERENCE_LEN || body.as_bytes().get(len) != Some(&b';') {
+        if body.as_bytes().get(len) != Some(&b';') {
             return Err(self.error(at, "'&' does not start a reference"));
         }
         let c = match name {
@@ -619,12 +632,15 @@ impl<'a> Reader<'a> {
                 } else if let Some(decimal) = name.strip_prefix('#') {
                     parse_number(decimal, 10)
                 } else {
-                    return Err(self.error(at, format!("undeclared entity &{name};")));
+                    return Err(self.error(at, format!("undeclared entity &{};", short(name))));
                 };
                 code.and_then(char::from_u32)
                     .filter(|&c| is_char(c))
                     .ok_or_else(|| {
-                        self.error(at, format!("&{name}; is not a character XML allows"))
+                        self.error(
+                            at,
+                            format!("&{}; is not a character XML allows", short(name)),
+                        )
                     })?
             }
         };
@@ -686,7 +702,10 @@ impl<'a> Reader<'a> {
             Some(prefix) if uri.is_empty() => {
                 return Err(self.error(
                     offset,
-                    format!("the namespace prefix {prefix} cannot be undeclared"),
+                    format!(
+                        "the namespace prefix {} cannot be undeclared",
+                        short(prefix)
+                    ),
                 ));
             }
             None if uri.is_empty() => {
@@ -694,7 +713,10 @@ impl<'a> Reader<'a> {
                 return Ok(None);
             }
             _ if reserved => {
-                return Err(self.error(offset, format!("{uri} cannot be bound to a prefix")));
+                return Err(self.error(
+                    offset,
+                    format!("{} cannot be bound to a prefix", short(uri)),
+                ));
             }
             _ => {}
         }
@@ -723,8 +745,9 @@ impl<'a> Reader<'a> {
             self.error(
                 offset,
                 format!(
-                    "undeclared namespace prefix {prefix} in <{}>",
-                    element.as_str()
+                    "undeclared namespace prefix {} in <{}>",
+                    short(prefix),
+                    short(element.as_str())
                 ),
             )
         })
@@ -790,6 +813,15 @@ pub(super) fn error_at(text: &str, offset: usize, message: impl Into<String>) ->
         line,
         column,
         message: message.into(),
+    }
+}
+
+/// At most 64 characters of a name or value from the document, with `…` when there are
+/// more, so that an error message names it without copying all of it.
+fn short(text: &str) -> std::borrow::Cow<'_, str> {
+    match text.char_indices().nth(64) {
+        Some((end, _)) => format!("{}…", text.get(..end).unwrap_or_default()).into(),
+        None => text.into(),
     }
 }
 

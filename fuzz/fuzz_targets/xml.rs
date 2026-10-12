@@ -68,8 +68,22 @@ fuzz_target!(|data: &[u8]| {
             if matches!(nodes.first(), Some(Node::Pi(target, _)) if target == "xml") {
                 nodes.remove(0);
             }
-            assert_eq!(ours, nodes);
+            // roxmltree takes an attribute p:xmlns for a declaration of the default
+            // namespace; Namespaces in XML 1.0, section 3, makes only xmlns and xmlns:p
+            // declarations, so officewright reads it as an attribute.
+            let prefixed_xmlns = ours.iter().any(|node| match node {
+                Node::Start { attributes, .. } => attributes
+                    .iter()
+                    .any(|(namespace, local, _)| !namespace.is_empty() && local == "xmlns"),
+                _ => false,
+            });
+            if !prefixed_xmlns {
+                assert_eq!(ours, nodes);
+            }
         }
+        // Namespaces in XML 1.0, section 3: the prefix xml is bound by definition, so
+        // `<xml:a/>` is namespace-well-formed; roxmltree reports an unknown prefix.
+        (Ok(_), Err(roxmltree::Error::UnknownNamespace(prefix, _))) if prefix == "xml" => {}
         (Ok(ours), Err(err)) => {
             panic!("roxmltree rejects ({err}) what officewright reads as {ours:?}")
         }
@@ -79,9 +93,9 @@ fuzz_target!(|data: &[u8]| {
     }
 });
 
-/// Whether officewright rejects the text where roxmltree accepts it, and rightly so:
-/// either a document type declaration, which OOXML parts may not have and roxmltree
-/// accepts when it is empty, or a rule of XML 1.0 that roxmltree does not check.
+/// Whether officewright rejects the text where roxmltree accepts it, and rightly so: a
+/// rule of XML 1.0 or of Namespaces in XML 1.0 that roxmltree does not check. (Both
+/// reject every document type declaration.)
 fn rejected_on_purpose(text: &str, err: &Error) -> bool {
     let Error::Xml {
         line,
@@ -92,9 +106,6 @@ fn rejected_on_purpose(text: &str, err: &Error) -> bool {
     else {
         return false;
     };
-    if message == "document type declarations are not allowed in OOXML parts" {
-        return true;
-    }
     // Production 16: a processing instruction target is followed by whitespace or `?>`;
     // roxmltree reads `<?version="1.0"?>`.
     if message == "expected whitespace after a processing instruction target" {
@@ -110,9 +121,21 @@ fn rejected_on_purpose(text: &str, err: &Error) -> bool {
     if message == "expected a name" && char_at(text, *line, *column) == Some(':') {
         return true;
     }
-    // The Unique Att Spec constraint covers namespace declarations too; roxmltree reads
-    // two `xmlns` attributes on one element.
-    if message.starts_with("duplicate attribute xmlns") {
+    // The Unique Att Spec constraint covers namespace declarations too, and Namespaces
+    // in XML 1.0, section 6.3, attributes with the same expanded name; roxmltree reads
+    // two xmlns, two xmlns:p, and p:xmlns next to q:xmlns for one namespace.
+    let duplicate = message
+        .strip_prefix("duplicate attribute ")
+        .and_then(|rest| rest.split_once(" in <"))
+        .map(|(name, _)| name);
+    if duplicate.is_some_and(|name| {
+        name == "xmlns" || name.starts_with("xmlns:") || name.ends_with(":xmlns")
+    }) {
+        return true;
+    }
+    // Namespaces in XML 1.0, section 3: the prefix xmlns must not be declared;
+    // roxmltree reads `xmlns:xmlns="urn:a"`.
+    if message == "the prefix xmlns cannot be declared" {
         return true;
     }
     // The Legal Character constraint: a character reference names a Char; roxmltree reads
