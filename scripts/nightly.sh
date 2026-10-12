@@ -26,7 +26,7 @@ printf '==> %s\n' "fuzzing (30 min per target)"
 # script if either fails.
 seeds() {
 	case $1 in
-	font_*) echo tests/fonts crates/officewright-font/tests/data ;;
+	font_* | pdf_embed) echo tests/fonts crates/officewright-font/tests/data ;;
 	zip_archive) echo crates/officewright-opc/tests/data ;;
 	*)
 		echo "nightly.sh: no seed directories for fuzz target $1; add them to seeds()" >&2

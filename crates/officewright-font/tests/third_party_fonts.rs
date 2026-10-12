@@ -131,6 +131,16 @@ fn check_subset(font: &FontFace) -> TestResult {
         assert_eq!(reread.advance_width(new), font.advance_width(*original));
     }
     assert!(subset.glyph_count() as usize > sorted.len());
+    // A CFF subset carries its font program as a CID-keyed CFF table: version 1.0
+    // (CFF spec, 6), with the ROS operator (12 30) opening the top DICT (CFF spec, 18).
+    match subset.outline_format() {
+        OutlineFormat::Cff => {
+            let cff = subset.cff_table().ok_or("a CFF subset has a CFF table")?;
+            assert_eq!(cff.get(..2), Some(&[1, 0][..]));
+            assert!(cff.windows(2).any(|w| w == [12, 30]), "no ROS operator");
+        }
+        _ => assert_eq!(subset.cff_table(), None),
+    }
     Ok(())
 }
 

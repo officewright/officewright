@@ -23,7 +23,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::ptr;
 
 use officewright_core::Error;
-use officewright_pdf::{Document, Font, PageSize, Pt, StandardFont};
+use officewright_pdf::{Document, EmbeddingNote, Font, PageSize, Pt, StandardFont};
 
 /// Version of the C ABI described by `officewright.h`, bumped on every breaking
 /// change. Bindings compare it with `ow_abi_version()` when they load the library.
@@ -63,15 +63,54 @@ pub struct OwPdfDocument(Document);
 
 /// A font to draw and measure text with.
 ///
-/// Created by `ow_pdf_font_new_standard` and released by `ow_pdf_font_free`. A document
-/// keeps what it needs from the fonts drawn with it, so a font may be freed before the
-/// document. Used by one thread at a time; may be moved between threads.
-pub struct OwPdfFont(Font);
+/// Created by `ow_pdf_font_new_standard`, `ow_pdf_font_open_path` or
+/// `ow_pdf_font_open_bytes` and released by `ow_pdf_font_free`. A document keeps what it
+/// needs from the fonts drawn with it, so a font may be freed before the document. Used
+/// by one thread at a time; may be moved between threads.
+pub struct OwPdfFont {
+    font: Font,
+    /// The messages of the font's embedding notes, for `ow_pdf_font_note`.
+    notes: Vec<(EmbeddingNote, CString)>,
+}
+
+impl OwPdfFont {
+    fn new(font: Font) -> Self {
+        let notes = font
+            .embedding_notes()
+            .iter()
+            .map(|&note| {
+                let message = CString::new(note.to_string()).unwrap_or_default();
+                (note, message)
+            })
+            .collect();
+        Self { font, notes }
+    }
+}
 
 /// The standard font Helvetica, with WinAnsiEncoding (Latin text), for
 /// `ow_pdf_font_new_standard`. Later versions add more standard fonts; existing values
 /// never change.
 pub const OW_STANDARD_FONT_HELVETICA: i32 = 0;
+
+/// An embedding note this version of the header does not know, from `ow_pdf_font_note`;
+/// its message says what it is. Also the kind a failed `ow_pdf_font_note` returns.
+pub const OW_FONT_NOTE_OTHER: i32 = 0;
+
+/// An embedding note, from `ow_pdf_font_note`: the font's license lets it be used only
+/// to view and print the document ("Preview & Print" embedding).
+pub const OW_FONT_NOTE_PREVIEW_AND_PRINT: i32 = 1;
+
+/// An embedding note: the font's license lets it be used to view, print and edit the
+/// document, but not installed ("Editable" embedding).
+pub const OW_FONT_NOTE_EDITABLE: i32 = 2;
+
+/// An embedding note: the font's license forbids subsetting, so the whole font is
+/// embedded and the file is larger.
+pub const OW_FONT_NOTE_WHOLE_FONT: i32 = 3;
+
+/// An embedding note: the font is a variable font; only its default instance is
+/// embedded. Later versions add notes with new values; existing values never change.
+pub const OW_FONT_NOTE_DEFAULT_INSTANCE: i32 = 4;
 
 /// Returns the C ABI version of the loaded library.
 ///
@@ -141,9 +180,9 @@ pub unsafe extern "C" fn ow_pdf_document_new(out_doc: *mut *mut OwPdfDocument) -
 ///
 /// Margins are 72 pt and baselines 1.2 times the font size apart. `\n`, `\r\n` and `\r`
 /// end a line, a form feed starts a new page, tabs stop every 8 characters, a leading
-/// byte order mark is dropped, and long lines wrap at spaces. Fails with
-/// `OW_STATUS_UNSUPPORTED` for characters the font cannot show (Helvetica: anything
-/// outside WinAnsiEncoding, such as non-Latin text) and with `OW_STATUS_INVALID_ARGUMENT`
+/// byte order mark is dropped, and long lines wrap at spaces, measured with the font's
+/// advance widths. Fails with `OW_STATUS_UNSUPPORTED` for characters the font cannot
+/// show (as `ow_pdf_document_add_text` describes) and with `OW_STATUS_INVALID_ARGUMENT`
 /// for sizes PDF does not allow or a page not larger than its margins.
 ///
 /// # Safety
@@ -208,11 +247,14 @@ pub unsafe extern "C" fn ow_pdf_document_add_page(
 /// the first character starts. The text is not wrapped or clipped;
 /// `ow_pdf_font_text_width` measures it.
 ///
-/// Fails with `OW_STATUS_UNSUPPORTED` if `text` has a character the font cannot show
-/// (Helvetica: anything outside WinAnsiEncoding, such as non-Latin text, and control
-/// characters such as newline and tab), and with `OW_STATUS_INVALID_ARGUMENT` for a page
-/// index out of range, a font size outside 0.01 to 32767 pt, or a position outside
-/// -32767 to 32767 pt. On failure the page is unchanged.
+/// Each character is drawn with its own glyph, without kerning or shaping. Fails with
+/// `OW_STATUS_UNSUPPORTED` if `text` has a character the font cannot show: for Helvetica
+/// anything outside WinAnsiEncoding, such as non-Latin text; for an embedded font a
+/// character it has no glyph for, or one of a script that needs shaping or right-to-left
+/// layout (see `ow_pdf_font_open_path`); for both, control characters such as newline
+/// and tab. Fails with `OW_STATUS_INVALID_ARGUMENT` for a page index out of range, a font
+/// size outside 0.01 to 32767 pt, or a position outside -32767 to 32767 pt. On failure
+/// the page is unchanged.
 ///
 /// # Safety
 ///
@@ -350,9 +392,148 @@ pub unsafe extern "C" fn ow_pdf_font_new_standard(
                 });
             }
         };
-        let font = Box::into_raw(Box::new(OwPdfFont(Font::standard(standard))));
+        let font = Box::into_raw(Box::new(OwPdfFont::new(Font::standard(standard))));
         // SAFETY: as above.
         unsafe { put(out_font, "out_font", font) }
+    })
+}
+
+/// Opens face `face_index` of a TrueType or OpenType font file or collection at `path`
+/// (UTF-8) for embedding; use 0 for a file with one font. The file is read once; it may
+/// change or go away afterwards.
+///
+/// The fonts the documents drawn with it embed are reduced to the glyphs they use. It
+/// shows the Latin, Greek, Cyrillic, Armenian, Georgian, Han, Hiragana and Katakana
+/// scripts, precomposed Hangul syllables, and the punctuation, digits and symbols every
+/// script shares, one glyph per character; text in scripts that need shaping or
+/// right-to-left layout is refused. Restrictions in the font's license that do not stop
+/// embedding are listed by `ow_pdf_font_note_count` and `ow_pdf_font_note`.
+///
+/// Fails with `OW_STATUS_IO` if the file cannot be read, `OW_STATUS_INVALID_ARGUMENT` if
+/// it is not a font, has no such face or is damaged, and `OW_STATUS_UNSUPPORTED` if its
+/// license forbids embedding or its outlines cannot be embedded (CFF2). On success
+/// `*out_font` is a new handle for `ow_pdf_font_free`.
+///
+/// # Safety
+///
+/// `path` must be NULL or a NUL-terminated string; `out_font` must be NULL or valid for
+/// writing a pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_pdf_font_open_path(
+    path: *const c_char,
+    face_index: u32,
+    out_font: *mut *mut OwPdfFont,
+) -> OwStatus {
+    guard(|| {
+        // SAFETY: the caller passes NULL or a pointer valid for writes.
+        unsafe { put(out_font, "out_font", ptr::null_mut()) }?;
+        // SAFETY: the caller passes NULL or a NUL-terminated string.
+        let path = unsafe { str_arg(path, "path") }?;
+        let font = Font::from_file(path, face_index)?;
+        let font = Box::into_raw(Box::new(OwPdfFont::new(font)));
+        // SAFETY: as above.
+        unsafe { put(out_font, "out_font", font) }
+    })
+}
+
+/// Opens face `face_index` of a TrueType or OpenType font or font collection in the
+/// `len` bytes at `data`, as `ow_pdf_font_open_path` opens a file. The bytes are copied;
+/// the caller keeps its buffer.
+///
+/// Fails as `ow_pdf_font_open_path`, apart from reading the file.
+///
+/// # Safety
+///
+/// `data` must be NULL or valid for reading `len` bytes; `out_font` must be NULL or valid
+/// for writing a pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_pdf_font_open_bytes(
+    data: *const u8,
+    len: usize,
+    face_index: u32,
+    out_font: *mut *mut OwPdfFont,
+) -> OwStatus {
+    guard(|| {
+        // SAFETY: the caller passes NULL or a pointer valid for writes.
+        unsafe { put(out_font, "out_font", ptr::null_mut()) }?;
+        if data.is_null() {
+            return Err(Failure::null("data"));
+        }
+        // SAFETY: not NULL, and the caller guarantees `len` readable bytes.
+        let bytes = unsafe { std::slice::from_raw_parts(data, len) };
+        let font = Font::from_bytes(bytes, face_index)?;
+        let font = Box::into_raw(Box::new(OwPdfFont::new(font)));
+        // SAFETY: as above.
+        unsafe { put(out_font, "out_font", font) }
+    })
+}
+
+/// Returns in `*out_count` the number of embedding notes of `font`: what its user should
+/// know about the font's license and format, such as a license that forbids subsetting.
+/// None of them stops the font from being used. A standard font has none.
+///
+/// # Safety
+///
+/// `font` must be NULL or a live handle; `out_count` must be NULL or valid for writing a
+/// `size_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_pdf_font_note_count(
+    font: *const OwPdfFont,
+    out_count: *mut usize,
+) -> OwStatus {
+    guard(|| {
+        // SAFETY: the caller passes NULL or a pointer valid for writes.
+        unsafe { put(out_count, "out_count", 0) }?;
+        // SAFETY: the caller passes NULL or a live handle.
+        let font = unsafe { font_handle(font) }?;
+        // SAFETY: as above.
+        unsafe { put(out_count, "out_count", font.notes.len()) }
+    })
+}
+
+/// Returns embedding note `index` (counting from 0) of `font`: its kind, an
+/// `OW_FONT_NOTE_*` value, in `*out_kind`, and a sentence that describes it in
+/// `*out_message`, UTF-8 and owned by the font: it stays valid until the font is freed.
+///
+/// Fails with `OW_STATUS_INVALID_ARGUMENT` if `index` is not below the count
+/// `ow_pdf_font_note_count` gives.
+///
+/// # Safety
+///
+/// `font` must be NULL or a live handle; `out_kind` and `out_message` must each be NULL
+/// or valid for writing.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_pdf_font_note(
+    font: *const OwPdfFont,
+    index: usize,
+    out_kind: *mut i32,
+    out_message: *mut *const c_char,
+) -> OwStatus {
+    guard(|| {
+        // SAFETY: the caller passes NULL or pointers valid for writes.
+        unsafe { put(out_kind, "out_kind", OW_FONT_NOTE_OTHER) }?;
+        // SAFETY: as above.
+        unsafe { put(out_message, "out_message", ptr::null()) }?;
+        // SAFETY: the caller passes NULL or a live handle.
+        let font = unsafe { font_handle(font) }?;
+        let (note, message) = font.notes.get(index).ok_or_else(|| Failure {
+            status: OwStatus::InvalidArgument,
+            message: format!(
+                "note index {index} is out of range for a font with {} notes",
+                font.notes.len()
+            ),
+        })?;
+        let kind = match note {
+            EmbeddingNote::PreviewAndPrint => OW_FONT_NOTE_PREVIEW_AND_PRINT,
+            EmbeddingNote::Editable => OW_FONT_NOTE_EDITABLE,
+            EmbeddingNote::WholeFont => OW_FONT_NOTE_WHOLE_FONT,
+            EmbeddingNote::DefaultInstance => OW_FONT_NOTE_DEFAULT_INSTANCE,
+            _ => OW_FONT_NOTE_OTHER,
+        };
+        // SAFETY: both pointers were checked above.
+        unsafe { put(out_kind, "out_kind", kind) }?;
+        // SAFETY: as above. The message lives as long as the handle.
+        unsafe { put(out_message, "out_message", message.as_ptr()) }
     })
 }
 
@@ -532,11 +713,19 @@ unsafe fn doc_ref<'a>(doc: *const OwPdfDocument) -> Result<&'a Document, Failure
 /// # Safety
 ///
 /// `font` must be NULL or a live handle.
+unsafe fn font_handle<'a>(font: *const OwPdfFont) -> Result<&'a OwPdfFont, Failure> {
+    // SAFETY: the caller guarantees a live handle if not NULL.
+    unsafe { font.as_ref() }.ok_or_else(|| Failure::null("font"))
+}
+
+/// Borrows the font of a font handle.
+///
+/// # Safety
+///
+/// `font` must be NULL or a live handle.
 unsafe fn font_ref<'a>(font: *const OwPdfFont) -> Result<&'a Font, Failure> {
     // SAFETY: the caller guarantees a live handle if not NULL.
-    unsafe { font.as_ref() }
-        .map(|font| &font.0)
-        .ok_or_else(|| Failure::null("font"))
+    unsafe { font_handle(font) }.map(|font| &font.font)
 }
 
 /// Borrows a document handle mutably.
@@ -890,5 +1079,220 @@ mod tests {
     fn keeps_messages_with_nul_bytes() {
         set_last_error("a\0b");
         assert_eq!(last_error(), "a\u{FFFD}b");
+    }
+
+    /// officewright-font's minimal test font, small enough for Miri.
+    fn minimal_font_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../officewright-font/tests/data/minimal.ttf")
+    }
+
+    /// The minimal font with `fsType` in its `OS/2` table (version 4) set to `fs_type`.
+    fn minimal_font_with_fs_type(fs_type: u16) -> Vec<u8> {
+        let mut font = fs::read(minimal_font_path()).unwrap();
+        let tables = usize::from(u16::from_be_bytes([font[4], font[5]]));
+        let record = (0..tables)
+            .map(|i| 12 + 16 * i)
+            .find(|&record| &font[record..record + 4] == b"OS/2")
+            .unwrap();
+        let os2 = u32::from_be_bytes(font[record + 8..record + 12].try_into().unwrap()) as usize;
+        font[os2 + 8..os2 + 10].copy_from_slice(&fs_type.to_be_bytes());
+        font
+    }
+
+    fn open_bytes(data: &[u8]) -> (OwStatus, *mut OwPdfFont) {
+        let mut font: *mut OwPdfFont = placeholder();
+        // SAFETY: `data` is valid for its length; a valid out-pointer.
+        let status = unsafe { ow_pdf_font_open_bytes(data.as_ptr(), data.len(), 0, &mut font) };
+        (status, font)
+    }
+
+    #[test]
+    fn embeds_fonts_opened_from_a_path_or_from_bytes() {
+        let path = c(minimal_font_path().to_str().unwrap());
+        let mut from_path = ptr::null_mut();
+        // SAFETY: a NUL-terminated path and a valid out-pointer.
+        let status = unsafe { ow_pdf_font_open_path(path.as_ptr(), 0, &mut from_path) };
+        assert_eq!(status, OwStatus::Ok, "{}", last_error());
+        let (status, from_bytes) = open_bytes(&fs::read(minimal_font_path()).unwrap());
+        assert_eq!(status, OwStatus::Ok, "{}", last_error());
+
+        let mut doc = ptr::null_mut();
+        let mut page = 0;
+        let mut width = 0.0;
+        let mut notes = 7;
+        let text = c("AÁ A");
+        // SAFETY: live handles, NUL-terminated strings and valid out-pointers; each
+        // handle is freed once, the fonts before the document that uses them.
+        unsafe {
+            assert_eq!(ow_pdf_document_new(&mut doc), OwStatus::Ok);
+            assert_eq!(
+                ow_pdf_document_add_page(doc, 595.0, 842.0, &mut page),
+                OwStatus::Ok
+            );
+            for font in [from_path, from_bytes] {
+                assert_eq!(
+                    ow_pdf_document_add_text(doc, page, 72.0, 700.0, font, 12.0, text.as_ptr()),
+                    OwStatus::Ok
+                );
+            }
+            // A is 600 and the space 250 font units of 1000.
+            assert_eq!(
+                ow_pdf_font_text_width(from_bytes, c("A A").as_ptr(), 10.0, &mut width),
+                OwStatus::Ok
+            );
+            assert_eq!(ow_pdf_font_note_count(from_path, &mut notes), OwStatus::Ok);
+            ow_pdf_font_free(from_path);
+            ow_pdf_font_free(from_bytes);
+            let pdf = String::from_utf8_lossy(&save_bytes(doc)).into_owned();
+            ow_pdf_document_free(doc);
+            // Both handles are the same font, embedded once.
+            assert_eq!(pdf.matches("/Subtype /Type0").count(), 1, "{pdf}");
+            assert!(pdf.contains("/FontFile2"));
+        }
+        assert_eq!(width, 14.5);
+        assert_eq!(notes, 0);
+    }
+
+    #[test]
+    fn reports_fonts_it_cannot_open() {
+        let (status, font) = open_bytes(b"not a font");
+        assert_eq!(status, OwStatus::InvalidArgument);
+        assert!(font.is_null());
+        assert!(
+            last_error().starts_with("cannot use the font data: data is not a TrueType"),
+            "{}",
+            last_error()
+        );
+        let (status, _) = open_bytes(&minimal_font_with_fs_type(0x0002));
+        assert_eq!(status, OwStatus::Unsupported);
+        assert_eq!(
+            last_error(),
+            "the license of font OfficewrightTest-Regular does not allow embedding it"
+        );
+
+        let path = std::env::temp_dir().join("officewright-missing-dir/font.ttf");
+        let c_path = c(path.to_str().unwrap());
+        let mut font: *mut OwPdfFont = placeholder();
+        // SAFETY: NUL-terminated strings, valid out-pointers and NULL where tested.
+        unsafe {
+            assert_eq!(
+                ow_pdf_font_open_path(c_path.as_ptr(), 0, &mut font),
+                OwStatus::Io
+            );
+            assert!(font.is_null());
+            assert!(
+                last_error().starts_with(&format!("cannot read {}: ", path.display())),
+                "{}",
+                last_error()
+            );
+            assert_eq!(
+                ow_pdf_font_open_path(ptr::null(), 0, &mut font),
+                OwStatus::NullArgument
+            );
+            assert_eq!(last_error(), "path is null");
+            assert_eq!(
+                ow_pdf_font_open_bytes(ptr::null(), 0, 0, &mut font),
+                OwStatus::NullArgument
+            );
+            assert_eq!(last_error(), "data is null");
+            assert_eq!(
+                ow_pdf_font_open_path(c_path.as_ptr(), 0, ptr::null_mut()),
+                OwStatus::NullArgument
+            );
+            assert_eq!(last_error(), "out_font is null");
+        }
+    }
+
+    #[test]
+    fn lists_the_embedding_notes_of_a_font() {
+        let (status, font) = open_bytes(&minimal_font_with_fs_type(0x0104));
+        assert_eq!(status, OwStatus::Ok, "{}", last_error());
+        let mut count = 0;
+        let mut kind = -1;
+        let mut message: *const c_char = ptr::null();
+        // SAFETY: a live handle and valid out-pointers; messages are read while the
+        // handle lives; NULL where tested.
+        unsafe {
+            assert_eq!(ow_pdf_font_note_count(font, &mut count), OwStatus::Ok);
+            assert_eq!(count, 2);
+            let mut notes = Vec::new();
+            for index in 0..count {
+                assert_eq!(
+                    ow_pdf_font_note(font, index, &mut kind, &mut message),
+                    OwStatus::Ok
+                );
+                notes.push((kind, CStr::from_ptr(message).to_str().unwrap().to_owned()));
+            }
+            assert_eq!(
+                notes,
+                [
+                    (
+                        OW_FONT_NOTE_PREVIEW_AND_PRINT,
+                        "its license allows the embedded font only for viewing and printing \
+                         the document"
+                            .to_owned()
+                    ),
+                    (
+                        OW_FONT_NOTE_WHOLE_FONT,
+                        "its license forbids subsetting, so the whole font is embedded".to_owned()
+                    ),
+                ]
+            );
+            assert_eq!(
+                ow_pdf_font_note(font, 2, &mut kind, &mut message),
+                OwStatus::InvalidArgument
+            );
+            assert_eq!(
+                last_error(),
+                "note index 2 is out of range for a font with 2 notes"
+            );
+            assert_eq!(kind, OW_FONT_NOTE_OTHER);
+            assert!(message.is_null());
+            assert_eq!(
+                ow_pdf_font_note(font, 0, ptr::null_mut(), &mut message),
+                OwStatus::NullArgument
+            );
+            assert_eq!(
+                ow_pdf_font_note_count(ptr::null(), &mut count),
+                OwStatus::NullArgument
+            );
+            assert_eq!(count, 0);
+            ow_pdf_font_free(font);
+
+            // A standard font has no notes.
+            let helvetica = helvetica();
+            assert_eq!(ow_pdf_font_note_count(helvetica, &mut count), OwStatus::Ok);
+            assert_eq!(count, 0);
+            ow_pdf_font_free(helvetica);
+        }
+    }
+
+    #[test]
+    fn reports_text_an_embedded_font_cannot_show() {
+        let (status, font) = open_bytes(&fs::read(minimal_font_path()).unwrap());
+        assert_eq!(status, OwStatus::Ok);
+        let doc = hello();
+        // SAFETY: live handles and NUL-terminated strings, each handle freed once.
+        unsafe {
+            for (text, message) in [
+                (
+                    "Aש",
+                    "character U+05E9 'ש' at byte 1 is in the Hebrew script, which needs \
+                     shaping or right-to-left layout; that is not supported yet",
+                ),
+                (
+                    "AЖ",
+                    "font OfficewrightTest-Regular has no glyph for character U+0416 'Ж' at byte 1",
+                ),
+            ] {
+                let text = c(text);
+                let status = ow_pdf_document_add_text(doc, 0, 0.0, 0.0, font, 10.0, text.as_ptr());
+                assert_eq!(status, OwStatus::Unsupported);
+                assert_eq!(last_error(), message);
+            }
+            ow_pdf_font_free(font);
+            ow_pdf_document_free(doc);
+        }
     }
 }
