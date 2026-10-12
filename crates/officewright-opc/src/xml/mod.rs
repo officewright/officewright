@@ -5,7 +5,8 @@
 //! name resolved to a namespace.
 //!
 //! The reader implements the XML that ECMA-376 Part 2 allows in a package: XML 1.0 with
-//! namespaces, in UTF-8 or UTF-16, without document type declarations. Without them, no
+//! namespaces, in UTF-8 or UTF-16 (and parts labelled ASCII, read as UTF-8), without
+//! document type declarations. Without them, no
 //! entity can be declared, so there is no entity expansion and nothing is ever loaded
 //! from outside the document.
 //!
