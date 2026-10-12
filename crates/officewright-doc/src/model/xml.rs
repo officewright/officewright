@@ -140,6 +140,37 @@ impl<'d> Element<'d> {
             .map(|a| &*a.value)
     }
 
+    /// The local name, if the element is in one of `namespaces`.
+    pub(crate) fn local_in(self, namespaces: &[Option<Sym>]) -> Option<&'d str> {
+        let (name, _) = self.start()?;
+        namespaces
+            .contains(&name.namespace)
+            .then(|| local(self.strings.get(name.qname)))
+    }
+
+    /// The child elements, with each `mc:AlternateContent` replaced by the children of
+    /// its `mc:Fallback`. Property elements are read through the fallback: Office puts
+    /// its extensions (w14, w15) in the choice, and the fallback is the branch a reader
+    /// that does not implement them takes.
+    pub(crate) fn children_through_fallback(self, mc: Option<Sym>) -> Vec<Element<'d>> {
+        let mut out = Vec::new();
+        let mut pending: Vec<Element<'d>> = self.children().collect();
+        pending.reverse();
+        while let Some(child) = pending.pop() {
+            if mc.is_some() && child.is(&[mc], "AlternateContent") {
+                let fallback = child.children().find(|branch| branch.is(&[mc], "Fallback"));
+                if let Some(fallback) = fallback {
+                    let mut inner: Vec<Element<'d>> = fallback.children().collect();
+                    inner.reverse();
+                    pending.extend(inner);
+                }
+            } else {
+                out.push(child);
+            }
+        }
+        out
+    }
+
     /// The child elements, each with everything in it.
     pub(crate) fn children(self) -> impl Iterator<Item = Element<'d>> + 'd {
         let (tokens, strings) = (self.tokens, self.strings);

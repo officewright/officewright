@@ -14,8 +14,10 @@ use officewright_opc::mce::{Disposition, Processor};
 use officewright_opc::xml::{Event, Input, NsId, Reader, StartTag};
 
 use super::capture::{Budget, Capture};
-use super::{Names, R, R_STRICT, W, W_STRICT, section, shorten};
+use super::styles::check_run_properties;
+use super::{R, R_STRICT, W, W_STRICT, section, shorten};
 use crate::diagnostic::{DiagnosticKind, Diagnostics};
+use crate::model::Names;
 use crate::model::xml::{Span, Sym};
 use crate::model::{
     Break, BreakClear, BreakKind, Conformance, ControlLevel, Document, FieldCharKind,
@@ -134,7 +136,7 @@ pub(super) fn read(
         mce.understand(*namespace);
     }
     let mc = reader.intern(officewright_opc::mce::NAMESPACE);
-    let names = Names::new(&mut document.strings);
+    let names = document.names;
     let mut reading = Reading {
         c: Capture::new(document, part_name, input.as_str(), diagnostics, budget),
         part,
@@ -789,6 +791,13 @@ impl Reading<'_, '_, '_> {
             {
                 *table = columns;
             }
+        }
+        if matches!(
+            self.c.document.node(node).map(|node| &node.kind),
+            Some(Kind::Run { .. })
+        ) {
+            let names = self.names;
+            check_run_properties(&mut self.c, &names, span, &[], offset);
         }
         if let Some(node) = self.c.document.nodes.get_mut(node as usize) {
             node.properties.push(span);

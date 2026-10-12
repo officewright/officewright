@@ -18,6 +18,12 @@ fuzz_target!(|data: &[u8]| {
     };
     let _ = document.text();
     let _ = document.diagnostics();
+    let styles = document.styles();
+    let _ = styles.default_run_properties();
+    for style in styles.iter() {
+        let _ = (style.name(), style.based_on(), style.run_properties());
+        assert!(styles.get(style.id()).is_some());
+    }
     let mut blocks: Vec<Block<'_>> = document.sections().flat_map(|s| s.blocks()).collect();
     while let Some(block) = blocks.pop() {
         match block {
@@ -28,6 +34,7 @@ fuzz_target!(|data: &[u8]| {
                 while let Some(inline) = inlines.pop() {
                     match inline {
                         Inline::Run(run) => {
+                            let _ = run.properties();
                             for item in run.content() {
                                 if let RunContent::Other(opaque) = item {
                                     check(opaque);

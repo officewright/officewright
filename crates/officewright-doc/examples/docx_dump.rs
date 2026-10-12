@@ -38,6 +38,13 @@ fn main() -> ExitCode {
 
 fn dump(document: &Document) {
     println!("{:?}, {:?}", document.kind(), document.conformance());
+    let styles = document.styles();
+    let defaults = styles.default_run_properties();
+    println!(
+        "{} styles; default font size {:?}",
+        styles.iter().len(),
+        defaults.size().map(|size| size.0)
+    );
     for (n, section) in document.sections().enumerate() {
         let properties = section.properties();
         let size = properties
