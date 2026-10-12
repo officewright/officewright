@@ -91,8 +91,8 @@
 #define OW_RESOLUTION_METRIC_COMPATIBLE 5
 
 /**
- * A common font of the same kind replaces the requested family, and text lays out
- * differently.
+ * A font of similar design, such as Caladea for Cambria, or a common font of the same
+ * kind replaces the requested family, and text lays out differently.
  */
 #define OW_RESOLUTION_FALLBACK 6
 
@@ -581,11 +581,11 @@ enum OwStatus ow_font_resolver_new(const struct OwFontBook *book,
  * font from `ow_pdf_font_open_path`.
  *
  * `bold` and `italic` are 0 or 1. When the family is not in the book, the resolver
- * takes its metric-compatible substitute (Carlito for Calibri, Caladea for Cambria,
- * Liberation for Arial, Times New Roman and Courier New) or a common font of the same
- * kind; a style the face lacks is synthetic. Every such substitution is added to the
- * resolver's report (`ow_font_resolver_substitution`); synthetic styles are reported but
- * not drawn yet.
+ * takes its metric-compatible substitute (Carlito for Calibri, Liberation for Arial,
+ * Times New Roman and Courier New), else a font of similar design (Caladea for
+ * Cambria, which lays out differently) or a common font of the same kind; a style the
+ * face lacks is synthetic. Every such substitution is added to the resolver's report
+ * (`ow_font_resolver_substitution`); synthetic styles are reported but not drawn yet.
  *
  * Fails with `OW_STATUS_UNSUPPORTED` if no font could be found or the chosen font's
  * license forbids embedding, `OW_STATUS_INVALID_ARGUMENT` if `bold` or `italic` is not

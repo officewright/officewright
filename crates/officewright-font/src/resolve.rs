@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::book::{FaceId, FaceInfo, FontBook, FontOrigin, name_key};
 
 /// A generic kind of typeface, used to pick a fallback when neither the requested
-/// family nor a metric-compatible substitute is available.
+/// family nor a substitute for it is available.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum GenericFamily {
@@ -61,8 +61,8 @@ impl FontRequest {
     }
 
     /// Says what kind of typeface the family is, for choosing a fallback. Without it,
-    /// the fallback is sans-serif, except for the families with a metric-compatible
-    /// substitute, whose kind is known.
+    /// the fallback is sans-serif, except for the families whose kind is known: those
+    /// with a substitute and the common fonts the fallbacks are chosen from.
     pub fn generic(mut self, generic: GenericFamily) -> Self {
         self.generic = Some(generic);
         self
@@ -117,8 +117,8 @@ pub enum ResolutionKind {
     /// replaces it, so text lays out the same.
     MetricCompatible,
     /// Neither the requested family nor a metric-compatible substitute is available; a
-    /// common font of the same generic family replaces it, and text lays out
-    /// differently.
+    /// font of similar design (Caladea for Cambria) or a common font of the same
+    /// generic family replaces it, and text lays out differently.
     Fallback,
     /// No font could be found at all.
     Missing,
@@ -142,6 +142,7 @@ pub struct Resolution {
     other_name: Option<OtherName>,
     instance: Option<String>,
     uninstalled_substitute: Option<String>,
+    similar_design: bool,
     synthetic_bold: bool,
     synthetic_italic: bool,
 }
@@ -243,6 +244,10 @@ impl fmt::Display for Resolution {
                 self.instance.as_deref().unwrap_or_default()
             )?,
             ResolutionKind::MetricCompatible => f.write_str(" (metric-compatible substitute)")?,
+            ResolutionKind::Fallback if self.similar_design => f.write_str(
+                " (fallback of similar design; it is not metric-compatible, so text may lay \
+                 out differently than in Word)",
+            )?,
             ResolutionKind::Fallback => match &self.uninstalled_substitute {
                 Some(substitute) => write!(
                     f,
@@ -299,15 +304,28 @@ const WINDOWS_ALIASES: [(&str, &str); 23] = [
 /// <https://github.com/googlefonts/carlito>), the Liberation README ("metric
 /// compatibility as usage of Times New Roman, Arial, Courier New",
 /// <https://github.com/liberationfonts/liberation-fonts>), and fontconfig's
-/// `conf.d/30-metric-aliases.conf`, which lists all five pairs. The generic family is
-/// the fallback when neither font is installed and the request does not give one.
-const METRIC_COMPATIBLE: [(&str, &str, GenericFamily); 5] = [
+/// `conf.d/30-metric-aliases.conf`. The generic family is the fallback when neither
+/// font is installed and the request does not give one.
+///
+/// fontconfig also pairs Cambria with Caladea, wrongly for the Cambria Word uses. The
+/// Word reference renders in `tests/corpus/reference/word-rules/E-line-fonts`
+/// (`geometry.json`) show Caladea's advance widths differing from Cambria's by up to
+/// 0.19 em (Cambria's digits are wider), against at most 0.003 em between Carlito and
+/// Calibri, and a line of 11 pt text 14.30 pt high with Caladea's metrics where Word
+/// sets Cambria's 12.90 pt apart. Caladea is in [`SIMILAR_DESIGNS`] instead.
+const METRIC_COMPATIBLE: [(&str, &str, GenericFamily); 4] = [
     ("calibri", "Carlito", GenericFamily::SansSerif),
-    ("cambria", "Caladea", GenericFamily::Serif),
     ("arial", "Liberation Sans", GenericFamily::SansSerif),
     ("times new roman", "Liberation Serif", GenericFamily::Serif),
     ("courier new", "Liberation Mono", GenericFamily::Monospace),
 ];
+
+/// Families of Microsoft fonts and free fonts of similar design that are not
+/// metric-compatible: the free font is the closest stand-in, but text lays out
+/// differently, so it is reported as a fallback. See [`METRIC_COMPATIBLE`] for why
+/// Caladea is here.
+const SIMILAR_DESIGNS: [(&str, &str, GenericFamily); 1] =
+    [("cambria", "Caladea", GenericFamily::Serif)];
 
 /// Fallback families for each generic family, in order of preference: the Microsoft
 /// font, its metric-compatible substitutes, then fonts common on macOS and Linux. A
@@ -374,9 +392,11 @@ impl FontBook {
     ///    (6) is the requested one.
     /// 4. A named instance of a variable font, such as "Bahnschrift SemiBold". Only the
     ///    default instance of a variable font is used yet; the resolution says so.
-    /// 5. The metric-compatible substitute: Carlito for Calibri, Caladea for Cambria,
-    ///    Liberation Sans, Serif and Mono for Arial, Times New Roman and Courier New.
-    /// 6. A common font of the request's generic family, or of the family's own if it
+    /// 5. The metric-compatible substitute: Carlito for Calibri, Liberation Sans, Serif
+    ///    and Mono for Arial, Times New Roman and Courier New.
+    /// 6. A font of similar design that lays out differently: Caladea for Cambria. It
+    ///    is reported as a fallback.
+    /// 7. A common font of the request's generic family, or of the family's own if it
     ///    is a known one, else sans-serif.
     ///
     /// Among the faces of the family, the one closest to the requested style wins;
@@ -392,6 +412,7 @@ impl FontBook {
                 other_name: None,
                 instance: None,
                 uninstalled_substitute: None,
+                similar_design: false,
                 synthetic_bold: face
                     .is_some_and(|(_, info)| request.bold && info.weight() < BOLD_WEIGHT),
                 synthetic_italic: face.is_some_and(|(_, info)| request.italic && !info.is_italic()),
@@ -432,9 +453,16 @@ impl FontBook {
         if let Some(face) = substitute.and_then(|substitute| self.find_any(substitute, request)) {
             return resolution(Some(face), ResolutionKind::MetricCompatible);
         }
+        let similar_design = SIMILAR_DESIGNS.iter().find(|(name, _, _)| *name == family);
+        if let Some(face) = similar_design.and_then(|(_, name, _)| self.find_any(name, request)) {
+            return Resolution {
+                similar_design: true,
+                ..resolution(Some(face), ResolutionKind::Fallback)
+            };
+        }
         let generic = request
             .generic
-            .or(known.map(|(_, _, generic)| *generic))
+            .or(known.or(similar_design).map(|(_, _, generic)| *generic))
             .or_else(|| {
                 FALLBACKS
                     .iter()
@@ -941,12 +969,42 @@ mod tests {
             Some("Liberation Serif"),
             "Cambria is a serif"
         );
+        assert_eq!(resolution.uninstalled_substitute(), None);
+        assert_eq!(
+            resolution.to_string(),
+            "\"Cambria\" → \"Liberation Serif\" (fallback; not installed)"
+        );
         let resolution = book.resolve(&FontRequest::new("Garamond").generic(GenericFamily::Serif));
         assert_eq!(resolution.family(), Some("Liberation Serif"));
         assert_eq!(
             resolution.to_string(),
             "\"Garamond\" → \"Liberation Serif\" (fallback; not installed)"
         );
+    }
+
+    #[test]
+    fn a_font_of_similar_design_is_a_fallback() {
+        // Caladea looks like Cambria but does not lay out like it: see METRIC_COMPATIBLE.
+        let book = book(&[
+            system(TestFont::new("Liberation Serif")),
+            system(TestFont::new("Caladea")),
+            system(TestFont::new("Caladea").style("Bold", 700, false)),
+        ]);
+        let resolution = book.resolve(&FontRequest::new("Cambria").bold(true));
+        assert_eq!(resolution.family(), Some("Caladea"));
+        assert_eq!(resolution.kind(), ResolutionKind::Fallback);
+        assert!(!resolution.synthetic_bold());
+        assert!(resolution.is_substitution());
+        assert_eq!(resolution.uninstalled_substitute(), None);
+        assert_eq!(
+            resolution.to_string(),
+            "\"Cambria\" bold → \"Caladea\" (fallback of similar design; it is not \
+             metric-compatible, so text may lay out differently than in Word)"
+        );
+        // The generic family of the request does not outrank the closer design.
+        let resolution =
+            book.resolve(&FontRequest::new("cambria").generic(GenericFamily::SansSerif));
+        assert_eq!(resolution.family(), Some("Caladea"));
     }
 
     #[test]

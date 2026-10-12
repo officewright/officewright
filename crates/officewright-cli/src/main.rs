@@ -32,9 +32,10 @@ fn cli() -> Command {
                      --font takes a font file, or a family name looked up among the system \
                      fonts and the fonts in each --font-dir, as Word looks up fonts. When the \
                      family is not there, its metric-compatible substitute (Carlito for \
-                     Calibri, Liberation Sans for Arial, ...) or a common font of the same \
-                     kind is used. Substitutions and what the font's license restricts are \
-                     printed as warnings.",
+                     Calibri, Liberation Sans for Arial, ...) is used, else a font of similar \
+                     design (Caladea for Cambria, which lays out differently) or a common \
+                     font of the same kind. Substitutions and what the font's license \
+                     restricts are printed as warnings.",
                 )
                 .arg(
                     Arg::new("input")
