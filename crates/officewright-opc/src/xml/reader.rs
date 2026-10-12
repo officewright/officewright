@@ -88,7 +88,8 @@ impl<'a> Reader<'a> {
     /// # Errors
     ///
     /// [`Error::Xml`] where the document is not well-formed, [`Error::Unsupported`] for
-    /// an XML declaration that names an encoding other than UTF-8, UTF-16 or US-ASCII, and
+    /// an XML declaration that names an encoding other than UTF-8, UTF-16, US-ASCII or
+    /// ASCII (a part labelled ASCII is read as UTF-8, any UTF-8 included), and
     /// [`Error::LimitExceeded`] when an element nests deeper than
     /// [`Limits::max_xml_depth`] or has more attributes than
     /// [`Limits::max_xml_attributes`].
@@ -516,11 +517,12 @@ impl<'a> Reader<'a> {
                     self.error(offset, format!("invalid encoding name {}", short(encoding)))
                 );
             }
-            // The bytes were decoded before reading; a UTF-8 or UTF-16 label is
-            // accepted whichever of the two they turned out to be. ECMA-376 Part 2 allows
-            // no other, but ASCII is a subset of UTF-8, and producers outside Office write
-            // that label (Python's ElementTree does by default), sometimes over text that
-            // is really UTF-8, so such a part is read as UTF-8 too.
+            // The bytes were decoded before reading, as UTF-8 or UTF-16, and the label
+            // is accepted whichever of the two they turned out to be. ECMA-376 Part 2
+            // allows only UTF-8 and UTF-16 labels. A part labelled US-ASCII or ASCII is
+            // accepted too (#11): ASCII is a subset of UTF-8, and producers outside Office
+            // write that label, some over text that is really UTF-8, which is then read
+            // as they meant it.
             let known = ["utf-8", "utf-16", "us-ascii", "ascii"];
             if !known
                 .iter()

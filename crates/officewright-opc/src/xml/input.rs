@@ -8,9 +8,9 @@ use crate::{Limits, Result};
 ///
 /// ECMA-376 Part 2 allows XML parts in UTF-8 and UTF-16 only. A byte order mark selects
 /// the encoding; without one, UTF-16 is recognised by its first characters `<?` (XML 1.0,
-/// Appendix F) and anything else is read as UTF-8, including parts labelled US-ASCII. Line ends are normalised to `\n` (XML
-/// 1.0, section 2.11) and every character is checked to be one that XML allows, so that
-/// the [`Reader`] works on clean text.
+/// Appendix F) and anything else is read as UTF-8, whatever its declaration says. Line
+/// ends are normalised to `\n` (XML 1.0, section 2.11) and every character is checked to
+/// be one that XML allows, so that the [`Reader`] works on clean text.
 #[derive(Clone, Debug)]
 pub struct Input<'b> {
     text: Cow<'b, str>,
