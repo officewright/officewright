@@ -1,5 +1,6 @@
 //! The building blocks every officewright OOXML reader shares: so far, reading the ZIP
-//! archives OOXML packages are stored in and the XML of their parts.
+//! archives OOXML packages are stored in and the XML of their parts, and following
+//! Markup Compatibility (ECMA-376 Part 3).
 //!
 //! The format crates build on this crate; most users never need it directly.
 //!
@@ -11,6 +12,7 @@
 
 mod error;
 mod limits;
+pub mod mce;
 #[cfg(test)]
 mod testing;
 pub mod xml;

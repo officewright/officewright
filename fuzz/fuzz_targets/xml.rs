@@ -1,9 +1,10 @@
-//! Reads the input as an XML part and checks it against roxmltree: both must accept and
-//! reject the same documents and read the same elements, attributes, text, comments and
-//! processing instructions from them.
+//! Reads the input as an XML part, following Markup Compatibility, and checks it against
+//! roxmltree: both must accept and reject the same documents and read the same elements,
+//! attributes, text, comments and processing instructions from them.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
+use officewright_opc::mce::Processor;
 use officewright_opc::xml::{Event, Input, NsId};
 use officewright_opc::{Error, Limits};
 use roxmltree::{Document, NodeType, ParsingOptions};
@@ -157,10 +158,24 @@ fn options<'a>() -> ParsingOptions<'a> {
 
 fn read(input: &Input<'_>, limits: &Limits) -> Result<Vec<Node>, Error> {
     let mut reader = input.reader(limits);
+    let mut mce = Processor::new(&mut reader);
+    let understood = reader.intern("urn:understood");
+    mce.understand(understood);
     let mut nodes = Vec::new();
     while let Some(event) = reader.read_event()? {
         match event {
             Event::Start(tag) => {
+                // Markup Compatibility errors are not XML errors, which is all roxmltree
+                // checks, so they only must not panic.
+                if mce.start(&reader, &tag).is_ok() {
+                    let _ = mce.element(tag.name());
+                    for attribute in tag.attributes() {
+                        let _ = mce.attribute(attribute.name());
+                    }
+                    if tag.name().local() == "Choice" {
+                        let _ = mce.is_selectable(&reader, &tag);
+                    }
+                }
                 let namespace =
                     |ns: Option<NsId>| ns.map_or("", |ns| reader.namespace_uri(ns)).to_owned();
                 let mut attributes: Vec<_> = tag
@@ -181,7 +196,10 @@ fn read(input: &Input<'_>, limits: &Limits) -> Result<Vec<Node>, Error> {
                     attributes,
                 });
             }
-            Event::End(_) => nodes.push(Node::End),
+            Event::End(_) => {
+                mce.end();
+                nodes.push(Node::End);
+            }
             Event::Text(text) => push_text(&mut nodes, &text),
             Event::Comment(comment) => nodes.push(Node::Comment(comment.to_owned())),
             Event::ProcessingInstruction(pi) => nodes.push(Node::Pi(

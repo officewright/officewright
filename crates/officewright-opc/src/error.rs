@@ -18,7 +18,7 @@ pub enum Error {
         /// What is wrong.
         message: String,
     },
-    /// An XML part is not well-formed.
+    /// An XML part is not well-formed, or breaks a rule of Markup Compatibility.
     Xml {
         /// The part, when known.
         part: Option<String>,
