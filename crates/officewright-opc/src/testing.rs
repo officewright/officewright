@@ -10,6 +10,8 @@ pub(crate) struct TestEntry {
     deflate: bool,
     zip64: bool,
     data_descriptor: bool,
+    descriptor_signature: bool,
+    trailing: Vec<u8>,
 }
 
 impl TestEntry {
@@ -20,6 +22,8 @@ impl TestEntry {
             deflate: false,
             zip64: false,
             data_descriptor: false,
+            descriptor_signature: true,
+            trailing: Vec::new(),
         }
     }
 
@@ -45,6 +49,22 @@ impl TestEntry {
             ..self
         }
     }
+
+    /// Writes the data descriptor without its optional signature.
+    pub(crate) fn without_descriptor_signature(self) -> Self {
+        Self {
+            descriptor_signature: false,
+            ..self
+        }
+    }
+
+    /// Appends bytes to the stored (compressed) data and counts them in its size.
+    pub(crate) fn trailing(self, bytes: &[u8]) -> Self {
+        Self {
+            trailing: bytes.into(),
+            ..self
+        }
+    }
 }
 
 /// A built archive and the offsets of its records, for tests that patch them.
@@ -67,11 +87,12 @@ pub(crate) fn build(entries: &[TestEntry], comment: &[u8]) -> Layout {
     let mut local = Vec::new();
     let mut stored = Vec::new();
     for entry in entries {
-        let data = if entry.deflate {
+        let mut data = if entry.deflate {
             miniz_oxide::deflate::compress_to_vec(&entry.data, 6)
         } else {
             entry.data.clone()
         };
+        data.extend_from_slice(&entry.trailing);
         let crc = crc32(&entry.data);
         local.push(out.len());
         let extra = if entry.zip64 {
@@ -98,7 +119,9 @@ pub(crate) fn build(entries: &[TestEntry], comment: &[u8]) -> Layout {
         out.extend_from_slice(&extra);
         out.extend_from_slice(&data);
         if entry.data_descriptor {
-            put32(&mut out, 0x0807_4b50);
+            if entry.descriptor_signature {
+                put32(&mut out, 0x0807_4b50);
+            }
             put32(&mut out, crc);
             if entry.zip64 {
                 put64(&mut out, data.len() as u64);

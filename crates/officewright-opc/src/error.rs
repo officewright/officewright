@@ -5,6 +5,7 @@ use std::{error, fmt};
 #[non_exhaustive]
 pub enum Error {
     /// The input is not a ZIP archive, or its structure is broken.
+    #[non_exhaustive]
     Zip {
         /// Byte offset of the problem in the archive.
         offset: u64,
@@ -12,6 +13,7 @@ pub enum Error {
         message: String,
     },
     /// A ZIP entry cannot be decompressed or fails its integrity check.
+    #[non_exhaustive]
     Entry {
         /// The entry name.
         name: String,
@@ -30,6 +32,7 @@ pub enum Error {
         message: String,
     },
     /// The input exceeds one of the configured [`Limits`](crate::Limits).
+    #[non_exhaustive]
     LimitExceeded {
         /// Which limit.
         limit: Limit,
