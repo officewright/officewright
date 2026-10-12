@@ -460,13 +460,17 @@ impl FontBook {
     /// A path that was already unreachable keeps its place in the list and the path it
     /// was first reached by, so reaching it through another alias of its directory does
     /// not change the entry; anything else listed for it before is replaced.
-    fn list_failure(&mut self, key: PathBuf, failure: Failure, path: PathBuf, error: Error) {
+    fn list_failure(&mut self, key: PathBuf, failure: Failure, path: PathBuf, mut error: Error) {
         if failure == Failure::Unreachable && self.failed.get(&key) == Some(&failure) {
             let listed = self
                 .skipped
                 .iter_mut()
                 .find(|skipped| skipped.key.as_ref() == Some(&key));
             if let Some(listed) = listed {
+                // The message names the path, so it keeps the listed one too.
+                if let (Error::Read { path, .. }, Some(first)) = (&mut error, &listed.path) {
+                    path.clone_from(first);
+                }
                 listed.error = error;
                 return;
             }
@@ -963,13 +967,15 @@ mod tests {
         let fonts = dir.0.join("fonts");
         fs::create_dir(&fonts).unwrap();
         let target = dir.0.join("sans.ttf");
-        let link = fonts.join("link.ttf");
-        std::os::unix::fs::symlink(&target, &link).unwrap();
+        std::os::unix::fs::symlink(&target, fonts.join("link.ttf")).unwrap();
+        // The file is added through another path to the same directory.
+        let alias = dir.0.join("alias");
+        std::os::unix::fs::symlink(&fonts, &alias).unwrap();
         let mut book = FontBook::new();
         book.add_dir(&fonts).unwrap();
         assert_eq!(book.skipped().len(), 1);
         fs::write(&target, TestFont::new("Test Sans").build()).unwrap();
-        assert_eq!(book.add_file(&link).unwrap(), 1);
+        assert_eq!(book.add_file(alias.join("link.ttf")).unwrap(), 1);
         assert!(book.skipped().is_empty(), "{:?}", book.skipped());
     }
 
@@ -1147,6 +1153,10 @@ mod tests {
         assert_eq!(book.skipped().len(), 1, "{:?}", book.skipped());
         assert_eq!(book.skipped()[0].path(), Some(link.as_path()));
         assert!(matches!(book.skipped()[0].error(), Error::Read { .. }));
+        // The message names the same path, not the alias it was last reached through.
+        let message = book.skipped()[0].to_string();
+        let prefix = format!("cannot read {}: ", link.display());
+        assert!(message.starts_with(&prefix), "{message}");
     }
 
     #[test]
