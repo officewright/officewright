@@ -4,14 +4,17 @@
 //! The tree is walked with an explicit stack: tables nest in tables as deep as the XML
 //! allows, and that must not decide how deep the call stack grows.
 
+use super::views::through_containers;
 use super::{Document, Kind, RevisionKind, RunItem};
 
 enum Task {
     Node(u32),
     Push(char),
-    /// Drops a line feed at the end of the text: the last paragraph of a table cell
-    /// ends the cell, not a line.
-    TrimLineFeed,
+    /// A table cell starts here.
+    CellStart,
+    /// Drops a line feed the cell that started last wrote at its end: the last paragraph
+    /// of a table cell ends the cell, not a line.
+    CellEnd,
     /// Entering (`true`) or leaving deleted content.
     Deleted(bool),
 }
@@ -43,6 +46,8 @@ pub(super) fn run(content: &[RunItem], out: &mut String) {
 fn walk(document: &Document, children: &[u32], out: &mut String) {
     let mut tasks: Vec<Task> = children.iter().rev().map(|&i| Task::Node(i)).collect();
     let mut deleted = 0usize;
+    // Where the text of each open cell starts.
+    let mut cells: Vec<usize> = Vec::new();
     while let Some(task) = tasks.pop() {
         let index = match task {
             Task::Node(index) => index,
@@ -50,8 +55,13 @@ fn walk(document: &Document, children: &[u32], out: &mut String) {
                 out.push(c);
                 continue;
             }
-            Task::TrimLineFeed => {
-                if out.ends_with('\n') {
+            Task::CellStart => {
+                cells.push(out.len());
+                continue;
+            }
+            Task::CellEnd => {
+                let start = cells.pop().unwrap_or(out.len());
+                if out.len() > start && out.ends_with('\n') {
                     out.pop();
                 }
                 continue;
@@ -78,10 +88,13 @@ fn walk(document: &Document, children: &[u32], out: &mut String) {
             }
             Kind::Row => {
                 tasks.push(Task::Push('\n'));
-                let cells = cells(document, &node.children);
+                let cells: Vec<u32> = through_containers(document, &node.children)
+                    .filter(|&i| matches!(document.node(i).map(|n| &n.kind), Some(Kind::Cell)))
+                    .collect();
                 for (n, &cell) in cells.iter().enumerate().rev() {
-                    tasks.push(Task::TrimLineFeed);
+                    tasks.push(Task::CellEnd);
                     tasks.push(Task::Node(cell));
+                    tasks.push(Task::CellStart);
                     if n > 0 {
                         tasks.push(Task::Push('\t'));
                     }
@@ -102,31 +115,11 @@ fn walk(document: &Document, children: &[u32], out: &mut String) {
             Kind::Other(_) => {}
             Kind::Table { .. }
             | Kind::Cell
-            | Kind::ContentControl
+            | Kind::ContentControl { .. }
             | Kind::Hyperlink(_)
             | Kind::Revision(_)
             | Kind::SimpleField { .. }
             | Kind::Wrapper => push_children(&mut tasks),
         }
     }
-}
-
-/// The cells of a row, seen through the content controls and wrappers around them.
-fn cells(document: &Document, children: &[u32]) -> Vec<u32> {
-    let mut cells = Vec::new();
-    let mut stack = vec![children.iter()];
-    while let Some(iter) = stack.last_mut() {
-        let Some(&index) = iter.next() else {
-            stack.pop();
-            continue;
-        };
-        match document.node(index).map(|node| (&node.kind, node)) {
-            Some((Kind::Cell, _)) => cells.push(index),
-            Some((Kind::ContentControl | Kind::Wrapper, node)) => {
-                stack.push(node.children.iter());
-            }
-            _ => {}
-        }
-    }
-    cells
 }

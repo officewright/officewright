@@ -693,3 +693,142 @@ fn keeps_comments_and_processing_instructions_in_kept_elements() {
         r#"<w14:x xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><!-- note --><?pi data?></w14:x>"#
     );
 }
+
+#[test]
+fn ends_a_section_after_its_paragraph_inside_content_controls() {
+    // As in LibreOffice's tdf170602_exportContext.docx: a cover page in a content
+    // control whose last paragraph but one ends the first section.
+    let document = open(
+        r#"<w:sdt><w:sdtPr><w:docPartObj/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>cover</w:t></w:r></w:p><w:p><w:pPr><w:sectPr><w:type w:val="nextPage"/></w:sectPr></w:pPr><w:r><w:t>end of cover</w:t></w:r></w:p><w:p><w:r><w:t>Contents</w:t></w:r></w:p></w:sdtContent></w:sdt><w:p><w:r><w:t>body</w:t></w:r></w:p>"#,
+    );
+    assert_eq!(
+        outline(&document),
+        [
+            "section 0",
+            "sdt 2 blocks",
+            "section 1",
+            "sdt 1 blocks",
+            "p \"body\""
+        ]
+    );
+    assert_eq!(document.text(), "cover\nend of cover\nContents\nbody\n");
+    // When the paragraph ends the control, nothing is left over for the next section;
+    // nested controls and custom XML are continued alike.
+    let document = open(
+        r#"<w:sdt><w:sdtContent><w:customXml w:element="x"><w:customXmlPr/><w:sdt><w:sdtContent><w:p><w:pPr><w:sectPr/></w:pPr></w:p><w:p><w:r><w:t>inner</w:t></w:r></w:p></w:sdtContent></w:sdt></w:customXml><w:p><w:pPr><w:sectPr/></w:pPr></w:p></w:sdtContent></w:sdt><w:p/>"#,
+    );
+    assert_eq!(
+        outline(&document),
+        [
+            "section 0",
+            "sdt 1 blocks",
+            "section 1",
+            "sdt 2 blocks",
+            "section 2",
+            "p \"\""
+        ]
+    );
+    let sections: Vec<Section<'_>> = document.sections().collect();
+    let Some(Block::ContentControl(second)) = sections[1].blocks().next() else {
+        panic!("no content control");
+    };
+    let Some(Block::ContentControl(inner)) = second.blocks().next() else {
+        panic!("no inner control");
+    };
+    assert_eq!(inner.blocks().count(), 1);
+}
+
+#[test]
+fn counts_tables_around_section_breaks() {
+    let document = open(
+        r#"<w:tbl><w:tr><w:tc><w:tbl><w:tr><w:tc><w:p><w:pPr><w:sectPr/></w:pPr></w:p></w:tc></w:tr></w:tbl><w:p><w:pPr><w:sectPr/></w:pPr></w:p></w:tc></w:tr></w:tbl><w:p><w:pPr><w:sectPr/></w:pPr></w:p><w:p/>"#,
+    );
+    assert_eq!(
+        outline(&document),
+        ["section 0", "table 1 rows", "p \"\"", "section 1", "p \"\""]
+    );
+}
+
+#[test]
+fn reads_the_properties_of_custom_xml_and_smart_tags_as_properties() {
+    let document = open(
+        r#"<w:customXml w:element="x"><w:customXmlPr><w:attr w:name="a" w:val="b"/></w:customXmlPr><w:p><w:smartTag w:element="y"><w:smartTagPr/><w:r><w:t>tag</w:t></w:r></w:smartTag></w:p></w:customXml>"#,
+    );
+    assert_eq!(outline(&document), ["section 0", "p \"tag\""]);
+    let Some(Block::Paragraph(paragraph)) = document.sections().next().unwrap().blocks().next()
+    else {
+        panic!("no paragraph");
+    };
+    assert_eq!(paragraph.inlines().count(), 1);
+}
+
+#[test]
+fn ends_a_row_with_a_line_feed_when_a_cell_has_no_paragraph() {
+    let document = open(
+        r#"<w:p><w:r><w:t>a</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:bookmarkStart w:id="0" w:name="b"/><w:bookmarkEnd w:id="0"/></w:tc><w:tc><w:p><w:r><w:t>y</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+    );
+    assert_eq!(document.text(), "a\nx\n\ty\n");
+}
+
+#[test]
+fn gives_content_controls_only_the_content_of_their_level() {
+    let document = open(
+        r#"<w:sdt><w:sdtContent><w:bookmarkStart w:id="0" w:name="a"/><w:p/><w:bookmarkEnd w:id="0"/></w:sdtContent></w:sdt><w:p><w:sdt><w:sdtContent><w:bookmarkStart w:id="1" w:name="b"/><w:r><w:t>x</w:t></w:r><w:bookmarkEnd w:id="1"/></w:sdtContent></w:sdt></w:p>"#,
+    );
+    let mut blocks = document.sections().next().unwrap().blocks();
+    let (Some(Block::ContentControl(block)), Some(Block::Paragraph(paragraph))) =
+        (blocks.next(), blocks.next())
+    else {
+        panic!("unexpected blocks");
+    };
+    assert_eq!((block.blocks().count(), block.inlines().count()), (3, 0));
+    let Some(Inline::ContentControl(inline)) = paragraph.inlines().next() else {
+        panic!("no inline control");
+    };
+    assert_eq!((inline.blocks().count(), inline.inlines().count()), (0, 3));
+}
+
+#[test]
+fn reads_hyperlink_targets_from_external_relationships_only() {
+    let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/a" TargetMode="External"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#;
+    let body = r#"<w:p><w:hyperlink r:id="rId1"><w:r><w:t>a</w:t></w:r></w:hyperlink><w:hyperlink r:id="rId1"><w:r><w:t>b</w:t></w:r></w:hyperlink><w:hyperlink r:id="rId2"><w:r><w:t>c</w:t></w:r></w:hyperlink><w:hyperlink r:id="rId9"><w:r><w:t>d</w:t></w:r></w:hyperlink><w:fldSimple><w:r><w:t>e</w:t></w:r></w:fldSimple></w:p>"#;
+    let document = Document::from_bytes(package(
+        DOCUMENT,
+        &document_xml(body),
+        &[("word/_rels/document.xml.rels", rels)],
+    ))
+    .unwrap();
+    let Some(Block::Paragraph(paragraph)) = document.sections().next().unwrap().blocks().next()
+    else {
+        panic!("no paragraph");
+    };
+    let targets: Vec<Option<&str>> = paragraph
+        .inlines()
+        .filter_map(|inline| match inline {
+            Inline::Hyperlink(link) => Some(link.target()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        targets,
+        [
+            Some("https://example.com/a"),
+            Some("https://example.com/a"),
+            None,
+            None
+        ]
+    );
+    // Links naming one relationship share one copy of its target.
+    assert!(std::ptr::eq(targets[0].unwrap(), targets[1].unwrap()));
+    let messages: Vec<&str> = document
+        .diagnostics()
+        .iter()
+        .map(Diagnostic::message)
+        .collect();
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert!(
+        messages[0]
+            .ends_with(r#"hyperlink r:id="rId9" names no relationship; the link is ignored"#)
+    );
+    assert!(messages[1].ends_with("w:fldSimple has no w:instr; its instruction is empty"));
+}

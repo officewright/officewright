@@ -34,10 +34,19 @@ fuzz_target!(|data: &[u8]| {
                                 }
                             }
                         }
-                        Inline::Hyperlink(link) => inlines.extend(link.inlines()),
+                        Inline::Hyperlink(link) => {
+                            let _ = (link.target(), link.anchor());
+                            inlines.extend(link.inlines());
+                        }
                         Inline::ContentControl(control) => inlines.extend(control.inlines()),
-                        Inline::Revision(revision) => inlines.extend(revision.inlines()),
-                        Inline::SimpleField(field) => inlines.extend(field.inlines()),
+                        Inline::Revision(revision) => {
+                            let _ = (revision.kind(), revision.author(), revision.date());
+                            inlines.extend(revision.inlines());
+                        }
+                        Inline::SimpleField(field) => {
+                            let _ = field.instruction();
+                            inlines.extend(field.inlines());
+                        }
                         Inline::Other(opaque) => check(opaque),
                         _ => {}
                     }
@@ -45,6 +54,7 @@ fuzz_target!(|data: &[u8]| {
             }
             Block::Table(table) => {
                 assert!(document.table(table.id()).is_some());
+                let _ = table.grid_columns().count();
                 for row in table.rows() {
                     for cell in row.cells() {
                         blocks.extend(cell.blocks());

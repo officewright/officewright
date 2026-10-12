@@ -5,8 +5,8 @@ use officewright_core::Pt;
 
 use super::xml::Span;
 use super::{
-    Document, HyperlinkData, Kind, Node, ParagraphId, RevisionData, RunItem, SectionData,
-    SectionProperties, TableId, text,
+    ControlLevel, Document, HyperlinkData, Kind, Node, ParagraphId, RevisionData, RunItem,
+    SectionData, SectionProperties, TableId, text,
 };
 
 /// A section of a document: its page setup and the blocks laid out with it.
@@ -183,13 +183,22 @@ impl<'a> ContentControl<'a> {
     /// The blocks inside a content control that is a [`Block`]; nothing for one that
     /// is an [`Inline`].
     pub fn blocks(self) -> impl Iterator<Item = Block<'a>> + 'a {
-        blocks(self.document, &self.node.children)
+        let is_block = self.level() == Some(ControlLevel::Block);
+        blocks(self.document, &self.node.children).filter(move |_| is_block)
     }
 
     /// The inline content inside a content control that is an [`Inline`]; nothing for
     /// one that is a [`Block`].
     pub fn inlines(self) -> impl Iterator<Item = Inline<'a>> + 'a {
-        inlines(self.document, &self.node.children)
+        let is_inline = self.level() == Some(ControlLevel::Inline);
+        inlines(self.document, &self.node.children).filter(move |_| is_inline)
+    }
+
+    fn level(self) -> Option<ControlLevel> {
+        match self.node.kind {
+            Kind::ContentControl { level } => Some(level),
+            _ => None,
+        }
     }
 }
 
@@ -394,7 +403,9 @@ impl<'a> Hyperlink<'a> {
     /// Where the hyperlink leads outside the document, such as a web address, as
     /// written in the relationship it names. officewright never follows it.
     pub fn target(self) -> Option<&'a str> {
-        self.data.target.as_deref()
+        self.data
+            .target
+            .map(|target| self.document.strings.get(target))
     }
 
     /// The bookmark the hyperlink leads to inside the document.
@@ -515,7 +526,7 @@ fn blocks<'a>(document: &'a Document, children: &'a [u32]) -> impl Iterator<Item
                 index,
                 node,
             }),
-            Kind::ContentControl => Block::ContentControl(ContentControl { document, node }),
+            Kind::ContentControl { .. } => Block::ContentControl(ContentControl { document, node }),
             Kind::Other(span) => Block::Other(Opaque::new(document, *span)),
             _ => return None,
         })
@@ -535,7 +546,9 @@ fn inlines<'a>(
                 node,
                 data,
             }),
-            Kind::ContentControl => Inline::ContentControl(ContentControl { document, node }),
+            Kind::ContentControl { .. } => {
+                Inline::ContentControl(ContentControl { document, node })
+            }
             Kind::Revision(data) => Inline::Revision(Revision {
                 document,
                 node,
@@ -562,12 +575,12 @@ fn through_wrappers<'a>(
 
 /// The nodes in `children`, with each wrapper and content control replaced by its own
 /// children: how a table sees rows and a row sees cells.
-fn through_containers<'a>(
+pub(super) fn through_containers<'a>(
     document: &'a Document,
     children: &'a [u32],
 ) -> impl Iterator<Item = u32> + 'a {
     walk(document, children, |kind| {
-        matches!(kind, Kind::Wrapper | Kind::ContentControl)
+        matches!(kind, Kind::Wrapper | Kind::ContentControl { .. })
     })
 }
 

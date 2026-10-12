@@ -17,8 +17,8 @@ use super::{Names, R, R_STRICT, W, W_STRICT, section, shorten};
 use crate::diagnostic::{DiagnosticKind, Diagnostics};
 use crate::model::xml::{Span, Sym, Token, XmlAttribute, XmlName};
 use crate::model::{
-    Break, BreakClear, BreakKind, Conformance, Document, FieldCharKind, HyperlinkData, Kind, Node,
-    RevisionData, RevisionKind, RunItem, SectionData, SectionProperties,
+    Break, BreakClear, BreakKind, Conformance, ControlLevel, Document, FieldCharKind,
+    HyperlinkData, Kind, Node, RevisionData, RevisionKind, RunItem, SectionData, SectionProperties,
 };
 use crate::units::twips_measure;
 use crate::{Error, Limit, Limits, Result};
@@ -94,6 +94,17 @@ struct Reading<'d, 'p, 't> {
     locator: Locator<'t>,
     /// The offset of the event read last, where a limit is exceeded.
     at: usize,
+    /// How many tables are open around the element read now.
+    tables_open: usize,
+    /// A paragraph whose properties end a section, with the section's properties: the
+    /// section ends when the paragraph does.
+    pending_break: Option<(u32, SectionProperties)>,
+    /// Content controls and wrappers continued in the next section, by the parent they
+    /// were added to, dropped again if nothing more goes into them.
+    continued: Vec<(u32, Parent)>,
+    /// The external target of each hyperlink relationship read so far, interned once
+    /// however many links name it.
+    link_targets: HashMap<Box<str>, Option<Sym>>,
 }
 
 pub(super) fn read(
@@ -131,6 +142,10 @@ pub(super) fn read(
         stack: Vec::new(),
         locator: Locator::new(input.as_str()),
         at: 0,
+        tables_open: 0,
+        pending_break: None,
+        continued: Vec::new(),
+        link_targets: HashMap::new(),
     };
     reading
         .run(&mut reader, &mut mce)
@@ -160,7 +175,7 @@ impl Reading<'_, '_, '_> {
                     self.start(reader, mce, tag, disposition)?;
                 }
                 Event::End(_) => {
-                    self.end();
+                    self.end()?;
                     mce.end();
                 }
                 Event::Text(text) => match self.stack.last_mut() {
@@ -300,6 +315,7 @@ impl Reading<'_, '_, '_> {
                 | (Some(Kind::Table { .. }), "tblPr" | "tblGrid")
                 | (Some(Kind::Row), "trPr" | "tblPrEx")
                 | (Some(Kind::Cell), "tcPr")
+                | (Some(Kind::Wrapper), "customXmlPr" | "smartTagPr")
         );
         if property {
             if let Parent::Node(node) = parent {
@@ -308,6 +324,8 @@ impl Reading<'_, '_, '_> {
         }
         match (level, local) {
             (Level::Block, "p") => self.open(parent, Kind::Paragraph, Level::Inline),
+            // Block-level w:ins, w:del, w:moveFrom and w:moveTo (around paragraphs or
+            // rows) and a w:tbl written inside a paragraph are kept without being read.
             (Level::Block, "tbl") => self.open(
                 parent,
                 Kind::Table {
@@ -326,7 +344,13 @@ impl Reading<'_, '_, '_> {
             (Level::Row, "tr") => self.open(parent, Kind::Row, Level::Cell),
             (Level::Cell, "tc") => self.open(parent, Kind::Cell, Level::Block),
             (Level::Block | Level::Inline | Level::Row | Level::Cell, "sdt") => {
-                let node = self.add(parent, Kind::ContentControl)?;
+                let control = match level {
+                    Level::Block => ControlLevel::Block,
+                    Level::Inline => ControlLevel::Inline,
+                    Level::Row => ControlLevel::Row,
+                    _ => ControlLevel::Cell,
+                };
+                let node = self.add(parent, Kind::ContentControl { level: control })?;
                 self.stack.push(Frame::ContentControl { node, level });
                 Ok(())
             }
@@ -360,6 +384,11 @@ impl Reading<'_, '_, '_> {
                 self.open(parent, Kind::Revision(Box::new(data)), Level::Inline)
             }
             (Level::Inline, "fldSimple") => {
+                if self.w_attribute(&tag, "instr").is_none() {
+                    self.diagnose(tag.offset(), DiagnosticKind::InvalidValue, || {
+                        "w:fldSimple has no w:instr; its instruction is empty".into()
+                    });
+                }
                 let instruction = self.w_attribute(&tag, "instr").unwrap_or_default().into();
                 self.open(parent, Kind::SimpleField { instruction }, Level::Inline)
             }
@@ -465,23 +494,130 @@ impl Reading<'_, '_, '_> {
         self.skip(reader, mce)
     }
 
-    fn end(&mut self) {
-        if let Some(Frame::Text { run, kind, text }) = self.stack.pop() {
-            let text = text.into_boxed_str();
-            let item = match kind {
-                TextKind::Text => RunItem::Text(text),
-                TextKind::Deleted => RunItem::DeletedText(text),
-                TextKind::FieldCode => RunItem::FieldCode(text),
-                TextKind::DeletedFieldCode => RunItem::DeletedFieldCode(text),
-            };
-            // The text was counted against the node limit when its frame opened.
-            if let Some(Node {
-                kind: Kind::Run { content },
-                ..
-            }) = self.document.nodes.get_mut(run as usize)
-            {
-                content.push(item);
+    fn end(&mut self) -> Result<()> {
+        match self.stack.pop() {
+            Some(Frame::Text { run, kind, text }) => {
+                let text = text.into_boxed_str();
+                let item = match kind {
+                    TextKind::Text => RunItem::Text(text),
+                    TextKind::Deleted => RunItem::DeletedText(text),
+                    TextKind::FieldCode => RunItem::FieldCode(text),
+                    TextKind::DeletedFieldCode => RunItem::DeletedFieldCode(text),
+                };
+                // The text was counted against the node limit when its frame opened.
+                if let Some(Node {
+                    kind: Kind::Run { content },
+                    ..
+                }) = self.document.nodes.get_mut(run as usize)
+                {
+                    content.push(item);
+                }
             }
+            Some(Frame::Container {
+                parent: Parent::Node(node),
+                level,
+            }) => {
+                let kind = self.document.node(node).map(|node| &node.kind);
+                let (table, wrapper) = (
+                    matches!(kind, Some(Kind::Table { .. })),
+                    matches!(kind, Some(Kind::Wrapper)),
+                );
+                if level == Level::Row && table {
+                    self.tables_open = self.tables_open.saturating_sub(1);
+                }
+                if matches!(&self.pending_break, Some((paragraph, _)) if *paragraph == node) {
+                    if let Some((_, properties)) = self.pending_break.take() {
+                        self.break_section(properties)?;
+                    }
+                }
+                if wrapper {
+                    self.drop_if_empty(node);
+                }
+            }
+            Some(Frame::ContentControl { node, .. }) => self.drop_if_empty(node),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Ends a section after the paragraph just read. Word ties a section to the
+    /// paragraph that holds its `w:sectPr` (§17.6.17), even inside a content control,
+    /// which marks a range of the document and has no layout of its own; such a control
+    /// (or custom XML element) is continued by a copy with the same properties in the
+    /// next section, so that a section stays a list of blocks.
+    /// `tdf170602_exportContext.docx` of LibreOffice's tests has a cover page in a
+    /// content control whose last paragraph ends the first section.
+    fn break_section(&mut self, properties: SectionProperties) -> Result<()> {
+        self.breaks.push((self.body.len(), properties));
+        let mut parent = Parent::Body;
+        let mut copies: Vec<(u32, u32)> = Vec::new();
+        for i in 0..self.stack.len() {
+            let original = match self.stack.get(i) {
+                Some(Frame::ContentControl {
+                    node,
+                    level: Level::Block,
+                }) => *node,
+                Some(Frame::Container {
+                    parent: Parent::Node(node),
+                    level: Level::Block,
+                }) => {
+                    if let Some(&(_, copy)) = copies.iter().find(|(original, _)| original == node) {
+                        if let Some(Frame::Container { parent, .. }) = self.stack.get_mut(i) {
+                            *parent = Parent::Node(copy);
+                        }
+                        continue;
+                    }
+                    *node
+                }
+                _ => continue,
+            };
+            let Some(source) = self.document.node(original) else {
+                continue;
+            };
+            let kind = match source.kind {
+                Kind::ContentControl { level } => Kind::ContentControl { level },
+                Kind::Wrapper => Kind::Wrapper,
+                _ => continue,
+            };
+            let properties = source.properties.clone();
+            let copy = self.add(parent, kind)?;
+            if let Some(node) = self.document.nodes.get_mut(copy as usize) {
+                node.properties = properties;
+            }
+            self.continued.push((copy, parent));
+            copies.push((original, copy));
+            match self.stack.get_mut(i) {
+                Some(Frame::ContentControl { node, .. }) => *node = copy,
+                Some(Frame::Container { parent, .. }) => *parent = Parent::Node(copy),
+                _ => {}
+            }
+            parent = Parent::Node(copy);
+        }
+        Ok(())
+    }
+
+    /// Takes a continued content control or wrapper out again when nothing went into it.
+    fn drop_if_empty(&mut self, node: u32) {
+        let Some(at) = self.continued.iter().position(|&(copy, _)| copy == node) else {
+            return;
+        };
+        let (_, parent) = self.continued.swap_remove(at);
+        if self
+            .document
+            .node(node)
+            .is_some_and(|node| !node.children.is_empty())
+        {
+            return;
+        }
+        let siblings = match parent {
+            Parent::Body => &mut self.body,
+            Parent::Node(parent) => match self.document.nodes.get_mut(parent as usize) {
+                Some(parent) => &mut parent.children,
+                None => return,
+            },
+        };
+        if siblings.last() == Some(&node) {
+            siblings.pop();
         }
     }
 
@@ -525,6 +661,9 @@ impl Reading<'_, '_, '_> {
 
     /// Adds a node to `parent` and reads its children at `level`.
     fn open(&mut self, parent: Parent, kind: Kind, level: Level) -> Result<()> {
+        if matches!(kind, Kind::Table { .. }) {
+            self.tables_open += 1;
+        }
         let node = self.add(parent, kind)?;
         self.stack.push(Frame::Container {
             parent: Parent::Node(node),
@@ -586,7 +725,7 @@ impl Reading<'_, '_, '_> {
             matches!(kind, Some(Kind::Table { .. })),
         );
         if paragraph {
-            self.section_break(span, offset);
+            self.section_break(node, span, offset);
         }
         if table && self.document.element(span).is(&self.names.w, "tblGrid") {
             let columns = self.grid(span, offset);
@@ -604,30 +743,21 @@ impl Reading<'_, '_, '_> {
         Ok(())
     }
 
-    /// A `w:sectPr` in the properties of a paragraph ends a section after the block of
-    /// the body the paragraph is in. Word uses it only in paragraphs of the body, not in
-    /// table cells.
-    fn section_break(&mut self, p_pr: Span, offset: usize) {
+    /// A `w:sectPr` in the properties of a paragraph ends a section after the paragraph
+    /// (see [`break_section`](Self::break_section)). Word never writes one in a table cell,
+    /// where its section break command splits the table instead; one found there ends no
+    /// section until a rule document shows what Word makes of it.
+    fn section_break(&mut self, paragraph: u32, p_pr: Span, offset: usize) {
+        if self.tables_open > 0 {
+            return;
+        }
         let place = self.place(offset);
         let p_pr = p_pr.of(&self.document.tokens, &self.document.strings);
         let Some(sect_pr) = p_pr.children().find(|c| c.is(&self.names.w, "sectPr")) else {
             return;
         };
-        let in_table = self.stack.iter().any(|frame| {
-            matches!(
-                frame,
-                Frame::Container {
-                    level: Level::Row | Level::Cell,
-                    ..
-                }
-            ) || matches!(frame, Frame::Container { parent: Parent::Node(node), .. }
-                    if matches!(self.document.node(*node).map(|n| &n.kind), Some(Kind::Cell)))
-        });
-        if in_table {
-            return;
-        }
         let properties = section::read(sect_pr, &self.names, &place, &mut self.diagnostics);
-        self.breaks.push((self.body.len(), properties));
+        self.pending_break = Some((paragraph, properties));
     }
 
     /// The widths of the columns of a `w:tblGrid`.
@@ -652,26 +782,36 @@ impl Reading<'_, '_, '_> {
         columns
     }
 
+    /// A hyperlink's anchor and external target. The `w:tooltip`, `w:tgtFrame` and
+    /// `w:docLocation` attributes are not read yet.
     fn hyperlink(&mut self, tag: &StartTag<'_>) -> HyperlinkData {
         let id = self.r.iter().find_map(|&r| tag.attribute(Some(r), "id"));
-        let target = id.and_then(|id| {
-            let relationship = self.part.relationships().get(id);
-            if relationship.is_none() {
-                self.diagnose(tag.offset(), DiagnosticKind::InvalidValue, || {
-                    format!(
-                        "hyperlink r:id=\"{}\" names no relationship; the link is ignored",
-                        shorten(id)
-                    )
-                });
-            }
-            let relationship = relationship?;
-            (relationship.target_mode() == officewright_opc::TargetMode::External)
-                .then(|| relationship.target().into())
-        });
         HyperlinkData {
-            target,
+            target: id.and_then(|id| self.link_target(tag, id)),
             anchor: self.w_attribute(tag, "anchor").map(Into::into),
         }
+    }
+
+    /// The external target of a relationship of the part. A target is copied once,
+    /// however many links name it: it comes from another part, so its length is not
+    /// bounded by the links.
+    fn link_target(&mut self, tag: &StartTag<'_>, id: &str) -> Option<Sym> {
+        if let Some(&target) = self.link_targets.get(id) {
+            return target;
+        }
+        let Some(relationship) = self.part.relationships().get(id) else {
+            self.diagnose(tag.offset(), DiagnosticKind::InvalidValue, || {
+                format!(
+                    "hyperlink r:id=\"{}\" names no relationship; the link is ignored",
+                    shorten(id)
+                )
+            });
+            return None;
+        };
+        let target = (relationship.target_mode() == officewright_opc::TargetMode::External)
+            .then(|| self.document.strings.intern(relationship.target()));
+        self.link_targets.insert(id.into(), target);
+        target
     }
 
     /// Keeps an element without understanding it, where it is.

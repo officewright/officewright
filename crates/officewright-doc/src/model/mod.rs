@@ -266,7 +266,9 @@ pub(crate) enum Kind {
     },
     Row,
     Cell,
-    ContentControl,
+    ContentControl {
+        level: ControlLevel,
+    },
     Run {
         content: Vec<RunItem>,
     },
@@ -283,8 +285,18 @@ pub(crate) enum Kind {
 
 #[derive(Debug, Default)]
 pub(crate) struct HyperlinkData {
-    pub(crate) target: Option<Box<str>>,
+    /// Interned: a target comes from the relationships part, and many links may name it.
+    pub(crate) target: Option<xml::Sym>,
     pub(crate) anchor: Option<Box<str>>,
+}
+
+/// Where a content control sits, and so what it contains.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ControlLevel {
+    Block,
+    Inline,
+    Row,
+    Cell,
 }
 
 #[derive(Debug)]
