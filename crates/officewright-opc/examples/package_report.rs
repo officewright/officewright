@@ -75,16 +75,14 @@ fn main() -> ExitCode {
 fn check(bytes: Vec<u8>, limits: &Limits) -> Result<usize, Error> {
     let package = Package::from_bytes(bytes, limits)?;
     let mut seen = HashSet::new();
-    let mut queue = targets(package.relationships());
+    let mut queue = Vec::new();
+    enqueue(&package, package.relationships(), &mut seen, &mut queue);
     let mut count = 0;
     while let Some(name) = queue.pop() {
         let Some(part) = package.part(&name) else {
             continue;
         };
-        if !seen.insert(name) {
-            continue;
-        }
-        queue.extend(targets(part.relationships()));
+        enqueue(&package, part.relationships(), &mut seen, &mut queue);
         let is_xml = part.content_type().is_some_and(|kind| {
             kind.ends_with("+xml") || kind == "application/xml" || kind == "text/xml"
         });
@@ -97,11 +95,22 @@ fn check(bytes: Vec<u8>, limits: &Limits) -> Result<usize, Error> {
     Ok(count)
 }
 
-fn targets(relationships: &Relationships) -> Vec<PartName> {
-    relationships
-        .iter()
-        .filter_map(|relationship| relationship.target_part())
-        .collect()
+/// Queues the parts the relationships point to that exist and were not queued before.
+/// Each target is resolved and dropped unless it names such a part, so the queue holds at
+/// most one name per part, whatever the number of relationships.
+fn enqueue(
+    package: &Package,
+    relationships: &Relationships,
+    seen: &mut HashSet<PartName>,
+    queue: &mut Vec<PartName>,
+) {
+    for relationship in relationships {
+        if let Some(name) = relationship.target_part() {
+            if package.part(&name).is_some() && seen.insert(name.clone()) {
+                queue.push(name);
+            }
+        }
+    }
 }
 
 /// The namespaces of ECMA-376, Transitional and Strict, that a document reader
@@ -166,11 +175,12 @@ fn read_xml(data: &[u8], limits: &Limits) -> Result<(), Error> {
                     alternates.push(false);
                     true
                 } else if name.is(mc, "Choice") || name.is(mc, "Fallback") {
-                    let selectable = name.is(mc, "Fallback") || mce.is_selectable(&reader, &tag)?;
+                    // As in the module example of mce: once a branch is taken, the others
+                    // are skipped without looking at their Requires.
                     match alternates.last_mut() {
-                        Some(taken) if !*taken && selectable => {
-                            *taken = true;
-                            true
+                        Some(taken) if !*taken => {
+                            *taken = name.is(mc, "Fallback") || mce.is_selectable(&reader, &tag)?;
+                            *taken
                         }
                         _ => false,
                     }
