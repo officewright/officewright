@@ -240,7 +240,8 @@ scripts/check-capi.sh target/capi (release.yml runs the same script on every unp
   tests/ffi-python against the shared library
 PDF output of officewright text-to-pdf (tests/pdf-output): qpdf --check without warnings, pdftotext reads the input back;
   with each font of tests/fonts embedded: pdffonts lists it embedded, subset and with a ToUnicode map, pdftotext reads back
-  every Latin, Greek and Cyrillic character the fonts have, pdftoppm renders a subset exactly as the whole font (Linux, macOS)
+  every Latin, Greek and Cyrillic character the fonts have, pdftoppm renders a subset exactly as the whole font; characters
+  that share a glyph read back through ActualText (Linux, macOS)
 corpus-runner over tests/corpus (committed corpus), compared with baseline.json   (from Milestone 4)
 ```
 

@@ -33,10 +33,10 @@ Fonts in `tests/fonts/`, at the repository root and so outside every crate. They
 read by `crates/officewright-font/tests/third_party_fonts.rs` and
 `crates/officewright-pdf/tests/embedded_fonts.rs`, which their crates exclude from their
 packages, by the C ABI tests in `tests/c` and `tests/ffi-python` and the PDF output
-checks in `tests/pdf-output`, and they seed the fuzz targets in `fuzz/`. The tests
-embed them, reduced to some of their glyphs, in PDF files they write to temporary
-directories; those files are not committed or published. Each font is unmodified and sits next to the license file it was distributed
-with, byte for byte.
+checks in `tests/pdf-output`, and they seed the fuzz targets in `fuzz/`. The tests embed
+them, reduced to some of their glyphs, in PDF files they write to temporary directories;
+those files are not committed or published. Each font is unmodified and sits next to the
+license file it was distributed with, byte for byte.
 
 ### Liberation Sans
 

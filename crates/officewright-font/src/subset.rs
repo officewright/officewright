@@ -98,8 +98,9 @@ impl FontFace {
     ///
     /// [`Error::GlyphOutOfRange`] if a glyph is not in the face,
     /// [`Error::UnsupportedOutlines`] for a face without outlines or with CFF2
-    /// outlines, and [`Error::Subset`] or [`Error::SubsetterPanicked`] if the face is
-    /// damaged in a way that only subsetting finds.
+    /// outlines, [`Error::MalformedTable`] for a `CFF ` table with a real number the
+    /// subsetter cannot write back, and [`Error::Subset`] or [`Error::SubsetterPanicked`]
+    /// if the face is damaged in a way that only subsetting finds.
     pub fn subset(&self, glyphs: impl IntoIterator<Item = GlyphId>) -> Result<Subset> {
         let face = self.index();
         let outline_format = match self.outline_format() {
@@ -117,6 +118,9 @@ impl FontFace {
                 });
             }
             ids.push(glyph.to_u16());
+        }
+        if outline_format == OutlineFormat::Cff {
+            crate::cff::check_reals(&crate::font::font_ref(self.data(), face)?, face)?;
         }
         let remapper = GlyphRemapper::new_from_glyphs_sorted(&ids);
         let data = self.data();

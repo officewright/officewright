@@ -62,11 +62,7 @@ impl<'a> Prepared<'a> {
         let base_font = if font.whole {
             font.name.clone()
         } else {
-            format!(
-                "{}+{}",
-                subset_tag(&font.name, usage.glyphs.keys().copied()),
-                font.name
-            )
+            format!("{}+{}", subset_tag(&font.name, subset.data()), font.name)
         };
         Ok(Self {
             font,
@@ -84,13 +80,14 @@ impl<'a> Prepared<'a> {
             .map_or(0, GlyphId::to_u16)
     }
 
-    /// Writes `text` to a content stream as hex strings of CIDs with `Tj` operators.
+    /// Writes `text` to a content stream as hex strings of CIDs with `Tj` operators, and
+    /// returns whether it needed replacement text.
     ///
     /// Where two characters share a glyph, its ToUnicode entry gives the one shown
     /// first; the other is shown in a marked-content span whose `/ActualText` gives
     /// the character (ISO 32000-1, 14.9.4), so text extraction returns the text as
-    /// written.
-    pub(crate) fn show(&self, out: &mut Vec<u8>, lookup: &Lookup<'_>, text: &str) -> Result<()> {
+    /// written. Such a span is a PDF 1.5 feature.
+    pub(crate) fn show(&self, out: &mut Vec<u8>, lookup: &Lookup<'_>, text: &str) -> Result<bool> {
         let mut runs: Vec<(bool, Vec<(u16, char)>)> = Vec::new();
         for (offset, ch) in text.char_indices() {
             let glyph = lookup.glyph(ch, offset)?.id;
@@ -126,7 +123,7 @@ impl<'a> Prepared<'a> {
                 );
             }
         }
-        Ok(())
+        Ok(runs.iter().any(|(mapped, _)| !mapped))
     }
 
     /// The font dictionary, a Type 0 font, whose other objects start at `first`.
@@ -329,13 +326,13 @@ pub(crate) fn pdf_name(name: &str) -> String {
     out
 }
 
-/// Six capital letters that tell this subset of a font from others (ISO 32000-1, 9.6.4),
-/// the same for the same font and glyphs, so equal documents give equal files.
-fn subset_tag(name: &str, glyphs: impl Iterator<Item = u16>) -> String {
-    // 64-bit FNV-1a over the name and the glyph IDs.
+/// Six capital letters that tell this subset from others (ISO 32000-1, 9.6.4): a hash of
+/// the font's name and the subset's data, so different fonts or glyphs give different
+/// tags, and equal documents give equal files.
+fn subset_tag(name: &str, data: &[u8]) -> String {
+    // 64-bit FNV-1a.
     let mut hash: u64 = 0xCBF2_9CE4_8422_2325;
-    let bytes = name.bytes().chain(glyphs.flat_map(u16::to_be_bytes));
-    for byte in bytes {
+    for &byte in name.as_bytes().iter().chain(data) {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
     }
@@ -361,12 +358,12 @@ mod tests {
     }
 
     #[test]
-    fn subset_tags_are_six_capitals_and_depend_on_the_glyphs() {
-        let tag = subset_tag("Font", [1, 2, 3].into_iter());
+    fn subset_tags_are_six_capitals_and_depend_on_the_font_and_its_data() {
+        let tag = subset_tag("Font", b"glyphs");
         assert_eq!(tag.len(), 6);
         assert!(tag.bytes().all(|b| b.is_ascii_uppercase()), "{tag}");
-        assert_eq!(tag, subset_tag("Font", [1, 2, 3].into_iter()));
-        assert_ne!(tag, subset_tag("Font", [1, 2, 4].into_iter()));
-        assert_ne!(tag, subset_tag("Other", [1, 2, 3].into_iter()));
+        assert_eq!(tag, subset_tag("Font", b"glyphs"));
+        assert_ne!(tag, subset_tag("Font", b"glyphz"));
+        assert_ne!(tag, subset_tag("Other", b"glyphs"));
     }
 }

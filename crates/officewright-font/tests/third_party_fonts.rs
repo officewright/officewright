@@ -201,3 +201,37 @@ fn resolves_arial_to_liberation_sans() {
     assert_eq!(noto.kind(), ResolutionKind::Exact);
     assert_eq!(resolver.substitutions().len(), 2);
 }
+
+#[test]
+fn refuses_cff_reals_the_subsetter_cannot_write() -> TestResult {
+    // Noto Sans with the first real number of its Private DICT, 46875E-6 (bytes 1e 46
+    // 87 5c 6f), replaced by 1E99999 (1e 1b 99 99 9f), which is infinite as an f32.
+    // subsetter 0.2.6 panics writing it back; the face is refused before that.
+    let mut data = read("noto/NotoSans-Regular.otf")?;
+    let real = [0x1e, 0x46, 0x87, 0x5c, 0x6f];
+    let at = data
+        .windows(real.len())
+        .position(|window| window == real)
+        .ok_or("no such real number")?;
+    data.get_mut(at..at + real.len())
+        .ok_or("short font")?
+        .copy_from_slice(&[0x1e, 0x1b, 0x99, 0x99, 0x9f]);
+    let font = FontFace::from_bytes(data, 0)?;
+    let err = font.subset([]).err().ok_or("the subset succeeded")?;
+    assert!(
+        matches!(
+            err,
+            officewright_font::Error::MalformedTable { table: "CFF ", .. }
+        ),
+        "{err}"
+    );
+    assert_eq!(
+        format!(
+            "{err}: {}",
+            std::error::Error::source(&err).ok_or("no cause")?
+        ),
+        "font face 0: table 'CFF ' is damaged: the real number 1E99999 in a DICT is too large \
+         to subset"
+    );
+    Ok(())
+}

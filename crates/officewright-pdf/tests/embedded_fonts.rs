@@ -140,6 +140,43 @@ fn embeds_truetype_fonts_as_cid_fonts() -> TestResult {
     assert!(rest.starts_with("LiberationSans "), "{rest}");
     // Eleven characters, nine different glyphs (и and р twice).
     assert!(pdf.contains("9 beginbfchar"), "{pdf}");
+    // A TrueType font program gives its length again (ISO 32000-1, Table 127).
+    let (_, program) = pdf
+        .split_once("8 0 obj\n<< /Length ")
+        .ok_or("no font program")?;
+    let (length, rest) = program.split_once(' ').ok_or("no length")?;
+    assert!(
+        rest.starts_with(&format!("/Length1 {length} >>")),
+        "{rest:.40}"
+    );
+    // Without characters that share a glyph, the file is PDF 1.4.
+    assert!(pdf.starts_with("%PDF-1.4\n"));
+    Ok(())
+}
+
+#[test]
+fn a_subset_tag_tells_glyph_sets_and_fonts_apart() -> TestResult {
+    let tag = |data: Vec<u8>, text: &str| -> TestResult<String> {
+        let pdf = pdf_text(&one_line(&Font::from_bytes(data, 0)?, text)?)?;
+        let (_, name) = pdf.split_once("/BaseFont /").ok_or("no BaseFont")?;
+        Ok(name.get(..6).ok_or("short name")?.to_owned())
+    };
+    let ab = tag(liberation_sans()?, "АБ")?;
+    assert_eq!(ab, tag(liberation_sans()?, "БА")?);
+    assert_ne!(ab, tag(liberation_sans()?, "АВ")?);
+    // Another font with the same name and glyph IDs: Liberation Sans with another
+    // advance width for А (its hmtx entry, an advance and a side bearing per glyph).
+    let mut other = liberation_sans()?;
+    let a = FontFace::from_bytes(liberation_sans()?, 0)?
+        .glyph_id('А')
+        .ok_or("no А")?;
+    let hmtx = table(&other, b"hmtx").ok_or("no hmtx table")?;
+    let advance = hmtx + 4 * usize::from(a.to_u16());
+    other
+        .get_mut(advance..advance + 2)
+        .ok_or("short hmtx table")?
+        .copy_from_slice(&1000u16.to_be_bytes());
+    assert_ne!(ab, tag(other, "АБ")?);
     Ok(())
 }
 
@@ -297,6 +334,8 @@ fn a_shared_glyph_keeps_each_character_for_text_extraction() -> TestResult {
         .copy_from_slice(&to);
     let font = Font::from_bytes(data, 0)?;
     let pdf = pdf_text(&one_line(&font, "AÁA")?)?;
+    // Replacement text in marked content is a PDF 1.5 feature.
+    assert!(pdf.starts_with("%PDF-1.5\n"));
     // One glyph: the ToUnicode map gives the character it showed first, A, and Á is
     // shown in a span with its own ActualText.
     assert!(

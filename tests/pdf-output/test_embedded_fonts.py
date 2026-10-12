@@ -7,7 +7,9 @@ it, for a TrueType font (Liberation Sans) and a CFF font (Noto Sans) from tests/
   character of the Latin, Greek and Cyrillic scripts that both fonts have;
 - pdftoppm must render the pages without complaint, and a subset must render exactly as
   the whole font does, which proves the subset kept the right glyph for every character
-  (text extraction cannot see that: it reads the ToUnicode map, not the glyphs).
+  (text extraction cannot see that: it reads the ToUnicode map, not the glyphs);
+- where two characters share a glyph, pdftotext must read each through the replacement
+  text (ActualText) of the second, in a file that declares PDF 1.5.
 
 OW_CLI must point at the officewright binary (scripts/check.sh sets it).
 """
@@ -21,6 +23,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 SAMPLE = HERE / "unicode-sample.txt"
 FONTS = HERE.parent / "fonts"
+# officewright-font's test font, with glyphs for the space, A, the acute accent and Á.
+MINIMAL = HERE.parent.parent / "crates" / "officewright-font" / "tests" / "data" / "minimal.ttf"
 
 # Each font with the type pdffonts gives an embedded font of its kind.
 CASES = (
@@ -39,6 +43,19 @@ def with_fs_type(font, fs_type):
             font[os2 + 8 : os2 + 10] = fs_type.to_bytes(2, "big")
             return bytes(font)
     raise ValueError("no OS/2 table")
+
+
+def with_shared_glyph(font):
+    """The minimal font with Á mapped to the glyph of A, as fonts do for look-alike
+    characters. Its cmap has one segment per character, whose idDelta is the glyph minus
+    the character."""
+
+    def deltas(acute):
+        pairs = ((0x20, 1), (0x41, 2), (0xB4, 3), (0xC1, acute))
+        return b"".join(((glyph - code) & 0xFFFF).to_bytes(2, "big") for code, glyph in pairs)
+
+    assert font.count(deltas(4)) == 1
+    return font.replace(deltas(4), deltas(2))
 
 
 def characters(text):
@@ -136,3 +153,17 @@ class EmbeddedFontTest(unittest.TestCase):
                     pixels = page.split(b"\n", 3)[3]
                     self.assertLess(min(pixels), 128, f"page {number} is blank")
                     self.assertEqual(page, reference, f"page {number} differs from the whole font")
+
+    def test_text_extraction_reads_characters_that_share_a_glyph(self):
+        with tempfile.TemporaryDirectory() as directory:
+            font = Path(directory) / "shared.ttf"
+            font.write_bytes(with_shared_glyph(MINIMAL.read_bytes()))
+            source = Path(directory) / "shared.txt"
+            source.write_text("AÁA ÁA", encoding="utf-8")
+            pdf, _ = self.convert(directory, font, source=source)
+            # The second character is shown with replacement text, a PDF 1.5 feature.
+            self.assertTrue(pdf.read_bytes().startswith(b"%PDF-1.5\n"))
+            result = subprocess.run(["qpdf", "--check", str(pdf)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            text = run(["pdftotext", "-enc", "UTF-8", str(pdf), "-"]).stdout.decode("utf-8")
+            self.assertEqual(text.split(), ["AÁA", "ÁA"])

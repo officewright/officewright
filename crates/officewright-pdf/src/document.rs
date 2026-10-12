@@ -94,7 +94,9 @@ impl Document {
     /// Writes the document as a PDF file to `out`.
     ///
     /// Embedded fonts are reduced to the glyphs the document shows now. Nothing is
-    /// written to `out` unless the whole document can be.
+    /// written to `out` unless the whole document can be. The file is PDF 1.4, or PDF 1.5
+    /// if two characters share a glyph of an embedded font and one of them needs
+    /// replacement text for text extraction.
     ///
     /// # Errors
     ///
@@ -152,12 +154,13 @@ impl Document {
                 None => Ok(Encoder::Standard(font)),
             })
             .collect::<Result<Vec<_>>>()?;
-        let contents = self
-            .pages
-            .iter()
-            .zip(&page_fonts)
-            .map(|(page, map)| page.content_stream(map, &encoders))
-            .collect::<Result<Vec<_>>>()?;
+        let mut actual_text = false;
+        let mut contents = Vec::with_capacity(self.pages.len());
+        for (page, map) in self.pages.iter().zip(&page_fonts) {
+            let (content, spans) = page.content_stream(map, &encoders)?;
+            contents.push(content);
+            actual_text |= spans;
+        }
 
         // Objects: 1 catalog, 2 page tree, then a font dictionary per font, then a page
         // and its content stream per page, then the other objects of each embedded font.
@@ -183,8 +186,12 @@ impl Document {
         let mut out = CountingWriter::new(out);
         let mut offsets = Vec::with_capacity(next_object);
 
-        // The comment's bytes above 127 tell transfer tools the file is binary (§7.5.2).
-        out.put(b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n")?;
+        // Replacement text in marked content needs PDF 1.5 (§14.9.4); everything else
+        // PDF 1.4. The comment's bytes above 127 tell transfer tools the file is binary
+        // (§7.5.2).
+        let version = if actual_text { "1.5" } else { "1.4" };
+        out.put(format!("%PDF-{version}\n").as_bytes())?;
+        out.put(b"%\xE2\xE3\xCF\xD3\n")?;
 
         offsets.push(out.written);
         out.put(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n")?;
@@ -394,9 +401,11 @@ impl Page {
         })
     }
 
-    /// Writes the content stream, encoding the text. `map` gives the document's index
-    /// of each of the page's fonts, and `encoders` the document's fonts.
-    fn content_stream(&self, map: &[usize], encoders: &[Encoder<'_>]) -> Result<Vec<u8>> {
+    /// Writes the content stream, encoding the text, and says whether it needed
+    /// replacement text. `map` gives the document's index of each of the page's fonts,
+    /// and `encoders` the document's fonts.
+    fn content_stream(&self, map: &[usize], encoders: &[Encoder<'_>]) -> Result<(Vec<u8>, bool)> {
+        let mut actual_text = false;
         let mut stream = Vec::new();
         for piece in &self.content {
             match piece {
@@ -406,11 +415,11 @@ impl Page {
                     // and `map` and `encoders` cover every font of the document
                     #[allow(clippy::indexing_slicing)]
                     let encoder = &encoders[map[*font]];
-                    encoder.show(&mut stream, text)?;
+                    actual_text |= encoder.show(&mut stream, text)?;
                 }
             }
         }
-        Ok(stream)
+        Ok((stream, actual_text))
     }
 }
 
@@ -423,13 +432,14 @@ enum Encoder<'a> {
 }
 
 impl Encoder<'_> {
-    /// Writes `text` with the operators that show it.
-    fn show(&self, out: &mut Vec<u8>, text: &str) -> Result<()> {
+    /// Writes `text` with the operators that show it, and says whether it needed
+    /// replacement text.
+    fn show(&self, out: &mut Vec<u8>, text: &str) -> Result<bool> {
         match self {
             Self::Standard(font) => {
                 push_string(out, &font.encode(text)?);
                 out.extend_from_slice(b" Tj");
-                Ok(())
+                Ok(false)
             }
             Self::Embedded(font, prepared) => prepared.show(out, &font.lookup(), text),
         }
