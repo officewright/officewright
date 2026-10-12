@@ -220,8 +220,8 @@ fn rejects_malformed_references() {
         "1:4: &#; is not a character XML allows"
     );
     assert_eq!(
-        error(&format!("<a>&{};</a>", "x".repeat(40))),
-        "1:4: '&' does not start a reference"
+        error(&format!("<a>&{};</a>", "x".repeat(70))),
+        format!("1:4: undeclared entity &{}…;", "x".repeat(64))
     );
 }
 
@@ -451,4 +451,77 @@ fn reports_offsets_of_events() {
     }
     assert_eq!(offsets, [0, 3, 4, 4, 8]);
     assert_eq!(reader.error(5, "bad").to_string(), "line 2, column 2: bad");
+}
+
+#[test]
+fn reads_character_references_with_any_number_of_leading_zeros() {
+    // Production 66 puts no bound on the digits.
+    assert_eq!(
+        trace(&format!(
+            "<a>&#x{}41;&#{}66;</a>",
+            "0".repeat(40),
+            "0".repeat(40)
+        )),
+        ["<a>", "'AB'", "</a>"]
+    );
+}
+
+#[test]
+fn rejects_duplicate_namespace_declarations() {
+    assert_eq!(
+        error("<a xmlns='urn:x' xmlns='urn:y'/>"),
+        "1:1: duplicate attribute xmlns in <a>"
+    );
+    assert_eq!(
+        error("<a xmlns:p='urn:x' xmlns:p='urn:y'><p:b/></a>"),
+        "1:1: duplicate attribute xmlns:p in <a>"
+    );
+}
+
+#[test]
+fn reads_the_xml_prefix_and_prefixed_attributes_named_xmlns() {
+    // The xml prefix is bound by definition (Namespaces in XML 1.0, section 3), and an
+    // attribute p:xmlns is an attribute, not a namespace declaration, which is xmlns or
+    // begins with xmlns: (same section).
+    assert_eq!(
+        trace("<xml:a/>"),
+        [
+            "<{http://www.w3.org/XML/1998/namespace}a>",
+            "</{http://www.w3.org/XML/1998/namespace}a>"
+        ]
+    );
+    assert_eq!(
+        trace(r#"<a xmlns:p="urn:x" p:xmlns="1"/>"#),
+        ["<a {urn:x}xmlns=1>", "</a>"]
+    );
+    assert_eq!(
+        error(r#"<a xmlns:p="urn:x" xmlns:q="urn:x" p:xmlns="1" q:xmlns="2"/>"#),
+        "1:1: duplicate attribute q:xmlns in <a>"
+    );
+    assert_eq!(
+        error(r#"<root xmlns:xmlns="urn:a"/>"#),
+        "1:1: the prefix xmlns cannot be declared"
+    );
+}
+
+#[test]
+fn checks_the_grammar_of_encoding_names() {
+    assert_eq!(
+        error(r#"<?xml version="1.0" encoding="8bit"?><a/>"#),
+        "1:1: invalid encoding name 8bit"
+    );
+}
+
+#[test]
+fn keeps_error_messages_short_whatever_the_document_holds() {
+    let name = "a".repeat(8 << 20);
+    let message = error(&format!("<{name}"));
+    assert_eq!(
+        message,
+        format!(
+            "1:{}: unexpected end of input in <{}…>",
+            (8 << 20) + 2,
+            "a".repeat(64)
+        )
+    );
 }
