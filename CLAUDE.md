@@ -76,7 +76,7 @@ scripts/install-cargo-c.sh  the pinned prebuilt cargo-c, shared by ci.yml and re
 scripts/nightly.sh      long-running checks (see below)
 scripts/make-rule-docs.py  writes tests/corpus/word-rules/ (stored ZIP, fixed dates: same bytes everywhere)
 scripts/windows/make-reference.ps1  renders the reference PDFs with Word on the maintainer's Windows machine
-scripts/corpus-import.py   checks make-reference.ps1 results and copies them into tests/corpus/
+scripts/corpus-import.py   checks make-reference.ps1 results and turns them into tests/corpus/ rasters and geometry
 ```
 
 ## Definition of done (every change)

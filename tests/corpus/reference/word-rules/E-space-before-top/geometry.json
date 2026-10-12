@@ -6,6 +6,8 @@
  "units": "points, origin at the top left of the page, y downwards",
  "page_count": 8,
  "fonts_not_embedded": [],
+ "compat_flags_dropped": [],
+ "compat_flags_added": [],
  "page_breaks": [
   {
    "paragraph": 2,

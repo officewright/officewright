@@ -8,6 +8,10 @@
  "fonts_not_embedded": [
   "ArialMT"
  ],
+ "compat_flags_dropped": [
+  "doNotUseIndentAsNumberingTabStop"
+ ],
+ "compat_flags_added": [],
  "page_breaks": [],
  "pages": [
   {

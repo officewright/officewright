@@ -13,8 +13,9 @@ import sys
 import tempfile
 import unittest
 import zipfile
-import zlib
 from pathlib import Path
+
+from pngcheck import png_pixels
 
 SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
 
@@ -68,17 +69,6 @@ def pixels_of(page, width=4, height=2):
 
 def pgm(width, height, pixels):
     return f"P5\n{width} {height}\n255\n".encode() + pixels
-
-
-def png_pixels(data):
-    """Width, height and grey values of a PNG written by png_from_pgm."""
-    assert data[:8] == b"\x89PNG\r\n\x1a\n"
-    width, height, depth, colour = struct.unpack(">IIBB", data[16:26])
-    assert (depth, colour) == (8, 0)
-    idat = data[data.index(b"IDAT") + 4 : data.index(b"IEND") - 8]
-    rows = zlib.decompress(idat)
-    stride = width + 1
-    return width, height, b"".join(rows[y * stride + 1 : (y + 1) * stride] for y in range(height))
 
 
 SOURCES = """\
@@ -218,7 +208,8 @@ class Import(unittest.TestCase):
             "| reference/word-rules/E-line-fonts/ | word-rules/E-line-fonts.docx, re-saved by "
             "Word as resaved/word-rules/E-line-fonts.docx | Microsoft Word 16.0, build 16.0.1, "
             "Windows 10.0.26100.0 (24H2) | 2026-10-13 | compatibility mode 15; 3 pages; printer "
-            "Microsoft Print to PDF; fonts Word substituted: none; fields as saved; PDF not "
+            "Microsoft Print to PDF; fonts Word substituted: none; w:compat flags Word dropped "
+            "from the re-saved copy: none; fields as saved; PDF not "
             f"committed, SHA-256 {pdf_sha256}; rasters and geometry by poppler 24.02.0 at 110 dpi, "
             "grey; fonts the PDF does not embed, rasterized with poppler's substitutes: Garamond |",
             sources,
@@ -228,16 +219,22 @@ class Import(unittest.TestCase):
         self.run_import()
         pages = self.corpus / "reference" / "word-rules" / "E-line-fonts"
         for number in (1, 2, 3):
-            width, height, pixels = png_pixels((pages / f"page-{number:03}.png").read_bytes())
+            width, height, per_metre, pixels = png_pixels(
+                (pages / f"page-{number:03}.png").read_bytes()
+            )
             self.assertEqual((width, height, pixels), (4, 2, pixels_of(number)))
+            self.assertEqual(per_metre, (4331, 4331, 1))  # 110 dpi
 
     def test_geometry_holds_pages_lines_words_and_word_page_breaks(self):
         doc = rules.documents()[0]
         record = self.add_result(doc)
-        # Word marks a page break before the first line of the first paragraph.
+        # Word marks a page break before the first line of the first paragraph, and one in
+        # the middle of the third paragraph, after "Cambria 11 pt, line 01: ...gjpqy".
         first = b'<w:t xml:space="preserve">Calibri 11 pt, line 01'
+        third = b'<w:t xml:space="preserve">Cambria 11 pt, line 02'
         self.change_resaved(record, {"word/document.xml": [
             (first, b"<w:lastRenderedPageBreak/>" + first),
+            (third, b"<w:lastRenderedPageBreak/>" + third),
         ]})
         self.run_import()
         geometry = json.loads(
@@ -254,10 +251,13 @@ class Import(unittest.TestCase):
         self.assertEqual(
             page["lines"][0]["words"][1], {"text": "one", "box": [95.429, 79.82, 135.0, 90.86]}
         )
-        self.assertEqual(len(geometry["page_breaks"]), 1)
-        self.assertEqual(geometry["page_breaks"][0]["offset"], 0)
-        self.assertEqual(geometry["page_breaks"][0]["paragraph"], 0)
-        self.assertTrue(geometry["page_breaks"][0]["text_after"].startswith("Calibri 11 pt"))
+        first, third = geometry["page_breaks"]
+        self.assertEqual((first["paragraph"], first["offset"], first["text_before"]), (0, 0, ""))
+        self.assertTrue(first["text_after"].startswith("Calibri 11 pt, line 01"))
+        line = "Cambria 11 pt, line 01: Hamburgefonts gjpqy"
+        self.assertEqual((third["paragraph"], third["offset"]), (2, len(line)))
+        self.assertEqual(third["text_before"], line[-30:])
+        self.assertTrue(third["text_after"].startswith("Cambria 11 pt, line 02"))
 
     def test_importing_again_replaces_rows_and_old_pages(self):
         self.run_import()
@@ -268,6 +268,48 @@ class Import(unittest.TestCase):
         self.assertEqual(sources.count("| reference/word-rules/E-line-fonts/ |"), 1)
         self.assertEqual(sources.count("| reference/word-rules/E-line-exact/ |"), 1)
         self.assertFalse(stale.exists())
+
+    def test_records_compat_flags_word_dropped(self):
+        doc = next(d for d in rules.documents() if d.name == "E-tab-hanging-noindenttab")
+        record = self.add_result(doc)
+        self.change_resaved(record, {"word/settings.xml": [
+            (b"<w:doNotUseIndentAsNumberingTabStop/>", b""),
+        ]})
+        self.run_import()
+        folder = self.corpus / "reference" / "word-rules" / doc.name
+        geometry = json.loads((folder / "geometry.json").read_text(encoding="utf-8"))
+        self.assertEqual(geometry["compat_flags_dropped"], ["doNotUseIndentAsNumberingTabStop"])
+        self.assertEqual(geometry["compat_flags_added"], [])
+        sources = (self.corpus / "SOURCES.md").read_text(encoding="utf-8")
+        self.assertIn(
+            "w:compat flags Word dropped from the re-saved copy: doNotUseIndentAsNumberingTabStop;",
+            sources,
+        )
+
+    def test_refuses_a_resaved_copy_without_a_document_part(self):
+        record = self.add_result(rules.documents()[0])
+        resaved = self.results / record["resaved_file"]
+        with zipfile.ZipFile(resaved) as archive:
+            parts = [(i.filename, archive.read(i)) for i in archive.infolist()]
+        with zipfile.ZipFile(resaved, "w") as archive:
+            for name, data in parts:
+                if name != "word/document.xml":
+                    archive.writestr(name, data)
+        record["resaved_sha256"] = sha256(resaved.read_bytes())
+        self.save_record(record)
+        self.assertIn("cannot read a package", self.refused())
+
+    def test_refuses_an_image_pdftoppm_should_not_write(self):
+        original = self.raster
+
+        def colour(pdf, directory):
+            pages = original(pdf, directory)
+            pages[0].write_bytes(b"P6\n1 1\n255\n\x00\x00\x00")
+            return pages
+
+        self.raster = colour
+        self.tools = importer.Tools(**{**self.tools.__dict__, "raster": colour})
+        self.assertIn("pdftoppm wrote an unexpected image", self.refused())
 
     def test_refuses_fonts_word_embedded(self):
         record = self.add_result(rules.documents()[0])
@@ -475,6 +517,25 @@ class Import(unittest.TestCase):
 class Pdffonts(unittest.TestCase):
     def test_lists_fonts_that_are_not_embedded_without_subset_tags(self):
         self.assertEqual(importer.not_embedded(PDFFONTS), ["Garamond"])
+
+    def test_a_name_longer_than_its_column_is_read(self):
+        name = "SomeFoundryExtraLongFontFamilyName-SemiBoldItalic"
+        row = f"{name} TrueType          WinAnsi          no  no  no      14  0"
+        self.assertEqual(importer.not_embedded(PDFFONTS + row + "\n"), sorted(["Garamond", name]))
+
+
+    def test_a_type_with_spaces_is_read(self):
+        row = "Helvetica" + " " * 28 + "Type 1            WinAnsi          no  no  no       3  0"
+        self.assertEqual(importer.not_embedded(PDFFONTS + row + "\n"), ["Garamond", "Helvetica"])
+
+
+class PageOrder(unittest.TestCase):
+    def test_pages_are_sorted_by_number(self):
+        names = [Path(f"page-{n}.pgm") for n in (10, 9, 1, 2)]
+        self.assertEqual(
+            [p.name for p in importer.in_page_order(names)],
+            ["page-1.pgm", "page-2.pgm", "page-9.pgm", "page-10.pgm"],
+        )
 
     def test_no_fonts(self):
         self.assertEqual(importer.not_embedded(PDFFONTS.split("-")[0]), [])

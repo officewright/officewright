@@ -140,10 +140,14 @@ def run_tool(*args: str) -> str:
     return done.stdout.decode("utf-8", errors="replace")
 
 
+def in_page_order(pages: list[Path]) -> list[Path]:
+    """pdftoppm's page-N.pgm files by page number (it pads N to the page count's width)."""
+    return sorted(pages, key=lambda path: int(path.stem.rsplit("-", 1)[1]))
+
+
 def poppler_raster(pdf: Path, directory: Path) -> list[Path]:
     run_tool("pdftoppm", "-r", str(RASTER_DPI), "-gray", str(pdf), str(directory / "page"))
-    pages = list(directory.glob("page-*.pgm"))
-    return sorted(pages, key=lambda path: int(path.stem.rsplit("-", 1)[1]))
+    return in_page_order(list(directory.glob("page-*.pgm")))
 
 
 def poppler_version() -> str:
@@ -276,6 +280,21 @@ def compatibility_mode(parts: dict[str, bytes]) -> int:
     return 12
 
 
+def compat_flags(parts: dict[str, bytes]) -> set[str]:
+    """The legacy w:compat flags a package sets (compatSetting elements aside)."""
+    root = settings_root(parts)
+    compat = root.find(f"{W}compat") if root is not None else None
+    if compat is None:
+        return set()
+    flags = set()
+    for element in compat:
+        name = local_name(element.tag)
+        value = element.get(f"{W}val", "true")
+        if name != "compatSetting" and value not in ("0", "false", "off"):
+            flags.add(name)
+    return flags
+
+
 def locale_marks(parts: dict[str, bytes]) -> tuple[set[str], dict[str, str]]:
     """The language tags a package names, and its decimal symbol and list separator."""
     languages = set()
@@ -353,9 +372,13 @@ def png_from_pgm(data: bytes) -> bytes:
         return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", crc)
 
     header = struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0)
+    # The resolution, in pixels per metre, so the file says its scale.
+    per_metre = round(RASTER_DPI / 0.0254)
+    physical = struct.pack(">IIB", per_metre, per_metre, 1)
     return (
         b"\x89PNG\r\n\x1a\n"
         + chunk(b"IHDR", header)
+        + chunk(b"pHYs", physical)
         + chunk(b"IDAT", zlib.compress(rows, 9))
         + chunk(b"IEND", b"")
     )
@@ -448,25 +471,29 @@ def pdf_pages(info: str) -> int:
 def not_embedded(pdffonts: str) -> list[str]:
     """Fonts pdffonts lists with emb = no.
 
-    pdffonts prints a header, a dashed rule whose dash groups give the column widths, and a
-    row per font: name, type, encoding, emb, sub, uni, object, generation.
+    pdffonts prints a header, a dashed rule and a row per font: name, type, encoding, emb,
+    sub, uni, object, generation.
     """
     lines = pdffonts.splitlines()
     rule = next((i for i, line in enumerate(lines) if line.startswith("---")), None)
     if rule is None:
         return []
-    columns = [m.span() for m in re.finditer(r"-+", lines[rule])]
     names = []
     for line in lines[rule + 1 :]:
-        if not line.strip() or len(columns) < 4:
+        # Read from the right: a long name pushes the columns aside, and the type may hold
+        # spaces ("CID TrueType"), but the last five fields are always emb, sub, uni, object
+        # and generation, and a PDF font name has no spaces.
+        fields = line.split()
+        if len(fields) < 7:
             continue
-        cells = [line[start:end + 1].strip() for start, end in columns]
-        if cells[3] == "no":
-            names.append(re.sub(r"^[A-Z]{6}\+", "", cells[0]))
+        if fields[-5] == "no":
+            names.append(re.sub(r"^[A-Z]{6}\+", "", fields[0]))
     return sorted(set(names))
 
 
-def reference_row(group: str, record: dict, missing_embeds: list[str], poppler: str) -> str:
+def reference_row(
+    group: str, record: dict, missing_embeds: list[str], poppler: str, dropped: list[str]
+) -> str:
     base = Path(record["file"]).stem
     windows = record["windows_version"]
     display = record.get("windows_display_version") or ""
@@ -477,9 +504,10 @@ def reference_row(group: str, record: dict, missing_embeds: list[str], poppler: 
         printer = f"printer other than {REFERENCE_PRINTER}, name not recorded"
     notes = [
         f"compatibility mode {record['compatibility_mode']}",
-        f"{record['pages']} pages",
+        f"{record['pages']} page{'s' if record['pages'] != 1 else ''}",
         printer,
         "fonts Word substituted: " + (", ".join(record["fonts_missing"]) or "none"),
+        "w:compat flags Word dropped from the re-saved copy: " + (", ".join(dropped) or "none"),
         "fields as saved",
         f"PDF not committed, SHA-256 {record['pdf_sha256']}",
         f"rasters and geometry by poppler {poppler} at {RASTER_DPI} dpi, grey",
@@ -550,6 +578,10 @@ def check_result(
             problems += locale_problems(original_parts, resaved_parts)
         mode = compatibility_mode(original_parts)
         resaved_mode = compatibility_mode(resaved_parts)
+        # Word drops a legacy flag it does not apply in the document's mode. The render is
+        # still Word's for this input, so the import records it rather than refusing it.
+        dropped = sorted(compat_flags(original_parts) - compat_flags(resaved_parts))
+        added = sorted(compat_flags(resaved_parts) - compat_flags(original_parts))
         page_breaks = rendered_page_breaks(resaved_parts)
     except (zipfile.BadZipFile, ElementTree.ParseError, ValueError, KeyError) as error:
         raise Refused(f"{record['file']}: cannot read a package: {error}") from error
@@ -585,10 +617,12 @@ def check_result(
         "units": "points, origin at the top left of the page, y downwards",
         "page_count": pages,
         "fonts_not_embedded": missing_embeds,
+        "compat_flags_dropped": dropped,
+        "compat_flags_added": added,
         "page_breaks": page_breaks,
         "pages": geometry_pages,
     }
-    row = reference_row(group, record, missing_embeds, poppler)
+    row = reference_row(group, record, missing_embeds, poppler, dropped)
     return Checked(record, pdf, resaved, row, geometry)
 
 
@@ -671,7 +705,10 @@ def main() -> int:
         return 1
     verb = "would import" if args.dry_run else "imported"
     for item in checked:
-        print(f"{verb} {item.record['file']}: {item.record['pages']} pages")
+        pages = item.record["pages"]
+        print(f"{verb} {item.record['file']}: {pages} page{'s' if pages != 1 else ''}")
+        for flag in item.geometry["compat_flags_dropped"]:
+            print(f"  note: Word dropped the w:compat flag {flag} from the re-saved copy")
     print(f"corpus-import.py: {verb} {len(checked)} reference renders")
     return 0
 

@@ -10,6 +10,8 @@
   "NotoSans-Regular",
   "TimesNewRomanPSMT"
  ],
+ "compat_flags_dropped": [],
+ "compat_flags_added": [],
  "page_breaks": [
   {
    "paragraph": 2,
