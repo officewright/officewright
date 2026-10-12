@@ -8,5 +8,9 @@ license.workspace = true
 license-file.workspace = true
 repository.workspace = true
 
+[dependencies]
+officewright-core.workspace = true
+officewright-opc.workspace = true
+
 [lints]
 workspace = true
