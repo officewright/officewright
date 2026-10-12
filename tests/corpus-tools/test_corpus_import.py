@@ -208,8 +208,8 @@ class Import(unittest.TestCase):
             "| reference/word-rules/E-line-fonts/ | word-rules/E-line-fonts.docx, re-saved by "
             "Word as resaved/word-rules/E-line-fonts.docx | Microsoft Word 16.0, build 16.0.1, "
             "Windows 10.0.26100.0 (24H2) | 2026-10-13 | compatibility mode 15; 3 pages; printer "
-            "Microsoft Print to PDF; fonts Word substituted: none; w:compat flags Word dropped "
-            "from the re-saved copy: none; fields as saved; PDF not "
+            "Microsoft Print to PDF; fonts Word substituted: none; w:compat settings Word "
+            "dropped from the re-saved copy: none; fields as saved; PDF not "
             f"committed, SHA-256 {pdf_sha256}; rasters and geometry by poppler 24.02.0 at 110 dpi, "
             "grey; fonts the PDF does not embed, rasterized with poppler's substitutes: Garamond |",
             sources,
@@ -282,9 +282,27 @@ class Import(unittest.TestCase):
         self.assertEqual(geometry["compat_flags_added"], [])
         sources = (self.corpus / "SOURCES.md").read_text(encoding="utf-8")
         self.assertIn(
-            "w:compat flags Word dropped from the re-saved copy: doNotUseIndentAsNumberingTabStop;",
+            "w:compat settings Word dropped from the re-saved copy: "
+            "doNotUseIndentAsNumberingTabStop;",
             sources,
         )
+
+    def test_records_compat_settings_word_added_or_dropped(self):
+        record = self.add_result(rules.documents()[0])
+        hyphenation = (
+            b'<w:compatSetting w:name="useWord2013TrackBottomHyphenation" '
+            b'w:uri="http://schemas.microsoft.com/office/word" w:val="1"/>'
+        )
+        self.change_resaved(record, {"word/settings.xml": [
+            (b"</w:compat>", hyphenation + b"</w:compat>"),
+            (b'<w:compatSetting w:name="enableOpenTypeFeatures" '
+             b'w:uri="http://schemas.microsoft.com/office/word" w:val="1"/>', b""),
+        ]})
+        self.run_import()
+        folder = self.corpus / "reference" / "word-rules" / rules.documents()[0].name
+        geometry = json.loads((folder / "geometry.json").read_text(encoding="utf-8"))
+        self.assertEqual(geometry["compat_flags_added"], ["useWord2013TrackBottomHyphenation=1"])
+        self.assertEqual(geometry["compat_flags_dropped"], ["enableOpenTypeFeatures=1"])
 
     def test_refuses_a_resaved_copy_without_a_document_part(self):
         record = self.add_result(rules.documents()[0])
@@ -301,15 +319,16 @@ class Import(unittest.TestCase):
 
     def test_refuses_an_image_pdftoppm_should_not_write(self):
         original = self.raster
+        for image in (b"P6\n1 1\n255\n\x00\x00\x00", b"P5\n1 1\n65535\n\x00\x00"):
+            with self.subTest(image=image[:2]):
 
-        def colour(pdf, directory):
-            pages = original(pdf, directory)
-            pages[0].write_bytes(b"P6\n1 1\n255\n\x00\x00\x00")
-            return pages
+                def unexpected(pdf, directory, image=image):
+                    pages = original(pdf, directory)
+                    pages[0].write_bytes(image)
+                    return pages
 
-        self.raster = colour
-        self.tools = importer.Tools(**{**self.tools.__dict__, "raster": colour})
-        self.assertIn("pdftoppm wrote an unexpected image", self.refused())
+                self.tools = importer.Tools(**{**self.tools.__dict__, "raster": unexpected})
+                self.assertIn("pdftoppm wrote an unexpected image", self.refused())
 
     def test_refuses_fonts_word_embedded(self):
         record = self.add_result(rules.documents()[0])
@@ -523,6 +542,14 @@ class Pdffonts(unittest.TestCase):
         row = f"{name} TrueType          WinAnsi          no  no  no      14  0"
         self.assertEqual(importer.not_embedded(PDFFONTS + row + "\n"), sorted(["Garamond", name]))
 
+
+    def test_emb_is_told_from_sub_and_uni(self):
+        columns = "TrueType          WinAnsi          "
+        rows = (
+            "NotEmbedded" + " " * 26 + columns + "no  no  yes     21  0\n"
+            "EmbeddedWhole" + " " * 24 + columns + "yes no  no      22  0\n"
+        )
+        self.assertEqual(importer.not_embedded(PDFFONTS + rows), ["Garamond", "NotEmbedded"])
 
     def test_a_type_with_spaces_is_read(self):
         row = "Helvetica" + " " * 28 + "Type 1            WinAnsi          no  no  no       3  0"

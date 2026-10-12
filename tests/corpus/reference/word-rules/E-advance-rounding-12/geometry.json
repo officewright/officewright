@@ -9,7 +9,10 @@
   "TimesNewRomanPSMT"
  ],
  "compat_flags_dropped": [],
- "compat_flags_added": [],
+ "compat_flags_added": [
+  "compatibilityMode=12",
+  "useWord2013TrackBottomHyphenation=1"
+ ],
  "page_breaks": [],
  "pages": [
   {

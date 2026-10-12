@@ -11,7 +11,9 @@
  "compat_flags_dropped": [
   "doNotUseIndentAsNumberingTabStop"
  ],
- "compat_flags_added": [],
+ "compat_flags_added": [
+  "useWord2013TrackBottomHyphenation=1"
+ ],
  "page_breaks": [],
  "pages": [
   {

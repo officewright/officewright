@@ -281,7 +281,7 @@ def compatibility_mode(parts: dict[str, bytes]) -> int:
 
 
 def compat_flags(parts: dict[str, bytes]) -> set[str]:
-    """The legacy w:compat flags a package sets (compatSetting elements aside)."""
+    """What w:compat sets: legacy flags by name, compatSetting elements as name=value."""
     root = settings_root(parts)
     compat = root.find(f"{W}compat") if root is not None else None
     if compat is None:
@@ -290,7 +290,9 @@ def compat_flags(parts: dict[str, bytes]) -> set[str]:
     for element in compat:
         name = local_name(element.tag)
         value = element.get(f"{W}val", "true")
-        if name != "compatSetting" and value not in ("0", "false", "off"):
+        if name == "compatSetting":
+            flags.add(f"{element.get(f'{W}name', '')}={value}")
+        elif value not in ("0", "false", "off"):
             flags.add(name)
     return flags
 
@@ -507,7 +509,7 @@ def reference_row(
         f"{record['pages']} page{'s' if record['pages'] != 1 else ''}",
         printer,
         "fonts Word substituted: " + (", ".join(record["fonts_missing"]) or "none"),
-        "w:compat flags Word dropped from the re-saved copy: " + (", ".join(dropped) or "none"),
+        "w:compat settings Word dropped from the re-saved copy: " + (", ".join(dropped) or "none"),
         "fields as saved",
         f"PDF not committed, SHA-256 {record['pdf_sha256']}",
         f"rasters and geometry by poppler {poppler} at {RASTER_DPI} dpi, grey",
@@ -578,8 +580,9 @@ def check_result(
             problems += locale_problems(original_parts, resaved_parts)
         mode = compatibility_mode(original_parts)
         resaved_mode = compatibility_mode(resaved_parts)
-        # Word drops a legacy flag it does not apply in the document's mode. The render is
-        # still Word's for this input, so the import records it rather than refusing it.
+        # Word drops a legacy flag it does not apply in the document's mode, and adds
+        # settings of its own (useWord2013TrackBottomHyphenation). The render is still
+        # Word's for this input, so the import records the difference rather than refusing.
         dropped = sorted(compat_flags(original_parts) - compat_flags(resaved_parts))
         added = sorted(compat_flags(resaved_parts) - compat_flags(original_parts))
         page_breaks = rendered_page_breaks(resaved_parts)
@@ -708,7 +711,7 @@ def main() -> int:
         pages = item.record["pages"]
         print(f"{verb} {item.record['file']}: {pages} page{'s' if pages != 1 else ''}")
         for flag in item.geometry["compat_flags_dropped"]:
-            print(f"  note: Word dropped the w:compat flag {flag} from the re-saved copy")
+            print(f"  note: Word dropped the w:compat setting {flag} from the re-saved copy")
     print(f"corpus-import.py: {verb} {len(checked)} reference renders")
     return 0
 
