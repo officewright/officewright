@@ -17,3 +17,6 @@ tests/fonts/** -text
 
 # Exact bytes matter: the fixture has a CRLF line ending and a form feed.
 tests/pdf-output/sample.txt -text
+
+# Fuzz seeds are kept byte for byte: CRLF line ends and UTF-16 are what some of them test.
+fuzz/seeds/** -text

@@ -12,6 +12,9 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4.13"
 officewright-font = { path = "../crates/officewright-font" }
 officewright-opc = { path = "../crates/officewright-opc" }
+# A second XML parser as an oracle: the xml target checks that both accept and reject the
+# same documents and read the same content from them.
+roxmltree = { version = "0.21.1", default-features = false, features = ["std"] }
 # The version officewright-font uses, to read the name table for typst/subsetter#30.
 skrifa = { version = "0.48.0", default-features = false, features = ["std"] }
 
@@ -30,6 +33,13 @@ bench = false
 [[bin]]
 name = "font_subset"
 path = "fuzz_targets/font_subset.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "xml"
+path = "fuzz_targets/xml.rs"
 test = false
 doc = false
 bench = false
