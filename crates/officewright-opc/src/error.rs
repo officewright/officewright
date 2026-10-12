@@ -21,6 +21,7 @@ pub enum Error {
         message: String,
     },
     /// An XML part is not well-formed.
+    #[non_exhaustive]
     Xml {
         /// The part, when known.
         part: Option<String>,
