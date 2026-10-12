@@ -83,12 +83,17 @@ class Embedding(unittest.TestCase):
         self.temp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.temp)
 
-    def embed(self, font, subtype, text):
+    def embed(self, font, subtype, text, name=None):
+        """Renders of the PDF naming the font (by name, else its PostScript name): as it
+        is, as the importer embeds the font, and with the font embedded by hand."""
         index = importer.font_index([font.parent])
         (face,) = [f for faces in index.values() for f in faces if f.path == font]
         drawn = importer.drawn_font(face.postscript, index)
+        if name:
+            drawn = importer.DrawnFont(name, face, drawn.data)
+        name = drawn.name
         original = self.temp / "original.pdf"
-        original.write_bytes(pdf(face.postscript, subtype, text))
+        original.write_bytes(pdf(name, subtype, text))
         work = self.temp / "work"
         work.mkdir()
         copy = importer.with_fonts_embedded(original, [drawn], work, importer.TOOLS)
@@ -101,7 +106,7 @@ class Embedding(unittest.TestCase):
         else:
             key, stream = "FontFile2", f"/Length1 {len(data)}"
         by_hand = self.temp / "by-hand.pdf"
-        by_hand.write_bytes(pdf(face.postscript, subtype, text, (key, stream, data)))
+        by_hand.write_bytes(pdf(name, subtype, text, (key, stream, data)))
         return raster(original), raster(copy), raster(by_hand)
 
     def test_a_truetype_font_is_drawn_from_the_embedded_file(self):
@@ -110,8 +115,11 @@ class Embedding(unittest.TestCase):
         self.assertNotEqual(copy, original, "poppler drew the same without the font")
 
     def test_a_cff_font_is_drawn_from_the_embedded_file(self):
-        _, copy, by_hand = self.embed(NOTO, "Type1", "Hamburg")
+        # A name no system has, so that poppler cannot find Noto Sans installed and draw the
+        # original with it.
+        original, copy, by_hand = self.embed(NOTO, "Type1", "Hamburg", "OfficewrightCffTest")
         self.assertEqual(copy, by_hand)
+        self.assertNotEqual(copy, original, "poppler drew the same without the font")
 
 
 if __name__ == "__main__":

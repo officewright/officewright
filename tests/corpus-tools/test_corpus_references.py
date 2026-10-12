@@ -72,6 +72,9 @@ class References(unittest.TestCase):
                 key = f"| reference/{group}/{name}/ |"
                 rows = [r for r in self.sources.splitlines() if r.startswith(key)]
                 self.assertEqual(len(rows), 1)
+                for font in geometry["fonts_rasterized_with"]:
+                    self.assertIn(f"{font['font']} ({font['full_name']}, ", rows[0])
+                    self.assertIn(f"SHA-256 {font['sha256']})", rows[0])
                 count = geometry["page_count"]
                 self.assertIn(f"; {count} page{'s' if count != 1 else ''};", rows[0])
                 self.assertIn(f"SHA-256 {geometry['pdf_sha256']};", rows[0])

@@ -14,6 +14,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 from pngcheck import png_pixels
 
@@ -77,7 +78,9 @@ def name_table(names):
 
 
 def face_tables(postscript, full_name, version, cff):
-    tables = {b"name": name_table({4: full_name, 5: version, 6: postscript})}
+    # head with a stale checkSumAdjustment (bytes 8 to 12), which a cut-out face must fix.
+    head = struct.pack(">IIII", 0x00010000, 0x00010000, 0x12345678, 0x5F0F3CF5) + bytes(38)
+    tables = {b"name": name_table({4: full_name, 5: version, 6: postscript}), b"head": head}
     tables[b"CFF " if cff else b"glyf"] = b"\x00" * 8
     return sorted(tables.items())
 
@@ -102,14 +105,13 @@ def sfnt(postscript, full_name="Test Font", version="Version 1.0", cff=False):
 def collection(*faces):
     """A TrueType collection of faces given as (postscript, full_name, version)."""
     header_size = 12 + 4 * len(faces)
-    directories_size = sum(12 + 16 * 2 for _ in faces)
+    tables = [face_tables(*face, False) for face in faces]
+    directories_size = sum(12 + 16 * len(face) for face in tables)
     heads, bodies, offsets = b"", b"", []
-    for postscript, full_name, version in faces:
+    for face in tables:
         offsets.append(header_size + len(heads))
         head, body = directory(
-            b"\x00\x01\x00\x00",
-            face_tables(postscript, full_name, version, False),
-            header_size + directories_size + len(bodies),
+            b"\x00\x01\x00\x00", face, header_size + directories_size + len(bodies)
         )
         heads += head
         bodies += body
@@ -753,6 +755,18 @@ class Pdffonts(unittest.TestCase):
         )
         self.assertEqual(importer.not_embedded(PDFFONTS + rows), ["Garamond", "NotEmbedded"])
 
+    def test_a_font_that_is_not_an_object_of_its_own_is_read(self):
+        row = "Direct" + " " * 31 + "TrueType          WinAnsi          no  no  no  [none]"
+        self.assertEqual(importer.not_embedded(PDFFONTS + row + "\n"), ["Direct", "Garamond"])
+
+    def test_a_name_with_spaces_is_read_whole(self):
+        row = "Segoe UI" + " " * 29 + "TrueType          WinAnsi          no  no  no      15  0"
+        self.assertEqual(importer.not_embedded(PDFFONTS + row + "\n"), ["Garamond", "Segoe UI"])
+
+    def test_a_row_it_cannot_read_is_refused(self):
+        with self.assertRaises(importer.Refused):
+            importer.not_embedded(PDFFONTS + "Odd                Mystery  WinAnsi no no no 16 0\n")
+
     def test_a_type_with_spaces_is_read(self):
         row = "Helvetica" + " " * 28 + "Type 1            WinAnsi          no  no  no       3  0"
         self.assertEqual(importer.not_embedded(PDFFONTS + row + "\n"), ["Garamond", "Helvetica"])
@@ -762,6 +776,27 @@ class FontFiles(unittest.TestCase):
     def setUp(self):
         self.temp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.temp)
+
+    def test_an_unreadable_face_is_refused_when_it_is_needed(self):
+        good = collection(("Other", "Other", "1"), ("Garamond", "Garamond", "2"))
+        # The name table is fine, but the face's glyf record (the first of glyf, head and
+        # name) points past the end of the file.
+        (second,) = struct.unpack(">I", good[16:20])
+        record = second + 12
+        broken = bytearray(good)
+        broken[record + 8 : record + 12] = struct.pack(">I", len(good) + 100)
+        (self.temp / "broken.ttc").write_bytes(bytes(broken))
+        index = importer.font_index([self.temp])
+        self.assertIn("Garamond", index)
+        with self.assertRaises(importer.Refused) as caught:
+            importer.drawn_font("Garamond", index)
+        self.assertIn("Garamond: the font file cannot be read: broken.ttc", str(caught.exception))
+
+    def test_a_folder_that_cannot_be_listed_is_refused(self):
+        with mock.patch.object(Path, "iterdir", side_effect=PermissionError("denied")):
+            with self.assertRaises(importer.Refused) as caught:
+                importer.font_index([self.temp])
+        self.assertIn("cannot be listed", str(caught.exception))
 
     def test_files_that_are_not_fonts_are_skipped(self):
         (self.temp / "broken.ttf").write_bytes(b"\x00\x01\x00\x00" + b"\xff" * 3)
@@ -802,8 +837,18 @@ class FontFiles(unittest.TestCase):
         self.assertEqual(sorted(tables), sorted(original))
         for tag, (offset, length) in tables.items():
             start, size = original[tag]
-            self.assertEqual(cut[offset : offset + length], data[start : start + size])
+            if tag != b"head":
+                self.assertEqual(cut[offset : offset + length], data[start : start + size])
             self.assertEqual(offset % 4, 0)
+        # Each table's checksum and head's checkSumAdjustment are right for the new file.
+        (count,) = struct.unpack(">H", cut[4:6])
+        for record in range(12, 12 + 16 * count, 16):
+            tag, checksum, offset, length = struct.unpack(">4sIII", cut[record : record + 16])
+            table = bytearray(cut[offset : offset + length])
+            if tag == b"head":
+                table[8:12] = bytes(4)
+            self.assertEqual(checksum, importer.checksum32(table), tag)
+        self.assertEqual(importer.checksum32(cut), 0xB1B0AFBA)
 
 
 class PageOrder(unittest.TestCase):

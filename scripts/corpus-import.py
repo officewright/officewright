@@ -492,26 +492,44 @@ def pdf_pages(info: str) -> int:
     return int(match.group(1))
 
 
-def not_embedded(pdffonts: str) -> list[str]:
-    """Fonts pdffonts lists with emb = no.
+# The font types pdffonts prints, longest first so that "Type 1C" is not read as "Type 1".
+# Each may carry a two-letter suffix in brackets for an OpenType wrapper.
+PDFFONTS_TYPES = (
+    "CID TrueType",
+    "CID Type 0C",
+    "CID Type 0",
+    "TrueType",
+    "Type 1C",
+    "Type 1",
+    "Type 3",
+    "unknown",
+)
+# A pdffonts row: name, type, encoding, emb, sub, uni, and the object number and generation,
+# or "[none]" for a font dictionary that is not an object of its own. A long name pushes the
+# columns aside, and a name may hold spaces (a "#20" in the PDF), so the row is read by the
+# known types rather than by column positions.
+PDFFONTS_ROW = re.compile(
+    r"^(?P<name>.+?)\s+(?:" + "|".join(map(re.escape, PDFFONTS_TYPES)) + r")(?: \([A-Z]{2}\))?"
+    r"\s+\S+\s+(?P<emb>yes|no)\s+(?:yes|no)\s+(?:yes|no)\s+(?:\[none\]|\d+\s+\d+)\s*$"
+)
 
-    pdffonts prints a header, a dashed rule and a row per font: name, type, encoding, emb,
-    sub, uni, object, generation.
-    """
+
+def not_embedded(pdffonts: str) -> list[str]:
+    """Fonts pdffonts lists with emb = no; a row it cannot read is refused, since it might
+    hide one."""
     lines = pdffonts.splitlines()
     rule = next((i for i, line in enumerate(lines) if line.startswith("---")), None)
     if rule is None:
         return []
     names = []
     for line in lines[rule + 1 :]:
-        # Read from the right: a long name pushes the columns aside, and the type may hold
-        # spaces ("CID TrueType"), but the last five fields are always emb, sub, uni, object
-        # and generation, and a PDF font name has no spaces.
-        fields = line.split()
-        if len(fields) < 7:
+        if not line.strip():
             continue
-        if fields[-5] == "no":
-            names.append(re.sub(r"^[A-Z]{6}\+", "", fields[0]))
+        row = PDFFONTS_ROW.match(line)
+        if not row:
+            raise Refused(f"cannot read this pdffonts row: {line!r}")
+        if row["emb"] == "no":
+            names.append(re.sub(r"^[A-Z]{6}\+", "", row["name"]))
     return sorted(set(names))
 
 
@@ -627,7 +645,11 @@ def font_index(directories: list[Path]) -> dict[str, list[FontFace]]:
     for directory in directories:
         if not directory.is_dir():
             raise Refused(f"--font-dir {directory} is not a folder")
-        for path in sorted(directory.iterdir()):
+        try:
+            paths = sorted(directory.iterdir())
+        except OSError as error:
+            raise Refused(f"--font-dir {directory} cannot be listed: {error}") from error
+        for path in paths:
             if path.suffix.lower() not in FONT_SUFFIXES or not path.is_file():
                 continue
             try:
@@ -661,12 +683,25 @@ def face_bytes(face: FontFace) -> bytes:
     )
     position = 12 + 16 * count
     directory, body = b"", b""
+    head = None
     for tag, (start, length) in tables:
-        padded = read(start, length).ljust((length + 3) // 4 * 4, b"\0")
-        checksum = sum(struct.unpack(f">{len(padded) // 4}I", padded)) & 0xFFFFFFFF
-        directory += struct.pack(">4sIII", tag, checksum, position + len(body), length)
+        padded = bytearray(read(start, length).ljust((length + 3) // 4 * 4, b"\0"))
+        if tag == b"head" and length >= 12:
+            # checkSumAdjustment is computed over the whole file with itself at zero.
+            padded[8:12] = b"\0\0\0\0"
+            head = position + len(body) + 8
+        directory += struct.pack(">4sIII", tag, checksum32(padded), position + len(body), length)
         body += padded
-    return header + directory + body
+    font = bytearray(header + directory + body)
+    if head is not None:
+        font[head : head + 4] = struct.pack(">I", (0xB1B0AFBA - checksum32(font)) & 0xFFFFFFFF)
+    return bytes(font)
+
+
+def checksum32(data: bytes) -> int:
+    """The OpenType table checksum: the sum of big-endian 32-bit words, zero-padded."""
+    padded = bytes(data).ljust((len(data) + 3) // 4 * 4, b"\0")
+    return sum(struct.unpack(f">{len(padded) // 4}I", padded)) & 0xFFFFFFFF
 
 
 @dataclass(frozen=True)
@@ -705,8 +740,14 @@ def drawn_font(name: str, index: dict[str, list[FontFace]]) -> DrawnFont:
             "for one user)"
         )
     by_content = {}
+    unreadable = []
     for face in faces:
-        by_content.setdefault(face_bytes(face), face)
+        try:
+            by_content.setdefault(face_bytes(face), face)
+        except (OSError, FontFormatError, struct.error):
+            unreadable.append(face.path.name)
+    if unreadable:
+        raise Refused(f"{name}: the font file cannot be read: {', '.join(sorted(unreadable))}")
     if len(by_content) > 1:
         files = ", ".join(sorted({face.path.name for face in faces}))
         raise Refused(f"{name}: --font-dir folders hold different fonts of that name: {files}")
