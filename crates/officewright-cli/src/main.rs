@@ -19,9 +19,16 @@ fn cli() -> Command {
             Command::new("text-to-pdf")
                 .about("Converts a UTF-8 text file to PDF")
                 .long_about(
-                    "Converts a UTF-8 text file to PDF in Helvetica, with 72 pt margins. Long \
-                     lines wrap at spaces and a form feed starts a new page. Only characters \
-                     in WinAnsiEncoding (Latin text) are supported.",
+                    "Converts a UTF-8 text file to PDF, with 72 pt margins. Long lines wrap at \
+                     spaces and a form feed starts a new page.\n\n\
+                     Without --font the text is set in Helvetica, which every PDF viewer has, \
+                     and only characters in WinAnsiEncoding (Latin text) are supported. With \
+                     --font the font is embedded, reduced to the glyphs the text uses. It \
+                     shows the characters it has of the Latin, Greek, Cyrillic, Armenian, \
+                     Georgian, Han, Hiragana and Katakana scripts and Hangul syllables, one \
+                     glyph per character; scripts that need shaping or right-to-left layout \
+                     are not supported yet. What the font's license restricts is printed as a \
+                     warning.",
                 )
                 .arg(
                     Arg::new("input")
@@ -44,6 +51,16 @@ fn cli() -> Command {
                         .value_parser(["a4", "letter"])
                         .default_value("a4")
                         .help("Page size"),
+                )
+                .arg(
+                    Arg::new("font")
+                        .long("font")
+                        .value_name("FILE")
+                        .value_parser(value_parser!(PathBuf))
+                        .help(
+                            "TrueType or OpenType font file to embed (the first font of a \
+                             collection); Helvetica if not given",
+                        ),
                 )
                 .arg(
                     Arg::new("font-size")
@@ -104,15 +121,22 @@ fn run_text_to_pdf(args: &ArgMatches) -> Result<(), String> {
             err.utf8_error().valid_up_to()
         )
     })?;
-    let helvetica = Font::standard(StandardFont::Helvetica);
-    let doc =
-        text_to_pdf(&text, page_size, &helvetica, Pt(font_size)).map_err(|err| match err {
-            Error::Unencodable { offset, .. } => {
-                let (line, column) = position(&text, offset);
-                format!("{}:{line}:{column}: {err}", input.display())
-            }
-            err => describe(&err),
-        })?;
+    let font = match args.get_one::<PathBuf>("font") {
+        Some(path) => Font::from_file(path, 0).map_err(|err| describe(&err))?,
+        None => Font::standard(StandardFont::Helvetica),
+    };
+    for note in font.embedding_notes() {
+        eprintln!("warning: font {}: {note}", font.name());
+    }
+    let doc = text_to_pdf(&text, page_size, &font, Pt(font_size)).map_err(|err| match err {
+        Error::Unencodable { offset, .. }
+        | Error::UnsupportedCharacter { offset, .. }
+        | Error::MissingGlyph { offset, .. } => {
+            let (line, column) = position(&text, offset);
+            format!("{}:{line}:{column}: {err}", input.display())
+        }
+        err => describe(&err),
+    })?;
     doc.save(output).map_err(|err| describe(&err))
 }
 

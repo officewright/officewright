@@ -1,15 +1,59 @@
-use officewright_core::Pt;
+use std::path::Path;
+use std::sync::Arc;
+use std::{fmt, fs};
 
-use crate::{Error, Result, encoding, helvetica};
+use officewright_core::Pt;
+use officewright_font::{CharMap, EmbeddingLicense, FontFace};
+
+use crate::{Error, Result, encoding, helvetica, script};
 
 /// A font to draw and measure text with.
 ///
-/// For now the standard Helvetica font is the only one. It is one of the fonts every
-/// PDF viewer provides, so nothing is embedded, and it is used with WinAnsiEncoding,
-/// which covers Latin text only.
+/// - [`Font::standard`] gives Helvetica, one of the fonts every PDF viewer provides, so
+///   nothing is embedded. It is used with WinAnsiEncoding, which covers Latin text only.
+/// - [`Font::from_file`], [`Font::from_bytes`] and [`Font::from_face`] give a TrueType or
+///   OpenType font that is embedded in the documents it is drawn in, reduced to the
+///   glyphs they use. It shows every character it has a glyph for in the scripts that
+///   need no shaping; [`Page::add_text`](crate::Page::add_text) lists them.
+///
+/// Cloning is cheap: the font data is shared. Two fonts are equal if they are the same
+/// standard font or the same face of the same font data, and a document embeds each
+/// font once however many pages use it. A `Font` is `Send` and `Sync`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Font {
-    standard: StandardFont,
+    kind: Kind,
+}
+
+#[derive(Clone, Debug)]
+enum Kind {
+    Standard(StandardFont),
+    Embedded(Arc<Embedded>),
+}
+
+impl PartialEq for Kind {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Standard(a), Self::Standard(b)) => a == b,
+            (Self::Embedded(a), Self::Embedded(b)) => {
+                Arc::ptr_eq(a, b)
+                    || (a.face.index() == b.face.index() && a.face.data() == b.face.data())
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Kind {}
+
+/// A TrueType or OpenType face that may be embedded.
+#[derive(Debug)]
+pub(crate) struct Embedded {
+    pub(crate) face: FontFace,
+    /// The PostScript name, or a name made from the family names if the face has none.
+    pub(crate) name: String,
+    /// The license forbids subsetting, so every glyph is embedded.
+    pub(crate) whole: bool,
+    notes: Vec<EmbeddingNote>,
 }
 
 /// The standard fonts that PDF viewers provide without embedding (ISO 32000-1, 9.6.2.2).
@@ -18,6 +62,42 @@ pub struct Font {
 pub enum StandardFont {
     /// Helvetica, with WinAnsiEncoding.
     Helvetica,
+}
+
+/// Something about an embedded font that its user should know, from its license or its
+/// format; none of these stops the font from being used. [`Font::embedding_notes`] lists
+/// them, for a report next to the output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum EmbeddingNote {
+    /// The license lets the embedded font be used only to view and print the document,
+    /// not to edit it ("Preview & Print" embedding, bit 2 of `fsType` in the `OS/2`
+    /// table).
+    PreviewAndPrint,
+    /// The license lets the embedded font be used to view, print and edit the document,
+    /// but not installed ("Editable" embedding, bit 3 of `fsType`).
+    Editable,
+    /// The license forbids subsetting (bit 8 of `fsType`), so every glyph of the font is
+    /// embedded, not only the ones the document uses, and the file is larger.
+    WholeFont,
+    /// The font is a variable font; only its default instance is embedded.
+    DefaultInstance,
+}
+
+impl fmt::Display for EmbeddingNote {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::PreviewAndPrint => {
+                "its license allows the embedded font only for viewing and printing the document"
+            }
+            Self::Editable => {
+                "its license allows the embedded font for viewing, printing and editing the \
+                 document, not for installing it"
+            }
+            Self::WholeFont => "its license forbids subsetting, so the whole font is embedded",
+            Self::DefaultInstance => "it is a variable font; only its default instance is embedded",
+        })
+    }
 }
 
 impl Font {
@@ -31,11 +111,134 @@ impl Font {
 
     /// A standard font.
     pub fn standard(font: StandardFont) -> Self {
-        Self { standard: font }
+        Self {
+            kind: Kind::Standard(font),
+        }
+    }
+
+    /// Reads face `face_index` of a TrueType or OpenType font file or collection (`.ttf`,
+    /// `.otf`, `.ttc`, `.otc`) for embedding; use 0 for a file with one font.
+    ///
+    /// The file is read into memory once; it may change or go away afterwards.
+    ///
+    /// ```no_run
+    /// use officewright_pdf::{Document, Font, PageSize, Pt};
+    ///
+    /// let font = Font::from_file("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 0)?;
+    /// let mut doc = Document::new();
+    /// doc.add_page(PageSize::A4)?
+    ///     .add_text(Pt(72.0), Pt(770.0), &font, Pt(12.0), "Привет, мир")?;
+    /// doc.save("hello.pdf")?;
+    /// # Ok::<(), officewright_pdf::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Read`] if the file cannot be read, and the errors of
+    /// [`from_face`](Self::from_face): [`Error::Font`] if it is not a font, has no such
+    /// face, is damaged or has outlines that cannot be embedded, and
+    /// [`Error::EmbeddingNotAllowed`] if its license forbids embedding.
+    pub fn from_file(path: impl AsRef<Path>, face_index: u32) -> Result<Self> {
+        let path = path.as_ref();
+        let data = fs::read(path).map_err(|source| Error::Read {
+            path: path.to_owned(),
+            source,
+        })?;
+        let face = FontFace::from_bytes(data, face_index).map_err(|source| Error::Font {
+            path: Some(path.to_owned()),
+            source,
+        })?;
+        Self::embed(face, Some(path))
+    }
+
+    /// Reads face `face_index` of a TrueType or OpenType font or font collection in
+    /// memory for embedding; use 0 for data with one font.
+    ///
+    /// # Errors
+    ///
+    /// As [`from_file`](Self::from_file), apart from reading the file.
+    pub fn from_bytes(data: impl Into<Arc<[u8]>>, face_index: u32) -> Result<Self> {
+        let face = FontFace::from_bytes(data, face_index)
+            .map_err(|source| Error::Font { path: None, source })?;
+        Self::embed(face, None)
+    }
+
+    /// A face read by `officewright-font`, for example one a
+    /// [`FontResolver`](officewright_font::FontResolver) chose, for embedding.
+    ///
+    /// The license recorded in the font (`fsType` in its `OS/2` table) decides how it
+    /// is embedded: a font that must not be embedded, or whose outlines must not be, is
+    /// refused; one that must not be subset is embedded whole. Every restriction that
+    /// does not stop embedding is listed in [`embedding_notes`](Self::embedding_notes).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::EmbeddingNotAllowed`] if the license forbids embedding the outlines, and
+    /// [`Error::Font`] if the face has no TrueType or CFF outlines (CFF2 cannot be
+    /// embedded yet) or is damaged in a way that subsetting finds.
+    pub fn from_face(face: FontFace) -> Result<Self> {
+        Self::embed(face, None)
+    }
+
+    fn embed(face: FontFace, path: Option<&Path>) -> Result<Self> {
+        let name = postscript_name(&face);
+        let permissions = face.embedding();
+        if !permissions.allows_embedding() || permissions.bitmap_only() {
+            return Err(Error::EmbeddingNotAllowed {
+                font: name,
+                bitmap_only: permissions.allows_embedding() && permissions.bitmap_only(),
+            });
+        }
+        // Subsetting to no glyphs checks now that the outlines can be embedded, rather
+        // than when a document is written.
+        face.subset([]).map_err(|source| Error::Font {
+            path: path.map(Path::to_owned),
+            source,
+        })?;
+        let mut notes = Vec::new();
+        match permissions.license() {
+            EmbeddingLicense::PreviewAndPrint => notes.push(EmbeddingNote::PreviewAndPrint),
+            EmbeddingLicense::Editable => notes.push(EmbeddingNote::Editable),
+            _ => {}
+        }
+        let whole = !permissions.allows_subsetting();
+        if whole {
+            notes.push(EmbeddingNote::WholeFont);
+        }
+        if face.is_variable() {
+            notes.push(EmbeddingNote::DefaultInstance);
+        }
+        Ok(Self {
+            kind: Kind::Embedded(Arc::new(Embedded {
+                face,
+                name,
+                whole,
+                notes,
+            })),
+        })
+    }
+
+    /// The font's name: the standard font's name, such as "Helvetica", or an embedded
+    /// font's PostScript name, the name it has in the PDF.
+    pub fn name(&self) -> &str {
+        match &self.kind {
+            Kind::Standard(StandardFont::Helvetica) => "Helvetica",
+            Kind::Embedded(font) => &font.name,
+        }
+    }
+
+    /// What the user of an embedded font should know about its license and format; empty
+    /// for a standard font and for a font without restrictions.
+    pub fn embedding_notes(&self) -> &[EmbeddingNote] {
+        match &self.kind {
+            Kind::Standard(_) => &[],
+            Kind::Embedded(font) => &font.notes,
+        }
     }
 
     /// Returns the width of `text` drawn in this font at `font_size`, as
-    /// [`Page::add_text`](crate::Page::add_text) draws it (no kerning).
+    /// [`Page::add_text`](crate::Page::add_text) draws it: the sum of the glyphs' advance
+    /// widths, without kerning.
     ///
     /// ```
     /// use officewright_pdf::{Font, Pt, StandardFont};
@@ -48,58 +251,132 @@ impl Font {
     ///
     /// # Errors
     ///
-    /// [`Error::Unencodable`] if `text` has a character the font's encoding lacks, and
-    /// [`Error::InvalidFontSize`] if `font_size` is outside [`MIN_SIZE`](Self::MIN_SIZE)
-    /// to [`MAX_SIZE`](Self::MAX_SIZE).
+    /// The errors of [`Page::add_text`](crate::Page::add_text) for a character the font
+    /// cannot show, and [`Error::InvalidFontSize`] if `font_size` is outside
+    /// [`MIN_SIZE`](Self::MIN_SIZE) to [`MAX_SIZE`](Self::MAX_SIZE).
     #[doc(alias = "MeasureString")]
     #[doc(alias = "measure")]
     pub fn text_width(&self, text: &str, font_size: Pt) -> Result<Pt> {
         check_font_size(font_size)?;
-        let units: u64 = self
-            .encode(text)?
-            .into_iter()
-            .map(|code| u64::from(self.width(code)))
-            .sum();
-        Ok(Pt(units as f64 * font_size.0 / 1000.0))
+        let lookup = self.lookup();
+        let mut units = 0.0;
+        for (offset, ch) in text.char_indices() {
+            units += lookup.glyph(ch, offset)?.advance;
+        }
+        Ok(Pt(units * font_size.0 / 1000.0))
     }
 
-    /// Fails unless the font's encoding has every character of `text`.
-    pub(crate) fn check(&self, text: &str) -> Result<()> {
-        match text.char_indices().find(|&(_, ch)| self.code(ch).is_none()) {
-            Some((offset, ch)) => Err(Error::Unencodable { ch, offset }),
-            None => Ok(()),
+    /// Looks up the glyphs of characters; one lookup serves a whole text.
+    pub(crate) fn lookup(&self) -> Lookup<'_> {
+        match &self.kind {
+            Kind::Standard(font) => Lookup::Standard(*font),
+            Kind::Embedded(font) => Lookup::Embedded {
+                font,
+                map: font.face.char_map(),
+                scale: 1000.0 / f64::from(font.face.units_per_em()),
+            },
         }
     }
 
-    /// The font dictionary, the font's object in the PDF file.
-    pub(crate) fn dictionary(&self) -> &'static [u8] {
-        match self.standard {
-            StandardFont::Helvetica => {
+    /// The embedded font, `None` for a standard font.
+    pub(crate) fn embedded(&self) -> Option<&Embedded> {
+        match &self.kind {
+            Kind::Standard(_) => None,
+            Kind::Embedded(font) => Some(font),
+        }
+    }
+
+    /// The font dictionary of a standard font, its object in the PDF file.
+    pub(crate) fn standard_dictionary(&self) -> Option<&'static [u8]> {
+        match self.kind {
+            Kind::Standard(StandardFont::Helvetica) => Some(
                 b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica \
-                  /Encoding /WinAnsiEncoding >>"
+                  /Encoding /WinAnsiEncoding >>",
+            ),
+            Kind::Embedded(_) => None,
+        }
+    }
+
+    /// Encodes `text` in a standard font's encoding.
+    pub(crate) fn encode(&self, text: &str) -> Result<Vec<u8>> {
+        text.char_indices()
+            .map(|(offset, ch)| encoding::win_ansi(ch).ok_or(Error::Unencodable { ch, offset }))
+            .collect()
+    }
+}
+
+/// The glyphs of a font's characters.
+pub(crate) enum Lookup<'a> {
+    Standard(StandardFont),
+    Embedded {
+        font: &'a Embedded,
+        map: CharMap<'a>,
+        /// From font units to 1/1000 em.
+        scale: f64,
+    },
+}
+
+/// A character's glyph.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Glyph {
+    /// The WinAnsiEncoding code for a standard font, the glyph ID for an embedded one.
+    pub(crate) id: u16,
+    /// The advance width in 1/1000 em.
+    pub(crate) advance: f64,
+}
+
+impl Lookup<'_> {
+    /// The glyph of `ch`, which is at byte `offset` of its text.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Unencodable`] for a character outside a standard font's encoding;
+    /// [`Error::UnsupportedCharacter`] and [`Error::MissingGlyph`] for one an embedded
+    /// font cannot show.
+    pub(crate) fn glyph(&self, ch: char, offset: usize) -> Result<Glyph> {
+        match self {
+            Self::Standard(StandardFont::Helvetica) => {
+                let code = encoding::win_ansi(ch).ok_or(Error::Unencodable { ch, offset })?;
+                Ok(Glyph {
+                    id: code.into(),
+                    advance: helvetica::width(code).into(),
+                })
+            }
+            Self::Embedded { font, map, scale } => {
+                script::check(ch).map_err(|_| Error::UnsupportedCharacter { ch, offset })?;
+                let glyph = map.map(ch).ok_or_else(|| Error::MissingGlyph {
+                    ch,
+                    offset,
+                    font: font.name.clone(),
+                })?;
+                let advance = font.face.advance_width(glyph).unwrap_or(0);
+                Ok(Glyph {
+                    id: glyph.to_u16(),
+                    advance: f64::from(advance) * scale,
+                })
             }
         }
     }
+}
 
-    /// Encodes `text` in the font's encoding.
-    pub(crate) fn encode(&self, text: &str) -> Result<Vec<u8>> {
-        text.char_indices()
-            .map(|(offset, ch)| self.code(ch).ok_or(Error::Unencodable { ch, offset }))
-            .collect()
+/// The face's PostScript name (name ID 6), or one made from its family and subfamily
+/// names without spaces, as PostScript names are, if it has none.
+fn postscript_name(face: &FontFace) -> String {
+    let names = face.names();
+    if let Some(name) = names.postscript_name() {
+        return name.to_owned();
     }
-
-    /// The code of `ch` in the font's encoding, if it has one.
-    pub(crate) fn code(&self, ch: char) -> Option<u8> {
-        match self.standard {
-            StandardFont::Helvetica => encoding::win_ansi(ch),
-        }
-    }
-
-    /// The advance width of a character code in 1/1000 em.
-    pub(crate) fn width(&self, code: u8) -> u16 {
-        match self.standard {
-            StandardFont::Helvetica => helvetica::width(code),
-        }
+    let made: String = [names.family(), names.subfamily()]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("-")
+        .split_whitespace()
+        .collect();
+    if made.is_empty() {
+        format!("Font{}", face.index())
+    } else {
+        made
     }
 }
 

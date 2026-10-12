@@ -1,7 +1,9 @@
 use std::any::Any;
 use std::fmt;
+use std::ops::Range;
 use std::panic::{self, UnwindSafe};
 
+use skrifa::raw::types::Tag;
 use skrifa::raw::{FontRef, TableProvider};
 use subsetter::GlyphRemapper;
 
@@ -34,6 +36,8 @@ pub struct Subset {
     remapper: GlyphRemapper,
     glyph_count: u16,
     outline_format: OutlineFormat,
+    /// Where the `CFF ` table is in `data`, for CFF outlines.
+    cff: Option<Range<usize>>,
 }
 
 impl Subset {
@@ -63,6 +67,13 @@ impl Subset {
     pub fn outline_format(&self) -> OutlineFormat {
         self.outline_format
     }
+
+    /// For CFF outlines, the `CFF ` table: the CID-keyed font program that a PDF embeds
+    /// as `FontFile3` with subtype `CIDFontType0C` (ISO 32000-1, 9.9). `None` for
+    /// TrueType outlines, which a PDF embeds as the whole [`data`](Self::data).
+    pub fn cff_table(&self) -> Option<&[u8]> {
+        self.data.get(self.cff.clone()?)
+    }
 }
 
 impl fmt::Debug for Subset {
@@ -87,8 +98,9 @@ impl FontFace {
     ///
     /// [`Error::GlyphOutOfRange`] if a glyph is not in the face,
     /// [`Error::UnsupportedOutlines`] for a face without outlines or with CFF2
-    /// outlines, and [`Error::Subset`] or [`Error::SubsetterPanicked`] if the face is
-    /// damaged in a way that only subsetting finds.
+    /// outlines, [`Error::MalformedTable`] for a `CFF ` table with a real number the
+    /// subsetter cannot write back, and [`Error::Subset`] or [`Error::SubsetterPanicked`]
+    /// if the face is damaged in a way that only subsetting finds.
     pub fn subset(&self, glyphs: impl IntoIterator<Item = GlyphId>) -> Result<Subset> {
         let face = self.index();
         let outline_format = match self.outline_format() {
@@ -107,6 +119,9 @@ impl FontFace {
             }
             ids.push(glyph.to_u16());
         }
+        if outline_format == OutlineFormat::Cff {
+            crate::cff::check_reals(&crate::font::font_ref(self.data(), face)?, face)?;
+        }
         let remapper = GlyphRemapper::new_from_glyphs_sorted(&ids);
         let data = self.data();
         let data = catch_subsetter_panic(face, || subsetter::subset(data, face, &remapper))?
@@ -116,20 +131,42 @@ impl FontFace {
             })?;
         // The output is read back: a subset the font parser cannot read would only
         // fail later, in a PDF viewer.
-        let glyph_count = FontRef::new(&data)
-            .and_then(|font| font.maxp())
+        let unreadable = |reason: String| Error::Subset {
+            face,
+            source: Cause::new(format!("the subset font is unreadable: {reason}")),
+        };
+        let font = FontRef::new(&data).map_err(|err| unreadable(err.to_string()))?;
+        let glyph_count = font
+            .maxp()
             .map(|maxp| maxp.num_glyphs())
-            .map_err(|err| Error::Subset {
-                face,
-                source: Cause::new(format!("the subset font is unreadable: {err}")),
-            })?;
+            .map_err(|err| unreadable(err.to_string()))?;
+        let cff = match outline_format {
+            OutlineFormat::Cff => Some(
+                table_range(&font, b"CFF ", data.len())
+                    .ok_or_else(|| unreadable("it has no CFF table".to_owned()))?,
+            ),
+            _ => None,
+        };
         Ok(Subset {
             data,
             remapper,
             glyph_count,
             outline_format,
+            cff,
         })
     }
+}
+
+/// Where the table `tag` is in the font data of `len` bytes, if it is there whole.
+fn table_range(font: &FontRef<'_>, tag: &[u8; 4], len: usize) -> Option<Range<usize>> {
+    let record = font
+        .table_directory()
+        .table_records()
+        .iter()
+        .find(|record| record.tag() == Tag::new(tag))?;
+    let start = usize::try_from(record.offset()).ok()?;
+    let end = start.checked_add(usize::try_from(record.length()).ok()?)?;
+    (end <= len).then_some(start..end)
 }
 
 /// Runs the subsetter and turns a panic into [`Error::SubsetterPanicked`].
@@ -180,6 +217,7 @@ mod tests {
         assert_eq!(subset.glyph_id(GlyphId::new(3)), None);
         assert_eq!(subset.glyph_count(), 3);
         assert_eq!(subset.outline_format(), OutlineFormat::TrueType);
+        assert_eq!(subset.cff_table(), None);
         let out = FontRef::new(subset.data()).unwrap();
         assert!(
             out.cmap().is_err(),

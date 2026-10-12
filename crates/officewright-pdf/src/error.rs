@@ -3,6 +3,8 @@ use std::{error, fmt, io};
 
 use officewright_core::Pt;
 
+use crate::script::{self, Refusal};
+
 /// An error from writing a PDF.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -14,6 +16,26 @@ pub enum Error {
         ch: char,
         /// Its byte offset in the text.
         offset: usize,
+    },
+    /// The text has a character that an embedded font cannot be drawn with yet: text is
+    /// drawn one glyph per character, left to right, without shaping, so control
+    /// characters, bidirectional formatting characters, unassigned and private-use code
+    /// points, conjoining Hangul jamo and the scripts that need shaping or right-to-left
+    /// layout are refused. See [`Page::add_text`](crate::Page::add_text).
+    UnsupportedCharacter {
+        /// The character.
+        ch: char,
+        /// Its byte offset in the text.
+        offset: usize,
+    },
+    /// The embedded font has no glyph for a character of the text.
+    MissingGlyph {
+        /// The character.
+        ch: char,
+        /// Its byte offset in the text.
+        offset: usize,
+        /// The font's name.
+        font: String,
     },
     /// A font size is outside [`Font::MIN_SIZE`](crate::Font::MIN_SIZE) to
     /// [`Font::MAX_SIZE`](crate::Font::MAX_SIZE).
@@ -54,6 +76,37 @@ pub enum Error {
         /// The underlying error.
         source: io::Error,
     },
+    /// Reading a font file failed.
+    Read {
+        /// The file.
+        path: PathBuf,
+        /// The underlying error.
+        source: io::Error,
+    },
+    /// A font cannot be used: it is not a TrueType or OpenType font, has no such face,
+    /// is damaged, or has outlines that cannot be embedded.
+    Font {
+        /// The font file, `None` for a font in memory.
+        path: Option<PathBuf>,
+        /// What is wrong with it.
+        source: officewright_font::Error,
+    },
+    /// The license of a font forbids embedding it (`fsType` in its `OS/2` table).
+    EmbeddingNotAllowed {
+        /// The font's name.
+        font: String,
+        /// The license allows embedding only the font's bitmaps, but the PDF writer
+        /// embeds outlines; otherwise the license forbids embedding altogether.
+        bitmap_only: bool,
+    },
+    /// A font could not be reduced to the glyphs the document uses: it is damaged in a
+    /// way that only subsetting those glyphs finds.
+    Embed {
+        /// The font's name.
+        font: String,
+        /// What the subsetter found.
+        source: officewright_font::Error,
+    },
 }
 
 impl fmt::Display for Error {
@@ -62,6 +115,39 @@ impl fmt::Display for Error {
             Self::Unencodable { ch, offset } => write!(
                 f,
                 "character U+{:04X} '{}' at byte {offset} is not in WinAnsiEncoding",
+                u32::from(*ch),
+                ch.escape_debug()
+            ),
+            Self::UnsupportedCharacter { ch, offset } => {
+                write!(
+                    f,
+                    "character U+{:04X} '{}' at byte {offset} ",
+                    u32::from(*ch),
+                    ch.escape_debug()
+                )?;
+                match script::check(*ch) {
+                    Err(Refusal::Control) => f.write_str("is a control character"),
+                    Err(Refusal::Bidi) => f.write_str(
+                        "is a bidirectional formatting character, and right-to-left layout is \
+                         not supported yet",
+                    ),
+                    Err(Refusal::Jamo) => f.write_str(
+                        "is a conjoining Hangul jamo; only precomposed Hangul syllables can be \
+                         drawn without shaping",
+                    ),
+                    Err(Refusal::Script(script)) => write!(
+                        f,
+                        "is in the {} script, which needs shaping or right-to-left layout; that \
+                         is not supported yet",
+                        script.full_name()
+                    ),
+                    Err(Refusal::Unknown) => f.write_str("is unassigned or for private use"),
+                    Ok(()) => f.write_str("cannot be drawn"),
+                }
+            }
+            Self::MissingGlyph { ch, offset, font } => write!(
+                f,
+                "font {font} has no glyph for character U+{:04X} '{}' at byte {offset}",
                 u32::from(*ch),
                 ch.escape_debug()
             ),
@@ -99,6 +185,22 @@ impl fmt::Display for Error {
             }
             Self::Io(_) => f.write_str("cannot write the PDF"),
             Self::Write { path, .. } => write!(f, "cannot write {}", path.display()),
+            Self::Read { path, .. } => write!(f, "cannot read {}", path.display()),
+            Self::Font {
+                path: Some(path), ..
+            } => write!(f, "cannot use the font in {}", path.display()),
+            Self::Font { path: None, .. } => f.write_str("cannot use the font data"),
+            Self::EmbeddingNotAllowed {
+                font,
+                bitmap_only: true,
+            } => write!(
+                f,
+                "the license of font {font} allows embedding only its bitmaps, not its outlines"
+            ),
+            Self::EmbeddingNotAllowed { font, .. } => {
+                write!(f, "the license of font {font} does not allow embedding it")
+            }
+            Self::Embed { font, .. } => write!(f, "cannot embed font {font}"),
         }
     }
 }
@@ -106,7 +208,10 @@ impl fmt::Display for Error {
 impl error::Error for Error {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
-            Self::Io(source) | Self::Write { source, .. } => Some(source),
+            Self::Io(source) | Self::Write { source, .. } | Self::Read { source, .. } => {
+                Some(source)
+            }
+            Self::Font { source, .. } | Self::Embed { source, .. } => Some(source),
             _ => None,
         }
     }
@@ -122,8 +227,24 @@ impl From<Error> for officewright_core::Error {
     fn from(err: Error) -> Self {
         let message = err.to_string();
         match err {
-            Error::Io(source) | Error::Write { source, .. } => Self::Io { message, source },
-            Error::Unencodable { .. } | Error::TooLarge => Self::Unsupported(message),
+            Error::Io(source) | Error::Write { source, .. } | Error::Read { source, .. } => {
+                Self::Io { message, source }
+            }
+            // The font error decides the kind; the message keeps every reason, since an
+            // invalid argument carries no source.
+            Error::Font { source, .. } | Error::Embed { source, .. } => {
+                let message = format!("{message}: {}", chain(&source));
+                match Self::from(source) {
+                    Self::Io { source, .. } => Self::Io { message, source },
+                    Self::Unsupported(_) => Self::Unsupported(message),
+                    _ => Self::InvalidArgument(message),
+                }
+            }
+            Error::Unencodable { .. }
+            | Error::UnsupportedCharacter { .. }
+            | Error::MissingGlyph { .. }
+            | Error::EmbeddingNotAllowed { .. }
+            | Error::TooLarge => Self::Unsupported(message),
             Error::InvalidFontSize(_)
             | Error::InvalidPosition { .. }
             | Error::InvalidPageSize { .. }
@@ -131,6 +252,17 @@ impl From<Error> for officewright_core::Error {
             | Error::NoPages => Self::InvalidArgument(message),
         }
     }
+}
+
+/// An error's message followed by the messages of its causes.
+fn chain(err: &dyn error::Error) -> String {
+    let mut message = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        message = format!("{message}: {cause}");
+        source = cause.source();
+    }
+    message
 }
 
 /// A `Result` whose error is [`Error`].

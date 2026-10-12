@@ -4,6 +4,7 @@ use std::{fs, io};
 
 use officewright_core::{PageSize, Pt};
 
+use crate::embed::{EXTRA_OBJECTS, Prepared, Usage};
 use crate::font::check_font_size;
 use crate::{Error, Font, Result};
 
@@ -92,9 +93,15 @@ impl Document {
 
     /// Writes the document as a PDF file to `out`.
     ///
+    /// Embedded fonts are reduced to the glyphs the document shows now. Nothing is
+    /// written to `out` unless the whole document can be. The file is PDF 1.4, or PDF 1.5
+    /// if two characters share a glyph of an embedded font and one of them needs
+    /// replacement text for text extraction.
+    ///
     /// # Errors
     ///
-    /// [`Error::NoPages`] if the document has no pages, [`Error::TooLarge`] if the file
+    /// [`Error::NoPages`] if the document has no pages, [`Error::Embed`] if an embedded
+    /// font turns out to be damaged when it is reduced, [`Error::TooLarge`] if the file
     /// would exceed 10<sup>10</sup> bytes, and [`Error::Io`] if writing fails.
     pub fn write_to(&self, out: impl Write) -> Result<()> {
         if self.pages.is_empty() {
@@ -119,23 +126,72 @@ impl Document {
                     .collect()
             })
             .collect();
-        // Encoded before anything is written, so an error leaves `out` untouched.
-        let contents = self
-            .pages
+
+        // Everything is prepared before anything is written, so an error leaves `out`
+        // untouched. First the glyphs each embedded font shows, over all pages.
+        let mut usages = vec![Usage::default(); fonts.len()];
+        for (page, map) in self.pages.iter().zip(&page_fonts) {
+            for (font, text) in page.texts() {
+                // reason: `map` has an entry for each of the page's fonts, which are the
+                // only fonts its texts use
+                #[allow(clippy::indexing_slicing)]
+                let font = map[font];
+                if let (Some(font), Some(usage)) = (fonts.get(font), usages.get_mut(font)) {
+                    if font.embedded().is_some() {
+                        let lookup = font.lookup();
+                        for (offset, ch) in text.char_indices() {
+                            usage.add(lookup.glyph(ch, offset)?.id, ch);
+                        }
+                    }
+                }
+            }
+        }
+        let encoders = fonts
             .iter()
-            .map(Page::content_stream)
+            .zip(usages)
+            .map(|(&font, usage)| match font.embedded() {
+                Some(embedded) => Ok(Encoder::Embedded(font, Prepared::new(embedded, usage)?)),
+                None => Ok(Encoder::Standard(font)),
+            })
             .collect::<Result<Vec<_>>>()?;
+        let mut actual_text = false;
+        let mut contents = Vec::with_capacity(self.pages.len());
+        for (page, map) in self.pages.iter().zip(&page_fonts) {
+            let (content, spans) = page.content_stream(map, &encoders)?;
+            contents.push(content);
+            actual_text |= spans;
+        }
 
         // Objects: 1 catalog, 2 page tree, then a font dictionary per font, then a page
-        // and its content stream per page.
+        // and its content stream per page, then the other objects of each embedded font.
         let font_object = |i: usize| 3 + i;
         let first_page = 3 + fonts.len();
         let page_object = |i: usize| first_page + 2 * i;
-        let mut out = CountingWriter::new(out);
-        let mut offsets = Vec::with_capacity(2 + fonts.len() + 2 * self.pages.len());
+        let mut next_object = first_page + 2 * self.pages.len();
+        let mut font_dictionaries = Vec::with_capacity(encoders.len());
+        let mut font_objects = Vec::new();
+        for encoder in &encoders {
+            match encoder {
+                Encoder::Standard(font) => {
+                    font_dictionaries.push(font.standard_dictionary().unwrap_or_default().to_vec());
+                }
+                Encoder::Embedded(_, prepared) => {
+                    font_dictionaries.push(prepared.dictionary(next_object));
+                    font_objects.extend(prepared.objects(next_object));
+                    next_object += EXTRA_OBJECTS;
+                }
+            }
+        }
 
-        // The comment's bytes above 127 tell transfer tools the file is binary (§7.5.2).
-        out.put(b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n")?;
+        let mut out = CountingWriter::new(out);
+        let mut offsets = Vec::with_capacity(next_object);
+
+        // Replacement text in marked content needs PDF 1.5 (§14.9.4); everything else
+        // PDF 1.4. The comment's bytes above 127 tell transfer tools the file is binary
+        // (§7.5.2).
+        let version = if actual_text { "1.5" } else { "1.4" };
+        out.put(format!("%PDF-{version}\n").as_bytes())?;
+        out.put(b"%\xE2\xE3\xCF\xD3\n")?;
 
         offsets.push(out.written);
         out.put(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n")?;
@@ -153,11 +209,9 @@ impl Document {
             .as_bytes(),
         )?;
 
-        for (i, font) in fonts.iter().enumerate() {
+        for (i, dictionary) in font_dictionaries.iter().enumerate() {
             offsets.push(out.written);
-            out.put(format!("{} 0 obj\n", font_object(i)).as_bytes())?;
-            out.put(font.dictionary())?;
-            out.put(b"\nendobj\n")?;
+            out.put_object(font_object(i), dictionary)?;
         }
 
         for (i, ((page, resources), content)) in self
@@ -202,6 +256,11 @@ impl Document {
             out.put(content)?;
             // The end-of-line before `endstream` is not part of /Length (§7.3.8.1).
             out.put(b"\nendstream\nendobj\n")?;
+        }
+
+        for (i, object) in font_objects.iter().enumerate() {
+            offsets.push(out.written);
+            out.put_object(first_page + 2 * self.pages.len() + i, object)?;
         }
 
         let xref = out.written;
@@ -264,20 +323,38 @@ impl Page {
     /// first character starts. The text is not wrapped or clipped;
     /// [`Font::text_width`] measures it.
     ///
+    /// Each character is drawn with its own glyph, one after the other, without
+    /// kerning, ligatures or other shaping. With an embedded font that is right for the
+    /// Latin, Greek, Cyrillic, Armenian, Georgian, Han, Hiragana and Katakana scripts,
+    /// precomposed Hangul syllables, and the punctuation, digits and symbols every script
+    /// shares; combining marks are drawn where the font places them. Text in other
+    /// scripts needs shaping or right-to-left layout and is refused rather than drawn
+    /// wrong.
+    ///
     /// # Errors
     ///
-    /// [`Error::Unencodable`] if `text` has a character the font's encoding lacks (for
-    /// Helvetica anything outside WinAnsiEncoding, including control characters such as
-    /// `\n` and `\t`), [`Error::InvalidFontSize`] for a size outside
-    /// [`Font::MIN_SIZE`] to [`Font::MAX_SIZE`], and [`Error::InvalidPosition`] for a
-    /// position outside -32767 to 32767 pt. On error the page is unchanged.
+    /// - [`Error::Unencodable`] for a standard font if `text` has a character
+    ///   WinAnsiEncoding lacks: anything but Latin text, including control characters
+    ///   such as `\n` and `\t`.
+    /// - [`Error::UnsupportedCharacter`] for an embedded font if `text` has a character
+    ///   of another script, a bidirectional formatting character, a conjoining Hangul
+    ///   jamo, a control character, or an unassigned or private-use code point.
+    /// - [`Error::MissingGlyph`] if an embedded font has no glyph for a character.
+    /// - [`Error::InvalidFontSize`] for a size outside [`Font::MIN_SIZE`] to
+    ///   [`Font::MAX_SIZE`], and [`Error::InvalidPosition`] for a position outside
+    ///   -32767 to 32767 pt.
+    ///
+    /// On error the page is unchanged.
     pub fn add_text(&mut self, x: Pt, y: Pt, font: &Font, font_size: Pt, text: &str) -> Result<()> {
         check_font_size(font_size)?;
         let positions = -MAX_POSITION..=MAX_POSITION;
         if !positions.contains(&x.0) || !positions.contains(&y.0) {
             return Err(Error::InvalidPosition { x, y });
         }
-        font.check(text)?;
+        let lookup = font.lookup();
+        for (offset, ch) in text.char_indices() {
+            lookup.glyph(ch, offset)?;
+        }
         let font = self.font_index(font);
         self.push_operators(
             format!(
@@ -316,27 +393,61 @@ impl Page {
         }
     }
 
-    /// Writes the content stream, encoding the text.
-    fn content_stream(&self) -> Result<Vec<u8>> {
+    /// The page's texts, each with the index of its font in the page's fonts.
+    fn texts(&self) -> impl Iterator<Item = (usize, &str)> {
+        self.content.iter().filter_map(|piece| match piece {
+            Content::Text { font, text } => Some((*font, text.as_str())),
+            Content::Operators(_) => None,
+        })
+    }
+
+    /// Writes the content stream, encoding the text, and says whether it needed
+    /// replacement text. `map` gives the document's index of each of the page's fonts,
+    /// and `encoders` the document's fonts.
+    fn content_stream(&self, map: &[usize], encoders: &[Encoder<'_>]) -> Result<(Vec<u8>, bool)> {
+        let mut actual_text = false;
         let mut stream = Vec::new();
         for piece in &self.content {
             match piece {
                 Content::Operators(operators) => stream.extend_from_slice(operators),
                 Content::Text { font, text } => {
-                    // reason: `font` came from font_index, and a page's fonts are never removed
+                    // reason: `font` came from font_index, a page's fonts are never removed,
+                    // and `map` and `encoders` cover every font of the document
                     #[allow(clippy::indexing_slicing)]
-                    let font = &self.fonts[*font];
-                    push_string(&mut stream, &font.encode(text)?);
-                    stream.extend_from_slice(b" Tj");
+                    let encoder = &encoders[map[*font]];
+                    actual_text |= encoder.show(&mut stream, text)?;
                 }
             }
         }
-        Ok(stream)
+        Ok((stream, actual_text))
+    }
+}
+
+/// How a document's font turns text into a content stream's strings.
+enum Encoder<'a> {
+    /// A standard font: a literal string in its encoding.
+    Standard(&'a Font),
+    /// An embedded font: two-byte CIDs of its subset.
+    Embedded(&'a Font, Prepared<'a>),
+}
+
+impl Encoder<'_> {
+    /// Writes `text` with the operators that show it, and says whether it needed
+    /// replacement text.
+    fn show(&self, out: &mut Vec<u8>, text: &str) -> Result<bool> {
+        match self {
+            Self::Standard(font) => {
+                push_string(out, &font.encode(text)?);
+                out.extend_from_slice(b" Tj");
+                Ok(false)
+            }
+            Self::Embedded(font, prepared) => prepared.show(out, &font.lookup(), text),
+        }
     }
 }
 
 /// Formats a finite number as a PDF real: at most four decimals, no exponent.
-fn number(value: f64) -> String {
+pub(crate) fn number(value: f64) -> String {
     let fixed = format!("{value:.4}");
     match fixed.trim_end_matches('0').trim_end_matches('.') {
         "-0" => "0".to_owned(),
@@ -378,6 +489,13 @@ impl<W: Write> CountingWriter<W> {
         self.inner.write_all(bytes)?;
         self.written += bytes.len() as u64;
         Ok(())
+    }
+
+    /// Writes indirect object `id` with `body`, a dictionary or a stream.
+    fn put_object(&mut self, id: usize, body: &[u8]) -> io::Result<()> {
+        self.put(format!("{id} 0 obj\n").as_bytes())?;
+        self.put(body)?;
+        self.put(b"\nendobj\n")
     }
 }
 
