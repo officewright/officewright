@@ -1,5 +1,7 @@
-//! Runs `officewright text-to-pdf --font` with officewright-font's minimal test font:
-//! 1000 units per em, with glyphs for the space, `A`, the acute accent and `Á`.
+//! Runs `officewright text-to-pdf --font` with officewright-font's minimal test font
+//! (1000 units per em, with glyphs for the space, `A`, the acute accent and `Á`) and, by
+//! family name, with the OFL fonts in tests/fonts at the repository root. Those keep their
+//! own licenses (THIRD-PARTY-NOTICES.md), so this test is not in the published crate.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -166,5 +168,117 @@ fn reports_fonts_it_cannot_use() -> io::Result<()> {
         "{stderr}"
     );
     assert!(!output.exists());
+    fs::remove_dir_all(&dir)
+}
+
+fn test_fonts() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fonts")
+}
+
+/// Runs text-to-pdf with `--font family`, looking it up only in tests/fonts, so the
+/// result is the same on every machine.
+fn convert_by_name(test: &str, family: &str) -> io::Result<(Output, Vec<u8>, PathBuf)> {
+    let dir = scratch(test)?;
+    let input = dir.join("in.txt");
+    let output = dir.join("out.pdf");
+    fs::write(&input, "Привет, мир")?;
+    let fonts = test_fonts();
+    let out = officewright(&[
+        &"text-to-pdf",
+        &"--font",
+        &family,
+        &"--font-dir",
+        &fonts,
+        &"--no-system-fonts",
+        &input,
+        &output,
+    ])?;
+    let pdf = fs::read(&output).unwrap_or_default();
+    Ok((out, pdf, dir))
+}
+
+#[test]
+fn looks_up_a_family_name_in_the_font_folders() -> io::Result<()> {
+    let (out, pdf, dir) = convert_by_name("by-name", "liberation sans")?;
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.stderr.is_empty());
+    assert!(String::from_utf8_lossy(&pdf).contains("+LiberationSans /Encoding /Identity-H"));
+    fs::remove_dir_all(&dir)
+}
+
+#[test]
+fn warns_about_a_substituted_family() -> io::Result<()> {
+    let (out, pdf, dir) = convert_by_name("substitute", "Arial")?;
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "warning: font \"Arial\" → \"Liberation Sans\" (metric-compatible substitute)\n"
+    );
+    assert!(String::from_utf8_lossy(&pdf).contains("+LiberationSans"));
+    fs::remove_dir_all(&dir)
+}
+
+#[test]
+fn reports_a_family_nothing_stands_in_for() -> io::Result<()> {
+    let dir = scratch("not-found")?;
+    let input = dir.join("in.txt");
+    let output = dir.join("out.pdf");
+    fs::write(&input, "A")?;
+    let out = officewright(&[
+        &"text-to-pdf",
+        &"--font",
+        &"Calibri",
+        &"--no-system-fonts",
+        &input,
+        &output,
+    ])?;
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "error: no font found for family \"Calibri\": no fonts were found in --font-dir\n"
+    );
+    assert!(!output.exists());
+    // --font-dir is for family names; with a font file it is a mistake.
+    let out = officewright(&[
+        &"text-to-pdf",
+        &"--font",
+        &minimal_font(),
+        &"--font-dir",
+        &test_fonts(),
+        &input,
+        &output,
+    ])?;
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "error: --font-dir and --no-system-fonts apply to a font family name, not a font file\n"
+    );
+    fs::remove_dir_all(&dir)
+}
+
+#[test]
+fn takes_a_font_file_name_or_relative_path_as_a_file() -> io::Result<()> {
+    let dir = scratch("file-names")?;
+    fs::write(dir.join("in.txt"), "A")?;
+    // Run in the scratch directory, so these are relative names: one that ends like a
+    // font file, and one that is a path without an extension. Neither exists, and neither
+    // is taken as a family name.
+    for (font, message) in [
+        ("missing.ttf", "error: cannot read missing.ttf: "),
+        ("MISSING.OTC", "error: cannot read MISSING.OTC: "),
+        ("sub/missing", "error: cannot read sub/missing: "),
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_officewright"))
+            .current_dir(&dir)
+            .args(["text-to-pdf", "--font", font, "in.txt", "out.pdf"])
+            .output()?;
+        assert_eq!(out.status.code(), Some(1), "{font}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.starts_with(message), "{font}: {stderr}");
+    }
     fs::remove_dir_all(&dir)
 }

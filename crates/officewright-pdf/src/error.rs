@@ -99,6 +99,12 @@ pub enum Error {
         /// embeds outlines; otherwise the license forbids embedding altogether.
         bitmap_only: bool,
     },
+    /// No font could be found for a family: the font book has neither the family nor a
+    /// substitute or fallback for it.
+    FontNotFound {
+        /// The requested family.
+        family: String,
+    },
     /// A font could not be reduced to the glyphs the document uses: it is damaged in a
     /// way that only subsetting those glyphs finds.
     Embed {
@@ -200,6 +206,7 @@ impl fmt::Display for Error {
             Self::EmbeddingNotAllowed { font, .. } => {
                 write!(f, "the license of font {font} does not allow embedding it")
             }
+            Self::FontNotFound { family } => write!(f, "no font found for family \"{family}\""),
             Self::Embed { font, .. } => write!(f, "cannot embed font {font}"),
         }
     }
@@ -244,6 +251,7 @@ impl From<Error> for officewright_core::Error {
             | Error::UnsupportedCharacter { .. }
             | Error::MissingGlyph { .. }
             | Error::EmbeddingNotAllowed { .. }
+            | Error::FontNotFound { .. }
             | Error::TooLarge => Self::Unsupported(message),
             Error::InvalidFontSize(_)
             | Error::InvalidPosition { .. }

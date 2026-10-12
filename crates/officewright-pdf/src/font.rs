@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::{fmt, fs};
 
 use officewright_core::Pt;
-use officewright_font::{CharMap, EmbeddingLicense, FontFace};
+use officewright_font::{CharMap, EmbeddingLicense, FontFace, FontRequest, FontResolver};
 
 use crate::{Error, Result, encoding, helvetica, script};
 
@@ -178,6 +178,50 @@ impl Font {
     /// embedded yet) or is damaged in a way that subsetting finds.
     pub fn from_face(face: FontFace) -> Result<Self> {
         Self::embed(face, None)
+    }
+
+    /// The font a [`FontResolver`] chooses for `request`, for embedding: the requested
+    /// family, or the substitute or fallback the resolver takes when it is not in its
+    /// [`FontBook`](officewright_font::FontBook).
+    ///
+    /// Every substitution is added to the resolver's
+    /// [`substitutions`](FontResolver::substitutions), the report to show next to the
+    /// output; the font's own [`embedding_notes`](Self::embedding_notes) report what its
+    /// license restricts. A style the face lacks is reported as synthetic bold or
+    /// italic but not drawn yet: the face is used as it is.
+    ///
+    /// ```no_run
+    /// use officewright_font::{FontBook, FontRequest, FontResolver};
+    /// use officewright_pdf::Font;
+    ///
+    /// let mut book = FontBook::new();
+    /// book.add_system_fonts();
+    /// let mut resolver = FontResolver::new(&book);
+    /// let font = Font::resolve(&mut resolver, &FontRequest::new("Calibri"))?;
+    /// for substitution in resolver.substitutions() {
+    ///     eprintln!("{substitution}"); // such as "Calibri" → "Carlito" (metric-compatible substitute)
+    /// }
+    /// # Ok::<(), officewright_pdf::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::FontNotFound`] if the book has no font the resolver could take, and the
+    /// errors of [`from_face`](Self::from_face) for the face it chose, with
+    /// [`Error::Font`] also if the face's file cannot be read any more.
+    pub fn resolve(resolver: &mut FontResolver<'_>, request: &FontRequest) -> Result<Self> {
+        let Some(id) = resolver.resolve(request).face() else {
+            return Err(Error::FontNotFound {
+                family: request.family().to_owned(),
+            });
+        };
+        let book = resolver.book();
+        let path = book.face(id).and_then(|face| face.path());
+        let face = book.load(id).map_err(|source| Error::Font {
+            path: path.map(Path::to_owned),
+            source,
+        })?;
+        Self::embed(face, path)
     }
 
     fn embed(face: FontFace, path: Option<&Path>) -> Result<Self> {

@@ -155,6 +155,7 @@ name = "officewright-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "officewright-font",
  "officewright-pdf",
 ]
 
@@ -171,6 +172,7 @@ name = "officewright-ffi"
 version = "0.1.0"
 dependencies = [
  "officewright-core",
+ "officewright-font",
  "officewright-pdf",
 ]
 

@@ -337,6 +337,101 @@ static void embedded_fonts(const char *fonts) {
     ow_pdf_font_free(liberation);
 }
 
+/* Chooses fonts by family name from a book of the test fonts, without the system
+ * fonts, so the result is the same on every machine. */
+static void fonts_by_name(const char *fonts, const char *dir) {
+    char path[4096];
+    OwFontBook *book = NULL;
+    OwFontBook *empty = NULL;
+    OwFontResolver *resolver = NULL;
+    OwFontResolver *nothing = NULL;
+    OwPdfFont *liberation = NULL;
+    OwPdfFont *arial = NULL;
+    OwPdfFont *bold = NULL;
+    OwPdfFont *not_found = NULL;
+    size_t added = 99;
+    size_t count = 99;
+    int32_t kind = -1;
+    const char *message = NULL;
+    double width = 0.0;
+    FILE *file;
+
+    EXPECT(ow_font_book_new(&book), OW_STATUS_OK, NULL);
+    EXPECT(ow_font_book_add_dir(book, fonts, &added), OW_STATUS_OK, NULL);
+    CHECK(added == 2);
+    EXPECT(ow_font_book_face_count(book, &count), OW_STATUS_OK, NULL);
+    CHECK(count == 2);
+    EXPECT(ow_font_resolver_new(book, &resolver), OW_STATUS_OK, NULL);
+    /* The resolver keeps its own copy of the book. */
+    ow_font_book_free(book);
+
+    EXPECT(ow_pdf_font_resolve(resolver, "Liberation Sans", 0, 0, &liberation), OW_STATUS_OK, NULL);
+    EXPECT(ow_font_resolver_substitution_count(resolver, &count), OW_STATUS_OK, NULL);
+    CHECK(count == 0);
+    /* Arial's metric-compatible substitute, and a bold the face lacks. */
+    EXPECT(ow_pdf_font_resolve(resolver, "Arial", 0, 0, &arial), OW_STATUS_OK, NULL);
+    EXPECT(ow_pdf_font_resolve(resolver, "Liberation Sans", 1, 0, &bold), OW_STATUS_OK, NULL);
+    EXPECT(ow_font_resolver_substitution_count(resolver, &count), OW_STATUS_OK, NULL);
+    CHECK(count == 2);
+    EXPECT(ow_font_resolver_substitution(resolver, 0, &kind, &message), OW_STATUS_OK, NULL);
+    CHECK(kind == OW_RESOLUTION_METRIC_COMPATIBLE);
+    CHECK(message != NULL && strstr(message, "\"Arial\"") != NULL &&
+          strstr(message, "\"Liberation Sans\" (metric-compatible substitute)") != NULL);
+    EXPECT(ow_font_resolver_substitution(resolver, 1, &kind, &message), OW_STATUS_OK, NULL);
+    CHECK(kind == OW_RESOLUTION_EXACT);
+    CHECK(message != NULL && strstr(message, "synthetic bold") != NULL);
+    EXPECT(ow_font_resolver_substitution(resolver, 2, &kind, &message), OW_STATUS_INVALID_ARGUMENT,
+           "substitution index 2 is out of range");
+    CHECK(kind == OW_RESOLUTION_OTHER && message == NULL);
+    /* The chosen fonts measure alike: Arial's substitute is Liberation Sans. */
+    EXPECT(ow_pdf_font_text_width(arial, "Arial", 10.0, &width), OW_STATUS_OK, NULL);
+    CHECK(width > 20.0 && width < 30.0);
+    EXPECT(ow_pdf_font_resolve(resolver, "Liberation Sans", 2, 0, &not_found),
+           OW_STATUS_INVALID_ARGUMENT, "bold is 2, not 0 or 1");
+    CHECK(not_found == NULL);
+    ow_font_resolver_free(resolver);
+    ow_pdf_font_free(liberation);
+    ow_pdf_font_free(arial);
+    ow_pdf_font_free(bold);
+
+    /* An empty book has nothing to stand in for a family. */
+    EXPECT(ow_font_book_new(&empty), OW_STATUS_OK, NULL);
+    EXPECT(ow_font_resolver_new(empty, &nothing), OW_STATUS_OK, NULL);
+    not_found = (OwPdfFont *)(void *)&count;
+    EXPECT(ow_pdf_font_resolve(nothing, "Calibri", 0, 0, &not_found), OW_STATUS_UNSUPPORTED,
+           "no font found for family \"Calibri\"");
+    CHECK(not_found == NULL);
+    EXPECT(ow_font_resolver_substitution(nothing, 0, &kind, &message), OW_STATUS_OK, NULL);
+    CHECK(kind == OW_RESOLUTION_MISSING);
+    ow_font_resolver_free(nothing);
+
+    /* A file that is not a font is skipped and listed. */
+    snprintf(path, sizeof path, "%s/broken.ttf", dir);
+    file = fopen(path, "wb");
+    CHECK(file != NULL);
+    if (file != NULL) {
+        fputs("not a font", file);
+        fclose(file);
+    }
+    EXPECT(ow_font_book_add_dir(empty, dir, &added), OW_STATUS_OK, NULL);
+    EXPECT(ow_font_book_skipped_count(empty, &count), OW_STATUS_OK, NULL);
+    CHECK(count >= 1);
+    EXPECT(ow_font_book_skipped(empty, 0, &message), OW_STATUS_OK, NULL);
+    CHECK(message != NULL && strstr(message, "broken.ttf") != NULL);
+    snprintf(path, sizeof path, "%s/no-such-folder", dir);
+    EXPECT(ow_font_book_add_dir(empty, path, &added), OW_STATUS_IO, "cannot read ");
+    CHECK(added == 0);
+    EXPECT(ow_font_book_add_bytes(empty, NULL, 0, &added), OW_STATUS_NULL_ARGUMENT, "data is null");
+    EXPECT(ow_font_book_add_bytes(empty, (const uint8_t *)"junk", 4, &added),
+           OW_STATUS_INVALID_ARGUMENT, "not a TrueType");
+    /* Calls that change nothing leave the message valid (AddressSanitizer would report a
+     * read of freed memory here). */
+    CHECK(message != NULL && strstr(message, "broken.ttf") != NULL);
+    ow_font_book_free(empty);
+    ow_font_book_free(NULL);
+    ow_font_resolver_free(NULL);
+}
+
 int main(int argc, char **argv) {
     uint32_t version = ow_abi_version();
     if (argc != 3) {
@@ -352,6 +447,7 @@ int main(int argc, char **argv) {
     text_layout_and_width();
     errors();
     embedded_fonts(argv[2]);
+    fonts_by_name(argv[2], argv[1]);
     if (failures != 0) {
         fprintf(stderr, "%d checks failed\n", failures);
         return 1;
