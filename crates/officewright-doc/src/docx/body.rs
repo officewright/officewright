@@ -65,6 +65,16 @@ enum Frame {
     },
 }
 
+/// A block-level content control or custom XML element open in the body.
+#[derive(Clone, Copy, Debug)]
+struct OpenBlock {
+    node: u32,
+    /// The frame that closes it: the content control's, or the custom XML element's.
+    frame: usize,
+    /// The frame its blocks are read in, once open (`w:sdtContent`).
+    content: Option<usize>,
+}
+
 #[derive(Clone, Copy, Debug)]
 enum TextKind {
     Text,
@@ -91,6 +101,9 @@ struct Reading<'d, 'p, 't> {
     nodes_left: usize,
     max_nodes: usize,
     stack: Vec<Frame>,
+    /// For each frame, the index of the frame that says where its children go: its own,
+    /// or for a transparent frame that of the frame it hands its children to.
+    defining: Vec<usize>,
     locator: Locator<'t>,
     /// The offset of the event read last, where a limit is exceeded.
     at: usize,
@@ -99,9 +112,12 @@ struct Reading<'d, 'p, 't> {
     /// A paragraph whose properties end a section, with the section's properties: the
     /// section ends when the paragraph does.
     pending_break: Option<(u32, SectionProperties)>,
-    /// Content controls and wrappers continued in the next section, by the parent they
-    /// were added to, dropped again if nothing more goes into them.
-    continued: Vec<(u32, Parent)>,
+    /// The block-level content controls and custom XML elements open in the body, outermost
+    /// first: what a section break inside them continues in the next section.
+    open_blocks: Vec<OpenBlock>,
+    /// The copies made for the next section that are still open, with the parent each was
+    /// added to: a copy is dropped again if nothing more goes into it.
+    continued: HashMap<u32, Parent>,
     /// The external target of each hyperlink relationship read so far, interned once
     /// however many links name it.
     link_targets: HashMap<Box<str>, Option<Sym>>,
@@ -140,11 +156,13 @@ pub(super) fn read(
         nodes_left: limits.max_nodes(),
         max_nodes: limits.max_nodes(),
         stack: Vec::new(),
+        defining: Vec::new(),
         locator: Locator::new(input.as_str()),
         at: 0,
         tables_open: 0,
         pending_break: None,
-        continued: Vec::new(),
+        open_blocks: Vec::new(),
+        continued: HashMap::new(),
         link_targets: HashMap::new(),
     };
     reading
@@ -222,7 +240,7 @@ impl Reading<'_, '_, '_> {
                 ));
             };
             self.document.conformance = conformance;
-            self.stack.push(Frame::Root);
+            self.push(Frame::Root);
             return Ok(());
         }
         if let Some(Frame::Alternate { taken }) = self.stack.last_mut() {
@@ -235,19 +253,19 @@ impl Reading<'_, '_, '_> {
                             .map_err(|err| Error::from(err.in_part(self.part_name)))?));
             if take {
                 *taken = true;
-                self.stack.push(Frame::Transparent);
+                self.push(Frame::Transparent);
             } else {
                 return self.skip(reader, mce);
             }
             return Ok(());
         }
         if name.is(self.mc, "AlternateContent") {
-            self.stack.push(Frame::Alternate { taken: false });
+            self.push(Frame::Alternate { taken: false });
             return Ok(());
         }
         match disposition {
             Disposition::ProcessContent => {
-                self.stack.push(Frame::Transparent);
+                self.push(Frame::Transparent);
                 return Ok(());
             }
             Disposition::Understood if self.is_w(&tag) => {}
@@ -258,7 +276,7 @@ impl Reading<'_, '_, '_> {
         match frame {
             Context::Root => {
                 if local == "body" {
-                    self.stack.push(Frame::Container {
+                    self.push(Frame::Container {
                         parent: Parent::Body,
                         level: Level::Block,
                     });
@@ -281,10 +299,16 @@ impl Reading<'_, '_, '_> {
             Context::ContentControl { node, level } => match local {
                 "sdtPr" | "sdtEndPr" => self.property(reader, mce, tag, node),
                 "sdtContent" => {
-                    self.stack.push(Frame::Container {
+                    self.push(Frame::Container {
                         parent: Parent::Node(node),
                         level,
                     });
+                    let frame = self.stack.len() - 1;
+                    if let Some(open) = self.open_blocks.last_mut() {
+                        if open.node == node && open.content.is_none() {
+                            open.content = Some(frame);
+                        }
+                    }
                     Ok(())
                 }
                 _ => self.keep(reader, mce, tag),
@@ -351,12 +375,22 @@ impl Reading<'_, '_, '_> {
                     _ => ControlLevel::Cell,
                 };
                 let node = self.add(parent, Kind::ContentControl { level: control })?;
-                self.stack.push(Frame::ContentControl { node, level });
+                self.push(Frame::ContentControl { node, level });
+                self.note_open_block(node, level, None);
                 Ok(())
             }
             (Level::Block | Level::Row | Level::Cell, "customXml")
             | (Level::Inline, "customXml" | "smartTag" | "dir" | "bdo") => {
-                self.open(parent, Kind::Wrapper, level)
+                self.open(parent, Kind::Wrapper, level)?;
+                if let Some(Frame::Container {
+                    parent: Parent::Node(node),
+                    ..
+                }) = self.stack.last()
+                {
+                    let (node, frame) = (*node, self.stack.len() - 1);
+                    self.note_open_block(node, level, Some(frame));
+                }
+                Ok(())
             }
             (Level::Inline, "r") => self.open(
                 parent,
@@ -495,7 +529,16 @@ impl Reading<'_, '_, '_> {
     }
 
     fn end(&mut self) -> Result<()> {
-        match self.stack.pop() {
+        let popped = self.stack.pop();
+        self.defining.pop();
+        if self
+            .open_blocks
+            .last()
+            .is_some_and(|open| open.frame == self.stack.len())
+        {
+            self.open_blocks.pop();
+        }
+        match popped {
             Some(Frame::Text { run, kind, text }) => {
                 let text = text.into_boxed_str();
                 let item = match kind {
@@ -550,58 +593,64 @@ impl Reading<'_, '_, '_> {
     fn break_section(&mut self, properties: SectionProperties) -> Result<()> {
         self.breaks.push((self.body.len(), properties));
         let mut parent = Parent::Body;
-        let mut copies: Vec<(u32, u32)> = Vec::new();
-        for i in 0..self.stack.len() {
-            let original = match self.stack.get(i) {
-                Some(Frame::ContentControl {
-                    node,
-                    level: Level::Block,
-                }) => *node,
-                Some(Frame::Container {
-                    parent: Parent::Node(node),
-                    level: Level::Block,
-                }) => {
-                    if let Some(&(_, copy)) = copies.iter().find(|(original, _)| original == node) {
-                        if let Some(Frame::Container { parent, .. }) = self.stack.get_mut(i) {
-                            *parent = Parent::Node(copy);
-                        }
-                        continue;
-                    }
-                    *node
-                }
-                _ => continue,
+        for i in 0..self.open_blocks.len() {
+            let Some(&OpenBlock {
+                node: original,
+                frame,
+                content,
+            }) = self.open_blocks.get(i)
+            else {
+                break;
             };
             let Some(source) = self.document.node(original) else {
                 continue;
             };
             let kind = match source.kind {
                 Kind::ContentControl { level } => Kind::ContentControl { level },
-                Kind::Wrapper => Kind::Wrapper,
-                _ => continue,
+                _ => Kind::Wrapper,
             };
             let properties = source.properties.clone();
             let copy = self.add(parent, kind)?;
             if let Some(node) = self.document.nodes.get_mut(copy as usize) {
                 node.properties = properties;
             }
-            self.continued.push((copy, parent));
-            copies.push((original, copy));
-            match self.stack.get_mut(i) {
-                Some(Frame::ContentControl { node, .. }) => *node = copy,
-                Some(Frame::Container { parent, .. }) => *parent = Parent::Node(copy),
-                _ => {}
+            // The paragraph that ends the section is inside the original, so it is not
+            // empty and stays; it only stops being the open copy.
+            self.continued.remove(&original);
+            self.continued.insert(copy, parent);
+            for index in std::iter::once(frame).chain(content) {
+                match self.stack.get_mut(index) {
+                    Some(Frame::ContentControl { node, .. }) => *node = copy,
+                    Some(Frame::Container { parent, .. }) => *parent = Parent::Node(copy),
+                    _ => {}
+                }
+            }
+            if let Some(open) = self.open_blocks.get_mut(i) {
+                open.node = copy;
             }
             parent = Parent::Node(copy);
         }
         Ok(())
     }
 
+    /// Notes a block-level content control or custom XML element of the body as open,
+    /// with the frame that closes it and, for a custom XML element, the frame its
+    /// children are read in.
+    fn note_open_block(&mut self, node: u32, level: Level, content: Option<usize>) {
+        if level == Level::Block && self.tables_open == 0 {
+            self.open_blocks.push(OpenBlock {
+                node,
+                frame: self.stack.len() - 1,
+                content,
+            });
+        }
+    }
+
     /// Takes a continued content control or wrapper out again when nothing went into it.
     fn drop_if_empty(&mut self, node: u32) {
-        let Some(at) = self.continued.iter().position(|&(copy, _)| copy == node) else {
+        let Some(parent) = self.continued.remove(&node) else {
             return;
         };
-        let (_, parent) = self.continued.swap_remove(at);
         if self
             .document
             .node(node)
@@ -639,24 +688,38 @@ impl Reading<'_, '_, '_> {
     }
 
     /// The innermost frame that says where children go; transparent frames and the
-    /// branches of `mc:AlternateContent` hand their children to it.
+    /// branches of `mc:AlternateContent` hand their children to it. Found without
+    /// walking the stack, however many transparent frames are open.
     fn context(&self) -> Context {
-        for frame in self.stack.iter().rev() {
-            return match frame {
-                Frame::Root => Context::Root,
-                Frame::Container { parent, level } => Context::Container {
-                    parent: *parent,
-                    level: *level,
-                },
-                Frame::ContentControl { node, level } => Context::ContentControl {
-                    node: *node,
-                    level: *level,
-                },
-                Frame::Text { .. } => Context::Text,
-                Frame::Alternate { .. } | Frame::Transparent => continue,
-            };
+        let frame = self
+            .defining
+            .last()
+            .and_then(|&index| self.stack.get(index));
+        match frame {
+            Some(Frame::Container { parent, level }) => Context::Container {
+                parent: *parent,
+                level: *level,
+            },
+            Some(Frame::ContentControl { node, level }) => Context::ContentControl {
+                node: *node,
+                level: *level,
+            },
+            Some(Frame::Text { .. }) => Context::Text,
+            Some(Frame::Root | Frame::Alternate { .. } | Frame::Transparent) | None => {
+                Context::Root
+            }
         }
-        Context::Root
+    }
+
+    fn push(&mut self, frame: Frame) {
+        let defining = match frame {
+            Frame::Alternate { .. } | Frame::Transparent => {
+                self.defining.last().copied().unwrap_or(self.stack.len())
+            }
+            _ => self.stack.len(),
+        };
+        self.stack.push(frame);
+        self.defining.push(defining);
     }
 
     /// Adds a node to `parent` and reads its children at `level`.
@@ -665,7 +728,7 @@ impl Reading<'_, '_, '_> {
             self.tables_open += 1;
         }
         let node = self.add(parent, kind)?;
-        self.stack.push(Frame::Container {
+        self.push(Frame::Container {
             parent: Parent::Node(node),
             level,
         });
@@ -705,7 +768,7 @@ impl Reading<'_, '_, '_> {
 
     fn push_frame(&mut self, frame: Frame) -> Result<()> {
         self.spend(1)?;
-        self.stack.push(frame);
+        self.push(frame);
         Ok(())
     }
 

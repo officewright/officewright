@@ -26,7 +26,9 @@ impl<'a> Section<'a> {
         &self.data.properties
     }
 
-    /// The paragraphs, tables and other blocks of the section, in document order.
+    /// The paragraphs, tables and other blocks of the section, in document order. A
+    /// content control that a section break falls inside is split between the two
+    /// sections (see [`ContentControl`]).
     pub fn blocks(self) -> impl Iterator<Item = Block<'a>> + 'a {
         blocks(self.document, &self.data.blocks)
     }
@@ -173,6 +175,10 @@ impl<'a> TableCell<'a> {
 
 /// A content control (`w:sdt`): a region of a document that a form or a template
 /// marks, around blocks or around inline content.
+///
+/// A section break inside a content control around blocks ends the section after its
+/// paragraph, as in Word, so such a control shows in both sections: once with the
+/// blocks before the break and once, with the same properties, with the rest.
 #[derive(Clone, Copy, Debug)]
 pub struct ContentControl<'a> {
     document: &'a Document,

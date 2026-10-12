@@ -832,3 +832,56 @@ fn reads_hyperlink_targets_from_external_relationships_only() {
     );
     assert!(messages[1].ends_with("w:fldSimple has no w:instr; its instruction is empty"));
 }
+
+/// Opens `body` with a raised XML depth limit and fails if it takes more than 20 s, far
+/// above the second or so it takes when the work is linear.
+fn open_in_linear_time(body: &str) -> Document {
+    let options = LoadOptions::new().with_limits(Limits::new().with_max_xml_depth(1 << 20));
+    let start = std::time::Instant::now();
+    let document = options.open_bytes(docx(body)).unwrap();
+    let elapsed = start.elapsed();
+    assert!(elapsed < std::time::Duration::from_secs(20), "{elapsed:?}");
+    document
+}
+
+#[test]
+fn closes_content_controls_after_section_breaks_in_linear_time() {
+    // A reviewer of #32 found each content control that closed searched every copy made
+    // for a section break: 500,000 breaks and 500,000 controls took 45 s.
+    let n = 100_000;
+    let body = format!(
+        "<w:sdt><w:sdtContent>{}</w:sdtContent></w:sdt><w:p>{}</w:p>",
+        "<w:p><w:pPr><w:sectPr/></w:pPr></w:p>".repeat(n),
+        "<w:sdt><w:sdtContent><w:r><w:t>x</w:t></w:r></w:sdtContent></w:sdt>".repeat(n)
+    );
+    let document = open_in_linear_time(&body);
+    assert_eq!(document.sections().len(), n + 1);
+}
+
+#[test]
+fn breaks_sections_under_nested_content_controls_in_linear_time() {
+    // ...and each break looked through every frame open around it and every copy made
+    // for it so far: 100 breaks under 20,000 nested controls took 15 s.
+    let depth = 10_000;
+    let body = format!(
+        "{}{}{}",
+        "<w:sdt><w:sdtContent>".repeat(depth),
+        "<w:p><w:pPr><w:sectPr/></w:pPr></w:p>".repeat(100),
+        "</w:sdtContent></w:sdt>".repeat(depth)
+    );
+    let document = open_in_linear_time(&body);
+    assert_eq!(document.sections().len(), 101);
+}
+
+#[test]
+fn breaks_sections_under_nested_alternate_content_in_linear_time() {
+    let n = 40_000;
+    let body = format!(
+        "{}{}{}",
+        "<mc:AlternateContent><mc:Fallback>".repeat(n),
+        "<w:p><w:pPr><w:sectPr/></w:pPr></w:p>".repeat(n),
+        "</mc:Fallback></mc:AlternateContent>".repeat(n)
+    );
+    let document = open_in_linear_time(&body);
+    assert_eq!(document.sections().len(), n + 1);
+}
