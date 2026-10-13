@@ -51,12 +51,18 @@ impl Formats<'_> {
     ) -> CharacterFormat {
         let document = self.document;
         let defaults = self.run_defaults();
-        let paragraph = paragraph_style.map(|index| self.characters.level(document, index));
+        let paragraph = paragraph_style.map(|index| {
+            self.characters
+                .level(document, index, &CharacterLevel::default())
+        });
         let character_style = direct
             .style
             .as_deref()
             .and_then(|id| style_index(document, id, StyleKind::Character));
-        let character = character_style.map(|index| self.characters.level(document, index));
+        let character = character_style.map(|index| {
+            self.characters
+                .level(document, index, &CharacterLevel::default())
+        });
         let direct = CharacterLevel::of(direct);
 
         // Each level replaces what it gives.

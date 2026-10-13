@@ -7,6 +7,7 @@ use officewright_core::Pt;
 
 use std::sync::Arc;
 
+use super::Document;
 use super::numbering::ListLevel;
 use super::properties::{
     ColorValue, FontHint, Highlight, Justification, LineSpacing, ParagraphBorders, Shading,
@@ -429,7 +430,8 @@ impl ParagraphFormat {
 
     /// The outline level, 0 for the top, for tables of contents; `None` for body text.
     /// Word takes it from the style id for Heading1 to Heading9 (MS-OI29500
-    /// §17.3.1.20(a)).
+    /// §17.3.1.20(a)); a style based on one of them has the `w:outlineLvl` it inherits
+    /// like any other property, not the level of its base's id.
     pub fn outline_level(&self) -> Option<u8> {
         self.outline_level
     }
@@ -448,7 +450,6 @@ pub struct ListFormat {
     pub(crate) instance: i64,
     pub(crate) definition: Option<i64>,
     pub(crate) level_number: usize,
-    pub(crate) level: Option<Arc<ListLevel>>,
     pub(crate) start: i64,
 }
 
@@ -470,9 +471,10 @@ impl ListFormat {
     }
 
     /// The level's definition, an override's when the instance has one; `None` when
-    /// the definition has no such level.
-    pub fn level(&self) -> Option<&ListLevel> {
-        self.level.as_deref()
+    /// the definition has no such level. `document` is the document of the paragraph:
+    /// the level is parsed from it on each call, since a document can name many.
+    pub fn level(&self, document: &Document) -> Option<ListLevel> {
+        super::resolve::list_level(document, self)
     }
 
     /// The number the level starts from: the instance's override (`w:startOverride`),

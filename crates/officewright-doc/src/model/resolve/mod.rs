@@ -5,6 +5,8 @@
 mod character;
 mod paragraph;
 
+pub(crate) use paragraph::list_level;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -49,9 +51,9 @@ pub struct Formats<'a> {
     /// Each list instance's levels that paragraphs use, with the instance's overrides,
     /// and the numbers they start from.
     instance_levels: HashMap<(i64, usize), paragraph::InstanceLevel>,
-    /// The level of each definition whose `w:pStyle` names a paragraph style, by the
-    /// definition and the style's index.
-    style_levels: HashMap<(i64, usize), Option<i64>>,
+    /// The defaults and a paragraph style with a list level laid over them, by the
+    /// style, the instance and the level; at most [`MAX_COMBINATIONS`] at a time.
+    combinations: HashMap<(Option<usize>, i64, usize), Arc<ParagraphLevel>>,
     /// How much work the caches saved, for tests.
     #[cfg(test)]
     work: Work,
@@ -69,8 +71,8 @@ pub(crate) struct Work {
     pub(crate) definitions: usize,
     /// Levels of instances replaced by an override's level.
     pub(crate) replacements: usize,
-    /// Definitions searched for the level whose `w:pStyle` names a style.
-    pub(crate) style_levels: usize,
+    /// A style's level and a list level laid over each other.
+    pub(crate) combinations: usize,
 }
 
 impl<'a> Formats<'a> {
@@ -87,7 +89,7 @@ impl<'a> Formats<'a> {
             numbering_styles: HashMap::new(),
             definitions: HashMap::new(),
             instance_levels: HashMap::new(),
-            style_levels: HashMap::new(),
+            combinations: HashMap::new(),
             #[cfg(test)]
             work: Work::default(),
         }
@@ -136,6 +138,13 @@ impl<'a> Formats<'a> {
         &self.work
     }
 
+    /// How many combinations of a style and a list level are kept, for tests of the
+    /// bound.
+    #[cfg(test)]
+    pub(crate) fn kept_combinations(&self) -> usize {
+        self.combinations.len()
+    }
+
     /// The index of the paragraph style of the paragraph `node`: its `w:pStyle` when it
     /// names a paragraph style, else the default paragraph style (the first, as
     /// [`Styles::default_style`](super::Styles::default_style) gives it).
@@ -159,6 +168,7 @@ impl<'a> Formats<'a> {
                     .styles
                     .styles
                     .iter()
+                    .take(MAX_STYLES)
                     .position(|style| style.kind == StyleKind::Paragraph && style.is_default)
             })
         })
@@ -173,6 +183,9 @@ trait Layer: Clone + Default {
 
     /// Lays `above` over this level: what it gives replaces what this one gives.
     fn overlay(&mut self, above: &Self);
+
+    /// Drops what only a level below could use, once this level lies over the root.
+    fn settle(&mut self) {}
 }
 
 /// What each style gives together with the styles it is based on, by the style's index
@@ -196,15 +209,16 @@ impl<L> Default for StyleLevels<L> {
 }
 
 impl<L: Layer> StyleLevels<L> {
-    /// What the style at `index` gives together with the styles it is based on, the
-    /// style's own properties winning (ECMA-376 §17.7.4.3; for toggle properties the
-    /// first value found up the chain, §17.7.3).
+    /// What the style at `index` gives together with the styles it is based on, laid
+    /// over `root`, the style's own properties winning (ECMA-376 §17.7.4.3; for toggle
+    /// properties the first value found up the chain, §17.7.3). The root is the same for
+    /// every call on one cache.
     ///
     /// Each style is worked out once, from the style it is based on. A style on a cycle
     /// of `w:basedOn`, which Word does not allow (MS-OI29500 §17.7.4.3(a)), is taken
     /// with its own properties only, so that the result does not depend on which style
     /// of the cycle is asked for first.
-    fn level(&mut self, document: &Document, index: usize) -> Arc<L> {
+    fn level(&mut self, document: &Document, index: usize, root: &L) -> Arc<L> {
         if let Some(level) = self.levels.get(&index) {
             return Arc::clone(level);
         }
@@ -232,8 +246,10 @@ impl<L: Layer> StyleLevels<L> {
             .and_then(|from| path.get(from..))
             .unwrap_or_default();
         for &style in cycle {
-            let level = Arc::new(self.own(document, style));
-            self.levels.insert(style, level);
+            let mut level = root.clone();
+            level.overlay(&self.own(document, style));
+            level.settle();
+            self.levels.insert(style, Arc::new(level));
         }
         let tail = path
             .get(..cycle_from.unwrap_or(path.len()))
@@ -243,8 +259,9 @@ impl<L: Layer> StyleLevels<L> {
             self.levels.get(first).map(Arc::clone)
         });
         for &style in tail.iter().rev() {
-            let mut level = below.as_deref().cloned().unwrap_or_default();
+            let mut level = below.as_deref().unwrap_or(root).clone();
             level.overlay(&self.own(document, style));
+            level.settle();
             let level = Arc::new(level);
             self.levels.insert(style, Arc::clone(&level));
             below = Some(level);
@@ -273,11 +290,23 @@ impl<L: Layer> StyleLevels<L> {
     }
 }
 
-/// The index of the style with this id when it is of `kind`.
+/// How many styles the resolver uses, the first ones of the styles part. Word does not
+/// open a document with more (MS-OI29500 §17.7.4.17(c)), so a document that has more
+/// lays out as nothing Word shows; the bound keeps what the resolver keeps per style
+/// small.
+const MAX_STYLES: usize = 4079;
+
+/// How many combinations of a paragraph style and a list level the resolver keeps at a
+/// time: each is a full set of paragraph properties, and the paragraphs of a document
+/// mostly use a few.
+const MAX_COMBINATIONS: usize = 1024;
+
+/// The index of the style with this id when it is of `kind` and among the styles the
+/// resolver uses.
 fn style_index(document: &Document, id: &str, kind: StyleKind) -> Option<usize> {
     let index = *document.styles.by_id.get(id)?;
     let style = document.styles.styles.get(index)?;
-    (style.kind == kind).then_some(index)
+    (style.kind == kind && index < MAX_STYLES).then_some(index)
 }
 
 /// The style the style at `index` is based on: none when its `w:basedOn` names no style

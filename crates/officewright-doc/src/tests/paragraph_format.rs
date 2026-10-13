@@ -410,7 +410,8 @@ fn resolves_the_list_and_lays_its_level_between_the_style_and_direct_formatting(
         paragraph("StyleLevel", r#"<w:numPr><w:numId w:val="1"/></w:numPr>"#),
     ]
     .concat();
-    let formats = formats(&build(&body, &styles, Some(&numbering)));
+    let document = build(&body, &styles, Some(&numbering));
+    let formats = formats(&document);
     let lists: Vec<_> = formats
         .iter()
         .map(|format| {
@@ -461,7 +462,7 @@ fn resolves_the_list_and_lays_its_level_between_the_style_and_direct_formatting(
     assert_eq!(formats[0].justification(), Justification::Right);
     assert_eq!(formats[0].before_spacing(), Pt(0.0));
     assert_eq!(
-        formats[0].list().unwrap().level().unwrap().text(),
+        formats[0].list().unwrap().level(&document).unwrap().text(),
         Some("%2.")
     );
 }
@@ -476,18 +477,19 @@ fn applies_the_overrides_of_an_instance() {
     let numbered =
         |level: i64| format!(r#"<w:numPr><w:ilvl w:val="{level}"/><w:numId w:val="1"/></w:numPr>"#);
     let body = [paragraph("", &numbered(0)), paragraph("", &numbered(1))].concat();
-    let formats = formats(&build(&body, &defaults(""), Some(&numbering)));
+    let document = build(&body, &defaults(""), Some(&numbering));
+    let formats = formats(&document);
     let start_override = formats[0].list().unwrap();
     assert_eq!(start_override.start(), 7);
-    assert_eq!(start_override.level().unwrap().text(), Some("%1."));
+    assert_eq!(start_override.level(&document).unwrap().text(), Some("%1."));
     // An override's level replaces the definition's, but Word ignores its start
     // (MS-OI29500 §17.9.25(b)).
     let replaced = formats[1].list().unwrap();
-    assert_eq!(replaced.level().unwrap().text(), Some("(%2)"));
+    assert_eq!(replaced.level(&document).unwrap().text(), Some("(%2)"));
     // The replacement is level 1, whatever its own w:ilvl says.
-    assert_eq!(replaced.level().unwrap().level(), 1);
+    assert_eq!(replaced.level(&document).unwrap().level(), 1);
     assert_eq!(
-        replaced.level().unwrap().number_format(),
+        replaced.level(&document).unwrap().number_format(),
         Some(NumberFormat::UpperRoman)
     );
     assert_eq!(replaced.start(), 4);
@@ -545,14 +547,15 @@ fn follows_the_link_of_a_numbering_style_to_its_definition() {
         paragraph("", &numbered(7)),
     ]
     .concat();
-    let formats = formats(&build(&body, &styles, Some(&numbering)));
+    let document = build(&body, &styles, Some(&numbering));
+    let formats = formats(&document);
     let linked = formats[0].list().unwrap();
     assert_eq!((linked.instance(), linked.definition()), (4, Some(30)));
-    assert_eq!(linked.level().unwrap().text(), Some("%2."));
+    assert_eq!(linked.level(&document).unwrap().text(), Some("%2."));
     assert_eq!(formats[0].start_indent(), Pt(72.0));
     for format in &formats[1..] {
         let list = format.list().unwrap();
-        assert_eq!((list.definition(), list.level()), (None, None));
+        assert_eq!((list.definition(), list.level(&document)), (None, None));
     }
 }
 
@@ -585,7 +588,7 @@ fn a_paragraph_of_another_document_takes_the_styles_of_its_own() {
 #[test]
 fn instances_of_one_definition_share_its_levels() {
     // A document may name a definition through many instances: their levels are parsed
-    // once, and only overridden ones are copied.
+    // once, and only overridden ones are parsed again.
     let mut numbering = definition(10, "");
     for id in 1..=2000 {
         numbering.push_str(&format!(
@@ -604,17 +607,21 @@ fn instances_of_one_definition_share_its_levels() {
             )
         })
         .collect();
-    let formats = formats(&build(&body, &defaults(""), Some(&numbering)));
-    let level = |format: &ParagraphFormat| format.list().unwrap().level.clone().unwrap();
-    let first = level(&formats[0]);
+    let document = build(&body, &defaults(""), Some(&numbering));
+    let mut formats = document.formats();
+    let results: Vec<_> = paragraphs(&document)
+        .into_iter()
+        .map(|paragraph| formats.paragraph(paragraph))
+        .collect();
+    assert_eq!(formats.work().definitions, 1);
+    assert_eq!(formats.work().replacements, 1);
+    let text = |format: &ParagraphFormat| format.list().unwrap().level(&document).unwrap().text;
     assert!(
-        formats[..2000]
+        results[..2000]
             .iter()
-            .all(|format| Arc::ptr_eq(&level(format), &first))
+            .all(|format| text(format).as_deref() == Some("%1."))
     );
-    let overridden = level(&formats[2000]);
-    assert!(!Arc::ptr_eq(&overridden, &first));
-    assert_eq!(overridden.text(), Some("*"));
+    assert_eq!(text(&results[2000]).as_deref(), Some("*"));
 }
 
 #[test]
@@ -722,11 +729,10 @@ fn follows_each_link_once_and_shares_the_levels_it_leads_to() {
         .map(|paragraph| formats.paragraph(paragraph).list().cloned().unwrap())
         .collect();
     assert!(lists.iter().all(|list| list.definition() == Some(9000)));
-    let first = lists[0].level.clone().unwrap();
     assert!(
         lists
             .iter()
-            .all(|list| Arc::ptr_eq(list.level.as_ref().unwrap(), &first))
+            .all(|list| list.level(&document).unwrap().text() == Some("%1."))
     );
     // Each linking definition's link is read once, and so is the definition they reach.
     assert_eq!(formats.work().links, 301);
@@ -764,7 +770,10 @@ fn reads_only_the_overrides_of_the_levels_paragraphs_use() {
     let mut formats = document.formats();
     for paragraph in paragraphs(&document) {
         let format = formats.paragraph(paragraph);
-        assert_eq!(format.list().unwrap().level().unwrap().text(), Some("R0"));
+        assert_eq!(
+            format.list().unwrap().level(&document).unwrap().text(),
+            Some("R0")
+        );
     }
     assert_eq!(formats.work().replacements, 1);
 }
@@ -807,7 +816,7 @@ fn works_out_each_list_definition_and_style_match_once() {
             .all(|format| Arc::ptr_eq(format.style.as_ref().unwrap(), &id))
     );
     assert_eq!(formats.work().definitions, 1);
-    assert_eq!(formats.work().style_levels, 1);
+    assert_eq!(formats.work().combinations, 1);
 }
 
 #[test]
@@ -1155,8 +1164,185 @@ fn an_instance_without_its_definition_has_no_levels_even_with_overrides() {
         "",
         r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>"#,
     );
-    let format = &formats(&build(&body, &defaults(""), Some(numbering)))[0];
+    let document = build(&body, &defaults(""), Some(numbering));
+    let format = &formats(&document)[0];
     let list = format.list().unwrap();
-    assert_eq!((list.definition(), list.level()), (None, None));
+    assert_eq!((list.definition(), list.level(&document)), (None, None));
     assert_eq!(format.start_indent(), Pt(0.0));
+}
+
+#[test]
+fn matches_a_level_to_a_style_within_its_own_definition() {
+    // Definition 10's level 2 names style S, definition 20 names no style. A paragraph
+    // of S in instance 2 (definition 20) without a w:ilvl of its own takes S's level,
+    // 0, not the level definition 10 names S at.
+    let numbering = [
+        definition(10, r#"<w:pStyle w:val="S"/>"#),
+        definition(20, ""),
+        r#"<w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num>"#.to_owned(),
+        r#"<w:num w:numId="2"><w:abstractNumId w:val="20"/></w:num>"#.to_owned(),
+    ]
+    .concat();
+    let styles = [
+        defaults(""),
+        style(
+            "paragraph",
+            "S",
+            None,
+            r#"<w:numPr><w:numId w:val="1"/></w:numPr>"#,
+        ),
+    ]
+    .concat();
+    let body = [
+        paragraph("S", ""),
+        paragraph("S", r#"<w:numPr><w:numId w:val="2"/></w:numPr>"#),
+    ]
+    .concat();
+    let levels: Vec<_> = formats(&build(&body, &styles, Some(&numbering)))
+        .iter()
+        .map(|format| {
+            let list = format.list().unwrap();
+            (list.instance(), list.level_number())
+        })
+        .collect();
+    assert_eq!(levels, [(1, 2), (2, 0)]);
+}
+
+#[test]
+fn takes_a_list_levels_indentation_in_character_units_alone() {
+    // A level whose w:ind gives only character units gives them to its paragraphs.
+    let numbering = r#"<w:abstractNum w:abstractNumId="10"><w:lvl w:ilvl="0"><w:pPr><w:ind w:rightChars="150"/></w:pPr></w:lvl><w:lvl w:ilvl="1"><w:pPr><w:ind w:hangingChars="250"/></w:pPr></w:lvl><w:lvl w:ilvl="2"><w:pPr><w:ind w:leftChars="350"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num>"#;
+    let body: String = (0..3)
+        .map(|level| {
+            paragraph(
+                "",
+                &format!(r#"<w:numPr><w:ilvl w:val="{level}"/><w:numId w:val="1"/></w:numPr>"#),
+            )
+        })
+        .collect();
+    let units: Vec<_> = formats(&build(&body, &defaults(""), Some(numbering)))
+        .iter()
+        .map(|format| {
+            (
+                format.start_indent_chars(),
+                format.end_indent_chars(),
+                format.first_line_indent_chars(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        units,
+        [
+            (None, Some(150), None),
+            (None, None, Some(-250)),
+            (Some(350), None, None),
+        ]
+    );
+}
+
+#[test]
+fn a_clear_up_a_style_chain_removes_a_stop_of_the_defaults() {
+    // Base clears 64 stops where nothing is set, which fills its bound of cleared stops;
+    // Derived then clears the defaults' stop at 7000 twips. Each style is laid over the
+    // defaults, so the clear finds that stop.
+    let clears: String = (1..=64)
+        .map(|n| format!(r#"<w:tab w:val="clear" w:pos="{}"/>"#, n * 10))
+        .collect();
+    let styles = [
+        defaults(r#"<w:tabs><w:tab w:val="left" w:pos="7000"/></w:tabs>"#),
+        style(
+            "paragraph",
+            "Base",
+            None,
+            &format!("<w:tabs>{clears}</w:tabs>"),
+        ),
+        style(
+            "paragraph",
+            "Derived",
+            Some("Base"),
+            r#"<w:tabs><w:tab w:val="clear" w:pos="7000"/></w:tabs>"#,
+        ),
+    ]
+    .concat();
+    let body = [paragraph("Base", ""), paragraph("Derived", "")].concat();
+    let formats = formats(&build(&body, &styles, None));
+    assert_eq!(tabs(&formats[0]), [tab(TabKind::Left, 350.0)]);
+    assert_eq!(tabs(&formats[1]), []);
+}
+
+#[test]
+fn uses_only_the_styles_word_opens_a_document_with() {
+    // Word does not open a document with more than 4,079 styles (MS-OI29500
+    // §17.7.4.17(c)): the resolver takes the first 4,079 and leaves the rest out, as
+    // the styles of a paragraph and as bases.
+    let mut styles = defaults("");
+    for n in 0..4079 {
+        styles.push_str(&style("paragraph", &format!("S{n}"), None, ""));
+    }
+    styles.push_str(&style(
+        "paragraph",
+        "Beyond",
+        None,
+        r#"<w:jc w:val="center"/>"#,
+    ));
+    styles.push_str(&style(
+        "paragraph",
+        "S0Again",
+        Some("Beyond"),
+        r#"<w:ind w:left="720"/>"#,
+    ));
+    let body = [
+        paragraph("S4078", r#"<w:jc w:val="right"/>"#),
+        paragraph("Beyond", ""),
+    ]
+    .concat();
+    let formats = formats(&build(&body, &styles, None));
+    assert_eq!(formats[0].style(), Some("S4078"));
+    assert_eq!(formats[0].justification(), Justification::Right);
+    assert_eq!(formats[1].style(), None);
+    assert_eq!(formats[1].justification(), Justification::Start);
+}
+
+#[test]
+fn keeps_a_bounded_number_of_style_and_list_level_combinations() {
+    // 1,100 styles each with a paragraph in a list whose level gives an indentation:
+    // more combinations than the cache keeps. Every paragraph still gets its style's
+    // alignment and the level's indentation, and a second pass over them finds the
+    // same.
+    let numbering = [
+        definition(10, ""),
+        r#"<w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num>"#.to_owned(),
+    ]
+    .concat();
+    let mut styles = defaults(r#"<w:numPr><w:numId w:val="1"/></w:numPr>"#);
+    for n in 0..1100 {
+        let alignment = if n % 2 == 0 { "center" } else { "both" };
+        styles.push_str(&style(
+            "paragraph",
+            &format!("S{n}"),
+            None,
+            &format!(
+                r#"<w:jc w:val="{alignment}"/><w:tabs><w:tab w:val="left" w:pos="{}"/></w:tabs>"#,
+                2000 + n
+            ),
+        ));
+    }
+    let body: String = (0..1100).map(|n| paragraph(&format!("S{n}"), "")).collect();
+    let document = build(&body, &styles, Some(&numbering));
+    let mut formats = document.formats();
+    for pass in 0..2 {
+        for (n, paragraph) in paragraphs(&document).into_iter().enumerate() {
+            let format = formats.paragraph(paragraph);
+            // The list level's alignment wins over the style's.
+            assert_eq!(format.justification(), Justification::Right, "pass {pass}");
+            assert_eq!(format.start_indent(), Pt(36.0), "pass {pass}");
+            assert_eq!(
+                tabs(&format),
+                [tab(TabKind::Left, (2000.0 + n as f64) / 20.0)],
+                "pass {pass}, paragraph {n}"
+            );
+        }
+        assert!(formats.kept_combinations() <= 1024);
+    }
+    assert_eq!(formats.work().combinations, 2200);
 }

@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use officewright_core::Pt;
 
-use super::{Formats, IGNORED_STYLES, Layer, overwrite, style_index};
+use super::{Formats, IGNORED_STYLES, Layer, MAX_COMBINATIONS, overwrite, style_index};
 use crate::model::Document;
 use crate::model::format::{ListFormat, ParagraphFlag, ParagraphFormat};
 use crate::model::numbering::ListLevel;
@@ -34,26 +34,26 @@ impl Formats<'_> {
     ) -> ParagraphFormat {
         let document = self.document;
         let defaults = self.paragraph_defaults();
-        let styled = style.map(|index| self.paragraphs.level(document, index));
+        // The defaults with the style and the styles it is based on laid over them,
+        // worked out once per style.
+        let base = match style {
+            Some(index) => self.paragraphs.level(document, index, &defaults),
+            None => defaults,
+        };
         let direct = ParagraphLevel::of(direct);
         let style_id = style
             .and_then(|index| document.styles.styles.get(index))
             .map(|style| Arc::clone(&style.id));
 
-        let (list, layer) = match self.list(&defaults, styled.as_deref(), &direct, style) {
-            Some((list, layer)) => (Some(list), layer),
-            None => (None, None),
+        let (list, below_direct) = match self.list(&base, &direct, style) {
+            Some((list, Some(layer))) => {
+                let combined = self.combination(style, &list, &base, &layer);
+                (Some(list), combined)
+            }
+            Some((list, None)) => (Some(list), base),
+            None => (None, base),
         };
-
-        // Every level is bounded (MAX_TABS), so laying them over each other costs a
-        // paragraph the same whatever it inherits.
-        let mut effect = ParagraphLevel::clone(&defaults);
-        if let Some(styled) = &styled {
-            effect.overlay(styled);
-        }
-        if let Some(layer) = &layer {
-            effect.overlay(layer);
-        }
+        let mut effect = ParagraphLevel::clone(&below_direct);
         effect.overlay(&direct);
         effect.format(style_id, list)
     }
@@ -62,10 +62,42 @@ impl Formats<'_> {
     fn paragraph_defaults(&mut self) -> Arc<ParagraphLevel> {
         let document = self.document;
         Arc::clone(self.paragraph_defaults.get_or_insert_with(|| {
-            Arc::new(ParagraphLevel::of(
+            let mut defaults = ParagraphLevel::of(
                 &crate::model::Styles::new(document).default_paragraph_properties(),
-            ))
+            );
+            defaults.settle();
+            Arc::new(defaults)
         }))
+    }
+
+    /// `base`, the defaults with the paragraph style at `style` laid over them, with the
+    /// layer of the list level `list` names laid over that. Kept for the next paragraph
+    /// of that style and level, as long as the cache has room: a combination costs a
+    /// merge of tab stops.
+    fn combination(
+        &mut self,
+        style: Option<usize>,
+        list: &ListFormat,
+        base: &ParagraphLevel,
+        layer: &ListLayer,
+    ) -> Arc<ParagraphLevel> {
+        let key = (style, list.instance, list.level_number);
+        if let Some(combined) = self.combinations.get(&key) {
+            return Arc::clone(combined);
+        }
+        #[cfg(test)]
+        {
+            self.work.combinations += 1;
+        }
+        let mut combined = base.clone();
+        combined.overlay_list(layer);
+        combined.settle();
+        let combined = Arc::new(combined);
+        if self.combinations.len() >= MAX_COMBINATIONS {
+            self.combinations.clear();
+        }
+        self.combinations.insert(key, Arc::clone(&combined));
+        combined
     }
 
     /// The list a paragraph is an item of, and what its level gives to the paragraph.
@@ -76,75 +108,31 @@ impl Formats<'_> {
     /// 0. Instance 0 is no list, even when a `w:num` has that id (ECMA-376 §17.9.18).
     fn list(
         &mut self,
-        defaults: &ParagraphLevel,
-        styled: Option<&ParagraphLevel>,
+        base: &ParagraphLevel,
         direct: &ParagraphLevel,
         style: Option<usize>,
-    ) -> Option<(ListFormat, Option<Arc<ParagraphLevel>>)> {
-        let inherited = styled
-            .and_then(|level| level.list_instance)
-            .or(defaults.list_instance);
-        let instance = direct.list_instance.or(inherited).filter(|&id| id != 0)?;
+    ) -> Option<(ListFormat, Option<Arc<ListLayer>>)> {
+        let instance = direct
+            .list_instance
+            .or(base.list_instance)
+            .filter(|&id| id != 0)?;
         let found = self.instance(instance)?;
         let written_level = direct.list_level.or_else(|| {
-            let by_style = found
-                .definition
-                .zip(style)
-                .and_then(|(definition, style)| self.level_of_style(definition, &found, style));
-            by_style.or_else(|| {
-                styled
-                    .and_then(|level| level.list_level)
-                    .or(defaults.list_level)
-            })
+            style
+                .and_then(|style| found.shared.level_of_style(style))
+                .or(base.list_level)
         });
         let level_number = usize::try_from(written_level.unwrap_or(0))
             .ok()
             .filter(|&level| level <= 8)?;
-        let (level, start) = self.instance_level(instance, &found, level_number);
+        let (layer, start) = self.instance_level(instance, &found, level_number);
         let list = ListFormat {
             instance,
             definition: found.definition,
             level_number,
-            level: level.as_ref().map(|level| Arc::clone(&level.level)),
             start,
         };
-        Some((list, level.and_then(|level| level.layer.clone())))
-    }
-
-    /// The level of the definition `definition` whose `w:pStyle` names the style at
-    /// `style`, worked out once per definition and style: an id may be long.
-    fn level_of_style(
-        &mut self,
-        definition: i64,
-        found: &InstanceDefinition,
-        style: usize,
-    ) -> Option<i64> {
-        if let Some(level) = self.style_levels.get(&(definition, style)) {
-            return *level;
-        }
-        #[cfg(test)]
-        {
-            self.work.style_levels += 1;
-        }
-        let id = self
-            .document
-            .styles
-            .styles
-            .get(style)
-            .map(|style| &*style.id);
-        // The definition's levels name the styles; an override's level does not take a
-        // style over.
-        let level = id.and_then(|id| {
-            found
-                .shared
-                .levels
-                .iter()
-                .flatten()
-                .find(|level| level.level.paragraph_style() == Some(id))
-                .and_then(|level| i64::try_from(level.level.level()).ok())
-        });
-        self.style_levels.insert((definition, style), level);
-        level
+        Some((list, layer))
     }
 
     /// The list instance `instance` and the definition whose levels it uses, worked out
@@ -240,8 +228,9 @@ impl Formats<'_> {
         instance
     }
 
-    /// The parsed levels of the definition `id`, with what each gives to its
-    /// paragraphs, worked out once and shared by every instance that uses it.
+    /// What the resolver needs of the levels of the definition `id`, worked out once and
+    /// shared by every instance that uses it. The levels are parsed once and dropped:
+    /// only what they give to paragraphs is kept.
     fn definition_levels(&mut self, id: i64) -> Arc<DefinitionLevels> {
         if let Some(levels) = self.definitions.get(&id) {
             return Arc::clone(levels);
@@ -251,7 +240,7 @@ impl Formats<'_> {
             self.work.definitions += 1;
         }
         let document = self.document;
-        let mut levels: [Option<Arc<ResolvedLevel>>; 9] = Default::default();
+        let mut levels: [Option<DefinitionLevel>; 9] = Default::default();
         let written = document
             .numbering()
             .definition(id)
@@ -259,7 +248,13 @@ impl Formats<'_> {
             .unwrap_or_default();
         for level in written {
             if let Some(slot) = levels.get_mut(level.level()) {
-                *slot = Some(Arc::new(ResolvedLevel::new(level)));
+                *slot = Some(DefinitionLevel {
+                    start: level.start(),
+                    style: level
+                        .paragraph_style()
+                        .and_then(|id| style_index(document, id, StyleKind::Paragraph)),
+                    layer: ListLayer::of(&level),
+                });
             }
         }
         let levels = Arc::new(DefinitionLevels { levels });
@@ -267,11 +262,12 @@ impl Formats<'_> {
         levels
     }
 
-    /// Level `number` of the instance `instance` with the instance's override applied,
-    /// and the number it starts from, worked out once per instance and level that a
-    /// paragraph uses. Only the instance's first override of that level is read, and
-    /// none when the instance's definition does not exist: such an instance is a list
-    /// without levels. Without a replacement level the entry shares the definition's.
+    /// What level `number` of the instance `instance` gives to paragraphs, with the
+    /// instance's override applied, and the number it starts from, worked out once per
+    /// instance and level that a paragraph uses. Only the instance's first override of
+    /// that level is read, and none when the instance's definition does not exist: such
+    /// an instance is a list without levels. Without a replacement level the entry
+    /// shares the definition's.
     fn instance_level(
         &mut self,
         instance: i64,
@@ -285,73 +281,91 @@ impl Formats<'_> {
             return (None, 0);
         }
         let document = self.document;
-        let base = found.shared.levels.get(number).cloned().flatten();
+        let base = found.shared.levels.get(number).and_then(Option::as_ref);
         let override_ = document
             .numbering()
             .instance(instance)
             .and_then(|num| num.override_of(number));
         // An override's own level replaces the definition's, but Word ignores its start
         // and restart (MS-OI29500 §17.9.25(b), §17.9.10(b)).
-        let level = match override_.as_ref().and_then(|over| over.definition()) {
+        let layer = match override_.as_ref().and_then(|over| over.definition()) {
             Some(replacement) => {
                 #[cfg(test)]
                 {
                     self.work.replacements += 1;
                 }
-                let base = base.as_ref().map(|base| &*base.level);
-                let mut replacement = replacement.clone();
-                replacement.level = number;
-                replacement.start = base.and_then(ListLevel::start);
-                replacement.restart = base.and_then(ListLevel::restart);
-                Some(Arc::new(ResolvedLevel::new(replacement)))
+                ListLayer::of(replacement)
             }
-            None => base,
+            None => base.and_then(|base| base.layer.clone()),
         };
         let start = override_
             .as_ref()
             .and_then(|over| over.start())
-            .or_else(|| level.as_ref().and_then(|level| level.level.start()))
+            .or_else(|| base.and_then(|base| base.start))
             .unwrap_or(0);
         self.instance_levels
-            .insert((instance, number), (level.clone(), start));
-        (level, start)
+            .insert((instance, number), (layer.clone(), start));
+        (layer, start)
     }
 }
 
-/// A list level, and what it gives to its paragraphs: none when it gives no alignment,
-/// indentation or tab stops.
-#[derive(Debug)]
-pub(super) struct ResolvedLevel {
-    level: Arc<ListLevel>,
-    layer: Option<Arc<ParagraphLevel>>,
-}
-
-impl ResolvedLevel {
-    fn new(level: ListLevel) -> Self {
-        let layer = ParagraphLevel::of_list_level(&level);
-        let gives = layer.justification.is_some()
-            || layer.start.is_some()
-            || layer.end.is_some()
-            || layer.first_line.is_some()
-            || layer.start_chars.is_some()
-            || layer.end_chars.is_some()
-            || layer.first_line_chars.is_some()
-            || !layer.tabs.stops.is_empty();
-        Self {
-            level: Arc::new(level),
-            layer: gives.then(|| Arc::new(layer)),
+/// The level that applies to a list item: the level `list` names of the definition it
+/// names, or the replacement in the instance's first override of that level, which
+/// keeps the definition's start and restart (MS-OI29500 §17.9.25(b), §17.9.10(b)).
+pub(crate) fn list_level(document: &Document, list: &ListFormat) -> Option<ListLevel> {
+    let numbering = document.numbering();
+    let base = numbering
+        .definition(list.definition?)
+        .and_then(|definition| definition.level(list.level_number));
+    let replacement = numbering
+        .instance(list.instance)
+        .and_then(|instance| instance.override_of(list.level_number))
+        .and_then(|over| over.definition().cloned());
+    match replacement {
+        Some(mut replacement) => {
+            replacement.level = list.level_number;
+            replacement.start = base.as_ref().and_then(ListLevel::start);
+            replacement.restart = base.as_ref().and_then(ListLevel::restart);
+            Some(replacement)
         }
+        None => base,
     }
 }
 
-/// A level of a list instance, with the instance's override, and the number it starts
-/// from.
-pub(super) type InstanceLevel = (Option<Arc<ResolvedLevel>>, i64);
+/// What a level of a list instance gives to paragraphs, with the instance's override,
+/// and the number it starts from.
+pub(super) type InstanceLevel = (Option<Arc<ListLayer>>, i64);
 
-/// The parsed levels of a list definition, 0 to 8.
+/// What the resolver keeps of the levels of a list definition, 0 to 8.
 #[derive(Debug, Default)]
 pub(super) struct DefinitionLevels {
-    levels: [Option<Arc<ResolvedLevel>>; 9],
+    levels: [Option<DefinitionLevel>; 9],
+}
+
+impl DefinitionLevels {
+    /// The first level whose `w:pStyle` names the paragraph style at `style`. An
+    /// override's level does not take a style over.
+    fn level_of_style(&self, style: usize) -> Option<i64> {
+        self.levels
+            .iter()
+            .position(|level| {
+                level
+                    .as_ref()
+                    .is_some_and(|level| level.style == Some(style))
+            })
+            .and_then(|number| i64::try_from(number).ok())
+    }
+}
+
+/// What the resolver keeps of a level of a list definition.
+#[derive(Debug)]
+struct DefinitionLevel {
+    /// Its `w:start`.
+    start: Option<i64>,
+    /// The index of the paragraph style its `w:pStyle` names.
+    style: Option<usize>,
+    /// What it gives to paragraphs; none when it gives nothing.
+    layer: Option<Arc<ListLayer>>,
 }
 
 /// The definition a list instance uses, after a numbering style's link, and its levels.
@@ -362,11 +376,34 @@ pub(super) struct InstanceDefinition {
     shared: Arc<DefinitionLevels>,
 }
 
-/// What one level of the hierarchy gives to a paragraph, or what several give together.
-#[derive(Clone, Debug, Default)]
-pub(super) struct ParagraphLevel {
-    flags: [Option<bool>; ParagraphFlag::COUNT],
+/// What a list level gives to its paragraphs: Word takes only the alignment, the
+/// indentation and the tab stops of its `w:pPr` (MS-OI29500 §17.9.22(b)).
+#[derive(Debug)]
+pub(super) struct ListLayer {
     justification: Option<Justification>,
+    indentation: Indentation,
+    tabs: Tabs,
+}
+
+impl ListLayer {
+    /// What `level` gives; none when it gives nothing.
+    fn of(level: &ListLevel) -> Option<Arc<Self>> {
+        let properties = level.paragraph_properties();
+        let layer = Self {
+            justification: properties.justification,
+            indentation: Indentation::of(properties),
+            tabs: Tabs::of(&properties.tabs),
+        };
+        let gives = layer.justification.is_some()
+            || !layer.indentation.is_empty()
+            || !layer.tabs.stops.is_empty();
+        gives.then(|| Arc::new(layer))
+    }
+}
+
+/// The indentation one level gives.
+#[derive(Clone, Copy, Debug, Default)]
+struct Indentation {
     start: Option<Pt>,
     end: Option<Pt>,
     /// Negative for a hanging indent.
@@ -376,6 +413,53 @@ pub(super) struct ParagraphLevel {
     start_chars: Option<i64>,
     end_chars: Option<i64>,
     first_line_chars: Option<i64>,
+}
+
+impl Indentation {
+    /// The indentation of one `w:ind`: a hanging indent wins over a first line indent,
+    /// and character units over points (ECMA-376 §17.3.1.12).
+    fn of(properties: &ParagraphProperties) -> Self {
+        let Some(ind) = &properties.indentation else {
+            return Self::default();
+        };
+        Self {
+            start: ind.start,
+            end: ind.end,
+            first_line: ind.hanging.map(|hanging| Pt(-hanging.0)).or(ind.first_line),
+            start_chars: ind.start_chars,
+            end_chars: ind.end_chars,
+            first_line_chars: ind
+                .hanging_chars
+                .map(|hanging| -hanging)
+                .or(ind.first_line_chars),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.start.is_none()
+            && self.end.is_none()
+            && self.first_line.is_none()
+            && self.start_chars.is_none()
+            && self.end_chars.is_none()
+            && self.first_line_chars.is_none()
+    }
+
+    fn overlay(&mut self, above: &Self) {
+        overwrite(&mut self.start, above.start);
+        overwrite(&mut self.end, above.end);
+        overwrite(&mut self.first_line, above.first_line);
+        overwrite(&mut self.start_chars, above.start_chars);
+        overwrite(&mut self.end_chars, above.end_chars);
+        overwrite(&mut self.first_line_chars, above.first_line_chars);
+    }
+}
+
+/// What one level of the hierarchy gives to a paragraph, or what several give together.
+#[derive(Clone, Debug, Default)]
+pub(super) struct ParagraphLevel {
+    flags: [Option<bool>; ParagraphFlag::COUNT],
+    justification: Option<Justification>,
+    indentation: Indentation,
     before: Option<Pt>,
     after: Option<Pt>,
     /// Line units, hundredths; 0 cancels those of lower levels.
@@ -412,6 +496,7 @@ impl ParagraphLevel {
         let mut level = Self {
             flags,
             justification: properties.justification,
+            indentation: Indentation::of(properties),
             shading: properties.shading,
             tabs: Tabs::of(&properties.tabs),
             outline_level: properties.outline_level,
@@ -421,7 +506,6 @@ impl ParagraphLevel {
             list_level: properties.numbering.and_then(|numbering| numbering.level),
             ..Self::default()
         };
-        level.indentation(properties);
         if let Some(spacing) = &properties.spacing {
             level.before = spacing.before;
             level.after = spacing.after;
@@ -444,38 +528,15 @@ impl ParagraphLevel {
         level
     }
 
-    /// What a list level gives to its paragraphs: Word takes only the alignment, the
-    /// indentation and the tab stops of its `w:pPr` (MS-OI29500 §17.9.22(b)).
-    fn of_list_level(list: &ListLevel) -> Self {
-        let properties = list.paragraph_properties();
-        let mut level = Self {
-            justification: properties.justification,
-            tabs: Tabs::of(&properties.tabs),
-            ..Self::default()
-        };
-        level.indentation(properties);
-        level
-    }
-
-    /// The indentation of one `w:ind`: a hanging indent wins over a first line indent,
-    /// and character units over points (ECMA-376 §17.3.1.12).
-    fn indentation(&mut self, properties: &ParagraphProperties) {
-        let Some(ind) = &properties.indentation else {
-            return;
-        };
-        self.start = ind.start;
-        self.end = ind.end;
-        self.first_line = ind.hanging.map(|hanging| Pt(-hanging.0)).or(ind.first_line);
-        self.start_chars = ind.start_chars;
-        self.end_chars = ind.end_chars;
-        self.first_line_chars = ind
-            .hanging_chars
-            .map(|hanging| -hanging)
-            .or(ind.first_line_chars);
+    /// Lays what a list level gives over this level.
+    fn overlay_list(&mut self, layer: &ListLayer) {
+        overwrite(&mut self.justification, layer.justification);
+        self.indentation.overlay(&layer.indentation);
+        self.tabs = self.tabs.overlay(&layer.tabs);
     }
 
     /// The format in effect once every level is laid over the others.
-    fn format(self, style: Option<Arc<str>>, list: Option<ListFormat>) -> ParagraphFormat {
+    fn format(&self, style: Option<Arc<str>>, list: Option<ListFormat>) -> ParagraphFormat {
         let mut flags = [false; ParagraphFlag::COUNT];
         for (index, slot) in flags.iter_mut().enumerate() {
             let default = [
@@ -491,7 +552,7 @@ impl ParagraphLevel {
         // the points (MS-OI29500 §17.3.1.12(b), §17.3.1.33(a)).
         let units = |value: Option<i64>| value.filter(|&value| value != 0);
         let [top, bottom, start, end, between, bar] = self.borders;
-        let tabs = self.tabs.without_clears().stops;
+        let tabs = Arc::clone(&self.tabs.set);
         // Word gives the outline level of its built-in headings by their style ids.
         let heading = style
             .as_deref()
@@ -507,12 +568,12 @@ impl ParagraphLevel {
         ParagraphFormat {
             style,
             justification: self.justification.unwrap_or(Justification::Start),
-            start_indent: self.start.unwrap_or(Pt(0.0)),
-            end_indent: self.end.unwrap_or(Pt(0.0)),
-            first_line_indent: self.first_line.unwrap_or(Pt(0.0)),
-            start_indent_chars: units(self.start_chars),
-            end_indent_chars: units(self.end_chars),
-            first_line_indent_chars: units(self.first_line_chars),
+            start_indent: self.indentation.start.unwrap_or(Pt(0.0)),
+            end_indent: self.indentation.end.unwrap_or(Pt(0.0)),
+            first_line_indent: self.indentation.first_line.unwrap_or(Pt(0.0)),
+            start_indent_chars: units(self.indentation.start_chars),
+            end_indent_chars: units(self.indentation.end_chars),
+            first_line_indent_chars: units(self.indentation.first_line_chars),
             before_spacing: self.before.unwrap_or(Pt(0.0)),
             after_spacing: self.after.unwrap_or(Pt(0.0)),
             before_spacing_lines: units(self.before_lines),
@@ -554,12 +615,7 @@ impl Layer for ParagraphLevel {
             overwrite(slot, value);
         }
         overwrite(&mut self.justification, above.justification);
-        overwrite(&mut self.start, above.start);
-        overwrite(&mut self.end, above.end);
-        overwrite(&mut self.first_line, above.first_line);
-        overwrite(&mut self.start_chars, above.start_chars);
-        overwrite(&mut self.end_chars, above.end_chars);
-        overwrite(&mut self.first_line_chars, above.first_line_chars);
+        self.indentation.overlay(&above.indentation);
         overwrite(&mut self.before, above.before);
         overwrite(&mut self.after, above.after);
         overwrite(&mut self.before_lines, above.before_lines);
@@ -576,6 +632,11 @@ impl Layer for ParagraphLevel {
         overwrite(&mut self.list_instance, above.list_instance);
         overwrite(&mut self.list_level, above.list_level);
     }
+
+    /// Once nothing lies below, a cleared stop has nothing left to remove.
+    fn settle(&mut self) {
+        self.tabs = self.tabs.without_clears();
+    }
 }
 
 /// Tab stops set and cleared, by position, one per position. A cleared stop stays, to
@@ -583,8 +644,9 @@ impl Layer for ParagraphLevel {
 #[derive(Clone, Debug, Default)]
 struct Tabs {
     stops: Arc<[TabStop]>,
-    /// Whether a stop is a cleared one.
-    clears: bool,
+    /// The set stops among `stops`: those in effect once nothing lies below. The same
+    /// list when none is cleared.
+    set: Arc<[TabStop]>,
 }
 
 impl Tabs {
@@ -600,21 +662,31 @@ impl Tabs {
                 _ => unique.push(tab),
             }
         }
-        Self::new(bounded(unique))
+        let mut bounded = Bounded::default();
+        for tab in unique {
+            bounded.push(tab);
+        }
+        Self::new(bounded.stops)
     }
 
     fn new(stops: Vec<TabStop>) -> Self {
-        let clears = stops.iter().any(is_cleared);
-        Self {
-            stops: stops.into(),
-            clears,
-        }
+        let stops: Arc<[TabStop]> = stops.into();
+        let set = if stops.iter().any(is_cleared) {
+            stops
+                .iter()
+                .filter(|tab| !is_cleared(tab))
+                .copied()
+                .collect()
+        } else {
+            Arc::clone(&stops)
+        };
+        Self { stops, set }
     }
 
     /// These stops with `above` laid over them: the stops add up, a stop at a position
     /// replaces the one below it, and a cleared one removes it (ECMA-376 §17.3.1.38).
-    /// Both lists are by position, so one pass merges them; a level without stops costs
-    /// nothing.
+    /// Both lists are by position, so one pass merges and bounds them; a level without
+    /// stops costs nothing.
     fn overlay(&self, above: &Tabs) -> Tabs {
         if above.stops.is_empty() {
             return self.clone();
@@ -623,7 +695,7 @@ impl Tabs {
             return above.clone();
         }
         let mut below = self.stops.iter().copied().peekable();
-        let mut merged = Vec::with_capacity(self.stops.len() + above.stops.len());
+        let mut merged = Bounded::default();
         for tab in above.stops.iter() {
             while let Some(lower) = below.next_if(|lower| lower.position.0 < tab.position.0) {
                 merged.push(lower);
@@ -631,40 +703,42 @@ impl Tabs {
             below.next_if(|lower| lower.position.0 == tab.position.0);
             merged.push(*tab);
         }
-        merged.extend(below);
-        Tabs::new(bounded(merged))
+        for lower in below {
+            merged.push(lower);
+        }
+        Tabs::new(merged.stops)
     }
 
     /// The stops without the cleared ones, for when nothing lies below.
     fn without_clears(&self) -> Tabs {
-        if !self.clears {
-            return self.clone();
+        Tabs {
+            stops: Arc::clone(&self.set),
+            set: Arc::clone(&self.set),
         }
-        Tabs::new(
-            self.stops
-                .iter()
-                .filter(|tab| !is_cleared(tab))
-                .copied()
-                .collect(),
-        )
     }
 }
 
-/// The stops at the lowest positions, at most [`MAX_TABS`] set and as many cleared.
-fn bounded(stops: Vec<TabStop>) -> Vec<TabStop> {
-    let (mut set, mut cleared) = (0, 0);
-    stops
-        .into_iter()
-        .filter(|tab| {
-            let count = if is_cleared(tab) {
-                &mut cleared
-            } else {
-                &mut set
-            };
+/// Stops pushed by position, of which it keeps those at the lowest positions: at most
+/// [`MAX_TABS`] set and as many cleared.
+#[derive(Default)]
+struct Bounded {
+    stops: Vec<TabStop>,
+    set: usize,
+    cleared: usize,
+}
+
+impl Bounded {
+    fn push(&mut self, tab: TabStop) {
+        let count = if is_cleared(&tab) {
+            &mut self.cleared
+        } else {
+            &mut self.set
+        };
+        if *count < MAX_TABS {
             *count += 1;
-            *count <= MAX_TABS
-        })
-        .collect()
+            self.stops.push(tab);
+        }
+    }
 }
 
 fn is_cleared(tab: &TabStop) -> bool {
