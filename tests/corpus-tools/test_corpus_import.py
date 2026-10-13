@@ -608,7 +608,7 @@ class Import(unittest.TestCase):
                 (b"<cp:lastModifiedBy>Officewright", b"<cp:lastModifiedBy>Jane Roe"),
             ],
             "word/settings.xml": [
-                (b"<w:zoom", b"<!-- C:\\Users\\jroe\\Normal.dotm --><w:zoom"),
+                (b"<w:zoom", b"<!-- C:\\Users\\<name>\\Normal.dotm --><w:zoom"),
             ],
         })
         message = self.refused()
@@ -622,7 +622,7 @@ class Import(unittest.TestCase):
         doc = rules.documents()[0]
         record = self.add_result(doc)
         pdf = self.results / record["pdf_file"]
-        pdf.write_bytes(b"%PDF-1.7\n% C:\\Users\\jroe\\file.docx\n%%EOF\n")
+        pdf.write_bytes(b"%PDF-1.7\n% C:\\Users\\<name>\\file.docx\n%%EOF\n")
         record["pdf_sha256"] = sha256(pdf.read_bytes())
         self.save_record(record)
         self.assertIn("PDF contains a user profile path", self.refused())
@@ -925,7 +925,7 @@ class Formatting(Import):
             "is not a known story": (lambda e: e["stories"][0].update(story="glossary"), {}),
             "length is not a count": (lambda e: first(e)["runs"][0].update(length=0), {}),
             "names a user profile path": (
-                lambda e: first(e).update(text="C:\\Users\\jroe\\x"), {}
+                lambda e: first(e).update(text="C:\\Users\\<name>\\x"), {}
             ),
             "unexpected runs_note": (lambda e: e.update(runs_note="left out: Ausnahme"), {}),
             "unexpected theme font": (lambda e: first(e)["font"].update(theme="+Textkoerper"), {}),
