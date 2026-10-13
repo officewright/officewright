@@ -888,3 +888,335 @@ fn reads_under_nested_alternate_content_in_linear_time() {
     let document = open_in_linear_time(&body);
     assert_eq!(document.sections().len(), n + 1);
 }
+
+/// A document with a styles part, whose relationship the main part gives.
+fn with_styles(body: &str, styles_xml: &str) -> Document {
+    Document::from_bytes(package(
+        DOCUMENT,
+        &document_xml(body),
+        &[
+            (
+                "word/_rels/document.xml.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#,
+            ),
+            ("word/styles.xml", styles_xml),
+        ],
+    ))
+    .unwrap()
+}
+
+fn first_run(document: &Document) -> Run<'_> {
+    let Some(Block::Paragraph(paragraph)) = document.sections().next().unwrap().blocks().next()
+    else {
+        panic!("no paragraph");
+    };
+    paragraph.runs().next().unwrap()
+}
+
+#[test]
+fn reads_the_properties_written_on_a_run() {
+    let document = open(
+        r#"<w:p><w:r><w:rPr><w:rStyle w:val="Strong"/><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="MS Mincho" w:cs="Arial" w:asciiTheme="minorHAnsi" w:cstheme="minorBidi" w:hint="eastAsia"/><w:b/><w:bCs w:val="0"/><w:i w:val="true"/><w:iCs w:val="off"/><w:caps w:val="on"/><w:smallCaps w:val="false"/><w:strike/><w:dstrike w:val="1"/><w:vanish/><w:rtl w:val="0"/><w:color w:val="1F3864" w:themeColor="accent1" w:themeShade="BF"/><w:spacing w:val="-20"/><w:w w:val="150"/><w:kern w:val="28"/><w:position w:val="-6"/><w:sz w:val="22"/><w:szCs w:val="21"/><w:highlight w:val="yellow"/><w:u w:val="dotDash" w:color="FF0000"/><w:shd w:val="pct25" w:color="auto" w:fill="D9E2F3" w:themeFill="accent1" w:themeFillTint="33"/><w:vertAlign w:val="superscript"/><w:lang w:val="en-US" w:eastAsia="ja-JP" w:bidi="ar-SA"/><w14:ligatures w14:val="standard"/></w:rPr><w:t>x</w:t></w:r></w:p>"#,
+    );
+    assert!(
+        document.diagnostics().is_empty(),
+        "{:?}",
+        document.diagnostics()
+    );
+    let run = first_run(&document);
+    let properties = run.properties();
+    assert_eq!(properties.style(), Some("Strong"));
+    let fonts = properties.fonts();
+    assert_eq!(
+        (
+            fonts.ascii(),
+            fonts.high_ansi(),
+            fonts.east_asia(),
+            fonts.complex_script()
+        ),
+        (
+            Some("Calibri"),
+            Some("Calibri"),
+            Some("MS Mincho"),
+            Some("Arial")
+        )
+    );
+    assert_eq!(fonts.ascii_theme(), Some(ThemeFont::MinorHAnsi));
+    assert_eq!(fonts.complex_script_theme(), Some(ThemeFont::MinorBidi));
+    assert_eq!(fonts.east_asia_theme(), None);
+    assert_eq!(fonts.hint(), Some(FontHint::EastAsia));
+    assert_eq!(properties.bold(), Some(true));
+    assert_eq!(properties.bold_complex_script(), Some(false));
+    assert_eq!(properties.italic(), Some(true));
+    assert_eq!(properties.italic_complex_script(), Some(false));
+    assert_eq!(properties.caps(), Some(true));
+    assert_eq!(properties.small_caps(), Some(false));
+    assert_eq!(properties.strike(), Some(true));
+    assert_eq!(properties.double_strike(), Some(true));
+    assert_eq!(properties.vanish(), Some(true));
+    assert_eq!(properties.right_to_left(), Some(false));
+    assert_eq!(properties.outline(), None);
+    let color = properties.color().unwrap();
+    assert_eq!(color.value(), Some(ColorValue::Rgb(0x1F, 0x38, 0x64)));
+    assert_eq!(color.theme(), Some(ThemeColor::Accent1));
+    assert_eq!((color.tint(), color.shade()), (None, Some(0xBF)));
+    assert_eq!(properties.spacing(), Some(Pt(-1.0)));
+    assert_eq!(properties.scale(), Some(150));
+    assert_eq!(properties.kerning(), Some(Pt(14.0)));
+    assert_eq!(properties.position(), Some(Pt(-3.0)));
+    assert_eq!(properties.size(), Some(Pt(11.0)));
+    assert_eq!(properties.size_complex_script(), Some(Pt(10.5)));
+    assert_eq!(properties.highlight(), Some(Highlight::Yellow));
+    let underline = properties.underline().unwrap();
+    assert_eq!(underline.style(), Some(UnderlineStyle::DotDash));
+    assert_eq!(underline.color().value(), Some(ColorValue::Rgb(0xFF, 0, 0)));
+    let shading = properties.shading().unwrap();
+    assert_eq!(shading.pattern(), Some(ShadingPattern::Percent25));
+    assert_eq!(shading.color().value(), Some(ColorValue::Auto));
+    assert_eq!(
+        shading.fill().value(),
+        Some(ColorValue::Rgb(0xD9, 0xE2, 0xF3))
+    );
+    assert_eq!(shading.fill().theme(), Some(ThemeColor::Accent1));
+    assert_eq!(shading.fill().tint(), Some(0x33));
+    assert_eq!(
+        properties.vertical_position(),
+        Some(VerticalPosition::Superscript)
+    );
+    let language = properties.language();
+    assert_eq!(
+        (language.latin(), language.east_asia(), language.bidi()),
+        (Some("en-US"), Some("ja-JP"), Some("ar-SA"))
+    );
+    // A run without properties sets nothing.
+    let plain = open("<w:p><w:r><w:t>x</w:t></w:r></w:p>");
+    assert_eq!(first_run(&plain).properties(), RunProperties::default());
+}
+
+#[test]
+fn reads_invalid_property_values_as_not_set() {
+    let document = open(
+        r#"<w:p><w:r><w:rPr><w:b w:val="yes"/><w:sz w:val="big"/><w:color w:val="red" w:themeTint="1"/><w:u w:val="squiggly"/><w:w w:val="601"/><w:rFonts w:asciiTheme="majorLatin"/><w:i/></w:rPr><w:t>x</w:t></w:r></w:p>"#,
+    );
+    let properties = first_run(&document).properties();
+    assert_eq!(properties.bold(), None);
+    assert_eq!(properties.size(), None);
+    assert_eq!(properties.color(), None);
+    assert_eq!(properties.underline().unwrap().style(), None);
+    assert_eq!(properties.scale(), None);
+    assert_eq!(properties.fonts().ascii_theme(), None);
+    assert_eq!(properties.italic(), Some(true));
+    let messages: Vec<&str> = document
+        .diagnostics()
+        .iter()
+        .map(Diagnostic::message)
+        .collect();
+    assert_eq!(messages.len(), 7, "{messages:?}");
+    assert!(
+        messages
+            .iter()
+            .all(|m| m.starts_with("/word/document.xml, line 1, column "))
+    );
+    assert!(messages[0].ends_with(r#": w:b w:val="yes" is not valid; it is ignored"#));
+    assert!(
+        messages[6]
+            .ends_with(r#": w:rFonts w:asciiTheme="majorLatin" is not valid; it is ignored"#)
+    );
+}
+
+#[test]
+fn reads_run_properties_through_the_fallback_of_alternate_content() {
+    let document = open(
+        r#"<w:p><w:r><w:rPr><mc:AlternateContent><mc:Choice Requires="w14"><w14:glow w14:rad="1"/></mc:Choice><mc:Fallback><w:b/></mc:Fallback></mc:AlternateContent><w:i/></w:rPr><w:t>x</w:t></w:r></w:p>"#,
+    );
+    let properties = first_run(&document).properties();
+    assert_eq!(
+        (properties.bold(), properties.italic()),
+        (Some(true), Some(true))
+    );
+}
+
+#[test]
+fn reads_styles_and_the_document_defaults() {
+    let styles = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="{W}"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:asciiTheme="minorHAnsi"/><w:sz w:val="22"/><w:lang w:val="en-GB"/></w:rPr></w:rPrDefault><w:pPrDefault/></w:docDefaults><w:latentStyles w:defQFormat="0"/><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:link w:val="Heading1Char"/><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style><w:style w:type="character" w:customStyle="1" w:styleId="Heading1Char"><w:name w:val="Heading 1 Char"/><w:rPr><w:b/></w:rPr></w:style><w:style w:type="character" w:default="1" w:styleId="DefaultParagraphFont"/><w:style w:type="table" w:default="1" w:styleId="TableNormal"/><w:style w:type="numbering" w:styleId="NoList"/></w:styles>"#
+    );
+    let document = with_styles(r#"<w:p><w:r><w:t>x</w:t></w:r></w:p>"#, &styles);
+    assert!(
+        document.diagnostics().is_empty(),
+        "{:?}",
+        document.diagnostics()
+    );
+    let styles = document.styles();
+    assert_eq!(styles.iter().len(), 6);
+    let kinds: Vec<(&str, StyleKind)> = styles.iter().map(|s| (s.id(), s.kind())).collect();
+    assert_eq!(
+        kinds,
+        [
+            ("Normal", StyleKind::Paragraph),
+            ("Heading1", StyleKind::Paragraph),
+            ("Heading1Char", StyleKind::Character),
+            ("DefaultParagraphFont", StyleKind::Character),
+            ("TableNormal", StyleKind::Table),
+            ("NoList", StyleKind::Numbering),
+        ]
+    );
+    let heading = styles.get("Heading1").unwrap();
+    assert_eq!(heading.name(), Some("heading 1"));
+    assert_eq!(heading.based_on(), Some("Normal"));
+    assert_eq!(heading.next(), Some("Normal"));
+    assert_eq!(heading.link(), Some("Heading1Char"));
+    assert!(!heading.is_default() && !heading.is_custom());
+    assert_eq!(heading.run_properties().bold(), Some(true));
+    assert_eq!(heading.run_properties().size(), Some(Pt(16.0)));
+    assert!(styles.get("Heading1Char").unwrap().is_custom());
+    assert!(styles.get("heading1").is_none());
+    assert_eq!(
+        styles.default_style(StyleKind::Paragraph).map(Style::id),
+        Some("Normal")
+    );
+    assert_eq!(
+        styles.default_style(StyleKind::Character).map(Style::id),
+        Some("DefaultParagraphFont")
+    );
+    let defaults = styles.default_run_properties();
+    assert_eq!(defaults.fonts().ascii_theme(), Some(ThemeFont::MinorHAnsi));
+    assert_eq!(defaults.size(), Some(Pt(11.0)));
+    assert_eq!(defaults.language().latin(), Some("en-GB"));
+    // A document without a styles part has no styles.
+    let plain = open("<w:p/>");
+    assert_eq!(plain.styles().iter().len(), 0);
+    assert_eq!(
+        plain.styles().default_run_properties(),
+        RunProperties::default()
+    );
+}
+
+#[test]
+fn repairs_damaged_style_lists() {
+    let styles = format!(
+        r#"<w:styles xmlns:w="{W}"><w:style w:styleId="A"><w:name w:val="first"/></w:style><w:style w:styleId="A"><w:name w:val="second"/></w:style><w:style w:type="paragraph" w:styleId=""><w:name w:val="no id"/></w:style><w:style w:type="list" w:styleId="B"><w:rPr><w:sz w:val="x"/></w:rPr></w:style></w:styles>"#
+    );
+    let document = with_styles("<w:p/>", &styles);
+    let styles = document.styles();
+    // The first style with an id is the one found by it; one without an id is dropped.
+    assert_eq!(styles.get("A").unwrap().name(), Some("first"));
+    assert_eq!(styles.iter().len(), 3);
+    assert_eq!(styles.get("B").unwrap().kind(), StyleKind::Paragraph);
+    let messages: Vec<&str> = document
+        .diagnostics()
+        .iter()
+        .map(Diagnostic::message)
+        .collect();
+    assert_eq!(messages.len(), 4, "{messages:?}");
+    assert!(messages[0].starts_with("/word/styles.xml, line 1, column "));
+    assert!(
+        messages[0]
+            .ends_with("a second style with id A is ignored where styles are looked up by id")
+    );
+    assert!(messages[1].ends_with("a w:style without a w:styleId is ignored"));
+    assert!(messages[2].ends_with(
+        r#"w:style w:type="list" is not valid; the style is read as a paragraph style"#
+    ));
+    assert!(messages[3].ends_with(r#"w:sz w:val="x" is not valid; it is ignored"#));
+    // A styles part whose root is not w:styles is damage.
+    let err = Document::from_bytes(package(
+        DOCUMENT,
+        &document_xml("<w:p/>"),
+        &[
+            (
+                "word/_rels/document.xml.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#,
+            ),
+            ("word/styles.xml", "<x/>"),
+        ],
+    ))
+    .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "/word/styles.xml, line 1, column 1: the root element is <x>, not w:styles"
+    );
+}
+
+#[test]
+fn shares_the_node_limit_between_parts() {
+    // From the review of #38: 100 paragraphs cost 100 nodes, 100 one-attribute styles
+    // 300, and both count against one limit.
+    let body = "<w:p/>".repeat(100);
+    let mut styles = format!(r#"<w:styles xmlns:w="{W}">"#);
+    for n in 0..100 {
+        styles.push_str(&format!(r#"<w:style w:styleId="s{n}"/>"#));
+    }
+    styles.push_str("</w:styles>");
+    let data = package(
+        DOCUMENT,
+        &document_xml(&body),
+        &[
+            (
+                "word/_rels/document.xml.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#,
+            ),
+            ("word/styles.xml", &styles),
+        ],
+    );
+    let options = LoadOptions::new().with_limits(Limits::new().with_max_nodes(350));
+    match options.open_bytes(data.clone()).unwrap_err() {
+        Error::LimitExceeded {
+            limit: Limit::Nodes,
+            context,
+            ..
+        } => {
+            assert!(context.starts_with("/word/styles.xml"), "{context}");
+        }
+        other => panic!("{other}"),
+    }
+    let options = LoadOptions::new().with_limits(Limits::new().with_max_nodes(400));
+    assert!(options.open_bytes(data).is_ok());
+}
+
+#[test]
+fn reads_a_zero_text_scale_as_not_set() {
+    // As in LibreOffice's tdf106001.docx, which Word shows at normal width.
+    let document = open(r#"<w:p><w:r><w:rPr><w:w w:val="0"/></w:rPr><w:t>x</w:t></w:r></w:p>"#);
+    assert_eq!(first_run(&document).properties().scale(), None);
+    assert_eq!(document.diagnostics().len(), 1);
+}
+
+#[test]
+fn reports_damage_to_style_flags_and_defaults() {
+    let styles = format!(
+        r#"<w:styles xmlns:w="{W}"><w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="20"/></w:rPr></w:rPrDefault></w:docDefaults><w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="40"/></w:rPr></w:rPrDefault></w:docDefaults><w:latentStyles/><w:latentStyles/><w:style w:styleId="A" w:default="yes" w:customStyle="x"/></w:styles>"#
+    );
+    let document = with_styles("<w:p/>", &styles);
+    // The first of two document defaults is the one read, as for styles.
+    assert_eq!(
+        document.styles().default_run_properties().size(),
+        Some(Pt(10.0))
+    );
+    let style = document.styles().get("A").unwrap();
+    assert!(!style.is_default() && !style.is_custom());
+    let messages: Vec<&str> = document
+        .diagnostics()
+        .iter()
+        .map(Diagnostic::message)
+        .collect();
+    assert_eq!(messages.len(), 4, "{messages:?}");
+    assert!(messages[0].ends_with("a second w:docDefaults is ignored"));
+    assert!(messages[1].ends_with("a second w:latentStyles is ignored"));
+    assert!(messages[2].ends_with(r#"w:style w:default="yes" is not valid; it is read as off"#));
+    assert!(messages[3].ends_with(r#"w:style w:customStyle="x" is not valid; it is read as off"#));
+}
+
+#[test]
+fn counts_invalid_values_past_the_diagnostic_limit() {
+    let r_pr = r#"<w:b w:val="x"/>"#.repeat(1500);
+    let document = open(&format!(
+        "<w:p><w:r><w:rPr>{r_pr}</w:rPr><w:t>x</w:t></w:r></w:p>"
+    ));
+    let diagnostics = document.diagnostics();
+    assert_eq!(diagnostics.len(), 1001);
+    assert_eq!(
+        diagnostics[1000].message(),
+        "500 more diagnostics are not kept"
+    );
+}

@@ -1,7 +1,9 @@
 //! The document model: what a document contains, independent of the file format it was
 //! read from.
 
+pub(crate) mod properties;
 mod section;
+pub(crate) mod styles;
 mod text;
 mod views;
 pub(crate) mod xml;
@@ -10,7 +12,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use officewright_core::Pt;
 
+pub use properties::{
+    Color, ColorValue, FontHint, Highlight, Language, RunFonts, RunProperties, Shading,
+    ShadingPattern, ThemeColor, ThemeFont, Underline, UnderlineStyle, VerticalPosition,
+};
 pub use section::{Orientation, PageMargins, SectionProperties, SectionStart};
+pub use styles::{Style, StyleKind, Styles};
 pub use views::{
     Block, Break, BreakClear, BreakKind, ContentControl, FieldCharKind, Hyperlink, Inline, Opaque,
     Paragraph, Revision, RevisionKind, Run, RunContent, Section, SimpleField, Table, TableCell,
@@ -50,10 +57,20 @@ pub struct Document {
     /// The tokens of every element kept without being understood, in document order.
     pub(crate) tokens: Vec<Token>,
     pub(crate) strings: Strings,
+    pub(crate) names: Names,
+    pub(crate) styles: styles::StyleTable,
     pub(crate) sections: Vec<SectionData>,
     pub(crate) kind: DocumentKind,
     pub(crate) conformance: Conformance,
     pub(crate) diagnostics: Vec<Diagnostic>,
+}
+
+/// Where the namespaces the model reads are in a document's strings: WordprocessingML,
+/// Transitional and Strict (read alike), and Markup Compatibility.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Names {
+    pub(crate) w: [Option<xml::Sym>; 2],
+    pub(crate) mc: Option<xml::Sym>,
 }
 
 /// What a WordprocessingML package holds, from the content type of its main part.
@@ -114,6 +131,8 @@ impl Document {
             nodes: Vec::new(),
             tokens: Vec::new(),
             strings: Strings::default(),
+            names: Names::default(),
+            styles: styles::StyleTable::default(),
             sections: Vec::new(),
             kind: DocumentKind::Document,
             conformance: Conformance::Transitional,
@@ -182,6 +201,11 @@ impl Document {
             text::blocks(self, &section.blocks, &mut out);
         }
         out
+    }
+
+    /// The styles of the document (`styles.xml`); none when it has no styles part.
+    pub fn styles(&self) -> Styles<'_> {
+        Styles::new(self)
     }
 
     /// What kind of package the document came from.

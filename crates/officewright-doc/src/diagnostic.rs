@@ -60,6 +60,16 @@ impl Diagnostics {
         self.kept.len() >= Self::MAX
     }
 
+    /// How many more diagnostics are kept.
+    pub(crate) fn room(&self) -> usize {
+        Self::MAX.saturating_sub(self.kept.len())
+    }
+
+    /// Counts diagnostics that are not kept.
+    pub(crate) fn omit(&mut self, count: u64) {
+        self.omitted += count;
+    }
+
     pub(crate) fn push(&mut self, kind: DiagnosticKind, message: impl FnOnce() -> String) {
         if self.kept.len() < Self::MAX {
             self.kept.push(Diagnostic::new(kind, message()));

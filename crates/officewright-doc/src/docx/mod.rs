@@ -1,13 +1,19 @@
 //! Reading WordprocessingML packages (`.docx`, `.docm`, `.dotx`, `.dotm`).
 
 mod body;
+mod capture;
+pub(crate) mod properties;
 mod section;
+mod styles;
 
 use officewright_opc::{Package, Part};
 
-use crate::model::xml::{Strings, Sym};
+use crate::diagnostic::Diagnostics;
+use crate::model::Names;
+use crate::model::xml::Strings;
 use crate::model::{Document, DocumentKind};
 use crate::{Error, Limits, Result};
+use capture::Budget;
 
 /// The main namespace of WordprocessingML, Transitional.
 const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
@@ -23,16 +29,11 @@ const OFFICE_DOCUMENT: [&str; 2] = [
     "http://purl.oclc.org/ooxml/officeDocument/relationships/officeDocument",
 ];
 
-/// The main namespace of WordprocessingML as stored in fragments, Transitional and
-/// Strict: both are read alike.
-pub(crate) struct Names {
-    pub(crate) w: [Option<Sym>; 2],
-}
-
 impl Names {
     fn new(strings: &mut Strings) -> Self {
         Self {
             w: [Some(strings.intern(W)), Some(strings.intern(W_STRICT))],
+            mc: Some(strings.intern(officewright_opc::mce::NAMESPACE)),
         }
     }
 }
@@ -45,8 +46,46 @@ pub(crate) fn read(data: Vec<u8>, limits: &Limits) -> Result<Document> {
     let xml = main.read()?;
     let mut document = Document::new();
     document.kind = kind;
-    body::read(&mut document, &xml, &main, limits)?;
+    document.names = Names::new(&mut document.strings);
+    let mut diagnostics = Diagnostics::default();
+    let mut budget = Budget::new(limits.max_nodes());
+    body::read(
+        &mut document,
+        &xml,
+        &main,
+        limits,
+        &mut diagnostics,
+        &mut budget,
+    )?;
+    if let Some(part) = related(&package, &main, &STYLES) {
+        let name = part.name().as_str();
+        let xml = part.read()?;
+        styles::read(
+            &mut document,
+            &xml,
+            name,
+            limits,
+            &mut diagnostics,
+            &mut budget,
+        )?;
+    }
+    document.diagnostics = diagnostics.finish();
     Ok(document)
+}
+
+/// The relationship type of the styles part, Transitional and Strict.
+const STYLES: [&str; 2] = [
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/styles",
+];
+
+/// The first part that `source` relates to with one of `types` and that exists.
+fn related<'p>(package: &'p Package, source: &Part<'p>, types: &[&str]) -> Option<Part<'p>> {
+    source
+        .relationships()
+        .iter()
+        .filter(|relationship| types.contains(&relationship.relationship_type()))
+        .find_map(|relationship| package.part(&relationship.target_part()?))
 }
 
 /// The main document part, which the package's officeDocument relationship names.

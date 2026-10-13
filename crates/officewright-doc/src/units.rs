@@ -2,11 +2,22 @@
 
 use officewright_core::Pt;
 
-/// A length in twentieths of a point, or with a unit (ECMA-376 Part 1, §22.9.2.15
-/// ST_TwipsMeasure, §17.18.81 ST_SignedTwipsMeasure, §22.9.2.15 ST_UniversalMeasure):
+/// A length in twentieths of a point, or with a unit (ST_TwipsMeasure,
+/// ST_SignedTwipsMeasure, ST_UniversalMeasure):
 /// `1440`, `2.54cm`, `-0.5in`. `signed` allows negative values. `None` when the value is
 /// not a length or is out of range for a document.
 pub(crate) fn twips_measure(value: &str, signed: bool) -> Option<Pt> {
+    measure(value, 20.0, signed)
+}
+
+/// A length in half-points, or with a unit (ST_HpsMeasure, ST_SignedHpsMeasure): `24`
+/// is 12 pt.
+pub(crate) fn half_points_measure(value: &str, signed: bool) -> Option<Pt> {
+    measure(value, 2.0, signed)
+}
+
+/// A length given as a number of `1 / per_point` points, or as a number with a unit.
+fn measure(value: &str, per_point: f64, signed: bool) -> Option<Pt> {
     let value = value.trim();
     let number_end = value
         .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+'))
@@ -17,8 +28,8 @@ pub(crate) fn twips_measure(value: &str, signed: bool) -> Option<Pt> {
     }
     let number: f64 = number.parse().ok()?;
     let points = match unit {
-        // Twentieths of a point; a value with a fraction is read as well.
-        "" => number / 20.0,
+        // A value without a unit may have a fraction too.
+        "" => number / per_point,
         "pt" => number,
         "in" => number * 72.0,
         "cm" => number * 72.0 / 2.54,
@@ -26,7 +37,7 @@ pub(crate) fn twips_measure(value: &str, signed: bool) -> Option<Pt> {
         "pc" | "pi" => number * 12.0,
         _ => return None,
     };
-    // Twips in a document fit in 32 bits; anything beyond is damage, not a length.
+    // Lengths in a document fit in 32 bits of twips; anything beyond is damage.
     let in_range = points.is_finite() && points.abs() <= f64::from(i32::MAX) / 20.0;
     (in_range && (signed || points >= 0.0)).then_some(Pt(points))
 }
@@ -49,6 +60,15 @@ mod tests {
         assert!((cm.0 - 72.0).abs() < 1e-9);
         let mm = twips_measure("25.4mm", false).unwrap();
         assert!((mm.0 - 72.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn reads_half_points() {
+        assert_eq!(half_points_measure("24", false), Some(Pt(12.0)));
+        assert_eq!(half_points_measure("21", false), Some(Pt(10.5)));
+        assert_eq!(half_points_measure("-6", true), Some(Pt(-3.0)));
+        assert_eq!(half_points_measure("-6", false), None);
+        assert_eq!(half_points_measure("11pt", false), Some(Pt(11.0)));
     }
 
     #[test]

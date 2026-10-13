@@ -1,7 +1,8 @@
 //! Section properties (`w:sectPr`, ECMA-376 Part 1, §17.6).
 
-use super::{Names, shorten};
+use super::shorten;
 use crate::diagnostic::{DiagnosticKind, Diagnostics};
+use crate::model::Names;
 use crate::model::xml::Element;
 use crate::model::{Orientation, SectionProperties, SectionStart};
 use crate::units::twips_measure;

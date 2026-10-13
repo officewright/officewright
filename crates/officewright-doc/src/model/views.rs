@@ -6,7 +6,7 @@ use officewright_core::Pt;
 use super::xml::Span;
 use super::{
     ControlLevel, Document, HyperlinkData, Kind, Node, ParagraphId, RevisionData, RunItem,
-    SectionData, SectionProperties, TableId, text,
+    RunProperties, SectionData, SectionProperties, TableId, text,
 };
 
 /// A section of a document: its page setup and the blocks laid out with it.
@@ -248,6 +248,20 @@ impl<'a> Run<'a> {
         items
             .iter()
             .map(move |item| RunContent::new(document, item))
+    }
+
+    /// The character properties written on the run (its `w:rPr`), without those of its
+    /// styles or the document defaults.
+    pub fn properties(self) -> RunProperties {
+        let document = self.document;
+        self.node
+            .properties
+            .iter()
+            .map(|&span| document.element(span))
+            .find(|element| element.is(&document.names.w, "rPr"))
+            .map_or_else(RunProperties::default, |r_pr| {
+                crate::docx::properties::run_properties(r_pr, &document.names, &mut |_, _, _| {})
+            })
     }
 
     /// The run's text: its text with tabs and line breaks, without deleted text and

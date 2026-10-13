@@ -41,10 +41,12 @@ mod units;
 pub use diagnostic::{Diagnostic, DiagnosticKind};
 pub use error::{Error, Limit, Result};
 pub use model::{
-    Block, Break, BreakClear, BreakKind, Conformance, ContentControl, Document, DocumentKind,
-    FieldCharKind, Hyperlink, Inline, Opaque, Orientation, PageMargins, Paragraph, ParagraphId,
-    Revision, RevisionKind, Run, RunContent, Section, SectionProperties, SectionStart, SimpleField,
-    Table, TableCell, TableId, TableRow,
+    Block, Break, BreakClear, BreakKind, Color, ColorValue, Conformance, ContentControl, Document,
+    DocumentKind, FieldCharKind, FontHint, Highlight, Hyperlink, Inline, Language, Opaque,
+    Orientation, PageMargins, Paragraph, ParagraphId, Revision, RevisionKind, Run, RunContent,
+    RunFonts, RunProperties, Section, SectionProperties, SectionStart, Shading, ShadingPattern,
+    SimpleField, Style, StyleKind, Styles, Table, TableCell, TableId, TableRow, ThemeColor,
+    ThemeFont, Underline, UnderlineStyle, VerticalPosition,
 };
 pub use options::{Limits, LoadOptions};
 
