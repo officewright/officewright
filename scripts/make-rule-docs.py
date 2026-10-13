@@ -284,8 +284,15 @@ class Doc:
     # added to them.
     run_defaults: bool = True
     run_defaults_extra: str = ""
+    # The attributes of the document defaults' w:rFonts.
+    run_default_fonts: str = (
+        'w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="Calibri" w:cs="Calibri"'
+    )
     # Whether the document has a theme part (theme_xml) and a colour mapping for it.
     theme: bool = False
+    # Entries of the colour mapping that differ from the identity, such as
+    # (("t2", "accent3"),).
+    color_mapping: tuple[tuple[str, str], ...] = ()
 
 
 def line_fonts() -> Doc:
@@ -694,8 +701,12 @@ def defaults_empty() -> Doc:
     body = "".join(
         [
             styled_para("Case 01: no font or size anywhere in the hierarchy", None, None, ""),
-            styled_para("Case 02: a paragraph style gives only the size, 14 pt", "ParaSized", None, ""),
-            styled_para("Case 03: a paragraph style gives only the font, Arial", "ParaNamed", None, ""),
+            styled_para(
+                "Case 02: a paragraph style gives only the size, 14 pt", "ParaSized", None, ""
+            ),
+            styled_para(
+                "Case 03: a paragraph style gives only the font, Arial", "ParaNamed", None, ""
+            ),
         ]
     )
     return Doc(
@@ -763,10 +774,14 @@ def theme_colors() -> Doc:
         body.append(styled_para(label, None, None, direct))
     return Doc(
         "E-theme-colors",
-        "Theme colours of runs as Word resolves them: through the colour mapping, with "
-        "themeTint and themeShade alone and together, against a w:val that disagrees",
+        "Theme colours of runs as Word resolves them: through a colour mapping that maps "
+        "text 2 and background 2 to accents 3 and 4, with themeTint and themeShade alone "
+        "and together, against a w:val that disagrees",
         "".join(body),
         theme=True,
+        # Not the identity, so that the render tells a colour resolved through the
+        # mapping from one resolved by its name.
+        color_mapping=(("bg2", "accent4"), ("t2", "accent3")),
     )
 
 
@@ -774,17 +789,15 @@ def theme_fonts() -> Doc:
     def fonts(attrs: str) -> str:
         return f"<w:rFonts {attrs}/>"
 
+    major = 'w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"'
+    minor = 'w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi"'
+    arial = 'w:ascii="Arial" w:hAnsi="Arial"'
     styles = "".join(
         [
-            style("paragraph", "ParaMajor", fonts('w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"'), "Normal"),
-            style("paragraph", "ParaArial", fonts('w:ascii="Arial" w:hAnsi="Arial"'), "Normal"),
-            style(
-                "paragraph",
-                "ParaBoth",
-                fonts('w:ascii="Arial" w:hAnsi="Arial" w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"'),
-                "Normal",
-            ),
-            style("character", "CharMinor", fonts('w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi"')),
+            style("paragraph", "ParaMajor", fonts(major), "Normal"),
+            style("paragraph", "ParaArial", fonts(arial), "Normal"),
+            style("paragraph", "ParaBoth", fonts(f"{arial} {major}"), "Normal"),
+            style("character", "CharMinor", fonts(minor)),
         ]
     )
     courier = fonts('w:ascii="Courier New" w:hAnsi="Courier New"')
@@ -806,7 +819,8 @@ def theme_fonts() -> Doc:
         "later level replaces the other, and which wins when one w:rFonts gives both",
         body,
         styles=styles,
-        run_defaults_extra=fonts('w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi"'),
+        # Calibri stays for East Asian and complex script text.
+        run_default_fonts=f'{minor} w:eastAsia="Calibri" w:cs="Calibri"',
         theme=True,
     )
 
@@ -847,17 +861,10 @@ def styles_xml(doc: Doc) -> str:
     hidden = '<w:uiPriority w:val="99"/><w:semiHidden/><w:unhideWhenUsed/>'
     run_defaults = ""
     if doc.run_defaults:
-        # A w:rFonts in run_defaults_extra (theme fonts) takes the place of the Calibri one,
-        # keeping Calibri for East Asian and complex-script text; other properties follow
-        # w:rFonts, as the order of CT_RPr asks.
-        fonts = '<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="Calibri" w:cs="Calibri"/>'
-        extra = doc.run_defaults_extra
-        if extra.startswith("<w:rFonts"):
-            fonts = extra.replace("/>", ' w:eastAsia="Calibri" w:cs="Calibri"/>', 1)
-            extra = ""
+        # Other properties follow w:rFonts, as the order of CT_RPr asks.
         run_defaults = (
             "<w:rPrDefault><w:rPr>"
-            f"{fonts}{extra}"
+            f"<w:rFonts {doc.run_default_fonts}/>{doc.run_defaults_extra}"
             '<w:sz w:val="22"/><w:szCs w:val="22"/>'
             '<w:lang w:val="en-US" w:eastAsia="en-US" w:bidi="ar-SA"/>'
             "</w:rPr></w:rPrDefault>"
@@ -926,16 +933,31 @@ def compat_setting(name: str, value: int) -> str:
     return f'<w:compatSetting w:name="{name}" w:uri="{WORD_URI}" w:val="{value}"/>'
 
 
+# The colour mapping Word writes, in its order: each theme colour stands for itself.
+IDENTITY_MAPPING = (
+    ("bg1", "light1"),
+    ("t1", "dark1"),
+    ("bg2", "light2"),
+    ("t2", "dark2"),
+    ("accent1", "accent1"),
+    ("accent2", "accent2"),
+    ("accent3", "accent3"),
+    ("accent4", "accent4"),
+    ("accent5", "accent5"),
+    ("accent6", "accent6"),
+    ("hyperlink", "hyperlink"),
+    ("followedHyperlink", "followedHyperlink"),
+)
+
+
 def settings_xml(doc: Doc) -> str:
     flags = "".join(f"<w:{flag}/>" for flag in doc.compat_flags)
     mapping = ""
     if doc.theme:
-        mapping = (
-            '<w:clrSchemeMapping w:bg1="light1" w:t1="dark1" w:bg2="light2" w:t2="dark2" '
-            'w:accent1="accent1" w:accent2="accent2" w:accent3="accent3" w:accent4="accent4" '
-            'w:accent5="accent5" w:accent6="accent6" w:hyperlink="hyperlink" '
-            'w:followedHyperlink="followedHyperlink"/>'
-        )
+        entries = dict(IDENTITY_MAPPING)
+        entries.update(doc.color_mapping)
+        attributes = " ".join(f'w:{name}="{value}"' for name, value in entries.items())
+        mapping = f"<w:clrSchemeMapping {attributes}/>"
     settings = ""
     if doc.mode != 12:
         settings = compat_setting("compatibilityMode", doc.mode)
