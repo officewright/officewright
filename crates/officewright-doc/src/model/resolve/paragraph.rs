@@ -479,7 +479,8 @@ impl Indentation {
             end_chars: ind.end_chars,
             first_line_chars: ind
                 .hanging_chars
-                .map(|hanging| -hanging)
+                // A value the file gives as i64::MIN has no negative; it saturates.
+                .map(i64::saturating_neg)
                 .or(ind.first_line_chars),
         }
     }

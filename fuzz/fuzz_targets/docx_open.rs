@@ -57,9 +57,10 @@ fuzz_target!(|data: &[u8]| {
         assert!(styles.get(style.id()).is_some());
     }
     let mut formats = document.formats();
-    // A fresh resolver walks every style chain again, so only the first runs are compared:
-    // the check stays, the cost does not grow with runs × chain length.
-    let mut compared = 0;
+    // A fresh resolver walks every style chain again, so only the first paragraphs and
+    // runs are compared, each with a budget of its own: the checks stay, the cost does
+    // not grow with their number × chain length.
+    let (mut paragraphs_compared, mut runs_compared) = (0, 0);
     let mut blocks: Vec<Block<'_>> = document.sections().flat_map(|s| s.blocks()).collect();
     while let Some(block) = blocks.pop() {
         match block {
@@ -69,14 +70,14 @@ fuzz_target!(|data: &[u8]| {
                 let _ = paragraph.text();
                 let _ = formats.paragraph_mark(paragraph);
                 let format = formats.paragraph(paragraph);
-                if compared < 256 {
-                    compared += 1;
+                if paragraphs_compared < 256 {
+                    paragraphs_compared += 1;
                     assert_eq!(format, paragraph.format());
                 }
                 for run in paragraph.runs() {
                     let format = formats.run(run);
-                    if compared < 256 {
-                        compared += 1;
+                    if runs_compared < 256 {
+                        runs_compared += 1;
                         assert_eq!(format, run.format());
                     }
                 }

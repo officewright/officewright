@@ -1483,3 +1483,48 @@ fn takes_the_first_level_that_names_the_style() {
     let format = &formats(&build(&paragraph("Item", ""), &styles, Some(numbering)))[0];
     assert_eq!(format.list().unwrap().level_number(), 1);
 }
+
+#[test]
+fn a_hanging_indent_of_the_lowest_number_saturates() {
+    // w:hangingChars of i64::MIN has no negative: the indent saturates, without a panic.
+    let body = paragraph("", r#"<w:ind w:hangingChars="-9223372036854775808"/>"#);
+    let format = &formats(&build(&body, &defaults(""), None))[0];
+    assert_eq!(format.first_line_indent_chars(), Some(i64::MAX));
+}
+
+#[test]
+fn reads_the_paragraph_style_as_the_paragraph_properties_do() {
+    // A w:pStyle in mc:AlternateContent counts, through its fallback, and of two the
+    // last wins, as Paragraph::properties reads them.
+    let styles = [
+        defaults(""),
+        style("paragraph", "Centred", None, r#"<w:jc w:val="center"/>"#),
+        style("paragraph", "Right", None, r#"<w:jc w:val="right"/>"#),
+    ]
+    .concat();
+    let body = [
+        r#"<w:p><w:pPr><mc:AlternateContent><mc:Choice Requires="w99"><w:pStyle w:val="Right"/></mc:Choice><mc:Fallback><w:pStyle w:val="Centred"/></mc:Fallback></mc:AlternateContent></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
+        r#"<w:p><w:pPr><w:pStyle w:val="Centred"/><w:pStyle w:val="Right"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
+    ]
+    .concat();
+    let document = build(&body, &styles, None);
+    let found: Vec<_> = paragraphs(&document)
+        .into_iter()
+        .map(|paragraph| {
+            let format = paragraph.format();
+            assert_eq!(
+                format.style(),
+                paragraph.properties().style.as_deref(),
+                "the same style as the properties"
+            );
+            (format.style().map(str::to_owned), format.justification())
+        })
+        .collect();
+    assert_eq!(
+        found,
+        [
+            (Some("Centred".to_owned()), Justification::Center),
+            (Some("Right".to_owned()), Justification::Right),
+        ]
+    );
+}

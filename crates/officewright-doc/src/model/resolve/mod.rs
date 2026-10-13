@@ -152,7 +152,9 @@ impl<'a> Formats<'a> {
 
     /// The index of the paragraph style of the paragraph `node`: its `w:pStyle` when it
     /// names a paragraph style, else the default paragraph style (the first, as
-    /// [`Styles::default_style`](super::Styles::default_style) gives it).
+    /// [`Styles::default_style`](super::Styles::default_style) gives it). The `w:pStyle`
+    /// is read as [`Paragraph::properties`] reads it: through `mc:AlternateContent`, the
+    /// last of several winning.
     fn paragraph_style(&mut self, node: Option<&'a Node>) -> Option<usize> {
         let document = self.document;
         let written = node.and_then(|node| {
@@ -161,8 +163,9 @@ impl<'a> Formats<'a> {
                 .map(|&span| document.element(span))
                 .find(|element| element.is(&document.names.w, "pPr"))
                 .and_then(|p_pr| {
-                    p_pr.children()
-                        .find(|child| child.is(&document.names.w, "pStyle"))
+                    p_pr.children_through_fallback(document.names.mc)
+                        .into_iter()
+                        .rfind(|child| child.is(&document.names.w, "pStyle"))
                         .and_then(|p_style| p_style.attribute(&document.names.w, "val"))
                 })
         });
