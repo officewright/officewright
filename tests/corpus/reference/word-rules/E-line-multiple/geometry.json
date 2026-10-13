@@ -6,6 +6,7 @@
  "units": "points, origin at the top left of the page, y downwards",
  "page_count": 2,
  "fonts_not_embedded": [],
+ "fonts_rasterized_with": [],
  "compat_flags_dropped": [],
  "compat_flags_added": [
   "useWord2013TrackBottomHyphenation=1"

@@ -8,6 +8,14 @@
  "fonts_not_embedded": [
   "ArialMT"
  ],
+ "fonts_rasterized_with": [
+  {
+   "font": "ArialMT",
+   "full_name": "Arial",
+   "version": "Version 7.06",
+   "sha256": "b3658eadae55e682b5f69eb64c439c1ecc8f196c0bb8d4756d145d13bc86476a"
+  }
+ ],
  "compat_flags_dropped": [],
  "compat_flags_added": [
   "useWord2013TrackBottomHyphenation=1"

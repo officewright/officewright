@@ -54,6 +54,16 @@ class References(unittest.TestCase):
                     self.assertEqual(height, math.ceil(page["height"] * DPI / 72))
                     self.assertEqual(per_metre, (PER_METRE, PER_METRE, 1))
 
+    def test_every_font_word_did_not_embed_is_drawn_with_a_named_file(self):
+        for folder in folders():
+            with self.subTest(document=f"{folder.parent.name}/{folder.name}"):
+                geometry = json.loads((folder / "geometry.json").read_text(encoding="utf-8"))
+                drawn = geometry["fonts_rasterized_with"]
+                self.assertEqual([font["font"] for font in drawn], geometry["fonts_not_embedded"])
+                for font in drawn:
+                    self.assertRegex(font["sha256"], r"^[0-9a-f]{64}$")
+                    self.assertTrue(font["full_name"])
+
     def test_each_folder_has_its_sources_row(self):
         for folder in folders():
             group, name = folder.parent.name, folder.name
@@ -62,6 +72,9 @@ class References(unittest.TestCase):
                 key = f"| reference/{group}/{name}/ |"
                 rows = [r for r in self.sources.splitlines() if r.startswith(key)]
                 self.assertEqual(len(rows), 1)
+                for font in geometry["fonts_rasterized_with"]:
+                    self.assertIn(f"{font['font']} ({font['full_name']}, ", rows[0])
+                    self.assertIn(f"SHA-256 {font['sha256']})", rows[0])
                 count = geometry["page_count"]
                 self.assertIn(f"; {count} page{'s' if count != 1 else ''};", rows[0])
                 self.assertIn(f"SHA-256 {geometry['pdf_sha256']};", rows[0])
