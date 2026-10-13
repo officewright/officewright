@@ -2434,7 +2434,7 @@ fn reads_list_definitions_and_instances() {
 #[test]
 fn reads_the_number_format_of_word_custom_formats_through_the_fallback() {
     // Word writes a custom format in the choice of mc:AlternateContent and decimal in the
-    // fallback, as in LibreOffice's arabic-zero3-numbering.docx.
+    // fallback, as in POI's Numbering.docx (α, β, γ).
     let numbering = format!(
         r#"<w:numbering xmlns:w="{W}" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" mc:Ignorable="w14"><w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:start w:val="1"/><mc:AlternateContent><mc:Choice Requires="w14"><w:numFmt w:val="custom" w:format="001, 002, 003, ..."/></mc:Choice><mc:Fallback><w:numFmt w:val="decimal"/></mc:Fallback></mc:AlternateContent><w:lvlText w:val="%1"/></w:lvl></w:abstractNum></w:numbering>"#
     );
@@ -2575,4 +2575,54 @@ fn shares_the_node_limit_with_the_numbering_part() {
     }
     let options = LoadOptions::new().with_limits(Limits::new().with_max_nodes(400));
     assert!(options.open_bytes(data).is_ok());
+}
+
+#[test]
+fn repairs_damaged_list_instances() {
+    // From the review of #46.
+    let numbering = format!(
+        r#"<w:numbering xmlns:w="{W}" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><w:abstractNum w:abstractNumId="-1"><w:nsid w:val="1A2B3C"/><w:lvl w:ilvl="0"><w:lvlText w:null="0"/></w:lvl><w:lvl w:ilvl="1"><w:lvlText w:val="%2)" w:null="1"/></w:lvl></w:abstractNum><w:abstractNum w:abstractNumId="0"><w:nsid w:val="1A2B3C"/><w:lvl w:ilvl="0"><w:lvlText w:null="0"/></w:lvl><w:lvl w:ilvl="1"><w:lvlText w:val="%2)" w:null="1"/></w:lvl></w:abstractNum><w:num w:numId="3"><mc:AlternateContent><mc:Choice Requires="w99"><w:abstractNumId w:val="9"/></mc:Choice><mc:Fallback><w:abstractNumId w:val="0"/></mc:Fallback></mc:AlternateContent><w:lvlOverride w:ilvl="0"><w:startOverride w:val="5"/></w:lvlOverride><w:lvlOverride w:ilvl="0"><w:startOverride w:val="7"/></w:lvlOverride><w:lvlOverride w:ilvl="2"><w:lvl w:ilvl="2"><w:numFmt w:val="lowerRoman"/></w:lvl><w:lvl w:ilvl="2"><w:numFmt w:val="decimal"/></w:lvl></w:lvlOverride><w:lvlOverride w:ilvl="1"><w:startOverride w:val="2"/><w:startOverride w:val="8"/><w:lvl w:ilvl="3"><w:numFmt w:val="upperRoman"/></w:lvl></w:lvlOverride></w:num><w:num w:numId="4"/></w:numbering>"#
+    );
+    let document = with_numbering("<w:p/>", &numbering);
+    let numbering = document.numbering();
+    // A negative definition id is not valid: Word does not open such a file
+    // (MS-OI29500 §17.9.1(a)).
+    assert!(numbering.definition(-1).is_none());
+    let definition = numbering.definition(0).unwrap();
+    // An identifier of fewer than eight digits is not valid.
+    assert_eq!(definition.identifier(), None);
+    let levels = definition.levels();
+    // w:null off is no empty template; w:val wins over w:null.
+    assert_eq!(levels[0].text(), None);
+    assert_eq!(levels[1].text(), Some("%2)"));
+    // w:abstractNumId is read through mc:AlternateContent's fallback.
+    let instance = numbering.instance(3).unwrap();
+    assert_eq!(instance.definition_id(), Some(0));
+    let overrides = instance.overrides();
+    // The first override of a level counts, and the first level in an override; an
+    // inner level keeps its own w:ilvl.
+    assert_eq!(overrides.len(), 3);
+    assert_eq!((overrides[0].level(), overrides[0].start()), (0, Some(5)));
+    assert_eq!(
+        overrides[1].definition().unwrap().number_format(),
+        Some(NumberFormat::LowerRoman)
+    );
+    assert_eq!((overrides[2].level(), overrides[2].start()), (1, Some(2)));
+    assert_eq!(overrides[2].definition().unwrap().level(), 3);
+    assert_eq!(numbering.instance(4).unwrap().definition_id(), None);
+    let messages = messages(&document);
+    assert_eq!(messages.len(), 8, "{messages:?}");
+    assert!(
+        messages[0]
+            .ends_with(r#": w:abstractNum w:abstractNumId="-1" is not valid; it is ignored"#)
+    );
+    assert!(messages[2].ends_with(": a w:abstractNum without a valid w:abstractNumId is ignored"));
+    assert!(messages[3].ends_with(r#": w:nsid w:val="1A2B3C" is not valid; it is ignored"#));
+    assert!(messages[4].ends_with(": a second w:lvlOverride of level 0 is ignored"));
+    assert!(messages[5].ends_with(": a second w:lvl in the w:lvlOverride of level 2 is ignored"));
+    assert!(
+        messages[6]
+            .ends_with(": a second w:startOverride in the w:lvlOverride of level 1 is ignored")
+    );
+    assert!(messages[7].ends_with(": a w:num without a w:abstractNumId names no definition"));
 }

@@ -45,8 +45,7 @@ xml_enum! {
     MultiLevelType {
         SingleLevel = "singleLevel",
         Multilevel = "multilevel",
-        /// Levels that each have their own template, as Word writes for bullets and
-        /// simple numbering.
+        /// Levels that each have their own template code.
         HybridMultilevel = "hybridMultilevel",
     }
 }
@@ -61,6 +60,39 @@ xml_enum! {
 }
 
 /// The numbering of a document: its list definitions and list instances.
+///
+/// A paragraph that is a list item names an instance and a level
+/// ([`NumberingReference`](super::NumberingReference)); the instance leads to its
+/// definition, and the definition to the level's number format and label template.
+///
+/// ```
+/// # fn main() -> officewright_doc::Result<()> {
+/// use officewright_doc::{Block, Document, NumberFormat};
+///
+/// let document = Document::open("tests/data/list.docx")?;
+/// let numbering = document.numbering();
+/// for block in document.sections().flat_map(|section| section.blocks()) {
+///     let Block::Paragraph(paragraph) = block else {
+///         continue;
+///     };
+///     let properties = paragraph.properties();
+///     let Some(reference) = properties.numbering() else {
+///         continue;
+///     };
+///     let instance = numbering
+///         .instance(reference.instance().expect("the item names a list"))
+///         .expect("the document has the list");
+///     let level = reference.level().and_then(|level| usize::try_from(level).ok());
+///     let level = instance
+///         .definition()
+///         .and_then(|definition| definition.level(level.unwrap_or(0)))
+///         .expect("the list defines the level");
+///     assert_eq!(level.number_format(), Some(NumberFormat::Decimal));
+///     assert_eq!(level.text(), Some("%1."));
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone, Copy, Debug)]
 pub struct Numbering<'a> {
     document: &'a Document,
@@ -116,7 +148,8 @@ impl<'a> Numbering<'a> {
 /// A list definition (`w:abstractNum`): the levels of a list, from 0 to 8.
 ///
 /// Word counts list items per definition: instances that share a definition continue
-/// one sequence unless an override starts it again.
+/// one sequence, and an override's start begins it again, as the reference render of
+/// the corpus file `word-rules/E-list-shared-abstract.docx` shows.
 #[derive(Clone, Copy, Debug)]
 pub struct ListDefinition<'a> {
     document: &'a Document,
@@ -136,7 +169,8 @@ impl<'a> ListDefinition<'a> {
             .and_then(long_hex)
     }
 
-    /// The number of the template the definition came from (`w:tmpl`).
+    /// A code an application may use to place the definition in its user interface
+    /// (`w:tmpl`).
     pub fn template(self) -> Option<u32> {
         self.child("tmpl")
             .and_then(|tmpl| tmpl.attribute(&self.document.names.w, "val"))
@@ -246,9 +280,11 @@ impl<'a> ListInstance<'a> {
     }
 
     /// The overrides of levels of the definition (`w:lvlOverride`), in document order.
-    /// One whose `w:ilvl` is not a number is left out.
+    /// One whose `w:ilvl` is not a number is left out, and so is a second override of
+    /// a level 0 to 8, as a definition's second level of one number is.
     pub fn overrides(self) -> Vec<LevelOverride> {
         let document = self.document;
+        let mut seen = [false; 9];
         document
             .element(self.data.element)
             .children_through_fallback(document.names.mc)
@@ -256,6 +292,17 @@ impl<'a> ListInstance<'a> {
             .filter(|child| child.is(&document.names.w, "lvlOverride"))
             .filter_map(|element| {
                 crate::docx::numbering::level_override(element, &document.names, &mut |_, _, _| {})
+            })
+            .filter(|level_override| {
+                let index = usize::try_from(level_override.level).ok();
+                match index.and_then(|index| seen.get_mut(index)) {
+                    Some(seen) if *seen => false,
+                    Some(seen) => {
+                        *seen = true;
+                        true
+                    }
+                    None => true,
+                }
             })
             .collect()
     }
@@ -282,14 +329,16 @@ impl LevelOverride {
         self.start
     }
 
-    /// A level that replaces the definition's for this instance (`w:lvl`). Word ignores
-    /// its `w:start` and `w:lvlRestart` (MS-OI29500 §17.9.10(b), §17.9.25(b)).
+    /// A level that replaces the definition's for this instance (`w:lvl`), the first
+    /// one written; its own `w:ilvl` is as written and may name another level. Word
+    /// ignores its `w:start` and `w:lvlRestart` (MS-OI29500 §17.9.10(b), §17.9.25(b)).
     pub fn definition(&self) -> Option<&ListLevel> {
         self.definition.as_ref()
     }
 }
 
-/// Numbering as Word 6 and Word 95 wrote it (`w:legacy`).
+/// Numbering of an earlier word processor that did not support all of today's
+/// numbering properties (`w:legacy`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub struct LegacyNumbering {
@@ -342,14 +391,14 @@ impl ListLevel {
         self.level
     }
 
-    /// The first number (`w:start`).
+    /// The first number (`w:start`); 0 when it is not written (§17.9.25).
     pub fn start(&self) -> Option<i64> {
         self.start
     }
 
-    /// How the number is written (`w:numFmt`). Word reads `w:numFmt` through
-    /// `mc:AlternateContent` with a custom format in the choice; the fallback's format is
-    /// the one read here.
+    /// How the number is written (`w:numFmt`). Word writes a custom format in the choice
+    /// of an `mc:AlternateContent` and a standard one in its fallback (POI's
+    /// `Numbering.docx`); the fallback's is the one read here.
     pub fn number_format(&self) -> Option<NumberFormat> {
         self.number_format
     }
@@ -380,9 +429,10 @@ impl ListLevel {
     }
 
     /// The template of the label (`w:lvlText`), where `%1` to `%9` stand for the number
-    /// of levels 1 to 9; empty when `w:null` is on. Word ignores the whole template when
-    /// it names a level deeper than this one, and uses it literally for bullets
-    /// (MS-OI29500 §17.9.11(c), §17.9.17(a)).
+    /// of levels 1 to 9: its `w:val`, or empty when there is none and `w:null` is on.
+    /// Word requires `w:null` on when `w:val` is not written, ignores the whole template
+    /// when it names a level deeper than this one, and uses it literally for bullets
+    /// (MS-OI29500 §17.9.11(c), (d), §17.9.17(a)).
     pub fn text(&self) -> Option<&str> {
         self.text.as_deref()
     }
@@ -405,7 +455,8 @@ impl ListLevel {
     }
 
     /// The paragraph properties the level gives its paragraphs (its `w:pPr`); of these
-    /// Word uses the alignment, indentation and tab stops only (MS-OI29500 §17.9.22(b)).
+    /// Word allows the alignment, indentation and tab stops only (MS-OI29500
+    /// §17.9.22(b)), though it writes others too.
     pub fn paragraph_properties(&self) -> &ParagraphProperties {
         &self.paragraph_properties
     }
@@ -415,7 +466,9 @@ impl ListLevel {
         &self.run_properties
     }
 
-    /// The level is not shown in Word's user interface until used (`w:tentative`).
+    /// The level is tentative (`w:tentative`): the standard keeps such levels out of the
+    /// user interface, but Word shows them in its list of multilevel lists (MS-OI29500
+    /// §17.9.6(b)).
     pub fn tentative(&self) -> Option<bool> {
         self.tentative
     }

@@ -1,5 +1,7 @@
 //! The numbering part (`w:numbering`, ECMA-376 Part 1, §17.9): list definitions and
-//! list instances, each kept whole with the ids they are looked up by.
+//! list instances, each kept whole with the ids they are looked up by. Diagnostics name
+//! the position of the definition or instance a value is in, as those of styles name
+//! the style.
 
 use std::collections::hash_map::Entry;
 
@@ -84,9 +86,11 @@ pub(super) fn read(
 /// Adds a `w:abstractNum` to the document's list definitions.
 fn definition(c: &mut Capture<'_, '_, '_>, names: &Names, span: Span, offset: usize) {
     let element = c.document.element(span);
+    // Word does not open a file with a negative abstractNumId (MS-OI29500 §17.9.1(a)).
+    let valid_id = |v: &str| integer(v).filter(|id| *id >= 0);
     let id = element
         .attribute(&names.w, "abstractNumId")
-        .and_then(integer);
+        .and_then(valid_id);
     // Levels written twice: the first counts, as ListDefinition::levels reads them.
     let mut seen = [false; 9];
     let mut repeated: Vec<usize> = Vec::new();
@@ -111,7 +115,7 @@ fn definition(c: &mut Capture<'_, '_, '_>, names: &Names, span: Span, offset: us
     }
     c.check(span, offset, |element, report| {
         // Read only for their diagnostics.
-        let _ = value(element, names, "abstractNumId", integer, report);
+        let _ = value(element, names, "abstractNumId", valid_id, report);
         for child in element.children_through_fallback(names.mc) {
             match child.local_in(&names.w) {
                 Some("nsid" | "tmpl") => {
@@ -152,12 +156,56 @@ fn instance(c: &mut Capture<'_, '_, '_>, names: &Names, span: Span, offset: usiz
     let element = c.document.element(span);
     let w = &names.w;
     let id = element.attribute(w, "numId").and_then(integer);
-    let definition = element
-        .children_through_fallback(names.mc)
-        .into_iter()
+    let children = element.children_through_fallback(names.mc);
+    let reference = children
+        .iter()
         .find(|child| child.is(w, "abstractNumId"))
-        .and_then(|reference| reference.attribute(w, "val"))
-        .and_then(integer);
+        .and_then(|reference| reference.attribute(w, "val"));
+    let definition = reference.and_then(integer);
+    // Overrides of one level after the first, and levels in one override after the
+    // first: both are ignored, as a definition's repeated levels are.
+    let mut seen = [false; 9];
+    let mut repeated: Vec<String> = Vec::new();
+    // Messages are built only while diagnostics have room for them.
+    let room = c.diagnostics.room();
+    let mut omitted = 0u64;
+    let mut note = |message: &dyn Fn() -> String| {
+        if repeated.len() < room {
+            repeated.push(message());
+        } else {
+            omitted += 1;
+        }
+    };
+    for child in children.iter().filter(|child| child.is(w, "lvlOverride")) {
+        let Some(level) = child
+            .attribute(w, "ilvl")
+            .and_then(|v| v.parse::<usize>().ok())
+        else {
+            continue;
+        };
+        if let Some(seen) = seen.get_mut(level) {
+            if *seen {
+                note(&|| format!("a second w:lvlOverride of level {level} is ignored"));
+                continue;
+            }
+            *seen = true;
+        }
+        let inner = child.children_through_fallback(names.mc);
+        for local in ["startOverride", "lvl"] {
+            if inner.iter().filter(|element| element.is(w, local)).count() > 1 {
+                note(&|| {
+                    format!("a second w:{local} in the w:lvlOverride of level {level} is ignored")
+                });
+            }
+        }
+    }
+    if reference.is_none() {
+        note(&|| "a w:num without a w:abstractNumId names no definition".into());
+    }
+    c.diagnostics.omit(omitted);
+    for message in repeated {
+        c.diagnose(offset, DiagnosticKind::UnexpectedContent, || message);
+    }
     c.check(span, offset, |element, report| {
         // Read only for their diagnostics.
         let _ = value(element, names, "numId", integer, report);
@@ -278,12 +326,19 @@ pub(crate) fn level_override(
         start: None,
         definition: None,
     };
+    // The first of each child counts; CT_NumLvl allows one.
+    let mut start_read = false;
+    let mut level_read = false;
     for child in element.children_through_fallback(names.mc) {
         match child.local_in(&names.w) {
-            Some("startOverride") => {
+            Some("startOverride") if !start_read => {
+                start_read = true;
                 level_override.start = value(child, names, "val", integer, report);
             }
-            Some("lvl") => level_override.definition = level(child, names, report),
+            Some("lvl") if !level_read => {
+                level_read = true;
+                level_override.definition = level(child, names, report);
+            }
             _ => {}
         }
     }
