@@ -5,7 +5,7 @@ use officewright_opc::mce::{Disposition, Processor};
 use officewright_opc::xml::{Event, Input, NsId};
 
 use super::capture::{Budget, Capture};
-use super::properties::{on_off_attribute, run_properties};
+use super::properties::{on_off_attribute, paragraph_properties, run_properties};
 use super::{R, R_STRICT, W, W_STRICT, shorten};
 use crate::diagnostic::{DiagnosticKind, Diagnostics};
 use crate::model::styles::{StyleData, StyleKind};
@@ -68,8 +68,24 @@ pub(super) fn read(
                         } else {
                             *slot = Some(span);
                             if defaults {
-                                let path = ["rPrDefault", "rPr"];
-                                check_run_properties(&mut c, &names, span, &path, offset);
+                                let run = ["rPrDefault", "rPr"];
+                                check_properties(
+                                    &mut c,
+                                    &names,
+                                    span,
+                                    &run,
+                                    Properties::Run,
+                                    offset,
+                                );
+                                let paragraph = ["pPrDefault", "pPr"];
+                                check_properties(
+                                    &mut c,
+                                    &names,
+                                    span,
+                                    &paragraph,
+                                    Properties::Paragraph,
+                                    offset,
+                                );
                             }
                         }
                     }
@@ -168,16 +184,25 @@ fn style(c: &mut Capture<'_, '_, '_>, names: &Names, span: Span, offset: usize) 
         styles.by_id.insert(data.id.clone(), index);
     }
     c.document.styles.styles.push(data);
-    check_run_properties(c, names, span, &["rPr"], offset);
+    check_properties(c, names, span, &["pPr"], Properties::Paragraph, offset);
+    check_properties(c, names, span, &["rPr"], Properties::Run, offset);
 }
 
-/// Reports the values that are not valid in the `w:rPr` found by following `path` down
-/// from `span`, as diagnostics at `offset`.
-pub(super) fn check_run_properties(
+/// Which properties an element holds.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Properties {
+    Run,
+    Paragraph,
+}
+
+/// Reports the values that are not valid in the property element found by following
+/// `path` down from `span`, as diagnostics at `offset`.
+pub(super) fn check_properties(
     c: &mut Capture<'_, '_, '_>,
     names: &Names,
     span: Span,
     path: &[&str],
+    which: Properties,
     offset: usize,
 ) {
     // Values are collected only while diagnostics have room for them; the rest are
@@ -195,14 +220,19 @@ pub(super) fn check_run_properties(
                     .find(|child| child.is(&names.w, local))
             });
         }
-        if let Some(r_pr) = element {
-            run_properties(r_pr, names, &mut |element, attribute, value| {
-                if invalid.len() < room {
-                    invalid.push((element.into(), attribute.into(), value.into()));
-                } else {
-                    omitted += 1;
-                }
-            });
+        let mut report = |element: &str, attribute: &str, value: &str| {
+            if invalid.len() < room {
+                invalid.push((element.into(), attribute.into(), value.into()));
+            } else {
+                omitted += 1;
+            }
+        };
+        match (element, which) {
+            (Some(r_pr), Properties::Run) => drop(run_properties(r_pr, names, &mut report)),
+            (Some(p_pr), Properties::Paragraph) => {
+                drop(paragraph_properties(p_pr, names, &mut report));
+            }
+            (None, _) => {}
         }
     }
     c.diagnostics.omit(omitted);

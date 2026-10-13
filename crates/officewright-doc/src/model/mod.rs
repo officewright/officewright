@@ -13,8 +13,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use officewright_core::Pt;
 
 pub use properties::{
-    Color, ColorValue, FontHint, Highlight, Language, RunFonts, RunProperties, Shading,
-    ShadingPattern, ThemeColor, ThemeFont, Underline, UnderlineStyle, VerticalPosition,
+    Border, BorderStyle, Color, ColorValue, FontHint, Highlight, Indentation, Justification,
+    Language, LineSpacing, NumberingReference, ParagraphBorders, ParagraphProperties, RunFonts,
+    RunProperties, Shading, ShadingPattern, Spacing, TabKind, TabLeader, TabStop, ThemeColor,
+    ThemeFont, Underline, UnderlineStyle, VerticalPosition,
 };
 pub use section::{Orientation, PageMargins, SectionProperties, SectionStart};
 pub use styles::{Style, StyleKind, Styles};

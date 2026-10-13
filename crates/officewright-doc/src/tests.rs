@@ -1220,3 +1220,250 @@ fn counts_invalid_values_past_the_diagnostic_limit() {
         "500 more diagnostics are not kept"
     );
 }
+
+fn first_paragraph(document: &Document) -> Paragraph<'_> {
+    let Some(Block::Paragraph(paragraph)) = document.sections().next().unwrap().blocks().next()
+    else {
+        panic!("no paragraph");
+    };
+    paragraph
+}
+
+#[test]
+fn reads_the_properties_written_on_a_paragraph() {
+    let document = open(
+        r#"<w:p><w:pPr><w:pStyle w:val="Heading1"/><w:keepNext/><w:keepLines w:val="1"/><w:pageBreakBefore w:val="0"/><w:widowControl w:val="off"/><w:numPr><w:ilvl w:val="1"/><w:numId w:val="3"/></w:numPr><w:suppressLineNumbers/><w:pBdr><w:top w:val="single" w:sz="4" w:space="1" w:color="auto"/><w:left w:val="double" w:sz="12" w:space="4" w:color="FF0000" w:shadow="1"/><w:between w:val="dotted" w:sz="2" w:space="0" w:color="auto"/><w:bar w:val="thick" w:sz="24" w:space="0" w:color="auto"/></w:pBdr><w:shd w:val="clear" w:color="auto" w:fill="F2F2F2"/><w:tabs><w:tab w:val="left" w:pos="720"/><w:tab w:val="center" w:leader="dot" w:pos="4320"/><w:tab w:val="right" w:leader="middleDot" w:pos="9360"/><w:tab w:val="clear" w:pos="1440"/><w:tab w:val="decimal" w:pos="-360"/></w:tabs><w:suppressAutoHyphens/><w:spacing w:before="240" w:beforeLines="100" w:beforeAutospacing="1" w:after="120" w:line="276" w:lineRule="auto"/><w:ind w:left="720" w:right="-360" w:hanging="360" w:leftChars="200"/><w:contextualSpacing/><w:mirrorIndents/><w:wordWrap w:val="0"/><w:bidi/><w:snapToGrid w:val="0"/><w:jc w:val="both"/><w:outlineLvl w:val="0"/><w:rPr><w:b/><w:sz w:val="28"/></w:rPr></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
+    );
+    assert!(
+        document.diagnostics().is_empty(),
+        "{:?}",
+        document.diagnostics()
+    );
+    let properties = first_paragraph(&document).properties();
+    assert_eq!(properties.style(), Some("Heading1"));
+    assert_eq!(properties.keep_next(), Some(true));
+    assert_eq!(properties.keep_lines(), Some(true));
+    assert_eq!(properties.page_break_before(), Some(false));
+    assert_eq!(properties.widow_control(), Some(false));
+    assert_eq!(properties.suppress_line_numbers(), Some(true));
+    assert_eq!(properties.suppress_auto_hyphens(), Some(true));
+    assert_eq!(properties.contextual_spacing(), Some(true));
+    assert_eq!(properties.mirror_indents(), Some(true));
+    assert_eq!(properties.word_wrap(), Some(false));
+    assert_eq!(properties.right_to_left(), Some(true));
+    assert_eq!(properties.snap_to_grid(), Some(false));
+    let numbering = properties.numbering().unwrap();
+    assert_eq!(
+        (numbering.instance(), numbering.level()),
+        (Some(3), Some(1))
+    );
+    let borders = properties.borders().unwrap();
+    let top = borders.top().unwrap();
+    assert_eq!(top.style(), Some(BorderStyle::Single));
+    assert_eq!((top.width(), top.space()), (Some(Pt(0.5)), Some(Pt(1.0))));
+    assert_eq!(top.color().value(), Some(ColorValue::Auto));
+    let start = borders.start().unwrap();
+    assert_eq!(start.style(), Some(BorderStyle::Double));
+    assert_eq!(start.width(), Some(Pt(1.5)));
+    assert_eq!(start.shadow(), Some(true));
+    assert_eq!(borders.bottom(), None);
+    assert_eq!(borders.end(), None);
+    assert_eq!(
+        borders.between().unwrap().style(),
+        Some(BorderStyle::Dotted)
+    );
+    assert_eq!(borders.bar().unwrap().width(), Some(Pt(3.0)));
+    assert_eq!(
+        properties.shading().unwrap().fill().value(),
+        Some(ColorValue::Rgb(0xF2, 0xF2, 0xF2))
+    );
+    let tabs: Vec<(Option<TabKind>, Option<TabLeader>, f64)> = properties
+        .tabs()
+        .iter()
+        .map(|tab| (tab.kind(), tab.leader(), tab.position().0))
+        .collect();
+    assert_eq!(
+        tabs,
+        [
+            (Some(TabKind::Left), None, 36.0),
+            (Some(TabKind::Center), Some(TabLeader::Dot), 216.0),
+            (Some(TabKind::Right), Some(TabLeader::MiddleDot), 468.0),
+            (Some(TabKind::Clear), None, 72.0),
+            (Some(TabKind::Decimal), None, -18.0),
+        ]
+    );
+    let spacing = properties.spacing().unwrap();
+    assert_eq!(
+        (spacing.before(), spacing.after()),
+        (Some(Pt(12.0)), Some(Pt(6.0)))
+    );
+    assert_eq!(
+        (spacing.before_lines(), spacing.after_lines()),
+        (Some(100), None)
+    );
+    assert_eq!(
+        (spacing.before_auto(), spacing.after_auto()),
+        (Some(true), None)
+    );
+    assert_eq!(spacing.line(), Some(LineSpacing::Multiple(1.15)));
+    let indentation = properties.indentation().unwrap();
+    assert_eq!(indentation.start(), Some(Pt(36.0)));
+    assert_eq!(indentation.end(), Some(Pt(-18.0)));
+    assert_eq!(indentation.hanging(), Some(Pt(18.0)));
+    assert_eq!(indentation.first_line(), None);
+    assert_eq!(indentation.start_chars(), Some(200));
+    assert_eq!(properties.justification(), Some(Justification::Both));
+    assert_eq!(properties.outline_level(), Some(0));
+    let mark = properties.mark_run_properties();
+    assert_eq!((mark.bold(), mark.size()), (Some(true), Some(Pt(14.0))));
+    // A paragraph without properties sets nothing.
+    let plain = open("<w:p/>");
+    assert_eq!(
+        first_paragraph(&plain).properties(),
+        ParagraphProperties::default()
+    );
+}
+
+#[test]
+fn reads_line_spacing_rules_and_strict_indentation() {
+    let line = |xml: &str| {
+        let document = open(&format!("<w:p><w:pPr>{xml}</w:pPr></w:p>"));
+        first_paragraph(&document)
+            .properties()
+            .spacing()
+            .and_then(Spacing::line)
+    };
+    assert_eq!(
+        line(r#"<w:spacing w:line="240"/>"#),
+        Some(LineSpacing::Multiple(1.0))
+    );
+    assert_eq!(
+        line(r#"<w:spacing w:line="300" w:lineRule="exact"/>"#),
+        Some(LineSpacing::Exact(Pt(15.0)))
+    );
+    assert_eq!(
+        line(r#"<w:spacing w:line="12pt" w:lineRule="atLeast"/>"#),
+        Some(LineSpacing::AtLeast(Pt(12.0)))
+    );
+    assert_eq!(line(r#"<w:spacing w:before="0"/>"#), None);
+    let xml = r#"<w:document xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main" conformance="strict"><w:body><w:p><w:pPr><w:ind w:start="1in" w:end="0.5in" w:firstLine="0.25in"/><w:jc w:val="start"/></w:pPr></w:p></w:body></w:document>"#;
+    let document = Document::from_bytes(package(DOCUMENT, xml, &[])).unwrap();
+    let properties = first_paragraph(&document).properties();
+    let indentation = properties.indentation().unwrap();
+    assert_eq!(
+        (
+            indentation.start(),
+            indentation.end(),
+            indentation.first_line()
+        ),
+        (Some(Pt(72.0)), Some(Pt(36.0)), Some(Pt(18.0)))
+    );
+    assert_eq!(properties.justification(), Some(Justification::Start));
+}
+
+#[test]
+fn reads_invalid_paragraph_values_as_not_set() {
+    let document = open(
+        r#"<w:p><w:pPr><w:jc w:val="middle"/><w:spacing w:before="much" w:line="240" w:lineRule="often"/><w:ind w:hanging="-5"/><w:outlineLvl w:val="twelve"/><w:tabs><w:tab w:val="left" w:pos="far"/><w:tab w:val="sideways" w:pos="10"/></w:tabs><w:pBdr><w:top w:val="zigzag" w:sz="-1"/></w:pBdr><w:keepNext w:val="maybe"/></w:pPr></w:p>"#,
+    );
+    let properties = first_paragraph(&document).properties();
+    assert_eq!(properties.justification(), None);
+    let spacing = properties.spacing().unwrap();
+    assert_eq!((spacing.before(), spacing.line()), (None, None));
+    assert_eq!(properties.indentation().unwrap().hanging(), None);
+    assert_eq!(properties.outline_level(), None);
+    // The stop without a position is left out; the one without a valid kind is kept.
+    assert_eq!(properties.tabs().len(), 1);
+    assert_eq!(properties.tabs()[0].kind(), None);
+    let top = properties.borders().unwrap().top().unwrap();
+    assert_eq!((top.style(), top.width()), (None, None));
+    assert_eq!(properties.keep_next(), None);
+    let messages: Vec<&str> = document
+        .diagnostics()
+        .iter()
+        .map(Diagnostic::message)
+        .collect();
+    assert_eq!(messages.len(), 10, "{messages:?}");
+    assert!(messages[0].ends_with(r#": w:jc w:val="middle" is not valid; it is ignored"#));
+}
+
+#[test]
+fn reads_the_paragraph_properties_of_styles_and_defaults() {
+    let styles = format!(
+        r#"<w:styles xmlns:w="{W}"><w:docDefaults><w:pPrDefault><w:pPr><w:spacing w:after="160" w:line="259" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:styleId="Heading1"><w:pPr><w:keepNext/><w:spacing w:before="240" w:after="0"/><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:sz w:val="32"/></w:rPr></w:style></w:styles>"#
+    );
+    let document = with_styles("<w:p/>", &styles);
+    assert!(
+        document.diagnostics().is_empty(),
+        "{:?}",
+        document.diagnostics()
+    );
+    let styles = document.styles();
+    let defaults = styles.default_paragraph_properties();
+    let spacing = defaults.spacing().unwrap();
+    assert_eq!(spacing.after(), Some(Pt(8.0)));
+    assert_eq!(spacing.line(), Some(LineSpacing::Multiple(259.0 / 240.0)));
+    let heading = styles.get("Heading1").unwrap().paragraph_properties();
+    assert_eq!(heading.keep_next(), Some(true));
+    assert_eq!(heading.outline_level(), Some(0));
+    assert_eq!(heading.spacing().unwrap().before(), Some(Pt(12.0)));
+}
+
+#[test]
+fn reports_invalid_paragraph_values_of_styles_and_defaults() {
+    // From the review of #39: the paragraph properties of the document defaults and of
+    // a style are checked at load, like those of the body.
+    let styles = format!(
+        r#"<w:styles xmlns:w="{W}"><w:docDefaults><w:pPrDefault><w:pPr><w:spacing w:line="240" w:lineRule="often"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:styleId="X"><w:pPr><w:jc w:val="middle"/></w:pPr></w:style></w:styles>"#
+    );
+    let document = with_styles("<w:p/>", &styles);
+    let messages: Vec<&str> = document
+        .diagnostics()
+        .iter()
+        .map(Diagnostic::message)
+        .collect();
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert!(messages[0].starts_with("/word/styles.xml, line 1, column "));
+    assert!(messages[0].ends_with(r#"w:spacing w:lineRule="often" is not valid; it is ignored"#));
+    assert!(messages[1].starts_with("/word/styles.xml, line 1, column "));
+    assert!(messages[1].ends_with(r#"w:jc w:val="middle" is not valid; it is ignored"#));
+}
+
+#[test]
+fn keeps_values_outside_the_ranges_of_the_prose_as_written() {
+    // Negative line spacing, as in LibreOffice's tdf125469_singleSpacing.docx, and list
+    // and outline levels past those ECMA-376 names, as in tdf61309.docx.
+    let document = open(
+        r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="12"/><w:numId w:val="1"/></w:numPr><w:spacing w:line="-240"/><w:outlineLvl w:val="25"/></w:pPr></w:p><w:p><w:pPr><w:spacing w:line="-240" w:lineRule="exact"/></w:pPr></w:p><w:p><w:pPr><w:spacing w:lineRule="often"/></w:pPr></w:p>"#,
+    );
+    let paragraphs: Vec<ParagraphProperties> = document
+        .sections()
+        .next()
+        .unwrap()
+        .blocks()
+        .map(|block| match block {
+            Block::Paragraph(paragraph) => paragraph.properties(),
+            _ => panic!("not a paragraph"),
+        })
+        .collect();
+    let first = &paragraphs[0];
+    assert_eq!(first.numbering().unwrap().level(), Some(12));
+    assert_eq!(first.outline_level(), Some(25));
+    assert_eq!(
+        first.spacing().unwrap().line(),
+        Some(LineSpacing::Multiple(-1.0))
+    );
+    assert_eq!(
+        paragraphs[1].spacing().unwrap().line(),
+        Some(LineSpacing::Exact(Pt(-12.0)))
+    );
+    // A rule that is not valid is reported even without a w:line.
+    assert_eq!(paragraphs[2].spacing().unwrap().line(), None);
+    let messages: Vec<&str> = document
+        .diagnostics()
+        .iter()
+        .map(Diagnostic::message)
+        .collect();
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(messages[0].ends_with(r#"w:spacing w:lineRule="often" is not valid; it is ignored"#));
+}
