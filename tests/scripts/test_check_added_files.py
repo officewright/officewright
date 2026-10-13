@@ -2,7 +2,9 @@
 
 import os
 import shutil
+import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,8 +12,8 @@ from pathlib import Path
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "check-added-files.sh"
 BASH = shutil.which("bash")
 
-# Files that name a home directory, in the forms they take in text, JSON and binaries.
-# The user names are filled in when the tests run, so this file passes the check itself.
+# Files that name a home directory, in the forms they take in text, JSON, URLs and binary
+# files. The user names are filled in when the tests run, so this file passes the check.
 OFFENDING = {
     "linux.txt": b"fonts in /home/%s/.fonts\n" % b"alice",
     "mac.md": b"see /Users/%s/Library/Fonts\n" % b"bob",
@@ -19,21 +21,47 @@ OFFENDING = {
     "escaped.json": b'{"path": "C:\\\\Users\\\\%s\\\\x.docx"}\n' % b"dave",
     "url.xml": b"<r Target='file:///c:/users/%s/Normal.dotm'/>\n" % b"erin",
     "binary.bin": b"\x00\x01PDF C:\\Users\\%s\\file.docx\x00\xff" % b"Frank Smith",
+    "unicode.txt": "C:\\Users\\%s\\x and /home/%s/\n".encode() % ("Jürgen".encode(), "Олена".encode()),
+    "percent.xml": b"<r Target='file:///C:/Users/%s/Normal.dotm'/>\n" % b"John%20Smith",
+    "apostrophe.txt": b"C:\\Users\\%s\\x\n" % b"d'Arcy",
+    "wsl.txt": b"\\\\wsl.localhost\\Ubuntu\\home\\%s\\dev\\x.docx\n" % b"gwen",
+    "wsl.json": b'"\\\\\\\\wsl$\\\\Ubuntu\\\\home\\\\%s\\\\x"\n' % b"hal",
+    "xp.txt": b"C:\\Documents and Settings\\%s\\x\n" % b"ivy",
+    # The home directory itself, with nothing after the name.
+    "env.sh": b"HOME=/home/%s\n" % b"jo",
+    "home.json": b'{"home": "/Users/%s", "profile": "C:\\\\Users\\\\%s"}\n' % (b"kim", b"lee"),
 }
-# Placeholders and paths that are not home directories.
+# Placeholders, and paths that are not home directories.
 ALLOWED = {
     "placeholders.txt": b"/home/<name>/.fonts /Users/<name>/Library C:\\Users\\<name>\\x\n",
     "escaped.xml": b"<r Target='file:///C:/Users/&lt;name&gt;/Normal.dotm'/>\n",
-    "system.txt": b"/usr/share/fonts /home/ C:\\Windows\\Fonts /Users/\n",
+    "variables.sh": b"/home/$USER/x C:\\Users\\%USERNAME%\\x /home/{user}/x /home/${USER}\n",
+    "built.py": b"'C:\\\\Users\\\\' + name + '\\\\x' and `/home/` and /home/ alone\n",
+    "system.txt": b"/usr/share/fonts C:\\Windows\\Fonts C:\\Users\\ /Users/\n",
 }
-BYTECODE = ["__pycache__/tool.cpython-312.pyc", "tool.pyc", "lib/old.pyo"]
+BYTECODE = [
+    "__pycache__/tool.cpython-312.pyc",
+    "tool.pyc",
+    "lib/old.pyo",
+    "lib/__pycache__/stale.txt",
+    "töol.pyc",
+]
+
+
+def remove_read_only(function, path, _):
+    """Git writes its objects read-only, which Windows does not let rmtree delete."""
+    os.chmod(path, stat.S_IWRITE)
+    function(path)
 
 
 class CheckAddedFiles(unittest.TestCase):
     def setUp(self):
         self.assertIsNotNone(BASH, "bash is needed to run scripts/check-added-files.sh")
         self.repo = Path(tempfile.mkdtemp(prefix="check-added-files-"))
-        self.addCleanup(shutil.rmtree, self.repo)
+        if sys.version_info >= (3, 12):
+            self.addCleanup(shutil.rmtree, self.repo, onexc=remove_read_only)
+        else:
+            self.addCleanup(shutil.rmtree, self.repo, onerror=remove_read_only)
         self.git("init", "-q")
 
     def git(self, *args):
@@ -47,26 +75,30 @@ class CheckAddedFiles(unittest.TestCase):
             path = self.repo / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
-        self.git("add", "-f", "--", *files)
+        self.git("--literal-pathspecs", "add", "-f", "--", *files)
 
-    def check(self, *args):
+    def commit(self):
+        self.git("commit", "-q", "--no-verify", "-m", "old")
+
+    def check(self, *args, locale="C"):
         result = subprocess.run(
-            [BASH, SCRIPT.as_posix(), *args], cwd=self.repo, capture_output=True, text=True,
-            env={**os.environ, "LC_ALL": "C"},
+            [BASH, SCRIPT.as_posix(), *args], cwd=self.repo, capture_output=True,
+            env={**os.environ, "LC_ALL": locale},
         )
-        return result.returncode, result.stderr
+        return result.returncode, result.stderr.decode("utf-8", "replace")
 
     def test_finds_every_form_of_a_home_directory(self):
         self.write({**OFFENDING, **ALLOWED})
         for args in [(), ("--staged",)]:
-            code, err = self.check(*args)
-            self.assertEqual(code, 1, err)
-            for name in OFFENDING:
-                self.assertIn(f"  {name}:1:", err)
-            for name in ALLOWED:
-                self.assertNotIn(name, err)
-            self.assertIn("/home/%s/" % "alice", err)
-            self.assertIn("C:\\Users\\%s\\" % "Frank Smith", err)
+            for locale in ["C", "C.UTF-8"]:
+                code, err = self.check(*args, locale=locale)
+                self.assertEqual(code, 1, err)
+                for name in OFFENDING:
+                    self.assertIn(f"  {name}:1:", err, (args, locale))
+                for name in ALLOWED:
+                    self.assertNotIn(name, err, (args, locale))
+                self.assertIn("/home/%s/" % "alice", err)
+                self.assertIn("C:\\Users\\%s\\" % "Frank Smith", err)
 
     def test_placeholders_pass(self):
         self.write(ALLOWED)
@@ -75,18 +107,27 @@ class CheckAddedFiles(unittest.TestCase):
 
     def test_refuses_python_bytecode(self):
         self.write({name: b"\x00bytecode" for name in BYTECODE})
-        code, err = self.check("--staged")
-        self.assertEqual(code, 1)
-        for name in BYTECODE:
-            self.assertIn(f"  {name}\n", err)
+        for args in [(), ("--staged",)]:
+            code, err = self.check(*args)
+            self.assertEqual(code, 1, args)
+            for name in BYTECODE:
+                self.assertIn(f"  {name}\n", err, args)
         # Removing bytecode that was committed before is what the check asks for.
-        self.git("commit", "-q", "--no-verify", "-m", "old")
+        self.commit()
         self.git("rm", "-q", "--cached", "--", *BYTECODE)
         self.assertEqual(self.check("--staged"), (0, ""))
 
+    def test_a_renamed_file_is_checked_under_its_new_name(self):
+        self.write({"tool.py": b"print()\n"})
+        self.commit()
+        self.git("mv", "tool.py", "tool.pyc")
+        code, err = self.check("--staged")
+        self.assertEqual(code, 1)
+        self.assertIn("  tool.pyc\n", err)
+
     def test_staged_checks_only_what_the_commit_adds_or_changes(self):
-        self.write({"linux.txt": OFFENDING["linux.txt"]})
-        self.git("commit", "-q", "--no-verify", "-m", "old")
+        self.write({"linux.txt": OFFENDING["linux.txt"], "other.txt": b"x\n"})
+        self.commit()
         self.write({"placeholders.txt": ALLOWED["placeholders.txt"]})
         self.assertEqual(self.check("--staged"), (0, ""))
         # Every tracked file is checked without --staged.
@@ -101,6 +142,31 @@ class CheckAddedFiles(unittest.TestCase):
         # Removing it is fine.
         self.git("rm", "-q", "-f", "--cached", "linux.txt")
         self.assertEqual(self.check("--staged"), (0, ""))
+
+    def test_a_commit_that_only_removes_files_passes(self):
+        self.write({"linux.txt": OFFENDING["linux.txt"], "other.txt": b"x\n"})
+        self.commit()
+        self.git("rm", "-q", "other.txt")
+        self.assertEqual(self.check("--staged"), (0, ""))
+
+    def test_file_names_are_not_pathspecs(self):
+        # `[ab].txt` would be a pattern for a.txt, and where file names may have a colon,
+        # `:(x)` would be pathspec magic and `:notes.txt` the pathspec of notes.txt.
+        colons = os.name != "nt"
+        old = {":(x)": b"x\n", ":notes.txt": OFFENDING["linux.txt"]} if colons else {}
+        self.write({**old, "a.txt": b"x\n"})
+        self.commit()
+        self.write({"[ab].txt": b"x\n", "b.txt": OFFENDING["mac.md"]})
+        (self.repo / "a.txt").write_bytes(OFFENDING["linux.txt"])
+        code, err = self.check("--staged")
+        self.assertEqual(code, 1, err)
+        self.assertIn("  b.txt:1:", err)
+        self.assertNotIn("a.txt", err.replace("[ab].txt", ""))
+        code, err = self.check()
+        self.assertEqual(code, 1, err)
+        self.assertIn("  a.txt:1:", err)
+        if colons:
+            self.assertIn("  :notes.txt:1:", err)
 
     def test_nothing_staged(self):
         self.assertEqual(self.check("--staged"), (0, ""))

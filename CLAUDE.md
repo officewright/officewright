@@ -88,9 +88,11 @@ tools/corpus-runner/    workspace member, publish = false: runs the library over
 tools/ooxml-validate/   small .NET tool: validates generated OOXML with Open XML SDK's OpenXmlValidator (MIT)
 corpus-ext/             gitignored: large external corpora downloaded by scripts/fetch-corpus.sh
 scripts/check.sh        PR quality gate (see below)
-scripts/check-added-files.sh  refuses Python bytecode and files naming a home directory (/home/<name>/,
-                        /Users/<name>/, C:\Users\<name>\; the placeholder <name> is allowed); every tracked
-                        file in check.sh, the staged ones with --staged in .githooks/pre-commit
+scripts/check-added-files.sh  refuses Python bytecode and files naming a home directory (/home/<name>,
+                        /Users/<name>, C:\Users\<name>, C:\Documents and Settings\<name>, a WSL home seen from
+                        Windows; placeholders such as <name> are allowed); every tracked file in check.sh, the
+                        staged ones with --staged in .githooks/pre-commit; it does not look inside compressed
+                        parts (DOCX, PDF streams), which the corpus importers check
 scripts/install-capi.sh installs the C library into a prefix with the release archive layout
 scripts/check-capi.sh   checks such a prefix as a user would: files, exports, tests/c, tests/ffi-python
 scripts/package.sh      builds one release archive; release-in-container.sh wraps it for the Linux builds
