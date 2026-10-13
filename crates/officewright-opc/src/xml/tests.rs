@@ -525,3 +525,33 @@ fn keeps_error_messages_short_whatever_the_document_holds() {
         )
     );
 }
+
+#[test]
+fn reads_parts_labelled_us_ascii_as_utf_8() {
+    // ASCII is a subset of UTF-8; a part whose label says ASCII but whose text is UTF-8
+    // is read as UTF-8, as its producer meant.
+    for label in ["US-ASCII", "us-ascii", "ASCII"] {
+        assert_eq!(
+            trace(&format!(
+                "<?xml version=\"1.0\" encoding=\"{label}\"?><a>\u{e9}t\u{e9}</a>"
+            )),
+            ["<a>", "'\u{e9}t\u{e9}'", "</a>"],
+            "{label}"
+        );
+    }
+    // Bytes that are not UTF-8 stay malformed, whatever the label.
+    assert!(matches!(
+        trace_bytes(
+            b"<?xml version=\"1.0\" encoding=\"US-ASCII\"?><a>\xE9</a>",
+            &Limits::new()
+        ),
+        Err(Error::Xml { .. })
+    ));
+    assert!(matches!(
+        trace_bytes(
+            b"<?xml version=\"1.0\" encoding=\"ASCII-8\"?><a/>",
+            &Limits::new()
+        ),
+        Err(Error::Unsupported(_))
+    ));
+}

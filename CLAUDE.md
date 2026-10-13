@@ -89,7 +89,7 @@ scripts/corpus-import.py   checks make-reference.ps1 results and turns them into
 2. New behaviour has tests; a bug fix has a regression test that failed before the fix.
 3. Every new public item has a doc comment; non-trivial public APIs have a runnable doc example.
 4. A new parser comes with a fuzz target in `fuzz/`.
-5. Every public Rust feature that users need is exposed through the C ABI in the same PR, with the header regenerated and covered by `tests/c` and `tests/ffi-python`. A crate that no user-facing feature uses yet (a building block such as `officewright-font`) gets its C ABI in the PR that makes it user-facing.
+5. Every public Rust feature that users need is exposed through the C ABI in the same PR, with the header regenerated and covered by `tests/c` and `tests/ffi-python`. A crate that no user-facing feature uses yet (a building block such as `officewright-font`) gets its C ABI in the PR that makes it user-facing. Work the maintainer planned as a chain of stacked PRs gets its C ABI in the PR of the chain the plan names: the DOCX reader in the last one, once the document model is complete.
 6. Never weaken a check to make it pass (no `#[allow]` without a `// reason:` comment, no skipped tests, no lowered lint levels).
 
 ## Rust conventions

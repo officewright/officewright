@@ -30,6 +30,7 @@ pub struct Reader<'a> {
     state: State,
     max_depth: usize,
     max_attributes: usize,
+    max_mce_names: usize,
     uris: Vec<Box<str>>,
     ids: HashMap<Box<str>, NsId>,
     /// The namespaces each prefix is bound to, innermost last; `""` is the default
@@ -67,6 +68,7 @@ impl<'a> Reader<'a> {
             state: State::Start,
             max_depth: limits.max_xml_depth(),
             max_attributes: limits.max_xml_attributes(),
+            max_mce_names: limits.max_mce_names(),
             uris: Vec::new(),
             ids: HashMap::new(),
             bindings: HashMap::new(),
@@ -86,7 +88,8 @@ impl<'a> Reader<'a> {
     /// # Errors
     ///
     /// [`Error::Xml`] where the document is not well-formed, [`Error::Unsupported`] for
-    /// an XML declaration that names an encoding other than UTF-8 or UTF-16, and
+    /// an XML declaration that names an encoding other than UTF-8, UTF-16, US-ASCII or
+    /// ASCII (a part labelled ASCII is read as UTF-8, any UTF-8 included), and
     /// [`Error::LimitExceeded`] when an element nests deeper than
     /// [`Limits::max_xml_depth`] or has more attributes than
     /// [`Limits::max_xml_attributes`].
@@ -514,9 +517,17 @@ impl<'a> Reader<'a> {
                     self.error(offset, format!("invalid encoding name {}", short(encoding)))
                 );
             }
-            // The bytes were decoded before reading; a UTF-8 or UTF-16 label is
-            // accepted whichever of the two they turned out to be.
-            if !encoding.eq_ignore_ascii_case("utf-8") && !encoding.eq_ignore_ascii_case("utf-16") {
+            // The bytes were decoded before reading, as UTF-8 or UTF-16, and the label
+            // is accepted whichever of the two they turned out to be. ECMA-376 Part 2
+            // allows only UTF-8 and UTF-16 labels. A part labelled US-ASCII or ASCII is
+            // accepted too (#11): ASCII is a subset of UTF-8, and producers outside Office
+            // write that label, some over text that is really UTF-8, which is then read
+            // as they meant it.
+            let known = ["utf-8", "utf-16", "us-ascii", "ascii"];
+            if !known
+                .iter()
+                .any(|label| encoding.eq_ignore_ascii_case(label))
+            {
                 return Err(Error::Unsupported(format!(
                     "xml encoding {}; OOXML parts are UTF-8 or UTF-16",
                     short(encoding)
@@ -751,10 +762,18 @@ impl<'a> Reader<'a> {
         })
     }
 
-    fn limit(&self, limit: Limit, offset: usize) -> Error {
+    /// [`Limits::max_mce_names`] of the limits this reader was made with.
+    pub(crate) fn max_mce_names(&self) -> usize {
+        self.max_mce_names
+    }
+
+    /// An [`Error::LimitExceeded`] for one of the limits on a part's XML, at a byte
+    /// offset of this document.
+    pub(crate) fn limit(&self, limit: Limit, offset: usize) -> Error {
         let (line, column) = location(self.text, offset);
         let maximum = match limit {
             Limit::XmlDepth => self.max_depth,
+            Limit::MceNames => self.max_mce_names,
             _ => self.max_attributes,
         };
         Error::LimitExceeded {

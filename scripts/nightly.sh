@@ -26,7 +26,9 @@ printf '==> %s\n' "fuzzing (30 min per target)"
 # script if either fails.
 seeds() {
 	case $1 in
+	docx_open) echo tests/corpus/word-rules tests/corpus/resaved crates/officewright-doc/tests/data ;;
 	font_* | pdf_embed) echo tests/fonts crates/officewright-font/tests/data ;;
+	package) echo fuzz/seeds/package ;;
 	xml) echo fuzz/seeds/xml ;;
 	zip_archive) echo crates/officewright-opc/tests/data ;;
 	*)
