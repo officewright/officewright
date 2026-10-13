@@ -7,8 +7,8 @@
 # with / or single or doubled backslashes, in text and binary files. A placeholder such as
 # <name>, $USER, %USERNAME% or {user} is allowed: a name is made of characters that do not
 # start a placeholder. Text compressed inside a file (DOCX, XLSX and PPTX parts, PDF
-# streams) or stored as UTF-16 is not searched; scripts/corpus-import.py and
-# scripts/import-public-docs.py check the packages they bring in.
+# streams) or stored as UTF-16 is not searched; only the documents brought in through
+# scripts/corpus-import.py and scripts/import-public-docs.py are checked there.
 #
 #   scripts/check-added-files.sh           every tracked file, as it is in the working tree
 #   scripts/check-added-files.sh --staged  the files the commit adds, changes or renames,
@@ -22,8 +22,9 @@ name="$char+"
 # Windows user names may have spaces inside, not at either end.
 windows_name="$char(($char| )*$char)?"
 sep='(\\+|/)'
-# The name ends at a separator, a quote, white space or the end of the line.
-end="($sep|[\"'\`[:space:]]|\$)"
+# The name ends at a separator, a quote, white space, a control character, markup or
+# punctuation that cannot be part of it, or the end of the line.
+end="($sep|[\"'\`<>(),;:&[:space:][:cntrl:]]|\$)"
 pattern="${sep}home$sep$name$end|/Users/$name$end"
 pattern+="|[A-Za-z]:$sep([Uu][Ss][Ee][Rr][Ss]|[Dd]ocuments and [Ss]ettings)$sep$windows_name$end"
 

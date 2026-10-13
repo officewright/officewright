@@ -30,6 +30,10 @@ OFFENDING = {
     # The home directory itself, with nothing after the name.
     "env.sh": b"HOME=/home/%s\n" % b"jo",
     "home.json": b'{"home": "/Users/%s", "profile": "C:\\\\Users\\\\%s"}\n' % (b"kim", b"lee"),
+    "home.xml": b"<home>/home/%s</home>\n" % b"mo",
+    "spaced.txt": b"cd /home/%s && ls\n" % b"nina",
+    "listed.txt": b"(/home/%s), /Users/%s; C:\\Users\\%s:\n" % (b"oz", b"pat", b"quinn"),
+    "nul.bin": b"\x00/home/%s\x00" % b"ray",
 }
 # Placeholders, and paths that are not home directories.
 ALLOWED = {
@@ -167,6 +171,28 @@ class CheckAddedFiles(unittest.TestCase):
         self.assertIn("  a.txt:1:", err)
         if colons:
             self.assertIn("  :notes.txt:1:", err)
+
+    def test_a_git_error_fails_the_check(self):
+        # A git that fails in grep, as it would on a broken repository.
+        real = Path(shutil.which("git")).as_posix()
+        bin_dir = self.repo / ".fake-bin"
+        bin_dir.mkdir()
+        fake = bin_dir / "git"
+        fake.write_text(
+            "#!/bin/sh\n"
+            'for a; do [ "$a" = grep ] && { echo "fatal: broken" >&2; exit 2; }; done\n'
+            f'exec "{real}" "$@"\n'
+        )
+        fake.chmod(0o755)
+        self.write(ALLOWED)
+        env_path = f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
+        for args in [(), ("--staged",)]:
+            result = subprocess.run(
+                [BASH, SCRIPT.as_posix(), *args], cwd=self.repo, capture_output=True,
+                text=True, env={**os.environ, "PATH": env_path},
+            )
+            self.assertEqual(result.returncode, 1, args)
+            self.assertIn("git grep failed", result.stderr, args)
 
     def test_nothing_staged(self):
         self.assertEqual(self.check("--staged"), (0, ""))
