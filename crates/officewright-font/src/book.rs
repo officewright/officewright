@@ -10,7 +10,7 @@ use crate::coverage::Coverage;
 use crate::error::{Error, Result};
 use crate::face::{EmbeddingPermissions, FaceProperties, FontNames, OutlineFormat};
 use crate::font::FontFace;
-use crate::index::{self, IndexError, IndexedFace};
+use crate::index::{self, CoverageLimits, IndexError, IndexedFace};
 use crate::system::system_font_dirs;
 
 /// Where a face in a [`FontBook`] came from. When several faces fit a request equally
@@ -205,10 +205,16 @@ impl FaceInfo {
         let file = &self.coverage.file;
         let all = file.coverages.get_or_init(|| match &self.source {
             Source::File(path) => match File::open(path) {
-                Ok(open) => index::read_coverages(&mut BufReader::new(open), &file.faces),
+                Ok(open) => index::read_coverages(
+                    &mut BufReader::new(open),
+                    &file.faces,
+                    CoverageLimits::FILE,
+                ),
                 Err(_) => Vec::new(),
             },
-            Source::Memory(data) => index::read_coverages(&mut Cursor::new(&**data), &file.faces),
+            Source::Memory(data) => {
+                index::read_coverages(&mut Cursor::new(&**data), &file.faces, CoverageLimits::FILE)
+            }
         });
         all.get(self.coverage.slot)
             .map_or(&NOTHING, |coverage| coverage)
@@ -409,24 +415,25 @@ impl FontBook {
     /// The faces whose character map has a glyph for `ch`, in the order of
     /// [`faces`](Self::faces).
     ///
-    /// A face covers the characters that the subtable [`FontFace::char_map`] uses both
-    /// lists and maps to a glyph other than 0 and inside the font. For an intact subtable
-    /// that is every character [`CharMap::map`](crate::CharMap::map) maps; in a damaged
-    /// one, such as a format 4 subtable whose segments are out of order, the listing and
-    /// the lookup can disagree, and only what both find counts. A symbol font covers the
-    /// characters its subtable lists, normally U+F020 to U+F0FF; the U+0020 to U+00FF
+    /// A face covers the characters that the subtable [`FontFace::char_map`] uses maps to
+    /// a glyph other than 0 and inside the font, exactly the characters
+    /// [`CharMap::map`](crate::CharMap::map) maps, with two exceptions. A symbol font covers
+    /// the characters its subtable lists, normally U+F020 to U+F0FF; the U+0020 to U+00FF
     /// that [`FontFace::glyph_id`] also finds, as Windows does, do not count, so a symbol
-    /// font never stands in for Latin text.
+    /// font never stands in for Latin text. And a subtable whose segments or groups are
+    /// out of order or overlap, so that a lookup cannot be trusted, covers nothing.
     ///
     /// Adding fonts does not read their character maps. The first query reads, for every
     /// face added from the same file or buffer, its table directory, its `cmap` table and
-    /// the start of its `maxp` table, and keeps what each face maps, so later queries cost
-    /// a lookup per face; the clones of the book share it. Faces that share their tables,
-    /// as those of a collection usually do, are read once. The reading is bounded per
-    /// file, like the index: about two million listed code points and 65,536 ranges of
-    /// them for all its faces together, which real fonts stay far below. A face past
-    /// those bounds, a face whose file can no longer be read, and a face whose `cmap` is
-    /// damaged or missing cover nothing, and are not read again.
+    /// the start of its `maxp` table, and keeps what each face maps as ranges of
+    /// characters, so later queries cost a lookup per face; the clones of the book share
+    /// it. Faces that share their tables, as those of a collection usually do, are read
+    /// once. The work grows with the size of the tables, not with the number of
+    /// characters they map, and is bounded per file like the index: the bytes it reads,
+    /// about four million segments, groups and glyph-array entries, and 65,536 ranges,
+    /// for all its faces together, which real fonts stay far below. A face past those
+    /// bounds, a face whose file can no longer be read, and a face whose `cmap` is damaged
+    /// or missing cover nothing, and are not read again.
     ///
     /// ```
     /// use officewright_font::FontBook;
@@ -1448,6 +1455,116 @@ mod tests {
     }
 
     #[test]
+    fn coverage_agrees_with_lookups_for_every_kind_of_subtable() {
+        use testing::{cmap_of, format4, groups_subtable};
+        let d = |code: u16, glyph: u16| glyph.wrapping_sub(code);
+        // The glyph ID array index where segment `i` of `count` (the closing one
+        // included) starts reading, as an idRangeOffset.
+        let at = |i: u16, count: u16, index: u16| 2 * (count - i + index);
+        let array = [0, 1, 2, 9, 3, 0, 4, 1, 2, 3, 4, 5, 0, 1, 2, 3];
+        let cases: [(&str, Vec<u8>); 8] = [
+            (
+                "glyph array",
+                cmap_of(&[(
+                    3,
+                    1,
+                    format4(
+                        &[
+                            (0x20, 0x2F, 0, at(0, 5, 0)),
+                            (0x100, 0x107, 0xFFFF, at(1, 5, 4)),
+                            (0x200, 0x2FF, 0, at(2, 5, 10)),
+                            // An entry of 0 maps nothing, whatever the delta.
+                            (0x300, 0x303, 2, at(3, 5, 0)),
+                        ],
+                        &array,
+                    ),
+                )]),
+            ),
+            (
+                "deltas that wrap",
+                testing::cmap_format4(&[(0x10, 0x20, 0xFFEE), (0xFFF0, 0xFFFE, 0x12)]),
+            ),
+            (
+                "format 12",
+                testing::cmap_groups(
+                    12,
+                    &[
+                        (0x1000, 0x1010, u32::MAX - 2),
+                        (0x2_0000, 0x2_0003, 1),
+                        (0x10_FFF0, 0x10_FFFF, 1),
+                    ],
+                ),
+            ),
+            (
+                "format 13",
+                testing::cmap_groups(
+                    13,
+                    &[
+                        (0x41, 0x45, 0),
+                        (0x50, 0x60, 3),
+                        (0x1_F600, 0x1_F64F, 4),
+                        (0x2_0000, 0x2_0001, 7),
+                    ],
+                ),
+            ),
+            (
+                "full Unicode over BMP",
+                // The full subtable comes first, so it wins only by its kind.
+                cmap_of(&[
+                    (3, 10, groups_subtable(12, &[(0x42, 0x42, 3)])),
+                    (0, 3, format4(&[(0x41, 0x41, d(0x41, 2), 0)], &[])),
+                ]),
+            ),
+            (
+                "the last of a kind",
+                cmap_of(&[
+                    (3, 1, format4(&[(0x41, 0x41, d(0x41, 2), 0)], &[])),
+                    (0, 3, format4(&[(0x42, 0x42, d(0x42, 3), 0)], &[])),
+                ]),
+            ),
+            (
+                "records that are not read",
+                // Variation sequences and a Macintosh subtable come last, where the
+                // search starts, and are passed over.
+                cmap_of(&[
+                    (3, 1, format4(&[(0x41, 0x41, d(0x41, 2), 0)], &[])),
+                    (0, 5, format4(&[(0x43, 0x43, d(0x43, 1), 0)], &[])),
+                    (1, 0, format4(&[(0x42, 0x42, d(0x42, 3), 0)], &[])),
+                ]),
+            ),
+            (
+                "symbol over Unicode",
+                // The symbol subtable comes first, so it wins only by its kind.
+                cmap_of(&[
+                    (3, 0, format4(&[(0xF041, 0xF043, d(0xF041, 2), 0)], &[])),
+                    (3, 10, groups_subtable(12, &[(0x100, 0x100, 1)])),
+                ]),
+            ),
+        ];
+        for (name, cmap) in cases {
+            let mut book = FontBook::new();
+            let font = TestFont::new("Test Map").with_table(b"cmap", cmap);
+            book.add_bytes(font.build(), FontOrigin::User).unwrap();
+            let face = book.load(FaceId(0)).unwrap();
+            let map = face.char_map();
+            let mut covered = 0;
+            for code_point in (0..=0x2_0010).chain(0x10_FFF0..=0x10_FFFF) {
+                let Some(ch) = char::from_u32(code_point) else {
+                    continue;
+                };
+                // The low range of a symbol font is found through the alias only.
+                if face.is_symbol() && code_point <= 0xFF {
+                    continue;
+                }
+                let covers = !book.faces_covering(ch).is_empty();
+                assert_eq!(covers, map.map(ch).is_some(), "{name}: {ch:?}");
+                covered += usize::from(covers);
+            }
+            assert!(covered > 0, "{name} covers nothing");
+        }
+    }
+
+    #[test]
     fn clones_share_what_was_read() {
         let dir = TempDir::new("coverage-clone");
         let path = dir.0.join("sans.ttf");
@@ -1504,9 +1621,9 @@ mod tests {
     }
 
     #[test]
-    fn a_file_has_one_budget_for_all_its_faces() {
-        // Three faces with maps of their own, each of all of Unicode: the first fits the
-        // budget of the file, the others do not and cover nothing.
+    fn a_map_costs_its_groups_not_its_characters() {
+        // Three faces with maps of their own, each one group of all of Unicode: a step
+        // each, so all of them are read, however many characters they map.
         let ttc = testing::collection(&[
             everything("Test One"),
             everything("Test Two"),
@@ -1514,17 +1631,15 @@ mod tests {
         ]);
         let mut book = FontBook::new();
         book.add_bytes(ttc, FontOrigin::Document).unwrap();
-        assert_eq!(
-            families(&book, &book.faces_covering('\u{4E00}')),
-            ["Test One"]
-        );
-        // Each file has a budget of its own.
         book.add_bytes(everything("Test Four"), FontOrigin::Document)
             .unwrap();
-        assert_eq!(
-            families(&book, &book.faces_covering('A')),
-            ["Test One", "Test Four"]
-        );
+        for ch in ['A', '\u{4E00}', '\u{10_FFFF}'] {
+            assert_eq!(
+                families(&book, &book.faces_covering(ch)),
+                ["Test One", "Test Two", "Test Three", "Test Four"],
+                "{ch:?}"
+            );
+        }
     }
 
     #[test]

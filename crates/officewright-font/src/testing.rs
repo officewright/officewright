@@ -529,39 +529,58 @@ pub(crate) fn name_table(records: &[(u16, u16, u16, u16, &str)]) -> Vec<u8> {
 /// closing segment at U+FFFF after them. Nothing is checked, so a test can build a
 /// damaged subtable.
 pub(crate) fn cmap_format4(segments: &[(u16, u16, u16)]) -> Vec<u8> {
+    let segments: Vec<_> = segments
+        .iter()
+        .map(|&(start, end, delta)| (start, end, delta, 0))
+        .collect();
+    cmap_of(&[(3, 1, format4(&segments, &[]))])
+}
+
+/// A format 4 subtable of `segments`, `(startCode, endCode, idDelta, idRangeOffset)`
+/// each, then the closing segment at U+FFFF, and `glyph_ids` as its glyph ID array.
+/// Nothing is checked.
+pub(crate) fn format4(segments: &[(u16, u16, u16, u16)], glyph_ids: &[u16]) -> Vec<u8> {
     let mut segments = segments.to_vec();
-    segments.push((0xFFFF, 0xFFFF, 1));
+    segments.push((0xFFFF, 0xFFFF, 1, 0));
     let seg_count = segments.len() as u16;
     let log2 = 15 - seg_count.leading_zeros() as u16;
     let search_range = 2 << log2;
     let mut sub = Vec::new();
     put_u16(&mut sub, 4); // format
-    put_u16(&mut sub, 16 + 8 * seg_count); // length
+    put_u16(&mut sub, 16 + 8 * seg_count + 2 * glyph_ids.len() as u16); // length
     put_u16(&mut sub, 0); // language
     put_u16(&mut sub, seg_count * 2);
     put_u16(&mut sub, search_range);
     put_u16(&mut sub, log2);
     put_u16(&mut sub, (seg_count * 2).saturating_sub(search_range));
-    for &(_, end, _) in &segments {
+    for &(_, end, _, _) in &segments {
         put_u16(&mut sub, end);
     }
     put_u16(&mut sub, 0); // reservedPad
-    for &(start, _, _) in &segments {
+    for &(start, _, _, _) in &segments {
         put_u16(&mut sub, start);
     }
-    for &(_, _, delta) in &segments {
+    for &(_, _, delta, _) in &segments {
         put_u16(&mut sub, delta);
     }
-    for _ in &segments {
-        put_u16(&mut sub, 0); // idRangeOffset
+    for &(_, _, _, offset) in &segments {
+        put_u16(&mut sub, offset);
     }
-    cmap_with(3, 1, &sub)
+    for &glyph in glyph_ids {
+        put_u16(&mut sub, glyph);
+    }
+    sub
 }
 
 /// A `cmap` table with one Windows Unicode full subtable in format 12 (each group maps
 /// a range to consecutive glyphs) or 13 (each group maps a range to one glyph), made of
 /// `groups`, `(startCharCode, endCharCode, glyphID)` each, as given.
 pub(crate) fn cmap_groups(format: u16, groups: &[(u32, u32, u32)]) -> Vec<u8> {
+    cmap_of(&[(3, 10, groups_subtable(format, groups))])
+}
+
+/// A format 12 or 13 subtable of `groups`, as given.
+pub(crate) fn groups_subtable(format: u16, groups: &[(u32, u32, u32)]) -> Vec<u8> {
     let mut sub = Vec::new();
     put_u16(&mut sub, format);
     put_u16(&mut sub, 0); // reserved
@@ -573,18 +592,25 @@ pub(crate) fn cmap_groups(format: u16, groups: &[(u32, u32, u32)]) -> Vec<u8> {
         put_u32(&mut sub, end);
         put_u32(&mut sub, glyph);
     }
-    cmap_with(3, 10, &sub)
+    sub
 }
 
-/// A `cmap` table with one encoding record pointing at `subtable`.
-fn cmap_with(platform: u16, encoding: u16, subtable: &[u8]) -> Vec<u8> {
+/// A `cmap` table with an encoding record `(platformID, encodingID, subtable)` each, in
+/// the order given.
+pub(crate) fn cmap_of(records: &[(u16, u16, Vec<u8>)]) -> Vec<u8> {
     let mut t = Vec::new();
     put_u16(&mut t, 0); // version
-    put_u16(&mut t, 1);
-    put_u16(&mut t, platform);
-    put_u16(&mut t, encoding);
-    put_u32(&mut t, 12);
-    t.extend_from_slice(subtable);
+    put_u16(&mut t, records.len() as u16);
+    let mut offset = 4 + 8 * records.len() as u32;
+    for (platform, encoding, subtable) in records {
+        put_u16(&mut t, *platform);
+        put_u16(&mut t, *encoding);
+        put_u32(&mut t, offset);
+        offset += subtable.len() as u32;
+    }
+    for (_, _, subtable) in records {
+        t.extend_from_slice(subtable);
+    }
     t
 }
 

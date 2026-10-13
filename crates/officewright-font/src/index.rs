@@ -15,10 +15,9 @@ use skrifa::raw::tables::name::Name;
 use skrifa::raw::types::Tag;
 use skrifa::raw::{FontData, FontRead, TableDirectory, TableProvider};
 
-use skrifa::charmap::Charmap;
-use skrifa::raw::FontRef;
+use skrifa::raw::tables::maxp::Maxp;
 
-use crate::coverage::Coverage;
+use crate::coverage::{Allowance, Coverage};
 use crate::error::{Cause, Error};
 use crate::face::{FaceProperties, english_rank};
 use crate::font::{all_records, optional, required};
@@ -66,64 +65,72 @@ const MAX_INSTANCES: usize = 256;
 /// of Unicode need a few hundred kilobytes.
 const MAX_CMAP: u32 = 16 << 20;
 
-/// The most code points the character maps of one file may list, all faces together. A
-/// font that maps the whole of Unicode lists 1.1 million, a collection of East Asian
-/// fonts about 65,000 per face; faces that share a `cmap` count once. Faces past the
-/// budget cover nothing, so a file whose faces all point at one huge map costs no more
-/// than one of them.
-const MAX_CODE_POINTS_PER_FILE: u64 = 1 << 21;
+/// How much reading the coverage of one file's faces may cost, all faces together.
+#[derive(Clone, Copy)]
+pub(crate) struct CoverageLimits {
+    /// Bytes read, table directories included.
+    pub(crate) read: u64,
+    /// Segments, groups and glyph-array entries looked at; see [`Coverage::of_cmap`].
+    pub(crate) steps: u64,
+    /// Ranges of code points kept.
+    pub(crate) ranges: usize,
+}
 
-/// The most ranges of code points kept for one file, all faces together. Real fonts need
-/// a few thousand; a map that lists every other code point would need hundreds of
-/// thousands, and a face that would go past the budget covers nothing.
-const MAX_RANGES_PER_FILE: usize = 1 << 16;
+impl CoverageLimits {
+    /// The limits of a file. Real character maps take a few thousand steps and ranges, a
+    /// few hundred thousand bytes; faces that share a `cmap` count once.
+    pub(crate) const FILE: Self = Self {
+        read: MAX_READ_PER_FILE,
+        steps: 1 << 22,
+        ranges: 1 << 16,
+    };
+}
 
 /// The characters each of `faces` of a font file maps to a glyph, as
 /// [`FontFace::char_map`](crate::FontFace::char_map) maps them, in the order of `faces`.
 ///
 /// It reads like the index: the table directories, the `cmap` tables and the start of
-/// the `maxp` tables, nothing else, within one budget for the whole file. Faces that
-/// share their `cmap` and `maxp` tables, as the faces of a collection usually do, share
-/// one coverage. A face that cannot be read, or would go past a budget, covers nothing.
-pub(crate) fn read_coverages<R: Read + Seek>(reader: &mut R, faces: &[u32]) -> Vec<Arc<Coverage>> {
-    let nothing = Arc::new(Coverage::default());
+/// the `maxp` tables, nothing else, within `limits` for the whole file. Faces that share
+/// their `cmap` and `maxp` tables, as the faces of a collection usually do, share one
+/// coverage. A face that cannot be read, or would go past the limits, covers nothing.
+pub(crate) fn read_coverages<R: Read + Seek>(
+    reader: &mut R,
+    faces: &[u32],
+    limits: CoverageLimits,
+) -> Vec<Arc<Coverage>> {
+    let nothing = Arc::new(Coverage::NOTHING);
     let Ok(file_len) = reader.seek(SeekFrom::End(0)) else {
         return vec![nothing; faces.len()];
     };
     let mut file = BoundedReader {
         reader,
         file_len,
-        budget: MAX_READ_PER_FILE,
+        budget: limits.read,
         exhausted: false,
     };
-    let mut budget = CoverageBudget {
-        code_points: MAX_CODE_POINTS_PER_FILE,
-        ranges: MAX_RANGES_PER_FILE,
+    let mut allowance = Allowance {
+        steps: limits.steps,
+        ranges: limits.ranges,
     };
     let mut known = HashMap::new();
     faces
         .iter()
         .map(|&face| {
-            read_face_coverage(&mut file, face, &mut budget, &mut known)
+            read_face_coverage(&mut file, face, &mut allowance, &mut known)
                 .unwrap_or_else(|| Arc::clone(&nothing))
         })
         .collect()
 }
 
-/// What is left of the budgets of one file.
-struct CoverageBudget {
-    code_points: u64,
-    ranges: usize,
-}
-
-/// Where a face's `cmap` and `maxp` tables are in the file.
+/// Where a face's `cmap` table and the part of its `maxp` table that is read are in the
+/// file.
 type TablesKey = (u32, u32, u32, u32);
 
 /// The coverage of one face; `None` if it covers nothing.
 fn read_face_coverage<R: Read + Seek>(
     file: &mut BoundedReader<'_, R>,
     face: u32,
-    budget: &mut CoverageBudget,
+    allowance: &mut Allowance,
     known: &mut HashMap<TablesKey, Option<Arc<Coverage>>>,
 ) -> Option<Arc<Coverage>> {
     let header = file.read_at(0, 12).ok()??;
@@ -159,7 +166,7 @@ fn read_face_coverage<R: Read + Seek>(
     if let Some(coverage) = known.get(&key) {
         return coverage.clone();
     }
-    let coverage = read_tables_coverage(file, key, budget).map(Arc::new);
+    let coverage = read_tables_coverage(file, key, allowance).map(Arc::new);
     known.insert(key, coverage.clone());
     coverage
 }
@@ -168,86 +175,19 @@ fn read_face_coverage<R: Read + Seek>(
 fn read_tables_coverage<R: Read + Seek>(
     file: &mut BoundedReader<'_, R>,
     (cmap_offset, cmap_len, maxp_offset, maxp_len): TablesKey,
-    budget: &mut CoverageBudget,
+    allowance: &mut Allowance,
 ) -> Option<Coverage> {
     if cmap_len > MAX_CMAP {
         return None;
     }
-    let cmap = file
-        .read_at(u64::from(cmap_offset), u64::from(cmap_len))
-        .ok()??;
     let maxp = file
         .read_at(u64::from(maxp_offset), u64::from(maxp_len))
         .ok()??;
-    let font = two_table_font(&cmap, &maxp)?;
-    let font = FontRef::new(&font).ok()?;
-    let glyph_count = u32::from(font.maxp().ok()?.num_glyphs());
-    let charmap = Charmap::new(&font);
-    // Glyph 0 means "not mapped" and is left out of the mappings; a glyph past the end of
-    // the font is a damaged entry, which `CharMap::map` does not map either. Each code
-    // point the subtable lists is looked up too, as `CharMap::map` looks it up: in a
-    // damaged subtable, such as one with overlapping segments, the two can disagree.
-    let maps = |code_point: u32| {
-        charmap
-            .map(code_point)
-            .is_some_and(|glyph| glyph.to_u32() < glyph_count)
-    };
-    let mut listed = charmap.mappings();
-    let mut out_of_budget = false;
-    let code_points = std::iter::from_fn(|| {
-        let item = listed.next()?;
-        if budget.code_points == 0 {
-            out_of_budget = true;
-            return None;
-        }
-        budget.code_points -= 1;
-        Some(item)
-    })
-    .filter(|&(code_point, glyph)| glyph.to_u32() < glyph_count && maps(code_point))
-    .map(|(code_point, _)| code_point);
-    // The iteration of format 12 and 13 subtables in read-fonts 0.45 stops one short of
-    // char::MAX, a noncharacter no real font maps; a lookup tells whether this one does.
-    let last = maps(u32::from(char::MAX)).then_some(u32::from(char::MAX));
-    let coverage = Coverage::from_code_points(code_points.chain(last), budget.ranges);
-    if out_of_budget {
-        // The rest of the file covers nothing too.
-        budget.code_points = 0;
-        return None;
-    }
-    let coverage = coverage?;
-    budget.ranges -= coverage.range_count();
-    Some(coverage)
-}
-
-/// A font file that holds only a `cmap` and a `maxp` table: all a character map needs.
-fn two_table_font(cmap: &[u8], maxp: &[u8]) -> Option<Vec<u8>> {
-    // The table directory: version 1.0, 2 tables, and the binary search fields for 2.
-    let mut font = Vec::with_capacity(44 + cmap.len() + 3 + maxp.len());
-    font.extend_from_slice(&0x0001_0000_u32.to_be_bytes());
-    for value in [2_u16, 32, 1, 0] {
-        font.extend_from_slice(&value.to_be_bytes());
-    }
-    let cmap_offset = 44_u32;
-    let cmap_len = u32::try_from(cmap.len()).ok()?;
-    // Tables start on four-byte boundaries.
-    let maxp_offset = cmap_offset
-        .checked_add(cmap_len)?
-        .checked_next_multiple_of(4)?;
-    let maxp_len = u32::try_from(maxp.len()).ok()?;
-    // Records sorted by tag, with checksums the parser does not check.
-    for (tag, offset, len) in [
-        (b"cmap", cmap_offset, cmap_len),
-        (b"maxp", maxp_offset, maxp_len),
-    ] {
-        font.extend_from_slice(tag);
-        font.extend_from_slice(&0_u32.to_be_bytes());
-        font.extend_from_slice(&offset.to_be_bytes());
-        font.extend_from_slice(&len.to_be_bytes());
-    }
-    font.extend_from_slice(cmap);
-    font.resize(usize::try_from(maxp_offset).ok()?, 0);
-    font.extend_from_slice(maxp);
-    Some(font)
+    let glyph_count = Maxp::read(FontData::new(&maxp)).ok()?.num_glyphs();
+    let cmap = file
+        .read_at(u64::from(cmap_offset), u64::from(cmap_len))
+        .ok()??;
+    Coverage::of_cmap(&cmap, glyph_count, allowance)
 }
 
 /// Why a font file could not be indexed.
@@ -664,12 +604,22 @@ mod tests {
             .unwrap()
     }
 
+    /// Whether each of `faces` of `data` covers `ch`, within `limits`.
+    fn covers_with(data: &[u8], faces: &[u32], ch: char, limits: CoverageLimits) -> Vec<bool> {
+        read_coverages(&mut Cursor::new(data), faces, limits)
+            .iter()
+            .map(|coverage| coverage.contains(ch))
+            .collect()
+    }
+
     /// Whether each of `faces` of `data` covers A.
     fn covers_a(data: &[u8], faces: &[u32]) -> Vec<bool> {
-        read_coverages(&mut Cursor::new(data), faces)
-            .iter()
-            .map(|coverage| coverage.contains('A'))
-            .collect()
+        covers_with(data, faces, 'A', CoverageLimits::FILE)
+    }
+
+    /// The table directory of face `face` of a collection.
+    fn face_offset(ttc: &[u8], face: usize) -> usize {
+        u32::from_be_bytes(ttc[12 + 4 * face..16 + 4 * face].try_into().unwrap()) as usize
     }
 
     #[test]
@@ -679,6 +629,76 @@ mod tests {
         assert_eq!(covers_a(&ttc, &[0, 1, 2, 7]), [true, true, false, false]);
         assert_eq!(covers_a(&font, &[0, 1]), [true, false]);
         assert_eq!(covers_a(b"not a font", &[0]), [false]);
+        // A header that lists one face, followed by the offset of another: only face 0.
+        let mut one = ttc.clone();
+        one[8..12].copy_from_slice(&1_u32.to_be_bytes());
+        assert_eq!(covers_a(&one, &[0, 1]), [true, false]);
+    }
+
+    /// A collection of three faces with character maps of their own, each 1,500 groups
+    /// of one code point and glyph 1: 1,500 steps and ranges, 18 kB, per face.
+    fn three_big_maps() -> Vec<u8> {
+        let groups: Vec<(u32, u32, u32)> =
+            (0..1500).map(|i| (0x41 + 2 * i, 0x41 + 2 * i, 1)).collect();
+        let font = TestFont::new("Test Big")
+            .with_table(b"cmap", testing::cmap_groups(12, &groups))
+            .build();
+        testing::collection(&[font.clone(), font.clone(), font])
+    }
+
+    #[test]
+    fn the_limits_of_a_file_hold_for_all_its_faces_together() {
+        let ttc = three_big_maps();
+        let all = [0, 1, 2];
+        assert_eq!(
+            covers_with(&ttc, &all, 'A', CoverageLimits::FILE),
+            [true; 3]
+        );
+        let limits = |read, steps, ranges| CoverageLimits {
+            read,
+            steps,
+            ranges,
+        };
+        // Room for two of the maps, whichever limit it is.
+        let only_two = [true, true, false];
+        assert_eq!(
+            covers_with(&ttc, &all, 'A', limits(45_000, 1 << 20, 1 << 20)),
+            only_two
+        );
+        assert_eq!(
+            covers_with(&ttc, &all, 'A', limits(1 << 20, 3_100, 1 << 20)),
+            only_two
+        );
+        assert_eq!(
+            covers_with(&ttc, &all, 'A', limits(1 << 20, 1 << 20, 3_100)),
+            only_two
+        );
+    }
+
+    #[test]
+    fn faces_share_coverage_only_when_they_share_maxp_too() {
+        let font = TestFont::new("Test Sans").build();
+        let mut ttc = testing::collection(&[font.clone(), font]);
+        // Face 1 points at face 0's cmap, but its own maxp says it has 2 glyphs, so A,
+        // glyph 2, is not one of them.
+        let (first, second) = (face_offset(&ttc, 0), face_offset(&ttc, 1));
+        let cmap = |base: usize| base + record(&font_at(&ttc, base), b"cmap");
+        let (from, to) = (cmap(first), cmap(second));
+        let location = ttc[from + 8..from + 16].to_vec();
+        ttc[to + 8..to + 16].copy_from_slice(&location);
+        let maxp = second + record(&font_at(&ttc, second), b"maxp");
+        let maxp_at = u32::from_be_bytes(ttc[maxp + 8..maxp + 12].try_into().unwrap()) as usize;
+        ttc[maxp_at + 4..maxp_at + 6].copy_from_slice(&2_u16.to_be_bytes());
+        assert_eq!(covers_a(&ttc, &[0, 1]), [true, false]);
+        assert_eq!(
+            covers_with(&ttc, &[0, 1], ' ', CoverageLimits::FILE),
+            [true, true]
+        );
+    }
+
+    /// The bytes from `offset` on, so `record` reads the table directory there.
+    fn font_at(ttc: &[u8], offset: usize) -> Vec<u8> {
+        ttc[offset..].to_vec()
     }
 
     #[test]
