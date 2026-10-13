@@ -296,3 +296,95 @@ fn links_are_followed_when_named_and_to_documents() -> io::Result<()> {
     assert!(output.contains("named/nested/BROKEN.DOCX"), "{output}");
     Ok(())
 }
+
+#[test]
+fn documents_with_a_reference_are_scored_or_say_why_not() -> io::Result<()> {
+    let corpus = Corpus::new("references")?;
+    let reference = corpus.dir.join("references/docs/good");
+    std::fs::create_dir_all(&reference)?;
+    std::fs::write(
+        reference.join("geometry.json"),
+        r#"{"format": 1, "document": "docs/good.docx", "pages": []}"#,
+    )?;
+    let options = [
+        "--references",
+        "references",
+        "--ours",
+        "ours",
+        "--report",
+        "report.json",
+    ];
+    let (code, output) = corpus.run(&[&options[..], &["docs"]].concat(), None)?;
+    assert_eq!(code, 0, "{output}");
+    assert!(
+        output.contains("not scored       docs/good.docx: no PDF of ours at ours"),
+        "{output}"
+    );
+    let report: serde_json::Value = serde_json::from_str(&corpus.read("report.json")?).unwrap();
+    assert!(
+        report["files"][0]["score_error"]
+            .as_str()
+            .unwrap()
+            .starts_with("no PDF of ours")
+    );
+    assert!(
+        report["files"][1].get("score_error").is_none(),
+        "no reference, nothing to score"
+    );
+
+    // A baseline that holds scores fails a run that does not score.
+    corpus.write(
+        "baseline.json",
+        r#"{"format": 1, "files": {"docs/good.docx": "opened", "docs/nested/BROKEN.DOCX": "unexpected-error"},
+            "scores": {"docs/good.docx": {"text_score": 1.0}}}"#,
+    )?;
+    let (code, output) = corpus.run(&["--baseline", "baseline.json", "docs"], None)?;
+    assert_eq!(code, 1, "{output}");
+    assert!(
+        output.contains("docs/good.docx: scored in the baseline, now not scored in this run"),
+        "{output}"
+    );
+
+    // A reference that names a path out of the corpus is refused.
+    std::fs::write(
+        reference.join("geometry.json"),
+        r#"{"format": 1, "document": "../escape.docx", "pages": []}"#,
+    )?;
+    let (code, output) = corpus.run(&[&options[..], &["docs"]].concat(), None)?;
+    assert_eq!(code, 2, "{output}");
+    assert!(output.contains("is not a plain path"), "{output}");
+    let (code, output) = corpus.run(&["--references", "references", "docs"], None)?;
+    assert_eq!(code, 2, "{output}");
+    assert!(
+        output.contains("--references and --ours go together"),
+        "{output}"
+    );
+    Ok(())
+}
+
+#[test]
+fn score_takes_its_two_options_in_either_order() -> io::Result<()> {
+    let corpus = Corpus::new("score")?;
+    for args in [
+        ["score", "--ours", "docs/x.pdf", "--reference", "missing"],
+        ["score", "--reference", "missing", "--ours", "docs/x.pdf"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_corpus-runner"))
+            .current_dir(&corpus.dir)
+            .args(args)
+            .output()?;
+        let text = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{text}");
+        assert!(
+            text.contains("geometry.json"),
+            "the reference is read first: {text}"
+        );
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_corpus-runner"))
+        .current_dir(&corpus.dir)
+        .args(["score", "--ours", "docs/x.pdf"])
+        .output()?;
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("usage:"));
+    Ok(())
+}

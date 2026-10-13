@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::child::Opened;
+use crate::metrics::Scores;
 
 /// How one file ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -57,6 +58,12 @@ pub struct FileResult {
     pub chars: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<u64>,
+    /// Our rendering against Word's reference, when the run has both.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scores: Option<Scores>,
+    /// Why a document with a reference could not be scored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score_error: Option<String>,
 }
 
 /// What a child process did: its exit, what it printed, and whether it was stopped.
@@ -87,6 +94,8 @@ pub fn classify(
         peak_rss_kb: None,
         chars: None,
         diagnostics: None,
+        scores: None,
+        score_error: None,
     };
     let first_line = |text: &str| {
         text.lines()
@@ -209,12 +218,32 @@ impl Report {
     }
 }
 
-/// The baseline: the status of every file, which is what a later run must not get worse
-/// at. Durations and memory vary between machines and are left out.
+/// The baseline: the status of every file, and the scores of every scored file, which is
+/// what a later run must not get worse at. Durations, memory and positions in points vary
+/// between machines or are gated otherwise, and are left out.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct Baseline {
     pub format: u32,
     pub files: BTreeMap<String, Status>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub scores: BTreeMap<String, BTreeMap<String, f64>>,
+}
+
+/// How far a score may move before the run says it changed (CLAUDE.md: a drop of more than
+/// 0.01 fails).
+pub const SCORE_TOLERANCE: f64 = 0.01;
+
+/// The scores the baseline keeps: fractions from 0 to 1, higher is better.
+fn tracked(scores: &Scores) -> BTreeMap<String, f64> {
+    let mut out = BTreeMap::new();
+    out.insert("text_score".to_owned(), scores.text_score);
+    out.insert("line_agreement".to_owned(), scores.line_agreement);
+    if let Some(agreement) = scores.page_break_agreement {
+        out.insert("page_break_agreement".to_owned(), agreement);
+    }
+    out.insert("ssim_mean".to_owned(), scores.ssim_mean);
+    out.insert("ssim_min".to_owned(), scores.ssim_min);
+    out
 }
 
 impl Baseline {
@@ -225,6 +254,11 @@ impl Baseline {
                 .files
                 .iter()
                 .map(|f| (f.path.clone(), f.status))
+                .collect(),
+            scores: report
+                .files
+                .iter()
+                .filter_map(|f| Some((f.path.clone(), tracked(f.scores.as_ref()?))))
                 .collect(),
         }
     }
@@ -282,7 +316,49 @@ pub fn compare(baseline: &Baseline, report: &Report) -> Changes {
             ));
         }
     }
+    compare_scores(baseline, &now, &mut changes);
     changes
+}
+
+fn compare_scores(baseline: &Baseline, now: &BTreeMap<&str, &FileResult>, changes: &mut Changes) {
+    for (path, before) in &baseline.scores {
+        let Some(scores) = now.get(path.as_str()).and_then(|file| file.scores.as_ref()) else {
+            let why = now
+                .get(path.as_str())
+                .and_then(|file| file.score_error.as_deref())
+                .unwrap_or("not scored in this run");
+            changes
+                .worse
+                .push(format!("{path}: scored in the baseline, now {why}"));
+            continue;
+        };
+        let after = tracked(scores);
+        for (metric, &old) in before {
+            match after.get(metric) {
+                Some(&new) if new < old - SCORE_TOLERANCE => {
+                    changes
+                        .worse
+                        .push(format!("{path}: {metric} {old} in the baseline, now {new}"));
+                }
+                Some(&new) if new > old + SCORE_TOLERANCE => {
+                    changes
+                        .better
+                        .push(format!("{path}: {metric} {old} in the baseline, now {new}"));
+                }
+                Some(_) => {}
+                None => changes
+                    .worse
+                    .push(format!("{path}: {metric} {old} in the baseline, now none")),
+            }
+        }
+    }
+    for (path, file) in now {
+        if file.scores.is_some() && !baseline.scores.contains_key(*path) {
+            changes.worse.push(format!(
+                "{path}: scored, but the baseline has no scores for it; run with --update-baseline and commit it"
+            ));
+        }
+    }
 }
 
 pub fn name(status: Status) -> &'static str {
@@ -398,6 +474,8 @@ mod tests {
             peak_rss_kb: None,
             chars: None,
             diagnostics: None,
+            scores: None,
+            score_error: None,
         }
     }
 
@@ -433,6 +511,95 @@ mod tests {
         );
         let same = compare(&baseline, &before);
         assert!(same.worse.is_empty() && same.better.is_empty());
+    }
+
+    fn scored(path: &str, text_score: f64, ssim_mean: f64) -> FileResult {
+        let mut result = file(path, Status::Opened);
+        result.scores = Some(Scores {
+            pages: 1,
+            ref_pages: 1,
+            text_score,
+            lines: 1,
+            lines_agreeing: 1,
+            line_agreement: 1.0,
+            words: 1,
+            words_matched: 1,
+            dx_median: Some(0.0),
+            dx_p95: Some(0.0),
+            dy_median: Some(0.0),
+            dy_p95: Some(0.0),
+            page_breaks: 0,
+            page_breaks_agreeing: 0,
+            page_break_agreement: None,
+            ssim: vec![ssim_mean],
+            ssim_mean,
+            ssim_min: ssim_mean,
+        });
+        result
+    }
+
+    #[test]
+    fn scores_move_beyond_the_tolerance_only() {
+        let before = Report::new(vec![
+            scored("a", 0.99, 0.95),
+            scored("b", 0.99, 0.95),
+            scored("c", 0.99, 0.95),
+            scored("d", 0.99, 0.95),
+        ]);
+        let baseline = Baseline::of(&before);
+        assert_eq!(baseline.scores["a"]["ssim_mean"], 0.95);
+        assert!(!baseline.scores["a"].contains_key("page_break_agreement"));
+        let mut lost = file("d", Status::Opened);
+        lost.score_error = Some("pdftoppm failed".to_owned());
+        let after = Report::new(vec![
+            scored("a", 0.985, 0.955),
+            scored("b", 0.97, 0.95),
+            scored("c", 0.99, 0.97),
+            lost,
+            scored("e", 1.0, 1.0),
+        ]);
+        let changes = compare(&baseline, &after);
+        assert_eq!(
+            changes.better,
+            [
+                "c: ssim_mean 0.95 in the baseline, now 0.97",
+                "c: ssim_min 0.95 in the baseline, now 0.97"
+            ]
+        );
+        assert!(
+            changes
+                .worse
+                .contains(&"b: text_score 0.99 in the baseline, now 0.97".to_owned()),
+            "{:?}",
+            changes.worse
+        );
+        assert!(
+            changes
+                .worse
+                .contains(&"d: scored in the baseline, now pdftoppm failed".to_owned()),
+            "{:?}",
+            changes.worse
+        );
+        assert!(
+            changes
+                .worse
+                .iter()
+                .any(|line| line.starts_with("e: scored, but the baseline has no scores")),
+            "{:?}",
+            changes.worse
+        );
+        assert!(
+            !changes
+                .worse
+                .iter()
+                .chain(&changes.better)
+                .any(|line| line.starts_with("a:")),
+            "a moved by less than 0.01"
+        );
+        let json =
+            serde_json::to_string(&Baseline::of(&Report::new(vec![file("x", Status::Opened)])))
+                .unwrap();
+        assert!(!json.contains("scores"), "no scores, no key: {json}");
     }
 
     #[test]
