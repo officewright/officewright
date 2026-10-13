@@ -1581,6 +1581,25 @@ mod tests {
     }
 
     #[test]
+    fn only_a_repeated_closing_segment_may_follow_one_at_u_ffff() {
+        // A segment at U+FFFF in the middle, then one for U+0060: of the five segments, a
+        // lookup of U+0060 first meets the one at U+FFFF and searches to its left, where
+        // it finds nothing.
+        let d = |code: u16| 1_u16.wrapping_sub(code);
+        let cmap = testing::cmap_format4(&[
+            (0x41, 0x41, d(0x41)),
+            (0x42, 0x42, d(0x42)),
+            (0xFFFF, 0xFFFF, 1),
+            (0x60, 0x60, d(0x60)),
+        ]);
+        let mut book = FontBook::new();
+        let font = TestFont::new("Test Map").with_table(b"cmap", cmap);
+        book.add_bytes(font.build(), FontOrigin::User).unwrap();
+        assert_eq!(book.load(FaceId(0)).unwrap().glyph_id('`'), None);
+        assert!(book.faces_covering('`').is_empty());
+    }
+
+    #[test]
     fn groups_past_the_end_of_unicode_are_still_in_order() {
         // A lookup of A first meets group 2, past A, so it searches on to its right, and
         // finds nothing: the group past the end of Unicode does not end the order check.

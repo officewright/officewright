@@ -786,6 +786,22 @@ mod tests {
     }
 
     #[test]
+    fn the_first_record_of_a_tag_is_the_table() {
+        // Two cmap records: the first maps B, the second A. The tags are then not in
+        // order, so read-fonts takes the first, and so must coverage.
+        let only = |code: u16| testing::cmap_format4(&[(code, code, 1_u16.wrapping_sub(code))]);
+        let mut font = TestFont::new("Test Sans")
+            .with_table(b"cmap", only(0x42))
+            .with_table(b"zzzz", only(0x41))
+            .build();
+        let second = record(&font, b"zzzz");
+        font[second..second + 4].copy_from_slice(b"cmap");
+        assert!(maps(&font, 'B') && !maps(&font, 'A'));
+        assert_eq!(covers_with(&font, &[0], 'B', CoverageLimits::FILE), [true]);
+        assert_eq!(covers_with(&font, &[0], 'A', CoverageLimits::FILE), [false]);
+    }
+
+    #[test]
     fn a_table_that_does_not_fit_in_the_file_is_missing() {
         let font = TestFont::new("Test Sans").build();
         let maxp = record(&font, b"maxp");
