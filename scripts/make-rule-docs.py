@@ -593,7 +593,8 @@ def tab_hanging(no_indent_tab: bool, mode: int = 15) -> Doc:
     variant = "with" if no_indent_tab else "without"
     name = "E-tab-hanging-noindenttab" if no_indent_tab else "E-tab-hanging"
     # Word 16 drops the flag from a document in mode 15 when it saves it and renders as if
-    # it were absent (the references of #13); the mode-14 pair shows the flag's effect (#18).
+    # it were absent (the references of #13); in mode 14 Word may keep it, which the
+    # mode-14 pair is meant to show (#18).
     where = ""
     if mode != 15:
         name += f"-{mode}"
