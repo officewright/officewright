@@ -23,9 +23,9 @@ for production use.
 
 It can:
 
-- write PDF files with text: Helvetica for Latin text, or a TrueType or OpenType font,
-  embedded and reduced to the glyphs the text uses, for Latin, Greek, Cyrillic, Armenian,
-  Georgian, Han, Hiragana, Katakana and Hangul text;
+- write PDF files with text: Helvetica for Latin text, or a TrueType or OpenType font for
+  Latin, Greek, Cyrillic, Armenian, Georgian, Han, Hiragana, Katakana and Hangul text,
+  embedded and, unless its license forbids subsetting, reduced to the glyphs the text uses;
 - choose a font by family name, with substitutes measured against Word's own rendering and
   a report of every substitution;
 - do this from Rust, from any language through the C library, prebuilt for Linux, Windows

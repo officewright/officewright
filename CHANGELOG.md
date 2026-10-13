@@ -6,13 +6,17 @@ Notable changes to Officewright. The format follows
 any release may change the Rust API. The C ABI has its own version (`OW_ABI_VERSION`),
 raised on every breaking change.
 
+## [Unreleased]
+
 ## [0.1.0] - 2026-10-13
 
 The first pre-release, for trying the C library and the command-line tool. It writes PDF
 files with text; it does not convert office documents yet. The Rust crates are not
 published on crates.io.
 
-### PDF output
+### Added
+
+#### PDF output
 
 - Pages of any size from 3 to 14400 pt, lines of text at given positions, and
   `text_to_pdf`, which lays out plain text on pages with margins, wrapping, tabs and
@@ -29,7 +33,7 @@ published on crates.io.
 - Page content and embedded fonts are compressed with the Flate filter; compression can be
   turned off (#29).
 
-### Fonts
+#### Fonts
 
 - Reading TrueType and OpenType fonts and font collections: metrics, character map, names,
   embedding permissions; subsetting.
@@ -37,10 +41,10 @@ published on crates.io.
   family name. A missing family is replaced by its metric-compatible substitute, measured
   against Word's own rendering: Carlito for Calibri, Liberation Sans, Serif and Mono for
   Arial, Times New Roman and Courier New (#24). Failing that, by a font of similar design
-  (Caladea for Cambria, #19, #25) or a common font of the same kind. Every substitution is
+  (Caladea for Cambria, #17, #25) or a common font of the same kind. Every substitution is
   reported (#17).
 
-### C library
+#### C library
 
 - C ABI version 1, prebuilt for Linux (x86_64 and aarch64 glibc, x86_64 musl), Windows
   (x86_64, aarch64) and macOS (x86_64, aarch64), with `officewright.h`, shared and static
@@ -54,12 +58,12 @@ published on crates.io.
   something not supported yet, damaged input (`OW_STATUS_MALFORMED`), an exceeded limit
   (`OW_STATUS_LIMIT_EXCEEDED`, #47), or a caught panic; `ow_last_error_message()` says more.
 
-### Command line
+#### Command line
 
 - `officewright text-to-pdf`: a UTF-8 text file to PDF, with the page size, the font size,
   and a font file or family name (`--font`, `--font-dir`, `--no-system-fonts`).
 
-### Reading office documents, not yet connected to PDF output
+#### Reading office documents, not yet connected to PDF output
 
 These are in the Rust crates only: neither the C library nor the command-line tool uses
 them yet.
@@ -70,4 +74,5 @@ them yet.
   tables, rows, cells and sections; the settings that bear on layout (#31, #32, #38, #39,
   #42, #43, #44).
 
+[Unreleased]: https://github.com/officewright/officewright/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/officewright/officewright/releases/tag/v0.1.0
