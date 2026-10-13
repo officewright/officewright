@@ -53,7 +53,7 @@ ir_struct! {
         copy image: ImageId => with_image;
         /// The size the image is shown at (`wp:extent`).
         copy size: Size => with_size;
-        /// The part of the image that is shown (`a:srcRect`, whose values are 1000ths of a
+        /// The part of the image that is shown (`a:srcRect`, whose values are thousandths of a
         /// percent); `None` for all of it.
         copy crop: Option<Crop> => with_crop;
         /// How far effects such as shadows reach beyond the picture on each side
@@ -61,7 +61,7 @@ ir_struct! {
         /// `l`, `r` and `t` at the left, right and top, where the standard says bottom
         /// (MS-OI29500 2.1.1352 a).
         copy effect_extent: Insets => with_effect_extent;
-        /// The rotation clockwise, in degrees (`a:xfrm`'s `rot` is in 60000ths of one).
+        /// The rotation clockwise, in degrees (`a:xfrm`'s `rot` counts 60000 to a degree).
         copy rotation: f64 => with_rotation;
         /// Whether the picture is mirrored left to right.
         copy flip_horizontal: bool => with_flip_horizontal;
