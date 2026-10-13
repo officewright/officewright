@@ -17,6 +17,31 @@ printf '==> %s\n' "external corpus pins"
 # Downloads nothing. The full fetch with SHA-256 checks runs weekly (.github/workflows/weekly.yml).
 scripts/fetch-corpus.sh --check all
 
+printf '==> %s\n' "corpus runner (Word documents of corpus-ext)"
+# The Word documents of Apache POI and LibreOffice: git sources, so fetching them verifies
+# them. Each child gets the 1 GiB address-space limit of CLAUDE.md through prlimit; the
+# report is uploaded by nightly.yml. The run fails on a panic, hang, memory blow-up or
+# crash, and on a file worse than tools/corpus-runner/baseline-ext.json; a better file
+# only shows in the output until the baseline is updated. A failed fetch or build fails
+# the night but does not stop the fuzzing.
+corpus_failed=
+if scripts/fetch-corpus.sh poi libreoffice && cargo build --release -p corpus-runner; then
+	# The committed POI documents are unmodified copies of the fetched ones.
+	for file in tests/corpus/poi/*.docx; do
+		if ! cmp -s "$file" "corpus-ext/poi/test-data/document/${file##*/}"; then
+			echo "nightly.sh: $file is not POI's file of that name" >&2
+			corpus_failed=1
+		fi
+	done
+	target/release/corpus-runner run --enforce-memory-limit \
+		--expected tools/corpus-runner/expected-errors.tsv \
+		--baseline tools/corpus-runner/baseline-ext.json --allow-better \
+		--report target/corpus-report.json corpus-ext/poi corpus-ext/libreoffice ||
+		corpus_failed=1
+else
+	corpus_failed=1
+fi
+
 printf '==> %s\n' "fuzzing (30 min per target)"
 # Each target is seeded with files of the format it reads; libFuzzer keeps the inputs it
 # finds in fuzz/corpus/<target> and writes crashing inputs to fuzz/artifacts/<target>,
@@ -26,7 +51,7 @@ printf '==> %s\n' "fuzzing (30 min per target)"
 # script if either fails.
 seeds() {
 	case $1 in
-	docx_open) echo tests/corpus/word-rules tests/corpus/resaved crates/officewright-doc/tests/data ;;
+	docx_open) echo tests/corpus/word-rules tests/corpus/resaved tests/corpus/poi crates/officewright-doc/tests/data ;;
 	font_* | pdf_embed) echo tests/fonts crates/officewright-font/tests/data ;;
 	package) echo fuzz/seeds/package ;;
 	xml) echo fuzz/seeds/xml ;;
@@ -51,7 +76,15 @@ for target in $targets; do
 		-max_total_time=1800 -timeout=30 -rss_limit_mb=1024 ||
 		crashed="$crashed $target"
 done
+failed=
 if [ -n "$crashed" ]; then
 	echo "nightly.sh: fuzzing failed in:$crashed (inputs in fuzz/artifacts/)" >&2
+	failed=1
+fi
+if [ -n "$corpus_failed" ]; then
+	echo "nightly.sh: the corpus checks failed (messages above; report in target/corpus-report.json)" >&2
+	failed=1
+fi
+if [ -n "$failed" ]; then
 	exit 1
 fi

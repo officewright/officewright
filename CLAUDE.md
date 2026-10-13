@@ -62,6 +62,7 @@ tests/pdf-output/       checks text-to-pdf output, in Helvetica and with Liberat
                         are the same)
 tests/corpus/           small curated real documents (committed) + SOURCES.md + baseline.json
 tests/corpus/word-rules/  documents written by scripts/make-rule-docs.py, one undocumented Word rule each
+tests/corpus/poi/        unmodified Apache POI test documents (Apache-2.0) with POI's LICENSE and NOTICE
 tests/corpus/reference/ ground truth from PDFs of Microsoft Word/Excel/PowerPoint, one folder per document: every page
                         as a 110 dpi grey PNG and geometry.json (lines, words, page breaks); the PDFs are not
                         committed, their SHA-256 and the app version are in SOURCES.md
@@ -140,7 +141,7 @@ Unit and snapshot tests (`insta`) cover small handcrafted inputs. Real-world cor
 
 ### Regression baseline
 
-`tools/corpus-runner` writes a JSON report (per file: status, error, duration, round-trip result, text score, SSIM per page). `tests/corpus/baseline.json` holds the last accepted report. A run fails if any file that passed now fails, or any score drops by more than 0.01. Improvements are accepted by regenerating the baseline in the same PR, so progress is visible in the diff.
+`tools/corpus-runner` opens every Word document of the paths it is given in a child process of its own (30 s time-out; on Linux a peak memory over 1 GiB is a failure, and with `--enforce-memory-limit` each child also runs under that address-space limit through `prlimit`) and writes a JSON report: per file its status (`opened`, `expected-error`, `unexpected-error`, `panic`, `timeout`, `memory`, `crash`), error, duration, peak memory, characters of text and diagnostics; later the round-trip result, text score and SSIM per page. An error counts as expected only when `tools/corpus-runner/expected-errors.tsv` lists the file with its reason (encrypted, another format under a Word extension, broken on purpose); a document Word opens is never listed. Every run fails on a panic, time-out, memory failure or crash. `tests/corpus/baseline.json` holds the accepted status of every committed file (durations and memory vary by machine and are left out); a run with `--baseline` fails if any file's status differs from it or the set of files does, or any score drops by more than 0.01. Improvements fail too until they are accepted by running with `--update-baseline` in the same PR, so progress is visible in the diff. The nightly run compares the Word documents of `corpus-ext/` with `tools/corpus-runner/baseline-ext.json` and fails only on worse files (`--allow-better`); a PR that changes the DOCX reader updates that baseline when it changes a file's status there, and so does a PR that moves the pins of POI or LibreOffice in `scripts/corpus-ext.tsv`.
 
 ## C ABI conventions (`officewright-ffi`)
 
@@ -204,12 +205,14 @@ The maintainer does not review Rust code. Correctness rests on the automated gat
   - **Deviations from CLAUDE.md** — and confirm CLAUDE.md was updated.
   - **New dependencies** — each with justification and the `cargo deny` result.
   - **Corpus numbers** — before → after, when the PR touches a reader or writer.
+  - **Release gate table** — from the day `corpus-runner gate` is in main, every PR that changes DOCX reading, layout or PDF output pastes the markdown table the command prints: each release criterion with its target, its value on main and its value on the PR's branch. Not before the command exists.
   - **How to check by hand** — exact commands the maintainer can run (for example a CLI call on a sample file) and what to look at in the output (open the PDF, compare with Word).
 
 ### 2. Independent reviewer
 - A fresh Claude Code session that has not seen the implementation conversation, on a different model than the author (Opus author → Fable reviewer, and vice versa).
 - Reviews the diff against CLAUDE.md, the Definition of done and the clean-room policy. Focus: parsers and FFI safety, tests that cannot fail or test the implementation instead of behaviour, missing edge cases, public API and C ABI stability.
 - For critical paths, temporarily breaks the code and confirms a test catches it.
+- Checks the release gate table where one is required: a value worse on the branch than on main is a **blocker** unless the PR explains it and the maintainer agreed to it in a PR comment. The exception concerns this review only; the baseline check and the merge conditions below stay as they are.
 - Verifies each finding adversarially, then posts one PR comment listing findings tagged **blocker**, **should-fix** or **nit**.
 
 ### 3. Fixes
@@ -259,10 +262,10 @@ PDF output of officewright text-to-pdf (tests/pdf-output): qpdf --check without 
   with Liberation Sans and Noto Sans of tests/fonts embedded: pdffonts lists each embedded, subset and with a ToUnicode map,
   pdftotext reads back every Latin, Greek and Cyrillic character both fonts have, pdftoppm renders a subset exactly as the
   whole font; characters that share a glyph read back through ActualText (Linux, macOS)
-corpus-runner over tests/corpus (committed corpus), compared with baseline.json   (from Milestone 4)
+corpus-runner over tests/corpus (committed corpus), compared with tests/corpus/baseline.json
 ```
 
-`scripts/nightly.sh` (scheduled CI, hours): Miri on `officewright-ffi`, `fetch-corpus.sh --check all` (every pinned commit is still fetchable and every archive still has its pinned size; downloads nothing), fuzzing (30 min per target, each seeded with files of the format it reads, listed in `seeds()` in nightly.sh; crashing inputs uploaded as a CI artifact; from Milestone 3), corpus-runner over `corpus-ext/` (from Milestone 4), report uploaded as a CI artifact. The full `fetch-corpus.sh all` from scratch, which downloads every source and verifies every SHA-256, runs weekly.
+`scripts/nightly.sh` (scheduled CI, hours): Miri on `officewright-ffi`, `fetch-corpus.sh --check all` (every pinned commit is still fetchable and every archive still has its pinned size; downloads nothing), fuzzing (30 min per target, each seeded with files of the format it reads, listed in `seeds()` in nightly.sh; crashing inputs uploaded as a CI artifact; from Milestone 3), corpus-runner over the Word documents of `corpus-ext/` (Apache POI and LibreOffice, fetched by the run; each child under the 1 GiB limit; compared with `tools/corpus-runner/baseline-ext.json`), report uploaded as a CI artifact. The full `fetch-corpus.sh all` from scratch, which downloads every source and verifies every SHA-256, runs weekly.
 
 `.githooks/pre-commit` runs fmt, clippy and test. Enable once per clone: `git config core.hooksPath .githooks`. CI (`.github/workflows/ci.yml`) runs `check.sh` on Linux, Windows (Git Bash with the MSVC environment from `ilammy/msvc-dev-cmd`) and macOS plus an MSRV job on Rust 1.85; `nightly.yml` runs `nightly.sh` on Linux; `weekly.yml` runs the full corpus fetch on Linux. Actions are pinned by commit SHA and tools by version, except qpdf and poppler for the PDF output check: they come from the runner's package manager (apt on `ubuntu-latest`, Homebrew on macOS), which keeps no installable old versions across runner image updates, so the CI step prints the versions it got.
 

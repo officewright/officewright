@@ -30,6 +30,11 @@ posting the comment it asks for.
 
 <!-- Before and after, when the change touches a reader or a writer. -->
 
+## Release gate table
+
+<!-- Once `corpus-runner gate` is in main: the table it prints, when the change touches
+DOCX reading, layout or PDF output. Otherwise delete this section. -->
+
 ## How to check by hand
 
 <!-- Exact commands, and what to look at in their output. -->

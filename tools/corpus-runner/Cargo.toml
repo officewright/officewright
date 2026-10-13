@@ -1,0 +1,19 @@
+[package]
+name = "corpus-runner"
+description = "Runs officewright over corpora of documents, one child process per file, and compares the results with a baseline"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+license-file.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+officewright-doc.workspace = true
+# Approved for this tool only (issue #36): the report and the baseline are JSON.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lints]
+workspace = true
