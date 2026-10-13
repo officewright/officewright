@@ -358,13 +358,19 @@ def line_fonts_truetype() -> Doc:
     )
 
 
-SMALL_CAPS_FONTS = ["Liberation Sans", "Carlito"]
+# Liberation Sans and Carlito have no smcp feature (Carlito has c2sc only); Noto Sans has one,
+# so its rows show whether Word uses the font's small capitals or synthesises them.
+SMALL_CAPS_FONTS = ["Liberation Sans", "Carlito", "Noto Sans"]
 # Sizes whose 80 % falls between half-points (7.2, 8.4, 8.8, 10.4, 16.8, 57.6 pt) and on one
 # (32 pt), so that the reference shows whether and how Word rounds the reduced size.
 SMALL_CAPS_SIZES = [9, 10.5, 11, 13, 21, 40, 72]
 
 
 def small_caps(mode: int) -> Doc:
+    if mode == 12:
+        setting = "no compatibilityMode setting, so Word's default, mode 12"
+    else:
+        setting = f"compatibility mode {mode}"
     body = []
     for font in SMALL_CAPS_FONTS:
         for size in SMALL_CAPS_SIZES:
@@ -382,11 +388,12 @@ def small_caps(mode: int) -> Doc:
                 )
     return Doc(
         f"E-smallcaps-{mode}",
-        "Small capitals in compatibility mode "
-        f"{mode}: per font (Liberation Sans, and Carlito, which has an smcp feature) and "
-        "size (9 to 72 pt), a paragraph with 'hamburg' in small caps, one with 'HAMBURG' "
-        "typed in capitals and one with 'Hamburg' in small caps; their widths and heights "
-        "give the size Word reduces small capitals to",
+        "Small capitals: per font (Liberation Sans and Carlito, without an smcp feature, and "
+        "Noto Sans, with one, rendered with its TrueType build installed as for "
+        "E-line-fonts-truetype) and size (9 to 72 pt), a paragraph with 'hamburg' in small "
+        "caps, one with 'HAMBURG' typed in capitals and one with 'Hamburg' in small caps; "
+        "their widths and heights give the size Word reduces small capitals to; "
+        f"{setting}",
         "".join(body),
         mode=mode,
     )
