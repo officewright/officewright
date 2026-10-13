@@ -205,12 +205,14 @@ The maintainer does not review Rust code. Correctness rests on the automated gat
   - **Deviations from CLAUDE.md** — and confirm CLAUDE.md was updated.
   - **New dependencies** — each with justification and the `cargo deny` result.
   - **Corpus numbers** — before → after, when the PR touches a reader or writer.
+  - **Release gate table** — from the day `corpus-runner gate` is in main, every PR that changes DOCX reading, layout or PDF output pastes the markdown table the command prints: each release criterion with its target, its value on main and its value on the PR's branch. Not before the command exists.
   - **How to check by hand** — exact commands the maintainer can run (for example a CLI call on a sample file) and what to look at in the output (open the PDF, compare with Word).
 
 ### 2. Independent reviewer
 - A fresh Claude Code session that has not seen the implementation conversation, on a different model than the author (Opus author → Fable reviewer, and vice versa).
 - Reviews the diff against CLAUDE.md, the Definition of done and the clean-room policy. Focus: parsers and FFI safety, tests that cannot fail or test the implementation instead of behaviour, missing edge cases, public API and C ABI stability.
 - For critical paths, temporarily breaks the code and confirms a test catches it.
+- Checks the release gate table where one is required: a value worse on the branch than on main is a **blocker** unless the PR explains it and the maintainer agreed to it in a PR comment. The exception concerns this review only; the baseline check and the merge conditions below stay as they are.
 - Verifies each finding adversarially, then posts one PR comment listing findings tagged **blocker**, **should-fix** or **nit**.
 
 ### 3. Fixes
