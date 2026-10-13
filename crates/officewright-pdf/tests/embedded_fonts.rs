@@ -386,11 +386,10 @@ fn embeds_each_font_once_with_the_glyphs_of_every_page() -> TestResult {
     Ok(())
 }
 
-#[test]
-fn a_shared_glyph_keeps_each_character_for_text_extraction() -> TestResult {
-    // minimal.ttf with Á mapped to the glyph of A, as fonts do for look-alike
-    // characters (Arial maps Latin Ə and Cyrillic Ә to one glyph). Its cmap has one
-    // segment per character, and idDelta is the glyph minus the character.
+/// minimal.ttf with Á mapped to the glyph of A, as fonts do for look-alike characters
+/// (Arial maps Latin Ə and Cyrillic Ә to one glyph). Its cmap has one segment per
+/// character, and idDelta is the glyph minus the character.
+fn shared_glyph_font() -> TestResult<Font> {
     let deltas = |acute: u16| -> Vec<u8> {
         [(0x20u16, 1u16), (0x41, 2), (0xB4, 3), (0xC1, acute)]
             .iter()
@@ -406,7 +405,12 @@ fn a_shared_glyph_keeps_each_character_for_text_extraction() -> TestResult {
     data.get_mut(at..at + to.len())
         .ok_or("short cmap")?
         .copy_from_slice(&to);
-    let font = Font::from_bytes(data, 0)?;
+    Ok(Font::from_bytes(data, 0)?)
+}
+
+#[test]
+fn a_shared_glyph_keeps_each_character_for_text_extraction() -> TestResult {
+    let font = shared_glyph_font()?;
     let pdf = pdf_text(&one_line(&font, "AÁA")?)?;
     // Replacement text in marked content is a PDF 1.5 feature.
     assert!(pdf.starts_with("%PDF-1.5\n"));
@@ -423,6 +427,41 @@ fn a_shared_glyph_keeps_each_character_for_text_extraction() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn shows_long_text_with_strings_readers_handle() -> TestResult {
+    // 40,001 characters shown with the glyph's own mapping, then 20,000 with
+    // replacement text: more than the 32,767 bytes of a string in PDF 1.5.
+    let font = shared_glyph_font()?;
+    let text = format!("{}{}", "A".repeat(40_001), "Á".repeat(20_000));
+    let pdf = pdf_text(&one_line(&font, &text)?)?;
+    let (_, content) = pdf.split_once("BT\n").ok_or("no text object")?;
+    let (content, _) = content.split_once("\nET").ok_or("no end of text")?;
+    // The bytes of each hexadecimal string: CIDs for Tj, UTF-16 for ActualText.
+    let mut shown = Vec::new();
+    let mut actual = Vec::new();
+    for line in content.lines().skip(2) {
+        let hex = |string: &str| -> TestResult<usize> {
+            let (_, rest) = string.split_once('<').ok_or("no string")?;
+            let (digits, _) = rest.split_once('>').ok_or("no end of string")?;
+            Ok(digits.len() / 2)
+        };
+        match line.split_once("/ActualText ") {
+            Some((_, span)) => {
+                actual.push(hex(span)?);
+                let (_, cids) = span.split_once(">> BDC ").ok_or("no BDC")?;
+                shown.push(hex(cids)?);
+            }
+            None => shown.push(hex(line)?),
+        }
+    }
+    // Pieces of 16,382 characters: the CIDs take 32,764 bytes, the replacement text
+    // 32,766 with its byte order mark.
+    assert_eq!(shown, [32764, 32764, 14474, 32764, 7236]);
+    assert_eq!(actual, [32766, 7238]);
+    let spans = content.matches("/Span << /ActualText <FEFF").count();
+    assert_eq!(spans, 2);
+    Ok(())
+}
 #[test]
 fn refuses_characters_an_embedded_font_cannot_show() -> TestResult {
     let font = Font::from_bytes(liberation_sans()?, 0)?;

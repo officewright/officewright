@@ -20,7 +20,7 @@ const MAX_MAPPED_UNITS: usize = 32;
 /// most bytes a string may have in the PDF 1.5 that replacement text makes a file: 32767
 /// (ISO 32000-1, Annex C; PDF 1.4 allows 65535).
 const MAX_ARRAY_ELEMENTS: usize = 8191;
-const MAX_STRING_BYTES: usize = 32767;
+pub(crate) const MAX_STRING_BYTES: usize = 32767;
 
 /// The most UTF-16 code units of text a cluster may have: its replacement text, two bytes
 /// a unit after a two-byte byte order mark, must fit in a string.

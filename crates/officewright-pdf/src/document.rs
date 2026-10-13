@@ -8,6 +8,7 @@ use officewright_core::Color;
 
 use crate::embed::{EXTRA_OBJECTS, Prepared, Usage};
 use crate::font::check_font_size;
+use crate::glyphs::MAX_STRING_BYTES;
 use crate::stream::stream_object;
 use crate::{Compression, Error, Font, GlyphRun, GraphicsPath, Result, Stroke};
 
@@ -619,8 +620,20 @@ impl Encoder<'_> {
     fn show(&self, out: &mut Vec<u8>, text: &str) -> Result<bool> {
         match self {
             Self::Standard(font) => {
-                push_string(out, &font.encode(text)?);
-                out.extend_from_slice(b" Tj");
+                // One byte a character; long text is shown with several strings, each
+                // within the 32767 bytes readers have to handle (ISO 32000-1, Annex C).
+                let encoded = font.encode(text)?;
+                let mut pieces = encoded.chunks(MAX_STRING_BYTES).peekable();
+                if pieces.peek().is_none() {
+                    out.extend_from_slice(b"() Tj");
+                }
+                for (i, piece) in pieces.enumerate() {
+                    if i > 0 {
+                        out.push(b'\n');
+                    }
+                    push_string(out, piece);
+                    out.extend_from_slice(b" Tj");
+                }
                 Ok(false)
             }
             Self::Embedded(font, prepared) => prepared.show(out, &font.lookup(), text),
@@ -717,6 +730,58 @@ mod tests {
             .map(|line| line.escape_ascii().to_string())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// The literal strings of `content`, decoded: escaped characters and octal codes are
+    /// one byte each.
+    fn literal_strings(content: &[u8]) -> Vec<Vec<u8>> {
+        let mut strings = Vec::new();
+        let mut bytes = content.iter().copied();
+        while let Some(byte) = bytes.next() {
+            if byte != b'(' {
+                continue;
+            }
+            let mut string = Vec::new();
+            while let Some(byte) = bytes.next() {
+                match byte {
+                    b')' => break,
+                    b'\\' => match bytes.next().unwrap() {
+                        digit @ b'0'..=b'7' => {
+                            let rest = [bytes.next().unwrap(), bytes.next().unwrap()];
+                            let octal = [digit, rest[0], rest[1]].map(|d| d - b'0');
+                            string.push(octal[0] << 6 | octal[1] << 3 | octal[2]);
+                        }
+                        escaped => string.push(escaped),
+                    },
+                    _ => string.push(byte),
+                }
+            }
+            strings.push(string);
+        }
+        strings
+    }
+
+    #[test]
+    fn shows_long_text_with_strings_readers_handle() {
+        // 70,000 characters, some of them escaped in the string: more than the 65,535
+        // bytes of a string in PDF 1.4 and the 32,767 of PDF 1.5.
+        let text = "ab(c\u{e9}".repeat(14_000);
+        let mut doc = Document::new();
+        let page = doc.add_page(PageSize::A4).unwrap();
+        page.add_text(Pt(72.0), Pt(700.0), &helvetica(), Pt(12.0), &text)
+            .unwrap();
+        page.add_text(Pt(72.0), Pt(680.0), &helvetica(), Pt(12.0), "")
+            .unwrap();
+        doc.set_compression(Compression::None);
+        let pdf = doc.to_bytes().unwrap();
+        let content = String::from_utf8_lossy(&pdf);
+        let strings = literal_strings(&pdf);
+        let lengths: Vec<usize> = strings.iter().map(Vec::len).collect();
+        // Three strings for the long text, at the limit, and one for the empty text.
+        assert_eq!(lengths, [32767, 32767, 4466, 0]);
+        assert_eq!(strings.concat(), helvetica().encode(&text).unwrap());
+        assert_eq!(content.matches(" Tj").count(), 4, "{content}");
+        assert!(content.contains("680 Td\n() Tj\nET"), "{content}");
     }
 
     #[test]
