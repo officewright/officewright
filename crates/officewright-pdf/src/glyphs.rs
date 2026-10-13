@@ -16,10 +16,12 @@ use crate::{Error, Font, Result};
 /// for longer text is shown with replacement text. A ligature stands for a few characters.
 const MAX_MAPPED_UNITS: usize = 32;
 
-/// The most elements an array may have in PDF 1.4 (PDF Reference 1.4, Appendix C), and the
-/// most bytes a string may have in the PDF 1.5 that replacement text makes a file: 32767
-/// (ISO 32000-1, Annex C; PDF 1.4 allows 65535).
+/// The most elements an array may have in PDF 1.4 (PDF Reference 1.4, Appendix C).
 const MAX_ARRAY_ELEMENTS: usize = 8191;
+
+/// The most bytes a string may have in PDF 1.5, which replacement text makes a file:
+/// 32767 (ISO 32000-1, Annex C; PDF 1.4 allows 65535). Every string this crate writes in
+/// a content stream keeps to it, whatever the file's version.
 pub(crate) const MAX_STRING_BYTES: usize = 32767;
 
 /// The most UTF-16 code units of text a cluster may have: its replacement text, two bytes

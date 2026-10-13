@@ -412,11 +412,19 @@ mod tests {
 
     #[test]
     fn cuts_runs_where_their_strings_would_pass_the_limit() {
-        let lengths = |run: &[(u16, char)]| -> Vec<usize> { pieces(run).map(<[_]>::len).collect() };
+        let lengths = |run: &[(u16, char)]| -> Vec<usize> {
+            // The pieces follow one another and together are the run.
+            assert_eq!(pieces(run).collect::<Vec<_>>().concat(), run);
+            pieces(run).map(<[_]>::len).collect()
+        };
+        // Every element different, so a piece in the wrong place shows.
+        let numbered = |count: usize, ch: char| -> Vec<(u16, char)> {
+            (0..count).map(|i| (i as u16, ch)).collect()
+        };
         // One unit a character: 16,382 of them a piece.
-        assert_eq!(lengths(&[(1, 'A'); 40_000]), [16_382, 16_382, 7_236]);
+        assert_eq!(lengths(&numbered(40_000, 'A')), [16_382, 16_382, 7_236]);
         // Characters outside the Basic Multilingual Plane take two units.
-        assert_eq!(lengths(&[(1, '\u{1F600}'); 10_000]), [8_191, 1_809]);
+        assert_eq!(lengths(&numbered(10_000, '\u{1F600}')), [8_191, 1_809]);
         let mixed: Vec<(u16, char)> = [(1, 'A'), (1, '\u{1F600}')].repeat(6_000);
         // 5,460 pairs of three units and one A: 16,381 units; the next character makes 16,383.
         assert_eq!(lengths(&mixed), [10_921, 1_079]);
