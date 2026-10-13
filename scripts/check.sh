@@ -169,11 +169,12 @@ scripts/check-capi.sh target/capi
 # The PDF bytes do not depend on the platform (the golden snapshot test checks them on
 # every OS), and Windows has no official poppler build, so this runs on Linux and macOS.
 if [ "$os" != windows ]; then
-	step "PDF output (qpdf, pdftotext, pdffonts, pdftoppm)"
+	step "PDF output (qpdf, pdftotext, pdffonts, pdfimages, pdftoppm)"
 	cargo build -p officewright-cli
-	cargo build -p officewright-pdf --example primitives
+	cargo build -p officewright-pdf --example primitives --example images
 	OW_CLI=${CARGO_TARGET_DIR:-target}/debug/officewright \
 		OW_PRIMITIVES=${CARGO_TARGET_DIR:-target}/debug/examples/primitives \
+		OW_IMAGES=${CARGO_TARGET_DIR:-target}/debug/examples/images \
 		"$python" -B -m unittest discover -s tests/pdf-output -v
 
 	step "reference font embedding (qpdf, pdffonts, pdftoppm)"

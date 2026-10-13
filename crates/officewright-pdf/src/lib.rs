@@ -18,7 +18,8 @@
 //! Text that a layout engine has shaped is drawn as a [`GlyphRun`]: glyphs of an embedded
 //! font at explicit positions, with the text they stand for, so ligatures, kerning and
 //! marks come out as shaped and text extraction still returns the text. Pages also take
-//! filled and stroked [`GraphicsPath`]s, with dashed [`Stroke`]s, and clipping paths.
+//! filled and stroked [`GraphicsPath`]s, with dashed [`Stroke`]s, clipping paths, and JPEG
+//! and PNG [`Image`]s.
 //!
 //! ```
 //! use officewright_pdf::{Document, Font, PageSize, Pt, StandardFont};
@@ -40,6 +41,7 @@ mod error;
 mod font;
 mod glyphs;
 mod helvetica;
+mod image;
 mod path;
 mod script;
 mod stream;
@@ -49,6 +51,7 @@ pub use document::{Document, Page};
 pub use error::{Error, Result};
 pub use font::{EmbeddingNote, Font, StandardFont};
 pub use glyphs::{GlyphRun, PlacedGlyph};
+pub use image::Image;
 pub use officewright_core::{Color, PageSize, Pt};
 pub use officewright_font::GlyphId;
 pub use path::{GraphicsPath, LineCap, LineJoin, Stroke};
