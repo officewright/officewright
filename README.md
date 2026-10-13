@@ -7,14 +7,41 @@ The core is written in Rust. Every other language uses it through a stable C ABI
 shipped as prebuilt libraries with a C header, so any language with an FFI can call
 it without a Rust toolchain.
 
-> **Status: pre-alpha.** A minimal PDF writer works from Rust, C and the command line;
-> it embeds TrueType and OpenType fonts for Latin, Greek, Cyrillic and the other scripts
-> that need no shaping. See the roadmap below.
+> **Status: pre-release 0.1.0.** It writes PDF files with text from Rust, C and the
+> command line. It does not convert DOCX or other office documents to PDF yet; see
+> [what 0.1.0 does](#what-010-does).
 
 Officewright is a source-available alternative to Spire.Office and Aspose. It is not
 affiliated with, endorsed by or connected to the makers of either product; the
 names are trademarks of their respective owners and are used here only to describe
 what this project is an alternative to.
+
+## What 0.1.0 does
+
+0.1.0 is a pre-release for trying the C library and the command-line tool. It is not ready
+for production use.
+
+It can:
+
+- write PDF files with text: Helvetica for Latin text, or a TrueType or OpenType font,
+  embedded and reduced to the glyphs the text uses, for Latin, Greek, Cyrillic, Armenian,
+  Georgian, Han, Hiragana, Katakana and Hangul text;
+- choose a font by family name, with substitutes measured against Word's own rendering and
+  a report of every substitution;
+- do this from Rust, from any language through the C library, prebuilt for Linux, Windows
+  and macOS on the [releases page](https://github.com/officewright/officewright/releases),
+  and with `officewright text-to-pdf`.
+
+It cannot yet:
+
+- convert DOCX, DOC, XLSX or PPTX to PDF. A DOCX reader is in the Rust crates, but the
+  layout engine that turns documents into pages is still being written;
+- shape text (Arabic, Hebrew, the Indic scripts), or draw images, tables and vector
+  graphics;
+- read PDF files;
+- be installed from crates.io or a package manager.
+
+[CHANGELOG.md](CHANGELOG.md) lists everything in the release.
 
 ## Command line
 
@@ -82,6 +109,8 @@ library; `tests/ffi-python` does it with Python's `ctypes`.
 4. DOCX → PDF: reader, layout engine, fidelity tests against Microsoft Word.
 5. XLSX and PPTX read/write, PDF reading and text extraction.
 6. Language packages (.NET, Python, Node, Java, Go, WebAssembly).
+
+0.1.0 has steps 1 to 3; step 4 is in progress.
 
 ## Clean room
 
