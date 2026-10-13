@@ -191,6 +191,19 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
         offset: usize,
         read: impl FnOnce(crate::model::xml::Element<'_>, super::properties::Report<'_>),
     ) {
+        self.check_in(["w:", "w:"], span, offset, read);
+    }
+
+    /// As [`check`](Self::check), for a vocabulary whose elements and attributes take
+    /// these prefixes in messages, such as `["a:", ""]` for DrawingML's unqualified
+    /// attributes.
+    pub(super) fn check_in(
+        &mut self,
+        [element_prefix, attribute_prefix]: [&str; 2],
+        span: Span,
+        offset: usize,
+        read: impl FnOnce(crate::model::xml::Element<'_>, super::properties::Report<'_>),
+    ) {
         let room = self.diagnostics.room();
         let mut omitted = 0u64;
         let mut invalid: Vec<(String, String, String)> = Vec::new();
@@ -208,7 +221,7 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
         for (element, attribute, value) in invalid {
             self.diagnose(offset, DiagnosticKind::InvalidValue, || {
                 format!(
-                    "w:{element} w:{attribute}=\"{}\" is not valid; it is ignored",
+                    "{element_prefix}{element} {attribute_prefix}{attribute}=\"{}\" is not valid; it is ignored",
                     super::shorten(&value)
                 )
             });

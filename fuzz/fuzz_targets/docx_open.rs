@@ -18,6 +18,12 @@ fuzz_target!(|data: &[u8]| {
     };
     let _ = document.text();
     let _ = document.diagnostics();
+    if let Some(theme) = document.theme() {
+        let _ = (theme.colors().map(|colors| colors.name()), theme.fonts());
+    }
+    for font in document.fonts() {
+        let _ = (font.panose(), font.signature(), font.embedded().len());
+    }
     let settings = document.settings();
     let _ = (
         settings.effective_compatibility_mode(),

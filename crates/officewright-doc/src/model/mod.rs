@@ -1,12 +1,14 @@
 //! The document model: what a document contains, independent of the file format it was
 //! read from.
 
+pub(crate) mod fonts;
 pub(crate) mod properties;
 pub(crate) mod section;
 pub(crate) mod settings;
 pub(crate) mod styles;
 pub(crate) mod table_properties;
 mod text;
+pub(crate) mod theme;
 mod views;
 pub(crate) mod xml;
 
@@ -14,6 +16,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use officewright_core::Pt;
 
+pub use fonts::{
+    EmbeddedFontReference, EmbeddedFontStyle, FontDeclaration, FontFamily, FontPitch, FontSignature,
+};
 pub use properties::{
     ArtBorder, Border, BorderStyle, Color, ColorValue, FontHint, Highlight, Indentation,
     Justification, Language, LineSpacing, NumberFormat, NumberingReference, ParagraphBorders,
@@ -37,6 +42,7 @@ pub use table_properties::{
     TableOverlap, TablePosition, TableProperties, TableRowProperties, TableWidth, TextDirection,
     VerticalAlignment, VerticalJustification,
 };
+pub use theme::{ColorScheme, FontCollection, FontScheme, SchemeColor, SystemColor, Theme};
 pub use views::{
     Block, Break, BreakClear, BreakKind, ContentControl, FieldCharKind, Hyperlink, Inline, Opaque,
     Paragraph, Revision, RevisionKind, Run, RunContent, Section, SimpleField, Table, TableCell,
@@ -79,6 +85,8 @@ pub struct Document {
     pub(crate) names: Names,
     pub(crate) styles: styles::StyleTable,
     pub(crate) settings: settings::Settings,
+    pub(crate) theme: Option<theme::Theme>,
+    pub(crate) fonts: Vec<fonts::FontDeclaration>,
     pub(crate) sections: Vec<SectionData>,
     pub(crate) kind: DocumentKind,
     pub(crate) conformance: Conformance,
@@ -92,6 +100,8 @@ pub(crate) struct Names {
     pub(crate) w: [Option<xml::Sym>; 2],
     /// The relationships namespace of attributes such as `r:id`.
     pub(crate) r: [Option<xml::Sym>; 2],
+    /// The main namespace of DrawingML, of the theme.
+    pub(crate) a: [Option<xml::Sym>; 2],
     pub(crate) mc: Option<xml::Sym>,
 }
 
@@ -156,6 +166,8 @@ impl Document {
             names: Names::default(),
             styles: styles::StyleTable::default(),
             settings: settings::Settings::default(),
+            theme: None,
+            fonts: Vec::new(),
             sections: Vec::new(),
             kind: DocumentKind::Document,
             conformance: Conformance::Transitional,
@@ -229,6 +241,26 @@ impl Document {
     /// The styles of the document (`styles.xml`); none when it has no styles part.
     pub fn styles(&self) -> Styles<'_> {
         Styles::new(self)
+    }
+
+    /// The theme of the document (its theme part), whose colours and fonts theme colours
+    /// and theme fonts stand for; `None` when it has none.
+    pub fn theme(&self) -> Option<&Theme> {
+        self.theme.as_ref()
+    }
+
+    /// What the font table (`fontTable.xml`) says about the fonts the document uses, in
+    /// document order.
+    pub fn fonts(&self) -> &[FontDeclaration] {
+        &self.fonts
+    }
+
+    /// The font table's declaration of a font, by the name runs give it (compared
+    /// exactly). A table may declare one name several times, once per face of a family
+    /// with its own PANOSE and signature (LibreOffice's `fdo77727.docx` declares five
+    /// Noto Sans); this gives the first, and [`fonts`](Self::fonts) all of them.
+    pub fn font(&self, name: &str) -> Option<&FontDeclaration> {
+        self.fonts.iter().find(|font| font.name() == name)
     }
 
     /// The settings of the document (`settings.xml`); none set when it has no settings

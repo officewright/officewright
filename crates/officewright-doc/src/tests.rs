@@ -2330,3 +2330,254 @@ fn shares_the_node_limit_with_the_settings_part() {
     let options = LoadOptions::new().with_limits(Limits::new().with_max_nodes(350));
     assert!(options.open_bytes(data).is_ok());
 }
+
+/// A document with one part related to the main part by `relationship` (the last
+/// segment of its type), at `target` under `word/`.
+fn with_part(relationship: &str, target: &str, xml: &str) -> Result<Document> {
+    let rels = format!(
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{relationship}" Target="{target}"/></Relationships>"#
+    );
+    let part = format!("word/{target}");
+    Document::from_bytes(package(
+        DOCUMENT,
+        &document_xml("<w:p/>"),
+        &[("word/_rels/document.xml.rels", &rels), (&part, xml)],
+    ))
+}
+
+const A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+
+#[test]
+fn reads_the_colours_and_fonts_of_the_theme() {
+    let theme = format!(
+        r#"<a:theme xmlns:a="{A}" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" mc:Ignorable="w14" name="Office Theme"><a:themeElements><a:clrScheme name="Office"><a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1><a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="44546A"/></a:dk2><a:lt2><a:srgbClr val="E7E6E6"/></a:lt2><a:accent1><a:srgbClr val="4472C4"/></a:accent1><a:accent2><a:srgbClr val="ed7d31"/></a:accent2><a:accent3><a:srgbClr val="A5A5A5"/></a:accent3><a:accent4><a:hslClr hue="0" sat="0%" lum="50%"/></a:accent4><a:accent5><a:srgbClr val="5B9BD5"/></a:accent5><a:accent6><a:srgbClr val="70AD47"/></a:accent6><a:hlink><a:srgbClr val="0563C1"/></a:hlink><a:folHlink><a:srgbClr val="954F72"/></a:folHlink></a:clrScheme><a:fontScheme name="Office"><a:majorFont><a:latin typeface="Calibri Light" panose="020F0302020204030204"/><a:ea typeface=""/><a:cs typeface=""/><a:font script="Jpan" typeface="游ゴシック Light"/><a:font script="Cyrl" typeface="Times New Roman"/></a:majorFont><a:minorFont><a:latin typeface="Calibri"/><a:ea typeface=""/><a:cs typeface="Arial"/></a:minorFont></a:fontScheme><a:fmtScheme name="Office"/></a:themeElements><w14:themeElements><a:clrScheme name="Fake"><a:dk2><a:srgbClr val="999999"/></a:dk2></a:clrScheme></w14:themeElements><a:objectDefaults/></a:theme>"#
+    );
+    let document = with_part("theme", "theme/theme1.xml", &theme).unwrap();
+    assert!(messages(&document).is_empty(), "{:?}", messages(&document));
+    let theme = document.theme().unwrap();
+    assert_eq!(theme.name(), Some("Office Theme"));
+    let colors = theme.colors().unwrap();
+    // Only the elements of DrawingML are read; the w14 ones are kept.
+    assert_eq!(colors.name(), Some("Office"));
+    assert_eq!(
+        colors.color(ColorSchemeIndex::Dark1),
+        Some(&SchemeColor::System {
+            color: SystemColor::WindowText,
+            last: Some((0, 0, 0))
+        })
+    );
+    let light1 = colors.color(ColorSchemeIndex::Light1).unwrap();
+    assert_eq!(light1.rgb(), Some((0xFF, 0xFF, 0xFF)));
+    assert_eq!(
+        colors.color(ColorSchemeIndex::Dark2),
+        Some(&SchemeColor::Rgb(0x44, 0x54, 0x6A))
+    );
+    // Hexadecimal digits in either case.
+    assert_eq!(
+        colors
+            .color(ColorSchemeIndex::Accent2)
+            .and_then(SchemeColor::rgb),
+        Some((0xED, 0x7D, 0x31))
+    );
+    // A colour model not read yet.
+    assert_eq!(colors.color(ColorSchemeIndex::Accent4), None);
+    assert_eq!(
+        colors.color(ColorSchemeIndex::FollowedHyperlink),
+        Some(&SchemeColor::Rgb(0x95, 0x4F, 0x72))
+    );
+    let fonts = theme.fonts().unwrap();
+    assert_eq!(fonts.name(), Some("Office"));
+    assert_eq!(fonts.major().latin(), Some("Calibri Light"));
+    assert_eq!(fonts.major().east_asian(), Some(""));
+    assert_eq!(fonts.major().script("Jpan"), Some("游ゴシック Light"));
+    assert_eq!(fonts.major().script("Hang"), None);
+    assert_eq!(fonts.major().scripts().len(), 2);
+    assert_eq!(fonts.minor().latin(), Some("Calibri"));
+    assert_eq!(fonts.minor().complex_script(), Some("Arial"));
+    // A document without a theme part has none.
+    assert!(open("<w:p/>").theme().is_none());
+}
+
+#[test]
+fn reads_invalid_theme_colours_as_not_set() {
+    let theme = format!(
+        r#"<a:theme xmlns:a="{A}"><a:themeElements><a:clrScheme name="x"><a:dk1><a:sysClr val="windowTxt" lastClr="000000"/></a:dk1><a:lt1><a:sysClr val="window" lastClr="FFF"/></a:lt1><a:dk2><a:srgbClr val="GG546A"/></a:dk2></a:clrScheme></a:themeElements></a:theme>"#
+    );
+    let document = with_part("theme", "theme/theme1.xml", &theme).unwrap();
+    let colors = *document.theme().unwrap().colors().as_ref().unwrap();
+    assert_eq!(colors.color(ColorSchemeIndex::Dark1), None);
+    // The system colour stays; its last value is not valid.
+    assert_eq!(
+        colors.color(ColorSchemeIndex::Light1),
+        Some(&SchemeColor::System {
+            color: SystemColor::Window,
+            last: None
+        })
+    );
+    assert_eq!(colors.color(ColorSchemeIndex::Dark2), None);
+    let messages = messages(&document);
+    assert_eq!(messages.len(), 3, "{messages:?}");
+    assert!(messages[0].starts_with("/word/theme/theme1.xml, line 1, column "));
+    assert!(messages[0].ends_with(r#": a:sysClr val="windowTxt" is not valid; it is ignored"#));
+    assert!(messages[1].ends_with(r#": a:sysClr lastClr="FFF" is not valid; it is ignored"#));
+    assert!(messages[2].ends_with(r#": a:srgbClr val="GG546A" is not valid; it is ignored"#));
+    let err = with_part(
+        "theme",
+        "theme/theme1.xml",
+        &format!(r#"<w:theme xmlns:w="{W}"/>"#),
+    )
+    .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "/word/theme/theme1.xml, line 1, column 1: the root element is <w:theme>, not a:theme"
+    );
+}
+
+#[test]
+fn reads_the_font_table() {
+    let fonts = format!(
+        r#"<w:fonts xmlns:w="{W}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:font w:name="Calibri"><w:panose1 w:val="020F0502020204030204"/><w:charset w:val="00"/><w:family w:val="swiss"/><w:pitch w:val="variable"/><w:sig w:usb0="E4002EFF" w:usb1="C000247B" w:usb2="00000009" w:usb3="00000000" w:csb0="000001FF" w:csb1="00000000"/></w:font><w:font w:name="MS Mincho"><w:altName w:val="ＭＳ 明朝"/><w:charset w:val="80"/><w:family w:val="modern"/><w:pitch w:val="fixed"/></w:font><w:font w:name="Symbol"><w:charset w:val="02" w:characterSet="Symbol"/><w:family w:val="roman"/><w:notTrueType/><w:embedRegular r:id="rId1" w:fontKey="{{4F9F5AB2-1C3D-4E5F-9A0B-1C2D3E4F5A6B}}" w:subsetted="1"/><w:embedBold r:id="rId2"/></w:font></w:fonts>"#
+    );
+    let document = with_part("fontTable", "fontTable.xml", &fonts).unwrap();
+    assert!(messages(&document).is_empty(), "{:?}", messages(&document));
+    assert_eq!(document.fonts().len(), 3);
+    let calibri = document.font("Calibri").unwrap();
+    assert_eq!(
+        calibri.panose(),
+        Some([0x02, 0x0F, 0x05, 0x02, 0x02, 0x02, 0x04, 0x03, 0x02, 0x04])
+    );
+    assert_eq!(calibri.charset(), Some(0));
+    assert_eq!(calibri.family(), Some(FontFamily::Swiss));
+    assert_eq!(calibri.pitch(), Some(FontPitch::Variable));
+    let signature = calibri.signature().unwrap();
+    assert_eq!(signature.unicode_ranges(), [0xE400_2EFF, 0xC000_247B, 9, 0]);
+    assert_eq!(signature.code_pages(), [0x1FF, 0]);
+    let mincho = document.font("MS Mincho").unwrap();
+    assert_eq!(mincho.alternative_name(), Some("ＭＳ 明朝"));
+    assert_eq!(mincho.charset(), Some(0x80));
+    assert_eq!(mincho.pitch(), Some(FontPitch::Fixed));
+    let symbol = document.font("Symbol").unwrap();
+    assert_eq!(
+        (symbol.charset(), symbol.character_set()),
+        (Some(2), Some("Symbol"))
+    );
+    assert_eq!(symbol.not_true_type(), Some(true));
+    let embedded = symbol.embedded();
+    assert_eq!(embedded.len(), 2);
+    assert_eq!(embedded[0].style(), EmbeddedFontStyle::Regular);
+    assert_eq!(embedded[0].relationship_id(), "rId1");
+    assert_eq!(
+        embedded[0].key(),
+        Some("{4F9F5AB2-1C3D-4E5F-9A0B-1C2D3E4F5A6B}")
+    );
+    assert_eq!(embedded[0].subsetted(), Some(true));
+    assert_eq!(
+        (embedded[1].style(), embedded[1].key()),
+        (EmbeddedFontStyle::Bold, None)
+    );
+    assert!(document.font("calibri").is_none());
+}
+
+#[test]
+fn repairs_a_damaged_font_table() {
+    let fonts = format!(
+        r#"<w:fonts xmlns:w="{W}"><w:font><w:family w:val="swiss"/></w:font><w:font w:name="A"><w:charset w:val="0"/><w:family w:val="sans"/><w:panose1 w:val="020F05"/><w:sig w:usb0="XYZ" w:usb1="00000000" w:usb2="0" w:usb3="00000000" w:csb0="00000001" w:csb1="00000000"/></w:font><w:font w:name="A"><w:pitch w:val="fixed"/></w:font></w:fonts>"#
+    );
+    let document = with_part("fontTable", "fontTable.xml", &fonts).unwrap();
+    // The font without a name is left out; both fonts named A are kept, as faces of a
+    // family are, and the first is the one looked up.
+    assert_eq!(document.fonts().len(), 2);
+    let a = document.font("A").unwrap();
+    assert_eq!(
+        (a.charset(), a.family(), a.panose(), a.pitch()),
+        (None, None, None, None)
+    );
+    assert_eq!(a.signature().unwrap().code_pages(), [1, 0]);
+    let messages = messages(&document);
+    assert_eq!(messages.len(), 6, "{messages:?}");
+    assert!(messages[0].ends_with(": a w:font without a w:name is ignored"));
+    assert!(messages[1].ends_with(r#": w:charset w:val="0" is not valid; it is ignored"#));
+    assert!(messages[5].ends_with(r#": w:sig w:usb2="0" is not valid; it is ignored"#));
+    let err = with_part(
+        "fontTable",
+        "fontTable.xml",
+        &format!(r#"<w:font xmlns:w="{W}"/>"#),
+    )
+    .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "/word/fontTable.xml, line 1, column 1: the root element is <w:font>, not w:fonts"
+    );
+}
+
+#[test]
+fn reads_a_strict_theme_and_font_table() {
+    let theme = r#"<a:theme xmlns:a="http://purl.oclc.org/ooxml/drawingml/main" name="S"><a:themeElements><a:clrScheme name="S"><a:dk1><a:srgbClr val="010203"/></a:dk1></a:clrScheme><a:fontScheme name="S"><a:majorFont><a:latin typeface="Aptos Display"/></a:majorFont><a:minorFont><a:latin typeface="Aptos"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>"#;
+    let fonts = r#"<w:fonts xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main"><w:font w:name="Aptos"><w:charset w:characterSet="windows-1252"/></w:font></w:fonts>"#;
+    let xml = r#"<w:document xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main" conformance="strict"><w:body><w:p/></w:body></w:document>"#;
+    let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://purl.oclc.org/ooxml/officeDocument/relationships/theme" Target="theme/theme1.xml"/><Relationship Id="rId2" Type="http://purl.oclc.org/ooxml/officeDocument/relationships/fontTable" Target="fontTable.xml"/></Relationships>"#;
+    let document = Document::from_bytes(package(
+        DOCUMENT,
+        xml,
+        &[
+            ("word/_rels/document.xml.rels", rels),
+            ("word/theme/theme1.xml", theme),
+            ("word/fontTable.xml", fonts),
+        ],
+    ))
+    .unwrap();
+    assert!(messages(&document).is_empty(), "{:?}", messages(&document));
+    let theme = document.theme().unwrap();
+    assert_eq!(
+        theme.colors().unwrap().color(ColorSchemeIndex::Dark1),
+        Some(&SchemeColor::Rgb(1, 2, 3))
+    );
+    assert_eq!(theme.fonts().unwrap().minor().latin(), Some("Aptos"));
+    let aptos = document.font("Aptos").unwrap();
+    assert_eq!(
+        (aptos.charset(), aptos.character_set()),
+        (None, Some("windows-1252"))
+    );
+}
+
+#[test]
+fn shares_the_node_limit_with_the_theme_and_the_font_table() {
+    // 100 paragraphs cost 100 nodes. Each part alone fits the lower limit, but not with
+    // the paragraphs: the theme's 100 empty elements cost 200, the 50 named fonts 150.
+    let body = "<w:p/>".repeat(100);
+    let theme = format!(
+        r#"<a:theme xmlns:a="{A}"><a:themeElements>{}</a:themeElements></a:theme>"#,
+        "<a:extLst/>".repeat(100)
+    );
+    let fonts = format!(
+        r#"<w:fonts xmlns:w="{W}">{}</w:fonts>"#,
+        r#"<w:font w:name="F"/>"#.repeat(50)
+    );
+    for (relationship, target, xml, limit) in [
+        ("theme", "theme/theme1.xml", theme.as_str(), 250),
+        ("fontTable", "fontTable.xml", fonts.as_str(), 200),
+    ] {
+        let rels = format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{relationship}" Target="{target}"/></Relationships>"#
+        );
+        let part = format!("word/{target}");
+        let data = package(
+            DOCUMENT,
+            &document_xml(&body),
+            &[("word/_rels/document.xml.rels", &rels), (&part, xml)],
+        );
+        let options = LoadOptions::new().with_limits(Limits::new().with_max_nodes(limit));
+        match options.open_bytes(data.clone()).unwrap_err() {
+            Error::LimitExceeded {
+                limit: Limit::Nodes,
+                context,
+                ..
+            } => {
+                assert!(context.starts_with(&format!("/{part}")), "{context}");
+            }
+            other => panic!("{other}"),
+        }
+        let options = LoadOptions::new().with_limits(Limits::new().with_max_nodes(500));
+        assert!(options.open_bytes(data).is_ok(), "{relationship}");
+    }
+}
