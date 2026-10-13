@@ -71,6 +71,18 @@ pub(crate) fn kerning(value: &mut Option<Pt>, clamper: &mut Clamper) {
     }
 }
 
+/// Word takes font sizes from 2 to 3277 half-points (ST_HpsMeasure, MS-OI29500 2.1.544
+/// a); negative sizes are rejected by `validate`.
+pub(crate) fn font_size(value: &mut Pt, clamper: &mut Clamper) {
+    limit(value, Pt(1.0), Pt(3277.0 / 2.0), "font size", clamper);
+}
+
+/// Word takes the distance between a border and the text from 0 to 31 pt
+/// (ST_PointMeasure, MS-OI29500 2.1.550 a); negative distances are rejected by `validate`.
+pub(crate) fn border_space(value: &mut Pt, clamper: &mut Clamper) {
+    limit(value, Pt(0.0), Pt(31.0), "border distance", clamper);
+}
+
 /// Word stores the distance between automatic tab stops as a `short` of twips, at least
 /// 0 (MS-OI29500 2.1.399 a); negative distances are rejected by `validate`.
 pub(crate) fn default_tab_stop(value: &mut Pt, clamper: &mut Clamper) {
@@ -97,10 +109,10 @@ pub(crate) fn vertical_margin(value: &mut Pt, clamper: &mut Clamper) {
     limit(value, Pt(-max.0), max, "margin", clamper);
 }
 
-/// The character scale (`w:w`) is a percentage from 1 to 600 (ST_TextScale). The schema
-/// allows 0 as well, but Word shows such text at its normal width: LibreOffice's
-/// `tdf106001.docx` has `w:w w:val="0"`, and its public bug report (tdf#106001) shows it
-/// in Word 2010 at normal width.
+/// Word takes a character scale (`w:w`) from 1 to 600 % (MS-OI29500 2.1.560 a). The
+/// schema allows 0 as well; this reads it as 100 %, as the DOCX reader does, after
+/// LibreOffice, which fixed tdf#106001 by treating such widths as normal. A Word reference
+/// render of a rule document is to confirm it.
 pub(crate) fn text_scale(value: &mut u16, clamper: &mut Clamper) {
     let clamped = match *value {
         0 => 100,

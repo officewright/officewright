@@ -98,31 +98,20 @@ pub enum CompatFlag {
 }
 
 impl CompatFlag {
-    pub(super) const NAMED: [(&'static str, CompatFlag); 12] = [
-        ("doNotExpandShiftReturn", Self::DoNotExpandShiftReturn),
-        (
-            "doNotUseIndentAsNumberingTabStop",
-            Self::DoNotUseIndentAsNumberingTabStop,
-        ),
-        (
-            "doNotUseHTMLParagraphAutoSpacing",
-            Self::DoNotUseHTMLParagraphAutoSpacing,
-        ),
-        ("noLeading", Self::NoLeading),
-        ("splitPgBreakAndParaMark", Self::SplitPgBreakAndParaMark),
-        ("growAutofit", Self::GrowAutofit),
-        (
-            "doNotAutofitConstrainedTables",
-            Self::DoNotAutofitConstrainedTables,
-        ),
-        ("layoutRawTableWidth", Self::LayoutRawTableWidth),
-        ("layoutTableRowsApart", Self::LayoutTableRowsApart),
-        (
-            "allowSpaceOfSameStyleInTable",
-            Self::AllowSpaceOfSameStyleInTable,
-        ),
-        ("doNotVertAlignCellWithSp", Self::DoNotVertAlignCellWithSp),
-        ("doNotBreakWrappedTables", Self::DoNotBreakWrappedTables),
+    /// Every variant but [`Other`](Self::Other), for [`from_name`](Self::from_name).
+    pub(super) const NAMED: [CompatFlag; 12] = [
+        Self::DoNotExpandShiftReturn,
+        Self::DoNotUseIndentAsNumberingTabStop,
+        Self::DoNotUseHTMLParagraphAutoSpacing,
+        Self::NoLeading,
+        Self::SplitPgBreakAndParaMark,
+        Self::GrowAutofit,
+        Self::DoNotAutofitConstrainedTables,
+        Self::LayoutRawTableWidth,
+        Self::LayoutTableRowsApart,
+        Self::AllowSpaceOfSameStyleInTable,
+        Self::DoNotVertAlignCellWithSp,
+        Self::DoNotBreakWrappedTables,
     ];
 
     /// The option with this element or setting name, as WordprocessingML writes it.
@@ -140,19 +129,27 @@ impl CompatFlag {
     /// ```
     pub fn from_name(name: &str) -> Self {
         Self::NAMED
-            .iter()
-            .find(|(known, _)| *known == name)
-            .map_or_else(|| Self::Other(name.to_owned()), |(_, flag)| flag.clone())
+            .into_iter()
+            .find(|flag| flag.name() == name)
+            .unwrap_or_else(|| Self::Other(name.to_owned()))
     }
 
     /// The element or setting name of the option.
     pub fn name(&self) -> &str {
         match self {
+            Self::DoNotExpandShiftReturn => "doNotExpandShiftReturn",
+            Self::DoNotUseIndentAsNumberingTabStop => "doNotUseIndentAsNumberingTabStop",
+            Self::DoNotUseHTMLParagraphAutoSpacing => "doNotUseHTMLParagraphAutoSpacing",
+            Self::NoLeading => "noLeading",
+            Self::SplitPgBreakAndParaMark => "splitPgBreakAndParaMark",
+            Self::GrowAutofit => "growAutofit",
+            Self::DoNotAutofitConstrainedTables => "doNotAutofitConstrainedTables",
+            Self::LayoutRawTableWidth => "layoutRawTableWidth",
+            Self::LayoutTableRowsApart => "layoutTableRowsApart",
+            Self::AllowSpaceOfSameStyleInTable => "allowSpaceOfSameStyleInTable",
+            Self::DoNotVertAlignCellWithSp => "doNotVertAlignCellWithSp",
+            Self::DoNotBreakWrappedTables => "doNotBreakWrappedTables",
             Self::Other(name) => name,
-            named => Self::NAMED
-                .iter()
-                .find(|(_, flag)| flag == named)
-                .map_or("", |(name, _)| name),
         }
     }
 }

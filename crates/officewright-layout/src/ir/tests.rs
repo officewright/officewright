@@ -107,7 +107,8 @@ fn rich_document() -> Document {
         Inline::text("Total", body),
         Inline::tab(body),
         Inline::text("12,50", body),
-        Inline::new_break(BreakKind::Line(BreakClear::None), body),
+        Inline::line_break(BreakClear::None, body),
+        Inline::column_break(body),
         Inline::symbol("Wingdings", 0xF0FC, body),
         Inline::soft_hyphen(body),
         Inline::no_break_hyphen(body),
@@ -307,7 +308,7 @@ fn every_inline_checks_its_style() {
     let foreign = other.add_run_style(RunStyle::default());
     let inlines = [
         Inline::tab(foreign),
-        Inline::new_break(BreakKind::Page, foreign),
+        Inline::page_break(foreign),
         Inline::symbol("Symbol", 0xF0B7, foreign),
         Inline::soft_hyphen(foreign),
         Inline::no_break_hyphen(foreign),
@@ -625,19 +626,190 @@ fn clamp_leaves_values_that_are_not_numbers_to_validate() {
         )
     });
     document.add_run_style(RunStyle::default().with_letter_spacing(Pt(f64::NAN)));
-    let page = PageSetup::new(PageSize::new(Pt(f64::NAN), Pt(f64::INFINITY)))
-        .with_margins(Margins::default().with_left(Pt(f64::NAN)));
-    document.add_section(Section::new(page));
+    // A margin that is not a number gives the page no bound: its valid width stays.
+    let nan_margin = Margins::default().with_left(Pt(f64::NAN));
+    document.add_section(Section::new(
+        PageSetup::new(PageSize::A4).with_margins(nan_margin),
+    ));
+    let size = PageSize::new(Pt(f64::NAN), Pt(f64::INFINITY));
+    document.add_section(Section::new(PageSetup::new(size)));
     let report = document.clamp();
     // Only the infinite page height is out of range; NaN compares with nothing.
     assert_eq!(
         entries(&report),
         [
-            "sections[1].page: page height inf pt is outside Word's range of 144 to 1584 pt and \
+            "sections[2].page: page height inf pt is outside Word's range of 144 to 1584 pt and \
           becomes 1584 pt"
         ]
     );
+    assert_eq!(document.sections()[1].page().size(), PageSize::A4);
     assert!(document.validate().is_err());
+}
+
+#[test]
+fn every_length_that_wordprocessingml_keeps_unsigned_is_checked() {
+    let minus = Pt(-1.0);
+    let in_settings = |settings: DocumentSettings| {
+        let mut document = Document::new(settings);
+        document.add_section(Section::new(PageSetup::default()));
+        document
+    };
+    let in_section = |section: Section| {
+        let mut document = Document::default();
+        document.add_section(section);
+        document
+    };
+    let in_margins =
+        |margins: Margins| in_section(Section::new(PageSetup::default().with_margins(margins)));
+    let in_columns =
+        |columns: Columns| in_section(Section::new(PageSetup::default()).with_columns(columns));
+    let in_props = |props: ParagraphProps| document_with(|style| paragraph_with(style, props));
+    let in_border = |border: Border| {
+        in_props(
+            ParagraphProps::default()
+                .with_borders(ParagraphBorders::default().with_top(Some(border))),
+        )
+    };
+    let in_style = |style: RunStyle| {
+        let mut document = document_with(|_| Vec::new());
+        document.add_run_style(style);
+        document
+    };
+    let cases = [
+        (
+            in_settings(DocumentSettings::default().with_default_tab_stop(minus)),
+            "settings.default_tab_stop",
+        ),
+        (
+            in_settings(
+                DocumentSettings::default()
+                    .with_hyphenation(Hyphenation::default().with_zone(minus)),
+            ),
+            "settings.hyphenation.zone",
+        ),
+        (
+            in_margins(Margins::default().with_left(minus)),
+            "sections[0].page.margins.left",
+        ),
+        (
+            in_margins(Margins::default().with_right(minus)),
+            "sections[0].page.margins.right",
+        ),
+        (
+            in_margins(Margins::default().with_header(minus)),
+            "sections[0].page.margins.header",
+        ),
+        (
+            in_margins(Margins::default().with_footer(minus)),
+            "sections[0].page.margins.footer",
+        ),
+        (
+            in_margins(Margins::default().with_gutter(minus)),
+            "sections[0].page.margins.gutter",
+        ),
+        (
+            in_columns(Columns::default().with_spacing(minus)),
+            "sections[0].columns.spacing",
+        ),
+        (
+            in_columns(Columns::default().with_widths([Column::default().with_width(minus)])),
+            "sections[0].columns.widths[0].width",
+        ),
+        (
+            in_columns(Columns::default().with_widths([Column::default().with_spacing(minus)])),
+            "sections[0].columns.widths[0].spacing",
+        ),
+        (
+            in_props(ParagraphProps::default().with_spacing(Spacing::default().with_before(minus))),
+            "sections[0].blocks[0].props.spacing.before",
+        ),
+        (
+            in_props(ParagraphProps::default().with_spacing(Spacing::default().with_after(minus))),
+            "sections[0].blocks[0].props.spacing.after",
+        ),
+        (
+            in_border(Border::default().with_width(minus)),
+            "sections[0].blocks[0].props.borders.top.width",
+        ),
+        (
+            in_border(Border::default().with_space(minus)),
+            "sections[0].blocks[0].props.borders.top.space",
+        ),
+        (
+            in_style(RunStyle::default().with_size(minus)),
+            "run_styles[1].size",
+        ),
+        (
+            in_style(RunStyle::default().with_size_complex_script(minus)),
+            "run_styles[1].size_complex_script",
+        ),
+        (
+            in_style(RunStyle::default().with_kern_min(Some(minus))),
+            "run_styles[1].kern_min",
+        ),
+    ];
+    for (document, location) in cases {
+        assert_eq!(invalid(&document), format!("{location}: -1 pt is negative"));
+    }
+
+    for (size, problem) in [
+        (
+            PageSize::new(Pt(1.0), Pt(-1.0)),
+            "size: page size 1 by -1 pt is negative",
+        ),
+        (
+            PageSize::new(Pt(1.0), Pt(f64::NAN)),
+            "size.height: NaN is not a finite length",
+        ),
+    ] {
+        let document = in_section(Section::new(PageSetup::new(size)));
+        assert_eq!(invalid(&document), format!("sections[0].page.{problem}"));
+    }
+}
+
+#[test]
+fn font_sizes_and_border_distances_are_clamped_to_words_limits() {
+    let mut document = document_with(|style| {
+        let border = Border::default().with_space(Pt(400.0));
+        paragraph_with(
+            style,
+            ParagraphProps::default()
+                .with_borders(ParagraphBorders::default().with_bar(Some(border))),
+        )
+    });
+    document.add_run_style(RunStyle::default().with_size(Pt(0.0)));
+    document.add_run_style(RunStyle::default().with_size_complex_script(Pt(5000.0)));
+    document.add_run_style(
+        RunStyle::default()
+            .with_size(Pt(1.0))
+            .with_size_complex_script(Pt(1638.5)),
+    );
+    assert_eq!(
+        entries(&document.clamp()),
+        [
+            "run_styles[1].size: font size 0 pt is outside Word's range of 1 to 1638.5 pt and \
+             becomes 1 pt",
+            "run_styles[2].size_complex_script: font size 5000 pt is outside Word's range of 1 \
+             to 1638.5 pt and becomes 1638.5 pt",
+            "sections[0].blocks[0].props.borders.bar.space: border distance 400 pt is outside \
+             Word's range of 0 to 31 pt and becomes 31 pt",
+        ]
+    );
+    assert!(document.clamp().is_empty());
+}
+
+#[test]
+fn defaults_are_what_a_document_means_when_it_says_nothing() {
+    // ECMA-376 Part 1, §17.3.1.44: widow control is on unless something turns it off.
+    assert!(ParagraphProps::default().widow_control());
+    // MS-OI29500 2.1.38 b and c: a border without a width or a distance has 0 for both.
+    let border = Border::default();
+    assert_eq!((border.width(), border.space()), (Pt(0.0), Pt(0.0)));
+    assert_eq!(
+        DocumentSettings::default().compat_mode(),
+        CompatMode::Word2007
+    );
+    assert_eq!(PageNumbering::default().format(), &NumberFormat::Decimal);
 }
 
 #[test]
@@ -674,9 +846,9 @@ fn accessors_read_back_what_the_setters_wrote() {
 
 #[test]
 fn compat_flags_map_names_both_ways() {
-    for (name, flag) in CompatFlag::NAMED {
-        assert_eq!(CompatFlag::from_name(name), flag);
-        assert_eq!(flag.name(), name);
+    for flag in CompatFlag::NAMED {
+        assert_eq!(CompatFlag::from_name(flag.name()), flag);
+        assert!(!matches!(flag, CompatFlag::Other(_)));
     }
     let other = CompatFlag::from_name("useFELayout");
     assert_eq!(other, CompatFlag::Other("useFELayout".into()));

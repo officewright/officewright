@@ -8,17 +8,19 @@ use super::rules;
 
 ir_struct! {
     /// The formatting of a run of text, with the styles already applied. Each default is
-    /// what WordprocessingML means when nothing in the style hierarchy sets the property.
+    /// what WordprocessingML means when nothing in the style hierarchy sets the property,
+    /// where it says; it leaves the font size to the application, and the default here is
+    /// 10 pt.
     #[derive(Clone, Debug, PartialEq)]
     pub struct RunStyle {
         /// The font families, by the kind of character.
         ref fonts: RunFonts = RunFonts::default() => with_fonts;
-        /// The font size of text that is not complex script (`w:sz`). 10 pt when nothing
-        /// sets it.
-        copy size: Pt = Pt(10.0) => with_size, check rules::non_negative;
+        /// The font size of text that is not complex script (`w:sz`).
+        copy size: Pt = Pt(10.0) => with_size, check rules::non_negative,
+            clamp rules::font_size;
         /// The font size of complex script text (`w:szCs`).
         copy size_complex_script: Pt = Pt(10.0) => with_size_complex_script,
-            check rules::non_negative;
+            check rules::non_negative, clamp rules::font_size;
         /// Whether text that is not complex script is bold.
         copy bold: bool = false => with_bold;
         /// Whether text that is not complex script is italic.
@@ -100,7 +102,8 @@ const DEFAULT_FONT: &str = "Times New Roman";
 
 impl RunFonts {
     /// The same family for every kind of character.
-    pub fn new(family: &str) -> Self {
+    pub fn new(family: impl AsRef<str>) -> Self {
+        let family = family.as_ref();
         Self::default()
             .with_ascii(family)
             .with_high_ansi(family)
