@@ -3,7 +3,7 @@
 use officewright_core::{PageSize, Pt};
 
 use super::macros::{ir_struct, no_rules};
-use super::note::{NoteProps, endnote_position};
+use super::note::{NoteProps, endnote_position, footnote_position};
 use super::paragraph::Block;
 use super::rules::{self, WORD_MAX_LENGTH};
 use super::walk::{Checker, Clamper};
@@ -32,7 +32,7 @@ ir_struct! {
         /// [`Top`](PageVerticalAlign::Top) is laid out yet.
         copy vertical_align: PageVerticalAlign => with_vertical_align;
         /// How its footnotes are numbered and placed.
-        ref footnotes: NoteProps => with_footnotes;
+        ref footnotes: NoteProps => with_footnotes, clamp footnote_position;
         /// How its endnotes are numbered and placed.
         ref endnotes: NoteProps => with_endnotes, check endnote_position;
         /// The body text, in reading order.

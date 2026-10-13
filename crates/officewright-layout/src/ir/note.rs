@@ -108,9 +108,11 @@ impl NoteProps {
     }
 }
 
-/// Where the notes of a section go. Footnotes go to any of these (ST_FtnPos), endnotes
-/// only to the end of the section or the document (the endnote positions of ECMA-376 Part 1,
-/// §17.18.26).
+/// Where the notes of a section go. Endnotes go only to the end of the section or the
+/// document (ECMA-376 Part 1, §17.18.23). Footnotes may be written with any of
+/// the four (ST_FtnPos, §17.18.34), but Word puts footnotes meant for the end of the
+/// section beneath the text, and does not support them at the end of the document
+/// (MS-OI29500 2.1.541), so `clamp` changes those two.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum NotePosition {
@@ -165,7 +167,7 @@ fn bullets_as_decimal(format: &mut NumberFormat, clamper: &mut Clamper) {
     }
 }
 
-/// Endnotes go to the end of a section or of the document (ECMA-376 Part 1, §17.18.26).
+/// Endnotes go to the end of a section or of the document (ECMA-376 Part 1, §17.18.23).
 pub(crate) fn endnote_position(props: &NoteProps, checker: &mut Checker<'_>) -> Result<()> {
     let place = match props.position {
         NotePosition::SectionEnd | NotePosition::DocumentEnd => return Ok(()),
@@ -175,6 +177,27 @@ pub(crate) fn endnote_position(props: &NoteProps, checker: &mut Checker<'_>) -> 
     Err(checker.error(format!(
         "endnotes placed {place}; endnotes go to the end of the section or of the document"
     )))
+}
+
+/// Word treats footnotes placed at the end of the section as placed beneath the text
+/// (MS-OI29500 2.1.541 b), and does not support them at the end of the document (2.1.541
+/// a), which are laid out at the bottom of the page, where a document that says nothing
+/// puts them.
+pub(crate) fn footnote_position(props: &mut NoteProps, clamper: &mut Clamper) {
+    let (position, message) = match props.position {
+        NotePosition::SectionEnd => (
+            NotePosition::BeneathText,
+            "footnotes placed at the end of the section are placed beneath the text, as in Word",
+        ),
+        NotePosition::DocumentEnd => (
+            NotePosition::PageBottom,
+            "footnotes placed at the end of the document, which Word does not support, are \
+             placed at the bottom of the page",
+        ),
+        NotePosition::PageBottom | NotePosition::BeneathText => return,
+    };
+    clamper.clamped(message.into());
+    props.position = position;
 }
 
 no_rules!(NoteKind, NotePosition, NoteRestart);

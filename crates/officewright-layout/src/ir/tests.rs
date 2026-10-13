@@ -1867,6 +1867,18 @@ fn notes_numbered_with_bullets_are_numbered_in_decimal() {
         &NumberFormat::Decimal
     );
     assert!(document.clamp().is_empty());
+
+    // Notes without numbers keep that.
+    let mut document = Document::default();
+    document.add_section(
+        Section::new(PageSetup::default())
+            .with_footnotes(NoteProps::footnotes().with_format(NumberFormat::None)),
+    );
+    assert!(document.clamp().is_empty());
+    assert_eq!(
+        document.sections()[0].footnotes().format(),
+        &NumberFormat::None
+    );
 }
 
 #[test]
@@ -1888,7 +1900,7 @@ fn endnotes_go_to_the_end_of_a_section_or_the_document() {
             )
         );
     }
-    // Footnotes may go to any of the four places (ST_FtnPos).
+    // Footnotes may be written with any of the four places (ST_FtnPos).
     let mut document = Document::default();
     document.add_section(
         Section::new(PageSetup::default())
@@ -1896,6 +1908,48 @@ fn endnotes_go_to_the_end_of_a_section_or_the_document() {
             .with_endnotes(NoteProps::endnotes().with_position(NotePosition::SectionEnd)),
     );
     assert!(document.validate().is_ok());
+}
+
+#[test]
+fn footnotes_go_where_word_puts_them() {
+    let mut document = Document::default();
+    for position in [
+        NotePosition::SectionEnd,
+        NotePosition::DocumentEnd,
+        NotePosition::PageBottom,
+        NotePosition::BeneathText,
+    ] {
+        document.add_section(
+            Section::new(PageSetup::default())
+                .with_footnotes(NoteProps::footnotes().with_position(position)),
+        );
+    }
+    // MS-OI29500 2.1.541: Word puts footnotes meant for the end of the section beneath
+    // the text, and does not support them at the end of the document.
+    assert_eq!(
+        entries(&document.clamp()),
+        [
+            "sections[0].footnotes: footnotes placed at the end of the section are placed \
+             beneath the text, as in Word",
+            "sections[1].footnotes: footnotes placed at the end of the document, which Word \
+             does not support, are placed at the bottom of the page",
+        ]
+    );
+    let positions: Vec<NotePosition> = document
+        .sections()
+        .iter()
+        .map(|section| section.footnotes().position())
+        .collect();
+    assert_eq!(
+        positions,
+        [
+            NotePosition::BeneathText,
+            NotePosition::PageBottom,
+            NotePosition::PageBottom,
+            NotePosition::BeneathText,
+        ]
+    );
+    assert!(document.clamp().is_empty());
 }
 
 #[test]
