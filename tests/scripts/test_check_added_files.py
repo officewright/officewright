@@ -46,7 +46,10 @@ OFFENDING = {
     # \Users without a drive letter, and the profile roots in upper case, as Windows and
     # macOS read them.
     "rooted.txt": b"\\Users\\%s\\AppData and \\\\Users\\\\%s\\\\x\n" % (b"uma", b"vic"),
-    "upper.txt": b"/USERS/%s/ and C:\\DOCUMENTS AND SETTINGS\\%s\\\n" % (b"wes", b"xia"),
+    "upper.txt": b"/USERS/%s/\n" % b"wes",
+    "upper-xp.txt": b"C:\\DOCUMENTS AND SETTINGS\\%s\\\n" % b"xia",
+    "lower-xp.txt": b"c:\\documents and settings\\%s\\\n" % b"yan",
+    "lower-drive.txt": b"d:/users/%s/x\n" % b"zed",
     # A name ends at a control character: a C string in a binary file.
     "cstring.bin": b"\x00/home/%s\x00" % b"ray",
 }
@@ -59,6 +62,8 @@ ALLOWED = {
     "system.txt": b"/usr/share/fonts C:\\Windows\\Fonts C:\\Users\\ /Users/\n",
     # Linux home directories are lower case: an upper-case Home is something else.
     "views.txt": b"Views/Home/Index.cshtml /HOME/README\n",
+    # A lower-case users folder is not a profile without a drive letter.
+    "rest.txt": b"/api/users/42 https://api.github.com/users/octocat docs/users/guide\n",
 }
 BYTECODE = [
     "__pycache__/tool.cpython-312.pyc",

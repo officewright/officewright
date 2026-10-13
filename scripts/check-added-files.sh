@@ -4,9 +4,9 @@
 # which give away whose machine they came from:
 #   /home/<name>, \\wsl.localhost\<distribution>\home\<name>, /Users/<name>,
 #   C:\Users\<name> and C:\Documents and Settings\<name>,
-# with / or single or doubled backslashes, in text and binary files; Users and Documents and
-# Settings in any letter case, as macOS and Windows read them, home in lower case, as Linux
-# does. A placeholder such as <name>, $USER, %USERNAME% or {user} is allowed. Text compressed inside a file (DOCX, XLSX and PPTX parts, PDF
+# with / or single or doubled backslashes, in text and binary files; after a drive letter
+# in any letter case, as Windows reads them, home in lower case, as Linux does, and Users
+# without a drive letter as Users or USERS. A placeholder such as <name>, $USER, %USERNAME% or {user} is allowed. Text compressed inside a file (DOCX, XLSX and PPTX parts, PDF
 # streams) or stored as UTF-16 is not searched; only the documents brought in through
 # scripts/corpus-import.py and scripts/import-public-docs.py are checked there.
 #
@@ -28,21 +28,11 @@ windows_name="$char(($char| )*$char)?"
 sep='(\\+|/)'
 end="($sep|[$others]|\$)"
 
-# `word` with each letter in either case.
-any_case() {
-	local word=$1 out='' letter i
-	for ((i = 0; i < ${#word}; i++)); do
-		letter=${word:i:1}
-		case $letter in
-		[A-Za-z]) out+="[$(printf %s "$letter" | tr '[:lower:]' '[:upper:]')$(printf %s "$letter" | tr '[:upper:]' '[:lower:]')]" ;;
-		*) out+=$letter ;;
-		esac
-	done
-	printf %s "$out"
-}
-users=$(any_case Users)
-documents=$(any_case 'Documents and Settings')
-pattern="${sep}home$sep$name$end|$sep$users$sep$name$end"
+# Windows reads the profile roots in any letter case. Without a drive letter, only Users
+# and USERS count, as macOS reads them, since paths such as /api/users/42 are common.
+users='[Uu][Ss][Ee][Rr][Ss]'
+documents='[Dd][Oo][Cc][Uu][Mm][Ee][Nn][Tt][Ss] [Aa][Nn][Dd] [Ss][Ee][Tt][Tt][Ii][Nn][Gg][Ss]'
+pattern="${sep}home$sep$name$end|$sep(Users|USERS)$sep$name$end"
 pattern+="|[A-Za-z]:$sep($users|$documents)$sep$windows_name$end"
 
 # Searches the files named on standard input, NUL-separated, for home directories.
