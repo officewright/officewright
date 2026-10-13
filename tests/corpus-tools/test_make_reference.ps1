@@ -197,8 +197,8 @@ Exit-Stuck 'test' ''
     $excerpt = Get-TextExcerpt ("Name:`tValue" + [char]11 + 'x' * 70 + [char]13 + [char]7)
     Check 'excerpt without marks, controls as spaces, 60 characters' ($excerpt.Length -eq 60 -and $excerpt.StartsWith('Name: Value x'))
 
-    function New-Font($Name, $Size, $Bold = 0, $Italic = 0, $Color = -16777216, $Rgb = 0) {
-        $textColor = New-Object PSObject -Property @{ RGB = $Rgb }
+    function New-Font($Name, $Size, $Bold = 0, $Italic = 0, $Color = -16777216, $Rgb = 0, $ThemeIndex = -1, $TintShade = 0) {
+        $textColor = New-Object PSObject -Property @{ RGB = $Rgb; ObjectThemeColor = $ThemeIndex; TintAndShade = $TintShade }
         return New-Object PSObject -Property @{ Name = $Name; Size = $Size; Bold = $Bold; Italic = $Italic; Color = $Color; TextColor = $textColor }
     }
     # Word's font box placeholders are in the language of its user interface; the stand-in
@@ -229,15 +229,32 @@ Exit-Stuck 'test' ''
     $complex = '<pkg:part pkg:name="/word/document.xml"><w:r><w:rPr><w:rFonts w:cstheme="majorBidi"/></w:rPr><w:t>x</w:t></w:r></pkg:part>'
     Check 'another theme attribute is taken when asciiTheme is missing' ((Get-ThemeKind $complex) -eq 'majorBidi')
     Check 'no theme on the run gives null' ($null -eq (Get-ThemeKind '<pkg:part pkg:name="/word/document.xml"><w:r><w:t>x</w:t></w:r></pkg:part>'))
+    # The first K2 run: Word gave no RGB value for theme colours.
+    $accent = Get-FontRecord (New-Font 'Arial' 11 0 0 -738132071 -738132071 4 -0.25) $theme
+    Check 'a theme colour without RGB names the theme colour and its shade' ($null -eq $accent.color -and $accent.theme_color -eq 'accent1' -and $accent.tint_shade -eq -0.25) "$($accent.theme_color) $($accent.tint_shade)"
+    $plain = Get-FontRecord (New-Font 'Arial' 11 0 0 255 255) $theme
+    Check 'a colour with RGB has no theme colour' ($plain.color -eq 'FF0000' -and -not $plain.Contains('theme_color'))
+    $unknown = Get-FontRecord (New-Font 'Arial' 11 0 0 -738132071 -738132071 -1) $theme
+    Check 'no theme colour index, no theme colour' (-not $unknown.Contains('theme_color') -and $null -eq $unknown.color)
+    Check 'theme colour names' ((Get-ThemeColorName 13) -eq 'text1' -and (Get-ThemeColorName 11) -eq 'followedHyperlink' -and $null -eq (Get-ThemeColorName 16))
     $mixed = Get-FontRecord (New-Font '' 9999999 9999999 0) $theme
     Check 'mixed font values are null' ($null -eq $mixed.name -and $null -eq $mixed.size -and $null -eq $mixed.bold)
 
     # A range over runs of formatting: Start and End are character positions, MoveEnd(13)
     # moves the end to the next run boundary, as Word's wdCharacterFormatting does.
-    function New-Range($Runs, [int] $Start, [int] $End, [int] $Step = 13, [int] $Delay = 0) {
-        $range = New-Object PSObject -Property @{ Runs = $Runs; Start = $Start; End = $End; Unit = $Step; Delay = $Delay }
-        $range | Add-Member ScriptProperty Duplicate { New-Range $this.Runs $this.Start $this.End $this.Unit $this.Delay }
-        $range | Add-Member ScriptMethod Collapse { param($Direction) if ($Direction -eq 1) { $this.End = $this.Start } else { $this.Start = $this.End } }
+    # -Quirky stands in for what the first K2 run showed of Word through PowerShell: a
+    # Duplicate that is the same range, and a Collapse that ignores its direction.
+    function New-Range($Runs, [int] $Start, [int] $End, [int] $Step = 13, [int] $Delay = 0, [switch] $Quirky) {
+        $range = New-Object PSObject -Property @{ Runs = $Runs; Start = $Start; End = $End; Unit = $Step; Delay = $Delay; Quirky = [bool]$Quirky }
+        $range | Add-Member ScriptProperty Duplicate {
+            if ($this.Quirky) { return $this }
+            New-Range $this.Runs $this.Start $this.End $this.Unit $this.Delay
+        }
+        $range | Add-Member ScriptMethod Collapse {
+            param($Direction)
+            if ($Direction -eq 1 -or $this.Quirky) { $this.End = $this.Start } else { $this.Start = $this.End }
+        }
+        $range | Add-Member ScriptMethod SetRange { param($From, $To) $this.Start = $From; $this.End = $To }
         $range | Add-Member ScriptMethod MoveEnd {
             param($Unit, $Count)
             if ($this.Delay -gt 0) { Start-Sleep -Milliseconds $this.Delay }
@@ -272,6 +289,10 @@ Exit-Stuck 'test' ''
     $refused = $false
     try { [void](Get-RunRecords (New-Range $runs 0 9 99) $later $theme) } catch { $refused = $true }
     Check 'a unit Word does not move over is an error, not an endless loop' $refused
+    $quirky = Get-RunRecords (New-Range $runs 0 9 -Quirky) $later $theme
+    Check 'runs are read when Duplicate shares the range and Collapse ignores its direction' ($quirky.Count -eq 3 -and $quirky[0].length -eq 5 -and $quirky[1].length -eq 3 -and $quirky[2].length -eq 1 -and $quirky[1].font.bold -eq $true) "$($quirky.Count)"
+    $middle = Get-RunRecords (New-Range $runs 5 9 -Quirky) $later $theme
+    Check 'a paragraph that starts after the first run' ($middle.Count -eq 2 -and $middle[0].length -eq 3 -and $middle[1].font.size -eq 12) "$($middle.Count)"
 
     function New-Paragraph($Text, $Runs, $Builtin, $StyleName, $ListType = 0, $ListString = '', $Step = 13, $Delay = 0) {
         $length = 0
@@ -339,6 +360,45 @@ Exit-Stuck 'test' ''
     }
     $json = ConvertTo-Json -InputObject $export -Depth 10 -Compress
     Check 'the export is JSON with the run lengths' ($json.Contains('"runs":[{"length":5') -and $json.Contains('"format":1'))
+
+    # -FormattingOnly reads a document again only when its rendered result is still there.
+    $again = Join-Path $temp 'again'
+    $results = Join-Path $again 'out'
+    New-Item -ItemType Directory -Path $results -Force | Out-Null
+    $letter = Join-Path $again 'letter.docx'
+    [System.IO.File]::WriteAllBytes($letter, [byte[]](1, 2, 3))
+    $copy = Join-Path $results 'letter.resaved.docx'
+    [System.IO.File]::WriteAllBytes($copy, [byte[]](4, 5, 6))
+    $recordPath = Join-Path $results 'letter.json'
+    $letterHash = Get-Sha256 $letter
+    $copyHash = Get-Sha256 $copy
+    function Write-Record($Changes) {
+        $record = [ordered]@{
+            script_version = 3; file = 'letter.docx'; sha256 = $letterHash
+            resaved_file = 'letter.resaved.docx'; resaved_sha256 = $copyHash; status = 'rendered'; pages = 2
+        }
+        foreach ($key in $Changes.Keys) { $record[$key] = $Changes[$key] }
+        Write-JsonFile $recordPath $record
+    }
+    Check 'a document never rendered is skipped' ((Get-FormattingOnlyState $letter $results 3).Reason -like 'not rendered yet*')
+    Write-Record @{}
+    $state = Get-FormattingOnlyState $letter $results 3
+    Check 'a rendered document is read again, with its record in order' ($state.Ready -and @($state.Record.Keys)[0] -eq 'script_version' -and $state.Record.pages -eq 2 -and @($state.Record.Keys)[-1] -eq 'pages') "$($state.Reason)"
+    Write-Record @{ status = 'formatting-failed' }
+    Check 'a document whose formatting failed is read again' (Get-FormattingOnlyState $letter $results 3).Ready
+    Write-Record @{ status = 'privacy-failed' }
+    Check 'a document refused for personal data is not' ((Get-FormattingOnlyState $letter $results 3).Reason -like '*did not succeed (privacy-failed)*')
+    Write-Record @{ script_version = 2 }
+    Check 'a result of an older format is not' ((Get-FormattingOnlyState $letter $results 3).Reason -like '*format 2*')
+    Write-Record @{ sha256 = ('0' * 64) }
+    Check 'an input that changed is not' ((Get-FormattingOnlyState $letter $results 3).Reason -like '*input changed*')
+    Write-Record @{ resaved_sha256 = ('0' * 64) }
+    Check 'a re-saved copy that is not the recorded one is not' ((Get-FormattingOnlyState $letter $results 3).Reason -like '*re-saved copy*')
+    Write-Record @{}
+    Remove-Item -LiteralPath $copy
+    Check 'a missing re-saved copy is not' ((Get-FormattingOnlyState $letter $results 3).Reason -like '*re-saved copy*')
+    Set-Content -LiteralPath $recordPath -Value 'not json'
+    Check 'an unreadable record is not' ((Get-FormattingOnlyState $letter $results 3).Reason -like '*cannot be read*')
 } finally {
     Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
 }

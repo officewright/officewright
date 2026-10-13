@@ -857,6 +857,20 @@ class Formatting(Import):
         count = len(body) + 1
         self.assertIn(f"formatting as Word computes it: {count} paragraphs, with runs", sources)
 
+    def test_a_theme_colour_is_committed_with_its_tint_or_shade(self):
+        doc = rules.documents()[0]
+        record = self.add_result(doc)
+        export = word_export(importer.read_parts(self.results / record["resaved_file"]))
+        font = export["stories"][0]["paragraphs"][0]["font"]
+        font.update(color=None, theme_color="accent1", tint_shade=-0.25)
+        self.add_v3(export)
+        self.run_import()
+        formatting = self.committed(doc)
+        first = formatting["stories"][0]["paragraphs"][0]
+        committed = formatting["fonts"][first["font"]]
+        self.assertEqual((committed["theme_color"], committed["tint_shade"]), ("accent1", -0.25))
+        self.assertIsNone(committed["color"])
+
     def test_a_style_name_may_have_253_characters(self):
         doc = rules.documents()[0]
         record = self.add_result(doc)
@@ -901,6 +915,15 @@ class Formatting(Import):
             "unexpected runs_note (not text)": (lambda e: e.update(runs_note=["x"]), {}),
             "unexpected alignment (not text)": (lambda e: first(e).update(alignment=["left"]), {}),
             "unexpected theme font (not text)": (lambda e: first(e)["font"].update(theme={}), {}),
+            "unexpected theme colour": (
+                lambda e: first(e)["font"].update(color=None, theme_color="accent9", tint_shade=0), {}
+            ),
+            "unexpected tint or shade": (
+                lambda e: first(e)["font"].update(color=None, theme_color="accent1", tint_shade=2), {}
+            ),
+            "a theme colour next to an RGB colour": (
+                lambda e: first(e)["font"].update(color="FF0000", theme_color="accent1", tint_shade=0), {}
+            ),
         }
         doc = rules.documents()[0]
         for message, (edit, changes) in cases.items():
