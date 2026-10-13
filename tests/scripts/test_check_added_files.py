@@ -103,7 +103,8 @@ class CheckAddedFiles(unittest.TestCase):
 
     def git(self, *args):
         subprocess.run(
-            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", *args],
+            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+             "-c", "commit.gpgsign=false", *args],
             cwd=self.repo, check=True, capture_output=True,
         )
 
