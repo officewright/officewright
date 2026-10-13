@@ -643,12 +643,16 @@ TOGGLE_STYLES = "".join(
         style("paragraph", "ParaBold", "<w:b/>", "Normal"),
         style("paragraph", "ParaBoldAgain", "<w:b/>", "ParaBold"),
         style("paragraph", "ParaBoldOff", '<w:b w:val="0"/>', "ParaBold"),
-        # Inherits bold without a w:b of its own (ECMA-376 §17.7.3, MS-OI29500 §17.7.3(c)).
+        # Inherit bold on or off without a w:b of their own (ECMA-376 §17.7.3,
+        # MS-OI29500 §17.7.3(a) and (c)): with bold in the document defaults, the ones that
+        # inherit off tell whether Word counts the levels of a basedOn chain one by one.
         style("paragraph", "ParaBoldInherit", "", "ParaBold"),
+        style("paragraph", "ParaBoldOffInherit", "", "ParaBoldOff"),
         style("character", "CharBold", "<w:b/>"),
         style("character", "CharBoldAgain", "<w:b/>", "CharBold"),
         style("character", "CharBoldOff", '<w:b w:val="0"/>', "CharBold"),
         style("character", "CharBoldInherit", "", "CharBold"),
+        style("character", "CharBoldOffInherit", "", "CharBoldOff"),
     ]
 )
 
@@ -672,6 +676,8 @@ TOGGLE_CASES = [
     ("ParaBoldInherit", None, ""),
     (None, "CharBoldInherit", ""),
     ("ParaBold", "CharBoldInherit", ""),
+    ("ParaBoldOffInherit", None, ""),
+    (None, "CharBoldOffInherit", ""),
 ]
 
 
@@ -963,6 +969,9 @@ def settings_xml(doc: Doc) -> str:
     mapping = ""
     if doc.theme:
         entries = dict(IDENTITY_MAPPING)
+        for name, _ in doc.color_mapping:
+            if name not in entries:
+                raise ValueError(f"{doc.name}: w:clrSchemeMapping has no attribute {name}")
         entries.update(doc.color_mapping)
         attributes = " ".join(f'w:{name}="{value}"' for name, value in entries.items())
         mapping = f"<w:clrSchemeMapping {attributes}/>"
