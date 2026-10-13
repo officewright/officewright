@@ -4,8 +4,8 @@
 //! A run is shaped in the face's design units, left to right; the layout scales the
 //! result to the font size when it places it.
 
-// reason: the layout shapes text from PR 5a on; until then only the tests and the
-// `fuzzing` module call the shaper.
+// reason: the layout itself shapes text from PR 6 (paragraph layout) on; until then only
+// the tests and the `fuzzing` module call the shaper.
 #![cfg_attr(not(any(test, feature = "fuzzing")), allow(dead_code))]
 
 use std::collections::HashMap;
@@ -14,11 +14,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use harfrust::{
-    Buffer, BufferFlags, Direction, Feature, Language, Script, ShapeOptions, ShaperFont, Tag,
+    Buffer, BufferFlags, Direction, Feature, Language, Script, ShapeOptions, ShapePlan, ShaperFont,
+    Tag,
 };
+use officewright_core::Pt;
 use officewright_font::{FontFace, GlyphId};
 
-use crate::ir::Ligatures;
+use crate::ir::{Ligatures, RunStyle};
 
 /// A face prepared for shaping: the face, and HarfRust's view of the same bytes.
 #[derive(Clone)]
@@ -32,6 +34,11 @@ pub(crate) struct ShapingFace {
 }
 
 impl ShapingFace {
+    /// The face.
+    pub(crate) fn face(&self) -> &FontFace {
+        &self.face
+    }
+
     pub(crate) fn new(face: FontFace) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         // The bytes are shared with the face, not copied.
@@ -66,6 +73,16 @@ pub(crate) struct Features {
 }
 
 impl Features {
+    /// The features a run of `style` asks for at `size`: kerning from the size its
+    /// `w:kern` gives, the ligatures and contextual alternates it names.
+    pub(crate) fn of(style: &RunStyle, size: Pt) -> Self {
+        Self {
+            kerning: style.kern_min().is_some_and(|min| size.0 >= min.0),
+            ligatures: style.ligatures(),
+            contextual_alternates: style.contextual_alternates(),
+        }
+    }
+
     /// The features as HarfRust takes them for a run in `script`. The kinds of ligatures
     /// of `w14:ligatures` are the OpenType features of the same names ([MS-DOCX]
     /// ST_Ligatures; ISO/IEC 14496-22): standard `liga`, contextual `clig`, historical
@@ -98,11 +115,18 @@ impl Features {
     }
 }
 
-/// The scripts in which kerning and the optional ligatures follow the run.
-const STANDARD_SCRIPTS: [Script; 6] = [
+/// The scripts in which kerning and the optional ligatures follow the run: those that
+/// Microsoft's "standard" shaping covers (Latin, Greek, Cyrillic, Armenian, Georgian,
+/// Runic and Ogham, "Developing OpenType Fonts for Standard Scripts"), and characters
+/// common to scripts.
+const STANDARD_SCRIPTS: [Script; 10] = [
     Script::LATIN,
     Script::GREEK,
     Script::CYRILLIC,
+    Script::ARMENIAN,
+    Script::GEORGIAN,
+    Script::RUNIC,
+    Script::OGHAM,
     Script::COMMON,
     Script::INHERITED,
     Script::UNKNOWN,
@@ -163,6 +187,9 @@ pub(crate) struct ShapedGlyph {
 /// table headings) is shaped once per layout run.
 pub(crate) struct Shaper {
     cache: HashMap<CacheKey, Arc<ShapedRun>>,
+    /// HarfRust's plans: which lookups of a face a script, language and features use.
+    /// Making one reads the face's layout tables, so each is made once.
+    plans: Plans,
     /// About how many bytes the cache holds, by [`cost`].
     cached_bytes: usize,
     /// About how many bytes the cache holds at most; when a run would pass it, the cache
@@ -188,6 +215,7 @@ impl Shaper {
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
             cache: HashMap::new(),
+            plans: Plans::default(),
             cached_bytes: 0,
             capacity,
         }
@@ -208,7 +236,7 @@ impl Shaper {
         if let Some(run) = self.cache.get(&key) {
             return Arc::clone(run);
         }
-        let run = Arc::new(shape(face, text, request));
+        let run = Arc::new(shape(face, text, request, &mut self.plans));
         let bytes = cost(&key, &run);
         if self.cached_bytes.saturating_add(bytes) > self.capacity {
             self.cache.clear();
@@ -238,8 +266,52 @@ fn cost(key: &CacheKey, run: &ShapedRun) -> usize {
         .saturating_add(ENTRY)
 }
 
-/// Shapes without the cache.
-fn shape(face: &ShapingFace, text: &str, request: &ShapeRequest) -> ShapedRun {
+/// Shaping plans by face, script, language and features.
+#[derive(Default)]
+struct Plans {
+    plans: HashMap<PlanKey, Arc<ShapePlan>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct PlanKey {
+    face: u64,
+    script: Option<Script>,
+    language: Option<String>,
+    features: Features,
+}
+
+impl Plans {
+    /// The most plans kept; a layout run has a few per face, so this is reached only by
+    /// documents with very many faces or languages, which then start afresh.
+    const CAPACITY: usize = 1024;
+
+    fn plan(
+        &mut self,
+        key: PlanKey,
+        font: &harfrust::Font,
+        language: Option<&Language>,
+        features: &[Feature],
+    ) -> Arc<ShapePlan> {
+        if let Some(plan) = self.plans.get(&key) {
+            return Arc::clone(plan);
+        }
+        if self.plans.len() >= Self::CAPACITY {
+            self.plans.clear();
+        }
+        let plan = Arc::new(ShapePlan::new(
+            font,
+            Direction::LeftToRight,
+            key.script,
+            language,
+            features,
+        ));
+        self.plans.insert(key, Arc::clone(&plan));
+        plan
+    }
+}
+
+/// Shapes without the cache of runs.
+fn shape(face: &ShapingFace, text: &str, request: &ShapeRequest, plans: &mut Plans) -> ShapedRun {
     let Some(font) = &face.font else {
         return shape_nominal(&face.face, text);
     };
@@ -259,12 +331,19 @@ fn shape(face: &ShapingFace, text: &str, request: &ShapeRequest) -> ShapedRun {
         .as_deref()
         .and_then(|tag| Language::from_str(tag).ok());
     buffer.set_script(script);
-    buffer.set_language(language);
+    buffer.set_language(language.clone());
     // Fills in the script from the text when the request does not give one.
     buffer.guess_segment_properties();
     let features = request.features.opentype(buffer.script());
     let shaper = ShaperFont::new(font);
-    let options = ShapeOptions::new().features(&features);
+    let key = PlanKey {
+        face: face.id,
+        script: buffer.script(),
+        language: request.language.clone(),
+        features: request.features,
+    };
+    let plan = plans.plan(key, font, language.as_ref(), &features);
+    let options = ShapeOptions::new().features(&features).plan(Some(&plan));
     if harfrust::shape(&shaper, &mut buffer, options).is_err() {
         // HarfRust refuses a buffer only for reasons this code rules out (no direction,
         // a plan for another script); shaping nominally keeps the text all the same.
@@ -400,10 +479,20 @@ mod tests {
             face: face.clone(),
             font: None,
         };
-        let shaped = shape(&without_layout, "A", &ShapeRequest::default());
+        let shaped = shape(
+            &without_layout,
+            "A",
+            &ShapeRequest::default(),
+            &mut Plans::default(),
+        );
         assert!(shaped.is_nominal());
         let with_layout = ShapingFace::new(face);
-        let shaped = shape(&with_layout, "A \u{C1}", &ShapeRequest::default());
+        let shaped = shape(
+            &with_layout,
+            "A \u{C1}",
+            &ShapeRequest::default(),
+            &mut Plans::default(),
+        );
         assert!(!shaped.is_nominal());
         assert_eq!(ids(&shaped), [(2, 0, 600), (1, 1, 250), (4, 2, 600)]);
         assert_eq!(shaped.replaced_glyphs(), 0);
@@ -444,7 +533,7 @@ mod tests {
                 request: request.clone(),
                 text: text.to_owned(),
             };
-            cost(&key, &shape(&face, text, &request))
+            cost(&key, &shape(&face, text, &request, &mut Plans::default()))
         };
         // Room for "AA" and "AAA" exactly.
         let mut shaper = Shaper::with_capacity(entry("AA") + entry("AAA"));
@@ -478,7 +567,7 @@ mod tests {
                 request: request.clone(),
                 text: text.to_owned(),
             };
-            cost(&key, &shape(&face, text, &request))
+            cost(&key, &shape(&face, text, &request, &mut Plans::default()))
         };
         let glyph = std::mem::size_of::<ShapedGlyph>();
         // Two more characters: two more glyphs and two more bytes of text.
