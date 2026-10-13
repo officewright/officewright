@@ -81,12 +81,7 @@ pub fn read_png(data: &[u8]) -> Result<Grey, String> {
         let mut current = vec![0u8; width];
         let mut left = 0u8;
         let mut upper_left = 0u8;
-        for ((value, &byte), (slot, &up)) in line
-            .iter()
-            .zip(line.iter())
-            .zip(current.iter_mut().zip(previous.iter()))
-        {
-            let _ = value;
+        for (&byte, (slot, &up)) in line.iter().zip(current.iter_mut().zip(previous.iter())) {
             let predicted = match filter {
                 0 => 0,
                 1 => left,
@@ -286,6 +281,17 @@ mod tests {
             assert_eq!((image.width, image.height), (5, 3), "filter {filter}");
             assert_eq!(image.pixels, sample().concat(), "filter {filter}");
         }
+    }
+
+    /// The PNG specification's predictor, at a tie: left wins over upper left.
+    #[test]
+    fn filter_four_prefers_left_then_up() {
+        // p = 1 + 4 - 3 = 2: left and upper left are both 1 away, up is 2 away.
+        assert_eq!(nearest_of_three(1, 4, 3), 1);
+        // p = 5 + 4 - 9 = 0: up (4) is closest.
+        assert_eq!(nearest_of_three(5, 4, 9), 4);
+        assert_eq!(nearest_of_three(10, 20, 30), 10);
+        assert_eq!(nearest_of_three(10, 20, 0), 20);
     }
 
     #[test]

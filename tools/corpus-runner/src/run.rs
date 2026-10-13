@@ -351,11 +351,11 @@ fn reference_index(options: &Options) -> Result<BTreeMap<PathBuf, (PathBuf, Path
             }
             let named: Named = serde_json::from_str(&read(&json)?)
                 .map_err(|error| format!("{}: {error}", json.display()))?;
-            if named
-                .document
-                .split('/')
-                .any(|part| part.is_empty() || part == "." || part == "..")
-            {
+            let plain = !named.document.is_empty()
+                && Path::new(&named.document)
+                    .components()
+                    .all(|part| matches!(part, std::path::Component::Normal(_)));
+            if !plain {
                 return Err(format!(
                     "{}: document {} is not a plain path",
                     json.display(),

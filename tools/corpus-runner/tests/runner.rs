@@ -361,3 +361,30 @@ fn documents_with_a_reference_are_scored_or_say_why_not() -> io::Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn score_takes_its_two_options_in_either_order() -> io::Result<()> {
+    let corpus = Corpus::new("score")?;
+    for args in [
+        ["score", "--ours", "docs/x.pdf", "--reference", "missing"],
+        ["score", "--reference", "missing", "--ours", "docs/x.pdf"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_corpus-runner"))
+            .current_dir(&corpus.dir)
+            .args(args)
+            .output()?;
+        let text = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{text}");
+        assert!(
+            text.contains("geometry.json"),
+            "the reference is read first: {text}"
+        );
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_corpus-runner"))
+        .current_dir(&corpus.dir)
+        .args(["score", "--ours", "docs/x.pdf"])
+        .output()?;
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("usage:"));
+    Ok(())
+}

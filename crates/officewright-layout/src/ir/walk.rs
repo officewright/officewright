@@ -33,6 +33,8 @@ pub(crate) struct Checker<'a> {
     in_field_result: bool,
     /// How many tables the walk is inside.
     table_depth: usize,
+    /// Whether the walk is inside a note or the separators of notes.
+    in_note: bool,
 }
 
 impl<'a> Checker<'a> {
@@ -42,6 +44,7 @@ impl<'a> Checker<'a> {
             location: Location::default(),
             in_field_result: false,
             table_depth: 0,
+            in_note: false,
         }
     }
 
@@ -82,6 +85,14 @@ impl<'a> Checker<'a> {
 
     pub(crate) fn set_in_field_result(&mut self, value: bool) {
         self.in_field_result = value;
+    }
+
+    pub(crate) fn in_note(&self) -> bool {
+        self.in_note
+    }
+
+    pub(crate) fn set_in_note(&mut self, value: bool) {
+        self.in_note = value;
     }
 
     /// Steps into a table, failing when that nests tables deeper than
@@ -173,6 +184,20 @@ impl Check for Pt {
             Err(checker.error(format!("{} is not a finite length", self.0)))
         }
     }
+}
+
+impl Check for f64 {
+    fn check(&self, checker: &mut Checker<'_>) -> Result<()> {
+        if self.is_finite() {
+            Ok(())
+        } else {
+            Err(checker.error(format!("{self} is not a finite number")))
+        }
+    }
+}
+
+impl Clamp for f64 {
+    fn clamp(&mut self, _: &mut Clamper) {}
 }
 
 impl Check for PageSize {
