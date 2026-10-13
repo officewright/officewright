@@ -1859,6 +1859,7 @@ fn table_and_list_defaults_are_what_a_document_means_when_it_says_nothing() {
     assert_eq!(props.alignment(), TableAlignment::Start);
     assert_eq!(props.cell_spacing(), Pt(0.0));
     assert!(!props.floating());
+    assert!(!props.bidi_visual());
     // Word's "Normal Table" style: 0 at the top and bottom, 108 twips at the sides.
     let margins = props.cell_margins();
     assert_eq!(
@@ -1885,6 +1886,8 @@ fn table_and_list_defaults_are_what_a_document_means_when_it_says_nothing() {
     assert_eq!(cell.text_direction(), TextDirection::LeftToRightTopToBottom);
     assert_eq!(cell.borders().start(), BorderSide::Inherit);
     assert_eq!(cell.margins(), None);
+    assert_eq!(cell.width(), PreferredWidth::Auto);
+    assert!(!cell.no_wrap() && !cell.hide_mark());
 }
 
 #[test]
@@ -1954,6 +1957,14 @@ fn table_measurements_are_clamped_to_a_short_of_twips() {
             .with_width_before(PreferredWidth::Points(Pt(5000.0)))
             .with_width_after(PreferredWidth::Percent(1000.0))
             .with_cells([cell]);
+        let margins = CellMargins::default()
+            .with_top(Pt(1700.0))
+            .with_end(Pt(1700.0));
+        let points_after = Row::default()
+            .with_width_after(PreferredWidth::Points(Pt(1700.0)))
+            .with_cells([Cell::default()
+                .with_margins(Some(margins))
+                .with_blocks([Paragraph::new(style).into()])]);
         let props = TableProps::default()
             .with_width(PreferredWidth::Points(Pt(5000.0)))
             .with_indent(Pt(-5000.0))
@@ -1964,7 +1975,7 @@ fn table_measurements_are_clamped_to_a_short_of_twips() {
             Table::default()
                 .with_props(props)
                 .with_grid([Pt(10.0)])
-                .with_rows([row])
+                .with_rows([row, points_after])
                 .into(),
         ]
     });
@@ -1995,6 +2006,15 @@ fn table_measurements_are_clamped_to_a_short_of_twips() {
             ),
             format!(
                 "sections[0].blocks[0].rows[0].cells[0].borders.top.space: border distance 40 pt {range} 0 to 31 pt and becomes 31 pt"
+            ),
+            format!(
+                "sections[0].blocks[0].rows[1].width_after: table measurement 1700 pt {range} 0 to 1638.35 pt and becomes 1638.35 pt"
+            ),
+            format!(
+                "sections[0].blocks[0].rows[1].cells[0].margins.top: table measurement 1700 pt {range} 0 to 1638.35 pt and becomes 1638.35 pt"
+            ),
+            format!(
+                "sections[0].blocks[0].rows[1].cells[0].margins.end: table measurement 1700 pt {range} 0 to 1638.35 pt and becomes 1638.35 pt"
             ),
         ]
     );
