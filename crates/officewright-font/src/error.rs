@@ -84,6 +84,15 @@ pub enum Error {
         /// What the subsetter reported.
         source: Cause,
     },
+    /// The face uses something the subsetter does not implement yet, such as accented
+    /// glyphs that CFF outlines compose with the deprecated four-argument `endchar`.
+    #[non_exhaustive]
+    SubsetUnsupported {
+        /// The face.
+        face: u32,
+        /// What the subsetter reported.
+        source: Cause,
+    },
     /// The subsetter panicked on the data of the face. The panic was caught; the font
     /// is malformed in a way the subsetter does not handle yet.
     #[non_exhaustive]
@@ -147,6 +156,11 @@ impl fmt::Display for Error {
                 None => write!(f, "font face {face} has no glyph outlines to subset"),
             },
             Self::Subset { face, .. } => write!(f, "cannot subset font face {face}"),
+            Self::SubsetUnsupported { face, .. } => write!(
+                f,
+                "cannot subset font face {face}: it uses a feature the subsetter does not \
+                 support yet"
+            ),
             Self::SubsetterPanicked { face, message } => write!(
                 f,
                 "cannot subset font face {face}: the subsetter crashed on its data \
@@ -163,7 +177,8 @@ impl error::Error for Error {
             Self::NotAFont { source }
             | Self::MalformedFace { source, .. }
             | Self::MalformedTable { source, .. }
-            | Self::Subset { source, .. } => Some(source),
+            | Self::Subset { source, .. }
+            | Self::SubsetUnsupported { source, .. } => Some(source),
             Self::Read { source, .. } => Some(source),
             Self::FaceIndexOutOfRange { .. }
             | Self::MissingTable { .. }
@@ -178,8 +193,9 @@ impl error::Error for Error {
 impl From<Error> for officewright_core::Error {
     /// A file that cannot be read is an I/O error. Data that is not a font, or a font
     /// that cannot be read or subset, is malformed; a face index or glyph the font does
-    /// not have is an invalid argument; outlines that cannot be subset yet are
-    /// unsupported. The message keeps the reason the font parser or the subsetter gave.
+    /// not have is an invalid argument; outlines or features that cannot be subset yet
+    /// are unsupported. The message keeps the reason the font parser or the subsetter
+    /// gave.
     fn from(err: Error) -> Self {
         let mut message = err.to_string();
         if let Some(cause) = error::Error::source(&err) {
@@ -190,7 +206,9 @@ impl From<Error> for officewright_core::Error {
         }
         match err {
             Error::Read { source, .. } => Self::Io { message, source },
-            Error::UnsupportedOutlines { .. } => Self::Unsupported(message),
+            Error::UnsupportedOutlines { .. } | Error::SubsetUnsupported { .. } => {
+                Self::Unsupported(message)
+            }
             Error::NotAFont { .. }
             | Error::MalformedFace { .. }
             | Error::MissingTable { .. }

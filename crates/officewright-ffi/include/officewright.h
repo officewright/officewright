@@ -328,7 +328,8 @@ enum OwStatus ow_pdf_document_set_compression(struct OwPdfDocument *doc, int32_t
  * an I/O error while writing can leave a partial file. Fails with
  * `OW_STATUS_INVALID_ARGUMENT` if the document has no pages, `OW_STATUS_MALFORMED` if an
  * embedded font turns out to be damaged when it is reduced to the glyphs the document
- * uses, and `OW_STATUS_IO` if the file cannot be written.
+ * uses, `OW_STATUS_UNSUPPORTED` if it uses a feature that cannot be subset yet, and
+ * `OW_STATUS_IO` if the file cannot be written.
  *
  * # Safety
  *
@@ -341,9 +342,10 @@ enum OwStatus ow_pdf_document_save_path(const struct OwPdfDocument *doc, const c
  * Returns the document as a PDF file in memory: `*out_data` points to `*out_len`
  * bytes, which the caller releases with `ow_bytes_free(*out_data, *out_len)`.
  *
- * Fails with `OW_STATUS_INVALID_ARGUMENT` if the document has no pages and
+ * Fails with `OW_STATUS_INVALID_ARGUMENT` if the document has no pages,
  * `OW_STATUS_MALFORMED` if an embedded font turns out to be damaged when it is reduced
- * to the glyphs the document uses.
+ * to the glyphs the document uses, and `OW_STATUS_UNSUPPORTED` if it uses a feature
+ * that cannot be subset yet.
  *
  * # Safety
  *

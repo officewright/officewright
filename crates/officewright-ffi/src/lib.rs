@@ -418,7 +418,8 @@ pub unsafe extern "C" fn ow_pdf_document_set_compression(
 /// an I/O error while writing can leave a partial file. Fails with
 /// `OW_STATUS_INVALID_ARGUMENT` if the document has no pages, `OW_STATUS_MALFORMED` if an
 /// embedded font turns out to be damaged when it is reduced to the glyphs the document
-/// uses, and `OW_STATUS_IO` if the file cannot be written.
+/// uses, `OW_STATUS_UNSUPPORTED` if it uses a feature that cannot be subset yet, and
+/// `OW_STATUS_IO` if the file cannot be written.
 ///
 /// # Safety
 ///
@@ -442,9 +443,10 @@ pub unsafe extern "C" fn ow_pdf_document_save_path(
 /// Returns the document as a PDF file in memory: `*out_data` points to `*out_len`
 /// bytes, which the caller releases with `ow_bytes_free(*out_data, *out_len)`.
 ///
-/// Fails with `OW_STATUS_INVALID_ARGUMENT` if the document has no pages and
+/// Fails with `OW_STATUS_INVALID_ARGUMENT` if the document has no pages,
 /// `OW_STATUS_MALFORMED` if an embedded font turns out to be damaged when it is reduced
-/// to the glyphs the document uses.
+/// to the glyphs the document uses, and `OW_STATUS_UNSUPPORTED` if it uses a feature
+/// that cannot be subset yet.
 ///
 /// # Safety
 ///
@@ -2008,6 +2010,39 @@ mod tests {
         // SAFETY: a live handle, a NUL-terminated string and a valid out-pointer.
         let status = unsafe { ow_pdf_font_resolve(resolver, family.as_ptr(), bold, 0, &mut font) };
         (status, font)
+    }
+
+    #[test]
+    fn reports_a_chosen_font_that_turned_out_damaged() {
+        let dir =
+            std::env::temp_dir().join(format!("officewright-ffi-damaged-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("minimal.ttf");
+        fs::copy(minimal_font_path(), &path).unwrap();
+        let book = new_book();
+        let mut added = 0;
+        // SAFETY: a live handle, a NUL-terminated path and a valid out-pointer.
+        let status =
+            unsafe { ow_font_book_add_dir(book, c(dir.to_str().unwrap()).as_ptr(), &mut added) };
+        assert_eq!(status, OwStatus::Ok);
+        assert_eq!(added, 1);
+        let resolver = new_resolver(book);
+        // The resolver reads the file when it chooses the font, by which time it is junk.
+        fs::write(&path, b"no longer a font").unwrap();
+        let (status, font) = resolve(resolver, "Officewright Test", 0);
+        assert_eq!(status, OwStatus::Malformed);
+        assert!(font.is_null());
+        assert!(
+            last_error().starts_with(&format!("cannot use the font in {}: ", path.display())),
+            "{}",
+            last_error()
+        );
+        // SAFETY: live handles, each freed once.
+        unsafe {
+            ow_font_resolver_free(resolver);
+            ow_font_book_free(book);
+        }
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     /// The substitution report of `resolver`.
