@@ -61,49 +61,47 @@ pub(crate) fn lay_out(
     }
 }
 
-/// The space above a paragraph with `props` that follows one with `previous`, in a
-/// document with `document`'s settings.
+/// The space between a paragraph with `above` and the one with `below` that follows it,
+/// in `document`: the larger of the space below the first and the space above the
+/// second, as Word's renders of `cv-en-academic-open.docx` and `cv-en-classic-open.docx`
+/// show (12 pt below and 12 pt above make 12 pt; 6 and 14 make 14; 4 and 6 make 6).
 ///
-/// Automatic spacing is 14 pt, and between two paragraphs that both have it, the
-/// space is that of one: the space below the first. The legacy option
-/// `doNotUseHTMLParagraphAutoSpacing` turns automatic spacing off, so that the explicit
-/// values apply (`E-autospacing-nohtml.docx`). Contextual spacing leaves the space out
-/// next to a paragraph of the same style (ECMA-376 Part 1, §17.3.1.9).
-pub(crate) fn space_before(
+/// Contextual spacing leaves out a paragraph's own space next to a paragraph of the
+/// same style (ECMA-376 Part 1, §17.3.1.9). Automatic spacing is 14 pt
+/// (`E-autospacing.docx`), and the legacy option `doNotUseHTMLParagraphAutoSpacing`
+/// turns it off, so that the explicit values apply (`E-autospacing-nohtml.docx`).
+pub(crate) fn space_between(
     document: &Document,
-    previous: Option<&ParagraphProps>,
-    props: &ParagraphProps,
+    above: &ParagraphProps,
+    below: &ParagraphProps,
 ) -> Pt {
-    let auto = auto_spacing(document);
+    let same_style = above.style_key() == below.style_key();
+    let after = if above.contextual_spacing() && same_style {
+        Pt(0.0)
+    } else {
+        space_after(document, above)
+    };
+    let before = if below.contextual_spacing() && same_style {
+        Pt(0.0)
+    } else {
+        space_before(document, below)
+    };
+    Pt(after.0.max(before.0))
+}
+
+/// The space above a paragraph with `props`, with no paragraph above it to share it.
+pub(crate) fn space_before(document: &Document, props: &ParagraphProps) -> Pt {
     let spacing = props.spacing();
-    if let Some(previous) = previous {
-        if props.contextual_spacing() && previous.style_key() == props.style_key() {
-            return Pt(0.0);
-        }
-        if auto && spacing.before_auto() && previous.spacing().after_auto() {
-            return Pt(0.0);
-        }
-    }
-    if auto && spacing.before_auto() {
+    if auto_spacing(document) && spacing.before_auto() {
         AUTO_SPACING
     } else {
         spacing.before()
     }
 }
 
-/// The space below a paragraph with `props` that one with `next` follows; see
-/// [`space_before`].
-pub(crate) fn space_after(
-    document: &Document,
-    props: &ParagraphProps,
-    next: Option<&ParagraphProps>,
-) -> Pt {
+/// The space below a paragraph with `props`, with no paragraph below it to share it.
+pub(crate) fn space_after(document: &Document, props: &ParagraphProps) -> Pt {
     let spacing = props.spacing();
-    if let Some(next) = next {
-        if props.contextual_spacing() && next.style_key() == props.style_key() {
-            return Pt(0.0);
-        }
-    }
     if auto_spacing(document) && spacing.after_auto() {
         AUTO_SPACING
     } else {
@@ -135,7 +133,29 @@ mod tests {
 
     /// The space between paragraphs `a` and `b`.
     fn between(document: &Document, a: &ParagraphProps, b: &ParagraphProps) -> f64 {
-        space_after(document, a, Some(b)).0 + space_before(document, Some(a), b).0
+        space_between(document, a, b).0
+    }
+
+    #[test]
+    fn the_space_between_two_paragraphs_is_the_larger_of_theirs() {
+        // Word's renders of the CVs: 12 pt below and 12 pt above are 12.08 pt apart
+        // (cv-en-academic-open), 6 and 14 are 14.05, 4 and 6 are 6.09, 2 and 6 are 5.89
+        // (cv-en-classic-open).
+        let document = Document::default();
+        for (after, before, gap) in [
+            (12.0, 12.0, 12.0),
+            (6.0, 14.0, 14.0),
+            (4.0, 6.0, 6.0),
+            (2.0, 6.0, 6.0),
+        ] {
+            let a = spaced(0.0, after, false, false);
+            let b = spaced(before, 0.0, false, false);
+            assert_eq!(between(&document, &a, &b), gap);
+        }
+        // With nothing to share them, a paragraph's own spaces.
+        let own = spaced(6.0, 10.0, false, false);
+        assert_eq!(space_before(&document, &own), Pt(6.0));
+        assert_eq!(space_after(&document, &own), Pt(10.0));
     }
 
     #[test]
@@ -153,7 +173,7 @@ mod tests {
         assert_eq!(between(&document, &explicit, &plain), 14.0);
         let before_only = spaced(0.0, 0.0, true, false);
         assert_eq!(between(&document, &before_only, &plain), 0.0);
-        assert_eq!(space_before(&document, None, &auto), Pt(14.0));
+        assert_eq!(space_before(&document, &auto), Pt(14.0));
     }
 
     #[test]
@@ -185,7 +205,7 @@ mod tests {
         assert_eq!(between(&document, &style(1, false), &style(1, true)), 10.0);
         // Only the first: its space below goes.
         assert_eq!(between(&document, &style(1, true), &style(1, false)), 6.0);
-        // Different styles: both stay.
-        assert_eq!(between(&document, &style(1, true), &style(2, true)), 16.0);
+        // Different styles: both stay, and the larger counts.
+        assert_eq!(between(&document, &style(1, true), &style(2, true)), 10.0);
     }
 }

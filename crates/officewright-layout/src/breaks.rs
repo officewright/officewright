@@ -58,6 +58,12 @@ impl BreakMap {
             // The last character that is not a mark or joiner of the one before it.
             let mut base: Option<char> = None;
             for (at, ch) in text.char_indices() {
+                // A word joiner (a note mark's placeholder among them) keeps the
+                // characters on both sides together.
+                if matches!(ch, '\u{2060}' | '\u{FEFF}') {
+                    base = None;
+                    continue;
+                }
                 if crate::itemize::attaches(ch) {
                     continue;
                 }
@@ -187,5 +193,18 @@ mod tests {
         assert_eq!(allowed(&map), [3, 6]);
         // Thai needs a dictionary: no breaks inside its words either way.
         assert!(allowed(&BreakMap::new("ภาษาไทย", false)).is_empty());
+        // A note mark stays with the words on both sides.
+        let text = format!("word{PLACEHOLDER_MARK}more");
+        assert_eq!(
+            allowed(&BreakMap::new(&text, false)),
+            [
+                1,
+                2,
+                3,
+                5 + PLACEHOLDER_MARK.len_utf8(),
+                6 + PLACEHOLDER_MARK.len_utf8(),
+                7 + PLACEHOLDER_MARK.len_utf8()
+            ]
+        );
     }
 }

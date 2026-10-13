@@ -1116,5 +1116,66 @@ fn a_line_cut_where_kerning_joins_two_glyphs_is_shaped_again() -> TestResult {
         "{} against {alone}",
         first.width()
     );
+    // Shaped on its own the line is wider than first fit measured it; it still fits,
+    // ending a cluster earlier where needed.
+    for line in laid.lines() {
+        assert!(
+            line.width() <= kerned / 2.0 + 1e-9,
+            "{:?}: {}",
+            line.text(),
+            line.width()
+        );
+    }
+    assert!(laid.report().is_empty());
+    Ok(())
+}
+
+#[test]
+fn spaces_before_a_word_too_wide_for_the_line_end_the_line() -> TestResult {
+    use officewright_layout::ir::{
+        ImageData, ImageFormat, InlineObject, ObjectContent, Picture, Size,
+    };
+
+    let book = book()?;
+    let (mut document, style) = liberation(11.0);
+    // The spaces, wider than the line, take the first line; the word, no wider than a
+    // line, the next.
+    let word = "Wordwordword";
+    let width = width_of(&book, &document, style, word) + 1.0;
+    let spaces = " ".repeat(30);
+    assert!(width_of(&book, &document, style, &format!("{spaces}W")) > width);
+    let text = format!("{spaces}{word}");
+    let laid = fuzzing::lay_out(
+        &book,
+        &document,
+        &paragraph(
+            style,
+            ParagraphProps::default(),
+            vec![Inline::text(text, style)],
+        ),
+        width,
+    );
+    let texts: Vec<&str> = laid.lines().iter().map(|line| line.text()).collect();
+    assert_eq!(texts, [spaces.as_str(), word]);
+    assert!(laid.report().is_empty(), "{:?}", laid.report());
+    // An object wider than its line stays on it, reported as an object.
+    let image = document.add_image(ImageData::new(ImageFormat::Png, Vec::new()));
+    let picture = ObjectContent::Picture(Picture::new(image));
+    let object = InlineObject::new(picture, Size::new(Pt(400.0), Pt(10.0)));
+    let laid = fuzzing::lay_out(
+        &book,
+        &document,
+        &paragraph(
+            style,
+            ParagraphProps::default(),
+            vec![Inline::Object(object)],
+        ),
+        100.0,
+    );
+    let messages: Vec<&str> = laid.report().iter().map(|entry| entry.message()).collect();
+    assert_eq!(
+        messages,
+        ["an inline object is wider than its line and reaches past its end"]
+    );
     Ok(())
 }

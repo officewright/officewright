@@ -32,6 +32,8 @@ fuzzing = []
 harfrust = { version = "=0.14.0", default-features = false, features = ["std"] }
 officewright-core.workspace = true
 officewright-font.workspace = true
+# The Unicode line breaking algorithm (UAX #14), where lines may end (approved with
+# HarfRust); no dependencies of its own.
 unicode-linebreak = { version = "0.1.5", default-features = false }
 # The Unicode Script property, to cut text into runs of one script (approved with
 # HarfRust); no dependencies of its own, and officewright-pdf has it already.

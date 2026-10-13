@@ -80,6 +80,9 @@ pub(crate) struct Piece {
     pub(crate) x: Pt,
     pub(crate) width: Pt,
     pub(crate) kind: PieceKind,
+    /// Whether it is of the spaces at the end of the line, which hang past its edge:
+    /// they count for no width, and justification leaves them alone.
+    pub(crate) hanging: bool,
 }
 
 /// What a piece of a line is.
@@ -310,22 +313,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             width,
             location,
         } = input;
-        let mut text = String::new();
-        let mut starts = Vec::with_capacity(itemized.items.len());
-        for item in &itemized.items {
-            starts.push(text.len());
-            match item {
-                Item::Text(run) => {
-                    text.push_str(itemized.text.get(run.range.clone()).unwrap_or(""))
-                }
-                Item::Tab(_) => text.push(PLACEHOLDER_TAB),
-                Item::Break(..) => text.push(PLACEHOLDER_BREAK),
-                Item::Object(_) => text.push(PLACEHOLDER_OBJECT),
-                Item::NoteReference(..) | Item::NoteMark(_) => text.push(PLACEHOLDER_MARK),
-                // An anchored object takes no room and does not change where lines end.
-                Item::Anchored(_) => {}
-            }
-        }
+        let (text, starts) = break_text(itemized);
         let props = paragraph.props();
         let breaks = BreakMap::new(&text, props.word_wrap());
         let tabs = TabStops::new(props, document.settings(), paragraph.list().is_some());
@@ -497,14 +485,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         loop {
             let first = lines.is_empty();
             let (end, line_end) = self.fit(start, first);
-            let end = self.settle(start, end, line_end);
-            // Every line takes at least one unit, so that breaking ends.
-            let end = if end <= start && start < self.units.len() {
-                start + 1
-            } else {
-                end
-            };
-            let mut line = self.place(start, end, first, line_end);
+            let (end, mut line) = self.refit(start, end, first, line_end);
             let last =
                 end >= self.units.len() && !(line_end == LineEnd::Break && end == self.units.len());
             self.align(&mut line, last);
@@ -524,6 +505,28 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             }
         }
         lines
+    }
+
+    /// The line from unit `start` to before unit `end`, which first fit chose, placed:
+    /// after shaping again the run a cut divides where its shaping depends on what
+    /// follows. Shaping again can make the line wider (a kerned pair cut apart); then
+    /// the cut moves back a cluster at a time until it fits again. Returns the unit
+    /// after the line's last, and the line.
+    fn refit(&mut self, start: usize, end: usize, first: bool, line_end: LineEnd) -> (usize, Line) {
+        let (_, right) = self.edges(first);
+        let mut end = self.settle(start, end, line_end);
+        loop {
+            // Every line takes at least one unit, so that breaking ends.
+            if end <= start && start < self.units.len() {
+                end = start + 1;
+            }
+            let line = self.place(start, end, first, line_end);
+            let fits = line.start.0 + line.width.0 <= right.0 + EPSILON;
+            if fits || line_end != LineEnd::Wrap || end <= start + 1 {
+                return (end, line);
+            }
+            end = self.settle(start, end - 1, line_end);
+        }
     }
 
     /// The edges of a line, from the start edge of the column.
@@ -557,16 +560,18 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                     let x = cursor.peek(unit.width, what);
                     // What takes no room fits wherever the line has got to.
                     let over = unit.width.0 > 0.0 && x.0 > right.0 + EPSILON;
-                    if over && cursor.has_content {
+                    if over {
+                        // The line ends at its last place to end, if it has one (after
+                        // spaces at its start, too), else before the unit that does not
+                        // fit, between two clusters; a unit alone on its line that does
+                        // not fit stays there, reported.
                         if let Some(end) = candidate {
                             return (end, LineEnd::Wrap);
                         }
-                        // No place to end the line: it ends before the unit that does
-                        // not fit, between two clusters.
-                        return (index, LineEnd::Wrap);
-                    }
-                    if over {
-                        self.report_overflow();
+                        if cursor.has_content {
+                            return (index, LineEnd::Wrap);
+                        }
+                        self.report_overflow(kind);
                     }
                     cursor.add(unit.width, what);
                 }
@@ -606,13 +611,18 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         }
     }
 
-    fn report_overflow(&mut self) {
+    /// Reports, once per paragraph, a unit wider than its whole line.
+    fn report_overflow(&mut self, kind: &UnitKind) {
         if !self.overflow_reported {
             self.overflow_reported = true;
+            let what = match kind {
+                UnitKind::Object { .. } => "an inline object",
+                _ => "a character",
+            };
             self.fonts.report_once(
                 ReportKind::Overflow,
                 self.location,
-                "a word is wider than its column and reaches past its end".to_owned(),
+                format!("{what} is wider than its line and reaches past its end"),
             );
         }
     }
@@ -789,6 +799,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                     x,
                     width,
                     kind: PieceKind::Tab { item, leader },
+                    hanging: false,
                 });
                 segment = pieces.len();
                 content_end = cursor.x;
@@ -811,7 +822,14 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                 .copied()
                 .flatten()
                 .unwrap_or_default();
-            push_piece(&mut pieces, x, unit, index != last_content, scale);
+            push_piece(
+                &mut pieces,
+                x,
+                unit,
+                index >= last_content,
+                index != last_content,
+                scale,
+            );
         }
         cursor.settle_into(&mut pieces, segment);
         // The hyphen of a line that ends at a soft hyphen.
@@ -823,6 +841,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                     x: content_end,
                     width,
                     kind: PieceKind::Hyphen { item, run, scale },
+                    hanging: false,
                 });
                 content_end = Pt(content_end.0 + width.0);
             }
@@ -890,12 +909,10 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             .iter()
             .rposition(|piece| matches!(piece.kind, PieceKind::Tab { .. }))
             .map_or(0, |tab| tab + 1);
-        let content_end = line.start.0 + line.width.0;
-        let hangs = |piece: &Piece| piece.x.0 >= content_end - EPSILON;
         // The stretched pieces, and how many places each widens.
         let mut counts: Vec<(usize, usize)> = Vec::new();
         for (index, piece) in line.pieces.iter().enumerate().skip(from) {
-            if hangs(piece) {
+            if piece.hanging {
                 break;
             }
             if let PieceKind::Text {
@@ -918,10 +935,17 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         }
         let extra = room / total as f64;
         let last_stretched = counts.last().map(|&(index, _)| index);
+        // How many places each piece widens, by its index.
+        let mut by_piece: Vec<Option<usize>> = vec![None; line.pieces.len()];
+        for &(index, count) in &counts {
+            if let Some(slot) = by_piece.get_mut(index) {
+                *slot = Some(count);
+            }
+        }
         let mut moved = 0.0;
         for (index, piece) in line.pieces.iter_mut().enumerate().skip(from) {
             piece.x = Pt(piece.x.0 + moved);
-            let Some(&(_, count)) = counts.iter().find(|&&(at, _)| at == index) else {
+            let Some(count) = by_piece.get(index).copied().flatten() else {
                 continue;
             };
             let PieceKind::Text {
@@ -1304,7 +1328,14 @@ impl Cursor {
 
 /// Adds unit `unit` at `x` to `pieces`, joining it to the text piece before it when it
 /// continues it and `join` allows.
-fn push_piece(pieces: &mut Vec<Piece>, x: Pt, unit: &Unit, join: bool, scale: Scale) {
+fn push_piece(
+    pieces: &mut Vec<Piece>,
+    x: Pt,
+    unit: &Unit,
+    hanging: bool,
+    join: bool,
+    scale: Scale,
+) {
     if let UnitKind::Glyphs {
         item,
         run,
@@ -1349,6 +1380,7 @@ fn push_piece(pieces: &mut Vec<Piece>, x: Pt, unit: &Unit, join: bool, scale: Sc
                 cluster_extra: Pt(0.0),
                 last_extra: true,
             },
+            hanging,
         });
         return;
     }
@@ -1369,6 +1401,7 @@ fn push_piece(pieces: &mut Vec<Piece>, x: Pt, unit: &Unit, join: bool, scale: Sc
         x,
         width: unit.width,
         kind,
+        hanging,
     });
 }
 
@@ -1378,6 +1411,26 @@ fn shift(line: &mut Line, by: Pt) {
         piece.x = Pt(piece.x.0 + by.0);
     }
     line.start = Pt(line.start.0 + by.0);
+}
+
+/// The break text of `itemized`: its drawn text with a character standing for each
+/// piece that is not text, and where each item starts in it.
+pub(crate) fn break_text(itemized: &Itemized) -> (String, Vec<usize>) {
+    let mut text = String::new();
+    let mut starts = Vec::with_capacity(itemized.items.len());
+    for item in &itemized.items {
+        starts.push(text.len());
+        match item {
+            Item::Text(run) => text.push_str(itemized.text.get(run.range.clone()).unwrap_or("")),
+            Item::Tab(_) => text.push(PLACEHOLDER_TAB),
+            Item::Break(..) => text.push(PLACEHOLDER_BREAK),
+            Item::Object(_) => text.push(PLACEHOLDER_OBJECT),
+            Item::NoteReference(..) | Item::NoteMark(_) => text.push(PLACEHOLDER_MARK),
+            // An anchored object takes no room and does not change where lines end.
+            Item::Anchored(_) => {}
+        }
+    }
+    (text, starts)
 }
 
 /// Whether bytes `text` of the drawn text are a space that may hang at the end of a
