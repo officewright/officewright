@@ -84,7 +84,8 @@ ir_struct! {
         /// Whether all lines of the paragraph stay on one page.
         copy keep_lines: bool = false => with_keep_lines;
         /// Whether a page break leaves at least two lines of the paragraph on each page.
-        copy widow_control: bool = false => with_widow_control;
+        /// On when nothing sets it (ECMA-376 Part 1, §17.3.1.44).
+        copy widow_control: bool = true => with_widow_control;
         /// Whether the paragraph starts a new page.
         copy page_break_before: bool = false => with_page_break_before;
         /// The custom tab stops, with those of the styles merged in and cleared ones
@@ -157,7 +158,8 @@ ir_struct! {
     }
 }
 
-/// The height of the lines of a paragraph.
+/// The height of the lines of a paragraph. A height or factor of zero or less is kept as
+/// the document gives it; what such lines look like is the layout's business.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum LineSpacing {
@@ -262,15 +264,17 @@ ir_struct! {
 }
 
 ir_struct! {
-    /// A border line.
+    /// A border line. Each default is Word's for an attribute the document leaves out
+    /// (MS-OI29500 2.1.38).
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct Border {
         /// The style of the line.
         copy style: BorderStyle = BorderStyle::Single => with_style;
         /// The width of the line.
-        copy width: Pt = Pt(0.5) => with_width, check rules::non_negative;
+        copy width: Pt = Pt(0.0) => with_width, check rules::non_negative;
         /// The distance from the text.
-        copy space: Pt = Pt(0.0) => with_space, check rules::non_negative;
+        copy space: Pt = Pt(0.0) => with_space, check rules::non_negative,
+            clamp rules::border_space;
         /// The colour.
         copy color: ColorValue = ColorValue::Auto => with_color;
         /// Whether the line has a shadow.

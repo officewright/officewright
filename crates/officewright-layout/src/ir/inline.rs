@@ -76,9 +76,29 @@ impl Inline {
         Self::Tab { style }
     }
 
-    /// A break.
-    pub fn new_break(kind: BreakKind, style: RunStyleId) -> Self {
-        Self::Break { kind, style }
+    /// A line break: the text after it starts a new line of the same paragraph, below
+    /// the floating objects `clear` names.
+    pub fn line_break(clear: BreakClear, style: RunStyleId) -> Self {
+        Self::Break {
+            kind: BreakKind::Line(clear),
+            style,
+        }
+    }
+
+    /// A page break.
+    pub fn page_break(style: RunStyleId) -> Self {
+        Self::Break {
+            kind: BreakKind::Page,
+            style,
+        }
+    }
+
+    /// A column break.
+    pub fn column_break(style: RunStyleId) -> Self {
+        Self::Break {
+            kind: BreakKind::Column,
+            style,
+        }
     }
 
     /// A symbol from a font.
