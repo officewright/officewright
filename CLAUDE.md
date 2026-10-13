@@ -273,7 +273,8 @@ PDF output of officewright text-to-pdf (tests/pdf-output): qpdf --check without 
   qpdf --check, pdffonts, pdftotext reads every text as written (ligatures, small capitals, a cluster of three glyphs),
   pdftoppm renders the subset exactly as the whole font and the shapes, colours and clips where the page puts them;
   the example images' page: pdfimages lists every JPEG and PNG as passed through or decoded with a soft mask, pdftoppm
-  shows their colours and transparency, the committed fuzz seeds equal images.py's output (Linux, macOS)
+  shows their colours and transparency, a PNG with every filter type renders the same decoded by officewright as
+  unfiltered by poppler, the committed fuzz seeds equal images.py's output (Linux, macOS)
 corpus-runner over tests/corpus (committed corpus), compared with tests/corpus/baseline.json
 ```
 

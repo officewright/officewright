@@ -127,6 +127,9 @@ class ImagesTest(unittest.TestCase):
             passed, decoded = cell("filtered.png"), cell("filtered-decoded.png")
             self.assertGreater(len(set(passed)), 100)
             self.assertEqual(passed, decoded)
+            # Only the four PNG files PDF takes as they are keep their predictors (rgb,
+            # palette, gray16 and filtered); filtered-decoded was decoded.
+            self.assertEqual(pdf.read_bytes().count(b"/Predictor 15"), 4)
 
     def test_the_fuzz_seeds_are_what_images_py_writes(self):
         with tempfile.TemporaryDirectory() as directory:

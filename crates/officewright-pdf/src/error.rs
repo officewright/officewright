@@ -117,8 +117,9 @@ pub enum Error {
     /// [`Page::pop_clip`](crate::Page::pop_clip) found no clipping path to remove.
     NoClip,
     #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
-    /// An image is damaged: truncated, with a wrong checksum, missing or invalid headers,
-    /// or compressed data that does not decompress to the size its header gives.
+    /// An image is damaged: truncated, with a wrong checksum of a critical PNG chunk,
+    /// missing or invalid headers, or compressed data that does not decompress to the size
+    /// its header gives.
     MalformedImage {
         /// The image file, `None` for an image in memory.
         path: Option<PathBuf>,

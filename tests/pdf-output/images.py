@@ -160,8 +160,15 @@ def samples():
     """The test images: name, file, and what pdfimages lists for it: (type, width, height,
     colour, components, bits, encoding) for the image and its soft mask, if any."""
     quadrants = [[RED, GREEN], [BLUE, WHITE]]
-    # 16 × 15 pixels of many colours, for the filters to work on.
-    gradient = [[((x * 16 + y * 7) % 256, (x * y * 5) % 256, (255 - x * 13 - y * 3) % 256) for x in range(16)] for y in range(15)]
+    # 64 × 63 pixels of pseudo-random colours, so that every filter, and every branch of
+    # the Paeth predictor, has work to do.
+    seed = [12345]
+
+    def sample():
+        seed[0] = (seed[0] * 1103515245 + 12345) % (1 << 31)
+        return seed[0] >> 23
+
+    noise = [[(sample(), sample(), sample()) for _ in range(64)] for _ in range(63)]
     adam7 = [[RED if x < 4 and y < 4 else GREEN if y < 4 else BLUE if x < 4 else WHITE for x in range(8)] for y in range(8)]
     return [
         ("rgb.png", png(2, 2, 2, 8, quadrants), [("image", 2, 2, "rgb", 3, 8, "image")]),
@@ -189,13 +196,13 @@ def samples():
         # has. test_images.py compares the two renders.
         (
             "filtered.png",
-            png(16, 15, 2, 8, gradient, filters=(0, 1, 2, 3, 4)),
-            [("image", 16, 15, "rgb", 3, 8, "image")],
+            png(64, 63, 2, 8, noise, filters=(0, 1, 2, 3, 4)),
+            [("image", 64, 63, "rgb", 3, 8, "image")],
         ),
         (
             "filtered-decoded.png",
-            png(16, 15, 2, 8, gradient, transparency=b"\x00\x01\x00\x02\x00\x03", filters=(0, 1, 2, 3, 4)),
-            [("image", 16, 15, "rgb", 3, 8, "image")],
+            png(64, 63, 2, 8, noise, transparency=b"\x00\x01\x00\x02\x00\x03", filters=(0, 1, 2, 3, 4)),
+            [("image", 64, 63, "rgb", 3, 8, "image")],
         ),
         (
             "cmyk.jpg",

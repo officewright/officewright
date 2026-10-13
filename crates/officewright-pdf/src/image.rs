@@ -211,8 +211,8 @@ impl Image {
     ///   12-bit JPEG, JPEG with 2 components or a height given only after the first
     ///   scan, PNG with a compression or filter method other than the standard one or with
     ///   a critical chunk this reader does not know.
-    /// - [`Error::MalformedImage`] for a damaged file: truncated, with a wrong PNG
-    ///   checksum, missing or invalid headers, or compressed data that does not decompress
+    /// - [`Error::MalformedImage`] for a damaged file: truncated, with a wrong checksum
+    ///   of a critical PNG chunk, missing or invalid headers, or compressed data that does not decompress
     ///   to the size its header gives.
     /// - [`Error::ImageTooLarge`] for a PNG whose pixel data would exceed 256 MiB.
     pub fn from_bytes(data: impl Into<Arc<[u8]>>) -> Result<Self> {
@@ -389,6 +389,8 @@ fn read_jpeg(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> 
         };
         at += 1;
         match code {
+            // 0xFF 0x00 is not a marker (B.1.1.2) but a stray 0xFF byte: skipped too.
+            0x00 => continue,
             // Markers without a segment: TEM and the restart markers.
             0x01 | 0xD0..=0xD7 => continue,
             // The start of a scan: every header has been read.
@@ -544,8 +546,8 @@ struct Pass {
 }
 
 /// Reads a PNG file (PNG specification, third edition): its header, palette, transparency
-/// and compressed data, checking every chunk's CRC and that the data decompresses to the
-/// size the header gives.
+/// and compressed data, checking the CRC of every critical chunk and that the data
+/// decompresses to the size the header gives.
 fn read_png(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> {
     let mut at = PNG_SIGNATURE.len();
     let mut header = None;
@@ -632,7 +634,8 @@ fn read_png(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> {
         (0, Some(key), _) if key.len() == 2 => Some(key),
         (2, Some(key), _) if key.len() == 6 => Some(key),
         (3, Some(mut alpha), Some(palette)) => {
-            alpha.truncate(palette.len() / 3);
+            // Only the entries that exist and that the bit depth can address.
+            alpha.truncate((palette.len() / 3).min(1 << header.bits));
             Some(alpha)
         }
         _ => None,
@@ -1707,6 +1710,13 @@ pub(crate) mod tests {
             Image::from_bytes(png.encode()).unwrap().inner.encoding,
             Encoding::Png { mask: None, .. }
         ));
+        // Nor does it when the palette has a third entry: a 1-bit index cannot reach it,
+        // and a /Mask of [2 2] would be outside the samples' range.
+        png.palette = Some(vec![0, 0, 0, 255, 255, 255, 9, 9, 9]);
+        assert!(matches!(
+            Image::from_bytes(png.encode()).unwrap().inner.encoding,
+            Encoding::Png { mask: None, .. }
+        ));
     }
 
     #[test]
@@ -1928,9 +1938,11 @@ pub(crate) mod tests {
     fn skips_bytes_before_a_jpeg_marker_as_libjpeg_does() {
         let good = jpeg(0xC0, 8, 4, 4, 3, false);
         let frame = good.windows(2).position(|w| w == [0xFF, 0xC0]).unwrap();
-        let data = [&good[..frame], b"\x00\x12garbage", &good[frame..]].concat();
-        let image = Image::from_bytes(data).unwrap();
-        assert_eq!((image.width(), image.height()), (4, 4));
+        for stray in [&b"\x00\x12garbage"[..], b"\x12\xFF\x00\x56\x78"] {
+            let data = [&good[..frame], stray, &good[frame..]].concat();
+            let image = Image::from_bytes(data).unwrap();
+            assert_eq!((image.width(), image.height()), (4, 4));
+        }
     }
 
     #[test]
