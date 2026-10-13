@@ -252,7 +252,8 @@ cargo fmt --check and cargo clippy -D warnings on the fuzz/ workspace (Linux/mac
 cargo deny check && cargo machete
 cargo package --list -p officewright-pdf, -font, -layout, -cli: no third-party data in the published crates
 typos && taplo fmt --check && shellcheck scripts/*.sh .githooks/pre-commit && actionlint
-tests/corpus-tools (Python unittest): committed rule documents equal make-rule-docs.py output; corpus-import.py refusals
+tests/corpus-tools (Python unittest): committed rule documents equal make-rule-docs.py output; corpus-import.py refusals;
+  every file in tests/fonts is listed with its SHA-256 in THIRD-PARTY-NOTICES.md
 tests/corpus-tools/poppler (Linux, macOS): fonts corpus-import.py embeds are what poppler draws
 tests/corpus-tools/test_make_reference.ps1 (Windows): a Word step that hangs is stopped, checked and never waited on forever
 scripts/install-capi.sh target/capi --debug, copy the header, git diff --exit-code crates/officewright-ffi/include/officewright.h
