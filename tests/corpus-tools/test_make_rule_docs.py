@@ -174,12 +174,20 @@ class Packages(unittest.TestCase):
                 self.assertEqual(modes, [14], doc.name)
             else:
                 self.assertEqual(modes, [15], doc.name)
+            # The settings Word writes only into documents in mode 15.
+            others = {
+                s.get(f"{W}name")
+                for s in compat.iter(f"{W}compatSetting")
+                if s.get(f"{W}name") != "compatibilityMode"
+            }
+            self.assertEqual(bool(others), modes == [15], doc.name)
             flags = {
                 child.tag.replace(W, "") for child in compat if child.tag != f"{W}compatSetting"
             }
             expected = {
                 "E-autospacing-nohtml": {"doNotUseHTMLParagraphAutoSpacing"},
                 "E-tab-hanging-noindenttab": {"doNotUseIndentAsNumberingTabStop"},
+                "E-tab-hanging-noindenttab-14": {"doNotUseIndentAsNumberingTabStop"},
             }.get(doc.name, set())
             self.assertEqual(flags, expected, doc.name)
 
