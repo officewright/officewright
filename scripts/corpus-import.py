@@ -519,6 +519,7 @@ RUNS_NOTES = {
     "left out: they took longer than the paragraphs",
     "left out: they did not fit in the time budget",
     "left out: reading them failed",
+    "left out: Word failed the check of the run reader",
 }
 # Style names (Word allows 253 characters) and list labels.
 STYLE_NAME = re.compile(r"^[^|\x00-\x1f]{1,253}$")

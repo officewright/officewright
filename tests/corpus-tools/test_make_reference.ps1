@@ -236,7 +236,21 @@ Exit-Stuck 'test' ''
     Check 'a colour with RGB has no theme colour' ($plain.color -eq 'FF0000' -and -not $plain.Contains('theme_color'))
     $unknown = Get-FontRecord (New-Font 'Arial' 11 0 0 -738132071 -738132071 -1) $theme
     Check 'no theme colour index, no theme colour' (-not $unknown.Contains('theme_color') -and $null -eq $unknown.color)
-    Check 'theme colour names' ((Get-ThemeColorName 13) -eq 'text1' -and (Get-ThemeColorName 11) -eq 'followedHyperlink' -and $null -eq (Get-ThemeColorName 16))
+    # WdThemeColorIndex 0 to 15 in Word's VBA reference, as ST_ThemeColor (ECMA-376 17.18.97).
+    $expected = 'dark1,light1,dark2,light2,accent1,accent2,accent3,accent4,accent5,accent6,hyperlink,followedHyperlink,background1,text1,background2,text2'
+    $table = @(0..15 | ForEach-Object { Get-ThemeColorName $_ }) -join ','
+    Check 'theme colour names' ($table -eq $expected -and $null -eq (Get-ThemeColorName 16) -and $null -eq (Get-ThemeColorName -1)) $table
+    $both = Get-FontRecord (New-Font 'Arial' 11 0 0 -738132071 0x336699 4 -0.25) $theme
+    Check 'a theme colour Word gives RGB for keeps the RGB only' ($both.color -eq '996633' -and -not $both.Contains('theme_color'))
+    $throwing = New-Object PSObject -Property @{ RGB = $null; TintAndShade = 0 }
+    $throwing | Add-Member ScriptProperty ObjectThemeColor { throw 'not available' }
+    $odd = New-Object PSObject -Property @{ Name = 'Arial'; Size = 11; Bold = 0; Italic = 0; Color = -738132071; TextColor = $throwing }
+    $oddRecord = Get-FontRecord $odd $theme
+    Check 'a theme colour Word cannot name is left out' ($null -eq $oddRecord.color -and -not $oddRecord.Contains('theme_color'))
+    $noTint = New-Object PSObject -Property @{ RGB = $null; ObjectThemeColor = 4 }
+    $noTint | Add-Member ScriptProperty TintAndShade { throw 'not available' }
+    $noTintRecord = Get-FontRecord (New-Object PSObject -Property @{ Name = 'Arial'; Size = 11; Bold = 0; Italic = 0; Color = -738132071; TextColor = $noTint }) $theme
+    Check 'a theme colour without its tint or shade is left out' (-not $noTintRecord.Contains('theme_color'))
     $mixed = Get-FontRecord (New-Font '' 9999999 9999999 0) $theme
     Check 'mixed font values are null' ($null -eq $mixed.name -and $null -eq $mixed.size -and $null -eq $mixed.bold)
 
@@ -244,11 +258,14 @@ Exit-Stuck 'test' ''
     # moves the end to the next run boundary, as Word's wdCharacterFormatting does.
     # -Quirky stands in for what the first K2 run showed of Word through PowerShell: a
     # Duplicate that is the same range, and a Collapse that ignores its direction.
-    function New-Range($Runs, [int] $Start, [int] $End, [int] $Step = 13, [int] $Delay = 0, [switch] $Quirky) {
-        $range = New-Object PSObject -Property @{ Runs = $Runs; Start = $Start; End = $End; Unit = $Step; Delay = $Delay; Quirky = [bool]$Quirky }
+    # -LosesUnit stands in for a Word that drops MoveEnd's unit and count, as a by-reference
+    # argument PowerShell does not pass would: it moves one character. Font is mixed for a
+    # range over more than one run or past -Limit, as Word's is past the paragraph's end.
+    function New-Range($Runs, [int] $Start, [int] $End, [int] $Step = 13, [int] $Delay = 0, [switch] $Quirky, [switch] $LosesUnit, [int] $Limit = [int]::MaxValue) {
+        $range = New-Object PSObject -Property @{ Runs = $Runs; Start = $Start; End = $End; Unit = $Step; Delay = $Delay; Quirky = [bool]$Quirky; LosesUnit = [bool]$LosesUnit; Limit = $Limit }
         $range | Add-Member ScriptProperty Duplicate {
             if ($this.Quirky) { return $this }
-            New-Range $this.Runs $this.Start $this.End $this.Unit $this.Delay
+            New-Range $this.Runs $this.Start $this.End $this.Unit $this.Delay -LosesUnit:$this.LosesUnit -Limit $this.Limit
         }
         $range | Add-Member ScriptMethod Collapse {
             param($Direction)
@@ -258,6 +275,7 @@ Exit-Stuck 'test' ''
         $range | Add-Member ScriptMethod MoveEnd {
             param($Unit, $Count)
             if ($this.Delay -gt 0) { Start-Sleep -Milliseconds $this.Delay }
+            if ($this.LosesUnit) { $this.End = $this.End + 1; return 1 }
             if ($Unit -ne $this.Unit) { return 0 }
             $position = 0
             foreach ($run in $this.Runs) {
@@ -269,7 +287,10 @@ Exit-Stuck 'test' ''
         $range | Add-Member ScriptProperty Font {
             $position = 0
             foreach ($run in $this.Runs) {
-                if ($position -eq $this.Start) { return $run.Font }
+                if ($this.Start -ge $position -and $this.Start -lt $position + $run.Length) {
+                    if ($this.End -gt $position + $run.Length -or $this.End -gt $this.Limit) { return New-Font '' 9999999 9999999 9999999 9999999 }
+                    return $run.Font
+                }
                 $position += $run.Length
             }
         }
@@ -283,8 +304,8 @@ Exit-Stuck 'test' ''
     $later = [DateTime]::UtcNow.AddMinutes(5)
     $read = Get-RunRecords (New-Range $runs 0 9) $later $theme
     Check 'runs of formatting are read with their lengths and fonts' ($read.Count -eq 3 -and $read[0].length -eq 5 -and $read[1].font.bold -eq $true -and $read[2].font.size -eq 12) "$($read.Count)"
-    $part = Get-RunRecords (New-Range $runs 0 7) $later $theme
-    Check 'a run past the range end is cut at the end' ($part.Count -eq 2 -and $part[1].length -eq 2) "$($part.Count)"
+    $part = Get-RunRecords (New-Range $runs 0 7 -Limit 7) $later $theme
+    Check 'a run past the range end is cut at the end, its font read inside it' ($part.Count -eq 2 -and $part[1].length -eq 2 -and $part[1].font.bold -eq $true) "$($part.Count)"
     Check 'runs past the deadline give null' ($null -eq (Get-RunRecords (New-Range $runs 0 9) ([DateTime]::UtcNow.AddSeconds(-1)) $theme))
     $refused = $false
     try { [void](Get-RunRecords (New-Range $runs 0 9 99) $later $theme) } catch { $refused = $true }
@@ -293,6 +314,20 @@ Exit-Stuck 'test' ''
     Check 'runs are read when Duplicate shares the range and Collapse ignores its direction' ($quirky.Count -eq 3 -and $quirky[0].length -eq 5 -and $quirky[1].length -eq 3 -and $quirky[2].length -eq 1 -and $quirky[1].font.bold -eq $true) "$($quirky.Count)"
     $middle = Get-RunRecords (New-Range $runs 5 9 -Quirky) $later $theme
     Check 'a paragraph that starts after the first run' ($middle.Count -eq 2 -and $middle[0].length -eq 3 -and $middle[1].font.size -eq 12) "$($middle.Count)"
+    # A Word that drops MoveEnd's unit gives one run per character without any error: only
+    # the check on runs whose lengths are known notices it.
+    $single = Get-RunRecords (New-Range $runs 0 9 -LosesUnit) $later $theme
+    Check 'a MoveEnd without its unit reads one run per character' ($single.Count -eq 9) "$($single.Count)"
+    Check 'the run reader passes its check with Word as documented' (Test-RunReader (New-Range $runs 0 9))
+    Check 'the run reader passes its check with the quirks of the first K2 run' (Test-RunReader (New-Range $runs 0 9 -Quirky))
+    Check 'the run reader fails its check when MoveEnd drops its unit' (-not (Test-RunReader (New-Range $runs 0 9 -LosesUnit)))
+    Check 'the run reader fails its check when Word does not move' (-not (Test-RunReader (New-Range $runs 0 9 99)))
+    $shifted = @(
+        (New-Object PSObject -Property @{ Length = 1; Font = (New-Font 'Arial' 10) }),
+        (New-Object PSObject -Property @{ Length = 1; Font = (New-Font 'Arial' 10 -1) }),
+        (New-Object PSObject -Property @{ Length = 7; Font = (New-Font 'Arial' 10) })
+    )
+    Check 'the run reader fails its check on runs of other lengths' (-not (Test-RunReader (New-Range $shifted 0 9)))
 
     function New-Paragraph($Text, $Runs, $Builtin, $StyleName, $ListType = 0, $ListString = '', $Step = 13, $Delay = 0) {
         $length = 0
@@ -338,6 +373,8 @@ Exit-Stuck 'test' ''
     Check 'runs are kept when they take no longer than the paragraphs' ($export.runs -eq $true -and @($export.stories[0].paragraphs[0].runs).Count -eq 3 -and $export.complete -eq $true)
     $late = (Export-Formatting $document 0 $theme $progress).Export
     Check 'a document over its time budget is marked incomplete, without runs' ($late.complete -eq $false -and $late.runs -eq $false -and $late.runs_note -eq 'not collected: the paragraphs did not fit in the time budget')
+    $unchecked = (Export-Formatting $document 600 $theme $progress $false).Export
+    Check 'runs are left out with a fixed note when the run reader failed its check' ($unchecked.complete -eq $true -and $unchecked.runs -eq $false -and $unchecked.runs_note -eq 'left out: Word failed the check of the run reader' -and -not $unchecked.stories[0].paragraphs[0].Contains('runs')) "$($unchecked.runs_note)"
     $failing = New-Object PSObject -Property @{ StoryRanges = @((New-Story 1 @((New-Paragraph ('Body' + [char]13) $runs $true '' 0 '' 99)))) }
     $failed = Export-Formatting $failing 600 $theme $progress
     Check 'a failed run pass gives a fixed note; the message stays apart' ($failed.Export.runs -eq $false -and $failed.Export.runs_note -eq 'left out: reading them failed' -and $failed.RunError -like '*did not move*')
@@ -392,6 +429,8 @@ Exit-Stuck 'test' ''
     Check 'a result of an older format is not' ((Get-FormattingOnlyState $letter $results 3).Reason -like '*format 2*')
     Write-Record @{ sha256 = ('0' * 64) }
     Check 'an input that changed is not' ((Get-FormattingOnlyState $letter $results 3).Reason -like '*input changed*')
+    Write-Record @{ file = 'other.docx' }
+    Check 'a record of another input is not' ((Get-FormattingOnlyState $letter $results 3).Reason -like '*input changed*')
     Write-Record @{ resaved_sha256 = ('0' * 64) }
     Check 'a re-saved copy that is not the recorded one is not' ((Get-FormattingOnlyState $letter $results 3).Reason -like '*re-saved copy*')
     Write-Record @{}
@@ -399,6 +438,26 @@ Exit-Stuck 'test' ''
     Check 'a missing re-saved copy is not' ((Get-FormattingOnlyState $letter $results 3).Reason -like '*re-saved copy*')
     Set-Content -LiteralPath $recordPath -Value 'not json'
     Check 'an unreadable record is not' ((Get-FormattingOnlyState $letter $results 3).Reason -like '*cannot be read*')
+
+    # A record read back is written again with its lists as lists, which corpus-import.py
+    # requires.
+    [System.IO.File]::WriteAllBytes($copy, [byte[]](4, 5, 6))
+    Write-Record @{ fonts = @('Arial'); fonts_missing = @(); privacy_findings = @('a', 'b'); word_version = '16.0'; word_build = '16.0.1' }
+    $state = Get-FormattingOnlyState $letter $results 3
+    $rewritten = Join-Path $results 'rewritten.json'
+    Write-JsonFile $rewritten $state.Record
+    $text = [System.IO.File]::ReadAllText($rewritten)
+    Check 'a record written again keeps its lists' ($state.Ready -and $text -match '"fonts":\s*\[\s*"Arial"\s*\]' -and $text -match '"fonts_missing":\s*\[\s*\]' -and $text -match '"privacy_findings":\s*\[\s*"a",\s*"b"\s*\]') $text
+    Check 'the Word that rendered a document reads it again' ((Get-WordChange $state.Record '16.0' '16.0.1') -eq '')
+    Check 'another Word build does not' ((Get-WordChange $state.Record '16.0' '16.0.2') -like '*render it again*')
+    $complete = @{ formatting_complete = $true; formatting_runs = $true }
+    Check 'an incomplete export does not replace a complete one' ((Get-WorseFormatting $complete @{ formatting_complete = $false; formatting_runs = $false }) -like '*incomplete*')
+    Check 'an export without runs does not replace one with runs' ((Get-WorseFormatting $complete @{ formatting_complete = $true; formatting_runs = $false }) -like '*no runs*')
+    Check 'an export as good or better replaces the earlier one' ((Get-WorseFormatting @{ formatting_complete = $true; formatting_runs = $false } $complete) -eq '' -and (Get-WorseFormatting $complete $complete) -eq '')
+    $foreign = New-Object PSObject -Property @{ Status = 'done'; Output = @((New-Object PSObject -Property @{ Foreign = $true })) }
+    $exported = New-Object PSObject -Property @{ Status = 'done'; Output = @((New-Object PSObject -Property @{ Export = @{}; RunError = $null })) }
+    $broken = New-Object PSObject -Property @{ Status = 'error'; Output = @() }
+    Check 'a step that found a document of the user''s says so' ((Test-ForeignStep $foreign) -and -not (Test-ForeignStep $exported) -and -not (Test-ForeignStep $broken))
 } finally {
     Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
 }
