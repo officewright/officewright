@@ -278,6 +278,21 @@ class Doc:
     mode: int = 15
     compat_flags: tuple[str, ...] = ()
     numbering: str | None = None
+    # Style definitions added to styles.xml after the built-in ones.
+    styles: str = ""
+    # Whether the document defaults give run properties (Calibri 11 pt), and properties
+    # added to them.
+    run_defaults: bool = True
+    run_defaults_extra: str = ""
+    # The attributes of the document defaults' w:rFonts.
+    run_default_fonts: str = (
+        'w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="Calibri" w:cs="Calibri"'
+    )
+    # Whether the document has a theme part (theme_xml) and a colour mapping for it.
+    theme: bool = False
+    # Entries of the colour mapping that differ from the identity, such as
+    # (("t2", "accent3"),).
+    color_mapping: tuple[tuple[str, str], ...] = ()
 
 
 def line_fonts() -> Doc:
@@ -602,6 +617,228 @@ def tab_hanging(no_indent_tab: bool) -> Doc:
     )
 
 
+# Styles and themes: what Word does where the style hierarchy, theme fonts and theme
+# colours meet, which ECMA-376 §17.7 and [MS-OI29500] §17.7 describe differently.
+
+
+def style(kind: str, style_id: str, rpr_xml: str, based_on: str | None = None) -> str:
+    base = f'<w:basedOn w:val="{based_on}"/>' if based_on else ""
+    rpr = f"<w:rPr>{rpr_xml}</w:rPr>" if rpr_xml else ""
+    return (
+        f'<w:style w:type="{kind}" w:customStyle="1" w:styleId="{style_id}">'
+        f'<w:name w:val="{style_id}"/>{base}{rpr}</w:style>'
+    )
+
+
+def styled_para(label: str, p_style: str | None, r_style: str | None, direct: str) -> str:
+    """A paragraph of one run whose text names its case."""
+    ppr_xml = f'<w:pPr><w:pStyle w:val="{p_style}"/></w:pPr>' if p_style else ""
+    rpr_parts = (f'<w:rStyle w:val="{r_style}"/>' if r_style else "") + direct
+    rpr_xml = f"<w:rPr>{rpr_parts}</w:rPr>" if rpr_parts else ""
+    return f"<w:p>{ppr_xml}<w:r>{rpr_xml}{text(label)}</w:r></w:p>"
+
+
+TOGGLE_STYLES = "".join(
+    [
+        style("paragraph", "ParaBold", "<w:b/>", "Normal"),
+        style("paragraph", "ParaBoldAgain", "<w:b/>", "ParaBold"),
+        style("paragraph", "ParaBoldOff", '<w:b w:val="0"/>', "ParaBold"),
+        # Inherit bold on or off without a w:b of their own (ECMA-376 §17.7.3,
+        # MS-OI29500 §17.7.3(a) and (c)): with bold in the document defaults, the ones that
+        # inherit off tell whether Word counts the levels of a basedOn chain one by one.
+        style("paragraph", "ParaBoldInherit", "", "ParaBold"),
+        style("paragraph", "ParaBoldOffInherit", "", "ParaBoldOff"),
+        style("character", "CharBold", "<w:b/>"),
+        style("character", "CharBoldAgain", "<w:b/>", "CharBold"),
+        style("character", "CharBoldOff", '<w:b w:val="0"/>', "CharBold"),
+        style("character", "CharBoldInherit", "", "CharBold"),
+        style("character", "CharBoldOffInherit", "", "CharBoldOff"),
+    ]
+)
+
+# (paragraph style, character style, direct run properties) of each toggle case.
+TOGGLE_CASES = [
+    (None, None, ""),
+    ("ParaBold", None, ""),
+    ("ParaBoldAgain", None, ""),
+    ("ParaBoldOff", None, ""),
+    (None, "CharBold", ""),
+    (None, "CharBoldAgain", ""),
+    (None, "CharBoldOff", ""),
+    ("ParaBold", "CharBold", ""),
+    ("ParaBold", "CharBoldAgain", ""),
+    ("ParaBold", "CharBoldOff", ""),
+    ("ParaBold", "CharBold", "<w:b/>"),
+    ("ParaBold", "CharBold", '<w:b w:val="0"/>'),
+    ("ParaBold", None, '<w:b w:val="0"/>'),
+    (None, None, "<w:b/>"),
+    (None, "CharBold", '<w:b w:val="0"/>'),
+    ("ParaBoldInherit", None, ""),
+    (None, "CharBoldInherit", ""),
+    ("ParaBold", "CharBoldInherit", ""),
+    ("ParaBoldOffInherit", None, ""),
+    (None, "CharBoldOffInherit", ""),
+]
+
+
+def style_toggles(defaults_bold: bool) -> Doc:
+    body = []
+    for n, (p_style, r_style, direct) in enumerate(TOGGLE_CASES, 1):
+        named = {"<w:b/>": "b on", '<w:b w:val="0"/>': "b off", "": "none"}[direct]
+        label = (
+            f"Case {n:02d}: paragraph style {p_style or 'Normal'}, character style "
+            f"{r_style or 'none'}, direct {named}"
+        )
+        body.append(styled_para(label, p_style, r_style, direct))
+    suffix = "-defaults" if defaults_bold else ""
+    where = "with" if defaults_bold else "without"
+    return Doc(
+        f"E-style-toggles{suffix}",
+        "Bold as a toggle property across the style hierarchy, " + where + " bold in the "
+        "document defaults: paragraph styles and character styles based on bold ones that "
+        "set it on or off or inherit it, with and without direct formatting; one case per "
+        "paragraph",
+        "".join(body),
+        styles=TOGGLE_STYLES,
+        run_defaults_extra="<w:b/>" if defaults_bold else "",
+    )
+
+
+def defaults_empty() -> Doc:
+    sized = style("paragraph", "ParaSized", '<w:sz w:val="28"/><w:szCs w:val="28"/>', "Normal")
+    named = style(
+        "paragraph",
+        "ParaNamed",
+        '<w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:eastAsia="Arial" w:cs="Arial"/>',
+        "Normal",
+    )
+    body = "".join(
+        [
+            styled_para("Case 01: no font or size anywhere in the hierarchy", None, None, ""),
+            styled_para(
+                "Case 02: a paragraph style gives only the size, 14 pt", "ParaSized", None, ""
+            ),
+            styled_para(
+                "Case 03: a paragraph style gives only the font, Arial", "ParaNamed", None, ""
+            ),
+        ]
+    )
+    return Doc(
+        "E-defaults-empty",
+        "The font and size Word applies when neither the document defaults nor any style "
+        "gives them, alone and with a style that gives only one of the two",
+        body,
+        styles=sized + named,
+        run_defaults=False,
+    )
+
+
+# The colours of the theme of these documents, chosen to be told apart in a render.
+THEME_COLORS = {
+    "dk1": '<a:sysClr val="windowText" lastClr="000000"/>',
+    "lt1": '<a:sysClr val="window" lastClr="FFFFFF"/>',
+    "dk2": '<a:srgbClr val="223344"/>',
+    "lt2": '<a:srgbClr val="EEDDCC"/>',
+    "accent1": '<a:srgbClr val="336699"/>',
+    "accent2": '<a:srgbClr val="CC6633"/>',
+    "accent3": '<a:srgbClr val="669933"/>',
+    "accent4": '<a:srgbClr val="993366"/>',
+    "accent5": '<a:srgbClr val="339999"/>',
+    "accent6": '<a:srgbClr val="996633"/>',
+    "hlink": '<a:srgbClr val="0066CC"/>',
+    "folHlink": '<a:srgbClr val="663399"/>',
+}
+THEME_FONTS = {"major": "Georgia", "minor": "Verdana", "cs": "Tahoma"}
+# The theme font each ST_Theme value of these documents stands for.
+THEME_SLOTS = {
+    "majorAscii": "major",
+    "majorHAnsi": "major",
+    "minorAscii": "minor",
+    "minorHAnsi": "minor",
+    "majorBidi": "cs",
+    "minorBidi": "cs",
+}
+
+
+def theme_colors() -> Doc:
+    cases = [
+        ("accent1", "000000", None, None),
+        ("accent1", "000000", "99", None),
+        ("accent1", "000000", None, "BF"),
+        ("accent1", "000000", "99", "BF"),
+        ("accent2", "000000", "33", None),
+        ("accent2", "000000", None, "80"),
+        ("text1", "FF0000", None, None),
+        ("text2", "FF0000", None, None),
+        ("background2", "FF0000", None, "80"),
+        ("dark2", "FF0000", None, None),
+        ("hyperlink", "FF0000", None, None),
+        ("followedHyperlink", "FF0000", "66", None),
+    ]
+    body = []
+    for n, (theme, value, tint, shade) in enumerate(cases, 1):
+        extra = (f' w:themeTint="{tint}"' if tint else "") + (
+            f' w:themeShade="{shade}"' if shade else ""
+        )
+        label = (
+            f"Case {n:02d}: themeColor {theme}, val {value}, tint {tint or 'none'}, "
+            f"shade {shade or 'none'}"
+        )
+        direct = f'<w:color w:val="{value}" w:themeColor="{theme}"{extra}/>'
+        body.append(styled_para(label, None, None, direct))
+    return Doc(
+        "E-theme-colors",
+        "Theme colours of runs as Word resolves them: through a colour mapping that maps "
+        "text 2 and background 2 to accents 3 and 4, with themeTint and themeShade alone "
+        "and together, against a w:val that disagrees",
+        "".join(body),
+        theme=True,
+        # Not the identity, so that the render tells a colour resolved through the
+        # mapping from one resolved by its name.
+        color_mapping=(("bg2", "accent4"), ("t2", "accent3")),
+    )
+
+
+def theme_fonts() -> Doc:
+    def fonts(attrs: str) -> str:
+        return f"<w:rFonts {attrs}/>"
+
+    major = 'w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"'
+    minor = 'w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi"'
+    arial = 'w:ascii="Arial" w:hAnsi="Arial"'
+    styles = "".join(
+        [
+            style("paragraph", "ParaMajor", fonts(major), "Normal"),
+            style("paragraph", "ParaArial", fonts(arial), "Normal"),
+            style("paragraph", "ParaBoth", fonts(f"{arial} {major}"), "Normal"),
+            style("character", "CharMinor", fonts(minor)),
+        ]
+    )
+    courier = fonts('w:ascii="Courier New" w:hAnsi="Courier New"')
+    cases = [
+        ("the document defaults' theme font, minorHAnsi", None, None, ""),
+        ("a paragraph style's theme font, majorHAnsi", "ParaMajor", None, ""),
+        ("a paragraph style's font, Arial", "ParaArial", None, ""),
+        ("a font, then a character style's theme font", "ParaArial", "CharMinor", ""),
+        ("a theme font, then a direct font, Courier New", "ParaMajor", None, courier),
+        ("a font and a theme font in one w:rFonts", "ParaBoth", None, ""),
+    ]
+    body = "".join(
+        styled_para(f"Case {n:02d}: {label}", p_style, r_style, direct)
+        for n, (label, p_style, r_style, direct) in enumerate(cases, 1)
+    )
+    return Doc(
+        "E-theme-fonts",
+        "Theme fonts across the style hierarchy: whether a font or a theme font written at a "
+        "later level replaces the other, and which wins when one w:rFonts gives both",
+        body,
+        styles=styles,
+        # Calibri stays for East Asian and complex script text.
+        run_default_fonts=f'{minor} w:eastAsia="Calibri" w:cs="Calibri"',
+        theme=True,
+    )
+
+
 def documents() -> list[Doc]:
     return [
         line_fonts(),
@@ -619,6 +856,11 @@ def documents() -> list[Doc]:
         list_shared_abstract(),
         tab_hanging(False),
         tab_hanging(True),
+        style_toggles(False),
+        style_toggles(True),
+        defaults_empty(),
+        theme_colors(),
+        theme_fonts(),
     ]
 
 
@@ -629,16 +871,22 @@ def xml_part(root: str) -> bytes:
     return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + root).encode()
 
 
-def styles_xml() -> str:
+def styles_xml(doc: Doc) -> str:
     hidden = '<w:uiPriority w:val="99"/><w:semiHidden/><w:unhideWhenUsed/>'
+    run_defaults = ""
+    if doc.run_defaults:
+        # Other properties follow w:rFonts, as the order of CT_RPr asks.
+        run_defaults = (
+            "<w:rPrDefault><w:rPr>"
+            f"<w:rFonts {doc.run_default_fonts}/>{doc.run_defaults_extra}"
+            '<w:sz w:val="22"/><w:szCs w:val="22"/>'
+            '<w:lang w:val="en-US" w:eastAsia="en-US" w:bidi="ar-SA"/>'
+            "</w:rPr></w:rPrDefault>"
+        )
     return (
         f'<w:styles xmlns:w="{W_NS}">'
         "<w:docDefaults>"
-        "<w:rPrDefault><w:rPr>"
-        '<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="Calibri" w:cs="Calibri"/>'
-        '<w:sz w:val="22"/><w:szCs w:val="22"/>'
-        '<w:lang w:val="en-US" w:eastAsia="en-US" w:bidi="ar-SA"/>'
-        "</w:rPr></w:rPrDefault>"
+        f"{run_defaults}"
         "<w:pPrDefault><w:pPr><w:widowControl/>"
         '<w:spacing w:after="0" w:line="240" w:lineRule="auto"/>'
         "</w:pPr></w:pPrDefault>"
@@ -656,7 +904,42 @@ def styles_xml() -> str:
         "</w:tblCellMar></w:tblPr></w:style>"
         '<w:style w:type="numbering" w:default="1" w:styleId="NoList">'
         f'<w:name w:val="No List"/>{hidden}</w:style>'
+        f"{doc.styles}"
         "</w:styles>"
+    )
+
+
+A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+
+
+def theme_xml() -> str:
+    """A theme of this repository: the colours and fonts of THEME_COLORS and THEME_FONTS,
+    and the smallest format scheme the schema allows (three styles in each list)."""
+    colors = "".join(f"<a:{name}>{color}</a:{name}>" for name, color in THEME_COLORS.items())
+
+    def collection(kind: str) -> str:
+        latin = THEME_FONTS[kind]
+        return (
+            f'<a:{kind}Font><a:latin typeface="{latin}"/><a:ea typeface=""/>'
+            f'<a:cs typeface="{THEME_FONTS["cs"]}"/></a:{kind}Font>'
+        )
+
+    fill = '<a:solidFill><a:schemeClr val="phClr"/></a:solidFill>'
+    line = f'<a:ln w="6350">{fill}</a:ln>'
+    effect = "<a:effectStyle><a:effectLst/></a:effectStyle>"
+    fmt = (
+        '<a:fmtScheme name="Officewright">'
+        f"<a:fillStyleLst>{fill * 3}</a:fillStyleLst>"
+        f"<a:lnStyleLst>{line * 3}</a:lnStyleLst>"
+        f"<a:effectStyleLst>{effect * 3}</a:effectStyleLst>"
+        f"<a:bgFillStyleLst>{fill * 3}</a:bgFillStyleLst>"
+        "</a:fmtScheme>"
+    )
+    return (
+        f'<a:theme xmlns:a="{A_NS}" name="Officewright">'
+        f'<a:themeElements><a:clrScheme name="Officewright">{colors}</a:clrScheme>'
+        f'<a:fontScheme name="Officewright">{collection("major")}{collection("minor")}'
+        f"</a:fontScheme>{fmt}</a:themeElements></a:theme>"
     )
 
 
@@ -664,8 +947,34 @@ def compat_setting(name: str, value: int) -> str:
     return f'<w:compatSetting w:name="{name}" w:uri="{WORD_URI}" w:val="{value}"/>'
 
 
+# The colour mapping Word writes, in its order: each theme colour stands for itself.
+IDENTITY_MAPPING = (
+    ("bg1", "light1"),
+    ("t1", "dark1"),
+    ("bg2", "light2"),
+    ("t2", "dark2"),
+    ("accent1", "accent1"),
+    ("accent2", "accent2"),
+    ("accent3", "accent3"),
+    ("accent4", "accent4"),
+    ("accent5", "accent5"),
+    ("accent6", "accent6"),
+    ("hyperlink", "hyperlink"),
+    ("followedHyperlink", "followedHyperlink"),
+)
+
+
 def settings_xml(doc: Doc) -> str:
     flags = "".join(f"<w:{flag}/>" for flag in doc.compat_flags)
+    mapping = ""
+    if doc.theme:
+        entries = dict(IDENTITY_MAPPING)
+        for name, _ in doc.color_mapping:
+            if name not in entries:
+                raise ValueError(f"{doc.name}: w:clrSchemeMapping has no attribute {name}")
+        entries.update(doc.color_mapping)
+        attributes = " ".join(f'w:{name}="{value}"' for name, value in entries.items())
+        mapping = f"<w:clrSchemeMapping {attributes}/>"
     settings = ""
     if doc.mode != 12:
         settings = compat_setting("compatibilityMode", doc.mode)
@@ -687,6 +996,7 @@ def settings_xml(doc: Doc) -> str:
         # The languages and number format are set, so that a re-saved copy that names the
         # language or locale of the machine Word ran on stands out (corpus-import.py).
         '<w:themeFontLang w:val="en-US" w:eastAsia="en-US" w:bidi="ar-SA"/>'
+        f"{mapping}"
         '<w:decimalSymbol w:val="."/>'
         '<w:listSeparator w:val=","/>'
         "</w:settings>"
@@ -733,8 +1043,14 @@ def parts(doc: Doc) -> list[tuple[str, bytes]]:
     if doc.numbering:
         numbering = f'<w:numbering xmlns:w="{W_NS}">{doc.numbering}</w:numbering>'
 
-    used = document + styles_xml() + (numbering or "")
-    fonts = sorted(set(re.findall(r'w:ascii="([^"]+)"', used)))
+    used = document + styles_xml(doc) + (numbering or "")
+    # The fonts every w:rFonts names, directly or through a theme attribute.
+    fonts = set()
+    for attributes in re.findall(r"<w:rFonts ([^>]*)/>", used):
+        fonts.update(re.findall(r'w:(?:ascii|hAnsi|eastAsia|cs)="([^"]+)"', attributes))
+        for value in re.findall(r'w:(?:ascii|hAnsi|eastAsia|cs)Theme="([^"]+)"', attributes):
+            fonts.add(THEME_FONTS[THEME_SLOTS[value]])
+    fonts = sorted(fonts)
 
     word_rels = [
         ("styles", "styles.xml"),
@@ -751,6 +1067,11 @@ def parts(doc: Doc) -> list[tuple[str, bytes]]:
     if numbering:
         word_rels.append(("numbering", "numbering.xml"))
         overrides.append(("/word/numbering.xml", f"{CT_W}.numbering+xml"))
+    if doc.theme:
+        word_rels.append(("theme", "theme/theme1.xml"))
+        overrides.append(
+            ("/word/theme/theme1.xml", "application/vnd.openxmlformats-officedocument.theme+xml")
+        )
     content_types = (
         '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
         '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.'
@@ -771,12 +1092,14 @@ def parts(doc: Doc) -> list[tuple[str, bytes]]:
         ("_rels/.rels", xml_part(root_rels)),
         ("docProps/core.xml", xml_part(core_xml(doc))),
         ("word/document.xml", xml_part(document)),
-        ("word/styles.xml", xml_part(styles_xml())),
+        ("word/styles.xml", xml_part(styles_xml(doc))),
         ("word/settings.xml", xml_part(settings_xml(doc))),
         ("word/fontTable.xml", xml_part(font_table_xml(fonts))),
     ]
     if numbering:
         result.append(("word/numbering.xml", xml_part(numbering)))
+    if doc.theme:
+        result.append(("word/theme/theme1.xml", xml_part(theme_xml())))
     result.append(("word/_rels/document.xml.rels", xml_part(relationships(word_rels))))
     for name, data in result:
         try:
