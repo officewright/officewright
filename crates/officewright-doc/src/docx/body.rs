@@ -730,8 +730,13 @@ impl Reading<'_, '_, '_> {
     fn add(&mut self, parent: Parent, kind: Kind) -> Result<u32> {
         self.c.spend(1)?;
         let index = self.c.document.nodes.len() as u32;
+        let parent_index = match parent {
+            Parent::Body => Node::NO_PARENT,
+            Parent::Node(parent) => parent,
+        };
         self.c.document.nodes.push(Node {
             kind,
+            parent: parent_index,
             properties: Vec::new(),
             children: Vec::new(),
         });

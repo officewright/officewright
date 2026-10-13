@@ -469,6 +469,11 @@ fn bounds_the_number_of_nodes() {
         ),
         "{err}"
     );
+    let message = err.to_string();
+    assert!(matches!(
+        officewright_core::Error::from(err),
+        officewright_core::Error::LimitExceeded(ref m) if *m == message
+    ));
     let options = LoadOptions::new().with_limits(Limits::new().with_max_nodes(100));
     assert!(options.open_bytes(docx(&body)).is_ok());
 }
@@ -536,7 +541,7 @@ fn opens_files_and_converts_errors_into_core_errors() {
     let malformed = Document::from_bytes(Vec::new()).unwrap_err();
     assert!(matches!(
         officewright_core::Error::from(malformed),
-        officewright_core::Error::InvalidArgument(_)
+        officewright_core::Error::Malformed(_)
     ));
 }
 
@@ -2330,3 +2335,646 @@ fn shares_the_node_limit_with_the_settings_part() {
     let options = LoadOptions::new().with_limits(Limits::new().with_max_nodes(350));
     assert!(options.open_bytes(data).is_ok());
 }
+
+fn with_numbering(body: &str, numbering_xml: &str) -> Document {
+    Document::from_bytes(package(
+        DOCUMENT,
+        &document_xml(body),
+        &[
+            (
+                "word/_rels/document.xml.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/></Relationships>"#,
+            ),
+            ("word/numbering.xml", numbering_xml),
+        ],
+    ))
+    .unwrap()
+}
+
+#[test]
+fn reads_list_definitions_and_instances() {
+    let numbering = format!(
+        r#"<w:numbering xmlns:w="{W}"><w:abstractNum w:abstractNumId="0"><w:nsid w:val="1A2B3C4D"/><w:multiLevelType w:val="hybridMultilevel"/><w:tmpl w:val="0409000F"/><w:name w:val="Legal"/><w:styleLink w:val="LegalList"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr><w:rPr><w:b/></w:rPr></w:lvl><w:lvl w:ilvl="1" w:tplc="04090019" w:tentative="1"><w:start w:val="0"/><w:numFmt w:val="bullet"/><w:lvlRestart w:val="0"/><w:pStyle w:val="Heading2"/><w:isLgl/><w:suff w:val="space"/><w:lvlText w:val=""/><w:lvlPicBulletId w:val="3"/><w:legacy w:legacy="1" w:legacySpace="120" w:legacyIndent="-360"/></w:lvl></w:abstractNum><w:abstractNum w:abstractNumId="5"><w:numStyleLink w:val="LegalList"/></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="5"/></w:lvlOverride><w:lvlOverride w:ilvl="1"><w:lvl w:ilvl="1"><w:start w:val="3"/><w:numFmt w:val="upperRoman"/><w:lvlText w:null="1"/></w:lvl></w:lvlOverride></w:num><w:num w:numId="2"><w:abstractNumId w:val="7"/></w:num></w:numbering>"#
+    );
+    let document = with_numbering(
+        r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr></w:p>"#,
+        &numbering,
+    );
+    assert!(messages(&document).is_empty(), "{:?}", messages(&document));
+    let numbering = document.numbering();
+    assert_eq!(numbering.definitions().len(), 2);
+    assert_eq!(numbering.instances().len(), 2);
+    // From a paragraph's list reference to its instance, definition and level.
+    let reference = *first_paragraph(&document).properties().numbering().unwrap();
+    let instance = numbering.instance(reference.instance().unwrap()).unwrap();
+    assert_eq!((instance.id(), instance.definition_id()), (1, Some(0)));
+    let definition = instance.definition().unwrap();
+    assert_eq!(definition.id(), 0);
+    assert_eq!(definition.identifier(), Some(0x1A2B_3C4D));
+    assert_eq!(definition.template(), Some(0x0409_000F));
+    assert_eq!(
+        definition.multi_level_type(),
+        Some(MultiLevelType::HybridMultilevel)
+    );
+    assert_eq!(definition.name(), Some("Legal"));
+    assert_eq!(definition.style_link(), Some("LegalList"));
+    assert_eq!(definition.numbering_style_link(), None);
+    let levels = definition.levels();
+    assert_eq!(levels.len(), 2);
+    let first = &levels[0];
+    assert_eq!(first.level(), 0);
+    assert_eq!(
+        (first.start(), first.number_format()),
+        (Some(1), Some(NumberFormat::Decimal))
+    );
+    assert_eq!(first.text(), Some("%1."));
+    assert_eq!(first.justification(), Some(Justification::Left));
+    let indentation = first.paragraph_properties().indentation().unwrap();
+    assert_eq!(
+        (indentation.start(), indentation.hanging()),
+        (Some(Pt(36.0)), Some(Pt(18.0)))
+    );
+    assert_eq!(first.run_properties().bold(), Some(true));
+    assert_eq!((first.tentative(), first.restart()), (None, None));
+    let second = definition.level(1).unwrap();
+    assert_eq!(second.tentative(), Some(true));
+    assert_eq!(second.template_code(), Some(0x0409_0019));
+    assert_eq!(second.number_format(), Some(NumberFormat::Bullet));
+    assert_eq!((second.start(), second.restart()), (Some(0), Some(0)));
+    assert_eq!(second.paragraph_style(), Some("Heading2"));
+    assert_eq!(second.legal(), Some(true));
+    assert_eq!(second.suffix(), Some(LevelSuffix::Space));
+    assert_eq!(second.text(), Some(""));
+    assert_eq!(second.picture_bullet(), Some(3));
+    let legacy = second.legacy().unwrap();
+    assert_eq!(
+        (legacy.legacy(), legacy.space(), legacy.indent()),
+        (Some(true), Some(Pt(6.0)), Some(Pt(-18.0)))
+    );
+    assert_eq!(definition.level(2), None);
+    // The overrides of the instance.
+    let overrides = instance.overrides();
+    assert_eq!(overrides.len(), 2);
+    assert_eq!((overrides[0].level(), overrides[0].start()), (0, Some(5)));
+    assert_eq!(overrides[0].definition(), None);
+    let replaced = overrides[1].definition().unwrap();
+    assert_eq!((replaced.level(), replaced.start()), (1, Some(3)));
+    assert_eq!(replaced.number_format(), Some(NumberFormat::UpperRoman));
+    // w:null on stands for an empty template.
+    assert_eq!(replaced.text(), Some(""));
+    // A definition that stands for a numbering style.
+    let linked = numbering.definition(5).unwrap();
+    assert_eq!(linked.numbering_style_link(), Some("LegalList"));
+    assert!(linked.levels().is_empty());
+    // An instance whose definition is missing.
+    let orphan = numbering.instance(2).unwrap();
+    assert_eq!(orphan.definition_id(), Some(7));
+    assert!(orphan.definition().is_none());
+    assert!(numbering.instance(3).is_none());
+    // A document without a numbering part has no lists.
+    let plain = open("<w:p/>");
+    assert_eq!(plain.numbering().definitions().len(), 0);
+}
+
+#[test]
+fn reads_the_number_format_of_word_custom_formats_through_the_fallback() {
+    // Word writes a custom format in the choice of mc:AlternateContent and decimal in the
+    // fallback, as in POI's Numbering.docx (α, β, γ).
+    let numbering = format!(
+        r#"<w:numbering xmlns:w="{W}" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" mc:Ignorable="w14"><w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:start w:val="1"/><mc:AlternateContent><mc:Choice Requires="w14"><w:numFmt w:val="custom" w:format="001, 002, 003, ..."/></mc:Choice><mc:Fallback><w:numFmt w:val="decimal"/></mc:Fallback></mc:AlternateContent><w:lvlText w:val="%1"/></w:lvl></w:abstractNum></w:numbering>"#
+    );
+    let document = with_numbering("<w:p/>", &numbering);
+    assert!(messages(&document).is_empty(), "{:?}", messages(&document));
+    let level = document
+        .numbering()
+        .definition(1)
+        .unwrap()
+        .level(0)
+        .unwrap();
+    assert_eq!(level.number_format(), Some(NumberFormat::Decimal));
+}
+
+#[test]
+fn repairs_damaged_numbering() {
+    let numbering = format!(
+        r#"<w:numbering xmlns:w="{W}"><w:abstractNum><w:lvl w:ilvl="0"/></w:abstractNum><w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:numFmt w:val="roman"/><w:suff w:val="tabs"/></w:lvl><w:lvl w:ilvl="0"><w:start w:val="9"/></w:lvl><w:lvl w:ilvl="9"><w:start w:val="1"/></w:lvl></w:abstractNum><w:abstractNum w:abstractNumId="1"/><w:num><w:abstractNumId w:val="1"/></w:num><w:num w:numId="4"><w:abstractNumId w:val="one"/><w:lvlOverride w:ilvl="x"/></w:num><w:num w:numId="4"><w:abstractNumId w:val="1"/></w:num></w:numbering>"#
+    );
+    let document = with_numbering("<w:p/>", &numbering);
+    let numbering_view = document.numbering();
+    // Every element is kept, the first with an id is the one looked up.
+    assert_eq!(numbering_view.definitions().len(), 2);
+    assert_eq!(numbering_view.instances().len(), 2);
+    let definition = numbering_view.definition(1).unwrap();
+    let levels = definition.levels();
+    // The level with w:ilvl 9 is left out, and the second level 0 is ignored.
+    assert_eq!(levels.len(), 1);
+    assert_eq!(
+        (
+            levels[0].number_format(),
+            levels[0].suffix(),
+            levels[0].start()
+        ),
+        (None, None, None)
+    );
+    let instance = numbering_view.instance(4).unwrap();
+    assert_eq!(instance.definition_id(), None);
+    assert!(instance.overrides().is_empty());
+    let messages = messages(&document);
+    assert_eq!(messages.len(), 10, "{messages:?}");
+    assert!(messages[0].ends_with(": a w:abstractNum without a valid w:abstractNumId is ignored"));
+    assert!(messages[1].ends_with(": a second w:lvl with w:ilvl 0 is ignored"));
+    assert!(messages[2].ends_with(r#": w:numFmt w:val="roman" is not valid; it is ignored"#));
+    assert!(messages[3].ends_with(r#": w:suff w:val="tabs" is not valid; it is ignored"#));
+    assert!(messages[4].ends_with(r#": w:lvl w:ilvl="9" is not valid; it is ignored"#));
+    assert!(messages[5].ends_with(
+        ": a second w:abstractNum with id 1 is ignored where definitions are looked up by id"
+    ));
+    assert!(messages[6].ends_with(": a w:num without a valid w:numId is ignored"));
+    assert!(messages[7].ends_with(r#": w:abstractNumId w:val="one" is not valid; it is ignored"#));
+    assert!(messages[8].ends_with(r#": w:lvlOverride w:ilvl="x" is not valid; it is ignored"#));
+    assert!(
+        messages[9]
+            .ends_with(": a second w:num with id 4 is ignored where instances are looked up by id")
+    );
+    // A numbering part that is not w:numbering refuses the document.
+    let data = package(
+        DOCUMENT,
+        &document_xml("<w:p/>"),
+        &[
+            (
+                "word/_rels/document.xml.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/></Relationships>"#,
+            ),
+            ("word/numbering.xml", "<x/>"),
+        ],
+    );
+    assert_eq!(
+        Document::from_bytes(data).unwrap_err().to_string(),
+        "/word/numbering.xml, line 1, column 1: the root element is <x>, not w:numbering"
+    );
+}
+
+#[test]
+fn reads_strict_numbering() {
+    let numbering_xml = r#"<w:numbering xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="lowerLetter"/><w:pPr><w:ind w:start="0.5in" w:hanging="0.25in"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#;
+    let xml = r#"<w:document xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main" conformance="strict"><w:body><w:p/></w:body></w:document>"#;
+    let document = Document::from_bytes(package(
+        DOCUMENT,
+        xml,
+        &[
+            (
+                "word/_rels/document.xml.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://purl.oclc.org/ooxml/officeDocument/relationships/numbering" Target="numbering.xml"/></Relationships>"#,
+            ),
+            ("word/numbering.xml", numbering_xml),
+        ],
+    ))
+    .unwrap();
+    assert!(messages(&document).is_empty(), "{:?}", messages(&document));
+    let level = document
+        .numbering()
+        .instance(1)
+        .unwrap()
+        .definition()
+        .unwrap()
+        .level(0)
+        .unwrap();
+    assert_eq!(level.number_format(), Some(NumberFormat::LowerLetter));
+    assert_eq!(
+        level.paragraph_properties().indentation().unwrap().start(),
+        Some(Pt(36.0))
+    );
+}
+
+#[test]
+fn shares_the_node_limit_with_the_numbering_part() {
+    // 100 paragraphs cost 100 nodes; 100 empty definitions with an id cost 300, as 100
+    // one-attribute styles do: 400 in all, more than the numbering part alone.
+    let body = "<w:p/>".repeat(100);
+    let mut numbering = format!(r#"<w:numbering xmlns:w="{W}">"#);
+    for n in 0..100 {
+        numbering.push_str(&format!(r#"<w:abstractNum w:abstractNumId="{n}"/>"#));
+    }
+    numbering.push_str("</w:numbering>");
+    let data = package(
+        DOCUMENT,
+        &document_xml(&body),
+        &[
+            (
+                "word/_rels/document.xml.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/></Relationships>"#,
+            ),
+            ("word/numbering.xml", &numbering),
+        ],
+    );
+    let options = LoadOptions::new().with_limits(Limits::new().with_max_nodes(350));
+    match options.open_bytes(data.clone()).unwrap_err() {
+        Error::LimitExceeded {
+            limit: Limit::Nodes,
+            context,
+            ..
+        } => {
+            assert!(context.starts_with("/word/numbering.xml"), "{context}");
+        }
+        other => panic!("{other}"),
+    }
+    let options = LoadOptions::new().with_limits(Limits::new().with_max_nodes(400));
+    assert!(options.open_bytes(data).is_ok());
+}
+
+#[test]
+fn repairs_damaged_list_instances() {
+    // From the review of #46.
+    let numbering = format!(
+        r#"<w:numbering xmlns:w="{W}" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><w:abstractNum w:abstractNumId="-1"><w:nsid w:val="1A2B3C"/><w:lvl w:ilvl="0"><w:lvlText w:null="0"/></w:lvl><w:lvl w:ilvl="1"><w:lvlText w:val="%2)" w:null="1"/></w:lvl></w:abstractNum><w:abstractNum w:abstractNumId="0"><w:nsid w:val="1A2B3C"/><w:lvl w:ilvl="0"><w:lvlText w:null="0"/></w:lvl><w:lvl w:ilvl="1"><w:lvlText w:val="%2)" w:null="1"/></w:lvl></w:abstractNum><w:num w:numId="3"><mc:AlternateContent><mc:Choice Requires="w99"><w:abstractNumId w:val="9"/></mc:Choice><mc:Fallback><w:abstractNumId w:val="0"/></mc:Fallback></mc:AlternateContent><w:lvlOverride w:ilvl="0"><w:startOverride w:val="5"/></w:lvlOverride><w:lvlOverride w:ilvl="0"><w:startOverride w:val="7"/></w:lvlOverride><w:lvlOverride w:ilvl="2"><w:lvl w:ilvl="2"><w:numFmt w:val="lowerRoman"/></w:lvl><w:lvl w:ilvl="2"><w:numFmt w:val="decimal"/></w:lvl></w:lvlOverride><w:lvlOverride w:ilvl="1"><w:startOverride w:val="2"/><w:startOverride w:val="8"/><w:lvl w:ilvl="3"><w:numFmt w:val="upperRoman"/></w:lvl></w:lvlOverride></w:num><w:num w:numId="4"/></w:numbering>"#
+    );
+    let document = with_numbering("<w:p/>", &numbering);
+    let numbering = document.numbering();
+    // A negative definition id is not valid: Word does not open such a file
+    // (MS-OI29500 §17.9.1(a)).
+    assert!(numbering.definition(-1).is_none());
+    let definition = numbering.definition(0).unwrap();
+    // An identifier of fewer than eight digits is not valid.
+    assert_eq!(definition.identifier(), None);
+    let levels = definition.levels();
+    // w:null off is no empty template; w:val wins over w:null.
+    assert_eq!(levels[0].text(), None);
+    assert_eq!(levels[1].text(), Some("%2)"));
+    // w:abstractNumId is read through mc:AlternateContent's fallback.
+    let instance = numbering.instance(3).unwrap();
+    assert_eq!(instance.definition_id(), Some(0));
+    let overrides = instance.overrides();
+    // The first override of a level counts, and the first level in an override; an
+    // inner level keeps its own w:ilvl.
+    assert_eq!(overrides.len(), 3);
+    assert_eq!((overrides[0].level(), overrides[0].start()), (0, Some(5)));
+    assert_eq!(
+        overrides[1].definition().unwrap().number_format(),
+        Some(NumberFormat::LowerRoman)
+    );
+    assert_eq!((overrides[2].level(), overrides[2].start()), (1, Some(2)));
+    assert_eq!(overrides[2].definition().unwrap().level(), 3);
+    assert_eq!(numbering.instance(4).unwrap().definition_id(), None);
+    let messages = messages(&document);
+    assert_eq!(messages.len(), 8, "{messages:?}");
+    assert!(
+        messages[0]
+            .ends_with(r#": w:abstractNum w:abstractNumId="-1" is not valid; it is ignored"#)
+    );
+    assert!(messages[2].ends_with(": a w:abstractNum without a valid w:abstractNumId is ignored"));
+    assert!(messages[3].ends_with(r#": w:nsid w:val="1A2B3C" is not valid; it is ignored"#));
+    assert!(messages[4].ends_with(": a second w:lvlOverride of level 0 is ignored"));
+    assert!(messages[5].ends_with(": a second w:lvl in the w:lvlOverride of level 2 is ignored"));
+    assert!(
+        messages[6]
+            .ends_with(": a second w:startOverride in the w:lvlOverride of level 1 is ignored")
+    );
+    assert!(messages[7].ends_with(": a w:num without a w:abstractNumId names no definition"));
+}
+
+/// A document with one part related to the main part by `relationship` (the last
+/// segment of its type), at `target` under `word/`.
+fn with_part(relationship: &str, target: &str, xml: &str) -> Result<Document> {
+    let rels = format!(
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{relationship}" Target="{target}"/></Relationships>"#
+    );
+    let part = format!("word/{target}");
+    Document::from_bytes(package(
+        DOCUMENT,
+        &document_xml("<w:p/>"),
+        &[("word/_rels/document.xml.rels", &rels), (&part, xml)],
+    ))
+}
+
+const A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+
+#[test]
+fn reads_the_colours_and_fonts_of_the_theme() {
+    let theme = format!(
+        r#"<a:theme xmlns:a="{A}" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" mc:Ignorable="w14" name="Office Theme"><a:themeElements><a:clrScheme name="Office"><a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1><a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="44546A"/></a:dk2><a:lt2><a:srgbClr val="E7E6E6"/></a:lt2><a:accent1><a:srgbClr val="4472C4"/></a:accent1><a:accent2><a:srgbClr val="ed7d31"/></a:accent2><a:accent3><a:srgbClr val="A5A5A5"/></a:accent3><a:accent4><a:hslClr hue="0" sat="0%" lum="50%"/></a:accent4><a:accent5><a:srgbClr val="5B9BD5"/></a:accent5><a:accent6><a:srgbClr val="70AD47"/></a:accent6><a:hlink><a:srgbClr val="0563C1"/></a:hlink><a:folHlink><a:srgbClr val="954F72"/></a:folHlink></a:clrScheme><a:fontScheme name="Office"><a:majorFont><a:latin typeface="Calibri Light" panose="020F0302020204030204"/><a:ea typeface=""/><a:cs typeface=""/><a:font script="Jpan" typeface="游ゴシック Light"/><a:font script="Cyrl" typeface="Times New Roman"/></a:majorFont><a:minorFont><a:latin typeface="Calibri"/><a:ea typeface=""/><a:cs typeface="Arial"/></a:minorFont></a:fontScheme><a:fmtScheme name="Office"/></a:themeElements><w14:themeElements><a:clrScheme name="Fake"><a:dk2><a:srgbClr val="999999"/></a:dk2></a:clrScheme></w14:themeElements><a:objectDefaults/></a:theme>"#
+    );
+    let document = with_part("theme", "theme/theme1.xml", &theme).unwrap();
+    assert!(messages(&document).is_empty(), "{:?}", messages(&document));
+    let theme = document.theme().unwrap();
+    assert_eq!(theme.name(), Some("Office Theme"));
+    let colors = theme.colors().unwrap();
+    // Only the elements of DrawingML are read; the w14 ones are kept.
+    assert_eq!(colors.name(), Some("Office"));
+    assert_eq!(
+        colors.color(ColorSchemeIndex::Dark1),
+        Some(&SchemeColor::System {
+            color: SystemColor::WindowText,
+            last: Some((0, 0, 0))
+        })
+    );
+    let light1 = colors.color(ColorSchemeIndex::Light1).unwrap();
+    assert_eq!(light1.rgb(), Some((0xFF, 0xFF, 0xFF)));
+    assert_eq!(
+        colors.color(ColorSchemeIndex::Dark2),
+        Some(&SchemeColor::Rgb(0x44, 0x54, 0x6A))
+    );
+    // Hexadecimal digits in either case.
+    assert_eq!(
+        colors
+            .color(ColorSchemeIndex::Accent2)
+            .and_then(SchemeColor::rgb),
+        Some((0xED, 0x7D, 0x31))
+    );
+    // A colour model not read yet.
+    assert_eq!(colors.color(ColorSchemeIndex::Accent4), None);
+    assert_eq!(
+        colors.color(ColorSchemeIndex::FollowedHyperlink),
+        Some(&SchemeColor::Rgb(0x95, 0x4F, 0x72))
+    );
+    // Every slot holds its own colour.
+    for (index, rgb) in [
+        (ColorSchemeIndex::Light2, (0xE7, 0xE6, 0xE6)),
+        (ColorSchemeIndex::Accent1, (0x44, 0x72, 0xC4)),
+        (ColorSchemeIndex::Accent3, (0xA5, 0xA5, 0xA5)),
+        (ColorSchemeIndex::Accent5, (0x5B, 0x9B, 0xD5)),
+        (ColorSchemeIndex::Accent6, (0x70, 0xAD, 0x47)),
+        (ColorSchemeIndex::Hyperlink, (0x05, 0x63, 0xC1)),
+    ] {
+        assert_eq!(
+            colors.color(index).and_then(SchemeColor::rgb),
+            Some(rgb),
+            "{index:?}"
+        );
+    }
+    let fonts = theme.fonts().unwrap();
+    assert_eq!(fonts.name(), Some("Office"));
+    assert_eq!(fonts.major().latin(), Some("Calibri Light"));
+    assert_eq!(fonts.major().east_asian(), Some(""));
+    assert_eq!(fonts.major().script("Jpan"), Some("游ゴシック Light"));
+    assert_eq!(fonts.major().script("Hang"), None);
+    assert_eq!(fonts.major().scripts().len(), 2);
+    assert_eq!(fonts.minor().latin(), Some("Calibri"));
+    assert_eq!(fonts.minor().complex_script(), Some("Arial"));
+    // A document without a theme part has none.
+    assert!(open("<w:p/>").theme().is_none());
+}
+
+#[test]
+fn reads_invalid_theme_colours_as_not_set() {
+    let theme = format!(
+        r#"<a:theme xmlns:a="{A}"><a:themeElements><a:clrScheme name="x"><a:dk1><a:sysClr val="windowTxt" lastClr="000000"/></a:dk1><a:lt1><a:sysClr val="window" lastClr="FFF"/></a:lt1><a:dk2><a:srgbClr val="GG546A"/></a:dk2></a:clrScheme></a:themeElements></a:theme>"#
+    );
+    let document = with_part("theme", "theme/theme1.xml", &theme).unwrap();
+    let colors = *document.theme().unwrap().colors().as_ref().unwrap();
+    assert_eq!(colors.color(ColorSchemeIndex::Dark1), None);
+    // The system colour stays; its last value is not valid.
+    assert_eq!(
+        colors.color(ColorSchemeIndex::Light1),
+        Some(&SchemeColor::System {
+            color: SystemColor::Window,
+            last: None
+        })
+    );
+    assert_eq!(colors.color(ColorSchemeIndex::Dark2), None);
+    let messages = messages(&document);
+    assert_eq!(messages.len(), 3, "{messages:?}");
+    assert!(messages[0].starts_with("/word/theme/theme1.xml, line 1, column "));
+    assert!(messages[0].ends_with(r#": a:sysClr val="windowTxt" is not valid; it is ignored"#));
+    assert!(messages[1].ends_with(r#": a:sysClr lastClr="FFF" is not valid; it is ignored"#));
+    assert!(messages[2].ends_with(r#": a:srgbClr val="GG546A" is not valid; it is ignored"#));
+    let err = with_part(
+        "theme",
+        "theme/theme1.xml",
+        &format!(r#"<w:theme xmlns:w="{W}"/>"#),
+    )
+    .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "/word/theme/theme1.xml, line 1, column 1: the root element is <w:theme>, not a:theme"
+    );
+}
+
+#[test]
+fn reads_the_font_table() {
+    let fonts = format!(
+        r#"<w:fonts xmlns:w="{W}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:font w:name="Calibri"><w:panose1 w:val="020F0502020204030204"/><w:charset w:val="00"/><w:family w:val="swiss"/><w:pitch w:val="variable"/><w:sig w:usb0="E4002EFF" w:usb1="C000247B" w:usb2="00000009" w:usb3="00000000" w:csb0="000001FF" w:csb1="00000000"/></w:font><w:font w:name="MS Mincho"><w:altName w:val="ＭＳ 明朝"/><w:charset w:val="80"/><w:family w:val="modern"/><w:pitch w:val="fixed"/></w:font><w:font w:name="Symbol"><w:charset w:val="02" w:characterSet="Symbol"/><w:family w:val="roman"/><w:notTrueType/><w:embedRegular r:id="rId1" w:fontKey="{{4F9F5AB2-1C3D-4E5F-9A0B-1C2D3E4F5A6B}}" w:subsetted="1"/><w:embedBold r:id="rId2"/></w:font></w:fonts>"#
+    );
+    let document = with_part("fontTable", "fontTable.xml", &fonts).unwrap();
+    assert!(messages(&document).is_empty(), "{:?}", messages(&document));
+    assert_eq!(document.fonts().len(), 3);
+    let calibri = document.font("Calibri").unwrap();
+    assert_eq!(
+        calibri.panose(),
+        Some([0x02, 0x0F, 0x05, 0x02, 0x02, 0x02, 0x04, 0x03, 0x02, 0x04])
+    );
+    assert_eq!(calibri.charset(), Some(0));
+    assert_eq!(calibri.family(), Some(FontFamily::Swiss));
+    assert_eq!(calibri.pitch(), Some(FontPitch::Variable));
+    let signature = calibri.signature().unwrap();
+    assert_eq!(signature.unicode_ranges(), [0xE400_2EFF, 0xC000_247B, 9, 0]);
+    assert_eq!(signature.code_pages(), [0x1FF, 0]);
+    let mincho = document.font("MS Mincho").unwrap();
+    assert_eq!(mincho.alternative_name(), Some("ＭＳ 明朝"));
+    assert_eq!(mincho.charset(), Some(0x80));
+    assert_eq!(mincho.pitch(), Some(FontPitch::Fixed));
+    let symbol = document.font("Symbol").unwrap();
+    assert_eq!(
+        (symbol.charset(), symbol.character_set()),
+        (Some(2), Some("Symbol"))
+    );
+    assert_eq!(symbol.not_true_type(), Some(true));
+    let embedded = symbol.embedded();
+    assert_eq!(embedded.len(), 2);
+    assert_eq!(embedded[0].style(), EmbeddedFontStyle::Regular);
+    assert_eq!(embedded[0].relationship_id(), "rId1");
+    assert_eq!(
+        embedded[0].key(),
+        Some("{4F9F5AB2-1C3D-4E5F-9A0B-1C2D3E4F5A6B}")
+    );
+    assert_eq!(embedded[0].subsetted(), Some(true));
+    assert_eq!(
+        (embedded[1].style(), embedded[1].key()),
+        (EmbeddedFontStyle::Bold, None)
+    );
+    // Word compares font names without regard to case (MS-OI29500 §17.8.3.10(b)).
+    assert_eq!(
+        document.font("calibri").map(FontDeclaration::name),
+        Some("Calibri")
+    );
+    assert_eq!(
+        document.font("ms mincho").map(FontDeclaration::name),
+        Some("MS Mincho")
+    );
+    assert!(document.font("Calibri Light").is_none());
+}
+
+#[test]
+fn repairs_a_damaged_font_table() {
+    let fonts = format!(
+        r#"<w:fonts xmlns:w="{W}"><w:font><w:family w:val="swiss"/></w:font><w:font w:name="A"><w:charset w:val="0"/><w:family w:val="sans"/><w:panose1 w:val="020F05"/><w:sig w:usb0="XYZ" w:usb1="00000000" w:usb2="0" w:usb3="00000000" w:csb0="00000001" w:csb1="00000000"/></w:font><w:font w:name="A"><w:pitch w:val="fixed"/></w:font></w:fonts>"#
+    );
+    let document = with_part("fontTable", "fontTable.xml", &fonts).unwrap();
+    // The font without a name is left out; both fonts named A are kept, as faces of a
+    // family are, and the first is the one looked up.
+    assert_eq!(document.fonts().len(), 2);
+    let a = document.font("A").unwrap();
+    assert_eq!(
+        (a.charset(), a.family(), a.panose(), a.pitch()),
+        (None, None, None, None)
+    );
+    // A signature with a value not valid is not read: zeros would say "covers nothing".
+    assert_eq!(a.signature(), None);
+    let messages = messages(&document);
+    assert_eq!(messages.len(), 6, "{messages:?}");
+    assert!(messages[0].ends_with(": a w:font without a w:name is ignored"));
+    assert!(messages[1].ends_with(r#": w:charset w:val="0" is not valid; it is ignored"#));
+    assert!(messages[5].ends_with(r#": w:sig w:usb2="0" is not valid; it is ignored"#));
+    let err = with_part(
+        "fontTable",
+        "fontTable.xml",
+        &format!(r#"<w:font xmlns:w="{W}"/>"#),
+    )
+    .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "/word/fontTable.xml, line 1, column 1: the root element is <w:font>, not w:fonts"
+    );
+}
+
+#[test]
+fn reads_a_strict_theme_and_font_table() {
+    let theme = r#"<a:theme xmlns:a="http://purl.oclc.org/ooxml/drawingml/main" name="S"><a:themeElements><a:clrScheme name="S"><a:dk1><a:srgbClr val="010203"/></a:dk1></a:clrScheme><a:fontScheme name="S"><a:majorFont><a:latin typeface="Aptos Display"/></a:majorFont><a:minorFont><a:latin typeface="Aptos"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>"#;
+    let fonts = r#"<w:fonts xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main"><w:font w:name="Aptos"><w:charset w:characterSet="windows-1252"/></w:font></w:fonts>"#;
+    let xml = r#"<w:document xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main" conformance="strict"><w:body><w:p/></w:body></w:document>"#;
+    let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://purl.oclc.org/ooxml/officeDocument/relationships/theme" Target="theme/theme1.xml"/><Relationship Id="rId2" Type="http://purl.oclc.org/ooxml/officeDocument/relationships/fontTable" Target="fontTable.xml"/></Relationships>"#;
+    let document = Document::from_bytes(package(
+        DOCUMENT,
+        xml,
+        &[
+            ("word/_rels/document.xml.rels", rels),
+            ("word/theme/theme1.xml", theme),
+            ("word/fontTable.xml", fonts),
+        ],
+    ))
+    .unwrap();
+    assert!(messages(&document).is_empty(), "{:?}", messages(&document));
+    let theme = document.theme().unwrap();
+    assert_eq!(
+        theme.colors().unwrap().color(ColorSchemeIndex::Dark1),
+        Some(&SchemeColor::Rgb(1, 2, 3))
+    );
+    assert_eq!(theme.fonts().unwrap().minor().latin(), Some("Aptos"));
+    let aptos = document.font("Aptos").unwrap();
+    assert_eq!(
+        (aptos.charset(), aptos.character_set()),
+        (None, Some("windows-1252"))
+    );
+}
+
+#[test]
+fn shares_the_node_limit_with_the_theme_and_the_font_table() {
+    // 100 paragraphs cost 100 nodes. Each part alone fits the lower limit, but not with
+    // the paragraphs: the theme's 100 empty elements cost 200, the 50 named fonts 150.
+    let body = "<w:p/>".repeat(100);
+    let theme = format!(
+        r#"<a:theme xmlns:a="{A}"><a:themeElements>{}</a:themeElements></a:theme>"#,
+        "<a:extLst/>".repeat(100)
+    );
+    let fonts = format!(
+        r#"<w:fonts xmlns:w="{W}">{}</w:fonts>"#,
+        r#"<w:font w:name="F"/>"#.repeat(50)
+    );
+    for (relationship, target, xml, limit) in [
+        ("theme", "theme/theme1.xml", theme.as_str(), 250),
+        ("fontTable", "fontTable.xml", fonts.as_str(), 200),
+    ] {
+        let rels = format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{relationship}" Target="{target}"/></Relationships>"#
+        );
+        let part = format!("word/{target}");
+        let data = package(
+            DOCUMENT,
+            &document_xml(&body),
+            &[("word/_rels/document.xml.rels", &rels), (&part, xml)],
+        );
+        let options = LoadOptions::new().with_limits(Limits::new().with_max_nodes(limit));
+        match options.open_bytes(data.clone()).unwrap_err() {
+            Error::LimitExceeded {
+                limit: Limit::Nodes,
+                context,
+                ..
+            } => {
+                assert!(context.starts_with(&format!("/{part}")), "{context}");
+            }
+            other => panic!("{other}"),
+        }
+        let options = LoadOptions::new().with_limits(Limits::new().with_max_nodes(500));
+        assert!(options.open_bytes(data).is_ok(), "{relationship}");
+    }
+}
+
+#[test]
+fn repairs_damaged_font_declarations() {
+    // From the review of #51.
+    let fonts = format!(
+        r#"<w:fonts xmlns:w="{W}" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" mc:Ignorable="w14"><w:font w:name="A"><w:charset w:val="00"/><w:charset w:val="80"/><w:family w:val="swiss"/><w:family w:val="roman"/><w:altName w:val="first"/><w:altName w:val="second"/><w:sig w:usb0="00000001" w:usb1="00000000"/><w:embedRegular w:fontKey="{{00000000-0000-0000-0000-000000000000}}"/><w:embedBold r:id="rId1"/><w:embedBold r:id="rId2"/></w:font><w:font w:name="B"><w:charset w:val="+F"/><mc:AlternateContent><mc:Choice Requires="w99"><w:family w:val="roman"/></mc:Choice><mc:Fallback><w:family w:val="modern"/></mc:Fallback></mc:AlternateContent></w:font><w14:font w:name="C"/></w:fonts>"#
+    );
+    let document = with_part("fontTable", "fontTable.xml", &fonts).unwrap();
+    // A font of another namespace is not read.
+    assert_eq!(document.fonts().len(), 2);
+    let a = document.font("A").unwrap();
+    // The first of each child counts.
+    assert_eq!(
+        (a.charset(), a.family()),
+        (Some(0), Some(FontFamily::Swiss))
+    );
+    assert_eq!(a.alternative_name(), Some("first"));
+    // A signature without all six values is not read.
+    assert_eq!(a.signature(), None);
+    // An embedded font without r:id is left out; of two of one style, the first counts.
+    let embedded = a.embedded();
+    assert_eq!(embedded.len(), 1);
+    assert_eq!(
+        (embedded[0].style(), embedded[0].relationship_id()),
+        (EmbeddedFontStyle::Bold, "rId1")
+    );
+    let b = document.font("B").unwrap();
+    // A sign is not a hexadecimal digit; w:family is read through the fallback.
+    assert_eq!((b.charset(), b.family()), (None, Some(FontFamily::Modern)));
+    let messages = messages(&document);
+    assert_eq!(messages.len(), 7, "{messages:?}");
+    assert!(messages[0].ends_with(": a second w:charset in a w:font is ignored"));
+    assert!(messages[1].ends_with(": a second w:family in a w:font is ignored"));
+    assert!(messages[2].ends_with(": a second w:altName in a w:font is ignored"));
+    assert!(messages[3].ends_with(": a w:sig without all six of its attributes is ignored"));
+    assert!(messages[4].ends_with(": a w:embedRegular without r:id is ignored"));
+    assert!(messages[5].ends_with(": a second w:embedBold in a w:font is ignored"));
+    assert!(messages[6].ends_with(r#": w:charset w:val="+F" is not valid; it is ignored"#));
+}
+
+#[test]
+fn repairs_a_damaged_theme() {
+    let theme = format!(
+        r#"<a:theme xmlns:a="{A}" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><a:themeElements><mc:AlternateContent><mc:Choice Requires="w99"><a:clrScheme name="Choice"/></mc:Choice><mc:Fallback><a:clrScheme name="Fallback"><a:dk1><a:srgbClr val="010101"/></a:dk1><a:dk1><a:srgbClr val="020202"/></a:dk1></a:clrScheme></mc:Fallback></mc:AlternateContent><a:clrScheme name="Second"/><a:fontScheme name="F"><a:majorFont><a:latin typeface="One"/><a:latin typeface="Two"/><a:font script="Jpan" typeface="J1"/><a:font script="Jpan" typeface="J2"/></a:majorFont><a:minorFont/><a:minorFont><a:latin typeface="Other"/></a:minorFont></a:fontScheme></a:themeElements><a:themeElements><a:clrScheme name="Later"/></a:themeElements></a:theme>"#
+    );
+    let document = with_part("theme", "theme/theme1.xml", &theme).unwrap();
+    let theme = document.theme().unwrap();
+    // mc:AlternateContent is read through its fallback; the first of each counts.
+    let colors = theme.colors().unwrap();
+    assert_eq!(colors.name(), Some("Fallback"));
+    assert_eq!(
+        colors.color(ColorSchemeIndex::Dark1),
+        Some(&SchemeColor::Rgb(1, 1, 1))
+    );
+    let fonts = theme.fonts().unwrap();
+    assert_eq!(fonts.major().latin(), Some("One"));
+    assert_eq!(fonts.major().script("Jpan"), Some("J1"));
+    assert_eq!(fonts.major().scripts().len(), 1);
+    assert_eq!(fonts.minor().latin(), None);
+    let messages = messages(&document);
+    assert_eq!(messages.len(), 6, "{messages:?}");
+    // Each level's repeats are noted before its children are read.
+    assert!(messages[0].ends_with(": a second a:clrScheme is ignored"));
+    assert!(messages[1].ends_with(": a second a:dk1 is ignored"));
+    assert!(messages[2].ends_with(": a second a:minorFont is ignored"));
+    assert!(messages[3].ends_with(": a second a:latin is ignored"));
+    assert!(messages[4].ends_with(": a second a:font for the script Jpan is ignored"));
+    assert!(messages[5].ends_with(": a second a:themeElements is ignored"));
+}
+
+mod format;

@@ -12,6 +12,9 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4.13"
 officewright-doc = { path = "../crates/officewright-doc" }
 officewright-font = { path = "../crates/officewright-font" }
+officewright-layout = { path = "../crates/officewright-layout", features = [
+  "fuzzing",
+] }
 officewright-opc = { path = "../crates/officewright-opc" }
 officewright-pdf = { path = "../crates/officewright-pdf" }
 # A second XML parser as an oracle: the xml target checks that both accept and reject the
@@ -56,6 +59,13 @@ bench = false
 [[bin]]
 name = "pdf_embed"
 path = "fuzz_targets/pdf_embed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "shape_font"
+path = "fuzz_targets/shape_font.rs"
 test = false
 doc = false
 bench = false

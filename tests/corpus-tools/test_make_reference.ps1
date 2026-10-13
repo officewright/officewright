@@ -179,6 +179,166 @@ Exit-Stuck 'test' ''
     $exited = $process.WaitForExit(30000)
     if (-not $exited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
     Check 'Exit-Stuck ends the process with code 2' ($exited -and $process.ExitCode -eq 2) "exited: $exited"
+
+    # Word's computed formatting, read from objects that stand in for Word's.
+    Check 'automatic colour' ((ConvertTo-HexColor -16777216 0) -eq 'auto')
+    Check 'mixed colour' ($null -eq (ConvertTo-HexColor 9999999 0))
+    Check 'red from RGB' ((ConvertTo-HexColor 255 255) -eq 'FF0000')
+    Check 'blue from RGB' ((ConvertTo-HexColor 16711680 16711680) -eq '0000FF')
+    Check 'a theme colour takes TextColor.RGB' ((ConvertTo-HexColor -738132071 0x336699) -eq '996633')
+    Check 'Word true' ((ConvertTo-Flag -1) -eq $true)
+    Check 'Word false' ((ConvertTo-Flag 0) -eq $false)
+    Check 'mixed flag' ($null -eq (ConvertTo-Flag 9999999))
+    Check 'points rounded to 0.01' ((ConvertTo-PointValue 12.3456) -eq 12.35)
+    Check 'mixed length' ($null -eq (ConvertTo-PointValue 9999999))
+    Check 'alignment names' ((Get-AlignmentName 3) -eq 'justify' -and (Get-AlignmentName 6) -eq 'other-6')
+    Check 'line rule names' ((Get-LineRuleName 4) -eq 'exactly' -and (Get-LineRuleName 5) -eq 'multiple')
+    Check 'separator stories are left out' ($null -eq (Get-StoryName 12) -and (Get-StoryName 7) -eq 'primary-header')
+    $excerpt = Get-TextExcerpt ("Name:`tValue" + [char]11 + 'x' * 70 + [char]13 + [char]7)
+    Check 'excerpt without marks, controls as spaces, 60 characters' ($excerpt.Length -eq 60 -and $excerpt.StartsWith('Name: Value x'))
+
+    function New-Font($Name, $Size, $Bold = 0, $Italic = 0, $Color = -16777216, $Rgb = 0) {
+        $textColor = New-Object PSObject -Property @{ RGB = $Rgb }
+        return New-Object PSObject -Property @{ Name = $Name; Size = $Size; Bold = $Bold; Italic = $Italic; Color = $Color; TextColor = $textColor }
+    }
+    # Word's font box placeholders are in the language of its user interface; the stand-in
+    # classifies a German one, as Word would through a scratch document.
+    $classified = New-Object System.Collections.ArrayList
+    $theme = @{
+        Fonts = @{ minorHAnsi = 'Calibri'; majorEastAsia = '' }
+        Seen = @{}
+        Classify = {
+            param($Placeholder)
+            [void]$classified.Add($Placeholder)
+            switch ($Placeholder) { '+Textkoerper' { 'minorHAnsi' } '+Ueberschriften Asiatisch' { 'majorEastAsia' } '+Kaputt' { throw 'no' } default { $null } }
+        }.GetNewClosure()
+    }
+    $font = Get-FontRecord (New-Font '+Textkoerper' 11 -1 0 255 255) $theme
+    Check 'a theme font is classified and named' ($font.name -eq 'Calibri' -and $font.theme -eq 'minorHAnsi' -and $font.bold -eq $true -and $font.color -eq 'FF0000')
+    [void](Get-FontRecord (New-Font '+Textkoerper' 11) $theme)
+    Check 'a placeholder is classified once' ($classified.Count -eq 1) "$($classified.Count)"
+    $unknown = Get-FontRecord (New-Font '+Unbekannt' 11) $theme
+    $broken = Get-FontRecord (New-Font '+Kaputt' 11) $theme
+    $empty = Get-FontRecord (New-Font '+Ueberschriften Asiatisch' 11) $theme
+    Check 'a placeholder never leaves: unresolved has no name' ($unknown.theme -eq 'unresolved' -and $null -eq $unknown.name -and $broken.theme -eq 'unresolved' -and $null -eq $broken.name)
+    Check 'a theme without that font gives no name' ($empty.theme -eq 'majorEastAsia' -and $null -eq $empty.name)
+    $flat = '<pkg:part pkg:name="/word/styles.xml"><w:rFonts w:asciiTheme="majorHAnsi"/></pkg:part>' +
+        '<pkg:part pkg:name="/word/document.xml"><w:p><w:pPr><w:rPr><w:rFonts w:asciiTheme="majorBidi"/></w:rPr></w:pPr>' +
+        '<w:r><w:rPr><w:rFonts w:asciiTheme="minorEastAsia" w:hAnsiTheme="minorEastAsia"/></w:rPr><w:t>x</w:t></w:r></w:p></pkg:part>'
+    Check 'the theme kind is read from the run x only' ((Get-ThemeKind $flat) -eq 'minorEastAsia')
+    $complex = '<pkg:part pkg:name="/word/document.xml"><w:r><w:rPr><w:rFonts w:cstheme="majorBidi"/></w:rPr><w:t>x</w:t></w:r></pkg:part>'
+    Check 'another theme attribute is taken when asciiTheme is missing' ((Get-ThemeKind $complex) -eq 'majorBidi')
+    Check 'no theme on the run gives null' ($null -eq (Get-ThemeKind '<pkg:part pkg:name="/word/document.xml"><w:r><w:t>x</w:t></w:r></pkg:part>'))
+    $mixed = Get-FontRecord (New-Font '' 9999999 9999999 0) $theme
+    Check 'mixed font values are null' ($null -eq $mixed.name -and $null -eq $mixed.size -and $null -eq $mixed.bold)
+
+    # A range over runs of formatting: Start and End are character positions, MoveEnd(13)
+    # moves the end to the next run boundary, as Word's wdCharacterFormatting does.
+    function New-Range($Runs, [int] $Start, [int] $End, [int] $Step = 13, [int] $Delay = 0) {
+        $range = New-Object PSObject -Property @{ Runs = $Runs; Start = $Start; End = $End; Unit = $Step; Delay = $Delay }
+        $range | Add-Member ScriptProperty Duplicate { New-Range $this.Runs $this.Start $this.End $this.Unit $this.Delay }
+        $range | Add-Member ScriptMethod Collapse { param($Direction) if ($Direction -eq 1) { $this.End = $this.Start } else { $this.Start = $this.End } }
+        $range | Add-Member ScriptMethod MoveEnd {
+            param($Unit, $Count)
+            if ($this.Delay -gt 0) { Start-Sleep -Milliseconds $this.Delay }
+            if ($Unit -ne $this.Unit) { return 0 }
+            $position = 0
+            foreach ($run in $this.Runs) {
+                $position += $run.Length
+                if ($position -gt $this.End) { $this.End = $position; return 1 }
+            }
+            return 0
+        }
+        $range | Add-Member ScriptProperty Font {
+            $position = 0
+            foreach ($run in $this.Runs) {
+                if ($position -eq $this.Start) { return $run.Font }
+                $position += $run.Length
+            }
+        }
+        return $range
+    }
+    $runs = @(
+        (New-Object PSObject -Property @{ Length = 5; Font = (New-Font 'Arial' 10) }),
+        (New-Object PSObject -Property @{ Length = 3; Font = (New-Font 'Arial' 10 -1) }),
+        (New-Object PSObject -Property @{ Length = 1; Font = (New-Font 'Arial' 12) })
+    )
+    $later = [DateTime]::UtcNow.AddMinutes(5)
+    $read = Get-RunRecords (New-Range $runs 0 9) $later $theme
+    Check 'runs of formatting are read with their lengths and fonts' ($read.Count -eq 3 -and $read[0].length -eq 5 -and $read[1].font.bold -eq $true -and $read[2].font.size -eq 12) "$($read.Count)"
+    $part = Get-RunRecords (New-Range $runs 0 7) $later $theme
+    Check 'a run past the range end is cut at the end' ($part.Count -eq 2 -and $part[1].length -eq 2) "$($part.Count)"
+    Check 'runs past the deadline give null' ($null -eq (Get-RunRecords (New-Range $runs 0 9) ([DateTime]::UtcNow.AddSeconds(-1)) $theme))
+    $refused = $false
+    try { [void](Get-RunRecords (New-Range $runs 0 9 99) $later $theme) } catch { $refused = $true }
+    Check 'a unit Word does not move over is an error, not an endless loop' $refused
+
+    function New-Paragraph($Text, $Runs, $Builtin, $StyleName, $ListType = 0, $ListString = '', $Step = 13, $Delay = 0) {
+        $length = 0
+        foreach ($run in $Runs) { $length += $run.Length }
+        $range = New-Range $Runs 0 $length $Step $Delay
+        $characters = New-Object PSObject -Property @{ First = (New-Object PSObject -Property @{ Font = $Runs[0].Font }) }
+        $range | Add-Member NoteProperty Text $Text
+        $range | Add-Member NoteProperty Characters $characters
+        $range | Add-Member NoteProperty ListFormat (New-Object PSObject -Property @{ ListType = $ListType; ListString = $ListString; ListLevelNumber = 2 })
+        $format = New-Object PSObject -Property @{
+            LeftIndent = 36; RightIndent = 0; FirstLineIndent = -18; SpaceBefore = 6; SpaceAfter = 9999999
+            SpaceBeforeAuto = 0; SpaceAfterAuto = -1; LineSpacing = 13.8; LineSpacingRule = 5; Alignment = 3
+        }
+        $style = New-Object PSObject -Property @{ BuiltIn = $Builtin; NameLocal = $StyleName }
+        return New-Object PSObject -Property @{ Range = $range; Format = $format; Style = $style }
+    }
+    $listed = New-Paragraph ('1.1 Scope' + [char]13) $runs $true 'Localized heading' 2 '1.1'
+    $record = Get-ParagraphRecord $listed 4 $theme
+    Check 'a built-in style is flagged, its localized name left out' ($record.style_builtin -eq $true -and $null -eq $record.style)
+    Check 'paragraph format values' ($record.left_indent -eq 36 -and $record.first_line_indent -eq -18 -and $null -eq $record.space_after -and $record.space_after_auto -eq $true -and $record.line_spacing_rule -eq 'multiple' -and $record.alignment -eq 'justify')
+    Check 'the list label and level' ($record.list_string -eq '1.1' -and $record.list_level -eq 2 -and $record.index -eq 4)
+    Check 'the first character''s font' ($record.font.name -eq 'Arial' -and $record.font.size -eq 10)
+    $custom = Get-ParagraphRecord (New-Paragraph ('Body' + [char]13) $runs $false 'Contract Clause') 0 $theme
+    Check 'a style the document defines keeps its name; no list' ($custom.style -eq 'Contract Clause' -and $null -eq $custom.list_level)
+    $nameless = Get-ParagraphRecord (New-Paragraph ('Body' + [char]13) $runs $false '') 0 $theme
+    Check 'an empty style name is null' ($null -eq $nameless.style)
+
+    function New-Story([int] $Type, $Paragraphs, $Next = $null) {
+        return New-Object PSObject -Property @{ StoryType = $Type; Paragraphs = $Paragraphs; NextStoryRange = $Next }
+    }
+    $header2 = New-Story 7 @((New-Paragraph ('Second header' + [char]13) $runs $false 'Header B'))
+    $document = New-Object PSObject -Property @{ StoryRanges = @(
+            (New-Story 1 @($listed, (New-Paragraph ('Body' + [char]13) $runs $true ''))),
+            (New-Story 7 @((New-Paragraph ('Header' + [char]13) $runs $true '')) $header2),
+            (New-Story 12 @((New-Paragraph ([string][char]3) $runs $true '')))
+        )
+    }
+    $progress = @{ Step = '' }
+    $export = (Export-Formatting $document 600 $theme $progress).Export
+    $names = @($export.stories | ForEach-Object { "$($_.story)/$($_.instance)" }) -join ','
+    Check 'every story and linked story is exported, separators left out' ($names -eq 'main/0,primary-header/0,primary-header/1') $names
+    Check 'paragraphs are numbered per story' (@($export.stories[0].paragraphs).Count -eq 2 -and $export.stories[0].paragraphs[1].index -eq 1)
+    Check 'runs are kept when they take no longer than the paragraphs' ($export.runs -eq $true -and @($export.stories[0].paragraphs[0].runs).Count -eq 3 -and $export.complete -eq $true)
+    $late = (Export-Formatting $document 0 $theme $progress).Export
+    Check 'a document over its time budget is marked incomplete, without runs' ($late.complete -eq $false -and $late.runs -eq $false -and $late.runs_note -eq 'not collected: the paragraphs did not fit in the time budget')
+    $failing = New-Object PSObject -Property @{ StoryRanges = @((New-Story 1 @((New-Paragraph ('Body' + [char]13) $runs $true '' 0 '' 99)))) }
+    $failed = Export-Formatting $failing 600 $theme $progress
+    Check 'a failed run pass gives a fixed note; the message stays apart' ($failed.Export.runs -eq $false -and $failed.Export.runs_note -eq 'left out: reading them failed' -and $failed.RunError -like '*did not move*')
+    $slow = New-Object PSObject -Property @{ StoryRanges = @((New-Story 1 @((New-Paragraph ('Body' + [char]13) $runs $true '' 0 '' 13 1500)))) }
+    $clipped = (Export-Formatting $slow 1 $theme $progress).Export
+    Check 'runs cut short by the time budget say so' ($clipped.complete -eq $true -and $clipped.runs -eq $false -and $clipped.runs_note -eq 'left out: they did not fit in the time budget') "$($clipped.runs_note)"
+    $unresolved = @((Export-Formatting $document 600 $theme $progress).Unresolved)
+    Check 'unresolved placeholders are reported apart' ($unresolved -contains '+Unbekannt' -and $unresolved -contains '+Kaputt' -and -not ($unresolved -contains '+Textkoerper'))
+    # The worker has only the functions' text: in a runspace of its own, the export of a
+    # document must find every function it calls.
+    $isolated = [PowerShell]::Create()
+    try {
+        [void]$isolated.AddScript('param($Functions, $Document) . ([ScriptBlock]::Create($Functions)); (Export-Formatting $Document 600 @{ Fonts = @{}; Seen = @{}; Classify = { $null } } @{ Step = "" }).Export')
+        [void]$isolated.AddArgument((Get-FormattingFunctions)).AddArgument($document)
+        $alone = $isolated.Invoke()
+        $errors = @($isolated.Streams.Error)
+        Check 'the worker gets every function the export needs' ($errors.Count -eq 0 -and @($alone[0].stories).Count -eq 3) "$($errors | Select-Object -First 1)"
+    } finally {
+        $isolated.Dispose()
+    }
+    $json = ConvertTo-Json -InputObject $export -Depth 10 -Compress
+    Check 'the export is JSON with the run lengths' ($json.Contains('"runs":[{"length":5') -and $json.Contains('"format":1'))
 } finally {
     Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
 }

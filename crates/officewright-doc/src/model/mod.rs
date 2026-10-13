@@ -1,12 +1,17 @@
 //! The document model: what a document contains, independent of the file format it was
 //! read from.
 
+pub(crate) mod fonts;
+pub(crate) mod format;
+pub(crate) mod numbering;
 pub(crate) mod properties;
+mod resolve;
 pub(crate) mod section;
 pub(crate) mod settings;
 pub(crate) mod styles;
 pub(crate) mod table_properties;
 mod text;
+pub(crate) mod theme;
 mod views;
 pub(crate) mod xml;
 
@@ -14,12 +19,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use officewright_core::Pt;
 
+pub use fonts::{
+    EmbeddedFontReference, EmbeddedFontStyle, FontDeclaration, FontFamily, FontPitch, FontSignature,
+};
+pub use format::{CharacterFormat, FontFamilies};
+pub use numbering::{
+    LegacyNumbering, LevelOverride, LevelSuffix, ListDefinition, ListInstance, ListLevel,
+    MultiLevelType, Numbering,
+};
 pub use properties::{
     ArtBorder, Border, BorderStyle, Color, ColorValue, FontHint, Highlight, Indentation,
     Justification, Language, LineSpacing, NumberFormat, NumberingReference, ParagraphBorders,
     ParagraphProperties, RunFonts, RunProperties, Shading, ShadingPattern, Spacing, TabKind,
     TabLeader, TabStop, ThemeColor, ThemeFont, Underline, UnderlineStyle, VerticalPosition,
 };
+pub use resolve::Formats;
 pub use section::{
     ChapterSeparator, Column, Columns, DocumentGrid, DocumentGridKind, HeaderFooterKind,
     HeaderFooterReference, LineNumberRestart, LineNumbering, NotePosition, NoteProperties,
@@ -37,6 +51,7 @@ pub use table_properties::{
     TableOverlap, TablePosition, TableProperties, TableRowProperties, TableWidth, TextDirection,
     VerticalAlignment, VerticalJustification,
 };
+pub use theme::{ColorScheme, FontCollection, FontScheme, SchemeColor, SystemColor, Theme};
 pub use views::{
     Block, Break, BreakClear, BreakKind, ContentControl, FieldCharKind, Hyperlink, Inline, Opaque,
     Paragraph, Revision, RevisionKind, Run, RunContent, Section, SimpleField, Table, TableCell,
@@ -79,6 +94,9 @@ pub struct Document {
     pub(crate) names: Names,
     pub(crate) styles: styles::StyleTable,
     pub(crate) settings: settings::Settings,
+    pub(crate) numbering: numbering::NumberingTable,
+    pub(crate) theme: Option<theme::Theme>,
+    pub(crate) fonts: Vec<fonts::FontDeclaration>,
     pub(crate) sections: Vec<SectionData>,
     pub(crate) kind: DocumentKind,
     pub(crate) conformance: Conformance,
@@ -92,6 +110,8 @@ pub(crate) struct Names {
     pub(crate) w: [Option<xml::Sym>; 2],
     /// The relationships namespace of attributes such as `r:id`.
     pub(crate) r: [Option<xml::Sym>; 2],
+    /// The main namespace of DrawingML, of the theme.
+    pub(crate) a: [Option<xml::Sym>; 2],
     pub(crate) mc: Option<xml::Sym>,
 }
 
@@ -156,6 +176,9 @@ impl Document {
             names: Names::default(),
             styles: styles::StyleTable::default(),
             settings: settings::Settings::default(),
+            numbering: numbering::NumberingTable::default(),
+            theme: None,
+            fonts: Vec::new(),
             sections: Vec::new(),
             kind: DocumentKind::Document,
             conformance: Conformance::Transitional,
@@ -229,6 +252,68 @@ impl Document {
     /// The styles of the document (`styles.xml`); none when it has no styles part.
     pub fn styles(&self) -> Styles<'_> {
         Styles::new(self)
+    }
+
+    /// Resolves the formatting in effect of runs and paragraph marks: the document
+    /// defaults, the styles and direct formatting combined as Word combines them, with
+    /// theme fonts and colours resolved. Keep it for all the runs of the document: it
+    /// remembers what it has worked out about each style.
+    ///
+    /// ```
+    /// # fn main() -> officewright_doc::Result<()> {
+    /// use officewright_doc::{Block, Document};
+    ///
+    /// let document = Document::open("tests/data/theme.docx")?;
+    /// let mut formats = document.formats();
+    /// for section in document.sections() {
+    ///     for block in section.blocks() {
+    ///         if let Block::Paragraph(paragraph) = block {
+    ///             for run in paragraph.runs() {
+    ///                 let format = formats.run(run);
+    ///                 println!("{} {} pt", format.fonts().ascii(), format.size().0);
+    ///             }
+    ///         }
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn formats(&self) -> Formats<'_> {
+        Formats::new(self)
+    }
+
+    /// The numbering of the document (`numbering.xml`): its list definitions and list
+    /// instances; none when it has no numbering part.
+    pub fn numbering(&self) -> Numbering<'_> {
+        Numbering::new(self)
+    }
+
+    /// The theme of the document (its theme part), whose colours and fonts theme colours
+    /// and theme fonts stand for; `None` when it has none.
+    pub fn theme(&self) -> Option<&Theme> {
+        self.theme.as_ref()
+    }
+
+    /// What the font table (`fontTable.xml`) says about the fonts the document uses, in
+    /// document order.
+    pub fn fonts(&self) -> &[FontDeclaration] {
+        &self.fonts
+    }
+
+    /// The font table's declaration of a font, by the name runs give it, compared
+    /// without regard to case as Word does (MS-OI29500 §17.8.3.10(b); LibreOffice's
+    /// `tdf140137.docx` names `times new roman` against a declared `Times New Roman`).
+    /// A table may declare one name several times, once per face of a family with its
+    /// own PANOSE and signature (`fdo77727.docx` declares five Noto Sans); this gives
+    /// the first, and [`fonts`](Self::fonts) all of them.
+    pub fn font(&self, name: &str) -> Option<&FontDeclaration> {
+        let folded = |text: &str| {
+            text.chars()
+                .flat_map(char::to_lowercase)
+                .collect::<Vec<_>>()
+        };
+        let wanted = folded(name);
+        self.fonts.iter().find(|font| folded(font.name()) == wanted)
     }
 
     /// The settings of the document (`settings.xml`); none set when it has no settings
@@ -305,10 +390,17 @@ pub(crate) struct SectionData {
 #[derive(Debug)]
 pub(crate) struct Node {
     pub(crate) kind: Kind,
+    /// The node this one is a child of; [`Node::NO_PARENT`] for a block of a section.
+    pub(crate) parent: u32,
     /// Property elements (`w:pPr`, `w:rPr`, `w:tblPr`, `w:tcPr`, `w:sdtPr`, …) as read,
     /// until the properties are typed.
     pub(crate) properties: Vec<Span>,
     pub(crate) children: Vec<u32>,
+}
+
+impl Node {
+    /// The parent of a block that belongs to a section, not to another node.
+    pub(crate) const NO_PARENT: u32 = u32::MAX;
 }
 
 #[derive(Debug)]

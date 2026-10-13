@@ -154,8 +154,8 @@ impl From<Error> for officewright_core::Error {
         match err {
             Error::Io { message, source } => Self::Io { message, source },
             Error::Unsupported(message) => Self::Unsupported(message),
-            // core has no category for damaged input yet; it is an invalid argument.
-            other => Self::InvalidArgument(other.to_string()),
+            Error::Malformed { message } => Self::Malformed(message),
+            limit @ Error::LimitExceeded { .. } => Self::LimitExceeded(limit.to_string()),
         }
     }
 }

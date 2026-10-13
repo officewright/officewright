@@ -71,8 +71,13 @@ GEOMETRY_FORMAT = 1
 
 XHTML = "{http://www.w3.org/1999/xhtml}"
 
-# The make-reference.ps1 output format this script reads.
-SCRIPT_VERSION = 2
+# The make-reference.ps1 output formats this script reads: 3 adds the formatting export.
+SCRIPT_VERSIONS = (2, 3)
+
+# The formatting.json this script writes, and its size limit (a corpus file stays under
+# 1 MB; runs are left out of a document that would not fit).
+FORMATTING_FORMAT = 1
+MAX_FORMATTING_BYTES = 900_000
 
 # The printer references are made with. Another printer is noted without its name, which
 # can say where the machine is (a network printer).
@@ -213,11 +218,22 @@ def load_record(path: Path) -> dict:
             value = record[key] = []
         if not isinstance(value, kind) or isinstance(value, bool):
             raise Refused(f"{path.name}: field {key} is missing or not a {kind.__name__}")
-    if record["script_version"] != SCRIPT_VERSION:
+    if record["script_version"] not in SCRIPT_VERSIONS:
         raise Refused(
             f"{path.name}: written by make-reference.ps1 format {record['script_version']}, "
-            f"this script reads format {SCRIPT_VERSION}"
+            f"this script reads formats {', '.join(map(str, SCRIPT_VERSIONS))}"
         )
+    if record["script_version"] >= 3:
+        for key, kind in (
+            ("formatting_file", str),
+            ("formatting_sha256", str),
+            ("formatting_paragraphs", int),
+            ("formatting_runs", bool),
+            ("formatting_complete", bool),
+        ):
+            value = record.get(key)
+            if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
+                raise Refused(f"{path.name}: field {key} is missing or not a {kind.__name__}")
     if record["status"] != "rendered":
         detail = record.get("error") or ", ".join(record["privacy_findings"])
         raise Refused(f"{record['file']}: status {record['status']}: {detail}")
@@ -228,7 +244,10 @@ def load_record(path: Path) -> dict:
     if re.search(r"[\\/:]", file) or not file.endswith(".docx") or file == ".docx":
         raise Refused(f"{path.name}: file must be the name of a .docx file, not {file!r}")
     stem = file[: -len(".docx")]
-    for key, expected in (("pdf_file", f"{stem}.pdf"), ("resaved_file", f"{stem}.resaved.docx")):
+    names = [("pdf_file", f"{stem}.pdf"), ("resaved_file", f"{stem}.resaved.docx")]
+    if record["script_version"] >= 3:
+        names.append(("formatting_file", f"{stem}.formatting.json"))
+    for key, expected in names:
         if record[key] != expected:
             raise Refused(f"{path.name}: {key} must be {expected!r}, not {record[key]!r}")
     checks = [
@@ -464,6 +483,335 @@ def rendered_page_breaks(parts: dict[str, bytes]) -> list[dict]:
                 }
             )
     return breaks
+
+
+# Word's computed formatting (make-reference.ps1 format 3).
+
+STORIES = {
+    "main", "footnotes", "endnotes", "comments", "text-boxes", "even-pages-header",
+    "primary-header", "even-pages-footer", "primary-footer", "first-page-header",
+    "first-page-footer",
+}
+LINE_RULES = {"single", "one-and-a-half", "double", "at-least", "exactly", "multiple"}
+ALIGNMENTS = {
+    "left", "center", "right", "justify", "distribute", "justify-medium", "justify-high",
+    "justify-low", "thai-justify",
+}
+COLOUR = re.compile(r"^(auto|[0-9A-F]{6})$")
+OTHER = re.compile(r"^other-\d+$")
+# Theme fonts as make-reference.ps1 classifies Word's font box placeholders: ST_Theme
+# values (ECMA-376 Part 1, 17.18.96), or "unresolved". The placeholders themselves are in
+# the language of Word's user interface and are refused.
+THEMES = {
+    f"{kind}{script}"
+    for kind in ("major", "minor")
+    for script in ("HAnsi", "Ascii", "EastAsia", "Bidi")
+} | {"unresolved"}
+# make-reference.ps1's notes about runs: fixed sentences, never Word's own messages.
+RUNS_NOTES = {
+    "",
+    "not collected: the paragraphs did not fit in the time budget",
+    "left out: they took longer than the paragraphs",
+    "left out: they did not fit in the time budget",
+    "left out: reading them failed",
+}
+# Style names (Word allows 253 characters) and list labels.
+STYLE_NAME = re.compile(r"^[^|\x00-\x1f]{1,253}$")
+MAX_LIST_LABEL = 255
+PARAGRAPH_FORMAT = (
+    "left_indent", "right_indent", "first_line_indent", "space_before", "space_after",
+    "space_before_auto", "space_after_auto", "line_spacing", "line_spacing_rule", "alignment",
+)
+
+
+def as_list(value: object, where: str) -> list:
+    """A JSON array; ConvertTo-Json in Windows PowerShell 5.1 can write a one-element array
+    as its element and an empty one as null."""
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, list):
+        return value
+    raise ValueError(f"{where} is not a list")
+
+
+def checked_number(value: object, where: str) -> float | int | None:
+    if value is None or (isinstance(value, (int, float)) and not isinstance(value, bool)):
+        return value
+    raise ValueError(f"{where} is not a number")
+
+
+def checked_flag(value: object, where: str) -> bool | None:
+    if value is None or isinstance(value, bool):
+        return value
+    raise ValueError(f"{where} is not true, false or null")
+
+
+def checked_font(font: object, where: str) -> dict:
+    keys = {"name", "size", "bold", "italic", "color", "theme"}
+    if not isinstance(font, dict) or not set(font) <= keys:
+        raise ValueError(f"{where} is not a font")
+    name, theme = font.get("name"), font.get("theme")
+    if name is not None and not (
+        isinstance(name, str) and FONT.match(name) and not name.startswith("+")
+    ):
+        raise ValueError(f"{where}: unexpected font name")
+    if theme is not None and not (isinstance(theme, str) and theme in THEMES):
+        raise ValueError(f"{where}: unexpected theme font")
+    if theme == "unresolved" and name is not None:
+        raise ValueError(f"{where}: an unresolved theme font has a name")
+    colour = font.get("color")
+    if colour is not None and not (isinstance(colour, str) and COLOUR.match(colour)):
+        raise ValueError(f"{where}: unexpected colour")
+    out = {
+        "name": name,
+        "size": checked_number(font.get("size"), f"{where} size"),
+        "bold": checked_flag(font.get("bold"), f"{where} bold"),
+        "italic": checked_flag(font.get("italic"), f"{where} italic"),
+        "color": colour,
+    }
+    if theme is not None:
+        out["theme"] = theme
+    return out
+
+
+def read_formatting(data: bytes) -> dict:
+    """make-reference.ps1's formatting export, every field checked; raises ValueError."""
+    export = json.loads(data.decode("utf-8-sig"))
+    if not isinstance(export, dict) or export.get("format") != 1:
+        raise ValueError("not a formatting export of format 1")
+    for key in ("complete", "runs"):
+        if not isinstance(export.get(key), bool):
+            raise ValueError(f"{key} is not true or false")
+    note = export.get("runs_note", "")
+    if not isinstance(note, str) or note not in RUNS_NOTES:
+        raise ValueError("unexpected runs_note")
+    stories = []
+    for s_index, story in enumerate(as_list(export.get("stories"), "stories")):
+        where = f"story {s_index}"
+        if not isinstance(story, dict) or not isinstance(story.get("story"), str) or (
+            story["story"] not in STORIES
+        ):
+            raise ValueError(f"{where} is not a known story")
+        instance = story.get("instance")
+        if not isinstance(instance, int) or isinstance(instance, bool) or instance < 0:
+            raise ValueError(f"{where}: instance is not a count")
+        paragraphs = []
+        listed = as_list(story.get("paragraphs"), f"{where} paragraphs")
+        for p_index, paragraph in enumerate(listed):
+            at = f"{where} paragraph {p_index}"
+            if not isinstance(paragraph, dict) or paragraph.get("index") != p_index:
+                raise ValueError(f"{at} is not paragraph {p_index}")
+            text, style = paragraph.get("text"), paragraph.get("style")
+            if not isinstance(text, str) or len(text) > 60:
+                raise ValueError(f"{at}: text is not an excerpt")
+            if style is not None and not (isinstance(style, str) and STYLE_NAME.match(style)):
+                raise ValueError(f"{at}: unexpected style name")
+            rule, alignment = paragraph.get("line_spacing_rule"), paragraph.get("alignment")
+            if not (isinstance(rule, str) and (rule in LINE_RULES or OTHER.match(rule))):
+                raise ValueError(f"{at}: unexpected line spacing rule")
+            if not (
+                isinstance(alignment, str) and (alignment in ALIGNMENTS or OTHER.match(alignment))
+            ):
+                raise ValueError(f"{at}: unexpected alignment")
+            label, level = paragraph.get("list_string"), paragraph.get("list_level")
+            if not isinstance(label, str) or len(label) > MAX_LIST_LABEL:
+                raise ValueError(f"{at}: list_string is not a label")
+            if level is not None and (not isinstance(level, int) or isinstance(level, bool)):
+                raise ValueError(f"{at}: list_level is not a level")
+            paragraph_format: dict[str, object] = {}
+            for key in PARAGRAPH_FORMAT:
+                value = paragraph.get(key)
+                if key.endswith("_auto"):
+                    paragraph_format[key] = checked_flag(value, f"{at} {key}")
+                elif key in ("line_spacing_rule", "alignment"):
+                    paragraph_format[key] = value  # checked above
+                else:
+                    paragraph_format[key] = checked_number(value, f"{at} {key}")
+            checked = {
+                "index": p_index,
+                "text": text,
+                "style": style,
+                "style_builtin": checked_flag(
+                    paragraph.get("style_builtin"), f"{at} style_builtin"
+                ),
+                "format": paragraph_format,
+                "list_string": label,
+                "list_level": level,
+                "font": checked_font(paragraph.get("font"), f"{at} font"),
+            }
+            if "runs" in paragraph:
+                runs = []
+                for r_index, run in enumerate(as_list(paragraph["runs"], f"{at} runs")):
+                    length = run.get("length") if isinstance(run, dict) else None
+                    if not isinstance(length, int) or isinstance(length, bool) or length < 1:
+                        raise ValueError(f"{at} run {r_index}: length is not a count")
+                    runs.append((length, checked_font(run.get("font"), f"{at} run {r_index} font")))
+                checked["runs"] = runs
+            paragraphs.append(checked)
+        stories.append({"story": story["story"], "instance": instance, "paragraphs": paragraphs})
+    return {
+        "complete": export["complete"],
+        "runs": export["runs"],
+        "runs_note": export.get("runs_note", ""),
+        "stories": stories,
+    }
+
+
+def alnum(text: str) -> str:
+    return re.sub(r"\W+", "", text)
+
+
+def body_paragraph_styles(
+    parts: dict[str, bytes],
+) -> list[tuple[str, str | None, str | None]]:
+    """(text, style id, style name) of the paragraphs of the body in order, the order of
+    Word's main story: text boxes, alternative content and notes are stories of their own.
+    Word's Paragraphs also count the end-of-row mark of every table row, which has no w:p;
+    it is ("", None, None) here, after the row's cells."""
+    root = ElementTree.fromstring(parts["word/document.xml"])
+    styles = None
+    if "word/styles.xml" in parts:
+        styles = ElementTree.fromstring(parts["word/styles.xml"])
+    names, default = {}, ""
+    for style in styles.iter(f"{W}style") if styles is not None else ():
+        if style.get(f"{W}type") != "paragraph":
+            continue
+        style_id = style.get(f"{W}styleId", "")
+        name = style.find(f"{W}name")
+        names[style_id] = name.get(f"{W}val", style_id) if name is not None else style_id
+        if style.get(f"{W}default") in ("1", "true", "on"):
+            default = style_id
+    MC = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
+    other_stories = (f"{W}txbxContent", f"{MC}AlternateContent")
+    out = []
+
+    def own_text(element: ElementTree.Element) -> str:
+        """The text of a paragraph without the text of the text boxes it anchors."""
+        text = element.text or "" if element.tag == f"{W}t" else ""
+        for child in element:
+            if child.tag not in other_stories:
+                text += own_text(child)
+        return text
+
+    def walk(element: ElementTree.Element) -> None:
+        for child in element:
+            if child.tag in other_stories:
+                continue
+            if child.tag == f"{W}p":
+                style = child.find(f"{W}pPr/{W}pStyle")
+                style_id = style.get(f"{W}val", default) if style is not None else default
+                out.append((own_text(child), style_id, names.get(style_id, style_id)))
+                walk(child)  # a text box inside is skipped above
+            elif child.tag == f"{W}tr":
+                walk(child)
+                out.append(("", None, None))
+            else:
+                walk(child)
+
+    body = root.find(f"{W}body")
+    walk(body if body is not None else root)
+    return out
+
+
+def compact_formatting(
+    export: dict, parts: dict[str, bytes], document: str, made_with: str
+) -> tuple[dict, str]:
+    """The committed form: fonts and paragraph formats in tables that paragraphs and runs
+    point into, body paragraphs with their style id and name from the re-saved copy.
+    Returns the object and a note for SOURCES.md."""
+    fonts: list[dict] = []
+    formats: list[dict] = []
+    font_index: dict[str, int] = {}
+    format_index: dict[str, int] = {}
+
+    def index_of(table: list, index: dict, value: dict) -> int:
+        key = json.dumps(value, sort_keys=True)
+        if key not in index:
+            index[key] = len(table)
+            table.append(value)
+        return index[key]
+
+    xml = body_paragraph_styles(parts)
+    main = [s for s in export["stories"] if s["story"] == "main"]
+    styles_aligned = False
+    if len(main) == 1 and len(main[0]["paragraphs"]) == len(xml):
+        styles_aligned = all(
+            alnum(xml_text).startswith(alnum(p["text"])[:20])
+            for p, (xml_text, _, _) in zip(main[0]["paragraphs"], xml)
+        )
+    stories = []
+    for story in export["stories"]:
+        paragraphs = []
+        for number, paragraph in enumerate(story["paragraphs"]):
+            out = {"index": paragraph["index"], "text": paragraph["text"]}
+            if paragraph["style"] is not None:
+                out["style"] = paragraph["style"]
+            if story["story"] == "main" and styles_aligned and xml[number][1] is not None:
+                out["style_id"], out["style_name"] = xml[number][1], xml[number][2]
+            out["format"] = index_of(formats, format_index, paragraph["format"])
+            if paragraph["list_string"]:
+                out["list_string"] = paragraph["list_string"]
+                out["list_level"] = paragraph["list_level"]
+            out["font"] = index_of(fonts, font_index, paragraph["font"])
+            if "runs" in paragraph:
+                out["runs"] = [
+                    [length, index_of(fonts, font_index, font)]
+                    for length, font in paragraph["runs"]
+                ]
+            paragraphs.append(out)
+        stories.append(
+            {"story": story["story"], "instance": story["instance"], "paragraphs": paragraphs}
+        )
+    result = {
+        "format": FORMATTING_FORMAT,
+        "document": document,
+        "made_with": made_with,
+        "units": "points",
+        "complete": export["complete"],
+        "runs": export["runs"],
+        "runs_note": export["runs_note"],
+        "styles_from_resaved_copy": styles_aligned,
+        "fonts": fonts,
+        "paragraph_formats": formats,
+        "stories": stories,
+    }
+    count = sum(len(s["paragraphs"]) for s in stories)
+    note = f"formatting as Word computes it: {count} paragraphs"
+    note += ", with runs" if export["runs"] else ", without runs"
+    if not export["complete"]:
+        note += ", incomplete (time budget)"
+    if not styles_aligned:
+        note += ", body styles not matched to the re-saved copy"
+    return result, note
+
+
+def formatting_bytes(result: dict) -> bytes:
+    return (json.dumps(result, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def within_size(result: dict, note: str) -> tuple[bytes, str]:
+    """The committed bytes; runs are dropped from a document that would pass the limit."""
+    data = formatting_bytes(result)
+    if len(data) > MAX_FORMATTING_BYTES and result["runs"]:
+        paragraphs = [p for story in result["stories"] for p in story["paragraphs"]]
+        for paragraph in paragraphs:
+            paragraph.pop("runs", None)
+        # Fonts only runs used go with them.
+        used = sorted({paragraph["font"] for paragraph in paragraphs})
+        renumbered = {old: new for new, old in enumerate(used)}
+        result["fonts"] = [result["fonts"][old] for old in used]
+        for paragraph in paragraphs:
+            paragraph["font"] = renumbered[paragraph["font"]]
+        result["runs"] = False
+        result["runs_note"] = "left out to keep the file under 1 MB"
+        note = note.replace(", with runs", ", runs left out (size)")
+        data = formatting_bytes(result)
+    if len(data) > MAX_FORMATTING_BYTES:
+        raise Refused(f"{result['document']}: formatting.json would be {len(data)} bytes")
+    return data, note
+
 
 
 def pdf_privacy_problems(info: str, xmp: str, data: bytes) -> list[str]:
@@ -820,7 +1168,12 @@ def with_fonts_embedded(pdf: Path, drawn: list[DrawnFont], directory: Path, tool
 
 
 def reference_row(
-    group: str, record: dict, drawn: list[DrawnFont], poppler: str, dropped: list[str]
+    group: str,
+    record: dict,
+    drawn: list[DrawnFont],
+    poppler: str,
+    dropped: list[str],
+    formatting_note: str = "",
 ) -> str:
     base = Path(record["file"]).stem
     windows = record["windows_version"]
@@ -849,6 +1202,8 @@ def reference_row(
             or "none"
         ),
     ]
+    if formatting_note:
+        notes.append(formatting_note)
     return (
         f"| reference/{group}/{base}/ "
         f"| {group}/{record['file']}, re-saved by Word as resaved/{group}/{base}.docx "
@@ -885,6 +1240,9 @@ class Checked:
     row: str
     geometry: dict
     drawn: list[DrawnFont]
+    # formatting.json, from make-reference.ps1 format 3 on, and its SOURCES.md note.
+    formatting: bytes | None = None
+    formatting_note: str = ""
 
 
 def check_result(
@@ -969,8 +1327,47 @@ def check_result(
         "page_breaks": page_breaks,
         "pages": geometry_pages,
     }
-    row = reference_row(group, record, drawn, poppler, dropped)
-    return Checked(record, pdf, resaved, row, geometry, drawn)
+    formatting, formatting_note = None, ""
+    if record["script_version"] >= 3:
+        formatting, formatting_note = checked_formatting(record, results, resaved_parts, group)
+    row = reference_row(group, record, drawn, poppler, dropped, formatting_note)
+    return Checked(record, pdf, resaved, row, geometry, drawn, formatting, formatting_note)
+
+
+def checked_formatting(
+    record: dict, results: Path, resaved_parts: dict[str, bytes], group: str
+) -> tuple[bytes, str]:
+    """The committed formatting.json of a result and its SOURCES.md note."""
+    path = results / record["formatting_file"]
+    if not path.is_file():
+        raise Refused(f"{record['file']}: {path.name} is missing")
+    data = path.read_bytes()
+    if sha256(path) != record["formatting_sha256"]:
+        raise Refused(f"{record['file']}: {path.name} changed after Word wrote it")
+    if PROFILE_PATH.search(data):
+        raise Refused(f"{record['file']}: {path.name} names a user profile path")
+    try:
+        export = read_formatting(data)
+    except (ValueError, UnicodeDecodeError) as error:
+        raise Refused(f"{record['file']}: cannot read {path.name}: {error}") from error
+    count = sum(len(story["paragraphs"]) for story in export["stories"])
+    if (
+        count != record["formatting_paragraphs"]
+        or export["runs"] != record["formatting_runs"]
+        or export["complete"] != record["formatting_complete"]
+    ):
+        raise Refused(f"{record['file']}: {path.name} does not match its record")
+    made_with = (
+        f"Microsoft Word {record['word_version']}, build {record['word_build']}, "
+        f"make-reference.ps1 format {record['script_version']}"
+    )
+    try:
+        document = f"{group}/{record['file']}"
+        result, note = compact_formatting(export, resaved_parts, document, made_with)
+    except (ElementTree.ParseError, KeyError) as error:
+        message = f"{record['file']}: cannot read the re-saved copy's styles: {error}"
+        raise Refused(message) from error
+    return within_size(result, note)
 
 
 def import_results(
@@ -985,7 +1382,11 @@ def import_results(
     if not (corpus / group).is_dir():
         raise Refused(f"tests/corpus/{group} does not exist")
     fonts = font_index(font_dirs or [])
-    records = sorted(p for p in results.glob("*.json") if p.name != "run.json")
+    records = sorted(
+        p
+        for p in results.glob("*.json")
+        if p.name != "run.json" and not p.name.endswith(".formatting.json")
+    )
     if not records:
         raise Refused(f"no results in {results}")
     checked = []
@@ -1027,6 +1428,8 @@ def import_results(
             (reference / f"page-{number:03}.png").write_bytes(png)
         geometry = json.dumps(item.geometry, indent=1, ensure_ascii=False) + "\n"
         (reference / "geometry.json").write_text(geometry, encoding="utf-8")
+        if item.formatting is not None:
+            (reference / "formatting.json").write_bytes(item.formatting)
         resaved = corpus / "resaved" / group / f"{base}.docx"
         resaved.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(item.resaved, resaved)
@@ -1074,6 +1477,8 @@ def main() -> int:
         print(f"{verb} {item.record['file']}: {pages} page{'s' if pages != 1 else ''}")
         for flag in item.geometry["compat_flags_dropped"]:
             print(f"  note: Word dropped the w:compat setting {flag} from the re-saved copy")
+        if item.formatting_note:
+            print(f"  {item.formatting_note}")
         for font in item.drawn:
             print(
                 f"  note: {font.name} is not embedded; rasterized with "

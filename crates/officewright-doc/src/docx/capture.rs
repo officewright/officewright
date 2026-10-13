@@ -191,6 +191,19 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
         offset: usize,
         read: impl FnOnce(crate::model::xml::Element<'_>, super::properties::Report<'_>),
     ) {
+        self.check_in(["w:", "w:"], span, offset, read);
+    }
+
+    /// As [`check`](Self::check), for a vocabulary whose elements and attributes take
+    /// these prefixes in messages, such as `["a:", ""]` for DrawingML's unqualified
+    /// attributes.
+    pub(super) fn check_in(
+        &mut self,
+        [element_prefix, attribute_prefix]: [&str; 2],
+        span: Span,
+        offset: usize,
+        read: impl FnOnce(crate::model::xml::Element<'_>, super::properties::Report<'_>),
+    ) {
         let room = self.diagnostics.room();
         let mut omitted = 0u64;
         let mut invalid: Vec<(String, String, String)> = Vec::new();
@@ -208,10 +221,28 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
         for (element, attribute, value) in invalid {
             self.diagnose(offset, DiagnosticKind::InvalidValue, || {
                 format!(
-                    "w:{element} w:{attribute}=\"{}\" is not valid; it is ignored",
+                    "{element_prefix}{element} {attribute_prefix}{attribute}=\"{}\" is not valid; it is ignored",
                     super::shorten(&value)
                 )
             });
+        }
+    }
+
+    /// A collector of notes on structure (repeated or incomplete elements) for one
+    /// element, to give to [`diagnose_notes`](Self::diagnose_notes) after reading it.
+    pub(super) fn notes(&self) -> Notes {
+        Notes {
+            room: self.diagnostics.room(),
+            messages: Vec::new(),
+            omitted: 0,
+        }
+    }
+
+    /// Reports collected notes as diagnostics at `offset`.
+    pub(super) fn diagnose_notes(&mut self, offset: usize, notes: Notes) {
+        self.diagnostics.omit(notes.omitted);
+        for message in notes.messages {
+            self.diagnose(offset, DiagnosticKind::UnexpectedContent, || message);
         }
     }
 
@@ -266,5 +297,24 @@ impl<'t> Locator<'t> {
         }
         self.offset = offset;
         (self.line, self.column)
+    }
+}
+
+/// Notes on the structure of an element, such as a child written twice. Messages are
+/// built only while diagnostics have room for them; the rest are counted.
+pub(super) struct Notes {
+    room: usize,
+    messages: Vec<String>,
+    omitted: u64,
+}
+
+impl Notes {
+    /// Adds a note.
+    pub(super) fn add(&mut self, message: impl FnOnce() -> String) {
+        if self.messages.len() < self.room {
+            self.messages.push(message());
+        } else {
+            self.omitted += 1;
+        }
     }
 }
