@@ -82,7 +82,7 @@ if [ -n "$crashed" ]; then
 	failed=1
 fi
 if [ -n "$corpus_failed" ]; then
-	echo "nightly.sh: the corpus runner failed (report in target/corpus-report.json)" >&2
+	echo "nightly.sh: the corpus checks failed (messages above; report in target/corpus-report.json)" >&2
 	failed=1
 fi
 if [ -n "$failed" ]; then
