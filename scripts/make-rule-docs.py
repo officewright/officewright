@@ -623,9 +623,10 @@ def tab_hanging(no_indent_tab: bool) -> Doc:
 
 def style(kind: str, style_id: str, rpr_xml: str, based_on: str | None = None) -> str:
     base = f'<w:basedOn w:val="{based_on}"/>' if based_on else ""
+    rpr = f"<w:rPr>{rpr_xml}</w:rPr>" if rpr_xml else ""
     return (
         f'<w:style w:type="{kind}" w:customStyle="1" w:styleId="{style_id}">'
-        f'<w:name w:val="{style_id}"/>{base}<w:rPr>{rpr_xml}</w:rPr></w:style>'
+        f'<w:name w:val="{style_id}"/>{base}{rpr}</w:style>'
     )
 
 
@@ -642,9 +643,12 @@ TOGGLE_STYLES = "".join(
         style("paragraph", "ParaBold", "<w:b/>", "Normal"),
         style("paragraph", "ParaBoldAgain", "<w:b/>", "ParaBold"),
         style("paragraph", "ParaBoldOff", '<w:b w:val="0"/>', "ParaBold"),
+        # Inherits bold without a w:b of its own (ECMA-376 §17.7.3, MS-OI29500 §17.7.3(c)).
+        style("paragraph", "ParaBoldInherit", "", "ParaBold"),
         style("character", "CharBold", "<w:b/>"),
         style("character", "CharBoldAgain", "<w:b/>", "CharBold"),
         style("character", "CharBoldOff", '<w:b w:val="0"/>', "CharBold"),
+        style("character", "CharBoldInherit", "", "CharBold"),
     ]
 )
 
@@ -665,6 +669,9 @@ TOGGLE_CASES = [
     ("ParaBold", None, '<w:b w:val="0"/>'),
     (None, None, "<w:b/>"),
     (None, "CharBold", '<w:b w:val="0"/>'),
+    ("ParaBoldInherit", None, ""),
+    (None, "CharBoldInherit", ""),
+    ("ParaBold", "CharBoldInherit", ""),
 ]
 
 
@@ -683,7 +690,8 @@ def style_toggles(defaults_bold: bool) -> Doc:
         f"E-style-toggles{suffix}",
         "Bold as a toggle property across the style hierarchy, " + where + " bold in the "
         "document defaults: paragraph styles and character styles based on bold ones that "
-        "set it on or off, with and without direct formatting; one case per paragraph",
+        "set it on or off or inherit it, with and without direct formatting; one case per "
+        "paragraph",
         "".join(body),
         styles=TOGGLE_STYLES,
         run_defaults_extra="<w:b/>" if defaults_bold else "",
