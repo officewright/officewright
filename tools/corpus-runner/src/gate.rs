@@ -2,7 +2,7 @@
 //! a markdown table with the target, the value on main and the value on the branch.
 
 use crate::metrics::Scores;
-use crate::report::{FileResult, Report, Status};
+use crate::report::{Report, Status};
 
 /// The fonts of `tests/fonts`, which Word had too when it rendered the references: a
 /// document in these only is laid out with Word's fonts (class S).
@@ -48,17 +48,53 @@ pub fn class(scores: &Scores, same_fonts: bool) -> Class {
     }
 }
 
+/// A number to compare with main, whether more of it is better, and by how much it may
+/// move before it counts as worse (timings and memory vary from run to run).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Key {
+    pub value: f64,
+    pub higher_is_better: bool,
+    pub tolerance: f64,
+}
+
+impl Key {
+    fn higher(value: f64) -> Self {
+        Key {
+            value,
+            higher_is_better: true,
+            tolerance: 0.0,
+        }
+    }
+
+    fn lower(value: f64) -> Self {
+        Key {
+            value,
+            higher_is_better: false,
+            tolerance: 0.0,
+        }
+    }
+
+    fn count(value: usize) -> Self {
+        Key::lower(value as f64)
+    }
+
+    fn worse_than(&self, before: &Key) -> bool {
+        if self.higher_is_better {
+            self.value < before.value - self.tolerance
+        } else {
+            self.value > before.value + self.tolerance
+        }
+    }
+}
+
 /// One criterion's value on one report.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Measure {
     pub text: String,
     /// Whether the target is met; `None` when there was nothing to measure.
     pub pass: Option<bool>,
-    /// A number to compare with main, whether more of it is better, and by how much it
-    /// may move before it counts as worse (timings vary from run to run).
-    pub key: Option<f64>,
-    pub higher_is_better: bool,
-    pub tolerance: f64,
+    /// The numbers compared with main: the branch is worse when any of them is.
+    pub keys: Vec<Key>,
 }
 
 impl Measure {
@@ -66,9 +102,7 @@ impl Measure {
         Measure {
             text,
             pass: Some(failures == 0),
-            key: Some(failures as f64),
-            higher_is_better: false,
-            tolerance: 0.0,
+            keys: vec![Key::count(failures)],
         }
     }
 
@@ -76,10 +110,20 @@ impl Measure {
         Measure {
             text: text.to_owned(),
             pass: None,
-            key: None,
-            higher_is_better: false,
-            tolerance: 0.0,
+            keys: Vec::new(),
         }
+    }
+
+    /// Worse than main: a number worse beyond its tolerance, or nothing measured where main
+    /// measured something.
+    pub fn worse_than(&self, before: &Measure) -> bool {
+        if self.keys.is_empty() {
+            return !before.keys.is_empty();
+        }
+        self.keys
+            .iter()
+            .zip(&before.keys)
+            .any(|(after, before)| after.worse_than(before))
     }
 }
 
@@ -92,7 +136,7 @@ pub const CRITERIA: [(&str, &str, &str); 12] = [
     ),
     (
         "Refusals",
-        "every error expected; none on a reference document",
+        "every error expected; every reference document opened and scored",
         "every file",
     ),
     (
@@ -143,6 +187,12 @@ pub const CRITERIA: [(&str, &str, &str); 12] = [
     ),
 ];
 
+/// The largest peak memory criterion 10 allows, in bytes (200 MB).
+const MEMORY_LIMIT: u64 = 200_000_000;
+
+/// The time criterion 10 allows a document, in milliseconds.
+const TIME_LIMIT_MS: u64 = 5_000;
+
 /// A scored document with its file name and class.
 struct Scored<'a> {
     name: &'a str,
@@ -151,6 +201,7 @@ struct Scored<'a> {
 }
 
 impl Scored<'_> {
+    /// A rule document of `tests/corpus/word-rules`: they are named `E-…`.
     fn is_rule(&self) -> bool {
         self.name.starts_with("E-")
     }
@@ -158,6 +209,10 @@ impl Scored<'_> {
 
 fn round(value: f64) -> f64 {
     (value * 10_000.0).round() / 10_000.0
+}
+
+fn file_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
 }
 
 /// The value of every criterion on the report.
@@ -168,7 +223,7 @@ pub fn measure(report: &Report, same_fonts: bool) -> Vec<Measure> {
         .filter_map(|file| {
             let scores = file.scores.as_ref()?;
             Some(Scored {
-                name: file.path.rsplit('/').next().unwrap_or(&file.path),
+                name: file_name(&file.path),
                 scores,
                 class: class(scores, same_fonts),
             })
@@ -178,7 +233,6 @@ pub fn measure(report: &Report, same_fonts: bool) -> Vec<Measure> {
         .iter()
         .filter(|doc| matches!(doc.class, Class::Same | Class::Twin))
         .collect();
-    let has_reference = |file: &FileResult| file.scores.is_some() || file.score_error.is_some();
     let mut out = Vec::new();
 
     // 1. Crashes.
@@ -189,7 +243,9 @@ pub fn measure(report: &Report, same_fonts: bool) -> Vec<Measure> {
         .count();
     out.push(Measure::counted(crashes.to_string(), crashes));
 
-    // 2. Refusals.
+    // 2. Refusals: an unexpected error anywhere, and a reference document that did not
+    // open or could not be scored, which would also leave the rows below with fewer
+    // documents than main.
     let unexpected = report
         .files
         .iter()
@@ -198,12 +254,21 @@ pub fn measure(report: &Report, same_fonts: bool) -> Vec<Measure> {
     let refused = report
         .files
         .iter()
-        .filter(|file| has_reference(file) && file.status != Status::Opened)
+        .filter(|file| file.score_error.is_some() && file.status != Status::Opened)
         .count();
-    out.push(Measure::counted(
-        format!("{unexpected} unexpected errors, {refused} reference documents not opened"),
-        unexpected + refused,
-    ));
+    let unscored = report
+        .files
+        .iter()
+        .filter(|file| file.score_error.is_some() && file.status == Status::Opened)
+        .count();
+    out.push(Measure {
+        text: format!(
+            "{unexpected} unexpected errors, {refused} reference documents not opened, \
+             {unscored} not scored"
+        ),
+        pass: Some(unexpected + refused + unscored == 0),
+        keys: vec![Key::count(unexpected), Key::count(refused + unscored)],
+    });
 
     // 3. Valid output.
     let checked: Vec<&Scored> = scored
@@ -259,9 +324,11 @@ pub fn measure(report: &Report, same_fonts: bool) -> Vec<Measure> {
                 rules.len()
             ),
             pass: Some(share >= 0.95 && far == 0 && rules_same == rules.len()),
-            key: Some(round(share)),
-            higher_is_better: true,
-            tolerance: 0.0,
+            keys: vec![
+                Key::higher(round(share)),
+                Key::count(far),
+                Key::count(rules.len() - rules_same),
+            ],
         });
     }
 
@@ -303,13 +370,14 @@ pub fn measure(report: &Report, same_fonts: bool) -> Vec<Measure> {
             .count();
         out.push(Measure {
             text: format!(
-                "{:.4} overall, {below} documents below 0.95, {rules_below} `E-*` below 1.0",
-                overall
+                "{overall:.4} overall, {below} documents below 0.95, {rules_below} `E-*` below 1.0"
             ),
             pass: Some(overall >= 0.98 && below == 0 && rules_below == 0),
-            key: Some(round(overall)),
-            higher_is_better: true,
-            tolerance: 0.0,
+            keys: vec![
+                Key::higher(round(overall)),
+                Key::count(below),
+                Key::count(rules_below),
+            ],
         });
     }
 
@@ -362,9 +430,7 @@ pub fn measure(report: &Report, same_fonts: bool) -> Vec<Measure> {
         out.push(Measure {
             text: format!("{overall:.4} ({agreeing}/{breaks} breaks)"),
             pass: Some(overall >= 0.97),
-            key: Some(round(overall)),
-            higher_is_better: true,
-            tolerance: 0.0,
+            keys: vec![Key::higher(round(overall))],
         });
     }
 
@@ -407,18 +473,30 @@ pub fn measure(report: &Report, same_fonts: bool) -> Vec<Measure> {
         .files
         .iter()
         .filter_map(|file| file.peak_rss_kb)
-        .max();
+        .max()
+        .map(|kb| kb.saturating_mul(1024));
+    let mut keys = vec![Key {
+        // Milliseconds: the same file takes a different time on every run.
+        tolerance: 500.0,
+        ..Key::lower(slowest as f64)
+    }];
+    if let Some(bytes) = peak {
+        keys.push(Key {
+            tolerance: 16.0 * 1024.0 * 1024.0,
+            ..Key::lower(bytes as f64)
+        });
+    }
     out.push(Measure {
         text: format!(
             "slowest {:.2} s, peak {} (opening only)",
             slowest as f64 / 1000.0,
-            peak.map_or("not measured".to_owned(), |kb| format!("{} MiB", kb / 1024))
+            peak.map_or("not measured".to_owned(), |bytes| format!(
+                "{:.0} MB",
+                bytes as f64 / 1e6
+            ))
         ),
-        pass: Some(slowest < 5_000 && peak.is_none_or(|kb| kb < 200 * 1000 * 1000 / 1024)),
-        key: Some(slowest as f64),
-        higher_is_better: false,
-        // Milliseconds: the same file takes a different time on every run.
-        tolerance: 500.0,
+        pass: Some(slowest < TIME_LIMIT_MS && peak.is_none_or(|bytes| bytes < MEMORY_LIMIT)),
+        keys,
     });
 
     // 11 and 12 need the layout report.
@@ -431,26 +509,51 @@ pub fn measure(report: &Report, same_fonts: bool) -> Vec<Measure> {
     out
 }
 
-/// How the documents divide, for the line above the table.
+/// How the documents divide, and which scored ones the render criteria leave out, for the
+/// lines above the table.
 pub fn census(report: &Report, same_fonts: bool) -> String {
     let mut counts = [0usize; 4];
-    for scores in report.files.iter().filter_map(|file| file.scores.as_ref()) {
+    let mut left_out = Vec::new();
+    for file in &report.files {
+        let Some(scores) = file.scores.as_ref() else {
+            continue;
+        };
         let index = match class(scores, same_fonts) {
             Class::Same => 0,
             Class::Twin => 1,
             Class::Other => 2,
             Class::Unknown => 3,
         };
+        if index >= 2 {
+            left_out.push(file_name(&file.path));
+        }
         if let Some(count) = counts.get_mut(index) {
             *count += 1;
         }
     }
     let [same, twin, other, unknown] = counts;
-    format!(
-        "{} files, {} scored against Word's references: S {same}, T {twin}, N {other}, no class {unknown}",
+    let unscored = report
+        .files
+        .iter()
+        .filter(|file| file.score_error.is_some())
+        .count();
+    let mut line = format!(
+        "{} files, {} scored against Word's references: S {same}, T {twin}, N {other}, \
+         no class {unknown}; {unscored} reference documents not scored",
         report.files.len(),
         same + twin + other + unknown
-    )
+    );
+    if !left_out.is_empty() {
+        let shown: Vec<&str> = left_out.iter().take(20).copied().collect();
+        line.push_str(&format!(
+            ". Not gated by rows 4 and 6 to 9 (N or no class): {}",
+            shown.join(", ")
+        ));
+        if left_out.len() > shown.len() {
+            line.push_str(&format!(" and {} more", left_out.len() - shown.len()));
+        }
+    }
+    line
 }
 
 fn met(pass: Option<bool>) -> &'static str {
@@ -476,14 +579,11 @@ pub fn table(branch: &[Measure], main: Option<&[Measure]>) -> String {
         let number = index + 1;
         match main.and_then(|main| main.get(index)) {
             Some(before) => {
-                let worse = match (before.key, measure.key) {
-                    (Some(old), Some(new)) if measure.higher_is_better => {
-                        new < old - measure.tolerance
-                    }
-                    (Some(old), Some(new)) => new > old + measure.tolerance,
-                    _ => false,
+                let mark = if measure.worse_than(before) {
+                    " **(worse than main)**"
+                } else {
+                    ""
                 };
-                let mark = if worse { " **(worse than main)**" } else { "" };
                 out.push_str(&format!(
                     "| {number} | {name} | {target} | {applies} | {} | {}{mark} | {} |\n",
                     before.text,
@@ -509,6 +609,7 @@ pub fn passes(measures: &[Measure]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::report::FileResult;
 
     fn scores(pages: usize, text: f64, lines: usize, agreeing: usize, fonts: &[&str]) -> Scores {
         Scores {
@@ -631,7 +732,9 @@ mod tests {
         assert_eq!((measures[10].pass, measures[11].pass), (None, None));
         assert_eq!(
             census(&report, false),
-            "5 files, 4 scored against Word's references: S 1, T 1, N 1, no class 1"
+            "5 files, 4 scored against Word's references: S 1, T 1, N 1, no class 1; \
+             0 reference documents not scored. Not gated by rows 4 and 6 to 9 (N or no \
+             class): old.docx, poster.docx"
         );
     }
 
@@ -675,7 +778,7 @@ mod tests {
         assert_eq!(failed, [1, 2, 3, 4, 5, 6, 7, 9]);
         assert_eq!(
             measures[1].text,
-            "2 unexpected errors, 1 reference documents not opened"
+            "2 unexpected errors, 1 reference documents not opened, 0 not scored"
         );
     }
 
@@ -717,6 +820,149 @@ mod tests {
         );
         let alone = super::table(&branch, None);
         assert!(alone.starts_with("| # | Criterion | Target | Applies to | Value | Met |"));
+    }
+
+    /// A reference document that opens but drops out of scoring fails row 2 and is worse
+    /// than main there, instead of leaving the rows below with one document fewer.
+    #[test]
+    fn a_document_that_is_no_longer_scored_is_worse() {
+        let main = measure(&good(), false);
+        let mut report = good();
+        let letter = named(&mut report, "c/letter.docx");
+        letter.scores = None;
+        letter.score_error = Some("pdftoppm failed".to_owned());
+        let branch = measure(&report, false);
+        assert_eq!(branch[1].pass, Some(false));
+        assert!(
+            branch[1].text.ends_with("1 not scored"),
+            "{}",
+            branch[1].text
+        );
+        assert!(branch[1].worse_than(&main[1]));
+        assert!(census(&report, false).contains("1 reference documents not scored"));
+        // A row that main measured and the branch cannot is worse too.
+        let unmeasured = measure(
+            &Report::new(vec![file("c/a.docx", Status::Opened, None)]),
+            false,
+        );
+        assert!(unmeasured[5].worse_than(&main[5]));
+        assert!(!main[5].worse_than(&unmeasured[5]));
+    }
+
+    /// Twenty documents in class S, made by `make`, which sees the index of each.
+    fn twenty(make: impl Fn(usize, &mut Scores)) -> Vec<Measure> {
+        let files = (0..20)
+            .map(|index| {
+                let mut s = scores(2, 1.0, 100, 100, &["Carlito"]);
+                make(index, &mut s);
+                file(&format!("c/d{index:02}.docx"), Status::Opened, Some(s))
+            })
+            .collect();
+        measure(&Report::new(files), false)
+    }
+
+    /// Each threshold, met exactly and missed by a little.
+    #[test]
+    fn thresholds_are_met_at_their_bounds() {
+        let row = |number: usize, make: &dyn Fn(usize, &mut Scores)| twenty(make)[number - 1].pass;
+        // 4: 19 of 20 = 95 % same pages; 18 of 20 is not enough.
+        assert_eq!(
+            row(4, &|i, s| if i == 0 {
+                s.pages = 3
+            }),
+            Some(true)
+        );
+        assert_eq!(
+            row(4, &|i, s| if i < 2 {
+                s.pages = 3
+            }),
+            Some(false)
+        );
+        // 5: 0.99 per document.
+        assert_eq!(
+            row(5, &|i, s| if i == 0 {
+                s.text_score = 0.99
+            }),
+            Some(true)
+        );
+        assert_eq!(
+            row(5, &|i, s| if i == 0 {
+                s.text_score = 0.9899
+            }),
+            Some(false)
+        );
+        // 6: 0.95 per document (the corpus stays above 0.98).
+        let lines = |agreeing: usize, fraction: f64| {
+            move |i: usize, s: &mut Scores| {
+                if i == 0 {
+                    (s.lines_agreeing, s.line_agreement) = (agreeing, fraction);
+                }
+            }
+        };
+        assert_eq!(row(6, &lines(95, 0.95)), Some(true));
+        assert_eq!(row(6, &lines(94, 0.94)), Some(false));
+        // 7: medians 0.5 pt and p95 2 pt.
+        assert_eq!(
+            row(7, &|_, s| (s.dx_median, s.dy_median, s.dy_p95) =
+                (Some(0.5), Some(0.5), Some(2.0))),
+            Some(true)
+        );
+        assert_eq!(
+            row(7, &|i, s| if i == 0 {
+                s.dx_median = Some(0.501)
+            }),
+            Some(false)
+        );
+        assert_eq!(
+            row(7, &|i, s| if i == 0 {
+                s.dy_median = Some(0.501)
+            }),
+            Some(false)
+        );
+        // 8: 0.97 over all breaks: 97 of 100 is enough, 96 is not.
+        let breaks = |missed: usize| {
+            move |i: usize, s: &mut Scores| {
+                s.page_breaks = 5;
+                s.page_breaks_agreeing = if i < missed { 4 } else { 5 };
+            }
+        };
+        assert_eq!(row(8, &breaks(3)), Some(true));
+        assert_eq!(row(8, &breaks(4)), Some(false));
+        // 9: class S, every page 0.90 and the mean 0.95.
+        assert_eq!(
+            row(9, &|_, s| (s.ssim_min, s.ssim_mean) = (0.90, 0.95)),
+            Some(true)
+        );
+        assert_eq!(
+            row(9, &|i, s| if i == 0 {
+                s.ssim_min = 0.8999
+            }),
+            Some(false)
+        );
+        assert_eq!(
+            row(9, &|i, s| if i == 0 {
+                s.ssim_mean = 0.9499
+            }),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn speed_and_memory_have_their_bounds_and_tolerances() {
+        let row = |ms: u64, kb: u64| {
+            let mut f = file("c/a.docx", Status::Opened, None);
+            (f.duration_ms, f.peak_rss_kb) = (ms, Some(kb));
+            measure(&Report::new(vec![f]), false).swap_remove(9)
+        };
+        // 200 MB is 195,312.5 KiB.
+        assert_eq!(row(4_999, 195_312).pass, Some(true));
+        assert_eq!(row(5_000, 195_312).pass, Some(false));
+        assert_eq!(row(4_999, 195_313).pass, Some(false));
+        assert!(row(100, 50_000).text.ends_with("peak 51 MB (opening only)"));
+        // Memory: 16 MiB more than main is noise, more than that is worse.
+        let main = row(100, 50_000);
+        assert!(!row(100, 50_000 + 16 * 1024).worse_than(&main));
+        assert!(row(100, 50_000 + 16 * 1024 + 1).worse_than(&main));
     }
 
     #[test]

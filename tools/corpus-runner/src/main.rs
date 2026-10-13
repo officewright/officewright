@@ -123,7 +123,13 @@ fn gate(args: &[String]) -> ExitCode {
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--main" => main_report = args.next(),
+            "--main" => match args.next() {
+                Some(path) => main_report = Some(path),
+                None => {
+                    eprintln!("corpus-runner: --main needs a report\n{USAGE}");
+                    return ExitCode::from(2);
+                }
+            },
             "--same-fonts" => same_fonts = true,
             path if !path.starts_with("--") && branch_report.is_none() => branch_report = Some(arg),
             _ => {
@@ -151,7 +157,13 @@ fn gate(args: &[String]) -> ExitCode {
     };
     let measures = gate::measure(&branch, same_fonts);
     let before = main.as_ref().map(|main| gate::measure(main, same_fonts));
-    println!("{}\n", gate::census(&branch, same_fonts));
+    match &main {
+        Some(main) => {
+            println!("main: {}\n", gate::census(main, same_fonts));
+            println!("branch: {}\n", gate::census(&branch, same_fonts));
+        }
+        None => println!("{}\n", gate::census(&branch, same_fonts)),
+    }
     print!("{}", gate::table(&measures, before.as_deref()));
     if gate::passes(&measures) {
         ExitCode::SUCCESS

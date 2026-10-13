@@ -356,23 +356,20 @@ pub fn check_pdf(pdf: &Path) -> Result<(bool, Vec<String>), String> {
     Ok((valid, not_embedded(&String::from_utf8_lossy(&listing))))
 }
 
-/// The names in the rows of a `pdffonts` listing whose `emb` column says no.
+/// The names in the rows of a `pdffonts` listing whose `emb` column says no. The columns
+/// are counted from the right (`emb sub uni object ID`), since a long font name shifts them
+/// and the type may hold spaces.
 fn not_embedded(listing: &str) -> Vec<String> {
-    let mut lines = listing.lines();
-    let Some(column) = lines
-        .next()
-        .and_then(|header| header.find(" emb "))
-        .map(|at| at + 1)
-    else {
-        return Vec::new();
-    };
-    lines
-        .skip(1)
-        .filter(|line| {
-            line.get(column..column + 3)
-                .is_some_and(|emb| emb.trim() == "no")
+    listing
+        .lines()
+        .skip(2)
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let emb = fields.len().checked_sub(5).and_then(|at| fields.get(at))?;
+            (*emb == "no")
+                .then(|| fields.first().map(|name| (*name).to_owned()))
+                .flatten()
         })
-        .filter_map(|line| line.split_whitespace().next().map(str::to_owned))
         .collect()
 }
 
@@ -703,8 +700,16 @@ mod tests {
 ------------------------------------ ----------------- ---------------- --- --- --- ---------\n\
 ABCDEF+Carlito                       CID TrueType      Identity-H       yes yes yes      9  0\n\
 Helvetica                            Type 1            WinAnsi          no  no  no       5  0\n\
-TimesNewRomanPSMT                    TrueType          WinAnsi          no  no  yes     12  0\n";
-        assert_eq!(not_embedded(listing), ["Helvetica", "TimesNewRomanPSMT"]);
+TimesNewRomanPSMT                    TrueType          WinAnsi          no  no  yes     12  0\n\
+ABCDEF+AVeryLongFontNameThatPushesTheColumns-BoldItalic TrueType WinAnsi no  no  yes     14  0\n";
+        assert_eq!(
+            not_embedded(listing),
+            [
+                "Helvetica",
+                "TimesNewRomanPSMT",
+                "ABCDEF+AVeryLongFontNameThatPushesTheColumns-BoldItalic"
+            ]
+        );
         assert!(not_embedded("").is_empty());
     }
 
