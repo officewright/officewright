@@ -141,15 +141,22 @@ struct Scratch {
 }
 
 impl Scratch {
+    /// A new, empty folder: one left by a killed run with the same process id is skipped,
+    /// so its files cannot be read as ours.
     fn new() -> Result<Self, String> {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "corpus-runner-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&path).map_err(|error| format!("{}: {error}", path.display()))?;
-        Ok(Scratch { path })
+        loop {
+            let path = std::env::temp_dir().join(format!(
+                "corpus-runner-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            match std::fs::create_dir(&path) {
+                Ok(()) => return Ok(Scratch { path }),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(format!("{}: {error}", path.display())),
+            }
+        }
     }
 }
 
@@ -445,6 +452,29 @@ mod tests {
     }
 
     #[test]
+    fn a_line_split_or_joined_does_not_agree() {
+        let word = rendering(&[&[WORD, LINE_2]]);
+        // Word's second line split in two: it starts and ends a line of ours, not the same.
+        let split = rendering(&[&[
+            WORD,
+            &[("dolor", 72.0, 114.0), ("sit", 105.0, 114.0)],
+            &[("amet.", 72.0, 128.0)],
+        ]]);
+        let scores = score(&split, &word);
+        assert_eq!((scores.lines, scores.lines_agreeing), (2, 1));
+        // Word's two lines joined: the second ends our line, but does not start it.
+        let joined = rendering(&[&[&[
+            ("Lorem", 72.0, 100.0),
+            ("ipsum", 110.0, 100.0),
+            ("dolor", 150.0, 100.0),
+            ("sit", 183.0, 100.0),
+            ("amet.", 203.0, 100.0),
+        ]]]);
+        let scores = score(&joined, &word);
+        assert_eq!((scores.lines, scores.lines_agreeing), (2, 0));
+    }
+
+    #[test]
     fn missing_pages_score_zero() {
         let word = rendering(&[&[WORD], &[PAGE_2]]);
         let ours = rendering(&[&[WORD]]);
@@ -596,6 +626,10 @@ mod tests {
         let mut values: Vec<f64> = (1..=20).map(f64::from).collect();
         assert_eq!(percentile(&mut values.clone(), 50), Some(10.0));
         assert_eq!(percentile(&mut values, 95), Some(19.0));
+        // An odd count: the rank rounds up.
+        let mut seven: Vec<f64> = (1..=7).map(f64::from).collect();
+        assert_eq!(percentile(&mut seven.clone(), 50), Some(4.0));
+        assert_eq!(percentile(&mut seven, 95), Some(7.0));
         assert_eq!(percentile(&mut [0.12345], 95), Some(0.123));
         assert_eq!(percentile(&mut [], 50), None);
     }

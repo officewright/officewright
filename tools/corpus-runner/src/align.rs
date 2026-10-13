@@ -34,7 +34,10 @@ fn align<T: PartialEq>(a: &[T], b: &[T], a0: usize, b0: usize, out: &mut Vec<(us
         let (x, y, u, v) = middle_snake(a, b);
         let before = (a.get(..x), b.get(..y));
         let after = (a.get(u..), b.get(v..));
-        if let ((Some(a1), Some(b1)), (Some(a2), Some(b2))) = (before, after) {
+        // Each half must be smaller than the whole, which Myers' bound guarantees; a split
+        // that is not would recurse for ever, so it ends the alignment of this part.
+        let splits = (x, y) != (a.len(), b.len()) && (u, v) != (0, 0);
+        if let ((Some(a1), Some(b1)), (Some(a2), Some(b2)), true) = (before, after, splits) {
             align(a1, b1, a0, b0, out);
             out.extend((0..u - x).map(|i| (a0 + x + i, b0 + y + i)));
             align(a2, b2, a0 + u, b0 + v, out);

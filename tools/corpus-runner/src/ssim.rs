@@ -128,6 +128,8 @@ mod tests {
         let three = page(60, 60, |x, y| if y < 3 { 255 } else { text(x, y - 3) });
         let (s1, s3) = (ssim(&a, &one), ssim(&a, &three));
         assert!(s1 < 0.95 && s3 < s1, "{s1} {s3}");
+        // From a direct 11×11 double sum with the paper's constants, outside this crate.
+        assert!((s1 - 0.644_953_586_554).abs() < 1e-9, "{s1}");
         assert!((ssim(&one, &a) - s1).abs() < 1e-12, "symmetric");
     }
 
