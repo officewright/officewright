@@ -1,4 +1,4 @@
-//! Units, geometry and error types shared by the officewright crates.
+//! Units, geometry, colours and error types shared by the officewright crates.
 #![forbid(unsafe_code)]
 
 use std::{error, fmt, io};
@@ -37,6 +37,49 @@ impl PageSize {
     /// The page height.
     pub const fn height(self) -> Pt {
         self.height
+    }
+}
+
+/// A colour in sRGB with eight bits per channel, the colour model of office documents.
+///
+/// ```
+/// use officewright_core::Color;
+///
+/// let orange = Color::rgb(0xED, 0x7D, 0x31);
+/// assert_eq!((orange.red(), orange.green(), orange.blue()), (237, 125, 49));
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Color {
+    red: u8,
+    green: u8,
+    blue: u8,
+}
+
+impl Color {
+    /// Black.
+    pub const BLACK: Self = Self::rgb(0, 0, 0);
+
+    /// White.
+    pub const WHITE: Self = Self::rgb(255, 255, 255);
+
+    /// The colour with these red, green and blue values.
+    pub const fn rgb(red: u8, green: u8, blue: u8) -> Self {
+        Self { red, green, blue }
+    }
+
+    /// The red value.
+    pub const fn red(self) -> u8 {
+        self.red
+    }
+
+    /// The green value.
+    pub const fn green(self) -> u8 {
+        self.green
+    }
+
+    /// The blue value.
+    pub const fn blue(self) -> u8 {
+        self.blue
     }
 }
 
