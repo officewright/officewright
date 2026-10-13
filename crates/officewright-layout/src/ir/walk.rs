@@ -62,6 +62,11 @@ impl<'a> Checker<'a> {
         self.location.pop();
     }
 
+    /// Steps into an entry of the list being checked.
+    pub(crate) fn enter_index(&mut self, index: usize) {
+        self.location.push(Step::Index(index));
+    }
+
     /// Checks a field.
     pub(crate) fn visit<T: Check + ?Sized>(
         &mut self,

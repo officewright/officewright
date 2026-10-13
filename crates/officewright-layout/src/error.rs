@@ -16,8 +16,8 @@ pub enum Error {
         /// What is wrong.
         problem: String,
     },
-    /// Tables are nested deeper than the layout follows, which keeps the stack a
-    /// document can take bounded.
+    /// Tables are nested deeper than the layout follows, which keeps the stack its walks
+    /// over a document take bounded.
     #[non_exhaustive]
     NestingTooDeep {
         /// Where the table that is too deep starts.

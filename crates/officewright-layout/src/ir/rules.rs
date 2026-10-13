@@ -11,6 +11,9 @@ use crate::Result;
 /// The limit Word sets on most lengths it stores in twips: 22 inches, 31680 twips.
 pub(crate) const WORD_MAX_LENGTH: Pt = Pt(31680.0 / 20.0);
 
+/// The largest length Word stores as a `short` of twips: 32767 twips.
+pub(crate) const WORD_MAX_SHORT_LENGTH: Pt = Pt(i16::MAX as f64 / 20.0);
+
 /// The length must not be negative.
 pub(crate) fn non_negative(value: &Pt, checker: &mut Checker<'_>) -> Result<()> {
     if value.0 < 0.0 {
@@ -89,7 +92,7 @@ pub(crate) fn default_tab_stop(value: &mut Pt, clamper: &mut Clamper) {
     limit(
         value,
         Pt(0.0),
-        Pt(f64::from(i16::MAX) / 20.0),
+        WORD_MAX_SHORT_LENGTH,
         "default tab stop",
         clamper,
     );

@@ -7,15 +7,53 @@ use super::walk::Checker;
 use super::{ListId, ListInstanceId, RunStyleId};
 use crate::Result;
 
-/// The number of levels a list has: Word does not load a document with a level outside 0
-/// to 8 (MS-OI29500 2.1.280 a).
+/// The number of levels a list definition has: Word does not load a document whose
+/// definition has a level outside 0 to 8 (MS-OI29500 2.1.280 a).
 pub(crate) const LIST_LEVELS: u8 = 9;
+
+/// The deepest level a list level can restart after: Word takes `w:lvlRestart` from 0 to
+/// 7 (MS-OI29500 2.1.282 a), and 7 means after level 6.
+const LAST_RESTART_LEVEL: u8 = 6;
 
 ir_struct! {
     /// A list definition: up to nine levels, whose counters every instance of the
     /// definition shares (`w:abstractNum`). Word counts per definition, not per instance:
     /// two instances of one definition continue one sequence unless an override restarts
     /// it.
+    ///
+    /// ```
+    /// use officewright_layout::ir::{
+    ///     Document, Level, LevelOverride, LevelTextPart, ListDefinition, ListInstance, ListItem,
+    ///     NumberFormat, PageSetup, Paragraph, RunStyle, Section,
+    /// };
+    ///
+    /// let mut document = Document::default();
+    /// let style = document.add_run_style(RunStyle::default());
+    /// // 1., 2., 3. at level 0; a), b) at level 1, starting again after each level 0 item.
+    /// let level = |format, close: &str, level| {
+    ///     Level::default()
+    ///         .with_start(1)
+    ///         .with_format(format)
+    ///         .with_text([LevelTextPart::Placeholder(level), LevelTextPart::Literal(close.into())])
+    /// };
+    /// let list = document.add_list(ListDefinition::default().with_levels([
+    ///     level(NumberFormat::Decimal, ".", 0),
+    ///     level(NumberFormat::LowerLetter, ")", 1),
+    /// ]));
+    /// let first = document.add_list_instance(ListInstance::new(list));
+    /// // A second instance of the same definition that starts again at 5.
+    /// let restarted = document.add_list_instance(
+    ///     ListInstance::new(list).with_overrides([LevelOverride::new(0).with_start(Some(5))]),
+    /// );
+    /// let item = |instance, level| Paragraph::new(style).with_list(Some(ListItem::new(instance, level, style)));
+    /// document.add_section(Section::new(PageSetup::default()).with_blocks([
+    ///     item(first, 0).into(),
+    ///     item(first, 1).into(),
+    ///     item(restarted, 0).into(),
+    /// ]));
+    /// document.validate()?;
+    /// # Ok::<(), officewright_layout::Error>(())
+    /// ```
     #[derive(Clone, Debug, Default, PartialEq)]
     pub struct ListDefinition {
         /// The levels, from level 0, the outermost. A list item of a level the definition
@@ -79,7 +117,8 @@ pub enum Restart {
     /// Never (`w:lvlRestart w:val="0"`).
     Never,
     /// After an item of this level or any outer one (MS-OI29500 2.1.282 c).
-    /// `w:lvlRestart w:val="n"` is `AfterLevel(n - 1)`.
+    /// `w:lvlRestart w:val="n"` is `AfterLevel(n - 1)`; Word takes `n` from 0 to 7
+    /// (2.1.282 a), so the level is 0 to 6.
     AfterLevel(u8),
 }
 
@@ -138,8 +177,10 @@ fn one_override_per_level(instance: &ListInstance, checker: &mut Checker<'_>) ->
         // The level is below LIST_LEVELS: the override's own check ran first.
         if let Some(seen) = seen.get_mut(usize::from(level_override.level)) {
             if *seen {
+                checker.enter("overrides");
+                checker.enter_index(position);
                 return Err(checker.error(format!(
-                    "override {position} is the second override of level {}",
+                    "a second override of level {}",
                     level_override.level
                 )));
             }
@@ -181,8 +222,9 @@ ir_struct! {
     pub struct ListItem {
         /// The list instance.
         copy instance: ListInstanceId => with_instance;
-        /// The level, from 0.
-        copy level: u8 => with_level, check level_index;
+        /// The level, from 0. Word loads levels up to 255 (MS-OI29500 2.1.277 a); an item
+        /// of a level its definition does not have gets no label.
+        copy level: u8 => with_level;
         /// The formatting of the label: the paragraph mark's with the level's own on top.
         copy label_style: RunStyleId => with_label_style;
     }
@@ -199,7 +241,7 @@ impl ListItem {
     }
 }
 
-/// A list level is from 0 to 8.
+/// A level of a list definition is from 0 to 8 (MS-OI29500 2.1.280 a).
 fn level_index(level: &u8, checker: &mut Checker<'_>) -> Result<()> {
     if *level >= LIST_LEVELS {
         return Err(checker.error(format!(
@@ -222,7 +264,10 @@ impl super::walk::Check for LevelTextPart {
 impl super::walk::Check for Restart {
     fn check(&self, checker: &mut Checker<'_>) -> Result<()> {
         match self {
-            Self::AfterLevel(level) => level_index(level, checker),
+            Self::AfterLevel(level) if *level > LAST_RESTART_LEVEL => Err(checker.error(format!(
+                "restarting after level {level}, but Word restarts after levels 0 to 6 at most"
+            ))),
+            Self::AfterLevel(_) => Ok(()),
             Self::Default | Self::Never => Ok(()),
         }
     }
