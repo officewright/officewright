@@ -187,7 +187,8 @@ fn reads_a_collection_of_real_fonts() -> TestResult {
 #[test]
 fn resolves_arial_to_liberation_sans() {
     let mut book = FontBook::new();
-    assert_eq!(book.add_dir(fonts_dir()).unwrap(), 5);
+    // Carlito and Liberation Sans, Serif and Mono in four styles each, and Noto Sans.
+    assert_eq!(book.add_dir(fonts_dir()).unwrap(), 17);
     assert!(book.skipped().is_empty(), "{:?}", book.skipped());
     let mut resolver = FontResolver::new(&book);
     let arial = resolver.resolve(&FontRequest::new("Arial")).clone();
@@ -203,6 +204,45 @@ fn resolves_arial_to_liberation_sans() {
     let noto = resolver.resolve(&FontRequest::new("noto sans"));
     assert_eq!(noto.kind(), ResolutionKind::Exact);
     assert_eq!(resolver.substitutions().len(), 2);
+}
+
+/// Bold and italic requests for the fonts the corpus uses find the twins' own styles, as
+/// Word finds the installed families, instead of synthesizing them from the regular face.
+#[test]
+fn bold_and_italic_resolve_to_the_twins_own_styles() -> TestResult {
+    let mut book = FontBook::new();
+    book.add_dir(fonts_dir())?;
+    let mut resolver = FontResolver::new(&book);
+    for (family, twin) in [
+        ("Calibri", "Carlito"),
+        ("Arial", "Liberation Sans"),
+        ("Times New Roman", "Liberation Serif"),
+        ("Courier New", "Liberation Mono"),
+    ] {
+        for (bold, italic, style) in [
+            (false, false, "Regular"),
+            (true, false, "Bold"),
+            (false, true, "Italic"),
+            (true, true, "Bold Italic"),
+        ] {
+            let request = FontRequest::new(family).bold(bold).italic(italic);
+            let resolution = resolver.resolve(&request).clone();
+            let what = format!("{family} {style}: {resolution:?}");
+            assert_eq!(
+                resolution.kind(),
+                ResolutionKind::MetricCompatible,
+                "{what}"
+            );
+            assert!(
+                !resolution.synthetic_bold() && !resolution.synthetic_italic(),
+                "{what}"
+            );
+            let face = book.load(resolution.face().ok_or("no face")?)?;
+            assert_eq!(face.names().family(), Some(twin), "{what}");
+            assert_eq!(face.names().subfamily(), Some(style), "{what}");
+        }
+    }
+    Ok(())
 }
 
 #[test]
