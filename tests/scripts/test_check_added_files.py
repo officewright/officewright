@@ -40,6 +40,13 @@ OFFENDING = {
              (b"", b"&amp;"), (b"<", b">"), (b"", b"(")]
         )
     },
+    # A name ends at any character no user name can have.
+    "bracket.txt": b"/home/%s[1]/x\n" % b"sam",
+    "equals.txt": b"x=/home/%s=y\n" % b"tia",
+    # \Users without a drive letter, and the profile roots in upper case, as Windows and
+    # macOS read them.
+    "rooted.txt": b"\\Users\\%s\\AppData and \\\\Users\\\\%s\\\\x\n" % (b"uma", b"vic"),
+    "upper.txt": b"/USERS/%s/ and C:\\DOCUMENTS AND SETTINGS\\%s\\\n" % (b"wes", b"xia"),
     # A name ends at a control character: a C string in a binary file.
     "cstring.bin": b"\x00/home/%s\x00" % b"ray",
 }
@@ -50,6 +57,8 @@ ALLOWED = {
     "variables.sh": b"/home/$USER/x C:\\Users\\%USERNAME%\\x /home/{user}/x /home/${USER}\n",
     "built.py": b"'C:\\\\Users\\\\' + name + '\\\\x' and `/home/` and /home/ alone\n",
     "system.txt": b"/usr/share/fonts C:\\Windows\\Fonts C:\\Users\\ /Users/\n",
+    # Linux home directories are lower case: an upper-case Home is something else.
+    "views.txt": b"Views/Home/Index.cshtml /HOME/README\n",
 }
 BYTECODE = [
     "__pycache__/tool.cpython-312.pyc",
@@ -58,6 +67,9 @@ BYTECODE = [
     "lib/__pycache__/stale.txt",
     "töol.pyc",
 ]
+# Names Windows does not allow: a newline and a tab, which Git lists quoted.
+if os.name != "nt":
+    BYTECODE += ["bad\nname.pyc", "tab\tname.pyo"]
 
 
 def remove_read_only(function, path, _):
