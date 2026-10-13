@@ -271,15 +271,16 @@ class Packages(unittest.TestCase):
 
     def test_cases_have_the_formatting_their_labels_name(self):
         def paragraphs(name):
-            """Per paragraph: its runs as (text, font, size in pt, toggles), and whether a
-            line break separates two of them."""
+            """Per paragraph: its runs as (text, font, size in pt, toggles), and its breaks as
+            (number of runs before the break, w:type of the break)."""
             doc = next(doc for doc in self.docs if doc.name == name)
             body = part(rules.parts(doc), "word/document.xml")
             for paragraph in body.iter(f"{W}p"):
-                runs, breaks = [], 0
+                runs, breaks = [], []
                 for r in paragraph.iter(f"{W}r"):
-                    if r.find(f"{W}br") is not None and r.find(f"{W}t") is None:
-                        breaks += 1
+                    brk = r.find(f"{W}br")
+                    if brk is not None and r.find(f"{W}t") is None:
+                        breaks.append((len(runs), brk.get(f"{W}type")))
                         continue
                     props = r.find(f"{W}rPr")
                     fonts = props.find(f"{W}rFonts")
@@ -335,7 +336,8 @@ class Packages(unittest.TestCase):
             )
             for runs, breaks in cases:
                 (label, label_font, label_size, label_toggles), (word, font, size, toggles) = runs
-                self.assertEqual(breaks, 1, label)
+                # One plain line break, between the label and the word.
+                self.assertEqual(breaks, [(1, None)], label)
                 self.assertEqual(label_toggles, set(), label)
                 self.assertEqual(label_font, font, label)
                 self.assertEqual(label_of(label), (font, size), label)
