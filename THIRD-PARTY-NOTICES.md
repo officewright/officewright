@@ -85,3 +85,20 @@ license file it was distributed with, byte for byte.
   `28b15b4b43b7bed62b5cf6e6b0b5ff5846270535`.
 - License: SIL Open Font License 1.1. Copyright 2022 The Noto Project Authors.
 - Why: an OpenType font with CFF outlines.
+
+## Apache POI test documents
+
+Copyright 2003-2026 The Apache Software Foundation. Licensed under the Apache License,
+Version 2.0.
+
+- Files: the 16 Word documents in `tests/corpus/poi/`, each listed with its SHA-256 in
+  `tests/corpus/SOURCES.md`, byte for byte as in Apache POI's `test-data/document` at
+  commit `f3688f45b0de8934fb32736ba14efc5bbca4a580`
+  (<https://github.com/apache/poi/tree/f3688f45b0de8934fb32736ba14efc5bbca4a580/test-data/document>).
+- Next to them, unmodified from POI's `legal/` at that commit: `tests/corpus/poi/LICENSE`
+  (SHA-256 `6e7c918e5a49f677c1b85a9eb2d035cd85c217fc42af6b4a336964a434001a9c`), the
+  Apache License 2.0 with the notes on the parts of POI under other licenses, and
+  `tests/corpus/poi/NOTICE`
+  (SHA-256 `a89ff8b670bcacd3e98ebee64979e0569181c7942e9ad795f4222b25e5637a61`).
+- They are test input of `tools/corpus-runner` (run by `scripts/check.sh`) and seed the
+  `docx_open` fuzz target; they sit outside every crate and are never published.
