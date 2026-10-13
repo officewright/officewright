@@ -110,11 +110,15 @@ def spacing(
     line: tuple[str, float] | None = None,
     before_auto: bool = False,
     after_auto: bool = False,
+    before_lines: int | None = None,
 ) -> str:
-    """line is ("exact" | "atLeast", points) or ("auto", w:line, where 240 is one line)."""
+    """line is ("exact" | "atLeast", points) or ("auto", w:line, where 240 is one line);
+    before_lines is in hundredths of a line."""
     a = []
     if before is not None:
         a.append(f'w:before="{twips(before)}"')
+    if before_lines is not None:
+        a.append(f'w:beforeLines="{before_lines}"')
     if before_auto:
         a.append('w:beforeAutospacing="1"')
     if after is not None:
@@ -130,9 +134,11 @@ def spacing(
 
 def ppr(
     *,
+    p_style: str | None = None,
     page_break_before: bool = False,
     widow_control: bool | None = None,
     list_item: tuple[int, int] | None = None,
+    num_pr: str | None = None,
     shading: str | None = None,
     tabs: list[tuple[str, int]] | None = None,
     space: str | None = None,
@@ -141,6 +147,8 @@ def ppr(
     sect: str | None = None,
 ) -> str:
     parts = []
+    if p_style:
+        parts.append(f'<w:pStyle w:val="{p_style}"/>')
     if page_break_before:
         parts.append("<w:pageBreakBefore/>")
     if widow_control is not None:
@@ -148,6 +156,8 @@ def ppr(
     if list_item is not None:
         num_id, ilvl = list_item
         parts.append(f'<w:numPr><w:ilvl w:val="{ilvl}"/><w:numId w:val="{num_id}"/></w:numPr>')
+    if num_pr is not None:
+        parts.append(f"<w:numPr>{num_pr}</w:numPr>")
     if shading:
         parts.append(f'<w:shd w:val="clear" w:color="auto" w:fill="{shading}"/>')
     if tabs:
@@ -239,11 +249,13 @@ def level(
     hanging: int,
     suffix: str | None = None,
     tab_stop: int | None = None,
+    p_style: str | None = None,
 ) -> str:
     suff = f'<w:suff w:val="{suffix}"/>' if suffix else ""
     tabs = f'<w:tabs><w:tab w:val="num" w:pos="{tab_stop}"/></w:tabs>' if tab_stop else ""
+    linked = f'<w:pStyle w:val="{p_style}"/>' if p_style else ""
     return (
-        f'<w:lvl w:ilvl="{ilvl}"><w:start w:val="1"/><w:numFmt w:val="{fmt}"/>{suff}'
+        f'<w:lvl w:ilvl="{ilvl}"><w:start w:val="1"/><w:numFmt w:val="{fmt}"/>{linked}{suff}'
         f'<w:lvlText w:val="{attr(template)}"/><w:lvlJc w:val="left"/>'
         f'<w:pPr>{tabs}<w:ind w:left="{left}" w:hanging="{hanging}"/></w:pPr></w:lvl>'
     )
@@ -839,6 +851,141 @@ def theme_fonts() -> Doc:
     )
 
 
+# Paragraph formatting across the style hierarchy: what ECMA-376 §17.3.1 and §17.9 leave
+# open or [MS-OI29500] describes only in prose.
+
+
+def para_style(style_id: str, ppr_xml: str, *, default: bool = False) -> str:
+    """A paragraph style with these paragraph properties (the children of w:pPr)."""
+    flag = ' w:default="1"' if default else ""
+    return (
+        f'<w:style w:type="paragraph"{flag} w:customStyle="1" w:styleId="{style_id}">'
+        f'<w:name w:val="{style_id}"/><w:basedOn w:val="Normal"/>'
+        f"<w:pPr>{ppr_xml}</w:pPr></w:style>"
+    )
+
+
+def list_level_inherit() -> Doc:
+    def levels(fmt: str, templates: list[str], linked: str | None = None) -> list[str]:
+        return [
+            level(
+                ilvl,
+                fmt,
+                template,
+                left=720 * (ilvl + 1),
+                hanging=360,
+                p_style=linked if ilvl == 2 else None,
+            )
+            for ilvl, template in enumerate(templates)
+        ]
+
+    numbering = (
+        abstract_num(0, "5C3A0021", levels("decimal", ["%1.", "%1.%2.", "%1.%2.%3."]))
+        + abstract_num(1, "5C3A0022", levels("lowerLetter", ["%1)", "(%2)", "[%3]"], "Linked"))
+        + num(1, 0)
+        + num(2, 1)
+    )
+    styles = "".join(
+        [
+            para_style(
+                "StyleLevel1", '<w:numPr><w:ilvl w:val="1"/><w:numId w:val="1"/></w:numPr>'
+            ),
+            para_style("StyleNoLevel", '<w:numPr><w:numId w:val="1"/></w:numPr>'),
+            # Level 2 of definition 1 names this style; its own w:ilvl says 0. ECMA-376
+            # §17.3.1.19 takes the level from w:pStyle, MS-OI29500 §17.3.1.19(a) says Word
+            # does not ignore the w:ilvl.
+            para_style("Linked", '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="2"/></w:numPr>'),
+        ]
+    )
+    cases = [
+        ("StyleLevel1", None, "the style gives instance 1 and level 1"),
+        ("StyleLevel1", '<w:numId w:val="1"/>', "the style gives level 1; direct numId 1, no ilvl"),
+        (
+            "StyleLevel1",
+            '<w:ilvl w:val="2"/>',
+            "the style gives instance 1; direct ilvl 2, no numId",
+        ),
+        ("Linked", None, "the style gives instance 2 and level 0; level 2 names the style"),
+        ("StyleNoLevel", None, "the style gives instance 1 and no level"),
+        (None, '<w:numId w:val="1"/>', "no style; direct numId 1, no ilvl"),
+        ("StyleLevel1", '<w:numId w:val="0"/>', "the style gives instance 1; direct numId 0"),
+    ]
+    body = "".join(
+        para(run(f"Case {n:02d}: {label}"), p_style=style, num_pr=direct)
+        for n, (style, direct, label) in enumerate(cases, 1)
+    )
+    return Doc(
+        "E-list-level-inherit",
+        "Which list level a paragraph takes when its style and its direct formatting each "
+        "give part of w:numPr, when a level's w:pStyle names the style, and when direct "
+        "formatting gives instance 0",
+        body,
+        numbering=numbering,
+        styles=styles,
+    )
+
+
+def paragraph_units() -> Doc:
+    styles = "".join(
+        [
+            para_style("CharsIndent", '<w:ind w:leftChars="200"/>'),
+            para_style("LinesBefore", '<w:spacing w:beforeLines="100"/>'),
+        ]
+    )
+
+    def case(n: int, label: str, style: str | None, **props) -> str:
+        return para(run(f"Case {n:02d}: {label}"), p_style=style, shading=GREY, **props)
+
+    body = "".join(
+        [
+            case(1, "a style indents 2 characters (leftChars 200)", "CharsIndent"),
+            case(2, "the same style; direct left indent 72 pt", "CharsIndent",
+                 ind={"left": 1440}),
+            case(3, "the same style; direct leftChars 0 and left indent 72 pt", "CharsIndent",
+                 ind={"leftChars": 0, "left": 1440}),
+            case(4, "no style; one w:ind gives left 36 pt and leftChars 300", None,
+                 ind={"left": 720, "leftChars": 300}),
+            case(5, "a style gives 1 line before (beforeLines 100)", "LinesBefore"),
+            case(6, "the same style; direct 24 pt before", "LinesBefore",
+                 space=spacing(before=24)),
+            case(7, "the same style; direct beforeLines 0 and 24 pt before", "LinesBefore",
+                 space=spacing(before=24, before_lines=0)),
+            case(8, "no style; one w:spacing gives 24 pt and beforeLines 50", None,
+                 space=spacing(before=24, before_lines=50)),
+        ]
+    )
+    return Doc(
+        "E-paragraph-units",
+        "Indents in character units and space before in line units against points, at one "
+        "level and across the style hierarchy, and what a value of 0 in those units does",
+        body,
+        styles=styles,
+    )
+
+
+def default_paragraph_style() -> Doc:
+    styles = para_style(
+        "AlsoDefault",
+        '<w:spacing w:after="480"/><w:jc w:val="center"/>',
+        default=True,
+    )
+    body = "".join(
+        [
+            para(run("Case 01: a paragraph that names no style")),
+            para(run("Case 02: a paragraph that names Normal"), p_style="Normal"),
+            para(run("Case 03: a paragraph that names AlsoDefault"), p_style="AlsoDefault"),
+            para(run("Case 04: a paragraph that names no style, after the others")),
+        ]
+    )
+    return Doc(
+        "E-default-paragraph-style",
+        "Which style a paragraph without w:pStyle takes when two paragraph styles are marked "
+        "w:default: Normal, written first, or AlsoDefault (centred, 24 pt after), written last",
+        body,
+        styles=styles,
+    )
+
+
 def documents() -> list[Doc]:
     return [
         line_fonts(),
@@ -861,6 +1008,9 @@ def documents() -> list[Doc]:
         defaults_empty(),
         theme_colors(),
         theme_fonts(),
+        list_level_inherit(),
+        paragraph_units(),
+        default_paragraph_style(),
     ]
 
 
@@ -969,9 +1119,13 @@ def settings_xml(doc: Doc) -> str:
     mapping = ""
     if doc.theme:
         entries = dict(IDENTITY_MAPPING)
-        for name, _ in doc.color_mapping:
+        values = {value for _, value in IDENTITY_MAPPING}
+        for name, value in doc.color_mapping:
             if name not in entries:
                 raise ValueError(f"{doc.name}: w:clrSchemeMapping has no attribute {name}")
+            # The values of IDENTITY_MAPPING are those of ST_WmlColorSchemeIndex.
+            if value not in values:
+                raise ValueError(f"{doc.name}: {value} is not a theme colour to map {name} to")
         entries.update(doc.color_mapping)
         attributes = " ".join(f'w:{name}="{value}"' for name, value in entries.items())
         mapping = f"<w:clrSchemeMapping {attributes}/>"

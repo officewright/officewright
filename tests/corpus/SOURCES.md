@@ -33,6 +33,9 @@ writes.
 | word-rules/E-defaults-empty.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | The font and size Word applies when neither the document defaults nor any style gives them, alone and with a style that gives only one of the two |
 | word-rules/E-theme-colors.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Theme colours of runs as Word resolves them: through a colour mapping that maps text 2 and background 2 to accents 3 and 4, with themeTint and themeShade alone and together, against a w:val that disagrees |
 | word-rules/E-theme-fonts.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Theme fonts across the style hierarchy: whether a font or a theme font written at a later level replaces the other, and which wins when one w:rFonts gives both |
+| word-rules/E-list-level-inherit.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Which list level a paragraph takes when its style and its direct formatting each give part of w:numPr, when a level's w:pStyle names the style, and when direct formatting gives instance 0 |
+| word-rules/E-paragraph-units.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Indents in character units and space before in line units against points, at one level and across the style hierarchy, and what a value of 0 in those units does |
+| word-rules/E-default-paragraph-style.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Which style a paragraph without w:pStyle takes when two paragraph styles are marked w:default: Normal, written first, or AlsoDefault (centred, 24 pt after), written last |
 
 ## Apache POI test documents (`poi/`)
 

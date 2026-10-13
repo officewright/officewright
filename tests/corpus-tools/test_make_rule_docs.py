@@ -186,7 +186,13 @@ class Packages(unittest.TestCase):
     def test_lists_only_use_defined_numbering(self):
         for doc in self.docs:
             parts = rules.parts(doc)
-            used = {n.get(f"{W}val") for n in part(parts, "word/document.xml").iter(f"{W}numId")}
+            # Instance 0 takes a paragraph out of a list; it never names one (ECMA-376
+            # §17.9.18).
+            used = {
+                n.get(f"{W}val")
+                for name in ("word/document.xml", "word/styles.xml")
+                for n in part(parts, name).iter(f"{W}numId")
+            } - {"0"}
             if not used:
                 continue
             numbering = part(parts, "word/numbering.xml")
@@ -207,6 +213,12 @@ class Packages(unittest.TestCase):
                 for n in root.iter(f"{W}{tag}")
             }
             self.assertLessEqual(named, defined, doc.name)
+
+    def test_refuses_a_colour_mapping_value_that_is_not_a_theme_colour(self):
+        doc = next(doc for doc in self.docs if doc.color_mapping)
+        mistyped = dataclasses.replace(doc, color_mapping=(("t2", "accent7"),))
+        with self.assertRaisesRegex(ValueError, "accent7 is not a theme colour"):
+            rules.settings_xml(mistyped)
 
     def test_refuses_a_colour_mapping_attribute_that_does_not_exist(self):
         doc = next(doc for doc in self.docs if doc.color_mapping)
