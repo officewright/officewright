@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Fast subset of scripts/check.sh. Enable once per clone: git config core.hooksPath .githooks
 set -euo pipefail
+scripts/check-added-files.sh --staged
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features

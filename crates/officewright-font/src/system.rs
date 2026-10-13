@@ -108,10 +108,10 @@ mod tests {
     #[cfg(unix)]
     fn unix_follows_the_xdg_defaults() {
         assert_eq!(
-            dirs(Platform::Unix, &[("HOME", "/home/u")]),
+            dirs(Platform::Unix, &[("HOME", "/home/<name>")]),
             [
-                Path::new("/home/u/.local/share/fonts"),
-                Path::new("/home/u/.fonts"),
+                Path::new("/home/<name>/.local/share/fonts"),
+                Path::new("/home/<name>/.fonts"),
                 Path::new("/usr/local/share/fonts"),
                 Path::new("/usr/share/fonts"),
             ]
@@ -124,7 +124,7 @@ mod tests {
         let found = dirs(
             Platform::Unix,
             &[
-                ("HOME", "/home/u"),
+                ("HOME", "/home/<name>"),
                 ("XDG_DATA_HOME", "relative"),
                 ("XDG_DATA_DIRS", "/opt/share:share:/usr/share:/usr/share"),
             ],
@@ -132,8 +132,8 @@ mod tests {
         assert_eq!(
             found,
             [
-                Path::new("/home/u/.local/share/fonts"),
-                Path::new("/home/u/.fonts"),
+                Path::new("/home/<name>/.local/share/fonts"),
+                Path::new("/home/<name>/.fonts"),
                 Path::new("/opt/share/fonts"),
                 Path::new("/usr/share/fonts"),
             ]
@@ -144,11 +144,11 @@ mod tests {
     #[cfg(unix)]
     fn macos_has_system_local_and_user_fonts() {
         assert_eq!(
-            dirs(Platform::MacOs, &[("HOME", "/Users/u")]),
+            dirs(Platform::MacOs, &[("HOME", "/Users/<name>")]),
             [
                 Path::new("/System/Library/Fonts"),
                 Path::new("/Library/Fonts"),
-                Path::new("/Users/u/Library/Fonts"),
+                Path::new("/Users/<name>/Library/Fonts"),
             ]
         );
     }
@@ -161,12 +161,12 @@ mod tests {
                 Platform::Windows,
                 &[
                     ("WINDIR", r"D:\Win"),
-                    ("LOCALAPPDATA", r"C:\Users\u\AppData\Local"),
+                    ("LOCALAPPDATA", r"C:\Users\<name>\AppData\Local"),
                 ],
             ),
             [
                 Path::new(r"D:\Win\Fonts"),
-                Path::new(r"C:\Users\u\AppData\Local\Microsoft\Windows\Fonts"),
+                Path::new(r"C:\Users\<name>\AppData\Local\Microsoft\Windows\Fonts"),
             ]
         );
         assert_eq!(
