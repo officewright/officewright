@@ -1819,6 +1819,55 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn only_adobes_app14_segment_marks_inverted_cmyk() {
+        let mut data = jpeg(0xC0, 8, 3, 2, 4, false);
+        // An APP14 segment of another application, before the frame header.
+        let frame = data.windows(2).position(|w| w == [0xFF, 0xC0]).unwrap();
+        data.splice(
+            frame..frame,
+            *b"\xFF\xEE\x00\x0EOther\x00\x64\x00\x00\x00\x00\x02",
+        );
+        let image = Image::from_bytes(data).unwrap();
+        assert!(matches!(
+            image.inner.encoding,
+            Encoding::Jpeg {
+                components: 4,
+                adobe: false
+            }
+        ));
+        let object = String::from_utf8_lossy(&image.objects(1, Compression::Flate)[0]).into_owned();
+        assert!(!object.contains("/Decode"), "{object}");
+    }
+
+    #[test]
+    fn decoded_images_and_their_soft_masks_follow_the_compression() {
+        // A decoded image that compresses: one colour, half transparent.
+        let mut png = Png::new(16, 16, 6, 8);
+        for pixel in &mut png.pixels {
+            *pixel = vec![200, 10, 10, 128];
+        }
+        let image = Image::from_bytes(png.encode()).unwrap();
+        let mut doc = crate::Document::new();
+        doc.add_page(crate::PageSize::A4)
+            .unwrap()
+            .draw_image(
+                &image,
+                crate::Pt(0.0),
+                crate::Pt(0.0),
+                crate::Pt(10.0),
+                crate::Pt(10.0),
+            )
+            .unwrap();
+        let flate = "/Filter /FlateDecode /Type /XObject /Subtype /Image";
+        let pdf = String::from_utf8_lossy(&doc.to_bytes().unwrap()).into_owned();
+        assert_eq!(pdf.matches(flate).count(), 2, "{pdf}");
+        doc.set_compression(Compression::None);
+        let pdf = String::from_utf8_lossy(&doc.to_bytes().unwrap()).into_owned();
+        assert_eq!(pdf.matches(flate).count(), 0);
+        assert_eq!(pdf.matches("/Subtype /Image").count(), 2);
+    }
+
+    #[test]
     fn writes_jpeg_files_as_they_are() {
         let objects = |components, adobe| {
             let data = jpeg(0xC0, 8, 3, 2, components, adobe);

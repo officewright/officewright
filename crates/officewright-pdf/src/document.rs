@@ -1397,6 +1397,11 @@ mod tests {
                 (32767.0, 0.0, 1.0, 1.0),
                 "position (32768, 1) pt is outside the -32767 to 32767 pt range",
             ),
+            // Wider than high: the far corner is x + width, y + height.
+            (
+                (32000.0, 0.0, 1000.0, 1.0),
+                "position (33000, 1) pt is outside the -32767 to 32767 pt range",
+            ),
         ];
         for ((x, y, width, height), message) in cases {
             let err = page
