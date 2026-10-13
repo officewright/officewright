@@ -81,12 +81,19 @@ tests/corpus-tools/     tests of make-rule-docs.py and corpus-import.py, and tha
                         with its SHA-256 (Python), and of make-reference.ps1
                         without Word (Windows PowerShell, Windows only); poppler/ checks corpus-import.py's
                         font embedding with the real qpdf and poppler (Linux, macOS)
+tests/scripts/          tests of scripts/check-added-files.sh in a throwaway git repository (Python)
 tests/fonts/            unmodified OFL test fonts with their license files, listed in THIRD-PARTY-NOTICES.md;
                         outside every crate, so never published
 tools/corpus-runner/    workspace member, publish = false: runs the library over a corpus, writes a JSON report
 tools/ooxml-validate/   small .NET tool: validates generated OOXML with Open XML SDK's OpenXmlValidator (MIT)
 corpus-ext/             gitignored: large external corpora downloaded by scripts/fetch-corpus.sh
 scripts/check.sh        PR quality gate (see below)
+scripts/check-added-files.sh  refuses Python bytecode and files naming a home directory (/home/<name>,
+                        /Users/<name>, C:\Users\<name>, C:\Documents and Settings\<name>, a WSL home seen from
+                        Windows; placeholders such as <name> are allowed); every tracked file in check.sh, the
+                        staged ones with --staged in .githooks/pre-commit; it does not look inside compressed
+                        parts (DOCX, PDF streams) or at UTF-16 text: documents brought in through
+                        scripts/corpus-import.py and scripts/import-public-docs.py are checked there
 scripts/install-capi.sh installs the C library into a prefix with the release archive layout
 scripts/check-capi.sh   checks such a prefix as a user would: files, exports, tests/c, tests/ffi-python
 scripts/package.sh      builds one release archive; release-in-container.sh wraps it for the Linux builds
@@ -267,6 +274,7 @@ cargo fmt --check and cargo clippy -D warnings on the fuzz/ workspace (Linux/mac
 cargo deny check && cargo machete
 cargo package --list -p officewright-pdf, -font, -layout, -cli: no third-party data in the published crates
 typos && taplo fmt --check && shellcheck scripts/*.sh .githooks/pre-commit && actionlint
+scripts/check-added-files.sh: no tracked Python bytecode, no file naming a home directory; its tests in tests/scripts
 tests/corpus-tools (Python unittest): committed rule documents equal make-rule-docs.py output; corpus-import.py refusals;
   every file in tests/fonts is listed with its SHA-256 in THIRD-PARTY-NOTICES.md
 tests/corpus-tools/poppler (Linux, macOS): fonts corpus-import.py embeds are what poppler draws
@@ -291,7 +299,7 @@ corpus-runner over tests/corpus (committed corpus), compared with tests/corpus/b
 
 `scripts/nightly.sh` (scheduled CI, hours): Miri on `officewright-ffi`, `fetch-corpus.sh --check all` (every pinned commit is still fetchable and every archive still has its pinned size; downloads nothing), fuzzing (30 min per target, each seeded with files of the format it reads, listed in `seeds()` in nightly.sh; crashing inputs uploaded as a CI artifact; from Milestone 3), corpus-runner over the Word documents of `corpus-ext/` (Apache POI and LibreOffice, fetched by the run; each child under the 1 GiB limit; compared with `tools/corpus-runner/baseline-ext.json`), report uploaded as a CI artifact. The full `fetch-corpus.sh all` from scratch, which downloads every source and verifies every SHA-256, runs weekly.
 
-`.githooks/pre-commit` runs fmt, clippy and test. Enable once per clone: `git config core.hooksPath .githooks`. CI (`.github/workflows/ci.yml`) runs `check.sh` on Linux, Windows (Git Bash with the MSVC environment from `ilammy/msvc-dev-cmd`) and macOS plus an MSRV job on Rust 1.85 (`cargo test`, with poppler for the corpus runner's tests); `nightly.yml` runs `nightly.sh` on Linux; `weekly.yml` runs the full corpus fetch on Linux. Actions are pinned by commit SHA and tools by version, except qpdf and poppler for the PDF output check: they come from the runner's package manager (apt on `ubuntu-latest`, Homebrew on macOS), which keeps no installable old versions across runner image updates, so the CI step prints the versions it got.
+`.githooks/pre-commit` runs `scripts/check-added-files.sh --staged`, fmt, clippy and test. Enable once per clone: `git config core.hooksPath .githooks`. CI (`.github/workflows/ci.yml`) runs `check.sh` on Linux, Windows (Git Bash with the MSVC environment from `ilammy/msvc-dev-cmd`) and macOS plus an MSRV job on Rust 1.85 (`cargo test`, with poppler for the corpus runner's tests); `nightly.yml` runs `nightly.sh` on Linux; `weekly.yml` runs the full corpus fetch on Linux. Actions are pinned by commit SHA and tools by version, except qpdf and poppler for the PDF output check: they come from the runner's package manager (apt on `ubuntu-latest`, Homebrew on macOS), which keeps no installable old versions across runner image updates, so the CI step prints the versions it got.
 
 Required local tools: `qpdf poppler-utils mupdf-tools libreoffice-writer-nogui shellcheck python3` (apt), `cargo-deny cargo-machete cargo-c typos-cli taplo-cli cargo-fuzz` (cargo install, or their prebuilt release binaries), `actionlint`, nightly toolchain with `miri`; on Windows, MSVC and Git Bash. `check.sh` must print a clear install hint for any missing tool instead of skipping the check.
 

@@ -136,6 +136,10 @@ shellcheck scripts/*.sh .githooks/pre-commit
 step "actionlint"
 actionlint
 
+step "committed files: no Python bytecode, no home directory paths"
+scripts/check-added-files.sh
+"$python" -B -m unittest discover -s tests/scripts -v
+
 step "corpus tools (tests/corpus-tools)"
 # The committed rule documents must be what scripts/make-rule-docs.py writes.
 "$python" -B -m unittest discover -s tests/corpus-tools -v
