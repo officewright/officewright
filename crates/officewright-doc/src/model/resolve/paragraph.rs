@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use officewright_core::Pt;
 
-use super::{Formats, Layer, overwrite, style_index};
+use super::{Formats, IGNORED_STYLES, Layer, overwrite, style_index};
 use crate::model::Document;
 use crate::model::format::{ListFormat, ParagraphFlag, ParagraphFormat};
 use crate::model::numbering::ListLevel;
@@ -38,13 +38,35 @@ impl Formats<'_> {
 
         let list = self.list(&defaults, styled.as_deref(), &direct, style_id.as_deref());
 
-        let mut effect = ParagraphLevel::clone(&defaults);
-        if let Some(styled) = &styled {
-            effect.overlay(styled);
-        }
-        if let Some(level) = list.as_ref().and_then(ListFormat::level) {
-            effect.overlay(&ParagraphLevel::of_list_level(level));
-        }
+        // What the levels below direct formatting give is the same for every paragraph
+        // of one style and list level: it is worked out once, so that a paragraph costs
+        // what its own properties hold, however many tab stops it inherits.
+        // The list level is the key by its address: instances share the levels of their
+        // definition, and so share the entry too.
+        let key = (
+            style,
+            list.as_ref()
+                .and_then(|list| list.level.as_ref())
+                .map(|level| Arc::as_ptr(level) as usize),
+        );
+        let inherited = match self.inherited.get(&key) {
+            Some(inherited) => Arc::clone(inherited),
+            None => {
+                let mut inherited = ParagraphLevel::clone(&defaults);
+                if let Some(styled) = &styled {
+                    inherited.overlay(styled);
+                }
+                if let Some(level) = list.as_ref().and_then(ListFormat::level) {
+                    inherited.overlay(&ParagraphLevel::of_list_level(level));
+                }
+                // Nothing lies below: a cleared stop that removed nothing goes.
+                inherited.tabs = inherited.tabs.without_clears();
+                let inherited = Arc::new(inherited);
+                self.inherited.insert(key, Arc::clone(&inherited));
+                inherited
+            }
+        };
+        let mut effect = ParagraphLevel::clone(&inherited);
         effect.overlay(&direct);
         effect.format(style_id, list)
     }
@@ -86,7 +108,11 @@ impl Formats<'_> {
                     .find(|level| level.paragraph_style() == Some(id))
                     .and_then(|level| i64::try_from(level.level()).ok())
             });
-            by_style.or_else(|| styled.and_then(|level| level.list_level))
+            by_style.or_else(|| {
+                styled
+                    .and_then(|level| level.list_level)
+                    .or(defaults.list_level)
+            })
         });
         let level_number = usize::try_from(written_level.unwrap_or(0))
             .ok()
@@ -103,12 +129,89 @@ impl Formats<'_> {
     /// The levels of the list instance `instance` with its overrides applied, worked out
     /// once per instance.
     fn list_levels(&mut self, instance: i64) -> Option<Arc<ListLevels>> {
-        let document = self.document;
-        self.lists
-            .entry(instance)
-            .or_insert_with(|| ListLevels::of(document, instance).map(Arc::new))
-            .clone()
+        if let Some(levels) = self.lists.get(&instance) {
+            return levels.clone();
+        }
+        let levels = self.instance_levels(instance).map(Arc::new);
+        self.lists.insert(instance, levels.clone());
+        levels
     }
+
+    /// The levels of the list instance `instance`; none when the document has no such
+    /// instance. The instance shares the definition's parsed levels and has copies only
+    /// of those it overrides, so that many instances of one definition cost little.
+    fn instance_levels(&mut self, instance: i64) -> Option<ListLevels> {
+        let document = self.document;
+        let num = document.numbering().instance(instance)?;
+        let shared = num
+            .definition_id()
+            .map(|id| self.definition_levels(id))
+            .unwrap_or_default();
+        let overrides = num.overrides();
+        let mut levels = shared.levels.clone();
+        let mut starts = [0; 9];
+        for (number, (slot, start)) in levels.iter_mut().zip(&mut starts).enumerate() {
+            let override_ = overrides
+                .iter()
+                .find(|over| usize::try_from(over.level()).ok() == Some(number));
+            // An override's own level replaces the definition's, but Word ignores its
+            // start and restart (MS-OI29500 §17.9.25(b), §17.9.10(b)).
+            if let Some(replacement) = override_.and_then(|over| over.definition()) {
+                let base = slot.as_deref();
+                let mut replacement = replacement.clone();
+                replacement.level = number;
+                replacement.start = base.and_then(ListLevel::start);
+                replacement.restart = base.and_then(ListLevel::restart);
+                *slot = Some(Arc::new(replacement));
+            }
+            *start = override_
+                .and_then(|over| over.start())
+                .or_else(|| slot.as_deref().and_then(ListLevel::start))
+                .unwrap_or(0);
+        }
+        Some(ListLevels {
+            definition: shared.definition,
+            levels,
+            starts,
+        })
+    }
+
+    /// The parsed levels of the definition an instance names by `w:abstractNumId`,
+    /// through a numbering style's link, worked out once per definition.
+    fn definition_levels(&mut self, id: i64) -> Arc<DefinitionLevels> {
+        if let Some(levels) = self.definitions.get(&id) {
+            return Arc::clone(levels);
+        }
+        let document = self.document;
+        let definition = document
+            .numbering()
+            .definition(id)
+            .and_then(|definition| definition_with_levels(document, definition));
+        let mut levels: [Option<Arc<ListLevel>>; 9] = Default::default();
+        for level in definition
+            .map(|definition| definition.levels())
+            .unwrap_or_default()
+        {
+            if let Some(slot) = levels.get_mut(level.level()) {
+                *slot = Some(Arc::new(level));
+            }
+        }
+        let levels = Arc::new(DefinitionLevels {
+            definition: definition.map(|definition| definition.id()),
+            levels,
+        });
+        self.definitions.insert(id, Arc::clone(&levels));
+        levels
+    }
+}
+
+/// The parsed levels of a list definition, 0 to 8.
+#[derive(Debug, Default)]
+pub(super) struct DefinitionLevels {
+    /// The definition whose levels these are, after a numbering style's link; none when
+    /// there is no such definition or the link leads nowhere.
+    definition: Option<i64>,
+    levels: [Option<Arc<ListLevel>>; 9],
 }
 
 /// The levels of a list instance, 0 to 8, with its overrides applied.
@@ -121,50 +224,10 @@ pub(super) struct ListLevels {
     starts: [i64; 9],
 }
 
-impl ListLevels {
-    /// The levels of the instance `instance`; none when the document has no such
-    /// instance or the instance no definition.
-    fn of(document: &Document, instance: i64) -> Option<Self> {
-        let num = document.numbering().instance(instance)?;
-        let definition = definition_with_levels(document, num.definition()?);
-        let written = definition
-            .map(|definition| definition.levels())
-            .unwrap_or_default();
-        let overrides = num.overrides();
-        let mut levels: [Option<Arc<ListLevel>>; 9] = Default::default();
-        let mut starts = [0; 9];
-        for (number, (slot, start)) in levels.iter_mut().zip(&mut starts).enumerate() {
-            let base = written.iter().find(|level| level.level() == number);
-            let override_ = overrides
-                .iter()
-                .find(|over| usize::try_from(over.level()).ok() == Some(number));
-            // An override's own level replaces the definition's, but Word ignores its
-            // start and restart (MS-OI29500 §17.9.25(b), §17.9.10(b)).
-            let level = match override_.and_then(|over| over.definition()) {
-                Some(replacement) => {
-                    let mut replacement = replacement.clone();
-                    replacement.start = base.and_then(ListLevel::start);
-                    replacement.restart = base.and_then(ListLevel::restart);
-                    Some(replacement)
-                }
-                None => base.cloned(),
-            };
-            *start = override_
-                .and_then(|over| over.start())
-                .or_else(|| level.as_ref().and_then(ListLevel::start))
-                .unwrap_or(0);
-            *slot = level.map(Arc::new);
-        }
-        Some(Self {
-            definition: definition.map(|definition| definition.id()),
-            levels,
-            starts,
-        })
-    }
-}
-
 /// The definition whose levels apply for the definition `start`: through
 /// `w:numStyleLink`, the numbering style's instance's definition (ECMA-376 §17.9.21).
+/// None when the link leads nowhere, loops, or names a style whose children Word
+/// ignores.
 fn definition_with_levels<'a>(
     document: &'a Document,
     start: crate::model::ListDefinition<'a>,
@@ -174,6 +237,9 @@ fn definition_with_levels<'a>(
         let Some(link) = definition.numbering_style_link() else {
             return Some(definition);
         };
+        if IGNORED_STYLES.contains(&link) {
+            return None;
+        }
         let style = style_index(document, link, StyleKind::Numbering)
             .and_then(|index| document.styles.styles.get(index))
             .map(|style| crate::model::Style::from_data(document, style))?;
@@ -208,9 +274,7 @@ pub(super) struct ParagraphLevel {
     /// top, bottom, start, end, between, bar.
     borders: [Option<Border>; 6],
     shading: Option<Shading>,
-    /// Stops set and cleared, in the order the levels give them; a cleared stop stays
-    /// until the end, to remove the stop of a lower level at its position.
-    tabs: Vec<TabStop>,
+    tabs: Tabs,
     outline_level: Option<i64>,
     list_instance: Option<i64>,
     list_level: Option<i64>,
@@ -236,7 +300,7 @@ impl ParagraphLevel {
             flags,
             justification: properties.justification,
             shading: properties.shading,
-            tabs: properties.tabs.clone(),
+            tabs: Tabs::of(&properties.tabs),
             outline_level: properties.outline_level,
             list_instance: properties
                 .numbering
@@ -273,7 +337,7 @@ impl ParagraphLevel {
         let properties = list.paragraph_properties();
         let mut level = Self {
             justification: properties.justification,
-            tabs: properties.tabs.clone(),
+            tabs: Tabs::of(&properties.tabs),
             ..Self::default()
         };
         level.indentation(properties);
@@ -314,16 +378,12 @@ impl ParagraphLevel {
         // the points (MS-OI29500 §17.3.1.12(b), §17.3.1.33(a)).
         let units = |value: Option<i64>| value.filter(|&value| value != 0);
         let [top, bottom, start, end, between, bar] = self.borders;
-        let mut tabs: Vec<TabStop> = self
-            .tabs
-            .into_iter()
-            .filter(|tab| tab.kind != Some(TabKind::Clear))
-            .collect();
-        tabs.sort_by(|a, b| a.position.0.total_cmp(&b.position.0));
+        let tabs = self.tabs.without_clears().stops;
         // Word gives the outline level of its built-in headings by their style ids.
         let heading = style
             .as_deref()
             .and_then(|id| id.strip_prefix("Heading"))
+            .filter(|number| number.len() == 1)
             .and_then(|number| number.parse::<u8>().ok())
             .filter(|number| (1..=9).contains(number))
             .map(|number| i64::from(number - 1));
@@ -398,14 +458,85 @@ impl Layer for ParagraphLevel {
             overwrite(slot, border);
         }
         overwrite(&mut self.shading, above.shading);
-        // Tab stops add up; a stop at a position replaces the one below it, and a
-        // cleared one removes it (ECMA-376 §17.3.1.38).
-        for tab in &above.tabs {
-            self.tabs.retain(|below| below.position != tab.position);
-            self.tabs.push(*tab);
-        }
+        self.tabs = self.tabs.overlay(&above.tabs);
         overwrite(&mut self.outline_level, above.outline_level);
         overwrite(&mut self.list_instance, above.list_instance);
         overwrite(&mut self.list_level, above.list_level);
     }
+}
+
+/// Tab stops set and cleared, by position, one per position. A cleared stop stays, to
+/// remove the stop a lower level sets at its position, until nothing lies below.
+#[derive(Clone, Debug, Default)]
+struct Tabs {
+    stops: Arc<[TabStop]>,
+    /// Whether a stop is a cleared one.
+    clears: bool,
+}
+
+impl Tabs {
+    /// The stops of one `w:tabs`, the last of several at one position winning.
+    fn of(tabs: &[TabStop]) -> Self {
+        let mut sorted = tabs.to_vec();
+        // A stable sort keeps stops at one position in the order written.
+        sorted.sort_by(|a, b| a.position.0.total_cmp(&b.position.0));
+        let mut unique: Vec<TabStop> = Vec::with_capacity(sorted.len());
+        for tab in sorted {
+            match unique.last_mut() {
+                Some(last) if last.position == tab.position => *last = tab,
+                _ => unique.push(tab),
+            }
+        }
+        Self::new(unique)
+    }
+
+    fn new(stops: Vec<TabStop>) -> Self {
+        let clears = stops.iter().any(is_cleared);
+        Self {
+            stops: stops.into(),
+            clears,
+        }
+    }
+
+    /// These stops with `above` laid over them: the stops add up, a stop at a position
+    /// replaces the one below it, and a cleared one removes it (ECMA-376 §17.3.1.38).
+    /// Both lists are by position, so one pass merges them; a level without stops costs
+    /// nothing.
+    fn overlay(&self, above: &Tabs) -> Tabs {
+        if above.stops.is_empty() {
+            return self.clone();
+        }
+        if self.stops.is_empty() {
+            return above.clone();
+        }
+        let mut below = self.stops.iter().copied().peekable();
+        let mut merged = Vec::with_capacity(self.stops.len() + above.stops.len());
+        for tab in above.stops.iter() {
+            while let Some(lower) = below.next_if(|lower| lower.position.0 < tab.position.0) {
+                merged.push(lower);
+            }
+            below.next_if(|lower| lower.position.0 == tab.position.0);
+            merged.push(*tab);
+        }
+        merged.extend(below);
+        Tabs::new(merged)
+    }
+
+    /// The stops without the cleared ones, for when nothing lies below.
+    fn without_clears(&self) -> Tabs {
+        if !self.clears {
+            return self.clone();
+        }
+        Tabs::new(
+            self.stops
+                .iter()
+                .filter(|tab| !is_cleared(tab))
+                .copied()
+                .collect(),
+        )
+    }
+}
+
+fn is_cleared(tab: &TabStop) -> bool {
+    tab.kind == Some(TabKind::Clear)
 }

@@ -274,7 +274,7 @@ pub struct ParagraphFormat {
     pub(crate) flags: [bool; ParagraphFlag::COUNT],
     pub(crate) borders: ParagraphBorders,
     pub(crate) shading: Option<Shading>,
-    pub(crate) tabs: Vec<TabStop>,
+    pub(crate) tabs: Arc<[TabStop]>,
     pub(crate) outline_level: Option<u8>,
     pub(crate) list: Option<ListFormat>,
 }

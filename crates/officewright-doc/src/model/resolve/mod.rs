@@ -38,6 +38,13 @@ pub struct Formats<'a> {
     default_paragraph_style: Option<Option<usize>>,
     /// The levels of each list instance named so far.
     lists: HashMap<i64, Option<Arc<paragraph::ListLevels>>>,
+    /// The parsed levels of each list definition named so far, which its instances
+    /// share.
+    definitions: HashMap<i64, Arc<paragraph::DefinitionLevels>>,
+    /// What the document defaults, a paragraph style and a list level give together, by
+    /// the style's index and the list level's address. The levels are kept by `lists`
+    /// and `definitions` for as long as this, so an address names one level.
+    inherited: HashMap<(Option<usize>, Option<usize>), Arc<ParagraphLevel>>,
 }
 
 impl<'a> Formats<'a> {
@@ -50,6 +57,8 @@ impl<'a> Formats<'a> {
             paragraph_defaults: None,
             default_paragraph_style: None,
             lists: HashMap::new(),
+            definitions: HashMap::new(),
+            inherited: HashMap::new(),
         }
     }
 
