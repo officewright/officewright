@@ -14,7 +14,7 @@ use officewright_opc::mce::{Disposition, Processor};
 use officewright_opc::xml::{Event, Input, NsId, Reader, StartTag};
 
 use super::capture::{Budget, Capture};
-use super::styles::check_run_properties;
+use super::styles::{Properties, check_properties};
 use super::{R, R_STRICT, W, W_STRICT, section, shorten};
 use crate::diagnostic::{DiagnosticKind, Diagnostics};
 use crate::model::Names;
@@ -792,12 +792,14 @@ impl Reading<'_, '_, '_> {
                 *table = columns;
             }
         }
-        if matches!(
-            self.c.document.node(node).map(|node| &node.kind),
-            Some(Kind::Run { .. })
-        ) {
+        let which = match self.c.document.node(node).map(|node| &node.kind) {
+            Some(Kind::Run { .. }) => Some(Properties::Run),
+            Some(Kind::Paragraph) => Some(Properties::Paragraph),
+            _ => None,
+        };
+        if let Some(which) = which {
             let names = self.names;
-            check_run_properties(&mut self.c, &names, span, &[], offset);
+            check_properties(&mut self.c, &names, span, &[], which, offset);
         }
         if let Some(node) = self.c.document.nodes.get_mut(node as usize) {
             node.properties.push(span);

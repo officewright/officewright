@@ -20,8 +20,10 @@ fuzz_target!(|data: &[u8]| {
     let _ = document.diagnostics();
     let styles = document.styles();
     let _ = styles.default_run_properties();
+    let _ = styles.default_paragraph_properties();
     for style in styles.iter() {
         let _ = (style.name(), style.based_on(), style.run_properties());
+        let _ = style.paragraph_properties();
         assert!(styles.get(style.id()).is_some());
     }
     let mut blocks: Vec<Block<'_>> = document.sections().flat_map(|s| s.blocks()).collect();
@@ -29,6 +31,7 @@ fuzz_target!(|data: &[u8]| {
         match block {
             Block::Paragraph(paragraph) => {
                 assert!(document.paragraph(paragraph.id()).is_some());
+                let _ = paragraph.properties();
                 let _ = paragraph.text();
                 let mut inlines: Vec<Inline<'_>> = paragraph.inlines().collect();
                 while let Some(inline) = inlines.pop() {

@@ -7,7 +7,8 @@
 //! ```
 //!
 //! With one file it prints the sections, their page setup and their blocks, and with
-//! `--runs` also every run of every paragraph with the properties written on it. With
+//! `--runs` also the style, alignment and list of each paragraph and every run with the
+//! properties written on it. With
 //! `--summary` it opens every file and prints a line for each that does not open, then
 //! how many did and how much text they hold, and the errors by kind.
 
@@ -90,6 +91,24 @@ fn print_block(block: Block<'_>, depth: usize, runs: bool) {
             }
             println!("{indent}paragraph {:?}{note}", paragraph.text());
             if runs {
+                let properties = paragraph.properties();
+                let mut written = String::new();
+                if let Some(style) = properties.style() {
+                    written.push_str(&format!(" style={style}"));
+                }
+                if let Some(justification) = properties.justification() {
+                    written.push_str(&format!(" justification={justification:?}"));
+                }
+                if let Some(numbering) = properties.numbering() {
+                    written.push_str(&format!(
+                        " list={:?} level={:?}",
+                        numbering.instance(),
+                        numbering.level()
+                    ));
+                }
+                if !written.is_empty() {
+                    println!("{indent}  properties:{written}");
+                }
                 for run in paragraph.runs() {
                     println!("{indent}  run {:?}{}", run.text(), describe(run));
                 }

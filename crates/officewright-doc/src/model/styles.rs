@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use super::Document;
-use super::properties::RunProperties;
+use super::properties::{ParagraphProperties, RunProperties};
 use super::xml::Span;
 
 /// The styles of a document as stored: each with its typed attributes and its element
@@ -90,24 +90,37 @@ impl<'a> Styles<'a> {
     /// bottom of every run's formatting.
     pub fn default_run_properties(self) -> RunProperties {
         let document = self.document;
-        let w = &document.names.w;
-        let Some(defaults) = document.styles.defaults else {
-            return RunProperties::default();
-        };
-        document
-            .element(defaults)
-            .children_through_fallback(document.names.mc)
-            .into_iter()
-            .find(|child| child.is(w, "rPrDefault"))
-            .and_then(|default| {
-                default
-                    .children_through_fallback(document.names.mc)
-                    .into_iter()
-                    .find(|child| child.is(w, "rPr"))
-            })
+        self.defaults(["rPrDefault", "rPr"])
             .map_or_else(RunProperties::default, |r_pr| {
                 crate::docx::properties::run_properties(r_pr, &document.names, &mut |_, _, _| {})
             })
+    }
+
+    /// The paragraph properties of the document defaults
+    /// (`w:docDefaults/w:pPrDefault`), the bottom of every paragraph's formatting.
+    pub fn default_paragraph_properties(self) -> ParagraphProperties {
+        let document = self.document;
+        self.defaults(["pPrDefault", "pPr"])
+            .map_or_else(ParagraphProperties::default, |p_pr| {
+                crate::docx::properties::paragraph_properties(
+                    p_pr,
+                    &document.names,
+                    &mut |_, _, _| {},
+                )
+            })
+    }
+
+    /// The element at `path` in `w:docDefaults`.
+    fn defaults(self, path: [&str; 2]) -> Option<super::xml::Element<'a>> {
+        let document = self.document;
+        let mut element = document.element(document.styles.defaults?);
+        for local in path {
+            element = element
+                .children_through_fallback(document.names.mc)
+                .into_iter()
+                .find(|child| child.is(&document.names.w, local))?;
+        }
+        Some(element)
     }
 }
 
@@ -157,6 +170,24 @@ impl<'a> Style<'a> {
     /// Whether the style was made by a user rather than built in (`w:customStyle`).
     pub fn is_custom(self) -> bool {
         self.data.is_custom
+    }
+
+    /// The paragraph properties the style sets itself (its `w:pPr`), without those of
+    /// the styles it is based on.
+    pub fn paragraph_properties(self) -> ParagraphProperties {
+        let document = self.document;
+        document
+            .element(self.data.element)
+            .children_through_fallback(document.names.mc)
+            .into_iter()
+            .find(|child| child.is(&document.names.w, "pPr"))
+            .map_or_else(ParagraphProperties::default, |p_pr| {
+                crate::docx::properties::paragraph_properties(
+                    p_pr,
+                    &document.names,
+                    &mut |_, _, _| {},
+                )
+            })
     }
 
     /// The run properties the style sets itself (its `w:rPr`), without those of the
