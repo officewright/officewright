@@ -36,7 +36,8 @@ family is missing, its metric-compatible substitute (Carlito for Calibri, Libera
 Arial, Times New Roman and Courier New) is used, else a font of similar design (Caladea
 for Cambria, which lays out differently than Cambria in Word) or a common font of the same
 kind. Characters a font cannot show are reported with their line and column; substitutions
-and restrictions in the font's license are printed as warnings.
+and restrictions in the font's license are printed as warnings. Page content and embedded
+fonts are compressed with the Flate filter.
 
 ## C library
 

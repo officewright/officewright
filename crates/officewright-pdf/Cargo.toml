@@ -12,6 +12,11 @@ repository.workspace = true
 exclude = ["data/afm", "tests/helvetica_afm.rs", "tests/embedded_fonts.rs"]
 
 [dependencies]
+# Flate (zlib) compression of content and font streams. officewright-opc reads ZIP
+# archives with it, so the workspace builds it already.
+miniz_oxide = { version = "0.9.1", default-features = false, features = [
+  "with-alloc",
+] }
 officewright-core.workspace = true
 officewright-font.workspace = true
 # The Unicode Script property, to refuse text that needs shaping or right-to-left

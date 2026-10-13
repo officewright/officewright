@@ -6,7 +6,8 @@ use officewright_core::{PageSize, Pt};
 
 use crate::embed::{EXTRA_OBJECTS, Prepared, Usage};
 use crate::font::check_font_size;
-use crate::{Error, Font, Result};
+use crate::stream::stream_object;
+use crate::{Compression, Error, Font, Result};
 
 /// Pages smaller or larger than this are outside ISO 32000-1, Annex C.
 const PAGE_SIDE: std::ops::RangeInclusive<f64> = 3.0..=14400.0;
@@ -25,6 +26,7 @@ const MAX_XREF_OFFSET: u64 = 9_999_999_999;
 #[derive(Clone, Debug, Default)]
 pub struct Document {
     pages: Vec<Page>,
+    compression: Compression,
 }
 
 /// A page of a [`Document`].
@@ -89,6 +91,28 @@ impl Document {
     /// The page at `index`, counting from 0 in the order the pages were added.
     pub fn page_mut(&mut self, index: usize) -> Option<&mut Page> {
         self.pages.get_mut(index)
+    }
+
+    /// Sets how the file stores page content and embedded fonts:
+    /// [`Compression::Flate`] unless set otherwise.
+    ///
+    /// ```
+    /// use officewright_pdf::{Compression, Font, PageSize, Pt, StandardFont, text_to_pdf};
+    ///
+    /// let helvetica = Font::standard(StandardFont::Helvetica);
+    /// let mut doc = text_to_pdf(&"Hello, world\n".repeat(40), PageSize::A4, &helvetica, Pt(11.0))?;
+    /// let compressed = doc.to_bytes()?;
+    /// doc.set_compression(Compression::None);
+    /// assert!(doc.to_bytes()?.len() > compressed.len());
+    /// # Ok::<(), officewright_pdf::Error>(())
+    /// ```
+    pub fn set_compression(&mut self, compression: Compression) {
+        self.compression = compression;
+    }
+
+    /// How the file stores page content and embedded fonts.
+    pub fn compression(&self) -> Compression {
+        self.compression
     }
 
     /// Writes the document as a PDF file to `out`.
@@ -177,7 +201,7 @@ impl Document {
                 }
                 Encoder::Embedded(_, prepared) => {
                     font_dictionaries.push(prepared.dictionary(next_object));
-                    font_objects.extend(prepared.objects(next_object));
+                    font_objects.extend(prepared.objects(next_object, self.compression));
                     next_object += EXTRA_OBJECTS;
                 }
             }
@@ -245,17 +269,7 @@ impl Document {
             )?;
 
             offsets.push(out.written);
-            out.put(
-                format!(
-                    "{} 0 obj\n<< /Length {} >>\nstream\n",
-                    page_id + 1,
-                    content.len()
-                )
-                .as_bytes(),
-            )?;
-            out.put(content)?;
-            // The end-of-line before `endstream` is not part of /Length (§7.3.8.1).
-            out.put(b"\nendstream\nendobj\n")?;
+            out.put_object(page_id + 1, &stream_object("", content, self.compression))?;
         }
 
         for (i, object) in font_objects.iter().enumerate() {
@@ -533,8 +547,26 @@ mod tests {
     }
 
     #[test]
+    fn writes_a_compressed_pdf() {
+        // The same bytes on every platform: CI runs this on Linux, macOS and Windows.
+        let text = "Hello, world\n".repeat(10);
+        let doc = crate::text_to_pdf(&text, PageSize::A4, &helvetica(), Pt(12.0)).unwrap();
+        let pdf = doc.to_bytes().unwrap();
+        assert!(String::from_utf8_lossy(&pdf).contains("/Filter /FlateDecode"));
+        insta::assert_snapshot!(readable(&pdf));
+    }
+
+    #[test]
     fn xref_offsets_point_at_their_objects() {
         let mut doc = hello();
+        // Enough text on the first page for its content stream to be compressed.
+        for line in 0..30 {
+            let y = Pt(700.0 - 14.0 * f64::from(line));
+            doc.page_mut(0)
+                .unwrap()
+                .add_text(Pt(72.0), y, &helvetica(), Pt(12.0), "Hello, world")
+                .unwrap();
+        }
         for _ in 0..2 {
             doc.add_page(PageSize::LETTER)
                 .unwrap()
@@ -543,6 +575,7 @@ mod tests {
         }
         let pdf = doc.to_bytes().unwrap();
         let text = String::from_utf8_lossy(&pdf);
+        assert_eq!(text.matches("/Filter /FlateDecode").count(), 1);
 
         let startxref: usize = text
             .rsplit_once("startxref\n")
@@ -563,6 +596,52 @@ mod tests {
             );
         }
         assert!(entries[10 * 20..].starts_with(b"trailer\n<< /Size 10 /Root 1 0 R >>"));
+    }
+
+    #[test]
+    fn compressed_content_decompresses_to_the_uncompressed_content() {
+        /// The dictionary and data of object 5, the first page's content stream.
+        fn content(pdf: &[u8]) -> (String, Vec<u8>) {
+            let find = |from: usize, what: &[u8]| {
+                from + pdf[from..]
+                    .windows(what.len())
+                    .position(|w| w == what)
+                    .unwrap()
+            };
+            let dictionary = find(0, b"\n5 0 obj\n") + b"\n5 0 obj\n".len();
+            let data = find(dictionary, b"\nstream\n") + b"\nstream\n".len();
+            let dictionary = String::from_utf8(pdf[dictionary..data - 8].to_vec()).unwrap();
+            let (_, length) = dictionary.split_once("/Length ").unwrap();
+            let length: usize = length.split(' ').next().unwrap().parse().unwrap();
+            assert!(pdf[data + length..].starts_with(b"\nendstream\nendobj\n"));
+            (dictionary, pdf[data..data + length].to_vec())
+        }
+
+        let text = "Hello, world\n".repeat(40);
+        let mut doc = crate::text_to_pdf(&text, PageSize::A4, &helvetica(), Pt(11.0)).unwrap();
+        assert_eq!(doc.compression(), Compression::Flate);
+        let compressed = doc.to_bytes().unwrap();
+        doc.set_compression(Compression::None);
+        let uncompressed = doc.to_bytes().unwrap();
+
+        let (dictionary, data) = content(&compressed);
+        assert_eq!(
+            dictionary,
+            format!("<< /Length {} /Filter /FlateDecode >>", data.len())
+        );
+        let (dictionary, plain) = content(&uncompressed);
+        assert_eq!(dictionary, format!("<< /Length {} >>", plain.len()));
+        assert_eq!(
+            miniz_oxide::inflate::decompress_to_vec_zlib(&data).unwrap(),
+            plain
+        );
+        assert!(
+            data.len() * 5 < plain.len(),
+            "{} of {}",
+            data.len(),
+            plain.len()
+        );
+        assert!(!String::from_utf8_lossy(&uncompressed).contains("/Filter"));
     }
 
     #[test]
@@ -667,6 +746,8 @@ mod tests {
             page.add_text(Pt(72.0), Pt(y), &helvetica(), Pt(12.0), text)
                 .unwrap();
         }
+        // Uncompressed, to read the content streams.
+        doc.set_compression(Compression::None);
         let pdf = String::from_utf8_lossy(&doc.to_bytes().unwrap()).into_owned();
 
         // 1 catalog, 2 page tree, 3 Helvetica, then each page and its content stream.
@@ -734,6 +815,7 @@ mod tests {
             .unwrap();
         page.add_text(Pt(0.0), Pt(0.0), &helvetica(), Font::MIN_SIZE, "x")
             .unwrap();
+        doc.set_compression(Compression::None);
         let pdf = String::from_utf8_lossy(&doc.to_bytes().unwrap()).into_owned();
         assert!(pdf.contains("/F1 32767 Tf\n-32767 32767 Td"), "{pdf}");
         assert!(pdf.contains("/F1 0.01 Tf\n0 0 Td"), "{pdf}");

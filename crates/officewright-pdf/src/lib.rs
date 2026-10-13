@@ -12,7 +12,8 @@
 //!   shaping, one glyph per character.
 //!
 //! Text a font cannot show is rejected with an error that names the character and its
-//! offset, rather than altered.
+//! offset, rather than altered. Page content and embedded fonts are compressed
+//! ([`Compression`]).
 //!
 //! ```
 //! use officewright_pdf::{Document, Font, PageSize, Pt, StandardFont};
@@ -34,10 +35,12 @@ mod error;
 mod font;
 mod helvetica;
 mod script;
+mod stream;
 mod text;
 
 pub use document::{Document, Page};
 pub use error::{Error, Result};
 pub use font::{EmbeddingNote, Font, StandardFont};
 pub use officewright_core::{PageSize, Pt};
+pub use stream::Compression;
 pub use text::text_to_pdf;

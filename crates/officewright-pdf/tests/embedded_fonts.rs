@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use officewright_font::{FontBook, FontFace, FontRequest, FontResolver, ResolutionKind};
 use officewright_pdf::{
-    Document, EmbeddingNote, Error, Font, PageSize, Pt, StandardFont, text_to_pdf,
+    Compression, Document, EmbeddingNote, Error, Font, PageSize, Pt, StandardFont, text_to_pdf,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -35,8 +35,68 @@ fn minimal() -> TestResult<Vec<u8>> {
     read("crates/officewright-font/tests/data/minimal.ttf")
 }
 
+/// A stream of a PDF file.
+struct Stream {
+    object: usize,
+    dictionary: String,
+    /// Where its data is in the file.
+    range: std::ops::Range<usize>,
+    /// The data, decompressed if it is Flate-compressed.
+    data: Vec<u8>,
+}
+
+/// The streams of a PDF file this crate wrote.
+fn streams(pdf: &[u8]) -> TestResult<Vec<Stream>> {
+    let mut streams = Vec::new();
+    let mut at = 0;
+    while let Some(found) = pdf
+        .get(at..)
+        .and_then(|rest| rest.windows(8).position(|w| w == b"\nstream\n"))
+    {
+        let head = String::from_utf8_lossy(pdf.get(..at + found).ok_or("bad offset")?);
+        let (before, dictionary) = head.rsplit_once(" 0 obj\n").ok_or("no object")?;
+        let object = before
+            .rsplit(|c: char| !c.is_ascii_digit())
+            .next()
+            .ok_or("no object number")?
+            .parse()?;
+        let (_, length) = dictionary.split_once("/Length ").ok_or("no /Length")?;
+        let length: usize = length
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .ok_or("no length")?
+            .parse()?;
+        let start = at + found + 8;
+        let data = pdf.get(start..start + length).ok_or("short stream")?;
+        let data = if dictionary.contains("/Filter /FlateDecode") {
+            miniz_oxide::inflate::decompress_to_vec_zlib(data).map_err(|err| format!("{err:?}"))?
+        } else {
+            data.to_vec()
+        };
+        streams.push(Stream {
+            object,
+            dictionary: dictionary.to_owned(),
+            range: start..start + length,
+            data,
+        });
+        at = start + length;
+    }
+    Ok(streams)
+}
+
+/// The PDF file of `doc` as text, with the data of every stream decompressed, so that
+/// page content and ToUnicode maps can be read.
 fn pdf_text(doc: &Document) -> TestResult<String> {
-    Ok(String::from_utf8_lossy(&doc.to_bytes()?).into_owned())
+    let pdf = doc.to_bytes()?;
+    let mut text = Vec::new();
+    let mut at = 0;
+    for stream in streams(&pdf)? {
+        text.extend_from_slice(pdf.get(at..stream.range.start).ok_or("bad offset")?);
+        text.extend_from_slice(&stream.data);
+        at = stream.range.end;
+    }
+    text.extend_from_slice(pdf.get(at..).ok_or("bad offset")?);
+    Ok(String::from_utf8_lossy(&text).into_owned())
 }
 
 fn one_line(font: &Font, text: &str) -> TestResult<Document> {
@@ -118,7 +178,8 @@ fn embeds_truetype_fonts_as_cid_fonts() -> TestResult {
     let font = Font::from_bytes(liberation_sans()?, 0)?;
     assert_eq!(font.name(), "LiberationSans");
     assert_eq!(font.embedding_notes(), []);
-    let pdf = pdf_text(&one_line(&font, "Привет, мир")?)?;
+    let doc = one_line(&font, "Привет, мир")?;
+    let pdf = pdf_text(&doc)?;
     for part in [
         "/Subtype /Type0",
         "/Encoding /Identity-H",
@@ -140,15 +201,28 @@ fn embeds_truetype_fonts_as_cid_fonts() -> TestResult {
     assert!(rest.starts_with("LiberationSans "), "{rest}");
     // Eleven characters, nine different glyphs (и and р twice).
     assert!(pdf.contains("9 beginbfchar"), "{pdf}");
-    // A TrueType font program gives its length again (ISO 32000-1, Table 127).
-    let (_, program) = pdf
-        .split_once("8 0 obj\n<< /Length ")
-        .ok_or("no font program")?;
-    let (length, rest) = program.split_once(' ').ok_or("no length")?;
+    // The font program is compressed, and as a TrueType font program it gives its
+    // length again, uncompressed (ISO 32000-1, Table 127). It decompresses to the
+    // program of an uncompressed file, a font of its own.
+    let program = |doc: &Document| -> TestResult<(String, Vec<u8>)> {
+        let program = streams(&doc.to_bytes()?)?
+            .into_iter()
+            .find(|stream| stream.object == 8)
+            .ok_or("no font program")?;
+        Ok((program.dictionary, program.data))
+    };
+    let (dictionary, compressed) = program(&doc)?;
+    assert!(dictionary.contains("/Filter /FlateDecode"), "{dictionary}");
     assert!(
-        rest.starts_with(&format!("/Length1 {length} >>")),
-        "{rest:.40}"
+        dictionary.ends_with(&format!(" /Length1 {} >>", compressed.len())),
+        "{dictionary}"
     );
+    let mut plain = doc.clone();
+    plain.set_compression(Compression::None);
+    let (dictionary, uncompressed) = program(&plain)?;
+    assert!(!dictionary.contains("/Filter"), "{dictionary}");
+    assert_eq!(compressed, uncompressed);
+    FontFace::from_bytes(compressed, 0)?;
     // Without characters that share a glyph, the file is PDF 1.4.
     assert!(pdf.starts_with("%PDF-1.4\n"));
     Ok(())
@@ -468,13 +542,19 @@ fn reports_fonts_it_cannot_use() -> TestResult {
     assert_eq!(err.to_string(), "cannot use the font data");
     let core = officewright_core::Error::from(err);
     assert!(
-        matches!(&core, officewright_core::Error::InvalidArgument(message)
+        matches!(&core, officewright_core::Error::Malformed(message)
             if message.starts_with("cannot use the font data: data is not a TrueType")),
         "{core}"
     );
 
+    // A face the file does not have is the caller's mistake, not damage.
     let err = Font::from_bytes(liberation_sans()?, 3).unwrap_err();
     assert!(matches!(err, Error::Font { .. }), "{err:?}");
+    let core = officewright_core::Error::from(err);
+    assert!(
+        matches!(core, officewright_core::Error::InvalidArgument(_)),
+        "{core}"
+    );
 
     let missing = repository().join("tests/fonts/no-such-font.ttf");
     let err = Font::from_file(&missing, 0).unwrap_err();

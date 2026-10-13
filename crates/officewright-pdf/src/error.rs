@@ -106,7 +106,8 @@ pub enum Error {
         family: String,
     },
     /// A font could not be reduced to the glyphs the document uses: it is damaged in a
-    /// way that only subsetting those glyphs finds.
+    /// way that only subsetting those glyphs finds, or uses a feature the subsetter does
+    /// not support yet.
     Embed {
         /// The font's name.
         font: String,
@@ -237,14 +238,18 @@ impl From<Error> for officewright_core::Error {
             Error::Io(source) | Error::Write { source, .. } | Error::Read { source, .. } => {
                 Self::Io { message, source }
             }
-            // The font error decides the kind; the message keeps every reason, since an
-            // invalid argument carries no source.
+            // The font error decides the kind; the message keeps every reason, since only
+            // an I/O error carries its source.
             Error::Font { source, .. } | Error::Embed { source, .. } => {
                 let message = format!("{message}: {}", chain(&source));
                 match Self::from(source) {
                     Self::Io { source, .. } => Self::Io { message, source },
                     Self::Unsupported(_) => Self::Unsupported(message),
-                    _ => Self::InvalidArgument(message),
+                    Self::Malformed(_) => Self::Malformed(message),
+                    Self::LimitExceeded(_) => Self::LimitExceeded(message),
+                    Self::InvalidArgument(_) => Self::InvalidArgument(message),
+                    // A kind of error this version does not know yet.
+                    _ => Self::Unsupported(message),
                 }
             }
             Error::Unencodable { .. }

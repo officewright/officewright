@@ -9,7 +9,8 @@ use officewright_font::{GlyphId, Subset};
 
 use crate::document::number;
 use crate::font::{Embedded, Lookup};
-use crate::{Error, Result};
+use crate::stream::stream_object;
+use crate::{Compression, Error, Result};
 
 /// How many objects an embedded font has after its font dictionary: the CIDFont, the
 /// font descriptor, the font program and the ToUnicode CMap.
@@ -145,7 +146,11 @@ impl<'a> Prepared<'a> {
 
     /// The objects after the font dictionary, numbered from `first`: the CIDFont, the
     /// font descriptor, the font program and the ToUnicode CMap.
-    pub(crate) fn objects(&self, first: usize) -> [Vec<u8>; EXTRA_OBJECTS] {
+    pub(crate) fn objects(
+        &self,
+        first: usize,
+        compression: Compression,
+    ) -> [Vec<u8>; EXTRA_OBJECTS] {
         let base_font = pdf_name(&self.base_font);
         let (subtype, file, program, program_entries) = match self.subset.cff_table() {
             Some(cff) => (
@@ -180,19 +185,11 @@ impl<'a> Prepared<'a> {
             self.metrics(),
             first + 2
         );
-        let mut program_object =
-            format!("<< /Length {}{program_entries} >>\nstream\n", program.len()).into_bytes();
-        program_object.extend_from_slice(program);
-        program_object.extend_from_slice(b"\nendstream");
-        let cmap = self.to_unicode();
-        let mut cmap_object = format!("<< /Length {} >>\nstream\n", cmap.len()).into_bytes();
-        cmap_object.extend_from_slice(cmap.as_bytes());
-        cmap_object.extend_from_slice(b"\nendstream");
         [
             cid_font.into_bytes(),
             descriptor.into_bytes(),
-            program_object,
-            cmap_object,
+            stream_object(&program_entries, program, compression),
+            stream_object("", self.to_unicode().as_bytes(), compression),
         ]
     }
 

@@ -1,0 +1,51 @@
+name: Bug report
+description: Officewright does something other than its documentation says, or differs from Microsoft Office.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security problems go in a private report instead, as [SECURITY.md](https://github.com/officewright/officewright/blob/main/SECURITY.md) describes.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The release, or the commit if you built from source.
+    validations:
+      required: true
+  - type: dropdown
+    id: interface
+    attributes:
+      label: How you use Officewright
+      options:
+        - Rust crates
+        - C library (from C, C++ or another language)
+        - Command-line tool
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: Operating system and architecture, such as Ubuntu 24.04 x86_64 or Windows 11 arm64.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: Include the exact error message or output.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: For a difference in layout or rendering, what Microsoft Word, Excel or PowerPoint shows.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: Code or commands, and an input file if one is needed. Attach only files you may share publicly, never confidential or personal documents.
+    validations:
+      required: true

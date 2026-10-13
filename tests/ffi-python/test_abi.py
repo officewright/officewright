@@ -5,8 +5,10 @@ OW_LIB must point at the shared library (scripts/check-capi.sh sets it).
 
 import ctypes
 import os
+import re
 import tempfile
 import unittest
+import zlib
 from ctypes import POINTER, byref, c_char_p, c_double, c_int, c_size_t, c_uint8, c_uint32, c_void_p
 from pathlib import Path
 
@@ -14,7 +16,7 @@ from pathlib import Path
 EXPECTED_ABI_VERSION = 1
 
 # OwStatus values, the standard font and the embedding notes from officewright.h.
-OK, NULL_ARGUMENT, INVALID_UTF8, INVALID_ARGUMENT, IO, UNSUPPORTED, PANIC = range(7)
+OK, NULL_ARGUMENT, INVALID_UTF8, INVALID_ARGUMENT, IO, UNSUPPORTED, PANIC, MALFORMED, LIMIT_EXCEEDED = range(9)
 OW_STANDARD_FONT_HELVETICA = 0
 OW_FONT_NOTE_OTHER, OW_FONT_NOTE_PREVIEW_AND_PRINT, OW_FONT_NOTE_EDITABLE, OW_FONT_NOTE_WHOLE_FONT = range(4)
 (
@@ -27,6 +29,7 @@ OW_FONT_NOTE_OTHER, OW_FONT_NOTE_PREVIEW_AND_PRINT, OW_FONT_NOTE_EDITABLE, OW_FO
     OW_RESOLUTION_FALLBACK,
     OW_RESOLUTION_MISSING,
 ) = range(8)
+OW_COMPRESSION_NONE, OW_COMPRESSION_FLATE = range(2)
 
 # The OFL test fonts at the repository root.
 FONTS = Path(__file__).resolve().parent.parent / "fonts"
@@ -49,6 +52,7 @@ declare("ow_pdf_document_new", c_int, POINTER(c_void_p))
 declare("ow_pdf_document_from_text", c_int, c_char_p, c_double, c_double, c_void_p, c_double, POINTER(c_void_p))
 declare("ow_pdf_document_add_page", c_int, c_void_p, c_double, c_double, POINTER(c_size_t))
 declare("ow_pdf_document_add_text", c_int, c_void_p, c_size_t, c_double, c_double, c_void_p, c_double, c_char_p)
+declare("ow_pdf_document_set_compression", c_int, c_void_p, ctypes.c_int32)
 declare("ow_pdf_document_save_path", c_int, c_void_p, c_char_p)
 declare("ow_pdf_document_save_bytes", c_int, c_void_p, POINTER(POINTER(c_uint8)), POINTER(c_size_t))
 declare("ow_pdf_document_free", None, c_void_p)
@@ -130,6 +134,8 @@ class AbiTest(unittest.TestCase):
         # The document keeps what it needs, so the font can go before the document.
         lib.ow_pdf_font_free(font)
         self.assertEqual(last_error(), "")
+        # Uncompressed, to read the page content.
+        self.check(lib.ow_pdf_document_set_compression(doc, OW_COMPRESSION_NONE))
 
         pdf = self.save_bytes(doc)
         self.assertTrue(pdf.startswith(b"%PDF-1.4\n"))
@@ -147,6 +153,7 @@ class AbiTest(unittest.TestCase):
         doc = c_void_p()
         self.check(lib.ow_pdf_document_from_text(b"Hello,\nworld\fpage two", 612.0, 792.0, font, 11.0, byref(doc)))
         self.addCleanup(lib.ow_pdf_document_free, doc)
+        self.check(lib.ow_pdf_document_set_compression(doc, OW_COMPRESSION_NONE))
         pdf = self.save_bytes(doc)
         self.assertIn(b"/Count 2", pdf)
         self.assertIn(b"(page two) Tj", pdf)
@@ -154,6 +161,34 @@ class AbiTest(unittest.TestCase):
         width = c_double()
         self.check(lib.ow_pdf_font_text_width(font, b"H", 10.0, byref(width)))
         self.assertAlmostEqual(width.value, 7.22)
+
+    def test_compresses_page_content_unless_told_not_to(self):
+        font = self.helvetica()
+        doc = c_void_p()
+        self.check(lib.ow_pdf_document_from_text(b"Hello, world\n" * 40, 595.0, 842.0, font, 11.0, byref(doc)))
+        self.addCleanup(lib.ow_pdf_document_free, doc)
+        compressed = self.save_bytes(doc)
+        self.check(lib.ow_pdf_document_set_compression(doc, OW_COMPRESSION_NONE))
+        plain = self.save_bytes(doc)
+        self.assertNotIn(b"/Filter", plain)
+        self.assertIn(b"(Hello, world) Tj", plain)
+
+        # The page content is object 5 in both; compressed, it inflates to the plain one.
+        def content(pdf):
+            match = re.search(rb"\n5 0 obj\n<< /Length (\d+)( /Filter /FlateDecode)? >>\nstream\n", pdf)
+            self.assertIsNotNone(match)
+            return match.group(2), pdf[match.end() : match.end() + int(match.group(1))]
+
+        flate, data = content(compressed)
+        self.assertEqual(flate, b" /Filter /FlateDecode")
+        self.assertEqual(content(plain), (None, zlib.decompress(data)))
+
+        self.check(lib.ow_pdf_document_set_compression(doc, 2), INVALID_ARGUMENT)
+        self.assertEqual(last_error(), "compression is 2, not OW_COMPRESSION_NONE (0) or OW_COMPRESSION_FLATE (1)")
+        self.assertEqual(self.save_bytes(doc), plain)
+        self.check(lib.ow_pdf_document_set_compression(doc, OW_COMPRESSION_FLATE))
+        self.assertEqual(self.save_bytes(doc), compressed)
+        self.check(lib.ow_pdf_document_set_compression(None, OW_COMPRESSION_NONE), NULL_ARGUMENT)
 
     def test_reports_errors_with_a_status_and_a_message(self):
         doc = self.new_document()
@@ -269,8 +304,14 @@ class AbiTest(unittest.TestCase):
 
     def test_reports_fonts_it_cannot_open(self):
         font = c_void_p(1)
-        self.check(lib.ow_pdf_font_open_bytes(b"not a font", 10, 0, byref(font)), INVALID_ARGUMENT)
+        self.check(lib.ow_pdf_font_open_bytes(b"not a font", 10, 0, byref(font)), MALFORMED)
         self.assertTrue(last_error().startswith("cannot use the font data: data is not a TrueType"), last_error())
+        self.assertFalse(font)
+        # A face the file does not have is the caller's mistake, not damage.
+        data = (FONTS / "liberation" / "LiberationSans-Regular.ttf").read_bytes()
+        font = c_void_p(1)
+        self.check(lib.ow_pdf_font_open_bytes(data, len(data), 1, byref(font)), INVALID_ARGUMENT)
+        self.assertEqual(last_error(), "cannot use the font data: font face 1 does not exist, the file has 1 face")
         self.assertFalse(font)
         missing = FONTS / "no-such-font.ttf"
         self.check(lib.ow_pdf_font_open_path(str(missing).encode(), 0, byref(font)), IO)

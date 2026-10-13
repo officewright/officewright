@@ -469,6 +469,11 @@ fn bounds_the_number_of_nodes() {
         ),
         "{err}"
     );
+    let message = err.to_string();
+    assert!(matches!(
+        officewright_core::Error::from(err),
+        officewright_core::Error::LimitExceeded(ref m) if *m == message
+    ));
     let options = LoadOptions::new().with_limits(Limits::new().with_max_nodes(100));
     assert!(options.open_bytes(docx(&body)).is_ok());
 }
@@ -536,7 +541,7 @@ fn opens_files_and_converts_errors_into_core_errors() {
     let malformed = Document::from_bytes(Vec::new()).unwrap_err();
     assert!(matches!(
         officewright_core::Error::from(malformed),
-        officewright_core::Error::InvalidArgument(_)
+        officewright_core::Error::Malformed(_)
     ));
 }
 

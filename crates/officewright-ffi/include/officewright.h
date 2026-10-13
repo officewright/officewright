@@ -102,6 +102,19 @@
 #define OW_RESOLUTION_MISSING 7
 
 /**
+ * For `ow_pdf_document_set_compression`: page content and embedded fonts are stored as
+ * they are, so the page content can be read in a text editor.
+ */
+#define OW_COMPRESSION_NONE 0
+
+/**
+ * For `ow_pdf_document_set_compression`: page content and embedded fonts are
+ * compressed with the Flate filter wherever that makes them smaller. Every PDF reader
+ * decompresses Flate, so this is the default.
+ */
+#define OW_COMPRESSION_FLATE 1
+
+/**
  * The result of a fallible `ow_*` function.
  *
  * New values may be added in later versions; treat any value other than
@@ -138,6 +151,16 @@ typedef enum OwStatus {
    * freed afterwards.
    */
   OW_STATUS_PANIC = 6,
+  /**
+   * The input is damaged, or is not what it was given as: data that is not a font, a
+   * font whose tables cannot be read.
+   */
+  OW_STATUS_MALFORMED = 7,
+  /**
+   * The input exceeds one of the limits that keep the time and memory a file can take
+   * bounded.
+   */
+  OW_STATUS_LIMIT_EXCEEDED = 8,
 } OwStatus;
 
 /**
@@ -288,12 +311,25 @@ enum OwStatus ow_pdf_document_add_text(struct OwPdfDocument *doc,
                                        const char *text);
 
 /**
+ * Sets how the document stores page content and embedded fonts when it is saved:
+ * `OW_COMPRESSION_FLATE`, the default, or `OW_COMPRESSION_NONE`. Fails with
+ * `OW_STATUS_INVALID_ARGUMENT` for any other value, leaving the document unchanged.
+ *
+ * # Safety
+ *
+ * `doc` must be NULL or a live handle not used by another thread during the call.
+ */
+enum OwStatus ow_pdf_document_set_compression(struct OwPdfDocument *doc, int32_t compression);
+
+/**
  * Writes the document as a PDF file at `path` (UTF-8), replacing any existing file.
  *
  * The file is generated in memory first, so a document error never touches `path`;
  * an I/O error while writing can leave a partial file. Fails with
- * `OW_STATUS_INVALID_ARGUMENT` if the document has no pages and `OW_STATUS_IO` if the
- * file cannot be written.
+ * `OW_STATUS_INVALID_ARGUMENT` if the document has no pages, `OW_STATUS_MALFORMED` if an
+ * embedded font turns out to be damaged when it is reduced to the glyphs the document
+ * uses, `OW_STATUS_UNSUPPORTED` if it uses a feature that cannot be subset yet, and
+ * `OW_STATUS_IO` if the file cannot be written.
  *
  * # Safety
  *
@@ -306,7 +342,10 @@ enum OwStatus ow_pdf_document_save_path(const struct OwPdfDocument *doc, const c
  * Returns the document as a PDF file in memory: `*out_data` points to `*out_len`
  * bytes, which the caller releases with `ow_bytes_free(*out_data, *out_len)`.
  *
- * Fails with `OW_STATUS_INVALID_ARGUMENT` if the document has no pages.
+ * Fails with `OW_STATUS_INVALID_ARGUMENT` if the document has no pages,
+ * `OW_STATUS_MALFORMED` if an embedded font turns out to be damaged when it is reduced
+ * to the glyphs the document uses, and `OW_STATUS_UNSUPPORTED` if it uses a feature
+ * that cannot be subset yet.
  *
  * # Safety
  *
@@ -351,9 +390,10 @@ enum OwStatus ow_pdf_font_new_standard(int32_t standard_font, struct OwPdfFont *
  * right-to-left layout is refused. Restrictions in the font's license that do not stop
  * embedding are listed by `ow_pdf_font_note_count` and `ow_pdf_font_note`.
  *
- * Fails with `OW_STATUS_IO` if the file cannot be read, `OW_STATUS_INVALID_ARGUMENT` if
- * it is not a font, has no such face or is damaged, and `OW_STATUS_UNSUPPORTED` if its
- * license forbids embedding or its outlines cannot be embedded (CFF2). On success
+ * Fails with `OW_STATUS_IO` if the file cannot be read, `OW_STATUS_MALFORMED` if it is
+ * not a font or is damaged, `OW_STATUS_INVALID_ARGUMENT` if it has no such face, and
+ * `OW_STATUS_UNSUPPORTED` if its license forbids embedding or its outlines cannot be
+ * embedded (CFF2). On success
  * `*out_font` is a new handle for `ow_pdf_font_free`.
  *
  * # Safety
@@ -480,8 +520,8 @@ enum OwStatus ow_font_book_add_dir(struct OwFontBook *book, const char *path, si
  * Adds the font faces of the font file or collection at `path` (UTF-8), and returns in
  * `*out_added` the number of faces added.
  *
- * Fails with `OW_STATUS_IO` if the file cannot be read and `OW_STATUS_INVALID_ARGUMENT`
- * if it is not a font or every face in it is damaged.
+ * Fails with `OW_STATUS_IO` if the file cannot be read and `OW_STATUS_MALFORMED` if it
+ * is not a font or every face in it is damaged.
  *
  * # Safety
  *
@@ -496,8 +536,8 @@ enum OwStatus ow_font_book_add_file(struct OwFontBook *book, const char *path, s
  * and returns in `*out_added` the number of faces added. The bytes are copied; the
  * caller keeps its buffer.
  *
- * Fails with `OW_STATUS_INVALID_ARGUMENT` if the data is not a font or every face in
- * it is damaged.
+ * Fails with `OW_STATUS_MALFORMED` if the data is not a font or every face in it is
+ * damaged.
  *
  * # Safety
  *
@@ -589,8 +629,8 @@ enum OwStatus ow_font_resolver_new(const struct OwFontBook *book,
  *
  * Fails with `OW_STATUS_UNSUPPORTED` if no font could be found or the chosen font's
  * license forbids embedding, `OW_STATUS_INVALID_ARGUMENT` if `bold` or `italic` is not
- * 0 or 1 or the chosen font is damaged, and `OW_STATUS_IO` if its file cannot be read
- * any more.
+ * 0 or 1, `OW_STATUS_MALFORMED` if the chosen font is damaged, and `OW_STATUS_IO` if
+ * its file cannot be read any more.
  *
  * # Safety
  *

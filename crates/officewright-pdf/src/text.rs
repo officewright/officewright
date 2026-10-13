@@ -184,7 +184,7 @@ fn units(lookup: &Lookup<'_>, ch: char) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::StandardFont;
+    use crate::{Compression, StandardFont};
 
     fn helvetica() -> Font {
         Font::standard(StandardFont::Helvetica)
@@ -346,10 +346,11 @@ mod tests {
 
     #[test]
     fn places_lines_inside_the_margins() {
-        let pdf = text_to_pdf("first\nsecond", PageSize::LETTER, &helvetica(), Pt(10.0))
-            .unwrap()
-            .to_bytes()
-            .unwrap();
+        let mut doc =
+            text_to_pdf("first\nsecond", PageSize::LETTER, &helvetica(), Pt(10.0)).unwrap();
+        // Uncompressed, to read the content stream.
+        doc.set_compression(Compression::None);
+        let pdf = doc.to_bytes().unwrap();
         let pdf = String::from_utf8_lossy(&pdf);
         assert!(pdf.contains("72 710 Td\n(first) Tj"), "{pdf}");
         assert!(pdf.contains("72 698 Td\n(second) Tj"), "{pdf}");
