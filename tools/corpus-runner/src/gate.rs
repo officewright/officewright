@@ -254,7 +254,9 @@ pub fn measure(report: &Report, same_fonts: bool) -> Vec<Measure> {
     let refused = report
         .files
         .iter()
-        .filter(|file| file.score_error.is_some() && file.status != Status::Opened)
+        .filter(|file| {
+            (file.scores.is_some() || file.score_error.is_some()) && file.status != Status::Opened
+        })
         .count();
     let unscored = report
         .files
@@ -840,6 +842,18 @@ mod tests {
         );
         assert!(branch[1].worse_than(&main[1]));
         assert!(census(&report, false).contains("1 reference documents not scored"));
+        // A reference document that did not open counts even if a PDF of it was scored.
+        let mut stale = good();
+        named(&mut stale, "c/letter.docx").status = Status::ExpectedError;
+        let measures = measure(&stale, false);
+        assert_eq!(measures[1].pass, Some(false));
+        assert!(
+            measures[1]
+                .text
+                .contains("1 reference documents not opened"),
+            "{}",
+            measures[1].text
+        );
         // A row that main measured and the branch cannot is worse too.
         let unmeasured = measure(
             &Report::new(vec![file("c/a.docx", Status::Opened, None)]),
@@ -901,6 +915,37 @@ mod tests {
         };
         assert_eq!(row(6, &lines(95, 0.95)), Some(true));
         assert_eq!(row(6, &lines(94, 0.94)), Some(false));
+        // 4: every rule document E-* has Word's page count, whatever the share.
+        let rule_off = |i: usize, s: &mut Scores| {
+            if i == 0 {
+                s.pages = 3;
+            }
+        };
+        let with_rule = |make: &dyn Fn(usize, &mut Scores), rule: bool| {
+            let files = (0..20)
+                .map(|index| {
+                    let mut s = scores(2, 1.0, 100, 100, &["Carlito"]);
+                    make(index, &mut s);
+                    let name = if rule && index == 0 {
+                        "E-rule".to_owned()
+                    } else {
+                        format!("d{index:02}")
+                    };
+                    file(&format!("c/{name}.docx"), Status::Opened, Some(s))
+                })
+                .collect();
+            measure(&Report::new(files), false)[3].pass
+        };
+        assert_eq!(
+            with_rule(&rule_off, false),
+            Some(true),
+            "19 of 20 is enough"
+        );
+        assert_eq!(
+            with_rule(&rule_off, true),
+            Some(false),
+            "not for a rule document"
+        );
         // 7: medians 0.5 pt and p95 2 pt.
         assert_eq!(
             row(7, &|_, s| (s.dx_median, s.dy_median, s.dy_p95) =
@@ -916,6 +961,22 @@ mod tests {
         assert_eq!(
             row(7, &|i, s| if i == 0 {
                 s.dy_median = Some(0.501)
+            }),
+            Some(false)
+        );
+        assert_eq!(
+            row(7, &|_, s| (s.dx_p95, s.dy_p95) = (Some(2.0), Some(2.0))),
+            Some(true)
+        );
+        assert_eq!(
+            row(7, &|i, s| if i == 0 {
+                s.dx_p95 = Some(2.001)
+            }),
+            Some(false)
+        );
+        assert_eq!(
+            row(7, &|i, s| if i == 0 {
+                s.dy_p95 = Some(2.001)
             }),
             Some(false)
         );
@@ -945,6 +1006,16 @@ mod tests {
             }),
             Some(false)
         );
+        // 9: class T, 0.02 lower.
+        let twin = |page: f64, mean: f64| {
+            move |_: usize, s: &mut Scores| {
+                s.word_fonts = Some(vec!["Calibri".to_owned()]);
+                (s.ssim_min, s.ssim_mean) = (page, mean);
+            }
+        };
+        assert_eq!(row(9, &twin(0.88, 0.93)), Some(true));
+        assert_eq!(row(9, &twin(0.8799, 0.93)), Some(false));
+        assert_eq!(row(9, &twin(0.88, 0.9299)), Some(false));
     }
 
     #[test]
