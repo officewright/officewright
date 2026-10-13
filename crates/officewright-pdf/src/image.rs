@@ -34,6 +34,9 @@ const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 /// from the same data, and a document embeds each image once however often it is drawn.
 /// An `Image` is `Send` and `Sync`.
 ///
+/// One of the drawing primitives the layout engine paints with: public, but exempt from
+/// semantic versioning until officewright 1.0 (feature `unstable-drawing`).
+///
 /// ```
 /// use officewright_pdf::{Document, Image, PageSize, Pt};
 ///

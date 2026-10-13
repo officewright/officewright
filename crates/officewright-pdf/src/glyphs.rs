@@ -16,10 +16,15 @@ use crate::{Error, Font, Result};
 /// for longer text is shown with replacement text. A ligature stands for a few characters.
 const MAX_MAPPED_UNITS: usize = 32;
 
-/// The most elements an array, and the most bytes a string, may have in PDF 1.4 (PDF
-/// Reference 1.4, Appendix C).
+/// The most elements an array may have in PDF 1.4 (PDF Reference 1.4, Appendix C), and the
+/// most bytes a string may have in the PDF 1.5 that replacement text makes a file: 32767
+/// (ISO 32000-1, Annex C; PDF 1.4 allows 65535).
 const MAX_ARRAY_ELEMENTS: usize = 8191;
-const MAX_STRING_BYTES: usize = 65535;
+const MAX_STRING_BYTES: usize = 32767;
+
+/// The most UTF-16 code units of text a cluster may have: its replacement text, two bytes
+/// a unit after a two-byte byte order mark, must fit in a string.
+const MAX_CLUSTER_UNITS: usize = (MAX_STRING_BYTES - 2) / 2;
 
 /// The smallest and largest horizontal scale of a run: 1 % to 1000 %, which covers Word's
 /// character scale (`w:w`, 1 % to 600 %).
@@ -77,31 +82,30 @@ impl PlacedGlyph {
 /// stretches or squeezes its glyphs (Word's character scale), a skew that slants them
 /// (synthetic italic), and a stroke around the outlines (synthetic bold).
 ///
-/// ```
+/// One of the drawing primitives the layout engine paints with: public, but exempt from
+/// semantic versioning until officewright 1.0 (feature `unstable-drawing`).
+///
+/// ```no_run
 /// use officewright_pdf::{Document, Font, GlyphId, GlyphRun, PageSize, PlacedGlyph, Pt};
 ///
-/// // A test font whose glyph 2 is A, 600/1000 em wide, and glyph 3 an acute accent. A
-/// // shaper chooses the glyphs and their positions.
-/// let font = Font::from_file(
-///     concat!(env!("CARGO_MANIFEST_DIR"), "/../officewright-font/tests/data/minimal.ttf"),
-///     0,
-/// )?;
-/// let (a, acute) = (GlyphId::new(2), GlyphId::new(3));
-/// let mut run = GlyphRun::new(&font, Pt(20.0), Pt(72.0), Pt(700.0));
-/// run.push_cluster("A", [PlacedGlyph::new(a, Pt(0.0), Pt(0.0))]);
-/// // Á as a base and a mark: the A 12 pt further on, the accent raised 2 pt above it.
+/// let font = Font::from_file("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 0)?;
+/// // A shaper chooses the glyphs and their positions; these are made up.
+/// let (ffi, x, acute) = (GlyphId::new(2400), GlyphId::new(91), GlyphId::new(1440));
+/// let mut run = GlyphRun::new(&font, Pt(12.0), Pt(72.0), Pt(700.0));
+/// // A ligature: one glyph for three characters.
+/// run.push_cluster("ffi", [PlacedGlyph::new(ffi, Pt(0.0), Pt(0.0))]);
+/// // A base and its mark for one character, the accent raised 1.5 pt.
 /// run.push_cluster(
-///     "Á",
+///     "x\u{301}",
 ///     [
-///         PlacedGlyph::new(a, Pt(12.0), Pt(0.0)),
-///         PlacedGlyph::new(acute, Pt(12.0), Pt(2.0)),
+///         PlacedGlyph::new(x, Pt(10.4), Pt(0.0)),
+///         PlacedGlyph::new(acute, Pt(11.1), Pt(1.5)),
 ///     ],
 /// );
 ///
 /// let mut doc = Document::new();
 /// doc.add_page(PageSize::A4)?.draw_glyphs(&run)?;
-/// // The cluster of two glyphs has replacement text, a PDF 1.5 feature.
-/// assert!(doc.to_bytes()?.starts_with(b"%PDF-1.5"));
+/// doc.save("glyphs.pdf")?;
 /// # Ok::<(), officewright_pdf::Error>(())
 /// ```
 #[derive(Clone, Debug, PartialEq)]
@@ -171,8 +175,8 @@ impl GlyphRun {
     }
 
     /// Appends a cluster: `text` and the glyphs that show it. Text extraction returns the
-    /// text, which may be empty for glyphs that stand for no text, such as tab leaders;
-    /// a cluster needs at least one glyph.
+    /// text, which may be empty for glyphs that stand for no text, such as tab leaders,
+    /// and may have up to 16382 UTF-16 code units; a cluster needs at least one glyph.
     pub fn push_cluster(&mut self, text: &str, glyphs: impl IntoIterator<Item = PlacedGlyph>) {
         self.glyphs.extend(glyphs);
         self.clusters.push((text.to_owned(), self.glyphs.len()));
@@ -250,9 +254,18 @@ impl GlyphRun {
             check_length("stroke width", width)?;
         }
         let count = embedded.face.glyph_count();
-        for (index, (_, glyphs)) in self.clusters().enumerate() {
+        for (index, (text, glyphs)) in self.clusters().enumerate() {
             if glyphs.is_empty() {
                 return Err(Error::EmptyCluster { cluster: index });
+            }
+            let units = text.encode_utf16().count();
+            if units > MAX_CLUSTER_UNITS {
+                return Err(Error::OutOfRange {
+                    what: "cluster text length in UTF-16 code units",
+                    value: units as f64,
+                    min: 0.0,
+                    max: MAX_CLUSTER_UNITS as f64,
+                });
             }
             for placed in glyphs {
                 let glyph = placed.glyph.to_u16();
@@ -416,7 +429,7 @@ impl Writer<'_, '_> {
         let glyph = placed.glyph.to_u16();
         let cid = self.prepared.cid(glyph);
         match self.array.last_mut() {
-            // A string may have 65535 bytes, two per CID; the element starts with `<`.
+            // A string may have 32767 bytes, two per CID; the element starts with `<`.
             Some(last) if last.starts_with('<') && last.len() < 1 + 4 * (MAX_STRING_BYTES / 2) => {
                 let _ = write!(last, "{cid:04X}");
             }
