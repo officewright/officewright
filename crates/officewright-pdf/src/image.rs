@@ -52,9 +52,16 @@ const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 ///     .draw_image(&image, Pt(72.0), Pt(600.0), Pt(144.0), Pt(144.0))?;
 /// # Ok::<(), officewright_pdf::Error>(())
 /// ```
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Image {
     inner: Arc<Inner>,
+}
+
+/// Shows the image's size, encoding and the length of its file, not the file's bytes.
+impl fmt::Debug for Image {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.inner.fmt(f)
+    }
 }
 
 impl PartialEq for Image {
@@ -65,13 +72,23 @@ impl PartialEq for Image {
 
 impl Eq for Image {}
 
-#[derive(Debug)]
 struct Inner {
     /// The file, which tells images apart.
     source: Arc<[u8]>,
     width: u32,
     height: u32,
     encoding: Encoding,
+}
+
+impl fmt::Debug for Inner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Image")
+            .field("bytes", &self.source.len())
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("encoding", &self.encoding)
+            .finish()
+    }
 }
 
 /// How an image goes into a PDF.
@@ -192,7 +209,8 @@ impl Image {
     /// - [`Error::UnsupportedImage`] for data in another format, and for JPEG and PNG
     ///   features PDF cannot show: lossless, hierarchical and arithmetic-coded JPEG,
     ///   12-bit JPEG, JPEG with 2 components or a height given only after the first
-    ///   scan, PNG with a compression or filter method other than the standard one.
+    ///   scan, PNG with a compression or filter method other than the standard one or with
+    ///   a critical chunk this reader does not know.
     /// - [`Error::MalformedImage`] for a damaged file: truncated, with a wrong PNG
     ///   checksum, missing or invalid headers, or compressed data that does not decompress
     ///   to the size its header gives.
@@ -236,6 +254,14 @@ impl Image {
     /// Whether the image needs PDF 1.5: 16-bit samples do.
     pub(crate) fn needs_pdf_15(&self) -> bool {
         matches!(self.inner.encoding, Encoding::Png { bits: 16, .. })
+    }
+
+    /// How many objects the image takes in a PDF: one, and one more for a soft mask.
+    pub(crate) fn object_count(&self) -> usize {
+        match &self.inner.encoding {
+            Encoding::Decoded { alpha: Some(_), .. } => 2,
+            _ => 1,
+        }
     }
 
     /// The image's objects, the first numbered `first`: the image XObject and its soft
@@ -350,9 +376,10 @@ fn read_jpeg(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> 
     let mut frame = None;
     let mut adobe = false;
     loop {
-        // A marker is 0xFF and a code; more 0xFF bytes may pad it (B.1.1.2).
-        if data.get(at) != Some(&0xFF) {
-            return Err(malformed(format!("no JPEG marker at byte {at}")));
+        // A marker is 0xFF and a code; more 0xFF bytes may pad it (B.1.1.2). Other bytes
+        // before a marker are skipped, as libjpeg skips them.
+        while data.get(at).is_some_and(|&byte| byte != 0xFF) {
+            at += 1;
         }
         while data.get(at) == Some(&0xFF) {
             at += 1;
@@ -390,7 +417,9 @@ fn read_jpeg(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> 
             }
             // DHT, JPG and DAC are not frame headers.
             0xC4 | 0xC8 | 0xCC => {}
-            0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF => {
+            // Lossless, differential and arithmetic-coded frames, and the DHP and EXP
+            // markers of hierarchical files (B.3, Annex J).
+            0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF | 0xDE | 0xDF => {
                 return Err(unsupported(
                     "lossless, hierarchical and arithmetic-coded JPEG cannot go into a PDF",
                 ));
@@ -491,13 +520,16 @@ impl Header {
     }
 
     /// The size of the decompressed data: every row of every pass with its filter byte. A
-    /// pass with no pixels has no rows.
-    fn data_size(self) -> u64 {
+    /// pass with no pixels has no rows. `None` if it does not fit in 64 bits, as for a
+    /// 16-bit colour image of 2^31 - 1 by 2^31 - 1 pixels.
+    fn data_size(self) -> Option<u64> {
         self.passes()
             .iter()
             .filter(|pass| pass.width > 0)
-            .map(|pass| pass.height * (1 + self.row_bytes(pass.width)))
-            .sum()
+            .try_fold(0u64, |size, pass| {
+                let row = self.row_bytes(pass.width).checked_add(1)?;
+                size.checked_add(pass.height.checked_mul(row)?)
+            })
     }
 }
 
@@ -536,13 +568,19 @@ fn read_png(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> {
                 "the PNG chunk at byte {at} is truncated"
             )));
         };
-        if crc32(data.get(at + 4..end).unwrap_or_default()) != crc {
+        let critical = kind.first().is_some_and(u8::is_ascii_uppercase);
+        let damaged = crc32(data.get(at + 4..end).unwrap_or_default()) != crc;
+        if damaged && critical {
             return Err(malformed(format!(
                 "the PNG chunk {} at byte {at} has a wrong CRC",
                 String::from_utf8_lossy(kind)
             )));
         }
         at = end.saturating_add(4);
+        // An ancillary chunk with a wrong CRC is left out, as libpng leaves it out.
+        if damaged {
+            continue;
+        }
         if header.is_none() && kind != b"IHDR" {
             return Err(malformed("the PNG file does not start with an IHDR chunk"));
         }
@@ -565,11 +603,11 @@ fn read_png(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> {
     let Some(header) = header else {
         return Err(malformed("the PNG file has no IHDR chunk"));
     };
-    let size = header.data_size();
-    if size > MAX_PNG_DATA {
-        return Err(Problem::TooLarge);
-    }
-    let size = usize::try_from(size).map_err(|_| Problem::TooLarge)?;
+    let size = header
+        .data_size()
+        .filter(|&size| size <= MAX_PNG_DATA)
+        .and_then(|size| usize::try_from(size).ok())
+        .ok_or(Problem::TooLarge)?;
 
     let palette = match (header.color_type, palette) {
         (3, None) => return Err(malformed("the PNG palette image has no PLTE chunk")),
@@ -587,8 +625,18 @@ fn read_png(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> {
         _ => None,
     };
     // Transparency is part of the pixels for images with an alpha channel, and a tRNS
-    // chunk there is not allowed (11.3.2.1); it is ignored, as decoders do.
-    let transparency = transparency.filter(|_| matches!(header.color_type, 0 | 2 | 3));
+    // chunk there is not allowed (11.3.2.1); it is ignored, as decoders do. So is a tRNS
+    // chunk of the wrong size for a greyscale or true colour image, and a palette's is
+    // cut to the palette's entries.
+    let transparency = match (header.color_type, transparency, &palette) {
+        (0, Some(key), _) if key.len() == 2 => Some(key),
+        (2, Some(key), _) if key.len() == 6 => Some(key),
+        (3, Some(mut alpha), Some(palette)) => {
+            alpha.truncate(palette.len() / 3);
+            Some(alpha)
+        }
+        _ => None,
+    };
 
     let space = match (header.color_type, &palette) {
         (0 | 4, _) => ColorSpace::Gray,
@@ -618,7 +666,7 @@ fn read_png(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> {
             3
         };
         let alpha = u64::from(matches!(header.color_type, 4 | 6) || transparency.is_some());
-        if pixels * (color + alpha) > MAX_PNG_DATA {
+        if pixels.saturating_mul(color + alpha) > MAX_PNG_DATA {
             return Err(Problem::TooLarge);
         }
     }
@@ -1475,6 +1523,14 @@ pub(crate) mod tests {
                 "the PNG IHDR chunk is not 13 bytes long",
             ),
             (
+                {
+                    let mut data = PNG_SIGNATURE.to_vec();
+                    Png::chunk(&mut data, b"IHDR", &[&png.header()[..], &[0]].concat());
+                    data
+                },
+                "the PNG IHDR chunk is not 13 bytes long",
+            ),
+            (
                 png.encode_with(&compress_to_vec_zlib(&png.rows()[..30], 6)),
                 "the PNG image data decompresses to 30 bytes, not 39",
             ),
@@ -1526,6 +1582,11 @@ pub(crate) mod tests {
         let mut palette = Png::new(2, 2, 3, 8);
         palette.palette = None;
         assert!(error(palette.encode()).ends_with("the PNG palette image has no PLTE chunk"));
+        palette.palette = Some(Vec::new());
+        assert!(
+            error(palette.encode())
+                .ends_with("the PNG palette has 0 bytes, not 3 for each of 1 to 256 entries")
+        );
         palette.palette = Some(vec![1, 2, 3, 4]);
         assert!(
             error(palette.encode())
@@ -1563,6 +1624,97 @@ pub(crate) mod tests {
             error(b"GIF89a".to_vec()),
             "image data cannot be used: it is neither a JPEG nor a PNG file"
         );
+    }
+
+    #[test]
+    fn refuses_png_files_whose_size_overflows() {
+        // 2^31 - 1 rows of 6 × (2^31 - 1) bytes: more than 2^64 bytes of data. This
+        // overflowed the arithmetic once.
+        let mut png = Png::new(1, 1, 2, 16);
+        png.width = 0x7FFF_FFFF;
+        png.height = 0x7FFF_FFFF;
+        let image = png.encode_with(&compress_to_vec_zlib(&[0; 10], 6));
+        assert!(matches!(
+            Image::from_bytes(image),
+            Err(Error::ImageTooLarge { path: None })
+        ));
+    }
+
+    #[test]
+    fn counts_the_alpha_of_decoded_images_against_the_limit() {
+        // 8256 × 8256 palette pixels: 68 MB of data, 204 MB decoded to RGB, 272.6 MB with
+        // the alpha that partial transparency adds, over 2^28 bytes.
+        let mut png = Png::new(1, 1, 3, 8);
+        png.width = 8256;
+        png.height = 8256;
+        png.transparency = Some(vec![128]);
+        let image = png.encode_with(&compress_to_vec_zlib(&[0; 10], 6));
+        assert!(matches!(
+            Image::from_bytes(image),
+            Err(Error::ImageTooLarge { .. })
+        ));
+        // Without transparency it is passed through, and only its data counts.
+        png.transparency = None;
+        let image = png.encode_with(&compress_to_vec_zlib(&[0; 10], 6));
+        assert!(error(image).contains("decompresses to"));
+    }
+
+    #[test]
+    fn leaves_out_ancillary_chunks_with_a_wrong_crc_as_libpng_does() {
+        let mut png = Png::new(3, 2, 3, 8);
+        png.transparency = Some(vec![0]);
+        let good = png.encode();
+        let trns = good.windows(4).position(|w| w == b"tRNS").unwrap();
+        // The CRC follows tRNS's one byte.
+        let mut damaged = good.clone();
+        damaged[trns + 5] ^= 1;
+        let image = Image::from_bytes(damaged).unwrap();
+        assert!(matches!(
+            image.inner.encoding,
+            Encoding::Png { mask: None, .. }
+        ));
+        // A critical chunk with a wrong CRC is still refused.
+        let mut damaged = good;
+        let plte = damaged.windows(4).position(|w| w == b"PLTE").unwrap();
+        damaged[plte + 4] ^= 1;
+        assert!(error(damaged).contains("the PNG chunk PLTE at byte"));
+    }
+
+    #[test]
+    fn ignores_transparency_of_the_wrong_size() {
+        // An empty tRNS for 16-bit grey: no key, so white stays opaque.
+        let mut png = Png::new(2, 1, 0, 16);
+        png.pixels = vec![vec![0xFFFF], vec![0]];
+        png.transparency = Some(Vec::new());
+        let image = Image::from_bytes(png.encode()).unwrap();
+        assert!(matches!(
+            image.inner.encoding,
+            Encoding::Png { mask: None, .. }
+        ));
+        // A key of the wrong size for a colour image.
+        let mut png = Png::new(2, 1, 2, 8);
+        png.transparency = Some(vec![0, 0]);
+        assert!(matches!(
+            Image::from_bytes(png.encode()).unwrap().inner.encoding,
+            Encoding::Png { mask: None, .. }
+        ));
+        // A palette tRNS longer than the palette is cut to its entries: index 2 does not
+        // exist in a 1-bit image of two colours.
+        let mut png = Png::new(2, 1, 3, 1);
+        png.palette = Some(vec![0, 0, 0, 255, 255, 255]);
+        png.transparency = Some(vec![255, 255, 0]);
+        assert!(matches!(
+            Image::from_bytes(png.encode()).unwrap().inner.encoding,
+            Encoding::Png { mask: None, .. }
+        ));
+    }
+
+    #[test]
+    fn debug_output_leaves_out_the_file() {
+        let image = Image::from_bytes(Png::new(64, 64, 2, 8).encode()).unwrap();
+        let debug = format!("{image:?}");
+        assert!(debug.starts_with("Image { bytes: "), "{debug}");
+        assert!(debug.len() < 200, "{debug}");
     }
 
     #[test]
@@ -1727,7 +1879,10 @@ pub(crate) mod tests {
                 "the JPEG file has no frame header",
             ),
             (b"\xFF\xD8\xFF\xD9".to_vec(), "the JPEG file has no scan"),
-            (b"\xFF\xD8\x00".to_vec(), "no JPEG marker at byte 2"),
+            (
+                b"\xFF\xD8\x00".to_vec(),
+                "the JPEG file ends before its first scan",
+            ),
             (
                 b"\xFF\xD8\xFF\xFF".to_vec(),
                 "the JPEG file ends before its first scan",
@@ -1736,7 +1891,10 @@ pub(crate) mod tests {
                 good[..frame + 3].to_vec(),
                 "the JPEG file ends in a segment",
             ),
-            (good[..frame + 8].to_vec(), "is truncated"),
+            (
+                good[..frame + 8].to_vec(),
+                &format!("the JPEG segment at byte {} is truncated", frame + 2),
+            ),
             (
                 [&good[..frame + 2], b"\x00\x05\x08\x00\x04"].concat(),
                 "the JPEG frame header is truncated",
@@ -1749,6 +1907,42 @@ pub(crate) mod tests {
                 "{err}"
             );
         }
+    }
+
+    #[test]
+    fn refuses_hierarchical_jpeg_files() {
+        // A hierarchical file starts with a DHP segment (B.3), here before a baseline frame.
+        for marker in [0xDE, 0xDF] {
+            let mut data = vec![0xFF, 0xD8, 0xFF, marker, 0x00, 0x02];
+            data.extend_from_slice(&jpeg(0xC0, 8, 4, 4, 1, false)[2..]);
+            assert!(
+                error(data).ends_with(
+                    "lossless, hierarchical and arithmetic-coded JPEG cannot go into a PDF"
+                ),
+                "{marker:X}"
+            );
+        }
+    }
+
+    #[test]
+    fn skips_bytes_before_a_jpeg_marker_as_libjpeg_does() {
+        let good = jpeg(0xC0, 8, 4, 4, 3, false);
+        let frame = good.windows(2).position(|w| w == [0xFF, 0xC0]).unwrap();
+        let data = [&good[..frame], b"\x00\x12garbage", &good[frame..]].concat();
+        let image = Image::from_bytes(data).unwrap();
+        assert_eq!((image.width(), image.height()), (4, 4));
+    }
+
+    #[test]
+    fn writes_a_range_of_transparent_palette_entries_as_a_colour_key() {
+        let mut png = Png::new(3, 2, 3, 2);
+        png.transparency = Some(vec![255, 0, 0]);
+        let image = Image::from_bytes(png.encode()).unwrap();
+        let object = String::from_utf8_lossy(&image.objects(1, Compression::None)[0]).into_owned();
+        assert!(
+            object.contains("/BitsPerComponent 2 /Mask [1 2] >>"),
+            "{object}"
+        );
     }
 
     #[test]

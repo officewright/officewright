@@ -13,9 +13,42 @@ import zlib
 from pathlib import Path
 
 
-def png(width, height, color_type, bits, rows, palette=None, transparency=None, interlaced=False):
+def zlib_stored(data):
+    """`data` as a zlib stream of stored deflate blocks (RFC 1950 and 1951, 3.2.4): the same
+    bytes with every zlib library, unlike compressed output, which differs between zlib and
+    zlib-ng."""
+    out = b"\x78\x01"
+    blocks = [data[i : i + 65535] for i in range(0, len(data), 65535)] or [b""]
+    for i, block in enumerate(blocks):
+        out += bytes([1 if i == len(blocks) - 1 else 0]) + struct.pack("<HH", len(block), len(block) ^ 0xFFFF)
+        out += block
+    return out + struct.pack(">I", zlib.adler32(data))
+
+
+def _paeth(a, b, c):
+    p = a + b - c
+    pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+    if pa <= pb and pa <= pc:
+        return a
+    return b if pb <= pc else c
+
+
+def _filter(kind, row, previous, bpp):
+    """`row` filtered with filter type `kind` (PNG specification, 7.3 and 9.2)."""
+    out = bytearray()
+    for i, x in enumerate(row):
+        a = row[i - bpp] if i >= bpp else 0
+        b = previous[i] if previous else 0
+        c = previous[i - bpp] if previous and i >= bpp else 0
+        predictor = [0, a, b, (a + b) // 2, _paeth(a, b, c)][kind]
+        out.append((x - predictor) & 0xFF)
+    return bytes(out)
+
+
+def png(width, height, color_type, bits, rows, palette=None, transparency=None, interlaced=False, filters=(0,)):
     """A PNG file. `rows` gives the samples of each row, already at the bit depth, as a
-    list of lists of pixels, each a tuple of samples."""
+    list of lists of pixels, each a tuple of samples. The rows use the filter types of
+    `filters` in turn."""
 
     def chunk(kind, body):
         return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
@@ -38,14 +71,20 @@ def png(width, height, color_type, bits, rows, palette=None, transparency=None, 
         passes = [(0, 0, 8, 8), (4, 0, 8, 8), (0, 4, 4, 8), (2, 0, 4, 4), (0, 2, 2, 4), (1, 0, 2, 2), (0, 1, 1, 2)]
     else:
         passes = [(0, 0, 1, 1)]
+    bpp = max(1, channels * bits // 8)
     data = b""
+    count = 0
     for x0, y0, dx, dy in passes:
         xs = range(x0, width, dx)
         if not xs:
             continue
+        previous = None
         for y in range(y0, height, dy):
-            # Filter type 0, None: the reader's unfiltering is tested in Rust.
-            data += b"\x00" + pack([rows[y][x] for x in xs])
+            row = pack([rows[y][x] for x in xs])
+            kind = filters[count % len(filters)]
+            count += 1
+            data += bytes([kind]) + _filter(kind, row, previous, bpp)
+            previous = row
     assert channels == len(rows[0][0])
     out = b"\x89PNG\r\n\x1a\n"
     out += chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, bits, color_type, 0, 0, int(interlaced)))
@@ -53,7 +92,7 @@ def png(width, height, color_type, bits, rows, palette=None, transparency=None, 
         out += chunk(b"PLTE", bytes(c for entry in palette for c in entry))
     if transparency is not None:
         out += chunk(b"tRNS", transparency)
-    out += chunk(b"IDAT", zlib.compress(data, 9))
+    out += chunk(b"IDAT", zlib_stored(data))
     out += chunk(b"IEND", b"")
     return out
 
@@ -121,6 +160,8 @@ def samples():
     """The test images: name, file, and what pdfimages lists for it: (type, width, height,
     colour, components, bits, encoding) for the image and its soft mask, if any."""
     quadrants = [[RED, GREEN], [BLUE, WHITE]]
+    # 16 × 15 pixels of many colours, for the filters to work on.
+    gradient = [[((x * 16 + y * 7) % 256, (x * y * 5) % 256, (255 - x * 13 - y * 3) % 256) for x in range(16)] for y in range(15)]
     adam7 = [[RED if x < 4 and y < 4 else GREEN if y < 4 else BLUE if x < 4 else WHITE for x in range(8)] for y in range(8)]
     return [
         ("rgb.png", png(2, 2, 2, 8, quadrants), [("image", 2, 2, "rgb", 3, 8, "image")]),
@@ -143,6 +184,19 @@ def samples():
         ),
         ("gray.jpg", jpeg(16, 8, [[(0,), (255,)]]), [("image", 16, 8, "gray", 1, 8, "jpeg")]),
         ("ycbcr.jpg", jpeg(16, 8, [[ycbcr(*RED), ycbcr(*BLUE)]]), [("image", 16, 8, "rgb", 3, 8, "jpeg")]),
+        # The same pixels with each filter type in turn: passed through, so poppler undoes the
+        # filters; and decoded by officewright, forced by a transparent colour that no pixel
+        # has. test_images.py compares the two renders.
+        (
+            "filtered.png",
+            png(16, 15, 2, 8, gradient, filters=(0, 1, 2, 3, 4)),
+            [("image", 16, 15, "rgb", 3, 8, "image")],
+        ),
+        (
+            "filtered-decoded.png",
+            png(16, 15, 2, 8, gradient, transparency=b"\x00\x01\x00\x02\x00\x03", filters=(0, 1, 2, 3, 4)),
+            [("image", 16, 15, "rgb", 3, 8, "image")],
+        ),
         (
             "cmyk.jpg",
             # Cyan and magenta, inverted.

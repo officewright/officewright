@@ -49,6 +49,8 @@ COLOURS = {
     "gray-key.png": [((0.25, 0.5), BACKGROUND), ((0.75, 0.5), images.BLACK)],
     "gray.jpg": [((0.25, 0.5), images.BLACK), ((0.75, 0.5), images.WHITE)],
     "ycbcr.jpg": [((0.25, 0.5), images.RED), ((0.75, 0.5), images.BLUE)],
+    "filtered.png": [],
+    "filtered-decoded.png": [],
     "cmyk.jpg": [((0.25, 0.5), cyan), ((0.75, 0.5), magenta)],
 }
 
@@ -107,6 +109,24 @@ class ImagesTest(unittest.TestCase):
                             all(abs(a - e) <= tolerance for a, e in zip(actual, colour)),
                             f"{actual} is not {colour}",
                         )
+
+    def test_our_unfiltering_draws_what_poppler_draws(self):
+        """The same filtered pixels, passed through for poppler to unfilter and decoded by
+        officewright, render the same."""
+        with tempfile.TemporaryDirectory() as directory:
+            pdf, _ = draw(directory)
+            image, _ = render(pdf)
+            names = [name for name, _, _ in images.samples()]
+
+            def cell(name):
+                i = names.index(name)
+                x = 40 + 130 * (i % 4)
+                y = 680 - 130 * (i // 4)
+                return [pixel(image, x + dx, y + dy) for dx in range(1, 99) for dy in range(1, 99)]
+
+            passed, decoded = cell("filtered.png"), cell("filtered-decoded.png")
+            self.assertGreater(len(set(passed)), 100)
+            self.assertEqual(passed, decoded)
 
     def test_the_fuzz_seeds_are_what_images_py_writes(self):
         with tempfile.TemporaryDirectory() as directory:

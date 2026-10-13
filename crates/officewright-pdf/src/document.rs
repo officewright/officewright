@@ -258,13 +258,12 @@ impl Document {
                 }
             }
         }
+        // The images' objects are only numbered here: making them cannot fail, so each is
+        // made as it is written, and the images are never all copied at once.
         let mut image_objects = Vec::with_capacity(images.len());
-        let mut extra_objects = font_objects;
         for image in &images {
             image_objects.push(next_object);
-            let objects = image.objects(next_object, self.compression);
-            next_object += objects.len();
-            extra_objects.extend(objects);
+            next_object += image.object_count();
         }
 
         let mut out = CountingWriter::new(out);
@@ -349,9 +348,18 @@ impl Document {
             out.put_object(page_id + 1, &stream_object("", content, self.compression))?;
         }
 
-        for (i, object) in extra_objects.iter().enumerate() {
+        let mut id = first_page + 2 * self.pages.len();
+        for object in &font_objects {
             offsets.push(out.written);
-            out.put_object(first_page + 2 * self.pages.len() + i, object)?;
+            out.put_object(id, object)?;
+            id += 1;
+        }
+        for (image, &first) in images.iter().zip(&image_objects) {
+            for object in image.objects(first, self.compression) {
+                offsets.push(out.written);
+                out.put_object(id, &object)?;
+                id += 1;
+            }
         }
 
         let xref = out.written;
@@ -1324,6 +1332,26 @@ mod tests {
         assert!(object(&pdf, 10).contains("/Predictor 15"), "{pdf}");
         assert_eq!(pdf.matches("/Subtype /Image").count(), 3);
         assert!(pdf.contains("xref\n0 11\n"));
+    }
+
+    #[test]
+    fn an_image_drawn_twice_on_a_page_is_one_resource() {
+        use crate::image::tests::Png;
+        let image = Image::from_bytes(Png::new(2, 2, 0, 8).encode()).unwrap();
+        let mut doc = Document::new();
+        let page = doc.add_page(PageSize::A4).unwrap();
+        for x in [0.0, 50.0] {
+            page.draw_image(&image, Pt(x), Pt(0.0), Pt(10.0), Pt(10.0))
+                .unwrap();
+        }
+        doc.set_compression(Compression::None);
+        let pdf = String::from_utf8_lossy(&doc.to_bytes().unwrap()).into_owned();
+        assert!(
+            object(&pdf, 3).contains("/Resources << /XObject << /Im1 5 0 R >> >>"),
+            "{pdf}"
+        );
+        assert_eq!(pdf.matches("/Im1 Do").count(), 2);
+        assert_eq!(pdf.matches("/Subtype /Image").count(), 1);
     }
 
     #[test]
