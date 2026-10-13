@@ -1,10 +1,13 @@
 //! The font table part (`w:fonts`, ECMA-376 Part 1, §17.8): each `w:font` is read, and
-//! every element is kept for writing.
+//! every element is kept for writing. Attributes are kept as written; typed values are
+//! checked, and a child written twice is ignored after the first, with a diagnostic, as
+//! in `w:sectPr`. An `mc:AlternateContent` directly under `w:fonts` is kept whole, so a
+//! font in it is not read; no document of the corpus has one.
 
 use officewright_opc::mce::{Disposition, Processor};
 use officewright_opc::xml::{Event, Input};
 
-use super::capture::{Budget, Capture};
+use super::capture::{Budget, Capture, Notes};
 use super::properties::{Report, on_off, on_off_attribute, value};
 use super::{R, R_STRICT, W, W_STRICT, shorten};
 use crate::diagnostic::{DiagnosticKind, Diagnostics};
@@ -61,9 +64,11 @@ pub(super) fn read(
                     continue;
                 }
                 let mut read = None;
+                let mut notes = c.notes();
                 c.check(span, offset, |element, report| {
-                    read = font(element, &names, report);
+                    read = font(element, &names, report, &mut notes);
                 });
+                c.diagnose_notes(offset, notes);
                 let Some(font) = read else {
                     c.diagnose(offset, DiagnosticKind::UnexpectedContent, || {
                         "a w:font without a w:name is ignored".into()
@@ -80,8 +85,28 @@ pub(super) fn read(
     Ok(())
 }
 
+/// The children of a `w:font`, each of which the schema allows once.
+const ONCE: [&str; 11] = [
+    "altName",
+    "panose1",
+    "charset",
+    "family",
+    "notTrueType",
+    "pitch",
+    "sig",
+    "embedRegular",
+    "embedBold",
+    "embedItalic",
+    "embedBoldItalic",
+];
+
 /// A `w:font`; `None` without a `w:name`.
-fn font(element: Element<'_>, names: &Names, report: Report<'_>) -> Option<FontDeclaration> {
+fn font(
+    element: Element<'_>,
+    names: &Names,
+    report: Report<'_>,
+    notes: &mut Notes,
+) -> Option<FontDeclaration> {
     let w = &names.w;
     let mut font = FontDeclaration {
         name: element.attribute(w, "name")?.into(),
@@ -95,10 +120,19 @@ fn font(element: Element<'_>, names: &Names, report: Report<'_>) -> Option<FontD
         not_true_type: None,
         embedded: Vec::new(),
     };
+    let mut seen: Vec<&str> = Vec::new();
     for child in element.children_through_fallback(names.mc) {
         let Some(local) = child.local_in(w) else {
             continue;
         };
+        // CT_Font writes each of its children once.
+        if ONCE.contains(&local) {
+            if seen.contains(&local) {
+                notes.add(|| format!("a second w:{local} in a w:font is ignored"));
+                continue;
+            }
+            seen.push(local);
+        }
         match local {
             "altName" => font.alternative_name = child.attribute(w, "val").map(Into::into),
             "panose1" => font.panose = value(child, names, "val", panose, report),
@@ -109,7 +143,7 @@ fn font(element: Element<'_>, names: &Names, report: Report<'_>) -> Option<FontD
                     names,
                     "val",
                     |v| {
-                        (v.len() == 2)
+                        (v.len() == 2 && v.bytes().all(|b| b.is_ascii_hexdigit()))
                             .then(|| u8::from_str_radix(v, 16).ok())
                             .flatten()
                     },
@@ -120,18 +154,22 @@ fn font(element: Element<'_>, names: &Names, report: Report<'_>) -> Option<FontD
             "family" => font.family = value(child, names, "val", FontFamily::from_xml, report),
             "pitch" => font.pitch = value(child, names, "val", FontPitch::from_xml, report),
             "sig" => {
-                let bits = |attribute, report: Report<'_>| {
-                    value(child, names, attribute, long_hex, report).unwrap_or_default()
-                };
-                font.signature = Some(FontSignature {
-                    unicode: [
-                        bits("usb0", report),
-                        bits("usb1", report),
-                        bits("usb2", report),
-                        bits("usb3", report),
-                    ],
-                    code_pages: [bits("csb0", report), bits("csb1", report)],
-                });
+                // CT_FontSig requires all six; without one, or with one not valid, the
+                // signature is not read, since zeros would say the font covers nothing.
+                const BITS: [&str; 6] = ["usb0", "usb1", "usb2", "usb3", "csb0", "csb1"];
+                if BITS.iter().any(|bits| child.attribute(w, bits).is_none()) {
+                    notes.add(|| "a w:sig without all six of its attributes is ignored".into());
+                }
+                let mut read = [None; 6];
+                for (slot, bits) in read.iter_mut().zip(BITS) {
+                    *slot = value(child, names, bits, long_hex, report);
+                }
+                if let [Some(u0), Some(u1), Some(u2), Some(u3), Some(c0), Some(c1)] = read {
+                    font.signature = Some(FontSignature {
+                        unicode: [u0, u1, u2, u3],
+                        code_pages: [c0, c1],
+                    });
+                }
             }
             "notTrueType" => font.not_true_type = on_off(child, names, report),
             "embedRegular" | "embedBold" | "embedItalic" | "embedBoldItalic" => {
@@ -139,6 +177,7 @@ fn font(element: Element<'_>, names: &Names, report: Report<'_>) -> Option<FontD
                     EmbeddedFontStyle::from_xml(local),
                     child.attribute(&names.r, "id"),
                 ) else {
+                    notes.add(|| format!("a w:{local} without r:id is ignored"));
                     continue;
                 };
                 font.embedded.push(EmbeddedFontReference {

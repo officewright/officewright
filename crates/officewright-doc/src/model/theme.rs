@@ -7,6 +7,26 @@ use super::settings::ColorSchemeIndex;
 
 /// The theme of a document: its colour scheme and font scheme. The rest of the part,
 /// such as the format scheme of shapes, is kept for writing.
+///
+/// ```
+/// # fn main() -> officewright_doc::Result<()> {
+/// use officewright_doc::{ColorSchemeIndex, Document, FontFamily};
+///
+/// let document = Document::open("tests/data/theme.docx")?;
+/// let theme = document.theme().expect("the document has a theme");
+/// let body = theme.fonts().and_then(|fonts| fonts.minor().latin());
+/// assert_eq!(body, Some("Calibri"));
+/// // What the font table says about the font, to choose a substitute when it is
+/// // missing; Word compares font names without regard to case.
+/// let calibri = document.font("calibri").expect("the font table declares it");
+/// assert_eq!(calibri.family(), Some(FontFamily::Swiss));
+/// let accent = theme
+///     .colors()
+///     .and_then(|colors| colors.color(ColorSchemeIndex::Accent1));
+/// assert_eq!(accent.and_then(|color| color.rgb()), Some((0x44, 0x72, 0xC4)));
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Theme {
@@ -49,8 +69,9 @@ impl ColorScheme {
     }
 
     /// One colour of the scheme; `None` when it is missing, not valid, or written in a
-    /// colour model this reader does not read yet (only RGB and system colours are,
-    /// the two Word writes).
+    /// colour model this reader does not read yet. RGB and system colours are read: the
+    /// two the corpus has (20,632 and 3,908 of them); Office does not allow a scheme
+    /// colour there (MS-OI29500 §20.1.4.1.9(a)).
     pub fn color(&self, index: ColorSchemeIndex) -> Option<&SchemeColor> {
         self.colors.get(position(index))?.as_ref()
     }
@@ -63,8 +84,8 @@ impl ColorScheme {
 pub enum SchemeColor {
     /// Red, green and blue (`a:srgbClr`).
     Rgb(u8, u8, u8),
-    /// A colour of the operating system (`a:sysClr`), and the value it had where the
-    /// document was last saved (`lastClr`).
+    /// A colour of the operating system (`a:sysClr`), and the RGB value of the last one
+    /// used (`lastClr`, MS-OI29500 §20.1.2.3.33(a)).
     System {
         /// The system colour.
         color: SystemColor,
@@ -147,7 +168,8 @@ impl FontScheme {
 }
 
 /// One set of theme fonts (`a:majorFont`, `a:minorFont`): a font for Latin, East Asian
-/// and complex-script text, and fonts for particular scripts.
+/// and complex-script text, and fonts for particular scripts. Only the typefaces are
+/// read yet, not the PANOSE, pitch and charset the fonts may carry.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct FontCollection {
@@ -163,8 +185,7 @@ impl FontCollection {
         self.latin.as_deref()
     }
 
-    /// The font of East Asian text (`a:ea`); often empty, which leaves the choice to a
-    /// font for the script.
+    /// The font of East Asian text (`a:ea`); often written empty.
     pub fn east_asian(&self) -> Option<&str> {
         self.east_asian.as_deref()
     }

@@ -1,10 +1,19 @@
 //! The theme part (`a:theme`, ECMA-376 Part 1, §20.1.6): the colour and font schemes
 //! are read, and every element is kept for writing.
+//!
+//! Attributes are kept as written and typed values are checked; a colour, a font or a
+//! script font without its required attribute reads as not set. An element the schema
+//! allows once is ignored after the first, with a diagnostic, as in `w:sectPr`.
+//! Diagnostics name the position of `a:themeElements`. An `mc:AlternateContent`
+//! directly under `a:theme` is kept whole, so a scheme in it is not read; no document of
+//! the corpus has one.
+
+use std::collections::HashSet;
 
 use officewright_opc::mce::{Disposition, Processor};
 use officewright_opc::xml::{Event, Input};
 
-use super::capture::{Budget, Capture};
+use super::capture::{Budget, Capture, Notes};
 use super::properties::Report;
 use super::{A, A_STRICT, R, R_STRICT, shorten};
 use crate::diagnostic::Diagnostics;
@@ -36,6 +45,7 @@ pub(super) fn read(
     let mut theme = Theme::default();
     let mut c = Capture::new(document, part, input.as_str(), diagnostics, budget);
     let mut in_root = false;
+    let mut elements_read = false;
     while let Some(event) = reader.read_event().map_err(opc)? {
         match event {
             Event::Start(tag) => {
@@ -60,9 +70,18 @@ pub(super) fn read(
                 // Every element is kept with the document's tokens for writing.
                 let span = c.capture(&mut reader, &mut mce, tag)?;
                 if understood && local == "themeElements" {
+                    if elements_read {
+                        let mut notes = c.notes();
+                        notes.add(|| "a second a:themeElements is ignored".into());
+                        c.diagnose_notes(offset, notes);
+                        continue;
+                    }
+                    elements_read = true;
+                    let mut notes = c.notes();
                     c.check_in(["a:", ""], span, offset, |element, report| {
-                        theme_elements(&mut theme, element, &names, report);
+                        theme_elements(&mut theme, element, &names, report, &mut notes);
                     });
+                    c.diagnose_notes(offset, notes);
                 }
             }
             Event::End(_) => mce.end(),
@@ -73,19 +92,51 @@ pub(super) fn read(
     Ok(())
 }
 
-fn theme_elements(theme: &mut Theme, element: Element<'_>, names: &Names, report: Report<'_>) {
+/// The children of `element` in DrawingML, with a note for each that repeats one of
+/// `once` already seen, which is left out.
+fn once<'d>(
+    element: Element<'d>,
+    names: &Names,
+    once: &[&str],
+    notes: &mut Notes,
+) -> Vec<(&'d str, Element<'d>)> {
+    let mut seen: Vec<&str> = Vec::new();
+    let mut children = Vec::new();
     for child in element.children_through_fallback(names.mc) {
-        match child.local_in(&names.a) {
-            Some("clrScheme") => theme.colors = Some(color_scheme(child, names, report)),
-            Some("fontScheme") => {
+        let Some(local) = child.local_in(&names.a) else {
+            continue;
+        };
+        if let Some(&name) = once.iter().find(|name| **name == local) {
+            if seen.contains(&name) {
+                notes.add(|| format!("a second a:{local} is ignored"));
+                continue;
+            }
+            seen.push(name);
+        }
+        children.push((local, child));
+    }
+    children
+}
+
+fn theme_elements(
+    theme: &mut Theme,
+    element: Element<'_>,
+    names: &Names,
+    report: Report<'_>,
+    notes: &mut Notes,
+) {
+    for (local, child) in once(element, names, &["clrScheme", "fontScheme"], notes) {
+        match local {
+            "clrScheme" => theme.colors = Some(color_scheme(child, names, report, notes)),
+            "fontScheme" => {
                 let mut scheme = FontScheme {
                     name: child.attribute(&[None], "name").map(Into::into),
                     ..FontScheme::default()
                 };
-                for collection in child.children_through_fallback(names.mc) {
-                    match collection.local_in(&names.a) {
-                        Some("majorFont") => scheme.major = fonts(collection, names),
-                        Some("minorFont") => scheme.minor = fonts(collection, names),
+                for (local, collection) in once(child, names, &["majorFont", "minorFont"], notes) {
+                    match local {
+                        "majorFont" => scheme.major = fonts(collection, names, notes),
+                        "minorFont" => scheme.minor = fonts(collection, names, notes),
                         _ => {}
                     }
                 }
@@ -96,25 +147,36 @@ fn theme_elements(theme: &mut Theme, element: Element<'_>, names: &Names, report
     }
 }
 
-fn color_scheme(element: Element<'_>, names: &Names, report: Report<'_>) -> ColorScheme {
+/// The twelve colours of a scheme, each allowed once.
+const COLORS: [&str; 12] = [
+    "dk1", "lt1", "dk2", "lt2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6",
+    "hlink", "folHlink",
+];
+
+fn color_scheme(
+    element: Element<'_>,
+    names: &Names,
+    report: Report<'_>,
+    notes: &mut Notes,
+) -> ColorScheme {
     let mut scheme = ColorScheme {
         name: element.attribute(&[None], "name").map(Into::into),
         ..ColorScheme::default()
     };
-    for child in element.children_through_fallback(names.mc) {
-        let index = match child.local_in(&names.a) {
-            Some("dk1") => ColorSchemeIndex::Dark1,
-            Some("lt1") => ColorSchemeIndex::Light1,
-            Some("dk2") => ColorSchemeIndex::Dark2,
-            Some("lt2") => ColorSchemeIndex::Light2,
-            Some("accent1") => ColorSchemeIndex::Accent1,
-            Some("accent2") => ColorSchemeIndex::Accent2,
-            Some("accent3") => ColorSchemeIndex::Accent3,
-            Some("accent4") => ColorSchemeIndex::Accent4,
-            Some("accent5") => ColorSchemeIndex::Accent5,
-            Some("accent6") => ColorSchemeIndex::Accent6,
-            Some("hlink") => ColorSchemeIndex::Hyperlink,
-            Some("folHlink") => ColorSchemeIndex::FollowedHyperlink,
+    for (local, child) in once(element, names, &COLORS, notes) {
+        let index = match local {
+            "dk1" => ColorSchemeIndex::Dark1,
+            "lt1" => ColorSchemeIndex::Light1,
+            "dk2" => ColorSchemeIndex::Dark2,
+            "lt2" => ColorSchemeIndex::Light2,
+            "accent1" => ColorSchemeIndex::Accent1,
+            "accent2" => ColorSchemeIndex::Accent2,
+            "accent3" => ColorSchemeIndex::Accent3,
+            "accent4" => ColorSchemeIndex::Accent4,
+            "accent5" => ColorSchemeIndex::Accent5,
+            "accent6" => ColorSchemeIndex::Accent6,
+            "hlink" => ColorSchemeIndex::Hyperlink,
+            "folHlink" => ColorSchemeIndex::FollowedHyperlink,
             _ => continue,
         };
         let position = position(index);
@@ -167,20 +229,32 @@ fn rgb(value: &str) -> Option<(u8, u8, u8)> {
     Some((byte(0)?, byte(2)?, byte(4)?))
 }
 
-fn fonts(element: Element<'_>, names: &Names) -> FontCollection {
+fn fonts(element: Element<'_>, names: &Names, notes: &mut Notes) -> FontCollection {
     let mut collection = FontCollection::default();
-    for child in element.children_through_fallback(names.mc) {
+    let mut scripts: HashSet<&str> = HashSet::new();
+    for (local, child) in once(element, names, &["latin", "ea", "cs"], notes) {
         let typeface = || child.attribute(&[None], "typeface").map(Into::into);
-        match child.local_in(&names.a) {
-            Some("latin") => collection.latin = typeface(),
-            Some("ea") => collection.east_asian = typeface(),
-            Some("cs") => collection.complex_script = typeface(),
-            Some("font") => {
-                if let (Some(script), Some(typeface)) =
+        match local {
+            "latin" => collection.latin = typeface(),
+            "ea" => collection.east_asian = typeface(),
+            "cs" => collection.complex_script = typeface(),
+            "font" => {
+                let (Some(script), Some(typeface)) =
                     (child.attribute(&[None], "script"), typeface())
-                {
-                    collection.scripts.push((script.into(), typeface));
+                else {
+                    continue;
+                };
+                // The first font for a script counts, as for the other children.
+                if !scripts.insert(script) {
+                    notes.add(|| {
+                        format!(
+                            "a second a:font for the script {} is ignored",
+                            shorten(script)
+                        )
+                    });
+                    continue;
                 }
+                collection.scripts.push((script.into(), typeface));
             }
             _ => {}
         }

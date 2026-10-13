@@ -112,12 +112,16 @@ pub struct FontDeclaration {
 }
 
 impl FontDeclaration {
-    /// The font's name, as runs name it (`w:name`).
+    /// The font's name, as runs name it (`w:name`). Word allows 1 to 31 characters, and
+    /// writes a name with `@` before it for the font of vertical text (MS-OI29500
+    /// §17.8.3.10(a), (c)); a name is kept as written, leading spaces too.
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Another name of the font (`w:altName`), such as its name in another language.
+    /// Another name of the font (`w:altName`), such as its name in another language. The
+    /// standard calls it a comma-separated list, but Word takes the whole value as one
+    /// name of at most 31 characters (MS-OI29500 §17.8.3.1(a), (b)).
     pub fn alternative_name(&self) -> Option<&str> {
         self.alternative_name.as_deref()
     }
@@ -133,8 +137,8 @@ impl FontDeclaration {
         self.charset
     }
 
-    /// The character set by its IANA name (`w:charset` `w:characterSet`), which Strict
-    /// documents write.
+    /// The character set by its IANA name (`w:charset` `w:characterSet`). Word ignores
+    /// it (MS-OI29500 §17.8.3.2(b)) and goes by [`charset`](Self::charset).
     pub fn character_set(&self) -> Option<&str> {
         self.character_set.as_deref()
     }
@@ -149,7 +153,8 @@ impl FontDeclaration {
         self.pitch
     }
 
-    /// The Unicode ranges and code pages the font covers (`w:sig`).
+    /// The Unicode ranges and code pages the font covers (`w:sig`); `None` unless all six
+    /// of its values are written and valid.
     pub fn signature(&self) -> Option<&FontSignature> {
         self.signature.as_ref()
     }

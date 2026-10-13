@@ -2385,6 +2385,21 @@ fn reads_the_colours_and_fonts_of_the_theme() {
         colors.color(ColorSchemeIndex::FollowedHyperlink),
         Some(&SchemeColor::Rgb(0x95, 0x4F, 0x72))
     );
+    // Every slot holds its own colour.
+    for (index, rgb) in [
+        (ColorSchemeIndex::Light2, (0xE7, 0xE6, 0xE6)),
+        (ColorSchemeIndex::Accent1, (0x44, 0x72, 0xC4)),
+        (ColorSchemeIndex::Accent3, (0xA5, 0xA5, 0xA5)),
+        (ColorSchemeIndex::Accent5, (0x5B, 0x9B, 0xD5)),
+        (ColorSchemeIndex::Accent6, (0x70, 0xAD, 0x47)),
+        (ColorSchemeIndex::Hyperlink, (0x05, 0x63, 0xC1)),
+    ] {
+        assert_eq!(
+            colors.color(index).and_then(SchemeColor::rgb),
+            Some(rgb),
+            "{index:?}"
+        );
+    }
     let fonts = theme.fonts().unwrap();
     assert_eq!(fonts.name(), Some("Office"));
     assert_eq!(fonts.major().latin(), Some("Calibri Light"));
@@ -2475,7 +2490,16 @@ fn reads_the_font_table() {
         (embedded[1].style(), embedded[1].key()),
         (EmbeddedFontStyle::Bold, None)
     );
-    assert!(document.font("calibri").is_none());
+    // Word compares font names without regard to case (MS-OI29500 §17.8.3.10(b)).
+    assert_eq!(
+        document.font("calibri").map(FontDeclaration::name),
+        Some("Calibri")
+    );
+    assert_eq!(
+        document.font("ms mincho").map(FontDeclaration::name),
+        Some("MS Mincho")
+    );
+    assert!(document.font("Calibri Light").is_none());
 }
 
 #[test]
@@ -2492,7 +2516,8 @@ fn repairs_a_damaged_font_table() {
         (a.charset(), a.family(), a.panose(), a.pitch()),
         (None, None, None, None)
     );
-    assert_eq!(a.signature().unwrap().code_pages(), [1, 0]);
+    // A signature with a value not valid is not read: zeros would say "covers nothing".
+    assert_eq!(a.signature(), None);
     let messages = messages(&document);
     assert_eq!(messages.len(), 6, "{messages:?}");
     assert!(messages[0].ends_with(": a w:font without a w:name is ignored"));
@@ -2580,4 +2605,73 @@ fn shares_the_node_limit_with_the_theme_and_the_font_table() {
         let options = LoadOptions::new().with_limits(Limits::new().with_max_nodes(500));
         assert!(options.open_bytes(data).is_ok(), "{relationship}");
     }
+}
+
+#[test]
+fn repairs_damaged_font_declarations() {
+    // From the review of #51.
+    let fonts = format!(
+        r#"<w:fonts xmlns:w="{W}" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" mc:Ignorable="w14"><w:font w:name="A"><w:charset w:val="00"/><w:charset w:val="80"/><w:family w:val="swiss"/><w:family w:val="roman"/><w:altName w:val="first"/><w:altName w:val="second"/><w:sig w:usb0="00000001" w:usb1="00000000"/><w:embedRegular w:fontKey="{{00000000-0000-0000-0000-000000000000}}"/><w:embedBold r:id="rId1"/><w:embedBold r:id="rId2"/></w:font><w:font w:name="B"><w:charset w:val="+F"/><mc:AlternateContent><mc:Choice Requires="w99"><w:family w:val="roman"/></mc:Choice><mc:Fallback><w:family w:val="modern"/></mc:Fallback></mc:AlternateContent></w:font><w14:font w:name="C"/></w:fonts>"#
+    );
+    let document = with_part("fontTable", "fontTable.xml", &fonts).unwrap();
+    // A font of another namespace is not read.
+    assert_eq!(document.fonts().len(), 2);
+    let a = document.font("A").unwrap();
+    // The first of each child counts.
+    assert_eq!(
+        (a.charset(), a.family()),
+        (Some(0), Some(FontFamily::Swiss))
+    );
+    assert_eq!(a.alternative_name(), Some("first"));
+    // A signature without all six values is not read.
+    assert_eq!(a.signature(), None);
+    // An embedded font without r:id is left out; of two of one style, the first counts.
+    let embedded = a.embedded();
+    assert_eq!(embedded.len(), 1);
+    assert_eq!(
+        (embedded[0].style(), embedded[0].relationship_id()),
+        (EmbeddedFontStyle::Bold, "rId1")
+    );
+    let b = document.font("B").unwrap();
+    // A sign is not a hexadecimal digit; w:family is read through the fallback.
+    assert_eq!((b.charset(), b.family()), (None, Some(FontFamily::Modern)));
+    let messages = messages(&document);
+    assert_eq!(messages.len(), 7, "{messages:?}");
+    assert!(messages[0].ends_with(": a second w:charset in a w:font is ignored"));
+    assert!(messages[1].ends_with(": a second w:family in a w:font is ignored"));
+    assert!(messages[2].ends_with(": a second w:altName in a w:font is ignored"));
+    assert!(messages[3].ends_with(": a w:sig without all six of its attributes is ignored"));
+    assert!(messages[4].ends_with(": a w:embedRegular without r:id is ignored"));
+    assert!(messages[5].ends_with(": a second w:embedBold in a w:font is ignored"));
+    assert!(messages[6].ends_with(r#": w:charset w:val="+F" is not valid; it is ignored"#));
+}
+
+#[test]
+fn repairs_a_damaged_theme() {
+    let theme = format!(
+        r#"<a:theme xmlns:a="{A}" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><a:themeElements><mc:AlternateContent><mc:Choice Requires="w99"><a:clrScheme name="Choice"/></mc:Choice><mc:Fallback><a:clrScheme name="Fallback"><a:dk1><a:srgbClr val="010101"/></a:dk1><a:dk1><a:srgbClr val="020202"/></a:dk1></a:clrScheme></mc:Fallback></mc:AlternateContent><a:clrScheme name="Second"/><a:fontScheme name="F"><a:majorFont><a:latin typeface="One"/><a:latin typeface="Two"/><a:font script="Jpan" typeface="J1"/><a:font script="Jpan" typeface="J2"/></a:majorFont><a:minorFont/><a:minorFont><a:latin typeface="Other"/></a:minorFont></a:fontScheme></a:themeElements><a:themeElements><a:clrScheme name="Later"/></a:themeElements></a:theme>"#
+    );
+    let document = with_part("theme", "theme/theme1.xml", &theme).unwrap();
+    let theme = document.theme().unwrap();
+    // mc:AlternateContent is read through its fallback; the first of each counts.
+    let colors = theme.colors().unwrap();
+    assert_eq!(colors.name(), Some("Fallback"));
+    assert_eq!(
+        colors.color(ColorSchemeIndex::Dark1),
+        Some(&SchemeColor::Rgb(1, 1, 1))
+    );
+    let fonts = theme.fonts().unwrap();
+    assert_eq!(fonts.major().latin(), Some("One"));
+    assert_eq!(fonts.major().script("Jpan"), Some("J1"));
+    assert_eq!(fonts.major().scripts().len(), 1);
+    assert_eq!(fonts.minor().latin(), None);
+    let messages = messages(&document);
+    assert_eq!(messages.len(), 6, "{messages:?}");
+    // Each level's repeats are noted before its children are read.
+    assert!(messages[0].ends_with(": a second a:clrScheme is ignored"));
+    assert!(messages[1].ends_with(": a second a:dk1 is ignored"));
+    assert!(messages[2].ends_with(": a second a:minorFont is ignored"));
+    assert!(messages[3].ends_with(": a second a:latin is ignored"));
+    assert!(messages[4].ends_with(": a second a:font for the script Jpan is ignored"));
+    assert!(messages[5].ends_with(": a second a:themeElements is ignored"));
 }

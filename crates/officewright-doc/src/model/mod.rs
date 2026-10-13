@@ -255,12 +255,20 @@ impl Document {
         &self.fonts
     }
 
-    /// The font table's declaration of a font, by the name runs give it (compared
-    /// exactly). A table may declare one name several times, once per face of a family
-    /// with its own PANOSE and signature (LibreOffice's `fdo77727.docx` declares five
-    /// Noto Sans); this gives the first, and [`fonts`](Self::fonts) all of them.
+    /// The font table's declaration of a font, by the name runs give it, compared
+    /// without regard to case as Word does (MS-OI29500 §17.8.3.10(b); LibreOffice's
+    /// `tdf140137.docx` names `times new roman` against a declared `Times New Roman`).
+    /// A table may declare one name several times, once per face of a family with its
+    /// own PANOSE and signature (`fdo77727.docx` declares five Noto Sans); this gives
+    /// the first, and [`fonts`](Self::fonts) all of them.
     pub fn font(&self, name: &str) -> Option<&FontDeclaration> {
-        self.fonts.iter().find(|font| font.name() == name)
+        let folded = |text: &str| {
+            text.chars()
+                .flat_map(char::to_lowercase)
+                .collect::<Vec<_>>()
+        };
+        let wanted = folded(name);
+        self.fonts.iter().find(|font| folded(font.name()) == wanted)
     }
 
     /// The settings of the document (`settings.xml`); none set when it has no settings
