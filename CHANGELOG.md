@@ -22,11 +22,12 @@ published on crates.io.
   `text_to_pdf`, which lays out plain text on pages with margins, wrapping, tabs and
   form-feed page breaks.
 - Helvetica, which every PDF viewer has, for Latin text in WinAnsiEncoding.
-- TrueType and OpenType (CFF) fonts, embedded and reduced to the glyphs the document uses,
-  with a ToUnicode map so that text can be copied and searched (#12). They show Latin,
-  Greek, Cyrillic, Armenian, Georgian, Han, Hiragana, Katakana and Hangul syllables, one
-  glyph per character. Text a font cannot show, or that needs shaping or right-to-left
-  layout, is refused with the character and its position, never altered.
+- TrueType and OpenType (CFF) fonts, embedded and, unless the font's license forbids
+  subsetting, reduced to the glyphs the document uses, with a ToUnicode map so that text
+  can be copied and searched (#12). They show Latin, Greek, Cyrillic, Armenian, Georgian,
+  Han, Hiragana, Katakana and Hangul syllables, one glyph per character. Text a font
+  cannot show, or that needs shaping or right-to-left layout, is refused with the
+  character and its position, never altered.
 - The font's license (`fsType`) is honoured: a font that forbids embedding is refused,
   other restrictions are reported (#12).
 - Fonts can be chosen by family name, the way Word names them (#17).

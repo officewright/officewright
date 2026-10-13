@@ -86,7 +86,7 @@ REFERENCE_PRINTER = "Microsoft Print to PDF"
 # Metadata values our own documents carry; anything else in a name field is refused.
 ALLOWED_NAMES = {"", "Officewright"}
 
-# A path into a user profile: C:\Users\<name>, /Users/<name>, file:///C:/Users/...
+# A path into a user profile: C:\Users\<name>, /Users/<name>, file:///C:/Users/<name>/...
 PROFILE_PATH = re.compile(rb"(?i)(\\|/)(users|documents and settings)(\\|/)")
 
 REFERENCE_HEADER = "| File | Rendered from | Application and version | Date | Notes |"
