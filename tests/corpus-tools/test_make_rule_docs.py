@@ -297,8 +297,22 @@ class Packages(unittest.TestCase):
             return match.group(1), float(match.group(2))
 
         italic = list(paragraphs("E-italic-missing"))
-        self.assertEqual(len(italic), 16)
-        self.assertIn("Noto Sans", {runs[0][1] for runs, _ in italic})
+        styles = {
+            "regular": set(),
+            "italic": {"i", "iCs"},
+            "bold": {"b", "bCs"},
+            "bold italic": {"b", "bCs", "i", "iCs"},
+        }
+        # Every planned case exactly once: a duplicate cannot stand in for a missing one.
+        self.assertEqual(
+            sorted((runs[0][1], runs[0][2], sorted(runs[0][3])) for runs, _ in italic),
+            sorted(
+                (font, size, sorted(toggles))
+                for font in ("Noto Sans", "Liberation Sans")
+                for size in (11, 20)
+                for toggles in styles.values()
+            ),
+        )
         for runs, _ in italic:
             ((text, font, size, toggles),) = runs
             words = text.split(":")[0]
@@ -310,14 +324,14 @@ class Packages(unittest.TestCase):
             name = f"E-smallcaps-{mode}"
             self.assertEqual(next(d for d in self.docs if d.name == name).mode, mode)
             cases = list(paragraphs(name))
-            self.assertEqual(len(cases), 3 * 3 * 7)
             self.assertEqual(
-                {runs[1][1:3] for runs, _ in cases},
-                {
-                    (font, size)
+                sorted((runs[1][1], runs[1][2], runs[1][0]) for runs, _ in cases),
+                sorted(
+                    (font, size, word)
                     for font in ("Liberation Sans", "Carlito", "Noto Sans")
                     for size in (9, 10.5, 11, 13, 21, 40, 72)
-                },
+                    for word in ("hamburg", "HAMBURG", "Hamburg")
+                ),
             )
             for runs, breaks in cases:
                 (label, label_font, label_size, label_toggles), (word, font, size, toggles) = runs
@@ -335,7 +349,12 @@ class Packages(unittest.TestCase):
 
         pages = list(paragraphs("E-line-fonts-truetype"))
         self.assertEqual(
-            {runs[0][1] for runs, _ in pages}, {"Noto Sans", "Aptos", "Liberation Sans"}
+            [runs[0][1:3] for runs, _ in pages],
+            [
+                (font, size)
+                for font in ("Noto Sans", "Aptos", "Liberation Sans")
+                for size in (11, 12)
+            ],
         )
         for runs, _ in pages:
             ((text, font, size, _),) = runs
