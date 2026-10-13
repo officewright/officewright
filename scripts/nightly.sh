@@ -17,6 +17,19 @@ printf '==> %s\n' "external corpus pins"
 # Downloads nothing. The full fetch with SHA-256 checks runs weekly (.github/workflows/weekly.yml).
 scripts/fetch-corpus.sh --check all
 
+printf '==> %s\n' "corpus runner (Word documents of corpus-ext)"
+# The Word documents of Apache POI and LibreOffice: git sources, so fetching them verifies
+# them. Each child gets the 1 GiB address-space limit of CLAUDE.md through prlimit; the
+# report is uploaded by nightly.yml. The run fails on a panic, hang, memory blow-up or
+# crash; unexpected errors are listed in the report without failing it.
+scripts/fetch-corpus.sh poi libreoffice
+cargo build --release -p corpus-runner
+corpus_failed=
+target/release/corpus-runner run --enforce-memory-limit \
+	--expected tools/corpus-runner/expected-errors.tsv \
+	--report target/corpus-report.json corpus-ext/poi corpus-ext/libreoffice ||
+	corpus_failed=1
+
 printf '==> %s\n' "fuzzing (30 min per target)"
 # Each target is seeded with files of the format it reads; libFuzzer keeps the inputs it
 # finds in fuzz/corpus/<target> and writes crashing inputs to fuzz/artifacts/<target>,
@@ -51,7 +64,15 @@ for target in $targets; do
 		-max_total_time=1800 -timeout=30 -rss_limit_mb=1024 ||
 		crashed="$crashed $target"
 done
+failed=
 if [ -n "$crashed" ]; then
 	echo "nightly.sh: fuzzing failed in:$crashed (inputs in fuzz/artifacts/)" >&2
+	failed=1
+fi
+if [ -n "$corpus_failed" ]; then
+	echo "nightly.sh: the corpus runner failed (report in target/corpus-report.json)" >&2
+	failed=1
+fi
+if [ -n "$failed" ]; then
 	exit 1
 fi
