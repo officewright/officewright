@@ -23,6 +23,18 @@ fuzz_target!(|data: &[u8]| {
         settings.effective_compatibility_mode(),
         settings.compatibility_options().count(),
     );
+    let numbering = document.numbering();
+    for definition in numbering.definitions() {
+        let _ = (
+            definition.identifier(),
+            definition.multi_level_type(),
+            definition.name(),
+        );
+        let _ = (definition.levels(), definition.level(0));
+    }
+    for instance in numbering.instances() {
+        let _ = (instance.definition(), instance.overrides());
+    }
     let styles = document.styles();
     let _ = styles.default_run_properties();
     let _ = styles.default_paragraph_properties();

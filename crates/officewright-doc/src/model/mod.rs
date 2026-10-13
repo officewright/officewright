@@ -1,6 +1,7 @@
 //! The document model: what a document contains, independent of the file format it was
 //! read from.
 
+pub(crate) mod numbering;
 pub(crate) mod properties;
 pub(crate) mod section;
 pub(crate) mod settings;
@@ -14,6 +15,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use officewright_core::Pt;
 
+pub use numbering::{
+    LegacyNumbering, LevelOverride, LevelSuffix, ListDefinition, ListInstance, ListLevel,
+    MultiLevelType, Numbering,
+};
 pub use properties::{
     ArtBorder, Border, BorderStyle, Color, ColorValue, FontHint, Highlight, Indentation,
     Justification, Language, LineSpacing, NumberFormat, NumberingReference, ParagraphBorders,
@@ -79,6 +84,7 @@ pub struct Document {
     pub(crate) names: Names,
     pub(crate) styles: styles::StyleTable,
     pub(crate) settings: settings::Settings,
+    pub(crate) numbering: numbering::NumberingTable,
     pub(crate) sections: Vec<SectionData>,
     pub(crate) kind: DocumentKind,
     pub(crate) conformance: Conformance,
@@ -156,6 +162,7 @@ impl Document {
             names: Names::default(),
             styles: styles::StyleTable::default(),
             settings: settings::Settings::default(),
+            numbering: numbering::NumberingTable::default(),
             sections: Vec::new(),
             kind: DocumentKind::Document,
             conformance: Conformance::Transitional,
@@ -229,6 +236,12 @@ impl Document {
     /// The styles of the document (`styles.xml`); none when it has no styles part.
     pub fn styles(&self) -> Styles<'_> {
         Styles::new(self)
+    }
+
+    /// The numbering of the document (`numbering.xml`): its list definitions and list
+    /// instances; none when it has no numbering part.
+    pub fn numbering(&self) -> Numbering<'_> {
+        Numbering::new(self)
     }
 
     /// The settings of the document (`settings.xml`); none set when it has no settings
