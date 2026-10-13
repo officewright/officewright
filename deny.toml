@@ -22,6 +22,10 @@ unused-allowed-license = "allow"
 # OPC pull requests; until then cargo deny warns that its exception is unused.
 [[licenses.exceptions]]
 allow = ["BUSL-1.1"]
+crate = "corpus-runner"
+
+[[licenses.exceptions]]
+allow = ["BUSL-1.1"]
 crate = "officewright"
 
 [[licenses.exceptions]]
