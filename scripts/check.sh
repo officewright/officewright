@@ -116,7 +116,7 @@ if printf '%s\n' "$packaged" | grep -E '^tests/(metric_compatible|third_party_fo
 	fail "officewright-font would publish the file above"
 fi
 packaged=$(cargo package --list --allow-dirty --quiet -p officewright-layout)
-if printf '%s\n' "$packaged" | grep -E '^tests/shaping\.rs$'; then
+if printf '%s\n' "$packaged" | grep -E '^(data/|tests/(shaping|fonts|symbol_table)\.rs$)'; then
 	fail "officewright-layout would publish the file above"
 fi
 packaged=$(cargo package --list --allow-dirty --quiet -p officewright-cli)

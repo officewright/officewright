@@ -45,8 +45,10 @@ crates/
   officewright-layout   page layout engine (shaping, text flow, line breaking, tables) — the core of DOCX→PDF;
                         its input is the layout IR (module `ir`), which the format crates build: public,
                         but exempt from semver until 1.0 and hidden in the docs unless feature `unstable-ir`;
-                        shapes with HarfRust behind a private module; feature `fuzzing` opens entry points
-                        for the fuzz targets, examples and font tests, which are not API
+                        chooses each character's font by Word's rule (MS-OI29500 2.1.88 b) with fallback,
+                        and shapes with HarfRust, behind private modules; feature `fuzzing` opens entry points
+                        for the fuzz targets, examples and font tests, which are not API; `data/symbol.txt`
+                        (Unicode's Adobe Symbol mapping) stays out of the published crate
   officewright-doc      DOC/DOCX/RTF          (counterpart of Spire.Doc)
   officewright-pdf      PDF read/write        (counterpart of Spire.PDF); the drawing primitives the layout engine
                         paints with are public, but exempt from semver until 1.0 and hidden in the docs unless
