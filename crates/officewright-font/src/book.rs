@@ -42,14 +42,28 @@ pub struct FaceInfo {
     coverage: CoverageCell,
 }
 
-/// The characters a face maps, read on the first query and kept, shared by the clones
-/// of the book.
-#[derive(Clone, Default)]
-struct CoverageCell(Arc<OnceLock<Coverage>>);
+/// What a face maps: its place among the faces added from one file or buffer, whose
+/// coverage is read together on the first query, kept, and shared by the clones of the
+/// book.
+#[derive(Clone)]
+struct CoverageCell {
+    file: Arc<FileCoverage>,
+    slot: usize,
+}
+
+/// The faces added from one file or buffer, and what each maps once it is read.
+struct FileCoverage {
+    faces: Vec<u32>,
+    coverages: OnceLock<Vec<Arc<Coverage>>>,
+}
+
+/// What a face covers when it cannot be read.
+static NOTHING: Coverage = Coverage::NOTHING;
 
 impl fmt::Debug for CoverageCell {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.0.get() {
+        let coverage = self.file.coverages.get().and_then(|all| all.get(self.slot));
+        match coverage {
             Some(coverage) => write!(f, "{} ranges", coverage.range_count()),
             None => f.write_str("not read"),
         }
@@ -184,19 +198,20 @@ impl FaceInfo {
         &self.keys
     }
 
-    /// The characters the face maps. The first call reads its `cmap`; a face that
-    /// cannot be read any more, or whose `cmap` is damaged, maps nothing, and is not
-    /// read again.
+    /// The characters the face maps. The first call reads the `cmap` of every face
+    /// added from the same file or buffer; a face that cannot be read any more, or whose
+    /// `cmap` is damaged, maps nothing, and is not read again.
     fn coverage(&self) -> &Coverage {
-        self.coverage.0.get_or_init(|| {
-            let coverage = match &self.source {
-                Source::File(path) => File::open(path)
-                    .ok()
-                    .and_then(|file| index::read_coverage(&mut BufReader::new(file), self.index)),
-                Source::Memory(data) => index::read_coverage(&mut Cursor::new(&**data), self.index),
-            };
-            coverage.unwrap_or_default()
-        })
+        let file = &self.coverage.file;
+        let all = file.coverages.get_or_init(|| match &self.source {
+            Source::File(path) => match File::open(path) {
+                Ok(open) => index::read_coverages(&mut BufReader::new(open), &file.faces),
+                Err(_) => Vec::new(),
+            },
+            Source::Memory(data) => index::read_coverages(&mut Cursor::new(&**data), &file.faces),
+        });
+        all.get(self.coverage.slot)
+            .map_or(&NOTHING, |coverage| coverage)
     }
 }
 
@@ -392,17 +407,26 @@ impl FontBook {
     }
 
     /// The faces whose character map has a glyph for `ch`, in the order of
-    /// [`faces`](Self::faces): every face that covers `ch`, and no other.
+    /// [`faces`](Self::faces).
     ///
-    /// A face covers the characters that the subtable [`FontFace::char_map`] uses maps to
-    /// a glyph other than 0. For a symbol font that is the characters U+F020 to U+F0FF it
-    /// lists; the U+0020 to U+00FF that [`FontFace::glyph_id`] also finds, as Windows
-    /// does, do not count, so a symbol font never stands in for Latin text.
+    /// A face covers the characters that the subtable [`FontFace::char_map`] uses both
+    /// lists and maps to a glyph other than 0 and inside the font. For an intact subtable
+    /// that is every character [`CharMap::map`](crate::CharMap::map) maps; in a damaged
+    /// one, such as a format 4 subtable whose segments are out of order, the listing and
+    /// the lookup can disagree, and only what both find counts. A symbol font covers the
+    /// characters its subtable lists, normally U+F020 to U+F0FF; the U+0020 to U+00FF
+    /// that [`FontFace::glyph_id`] also finds, as Windows does, do not count, so a symbol
+    /// font never stands in for Latin text.
     ///
-    /// Adding fonts does not read their character maps. The first query reads the `cmap`
-    /// table of each face, and only that, and keeps what it maps, so later queries cost a
-    /// lookup per face; the clones of the book share it. A face whose file can no longer
-    /// be read, or whose `cmap` is damaged, covers nothing and is not read again.
+    /// Adding fonts does not read their character maps. The first query reads, for every
+    /// face added from the same file or buffer, its table directory, its `cmap` table and
+    /// the start of its `maxp` table, and keeps what each face maps, so later queries cost
+    /// a lookup per face; the clones of the book share it. Faces that share their tables,
+    /// as those of a collection usually do, are read once. The reading is bounded per
+    /// file, like the index: about two million listed code points and 65,536 ranges of
+    /// them for all its faces together, which real fonts stay far below. A face past
+    /// those bounds, a face whose file can no longer be read, and a face whose `cmap` is
+    /// damaged or missing cover nothing, and are not read again.
     ///
     /// ```
     /// use officewright_font::FontBook;
@@ -578,24 +602,32 @@ impl FontBook {
             Source::File(path) => Some(path.clone()),
             Source::Memory(_) => None,
         };
-        let mut added = 0;
+        let mut indexed = Vec::new();
         let mut errors = Vec::new();
         for (index, face) in faces {
             match face {
-                Ok(face) => {
-                    let keys = NameKeys::new(&face);
-                    self.faces.push(FaceInfo {
-                        source: source.clone(),
-                        index,
-                        origin,
-                        properties: face.properties,
-                        keys,
-                        coverage: CoverageCell::default(),
-                    });
-                    added += 1;
-                }
+                Ok(face) => indexed.push((index, face)),
                 Err(error) => errors.push(error),
             }
+        }
+        let added = indexed.len();
+        let file = Arc::new(FileCoverage {
+            faces: indexed.iter().map(|(index, _)| *index).collect(),
+            coverages: OnceLock::new(),
+        });
+        for (slot, (index, face)) in indexed.into_iter().enumerate() {
+            let keys = NameKeys::new(&face);
+            self.faces.push(FaceInfo {
+                source: source.clone(),
+                index,
+                origin,
+                properties: face.properties,
+                keys,
+                coverage: CoverageCell {
+                    file: Arc::clone(&file),
+                    slot,
+                },
+            });
         }
         if added == 0 {
             if let Some(error) = errors.into_iter().next() {
@@ -1387,6 +1419,134 @@ mod tests {
         // What was read is shown as a count, not as the ranges themselves.
         let debug = format!("{:?}", book.face(FaceId(0)).unwrap());
         assert!(debug.contains("coverage: 4 ranges"), "{debug}");
+    }
+
+    #[test]
+    fn covers_only_glyphs_the_font_has_and_lookups_find() {
+        let delta = |code: u16, glyph: u16| glyph.wrapping_sub(code);
+        let mut book = FontBook::new();
+        // B maps to glyph 99, past the end of the five glyphs the test font has.
+        let past_the_end =
+            testing::cmap_format4(&[(0x41, 0x41, delta(0x41, 2)), (0x42, 0x42, delta(0x42, 99))]);
+        // Segments out of order: the subtable lists A, but a lookup, a binary search,
+        // does not find it.
+        let out_of_order =
+            testing::cmap_format4(&[(0x41, 0x41, delta(0x41, 2)), (0x10, 0x10, delta(0x10, 1))]);
+        for (family, cmap) in [("Test Past", past_the_end), ("Test Order", out_of_order)] {
+            book.add_bytes(
+                TestFont::new(family).with_table(b"cmap", cmap).build(),
+                FontOrigin::User,
+            )
+            .unwrap();
+        }
+        let past = book.load(FaceId(0)).unwrap();
+        assert!(past.glyph_id('A').is_some() && past.glyph_id('B').is_none());
+        let order = book.load(FaceId(1)).unwrap();
+        assert!(order.glyph_id('\u{10}').is_some() && order.glyph_id('A').is_none());
+        assert_eq!(families(&book, &book.faces_covering('A')), ["Test Past"]);
+        assert!(book.faces_covering('B').is_empty());
+    }
+
+    #[test]
+    fn clones_share_what_was_read() {
+        let dir = TempDir::new("coverage-clone");
+        let path = dir.0.join("sans.ttf");
+        fs::write(&path, TestFont::new("Test Sans").build()).unwrap();
+        let mut book = FontBook::new();
+        book.add_dir(&dir.0).unwrap();
+        let copy = book.clone();
+        assert_eq!(book.faces_covering('A'), [FaceId(0)]);
+        // The clone answers from what the book read, without the file.
+        fs::remove_file(&path).unwrap();
+        assert_eq!(copy.faces_covering('A'), [FaceId(0)]);
+    }
+
+    /// A collection of `count` faces that all point at the one font in it.
+    fn one_font_many_faces(font: &[u8], count: u32) -> Vec<u8> {
+        let mut ttc = Vec::new();
+        ttc.extend_from_slice(b"ttcf");
+        ttc.extend_from_slice(&0x0001_0000_u32.to_be_bytes());
+        ttc.extend_from_slice(&count.to_be_bytes());
+        let start = 12 + 4 * count;
+        for _ in 0..count {
+            ttc.extend_from_slice(&start.to_be_bytes());
+        }
+        let mut font = font.to_vec();
+        let tables = usize::from(u16::from_be_bytes([font[4], font[5]]));
+        for record in 0..tables {
+            let at = 12 + 16 * record + 8;
+            let offset = u32::from_be_bytes(font[at..at + 4].try_into().unwrap());
+            font[at..at + 4].copy_from_slice(&(offset + start).to_be_bytes());
+        }
+        ttc.extend_from_slice(&font);
+        ttc
+    }
+
+    /// The test font with a format 13 map of every code point to glyph 1.
+    fn everything(family: &str) -> Vec<u8> {
+        let cmap = testing::cmap_groups(13, &[(0, 0x10_FFFF, 1)]);
+        TestFont::new(family).with_table(b"cmap", cmap).build()
+    }
+
+    #[test]
+    fn faces_that_share_a_map_read_it_once() {
+        // 1024 faces of one font that maps all of Unicode: read once, within the budget,
+        // and every face covers it.
+        let mut book = FontBook::new();
+        book.add_bytes(
+            one_font_many_faces(&everything("Test All"), 1024),
+            FontOrigin::Document,
+        )
+        .unwrap();
+        assert_eq!(book.len(), 1024);
+        assert_eq!(book.faces_covering('\u{4E00}').len(), 1024);
+        assert_eq!(book.faces_covering(char::MAX).len(), 1024);
+    }
+
+    #[test]
+    fn a_file_has_one_budget_for_all_its_faces() {
+        // Three faces with maps of their own, each of all of Unicode: the first fits the
+        // budget of the file, the others do not and cover nothing.
+        let ttc = testing::collection(&[
+            everything("Test One"),
+            everything("Test Two"),
+            everything("Test Three"),
+        ]);
+        let mut book = FontBook::new();
+        book.add_bytes(ttc, FontOrigin::Document).unwrap();
+        assert_eq!(
+            families(&book, &book.faces_covering('\u{4E00}')),
+            ["Test One"]
+        );
+        // Each file has a budget of its own.
+        book.add_bytes(everything("Test Four"), FontOrigin::Document)
+            .unwrap();
+        assert_eq!(
+            families(&book, &book.faces_covering('A')),
+            ["Test One", "Test Four"]
+        );
+    }
+
+    #[test]
+    fn a_map_that_needs_too_many_ranges_covers_nothing() {
+        // Every other code point from 0: 70,000 ranges, more than a file may keep.
+        let groups: Vec<(u32, u32, u32)> = (0..70_000).map(|i| (2 * i, 2 * i, 1)).collect();
+        let sparse =
+            TestFont::new("Test Sparse").with_table(b"cmap", testing::cmap_groups(12, &groups));
+        let mut book = FontBook::new();
+        book.add_bytes(sparse.build(), FontOrigin::User).unwrap();
+        let face = book.load(FaceId(0)).unwrap();
+        assert!(face.glyph_id('\u{2}').is_some());
+        assert!(book.faces_covering('\u{2}').is_empty());
+        // Half as many fit.
+        let groups: Vec<(u32, u32, u32)> = (0..30_000).map(|i| (2 * i, 2 * i, 1)).collect();
+        let fewer =
+            TestFont::new("Test Fewer").with_table(b"cmap", testing::cmap_groups(12, &groups));
+        book.add_bytes(fewer.build(), FontOrigin::User).unwrap();
+        assert_eq!(
+            families(&book, &book.faces_covering('\u{2}')),
+            ["Test Fewer"]
+        );
     }
 
     #[test]

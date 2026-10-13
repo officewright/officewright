@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::io::{self, Read, Seek, SeekFrom};
+use std::sync::Arc;
 
 use skrifa::raw::tables::fvar::Fvar;
 use skrifa::raw::tables::name::Name;
@@ -65,25 +66,72 @@ const MAX_INSTANCES: usize = 256;
 /// of Unicode need a few hundred kilobytes.
 const MAX_CMAP: u32 = 16 << 20;
 
-/// The characters face `face` of a font file maps to a glyph, as
-/// [`FontFace::char_map`](crate::FontFace::char_map) maps them, read like the index
-/// reads: the table directory, the `cmap` table and the start of `maxp`, nothing else.
-/// `None` if the face cannot be read.
-pub(crate) fn read_coverage<R: Read + Seek>(reader: &mut R, face: u32) -> Option<Coverage> {
-    let file_len = reader.seek(SeekFrom::End(0)).ok()?;
+/// The most code points the character maps of one file may list, all faces together. A
+/// font that maps the whole of Unicode lists 1.1 million, a collection of East Asian
+/// fonts about 65,000 per face; faces that share a `cmap` count once. Faces past the
+/// budget cover nothing, so a file whose faces all point at one huge map costs no more
+/// than one of them.
+const MAX_CODE_POINTS_PER_FILE: u64 = 1 << 21;
+
+/// The most ranges of code points kept for one file, all faces together. Real fonts need
+/// a few thousand; a map that lists every other code point would need hundreds of
+/// thousands, and a face that would go past the budget covers nothing.
+const MAX_RANGES_PER_FILE: usize = 1 << 16;
+
+/// The characters each of `faces` of a font file maps to a glyph, as
+/// [`FontFace::char_map`](crate::FontFace::char_map) maps them, in the order of `faces`.
+///
+/// It reads like the index: the table directories, the `cmap` tables and the start of
+/// the `maxp` tables, nothing else, within one budget for the whole file. Faces that
+/// share their `cmap` and `maxp` tables, as the faces of a collection usually do, share
+/// one coverage. A face that cannot be read, or would go past a budget, covers nothing.
+pub(crate) fn read_coverages<R: Read + Seek>(reader: &mut R, faces: &[u32]) -> Vec<Arc<Coverage>> {
+    let nothing = Arc::new(Coverage::default());
+    let Ok(file_len) = reader.seek(SeekFrom::End(0)) else {
+        return vec![nothing; faces.len()];
+    };
     let mut file = BoundedReader {
         reader,
         file_len,
         budget: MAX_READ_PER_FILE,
         exhausted: false,
     };
+    let mut budget = CoverageBudget {
+        code_points: MAX_CODE_POINTS_PER_FILE,
+        ranges: MAX_RANGES_PER_FILE,
+    };
+    let mut known = HashMap::new();
+    faces
+        .iter()
+        .map(|&face| {
+            read_face_coverage(&mut file, face, &mut budget, &mut known)
+                .unwrap_or_else(|| Arc::clone(&nothing))
+        })
+        .collect()
+}
+
+/// What is left of the budgets of one file.
+struct CoverageBudget {
+    code_points: u64,
+    ranges: usize,
+}
+
+/// Where a face's `cmap` and `maxp` tables are in the file.
+type TablesKey = (u32, u32, u32, u32);
+
+/// The coverage of one face; `None` if it covers nothing.
+fn read_face_coverage<R: Read + Seek>(
+    file: &mut BoundedReader<'_, R>,
+    face: u32,
+    budget: &mut CoverageBudget,
+    known: &mut HashMap<TablesKey, Option<Arc<Coverage>>>,
+) -> Option<Arc<Coverage>> {
     let header = file.read_at(0, 12).ok()??;
     let offset = if header.get(..4) == Some(b"ttcf") {
         if face >= be_u32(&header, 8)? {
             return None;
         }
-        let at = 12 + 4 * u64::from(face);
-        let offset = file.read_at(at, 4).ok()??;
+        let offset = file.read_at(12 + 4 * u64::from(face), 4).ok()??;
         u64::from(be_u32(&offset, 0)?)
     } else if face == 0 {
         0
@@ -101,20 +149,35 @@ pub(crate) fn read_coverage<R: Read + Seek>(reader: &mut R, face: u32) -> Option
             .table_records()
             .iter()
             .find(|record| record.tag() == Tag::new(tag))
+            .map(|record| (record.offset(), record.length()))
     };
-    let Some(cmap) = record(b"cmap") else {
-        return Some(Coverage::default());
-    };
-    if cmap.length() > MAX_CMAP {
+    let (cmap_offset, cmap_len) = record(b"cmap")?;
+    let (maxp_offset, maxp_len) = record(b"maxp")?;
+    // numGlyphs is at bytes 4 and 5; the parser wants the whole table of its version.
+    let maxp_len = maxp_len.min(32);
+    let key = (cmap_offset, cmap_len, maxp_offset, maxp_len);
+    if let Some(coverage) = known.get(&key) {
+        return coverage.clone();
+    }
+    let coverage = read_tables_coverage(file, key, budget).map(Arc::new);
+    known.insert(key, coverage.clone());
+    coverage
+}
+
+/// The coverage of the `cmap` and `maxp` tables at `key`.
+fn read_tables_coverage<R: Read + Seek>(
+    file: &mut BoundedReader<'_, R>,
+    (cmap_offset, cmap_len, maxp_offset, maxp_len): TablesKey,
+    budget: &mut CoverageBudget,
+) -> Option<Coverage> {
+    if cmap_len > MAX_CMAP {
         return None;
     }
     let cmap = file
-        .read_at(u64::from(cmap.offset()), u64::from(cmap.length()))
+        .read_at(u64::from(cmap_offset), u64::from(cmap_len))
         .ok()??;
-    // numGlyphs is at bytes 4 and 5; the parser wants the whole table of its version.
-    let maxp = record(b"maxp")?;
     let maxp = file
-        .read_at(u64::from(maxp.offset()), u64::from(maxp.length().min(32)))
+        .read_at(u64::from(maxp_offset), u64::from(maxp_len))
         .ok()??;
     let font = two_table_font(&cmap, &maxp)?;
     let font = FontRef::new(&font).ok()?;
@@ -129,12 +192,31 @@ pub(crate) fn read_coverage<R: Read + Seek>(reader: &mut R, face: u32) -> Option
             .map(code_point)
             .is_some_and(|glyph| glyph.to_u32() < glyph_count)
     };
-    Some(Coverage::from_code_points(
-        charmap
-            .mappings()
-            .filter(|&(code_point, glyph)| glyph.to_u32() < glyph_count && maps(code_point))
-            .map(|(code_point, _)| code_point),
-    ))
+    let mut listed = charmap.mappings();
+    let mut out_of_budget = false;
+    let code_points = std::iter::from_fn(|| {
+        let item = listed.next()?;
+        if budget.code_points == 0 {
+            out_of_budget = true;
+            return None;
+        }
+        budget.code_points -= 1;
+        Some(item)
+    })
+    .filter(|&(code_point, glyph)| glyph.to_u32() < glyph_count && maps(code_point))
+    .map(|(code_point, _)| code_point);
+    // The iteration of format 12 and 13 subtables in read-fonts 0.45 stops one short of
+    // char::MAX, a noncharacter no real font maps; a lookup tells whether this one does.
+    let last = maps(u32::from(char::MAX)).then_some(u32::from(char::MAX));
+    let coverage = Coverage::from_code_points(code_points.chain(last), budget.ranges);
+    if out_of_budget {
+        // The rest of the file covers nothing too.
+        budget.code_points = 0;
+        return None;
+    }
+    let coverage = coverage?;
+    budget.ranges -= coverage.range_count();
+    Some(coverage)
 }
 
 /// A font file that holds only a `cmap` and a `maxp` table: all a character map needs.
@@ -580,6 +662,45 @@ mod tests {
             .map(|i| 12 + 16 * i)
             .find(|at| &font[*at..*at + 4] == tag)
             .unwrap()
+    }
+
+    /// Whether each of `faces` of `data` covers A.
+    fn covers_a(data: &[u8], faces: &[u32]) -> Vec<bool> {
+        read_coverages(&mut Cursor::new(data), faces)
+            .iter()
+            .map(|coverage| coverage.contains('A'))
+            .collect()
+    }
+
+    #[test]
+    fn coverage_reads_only_faces_the_file_has() {
+        let font = TestFont::new("Test Sans").build();
+        let ttc = testing::collection(&[font.clone(), font.clone()]);
+        assert_eq!(covers_a(&ttc, &[0, 1, 2, 7]), [true, true, false, false]);
+        assert_eq!(covers_a(&font, &[0, 1]), [true, false]);
+        assert_eq!(covers_a(b"not a font", &[0]), [false]);
+    }
+
+    #[test]
+    fn coverage_refuses_huge_character_maps() {
+        // The cmap moved to the end of the file, followed by zeros up to `len` bytes, all
+        // of them in the file.
+        let moved = |len: u32| {
+            let mut font = TestFont::new("Test Sans").build();
+            let at = record(&font, b"cmap");
+            let offset = u32::from_be_bytes(font[at + 8..at + 12].try_into().unwrap()) as usize;
+            let old_len = u32::from_be_bytes(font[at + 12..at + 16].try_into().unwrap()) as usize;
+            let cmap = font[offset..offset + old_len].to_vec();
+            let new_offset = u32::try_from(font.len()).unwrap();
+            font[at + 8..at + 12].copy_from_slice(&new_offset.to_be_bytes());
+            font[at + 12..at + 16].copy_from_slice(&len.to_be_bytes());
+            font.extend_from_slice(&cmap);
+            font.resize(new_offset as usize + len as usize, 0);
+            font
+        };
+        assert_eq!(covers_a(&moved(4096), &[0]), [true]);
+        assert_eq!(covers_a(&moved(MAX_CMAP), &[0]), [true]);
+        assert_eq!(covers_a(&moved(MAX_CMAP + 1), &[0]), [false]);
     }
 
     fn cause(err: &Error) -> String {

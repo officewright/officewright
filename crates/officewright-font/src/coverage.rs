@@ -6,17 +6,30 @@
 pub(crate) struct Coverage(Vec<(u32, u32)>);
 
 impl Coverage {
-    /// The coverage of a list of code points, in any order and with repeats.
-    pub(crate) fn from_code_points(code_points: impl IntoIterator<Item = u32>) -> Self {
+    /// Nothing at all.
+    pub(crate) const NOTHING: Self = Self(Vec::new());
+
+    /// The coverage of a list of code points, in any order and with repeats; `None` if it
+    /// would take more than `max_ranges` ranges.
+    pub(crate) fn from_code_points(
+        code_points: impl IntoIterator<Item = u32>,
+        max_ranges: usize,
+    ) -> Option<Self> {
         // Character maps list their code points in order, so the runs are long.
         let mut runs: Vec<(u32, u32)> = Vec::new();
         for code_point in code_points {
-            match runs.last_mut() {
-                Some((start, end)) if (*start..=end.saturating_add(1)).contains(&code_point) => {
+            if let Some((start, end)) = runs.last_mut() {
+                if (*start..=end.saturating_add(1)).contains(&code_point) {
                     *end = (*end).max(code_point);
+                    continue;
                 }
-                _ => runs.push((code_point, code_point)),
             }
+            // Merging can only make fewer ranges than runs, so too many runs is too many
+            // unless the input is out of order, as only a damaged map is.
+            if runs.len() >= max_ranges {
+                return None;
+            }
+            runs.push((code_point, code_point));
         }
         // A damaged map may list them in any order.
         runs.sort_unstable();
@@ -27,7 +40,7 @@ impl Coverage {
                 _ => ranges.push((start, end)),
             }
         }
-        Self(ranges)
+        Some(Self(ranges))
     }
 
     /// Whether the face maps `ch`.
@@ -54,7 +67,8 @@ mod tests {
 
     #[test]
     fn merges_runs_in_any_order() {
-        let coverage = Coverage::from_code_points([0x42, 0x41, 0x43, 0x41, 0x100, 0x45, 0x44]);
+        let coverage =
+            Coverage::from_code_points([0x42, 0x41, 0x43, 0x41, 0x100, 0x45, 0x44], 8).unwrap();
         assert_eq!(coverage.0, [(0x41, 0x45), (0x100, 0x100)]);
         for ch in ['A', 'B', 'E', '\u{100}'] {
             assert!(coverage.contains(ch), "{ch:?}");
@@ -66,11 +80,25 @@ mod tests {
 
     #[test]
     fn covers_the_ends_of_unicode() {
-        let coverage = Coverage::from_code_points([0, 0x10_FFFF, 0x10_FFFE]);
+        let coverage = Coverage::from_code_points([0, 0x10_FFFF, 0x10_FFFE], 3).unwrap();
         assert_eq!(coverage.0, [(0, 0), (0x10_FFFE, 0x10_FFFF)]);
         assert!(coverage.contains('\0'));
         assert!(coverage.contains(char::MAX));
         assert!(!Coverage::default().contains('A'));
         assert_eq!(Coverage::default().range_count(), 0);
+    }
+
+    #[test]
+    fn refuses_more_ranges_than_allowed() {
+        assert_eq!(Coverage::from_code_points([1, 3, 5], 2), None);
+        assert_eq!(
+            Coverage::from_code_points([1, 3, 5], 3).map(|c| c.range_count()),
+            Some(3)
+        );
+        // Code points in a row make one range.
+        assert_eq!(
+            Coverage::from_code_points(1..=1000, 1).map(|c| c.range_count()),
+            Some(1)
+        );
     }
 }
