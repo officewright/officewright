@@ -28,6 +28,8 @@ writes.
 | word-rules/E-list-shared-abstract.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | List numbering across w:num instances that share one w:abstractNum, with and without startOverride, interleaved with a list of another abstract definition |
 | word-rules/E-tab-hanging.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Where a tab after a label goes when the paragraph has a hanging indent, for typed labels and list labels, without the compat flag doNotUseIndentAsNumberingTabStop (default tab stops every 36 pt) |
 | word-rules/E-tab-hanging-noindenttab.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Where a tab after a label goes when the paragraph has a hanging indent, for typed labels and list labels, with the compat flag doNotUseIndentAsNumberingTabStop (default tab stops every 36 pt) |
+| word-rules/E-tab-hanging-14.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Where a tab after a label goes when the paragraph has a hanging indent, for typed labels and list labels, without the compat flag doNotUseIndentAsNumberingTabStop (default tab stops every 36 pt), in compatibility mode 14 |
+| word-rules/E-tab-hanging-noindenttab-14.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Where a tab after a label goes when the paragraph has a hanging indent, for typed labels and list labels, with the compat flag doNotUseIndentAsNumberingTabStop (default tab stops every 36 pt), in compatibility mode 14 |
 
 ## Reference renders (`reference/`)
 

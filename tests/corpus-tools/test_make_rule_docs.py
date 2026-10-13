@@ -175,6 +175,7 @@ class Packages(unittest.TestCase):
             expected = {
                 "E-autospacing-nohtml": {"doNotUseHTMLParagraphAutoSpacing"},
                 "E-tab-hanging-noindenttab": {"doNotUseIndentAsNumberingTabStop"},
+                "E-tab-hanging-noindenttab-14": {"doNotUseIndentAsNumberingTabStop"},
             }.get(doc.name, set())
             self.assertEqual(flags, expected, doc.name)
 
