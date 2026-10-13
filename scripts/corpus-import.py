@@ -507,6 +507,11 @@ THEMES = {
     for kind in ("major", "minor")
     for script in ("HAnsi", "Ascii", "EastAsia", "Bidi")
 } | {"unresolved"}
+# Theme colours as make-reference.ps1 names them: ST_ThemeColor (ECMA-376 Part 1, 17.18.97).
+THEME_COLOURS = {
+    "dark1", "light1", "dark2", "light2", "accent1", "accent2", "accent3", "accent4", "accent5",
+    "accent6", "hyperlink", "followedHyperlink", "background1", "text1", "background2", "text2",
+}
 # make-reference.ps1's notes about runs: fixed sentences, never Word's own messages.
 RUNS_NOTES = {
     "",
@@ -514,6 +519,7 @@ RUNS_NOTES = {
     "left out: they took longer than the paragraphs",
     "left out: they did not fit in the time budget",
     "left out: reading them failed",
+    "left out: Word failed the check of the run reader",
 }
 # Style names (Word allows 253 characters) and list labels.
 STYLE_NAME = re.compile(r"^[^|\x00-\x1f]{1,253}$")
@@ -549,7 +555,7 @@ def checked_flag(value: object, where: str) -> bool | None:
 
 
 def checked_font(font: object, where: str) -> dict:
-    keys = {"name", "size", "bold", "italic", "color", "theme"}
+    keys = {"name", "size", "bold", "italic", "color", "theme", "theme_color", "tint_shade"}
     if not isinstance(font, dict) or not set(font) <= keys:
         raise ValueError(f"{where} is not a font")
     name, theme = font.get("name"), font.get("theme")
@@ -573,6 +579,22 @@ def checked_font(font: object, where: str) -> dict:
     }
     if theme is not None:
         out["theme"] = theme
+    theme_colour, tint_shade = font.get("theme_color"), font.get("tint_shade")
+    if theme_colour is not None or tint_shade is not None:
+        # A theme colour Word gave no RGB value for: its ST_ThemeColor name and Word's
+        # TintAndShade, from -1 (darkest) to 1 (lightest).
+        if not (isinstance(theme_colour, str) and theme_colour in THEME_COLOURS):
+            raise ValueError(f"{where}: unexpected theme colour")
+        if not (
+            isinstance(tint_shade, (int, float))
+            and not isinstance(tint_shade, bool)
+            and -1 <= tint_shade <= 1
+        ):
+            raise ValueError(f"{where}: unexpected tint or shade")
+        if colour is not None:
+            raise ValueError(f"{where}: a theme colour next to an RGB colour")
+        out["theme_color"] = theme_colour
+        out["tint_shade"] = tint_shade
     return out
 
 
