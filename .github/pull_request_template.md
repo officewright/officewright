@@ -36,9 +36,15 @@ posting the comment it asks for.
 
 ---
 
+Definition of done (CONTRIBUTING.md):
+
 - [ ] `scripts/check.sh` passes locally.
-- [ ] New behaviour has tests; a bug fix has a regression test that failed before the fix.
-- [ ] Every new public item has a doc comment; what users need is also in the C ABI, with
-      the header regenerated and covered by `tests/c` and `tests/ffi-python`.
+- [ ] New behaviour has tests. A bug fix has a regression test that failed before the fix.
+- [ ] Every new public item has a doc comment. Non-trivial public APIs have a runnable doc
+      example.
 - [ ] A new parser comes with a fuzz target in `fuzz/`.
-- [ ] No check is weakened.
+- [ ] Every public Rust feature that users need is exposed through the C ABI in the same
+      pull request, with the header regenerated and covered by `tests/c` and
+      `tests/ffi-python`.
+- [ ] No check is weakened to make it pass: no `#[allow]` without a `// reason:` comment, no
+      skipped tests, no lowered lint levels.

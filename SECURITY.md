@@ -4,10 +4,10 @@
 
 Please do not report security problems in public issues, pull requests or discussions.
 
-Report them privately through GitHub: on the repository's **Security** tab, choose
-**Report a vulnerability**, or go straight to
-<https://github.com/officewright/officewright/security/advisories/new>. The report and
-the discussion stay private between you and the maintainer until a fix is published.
+Report them privately through GitHub's private vulnerability reporting:
+<https://github.com/officewright/officewright/security/advisories/new>, also reachable as
+**Report a vulnerability** on the repository's security page. Only you and the maintainer
+see the report and the discussion of it.
 
 Include what you can of:
 

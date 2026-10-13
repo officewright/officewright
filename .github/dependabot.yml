@@ -1,5 +1,10 @@
 # Dependabot opens pull requests that update existing dependencies; each still goes
 # through CI, including the MSRV job and `cargo deny`. New dependencies are added by hand.
+# Not covered here: the Rust toolchain (RUST_TOOLCHAIN in release.yml, the MSRV in
+# Cargo.toml), the container image digests in release.yml, and the tool versions pinned
+# in the workflows and scripts. An update that breaks the MSRV or `cargo deny` can be
+# kept from coming back with an `ignore` entry. Minor updates of 0.x crates may break the
+# build despite being grouped with patch updates; CI shows that before anything merges.
 version: 2
 updates:
   - package-ecosystem: cargo
