@@ -209,7 +209,7 @@ The maintainer does not review Rust code. Correctness rests on the automated gat
 - A fresh Claude Code session that has not seen the implementation conversation, on a different model than the author (Opus author → Fable reviewer, and vice versa).
 - Reviews the diff against CLAUDE.md, the Definition of done and the clean-room policy. Focus: parsers and FFI safety, tests that cannot fail or test the implementation instead of behaviour, missing edge cases, public API and C ABI stability.
 - For critical paths, temporarily breaks the code and confirms a test catches it.
-- Checks the release gate table where one is required: a value worse on the branch than on main is a **blocker** unless the PR explains it and the maintainer agreed to it.
+- Checks the release gate table where one is required: a value worse on the branch than on main is a **blocker** unless the PR explains it and the maintainer agreed to it in a PR comment. The exception concerns this review only; the baseline check and the merge conditions below stay as they are.
 - Verifies each finding adversarially, then posts one PR comment listing findings tagged **blocker**, **should-fix** or **nit**.
 
 ### 3. Fixes
