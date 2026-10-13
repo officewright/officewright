@@ -465,6 +465,34 @@ mod tests {
         assert!(!Arc::ptr_eq(&long, &small.shape(&face, "AAAA", &request)));
     }
 
+    #[test]
+    fn an_entry_costs_its_glyphs_its_text_and_its_language() {
+        let face = ShapingFace::new(minimal());
+        let entry = |text: &str, language: Option<&str>| {
+            let request = ShapeRequest {
+                language: language.map(str::to_owned),
+                ..ShapeRequest::default()
+            };
+            let key = CacheKey {
+                face: face.id,
+                request: request.clone(),
+                text: text.to_owned(),
+            };
+            cost(&key, &shape(&face, text, &request))
+        };
+        let glyph = std::mem::size_of::<ShapedGlyph>();
+        // Two more characters: two more glyphs and two more bytes of text.
+        assert_eq!(entry("AAAA", None) - entry("AA", None), 2 * glyph + 2);
+        // A language adds its tag.
+        assert_eq!(entry("AA", Some("ro")) - entry("AA", None), 2);
+        // An empty run costs the entry itself: key, run, `Arc` and map slot.
+        let fixed = std::mem::size_of::<CacheKey>()
+            + std::mem::size_of::<ShapedRun>()
+            + std::mem::size_of::<Arc<ShapedRun>>()
+            + 2 * std::mem::size_of::<usize>();
+        assert_eq!(entry("", None), fixed);
+    }
+
     /// The features a request turns into, by tag.
     fn features(features: Features, script: Option<Script>) -> Vec<(String, u32)> {
         let mut list: Vec<(String, u32)> = features

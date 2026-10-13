@@ -191,6 +191,47 @@ fn the_language_chooses_the_forms_of_letters() -> TestResult {
 }
 
 #[test]
+fn kerning_follows_the_run_only_in_the_standard_scripts() -> TestResult {
+    // Liberation Sans kerns Hebrew in its own `hebr` script. Shaped as Hebrew, the script
+    // guessed from the text, the pair is kerned whatever the run asks; shaped as Latin,
+    // where Word's switch applies and is off, it is not.
+    let face = liberation_sans()?;
+    let hebrew = "\u{5DC}\u{5E5}";
+    let guessed = shape(&face, hebrew, &Settings::new());
+    assert_eq!(total(&guessed), 2097);
+    let kerned = shape(&face, hebrew, &Settings::new().with_kerning(true));
+    assert_eq!(total(&kerned), total(&guessed));
+    let flags: Vec<bool> = guessed
+        .glyphs()
+        .iter()
+        .map(|glyph| glyph.unsafe_to_break())
+        .collect();
+    assert_eq!(flags, [false, true]);
+    let latin = shape(&face, hebrew, &Settings::new().with_script("Latn"));
+    assert_eq!(total(&latin), 2117);
+    Ok(())
+}
+
+#[test]
+fn a_script_code_that_is_no_script_leaves_the_script_to_the_text() -> TestResult {
+    // With a code that names no script, the script is still taken from the text, so the
+    // Romanian forms of Latin letters apply.
+    let face = noto_sans()?;
+    let romanian = shape(
+        &face,
+        "\u{15F}\u{163}",
+        &Settings::new().with_language("ro"),
+    );
+    let unknown = shape(
+        &face,
+        "\u{15F}\u{163}",
+        &Settings::new().with_script("1234").with_language("ro"),
+    );
+    assert_eq!(ids(&unknown), ids(&romanian));
+    Ok(())
+}
+
+#[test]
 fn a_character_the_face_lacks_takes_the_missing_glyph() -> TestResult {
     let shaped = shape(&liberation_sans()?, "a中b", &Settings::new());
     let ids = ids(&shaped);
