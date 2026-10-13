@@ -231,8 +231,20 @@ impl Builder<'_, '_, '_> {
                 vec![ch]
             };
             let small = style.small_caps() && !style.caps() && lowercase;
-            for drawn in drawn {
-                self.character(drawn, source.clone(), id, style, small);
+            // The characters drawn for one character of the source (ŉ in capitals is ʼN)
+            // stay together, in the look and script of the first.
+            let mut drawn = drawn.into_iter();
+            if let Some(first) = drawn.next() {
+                self.character(first, source.clone(), id, style, small);
+            }
+            for ch in drawn {
+                match self.pending.last() {
+                    Some(previous) => {
+                        let (look, script) = (previous.look.clone(), previous.script);
+                        self.push_as(ch, source.clone(), look, script);
+                    }
+                    None => self.character(ch, source.clone(), id, style, small),
+                }
             }
         }
     }
@@ -423,18 +435,19 @@ impl Builder<'_, '_, '_> {
         }
         for other in Slot::ALL {
             let other_family = other.family(style.fonts());
-            if other_family == family {
+            if crate::slot::same_family(other_family, family) {
                 continue;
             }
             let other = self.fonts.choose(other_family, bold, italic);
-            if other
-                .face
-                .is_some_and(|face| self.fonts.has_glyph(face, ch))
-            {
+            if let Some(face) = other.face.filter(|&face| self.fonts.has_glyph(face, ch)) {
+                self.fonts.report_fallback(family, face, ch, self.location);
                 return other;
             }
         }
         if let Some(covering) = self.fonts.covering(ch, family, bold, italic) {
+            if let Some(face) = covering.face {
+                self.fonts.report_fallback(family, face, ch, self.location);
+            }
             return covering;
         }
         self.fonts.missing(ch);
@@ -819,11 +832,20 @@ mod tests {
             ]
         );
         assert_eq!(families, ["Officewright Lite", TEST, "Officewright Lite"]);
-        assert!(report.is_empty(), "{report:?}");
+        // The fallback is reported, once for the family and the font it falls back to.
+        assert_eq!(
+            messages(&report),
+            [(
+                ReportKind::FontSubstituted,
+                "\"Officewright Lite\" has no glyph for some characters, such as U+00C1 'Á'; \
+                 they are drawn in \"Officewright Test\""
+            )]
+        );
         // No font of the run has it: the book's first font that does.
         let lite = setup.style(plain("Officewright Lite"));
-        let (_, _, families) = setup.run(&[Inline::text("\u{C1}", lite)]);
+        let (_, report, families) = setup.run(&[Inline::text("\u{C1}\u{C1}", lite)]);
         assert_eq!(families, ["Officewright Zzzz"]);
+        assert_eq!(report.len(), 1, "{report:?}");
     }
 
     #[test]
@@ -1347,5 +1369,37 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn an_installed_symbol_font_stays_in_a_style_it_lacks() {
+        // Symbol is installed, but not in bold: it draws bold synthetically, and its codes
+        // are its own, not the Unicode characters they stand for.
+        let symbol = crate::testing::with_family(minimal(), "Symbol");
+        let mut setup = Setup::new(vec![minimal(), symbol]);
+        let bold_symbol = setup.style(plain("Symbol").with_bold(true));
+        let bold = setup.style(plain(TEST).with_bold(true));
+        let (itemized, _, families) = setup.run(&[
+            Inline::text("A", bold_symbol),
+            Inline::symbol("Symbol", 0x0041, bold),
+        ]);
+        assert_eq!(itemized.text, "AA");
+        assert_eq!(families, ["Symbol", "Symbol"]);
+        assert!(first_run(&itemized).synthetic_bold);
+    }
+
+    #[test]
+    fn keeps_the_capitals_of_one_character_together() {
+        // ŉ in capitals is ʼN. The rule gives ʼ (a spacing modifier letter) the East
+        // Asian font with the hint, and N the ASCII one; they stay one cluster all the
+        // same, in the font of the first.
+        let mut setup = Setup::new(vec![minimal(), renamed(minimal(), "Officewright Zzzz")]);
+        let fonts = RunFonts::new(TEST)
+            .with_east_asia("Officewright Zzzz")
+            .with_hint(crate::ir::FontHint::EastAsia);
+        let style = setup.style(RunStyle::default().with_fonts(fonts).with_caps(true));
+        let (itemized, _, families) = setup.run(&[Inline::text("\u{149}", style)]);
+        assert_eq!(runs(&itemized), [("\u{2BC}N", "\u{149}", 10.0)]);
+        assert_eq!(families, ["Officewright Zzzz"]);
     }
 }

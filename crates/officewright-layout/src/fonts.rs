@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use officewright_font::{FaceId, FontBook, FontRequest, FontResolver};
+use officewright_font::{FaceId, FontBook, FontRequest, FontResolver, ResolutionKind};
 use unicode_script::UnicodeScript;
 
 use crate::report::{LayoutReport, Location, ReportKind};
@@ -36,6 +36,8 @@ pub(crate) struct Fonts<'a> {
     /// The faces that have a character, best first, by character, style and the first
     /// word of the requested family.
     covering: HashMap<(char, bool, bool, String), Vec<FaceId>>,
+    /// The families and the fallbacks reported for them.
+    fallbacks: HashSet<(String, String)>,
     /// The characters no font has, by script.
     missing: BTreeMap<&'static str, BTreeSet<char>>,
     /// What is reported once per layout run.
@@ -50,6 +52,7 @@ impl<'a> Fonts<'a> {
             faces: HashMap::new(),
             covering: HashMap::new(),
             missing: BTreeMap::new(),
+            fallbacks: HashSet::new(),
             reported: HashSet::new(),
             report: LayoutReport::default(),
         }
@@ -63,7 +66,12 @@ impl<'a> Fonts<'a> {
             face: resolution.face(),
             synthetic_bold: resolution.synthetic_bold(),
             synthetic_italic: resolution.synthetic_italic(),
-            installed: !resolution.is_substitution(),
+            // The family itself, or the font Windows takes for its name; a synthesized
+            // style does not make it another font.
+            installed: matches!(
+                resolution.kind(),
+                ResolutionKind::Exact | ResolutionKind::Alias
+            ),
         }
     }
 
@@ -143,6 +151,36 @@ impl<'a> Fonts<'a> {
             synthetic_italic: italic && !is_italic,
             installed: false,
         })
+    }
+
+    /// Reports that characters of text in `family` are drawn in the face `fallback`, once
+    /// per family and fallback, naming the first such character.
+    pub(crate) fn report_fallback(
+        &mut self,
+        family: &str,
+        fallback: FaceId,
+        ch: char,
+        location: &Location,
+    ) {
+        let name = self
+            .resolver
+            .book()
+            .face(fallback)
+            .and_then(|face| face.names().family())
+            .unwrap_or("another font")
+            .to_owned();
+        if self.fallbacks.insert((family.to_lowercase(), name.clone())) {
+            self.report.push(
+                ReportKind::FontSubstituted,
+                location.clone(),
+                format!(
+                    "\"{family}\" has no glyph for some characters, such as U+{:04X} '{}'; they \
+                     are drawn in \"{name}\"",
+                    u32::from(ch),
+                    ch.escape_debug()
+                ),
+            );
+        }
     }
 
     /// Counts `ch` as drawn with the missing-glyph shape because no font has it; the

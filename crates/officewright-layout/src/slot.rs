@@ -154,6 +154,12 @@ const LATIN1_CHINESE: [(u32, u32); 6] = [
     (0xFC, 0xFC),
 ];
 
+/// Whether two family names name the same family, as Word compares them: ignoring case
+/// and the spaces around them.
+pub(crate) fn same_family(a: &str, b: &str) -> bool {
+    a.trim().eq_ignore_ascii_case(b.trim())
+}
+
 /// Whether the BCP 47 tag `tag` is of one of `languages`, by its primary subtag in any
 /// case: `zh-Hant` and `ZH-cn` are `zh`, `zha` (Zhuang) is not.
 pub(crate) fn language_is(tag: &str, languages: &[&str]) -> bool {
@@ -178,7 +184,9 @@ pub(crate) fn slot(ch: char, style: &RunStyle) -> Slot {
     }
     // Times New Roman for East Asian text means none was chosen, and when the two Latin
     // fonts agree, everything takes the ASCII one.
-    if fonts.east_asia() == "Times New Roman" && fonts.ascii() == fonts.high_ansi() {
+    if same_family(fonts.east_asia(), "Times New Roman")
+        && same_family(fonts.ascii(), fonts.high_ansi())
+    {
         return Slot::Ascii;
     }
     let code = u32::from(ch);
@@ -424,6 +432,16 @@ mod tests {
         assert_eq!(at(0x4E00, &style), E);
         // The default run, all Times New Roman, takes ASCII throughout.
         assert_eq!(at(0x4E00, &RunStyle::default()), A);
+    }
+
+    #[test]
+    fn compares_family_names_ignoring_case_and_surrounding_spaces() {
+        let fonts = RunFonts::new("Calibri")
+            .with_high_ansi(" calibri ")
+            .with_east_asia("times new roman");
+        assert_eq!(at(0x4E00, &RunStyle::default().with_fonts(fonts)), A);
+        assert!(same_family("Times New Roman", " TIMES new roman"));
+        assert!(!same_family("Times New Roman", "Times New Roman PS"));
     }
 
     #[test]
