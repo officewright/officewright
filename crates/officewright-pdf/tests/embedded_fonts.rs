@@ -542,13 +542,19 @@ fn reports_fonts_it_cannot_use() -> TestResult {
     assert_eq!(err.to_string(), "cannot use the font data");
     let core = officewright_core::Error::from(err);
     assert!(
-        matches!(&core, officewright_core::Error::InvalidArgument(message)
+        matches!(&core, officewright_core::Error::Malformed(message)
             if message.starts_with("cannot use the font data: data is not a TrueType")),
         "{core}"
     );
 
+    // A face the file does not have is the caller's mistake, not damage.
     let err = Font::from_bytes(liberation_sans()?, 3).unwrap_err();
     assert!(matches!(err, Error::Font { .. }), "{err:?}");
+    let core = officewright_core::Error::from(err);
+    assert!(
+        matches!(core, officewright_core::Error::InvalidArgument(_)),
+        "{core}"
+    );
 
     let missing = repository().join("tests/fonts/no-such-font.ttf");
     let err = Font::from_file(&missing, 0).unwrap_err();

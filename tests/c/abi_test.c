@@ -170,6 +170,8 @@ static void compression(void) {
 }
 
 static void errors(void) {
+    /* Statuses are only ever appended, so existing values keep their numbers. */
+    CHECK(OW_STATUS_PANIC == 6 && OW_STATUS_MALFORMED == 7 && OW_STATUS_LIMIT_EXCEEDED == 8);
     /* Failing calls must reset their out-parameters, so these start as non-NULL
      * placeholders that are never dereferenced. */
     uint8_t dummy = 0;
@@ -368,8 +370,17 @@ static void embedded_fonts(const char *fonts) {
     /* Fonts that cannot be opened. */
     not_made = liberation;
     EXPECT(ow_pdf_font_open_bytes((const uint8_t *)"not a font", 10, 0, &not_made),
-           OW_STATUS_INVALID_ARGUMENT, "cannot use the font data: data is not a TrueType");
+           OW_STATUS_MALFORMED, "cannot use the font data: data is not a TrueType");
     CHECK(not_made == NULL);
+    /* A face the file does not have is the caller's mistake, not damage. */
+    snprintf(path, sizeof path, "%s/liberation/LiberationSans-Regular.ttf", fonts);
+    font_data = read_file(path, &font_len);
+    CHECK(font_data != NULL);
+    not_made = liberation;
+    EXPECT(ow_pdf_font_open_bytes(font_data, font_len, 1, &not_made), OW_STATUS_INVALID_ARGUMENT,
+           "font face 1 does not exist, the file has 1 face");
+    CHECK(not_made == NULL);
+    free(font_data);
     EXPECT(ow_pdf_font_open_bytes(NULL, 0, 0, &not_made), OW_STATUS_NULL_ARGUMENT, "data is null");
     snprintf(path, sizeof path, "%s/no-such-font.ttf", fonts);
     EXPECT(ow_pdf_font_open_path(path, 0, &not_made), OW_STATUS_IO, "cannot read ");
@@ -466,7 +477,7 @@ static void fonts_by_name(const char *fonts, const char *dir) {
     CHECK(added == 0);
     EXPECT(ow_font_book_add_bytes(empty, NULL, 0, &added), OW_STATUS_NULL_ARGUMENT, "data is null");
     EXPECT(ow_font_book_add_bytes(empty, (const uint8_t *)"junk", 4, &added),
-           OW_STATUS_INVALID_ARGUMENT, "not a TrueType");
+           OW_STATUS_MALFORMED, "not a TrueType");
     /* Calls that change nothing leave the message valid (AddressSanitizer would report a
      * read of freed memory here). */
     CHECK(message != NULL && strstr(message, "broken.ttf") != NULL);

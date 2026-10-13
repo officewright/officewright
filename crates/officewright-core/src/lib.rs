@@ -58,6 +58,13 @@ pub enum Error {
     InvalidArgument(String),
     /// The input is valid but uses something officewright cannot handle yet.
     Unsupported(String),
+    /// The input is damaged, or is not what it was given as: a broken ZIP archive, XML
+    /// that is not well-formed, a package without its main part, a font whose tables
+    /// cannot be read.
+    Malformed(String),
+    /// The input exceeds one of the limits that keep the time and memory a file can
+    /// take bounded, such as the size of a part or the depth of nested XML elements.
+    LimitExceeded(String),
 }
 
 impl fmt::Display for Error {
@@ -65,7 +72,9 @@ impl fmt::Display for Error {
         match self {
             Self::Io { message, .. }
             | Self::InvalidArgument(message)
-            | Self::Unsupported(message) => f.write_str(message),
+            | Self::Unsupported(message)
+            | Self::Malformed(message)
+            | Self::LimitExceeded(message) => f.write_str(message),
         }
     }
 }
@@ -74,7 +83,10 @@ impl error::Error for Error {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
             Self::Io { source, .. } => Some(source),
-            Self::InvalidArgument(_) | Self::Unsupported(_) => None,
+            Self::InvalidArgument(_)
+            | Self::Unsupported(_)
+            | Self::Malformed(_)
+            | Self::LimitExceeded(_) => None,
         }
     }
 }
@@ -91,6 +103,18 @@ mod tests {
         let mm = |pt: Pt| pt.0 * 25.4 / 72.0;
         assert!((mm(PageSize::A4.width()) - 210.0).abs() < 1e-9);
         assert!((mm(PageSize::A4.height()) - 297.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn input_errors_are_their_message() {
+        let message = "zip archive: bad signature at byte 4";
+        for err in [
+            Error::Malformed(message.into()),
+            Error::LimitExceeded(message.into()),
+        ] {
+            assert_eq!(err.to_string(), message);
+            assert!(error::Error::source(&err).is_none());
+        }
     }
 
     #[test]
