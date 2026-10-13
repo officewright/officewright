@@ -187,7 +187,8 @@ fn reads_a_collection_of_real_fonts() -> TestResult {
 #[test]
 fn resolves_arial_to_liberation_sans() {
     let mut book = FontBook::new();
-    assert_eq!(book.add_dir(fonts_dir()).unwrap(), 5);
+    // Carlito and Liberation Sans, Serif and Mono in four styles each, and Noto Sans.
+    assert_eq!(book.add_dir(fonts_dir()).unwrap(), 17);
     assert!(book.skipped().is_empty(), "{:?}", book.skipped());
     let mut resolver = FontResolver::new(&book);
     let arial = resolver.resolve(&FontRequest::new("Arial")).clone();
@@ -203,6 +204,45 @@ fn resolves_arial_to_liberation_sans() {
     let noto = resolver.resolve(&FontRequest::new("noto sans"));
     assert_eq!(noto.kind(), ResolutionKind::Exact);
     assert_eq!(resolver.substitutions().len(), 2);
+}
+
+/// Bold and italic requests for the fonts the corpus uses find the twins' own styles, as
+/// Word finds the installed families, instead of synthesizing them from the regular face.
+#[test]
+fn bold_and_italic_resolve_to_the_twins_own_styles() -> TestResult {
+    let mut book = FontBook::new();
+    book.add_dir(fonts_dir())?;
+    let mut resolver = FontResolver::new(&book);
+    for (family, twin) in [
+        ("Calibri", "Carlito"),
+        ("Arial", "Liberation Sans"),
+        ("Times New Roman", "Liberation Serif"),
+        ("Courier New", "Liberation Mono"),
+    ] {
+        for (bold, italic, style) in [
+            (false, false, "Regular"),
+            (true, false, "Bold"),
+            (false, true, "Italic"),
+            (true, true, "Bold Italic"),
+        ] {
+            let request = FontRequest::new(family).bold(bold).italic(italic);
+            let resolution = resolver.resolve(&request).clone();
+            let what = format!("{family} {style}: {resolution:?}");
+            assert_eq!(
+                resolution.kind(),
+                ResolutionKind::MetricCompatible,
+                "{what}"
+            );
+            assert!(
+                !resolution.synthetic_bold() && !resolution.synthetic_italic(),
+                "{what}"
+            );
+            let face = book.load(resolution.face().ok_or("no face")?)?;
+            assert_eq!(face.names().family(), Some(twin), "{what}");
+            assert_eq!(face.names().subfamily(), Some(style), "{what}");
+        }
+    }
+    Ok(())
 }
 
 #[test]
@@ -251,6 +291,119 @@ fn refuses_cff_reals_the_subsetter_cannot_write() -> TestResult {
             ),
             "font face 0: table 'CFF ' is damaged: the real number 1E99999 in a DICT is too \
              large to subset"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn finds_the_faces_that_cover_a_character() -> TestResult {
+    let mut book = FontBook::new();
+    book.add_dir(fonts_dir())?;
+    let families = |ch: char| -> Vec<String> {
+        book.faces_covering(ch)
+            .into_iter()
+            .filter_map(|id| book.face(id)?.names().family().map(str::to_owned))
+            .collect()
+    };
+    let latin = families('A');
+    for family in ["Liberation Sans", "Carlito"] {
+        assert!(
+            latin.iter().any(|name| name == family),
+            "{family}: {latin:?}"
+        );
+    }
+    assert!(families('Ж').iter().any(|name| name == "Liberation Sans"));
+    assert!(families('\u{4E00}').is_empty());
+    Ok(())
+}
+
+#[test]
+fn coverage_agrees_with_the_character_map() -> TestResult {
+    let mut book = FontBook::new();
+    book.add_dir(fonts_dir())?;
+    assert!(book.len() >= 5);
+    // Every character of the Basic Multilingual Plane and a few beyond, for every face.
+    let chars: Vec<char> = (0..=0xFFFF_u32)
+        .chain([0x1_F600, 0x2_0000, 0x10_FFFF])
+        .filter_map(char::from_u32)
+        .collect();
+    for (id, info) in book.faces() {
+        let face = book.load(id)?;
+        let map = face.char_map();
+        let mut mapped = 0;
+        for &ch in &chars {
+            let covered = book.faces_covering(ch).contains(&id);
+            assert_eq!(
+                covered,
+                map.map(ch).is_some(),
+                "{:?} {ch:?}",
+                info.names().family()
+            );
+            mapped += usize::from(covered);
+        }
+        assert!(mapped > 200, "{:?} maps {mapped}", info.names().family());
+    }
+    Ok(())
+}
+
+/// A table of a font file, found through its table directory.
+fn table<'a>(font: &'a [u8], tag: &[u8; 4]) -> TestResult<&'a [u8]> {
+    let u16_at = |at: usize| -> TestResult<usize> {
+        Ok(usize::from(u16::from_be_bytes(
+            font.get(at..at + 2).ok_or("short")?.try_into()?,
+        )))
+    };
+    let u32_at = |at: usize| -> TestResult<usize> {
+        Ok(usize::try_from(u32::from_be_bytes(
+            font.get(at..at + 4).ok_or("short")?.try_into()?,
+        ))?)
+    };
+    for record in (0..u16_at(4)?).map(|i| 12 + 16 * i) {
+        if font.get(record..record + 4) == Some(&tag[..]) {
+            let (offset, len) = (u32_at(record + 8)?, u32_at(record + 12)?);
+            return Ok(font.get(offset..offset + len).ok_or("short table")?);
+        }
+    }
+    Err(format!("no {} table", String::from_utf8_lossy(tag)).into())
+}
+
+#[test]
+fn reads_underline_and_strikeout_as_the_tables_store_them() -> TestResult {
+    let i16_at = |table: &[u8], at: usize| -> TestResult<i16> {
+        Ok(i16::from_be_bytes(
+            table.get(at..at + 2).ok_or("short")?.try_into()?,
+        ))
+    };
+    for path in [
+        "liberation/LiberationSans-Regular.ttf",
+        "liberation/LiberationSerif-Regular.ttf",
+        "liberation/LiberationMono-Regular.ttf",
+        "carlito/Carlito-Regular.ttf",
+        "noto/NotoSans-Regular.otf",
+    ] {
+        let data = read(path)?;
+        let face = FontFace::from_bytes(data.clone(), 0)?;
+        // post: underlinePosition at byte 8, underlineThickness at 10; OS/2:
+        // yStrikeoutSize at 26, yStrikeoutPosition at 28.
+        let post = table(&data, b"post")?;
+        let os2 = table(&data, b"OS/2")?;
+        let underline = face.underline_metrics().ok_or("no underline")?;
+        assert_eq!(
+            (underline.position(), underline.thickness()),
+            (i16_at(post, 8)?, i16_at(post, 10)?),
+            "{path}"
+        );
+        let strikeout = face.strikeout_metrics().ok_or("no strikeout")?;
+        assert_eq!(
+            (strikeout.position(), strikeout.thickness()),
+            (i16_at(os2, 28)?, i16_at(os2, 26)?),
+            "{path}"
+        );
+        // Real fonts put the underline below the baseline and the strikeout above it.
+        assert!(
+            underline.position() < 0 && strikeout.position() > 0,
+            "{path}"
         );
     }
     Ok(())

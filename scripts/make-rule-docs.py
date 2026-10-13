@@ -572,7 +572,7 @@ def list_shared_abstract() -> Doc:
     )
 
 
-def tab_hanging(no_indent_tab: bool) -> Doc:
+def tab_hanging(no_indent_tab: bool, mode: int = 15) -> Doc:
     hanging = {"left": 1000, "hanging": 1000}
 
     def single(abstract: int, nsid: str, template: str, suffix: str, stop: int = 0) -> str:
@@ -618,14 +618,23 @@ def tab_hanging(no_indent_tab: bool) -> Doc:
     ]
     flags = ("doNotUseIndentAsNumberingTabStop",) if no_indent_tab else ()
     variant = "with" if no_indent_tab else "without"
+    name = "E-tab-hanging-noindenttab" if no_indent_tab else "E-tab-hanging"
+    # Word 16 drops the flag from a document in mode 15 when it saves it and renders as if
+    # it were absent (the references of #13); in mode 14 Word may keep it, which the
+    # mode-14 pair is meant to show (#18).
+    where = ""
+    if mode != 15:
+        name += f"-{mode}"
+        where = f", in compatibility mode {mode}"
     return Doc(
-        "E-tab-hanging-noindenttab" if no_indent_tab else "E-tab-hanging",
+        name,
         "Where a tab after a label goes when the paragraph has a hanging indent, for typed "
         f"labels and list labels, {variant} the compat flag doNotUseIndentAsNumberingTabStop "
-        "(default tab stops every 36 pt)",
+        f"(default tab stops every 36 pt){where}",
         "".join(body),
         compat_flags=flags,
         numbering=numbering,
+        mode=mode,
     )
 
 
@@ -1008,6 +1017,8 @@ def documents() -> list[Doc]:
         defaults_empty(),
         theme_colors(),
         theme_fonts(),
+        tab_hanging(False, 14),
+        tab_hanging(True, 14),
         list_level_inherit(),
         paragraph_units(),
         default_paragraph_style(),

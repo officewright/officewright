@@ -40,7 +40,8 @@ pub enum Error {
     /// A font size is outside [`Font::MIN_SIZE`](crate::Font::MIN_SIZE) to
     /// [`Font::MAX_SIZE`](crate::Font::MAX_SIZE).
     InvalidFontSize(Pt),
-    /// A text position is outside -32767 to 32767 pt.
+    /// A position is outside -32767 to 32767 pt: where text or a glyph is drawn, a glyph's
+    /// offset in its run, or a point of a path.
     InvalidPosition {
         /// Horizontal position.
         x: Pt,
@@ -65,6 +66,84 @@ pub enum Error {
     },
     /// The document has no pages; a PDF needs at least one.
     NoPages,
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
+    /// A [`GlyphRun`](crate::GlyphRun) is in a standard font. Glyphs are drawn by their
+    /// IDs in an embedded font; a standard font is addressed through WinAnsiEncoding.
+    NotEmbedded {
+        /// The font's name.
+        font: String,
+    },
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
+    /// A glyph ID is not less than the number of glyphs of the font.
+    InvalidGlyph {
+        /// The glyph ID.
+        glyph: u16,
+        /// The font's name.
+        font: String,
+    },
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
+    /// A cluster of a [`GlyphRun`](crate::GlyphRun) has no glyphs, so nothing would show
+    /// its text.
+    EmptyCluster {
+        /// The cluster's index in its run, from 0.
+        cluster: usize,
+    },
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
+    /// The text of a cluster of a [`GlyphRun`](crate::GlyphRun) has more than 16382 UTF-16
+    /// code units, too many for its replacement text to fit in a PDF string.
+    ClusterTooLong {
+        /// The cluster's index in its run, from 0.
+        cluster: usize,
+        /// The number of UTF-16 code units of its text.
+        units: usize,
+    },
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
+    /// A number for drawing is outside the range it must be in.
+    OutOfRange {
+        /// What the number is, such as "line width".
+        what: &'static str,
+        /// The number.
+        value: f64,
+        /// The smallest value allowed.
+        min: f64,
+        /// The largest value allowed.
+        max: f64,
+    },
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
+    /// A dash pattern has only lengths of 0, which draws nothing (ISO 32000-1, 8.4.3.6);
+    /// a solid line has an empty pattern.
+    InvalidDash,
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
+    /// [`Page::pop_clip`](crate::Page::pop_clip) found no clipping path to remove.
+    NoClip,
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
+    /// An image is damaged: truncated, with a wrong checksum of a critical PNG chunk,
+    /// missing or invalid headers, or compressed data that does not decompress to the size
+    /// its header gives.
+    MalformedImage {
+        /// The image file, `None` for an image in memory.
+        path: Option<PathBuf>,
+        /// What is wrong with it.
+        reason: String,
+    },
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
+    /// An image is not a JPEG or PNG file, or uses a feature that cannot go into a PDF.
+    UnsupportedImage {
+        /// The image file, `None` for an image in memory.
+        path: Option<PathBuf>,
+        /// What cannot be used.
+        reason: String,
+    },
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
+    /// A PNG image's pixel data would take more than 256 MiB.
+    ImageTooLarge {
+        /// The image file, `None` for an image in memory.
+        path: Option<PathBuf>,
+    },
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
+    /// More clipping paths would be in effect at once than every PDF reader can nest:
+    /// [`Page::MAX_CLIPS`](crate::Page::MAX_CLIPS).
+    TooManyClips,
     /// The PDF would be larger than a cross-reference table can address (10^10 bytes).
     TooLarge,
     /// Writing the PDF failed.
@@ -167,7 +246,7 @@ impl fmt::Display for Error {
             ),
             Self::InvalidPosition { x, y } => write!(
                 f,
-                "text position ({}, {}) pt is outside the -{max} to {max} pt range",
+                "position ({}, {}) pt is outside the -{max} to {max} pt range",
                 x.0,
                 y.0,
                 max = crate::document::MAX_POSITION
@@ -187,6 +266,53 @@ impl fmt::Display for Error {
                 width.0, height.0, margin.0
             ),
             Self::NoPages => f.write_str("document has no pages"),
+            Self::NotEmbedded { font } => write!(
+                f,
+                "glyphs can be drawn only in an embedded font, and {font} is a standard font"
+            ),
+            Self::InvalidGlyph { glyph, font } => write!(f, "font {font} has no glyph {glyph}"),
+            Self::EmptyCluster { cluster } => {
+                write!(f, "cluster {cluster} of the glyph run has no glyphs")
+            }
+            Self::ClusterTooLong { cluster, units } => write!(
+                f,
+                "cluster {cluster} of the glyph run has {units} UTF-16 code units of text, more \
+                 than the {} its replacement text can hold",
+                crate::glyphs::MAX_CLUSTER_UNITS
+            ),
+            Self::OutOfRange {
+                what,
+                value,
+                min,
+                max,
+            } => write!(f, "{what} {value} is outside the {min} to {max} range"),
+            Self::InvalidDash => {
+                f.write_str("dash pattern has only lengths of 0; a solid line has an empty pattern")
+            }
+            Self::NoClip => f.write_str("there is no clipping path to remove"),
+            Self::MalformedImage { path, reason } => {
+                write!(
+                    f,
+                    "image {} is damaged: {reason}",
+                    image_name(path.as_deref())
+                )
+            }
+            Self::UnsupportedImage { path, reason } => write!(
+                f,
+                "image {} cannot be used: {reason}",
+                image_name(path.as_deref())
+            ),
+            Self::ImageTooLarge { path } => write!(
+                f,
+                "image {} is too large: its pixels would take more than {} bytes",
+                image_name(path.as_deref()),
+                crate::image::MAX_PNG_DATA
+            ),
+            Self::TooManyClips => write!(
+                f,
+                "more than {} clipping paths would be in effect at once",
+                crate::Page::MAX_CLIPS
+            ),
             Self::TooLarge => {
                 f.write_str("PDF exceeds the 10000000000 bytes a cross-reference table can address")
             }
@@ -252,7 +378,10 @@ impl From<Error> for officewright_core::Error {
                     _ => Self::Unsupported(message),
                 }
             }
+            Error::MalformedImage { .. } => Self::Malformed(message),
+            Error::ImageTooLarge { .. } => Self::LimitExceeded(message),
             Error::Unencodable { .. }
+            | Error::UnsupportedImage { .. }
             | Error::UnsupportedCharacter { .. }
             | Error::MissingGlyph { .. }
             | Error::EmbeddingNotAllowed { .. }
@@ -262,8 +391,24 @@ impl From<Error> for officewright_core::Error {
             | Error::InvalidPosition { .. }
             | Error::InvalidPageSize { .. }
             | Error::NoRoomForText { .. }
-            | Error::NoPages => Self::InvalidArgument(message),
+            | Error::NoPages
+            | Error::NotEmbedded { .. }
+            | Error::InvalidGlyph { .. }
+            | Error::EmptyCluster { .. }
+            | Error::ClusterTooLong { .. }
+            | Error::OutOfRange { .. }
+            | Error::InvalidDash
+            | Error::NoClip
+            | Error::TooManyClips => Self::InvalidArgument(message),
         }
+    }
+}
+
+/// How an image error names the image: by its file, or as data in memory.
+fn image_name(path: Option<&std::path::Path>) -> String {
+    match path {
+        Some(path) => path.display().to_string(),
+        None => "data".to_owned(),
     }
 }
 

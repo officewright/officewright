@@ -359,19 +359,22 @@ class AbiTest(unittest.TestCase):
         book = self.new_book()
         added = c_size_t()
         self.check(lib.ow_font_book_add_dir(book, str(FONTS).encode(), byref(added)))
-        self.assertEqual(added.value, 5)
+        # Carlito and Liberation Sans, Serif and Mono in four styles each, and Noto Sans.
+        self.assertEqual(added.value, 17)
         resolver = self.resolver(book)
 
         self.resolve(resolver, "Liberation Sans")
         self.resolve(resolver, "noto sans")
         self.assertEqual(self.substitutions(resolver), [])
         arial = self.resolve(resolver, "Arial")
+        # Liberation Sans has a bold face; Noto Sans has none, so its regular face is drawn bold.
         self.resolve(resolver, "Liberation Sans", bold=1)
+        self.resolve(resolver, "Noto Sans", bold=1)
         self.assertEqual(
             self.substitutions(resolver),
             [
                 (OW_RESOLUTION_METRIC_COMPATIBLE, '"Arial" → "Liberation Sans" (metric-compatible substitute)'),
-                (OW_RESOLUTION_EXACT, '"Liberation Sans" bold → "Liberation Sans" with synthetic bold'),
+                (OW_RESOLUTION_EXACT, '"Noto Sans" bold → "Noto Sans" with synthetic bold'),
             ],
         )
         doc = c_void_p()

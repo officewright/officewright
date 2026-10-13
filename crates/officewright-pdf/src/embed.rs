@@ -9,6 +9,7 @@ use officewright_font::{GlyphId, Subset};
 
 use crate::document::number;
 use crate::font::{Embedded, Lookup};
+use crate::glyphs::MAX_STRING_BYTES;
 use crate::stream::stream_object;
 use crate::{Compression, Error, Result};
 
@@ -16,16 +17,32 @@ use crate::{Compression, Error, Result};
 /// font descriptor, the font program and the ToUnicode CMap.
 pub(crate) const EXTRA_OBJECTS: usize = 4;
 
-/// The glyphs a document shows in an embedded font, each with the character it showed
-/// first: the one its ToUnicode entry gives.
+/// The glyphs a document shows in an embedded font, each with the text its ToUnicode
+/// entry gives: the first text it was shown alone for, if any.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Usage {
-    glyphs: BTreeMap<u16, char>,
+    glyphs: BTreeMap<u16, Option<String>>,
 }
 
 impl Usage {
-    pub(crate) fn add(&mut self, glyph: u16, ch: char) {
-        self.glyphs.entry(glyph).or_insert(ch);
+    /// Records that `glyph` was shown alone for `text`, which becomes its ToUnicode entry
+    /// unless it has one already.
+    pub(crate) fn add(&mut self, glyph: u16, text: &str) {
+        let entry = self.glyphs.entry(glyph).or_default();
+        if entry.is_none() {
+            *entry = Some(text.to_owned());
+        }
+    }
+
+    /// Records that `glyph` was shown together with other glyphs for some text, which
+    /// gives it no ToUnicode entry.
+    pub(crate) fn add_unmapped(&mut self, glyph: u16) {
+        self.glyphs.entry(glyph).or_default();
+    }
+
+    /// The text of the ToUnicode entry of `glyph`.
+    pub(crate) fn text(&self, glyph: u16) -> Option<&str> {
+        self.glyphs.get(&glyph).and_then(Option::as_deref)
     }
 }
 
@@ -73,8 +90,13 @@ impl<'a> Prepared<'a> {
         })
     }
 
+    /// The glyphs shown and their text.
+    pub(crate) fn usage(&self) -> &Usage {
+        &self.usage
+    }
+
     /// The glyph's ID in the subset, which is its CID.
-    fn cid(&self, glyph: u16) -> u16 {
+    pub(crate) fn cid(&self, glyph: u16) -> u16 {
         // The subset keeps every glyph it was made from, so .notdef is never written.
         self.subset
             .glyph_id(GlyphId::new(glyph))
@@ -88,11 +110,15 @@ impl<'a> Prepared<'a> {
     /// first; the other is shown in a marked-content span whose `/ActualText` gives
     /// the character (ISO 32000-1, 14.9.4), so text extraction returns the text as
     /// written. Such a span is a PDF 1.5 feature.
+    ///
+    /// Long text is shown with several strings, each within the 32767 bytes readers
+    /// have to handle in PDF 1.5 (ISO 32000-1, Annex C); one `Tj` after another moves
+    /// on as one would.
     pub(crate) fn show(&self, out: &mut Vec<u8>, lookup: &Lookup<'_>, text: &str) -> Result<bool> {
         let mut runs: Vec<(bool, Vec<(u16, char)>)> = Vec::new();
         for (offset, ch) in text.char_indices() {
             let glyph = lookup.glyph(ch, offset)?.id;
-            let mapped = self.usage.glyphs.get(&glyph) == Some(&ch);
+            let mapped = self.usage.text(glyph) == Some(&*ch.encode_utf8(&mut [0; 4]));
             let cid = self.cid(glyph);
             match runs.last_mut() {
                 Some((last, run)) if *last == mapped => run.push((cid, ch)),
@@ -102,19 +128,22 @@ impl<'a> Prepared<'a> {
         if runs.is_empty() {
             out.extend_from_slice(b"<> Tj");
         }
-        for (i, (mapped, run)) in runs.iter().enumerate() {
+        let pieces = runs
+            .iter()
+            .flat_map(|(mapped, run)| pieces(run).map(move |piece| (*mapped, piece)));
+        for (i, (mapped, piece)) in pieces.enumerate() {
             if i > 0 {
                 out.push(b'\n');
             }
             let mut cids = String::from("<");
-            for (cid, _) in run {
+            for (cid, _) in piece {
                 let _ = write!(cids, "{cid:04X}");
             }
             cids.push('>');
-            if *mapped {
+            if mapped {
                 out.extend_from_slice(format!("{cids} Tj").as_bytes());
             } else {
-                let actual: String = run.iter().map(|&(_, ch)| ch).collect();
+                let actual: String = piece.iter().map(|&(_, ch)| ch).collect();
                 out.extend_from_slice(
                     format!(
                         "/Span << /ActualText {} >> BDC {cids} Tj EMC",
@@ -198,17 +227,28 @@ impl<'a> Prepared<'a> {
         units * 1000.0 / f64::from(self.font.face.units_per_em())
     }
 
+    /// The advance width of `glyph` in 1/1000 em, as the `/W` array gives it.
+    pub(crate) fn width(&self, glyph: u16) -> f64 {
+        let width = number(self.advance(glyph));
+        width.parse().unwrap_or_else(|_| self.advance(glyph))
+    }
+
+    /// The advance width of `glyph` in 1/1000 em.
+    fn advance(&self, glyph: u16) -> f64 {
+        let advance = self
+            .font
+            .face
+            .advance_width(GlyphId::new(glyph))
+            .unwrap_or(0);
+        self.scale(f64::from(advance))
+    }
+
     /// The `/W` array: the width of each glyph shown, in runs of consecutive CIDs.
     fn widths(&self) -> String {
         let mut runs: Vec<(u16, Vec<String>)> = Vec::new();
         for &glyph in self.usage.glyphs.keys() {
             let cid = self.cid(glyph);
-            let advance = self
-                .font
-                .face
-                .advance_width(GlyphId::new(glyph))
-                .unwrap_or(0);
-            let width = number(self.scale(f64::from(advance)));
+            let width = number(self.advance(glyph));
             match runs.last_mut() {
                 Some((start, widths)) if usize::from(*start) + widths.len() == usize::from(cid) => {
                     widths.push(width);
@@ -260,7 +300,7 @@ impl<'a> Prepared<'a> {
         )
     }
 
-    /// The ToUnicode CMap: for each glyph shown, the character it showed first
+    /// The ToUnicode CMap: for each glyph shown alone, the text it showed first
     /// (ISO 32000-1, 9.10.3).
     fn to_unicode(&self) -> String {
         let mut cmap = String::from(
@@ -269,20 +309,18 @@ impl<'a> Prepared<'a> {
              /CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n\
              1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n",
         );
-        let entries: Vec<(u16, char)> = self
+        let entries: Vec<(u16, &str)> = self
             .usage
             .glyphs
             .iter()
-            .map(|(&glyph, &ch)| (self.cid(glyph), ch))
+            .filter_map(|(&glyph, text)| Some((self.cid(glyph), text.as_deref()?)))
             .collect();
         // A bfchar section holds at most 100 entries (Adobe Technical Note 5411, 1.4.1).
         for chunk in entries.chunks(100) {
             let _ = writeln!(cmap, "{} beginbfchar", chunk.len());
-            for &(cid, ch) in chunk {
-                let mut units = [0; 2];
-                let utf16: String = ch
-                    .encode_utf16(&mut units)
-                    .iter()
+            for &(cid, text) in chunk {
+                let utf16: String = text
+                    .encode_utf16()
                     .map(|unit| format!("{unit:04X}"))
                     .collect();
                 let _ = writeln!(cmap, "<{cid:04X}> <{utf16}>");
@@ -296,13 +334,43 @@ impl<'a> Prepared<'a> {
 
 /// A PDF text string for `text` in UTF-16BE with a byte order mark, as a hexadecimal
 /// string (ISO 32000-1, 7.9.2.2).
-fn text_string(text: &str) -> String {
+pub(crate) fn text_string(text: &str) -> String {
     let mut out = String::from("<FEFF");
     for unit in text.encode_utf16() {
         let _ = write!(out, "{unit:04X}");
     }
     out.push('>');
     out
+}
+
+/// The most UTF-16 code units of text in a piece of a run that [`Prepared::show`] writes
+/// with one string. Its replacement text, two bytes a unit after a two-byte byte order
+/// mark, then fits in a string, and so do its CIDs, two bytes for each character, which
+/// has one or two units.
+const MAX_PIECE_UNITS: usize = (MAX_STRING_BYTES - 2) / 2;
+
+/// `run` cut into pieces of at most [`MAX_PIECE_UNITS`] UTF-16 code units of text; an
+/// empty run is one empty piece.
+fn pieces(run: &[(u16, char)]) -> impl Iterator<Item = &[(u16, char)]> {
+    let mut rest = run;
+    let mut done = false;
+    std::iter::from_fn(move || {
+        if done {
+            return None;
+        }
+        let mut units = 0;
+        let end = rest
+            .iter()
+            .position(|&(_, ch)| {
+                units += ch.len_utf16();
+                units > MAX_PIECE_UNITS
+            })
+            .unwrap_or(rest.len());
+        let (piece, after) = rest.split_at(end);
+        rest = after;
+        done = rest.is_empty();
+        Some(piece)
+    })
 }
 
 /// `name` as a PDF name object: bytes outside the regular characters are written as
@@ -341,6 +409,27 @@ fn subset_tag(name: &str, data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cuts_runs_where_their_strings_would_pass_the_limit() {
+        let lengths = |run: &[(u16, char)]| -> Vec<usize> {
+            // The pieces follow one another and together are the run.
+            assert_eq!(pieces(run).collect::<Vec<_>>().concat(), run);
+            pieces(run).map(<[_]>::len).collect()
+        };
+        // Every element different, so a piece in the wrong place shows.
+        let numbered = |count: usize, ch: char| -> Vec<(u16, char)> {
+            (0..count).map(|i| (i as u16, ch)).collect()
+        };
+        // One unit a character: 16,382 of them a piece.
+        assert_eq!(lengths(&numbered(40_000, 'A')), [16_382, 16_382, 7_236]);
+        // Characters outside the Basic Multilingual Plane take two units.
+        assert_eq!(lengths(&numbered(10_000, '\u{1F600}')), [8_191, 1_809]);
+        let mixed: Vec<(u16, char)> = [(1, 'A'), (1, '\u{1F600}')].repeat(6_000);
+        // 5,460 pairs of three units and one A: 16,381 units; the next character makes 16,383.
+        assert_eq!(lengths(&mixed), [10_921, 1_079]);
+        assert_eq!(lengths(&[]), [0]);
+    }
 
     #[test]
     fn escapes_names() {

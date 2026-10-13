@@ -386,18 +386,17 @@ fn embeds_each_font_once_with_the_glyphs_of_every_page() -> TestResult {
     Ok(())
 }
 
-#[test]
-fn a_shared_glyph_keeps_each_character_for_text_extraction() -> TestResult {
-    // minimal.ttf with Á mapped to the glyph of A, as fonts do for look-alike
-    // characters (Arial maps Latin Ə and Cyrillic Ә to one glyph). Its cmap has one
-    // segment per character, and idDelta is the glyph minus the character.
-    let deltas = |acute: u16| -> Vec<u8> {
-        [(0x20u16, 1u16), (0x41, 2), (0xB4, 3), (0xC1, acute)]
+/// minimal.ttf with Á and ´ mapped to the glyph of A, as fonts do for look-alike
+/// characters (Arial maps Latin Ə and Cyrillic Ә to one glyph). Its cmap has one segment
+/// per character, and idDelta is the glyph minus the character.
+fn shared_glyph_font() -> TestResult<Font> {
+    let deltas = |accent: u16, acute: u16| -> Vec<u8> {
+        [(0x20u16, 1u16), (0x41, 2), (0xB4, accent), (0xC1, acute)]
             .iter()
             .flat_map(|&(code, glyph)| glyph.wrapping_sub(code).to_be_bytes())
             .collect()
     };
-    let (from, to) = (deltas(4), deltas(2));
+    let (from, to) = (deltas(3, 4), deltas(2, 2));
     let mut data = minimal()?;
     let at = data
         .windows(from.len())
@@ -406,7 +405,12 @@ fn a_shared_glyph_keeps_each_character_for_text_extraction() -> TestResult {
     data.get_mut(at..at + to.len())
         .ok_or("short cmap")?
         .copy_from_slice(&to);
-    let font = Font::from_bytes(data, 0)?;
+    Ok(Font::from_bytes(data, 0)?)
+}
+
+#[test]
+fn a_shared_glyph_keeps_each_character_for_text_extraction() -> TestResult {
+    let font = shared_glyph_font()?;
     let pdf = pdf_text(&one_line(&font, "AÁA")?)?;
     // Replacement text in marked content is a PDF 1.5 feature.
     assert!(pdf.starts_with("%PDF-1.5\n"));
@@ -419,6 +423,64 @@ fn a_shared_glyph_keeps_each_character_for_text_extraction() -> TestResult {
     assert!(
         pdf.contains("<0001> Tj\n/Span << /ActualText <FEFF00C1> >> BDC <0001> Tj EMC\n<0001> Tj"),
         "{pdf}"
+    );
+    Ok(())
+}
+
+#[test]
+fn shows_long_text_with_strings_readers_handle() -> TestResult {
+    // 40,001 characters shown with their glyphs' own mappings, then 20,000 with
+    // replacement text: more than the 32,767 bytes of a string in PDF 1.5. Neither part
+    // repeats every 16,382 characters, so a piece out of place shows.
+    let font = shared_glyph_font()?;
+    let mapped: String = "AA ".chars().cycle().take(40_001).collect();
+    let replaced: String = "Á´´".chars().cycle().take(20_000).collect();
+    let pdf = pdf_text(&one_line(&font, &format!("{mapped}{replaced}"))?)?;
+    let (_, content) = pdf.split_once("BT\n").ok_or("no text object")?;
+    let (content, _) = content.split_once("\nET").ok_or("no end of text")?;
+    // The hexadecimal digits of a string.
+    let digits = |string: &str| -> TestResult<String> {
+        let (_, rest) = string.split_once('<').ok_or("no string")?;
+        let (digits, _) = rest.split_once('>').ok_or("no end of string")?;
+        Ok(digits.to_owned())
+    };
+    // The CIDs of the Tj strings, and the replacement text, as written.
+    let (mut shown, mut actual) = (Vec::new(), Vec::new());
+    for line in content.lines().skip(2) {
+        let cids = match line.split_once("/ActualText ") {
+            Some((_, span)) => {
+                actual.push(digits(span)?);
+                let (_, cids) = span.split_once(">> BDC ").ok_or("no BDC")?;
+                digits(cids)?
+            }
+            None => digits(line)?,
+        };
+        shown.push(cids);
+    }
+    // Pieces of 16,382 characters: the CIDs take 32,764 bytes, the replacement text
+    // 32,766 with its byte order mark.
+    let bytes = |strings: &[String]| strings.iter().map(|s| s.len() / 2).collect::<Vec<_>>();
+    assert_eq!(bytes(&shown), [32764, 32764, 14474, 32764, 7236]);
+    assert_eq!(bytes(&actual), [32766, 7238]);
+    // Together the strings show the text in order: A and the accented characters share
+    // a glyph, the space has its own.
+    let all = shown.concat();
+    let (a, space) = (all.get(..4).ok_or("short")?, all.get(8..12).ok_or("short")?);
+    assert_ne!(a, space);
+    let cid = |ch: char| if ch == ' ' { space } else { a };
+    let expected: String = mapped.chars().chain(replaced.chars()).map(cid).collect();
+    assert!(all == expected, "the CIDs differ from the text's");
+    let text: String = actual
+        .iter()
+        .map(|units| units.strip_prefix("FEFF").ok_or("no byte order mark"))
+        .collect::<Result<_, _>>()?;
+    let expected: String = replaced
+        .encode_utf16()
+        .map(|u| format!("{u:04X}"))
+        .collect();
+    assert!(
+        text == expected,
+        "the replacement text differs from the text"
     );
     Ok(())
 }
@@ -618,11 +680,16 @@ fn resolves_families_and_reports_the_substitutions() -> TestResult {
         Font::resolve(&mut resolver, &FontRequest::new("Arial"))?,
         liberation
     );
+    // The bold face of tests/fonts is used as it is.
     let bold = Font::resolve(
         &mut resolver,
         &FontRequest::new("Liberation Sans").bold(true),
     )?;
-    assert_eq!(bold, liberation);
+    assert_eq!(bold.name(), "LiberationSans-Bold");
+    // Noto Sans has no bold face there, so its regular face is drawn bold, and the
+    // report says so.
+    let noto_bold = Font::resolve(&mut resolver, &FontRequest::new("Noto Sans").bold(true))?;
+    assert_eq!(noto_bold, noto);
     let calibri = Font::resolve(&mut resolver, &FontRequest::new("Calibri"))?;
     assert_eq!(calibri.name(), "Carlito-Regular");
     // Verdana has no metric-compatible substitute, so a common sans-serif font stands
@@ -638,7 +705,7 @@ fn resolves_families_and_reports_the_substitutions() -> TestResult {
         report,
         [
             "\"Arial\" → \"Liberation Sans\" (metric-compatible substitute)",
-            "\"Liberation Sans\" bold → \"Liberation Sans\" with synthetic bold",
+            "\"Noto Sans\" bold → \"Noto Sans\" with synthetic bold",
             "\"Calibri\" → \"Carlito\" (metric-compatible substitute)",
             "\"Verdana\" → \"Liberation Sans\" (fallback; not installed)",
         ]

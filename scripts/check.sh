@@ -108,7 +108,7 @@ step "published crates leave out third-party data"
 # Adobe's AFM files, the test fonts and the tests that read them are not under
 # Officewright's license; see THIRD-PARTY-NOTICES.md. The test fonts live outside every crate.
 packaged=$(cargo package --list --allow-dirty --quiet -p officewright-pdf)
-if printf '%s\n' "$packaged" | grep -E '^(data/afm/|tests/helvetica_afm\.rs$|tests/embedded_fonts\.rs$)'; then
+if printf '%s\n' "$packaged" | grep -E '^(data/afm/|tests/(helvetica_afm|embedded_fonts|glyph_runs)\.rs$)'; then
 	fail "officewright-pdf would publish the files above"
 fi
 packaged=$(cargo package --list --allow-dirty --quiet -p officewright-font)
@@ -169,9 +169,13 @@ scripts/check-capi.sh target/capi
 # The PDF bytes do not depend on the platform (the golden snapshot test checks them on
 # every OS), and Windows has no official poppler build, so this runs on Linux and macOS.
 if [ "$os" != windows ]; then
-	step "PDF output (qpdf, pdftotext, pdffonts, pdftoppm)"
+	step "PDF output (qpdf, pdftotext, pdffonts, pdfimages, pdftoppm)"
 	cargo build -p officewright-cli
-	OW_CLI=${CARGO_TARGET_DIR:-target}/debug/officewright "$python" -B -m unittest discover -s tests/pdf-output -v
+	cargo build -p officewright-pdf --example primitives --example images
+	OW_CLI=${CARGO_TARGET_DIR:-target}/debug/officewright \
+		OW_PRIMITIVES=${CARGO_TARGET_DIR:-target}/debug/examples/primitives \
+		OW_IMAGES=${CARGO_TARGET_DIR:-target}/debug/examples/images \
+		"$python" -B -m unittest discover -s tests/pdf-output -v
 
 	step "reference font embedding (qpdf, pdffonts, pdftoppm)"
 	# corpus-import.py embeds the fonts Word did not embed before rasterizing its PDFs.
