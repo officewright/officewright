@@ -907,10 +907,19 @@ mod tests {
     #[cfg(any(unix, windows))]
     fn survives_directory_link_loops() {
         let dir = TempDir::new("loop");
-        fs::write(dir.0.join("sans.ttf"), TestFont::new("Test Sans").build()).unwrap();
-        dir_link(&dir.0, &dir.0.join("self"));
+        let (scan, fonts) = (dir.0.join("scan"), dir.0.join("fonts"));
+        fs::create_dir(&scan).unwrap();
+        fs::create_dir(&fonts).unwrap();
+        fs::write(fonts.join("sans.ttf"), TestFont::new("Test Sans").build()).unwrap();
+        // The font is reached only through a link, found inside the scanned folder;
+        // three links in its folder lead back to it, so a scan that did not notice the
+        // loop would read 3^16 folders before its depth limit.
+        dir_link(&fonts, &scan.join("fonts"));
+        for name in ["a", "b", "c"] {
+            dir_link(&fonts, &fonts.join(name));
+        }
         let mut book = FontBook::new();
-        assert_eq!(book.add_dir(&dir.0).unwrap(), 1);
+        assert_eq!(book.add_dir(&scan).unwrap(), 1);
     }
 
     #[test]

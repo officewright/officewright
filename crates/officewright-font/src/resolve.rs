@@ -183,9 +183,11 @@ impl Resolution {
         self.instance.as_deref()
     }
 
-    /// For [`ResolutionKind::Fallback`], the metric-compatible substitute that would
-    /// have been used had it been installed, if the family has one. A family without one
-    /// may have a font of similar design instead:
+    /// For [`ResolutionKind::Fallback`], the free metric-compatible substitute that would
+    /// have been used had it been installed, such as Carlito for Calibri: a font the user
+    /// can install. `None` when the family has none, and when the request is for the free
+    /// font itself, whose Microsoft counterpart is not one to advise. A family without
+    /// one may have a font of similar design instead:
     /// [`uninstalled_similar_design`](Self::uninstalled_similar_design).
     pub fn uninstalled_substitute(&self) -> Option<&str> {
         match &self.uninstalled_substitute {
@@ -194,9 +196,10 @@ impl Resolution {
         }
     }
 
-    /// For [`ResolutionKind::Fallback`], the font of similar design that would have been
-    /// used had it been installed, if the family has one, such as Caladea for Cambria.
-    /// It would lay out differently too, but look closer to the requested family.
+    /// For [`ResolutionKind::Fallback`], the free font of similar design that would have
+    /// been used had it been installed, such as Caladea for Cambria. It would lay out
+    /// differently too, but look closer to the requested family. `None` when the family
+    /// has none, and when the request is for the free font itself.
     pub fn uninstalled_similar_design(&self) -> Option<&str> {
         match &self.uninstalled_substitute {
             Some((substitute, Likeness::Design)) => Some(substitute),
@@ -363,6 +366,8 @@ const SIMILAR_DESIGNS: [(&str, &str, GenericFamily); 1] =
 /// family belongs to, whichever side it is on.
 #[derive(Clone, Copy)]
 struct Pair {
+    /// The other font: a free font's family name, or a Microsoft font's normalized
+    /// name, which is for looking it up only, never for showing.
     other: &'static str,
     generic: GenericFamily,
     /// Whether `other` is the free font, not the Microsoft one.
@@ -510,11 +515,11 @@ impl FontBook {
         // The family the name stands for: the alias target, or the name itself.
         let family = alias.map_or(key, name_key);
         let known = Pair::of(&METRIC_COMPATIBLE, &family);
-        if let Some(face) = known.and_then(|pair| self.find_any(pair.other, request)) {
+        if let Some(face) = known.and_then(|pair| self.find_other(pair, request)) {
             return resolution(Some(face), ResolutionKind::MetricCompatible);
         }
         let similar_design = Pair::of(&SIMILAR_DESIGNS, &family);
-        if let Some(face) = similar_design.and_then(|pair| self.find_any(pair.other, request)) {
+        if let Some(face) = similar_design.and_then(|pair| self.find_other(pair, request)) {
             return Resolution {
                 similar_design: true,
                 ..resolution(Some(face), ResolutionKind::Fallback)
@@ -633,6 +638,17 @@ impl FontBook {
                 )
             })
             .map(|(id, face, (_, _, value))| ((id, face), value))
+    }
+
+    /// The best face of the other font of `pair`: a free font by any of its names, a
+    /// Microsoft font by its family name only, since another of its families may have
+    /// that typographic name (Calibri Light's is Calibri) without its metrics.
+    fn find_other(&self, pair: Pair, request: &FontRequest) -> Option<(FaceId, &FaceInfo)> {
+        if pair.other_is_free {
+            self.find_any(pair.other, request)
+        } else {
+            self.find_family(pair.other, request)
+        }
     }
 
     /// The best face of `family` by any of its names.
@@ -1140,6 +1156,22 @@ mod tests {
                 format!("\"{family}\" → \"{fallback}\" (fallback; not installed)")
             );
         }
+    }
+
+    #[test]
+    fn a_free_twin_does_not_take_another_microsoft_family() {
+        // Calibri Light has the typographic family Calibri but not Calibri's metrics.
+        let book = book(&[system(
+            TestFont::new("Calibri Light")
+                .typographic("Calibri", "Light")
+                .style("Regular", 300, false),
+        )]);
+        let resolution = book.resolve(&FontRequest::new("Carlito"));
+        assert_ne!(resolution.kind(), ResolutionKind::MetricCompatible);
+        assert_ne!(resolution.family(), Some("Calibri Light"));
+        // Asked for by name, it is still found, and reported as such.
+        let resolution = book.resolve(&FontRequest::new("Calibri"));
+        assert_eq!(resolution.kind(), ResolutionKind::OtherName);
     }
 
     /// A book of Liberation Sans and Liberation Serif.
