@@ -254,7 +254,7 @@ The maintainer does not review Rust code. Correctness rests on the automated gat
 
 ### 4. Merge
 The author squash-merges their own PR when all hold:
-- the last independent review on the PR's current head commit says "No blockers."; after that review only tests and the PR description may change, anything else goes back to the reviewer;
+- the last independent review says "No blockers." and names the commit it reviewed; the head may differ from that commit only by changes to tests and by merges of main (the PR description may change too), anything else goes back to the reviewer;
 - the branch is updated from main, and all required CI checks are green on it;
 - corpus numbers are not below the baseline;
 - Copilot's review has arrived (or the PR says why there is none), and every finding in it has a reply (step 3).
