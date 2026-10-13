@@ -199,8 +199,18 @@ fn the_baseline_holds_every_status() -> io::Result<()> {
         output.contains("better than the baseline: docs/nested/BROKEN.DOCX"),
         "{output}"
     );
-    let (code, output) = corpus.run(&[&base[..], &allow[..], &["docs"]].concat(), Some("panic"))?;
+    // A regression that is no crash: the document that opened no longer does.
+    let good = std::fs::read(corpus.dir.join("docs/good.docx"))?;
+    corpus.write("docs/good.docx", "not a zip archive any more")?;
+    let (code, output) = corpus.run(&[&base[..], &allow[..], &["docs"]].concat(), None)?;
     assert_eq!(code, 1, "worse still fails: {output}");
+    assert!(
+        output.contains(
+            "worse than the baseline: docs/good.docx: opened in the baseline, now unexpected-error"
+        ),
+        "{output}"
+    );
+    std::fs::write(corpus.dir.join("docs/good.docx"), good)?;
 
     // A file the baseline does not know, and one it knows that is gone.
     std::fs::rename(
@@ -263,6 +273,7 @@ fn links_are_followed_when_named_and_to_documents() -> io::Result<()> {
     std::fs::create_dir_all(dir.join("walked"))?;
     symlink(dir.join("docs/good.docx"), dir.join("walked/linked.docx"))?;
     symlink(dir.join("docs"), dir.join("walked/linked-dir"))?;
+    symlink(dir.join("docs"), dir.join("walked/linked-dir.docx"))?;
     symlink(
         dir.join("docs/missing.docx"),
         dir.join("walked/broken.docx"),
