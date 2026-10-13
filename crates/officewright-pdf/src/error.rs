@@ -89,6 +89,15 @@ pub enum Error {
         cluster: usize,
     },
     #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
+    /// The text of a cluster of a [`GlyphRun`](crate::GlyphRun) has more than 16382 UTF-16
+    /// code units, too many for its replacement text to fit in a PDF string.
+    ClusterTooLong {
+        /// The cluster's index in its run, from 0.
+        cluster: usize,
+        /// The number of UTF-16 code units of its text.
+        units: usize,
+    },
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
     /// A number for drawing is outside the range it must be in.
     OutOfRange {
         /// What the number is, such as "line width".
@@ -107,6 +116,30 @@ pub enum Error {
     #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
     /// [`Page::pop_clip`](crate::Page::pop_clip) found no clipping path to remove.
     NoClip,
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
+    /// An image is damaged: truncated, with a wrong checksum of a critical PNG chunk,
+    /// missing or invalid headers, or compressed data that does not decompress to the size
+    /// its header gives.
+    MalformedImage {
+        /// The image file, `None` for an image in memory.
+        path: Option<PathBuf>,
+        /// What is wrong with it.
+        reason: String,
+    },
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
+    /// An image is not a JPEG or PNG file, or uses a feature that cannot go into a PDF.
+    UnsupportedImage {
+        /// The image file, `None` for an image in memory.
+        path: Option<PathBuf>,
+        /// What cannot be used.
+        reason: String,
+    },
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
+    /// A PNG image's pixel data would take more than 256 MiB.
+    ImageTooLarge {
+        /// The image file, `None` for an image in memory.
+        path: Option<PathBuf>,
+    },
     #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
     /// More clipping paths would be in effect at once than every PDF reader can nest:
     /// [`Page::MAX_CLIPS`](crate::Page::MAX_CLIPS).
@@ -241,6 +274,12 @@ impl fmt::Display for Error {
             Self::EmptyCluster { cluster } => {
                 write!(f, "cluster {cluster} of the glyph run has no glyphs")
             }
+            Self::ClusterTooLong { cluster, units } => write!(
+                f,
+                "cluster {cluster} of the glyph run has {units} UTF-16 code units of text, more \
+                 than the {} its replacement text can hold",
+                crate::glyphs::MAX_CLUSTER_UNITS
+            ),
             Self::OutOfRange {
                 what,
                 value,
@@ -251,6 +290,24 @@ impl fmt::Display for Error {
                 f.write_str("dash pattern has only lengths of 0; a solid line has an empty pattern")
             }
             Self::NoClip => f.write_str("there is no clipping path to remove"),
+            Self::MalformedImage { path, reason } => {
+                write!(
+                    f,
+                    "image {} is damaged: {reason}",
+                    image_name(path.as_deref())
+                )
+            }
+            Self::UnsupportedImage { path, reason } => write!(
+                f,
+                "image {} cannot be used: {reason}",
+                image_name(path.as_deref())
+            ),
+            Self::ImageTooLarge { path } => write!(
+                f,
+                "image {} is too large: its pixels would take more than {} bytes",
+                image_name(path.as_deref()),
+                crate::image::MAX_PNG_DATA
+            ),
             Self::TooManyClips => write!(
                 f,
                 "more than {} clipping paths would be in effect at once",
@@ -321,7 +378,10 @@ impl From<Error> for officewright_core::Error {
                     _ => Self::Unsupported(message),
                 }
             }
+            Error::MalformedImage { .. } => Self::Malformed(message),
+            Error::ImageTooLarge { .. } => Self::LimitExceeded(message),
             Error::Unencodable { .. }
+            | Error::UnsupportedImage { .. }
             | Error::UnsupportedCharacter { .. }
             | Error::MissingGlyph { .. }
             | Error::EmbeddingNotAllowed { .. }
@@ -335,11 +395,20 @@ impl From<Error> for officewright_core::Error {
             | Error::NotEmbedded { .. }
             | Error::InvalidGlyph { .. }
             | Error::EmptyCluster { .. }
+            | Error::ClusterTooLong { .. }
             | Error::OutOfRange { .. }
             | Error::InvalidDash
             | Error::NoClip
             | Error::TooManyClips => Self::InvalidArgument(message),
         }
+    }
+}
+
+/// How an image error names the image: by its file, or as data in memory.
+fn image_name(path: Option<&std::path::Path>) -> String {
+    match path {
+        Some(path) => path.display().to_string(),
+        None => "data".to_owned(),
     }
 }
 
