@@ -412,9 +412,10 @@ static void fonts_by_name(const char *fonts, const char *dir) {
 
     EXPECT(ow_font_book_new(&book), OW_STATUS_OK, NULL);
     EXPECT(ow_font_book_add_dir(book, fonts, &added), OW_STATUS_OK, NULL);
-    CHECK(added == 5);
+    /* Carlito and Liberation Sans, Serif and Mono in four styles each, and Noto Sans. */
+    CHECK(added == 17);
     EXPECT(ow_font_book_face_count(book, &count), OW_STATUS_OK, NULL);
-    CHECK(count == 5);
+    CHECK(count == 17);
     EXPECT(ow_font_resolver_new(book, &resolver), OW_STATUS_OK, NULL);
     /* The resolver keeps its own copy of the book. */
     ow_font_book_free(book);
@@ -422,9 +423,9 @@ static void fonts_by_name(const char *fonts, const char *dir) {
     EXPECT(ow_pdf_font_resolve(resolver, "Liberation Sans", 0, 0, &liberation), OW_STATUS_OK, NULL);
     EXPECT(ow_font_resolver_substitution_count(resolver, &count), OW_STATUS_OK, NULL);
     CHECK(count == 0);
-    /* Arial's metric-compatible substitute, and a bold the face lacks. */
+    /* Arial's metric-compatible substitute, and a bold Noto Sans has no face for. */
     EXPECT(ow_pdf_font_resolve(resolver, "Arial", 0, 0, &arial), OW_STATUS_OK, NULL);
-    EXPECT(ow_pdf_font_resolve(resolver, "Liberation Sans", 1, 0, &bold), OW_STATUS_OK, NULL);
+    EXPECT(ow_pdf_font_resolve(resolver, "Noto Sans", 1, 0, &bold), OW_STATUS_OK, NULL);
     EXPECT(ow_font_resolver_substitution_count(resolver, &count), OW_STATUS_OK, NULL);
     CHECK(count == 2);
     EXPECT(ow_font_resolver_substitution(resolver, 0, &kind, &message), OW_STATUS_OK, NULL);

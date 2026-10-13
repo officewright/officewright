@@ -48,7 +48,9 @@ crates/
                         shapes with HarfRust behind a private module; feature `fuzzing` opens entry points
                         for the fuzz targets, examples and font tests, which are not API
   officewright-doc      DOC/DOCX/RTF          (counterpart of Spire.Doc)
-  officewright-pdf      PDF read/write        (counterpart of Spire.PDF)
+  officewright-pdf      PDF read/write        (counterpart of Spire.PDF); the drawing primitives the layout engine
+                        paints with are public, but exempt from semver until 1.0 and hidden in the docs unless
+                        feature `unstable-drawing`
   officewright-xls      XLS/XLSX              (counterpart of Spire.XLS)
   officewright-slides   PPT/PPTX              (counterpart of Spire.Presentation)
   officewright-ffi      C ABI; built by cargo-c (`cargo cinstall`) into the native lib `officewright`
@@ -59,17 +61,21 @@ tests/c/                C tests compiled against the generated header and the st
 tests/ffi-python/       Python ctypes tests loading the shared library — proves the ABI is usable
                         from a non-C language with no build step
 tests/pdf-output/       checks text-to-pdf output, in Helvetica and with Liberation Sans (TrueType) and Noto Sans
-                        (CFF) from tests/fonts embedded, with qpdf, pdftotext, pdffonts and pdftoppm (Linux,
-                        macOS; Windows has no official poppler build, and the golden snapshot proves the bytes
-                        are the same)
+                        (CFF) from tests/fonts embedded, and the page of glyph runs and vector graphics that
+                        officewright-pdf's example `primitives` draws in both fonts, with qpdf, pdftotext,
+                        pdffonts and pdftoppm (Linux, macOS; Windows has no official poppler build, and the
+                        golden snapshot proves the bytes are the same)
 tests/corpus/           small curated real documents (committed) + SOURCES.md + baseline.json
 tests/corpus/word-rules/  documents written by scripts/make-rule-docs.py, one undocumented Word rule each
 tests/corpus/poi/        unmodified Apache POI test documents (Apache-2.0) with POI's LICENSE and NOTICE
+tests/corpus/generated/   business documents written by scripts/make-business-docs.py (CVs, invoices,
+                          contracts and letters in English, Ukrainian, Russian, German, Chinese), fictional
 tests/corpus/reference/ ground truth from PDFs of Microsoft Word/Excel/PowerPoint, one folder per document: every page
                         as a 110 dpi grey PNG and geometry.json (lines, words, page breaks); the PDFs are not
                         committed, their SHA-256 and the app version are in SOURCES.md
 tests/corpus/resaved/   the copy Word saved of each document before exporting its reference PDF
-tests/corpus-tools/     tests of make-rule-docs.py and corpus-import.py (Python) and of make-reference.ps1
+tests/corpus-tools/     tests of make-rule-docs.py and corpus-import.py, and that every test font is credited
+                        with its SHA-256 (Python), and of make-reference.ps1
                         without Word (Windows PowerShell, Windows only); poppler/ checks corpus-import.py's
                         font embedding with the real qpdf and poppler (Linux, macOS)
 tests/fonts/            unmodified OFL test fonts with their license files, listed in THIRD-PARTY-NOTICES.md;
@@ -84,6 +90,7 @@ scripts/package.sh      builds one release archive; release-in-container.sh wrap
 scripts/install-cargo-c.sh  the pinned prebuilt cargo-c, shared by ci.yml and release.yml
 scripts/nightly.sh      long-running checks (see below)
 scripts/make-rule-docs.py  writes tests/corpus/word-rules/ (stored ZIP, fixed dates: same bytes everywhere)
+scripts/make-business-docs.py  writes tests/corpus/generated/ the same way, with open-font twins
 scripts/windows/make-reference.ps1  renders the reference PDFs with Word on the maintainer's Windows machine
 scripts/corpus-import.py   checks make-reference.ps1 results and turns them into tests/corpus/ rasters and geometry
 ```
@@ -94,7 +101,7 @@ scripts/corpus-import.py   checks make-reference.ps1 results and turns them into
 2. New behaviour has tests; a bug fix has a regression test that failed before the fix.
 3. Every new public item has a doc comment; non-trivial public APIs have a runnable doc example.
 4. A new parser comes with a fuzz target in `fuzz/`.
-5. Every public Rust feature that users need is exposed through the C ABI in the same PR, with the header regenerated and covered by `tests/c` and `tests/ffi-python`. A crate that no user-facing feature uses yet (a building block such as `officewright-font`) gets its C ABI in the PR that makes it user-facing. Work the maintainer planned as a chain of stacked PRs gets its C ABI in the PR of the chain the plan names: the DOCX reader in the last one, once the document model is complete.
+5. Every public Rust feature that users need is exposed through the C ABI in the same PR, with the header regenerated and covered by `tests/c` and `tests/ffi-python`. A crate that no user-facing feature uses yet (a building block such as `officewright-font`) gets its C ABI in the PR that makes it user-facing. Work the maintainer planned as a chain of stacked PRs gets its C ABI in the PR of the chain the plan names: the DOCX reader in the last one, once the document model is complete. The PDF drawing primitives of `officewright-pdf` (glyph runs, paths, strokes, clipping) are what the layout engine paints with, not an API for users: like the layout IR they are public but hidden in the docs unless feature `unstable-drawing`, exempt from semver until 1.0, not passed on by the facade, and have no C ABI. Users get them through DOCX to PDF, whose C ABI comes with it; a drawing API for users, Rust and C ABI together, gets a plan of its own after DOCX to PDF.
 6. Never weaken a check to make it pass (no `#[allow]` without a `// reason:` comment, no skipped tests, no lowered lint levels).
 
 ## Rust conventions
@@ -129,6 +136,7 @@ Unit and snapshot tests (`insta`) cover small handcrafted inputs. Real-world cor
   - LibreOffice `sw/qa`, `sc/qa`, `sd/qa` documents (MPL-2.0): used as test input only, never copied into the repo.
   - Digital Corpora GovDocs1 and the Common Crawl PDF corpus: large-scale robustness runs (samples of 10k–100k files).
 - Ground truth for rendering, `tests/corpus/reference/`: PDFs exported by Microsoft Word/Excel/PowerPoint from the corpus files (`scripts/windows/make-reference.ps1`, COM automation, run by the maintainer on Windows). The PDFs stay with the maintainer, because they hold subsets of Microsoft's fonts. `scripts/corpus-import.py` commits instead every page rasterized by `pdftoppm -r 110 -gray` as a PNG and `geometry.json`: page sizes, the boxes of every line and word (`pdftotext -bbox-layout`, points from the top left), the page count, and Word's page breaks from the re-saved copy. It records each PDF's SHA-256 in SOURCES.md, and refuses a re-saved copy into which Word embedded fonts. `make-reference.ps1` also exports the formatting Word computes for every paragraph of every story (whether the style is built in, indents, spacing, line spacing, alignment, the list label `ListFormat.ListString`, the first character's font, and the runs of formatting when reading them takes no longer than the paragraphs); `corpus-import.py` commits it as `formatting.json` with the body paragraphs' style ids and names taken from the re-saved copy. Word's own style names, the names its font box gives theme fonts, and its error messages are in the language of its user interface, so they never leave the Windows side: theme fonts are recorded by their ST_Theme value (`minorHAnsi`), and the importer accepts only make-reference.ps1's fixed English notes. Fonts Word only references (Times New Roman, Arial) are embedded into a temporary copy of the PDF before rasterizing, from the maintainer's own installed font files (`--font-dir`, found by PostScript name, never copied into the repository), so every PNG shows Word's glyphs; SOURCES.md and `geometry.json` name those files by version and SHA-256, never by path. Word's printer is Microsoft Print to PDF (a printer that does not answer can stall Word, and with `w:usePrinterMetrics` Word lays out with the printer's metrics; the script warns otherwise). Word saves each document again first and exports from that copy, which goes to `tests/corpus/resaved/` (its `w:lastRenderedPageBreak` marks are Word's page breaks); `scripts/corpus-import.py` brings the results in and refuses any that carry a person's or company's name or a user profile path. LibreOffice exports are a secondary reference, marked as such. Never use output of Spire or Aspose as reference.
+- Business documents we make ourselves are generated, `tests/corpus/generated/` (`scripts/make-business-docs.py`): invented people, companies, addresses and accounts only; each document but the Chinese ones also as a `-open` twin in the open metric-compatible fonts, so CI can compare its Word reference with the very fonts Word used.
 - Undocumented Word rules get a generated document each in `tests/corpus/word-rules/` (`scripts/make-rule-docs.py`, written from ECMA-376 markup), so a reference render isolates one rule.
 
 ### What runs against the corpora
@@ -192,7 +200,7 @@ Not before the C ABI is stable. When they come: .NET (`netstandard2.0` + `net8.0
 - Conventional Commits with the crate as scope: `feat(pdf): write xref streams`, `fix(ffi): free buffer on error path`, `docs(readme): ...`, `ci: ...`. Breaking changes use `!` (`feat(pdf)!: ...`).
 - One logical change per commit; no "wip"/"fix stuff" commits.
 - Until Milestone 1 is merged, commit to `main`. After that, work on branches (`feat/<topic>`, `fix/<topic>`), open a PR, merge only with green CI. `main` is protected.
-- Releases (later): release-plz generates versions and CHANGELOG from commit messages; cargo-semver-checks runs before publishing, without the feature `unstable-ir` of `officewright-layout` (the IR is exempt until 1.0).
+- Releases (later): release-plz generates versions and CHANGELOG from commit messages; cargo-semver-checks runs before publishing, without the feature `unstable-ir` of `officewright-layout` and `unstable-drawing` of `officewright-pdf` (the IR and the drawing primitives are exempt until 1.0).
 
 ## Review process
 
@@ -251,7 +259,8 @@ cargo fmt --check and cargo clippy -D warnings on the fuzz/ workspace (Linux/mac
 cargo deny check && cargo machete
 cargo package --list -p officewright-pdf, -font, -layout, -cli: no third-party data in the published crates
 typos && taplo fmt --check && shellcheck scripts/*.sh .githooks/pre-commit && actionlint
-tests/corpus-tools (Python unittest): committed rule documents equal make-rule-docs.py output; corpus-import.py refusals
+tests/corpus-tools (Python unittest): committed rule documents equal make-rule-docs.py output; corpus-import.py refusals;
+  every file in tests/fonts is listed with its SHA-256 in THIRD-PARTY-NOTICES.md
 tests/corpus-tools/poppler (Linux, macOS): fonts corpus-import.py embeds are what poppler draws
 tests/corpus-tools/test_make_reference.ps1 (Windows): a Word step that hangs is stopped, checked and never waited on forever
 scripts/install-capi.sh target/capi --debug, copy the header, git diff --exit-code crates/officewright-ffi/include/officewright.h
@@ -263,7 +272,10 @@ scripts/check-capi.sh target/capi (release.yml runs the same script on every unp
 PDF output of officewright text-to-pdf (tests/pdf-output): qpdf --check without warnings, pdftotext reads the input back;
   with Liberation Sans and Noto Sans of tests/fonts embedded: pdffonts lists each embedded, subset and with a ToUnicode map,
   pdftotext reads back every Latin, Greek and Cyrillic character both fonts have, pdftoppm renders a subset exactly as the
-  whole font; characters that share a glyph read back through ActualText (Linux, macOS)
+  whole font; characters that share a glyph read back through ActualText; the example primitives' page in both fonts:
+  qpdf --check, pdffonts, pdftotext reads every text as written (ligatures, small capitals, a cluster of three glyphs),
+  pdftoppm renders the subset exactly as the whole font and the shapes, colours and clips where the page puts them
+  (Linux, macOS)
 corpus-runner over tests/corpus (committed corpus), compared with tests/corpus/baseline.json
 ```
 
