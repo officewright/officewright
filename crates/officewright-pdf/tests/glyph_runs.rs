@@ -495,6 +495,24 @@ fn a_cluster_text_must_fit_in_a_string() -> TestResult {
         err.to_string(),
         "cluster text length in UTF-16 code units 16383 is outside the 0 to 16382 range"
     );
+    // The limit counts UTF-16 code units: U+1D400 takes two, so 8191 of them fit and
+    // 8192 do not.
+    let wide = |count: usize| {
+        let mut run = GlyphRun::new(&font, Pt(10.0), Pt(72.0), Pt(700.0));
+        run.push_cluster(&"\u{1D400}".repeat(count), [glyph(A, 0.0, 0.0)]);
+        run
+    };
+    let pdf = pdf_of(&[wide(8191)])?;
+    let (_, span) = pdf.split_once("/ActualText <").ok_or("no span")?;
+    let (hex, _) = span.split_once('>').ok_or("no end")?;
+    assert_eq!(hex.len() / 2, 32766);
+    let mut doc = Document::new();
+    let err = doc
+        .add_page(PageSize::A4)?
+        .draw_glyphs(&wide(8192))
+        .err()
+        .ok_or("too long")?;
+    assert!(err.to_string().contains(" 16384 is outside"), "{err}");
     Ok(())
 }
 
