@@ -12,7 +12,14 @@
       3. reopens that re-saved file and exports <name>.pdf from it;
       4. checks both files for the Windows and Office user names, the computer name and
          the user profile path, and refuses them if any appears;
-      5. writes <name>.json: hashes, Word version and build, the printer, page count,
+      5. writes <name>.formatting.json: for every paragraph of every story (body, headers,
+         footers, notes, text boxes) the formatting Word computes for it: whether its style
+         is built in (and the name of a style the document defines), indents, spacing
+         before and after, line spacing, alignment, the list label Word shows
+         (ListFormat.ListString) and the font of its first character (name, size, bold,
+         italic, colour); and, when that takes no longer than the paragraphs did, the same
+         font properties for every run of formatting;
+      6. writes <name>.json: hashes, Word version and build, the printer, page count,
          compatibility mode, and the fonts the document asks for that neither Windows nor
          Word has.
     scripts/corpus-import.py, run on the Linux side, checks these files again and copies
@@ -49,6 +56,10 @@
 .PARAMETER TimeoutSeconds
     How long Word may take to start, or to save and export one document.
 
+.PARAMETER FormattingSeconds
+    How long reading the formatting of one document may take. A document that needs more
+    keeps the paragraphs read so far and is marked incomplete.
+
 .PARAMETER DryRun
     Check the inputs, the output folder, the fonts and the printer, print what would be
     rendered, and stop before Word starts.
@@ -71,6 +82,9 @@ param(
     [ValidateRange(10, 3600)]
     [int] $TimeoutSeconds = 120,
 
+    [ValidateRange(30, 7200)]
+    [int] $FormattingSeconds = 900,
+
     [switch] $DryRun
 )
 
@@ -78,7 +92,7 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 # Bumped whenever the output files change shape; corpus-import.py checks it.
-$ScriptVersion = 2
+$ScriptVersion = 3
 
 # The printer the references are made with.
 $ReferencePrinter = 'Microsoft Print to PDF'
@@ -332,6 +346,238 @@ function Exit-Stuck([string] $Message, [string] $Staging) {
     [Environment]::Exit(2)
 }
 
+# Word's computed formatting. These functions run in the worker (Export-Formatting passes
+# their text to it) and are tested without Word on objects that stand in for Word's.
+
+function ConvertTo-PointValue($Value) {
+    # A length in points, rounded to 0.01 pt; $null for Word's "differs within the range".
+    if ($null -eq $Value) { return $null }
+    $number = [double]$Value
+    if ($number -ge 9999999) { return $null }
+    return [math]::Round($number, 2)
+}
+
+function ConvertTo-Flag($Value) {
+    # Word's True (-1) and False (0); $null for wdUndefined (9999999), which means mixed.
+    if ($null -eq $Value) { return $null }
+    $number = [long]$Value
+    if ($number -eq 9999999) { return $null }
+    return ($number -ne 0)
+}
+
+function ConvertTo-HexColor($Color, $Rgb) {
+    # Font.Color is wdColorAutomatic (-16777216) for automatic and 9999999 when mixed;
+    # Font.TextColor.RGB is the colour itself, theme colours resolved, as R + G*256 + B*65536.
+    if ($null -eq $Color) { return $null }
+    $code = [long]$Color
+    if ($code -eq -16777216) { return 'auto' }
+    if ($code -eq 9999999 -or $null -eq $Rgb) { return $null }
+    $value = [long]$Rgb
+    if ($value -lt 0 -or $value -gt 16777215) { return $null }
+    return '{0:X2}{1:X2}{2:X2}' -f ($value -band 255), (($value -shr 8) -band 255), (($value -shr 16) -band 255)
+}
+
+function Get-AlignmentName([int] $Value) {
+    switch ($Value) {
+        0 { 'left' } 1 { 'center' } 2 { 'right' } 3 { 'justify' } 4 { 'distribute' }
+        5 { 'justify-medium' } 7 { 'justify-high' } 8 { 'justify-low' } 9 { 'thai-justify' }
+        default { "other-$Value" }
+    }
+}
+
+function Get-LineRuleName([int] $Value) {
+    switch ($Value) {
+        0 { 'single' } 1 { 'one-and-a-half' } 2 { 'double' } 3 { 'at-least' } 4 { 'exactly' }
+        5 { 'multiple' } default { "other-$Value" }
+    }
+}
+
+function Get-StoryName([int] $Value) {
+    # WdStoryType; the separator stories (12 to 17) hold no paragraphs of the document.
+    switch ($Value) {
+        1 { 'main' } 2 { 'footnotes' } 3 { 'endnotes' } 4 { 'comments' } 5 { 'text-boxes' }
+        6 { 'even-pages-header' } 7 { 'primary-header' } 8 { 'even-pages-footer' }
+        9 { 'primary-footer' } 10 { 'first-page-header' } 11 { 'first-page-footer' }
+        default { $null }
+    }
+}
+
+function Get-TextExcerpt([string] $Text) {
+    # The paragraph's first 60 characters, without the paragraph and cell marks; other
+    # control characters (tabs, line breaks, field marks) as spaces.
+    $text = $Text.TrimEnd([char]13, [char]7)
+    $text = [regex]::Replace($text, '[\x00-\x1f]', ' ')
+    if ($text.Length -gt 60) { $text = $text.Substring(0, 60) }
+    return $text
+}
+
+function Get-FontRecord($Font, $ThemeFonts) {
+    # Name (a theme font such as "+Body" resolved through the document's theme), size,
+    # bold, italic and colour as Word computes them.
+    $name = [string]$Font.Name
+    $theme = $null
+    if ($name.StartsWith('+')) {
+        $theme = $name
+        if ($ThemeFonts -and $ThemeFonts.ContainsKey($name)) { $name = $ThemeFonts[$name] }
+    }
+    if ($name -eq '') { $name = $null }
+    $rgb = $null
+    try { $rgb = $Font.TextColor.RGB } catch { $rgb = $null }
+    $record = [ordered]@{
+        name = $name
+        size = ConvertTo-PointValue $Font.Size
+        bold = ConvertTo-Flag $Font.Bold
+        italic = ConvertTo-Flag $Font.Italic
+        color = ConvertTo-HexColor $Font.Color $rgb
+    }
+    if ($theme) { $record.theme = $theme }
+    return $record
+}
+
+function Get-ParagraphRecord($Paragraph, [int] $Index, $ThemeFonts) {
+    $range = $Paragraph.Range
+    $format = $Paragraph.Format
+    # Only the name of a style the document defines: built-in styles have names in the
+    # language of Word's user interface, which says where Word runs. corpus-import.py
+    # takes their names from the re-saved copy instead.
+    $styleName = $null
+    $builtIn = $null
+    try {
+        $style = $Paragraph.Style
+        $builtIn = [bool]$style.BuiltIn
+        if (-not $builtIn) { $styleName = [string]$style.NameLocal }
+    } catch { }
+    $list = $range.ListFormat
+    $listString = [string]$list.ListString
+    $level = $null
+    if ([int]$list.ListType -ne 0) { $level = [int]$list.ListLevelNumber }
+    return [ordered]@{
+        index = $Index
+        text = Get-TextExcerpt ([string]$range.Text)
+        style = $styleName
+        style_builtin = $builtIn
+        left_indent = ConvertTo-PointValue $format.LeftIndent
+        right_indent = ConvertTo-PointValue $format.RightIndent
+        first_line_indent = ConvertTo-PointValue $format.FirstLineIndent
+        space_before = ConvertTo-PointValue $format.SpaceBefore
+        space_after = ConvertTo-PointValue $format.SpaceAfter
+        space_before_auto = ConvertTo-Flag $format.SpaceBeforeAuto
+        space_after_auto = ConvertTo-Flag $format.SpaceAfterAuto
+        line_spacing = ConvertTo-PointValue $format.LineSpacing
+        line_spacing_rule = Get-LineRuleName ([int]$format.LineSpacingRule)
+        alignment = Get-AlignmentName ([int]$format.Alignment)
+        list_string = $listString
+        list_level = $level
+        font = Get-FontRecord $range.Characters.First.Font $ThemeFonts
+    }
+}
+
+function Get-RunRecords($Range, [DateTime] $Deadline, $ThemeFonts) {
+    # The paragraph's stretches of one character formatting, as Word's wdCharacterFormatting
+    # unit (13) moves over them; $null once $Deadline has passed.
+    $runs = New-Object System.Collections.ArrayList
+    $end = [int]$Range.End
+    $cursor = $Range.Duplicate
+    $cursor.Collapse(1)                       # wdCollapseStart
+    while ([int]$cursor.Start -lt $end) {
+        if ([DateTime]::UtcNow -gt $Deadline) { return $null }
+        $from = [int]$cursor.Start
+        [void]$cursor.MoveEnd(13, 1)
+        if ([int]$cursor.End -le $from) { throw 'Word did not move over a run of formatting' }
+        if ([int]$cursor.End -gt $end) { $cursor.End = $end }
+        [void]$runs.Add([ordered]@{
+                length = [int]$cursor.End - $from
+                font = Get-FontRecord $cursor.Font $ThemeFonts
+            })
+        $cursor.Collapse(0)                   # wdCollapseEnd
+    }
+    return , $runs.ToArray()
+}
+
+function Export-Formatting($Document, [int] $BudgetSeconds, $ThemeFonts) {
+    # Every paragraph of every story with the formatting Word computes for it. Then, in a
+    # second pass, its runs of formatting, kept only if that pass takes no longer than the
+    # first, so that the whole export takes at most twice as long as without runs.
+    $deadline = [DateTime]::UtcNow.AddSeconds($BudgetSeconds)
+    $clock = [System.Diagnostics.Stopwatch]::StartNew()
+    $stories = New-Object System.Collections.ArrayList
+    $visited = New-Object System.Collections.ArrayList
+    $complete = $true
+    foreach ($story in $Document.StoryRanges) {
+        $range = $story
+        $instance = 0
+        while ($null -ne $range) {
+            $name = Get-StoryName ([int]$range.StoryType)
+            if ($null -eq $name) { break }
+            $records = New-Object System.Collections.ArrayList
+            $index = 0
+            foreach ($paragraph in $range.Paragraphs) {
+                if ([DateTime]::UtcNow -gt $deadline) { $complete = $false; break }
+                $record = Get-ParagraphRecord $paragraph $index $ThemeFonts
+                [void]$records.Add($record)
+                [void]$visited.Add(@($paragraph, $record))
+                $index++
+            }
+            [void]$stories.Add([ordered]@{ story = $name; instance = $instance; paragraphs = $records.ToArray() })
+            if (-not $complete) { break }
+            $range = $range.NextStoryRange
+            $instance++
+        }
+        if (-not $complete) { break }
+    }
+    $paragraphSeconds = $clock.Elapsed.TotalSeconds
+    # A floor of five seconds keeps small documents from losing their runs to timer noise.
+    $runBudget = [math]::Max($paragraphSeconds, 5)
+    $runDeadline = [DateTime]::UtcNow.AddSeconds($runBudget)
+    if ($runDeadline -gt $deadline) { $runDeadline = $deadline }
+    $runClock = [System.Diagnostics.Stopwatch]::StartNew()
+    $runsKept = $complete
+    $note = ''
+    if (-not $complete) { $note = 'not collected: the paragraphs did not fit in the time budget' }
+    $collected = New-Object System.Collections.ArrayList
+    if ($runsKept) {
+        try {
+            foreach ($pair in $visited) {
+                $runs = Get-RunRecords $pair[0].Range $runDeadline $ThemeFonts
+                if ($null -eq $runs) {
+                    $runsKept = $false
+                    $note = "left out: they took longer than the paragraphs ($([math]::Round($paragraphSeconds, 1)) s)"
+                    break
+                }
+                [void]$collected.Add($runs)
+            }
+        } catch {
+            $runsKept = $false
+            $note = "left out: $($_.Exception.Message)"
+        }
+    }
+    if ($runsKept) {
+        for ($i = 0; $i -lt $visited.Count; $i++) { $visited[$i][1].runs = $collected[$i] }
+    }
+    return [ordered]@{
+        format = 1
+        complete = $complete
+        runs = $runsKept
+        runs_note = $note
+        paragraph_seconds = [math]::Round($paragraphSeconds, 1)
+        run_seconds = [math]::Round($runClock.Elapsed.TotalSeconds, 1)
+        stories = $stories.ToArray()
+    }
+}
+
+function Get-FormattingFunctions {
+    # The text of the functions above: the worker runs in a runspace of its own, which has
+    # none of this script's functions.
+    $names = @(
+        'ConvertTo-PointValue', 'ConvertTo-Flag', 'ConvertTo-HexColor', 'Get-AlignmentName',
+        'Get-LineRuleName', 'Get-StoryName', 'Get-TextExcerpt', 'Get-FontRecord',
+        'Get-ParagraphRecord', 'Get-RunRecords', 'Export-Formatting'
+    )
+    return ($names | ForEach-Object {
+            "function $_ {`n$((Get-Item "function:$_").ScriptBlock.ToString())`n}"
+        }) -join "`n"
+}
+
 # Scripts the worker runs. Word's objects stay in the worker's session ($global:word); the
 # shared $progress.Step names the call in progress for the time-out message.
 
@@ -409,6 +655,45 @@ try {
 }
 New-Object PSObject -Property @{ Foreign = $false; Pages = $pages; Mode = $mode }
 '@
+
+$FormattingScript = @'
+param($Resaved, $OutPath, $BudgetSeconds, $Functions)
+$ErrorActionPreference = 'Stop'
+. ([ScriptBlock]::Create($Functions))
+$word = $global:word
+$progress.Step = 'Documents.Open (formatting)'
+$doc = $word.Documents.Open($Resaved, $false, $true, $false)
+try {
+    $themeFonts = @{}
+    try {
+        $scheme = $doc.DocumentTheme.ThemeFontScheme
+        $minor = [string]$scheme.MinorFont.Item(1).Name       # msoThemeLatin
+        $major = [string]$scheme.MajorFont.Item(1).Name
+        foreach ($key in @('+Body', '+Body CS', '+Body EA')) { $themeFonts[$key] = $minor }
+        foreach ($key in @('+Headings', '+Headings CS', '+Headings EA')) { $themeFonts[$key] = $major }
+        $themeFonts['+Body EA'] = [string]$scheme.MinorFont.Item(2).Name      # msoThemeEastAsian
+        $themeFonts['+Headings EA'] = [string]$scheme.MajorFont.Item(2).Name
+        $themeFonts['+Body CS'] = [string]$scheme.MinorFont.Item(3).Name      # msoThemeComplexScript
+        $themeFonts['+Headings CS'] = [string]$scheme.MajorFont.Item(3).Name
+    } catch { }
+    $progress.Step = 'reading the formatting of every paragraph'
+    $export = Export-Formatting $doc $BudgetSeconds $themeFonts
+} finally {
+    $progress.Step = 'closing the re-saved copy (formatting)'
+    $doc.Close(0)
+    [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($doc)
+}
+$json = ConvertTo-Json -InputObject $export -Depth 10 -Compress
+$utf8 = New-Object System.Text.UTF8Encoding $false
+[System.IO.File]::WriteAllText($OutPath, $json + "`n", $utf8)
+$count = 0
+foreach ($story in $export.stories) { $count += @($story.paragraphs).Count }
+New-Object PSObject -Property @{
+    Paragraphs = $count; Runs = $export.runs; Complete = $export.complete; Note = $export.runs_note
+}
+'@
+
+$FormattingFunctions = Get-FormattingFunctions
 
 $CloseWordScript = @'
 $ErrorActionPreference = 'Stop'
@@ -494,7 +779,8 @@ foreach ($file in $inputs) {
     $json = Join-Path $outDir ($file.BaseName + '.json')
     if (-not $Overwrite -and (Test-Path -LiteralPath $json)) {
         try {
-            $skip = (Get-Content -LiteralPath $json -Raw | ConvertFrom-Json).status -eq 'rendered'
+            $previous = Get-Content -LiteralPath $json -Raw | ConvertFrom-Json
+            $skip = $previous.status -eq 'rendered' -and $previous.script_version -eq $ScriptVersion
         } catch {
             $skip = $false
         }
@@ -620,7 +906,8 @@ try {
         $resaved = Join-Path $outDir ($base + '.resaved.docx')
         $pdf = Join-Path $outDir ($base + '.pdf')
         $jsonPath = Join-Path $outDir ($base + '.json')
-        foreach ($old in @($resaved, $pdf, $jsonPath)) {
+        $formattingPath = Join-Path $outDir ($base + '.formatting.json')
+        foreach ($old in @($resaved, $pdf, $jsonPath, $formattingPath)) {
             if (Test-Path -LiteralPath $old) { Remove-Item -LiteralPath $old -Force }
         }
         Copy-Item -LiteralPath $file.FullName -Destination $staged
@@ -634,6 +921,12 @@ try {
             resaved_sha256 = ''
             pdf_file = $base + '.pdf'
             pdf_sha256 = ''
+            formatting_file = $base + '.formatting.json'
+            formatting_sha256 = ''
+            formatting_paragraphs = 0
+            formatting_runs = $false
+            formatting_complete = $false
+            formatting_seconds = 0
             status = 'failed'
             error = ''
             pages = 0
@@ -675,7 +968,35 @@ try {
                 $record.status = 'privacy-failed'
                 $record.error = 'personal data in the output; corpus-import.py refuses this document'
             } else {
-                $record.status = 'rendered'
+                Write-Host '  reading the formatting Word computes ...'
+                $formattingStarted = Get-Date
+                $step = Invoke-WordStep $worker $FormattingScript @($resaved, $formattingPath, $FormattingSeconds, $FormattingFunctions) ($FormattingSeconds + 120) $targets $progress
+                if ($step.Status -eq 'done') {
+                    $summary = $step.Output[0]
+                    $record.formatting_seconds = [math]::Round(((Get-Date) - $formattingStarted).TotalSeconds, 1)
+                    $record.formatting_sha256 = Get-Sha256 $formattingPath
+                    $record.formatting_paragraphs = [int]$summary.Paragraphs
+                    $record.formatting_runs = [bool]$summary.Runs
+                    $record.formatting_complete = [bool]$summary.Complete
+                    $formattingText = [System.IO.File]::ReadAllText($formattingPath)
+                    $leaks = @($docTokens | Where-Object { Test-Token $formattingText $_.Value } | ForEach-Object { "formatting: $($_.Kind)" })
+                    $record.privacy_findings = $leaks
+                    if ($leaks.Count -gt 0) {
+                        $record.status = 'privacy-failed'
+                        $record.error = 'personal data in the formatting export; corpus-import.py refuses this document'
+                    } else {
+                        $record.status = 'rendered'
+                    }
+                    if ($summary.Note) { Write-Host "  runs of formatting $($summary.Note)" -ForegroundColor Yellow }
+                } elseif ($step.Status -eq 'error') {
+                    $record.status = 'formatting-failed'
+                    $record.error = "reading the formatting failed: $($step.Message)"
+                    if (@(Get-OwnWordProcess $since).Count -eq 0) { $aborted = $true }
+                } else {
+                    $record.status = 'formatting-failed'
+                    $record.error = "Word stopped while reading the formatting: $($step.Message)"
+                    $aborted = $true
+                }
             }
         } elseif ($step.Status -eq 'error') {
             $record.error = $step.Message
@@ -693,7 +1014,10 @@ try {
 
         $color = 'Green'
         if ($record.status -ne 'rendered') { $color = 'Red' }
-        $detail = "$($record.pages) pages, compatibility mode $($record.compatibility_mode)"
+        $runs = 'without runs'
+        if ($record.formatting_runs) { $runs = 'with runs' }
+        $detail = "$($record.pages) pages, compatibility mode $($record.compatibility_mode), formatting of $($record.formatting_paragraphs) paragraphs $runs"
+        if ($record.formatting_paragraphs -gt 0 -and -not $record.formatting_complete) { $detail += ' (incomplete: time budget)' }
         if ($record.status -ne 'rendered') { $detail = $record.error }
         Write-Host "  $($record.status): $detail" -ForegroundColor $color
         foreach ($finding in $record.privacy_findings) { Write-Host "    $finding" -ForegroundColor Red }

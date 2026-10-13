@@ -772,6 +772,187 @@ class Pdffonts(unittest.TestCase):
         self.assertEqual(importer.not_embedded(PDFFONTS + row + "\n"), ["Garamond", "Helvetica"])
 
 
+def word_export(parts, runs=True, texts=None):
+    """make-reference.ps1's formatting export for a package, as Word would write it: the
+    body paragraphs with their texts, a built-in style, and a header story."""
+    body = importer.body_paragraph_styles(parts)
+    font = {"name": "Calibri", "size": 11, "bold": False, "italic": False, "color": "auto"}
+    bold = dict(font, bold=True)
+    paragraphs = []
+    for index, (text, _, _) in enumerate(body):
+        paragraph = {
+            "index": index, "text": (texts[index] if texts else text)[:60], "style": None,
+            "style_builtin": True, "left_indent": 0, "right_indent": 0,
+            "first_line_indent": 0, "space_before": 0, "space_after": 0,
+            "space_before_auto": False, "space_after_auto": False, "line_spacing": 12,
+            "line_spacing_rule": "single", "alignment": "left", "list_string": "",
+            "list_level": None, "font": font,
+        }
+        if runs:
+            paragraph["runs"] = [{"length": 3, "font": bold}, {"length": 4, "font": font}]
+        paragraphs.append(paragraph)
+    header = dict(paragraphs[0], text="Header", style="Letterhead", style_builtin=False,
+                  list_string="1.", list_level=1, alignment="other-6")
+    return {
+        "format": 1, "complete": True, "runs": runs, "runs_note": "",
+        "paragraph_seconds": 0.4, "run_seconds": 0.3,
+        "stories": [
+            {"story": "main", "instance": 0, "paragraphs": paragraphs},
+            # PowerShell 5.1 writes a one-element array as its element.
+            {"story": "primary-header", "instance": 0, "paragraphs": header},
+        ],
+    }
+
+
+class Formatting(Import):
+    def add_v3(self, export=None, **changes):
+        doc = rules.documents()[0]
+        record = self.add_result(doc)
+        parts = importer.read_parts(self.results / record["resaved_file"])
+        export = export if export is not None else word_export(parts)
+        path = self.results / f"{doc.name}.formatting.json"
+        path.write_text(json.dumps(export), encoding="utf-8")
+        record.update({
+            "script_version": 3,
+            "formatting_file": path.name,
+            "formatting_sha256": sha256(path.read_bytes()),
+            "formatting_paragraphs": sum(
+                len(s["paragraphs"]) if isinstance(s["paragraphs"], list) else 1
+                for s in export["stories"]
+            ),
+            "formatting_runs": export["runs"],
+            "formatting_complete": export["complete"],
+        })
+        record.update(changes)
+        self.save_record(record)
+        return doc, parts
+
+    def committed(self, doc):
+        folder = self.corpus / "reference" / "word-rules" / doc.name
+        return json.loads((folder / "formatting.json").read_text(encoding="utf-8"))
+
+    def test_the_export_is_committed_compact_with_styles_from_the_resaved_copy(self):
+        doc, parts = self.add_v3()
+        self.run_import()
+        formatting = self.committed(doc)
+        body = importer.body_paragraph_styles(parts)
+        self.assertEqual(formatting["format"], 1)
+        self.assertEqual(formatting["document"], f"word-rules/{doc.name}.docx")
+        self.assertTrue(formatting["styles_from_resaved_copy"])
+        main, header = formatting["stories"]
+        self.assertEqual(len(main["paragraphs"]), len(body))
+        first = main["paragraphs"][0]
+        self.assertEqual((first["style_id"], first["style_name"]), body[0][1:])
+        self.assertNotIn("style", first)
+        # Fonts and paragraph formats are tables; runs are [length, font] pairs.
+        self.assertEqual(len(formatting["fonts"]), 2)
+        self.assertEqual(len(formatting["paragraph_formats"]), 2)
+        self.assertEqual(formatting["fonts"][first["font"]]["name"], "Calibri")
+        self.assertEqual([length for length, _ in first["runs"]], [3, 4])
+        self.assertTrue(formatting["fonts"][first["runs"][0][1]]["bold"])
+        self.assertEqual(header["paragraphs"][0]["style"], "Letterhead")
+        self.assertEqual(header["paragraphs"][0]["list_string"], "1.")
+        self.assertNotIn("style_id", header["paragraphs"][0])
+        sources = (self.corpus / "SOURCES.md").read_text(encoding="utf-8")
+        count = len(body) + 1
+        self.assertIn(f"formatting as Word computes it: {count} paragraphs, with runs", sources)
+
+    def test_misaligned_paragraphs_get_no_style_ids(self):
+        doc = rules.documents()[0]
+        record = self.add_result(doc)
+        parts = importer.read_parts(self.results / record["resaved_file"])
+        texts = ["Something else entirely"] * len(importer.body_paragraph_styles(parts))
+        self.add_v3(word_export(parts, texts=texts))
+        self.run_import()
+        formatting = self.committed(doc)
+        self.assertFalse(formatting["styles_from_resaved_copy"])
+        self.assertNotIn("style_id", formatting["stories"][0]["paragraphs"][0])
+
+    def test_refusals(self):
+        first = lambda export: export["stories"][0]["paragraphs"][0]
+        cases = {
+            "changed after Word wrote it": (None, {"formatting_sha256": "0" * 64}),
+            "does not match its record": (None, {"formatting_paragraphs": 1}),
+            "unexpected alignment": (lambda e: first(e).update(alignment="sideways"), {}),
+            "unexpected colour": (lambda e: first(e)["font"].update(color="red"), {}),
+            "text is not an excerpt": (lambda e: first(e).update(text="x" * 61), {}),
+            "is not a known story": (lambda e: e["stories"][0].update(story="glossary"), {}),
+            "length is not a count": (lambda e: first(e)["runs"][0].update(length=0), {}),
+            "names a user profile path": (
+                lambda e: first(e).update(text="C:\\Users\\jroe\\x"), {}
+            ),
+        }
+        doc = rules.documents()[0]
+        for message, (edit, changes) in cases.items():
+            with self.subTest(message):
+                record = self.add_result(doc)
+                export = word_export(importer.read_parts(self.results / record["resaved_file"]))
+                if edit:
+                    edit(export)
+                self.add_v3(export, **changes)
+                self.assertIn(message, self.refused())
+
+    def test_runs_are_dropped_to_stay_under_the_size_limit(self):
+        doc, _ = self.add_v3()
+        limit = importer.MAX_FORMATTING_BYTES
+        self.addCleanup(setattr, importer, "MAX_FORMATTING_BYTES", limit)
+        with_runs = importer.formatting_bytes(self.check_compact(doc))
+        importer.MAX_FORMATTING_BYTES = len(with_runs) - 1
+        self.run_import()
+        formatting = self.committed(doc)
+        self.assertFalse(formatting["runs"])
+        self.assertEqual(formatting["runs_note"], "left out to keep the file under 1 MB")
+        self.assertNotIn("runs", formatting["stories"][0]["paragraphs"][0])
+        importer.MAX_FORMATTING_BYTES = 10
+        shutil.rmtree(self.corpus / "reference")
+        self.assertIn("formatting.json would be", self.refused())
+
+    def check_compact(self, doc):
+        record = json.loads((self.results / f"{doc.name}.json").read_text(encoding="utf-8"))
+        parts = importer.read_parts(self.results / record["resaved_file"])
+        export = importer.read_formatting((self.results / record["formatting_file"]).read_bytes())
+        result, _ = importer.compact_formatting(export, parts, "x", "y")
+        return result
+
+    def test_a_format_2_result_still_imports_without_formatting(self):
+        self.run_import()
+        folder = self.corpus / "reference" / "word-rules" / rules.documents()[0].name
+        self.assertFalse((folder / "formatting.json").exists())
+
+
+class BodyParagraphs(unittest.TestCase):
+    def test_text_boxes_are_not_body_paragraphs(self):
+        w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+        mc = 'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"'
+        box = "<w:txbxContent><w:p><w:r><w:t>In a box</w:t></w:r></w:p></w:txbxContent>"
+        document = (
+            f"<w:document {w} {mc}><w:body>"
+            '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Title</w:t></w:r></w:p>'
+            f"<w:p><w:r><mc:AlternateContent><mc:Choice>{box}</mc:Choice>"
+            f"<mc:Fallback>{box}</mc:Fallback></mc:AlternateContent></w:r>"
+            "<w:r><w:t>After the box</w:t></w:r></w:p>"
+            f"<w:p><w:r><w:pict>{box}</w:pict></w:r></w:p>"
+            "<w:tbl><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"
+            "</w:body></w:document>"
+        )
+        styles = (
+            f"<w:styles {w}>"
+            '<w:style w:type="paragraph" w:default="1" w:styleId="Normal">'
+            '<w:name w:val="Normal"/></w:style>'
+            '<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/></w:style>'
+            "</w:styles>"
+        )
+        found = importer.body_paragraph_styles(
+            {"word/document.xml": document.encode(), "word/styles.xml": styles.encode()}
+        )
+        self.assertEqual(found, [
+            ("Title", "Heading1", "heading 1"),
+            ("After the box", "Normal", "Normal"),
+            ("", "Normal", "Normal"),
+            ("Cell", "Normal", "Normal"),
+        ])
+
+
 class FontFiles(unittest.TestCase):
     def setUp(self):
         self.temp = Path(tempfile.mkdtemp())
