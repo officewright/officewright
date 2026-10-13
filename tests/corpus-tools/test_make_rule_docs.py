@@ -7,6 +7,7 @@ and check the package structure that Word needs to open a file at all.
 
 import dataclasses
 import importlib.util
+import re
 import shutil
 import sys
 import tempfile
@@ -215,6 +216,153 @@ class Packages(unittest.TestCase):
                 for n in root.iter(f"{W}{tag}")
             }
             self.assertLessEqual(named, defined, doc.name)
+
+    def test_run_properties_follow_the_schema_order(self):
+        # CT_RPr is a sequence (ECMA-376 Part 1, 17.3.2.28); Word refuses a document whose
+        # run properties are out of order.
+        order = [
+            "rStyle",
+            "rFonts",
+            "b",
+            "bCs",
+            "i",
+            "iCs",
+            "caps",
+            "smallCaps",
+            "strike",
+            "dstrike",
+            "outline",
+            "shadow",
+            "emboss",
+            "imprint",
+            "noProof",
+            "snapToGrid",
+            "vanish",
+            "webHidden",
+            "color",
+            "spacing",
+            "w",
+            "kern",
+            "position",
+            "sz",
+            "szCs",
+            "highlight",
+            "u",
+            "effect",
+            "bdr",
+            "shd",
+            "fitText",
+            "vertAlign",
+            "rtl",
+            "cs",
+            "em",
+            "lang",
+            "eastAsianLayout",
+            "specVanish",
+            "oMath",
+        ]
+        for doc in self.docs:
+            parts = rules.parts(doc)
+            for name in ("word/document.xml", "word/styles.xml"):
+                for properties in part(parts, name).iter(f"{W}rPr"):
+                    tags = [child.tag.replace(W, "") for child in properties]
+                    places = [order.index(tag) for tag in tags]
+                    self.assertEqual(places, sorted(set(places)), f"{doc.name}: {tags}")
+
+    def test_cases_have_the_formatting_their_labels_name(self):
+        def paragraphs(name):
+            """Per paragraph: its runs as (text, font, size in pt, toggles), and its breaks as
+            (number of runs before the break, w:type of the break)."""
+            doc = next(doc for doc in self.docs if doc.name == name)
+            body = part(rules.parts(doc), "word/document.xml")
+            for paragraph in body.iter(f"{W}p"):
+                runs, breaks = [], []
+                for r in paragraph.iter(f"{W}r"):
+                    brk = r.find(f"{W}br")
+                    if brk is not None and r.find(f"{W}t") is None:
+                        breaks.append((len(runs), brk.get(f"{W}type")))
+                        continue
+                    props = r.find(f"{W}rPr")
+                    fonts = props.find(f"{W}rFonts")
+                    size = props.find(f"{W}sz")
+                    toggles = {c.tag.replace(W, "") for c in props} - {"rFonts", "sz", "szCs"}
+                    text = "\n".join(t.text or "" for t in r.iter(f"{W}t"))
+                    runs.append(
+                        (text, fonts.get(f"{W}ascii"), int(size.get(f"{W}val")) / 2, toggles)
+                    )
+                yield runs, breaks
+
+        def label_of(text):
+            match = re.match(r"(.+?) (\d+(?:\.\d+)?) pt[, ]", text)
+            self.assertIsNotNone(match, text)
+            return match.group(1), float(match.group(2))
+
+        italic = list(paragraphs("E-italic-missing"))
+        styles = {
+            "regular": set(),
+            "italic": {"i", "iCs"},
+            "bold": {"b", "bCs"},
+            "bold italic": {"b", "bCs", "i", "iCs"},
+        }
+        # Every planned case exactly once: a duplicate cannot stand in for a missing one.
+        self.assertEqual(
+            sorted((runs[0][1], runs[0][2], sorted(runs[0][3])) for runs, _ in italic),
+            sorted(
+                (font, size, sorted(toggles))
+                for font in ("Noto Sans", "Liberation Sans")
+                for size in (11, 20)
+                for toggles in styles.values()
+            ),
+        )
+        for runs, _ in italic:
+            ((text, font, size, toggles),) = runs
+            words = text.split(":")[0]
+            self.assertEqual(label_of(text), (font, size), text)
+            self.assertEqual("italic" in words, {"i", "iCs"} <= toggles, text)
+            self.assertEqual("bold" in words, {"b", "bCs"} <= toggles, text)
+
+        for mode in (12, 14, 15):
+            name = f"E-smallcaps-{mode}"
+            self.assertEqual(next(d for d in self.docs if d.name == name).mode, mode)
+            cases = list(paragraphs(name))
+            self.assertEqual(
+                sorted((runs[1][1], runs[1][2], runs[1][0]) for runs, _ in cases),
+                sorted(
+                    (font, size, word)
+                    for font in ("Liberation Sans", "Carlito", "Noto Sans")
+                    for size in (9, 10.5, 11, 13, 21, 40, 72)
+                    for word in ("hamburg", "HAMBURG", "Hamburg")
+                ),
+            )
+            for runs, breaks in cases:
+                (label, label_font, label_size, label_toggles), (word, font, size, toggles) = runs
+                # One plain line break, between the label and the word.
+                self.assertEqual(breaks, [(1, None)], label)
+                self.assertEqual(label_toggles, set(), label)
+                self.assertEqual(label_font, font, label)
+                self.assertEqual(label_of(label), (font, size), label)
+                kind = label.split(", ")[-1].rstrip(":")
+                expected = {
+                    "small caps": ("hamburg", {"smallCaps"}),
+                    "capitals": ("HAMBURG", set()),
+                    "mixed small caps": ("Hamburg", {"smallCaps"}),
+                }[kind]
+                self.assertEqual((word, toggles), expected, label)
+
+        pages = list(paragraphs("E-line-fonts-truetype"))
+        self.assertEqual(
+            [runs[0][1:3] for runs, _ in pages],
+            [
+                (font, size)
+                for font in ("Noto Sans", "Aptos", "Liberation Sans")
+                for size in (11, 12)
+            ],
+        )
+        for runs, _ in pages:
+            ((text, font, size, _),) = runs
+            self.assertEqual(len(text.split("\n")), 10, text)
+            for line in text.split("\n"):
+                self.assertEqual(label_of(line), (font, size), line)
 
     def test_refuses_a_colour_mapping_attribute_that_does_not_exist(self):
         doc = next(doc for doc in self.docs if doc.color_mapping)
