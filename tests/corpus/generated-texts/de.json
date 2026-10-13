@@ -1,0 +1,86 @@
+{
+  "contract": {
+    "title": "Dienstleistungsvertrag",
+    "between": "zwischen",
+    "client": "Bäckerei Sonnenkorn GmbH, Marktstraße 3, 00000 Musterstadt",
+    "client_role": "– nachfolgend „Auftraggeber“ genannt –",
+    "and": "und",
+    "contractor": "Pixelwerk Studio UG (haftungsbeschränkt), Hafenweg 12, 00000 Beispielhausen",
+    "contractor_role": "– nachfolgend „Auftragnehmer“ genannt –",
+    "sections": [
+      ["Vertragsgegenstand", [
+        "Der Auftragnehmer übernimmt für den Auftraggeber die laufende Pflege und Weiterentwicklung der Website www.beispiel-baeckerei.example sowie des zugehörigen Online-Bestellsystems.",
+        "Art und Umfang der Leistungen ergeben sich aus der Leistungsbeschreibung in Anlage 1."
+      ]],
+      ["Vergütung", [
+        "Der Auftraggeber zahlt eine monatliche Pauschale von 1.450,00 € zuzüglich der gesetzlichen Umsatzsteuer.",
+        "Leistungen über den vereinbarten Umfang hinaus werden nach Aufwand mit 95,00 € je Stunde abgerechnet.",
+        "Rechnungen sind innerhalb von 14 Tagen nach Zugang ohne Abzug zu zahlen."
+      ]],
+      ["Mitwirkungspflichten", [
+        "Der Auftraggeber stellt Texte, Bilder und Preislisten rechtzeitig in digitaler Form zur Verfügung.",
+        "Er benennt einen Ansprechpartner, der Entscheidungen innerhalb von drei Werktagen herbeiführen kann."
+      ]],
+      ["Haftung", [
+        "Der Auftragnehmer haftet unbeschränkt bei Vorsatz und grober Fahrlässigkeit. Im Übrigen ist die Haftung auf den vorhersehbaren, vertragstypischen Schaden begrenzt."
+      ]],
+      ["Laufzeit und Kündigung", [
+        "Der Vertrag beginnt am 1. April 2026 und läuft auf unbestimmte Zeit.",
+        "Er kann von beiden Seiten mit einer Frist von drei Monaten zum Quartalsende gekündigt werden."
+      ]],
+      ["Schlussbestimmungen", [
+        "Änderungen und Ergänzungen dieses Vertrages bedürfen der Textform.",
+        "Sollte eine Bestimmung unwirksam sein, bleibt die Wirksamkeit der übrigen Bestimmungen unberührt."
+      ]]
+    ],
+    "footnote_section": 4,
+    "footnote": "Die gesetzlichen Haftungsregeln für Schäden aus der Verletzung des Lebens, des Körpers oder der Gesundheit bleiben unberührt.",
+    "place_date": "Musterstadt, den 12. März 2026",
+    "signatures": ["Auftraggeber", "Auftragnehmer"],
+    "page": "Seite {page} von {pages}"
+  },
+  "invoice": {
+    "lines": [
+      ["Website-Pflege, Pauschale März 2026", "1", "1.450,00"],
+      ["Fotoproduktion Produktbilder (halber Tag)", "1", "480,00"],
+      ["Anpassung Bestellformular", "3,5", "95,00"],
+      ["Hosting-Paket „Business“, Quartal", "1", "87,00"]
+    ],
+    "columns": ["Pos.", "Bezeichnung", "Menge", "Einzelpreis", "Gesamt"],
+    "return_line": "Pixelwerk Studio UG · Hafenweg 12 · 00000 Beispielhausen",
+    "address": "Bäckerei Sonnenkorn GmbH\nFrau Petra Sommer\nMarktstraße 3\n00000 Musterstadt",
+    "info": [["Rechnungsnummer:", "2026-0412"], ["Kundennummer:", "10058"], ["Datum:", "12.03.2026"], ["Leistungszeitraum:", "03/2026"]],
+    "title": "Rechnung",
+    "salutation": "Sehr geehrte Frau Sommer,",
+    "intro": "für unsere Leistungen im März 2026 erlauben wir uns, wie folgt zu berechnen:",
+    "net": "Nettobetrag",
+    "vat": "zzgl. 19 % USt.",
+    "total": "Rechnungsbetrag",
+    "terms": "Bitte überweisen Sie den Betrag innerhalb von 14 Tagen ohne Abzug unter Angabe der Rechnungsnummer.",
+    "closing": "Mit freundlichen Grüßen",
+    "signature": "Pixelwerk Studio",
+    "footer": [
+      "Pixelwerk Studio UG (haftungsbeschränkt)\nHafenweg 12, 00000 Beispielhausen",
+      "Beispielbank\nIBAN DE00 0000 0000 0000 0000 00\nBIC BEISDEXXXXX",
+      "Amtsgericht Beispielhausen HRB 00000\nUSt-IdNr. DE000000000"
+    ]
+  },
+  "letter": {
+    "sender": "Pixelwerk Studio",
+    "sender_line": "Hafenweg 12 · 00000 Beispielhausen · Tel. 0000 000000",
+    "address": "Bäckerei Sonnenkorn GmbH\nFrau Petra Sommer\nMarktstraße 3\n00000 Musterstadt",
+    "date": "Beispielhausen, 12. März 2026",
+    "subject": "Angebot für die Erweiterung Ihres Online-Shops",
+    "salutation": "Sehr geehrte Frau Sommer,",
+    "paragraphs": [
+      "vielen Dank für das freundliche Gespräch am vergangenen Dienstag. Wie besprochen erhalten Sie anbei unser Angebot für die Erweiterung Ihres Online-Shops um die Vorbestellung von Torten und eine Abholzeitwahl.",
+      "Die Umsetzung planen wir in zwei Schritten. Zunächst richten wir die Vorbestellung mit Auswahl von Größe und Beschriftung ein; danach folgt die Abholzeitwahl mit einer Übersicht für Ihre Filialen. Für beide Schritte zusammen veranschlagen wir 24 Stunden.",
+      "Das Angebot ist bis zum 30. April 2026 gültig. Für Rückfragen stehe ich Ihnen gern zur Verfügung."
+    ],
+    "closing": "Mit freundlichen Grüßen",
+    "name": "Jonas Becker",
+    "role": "Projektleitung",
+    "enclosure_title": "Anlage",
+    "enclosure": "Angebot Nr. A-2026-031"
+  }
+}
