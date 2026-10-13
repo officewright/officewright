@@ -1,2 +1,4 @@
 corpus-ext/
 target/
+# Python bytecode caches, which record absolute paths.
+__pycache__/
