@@ -16,12 +16,24 @@ pub enum Error {
         /// What is wrong.
         problem: String,
     },
+    /// Tables are nested deeper than the layout follows, which keeps the stack its walks
+    /// over a document take bounded.
+    #[non_exhaustive]
+    NestingTooDeep {
+        /// Where the table that is too deep starts.
+        location: Location,
+        /// The deepest nesting the layout follows: a table in a table is at depth 2.
+        limit: usize,
+    },
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidDocument { location, problem } => write!(f, "{location}: {problem}"),
+            Self::NestingTooDeep { location, limit } => {
+                write!(f, "{location}: tables are nested more than {limit} deep")
+            }
         }
     }
 }
@@ -33,6 +45,7 @@ impl From<Error> for officewright_core::Error {
         match err {
             // The IR is an argument the caller built, not input read from a file.
             invalid @ Error::InvalidDocument { .. } => Self::InvalidArgument(invalid.to_string()),
+            deep @ Error::NestingTooDeep { .. } => Self::LimitExceeded(deep.to_string()),
         }
     }
 }

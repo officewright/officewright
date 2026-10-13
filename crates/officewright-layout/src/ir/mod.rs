@@ -16,12 +16,14 @@
 //! within Word's limits, and reports each change.
 
 mod inline;
+mod list;
 pub(crate) mod macros;
 mod paragraph;
 mod rules;
 mod section;
 mod settings;
 mod style;
+mod table;
 pub(crate) mod walk;
 
 #[cfg(test)]
@@ -30,6 +32,10 @@ mod tests;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub use inline::{BreakClear, BreakKind, Field, FieldKind, Inline};
+pub use list::{
+    Level, LevelAlignment, LevelOverride, LevelTextPart, ListDefinition, ListInstance, ListItem,
+    Restart, Suffix,
+};
 pub use paragraph::{
     Alignment, Block, Border, BorderStyle, Indent, LineSpacing, Paragraph, ParagraphBorders,
     ParagraphProps, Shading, ShadingPattern, Spacing, StyleKey, TabKind, TabLeader, TabStop,
@@ -43,12 +49,17 @@ pub use style::{
     ColorValue, EastAsiaCharset, FontHint, Language, Ligatures, RunFonts, RunStyle, Underline,
     UnderlineKind, VerticalPosition,
 };
+pub use table::{
+    BorderSide, Cell, CellBorders, CellMargins, CellVerticalAlign, PreferredWidth, Row, RowHeight,
+    Table, TableAlignment, TableBorders, TableLayout, TableProps, TextDirection, VerticalMerge,
+};
+pub use walk::MAX_TABLE_DEPTH;
 
 use crate::{LayoutReport, Result};
 use walk::{Checker, Clamper};
 
-/// A document in the layout IR: its settings, the run styles its text uses, and its
-/// sections.
+/// A document in the layout IR: its settings, the run styles its text uses, its list
+/// definitions and their instances, and its sections.
 ///
 /// ```
 /// use officewright_core::{PageSize, Pt};
@@ -77,6 +88,8 @@ pub struct Document {
     tag: DocumentTag,
     settings: DocumentSettings,
     run_styles: Vec<RunStyle>,
+    lists: Vec<ListDefinition>,
+    list_instances: Vec<ListInstance>,
     sections: Vec<Section>,
 }
 
@@ -87,6 +100,8 @@ impl Document {
             tag: DocumentTag::next(),
             settings,
             run_styles: Vec::new(),
+            lists: Vec::new(),
+            list_instances: Vec::new(),
             sections: Vec::new(),
         }
     }
@@ -109,10 +124,39 @@ impl Document {
 
     /// The run style with this id; `None` for an id of another document.
     pub fn run_style(&self, id: RunStyleId) -> Option<&RunStyle> {
-        if id.document != self.tag {
-            return None;
+        self.entry(id.document, id.index, &self.run_styles)
+    }
+
+    /// Adds a list definition and returns its id, which only this document and its
+    /// clones accept.
+    pub fn add_list(&mut self, list: ListDefinition) -> ListId {
+        let index = self.lists.len();
+        self.lists.push(list);
+        ListId {
+            document: self.tag,
+            index,
         }
-        self.run_styles.get(id.index)
+    }
+
+    /// The list definition with this id; `None` for an id of another document.
+    pub fn list(&self, id: ListId) -> Option<&ListDefinition> {
+        self.entry(id.document, id.index, &self.lists)
+    }
+
+    /// Adds an instance of a list definition and returns its id, which only this
+    /// document and its clones accept.
+    pub fn add_list_instance(&mut self, instance: ListInstance) -> ListInstanceId {
+        let index = self.list_instances.len();
+        self.list_instances.push(instance);
+        ListInstanceId {
+            document: self.tag,
+            index,
+        }
+    }
+
+    /// The list instance with this id; `None` for an id of another document.
+    pub fn list_instance(&self, id: ListInstanceId) -> Option<&ListInstance> {
+        self.entry(id.document, id.index, &self.list_instances)
     }
 
     /// Adds a section after the last one.
@@ -127,13 +171,15 @@ impl Document {
 
     /// Checks that the document keeps the rules of the IR, which no correct producer
     /// breaks: every length is a finite number, lengths that WordprocessingML only has
-    /// unsigned are not negative, every run style id is of this document, text holds no
-    /// control characters, the document has a section. It does not change the document.
+    /// unsigned are not negative, every id is of this document, text holds no control
+    /// characters, list levels are 0 to 8, tables have rows, rows have cells and cells
+    /// have content, the document has a section. It does not change the document.
     ///
     /// # Errors
     ///
     /// [`Error::InvalidDocument`](crate::Error::InvalidDocument) for the first broken
-    /// rule, naming where it is.
+    /// rule, naming where it is; [`Error::NestingTooDeep`](crate::Error::NestingTooDeep)
+    /// for tables nested deeper than [`MAX_TABLE_DEPTH`].
     ///
     /// ```
     /// use officewright_core::{PageSize, Pt};
@@ -149,6 +195,8 @@ impl Document {
         let mut checker = Checker::new(self);
         checker.visit("settings", &self.settings)?;
         checker.visit("run_styles", &self.run_styles)?;
+        checker.visit("lists", &self.lists)?;
+        checker.visit("list_instances", &self.list_instances)?;
         if self.sections.is_empty() {
             return Err(checker.error("has no section"));
         }
@@ -176,19 +224,35 @@ impl Document {
         let mut clamper = Clamper::default();
         clamper.visit("settings", &mut self.settings);
         clamper.visit("run_styles", &mut self.run_styles);
+        clamper.visit("lists", &mut self.lists);
+        clamper.visit("list_instances", &mut self.list_instances);
         clamper.visit("sections", &mut self.sections);
         clamper.finish()
     }
 
-    pub(crate) fn check_run_style(&self, id: RunStyleId, checker: &Checker<'_>) -> Result<()> {
-        if id.document != self.tag {
-            return Err(checker.error("the run style id is of another document"));
+    fn entry<'a, T>(&self, document: DocumentTag, index: usize, table: &'a [T]) -> Option<&'a T> {
+        if document != self.tag {
+            return None;
         }
-        if id.index >= self.run_styles.len() {
+        table.get(index)
+    }
+
+    /// Checks that an id of `what` names an entry of this document, whose table has
+    /// `count` entries.
+    fn check_id(
+        &self,
+        document: DocumentTag,
+        index: usize,
+        count: usize,
+        what: &str,
+        checker: &Checker<'_>,
+    ) -> Result<()> {
+        if document != self.tag {
+            return Err(checker.error(format!("the {what} id is of another document")));
+        }
+        if index >= count {
             return Err(checker.error(format!(
-                "run style {} does not exist; the document has {}",
-                id.index,
-                self.run_styles.len()
+                "{what} {index} does not exist; the document has {count}"
             )));
         }
         Ok(())
@@ -212,9 +276,38 @@ impl DocumentTag {
     }
 }
 
-/// A run style of a [`Document`], from [`Document::add_run_style`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct RunStyleId {
-    document: DocumentTag,
-    index: usize,
+/// Defines ids of the entries of a document's tables: each knows its document, so that
+/// [`Document::validate`] rejects an id of another one.
+macro_rules! document_ids {
+    ($($(#[$meta:meta])* $name:ident in $table:ident, $what:literal;)*) => {
+        $(
+            $(#[$meta])*
+            #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+            pub struct $name {
+                document: DocumentTag,
+                index: usize,
+            }
+
+            impl walk::Check for $name {
+                fn check(&self, checker: &mut Checker<'_>) -> Result<()> {
+                    let document = checker.document();
+                    let count = document.$table.len();
+                    document.check_id(self.document, self.index, count, $what, checker)
+                }
+            }
+
+            impl walk::Clamp for $name {
+                fn clamp(&mut self, _: &mut Clamper) {}
+            }
+        )*
+    };
+}
+
+document_ids! {
+    /// A run style of a [`Document`], from [`Document::add_run_style`].
+    RunStyleId in run_styles, "run style";
+    /// A list definition of a [`Document`], from [`Document::add_list`].
+    ListId in lists, "list definition";
+    /// A list instance of a [`Document`], from [`Document::add_list_instance`].
+    ListInstanceId in list_instances, "list instance";
 }

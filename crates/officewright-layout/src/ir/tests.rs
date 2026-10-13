@@ -26,7 +26,7 @@ fn paragraph_with(style: RunStyleId, props: ParagraphProps) -> Vec<Block> {
 fn invalid(document: &Document) -> String {
     match document.validate() {
         Err(err @ Error::InvalidDocument { .. }) => err.to_string(),
-        Ok(()) => panic!("the document is valid"),
+        other => panic!("not an invalid document: {other:?}"),
     }
 }
 
@@ -395,6 +395,7 @@ fn validate_does_not_change_the_document() {
     assert!(document.validate().is_ok());
     let position = |document: &Document| match &document.sections()[0].blocks()[0] {
         Block::Paragraph(paragraph) => paragraph.props().tabs()[0].position(),
+        other => panic!("{other:?}"),
     };
     assert_eq!(position(&document), Pt(2000.0));
     assert_eq!(document.clamp().len(), 1);
@@ -914,4 +915,798 @@ fn an_invalid_document_is_an_invalid_argument() {
         officewright_core::Error::InvalidArgument(text) => assert_eq!(text, message),
         other => panic!("{other:?}"),
     }
+}
+
+/// A document with a two-level list: one definition, two instances of it, the second
+/// starting level 0 again at 5, and `items` paragraphs of the first instance.
+fn list_document(item: impl FnOnce(ListInstanceId, RunStyleId) -> ListItem) -> Document {
+    let mut document = Document::default();
+    let style = document.add_run_style(RunStyle::default());
+    let decimal = Level::default().with_start(1).with_text([
+        LevelTextPart::Placeholder(0),
+        LevelTextPart::Literal(".".into()),
+    ]);
+    let letter = Level::default()
+        .with_start(1)
+        .with_format(NumberFormat::LowerLetter)
+        .with_text([
+            LevelTextPart::Placeholder(0),
+            LevelTextPart::Literal(".".into()),
+            LevelTextPart::Placeholder(1),
+        ])
+        .with_restart(Restart::AfterLevel(0))
+        .with_suffix(Suffix::Space)
+        .with_alignment(LevelAlignment::End);
+    let list = document.add_list(ListDefinition::default().with_levels([decimal, letter]));
+    let first = document.add_list_instance(ListInstance::new(list));
+    let restarted =
+        ListInstance::new(list).with_overrides([LevelOverride::new(0).with_start(Some(5))]);
+    document.add_list_instance(restarted);
+    let item = item(first, style);
+    let paragraph = Paragraph::new(style).with_list(Some(item));
+    document.add_section(Section::new(PageSetup::default()).with_blocks([paragraph.into()]));
+    document
+}
+
+#[test]
+fn a_list_validates_and_its_entries_read_back() {
+    let document = list_document(|instance, style| ListItem::new(instance, 1, style));
+    assert!(document.validate().is_ok());
+    let Block::Paragraph(paragraph) = &document.sections()[0].blocks()[0] else {
+        panic!("not a paragraph");
+    };
+    let item = paragraph.list().expect("a list item");
+    let instance = document
+        .list_instance(item.instance())
+        .expect("the instance");
+    let list = document
+        .list(instance.definition())
+        .expect("the definition");
+    assert_eq!(list.levels()[1].format(), &NumberFormat::LowerLetter);
+    assert_eq!(list.levels()[1].restart(), Restart::AfterLevel(0));
+    assert!(Document::default().list(instance.definition()).is_none());
+    assert!(Document::default().list_instance(item.instance()).is_none());
+}
+
+#[test]
+fn list_definitions_have_levels_0_to_8() {
+    // A paragraph may be at any level Word loads (MS-OI29500 2.1.277 a, up to 255); one
+    // its definition lacks gets no label.
+    for level in [9, 255] {
+        let document = list_document(|instance, style| ListItem::new(instance, level, style));
+        assert!(document.validate().is_ok(), "{level}");
+    }
+
+    let mut document = list_document(|instance, style| ListItem::new(instance, 0, style));
+    document.add_list(ListDefinition::default().with_levels(vec![Level::default(); 10]));
+    assert_eq!(
+        invalid(&document),
+        "lists[1].levels: 10 levels, but a list has at most 9"
+    );
+
+    let mut document = list_document(|instance, style| ListItem::new(instance, 0, style));
+    let text = [
+        LevelTextPart::Literal("(".into()),
+        LevelTextPart::Placeholder(9),
+    ];
+    document.add_list(ListDefinition::default().with_levels([Level::default().with_text(text)]));
+    assert_eq!(
+        invalid(&document),
+        "lists[1].levels[0].text[1]: level 9 does not exist; levels are 0 to 8"
+    );
+
+    // Word takes w:lvlRestart from 0 to 7 (MS-OI29500 2.1.282 a): after levels 0 to 6.
+    for (level, valid) in [(6, true), (7, false), (12, false)] {
+        let mut document = list_document(|instance, style| ListItem::new(instance, 0, style));
+        let restart = Level::default().with_restart(Restart::AfterLevel(level));
+        document.add_list(ListDefinition::default().with_levels([restart]));
+        if valid {
+            assert!(document.validate().is_ok());
+        } else {
+            assert_eq!(
+                invalid(&document),
+                format!(
+                    "lists[1].levels[0].restart: restarting after level {level}, but Word \
+                     restarts after levels 0 to 6 at most"
+                )
+            );
+        }
+    }
+}
+
+#[test]
+fn an_instance_overrides_a_level_at_most_once() {
+    let mut document = list_document(|instance, style| ListItem::new(instance, 0, style));
+    let list = document.add_list(ListDefinition::default());
+    let overrides = [
+        LevelOverride::new(2).with_start(Some(1)),
+        LevelOverride::new(0),
+        LevelOverride::new(2).with_replacement(Some(Level::default())),
+    ];
+    document.add_list_instance(ListInstance::new(list).with_overrides(overrides));
+    assert_eq!(
+        invalid(&document),
+        "list_instances[2].overrides[2]: a second override of level 2"
+    );
+
+    let mut document = list_document(|instance, style| ListItem::new(instance, 0, style));
+    let list = document.add_list(ListDefinition::default());
+    document.add_list_instance(ListInstance::new(list).with_overrides([LevelOverride::new(9)]));
+    assert_eq!(
+        invalid(&document),
+        "list_instances[2].overrides[0].level: level 9 does not exist; levels are 0 to 8"
+    );
+}
+
+#[test]
+fn list_ids_belong_to_their_document() {
+    let mut other = Document::default();
+    let foreign_list = other.add_list(ListDefinition::default());
+    let foreign_instance = other.add_list_instance(ListInstance::new(foreign_list));
+
+    let document = list_document(|_, style| ListItem::new(foreign_instance, 0, style));
+    assert_eq!(
+        invalid(&document),
+        "sections[0].blocks[0].list.instance: the list instance id is of another document"
+    );
+
+    let mut document = list_document(|instance, style| ListItem::new(instance, 0, style));
+    document.add_list_instance(ListInstance::new(foreign_list));
+    assert_eq!(
+        invalid(&document),
+        "list_instances[2].definition: the list definition id is of another document"
+    );
+
+    let mut other = Document::default();
+    let foreign_style = other.add_run_style(RunStyle::default());
+    let document = list_document(|instance, _| ListItem::new(instance, 0, foreign_style));
+    assert_eq!(
+        invalid(&document),
+        "sections[0].blocks[0].list.label_style: the run style id is of another document"
+    );
+
+    // A clone's instance is not in the original.
+    let mut original = list_document(|instance, style| ListItem::new(instance, 0, style));
+    let mut clone = original.clone();
+    let list = clone.add_list(ListDefinition::default());
+    original.add_list_instance(ListInstance::new(list));
+    assert_eq!(
+        invalid(&original),
+        "list_instances[2].definition: list definition 1 does not exist; the document has 1"
+    );
+}
+
+/// A table of `rows`, each holding cells with one empty paragraph.
+fn table(style: RunStyleId, rows: usize, cells: usize) -> Table {
+    let cell = Cell::default().with_blocks([Paragraph::new(style).into()]);
+    let row = Row::default().with_cells(vec![cell; cells]);
+    Table::default()
+        .with_grid(vec![Pt(100.0); cells])
+        .with_rows(vec![row; rows])
+}
+
+#[test]
+fn a_table_with_every_property_validates_and_needs_no_clamp() {
+    let border = Border::default()
+        .with_style(BorderStyle::Single)
+        .with_width(Pt(0.5));
+    let mut document = document_with(|style| {
+        let inner = table(style, 1, 1);
+        let cell = Cell::default()
+            .with_width(PreferredWidth::Percent(50.0))
+            .with_grid_span(2)
+            .with_vertical_merge(VerticalMerge::Restart)
+            .with_margins(Some(CellMargins::default().with_top(Pt(2.0))))
+            .with_borders(
+                CellBorders::default()
+                    .with_top(BorderSide::Nil)
+                    .with_start(BorderSide::None)
+                    .with_bottom(BorderSide::Line(border)),
+            )
+            .with_shading(Some(
+                Shading::default().with_pattern(ShadingPattern::Percent10),
+            ))
+            .with_vertical_align(CellVerticalAlign::Center)
+            .with_no_wrap(true)
+            .with_text_direction(TextDirection::BottomToTopLeftToRight)
+            .with_blocks([
+                Paragraph::new(style).into(),
+                inner.into(),
+                Paragraph::new(style).into(),
+            ]);
+        let row = Row::default()
+            .with_height(RowHeight::AtLeast(Pt(20.0)))
+            .with_cant_split(true)
+            .with_header(true)
+            .with_grid_before(1)
+            .with_width_before(PreferredWidth::Points(Pt(30.0)))
+            .with_cells([cell]);
+        let props = TableProps::default()
+            .with_width(PreferredWidth::Points(Pt(400.0)))
+            .with_layout(TableLayout::Fixed)
+            .with_indent(Pt(-5.4))
+            .with_alignment(TableAlignment::Center)
+            .with_cell_spacing(Pt(1.0))
+            .with_borders(
+                TableBorders::default()
+                    .with_top(BorderSide::Line(border))
+                    .with_inside_horizontal(BorderSide::Line(border)),
+            )
+            .with_floating(true);
+        vec![
+            Table::default()
+                .with_props(props)
+                .with_grid([Pt(30.0), Pt(200.0), Pt(170.0)])
+                .with_rows([row])
+                .into(),
+        ]
+    });
+    assert!(document.validate().is_ok());
+    let report = document.clamp();
+    assert!(report.is_empty(), "{:?}", entries(&report));
+}
+
+#[test]
+fn tables_have_rows_rows_have_cells_and_cells_have_content() {
+    let document = document_with(|style| vec![table(style, 0, 2).into()]);
+    assert_eq!(
+        invalid(&document),
+        "sections[0].blocks[0].rows: a table without rows"
+    );
+
+    let document = document_with(|style| vec![table(style, 2, 0).into()]);
+    assert_eq!(
+        invalid(&document),
+        "sections[0].blocks[0].rows[0].cells: a row without cells"
+    );
+
+    let document = document_with(|_| {
+        let row = Row::default().with_cells([Cell::default()]);
+        vec![
+            Table::default()
+                .with_grid([Pt(10.0)])
+                .with_rows([row])
+                .into(),
+        ]
+    });
+    assert_eq!(
+        invalid(&document),
+        "sections[0].blocks[0].rows[0].cells[0].blocks: a cell without content; it needs at \
+         least an empty paragraph"
+    );
+}
+
+#[test]
+fn table_widths_and_margins_are_not_negative() {
+    type Change = fn(Table) -> Table;
+    let cases: [(Change, &str); 8] = [
+        (
+            |t| t.with_grid([Pt(10.0), Pt(-3.0)]),
+            "grid: grid column 1 is -3 pt wide, a negative width",
+        ),
+        (
+            |t| t.with_props(TableProps::default().with_width(PreferredWidth::Points(Pt(-1.0)))),
+            "props.width: -1 pt is negative",
+        ),
+        (
+            |t| t.with_props(TableProps::default().with_width(PreferredWidth::Percent(-5.0))),
+            "props.width: -5 % is negative",
+        ),
+        (
+            |t| t.with_props(TableProps::default().with_width(PreferredWidth::Percent(f64::NAN))),
+            "props.width: NaN % is not a finite percentage",
+        ),
+        (
+            |t| t.with_props(TableProps::default().with_cell_spacing(Pt(-1.0))),
+            "props.cell_spacing: -1 pt is negative",
+        ),
+        (
+            |t| {
+                let margins = CellMargins::default().with_end(Pt(-2.0));
+                t.with_props(TableProps::default().with_cell_margins(margins))
+            },
+            "props.cell_margins.end: -2 pt is negative",
+        ),
+        (
+            |t| {
+                let rows = t.rows().iter().map(|row| {
+                    row.clone()
+                        .with_width_after(PreferredWidth::Points(Pt(-4.0)))
+                });
+                t.clone().with_rows(rows.collect::<Vec<_>>())
+            },
+            "rows[0].width_after: -4 pt is negative",
+        ),
+        (
+            |t| {
+                let rows = t
+                    .rows()
+                    .iter()
+                    .map(|row| row.clone().with_height(RowHeight::Exact(Pt(-1.0))));
+                t.clone().with_rows(rows.collect::<Vec<_>>())
+            },
+            "rows[0].height: -1 pt is negative",
+        ),
+    ];
+    for (change, problem) in cases {
+        let document = document_with(|style| vec![change(table(style, 1, 2)).into()]);
+        assert_eq!(
+            invalid(&document),
+            format!("sections[0].blocks[0].{problem}")
+        );
+    }
+
+    let border = Border::default().with_width(Pt(f64::NAN));
+    let document = document_with(|style| {
+        let borders = CellBorders::default().with_end(BorderSide::Line(border));
+        let cell = Cell::default()
+            .with_borders(borders)
+            .with_blocks([Paragraph::new(style).into()]);
+        let row = Row::default().with_cells([cell]);
+        vec![
+            Table::default()
+                .with_grid([Pt(10.0)])
+                .with_rows([row])
+                .into(),
+        ]
+    });
+    assert_eq!(
+        invalid(&document),
+        "sections[0].blocks[0].rows[0].cells[0].borders.end.width: NaN is not a finite length"
+    );
+}
+
+#[test]
+fn every_length_of_a_table_that_word_keeps_unsigned_is_checked() {
+    let minus = Pt(-1.0);
+    let in_props = |props: TableProps| {
+        document_with(|style| vec![table(style, 1, 1).with_props(props).into()])
+    };
+    let in_row = |row: fn(Row) -> Row| {
+        document_with(|style| {
+            let table = table(style, 1, 1);
+            let rows: Vec<Row> = table.rows().iter().cloned().map(row).collect();
+            vec![table.with_rows(rows).into()]
+        })
+    };
+    let in_cell = |cell: Cell| {
+        document_with(|style| {
+            let cell = cell.with_blocks([Paragraph::new(style).into()]);
+            let row = Row::default().with_cells([cell]);
+            vec![
+                Table::default()
+                    .with_grid([Pt(10.0)])
+                    .with_rows([row])
+                    .into(),
+            ]
+        })
+    };
+    let margins = |change: fn(CellMargins) -> CellMargins| change(CellMargins::default());
+    let cases = [
+        (
+            in_props(TableProps::default().with_cell_margins(margins(|m| m.with_top(Pt(-1.0))))),
+            "props.cell_margins.top",
+        ),
+        (
+            in_props(TableProps::default().with_cell_margins(margins(|m| m.with_start(Pt(-1.0))))),
+            "props.cell_margins.start",
+        ),
+        (
+            in_props(TableProps::default().with_cell_margins(margins(|m| m.with_bottom(Pt(-1.0))))),
+            "props.cell_margins.bottom",
+        ),
+        (
+            in_props(TableProps::default().with_cell_margins(margins(|m| m.with_end(Pt(-1.0))))),
+            "props.cell_margins.end",
+        ),
+        (
+            in_props(TableProps::default().with_cell_spacing(minus)),
+            "props.cell_spacing",
+        ),
+        (
+            in_props(TableProps::default().with_width(PreferredWidth::Points(minus))),
+            "props.width",
+        ),
+        (
+            in_row(|row| row.with_width_before(PreferredWidth::Points(Pt(-1.0)))),
+            "rows[0].width_before",
+        ),
+        (
+            in_row(|row| row.with_width_after(PreferredWidth::Points(Pt(-1.0)))),
+            "rows[0].width_after",
+        ),
+        (
+            in_row(|row| row.with_height(RowHeight::AtLeast(Pt(-1.0)))),
+            "rows[0].height",
+        ),
+        (
+            in_row(|row| row.with_height(RowHeight::Exact(Pt(-1.0)))),
+            "rows[0].height",
+        ),
+        (
+            in_cell(Cell::default().with_width(PreferredWidth::Points(minus))),
+            "rows[0].cells[0].width",
+        ),
+        (
+            in_cell(Cell::default().with_margins(Some(margins(|m| m.with_top(Pt(-1.0)))))),
+            "rows[0].cells[0].margins.top",
+        ),
+        (
+            in_cell(Cell::default().with_margins(Some(margins(|m| m.with_end(Pt(-1.0)))))),
+            "rows[0].cells[0].margins.end",
+        ),
+    ];
+    for (document, location) in cases {
+        assert_eq!(
+            invalid(&document),
+            format!("sections[0].blocks[0].{location}: -1 pt is negative")
+        );
+    }
+}
+
+#[test]
+fn rows_and_spans_are_clamped_to_words_limits() {
+    let mut document = document_with(|style| {
+        let cell = |span| {
+            Cell::default()
+                .with_grid_span(span)
+                .with_blocks([Paragraph::new(style).into()])
+        };
+        let rows = [
+            Row::default()
+                .with_height(RowHeight::Exact(Pt(0.0)))
+                .with_cells([cell(0)]),
+            Row::default()
+                .with_height(RowHeight::AtLeast(Pt(2000.0)))
+                .with_cells([cell(1)]),
+            Row::default()
+                .with_height(RowHeight::Exact(Pt(1584.0)))
+                .with_cells([cell(2)]),
+        ];
+        vec![
+            Table::default()
+                .with_grid([Pt(50.0), Pt(50.0)])
+                .with_rows(rows)
+                .into(),
+        ]
+    });
+    assert_eq!(
+        entries(&document.clamp()),
+        [
+            "sections[0].blocks[0].rows[0].height: an exact row height of 0 pt, which Word does \
+             not accept, becomes the height of the content",
+            "sections[0].blocks[0].rows[0].cells[0].grid_span: a cell spanning 0 grid columns \
+             spans 1",
+            "sections[0].blocks[0].rows[1].height: row height 2000 pt is outside Word's range of \
+             0 to 1584 pt and becomes 1584 pt",
+        ]
+    );
+    let Block::Table(table) = &document.sections()[0].blocks()[0] else {
+        panic!("not a table");
+    };
+    assert_eq!(table.rows()[0].height(), RowHeight::Auto);
+    assert_eq!(table.rows()[0].cells()[0].grid_span(), 1);
+    assert!(document.clamp().is_empty());
+}
+
+#[test]
+fn clamp_reaches_into_nested_tables() {
+    let mut document = document_with(|style| {
+        let tab = TabStop::default().with_position(Pt(1600.0));
+        let paragraph =
+            Paragraph::new(style).with_props(ParagraphProps::default().with_tabs([tab]));
+        let inner_cell = Cell::default().with_blocks([paragraph.into()]);
+        let inner = Table::default()
+            .with_grid([Pt(10.0)])
+            .with_rows([Row::default().with_cells([inner_cell])]);
+        let outer_cell = Cell::default().with_blocks([inner.into(), Paragraph::new(style).into()]);
+        vec![
+            Table::default()
+                .with_grid([Pt(10.0)])
+                .with_rows([Row::default().with_cells([outer_cell])])
+                .into(),
+        ]
+    });
+    let report = document.clamp();
+    assert_eq!(
+        report.entries()[0].location().to_string(),
+        "sections[0].blocks[0].rows[0].cells[0].blocks[0].rows[0].cells[0].blocks[0].props.\
+         tabs[0].position"
+    );
+}
+
+/// `depth` tables nested in each other; the innermost cell's span is 0.
+fn nested_tables(style: RunStyleId, depth: usize) -> Block {
+    let mut block: Block = Paragraph::new(style).into();
+    for level in 0..depth {
+        let span = if level == 0 { 0 } else { 1 };
+        let blocks = if level == 0 {
+            vec![block]
+        } else {
+            vec![block, Paragraph::new(style).into()]
+        };
+        let cell = Cell::default().with_grid_span(span).with_blocks(blocks);
+        block = Table::default()
+            .with_grid([Pt(10.0)])
+            .with_rows([Row::default().with_cells([cell])])
+            .into();
+    }
+    block
+}
+
+#[test]
+fn tables_nest_at_most_max_table_depth_deep() {
+    let mut document = document_with(|style| vec![nested_tables(style, MAX_TABLE_DEPTH)]);
+    assert!(document.validate().is_ok());
+    assert_eq!(document.clamp().len(), 1, "the innermost span is clamped");
+
+    let document = document_with(|style| vec![nested_tables(style, MAX_TABLE_DEPTH + 1)]);
+    let err = document.validate().unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::NestingTooDeep {
+                limit: MAX_TABLE_DEPTH,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    let path = "rows[0].cells[0].blocks[0].".repeat(MAX_TABLE_DEPTH);
+    assert_eq!(
+        err.to_string(),
+        format!("sections[0].blocks[0].{path}: tables are nested more than 100 deep")
+            .replace(".: ", ": ")
+    );
+    match officewright_core::Error::from(err) {
+        officewright_core::Error::LimitExceeded(_) => {}
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_deep_nest_of_tables_stops_both_walks_at_the_limit() {
+    // Far deeper than the limit: neither walk may recurse that deep.
+    // Kept to 500 so that dropping the nest in a debug build fits the 2 MiB of a test
+    // thread on every platform.
+    let mut document = document_with(|style| vec![nested_tables(style, 500)]);
+    assert!(matches!(
+        document.validate(),
+        Err(Error::NestingTooDeep { .. })
+    ));
+    // The span of 0 is in the innermost table, beyond the limit: left alone.
+    assert!(document.clamp().is_empty());
+}
+
+#[test]
+fn a_cell_ends_with_a_paragraph() {
+    let in_cell = |blocks: fn(RunStyleId) -> Vec<Block>| {
+        document_with(|style| {
+            let cell = Cell::default().with_blocks(blocks(style));
+            let row = Row::default().with_cells([cell]);
+            vec![
+                Table::default()
+                    .with_grid([Pt(10.0)])
+                    .with_rows([row])
+                    .into(),
+            ]
+        })
+    };
+    // MS-OI29500 2.1.168 b: Word fails to open a cell whose last block is not a paragraph.
+    let document = in_cell(|style| vec![table(style, 1, 1).into()]);
+    assert_eq!(
+        invalid(&document),
+        "sections[0].blocks[0].rows[0].cells[0].blocks: a cell whose last block is not a \
+         paragraph; Word needs one after a nested table"
+    );
+    let document = in_cell(|style| vec![table(style, 1, 1).into(), Paragraph::new(style).into()]);
+    assert!(document.validate().is_ok());
+}
+
+#[test]
+fn table_and_list_defaults_are_what_a_document_means_when_it_says_nothing() {
+    let level = Level::default();
+    // ECMA-376 Part 1 §17.9: start 0, decimal, a tab after the label, aligned at the start;
+    // without w:lvlRestart Word restarts after any outer level (MS-OI29500 2.1.282 d).
+    assert_eq!(level.start(), 0);
+    assert_eq!(level.format(), &NumberFormat::Decimal);
+    assert!(!level.legal());
+    assert_eq!(level.restart(), Restart::Default);
+    assert_eq!(level.suffix(), Suffix::Tab);
+    assert_eq!(level.alignment(), LevelAlignment::Start);
+    assert!(level.text().is_empty());
+
+    let props = TableProps::default();
+    assert_eq!(props.width(), PreferredWidth::Auto);
+    assert_eq!(props.layout(), TableLayout::Autofit);
+    assert_eq!(props.indent(), Pt(0.0));
+    assert_eq!(props.alignment(), TableAlignment::Start);
+    assert_eq!(props.cell_spacing(), Pt(0.0));
+    assert!(!props.floating());
+    assert!(!props.bidi_visual());
+    // Word's "Normal Table" style: 0 at the top and bottom, 108 twips at the sides.
+    let margins = props.cell_margins();
+    assert_eq!(
+        (
+            margins.top(),
+            margins.start(),
+            margins.bottom(),
+            margins.end()
+        ),
+        (Pt(0.0), Pt(5.4), Pt(0.0), Pt(5.4))
+    );
+    assert_eq!(props.borders().top(), BorderSide::Inherit);
+
+    let row = Row::default();
+    assert_eq!(row.height(), RowHeight::Auto);
+    assert!(!row.header() && !row.cant_split());
+    assert_eq!((row.grid_before(), row.grid_after()), (0, 0));
+
+    let cell = Cell::default();
+    assert_eq!(cell.grid_span(), 1);
+    assert_eq!(cell.vertical_merge(), VerticalMerge::None);
+    assert_eq!(cell.vertical_align(), CellVerticalAlign::Top);
+    // MS-OI29500 2.1.172 a: left to right, top to bottom.
+    assert_eq!(cell.text_direction(), TextDirection::LeftToRightTopToBottom);
+    assert_eq!(cell.borders().start(), BorderSide::Inherit);
+    assert_eq!(cell.margins(), None);
+    assert_eq!(cell.width(), PreferredWidth::Auto);
+    assert!(!cell.no_wrap() && !cell.hide_mark());
+}
+
+#[test]
+fn many_tables_side_by_side_are_not_nested() {
+    let mut document = document_with(|style| {
+        (0..=MAX_TABLE_DEPTH)
+            .map(|_| {
+                let cell = Cell::default()
+                    .with_grid_span(0)
+                    .with_blocks([Paragraph::new(style).into()]);
+                Table::default()
+                    .with_grid([Pt(10.0)])
+                    .with_rows([Row::default().with_cells([cell])])
+                    .into()
+            })
+            .collect()
+    });
+    assert!(document.validate().is_ok());
+    assert_eq!(document.clamp().len(), MAX_TABLE_DEPTH + 1);
+}
+
+#[test]
+fn table_lengths_are_finite() {
+    let in_cell = |cell: Cell| {
+        document_with(|style| {
+            let row = Row::default().with_cells([cell.with_blocks([Paragraph::new(style).into()])]);
+            vec![
+                Table::default()
+                    .with_grid([Pt(10.0)])
+                    .with_rows([row])
+                    .into(),
+            ]
+        })
+    };
+    let document = in_cell(Cell::default().with_width(PreferredWidth::Points(Pt(f64::NAN))));
+    assert_eq!(
+        invalid(&document),
+        "sections[0].blocks[0].rows[0].cells[0].width: NaN is not a finite length"
+    );
+    let document = document_with(|style| {
+        let cell = Cell::default().with_blocks([Paragraph::new(style).into()]);
+        let row = Row::default()
+            .with_height(RowHeight::AtLeast(Pt(f64::INFINITY)))
+            .with_cells([cell]);
+        vec![
+            Table::default()
+                .with_grid([Pt(10.0)])
+                .with_rows([row])
+                .into(),
+        ]
+    });
+    assert_eq!(
+        invalid(&document),
+        "sections[0].blocks[0].rows[0].height: inf is not a finite length"
+    );
+}
+
+#[test]
+fn table_measurements_are_clamped_to_a_short_of_twips() {
+    let mut document = document_with(|style| {
+        let border = BorderSide::Line(Border::default().with_space(Pt(40.0)));
+        let cell = Cell::default()
+            .with_width(PreferredWidth::Points(Pt(2000.0)))
+            .with_borders(CellBorders::default().with_top(border))
+            .with_blocks([Paragraph::new(style).into()]);
+        let row = Row::default()
+            .with_width_before(PreferredWidth::Points(Pt(5000.0)))
+            .with_width_after(PreferredWidth::Percent(1000.0))
+            .with_cells([cell]);
+        let margins = CellMargins::default()
+            .with_top(Pt(1700.0))
+            .with_end(Pt(1700.0));
+        let points_after = Row::default()
+            .with_width_after(PreferredWidth::Points(Pt(1700.0)))
+            .with_cells([Cell::default()
+                .with_margins(Some(margins))
+                .with_blocks([Paragraph::new(style).into()])]);
+        let props = TableProps::default()
+            .with_width(PreferredWidth::Points(Pt(5000.0)))
+            .with_indent(Pt(-5000.0))
+            .with_cell_spacing(Pt(5000.0))
+            .with_cell_margins(CellMargins::default().with_start(Pt(5000.0)))
+            .with_borders(TableBorders::default().with_bottom(border));
+        vec![
+            Table::default()
+                .with_props(props)
+                .with_grid([Pt(10.0)])
+                .with_rows([row, points_after])
+                .into(),
+        ]
+    });
+    let range = "is outside Word's range of";
+    assert_eq!(
+        entries(&document.clamp()),
+        [
+            format!(
+                "sections[0].blocks[0].props.width: table measurement 5000 pt {range} 0 to 1638.35 pt and becomes 1638.35 pt"
+            ),
+            format!(
+                "sections[0].blocks[0].props.indent: table indent -5000 pt {range} -1638.35 to 1638.35 pt and becomes -1638.35 pt"
+            ),
+            format!(
+                "sections[0].blocks[0].props.cell_margins.start: table measurement 5000 pt {range} 0 to 1638.35 pt and becomes 1638.35 pt"
+            ),
+            format!(
+                "sections[0].blocks[0].props.cell_spacing: table measurement 5000 pt {range} 0 to 1638.35 pt and becomes 1638.35 pt"
+            ),
+            format!(
+                "sections[0].blocks[0].props.borders.bottom.space: border distance 40 pt {range} 0 to 31 pt and becomes 31 pt"
+            ),
+            format!(
+                "sections[0].blocks[0].rows[0].width_before: table measurement 5000 pt {range} 0 to 1638.35 pt and becomes 1638.35 pt"
+            ),
+            format!(
+                "sections[0].blocks[0].rows[0].cells[0].width: table measurement 2000 pt {range} 0 to 1638.35 pt and becomes 1638.35 pt"
+            ),
+            format!(
+                "sections[0].blocks[0].rows[0].cells[0].borders.top.space: border distance 40 pt {range} 0 to 31 pt and becomes 31 pt"
+            ),
+            format!(
+                "sections[0].blocks[0].rows[1].width_after: table measurement 1700 pt {range} 0 to 1638.35 pt and becomes 1638.35 pt"
+            ),
+            format!(
+                "sections[0].blocks[0].rows[1].cells[0].margins.top: table measurement 1700 pt {range} 0 to 1638.35 pt and becomes 1638.35 pt"
+            ),
+            format!(
+                "sections[0].blocks[0].rows[1].cells[0].margins.end: table measurement 1700 pt {range} 0 to 1638.35 pt and becomes 1638.35 pt"
+            ),
+        ]
+    );
+    // Percentages are left as they are: Word's limit depends on how the file wrote them.
+    let Block::Table(table) = &document.sections()[0].blocks()[0] else {
+        panic!("not a table");
+    };
+    assert_eq!(
+        table.rows()[0].width_after(),
+        PreferredWidth::Percent(1000.0)
+    );
+    assert!(document.clamp().is_empty());
+}
+
+#[test]
+fn a_negative_exact_row_height_is_clamped_in_one_go() {
+    let mut document = document_with(|style| {
+        let cell = Cell::default().with_blocks([Paragraph::new(style).into()]);
+        let row = Row::default()
+            .with_height(RowHeight::Exact(Pt(-1.0)))
+            .with_cells([cell]);
+        vec![
+            Table::default()
+                .with_grid([Pt(10.0)])
+                .with_rows([row])
+                .into(),
+        ]
+    });
+    assert_eq!(document.clamp().len(), 2);
+    assert!(document.clamp().is_empty());
 }
