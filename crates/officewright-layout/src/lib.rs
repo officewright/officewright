@@ -27,6 +27,7 @@
 //! ```
 #![forbid(unsafe_code)]
 
+mod breaks;
 mod error;
 mod fonts;
 #[cfg(feature = "fuzzing")]
@@ -34,11 +35,14 @@ pub mod fuzzing;
 #[cfg_attr(not(feature = "unstable-ir"), doc(hidden))]
 pub mod ir;
 mod itemize;
+mod lines;
 mod metrics;
+mod paragraph;
 mod report;
 mod shape;
 mod slot;
 mod symbol;
+mod tabs;
 #[cfg(test)]
 mod testing;
 

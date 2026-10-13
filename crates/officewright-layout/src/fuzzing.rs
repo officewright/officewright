@@ -595,3 +595,320 @@ pub fn font_slot(ch: char, style: &RunStyle) -> &'static str {
 pub fn symbol_unicode(font: &str, code: u32) -> Option<char> {
     SymbolFont::of(font)?.unicode(code)
 }
+
+/// A word of a line as [`lay_out`] places it: what has no space in it, between spaces,
+/// tabs and the pieces that are not text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Word {
+    text: String,
+    start: f64,
+    end: f64,
+}
+
+impl Word {
+    /// The text as drawn.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Where its first glyph starts, in points from the start edge of the column.
+    pub fn start(&self) -> f64 {
+        self.start
+    }
+
+    /// Where its last glyph ends.
+    pub fn end(&self) -> f64 {
+        self.end
+    }
+}
+
+/// A line of a paragraph as [`lay_out`] breaks it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Line {
+    text: String,
+    words: Vec<Word>,
+    tabs: Vec<(f64, f64)>,
+    width: f64,
+    ascent: f64,
+    descent: f64,
+    height: f64,
+    baseline: f64,
+    end: &'static str,
+}
+
+impl Line {
+    /// The text the line holds as drawn, a tab as `\t`.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// The words, in order.
+    pub fn words(&self) -> &[Word] {
+        &self.words
+    }
+
+    /// Where each tab starts and ends, in points from the start edge of the column.
+    pub fn tabs(&self) -> &[(f64, f64)] {
+        &self.tabs
+    }
+
+    /// The width of what is on the line, without the spaces that hang at its end.
+    pub fn width(&self) -> f64 {
+        self.width
+    }
+
+    /// How far its text reaches above the baseline.
+    pub fn ascent(&self) -> f64 {
+        self.ascent
+    }
+
+    /// How far its text reaches below the baseline.
+    pub fn descent(&self) -> f64 {
+        self.descent
+    }
+
+    /// Its height, after the paragraph's line spacing.
+    pub fn height(&self) -> f64 {
+        self.height
+    }
+
+    /// Its baseline, from its top.
+    pub fn baseline(&self) -> f64 {
+        self.baseline
+    }
+
+    /// Why it ends: `wrap`, `break`, `page break`, `column break` or `paragraph`.
+    pub fn end(&self) -> &'static str {
+        self.end
+    }
+}
+
+/// A paragraph as [`lay_out`] breaks it into lines.
+#[derive(Clone, Debug)]
+pub struct LaidOut {
+    lines: Vec<Line>,
+    height: f64,
+    report: LayoutReport,
+}
+
+impl LaidOut {
+    /// The height of all its lines.
+    pub fn height(&self) -> f64 {
+        self.height
+    }
+
+    /// The lines, in order.
+    pub fn lines(&self) -> &[Line] {
+        &self.lines
+    }
+
+    /// What the layout did that differs from Word.
+    pub fn report(&self) -> &LayoutReport {
+        &self.report
+    }
+}
+
+/// Lays out `paragraph` of `document` in a column `width` points wide, with the fonts
+/// of `book`, as the layout does.
+pub fn lay_out(
+    book: &FontBook,
+    document: &Document,
+    paragraph: &crate::ir::Paragraph,
+    width: f64,
+) -> LaidOut {
+    use crate::lines::{LineEnd, PieceKind};
+
+    let mut fonts = Fonts::new(book);
+    let mut shaper = Shaper::new();
+    let location = Location::default();
+    let layout = crate::paragraph::lay_out(
+        document,
+        paragraph,
+        Pt(width),
+        &mut fonts,
+        &mut shaper,
+        &location,
+    );
+    let itemized = &layout.itemized;
+    let lines = layout
+        .lines
+        .iter()
+        .map(|line| {
+            let mut words: Vec<Word> = Vec::new();
+            let mut tabs = Vec::new();
+            let mut text = String::new();
+            // Whether the next glyph that is not a space starts a word.
+            let mut new_word = true;
+            for piece in &line.pieces {
+                match &piece.kind {
+                    PieceKind::Text { .. } | PieceKind::Hyphen { .. } => {
+                        let hyphen = matches!(piece.kind, PieceKind::Hyphen { .. });
+                        let glyphs = piece.glyphs(itemized);
+                        for (index, glyph) in glyphs.iter().enumerate() {
+                            let cluster = if hyphen {
+                                "-".to_owned()
+                            } else {
+                                let end = glyphs
+                                    .iter()
+                                    .skip(index + 1)
+                                    .find(|next| next.cluster != glyph.cluster)
+                                    .map_or_else(
+                                        || piece_text_end(&piece.kind),
+                                        |next| next.cluster,
+                                    );
+                                if glyphs
+                                    .get(index.wrapping_sub(1))
+                                    .is_some_and(|before| before.cluster == glyph.cluster)
+                                {
+                                    String::new()
+                                } else {
+                                    itemized
+                                        .text
+                                        .get(glyph.cluster..end)
+                                        .unwrap_or_default()
+                                        .to_owned()
+                                }
+                            };
+                            text.push_str(&cluster);
+                            if cluster.chars().all(char::is_whitespace) && !cluster.is_empty() {
+                                new_word = true;
+                                continue;
+                            }
+                            let (start, end) = (glyph.x.0, glyph.x.0 + glyph.advance.0);
+                            match words.last_mut() {
+                                Some(word) if !new_word => {
+                                    word.text.push_str(&cluster);
+                                    word.end = word.end.max(end);
+                                }
+                                _ => words.push(Word {
+                                    text: cluster,
+                                    start,
+                                    end,
+                                }),
+                            }
+                            new_word = false;
+                        }
+                    }
+                    PieceKind::Tab { .. } => {
+                        text.push('\t');
+                        tabs.push((piece.x.0, piece.x.0 + piece.width.0));
+                        new_word = true;
+                    }
+                    PieceKind::Break { .. } | PieceKind::Object { .. } => new_word = true,
+                }
+            }
+            Line {
+                text,
+                words,
+                tabs,
+                width: line.width.0,
+                ascent: line.ascent.0,
+                descent: line.descent.0,
+                height: line.height.0,
+                baseline: line.baseline.0,
+                end: match line.end {
+                    LineEnd::Wrap => "wrap",
+                    LineEnd::Break => "break",
+                    LineEnd::PageBreak => "page break",
+                    LineEnd::ColumnBreak => "column break",
+                    LineEnd::Paragraph => "paragraph",
+                },
+            }
+        })
+        .collect();
+    LaidOut {
+        lines,
+        height: layout.height().0,
+        report: fonts.into_report(),
+    }
+}
+
+/// The space above and below a paragraph with `props` of `document`, between
+/// paragraphs with `previous` and `next`.
+pub fn spacing(
+    document: &Document,
+    previous: Option<&crate::ir::ParagraphProps>,
+    props: &crate::ir::ParagraphProps,
+    next: Option<&crate::ir::ParagraphProps>,
+) -> (f64, f64) {
+    (
+        crate::paragraph::space_before(document, previous, props).0,
+        crate::paragraph::space_after(document, props, next).0,
+    )
+}
+
+/// Where the drawn text of a text piece ends.
+fn piece_text_end(kind: &crate::lines::PieceKind) -> usize {
+    match kind {
+        crate::lines::PieceKind::Text { text, .. } => text.end,
+        _ => 0,
+    }
+}
+
+/// Lays out `paragraph` of `document` in a column `width` points wide with the fonts of
+/// `book`, and checks what pagination relies on: the lines hold the paragraph's text in
+/// order, each exactly once; no line is wider than the column unless the report says
+/// something overflows; heights and baselines are numbers, the heights not negative.
+pub fn check_lines(
+    book: &FontBook,
+    document: &Document,
+    paragraph: &crate::ir::Paragraph,
+    width: f64,
+) -> Result<(), String> {
+    let mut fonts = Fonts::new(book);
+    let mut shaper = Shaper::new();
+    let location = Location::default();
+    let layout = crate::paragraph::lay_out(
+        document,
+        paragraph,
+        Pt(width),
+        &mut fonts,
+        &mut shaper,
+        &location,
+    );
+    let report = fonts.into_report();
+    let overflow = report
+        .iter()
+        .any(|entry| entry.kind() == crate::ReportKind::Overflow);
+    let indent = paragraph.props().indent();
+    let mut end = 0;
+    for (index, line) in layout.lines.iter().enumerate() {
+        if line.range.start != end {
+            return Err(format!(
+                "line {index} starts at {} after {end}",
+                line.range.start
+            ));
+        }
+        end = line.range.end;
+        let room = width
+            - indent.start().0
+            - indent.end().0
+            - if index == 0 {
+                indent.first_line().0
+            } else {
+                0.0
+            };
+        if line.width.0 > room.max(0.0) + 1e-6 && !overflow && line.width.0 > 0.0 {
+            // A line with one piece too wide for any line is the only one allowed past
+            // the end, and it is reported.
+            return Err(format!(
+                "line {index} is {} wide in {room} without a report",
+                line.width.0
+            ));
+        }
+        let numbers = [
+            line.height.0,
+            line.baseline.0,
+            line.ascent.0,
+            line.descent.0,
+            line.width.0,
+        ];
+        if numbers.iter().any(|number| !number.is_finite()) || line.height.0 < 0.0 {
+            return Err(format!("line {index}: {numbers:?}"));
+        }
+    }
+    if layout.lines.is_empty() {
+        return Err("no line".to_owned());
+    }
+    Ok(())
+}
