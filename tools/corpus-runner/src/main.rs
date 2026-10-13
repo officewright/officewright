@@ -47,6 +47,7 @@
 
 mod align;
 mod child;
+mod gate;
 mod geometry;
 mod metrics;
 mod raster;
@@ -63,6 +64,7 @@ const USAGE: &str = "usage: corpus-runner run [--root DIR] [--report FILE] \
 [--baseline FILE [--update-baseline | --allow-better]] [--expected FILE] [--timeout SECONDS] \
 [--memory-limit MIB] [--enforce-memory-limit] [--jobs N] [--references DIR --ours DIR] PATH...
        corpus-runner score --ours FILE.pdf --reference DIR
+       corpus-runner gate [--main MAIN.json] [--same-fonts] REPORT.json
        corpus-runner open FILE";
 
 fn main() -> ExitCode {
@@ -70,6 +72,7 @@ fn main() -> ExitCode {
     match args.split_first() {
         Some((command, [file])) if command == "open" => child::main(file),
         Some((command, rest)) if command == "score" => score(rest),
+        Some((command, rest)) if command == "gate" => gate(rest),
         Some((command, rest)) if command == "run" => match parse(rest) {
             Ok(options) => run::main(&options),
             Err(message) => {
@@ -108,6 +111,64 @@ fn score(args: &[String]) -> ExitCode {
             eprintln!("corpus-runner: {message}");
             ExitCode::from(2)
         }
+    }
+}
+
+/// Prints the release criteria over a run's report as a markdown table, next to main's
+/// when given; fails when a criterion that could be measured is missed.
+fn gate(args: &[String]) -> ExitCode {
+    let mut main_report = None;
+    let mut same_fonts = false;
+    let mut branch_report = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--main" => match args.next() {
+                Some(path) => main_report = Some(path),
+                None => {
+                    eprintln!("corpus-runner: --main needs a report\n{USAGE}");
+                    return ExitCode::from(2);
+                }
+            },
+            "--same-fonts" => same_fonts = true,
+            path if !path.starts_with("--") && branch_report.is_none() => branch_report = Some(arg),
+            _ => {
+                eprintln!("{USAGE}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let Some(branch_report) = branch_report else {
+        eprintln!("{USAGE}");
+        return ExitCode::from(2);
+    };
+    let read = |path: &String| -> Result<report::Report, String> {
+        let text = std::fs::read_to_string(path).map_err(|error| format!("{path}: {error}"))?;
+        serde_json::from_str(&text).map_err(|error| format!("{path}: {error}"))
+    };
+    let reports =
+        read(branch_report).and_then(|branch| Ok((branch, main_report.map(read).transpose()?)));
+    let (branch, main) = match reports {
+        Ok(reports) => reports,
+        Err(message) => {
+            eprintln!("corpus-runner: {message}");
+            return ExitCode::from(2);
+        }
+    };
+    let measures = gate::measure(&branch, same_fonts);
+    let before = main.as_ref().map(|main| gate::measure(main, same_fonts));
+    match &main {
+        Some(main) => {
+            println!("main: {}\n", gate::census(main, same_fonts));
+            println!("branch: {}\n", gate::census(&branch, same_fonts));
+        }
+        None => println!("{}\n", gate::census(&branch, same_fonts)),
+    }
+    print!("{}", gate::table(&measures, before.as_deref()));
+    if gate::passes(&measures) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }
 

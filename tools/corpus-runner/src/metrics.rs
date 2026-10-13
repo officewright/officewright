@@ -49,6 +49,16 @@ pub struct Scores {
     pub ssim: Vec<f64>,
     pub ssim_mean: f64,
     pub ssim_min: f64,
+    /// `qpdf --check` passed without warnings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pdf_valid: Option<bool>,
+    /// The fonts our PDF uses without embedding them, as `pdffonts` lists them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fonts_not_embedded: Option<Vec<String>>,
+    /// The fonts Word used, from the reference's `formatting.json`; `(unresolved)` for a
+    /// theme font make-reference.ps1 could not name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub word_fonts: Option<Vec<String>>,
 }
 
 /// The pages of one rendering: its words with their boxes, and its 110 dpi grey rasters.
@@ -326,7 +336,70 @@ pub fn score(ours: &Rendering, reference: &Rendering) -> Scores {
         ssim_mean: round(mean(ssim.iter().copied())),
         ssim_min: ssim.iter().copied().reduce(f64::min).unwrap_or(1.0),
         ssim,
+        pdf_valid: None,
+        fonts_not_embedded: None,
+        word_fonts: None,
     }
+}
+
+/// Whether `qpdf --check` passes without warnings, and the fonts `pdffonts` lists as not
+/// embedded.
+pub fn check_pdf(pdf: &Path) -> Result<(bool, Vec<String>), String> {
+    let output = Command::new("qpdf")
+        .arg("--check")
+        .arg(pdf)
+        .output()
+        .map_err(|error| format!("cannot run qpdf: {error}"))?;
+    let said = String::from_utf8_lossy(&output.stdout) + String::from_utf8_lossy(&output.stderr);
+    let valid = output.status.success() && !said.contains("WARNING");
+    let listing = tool(Command::new("pdffonts").arg(pdf))?;
+    Ok((valid, not_embedded(&String::from_utf8_lossy(&listing))))
+}
+
+/// The names in the rows of a `pdffonts` listing whose `emb` column says no. The columns
+/// are counted from the right (`emb sub uni object ID`), since a long font name shifts them
+/// and the type may hold spaces.
+fn not_embedded(listing: &str) -> Vec<String> {
+    listing
+        .lines()
+        .skip(2)
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let emb = fields.len().checked_sub(5).and_then(|at| fields.get(at))?;
+            (*emb == "no")
+                .then(|| fields.first().map(|name| (*name).to_owned()))
+                .flatten()
+        })
+        .collect()
+}
+
+/// The fonts Word used for the document, from its reference's `formatting.json` (written
+/// by make-reference.ps1 format 3 on); `None` for an older reference.
+pub fn word_fonts(reference: &Path) -> Result<Option<Vec<String>>, String> {
+    let path = reference.join("formatting.json");
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let text =
+        std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
+    let fonts = value
+        .get("fonts")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| format!("{}: no fonts table", path.display()))?;
+    let mut names: Vec<String> = fonts
+        .iter()
+        .map(|font| {
+            font.get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("(unresolved)")
+                .to_owned()
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    Ok(Some(names))
 }
 
 /// The mean, 1 for no values.
@@ -619,6 +692,42 @@ mod tests {
                 .unwrap_err()
                 .contains("pdftotext failed")
         );
+    }
+
+    #[test]
+    fn fonts_not_embedded_come_from_the_emb_column() {
+        let listing = "name                                 type              encoding         emb sub uni object ID\n\
+------------------------------------ ----------------- ---------------- --- --- --- ---------\n\
+ABCDEF+Carlito                       CID TrueType      Identity-H       yes yes yes      9  0\n\
+Helvetica                            Type 1            WinAnsi          no  no  no       5  0\n\
+TimesNewRomanPSMT                    TrueType          WinAnsi          no  no  yes     12  0\n\
+ABCDEF+AVeryLongFontNameThatPushesTheColumns-BoldItalic TrueType WinAnsi no  no  yes     14  0\n";
+        assert_eq!(
+            not_embedded(listing),
+            [
+                "Helvetica",
+                "TimesNewRomanPSMT",
+                "ABCDEF+AVeryLongFontNameThatPushesTheColumns-BoldItalic"
+            ]
+        );
+        assert!(not_embedded("").is_empty());
+    }
+
+    #[test]
+    fn word_fonts_come_from_the_formatting_export() {
+        let scratch = Scratch::new().unwrap();
+        assert_eq!(word_fonts(&scratch.path).unwrap(), None);
+        std::fs::write(
+            scratch.path.join("formatting.json"),
+            r#"{"fonts": [{"name": "Calibri"}, {"name": null, "theme": "unresolved"}, {"name": "Calibri", "bold": true}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            word_fonts(&scratch.path).unwrap(),
+            Some(vec!["(unresolved)".to_owned(), "Calibri".to_owned()])
+        );
+        std::fs::write(scratch.path.join("formatting.json"), "{}").unwrap();
+        assert!(word_fonts(&scratch.path).is_err());
     }
 
     #[test]

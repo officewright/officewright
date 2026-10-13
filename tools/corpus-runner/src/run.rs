@@ -375,7 +375,12 @@ fn score_file(reference: &Path, pdf: &Path) -> Result<metrics::Scores, String> {
     }
     let word = metrics::Rendering::reference(reference)?;
     let ours = metrics::Rendering::pdf(pdf)?;
-    Ok(metrics::score(&ours, &word))
+    let mut scores = metrics::score(&ours, &word);
+    let (valid, not_embedded) = metrics::check_pdf(pdf)?;
+    scores.pdf_valid = Some(valid);
+    scores.fonts_not_embedded = Some(not_embedded);
+    scores.word_fonts = metrics::word_fonts(reference)?;
+    Ok(scores)
 }
 
 /// Runs `corpus-runner open FILE`, stopping it after the time-out. `Err` is a failure of
