@@ -1519,4 +1519,61 @@ mod tests {
         assert_eq!(entry.location(), &at(3));
         assert_eq!(report.len(), 1, "{report:?}");
     }
+
+    #[test]
+    fn keeps_format_characters_off_the_start_of_a_cut_run() {
+        // HarfRust starts a cluster at these, but they belong to the character before.
+        let mut setup = Setup::new(vec![minimal()]);
+        let style = setup.style(plain(TEST));
+        for ch in ['\u{AD}', '\u{200B}', '\u{200C}', '\u{2060}'] {
+            let text = format!("{}{ch}AAAA", "A".repeat(4095));
+            let (itemized, _, _) = setup.run(&[Inline::text(&text, style)]);
+            let pieces = runs(&itemized);
+            assert_eq!(pieces.len(), 2, "{ch:?}");
+            for (text, _, _) in &pieces {
+                assert!(text.starts_with('A'), "{ch:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn cuts_long_runs_in_a_face_harfrust_cannot_read_where_a_cluster_starts() {
+        // Without HarfRust's clusters, marks and joiners still stay with their base, and the
+        // capitals of one character together.
+        let mut setup = Setup::new(vec![minimal()]);
+        let style = setup.style(plain(TEST));
+        let caps = setup.style(plain(TEST).with_caps(true));
+        let mut fonts = Fonts::new(&setup.book);
+        let ids: Vec<_> = setup.book.faces().map(|(id, _)| id).collect();
+        for id in ids {
+            fonts.load_unreadable(id);
+        }
+        let text = "e\u{301}".repeat(2000);
+        let inlines = [Inline::text(&text, style)];
+        let itemized = itemize(&setup.document, &inlines, &mut fonts, &Location::default());
+        let pieces = runs(&itemized);
+        assert!(pieces.len() > 1);
+        for (text, _, _) in &pieces {
+            assert!(text.starts_with('e'));
+        }
+        let text = format!("A{}", "\u{DF}".repeat(3000));
+        let inlines = [Inline::text(&text, caps)];
+        let itemized = itemize(&setup.document, &inlines, &mut fonts, &Location::default());
+        let mut end = 0;
+        for item in &itemized.items {
+            let Item::Text(run) = item else { continue };
+            assert_eq!(run.source.start, end, "{run:?}");
+            assert_eq!(run.range.len(), run.source.len());
+            end = run.source.end;
+        }
+        assert_eq!(end, itemized.source.len());
+        let shaped = shape_runs(
+            &setup.document,
+            &itemized,
+            &mut fonts,
+            &mut Shaper::new(),
+            &Location::default(),
+        );
+        assert!(shaped.iter().flatten().all(|run| run.is_nominal()));
+    }
 }

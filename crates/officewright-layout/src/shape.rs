@@ -50,6 +50,15 @@ impl ShapingFace {
             font,
         }
     }
+
+    /// `face` as if HarfRust could not read it, for the tests of what the layout then does.
+    #[cfg(test)]
+    pub(crate) fn unreadable(face: FontFace) -> Self {
+        Self {
+            font: None,
+            ..Self::new(face)
+        }
+    }
 }
 
 /// The canonical combining class of `ch` (Unicode's `ccc`), from HarfRust's tables: 0 for

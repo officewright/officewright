@@ -361,9 +361,13 @@ fn a_run_cut_for_its_length_starts_where_a_cluster_starts() -> TestResult {
     ];
     for text in &texts {
         fuzzing::check_paragraph(&book, &document, &[Inline::text(text, id)])
-            .map_err(|err| format!("{:?}: {err}", text.get(..12)))?;
+            .map_err(|err| format!("{:?}: {err}", text.chars().take(4).collect::<String>()))?;
         let paragraph = fuzzing::paragraph(&book, &document, &[Inline::text(text, id)]);
-        assert!(paragraph.runs().len() > 1, "{:?}", text.get(..12));
+        assert!(
+            paragraph.runs().len() > 1,
+            "{:?}",
+            text.chars().take(4).collect::<String>()
+        );
     }
     Ok(())
 }

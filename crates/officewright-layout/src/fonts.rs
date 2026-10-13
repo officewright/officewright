@@ -97,6 +97,15 @@ impl<'a> Fonts<'a> {
         face.clone()
     }
 
+    /// Loads face `id` as if HarfRust could not read it, for the tests of what the layout
+    /// then does.
+    #[cfg(test)]
+    pub(crate) fn load_unreadable(&mut self, id: FaceId) {
+        let face = self.resolver.book().load(id).ok();
+        let face = face.map(|face| Arc::new(ShapingFace::unreadable(face)));
+        self.faces.insert(id, face);
+    }
+
     /// Whether face `id` has a glyph for `ch`; a symbol font has one for U+0020 to
     /// U+00FF where it has one for U+F020 to U+F0FF, as Windows finds them.
     pub(crate) fn has_glyph(&mut self, id: FaceId, ch: char) -> bool {
