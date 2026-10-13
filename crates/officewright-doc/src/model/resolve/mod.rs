@@ -53,8 +53,9 @@ pub struct Formats<'a> {
     /// The parsed levels of each list definition used so far, which its instances
     /// share.
     definitions: HashMap<i64, Arc<paragraph::DefinitionLevels>>,
-    /// What each level of a definition that paragraphs use gives to them.
-    level_layers: HashMap<(i64, usize), Option<Arc<paragraph::ListLayer>>>,
+    /// What each level of a definition that paragraphs use gives to them and to their
+    /// labels.
+    level_layers: HashMap<(i64, usize), paragraph::LevelGives>,
     /// Each list instance's levels that paragraphs use, with the instance's overrides,
     /// and the numbers they start from.
     instance_levels: HashMap<(i64, usize), paragraph::InstanceLevel>,
@@ -76,7 +77,7 @@ pub(crate) struct Work {
     pub(crate) numbering_styles: usize,
     /// Definitions whose levels were parsed.
     pub(crate) definitions: usize,
-    /// Levels of definitions parsed for what they give to paragraphs.
+    /// Levels of definitions parsed for what they give to paragraphs and labels.
     pub(crate) level_layers: usize,
     /// Levels of instances replaced by an override's level.
     pub(crate) replacements: usize,
@@ -124,7 +125,7 @@ impl<'a> Formats<'a> {
         }
         let direct = run.properties();
         let paragraph = self.paragraph_style(paragraph_of(self.document, run.node()));
-        self.resolve_run(paragraph, &direct)
+        self.resolve_run(paragraph, &direct, None)
     }
 
     /// The formatting of a paragraph's mark in effect, which decides, among other
@@ -135,7 +136,24 @@ impl<'a> Formats<'a> {
         }
         let direct = paragraph.properties().mark;
         let style = self.paragraph_style(Some(paragraph.node()));
-        self.resolve_run(style, &direct)
+        self.resolve_run(style, &direct, None)
+    }
+
+    /// The formatting of a list item's label, its number or bullet, in effect: the
+    /// paragraph mark's, with the run properties of the list level laid over it. Word
+    /// ignores the level's `w:rStyle`, `w:highlight` and `w:oMath` there (MS-OI29500
+    /// §17.9.24(a)). None when the paragraph is not a list item.
+    ///
+    /// What a level gives to labels is read once per level, however many paragraphs
+    /// use it.
+    pub fn list_label(&mut self, paragraph: Paragraph<'a>) -> Option<CharacterFormat> {
+        if !std::ptr::eq(paragraph.document(), self.document) {
+            return Formats::new(paragraph.document()).list_label(paragraph);
+        }
+        let properties = paragraph.properties();
+        let style = self.paragraph_style(Some(paragraph.node()));
+        let label = self.label_level(style, &properties)?;
+        Some(self.resolve_run(style, &properties.mark, label.as_deref()))
     }
 
     /// How many times a style's own properties were read, for tests of the work done.

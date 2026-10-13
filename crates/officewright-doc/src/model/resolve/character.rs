@@ -48,13 +48,15 @@ const TOGGLES: [Toggle; 12] = [
 
 impl Formats<'_> {
     /// Combines the levels of the hierarchy for a run whose paragraph style has the index
-    /// `paragraph_style` and whose own properties are `direct`. A run without a
-    /// `w:rStyle` gets no character style: Word's default character style is
-    /// DefaultParagraphFont, whose children it ignores.
+    /// `paragraph_style` and whose own properties are `direct`, with `label`, what a list
+    /// level gives to its label, laid over them. A run without a `w:rStyle` gets no
+    /// character style: Word's default character style is DefaultParagraphFont, whose
+    /// children it ignores.
     pub(super) fn resolve_run(
         &mut self,
         paragraph_style: Option<usize>,
         direct: &RunProperties,
+        label: Option<&CharacterLevel>,
     ) -> CharacterFormat {
         let document = self.document;
         let defaults = self.run_defaults();
@@ -78,6 +80,9 @@ impl Formats<'_> {
             effect.overlay(level);
         }
         effect.overlay(&direct);
+        if let Some(label) = label {
+            effect.overlay(label);
+        }
 
         // On/off properties: toggle properties by ECMA-376 §17.7.3, the others by the
         // last level that gives them.
@@ -105,6 +110,10 @@ impl Formats<'_> {
                     .or(levels.0)
                     .unwrap_or(false)
             };
+            // The list level's value, like direct formatting, sets it.
+            if let Some(value) = value(label, index) {
+                *slot = value;
+            }
         }
         // Word ignores specVanish unless the text is hidden too (MS-OI29500 §17.3.2.36(a)).
         if toggles.get(Toggle::Vanish as usize) != Some(&true) {
@@ -282,6 +291,56 @@ pub(super) struct CharacterLevel {
 }
 
 impl CharacterLevel {
+    /// What a list level's `w:rPr` gives to its label: Word ignores `w:rStyle`,
+    /// `w:highlight` and `w:oMath` there (MS-OI29500 §17.9.24(a)); `w:rPrChange` is not
+    /// read. None when it gives nothing.
+    pub(super) fn of_label(properties: &RunProperties) -> Option<Arc<Self>> {
+        let mut level = Self::of(properties);
+        level.highlight = None;
+        if let Some(math) = level.toggles.get_mut(Toggle::Math as usize) {
+            *math = None;
+        }
+        level.gives().then(|| Arc::new(level))
+    }
+
+    /// Whether the level gives anything.
+    fn gives(&self) -> bool {
+        let Self {
+            fonts,
+            hint,
+            toggles,
+            color,
+            underline_style,
+            underline_color,
+            size,
+            size_complex_script,
+            vertical_position,
+            position,
+            spacing,
+            scale,
+            kerning,
+            highlight,
+            shading,
+            languages,
+        } = self;
+        fonts.iter().any(Option::is_some)
+            || hint.is_some()
+            || toggles.iter().any(Option::is_some)
+            || color.is_some()
+            || underline_style.is_some()
+            || underline_color.is_some()
+            || size.is_some()
+            || size_complex_script.is_some()
+            || vertical_position.is_some()
+            || position.is_some()
+            || spacing.is_some()
+            || scale.is_some()
+            || kerning.is_some()
+            || highlight.is_some()
+            || shading.is_some()
+            || languages.iter().any(Option::is_some)
+    }
+
     /// What one `w:rPr` gives.
     fn of(properties: &RunProperties) -> Self {
         let fonts = &properties.fonts;

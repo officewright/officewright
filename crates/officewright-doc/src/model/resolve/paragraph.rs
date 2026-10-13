@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use officewright_core::Pt;
 
+use super::character::CharacterLevel;
 use super::{Formats, IGNORED_STYLES, Layer, MAX_COMBINATIONS, overwrite, style_index};
 use crate::model::Document;
 use crate::model::format::{ListFormat, ParagraphFlag, ParagraphFormat};
@@ -46,16 +47,40 @@ impl Formats<'_> {
             .map(|style| Arc::clone(&style.id));
 
         let (list, below_direct) = match self.list(&base, &direct, style) {
-            Some((list, Some(layer))) => {
+            Some((
+                list,
+                InstanceLevel {
+                    layer: Some(layer), ..
+                },
+            )) => {
                 let combined = self.combination(style, &base, &layer);
                 (Some(list), combined)
             }
-            Some((list, None)) => (Some(list), base),
+            Some((list, _)) => (Some(list), base),
             None => (None, base),
         };
         let mut effect = ParagraphLevel::clone(&below_direct);
         effect.overlay(&direct);
         effect.format(style_id, list)
+    }
+
+    /// What the list level of a paragraph whose style has the index `style` and whose
+    /// own properties are `direct` gives to its label: none when the paragraph is not a
+    /// list item, `Some(None)` when the level gives the label nothing.
+    pub(super) fn label_level(
+        &mut self,
+        style: Option<usize>,
+        direct: &ParagraphProperties,
+    ) -> Option<Option<Arc<CharacterLevel>>> {
+        let document = self.document;
+        let defaults = self.paragraph_defaults();
+        let base = match style {
+            Some(index) => self.paragraphs.level(document, index, &defaults),
+            None => defaults,
+        };
+        let direct = ParagraphLevel::of(direct);
+        let (_, level) = self.list(&base, &direct, style)?;
+        Some(level.label)
     }
 
     /// What the document defaults give to paragraphs.
@@ -110,7 +135,7 @@ impl Formats<'_> {
         base: &ParagraphLevel,
         direct: &ParagraphLevel,
         style: Option<usize>,
-    ) -> Option<(ListFormat, Option<SourcedLayer>)> {
+    ) -> Option<(ListFormat, InstanceLevel)> {
         let instance = direct
             .list_instance
             .or(base.list_instance)
@@ -124,14 +149,14 @@ impl Formats<'_> {
         let level_number = usize::try_from(written_level.unwrap_or(0))
             .ok()
             .filter(|&level| level <= 8)?;
-        let (layer, start) = self.instance_level(instance, &found, level_number);
+        let level = self.instance_level(instance, &found, level_number);
         let list = ListFormat {
             instance,
             definition: found.definition,
             level_number,
-            start,
+            start: level.start,
         };
-        Some((list, layer))
+        Some((list, level))
     }
 
     /// The list instance `instance` and the definition whose levels it uses, worked out
@@ -263,8 +288,9 @@ impl Formats<'_> {
         levels
     }
 
-    /// What level `number` of the instance `instance` gives to paragraphs, with the
-    /// instance's override applied, and the number it starts from, worked out once per
+    /// What level `number` of the instance `instance` gives to paragraphs and to their
+    /// labels, with the instance's override applied, and the number it starts from, worked
+    /// out once per
     /// instance and level that a paragraph uses. Only the instance's first override of
     /// that level is read, and none when the instance's definition does not exist: such
     /// an instance is a list without levels. Without a replacement level the entry
@@ -279,7 +305,7 @@ impl Formats<'_> {
             return level.clone();
         }
         if found.definition.is_none() {
-            return (None, 0);
+            return InstanceLevel::default();
         }
         let document = self.document;
         let base = found.shared.levels.get(number).and_then(Option::as_ref);
@@ -289,55 +315,73 @@ impl Formats<'_> {
             .and_then(|num| num.override_of(number));
         // An override's own level replaces the definition's, but Word ignores its start
         // and restart (MS-OI29500 §17.9.25(b), §17.9.10(b)).
-        let layer = match override_.as_ref().and_then(|over| over.definition()) {
+        let (layer, label) = match override_.as_ref().and_then(|over| over.definition()) {
             Some(replacement) => {
                 #[cfg(test)]
                 {
                     self.work.replacements += 1;
                 }
-                ListLayer::of(replacement).map(|layer| SourcedLayer {
+                let layer = ListLayer::of(replacement).map(|layer| SourcedLayer {
                     source: LayerSource::Override(instance, number),
                     layer,
-                })
-            }
-            None if base.is_some() => found.definition.and_then(|definition| {
-                let layer = self.level_layer(definition, number)?;
-                Some(SourcedLayer {
-                    source: LayerSource::Definition(definition, number),
+                });
+                (
                     layer,
-                })
-            }),
-            None => None,
+                    CharacterLevel::of_label(replacement.run_properties()),
+                )
+            }
+            None if base.is_some() => match found.definition {
+                Some(definition) => {
+                    let gives = self.level_gives(definition, number);
+                    let layer = gives.layer.map(|layer| SourcedLayer {
+                        source: LayerSource::Definition(definition, number),
+                        layer,
+                    });
+                    (layer, gives.label)
+                }
+                None => (None, None),
+            },
+            None => (None, None),
         };
         let start = override_
             .as_ref()
             .and_then(|over| over.start())
             .or_else(|| base.and_then(|base| base.start))
             .unwrap_or(0);
+        let level = InstanceLevel {
+            layer,
+            start,
+            label,
+        };
         self.instance_levels
-            .insert((instance, number), (layer.clone(), start));
-        (layer, start)
+            .insert((instance, number), level.clone());
+        level
     }
 
-    /// What level `number` of the definition `definition` gives to paragraphs, worked
-    /// out once per definition and level that a paragraph uses.
-    fn level_layer(&mut self, definition: i64, number: usize) -> Option<Arc<ListLayer>> {
-        if let Some(layer) = self.level_layers.get(&(definition, number)) {
-            return layer.clone();
+    /// What level `number` of the definition `definition` gives to paragraphs and to
+    /// their labels, worked out once per definition and level that a paragraph uses.
+    fn level_gives(&mut self, definition: i64, number: usize) -> LevelGives {
+        if let Some(gives) = self.level_layers.get(&(definition, number)) {
+            return gives.clone();
         }
         #[cfg(test)]
         {
             self.work.level_layers += 1;
         }
-        let layer = self
+        let level = self
             .document
             .numbering()
             .definition(definition)
-            .and_then(|definition| definition.level(number))
-            .and_then(|level| ListLayer::of(&level));
+            .and_then(|definition| definition.level(number));
+        let gives = LevelGives {
+            layer: level.as_ref().and_then(ListLayer::of),
+            label: level
+                .as_ref()
+                .and_then(|level| CharacterLevel::of_label(level.run_properties())),
+        };
         self.level_layers
-            .insert((definition, number), layer.clone());
-        layer
+            .insert((definition, number), gives.clone());
+        gives
     }
 }
 
@@ -364,9 +408,21 @@ pub(crate) fn list_level(document: &Document, list: &ListFormat) -> Option<ListL
     }
 }
 
-/// What a level of a list instance gives to paragraphs, with the instance's override,
-/// and the number it starts from.
-pub(super) type InstanceLevel = (Option<SourcedLayer>, i64);
+/// What a level of a list instance gives to paragraphs and to their labels, with the
+/// instance's override, and the number it starts from.
+#[derive(Clone, Debug, Default)]
+pub(super) struct InstanceLevel {
+    layer: Option<SourcedLayer>,
+    start: i64,
+    label: Option<Arc<CharacterLevel>>,
+}
+
+/// What a level of a list definition gives to paragraphs and to their labels.
+#[derive(Clone, Debug, Default)]
+pub(super) struct LevelGives {
+    layer: Option<Arc<ListLayer>>,
+    label: Option<Arc<CharacterLevel>>,
+}
 
 /// What a list level gives to paragraphs, and where it comes from.
 #[derive(Clone, Debug)]

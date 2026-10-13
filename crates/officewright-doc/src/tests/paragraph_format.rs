@@ -1579,3 +1579,92 @@ fn reads_the_style_of_each_paragraph_once_for_the_document() {
     assert_eq!(formats.paragraph(first).style(), Some("Centred"));
     assert_eq!(formats.paragraph(second).style(), None);
 }
+
+#[test]
+fn formats_a_list_label_as_the_mark_with_the_level_over_it() {
+    // The label takes the paragraph mark's formatting with the level's run properties
+    // over it; Word ignores the level's w:rStyle, w:highlight and w:oMath there
+    // (MS-OI29500 §17.9.24(a)).
+    let level = |ilvl: i64, r_pr: &str| {
+        format!(
+            r#"<w:lvl w:ilvl="{ilvl}"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="o"/><w:rPr>{r_pr}</w:rPr></w:lvl>"#
+        )
+    };
+    let numbering = [
+        format!(
+            r#"<w:abstractNum w:abstractNumId="10">{}{}</w:abstractNum>"#,
+            level(
+                0,
+                r#"<w:rStyle w:val="Emphasis"/><w:rFonts w:ascii="Symbol" w:hAnsi="Symbol" w:hint="default"/><w:b/><w:i w:val="0"/><w:highlight w:val="yellow"/><w:oMath/>"#
+            ),
+            level(1, ""),
+        ),
+        r#"<w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num>"#.to_owned(),
+        // An override's replacement level gives the label its own run properties.
+        r#"<w:num w:numId="2"><w:abstractNumId w:val="10"/><w:lvlOverride w:ilvl="0"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:rPr><w:color w:val="00FF00"/></w:rPr></w:lvl></w:lvlOverride></w:num>"#.to_owned(),
+    ]
+    .concat();
+    let styles = [
+        defaults(""),
+        r#"<w:style w:type="character" w:styleId="Emphasis"><w:name w:val="Emphasis"/><w:rPr><w:u w:val="single"/><w:caps/></w:rPr></w:style>"#.to_owned(),
+    ]
+    .concat();
+    let item = |instance: i64, level: i64| {
+        format!(
+            r#"<w:numPr><w:ilvl w:val="{level}"/><w:numId w:val="{instance}"/></w:numPr><w:rPr><w:i/><w:color w:val="FF0000"/><w:sz w:val="28"/></w:rPr>"#
+        )
+    };
+    let body = [
+        paragraph("", &item(1, 0)),
+        paragraph("", &item(1, 1)),
+        paragraph("", &item(2, 0)),
+        paragraph("", r#"<w:rPr><w:sz w:val="28"/></w:rPr>"#),
+    ]
+    .concat()
+    .repeat(50);
+    let document = build(&body, &styles, Some(&numbering));
+    let mut formats = document.formats();
+    let labels: Vec<_> = paragraphs(&document)
+        .into_iter()
+        .map(|paragraph| formats.list_label(paragraph))
+        .collect();
+    let red = ColorValue::Rgb(255, 0, 0);
+
+    // Level 0: the level's font and bold, its "not italic" over the mark's italic; the
+    // mark's size and colour; no highlight, no maths, and nothing of the character style
+    // the level names.
+    let first = labels[0].as_ref().unwrap();
+    assert_eq!(first.fonts().ascii(), "Symbol");
+    assert_eq!((first.bold(), first.italic()), (true, false));
+    assert_eq!((first.size(), first.color()), (Pt(14.0), red));
+    assert_eq!(first.highlight(), None);
+    assert!(!first.math());
+    assert_eq!(
+        (first.underline(), first.caps(), first.style()),
+        (None, false, None)
+    );
+    // The paragraph's own mark is italic.
+    assert!(formats.paragraph_mark(paragraphs(&document)[0]).italic());
+
+    // Level 1 gives nothing: the label is formatted as the mark.
+    let second = labels[1].as_ref().unwrap();
+    assert_eq!(second, &formats.paragraph_mark(paragraphs(&document)[1]));
+
+    // The replacement level of instance 2: its colour, nothing of the definition's level.
+    let third = labels[2].as_ref().unwrap();
+    assert_eq!(third.color(), ColorValue::Rgb(0, 255, 0));
+    assert_eq!((third.bold(), third.italic()), (false, true));
+    // The mark's font: Word's defaults, as these styles give no run properties.
+    assert_eq!(third.fonts().ascii(), "Calibri");
+
+    // Not a list item.
+    assert_eq!(labels[3], None);
+    // The same for every repetition.
+    for (n, label) in labels.iter().enumerate() {
+        assert_eq!(label, &labels[n % 4]);
+    }
+    // Each level was read once for 150 list items: two of the definition, and the
+    // replacement in instance 2's override.
+    assert_eq!(formats.work().level_layers, 2);
+    assert_eq!(formats.work().replacements, 1);
+}
