@@ -16,7 +16,7 @@ from pathlib import Path
 EXPECTED_ABI_VERSION = 1
 
 # OwStatus values, the standard font and the embedding notes from officewright.h.
-OK, NULL_ARGUMENT, INVALID_UTF8, INVALID_ARGUMENT, IO, UNSUPPORTED, PANIC = range(7)
+OK, NULL_ARGUMENT, INVALID_UTF8, INVALID_ARGUMENT, IO, UNSUPPORTED, PANIC, MALFORMED, LIMIT_EXCEEDED = range(9)
 OW_STANDARD_FONT_HELVETICA = 0
 OW_FONT_NOTE_OTHER, OW_FONT_NOTE_PREVIEW_AND_PRINT, OW_FONT_NOTE_EDITABLE, OW_FONT_NOTE_WHOLE_FONT = range(4)
 (
@@ -304,8 +304,14 @@ class AbiTest(unittest.TestCase):
 
     def test_reports_fonts_it_cannot_open(self):
         font = c_void_p(1)
-        self.check(lib.ow_pdf_font_open_bytes(b"not a font", 10, 0, byref(font)), INVALID_ARGUMENT)
+        self.check(lib.ow_pdf_font_open_bytes(b"not a font", 10, 0, byref(font)), MALFORMED)
         self.assertTrue(last_error().startswith("cannot use the font data: data is not a TrueType"), last_error())
+        self.assertFalse(font)
+        # A face the file does not have is the caller's mistake, not damage.
+        data = (FONTS / "liberation" / "LiberationSans-Regular.ttf").read_bytes()
+        font = c_void_p(1)
+        self.check(lib.ow_pdf_font_open_bytes(data, len(data), 1, byref(font)), INVALID_ARGUMENT)
+        self.assertEqual(last_error(), "cannot use the font data: font face 1 does not exist, the file has 1 face")
         self.assertFalse(font)
         missing = FONTS / "no-such-font.ttf"
         self.check(lib.ow_pdf_font_open_path(str(missing).encode(), 0, byref(font)), IO)
