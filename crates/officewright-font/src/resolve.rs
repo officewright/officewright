@@ -1159,6 +1159,22 @@ mod tests {
     }
 
     #[test]
+    fn a_free_substitute_is_found_by_any_of_its_names() {
+        // Some systems install the styles of a free font as families of their own, here
+        // "Carlito Bold", whose typographic family is Carlito: it has Calibri Bold's
+        // metrics all the same.
+        let book = book(&[system(
+            TestFont::new("Carlito Bold")
+                .typographic("Carlito", "Bold")
+                .style("Regular", 700, false),
+        )]);
+        let resolution = book.resolve(&FontRequest::new("Calibri").bold(true));
+        assert_eq!(resolution.family(), Some("Carlito Bold"));
+        assert_eq!(resolution.kind(), ResolutionKind::MetricCompatible);
+        assert!(!resolution.synthetic_bold());
+    }
+
+    #[test]
     fn a_free_twin_does_not_take_another_microsoft_family() {
         // Calibri Light has the typographic family Calibri but not Calibri's metrics.
         let book = book(&[system(

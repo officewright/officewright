@@ -913,7 +913,7 @@ mod tests {
         fs::write(fonts.join("sans.ttf"), TestFont::new("Test Sans").build()).unwrap();
         // The font is reached only through a link, found inside the scanned folder;
         // three links in its folder lead back to it, so a scan that did not notice the
-        // loop would read 3^16 folders before its depth limit.
+        // loop would read millions of folders before its depth limit.
         dir_link(&fonts, &scan.join("fonts"));
         for name in ["a", "b", "c"] {
             dir_link(&fonts, &fonts.join(name));
