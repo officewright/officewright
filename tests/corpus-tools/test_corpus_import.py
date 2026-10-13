@@ -857,6 +857,43 @@ class Formatting(Import):
         count = len(body) + 1
         self.assertIn(f"formatting as Word computes it: {count} paragraphs, with runs", sources)
 
+    def test_a_theme_colour_is_committed_with_its_tint_or_shade(self):
+        doc = rules.documents()[0]
+        record = self.add_result(doc)
+        export = word_export(importer.read_parts(self.results / record["resaved_file"]))
+        font = export["stories"][0]["paragraphs"][0]["font"]
+        font.update(color=None, theme_color="accent1", tint_shade=-0.25)
+        self.add_v3(export)
+        self.run_import()
+        formatting = self.committed(doc)
+        first = formatting["stories"][0]["paragraphs"][0]
+        committed = formatting["fonts"][first["font"]]
+        self.assertEqual((committed["theme_color"], committed["tint_shade"]), ("accent1", -0.25))
+        self.assertIsNone(committed["color"])
+
+    def test_tint_and_shade_may_reach_their_bounds(self):
+        doc = rules.documents()[0]
+        for tint_shade in (-1, 1):
+            with self.subTest(tint_shade):
+                record = self.add_result(doc)
+                export = word_export(importer.read_parts(self.results / record["resaved_file"]))
+                font = export["stories"][0]["paragraphs"][0]["font"]
+                font.update(color=None, theme_color="text2", tint_shade=tint_shade)
+                self.add_v3(export)
+                self.run_import()
+                formatting = self.committed(doc)
+                first = formatting["stories"][0]["paragraphs"][0]
+                self.assertEqual(formatting["fonts"][first["font"]]["tint_shade"], tint_shade)
+
+    def test_the_run_reader_check_note_is_accepted(self):
+        doc = rules.documents()[0]
+        record = self.add_result(doc)
+        export = word_export(importer.read_parts(self.results / record["resaved_file"]), runs=False)
+        export.update(runs_note="left out: Word failed the check of the run reader")
+        self.add_v3(export, formatting_runs=False)
+        self.run_import()
+        self.assertFalse(self.committed(doc)["runs"])
+
     def test_a_style_name_may_have_253_characters(self):
         doc = rules.documents()[0]
         record = self.add_result(doc)
@@ -901,6 +938,24 @@ class Formatting(Import):
             "unexpected runs_note (not text)": (lambda e: e.update(runs_note=["x"]), {}),
             "unexpected alignment (not text)": (lambda e: first(e).update(alignment=["left"]), {}),
             "unexpected theme font (not text)": (lambda e: first(e)["font"].update(theme={}), {}),
+            "unexpected theme colour": (
+                lambda e: first(e)["font"].update(color=None, theme_color="accent9", tint_shade=0), {}
+            ),
+            "unexpected tint or shade": (
+                lambda e: first(e)["font"].update(color=None, theme_color="accent1", tint_shade=2), {}
+            ),
+            "unexpected tint or shade (true)": (
+                lambda e: first(e)["font"].update(color=None, theme_color="accent1", tint_shade=True), {}
+            ),
+            "unexpected theme colour (tint or shade alone)": (
+                lambda e: first(e)["font"].update(color=None, theme_color=None, tint_shade=0), {}
+            ),
+            "unexpected tint or shade (missing)": (
+                lambda e: first(e)["font"].update(color=None, theme_color="accent1"), {}
+            ),
+            "a theme colour next to an RGB colour": (
+                lambda e: first(e)["font"].update(color="FF0000", theme_color="accent1", tint_shade=0), {}
+            ),
         }
         doc = rules.documents()[0]
         for message, (edit, changes) in cases.items():
