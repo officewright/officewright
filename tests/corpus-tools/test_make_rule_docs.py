@@ -230,9 +230,52 @@ class Packages(unittest.TestCase):
 
     def test_refuses_a_colour_mapping_value_that_is_not_a_theme_colour(self):
         doc = next(doc for doc in self.docs if doc.color_mapping)
-        mistyped = dataclasses.replace(doc, color_mapping=(("t2", "accent7"),))
-        with self.assertRaisesRegex(ValueError, "accent7 is not a theme colour"):
-            rules.settings_xml(mistyped)
+        # A value that is no colour, and one that is the name of a mapping attribute.
+        for value in ("accent7", "t1"):
+            mistyped = dataclasses.replace(doc, color_mapping=(("t2", value),))
+            with self.assertRaisesRegex(ValueError, f"{value} is not a theme colour"):
+                rules.settings_xml(mistyped)
+
+    def test_paragraph_properties_lists_and_styles_follow_the_schema_order(self):
+        # Like CT_RPr, these are sequences (ECMA-376 Part 1: CT_PPr 17.3.1.26, CT_NumPr
+        # 17.9.18, CT_Lvl 17.9.6, CT_Style 17.7.4.17); an element the list does not name
+        # fails too.
+        orders = {
+            "pPr": [
+                "pStyle", "keepNext", "keepLines", "pageBreakBefore", "framePr",
+                "widowControl", "numPr", "suppressLineNumbers", "pBdr", "shd", "tabs",
+                "suppressAutoHyphens", "kinsoku", "wordWrap", "overflowPunct",
+                "topLinePunct", "autoSpaceDE", "autoSpaceDN", "bidi", "adjustRightInd",
+                "snapToGrid", "spacing", "ind", "contextualSpacing", "mirrorIndents",
+                "suppressOverlap", "jc", "textDirection", "textAlignment",
+                "textboxTightWrap", "outlineLvl", "divId", "cnfStyle", "rPr", "sectPr",
+                "pPrChange",
+            ],
+            "numPr": ["ilvl", "numId", "numberingChange", "ins"],
+            "lvl": [
+                "start", "numFmt", "lvlRestart", "pStyle", "isLgl", "suff", "lvlText",
+                "lvlPicBulletId", "legacy", "lvlJc", "pPr", "rPr",
+            ],
+            "style": [
+                "name", "aliases", "basedOn", "next", "link", "autoRedefine", "hidden",
+                "uiPriority", "semiHidden", "unhideWhenUsed", "qFormat", "locked",
+                "personal", "personalCompose", "personalReply", "rsid", "pPr", "rPr",
+                "tblPr", "trPr", "tcPr", "tblStylePr",
+            ],
+        }
+        for doc in self.docs:
+            parts = rules.parts(doc)
+            for name, _ in parts:
+                if name not in ("word/document.xml", "word/styles.xml", "word/numbering.xml"):
+                    continue
+                root = part(parts, name)
+                for kind, order in orders.items():
+                    for element in root.iter(f"{W}{kind}"):
+                        tags = [child.tag.replace(W, "") for child in element]
+                        for tag in tags:
+                            self.assertIn(tag, order, f"{doc.name}: {kind} {tags}")
+                        places = [order.index(tag) for tag in tags]
+                        self.assertEqual(places, sorted(set(places)), f"{doc.name}: {tags}")
 
     def test_run_properties_follow_the_schema_order(self):
         # CT_RPr is a sequence (ECMA-376 Part 1, 17.3.2.28); Word refuses a document whose
@@ -380,6 +423,143 @@ class Packages(unittest.TestCase):
             self.assertEqual(len(text.split("\n")), 10, text)
             for line in text.split("\n"):
                 self.assertEqual(label_of(line), (font, size), line)
+
+    def test_paragraph_rule_cases_have_the_markup_their_labels_name(self):
+        def val(element, tag):
+            child = None if element is None else element.find(f"{W}{tag}")
+            return None if child is None else child.get(f"{W}val")
+
+        def load(name):
+            """The document's styles by id, and per body paragraph its label without the
+            case number, its w:pStyle and its w:pPr, checking the case numbers."""
+            parts = rules.parts(next(doc for doc in self.docs if doc.name == name))
+            styles = {
+                style.get(f"{W}styleId"): style
+                for style in part(parts, "word/styles.xml").iter(f"{W}style")
+            }
+            cases = []
+            body = part(parts, "word/document.xml").find(f"{W}body")
+            for n, paragraph in enumerate(body.findall(f"{W}p"), 1):
+                text = "".join(t.text for t in paragraph.iter(f"{W}t"))
+                prefix = f"Case {n:02d}: "
+                self.assertTrue(text.startswith(prefix), text)
+                p_pr = paragraph.find(f"{W}pPr")
+                cases.append((text.removeprefix(prefix), val(p_pr, "pStyle"), p_pr))
+            return parts, styles, cases
+
+        # E-list-level-inherit: what each label says the style, the list definition and
+        # the paragraph give.
+        parts, styles, cases = load("E-list-level-inherit")
+        numbering = part(parts, "word/numbering.xml")
+        definition_of = {
+            n.get(f"{W}numId"): val(n, "abstractNumId") for n in numbering.iter(f"{W}num")
+        }
+        self.assertEqual(len(cases), 8)
+        for label, style, p_pr in cases:
+            styled, *rest = label.split("; ")
+            if style is None:
+                self.assertEqual(styled, "no style", label)
+            else:
+                said = re.fullmatch(
+                    r"the style gives (?:instance (\d+))?(?: and )?(?:level (\d+)|(no level))?",
+                    styled,
+                )
+                self.assertIsNotNone(said, label)
+                style_num_pr = styles[style].find(f"{W}pPr/{W}numPr")
+                instance = val(style_num_pr, "numId")
+                if said.group(1):
+                    self.assertEqual(instance, said.group(1), label)
+                if said.group(2) or said.group(3):
+                    self.assertEqual(val(style_num_pr, "ilvl"), said.group(2), label)
+            direct = ""
+            for clause in rest:
+                linked = re.fullmatch(r"level (\d+) names the style", clause)
+                if linked:
+                    level = numbering.find(
+                        f"{W}abstractNum[@{W}abstractNumId='{definition_of[instance]}']"
+                        f"/{W}lvl[@{W}ilvl='{linked.group(1)}']"
+                    )
+                    self.assertEqual(val(level, "pStyle"), style, label)
+                else:
+                    direct += clause
+            said = dict(re.findall(r"direct (numId|ilvl) (\d+)", direct))
+            for tag in ("numId", "ilvl"):
+                self.assertEqual(val(p_pr.find(f"{W}numPr"), tag), said.get(tag), label)
+        # Instances 1 and 2 use definitions of different number formats, so a render
+        # tells which one a paragraph took.
+        formats = {
+            d.get(f"{W}abstractNumId"): {val(lvl, "numFmt") for lvl in d.iter(f"{W}lvl")}
+            for d in numbering.iter(f"{W}abstractNum")
+        }
+        self.assertTrue(formats[definition_of["1"]].isdisjoint(formats[definition_of["2"]]))
+
+        # E-paragraph-units: every value the paragraph or its style writes in w:ind and
+        # w:spacing is in the label, and nothing else is.
+        def written(p_pr):
+            values = {}
+            for tag in ("ind", "spacing"):
+                element = None if p_pr is None else p_pr.find(f"{W}{tag}")
+                if element is not None:
+                    values.update((k.replace(W, ""), v) for k, v in element.items())
+            return {
+                (name, f"{int(value) / 20:g}" if name in ("left", "before") else value)
+                for name, value in values.items()
+            }
+
+        def said(text):
+            found = set(re.findall(r"(leftChars|beforeLines) (\d+)", text))
+            found |= {("left", n) for n in re.findall(r"left(?: indent)? (\d+) pt", text)}
+            before = r"(?<!left )(?<!indent )\b(\d+) pt"
+            found |= {("before", n) for n in re.findall(before, text)}
+            return found
+
+        _, styles, cases = load("E-paragraph-units")
+        self.assertEqual(len(cases), 8)
+        previous = None
+        for label, style, p_pr in cases:
+            styled, _, direct = label.partition("; ")
+            if style is None:
+                self.assertEqual(styled, "no style", label)
+            elif styled == "the same style":
+                self.assertEqual(style, previous, label)
+            else:
+                self.assertEqual(said(styled), written(styles[style].find(f"{W}pPr")), label)
+            self.assertEqual(said(direct), written(p_pr), label)
+            previous = style
+
+        # E-default-paragraph-style: each label names the paragraph's style, and the
+        # styles are what the purpose says, in that order.
+        doc = next(doc for doc in self.docs if doc.name == "E-default-paragraph-style")
+        _, styles, cases = load(doc.name)
+        self.assertEqual(len(cases), 5)
+        for label, style, _ in cases:
+            pattern = r"a paragraph that names (no style|\w+)(, after the others)?"
+            named = re.fullmatch(pattern, label)
+            self.assertIsNotNone(named, label)
+            name = named.group(1)
+            self.assertEqual(style, None if name == "no style" else name, label)
+        paragraph_styles = [
+            (style_id, element.get(f"{W}default"))
+            for style_id, element in styles.items()
+            if element.get(f"{W}type") == "paragraph"
+        ]
+        self.assertEqual(
+            paragraph_styles, [("FirstDefault", "1"), ("Normal", None), ("LastDefault", "1")]
+        )
+        described = re.findall(
+            r"(\w+) \((right-aligned|centred|left-aligned), (?:(\d+) pt after|no space after)\)",
+            doc.purpose,
+        )
+        self.assertEqual(
+            [style_id for style_id, _, _ in described], ["FirstDefault", "LastDefault", "Normal"]
+        )
+        alignment_of = {"right-aligned": "right", "centred": "center", "left-aligned": None}
+        for style_id, alignment, after in described:
+            p_pr = styles[style_id].find(f"{W}pPr")
+            self.assertEqual(val(p_pr, "jc"), alignment_of[alignment], style_id)
+            spacing = None if p_pr is None else p_pr.find(f"{W}spacing")
+            space = None if spacing is None else spacing.get(f"{W}after")
+            self.assertEqual(space, str(int(after) * 20) if after else None, style_id)
 
     def test_refuses_a_colour_mapping_attribute_that_does_not_exist(self):
         doc = next(doc for doc in self.docs if doc.color_mapping)

@@ -298,8 +298,11 @@ class Doc:
     mode: int = 15
     compat_flags: tuple[str, ...] = ()
     numbering: str | None = None
-    # Style definitions added to styles.xml after the built-in ones.
+    # Style definitions added to styles.xml after the built-in ones, and before Normal.
     styles: str = ""
+    styles_before_normal: str = ""
+    # Whether Normal is marked w:default.
+    normal_default: bool = True
     # Whether the document defaults give run properties (Calibri 11 pt), and properties
     # added to them.
     run_defaults: bool = True
@@ -1013,6 +1016,11 @@ def list_level_inherit() -> Doc:
         ("StyleNoLevel", None, "the style gives instance 1 and no level"),
         (None, '<w:numId w:val="1"/>', "no style; direct numId 1, no ilvl"),
         ("StyleLevel1", '<w:numId w:val="0"/>', "the style gives instance 1; direct numId 0"),
+        (
+            "StyleLevel1",
+            '<w:numId w:val="2"/>',
+            "the style gives instance 1 and level 1; direct numId 2, no ilvl",
+        ),
     ]
     body = "".join(
         para(run(f"Case {n:02d}: {label}"), p_style=style, num_pr=direct)
@@ -1021,8 +1029,8 @@ def list_level_inherit() -> Doc:
     return Doc(
         "E-list-level-inherit",
         "Which list level a paragraph takes when its style and its direct formatting each "
-        "give part of w:numPr, when a level's w:pStyle names the style, and when direct "
-        "formatting gives instance 0",
+        "give part of w:numPr, also with another instance, when a level's w:pStyle names the "
+        "style, and when direct formatting gives instance 0",
         body,
         numbering=numbering,
         styles=styles,
@@ -1047,8 +1055,8 @@ def paragraph_units() -> Doc:
                  ind={"left": 1440}),
             case(3, "the same style; direct leftChars 0 and left indent 72 pt", "CharsIndent",
                  ind={"leftChars": 0, "left": 1440}),
-            case(4, "no style; one w:ind gives left 36 pt and leftChars 300", None,
-                 ind={"left": 720, "leftChars": 300}),
+            case(4, "no style; one w:ind gives left 50 pt and leftChars 300", None,
+                 ind={"left": 1000, "leftChars": 300}),
             case(5, "a style gives 1 line before (beforeLines 100)", "LinesBefore"),
             case(6, "the same style; direct 24 pt before", "LinesBefore",
                  space=spacing(before=24)),
@@ -1068,8 +1076,15 @@ def paragraph_units() -> Doc:
 
 
 def default_paragraph_style() -> Doc:
-    styles = para_style(
-        "AlsoDefault",
+    # Normal is not marked w:default, so that Word's choice tells the first default
+    # style, the last one and the style named Normal apart.
+    first = para_style(
+        "FirstDefault",
+        '<w:spacing w:after="240"/><w:jc w:val="right"/>',
+        default=True,
+    )
+    last = para_style(
+        "LastDefault",
         '<w:spacing w:after="480"/><w:jc w:val="center"/>',
         default=True,
     )
@@ -1077,16 +1092,21 @@ def default_paragraph_style() -> Doc:
         [
             para(run("Case 01: a paragraph that names no style")),
             para(run("Case 02: a paragraph that names Normal"), p_style="Normal"),
-            para(run("Case 03: a paragraph that names AlsoDefault"), p_style="AlsoDefault"),
-            para(run("Case 04: a paragraph that names no style, after the others")),
+            para(run("Case 03: a paragraph that names FirstDefault"), p_style="FirstDefault"),
+            para(run("Case 04: a paragraph that names LastDefault"), p_style="LastDefault"),
+            para(run("Case 05: a paragraph that names no style, after the others")),
         ]
     )
     return Doc(
         "E-default-paragraph-style",
         "Which style a paragraph without w:pStyle takes when two paragraph styles are marked "
-        "w:default: Normal, written first, or AlsoDefault (centred, 24 pt after), written last",
+        "w:default and Normal is not: FirstDefault (right-aligned, 12 pt after), written "
+        "before Normal, LastDefault (centred, 24 pt after), written last, or Normal "
+        "(left-aligned, no space after)",
         body,
-        styles=styles,
+        styles=last,
+        styles_before_normal=first,
+        normal_default=False,
     )
 
 
@@ -1144,6 +1164,7 @@ def styles_xml(doc: Doc) -> str:
             '<w:lang w:val="en-US" w:eastAsia="en-US" w:bidi="ar-SA"/>'
             "</w:rPr></w:rPrDefault>"
         )
+    normal_default = ' w:default="1"' if doc.normal_default else ""
     return (
         f'<w:styles xmlns:w="{W_NS}">'
         "<w:docDefaults>"
@@ -1152,7 +1173,8 @@ def styles_xml(doc: Doc) -> str:
         '<w:spacing w:after="0" w:line="240" w:lineRule="auto"/>'
         "</w:pPr></w:pPrDefault>"
         "</w:docDefaults>"
-        '<w:style w:type="paragraph" w:default="1" w:styleId="Normal">'
+        f"{doc.styles_before_normal}"
+        f'<w:style w:type="paragraph"{normal_default} w:styleId="Normal">'
         '<w:name w:val="Normal"/><w:qFormat/></w:style>'
         '<w:style w:type="character" w:default="1" w:styleId="DefaultParagraphFont">'
         '<w:name w:val="Default Paragraph Font"/><w:uiPriority w:val="1"/>'
