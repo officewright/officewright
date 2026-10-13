@@ -791,6 +791,37 @@ mod tests {
         }
     }
 
+    /// Makes `link` a symbolic link to the file `target`. On Windows this needs Developer
+    /// Mode or an administrator, which CI runners have; without them the test fails, as
+    /// CLAUDE.md allows no skipped tests.
+    #[cfg(any(unix, windows))]
+    fn file_link(target: &Path, link: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(target, link)
+            .expect("a symbolic link needs Developer Mode or an administrator on Windows");
+    }
+
+    /// Makes `link` a link to the directory `target`: a symbolic link, and on Windows a
+    /// directory junction, which needs no privilege.
+    #[cfg(any(unix, windows))]
+    fn dir_link(target: &Path, link: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        #[cfg(windows)]
+        {
+            let status = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .stdout(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert!(status.success(), "mklink /J {}", link.display());
+        }
+    }
+
     #[test]
     fn a_clone_is_a_book_of_its_own() {
         let dir = TempDir::new("clone");
@@ -873,11 +904,11 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn survives_directory_link_loops() {
         let dir = TempDir::new("loop");
         fs::write(dir.0.join("sans.ttf"), TestFont::new("Test Sans").build()).unwrap();
-        std::os::unix::fs::symlink(&dir.0, dir.0.join("self")).unwrap();
+        dir_link(&dir.0, &dir.0.join("self"));
         let mut book = FontBook::new();
         assert_eq!(book.add_dir(&dir.0).unwrap(), 1);
     }
@@ -1228,7 +1259,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn adds_fonts_through_links() {
         let dir = TempDir::new("links");
         let fonts = dir.0.join("fonts");
@@ -1238,7 +1269,7 @@ mod tests {
         let font = fonts.join("sans.ttf");
         let link = links.join("link.ttf");
         fs::write(&font, TestFont::new("Test Sans").build()).unwrap();
-        std::os::unix::fs::symlink(&font, &link).unwrap();
+        file_link(&font, &link);
 
         let mut book = FontBook::new();
         assert_eq!(book.add_file(&link).unwrap(), 1);
@@ -1249,25 +1280,39 @@ mod tests {
         let mut book = FontBook::new();
         assert_eq!(book.add_dir(&links).unwrap(), 1);
         assert!(book.skipped().is_empty(), "{:?}", book.skipped());
+        // The folder of fonts reached through a link to it holds the same font.
+        let alias = dir.0.join("alias");
+        dir_link(&fonts, &alias);
+        assert_eq!(book.add_dir(&alias).unwrap(), 0);
+        assert_eq!(book.add_dir(&fonts).unwrap(), 0);
+        assert_eq!(book.len(), 1);
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn lists_font_files_that_cannot_be_resolved_once() {
         let dir = TempDir::new("dangling");
         let fonts = dir.0.join("fonts");
         fs::create_dir(&fonts).unwrap();
         let link = fonts.join("gone.ttf");
-        std::os::unix::fs::symlink(fonts.join("removed.ttf"), &link).unwrap();
+        file_link(&fonts.join("removed.ttf"), &link);
         // A dangling link with another name is not a font file and is not listed.
-        std::os::unix::fs::symlink(fonts.join("removed.txt"), fonts.join("gone.txt")).unwrap();
+        file_link(&fonts.join("removed.txt"), &fonts.join("gone.txt"));
         // The same directory reached through a link to it.
         let alias = dir.0.join("alias");
-        std::os::unix::fs::symlink(&fonts, &alias).unwrap();
+        dir_link(&fonts, &alias);
         let mut book = FontBook::new();
         book.add_dir(&fonts).unwrap();
         book.add_dir(&fonts).unwrap();
         book.add_dir(&alias).unwrap();
+        // On Windows, a directory symbolic link reaches it too, as a junction does.
+        #[cfg(windows)]
+        {
+            let symlink = dir.0.join("symlink");
+            std::os::windows::fs::symlink_dir(&fonts, &symlink)
+                .expect("a symbolic link needs Developer Mode or an administrator on Windows");
+            book.add_dir(&symlink).unwrap();
+        }
         assert_eq!(book.skipped().len(), 1, "{:?}", book.skipped());
         assert_eq!(book.skipped()[0].path(), Some(link.as_path()));
         assert!(matches!(book.skipped()[0].error(), Error::Read { .. }));
