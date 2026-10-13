@@ -7,6 +7,8 @@ extend-ignore-re = ['-Fo"']
 extend-exclude = ["tests/corpus/*", "!tests/corpus/SOURCES.md"]
 
 [default.extend-words]
+# PDF's Flate filter (FlateDecode, ISO 32000-1, 7.4.4), not a misspelling of "flat".
+flate = "flate"
 # OpenType tags, not misspellings: the glyph location table and the width axis.
 loca = "loca"
 wdth = "wdth"

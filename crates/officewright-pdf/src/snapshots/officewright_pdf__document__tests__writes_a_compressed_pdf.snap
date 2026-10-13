@@ -1,0 +1,37 @@
+---
+source: crates/officewright-pdf/src/document.rs
+expression: readable(&pdf)
+---
+%PDF-1.4
+%\xe2\xe3\xcf\xd3
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [4 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595.2756 841.8898] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>
+endobj
+5 0 obj
+<< /Length 111 /Filter /FlateDecode >>
+stream
+x\x9c\x95\xd0\xb1\t\x80@\x0c@\xd1>S\xa4T\x90x\x17\xcf\\l\x05\xc5\x012\x82Z\xc8\x81`\xe3\xfaZ[\x08\x19\xe0\x17\xef\x8f\x06\xed\x1c12\xda\x0e\x991\xf7\x99T\x07E[\xa1Z\xb6R\xce\x06\xef\xf3*k\x8dv\xc0d0~\x83\xd4Qr\x05<Pp\x051\x91\xb8\x82\x10\x88=\x81h\xefCK\x8e>\xb4\xbc[]hI\xecC\x0b\xeb?\xfa\x01yxx<
+endstream
+endobj
+xref
+0 6
+0000000000 65535 f\r
+0000000015 00000 n\r
+0000000064 00000 n\r
+0000000121 00000 n\r
+0000000218 00000 n\r
+0000000354 00000 n\r
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+537
+%%EOF

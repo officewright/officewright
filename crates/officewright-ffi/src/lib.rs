@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use officewright_core::Error;
 use officewright_font::{FontBook, FontOrigin, FontRequest, FontResolver, ResolutionKind};
-use officewright_pdf::{Document, EmbeddingNote, Font, PageSize, Pt, StandardFont};
+use officewright_pdf::{Compression, Document, EmbeddingNote, Font, PageSize, Pt, StandardFont};
 
 /// Version of the C ABI described by `officewright.h`, bumped on every breaking
 /// change. Bindings compare it with `ow_abi_version()` when they load the library.
@@ -187,6 +187,15 @@ pub const OW_RESOLUTION_FALLBACK: i32 = 6;
 
 /// No font could be found at all.
 pub const OW_RESOLUTION_MISSING: i32 = 7;
+
+/// For `ow_pdf_document_set_compression`: page content and embedded fonts are stored as
+/// they are, so the page content can be read in a text editor.
+pub const OW_COMPRESSION_NONE: i32 = 0;
+
+/// For `ow_pdf_document_set_compression`: page content and embedded fonts are
+/// compressed with the Flate filter wherever that makes them smaller. Every PDF reader
+/// decompresses Flate, so this is the default.
+pub const OW_COMPRESSION_FLATE: i32 = 1;
 
 /// Returns the C ABI version of the loaded library.
 ///
@@ -361,6 +370,38 @@ pub unsafe extern "C" fn ow_pdf_document_add_text(
             ),
         })?;
         page.add_text(Pt(x_pt), Pt(y_pt), font, Pt(font_size_pt), text)?;
+        Ok(())
+    })
+}
+
+/// Sets how the document stores page content and embedded fonts when it is saved:
+/// `OW_COMPRESSION_FLATE`, the default, or `OW_COMPRESSION_NONE`. Fails with
+/// `OW_STATUS_INVALID_ARGUMENT` for any other value, leaving the document unchanged.
+///
+/// # Safety
+///
+/// `doc` must be NULL or a live handle not used by another thread during the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_pdf_document_set_compression(
+    doc: *mut OwPdfDocument,
+    compression: i32,
+) -> OwStatus {
+    guard(|| {
+        // SAFETY: the caller passes NULL or a live handle it does not share.
+        let doc = unsafe { doc_mut(doc) }?;
+        doc.set_compression(match compression {
+            OW_COMPRESSION_NONE => Compression::None,
+            OW_COMPRESSION_FLATE => Compression::Flate,
+            other => {
+                return Err(Failure {
+                    status: OwStatus::InvalidArgument,
+                    message: format!(
+                        "compression is {other}, not OW_COMPRESSION_NONE (0) or \
+                         OW_COMPRESSION_FLATE (1)"
+                    ),
+                });
+            }
+        });
         Ok(())
     })
 }
@@ -1346,6 +1387,10 @@ mod tests {
     #[test]
     fn builds_and_saves_a_document() {
         let doc = hello();
+        // Uncompressed, to read the page content.
+        // SAFETY: a live handle.
+        let status = unsafe { ow_pdf_document_set_compression(doc, OW_COMPRESSION_NONE) };
+        assert_eq!(status, OwStatus::Ok);
         let pdf = save_bytes(doc);
         assert!(pdf.starts_with(b"%PDF-1.4\n"));
         assert!(pdf.ends_with(b"%%EOF\n"));
@@ -1392,6 +1437,51 @@ mod tests {
             ow_pdf_font_free(font);
         }
         assert_eq!(width, 7.22);
+    }
+
+    #[test]
+    fn sets_how_streams_are_stored() {
+        let contains = |pdf: &[u8], part: &[u8]| pdf.windows(part.len()).any(|w| w == part);
+        let font = helvetica();
+        let mut doc = ptr::null_mut();
+        let text = c(&"Hello, world\n".repeat(40));
+        // SAFETY: valid strings, out-pointers and handles, each freed once.
+        unsafe {
+            let status =
+                ow_pdf_document_from_text(text.as_ptr(), 595.0, 842.0, font, 11.0, &mut doc);
+            assert_eq!(status, OwStatus::Ok);
+            ow_pdf_font_free(font);
+            // Compressed unless set otherwise.
+            let compressed = save_bytes(doc);
+            assert!(contains(&compressed, b"/Filter /FlateDecode"));
+            assert!(!contains(&compressed, b"(Hello, world) Tj"));
+
+            let status = ow_pdf_document_set_compression(doc, OW_COMPRESSION_NONE);
+            assert_eq!(status, OwStatus::Ok);
+            let plain = save_bytes(doc);
+            assert!(!contains(&plain, b"/Filter"));
+            assert!(contains(&plain, b"(Hello, world) Tj"));
+            assert!(plain.len() > compressed.len());
+
+            assert_eq!(
+                ow_pdf_document_set_compression(doc, 2),
+                OwStatus::InvalidArgument
+            );
+            assert_eq!(
+                last_error(),
+                "compression is 2, not OW_COMPRESSION_NONE (0) or OW_COMPRESSION_FLATE (1)"
+            );
+            assert_eq!(save_bytes(doc), plain);
+            let status = ow_pdf_document_set_compression(doc, OW_COMPRESSION_FLATE);
+            assert_eq!(status, OwStatus::Ok);
+            assert_eq!(save_bytes(doc), compressed);
+
+            assert_eq!(
+                ow_pdf_document_set_compression(ptr::null_mut(), OW_COMPRESSION_NONE),
+                OwStatus::NullArgument
+            );
+            ow_pdf_document_free(doc);
+        }
     }
 
     /// A non-NULL placeholder for an out-parameter, to see that a failing call resets it.
