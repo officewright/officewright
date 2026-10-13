@@ -79,8 +79,12 @@ if os.name != "nt":
 
 def remove_read_only(function, path, _):
     """Git writes its objects read-only, which Windows does not let rmtree delete."""
-    os.chmod(path, stat.S_IWRITE)
-    function(path)
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        function(path)
+    except FileNotFoundError:
+        # Gone already, such as a lock of a git process that has just ended.
+        pass
 
 
 class CheckAddedFiles(unittest.TestCase):
@@ -92,6 +96,10 @@ class CheckAddedFiles(unittest.TestCase):
         else:
             self.addCleanup(shutil.rmtree, self.repo, onerror=remove_read_only)
         self.git("init", "-q")
+        # No background maintenance after a commit, whose lock files would come and go
+        # while the repository is removed.
+        self.git("config", "maintenance.auto", "false")
+        self.git("config", "gc.auto", "0")
 
     def git(self, *args):
         subprocess.run(
