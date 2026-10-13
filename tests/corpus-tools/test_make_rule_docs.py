@@ -152,7 +152,11 @@ class Packages(unittest.TestCase):
             named = set()
             for name in ("word/document.xml", "word/styles.xml"):
                 for fonts in part(parts, name).iter(f"{W}rFonts"):
-                    named.update(fonts.attrib.values())
+                    for attribute, value in fonts.attrib.items():
+                        # A theme attribute names the theme's font for its slot.
+                        if attribute.endswith("Theme"):
+                            value = rules.THEME_FONTS[rules.THEME_SLOTS[value]]
+                        named.add(value)
             self.assertEqual(table, named, doc.name)
 
     def test_compatibility_settings_match_the_name(self):
