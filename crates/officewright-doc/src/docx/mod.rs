@@ -2,11 +2,14 @@
 
 mod body;
 mod capture;
+mod fonts;
+pub(crate) mod numbering;
 pub(crate) mod properties;
 mod section;
 mod settings;
 mod styles;
 pub(crate) mod table_properties;
+mod theme;
 
 use officewright_opc::{Package, Part};
 
@@ -24,6 +27,9 @@ const W_STRICT: &str = "http://purl.oclc.org/ooxml/wordprocessingml/main";
 /// The relationships namespace of attributes such as `r:id`, Transitional and Strict.
 const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const R_STRICT: &str = "http://purl.oclc.org/ooxml/officeDocument/relationships";
+/// The main namespace of DrawingML, Transitional and Strict.
+const A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+const A_STRICT: &str = "http://purl.oclc.org/ooxml/drawingml/main";
 
 /// The relationship type of the main part, Transitional and Strict.
 const OFFICE_DOCUMENT: [&str; 2] = [
@@ -36,6 +42,7 @@ impl Names {
         Self {
             w: [Some(strings.intern(W)), Some(strings.intern(W_STRICT))],
             r: [Some(strings.intern(R)), Some(strings.intern(R_STRICT))],
+            a: [Some(strings.intern(A)), Some(strings.intern(A_STRICT))],
             mc: Some(strings.intern(officewright_opc::mce::NAMESPACE)),
         }
     }
@@ -72,6 +79,42 @@ pub(crate) fn read(data: Vec<u8>, limits: &Limits) -> Result<Document> {
             &mut budget,
         )?;
     }
+    if let Some(part) = related(&package, &main, &NUMBERING) {
+        let name = part.name().as_str();
+        let xml = part.read()?;
+        numbering::read(
+            &mut document,
+            &xml,
+            name,
+            limits,
+            &mut diagnostics,
+            &mut budget,
+        )?;
+    }
+    if let Some(part) = related(&package, &main, &THEME) {
+        let name = part.name().as_str();
+        let xml = part.read()?;
+        theme::read(
+            &mut document,
+            &xml,
+            name,
+            limits,
+            &mut diagnostics,
+            &mut budget,
+        )?;
+    }
+    if let Some(part) = related(&package, &main, &FONT_TABLE) {
+        let name = part.name().as_str();
+        let xml = part.read()?;
+        fonts::read(
+            &mut document,
+            &xml,
+            name,
+            limits,
+            &mut diagnostics,
+            &mut budget,
+        )?;
+    }
     if let Some(part) = related(&package, &main, &SETTINGS) {
         let name = part.name().as_str();
         let xml = part.read()?;
@@ -87,6 +130,24 @@ pub(crate) fn read(data: Vec<u8>, limits: &Limits) -> Result<Document> {
     document.diagnostics = diagnostics.finish();
     Ok(document)
 }
+
+/// The relationship type of the numbering part, Transitional and Strict.
+const NUMBERING: [&str; 2] = [
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/numbering",
+];
+
+/// The relationship type of the theme part, Transitional and Strict.
+const THEME: [&str; 2] = [
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/theme",
+];
+
+/// The relationship type of the font table part, Transitional and Strict.
+const FONT_TABLE: [&str; 2] = [
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/fontTable",
+];
 
 /// The relationship type of the settings part, Transitional and Strict.
 const SETTINGS: [&str; 2] = [

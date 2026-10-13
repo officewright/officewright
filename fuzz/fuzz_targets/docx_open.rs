@@ -1,6 +1,8 @@
 //! Opens the input as a Word document and walks everything the model read from it:
 //! sections, blocks, tables, inline content and runs, the text, and the XML of every
-//! element kept without being understood, which must read back as XML.
+//! element kept without being understood, which must read back as XML. The formatting in
+//! effect of every run and paragraph mark is resolved, and must not depend on what the
+//! resolver remembered from earlier runs.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
@@ -18,11 +20,29 @@ fuzz_target!(|data: &[u8]| {
     };
     let _ = document.text();
     let _ = document.diagnostics();
+    if let Some(theme) = document.theme() {
+        let _ = (theme.colors().map(|colors| colors.name()), theme.fonts());
+    }
+    for font in document.fonts() {
+        let _ = (font.panose(), font.signature(), font.embedded().len());
+    }
     let settings = document.settings();
     let _ = (
         settings.effective_compatibility_mode(),
         settings.compatibility_options().count(),
     );
+    let numbering = document.numbering();
+    for definition in numbering.definitions() {
+        let _ = (
+            definition.identifier(),
+            definition.multi_level_type(),
+            definition.name(),
+        );
+        let _ = (definition.levels(), definition.level(0));
+    }
+    for instance in numbering.instances() {
+        let _ = (instance.definition(), instance.overrides());
+    }
     let styles = document.styles();
     let _ = styles.default_run_properties();
     let _ = styles.default_paragraph_properties();
@@ -36,6 +56,10 @@ fuzz_target!(|data: &[u8]| {
         );
         assert!(styles.get(style.id()).is_some());
     }
+    let mut formats = document.formats();
+    // A fresh resolver walks every style chain again, so only the first runs are compared:
+    // the check stays, the cost does not grow with runs × chain length.
+    let mut compared = 0;
     let mut blocks: Vec<Block<'_>> = document.sections().flat_map(|s| s.blocks()).collect();
     while let Some(block) = blocks.pop() {
         match block {
@@ -43,6 +67,14 @@ fuzz_target!(|data: &[u8]| {
                 assert!(document.paragraph(paragraph.id()).is_some());
                 let _ = paragraph.properties();
                 let _ = paragraph.text();
+                let _ = formats.paragraph_mark(paragraph);
+                for run in paragraph.runs() {
+                    let format = formats.run(run);
+                    if compared < 256 {
+                        compared += 1;
+                        assert_eq!(format, run.format());
+                    }
+                }
                 let mut inlines: Vec<Inline<'_>> = paragraph.inlines().collect();
                 while let Some(inline) = inlines.pop() {
                     match inline {

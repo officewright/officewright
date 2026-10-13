@@ -56,6 +56,12 @@ pub enum OwStatus {
     /// officewright panicked, which is a bug. Handles passed to the call may only be
     /// freed afterwards.
     Panic = 6,
+    /// The input is damaged, or is not what it was given as: data that is not a font, a
+    /// font whose tables cannot be read.
+    Malformed = 7,
+    /// The input exceeds one of the limits that keep the time and memory a file can take
+    /// bounded.
+    LimitExceeded = 8,
 }
 
 /// A PDF document being built.
@@ -410,8 +416,10 @@ pub unsafe extern "C" fn ow_pdf_document_set_compression(
 ///
 /// The file is generated in memory first, so a document error never touches `path`;
 /// an I/O error while writing can leave a partial file. Fails with
-/// `OW_STATUS_INVALID_ARGUMENT` if the document has no pages and `OW_STATUS_IO` if the
-/// file cannot be written.
+/// `OW_STATUS_INVALID_ARGUMENT` if the document has no pages, `OW_STATUS_MALFORMED` if an
+/// embedded font turns out to be damaged when it is reduced to the glyphs the document
+/// uses, `OW_STATUS_UNSUPPORTED` if it uses a feature that cannot be subset yet, and
+/// `OW_STATUS_IO` if the file cannot be written.
 ///
 /// # Safety
 ///
@@ -435,7 +443,10 @@ pub unsafe extern "C" fn ow_pdf_document_save_path(
 /// Returns the document as a PDF file in memory: `*out_data` points to `*out_len`
 /// bytes, which the caller releases with `ow_bytes_free(*out_data, *out_len)`.
 ///
-/// Fails with `OW_STATUS_INVALID_ARGUMENT` if the document has no pages.
+/// Fails with `OW_STATUS_INVALID_ARGUMENT` if the document has no pages,
+/// `OW_STATUS_MALFORMED` if an embedded font turns out to be damaged when it is reduced
+/// to the glyphs the document uses, and `OW_STATUS_UNSUPPORTED` if it uses a feature
+/// that cannot be subset yet.
 ///
 /// # Safety
 ///
@@ -526,9 +537,10 @@ pub unsafe extern "C" fn ow_pdf_font_new_standard(
 /// right-to-left layout is refused. Restrictions in the font's license that do not stop
 /// embedding are listed by `ow_pdf_font_note_count` and `ow_pdf_font_note`.
 ///
-/// Fails with `OW_STATUS_IO` if the file cannot be read, `OW_STATUS_INVALID_ARGUMENT` if
-/// it is not a font, has no such face or is damaged, and `OW_STATUS_UNSUPPORTED` if its
-/// license forbids embedding or its outlines cannot be embedded (CFF2). On success
+/// Fails with `OW_STATUS_IO` if the file cannot be read, `OW_STATUS_MALFORMED` if it is
+/// not a font or is damaged, `OW_STATUS_INVALID_ARGUMENT` if it has no such face, and
+/// `OW_STATUS_UNSUPPORTED` if its license forbids embedding or its outlines cannot be
+/// embedded (CFF2). On success
 /// `*out_font` is a new handle for `ow_pdf_font_free`.
 ///
 /// # Safety
@@ -780,8 +792,8 @@ pub unsafe extern "C" fn ow_font_book_add_dir(
 /// Adds the font faces of the font file or collection at `path` (UTF-8), and returns in
 /// `*out_added` the number of faces added.
 ///
-/// Fails with `OW_STATUS_IO` if the file cannot be read and `OW_STATUS_INVALID_ARGUMENT`
-/// if it is not a font or every face in it is damaged.
+/// Fails with `OW_STATUS_IO` if the file cannot be read and `OW_STATUS_MALFORMED` if it
+/// is not a font or every face in it is damaged.
 ///
 /// # Safety
 ///
@@ -812,8 +824,8 @@ pub unsafe extern "C" fn ow_font_book_add_file(
 /// and returns in `*out_added` the number of faces added. The bytes are copied; the
 /// caller keeps its buffer.
 ///
-/// Fails with `OW_STATUS_INVALID_ARGUMENT` if the data is not a font or every face in
-/// it is damaged.
+/// Fails with `OW_STATUS_MALFORMED` if the data is not a font or every face in it is
+/// damaged.
 ///
 /// # Safety
 ///
@@ -982,8 +994,8 @@ pub unsafe extern "C" fn ow_font_resolver_new(
 ///
 /// Fails with `OW_STATUS_UNSUPPORTED` if no font could be found or the chosen font's
 /// license forbids embedding, `OW_STATUS_INVALID_ARGUMENT` if `bold` or `italic` is not
-/// 0 or 1 or the chosen font is damaged, and `OW_STATUS_IO` if its file cannot be read
-/// any more.
+/// 0 or 1, `OW_STATUS_MALFORMED` if the chosen font is damaged, and `OW_STATUS_IO` if
+/// its file cannot be read any more.
 ///
 /// # Safety
 ///
@@ -1137,6 +1149,8 @@ impl From<Error> for Failure {
             Error::Io { .. } => OwStatus::Io,
             Error::InvalidArgument(_) => OwStatus::InvalidArgument,
             Error::Unsupported(_) => OwStatus::Unsupported,
+            Error::Malformed(_) => OwStatus::Malformed,
+            Error::LimitExceeded(_) => OwStatus::LimitExceeded,
             // A kind of error this version of the ABI has no status for yet.
             _ => OwStatus::Unsupported,
         };
@@ -1484,6 +1498,46 @@ mod tests {
         }
     }
 
+    #[test]
+    fn maps_each_kind_of_error_to_its_status() {
+        let io = Error::Io {
+            message: "cannot read a.ttf".into(),
+            source: std::io::Error::other("gone"),
+        };
+        let cases = [
+            (io, OwStatus::Io, "cannot read a.ttf: gone"),
+            (
+                Error::InvalidArgument("bad".into()),
+                OwStatus::InvalidArgument,
+                "bad",
+            ),
+            (
+                Error::Unsupported("later".into()),
+                OwStatus::Unsupported,
+                "later",
+            ),
+            (
+                Error::Malformed("broken".into()),
+                OwStatus::Malformed,
+                "broken",
+            ),
+            (
+                Error::LimitExceeded("too big".into()),
+                OwStatus::LimitExceeded,
+                "too big",
+            ),
+        ];
+        for (err, status, message) in cases {
+            let failure = Failure::from(err);
+            assert_eq!(failure.status, status);
+            assert_eq!(failure.message, message);
+        }
+        // Statuses are only ever appended, so existing values keep their numbers.
+        assert_eq!(OwStatus::Panic as i32, 6);
+        assert_eq!(OwStatus::Malformed as i32, 7);
+        assert_eq!(OwStatus::LimitExceeded as i32, 8);
+    }
+
     /// A non-NULL placeholder for an out-parameter, to see that a failing call resets it.
     fn placeholder<T>() -> *mut T {
         ptr::NonNull::dangling().as_ptr()
@@ -1778,12 +1832,23 @@ mod tests {
     #[test]
     fn reports_fonts_it_cannot_open() {
         let (status, font) = open_bytes(b"not a font");
-        assert_eq!(status, OwStatus::InvalidArgument);
+        assert_eq!(status, OwStatus::Malformed);
         assert!(font.is_null());
         assert!(
             last_error().starts_with("cannot use the font data: data is not a TrueType"),
             "{}",
             last_error()
+        );
+        // A face the file does not have is the caller's mistake, not damage.
+        let data = fs::read(minimal_font_path()).unwrap();
+        let mut font: *mut OwPdfFont = placeholder();
+        // SAFETY: `data` is valid for its length; a valid out-pointer.
+        let status = unsafe { ow_pdf_font_open_bytes(data.as_ptr(), data.len(), 1, &mut font) };
+        assert_eq!(status, OwStatus::InvalidArgument);
+        assert!(font.is_null());
+        assert_eq!(
+            last_error(),
+            "cannot use the font data: font face 1 does not exist, the file has 1 face"
         );
         let (status, _) = open_bytes(&minimal_font_with_fs_type(0x0002));
         assert_eq!(status, OwStatus::Unsupported);
@@ -1947,6 +2012,39 @@ mod tests {
         (status, font)
     }
 
+    #[test]
+    fn reports_a_chosen_font_that_turned_out_damaged() {
+        let dir =
+            std::env::temp_dir().join(format!("officewright-ffi-damaged-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("minimal.ttf");
+        fs::copy(minimal_font_path(), &path).unwrap();
+        let book = new_book();
+        let mut added = 0;
+        // SAFETY: a live handle, a NUL-terminated path and a valid out-pointer.
+        let status =
+            unsafe { ow_font_book_add_dir(book, c(dir.to_str().unwrap()).as_ptr(), &mut added) };
+        assert_eq!(status, OwStatus::Ok);
+        assert_eq!(added, 1);
+        let resolver = new_resolver(book);
+        // The resolver reads the file when it chooses the font, by which time it is junk.
+        fs::write(&path, b"no longer a font").unwrap();
+        let (status, font) = resolve(resolver, "Officewright Test", 0);
+        assert_eq!(status, OwStatus::Malformed);
+        assert!(font.is_null());
+        assert!(
+            last_error().starts_with(&format!("cannot use the font in {}: ", path.display())),
+            "{}",
+            last_error()
+        );
+        // SAFETY: live handles, each freed once.
+        unsafe {
+            ow_font_resolver_free(resolver);
+            ow_font_book_free(book);
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// The substitution report of `resolver`.
     fn substitutions(resolver: *const OwFontResolver) -> Vec<(i32, String)> {
         let mut count = 99;
@@ -2105,11 +2203,11 @@ mod tests {
             assert_eq!(added, 0);
             assert_eq!(
                 ow_font_book_add_file(book, c(broken.to_str().unwrap()).as_ptr(), &mut added),
-                OwStatus::InvalidArgument
+                OwStatus::Malformed
             );
             assert_eq!(
                 ow_font_book_add_bytes(book, b"junk".as_ptr(), 4, &mut added),
-                OwStatus::InvalidArgument
+                OwStatus::Malformed
             );
             // A scan that finds nothing new changes nothing either. Calls that change
             // nothing keep the message valid; Miri would report a read of freed memory.

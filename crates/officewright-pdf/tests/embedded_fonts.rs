@@ -542,13 +542,19 @@ fn reports_fonts_it_cannot_use() -> TestResult {
     assert_eq!(err.to_string(), "cannot use the font data");
     let core = officewright_core::Error::from(err);
     assert!(
-        matches!(&core, officewright_core::Error::InvalidArgument(message)
+        matches!(&core, officewright_core::Error::Malformed(message)
             if message.starts_with("cannot use the font data: data is not a TrueType")),
         "{core}"
     );
 
+    // A face the file does not have is the caller's mistake, not damage.
     let err = Font::from_bytes(liberation_sans()?, 3).unwrap_err();
     assert!(matches!(err, Error::Font { .. }), "{err:?}");
+    let core = officewright_core::Error::from(err);
+    assert!(
+        matches!(core, officewright_core::Error::InvalidArgument(_)),
+        "{core}"
+    );
 
     let missing = repository().join("tests/fonts/no-such-font.ttf");
     let err = Font::from_file(&missing, 0).unwrap_err();
@@ -612,11 +618,16 @@ fn resolves_families_and_reports_the_substitutions() -> TestResult {
         Font::resolve(&mut resolver, &FontRequest::new("Arial"))?,
         liberation
     );
+    // The bold face of tests/fonts is used as it is.
     let bold = Font::resolve(
         &mut resolver,
         &FontRequest::new("Liberation Sans").bold(true),
     )?;
-    assert_eq!(bold, liberation);
+    assert_eq!(bold.name(), "LiberationSans-Bold");
+    // Noto Sans has no bold face there, so its regular face is drawn bold, and the
+    // report says so.
+    let noto_bold = Font::resolve(&mut resolver, &FontRequest::new("Noto Sans").bold(true))?;
+    assert_eq!(noto_bold, noto);
     let calibri = Font::resolve(&mut resolver, &FontRequest::new("Calibri"))?;
     assert_eq!(calibri.name(), "Carlito-Regular");
     // Verdana has no metric-compatible substitute, so a common sans-serif font stands
@@ -632,7 +643,7 @@ fn resolves_families_and_reports_the_substitutions() -> TestResult {
         report,
         [
             "\"Arial\" → \"Liberation Sans\" (metric-compatible substitute)",
-            "\"Liberation Sans\" bold → \"Liberation Sans\" with synthetic bold",
+            "\"Noto Sans\" bold → \"Noto Sans\" with synthetic bold",
             "\"Calibri\" → \"Carlito\" (metric-compatible substitute)",
             "\"Verdana\" → \"Liberation Sans\" (fallback; not installed)",
         ]

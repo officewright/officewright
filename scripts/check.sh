@@ -115,6 +115,10 @@ packaged=$(cargo package --list --allow-dirty --quiet -p officewright-font)
 if printf '%s\n' "$packaged" | grep -E '^tests/(metric_compatible|third_party_fonts)\.rs$'; then
 	fail "officewright-font would publish the file above"
 fi
+packaged=$(cargo package --list --allow-dirty --quiet -p officewright-layout)
+if printf '%s\n' "$packaged" | grep -E '^tests/shaping\.rs$'; then
+	fail "officewright-layout would publish the file above"
+fi
 packaged=$(cargo package --list --allow-dirty --quiet -p officewright-cli)
 if printf '%s\n' "$packaged" | grep -E '^tests/fonts\.rs$'; then
 	fail "officewright-cli would publish the file above"
@@ -141,6 +145,13 @@ if [ "$os" = windows ]; then
 	step "make-reference.ps1 without Word (Windows PowerShell)"
 	powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tests/corpus-tools/test_make_reference.ps1
 fi
+
+step "corpus runner over tests/corpus (against tests/corpus/baseline.json)"
+# Every committed Word document opens in a child process; a panic, hang, memory blow-up or
+# any change of a file's status from the baseline fails. An improvement is accepted by
+# running this with --update-baseline and committing the baseline.
+cargo run --quiet -p corpus-runner -- run --baseline tests/corpus/baseline.json \
+	--expected tools/corpus-runner/expected-errors.tsv tests/corpus
 
 step "C library (cargo cinstall)"
 # The same layout the release archives ship; scripts/check-capi.sh tests it as a user would.
