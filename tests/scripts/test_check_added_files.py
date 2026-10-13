@@ -32,8 +32,16 @@ OFFENDING = {
     "home.json": b'{"home": "/Users/%s", "profile": "C:\\\\Users\\\\%s"}\n' % (b"kim", b"lee"),
     "home.xml": b"<home>/home/%s</home>\n" % b"mo",
     "spaced.txt": b"cd /home/%s && ls\n" % b"nina",
-    "listed.txt": b"(/home/%s), /Users/%s; C:\\Users\\%s:\n" % (b"oz", b"pat", b"quinn"),
-    "nul.bin": b"\x00/home/%s\x00" % b"ray",
+    # A name ends at each of these, one file each, so every one of them is needed.
+    **{
+        f"end-{i}.txt": b"x%s/home/%s%sy\n" % (before, b"oz", after)
+        for i, (before, after) in enumerate(
+            [(b"<p>", b"</p>"), (b"(", b")"), (b"[", b","), (b"a=", b";"), (b"", b":"),
+             (b"", b"&amp;"), (b"<", b">"), (b"", b"(")]
+        )
+    },
+    # A name ends at a control character: a C string in a binary file.
+    "cstring.bin": b"\x00/home/%s\x00" % b"ray",
 }
 # Placeholders, and paths that are not home directories.
 ALLOWED = {
