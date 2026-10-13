@@ -161,7 +161,7 @@ impl<'a> Prepared<'a> {
         // The Type 0 font's name is the CIDFont's, followed by the CMap's for a
         // CIDFontType0 (ISO 32000-1, 9.7.6.1).
         let name = match self.subset.cff_table() {
-            Some(_) => format!("{}-Identity-H", self.base_font),
+            Some(_) => format!("{}{CMAP_SUFFIX}", self.base_font),
             None => self.base_font.clone(),
         };
         format!(
@@ -378,17 +378,67 @@ fn pieces(run: &[(u16, char)]) -> impl Iterator<Item = &[(u16, char)]> {
 pub(crate) fn pdf_name(name: &str) -> String {
     let mut out = String::from("/");
     for byte in name.bytes() {
-        match byte {
-            b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%' | b'#' => {
-                let _ = write!(out, "#{byte:02X}");
-            }
-            b'!'..=b'~' => out.push(char::from(byte)),
-            _ => {
-                let _ = write!(out, "#{byte:02X}");
-            }
+        if regular(byte) {
+            out.push(char::from(byte));
+        } else {
+            let _ = write!(out, "#{byte:02X}");
         }
     }
     out
+}
+
+/// Whether `byte` stands for itself in a PDF name, rather than as `#` and two
+/// hexadecimal digits: a printable ASCII character other than a delimiter or `#`
+/// (ISO 32000-1, 7.2.2 and 7.3.5).
+fn regular(byte: u8) -> bool {
+    matches!(byte, b'!'..=b'~')
+        && !matches!(
+            byte,
+            b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%' | b'#'
+        )
+}
+
+/// The longest name, in bytes, that a reader has to accept (ISO 32000-1, Annex C).
+///
+/// The standard counts a name's bytes after its `#xx` escapes are decoded (7.3.5); the
+/// names of embedded fonts are kept within it as written, escapes and all, which is
+/// within it by either count.
+const MAX_NAME_BYTES: usize = 127;
+
+/// The letters of a subset tag.
+const SUBSET_TAG_LETTERS: usize = 6;
+
+/// What the name of a CIDFontType0's Type 0 font adds to the CIDFont's: the name of its
+/// CMap (ISO 32000-1, 9.7.6.1).
+const CMAP_SUFFIX: &str = "-Identity-H";
+
+/// The start of a font's PostScript name `name` that its PDF names can hold: with the
+/// subset tag unless the `whole` font is embedded, and with the CMap name for CFF
+/// outlines (`cff`), every name the font has in the file takes at most
+/// [`MAX_NAME_BYTES`] as written. A name is cut between characters, so never inside the
+/// escapes of one.
+pub(crate) fn fit_font_name(name: &str, whole: bool, cff: bool) -> &str {
+    let mut room = MAX_NAME_BYTES;
+    if !whole {
+        // The tag and the plus sign after it.
+        room -= SUBSET_TAG_LETTERS + 1;
+    }
+    if cff {
+        room -= CMAP_SUFFIX.len();
+    }
+    let mut used = 0;
+    let end = name
+        .char_indices()
+        .find(|&(_, ch)| {
+            used += ch
+                .encode_utf8(&mut [0; 4])
+                .bytes()
+                .map(|byte| if regular(byte) { 1 } else { 3 })
+                .sum::<usize>();
+            used > room
+        })
+        .map_or(name.len(), |(at, _)| at);
+    name.get(..end).unwrap_or(name)
 }
 
 /// Six capital letters that tell this subset from others (ISO 32000-1, 9.6.4): a hash of
@@ -401,7 +451,7 @@ fn subset_tag(name: &str, data: &[u8]) -> String {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
     }
-    (0..6)
+    (0..SUBSET_TAG_LETTERS)
         .map(|i| char::from(b'A' + ((hash >> (10 * i)) % 26) as u8))
         .collect()
 }
@@ -435,6 +485,46 @@ mod tests {
     fn escapes_names() {
         assert_eq!(pdf_name("LiberationSans"), "/LiberationSans");
         assert_eq!(pdf_name("A B#(1)/é"), "/A#20B#23#281#29#2F#C3#A9");
+    }
+
+    #[test]
+    fn cuts_font_names_to_the_longest_name_readers_accept() {
+        let long = "Long".repeat(50);
+        // A subset's tag and plus sign take 7 of the 127 bytes, a CFF font's CMap name 11.
+        assert_eq!(fit_font_name(&long, false, false), &long[..120]);
+        assert_eq!(fit_font_name(&long, true, false), &long[..127]);
+        assert_eq!(fit_font_name(&long, false, true), &long[..109]);
+        assert_eq!(fit_font_name(&long, true, true), &long[..116]);
+        // At the limit a name stays whole; a byte more and its last character goes.
+        assert_eq!(fit_font_name(&long[..120], false, false), &long[..120]);
+        assert_eq!(fit_font_name(&long[..121], false, false), &long[..120]);
+        assert_eq!(fit_font_name("", false, true), "");
+        // Bytes written as escapes count three each: 40 number signs fill 120 bytes.
+        let signs = "#".repeat(50);
+        assert_eq!(fit_font_name(&signs, false, false), &signs[..40]);
+        // é is two bytes, six as written; a name is never cut inside a character.
+        let accents = format!("{}é", "A".repeat(114));
+        assert_eq!(fit_font_name(&accents, false, false), accents);
+        let accents = format!("{}é", "A".repeat(115));
+        assert_eq!(fit_font_name(&accents, false, false), &accents[..115]);
+        for name in [long.as_str(), &signs, &accents, &"é".repeat(30), "a/b(c)"] {
+            for (whole, cff) in [(false, false), (true, false), (false, true), (true, true)] {
+                let fit = fit_font_name(name, whole, cff);
+                let tag = if whole { 0 } else { 7 };
+                let suffix = if cff { CMAP_SUFFIX.len() } else { 0 };
+                // Without the slash.
+                let written = pdf_name(fit).len() - 1;
+                assert!(
+                    written + tag + suffix <= MAX_NAME_BYTES,
+                    "{name:?} {whole} {cff}"
+                );
+                // Another character would not have fitted.
+                if let Some(next) = name[fit.len()..].chars().next() {
+                    let longer = &name[..fit.len() + next.len_utf8()];
+                    assert!(pdf_name(longer).len() - 1 + tag + suffix > MAX_NAME_BYTES);
+                }
+            }
+        }
     }
 
     #[test]
