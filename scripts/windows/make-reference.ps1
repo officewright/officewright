@@ -17,8 +17,9 @@
          is built in (and the name of a style the document defines), indents, spacing
          before and after, line spacing, alignment, the list label Word shows
          (ListFormat.ListString) and the font of its first character (name, size, bold,
-         italic, colour); and, when that takes no longer than the paragraphs did, the same
-         font properties for every run of formatting;
+         italic, colour; a theme font by its ST_Theme value, such as minorHAnsi); and, when
+         that takes no longer than the paragraphs did, the same font properties for every
+         run of formatting;
       6. writes <name>.json: hashes, Word version and build, the printer, page count,
          compatibility mode, and the fonts the document asks for that neither Windows nor
          Word has.
@@ -411,14 +412,34 @@ function Get-TextExcerpt([string] $Text) {
     return $text
 }
 
-function Get-FontRecord($Font, $ThemeFonts) {
-    # Name (a theme font such as "+Body" resolved through the document's theme), size,
-    # bold, italic and colour as Word computes them.
+function Get-ThemeKind([string] $Xml) {
+    # The theme font Word wrote for the text of a scratch document, from its
+    # Range.WordOpenXML: an ST_Theme value such as minorHAnsi or majorEastAsia. Only the
+    # main document part is read, since the styles part names theme fonts too.
+    $part = [regex]::Match($Xml, '(?s)pkg:name="/word/document\.xml".*?</pkg:part>').Value
+    $match = [regex]::Match($part, 'w:asciiTheme="((?:major|minor)(?:HAnsi|Ascii|EastAsia|Bidi))"')
+    if ($match.Success) { return $match.Groups[1].Value }
+    return $null
+}
+
+function Get-FontRecord($Font, $Themes) {
+    # Name, size, bold, italic and colour as Word computes them. Font.Name gives a theme
+    # font as the placeholder of Word's font box ("+Body" in an English Word), which is in
+    # the language of Word's user interface: it never leaves this function. $Themes.Classify
+    # turns it into the theme font it stands for (once per placeholder, kept in
+    # $Themes.Seen), and $Themes.Fonts names that font in the document's theme. A
+    # placeholder that cannot be classified gives the theme "unresolved" and no name.
     $name = [string]$Font.Name
     $theme = $null
     if ($name.StartsWith('+')) {
-        $theme = $name
-        if ($ThemeFonts -and $ThemeFonts.ContainsKey($name)) { $name = $ThemeFonts[$name] }
+        if (-not $Themes.Seen.ContainsKey($name)) {
+            $kind = $null
+            try { $kind = & $Themes.Classify $name } catch { $kind = $null }
+            $Themes.Seen[$name] = $kind
+        }
+        $theme = $Themes.Seen[$name]
+        $name = $null
+        if ($theme) { $name = $Themes.Fonts[$theme] } else { $theme = 'unresolved' }
     }
     if ($name -eq '') { $name = $null }
     $rgb = $null
@@ -434,7 +455,7 @@ function Get-FontRecord($Font, $ThemeFonts) {
     return $record
 }
 
-function Get-ParagraphRecord($Paragraph, [int] $Index, $ThemeFonts) {
+function Get-ParagraphRecord($Paragraph, [int] $Index, $Themes) {
     $range = $Paragraph.Range
     $format = $Paragraph.Format
     # Only the name of a style the document defines: built-in styles have names in the
@@ -447,6 +468,7 @@ function Get-ParagraphRecord($Paragraph, [int] $Index, $ThemeFonts) {
         $builtIn = [bool]$style.BuiltIn
         if (-not $builtIn) { $styleName = [string]$style.NameLocal }
     } catch { }
+    if ($styleName -eq '') { $styleName = $null }
     $list = $range.ListFormat
     $listString = [string]$list.ListString
     $level = $null
@@ -468,11 +490,11 @@ function Get-ParagraphRecord($Paragraph, [int] $Index, $ThemeFonts) {
         alignment = Get-AlignmentName ([int]$format.Alignment)
         list_string = $listString
         list_level = $level
-        font = Get-FontRecord $range.Characters.First.Font $ThemeFonts
+        font = Get-FontRecord $range.Characters.First.Font $Themes
     }
 }
 
-function Get-RunRecords($Range, [DateTime] $Deadline, $ThemeFonts) {
+function Get-RunRecords($Range, [DateTime] $Deadline, $Themes) {
     # The paragraph's stretches of one character formatting, as Word's wdCharacterFormatting
     # unit (13) moves over them; $null once $Deadline has passed.
     $runs = New-Object System.Collections.ArrayList
@@ -481,20 +503,22 @@ function Get-RunRecords($Range, [DateTime] $Deadline, $ThemeFonts) {
     $cursor.Collapse(1)                       # wdCollapseStart
     while ([int]$cursor.Start -lt $end) {
         if ([DateTime]::UtcNow -gt $Deadline) { return $null }
+        # Each run is at least a character long, so more runs than characters is a fault.
+        if ($runs.Count -gt $end - [int]$Range.Start) { throw 'Word gave more runs than characters' }
         $from = [int]$cursor.Start
         [void]$cursor.MoveEnd(13, 1)
         if ([int]$cursor.End -le $from) { throw 'Word did not move over a run of formatting' }
         if ([int]$cursor.End -gt $end) { $cursor.End = $end }
         [void]$runs.Add([ordered]@{
                 length = [int]$cursor.End - $from
-                font = Get-FontRecord $cursor.Font $ThemeFonts
+                font = Get-FontRecord $cursor.Font $Themes
             })
         $cursor.Collapse(0)                   # wdCollapseEnd
     }
     return , $runs.ToArray()
 }
 
-function Export-Formatting($Document, [int] $BudgetSeconds, $ThemeFonts) {
+function Export-Formatting($Document, [int] $BudgetSeconds, $Themes, $Progress) {
     # Every paragraph of every story with the formatting Word computes for it. Then, in a
     # second pass, its runs of formatting, kept only if that pass takes no longer than the
     # first, so that the whole export takes at most twice as long as without runs.
@@ -513,7 +537,8 @@ function Export-Formatting($Document, [int] $BudgetSeconds, $ThemeFonts) {
             $index = 0
             foreach ($paragraph in $range.Paragraphs) {
                 if ([DateTime]::UtcNow -gt $deadline) { $complete = $false; break }
-                $record = Get-ParagraphRecord $paragraph $index $ThemeFonts
+                $Progress.Step = "reading the formatting of paragraph $index of the $name story"
+                $record = Get-ParagraphRecord $paragraph $index $Themes
                 [void]$records.Add($record)
                 [void]$visited.Add(@($paragraph, $record))
                 $index++
@@ -529,32 +554,39 @@ function Export-Formatting($Document, [int] $BudgetSeconds, $ThemeFonts) {
     # A floor of five seconds keeps small documents from losing their runs to timer noise.
     $runBudget = [math]::Max($paragraphSeconds, 5)
     $runDeadline = [DateTime]::UtcNow.AddSeconds($runBudget)
-    if ($runDeadline -gt $deadline) { $runDeadline = $deadline }
+    $clipped = $runDeadline -gt $deadline
+    if ($clipped) { $runDeadline = $deadline }
     $runClock = [System.Diagnostics.Stopwatch]::StartNew()
     $runsKept = $complete
+    # The notes are fixed English sentences, which corpus-import.py checks: Word's own
+    # error messages are in the language of its user interface and go to the console only.
     $note = ''
+    $runError = $null
     if (-not $complete) { $note = 'not collected: the paragraphs did not fit in the time budget' }
     $collected = New-Object System.Collections.ArrayList
     if ($runsKept) {
+        $Progress.Step = 'reading the runs of formatting'
         try {
             foreach ($pair in $visited) {
-                $runs = Get-RunRecords $pair[0].Range $runDeadline $ThemeFonts
+                $runs = Get-RunRecords $pair[0].Range $runDeadline $Themes
                 if ($null -eq $runs) {
                     $runsKept = $false
-                    $note = "left out: they took longer than the paragraphs ($([math]::Round($paragraphSeconds, 1)) s)"
+                    $note = 'left out: they took longer than the paragraphs'
+                    if ($clipped) { $note = 'left out: they did not fit in the time budget' }
                     break
                 }
                 [void]$collected.Add($runs)
             }
         } catch {
             $runsKept = $false
-            $note = "left out: $($_.Exception.Message)"
+            $note = 'left out: reading them failed'
+            $runError = $_.Exception.Message
         }
     }
     if ($runsKept) {
         for ($i = 0; $i -lt $visited.Count; $i++) { $visited[$i][1].runs = $collected[$i] }
     }
-    return [ordered]@{
+    $export = [ordered]@{
         format = 1
         complete = $complete
         runs = $runsKept
@@ -563,6 +595,16 @@ function Export-Formatting($Document, [int] $BudgetSeconds, $ThemeFonts) {
         run_seconds = [math]::Round($runClock.Elapsed.TotalSeconds, 1)
         stories = $stories.ToArray()
     }
+    $unresolved = @($Themes.Seen.Keys | Where-Object { -not $Themes.Seen[$_] })
+    return New-Object PSObject -Property @{ Export = $export; RunError = $runError; Unresolved = $unresolved }
+}
+
+function Write-FormattingJson($Export, [string] $Path) {
+    # On the main thread: ConvertTo-Json of Windows PowerShell 5.1 is slow on a large export,
+    # and Word, idle by then, must not be stopped for it.
+    $json = ConvertTo-Json -InputObject $Export -Depth 10 -Compress
+    $utf8 = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($Path, $json + "`n", $utf8)
 }
 
 function Get-FormattingFunctions {
@@ -570,7 +612,7 @@ function Get-FormattingFunctions {
     # none of this script's functions.
     $names = @(
         'ConvertTo-PointValue', 'ConvertTo-Flag', 'ConvertTo-HexColor', 'Get-AlignmentName',
-        'Get-LineRuleName', 'Get-StoryName', 'Get-TextExcerpt', 'Get-FontRecord',
+        'Get-LineRuleName', 'Get-StoryName', 'Get-TextExcerpt', 'Get-ThemeKind', 'Get-FontRecord',
         'Get-ParagraphRecord', 'Get-RunRecords', 'Export-Formatting'
     )
     return ($names | ForEach-Object {
@@ -657,40 +699,52 @@ New-Object PSObject -Property @{ Foreign = $false; Pages = $pages; Mode = $mode 
 '@
 
 $FormattingScript = @'
-param($Resaved, $OutPath, $BudgetSeconds, $Functions)
+param($Resaved, $BudgetSeconds, $Functions)
 $ErrorActionPreference = 'Stop'
 . ([ScriptBlock]::Create($Functions))
 $word = $global:word
 $progress.Step = 'Documents.Open (formatting)'
 $doc = $word.Documents.Open($Resaved, $false, $true, $false)
 try {
-    $themeFonts = @{}
+    # The fonts of the document's theme by ST_Theme value. MsoFontLanguageIndex: 1 Latin,
+    # 2 complex script, 3 East Asian.
+    $fonts = @{}
     try {
         $scheme = $doc.DocumentTheme.ThemeFontScheme
-        $minor = [string]$scheme.MinorFont.Item(1).Name       # msoThemeLatin
-        $major = [string]$scheme.MajorFont.Item(1).Name
-        foreach ($key in @('+Body', '+Body CS', '+Body EA')) { $themeFonts[$key] = $minor }
-        foreach ($key in @('+Headings', '+Headings CS', '+Headings EA')) { $themeFonts[$key] = $major }
-        $themeFonts['+Body EA'] = [string]$scheme.MinorFont.Item(2).Name      # msoThemeEastAsian
-        $themeFonts['+Headings EA'] = [string]$scheme.MajorFont.Item(2).Name
-        $themeFonts['+Body CS'] = [string]$scheme.MinorFont.Item(3).Name      # msoThemeComplexScript
-        $themeFonts['+Headings CS'] = [string]$scheme.MajorFont.Item(3).Name
+        foreach ($pair in @(@('minor', $scheme.MinorFont), @('major', $scheme.MajorFont))) {
+            $latin = [string]$pair[1].Item(1).Name
+            $fonts["$($pair[0])HAnsi"] = $latin
+            $fonts["$($pair[0])Ascii"] = $latin
+            $fonts["$($pair[0])Bidi"] = [string]$pair[1].Item(2).Name
+            $fonts["$($pair[0])EastAsia"] = [string]$pair[1].Item(3).Name
+        }
     } catch { }
-    $progress.Step = 'reading the formatting of every paragraph'
-    $export = Export-Formatting $doc $BudgetSeconds $themeFonts
+    # A placeholder of Word's font box set on the text of a scratch document makes Word
+    # write the theme font it stands for into that document's XML.
+    $classify = {
+        param($Placeholder)
+        $progress.Step = 'Documents.Add (classifying a theme font)'
+        $scratch = $global:word.Documents.Add()
+        try {
+            $scratch.Range().InsertAfter('x')
+            $range = $scratch.Range(0, 1)
+            $range.Font.Name = $Placeholder
+            $xml = [string]$range.WordOpenXML
+        } finally {
+            $scratch.Close(0)
+            [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($scratch)
+        }
+        Get-ThemeKind $xml
+    }
+    $themes = @{ Fonts = $fonts; Seen = @{}; Classify = $classify }
+    $result = Export-Formatting $doc $BudgetSeconds $themes $progress
 } finally {
     $progress.Step = 'closing the re-saved copy (formatting)'
     $doc.Close(0)
     [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($doc)
 }
-$json = ConvertTo-Json -InputObject $export -Depth 10 -Compress
-$utf8 = New-Object System.Text.UTF8Encoding $false
-[System.IO.File]::WriteAllText($OutPath, $json + "`n", $utf8)
-$count = 0
-foreach ($story in $export.stories) { $count += @($story.paragraphs).Count }
-New-Object PSObject -Property @{
-    Paragraphs = $count; Runs = $export.runs; Complete = $export.complete; Note = $export.runs_note
-}
+# The main thread writes the JSON, outside this step's time-out.
+$result
 '@
 
 $FormattingFunctions = Get-FormattingFunctions
@@ -970,14 +1024,18 @@ try {
             } else {
                 Write-Host '  reading the formatting Word computes ...'
                 $formattingStarted = Get-Date
-                $step = Invoke-WordStep $worker $FormattingScript @($resaved, $formattingPath, $FormattingSeconds, $FormattingFunctions) ($FormattingSeconds + 120) $targets $progress
+                $step = Invoke-WordStep $worker $FormattingScript @($resaved, $FormattingSeconds, $FormattingFunctions) ($FormattingSeconds + 120) $targets $progress
                 if ($step.Status -eq 'done') {
                     $summary = $step.Output[0]
+                    $export = $summary.Export
+                    Write-FormattingJson $export $formattingPath
                     $record.formatting_seconds = [math]::Round(((Get-Date) - $formattingStarted).TotalSeconds, 1)
                     $record.formatting_sha256 = Get-Sha256 $formattingPath
-                    $record.formatting_paragraphs = [int]$summary.Paragraphs
-                    $record.formatting_runs = [bool]$summary.Runs
-                    $record.formatting_complete = [bool]$summary.Complete
+                    $paragraphs = 0
+                    foreach ($story in $export.stories) { $paragraphs += @($story.paragraphs).Count }
+                    $record.formatting_paragraphs = $paragraphs
+                    $record.formatting_runs = [bool]$export.runs
+                    $record.formatting_complete = [bool]$export.complete
                     $formattingText = [System.IO.File]::ReadAllText($formattingPath)
                     $leaks = @($docTokens | Where-Object { Test-Token $formattingText $_.Value } | ForEach-Object { "formatting: $($_.Kind)" })
                     $record.privacy_findings = $leaks
@@ -987,7 +1045,11 @@ try {
                     } else {
                         $record.status = 'rendered'
                     }
-                    if ($summary.Note) { Write-Host "  runs of formatting $($summary.Note)" -ForegroundColor Yellow }
+                    if ($export.runs_note) { Write-Host "  runs of formatting $($export.runs_note)" -ForegroundColor Yellow }
+                    if ($summary.RunError) { Write-Host "  $($summary.RunError)" -ForegroundColor Yellow }
+                    foreach ($placeholder in @($summary.Unresolved)) {
+                        Write-Host "  theme font not resolved: $placeholder" -ForegroundColor Yellow
+                    }
                 } elseif ($step.Status -eq 'error') {
                     $record.status = 'formatting-failed'
                     $record.error = "reading the formatting failed: $($step.Message)"

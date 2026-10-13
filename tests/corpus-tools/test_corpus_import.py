@@ -881,6 +881,13 @@ class Formatting(Import):
             "names a user profile path": (
                 lambda e: first(e).update(text="C:\\Users\\jroe\\x"), {}
             ),
+            "unexpected runs_note": (lambda e: e.update(runs_note="left out: Ausnahme"), {}),
+            "unexpected theme font": (lambda e: first(e)["font"].update(theme="+Textkoerper"), {}),
+            "unexpected font name": (lambda e: first(e)["font"].update(name="+Body"), {}),
+            "an unresolved theme font has a name": (
+                lambda e: first(e)["font"].update(theme="unresolved"), {}
+            ),
+            "does not match its record (complete)": (None, {"formatting_complete": False}),
         }
         doc = rules.documents()[0]
         for message, (edit, changes) in cases.items():
@@ -890,7 +897,7 @@ class Formatting(Import):
                 if edit:
                     edit(export)
                 self.add_v3(export, **changes)
-                self.assertIn(message, self.refused())
+                self.assertIn(message.split(" (")[0], self.refused())
 
     def test_runs_are_dropped_to_stay_under_the_size_limit(self):
         doc, _ = self.add_v3()
@@ -903,6 +910,9 @@ class Formatting(Import):
         self.assertFalse(formatting["runs"])
         self.assertEqual(formatting["runs_note"], "left out to keep the file under 1 MB")
         self.assertNotIn("runs", formatting["stories"][0]["paragraphs"][0])
+        # The bold font only runs used goes with them.
+        self.assertEqual([font["bold"] for font in formatting["fonts"]], [False])
+        self.assertEqual({p["font"] for s in formatting["stories"] for p in s["paragraphs"]}, {0})
         importer.MAX_FORMATTING_BYTES = 10
         shutil.rmtree(self.corpus / "reference")
         self.assertIn("formatting.json would be", self.refused())
@@ -950,7 +960,50 @@ class BodyParagraphs(unittest.TestCase):
             ("After the box", "Normal", "Normal"),
             ("", "Normal", "Normal"),
             ("Cell", "Normal", "Normal"),
+            ("", None, None),
         ])
+
+    def test_table_row_ends_line_up_with_words_paragraphs(self):
+        w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+
+        def cell(text):
+            return f"<w:tc><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:tc>"
+
+        document = (
+            f"<w:document {w}><w:body><w:p><w:r><w:t>Before</w:t></w:r></w:p><w:tbl>"
+            f"<w:tr>{cell('A')}{cell('B')}</w:tr><w:tr>{cell('C')}{cell('D')}</w:tr></w:tbl>"
+            "<w:p><w:r><w:t>After</w:t></w:r></w:p></w:body></w:document>"
+        )
+        parts = {"word/document.xml": document.encode()}
+
+        def export(texts):
+            font = {"name": "Calibri", "size": 11, "bold": False, "italic": False,
+                    "color": "auto", "theme": "minorHAnsi"}
+            paragraphs = [
+                {"index": i, "text": text, "style": None, "style_builtin": True,
+                 "left_indent": 0, "right_indent": 0, "first_line_indent": 0,
+                 "space_before": 0, "space_after": 0, "space_before_auto": False,
+                 "space_after_auto": False, "line_spacing": 12, "line_spacing_rule": "single",
+                 "alignment": "left", "list_string": "", "list_level": None, "font": font}
+                for i, text in enumerate(texts)
+            ]
+            data = {"format": 1, "complete": True, "runs": False, "runs_note": "",
+                    "stories": [{"story": "main", "instance": 0, "paragraphs": paragraphs}]}
+            return importer.read_formatting(json.dumps(data).encode())
+
+        # Word's main story of this document: each row ends with a paragraph of its own.
+        words = ["Before", "A", "B", "", "C", "D", "", "After"]
+        result, note = importer.compact_formatting(export(words), parts, "x", "y")
+        self.assertTrue(result["styles_from_resaved_copy"])
+        paragraphs = result["stories"][0]["paragraphs"]
+        self.assertNotIn("style_id", paragraphs[3])
+        self.assertEqual(paragraphs[4]["style_id"], "")
+        self.assertNotIn("not matched", note)
+        result, note = importer.compact_formatting(
+            export(["Before", "A", "B", "C", "D", "After"]), parts, "x", "y"
+        )
+        self.assertFalse(result["styles_from_resaved_copy"])
+        self.assertIn("body styles not matched to the re-saved copy", note)
 
 
 class FontFiles(unittest.TestCase):

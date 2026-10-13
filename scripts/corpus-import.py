@@ -499,6 +499,25 @@ ALIGNMENTS = {
 }
 COLOUR = re.compile(r"^(auto|[0-9A-F]{6})$")
 OTHER = re.compile(r"^other-\d+$")
+# Theme fonts as make-reference.ps1 classifies Word's font box placeholders: ST_Theme
+# values (ECMA-376 Part 1, 17.18.96), or "unresolved". The placeholders themselves are in
+# the language of Word's user interface and are refused.
+THEMES = {
+    f"{kind}{script}"
+    for kind in ("major", "minor")
+    for script in ("HAnsi", "Ascii", "EastAsia", "Bidi")
+} | {"unresolved"}
+# make-reference.ps1's notes about runs: fixed sentences, never Word's own messages.
+RUNS_NOTES = {
+    "",
+    "not collected: the paragraphs did not fit in the time budget",
+    "left out: they took longer than the paragraphs",
+    "left out: they did not fit in the time budget",
+    "left out: reading them failed",
+}
+# Style names (Word allows 253 characters) and list labels.
+STYLE_NAME = re.compile(r"^[^|\x00-\x1f]{1,253}$")
+MAX_LIST_LABEL = 255
 PARAGRAPH_FORMAT = (
     "left_indent", "right_indent", "first_line_indent", "space_before", "space_after",
     "space_before_auto", "space_after_auto", "line_spacing", "line_spacing_rule", "alignment",
@@ -534,12 +553,14 @@ def checked_font(font: object, where: str) -> dict:
     if not isinstance(font, dict) or not set(font) <= keys:
         raise ValueError(f"{where} is not a font")
     name, theme = font.get("name"), font.get("theme")
-    if name is not None and not (isinstance(name, str) and FONT.match(name)):
-        raise ValueError(f"{where}: unexpected font name")
-    if theme is not None and not (
-        isinstance(theme, str) and theme.startswith("+") and FONT.match(theme)
+    if name is not None and not (
+        isinstance(name, str) and FONT.match(name) and not name.startswith("+")
     ):
+        raise ValueError(f"{where}: unexpected font name")
+    if theme is not None and theme not in THEMES:
         raise ValueError(f"{where}: unexpected theme font")
+    if theme == "unresolved" and name is not None:
+        raise ValueError(f"{where}: an unresolved theme font has a name")
     colour = font.get("color")
     if colour is not None and not (isinstance(colour, str) and COLOUR.match(colour)):
         raise ValueError(f"{where}: unexpected colour")
@@ -563,8 +584,8 @@ def read_formatting(data: bytes) -> dict:
     for key in ("complete", "runs"):
         if not isinstance(export.get(key), bool):
             raise ValueError(f"{key} is not true or false")
-    if not isinstance(export.get("runs_note", ""), str):
-        raise ValueError("runs_note is not text")
+    if export.get("runs_note", "") not in RUNS_NOTES:
+        raise ValueError("unexpected runs_note")
     stories = []
     for s_index, story in enumerate(as_list(export.get("stories"), "stories")):
         where = f"story {s_index}"
@@ -582,7 +603,7 @@ def read_formatting(data: bytes) -> dict:
             text, style = paragraph.get("text"), paragraph.get("style")
             if not isinstance(text, str) or len(text) > 60:
                 raise ValueError(f"{at}: text is not an excerpt")
-            if style is not None and not (isinstance(style, str) and FONT.match(style)):
+            if style is not None and not (isinstance(style, str) and STYLE_NAME.match(style)):
                 raise ValueError(f"{at}: unexpected style name")
             rule, alignment = paragraph.get("line_spacing_rule"), paragraph.get("alignment")
             if not (rule in LINE_RULES or (isinstance(rule, str) and OTHER.match(rule))):
@@ -592,7 +613,7 @@ def read_formatting(data: bytes) -> dict:
             ):
                 raise ValueError(f"{at}: unexpected alignment")
             label, level = paragraph.get("list_string"), paragraph.get("list_level")
-            if not isinstance(label, str) or len(label) > 64:
+            if not isinstance(label, str) or len(label) > MAX_LIST_LABEL:
                 raise ValueError(f"{at}: list_string is not a label")
             if level is not None and (not isinstance(level, int) or isinstance(level, bool)):
                 raise ValueError(f"{at}: list_level is not a level")
@@ -639,9 +660,13 @@ def alnum(text: str) -> str:
     return re.sub(r"\W+", "", text)
 
 
-def body_paragraph_styles(parts: dict[str, bytes]) -> list[tuple[str, str, str]]:
+def body_paragraph_styles(
+    parts: dict[str, bytes],
+) -> list[tuple[str, str | None, str | None]]:
     """(text, style id, style name) of the paragraphs of the body in order, the order of
-    Word's main story: text boxes, alternative content and notes are stories of their own."""
+    Word's main story: text boxes, alternative content and notes are stories of their own.
+    Word's Paragraphs also count the end-of-row mark of every table row, which has no w:p;
+    it is ("", None, None) here, after the row's cells."""
     root = ElementTree.fromstring(parts["word/document.xml"])
     styles = None
     if "word/styles.xml" in parts:
@@ -676,6 +701,9 @@ def body_paragraph_styles(parts: dict[str, bytes]) -> list[tuple[str, str, str]]
                 style_id = style.get(f"{W}val", default) if style is not None else default
                 out.append((own_text(child), style_id, names.get(style_id, style_id)))
                 walk(child)  # a text box inside is skipped above
+            elif child.tag == f"{W}tr":
+                walk(child)
+                out.append(("", None, None))
             else:
                 walk(child)
 
@@ -717,7 +745,7 @@ def compact_formatting(
             out = {"index": paragraph["index"], "text": paragraph["text"]}
             if paragraph["style"] is not None:
                 out["style"] = paragraph["style"]
-            if story["story"] == "main" and styles_aligned:
+            if story["story"] == "main" and styles_aligned and xml[number][1] is not None:
                 out["style_id"], out["style_name"] = xml[number][1], xml[number][2]
             out["format"] = index_of(formats, format_index, paragraph["format"])
             if paragraph["list_string"]:
@@ -751,6 +779,8 @@ def compact_formatting(
     note += ", with runs" if export["runs"] else ", without runs"
     if not export["complete"]:
         note += ", incomplete (time budget)"
+    if not styles_aligned:
+        note += ", body styles not matched to the re-saved copy"
     return result, note
 
 
@@ -762,9 +792,15 @@ def within_size(result: dict, note: str) -> tuple[bytes, str]:
     """The committed bytes; runs are dropped from a document that would pass the limit."""
     data = formatting_bytes(result)
     if len(data) > MAX_FORMATTING_BYTES and result["runs"]:
-        for story in result["stories"]:
-            for paragraph in story["paragraphs"]:
-                paragraph.pop("runs", None)
+        paragraphs = [p for story in result["stories"] for p in story["paragraphs"]]
+        for paragraph in paragraphs:
+            paragraph.pop("runs", None)
+        # Fonts only runs used go with them.
+        used = sorted({paragraph["font"] for paragraph in paragraphs})
+        renumbered = {old: new for new, old in enumerate(used)}
+        result["fonts"] = [result["fonts"][old] for old in used]
+        for paragraph in paragraphs:
+            paragraph["font"] = renumbered[paragraph["font"]]
         result["runs"] = False
         result["runs_note"] = "left out to keep the file under 1 MB"
         note = note.replace(", with runs", ", runs left out (size)")
@@ -1201,8 +1237,9 @@ class Checked:
     row: str
     geometry: dict
     drawn: list[DrawnFont]
-    # formatting.json, from make-reference.ps1 format 3 on.
+    # formatting.json, from make-reference.ps1 format 3 on, and its SOURCES.md note.
     formatting: bytes | None = None
+    formatting_note: str = ""
 
 
 def check_result(
@@ -1291,7 +1328,7 @@ def check_result(
     if record["script_version"] >= 3:
         formatting, formatting_note = checked_formatting(record, results, resaved_parts, group)
     row = reference_row(group, record, drawn, poppler, dropped, formatting_note)
-    return Checked(record, pdf, resaved, row, geometry, drawn, formatting)
+    return Checked(record, pdf, resaved, row, geometry, drawn, formatting, formatting_note)
 
 
 def checked_formatting(
@@ -1311,7 +1348,11 @@ def checked_formatting(
     except (ValueError, UnicodeDecodeError) as error:
         raise Refused(f"{record['file']}: cannot read {path.name}: {error}") from error
     count = sum(len(story["paragraphs"]) for story in export["stories"])
-    if count != record["formatting_paragraphs"] or export["runs"] != record["formatting_runs"]:
+    if (
+        count != record["formatting_paragraphs"]
+        or export["runs"] != record["formatting_runs"]
+        or export["complete"] != record["formatting_complete"]
+    ):
         raise Refused(f"{record['file']}: {path.name} does not match its record")
     made_with = (
         f"Microsoft Word {record['word_version']}, build {record['word_build']}, "
@@ -1433,6 +1474,8 @@ def main() -> int:
         print(f"{verb} {item.record['file']}: {pages} page{'s' if pages != 1 else ''}")
         for flag in item.geometry["compat_flags_dropped"]:
             print(f"  note: Word dropped the w:compat setting {flag} from the re-saved copy")
+        if item.formatting_note:
+            print(f"  {item.formatting_note}")
         for font in item.drawn:
             print(
                 f"  note: {font.name} is not embedded; rasterized with "
