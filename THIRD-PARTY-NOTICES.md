@@ -27,6 +27,36 @@ Adobe's terms, from `MustRead.html`:
 
 > This file and the 14 PostScript(R) AFM files it accompanies may be used, copied, and distributed for any purpose and without charge, with or without modification, provided that all copyright notices are retained; that the AFM files are not distributed without this file; that all modifications to this file or any of the AFM files are prominently noted in the modified file(s); and that this paragraph is not modified. Adobe Systems has no responsibility or obligation to support the use of the AFM files.
 
+## Documents of the European Union
+
+© European Union. Licensed under the Creative Commons Attribution 4.0
+International licence (CC BY 4.0, <https://creativecommons.org/licenses/by/4.0/>), as
+the European Commission's legal notice (<https://commission.europa.eu/legal-notice_en>)
+states for the content it owns: "Unless otherwise indicated (e.g. in individual copyright
+notices), content owned by the EU on this website is licensed under the Creative Commons
+Attribution 4.0 International (CC BY 4.0) licence. This means that reuse is allowed,
+provided appropriate credit is given and changes are indicated."
+
+Test documents in `tests/corpus/business/`, outside every crate and never published:
+
+- `form-ec-state-aid-notification-de.docx`, `-bg.docx`, `-el.docx`: the Part I general
+  information form for notifying State aid, in German, Bulgarian and Greek. Source:
+  European Commission, Directorate-General for Competition,
+  <https://competition-policy.ec.europa.eu/state-aid/legislation/forms-notifications-and-reporting_en>
+  (archive `forms_notifications_and_reporting_part_I.zip`).
+- `contract-ec-data-processing-clauses-de.docx`, `-bg.docx`, `-el.docx`: the annex with
+  the standard contractual clauses between controllers and processors (Commission
+  Implementing Decision (EU) 2021/915), in German, Bulgarian and Greek. Source: European
+  Commission,
+  <https://commission.europa.eu/publications/standard-contractual-clauses-controllers-and-processors-eueea_en>
+  (archive `strandard_contractual_clauses_eu-eea.zip`).
+
+Changes: the document properties' custom fields, the custom XML parts and the attached
+template are removed, and every picture (the EU emblem among them, which the legal notice
+excludes from the licence) is replaced by a grey placeholder of the same size.
+`tests/corpus/SOURCES.md` gives each file's URL, download date, original SHA-256 and its
+changes; `scripts/import-public-docs.py` makes them.
+
 ## Test fonts
 
 Fonts in `tests/fonts/`, at the repository root and so outside every crate. They are

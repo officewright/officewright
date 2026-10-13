@@ -48,7 +48,7 @@ OUT_DIR = CORPUS / "business"
 SOURCES_MD = CORPUS / "SOURCES.md"
 
 TABLE_HEADER = "| File | Origin | Licence | Changes |"
-TABLE_TITLE = "## Public-domain and CC0 documents (`business/`)"
+TABLE_TITLE = "## Public and openly licensed documents (`business/`)"
 
 EMAIL = re.compile(rb"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 EMAIL_TEXT = re.compile(EMAIL.pattern.decode())
@@ -86,6 +86,7 @@ class PublicDoc:
     source: str
     url: str
     downloaded: str
+    # Of the document itself, also when it comes out of an archive.
     sha256: str
     # Generic mailboxes and template placeholders that may stay.
     emails: tuple[str, ...] = ()
@@ -94,6 +95,8 @@ class PublicDoc:
     replacements: tuple[Replacement, ...] = ()
     # What the row says about the replacements, without repeating the replaced text.
     replaced: str = ""
+    # The document's path in the ZIP archive at url, when url names an archive.
+    member: str = ""
 
 
 PD_CC0 = "Public domain (work of the United States Government), and CC0 1.0 worldwide"
@@ -174,6 +177,14 @@ SOURCES: dict[str, Source] = {
         "without permission. These works are available for worldwide use and reuse under the "
         "terms of the Creative Commons CC0 1.0 Universal license.",
     ),
+    "eu-commission": Source(
+        "CC BY 4.0, \u00a9 European Union (attribution in THIRD-PARTY-NOTICES.md)",
+        "https://commission.europa.eu/legal-notice_en",
+        "Unless otherwise indicated (e.g. in individual copyright notices), content owned by "
+        "the EU on this website is licensed under the Creative Commons Attribution 4.0 "
+        "International (CC BY 4.0) licence. This means that reuse is allowed, provided "
+        "appropriate credit is given and changes are indicated.",
+    ),
     "dol-ebsa": Source(
         "Public domain (work of the United States Government)",
         "https://www.dol.gov/general/aboutdol/copyright",
@@ -182,6 +193,16 @@ SOURCES: dict[str, Source] = {
     ),
 }
 
+
+# Archives of the European Commission that hold one document per language.
+STATE_AID_FORMS = (
+    "https://competition-policy.ec.europa.eu/document/download/66c3ba98-4ddf-48a7-a7c4-"
+    "24234db8672b_en?filename=forms_notifications_and_reporting_part_I.zip"
+)
+DATA_PROCESSING_CLAUSES = (
+    "https://commission.europa.eu/document/download/a53e88fe-3b08-4e83-8587-4e3869ebb1c3_en"
+    "?filename=strandard_contractual_clauses_eu-eea.zip"
+)
 
 DOCUMENTS: list[PublicDoc] = [
     PublicDoc(
@@ -437,6 +458,54 @@ DOCUMENTS: list[PublicDoc] = [
         emails=('ebsa.opr@dol.gov',),
         # EBSA's and HealthCare.gov's toll-free numbers.
         phones=("1-866-444-3272", "1-800-318-2596"),
+    ),
+    PublicDoc(
+        "form-ec-state-aid-notification-de",
+        "eu-commission",
+        STATE_AID_FORMS,
+        "2026-10-13",
+        "fa0f4f244947c7cc38cd4d7dc88c487bf084f9ca9811558ac44decadeec8f3e0",
+        member="Part_I_de.docx",
+    ),
+    PublicDoc(
+        "form-ec-state-aid-notification-bg",
+        "eu-commission",
+        STATE_AID_FORMS,
+        "2026-10-13",
+        "face480403779ab778823eb227392d596fc09890cba2cbdc396e8c796e76694c",
+        member="Part_I_bg.docx",
+    ),
+    PublicDoc(
+        "form-ec-state-aid-notification-el",
+        "eu-commission",
+        STATE_AID_FORMS,
+        "2026-10-13",
+        "6345956446d8eb8c70f0656cb57d70ddec2a28cb26dde6c30264e0a3f31979fb",
+        member="Part_I_el.docx",
+    ),
+    PublicDoc(
+        "contract-ec-data-processing-clauses-de",
+        "eu-commission",
+        DATA_PROCESSING_CLAUSES,
+        "2026-10-13",
+        "147e427694a4c3aee34b8a7cf7f1dfb8df53555f84ee7112bead02d9580cd52e",
+        member="DE Annex Standard Contractual Clauses EU-EEA.docx",
+    ),
+    PublicDoc(
+        "contract-ec-data-processing-clauses-bg",
+        "eu-commission",
+        DATA_PROCESSING_CLAUSES,
+        "2026-10-13",
+        "1372a8203b2141f14744bced14aaf2f79a61f08053b57a77a3ee92edd10bdc8d",
+        member="BG Annex Strandard Contractual Clauses EU-EEA.docx",
+    ),
+    PublicDoc(
+        "contract-ec-data-processing-clauses-el",
+        "eu-commission",
+        DATA_PROCESSING_CLAUSES,
+        "2026-10-13",
+        "ce7a060799c50a7ad08f96ee1911fcde3e50f68b5a50458877c963132baf953e",
+        member="EL Annex Standard Contractual Clauses EU-EEA.docx",
     ),
 ]
 
@@ -806,7 +875,8 @@ def sources_row(doc: PublicDoc, changes: list[str]) -> str:
     cell = lambda text: text.replace("|", "\\|")
     return (
         f"| business/{doc.name}.docx "
-        f"| {cell(doc.url)}, downloaded {doc.downloaded}, original SHA-256 {doc.sha256} "
+        f"| {cell(doc.url)}{f', file {cell(doc.member)} in the archive' if doc.member else ''}, "
+        f"downloaded {doc.downloaded}, original SHA-256 {doc.sha256} "
         f"| {cell(source.licence)}: \"{cell(source.quote)}\" ({source.statement_url}) "
         f"| {cell('; '.join(changes))} |"
     )
@@ -818,10 +888,11 @@ def with_rows(sources: str, rows: list[str]) -> str:
         [
             TABLE_TITLE,
             "",
-            "Business documents from United States federal agencies, committed as "
-            "`scripts/import-public-docs.py` cleans them: every row gives the URL, the "
-            "download date, the original's SHA-256, the licence statement and what was "
-            "changed.",
+            "Business documents of United States federal agencies (public domain, most also"
+            " CC0) and of the European Commission (CC BY 4.0, credited in"
+            " THIRD-PARTY-NOTICES.md), committed as `scripts/import-public-docs.py` cleans"
+            " them: every row gives the URL, the download date, the original's SHA-256, the"
+            " licence statement and what was changed.",
             "",
             TABLE_HEADER,
             "|------|--------|---------|---------|",
@@ -865,7 +936,14 @@ def original(doc: PublicDoc, originals: Path, fetch: bool) -> bytes:
             raise Refused(f"{doc.name}: {path} is missing (use --fetch, or save it from {doc.url})")
         request = urllib.request.Request(doc.url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(request, timeout=120) as response:
-            path.write_bytes(response.read())
+            data = response.read()
+        if doc.member:
+            try:
+                with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                    data = archive.read(doc.member)
+            except (zipfile.BadZipFile, KeyError) as error:
+                raise Refused(f"{doc.name}: {doc.member} is not in the archive") from error
+        path.write_bytes(data)
     data = path.read_bytes()
     if hashlib.sha256(data).hexdigest() != doc.sha256:
         raise Refused(f"{doc.name}: the original is not the listed file (SHA-256 differs)")

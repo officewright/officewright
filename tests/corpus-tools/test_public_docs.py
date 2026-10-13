@@ -445,6 +445,21 @@ class Committed(unittest.TestCase):
         committed = {p.name for p in BUSINESS.glob("*.docx")}
         self.assertEqual(committed, listed)
 
+    def test_documents_under_attribution_licences_are_credited(self):
+        notices = (ROOT / "THIRD-PARTY-NOTICES.md").read_text(encoding="utf-8")
+        attributed = [d for d in public.DOCUMENTS if "CC BY" in public.SOURCES[d.source].licence]
+        self.assertTrue(attributed)
+        for doc in attributed:
+            with self.subTest(doc.name):
+                stem = doc.name.rsplit("-", 1)[0]
+                self.assertIn(f"`{stem}-", notices)
+                self.assertIn(doc.name.rsplit("-", 1)[1], notices)
+
+    def test_a_member_of_an_archive_is_named_in_its_row(self):
+        doc = next(d for d in public.DOCUMENTS if d.member)
+        row = public.sources_row(doc, ["x"])
+        self.assertIn(f", file {doc.member} in the archive, downloaded {doc.downloaded}", row)
+
     def test_names_are_unique_and_plain(self):
         names = [doc.name for doc in public.DOCUMENTS]
         self.assertEqual(len(names), len(set(names)))

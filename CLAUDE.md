@@ -60,8 +60,8 @@ tests/pdf-output/       checks text-to-pdf output, in Helvetica and with Liberat
                         are the same)
 tests/corpus/           small curated real documents (committed) + SOURCES.md + baseline.json
 tests/corpus/word-rules/  documents written by scripts/make-rule-docs.py, one undocumented Word rule each
-tests/corpus/business/    public-domain and CC0 business documents of US federal agencies, cleaned by
-                          scripts/import-public-docs.py
+tests/corpus/business/    business documents of US federal agencies (public domain, CC0) and of the
+                          European Commission (CC BY 4.0), cleaned by scripts/import-public-docs.py
 tests/corpus/reference/ ground truth from PDFs of Microsoft Word/Excel/PowerPoint, one folder per document: every page
                         as a 110 dpi grey PNG and geometry.json (lines, words, page breaks); the PDFs are not
                         committed, their SHA-256 and the app version are in SOURCES.md
