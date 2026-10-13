@@ -16,7 +16,7 @@ from pathlib import Path
 EXPECTED_ABI_VERSION = 1
 
 # OwStatus values, the standard font and the embedding notes from officewright.h.
-OK, NULL_ARGUMENT, INVALID_UTF8, INVALID_ARGUMENT, IO, UNSUPPORTED, PANIC = range(7)
+OK, NULL_ARGUMENT, INVALID_UTF8, INVALID_ARGUMENT, IO, UNSUPPORTED, PANIC, MALFORMED, LIMIT_EXCEEDED = range(9)
 OW_STANDARD_FONT_HELVETICA = 0
 OW_FONT_NOTE_OTHER, OW_FONT_NOTE_PREVIEW_AND_PRINT, OW_FONT_NOTE_EDITABLE, OW_FONT_NOTE_WHOLE_FONT = range(4)
 (
@@ -304,8 +304,14 @@ class AbiTest(unittest.TestCase):
 
     def test_reports_fonts_it_cannot_open(self):
         font = c_void_p(1)
-        self.check(lib.ow_pdf_font_open_bytes(b"not a font", 10, 0, byref(font)), INVALID_ARGUMENT)
+        self.check(lib.ow_pdf_font_open_bytes(b"not a font", 10, 0, byref(font)), MALFORMED)
         self.assertTrue(last_error().startswith("cannot use the font data: data is not a TrueType"), last_error())
+        self.assertFalse(font)
+        # A face the file does not have is the caller's mistake, not damage.
+        data = (FONTS / "liberation" / "LiberationSans-Regular.ttf").read_bytes()
+        font = c_void_p(1)
+        self.check(lib.ow_pdf_font_open_bytes(data, len(data), 1, byref(font)), INVALID_ARGUMENT)
+        self.assertEqual(last_error(), "cannot use the font data: font face 1 does not exist, the file has 1 face")
         self.assertFalse(font)
         missing = FONTS / "no-such-font.ttf"
         self.check(lib.ow_pdf_font_open_path(str(missing).encode(), 0, byref(font)), IO)
@@ -353,19 +359,22 @@ class AbiTest(unittest.TestCase):
         book = self.new_book()
         added = c_size_t()
         self.check(lib.ow_font_book_add_dir(book, str(FONTS).encode(), byref(added)))
-        self.assertEqual(added.value, 5)
+        # Carlito and Liberation Sans, Serif and Mono in four styles each, and Noto Sans.
+        self.assertEqual(added.value, 17)
         resolver = self.resolver(book)
 
         self.resolve(resolver, "Liberation Sans")
         self.resolve(resolver, "noto sans")
         self.assertEqual(self.substitutions(resolver), [])
         arial = self.resolve(resolver, "Arial")
+        # Liberation Sans has a bold face; Noto Sans has none, so its regular face is drawn bold.
         self.resolve(resolver, "Liberation Sans", bold=1)
+        self.resolve(resolver, "Noto Sans", bold=1)
         self.assertEqual(
             self.substitutions(resolver),
             [
                 (OW_RESOLUTION_METRIC_COMPATIBLE, '"Arial" → "Liberation Sans" (metric-compatible substitute)'),
-                (OW_RESOLUTION_EXACT, '"Liberation Sans" bold → "Liberation Sans" with synthetic bold'),
+                (OW_RESOLUTION_EXACT, '"Noto Sans" bold → "Noto Sans" with synthetic bold'),
             ],
         )
         doc = c_void_p()

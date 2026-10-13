@@ -133,6 +133,10 @@ pub struct Style<'a> {
 }
 
 impl<'a> Style<'a> {
+    pub(super) fn from_data(document: &'a Document, data: &'a StyleData) -> Self {
+        Self { document, data }
+    }
+
     /// The style id, by which paragraphs, runs and other styles name it (`w:styleId`).
     pub fn id(self) -> &'a str {
         &self.data.id

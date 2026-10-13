@@ -43,9 +43,21 @@ class References(unittest.TestCase):
                 self.assertEqual(len(geometry["pages"]), count)
                 pngs = sorted(p.name for p in folder.glob("*.png"))
                 self.assertEqual(pngs, [f"page-{n:03}.png" for n in range(1, count + 1)])
-                self.assertEqual(
-                    sorted(p.name for p in folder.iterdir()), sorted(pngs + ["geometry.json"])
-                )
+                # formatting.json comes with references made by make-reference.ps1 format 3.
+                files = sorted(p.name for p in folder.iterdir() if p.name != "formatting.json")
+                self.assertEqual(files, sorted(pngs + ["geometry.json"]))
+                if (folder / "formatting.json").exists():
+                    text = (folder / "formatting.json").read_text(encoding="utf-8")
+                    formatting = json.loads(text)
+                    self.assertEqual(formatting["format"], 1)
+                    self.assertEqual(formatting["document"], geometry["document"])
+                    self.assertTrue(formatting["stories"])
+                    fonts, formats = len(formatting["fonts"]), len(formatting["paragraph_formats"])
+                    for story in formatting["stories"]:
+                        for paragraph in story["paragraphs"]:
+                            self.assertLess(paragraph["font"], fonts)
+                            self.assertLess(paragraph["format"], formats)
+                    self.assertLess((folder / "formatting.json").stat().st_size, 1_000_000)
                 for page in geometry["pages"]:
                     png = (folder / f"page-{page['number']:03}.png").read_bytes()
                     width, height, per_metre, _ = png_pixels(png)

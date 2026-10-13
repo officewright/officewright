@@ -108,12 +108,16 @@ step "published crates leave out third-party data"
 # Adobe's AFM files, the test fonts and the tests that read them are not under
 # Officewright's license; see THIRD-PARTY-NOTICES.md. The test fonts live outside every crate.
 packaged=$(cargo package --list --allow-dirty --quiet -p officewright-pdf)
-if printf '%s\n' "$packaged" | grep -E '^(data/afm/|tests/helvetica_afm\.rs$|tests/embedded_fonts\.rs$)'; then
+if printf '%s\n' "$packaged" | grep -E '^(data/afm/|tests/(helvetica_afm|embedded_fonts|glyph_runs)\.rs$)'; then
 	fail "officewright-pdf would publish the files above"
 fi
 packaged=$(cargo package --list --allow-dirty --quiet -p officewright-font)
 if printf '%s\n' "$packaged" | grep -E '^tests/(metric_compatible|third_party_fonts)\.rs$'; then
 	fail "officewright-font would publish the file above"
+fi
+packaged=$(cargo package --list --allow-dirty --quiet -p officewright-layout)
+if printf '%s\n' "$packaged" | grep -E '^tests/shaping\.rs$'; then
+	fail "officewright-layout would publish the file above"
 fi
 packaged=$(cargo package --list --allow-dirty --quiet -p officewright-cli)
 if printf '%s\n' "$packaged" | grep -E '^tests/fonts\.rs$'; then
@@ -142,6 +146,13 @@ if [ "$os" = windows ]; then
 	powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tests/corpus-tools/test_make_reference.ps1
 fi
 
+step "corpus runner over tests/corpus (against tests/corpus/baseline.json)"
+# Every committed Word document opens in a child process; a panic, hang, memory blow-up or
+# any change of a file's status from the baseline fails. An improvement is accepted by
+# running this with --update-baseline and committing the baseline.
+cargo run --quiet -p corpus-runner -- run --baseline tests/corpus/baseline.json \
+	--expected tools/corpus-runner/expected-errors.tsv tests/corpus
+
 step "C library (cargo cinstall)"
 # The same layout the release archives ship; scripts/check-capi.sh tests it as a user would.
 rm -rf target/capi
@@ -160,7 +171,10 @@ scripts/check-capi.sh target/capi
 if [ "$os" != windows ]; then
 	step "PDF output (qpdf, pdftotext, pdffonts, pdftoppm)"
 	cargo build -p officewright-cli
-	OW_CLI=${CARGO_TARGET_DIR:-target}/debug/officewright "$python" -B -m unittest discover -s tests/pdf-output -v
+	cargo build -p officewright-pdf --example primitives
+	OW_CLI=${CARGO_TARGET_DIR:-target}/debug/officewright \
+		OW_PRIMITIVES=${CARGO_TARGET_DIR:-target}/debug/examples/primitives \
+		"$python" -B -m unittest discover -s tests/pdf-output -v
 
 	step "reference font embedding (qpdf, pdffonts, pdftoppm)"
 	# corpus-import.py embeds the fonts Word did not embed before rasterizing its PDFs.
