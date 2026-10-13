@@ -9,6 +9,10 @@ extend-exclude = ["tests/corpus/*", "!tests/corpus/SOURCES.md"]
 [default.extend-words]
 # PDF's Flate filter (FlateDecode, ISO 32000-1, 7.4.4), not a misspelling of "flat".
 flate = "flate"
+# PDF's /DecodeParms key (ISO 32000-1, 7.3.8.2), not a misspelling of "params".
+parms = "parms"
+# PNG's Paeth filter (PNG specification, 9.4), named after Alan W. Paeth, not "path".
+paeth = "paeth"
 # OpenType tags, not misspellings: the glyph location table and the width axis.
 loca = "loca"
 wdth = "wdth"

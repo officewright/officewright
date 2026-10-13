@@ -9,8 +9,10 @@ use officewright_core::Color;
 use crate::embed::{EXTRA_OBJECTS, Prepared, Usage};
 use crate::font::check_font_size;
 use crate::glyphs::MAX_STRING_BYTES;
+use crate::image::draw_operators;
+use crate::path::check_range;
 use crate::stream::stream_object;
-use crate::{Compression, Error, Font, GlyphRun, GraphicsPath, Result, Stroke};
+use crate::{Compression, Error, Font, GlyphRun, GraphicsPath, Image, Result, Stroke};
 
 /// Pages smaller or larger than this are outside ISO 32000-1, Annex C.
 const PAGE_SIDE: std::ops::RangeInclusive<f64> = 3.0..=14400.0;
@@ -19,6 +21,10 @@ const PAGE_SIDE: std::ops::RangeInclusive<f64> = 3.0..=14400.0;
 /// every PDF 1.4 reader has to handle (PDF Reference 1.4, Appendix C), far beyond the
 /// largest page.
 pub(crate) const MAX_POSITION: f64 = 32767.0;
+
+/// The smallest side of an image on a page: smaller ones would round to 0 in the four
+/// decimals the file stores, and an image of no size cannot be drawn.
+const MIN_IMAGE_SIDE: f64 = 0.01;
 
 /// The largest byte offset the 10-digit fields of a cross-reference table can hold.
 const MAX_XREF_OFFSET: u64 = 9_999_999_999;
@@ -39,6 +45,9 @@ pub struct Page {
     /// The fonts the page uses, in the order of first use; the first is the page's font
     /// resource `/F1`.
     fonts: Vec<Font>,
+    /// The images the page draws, in the order of first use; the first is the page's
+    /// image resource `/Im1`.
+    images: Vec<Image>,
     /// The content stream. Text stays text until the document is written, when the text
     /// of every page is known.
     content: Vec<Content>,
@@ -88,6 +97,7 @@ impl Document {
         self.pages.push(Page {
             size,
             fonts: Vec::new(),
+            images: Vec::new(),
             content: Vec::new(),
             clips: 0,
         });
@@ -164,6 +174,26 @@ impl Document {
                     .collect()
             })
             .collect();
+        // The same for images.
+        let mut images: Vec<&Image> = Vec::new();
+        let page_images: Vec<Vec<usize>> = self
+            .pages
+            .iter()
+            .map(|page| {
+                page.images
+                    .iter()
+                    .map(
+                        |image| match images.iter().position(|known| *known == image) {
+                            Some(index) => index,
+                            None => {
+                                images.push(image);
+                                images.len() - 1
+                            }
+                        },
+                    )
+                    .collect()
+            })
+            .collect();
 
         // Everything is prepared before anything is written, so an error leaves `out`
         // untouched. First the glyphs each embedded font shows, over all pages.
@@ -209,7 +239,8 @@ impl Document {
         }
 
         // Objects: 1 catalog, 2 page tree, then a font dictionary per font, then a page
-        // and its content stream per page, then the other objects of each embedded font.
+        // and its content stream per page, then the other objects of each embedded font,
+        // then the objects of each image.
         let font_object = |i: usize| 3 + i;
         let first_page = 3 + fonts.len();
         let page_object = |i: usize| first_page + 2 * i;
@@ -228,14 +259,22 @@ impl Document {
                 }
             }
         }
+        // The images' objects are only numbered here: making them cannot fail, so each is
+        // made as it is written, and the images are never all copied at once.
+        let mut image_objects = Vec::with_capacity(images.len());
+        for image in &images {
+            image_objects.push(next_object);
+            next_object += image.object_count();
+        }
 
         let mut out = CountingWriter::new(out);
         let mut offsets = Vec::with_capacity(next_object);
 
-        // Replacement text in marked content needs PDF 1.5 (§14.9.4); everything else
-        // PDF 1.4. The comment's bytes above 127 tell transfer tools the file is binary
-        // (§7.5.2).
-        let version = if actual_text { "1.5" } else { "1.4" };
+        // Replacement text in marked content (§14.9.4) and 16-bit image samples (§8.9.5.1)
+        // need PDF 1.5; everything else PDF 1.4. The comment's bytes above 127 tell
+        // transfer tools the file is binary (§7.5.2).
+        let pdf_15 = actual_text || images.iter().any(|image| image.needs_pdf_15());
+        let version = if pdf_15 { "1.5" } else { "1.4" };
         out.put(format!("%PDF-{version}\n").as_bytes())?;
         out.put(b"%\xE2\xE3\xCF\xD3\n")?;
 
@@ -260,23 +299,39 @@ impl Document {
             out.put_object(font_object(i), dictionary)?;
         }
 
-        for (i, ((page, resources), content)) in self
+        for (i, (((page, fonts), images), content)) in self
             .pages
             .iter()
             .zip(&page_fonts)
+            .zip(&page_images)
             .zip(&contents)
             .enumerate()
         {
             let page_id = page_object(i);
-            let fonts: Vec<String> = resources
+            let fonts: Vec<String> = fonts
                 .iter()
                 .enumerate()
                 .map(|(resource, &font)| format!("/F{} {} 0 R", resource + 1, font_object(font)))
                 .collect();
-            let resources = if fonts.is_empty() {
+            let images: Vec<String> = images
+                .iter()
+                .enumerate()
+                .filter_map(|(resource, &image)| {
+                    let object = image_objects.get(image)?;
+                    Some(format!("/Im{} {object} 0 R", resource + 1))
+                })
+                .collect();
+            let mut resources = Vec::new();
+            if !fonts.is_empty() {
+                resources.push(format!("/Font << {} >>", fonts.join(" ")));
+            }
+            if !images.is_empty() {
+                resources.push(format!("/XObject << {} >>", images.join(" ")));
+            }
+            let resources = if resources.is_empty() {
                 "<< >>".to_owned()
             } else {
-                format!("<< /Font << {} >> >>", fonts.join(" "))
+                format!("<< {} >>", resources.join(" "))
             };
             offsets.push(out.written);
             out.put(
@@ -294,9 +349,18 @@ impl Document {
             out.put_object(page_id + 1, &stream_object("", content, self.compression))?;
         }
 
-        for (i, object) in font_objects.iter().enumerate() {
+        let mut id = first_page + 2 * self.pages.len();
+        for object in &font_objects {
             offsets.push(out.written);
-            out.put_object(first_page + 2 * self.pages.len() + i, object)?;
+            out.put_object(id, object)?;
+            id += 1;
+        }
+        for (image, &first) in images.iter().zip(&image_objects) {
+            for object in image.objects(first, self.compression) {
+                offsets.push(out.written);
+                out.put_object(id, &object)?;
+                id += 1;
+            }
         }
 
         let xref = out.written;
@@ -424,13 +488,14 @@ impl Page {
     /// # Errors
     ///
     /// - [`Error::NotEmbedded`] if the run's font is a standard font.
-    /// - [`Error::InvalidGlyph`] if a glyph ID is not in the font, and
-    ///   [`Error::EmptyCluster`] if a cluster has no glyphs.
+    /// - [`Error::InvalidGlyph`] if a glyph ID is not in the font,
+    ///   [`Error::EmptyCluster`] if a cluster has no glyphs, and [`Error::ClusterTooLong`]
+    ///   if a cluster's text has more than 16382 UTF-16 code units.
     /// - [`Error::InvalidFontSize`] for a size outside [`Font::MIN_SIZE`] to
     ///   [`Font::MAX_SIZE`]; [`Error::InvalidPosition`] if the origin, a glyph's offset
     ///   or a glyph's position is outside -32767 to 32767 pt; and [`Error::OutOfRange`]
-    ///   for a horizontal scale outside 0.01 to 10, a skew outside -1 to 1, a stroke width
-    ///   outside 0 to 32767 pt, or a cluster's text longer than 16382 UTF-16 code units.
+    ///   for a horizontal scale outside 0.01 to 10, a skew outside -1 to 1, or a stroke
+    ///   width outside 0 to 32767 pt.
     ///
     /// On error the page is unchanged.
     pub fn draw_glyphs(&mut self, run: &GlyphRun) -> Result<()> {
@@ -443,6 +508,49 @@ impl Page {
             font,
             run: run.clone(),
         });
+        Ok(())
+    }
+
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
+    /// Draws `image` stretched over the rectangle with its lower-left corner at (`x`, `y`)
+    /// and the given width and height, in points. The image's own resolution is ignored;
+    /// a document embeds each image once however often its pages draw it.
+    ///
+    /// ```
+    /// use officewright_pdf::{Document, Image, PageSize, Pt};
+    ///
+    /// # let png = &b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01\x08\x02\0\0\0\x90wS\xde\
+    /// #     \0\0\0\x0cIDATx\xdac\xf8\xcf\xc0\0\0\x03\x01\x01\0\xf7\x03AC\
+    /// #     \0\0\0\0IEND\xaeB`\x82"[..];
+    /// let image = Image::from_bytes(png)?;
+    /// let mut doc = Document::new();
+    /// let page = doc.add_page(PageSize::A4)?;
+    /// // 2 inches wide, keeping the image's proportions.
+    /// let width = 144.0;
+    /// let height = width * f64::from(image.height()) / f64::from(image.width());
+    /// page.draw_image(&image, Pt(72.0), Pt(600.0), Pt(width), Pt(height))?;
+    /// # Ok::<(), officewright_pdf::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::OutOfRange`] if the width or height is outside 0.01 to 32767 pt, and
+    /// [`Error::InvalidPosition`] if a corner of the rectangle is outside -32767 to 32767
+    /// pt. On error the page is unchanged.
+    pub fn draw_image(&mut self, image: &Image, x: Pt, y: Pt, width: Pt, height: Pt) -> Result<()> {
+        check_range("image width", width.0, MIN_IMAGE_SIDE, MAX_POSITION)?;
+        check_range("image height", height.0, MIN_IMAGE_SIDE, MAX_POSITION)?;
+        check_position(x, y)?;
+        check_position(Pt(x.0 + width.0), Pt(y.0 + height.0))?;
+        let resource = match self.images.iter().position(|known| known == image) {
+            Some(index) => index,
+            None => {
+                self.images.push(image.clone());
+                self.images.len() - 1
+            }
+        };
+        let operators = draw_operators(resource + 1, x.0, y.0, width.0, height.0);
+        self.push_operators(operators.as_bytes());
         Ok(())
     }
 
@@ -1217,6 +1325,10 @@ mod tests {
                 font: "F".to_owned(),
             },
             Error::EmptyCluster { cluster: 0 },
+            Error::ClusterTooLong {
+                cluster: 1,
+                units: 20000,
+            },
             Error::OutOfRange {
                 what: "skew",
                 value: 2.0,
@@ -1236,6 +1348,159 @@ mod tests {
                 "{message}"
             );
         }
+    }
+
+    #[test]
+    fn draws_each_image_once_for_the_pages_that_use_it() {
+        use crate::image::tests::Png;
+        let png = Image::from_bytes(Png::new(3, 2, 2, 8).encode()).unwrap();
+        // With an alpha channel: an image and its soft mask.
+        let alpha = Image::from_bytes(Png::new(2, 2, 6, 8).encode()).unwrap();
+        let mut doc = Document::new();
+        let page = doc.add_page(PageSize::A4).unwrap();
+        page.draw_image(&alpha, Pt(10.0), Pt(20.0), Pt(30.0), Pt(40.0))
+            .unwrap();
+        page.draw_image(&png, Pt(0.5), Pt(0.0), Pt(1.25), Pt(2.0))
+            .unwrap();
+        page.add_text(Pt(72.0), Pt(700.0), &helvetica(), Pt(12.0), "x")
+            .unwrap();
+        // The same image, read again, on a second page.
+        let again = Image::from_bytes(Png::new(3, 2, 2, 8).encode()).unwrap();
+        doc.add_page(PageSize::A4)
+            .unwrap()
+            .draw_image(&again, Pt(0.0), Pt(0.0), Pt(100.0), Pt(100.0))
+            .unwrap();
+        doc.set_compression(Compression::None);
+        let pdf = String::from_utf8_lossy(&doc.to_bytes().unwrap()).into_owned();
+        // 1 catalog, 2 page tree, 3 Helvetica, 4 and 6 the pages, 5 and 7 their content,
+        // 8 the image with alpha and 9 its mask, 10 the other image.
+        assert!(pdf.starts_with("%PDF-1.4\n"));
+        assert!(
+            object(&pdf, 4).contains(
+                "/Resources << /Font << /F1 3 0 R >> /XObject << /Im1 8 0 R /Im2 10 0 R >> >>"
+            ),
+            "{pdf}"
+        );
+        assert!(
+            object(&pdf, 6).contains("/Resources << /XObject << /Im1 10 0 R >> >>"),
+            "{pdf}"
+        );
+        assert!(
+            object(&pdf, 5).contains(
+                "q\n30 0 0 40 10 20 cm\n/Im1 Do\nQ\nq\n1.25 0 0 2 0.5 0 cm\n/Im2 Do\nQ\nBT\n"
+            ),
+            "{pdf}"
+        );
+        assert!(object(&pdf, 7).contains("q\n100 0 0 100 0 0 cm\n/Im1 Do\nQ\n"));
+        assert!(object(&pdf, 8).contains("/SMask 9 0 R"), "{pdf}");
+        assert!(object(&pdf, 9).contains("/ColorSpace /DeviceGray"), "{pdf}");
+        assert!(object(&pdf, 10).contains("/Predictor 15"), "{pdf}");
+        assert_eq!(pdf.matches("/Subtype /Image").count(), 3);
+        assert!(pdf.contains("xref\n0 11\n"));
+    }
+
+    #[test]
+    fn an_image_drawn_twice_on_a_page_is_one_resource() {
+        use crate::image::tests::Png;
+        let image = Image::from_bytes(Png::new(2, 2, 0, 8).encode()).unwrap();
+        let mut doc = Document::new();
+        let page = doc.add_page(PageSize::A4).unwrap();
+        for x in [0.0, 50.0] {
+            page.draw_image(&image, Pt(x), Pt(0.0), Pt(10.0), Pt(10.0))
+                .unwrap();
+        }
+        doc.set_compression(Compression::None);
+        let pdf = String::from_utf8_lossy(&doc.to_bytes().unwrap()).into_owned();
+        assert!(
+            object(&pdf, 3).contains("/Resources << /XObject << /Im1 5 0 R >> >>"),
+            "{pdf}"
+        );
+        assert_eq!(pdf.matches("/Im1 Do").count(), 2);
+        assert_eq!(pdf.matches("/Subtype /Image").count(), 1);
+    }
+
+    #[test]
+    fn sixteen_bit_images_make_the_file_pdf_1_5() {
+        use crate::image::tests::Png;
+        let mut doc = Document::new();
+        let image = Image::from_bytes(Png::new(2, 2, 0, 16).encode()).unwrap();
+        doc.add_page(PageSize::A4)
+            .unwrap()
+            .draw_image(&image, Pt(0.0), Pt(0.0), Pt(10.0), Pt(10.0))
+            .unwrap();
+        assert!(doc.to_bytes().unwrap().starts_with(b"%PDF-1.5\n"));
+    }
+
+    #[test]
+    fn rejects_image_rectangles_out_of_range_and_leaves_the_page_unchanged() {
+        use crate::image::tests::Png;
+        let image = Image::from_bytes(Png::new(1, 1, 0, 8).encode()).unwrap();
+        let mut doc = Document::new();
+        let page = doc.add_page(PageSize::A4).unwrap();
+        let cases = [
+            (
+                (0.0, 0.0, 0.0, 1.0),
+                "image width 0 is outside the 0.01 to 32767 range",
+            ),
+            (
+                (0.0, 0.0, 1.0, -1.0),
+                "image height -1 is outside the 0.01 to 32767 range",
+            ),
+            (
+                (0.0, 0.0, f64::NAN, 1.0),
+                "image width NaN is outside the 0.01 to 32767 range",
+            ),
+            (
+                (0.0, 0.0, 32767.5, 1.0),
+                "image width 32767.5 is outside the 0.01 to 32767 range",
+            ),
+            (
+                (f64::INFINITY, 0.0, 1.0, 1.0),
+                "position (inf, 0) pt is outside the -32767 to 32767 pt range",
+            ),
+            (
+                (32767.0, 0.0, 1.0, 1.0),
+                "position (32768, 1) pt is outside the -32767 to 32767 pt range",
+            ),
+            // Wider than high: the far corner is x + width, y + height.
+            (
+                (32000.0, 0.0, 1000.0, 1.0),
+                "position (33000, 1) pt is outside the -32767 to 32767 pt range",
+            ),
+        ];
+        for ((x, y, width, height), message) in cases {
+            let err = page
+                .draw_image(&image, Pt(x), Pt(y), Pt(width), Pt(height))
+                .unwrap_err();
+            assert_eq!(err.to_string(), message);
+        }
+        assert!(page.content.is_empty() && page.images.is_empty());
+        page.draw_image(&image, Pt(-32767.0), Pt(0.0), Pt(0.01), Pt(32767.0))
+            .unwrap();
+    }
+
+    #[test]
+    fn image_errors_have_their_kinds() {
+        let malformed = Error::MalformedImage {
+            path: None,
+            reason: "x".to_owned(),
+        };
+        assert!(matches!(
+            officewright_core::Error::from(malformed),
+            officewright_core::Error::Malformed(m) if m == "image data is damaged: x"
+        ));
+        let unsupported = Error::UnsupportedImage {
+            path: Some("a.gif".into()),
+            reason: "y".to_owned(),
+        };
+        assert!(matches!(
+            officewright_core::Error::from(unsupported),
+            officewright_core::Error::Unsupported(m) if m == "image a.gif cannot be used: y"
+        ));
+        assert!(matches!(
+            officewright_core::Error::from(Error::ImageTooLarge { path: None }),
+            officewright_core::Error::LimitExceeded(_)
+        ));
     }
 
     #[test]
