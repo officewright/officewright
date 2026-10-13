@@ -17,9 +17,12 @@
          is built in (and the name of a style the document defines), indents, spacing
          before and after, line spacing, alignment, the list label Word shows
          (ListFormat.ListString) and the font of its first character (name, size, bold,
-         italic, colour; a theme font by its ST_Theme value, such as minorHAnsi); and, when
-         that takes no longer than the paragraphs did, the same font properties for every
-         run of formatting;
+         italic, colour; a theme font by its ST_Theme value, such as minorHAnsi; a theme
+         colour Word gives no RGB value for by its ST_ThemeColor value, such as accent1, with
+         its tint or shade); and, when that takes no longer than the paragraphs did, the same
+         font properties for every run of formatting. The runs are read only after the run
+         reader gave the known runs of a scratch document; the console says what it read
+         otherwise;
       6. writes <name>.json: hashes, Word version and build, the printer, page count,
          compatibility mode, and the fonts the document asks for that neither Windows nor
          Word has.
@@ -61,12 +64,25 @@
     How long reading the formatting of one document may take. A document that needs more
     keeps the paragraphs read so far and is marked incomplete.
 
+.PARAMETER FormattingOnly
+    Read the formatting again for documents already rendered into -OutputDir, without
+    rendering them: Word opens the re-saved copy there and <name>.formatting.json and the
+    record's formatting fields are written again; the PDF and the re-saved copy are left as
+    they are. A document is read only when its record says rendered or formatting-failed,
+    the input is the file the record was made from, the re-saved copy is the one the
+    record names, and Word is the version and build that rendered it; others are skipped
+    with the reason. When reading fails, the new export holds personal data, or it is
+    incomplete or without runs where the earlier one was not, the earlier files are kept.
+
 .PARAMETER DryRun
     Check the inputs, the output folder, the fonts and the printer, print what would be
     rendered, and stop before Word starts.
 
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File C:\officewright-ref\make-reference.ps1 -InputPath C:\officewright-ref\word-rules -OutputDir C:\officewright-ref\out
+
+.EXAMPLE
+    powershell -NoProfile -ExecutionPolicy Bypass -File C:\officewright-ref\make-reference.ps1 -InputPath C:\officewright-ref\word-rules -OutputDir C:\officewright-ref\out -FormattingOnly
 #>
 [CmdletBinding()]
 param(
@@ -85,6 +101,8 @@ param(
 
     [ValidateRange(30, 7200)]
     [int] $FormattingSeconds = 900,
+
+    [switch] $FormattingOnly,
 
     [switch] $DryRun
 )
@@ -110,6 +128,74 @@ function Resolve-UserPath([string] $Path) {
 
 function Get-Sha256([string] $Path) {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function ConvertTo-OrderedRecord($Object) {
+    # A record read back with ConvertFrom-Json, as the ordered dictionary the script writes,
+    # so that its fields keep their order.
+    $record = [ordered]@{}
+    foreach ($property in $Object.PSObject.Properties) { $record[$property.Name] = $property.Value }
+    return $record
+}
+
+function Get-FormattingOnlyState([string] $InputFile, [string] $OutDir, [int] $Version) {
+    # Whether the formatting of a rendered document can be read again: Ready, a Reason when
+    # it cannot, and the Record to update.
+    $name = [System.IO.Path]::GetFileName($InputFile)
+    $base = [System.IO.Path]::GetFileNameWithoutExtension($InputFile)
+    $state = New-Object PSObject -Property @{ Ready = $false; Reason = ''; Record = $null }
+    $jsonPath = Join-Path $OutDir ($base + '.json')
+    if (-not (Test-Path -LiteralPath $jsonPath)) {
+        $state.Reason = 'not rendered yet; run without -FormattingOnly first'
+        return $state
+    }
+    try {
+        $record = ConvertTo-OrderedRecord (Get-Content -LiteralPath $jsonPath -Raw | ConvertFrom-Json)
+    } catch {
+        $state.Reason = 'its record cannot be read'
+        return $state
+    }
+    $resaved = Join-Path $OutDir ($base + '.resaved.docx')
+    if ($record['script_version'] -ne $Version) {
+        $state.Reason = "rendered by format $($record['script_version']) of this script, not $Version"
+    } elseif ($record['status'] -ne 'rendered' -and $record['status'] -ne 'formatting-failed') {
+        $state.Reason = "its rendering did not succeed ($($record['status']))"
+    } elseif ($record['file'] -ne $name -or $record['sha256'] -ne (Get-Sha256 $InputFile)) {
+        $state.Reason = 'the input changed since it was rendered'
+    } elseif (-not (Test-Path -LiteralPath $resaved) -or $record['resaved_sha256'] -ne (Get-Sha256 $resaved)) {
+        $state.Reason = 'the re-saved copy is missing or not the one its record names'
+    } else {
+        $state.Ready = $true
+        $state.Record = $record
+    }
+    return $state
+}
+
+function Get-WordChange($Record, [string] $Version, [string] $Build) {
+    # Why the formatting of a rendered document cannot be read again by this Word: the
+    # record names the Word that rendered it, which corpus-import.py commits as the maker of
+    # the formatting too. '' when it is this Word.
+    if ([string]$Record['word_version'] -eq $Version -and [string]$Record['word_build'] -eq $Build) { return '' }
+    return "rendered by Word $($Record['word_version']) build $($Record['word_build']), not by this Word $Version build $Build; render it again with -Overwrite"
+}
+
+function Get-WorseFormatting($Before, $After) {
+    # Why a new formatting export is worse than the earlier one, which is then kept; '' when
+    # it is not.
+    if ($Before['formatting_complete'] -and -not $After['formatting_complete']) {
+        return 'the new export is incomplete and the earlier one is complete'
+    }
+    if ($Before['formatting_runs'] -and -not $After['formatting_runs']) {
+        return 'the new export has no runs and the earlier one has'
+    }
+    return ''
+}
+
+function Test-ForeignStep($Step) {
+    # Whether a step found a document the user opened in this script's Word instance.
+    if ($Step.Status -ne 'done' -or @($Step.Output).Count -eq 0) { return $false }
+    $output = $Step.Output[0]
+    return ($output.PSObject.Properties.Name -contains 'Foreign') -and [bool]$output.Foreign
 }
 
 function Write-JsonFile([string] $Path, $Value) {
@@ -455,7 +541,32 @@ function Get-FontRecord($Font, $Themes) {
         color = ConvertTo-HexColor $Font.Color $rgb
     }
     if ($theme) { $record.theme = $theme }
+    if ($null -eq $record.color -and [long]$Font.Color -ne 9999999) {
+        # A theme colour: Word gives no RGB value for it, so the record names the theme
+        # colour (ST_ThemeColor) and Word's lightening or darkening of it. PowerShell gives
+        # $null for a property whose getter fails, which [int] and [double] would turn into 0,
+        # dark1 and no tint: both values must be there.
+        try {
+            $index = $Font.TextColor.ObjectThemeColor
+            $tintShade = $Font.TextColor.TintAndShade
+            $themeColor = $null
+            if ($null -ne $index -and $null -ne $tintShade) { $themeColor = Get-ThemeColorName ([int]$index) }
+            if ($themeColor) {
+                $record.theme_color = $themeColor
+                $record.tint_shade = [math]::Round([double]$tintShade, 4)
+            }
+        } catch { }
+    }
     return $record
+}
+
+function Get-ThemeColorName([int] $Index) {
+    # WdThemeColorIndex as the ST_ThemeColor name of ECMA-376; $null for no theme colour.
+    $names = @('dark1', 'light1', 'dark2', 'light2', 'accent1', 'accent2', 'accent3', 'accent4',
+        'accent5', 'accent6', 'hyperlink', 'followedHyperlink', 'background1', 'text1',
+        'background2', 'text2')
+    if ($Index -lt 0 -or $Index -ge $names.Count) { return $null }
+    return $names[$Index]
 }
 
 function Get-ParagraphRecord($Paragraph, [int] $Index, $Themes) {
@@ -499,32 +610,59 @@ function Get-ParagraphRecord($Paragraph, [int] $Index, $Themes) {
 
 function Get-RunRecords($Range, [DateTime] $Deadline, $Themes) {
     # The paragraph's stretches of one character formatting, as Word's wdCharacterFormatting
-    # unit (13) moves over them; $null once $Deadline has passed.
+    # unit (13) moves over them; $null once $Deadline has passed. The paragraph's ends are
+    # read once, and the cursor is put at each run's start with SetRange, so neither how
+    # Word's Collapse takes its direction nor whether Duplicate shares state with the
+    # paragraph's range can make the reading repeat a run.
     $runs = New-Object System.Collections.ArrayList
+    $start = [int]$Range.Start
     $end = [int]$Range.End
     $cursor = $Range.Duplicate
-    $cursor.Collapse(1)                       # wdCollapseStart
-    while ([int]$cursor.Start -lt $end) {
+    $position = $start
+    while ($position -lt $end) {
         if ([DateTime]::UtcNow -gt $Deadline) { return $null }
         # Each run is at least a character long, so more runs than characters is a fault.
-        if ($runs.Count -gt $end - [int]$Range.Start) { throw 'Word gave more runs than characters' }
-        $from = [int]$cursor.Start
+        if ($runs.Count -ge $end - $start) { throw 'Word gave more runs than characters' }
+        $cursor.SetRange($position, $position)
         [void]$cursor.MoveEnd(13, 1)
-        if ([int]$cursor.End -le $from) { throw 'Word did not move over a run of formatting' }
-        if ([int]$cursor.End -gt $end) { $cursor.End = $end }
+        $next = [int]$cursor.End
+        if ($next -le $position) { throw 'Word did not move over a run of formatting' }
+        if ($next -gt $end) {
+            $next = $end
+            $cursor.SetRange($position, $next)
+        }
         [void]$runs.Add([ordered]@{
-                length = [int]$cursor.End - $from
+                length = $next - $position
                 font = Get-FontRecord $cursor.Font $Themes
             })
-        $cursor.Collapse(0)                   # wdCollapseEnd
+        $position = $next
     }
     return , $runs.ToArray()
 }
 
-function Export-Formatting($Document, [int] $BudgetSeconds, $Themes, $Progress) {
+function Get-RunReaderFault($Range) {
+    # '' when Get-RunRecords reads the runs of a paragraph that starts with five characters
+    # not bold and three bold; otherwise what it read, for the console only (Word's messages
+    # are in the language of its user interface). A Word that dropped the unit or the count
+    # of MoveEnd would give one run per character, which no other check notices.
+    $themes = @{ Fonts = @{}; Seen = @{}; Classify = { $null } }
+    try {
+        $runs = Get-RunRecords $Range ([DateTime]::UtcNow.AddSeconds(60)) $themes
+    } catch {
+        return "reading failed: $($_.Exception.Message)"
+    }
+    if ($null -eq $runs) { return 'reading took longer than a minute' }
+    if ($runs.Count -ge 2 -and $runs[0].length -eq 5 -and $runs[1].length -eq 3 -and
+        $runs[0].font.bold -eq $false -and $runs[1].font.bold -eq $true) { return '' }
+    $read = @($runs | Select-Object -First 12 | ForEach-Object { "$($_.length) bold=$($_.font.bold)" })
+    return "expected 5 bold=False, 3 bold=True, ...; read $($runs.Count) runs: $($read -join ', ')"
+}
+
+function Export-Formatting($Document, [int] $BudgetSeconds, $Themes, $Progress, [bool] $RunReaderOk = $true) {
     # Every paragraph of every story with the formatting Word computes for it. Then, in a
     # second pass, its runs of formatting, kept only if that pass takes no longer than the
-    # first, so that the whole export takes at most twice as long as without runs.
+    # first, so that the whole export takes at most twice as long as without runs, and only
+    # read when the run reader passed its check ($RunReaderOk).
     $deadline = [DateTime]::UtcNow.AddSeconds($BudgetSeconds)
     $clock = [System.Diagnostics.Stopwatch]::StartNew()
     $stories = New-Object System.Collections.ArrayList
@@ -565,7 +703,12 @@ function Export-Formatting($Document, [int] $BudgetSeconds, $Themes, $Progress) 
     # error messages are in the language of its user interface and go to the console only.
     $note = ''
     $runError = $null
-    if (-not $complete) { $note = 'not collected: the paragraphs did not fit in the time budget' }
+    if (-not $complete) {
+        $note = 'not collected: the paragraphs did not fit in the time budget'
+    } elseif (-not $RunReaderOk) {
+        $runsKept = $false
+        $note = 'left out: Word failed the check of the run reader'
+    }
     $collected = New-Object System.Collections.ArrayList
     if ($runsKept) {
         $Progress.Step = 'reading the runs of formatting'
@@ -610,13 +753,59 @@ function Write-FormattingJson($Export, [string] $Path) {
     [System.IO.File]::WriteAllText($Path, $json + "`n", $utf8)
 }
 
+function Read-DocumentFormatting($Record, [string] $Resaved, [string] $FormattingPath, $DocTokens) {
+    # Runs the formatting step on the re-saved copy, writes the export to $FormattingPath and
+    # fills the record's formatting fields and status; returns the step. Uses the worker and
+    # the settings of the main script.
+    Write-Host '  reading the formatting Word computes ...'
+    $formattingStarted = Get-Date
+    $step = Invoke-WordStep $worker $FormattingScript @($Resaved, $FormattingSeconds, $FormattingFunctions) ($FormattingSeconds + 120) $targets $progress
+    if (Test-ForeignStep $step) {
+        $Record.status = 'formatting-failed'
+        $Record.error = 'a document the user opened was in Word; the formatting was not read'
+    } elseif ($step.Status -eq 'done') {
+        $summary = $step.Output[0]
+        $export = $summary.Export
+        Write-FormattingJson $export $FormattingPath
+        $Record.formatting_seconds = [math]::Round(((Get-Date) - $formattingStarted).TotalSeconds, 1)
+        $Record.formatting_sha256 = Get-Sha256 $FormattingPath
+        $paragraphs = 0
+        foreach ($story in $export.stories) { $paragraphs += @($story.paragraphs).Count }
+        $Record.formatting_paragraphs = $paragraphs
+        $Record.formatting_runs = [bool]$export.runs
+        $Record.formatting_complete = [bool]$export.complete
+        $formattingText = [System.IO.File]::ReadAllText($FormattingPath)
+        $leaks = @($DocTokens | Where-Object { Test-Token $formattingText $_.Value } | ForEach-Object { "formatting: $($_.Kind)" })
+        $Record.privacy_findings = $leaks
+        if ($leaks.Count -gt 0) {
+            $Record.status = 'privacy-failed'
+            $Record.error = 'personal data in the formatting export; corpus-import.py refuses this document'
+        } else {
+            $Record.status = 'rendered'
+            $Record.error = ''
+        }
+        if ($export.runs_note) { Write-Host "  runs of formatting $($export.runs_note)" -ForegroundColor Yellow }
+        if ($summary.RunError) { Write-Host "  $($summary.RunError)" -ForegroundColor Yellow }
+        foreach ($placeholder in @($summary.Unresolved)) {
+            Write-Host "  theme font not resolved: $placeholder" -ForegroundColor Yellow
+        }
+    } elseif ($step.Status -eq 'error') {
+        $Record.status = 'formatting-failed'
+        $Record.error = "reading the formatting failed: $($step.Message)"
+    } else {
+        $Record.status = 'formatting-failed'
+        $Record.error = "Word stopped while reading the formatting: $($step.Message)"
+    }
+    return $step
+}
+
 function Get-FormattingFunctions {
     # The text of the functions above: the worker runs in a runspace of its own, which has
     # none of this script's functions.
     $names = @(
-        'ConvertTo-PointValue', 'ConvertTo-Flag', 'ConvertTo-HexColor', 'Get-AlignmentName',
+        'ConvertTo-PointValue', 'ConvertTo-Flag', 'ConvertTo-HexColor', 'Get-ThemeColorName', 'Get-AlignmentName',
         'Get-LineRuleName', 'Get-StoryName', 'Get-TextExcerpt', 'Get-ThemeKind', 'Get-FontRecord',
-        'Get-ParagraphRecord', 'Get-RunRecords', 'Export-Formatting'
+        'Get-ParagraphRecord', 'Get-RunRecords', 'Get-RunReaderFault', 'Export-Formatting'
     )
     return ($names | ForEach-Object {
             "function $_ {`n$((Get-Item "function:$_").ScriptBlock.ToString())`n}"
@@ -706,6 +895,37 @@ param($Resaved, $BudgetSeconds, $Functions)
 $ErrorActionPreference = 'Stop'
 . ([ScriptBlock]::Create($Functions))
 $word = $global:word
+$progress.Step = 'counting open documents'
+if ($word.Documents.Count -gt 0) {
+    # Not ours, as in the rendering step.
+    return New-Object PSObject -Property @{ Foreign = $true }
+}
+# The run reader's check on a scratch document: "aaaaa" not bold, "bbb" bold, "cc". A check
+# that cannot be made costs the runs, not the paragraphs.
+$progress.Step = 'Documents.Add (checking the run reader)'
+$runReaderFault = ''
+$scratch = $null
+try {
+    $scratch = $word.Documents.Add()
+    $scratch.Range(0, 0).InsertAfter('aaaaabbbcc')
+    $scratch.Range(0, 10).Font.Bold = 0
+    $scratch.Range(5, 8).Font.Bold = -1
+    $progress.Step = 'checking the run reader'
+    $runReaderFault = Get-RunReaderFault $scratch.Paragraphs.Item(1).Range
+} catch {
+    $runReaderFault = "the scratch document could not be set up: $($_.Exception.Message)"
+} finally {
+    if ($null -ne $scratch) {
+        try {
+            $scratch.Close(0)
+        } catch {
+            # Left open, it would stop the next document as a document of the user's.
+            throw "the scratch document for checking the run reader did not close: $($_.Exception.Message)"
+        } finally {
+            [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($scratch)
+        }
+    }
+}
 $progress.Step = 'Documents.Open (formatting)'
 $doc = $word.Documents.Open($Resaved, $false, $true, $false)
 try {
@@ -748,7 +968,9 @@ try {
         Get-ThemeKind $xml
     }
     $themes = @{ Fonts = $fonts; Seen = @{}; Classify = $classify }
-    $result = Export-Formatting $doc $BudgetSeconds $themes $progress
+    $result = Export-Formatting $doc $BudgetSeconds $themes $progress ($runReaderFault -eq '')
+    # For the console: the export carries only the fixed note.
+    if ($runReaderFault) { $result.RunError = "check of the run reader: $runReaderFault" }
 } finally {
     $progress.Step = 'closing the re-saved copy (formatting)'
     $doc.Close(0)
@@ -841,8 +1063,14 @@ $plan = @()
 foreach ($file in $inputs) {
     $fonts = @(Get-DocumentFonts $file.FullName)
     $skip = $false
+    $why = 'rendered before; -Overwrite renders it again'
+    $again = $null
     $json = Join-Path $outDir ($file.BaseName + '.json')
-    if (-not $Overwrite -and (Test-Path -LiteralPath $json)) {
+    if ($FormattingOnly) {
+        $again = Get-FormattingOnlyState $file.FullName $outDir $ScriptVersion
+        $skip = -not $again.Ready
+        $why = $again.Reason
+    } elseif (-not $Overwrite -and (Test-Path -LiteralPath $json)) {
         try {
             $previous = Get-Content -LiteralPath $json -Raw | ConvertFrom-Json
             $skip = $previous.status -eq 'rendered' -and $previous.script_version -eq $ScriptVersion
@@ -855,13 +1083,16 @@ foreach ($file in $inputs) {
         Fonts = $fonts
         NotInWindows = @(Get-MissingFonts $fonts $windowsFonts)
         Skip = $skip
+        SkipReason = $why
+        Again = $again
     }
 }
 
 Write-Host "Documents: $($inputs.Count) in, results to $outDir"
 foreach ($entry in $plan) {
     $state = 'render'
-    if ($entry.Skip) { $state = 'skip (rendered before; -Overwrite renders it again)' }
+    if ($FormattingOnly) { $state = 'read the formatting again' }
+    if ($entry.Skip) { $state = "skip ($($entry.SkipReason))" }
     Write-Host ("  {0,-34} {1}" -f $entry.File.Name, $state)
     if ($entry.NotInWindows.Count -gt 0) {
         Write-Host ("  {0,-34} fonts not installed in Windows: {1}" -f '', ($entry.NotInWindows -join ', ')) -ForegroundColor Yellow
@@ -972,6 +1203,56 @@ try {
         $pdf = Join-Path $outDir ($base + '.pdf')
         $jsonPath = Join-Path $outDir ($base + '.json')
         $formattingPath = Join-Path $outDir ($base + '.formatting.json')
+        if ($FormattingOnly) {
+            # The re-saved copy is read again; the earlier files stay until the new export is
+            # known to be good.
+            Write-Host "Reading the formatting of $($file.Name) again ..."
+            $record = $entry.Again.Record
+            $change = Get-WordChange $record ([string]$info.Version) ([string]$info.Build)
+            if ($change) {
+                Write-Host "  skipped: $change" -ForegroundColor Yellow
+                $results += New-Object PSObject -Property @{ File = $file.Name; Status = 'skipped'; Missing = @() }
+                continue
+            }
+            $before = [ordered]@{}
+            foreach ($key in @($record.Keys)) { $before[$key] = $record[$key] }
+            $inputText = Get-PackageText $file.FullName
+            $docTokens = @($tokens | Where-Object { $_.Always -or -not (Test-Token $inputText $_.Value) })
+            $newPath = $formattingPath + '.new'
+            $step = Read-DocumentFormatting $record $resaved $newPath $docTokens
+            if (Test-ForeignStep $step) {
+                $userDocuments = $true
+                Write-Host 'Stopping: a document was opened in the Word instance this script uses. Word stays open and visible; save your work there, close Word, and start the script again.' -ForegroundColor Red
+                break
+            }
+            $worse = ''
+            if ($record.status -eq 'rendered') { $worse = Get-WorseFormatting $before $record }
+            if ($worse) {
+                Remove-Item -LiteralPath $newPath -Force -ErrorAction SilentlyContinue
+                Write-Host "  kept the earlier formatting: $worse" -ForegroundColor Yellow
+                $results += New-Object PSObject -Property @{ File = $file.Name; Status = 'skipped'; Missing = @() }
+            } elseif ($record.status -eq 'rendered') {
+                Move-Item -LiteralPath $newPath -Destination $formattingPath -Force
+                Write-JsonFile $jsonPath $record
+                $runs = 'without runs'
+                if ($record.formatting_runs) { $runs = 'with runs' }
+                $detail = "formatting of $($record.formatting_paragraphs) paragraphs $runs"
+                if (-not $record.formatting_complete) { $detail += ' (incomplete: time budget)' }
+                Write-Host "  rendered: $detail" -ForegroundColor Green
+                $results += New-Object PSObject -Property @{ File = $file.Name; Status = $record.status; Missing = @() }
+            } else {
+                Remove-Item -LiteralPath $newPath -Force -ErrorAction SilentlyContinue
+                Write-Host "  $($record.status): $($record.error); the earlier formatting is kept" -ForegroundColor Red
+                foreach ($finding in $record.privacy_findings) { Write-Host "    $finding" -ForegroundColor Red }
+                $results += New-Object PSObject -Property @{ File = $file.Name; Status = $record.status; Missing = @() }
+            }
+            if ($step.Status -eq 'stuck') { Exit-Stuck $step.Message $staging }
+            if (($step.Status -eq 'error' -and @(Get-OwnWordProcess $since).Count -eq 0) -or $step.Status -eq 'timeout') {
+                Write-Host 'Stopping: the Word instance is gone. Start the script again to read the remaining documents.' -ForegroundColor Red
+                break
+            }
+            continue
+        }
         foreach ($old in @($resaved, $pdf, $jsonPath, $formattingPath)) {
             if (Test-Path -LiteralPath $old) { Remove-Item -LiteralPath $old -Force }
         }
@@ -1033,41 +1314,12 @@ try {
                 $record.status = 'privacy-failed'
                 $record.error = 'personal data in the output; corpus-import.py refuses this document'
             } else {
-                Write-Host '  reading the formatting Word computes ...'
-                $formattingStarted = Get-Date
-                $step = Invoke-WordStep $worker $FormattingScript @($resaved, $FormattingSeconds, $FormattingFunctions) ($FormattingSeconds + 120) $targets $progress
-                if ($step.Status -eq 'done') {
-                    $summary = $step.Output[0]
-                    $export = $summary.Export
-                    Write-FormattingJson $export $formattingPath
-                    $record.formatting_seconds = [math]::Round(((Get-Date) - $formattingStarted).TotalSeconds, 1)
-                    $record.formatting_sha256 = Get-Sha256 $formattingPath
-                    $paragraphs = 0
-                    foreach ($story in $export.stories) { $paragraphs += @($story.paragraphs).Count }
-                    $record.formatting_paragraphs = $paragraphs
-                    $record.formatting_runs = [bool]$export.runs
-                    $record.formatting_complete = [bool]$export.complete
-                    $formattingText = [System.IO.File]::ReadAllText($formattingPath)
-                    $leaks = @($docTokens | Where-Object { Test-Token $formattingText $_.Value } | ForEach-Object { "formatting: $($_.Kind)" })
-                    $record.privacy_findings = $leaks
-                    if ($leaks.Count -gt 0) {
-                        $record.status = 'privacy-failed'
-                        $record.error = 'personal data in the formatting export; corpus-import.py refuses this document'
-                    } else {
-                        $record.status = 'rendered'
-                    }
-                    if ($export.runs_note) { Write-Host "  runs of formatting $($export.runs_note)" -ForegroundColor Yellow }
-                    if ($summary.RunError) { Write-Host "  $($summary.RunError)" -ForegroundColor Yellow }
-                    foreach ($placeholder in @($summary.Unresolved)) {
-                        Write-Host "  theme font not resolved: $placeholder" -ForegroundColor Yellow
-                    }
+                $step = Read-DocumentFormatting $record $resaved $formattingPath $docTokens
+                if (Test-ForeignStep $step) {
+                    $userDocuments = $true
                 } elseif ($step.Status -eq 'error') {
-                    $record.status = 'formatting-failed'
-                    $record.error = "reading the formatting failed: $($step.Message)"
                     if (@(Get-OwnWordProcess $since).Count -eq 0) { $aborted = $true }
-                } else {
-                    $record.status = 'formatting-failed'
-                    $record.error = "Word stopped while reading the formatting: $($step.Message)"
+                } elseif ($step.Status -ne 'done') {
                     $aborted = $true
                 }
             }
@@ -1098,6 +1350,10 @@ try {
             Write-Host "    fonts Word does not have: $($record.fonts_missing -join ', ')" -ForegroundColor Yellow
         }
         $results += New-Object PSObject -Property @{ File = $file.Name; Status = $record.status; Missing = $record.fonts_missing }
+        if ($userDocuments) {
+            Write-Host 'Stopping: a document was opened in the Word instance this script uses. Word stays open and visible; save your work there, close Word, and start the script again.' -ForegroundColor Red
+            break
+        }
         if ($aborted) {
             Write-Host 'Stopping: the Word instance is gone. Start the script again to render the remaining documents.' -ForegroundColor Red
             break
@@ -1131,7 +1387,9 @@ $notRun = $plan.Count - $results.Count
 $missing = @($results | ForEach-Object { $_.Missing } | Where-Object { $_ } | Sort-Object -Unique)
 
 Write-Host ''
-Write-Host "Rendered: $rendered, skipped: $skipped, failed: $($failed.Count), not started: $notRun"
+$verb = 'Rendered'
+if ($FormattingOnly) { $verb = 'Formatting read again' }
+Write-Host "$($verb): $rendered, skipped: $skipped, failed: $($failed.Count), not started: $notRun"
 foreach ($item in $failed) { Write-Host "  failed: $($item.File) ($($item.Status))" -ForegroundColor Red }
 if ($missing.Count -gt 0) {
     Write-Host "Fonts Word substituted: $($missing -join ', ')" -ForegroundColor Yellow
