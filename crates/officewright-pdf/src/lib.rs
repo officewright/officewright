@@ -15,10 +15,11 @@
 //! offset, rather than altered. Page content and embedded fonts are compressed
 //! ([`Compression`]).
 //!
-//! Text that a layout engine has shaped is drawn as a [`GlyphRun`]: glyphs of an embedded
-//! font at explicit positions, with the text they stand for, so ligatures, kerning and
-//! marks come out as shaped and text extraction still returns the text. Pages also take
-//! filled and stroked [`GraphicsPath`]s, with dashed [`Stroke`]s, and clipping paths.
+//! The layout engine draws on pages with primitives that are public but exempt from
+//! semantic versioning until officewright 1.0: glyph runs (glyphs of an embedded font at
+//! explicit positions, with the text they stand for), filled and stroked paths, dashed
+//! strokes and clipping paths. Their documentation is hidden unless the feature
+//! `unstable-drawing` is on; a drawing API for users will have a plan of its own.
 //!
 //! ```
 //! use officewright_pdf::{Document, Font, PageSize, Pt, StandardFont};
@@ -48,9 +49,14 @@ mod text;
 pub use document::{Document, Page};
 pub use error::{Error, Result};
 pub use font::{EmbeddingNote, Font, StandardFont};
+#[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
 pub use glyphs::{GlyphRun, PlacedGlyph};
-pub use officewright_core::{Color, PageSize, Pt};
+#[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
+pub use officewright_core::Color;
+pub use officewright_core::{PageSize, Pt};
+#[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
 pub use officewright_font::GlyphId;
+#[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
 pub use path::{GraphicsPath, LineCap, LineJoin, Stroke};
 pub use stream::Compression;
 pub use text::text_to_pdf;

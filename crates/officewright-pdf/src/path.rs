@@ -21,6 +21,9 @@ const MAX_DASH_LENGTHS: usize = 8191;
 /// subpaths; each starts at a point, and [`close`](Self::close) joins its end to that
 /// point. Filling and clipping use the nonzero winding number rule (ISO 32000-1, 8.5.3.3.2).
 ///
+/// One of the drawing primitives the layout engine paints with: public, but exempt from
+/// semantic versioning until officewright 1.0 (feature `unstable-drawing`).
+///
 /// ```
 /// use officewright_pdf::{Color, Document, GraphicsPath, PageSize, Pt, Stroke};
 ///
@@ -107,8 +110,8 @@ impl GraphicsPath {
         self
     }
 
-    /// Fails unless every point of the path, the corners of its rectangles included, is
-    /// within -32767 to 32767 pt.
+    /// Fails unless every point of the path, the corners of its rectangles included, and
+    /// the width and height of every rectangle are within -32767 to 32767 pt.
     pub(crate) fn check(&self) -> Result<()> {
         for segment in &self.segments {
             match *segment {
@@ -121,6 +124,8 @@ impl GraphicsPath {
                 Segment::Close => {}
                 Segment::Rect([x, y, width, height]) => {
                     check_position(x, y)?;
+                    // `re` writes the width and height as they are.
+                    check_position(width, height)?;
                     check_position(Pt(x.0 + width.0), Pt(y.0 + height.0))?;
                 }
             }
@@ -164,6 +169,9 @@ impl GraphicsPath {
 /// the shape of its ends and corners.
 ///
 /// A new stroke is solid, with butt caps and mitred joins, the PDF defaults.
+///
+/// One of the drawing primitives the layout engine paints with: public, but exempt from
+/// semantic versioning until officewright 1.0 (feature `unstable-drawing`).
 ///
 /// ```
 /// use officewright_pdf::{Color, Document, GraphicsPath, LineCap, PageSize, Pt, Stroke};
@@ -405,6 +413,8 @@ mod tests {
             GraphicsPath::new(Pt(0.0), Pt(f64::NAN)),
             GraphicsPath::rect(Pt(1.0), Pt(0.0), ok, Pt(0.0)),
             GraphicsPath::rect(Pt(0.0), Pt(0.0), Pt(0.0), Pt(f64::INFINITY)),
+            // Both corners are in range, but the width written with `re` is not.
+            GraphicsPath::rect(Pt(20000.0), Pt(0.0), Pt(-40000.0), Pt(10.0)),
         ];
         for at in 0..3 {
             let mut points = [Pt(0.0); 6];

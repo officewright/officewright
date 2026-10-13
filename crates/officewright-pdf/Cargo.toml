@@ -16,6 +16,12 @@ exclude = [
   "tests/glyph_runs.rs",
 ]
 
+[features]
+# Shows the drawing primitives the layout engine paints with (glyph runs, paths, strokes,
+# clipping) in the documentation. They are public and compiled either way, and exempt
+# from semver until 1.0; the facade does not pass the feature on.
+unstable-drawing = []
+
 [dependencies]
 # Flate (zlib) compression of content and font streams. officewright-opc reads ZIP
 # archives with it, so the workspace builds it already.

@@ -176,6 +176,11 @@ fn draw(content: &str, widths: &HashMap<u16, f64>) -> TestResult<Vec<Drawn>> {
 /// Asserts that the glyphs of `runs`, drawn on one page, are the runs' glyphs and land
 /// where the runs put them, slant included, to within 0.001 pt.
 fn assert_positions(runs: &[GlyphRun]) -> TestResult {
+    assert_positions_within(runs, 1e-3)
+}
+
+/// As [`assert_positions`], to within `tolerance` points.
+fn assert_positions_within(runs: &[GlyphRun], tolerance: f64) -> TestResult {
     let pdf = pdf_of(runs)?;
     let drawn = draw(content(&pdf)?, &widths(&pdf)?)?;
     let expected: Vec<(f64, f64)> = runs
@@ -208,7 +213,7 @@ fn assert_positions(runs: &[GlyphRun]) -> TestResult {
     assert_eq!(distinct.len(), cids.len());
     for (glyph, (x, y)) in drawn.iter().zip(expected) {
         assert!(
-            (glyph.x - x).abs() < 1e-3 && (glyph.y - y).abs() < 1e-3,
+            (glyph.x - x).abs() < tolerance && (glyph.y - y).abs() < tolerance,
             "{glyph:?} should be at ({x}, {y})"
         );
     }
@@ -297,7 +302,7 @@ fn places_glyphs_too_far_apart_for_an_adjustment_with_a_text_matrix() -> TestRes
 }
 
 #[test]
-fn splits_arrays_and_strings_at_the_limits_of_pdf_1_4() -> TestResult {
+fn splits_arrays_and_strings_at_the_limits_readers_handle() -> TestResult {
     let font = Font::from_bytes(minimal()?, 0)?;
     // Every glyph 1 pt after the end of the one before: an adjustment and a string each.
     let mut spaced = GlyphRun::new(&font, Pt(1.0), Pt(-32000.0), Pt(0.0));
@@ -325,8 +330,9 @@ fn splits_arrays_and_strings_at_the_limits_of_pdf_1_4() -> TestResult {
             longest_string = longest_string.max((string.len() - 2) / 2);
         }
     }
-    // Both limits were reached, and kept.
-    assert_eq!((longest_array, longest_string), (8191, 65534));
+    // Both limits were reached, and kept: 8191 elements (PDF 1.4) and 32767 bytes (PDF
+    // 1.5, which replacement text needs).
+    assert_eq!((longest_array, longest_string), (8191, 32766));
     Ok(())
 }
 
@@ -399,7 +405,8 @@ fn text_a_glyph_cannot_map_gets_replacement_text() -> TestResult {
     run.push_cluster("Á", [glyph(A, 12.0, 0.0), glyph(ACUTE, 12.0, 1.0)]);
     // Glyphs that stand for no text, such as tab leaders.
     run.push_cluster("", [glyph(SPACE, 18.0, 0.0)]);
-    // 32 UTF-16 code units fit in a ToUnicode entry, 33 do not.
+    // Long text: 32 UTF-16 code units fit in a ToUnicode entry; the next cluster's glyph
+    // already has one, so its text is replaced.
     let long = "x".repeat(32);
     run.push_cluster(&long, [glyph(A_ACUTE, 20.0, 0.0)]);
     run.push_cluster(&format!("{long}y"), [glyph(A_ACUTE, 26.0, 0.0)]);
@@ -427,6 +434,112 @@ fn text_a_glyph_cannot_map_gets_replacement_text() -> TestResult {
     let mut cids: Vec<u16> = widths(&pdf)?.into_keys().collect();
     cids.sort_unstable();
     assert_eq!(cids, [1, 2, 3, 4]);
+    Ok(())
+}
+
+#[test]
+fn the_tounicode_length_limit_counts_utf16_code_units() -> TestResult {
+    let data = liberation_sans()?;
+    let face = FontFace::from_bytes(data.clone(), 0)?;
+    let font = Font::from_bytes(data, 0)?;
+    // Four glyphs, each used for one cluster only, so no entry is taken already.
+    let [a, b, c, d] = ['a', 'b', 'c', 'd'].map(|ch| glyph_of(&face, ch, 10.0).map(|(id, _)| id));
+    let mut run = GlyphRun::new(&font, Pt(10.0), Pt(72.0), Pt(700.0));
+    // U+1D400 takes two UTF-16 code units: 16 of them are 32 units, 17 are 34.
+    let bold = |count: usize| "\u{1D400}".repeat(count);
+    let cases = [
+        (a?, "x".repeat(32), true),
+        (b?, "x".repeat(33), false),
+        (c?, bold(16), true),
+        (d?, bold(17), false),
+    ];
+    for (i, (id, text, _)) in cases.iter().enumerate() {
+        run.push_cluster(text, [glyph(*id, 10.0 * i as f64, 0.0)]);
+    }
+    let pdf = pdf_of(&[run])?;
+    let utf16 = |text: &str| -> String {
+        text.encode_utf16()
+            .map(|unit| format!("{unit:04X}"))
+            .collect()
+    };
+    for (_, text, mapped) in &cases {
+        let entry = format!("> <{}>\n", utf16(text));
+        let span = format!("/ActualText <FEFF{}>", utf16(text));
+        assert_eq!(pdf.contains(&entry), *mapped, "{text}");
+        assert_eq!(pdf.contains(&span), !*mapped, "{text}");
+    }
+    assert!(pdf.contains("2 beginbfchar"), "{pdf}");
+    Ok(())
+}
+
+#[test]
+fn a_cluster_text_must_fit_in_a_string() -> TestResult {
+    let font = Font::from_bytes(minimal()?, 0)?;
+    let run = |units: usize| {
+        let mut run = GlyphRun::new(&font, Pt(10.0), Pt(72.0), Pt(700.0));
+        run.push_cluster(&"x".repeat(units), [glyph(A, 0.0, 0.0)]);
+        run
+    };
+    // 16382 code units, after the byte order mark, are 32766 bytes.
+    let pdf = pdf_of(&[run(16382)])?;
+    let (_, span) = pdf.split_once("/ActualText <").ok_or("no span")?;
+    let (hex, _) = span.split_once('>').ok_or("no end")?;
+    assert_eq!(hex.len() / 2, 32766);
+    let mut doc = Document::new();
+    let err = doc
+        .add_page(PageSize::A4)?
+        .draw_glyphs(&run(16383))
+        .err()
+        .ok_or("too long")?;
+    assert_eq!(
+        err.to_string(),
+        "cluster text length in UTF-16 code units 16383 is outside the 0 to 16382 range"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_replaced_cluster_encloses_only_its_own_glyphs() -> TestResult {
+    let font = Font::from_bytes(minimal()?, 0)?;
+    let mut run = GlyphRun::new(&font, Pt(10.0), Pt(72.0), Pt(700.0));
+    run.push_cluster("A", [glyph(A, 0.0, 0.0)]);
+    run.push_cluster("AA", [glyph(A, 6.0, 0.0), glyph(A, 12.0, 0.0)]);
+    run.push_cluster("A", [glyph(A, 18.0, 0.0)]);
+    let pdf = pdf_of(&[run])?;
+    assert_eq!(
+        content(&pdf)?,
+        "q\n0 0 0 rg\nBT\n/F1 10 Tf\n1 0 0 1 72 700 Tm\n[<0001>] TJ\n\
+         /Span << /ActualText <FEFF00410041> >> BDC\n[<00010001>] TJ\nEMC\n[<0001>] TJ\nET\nQ\n"
+    );
+    Ok(())
+}
+
+#[test]
+fn keeps_positions_to_a_ten_thousandth_of_a_point() -> TestResult {
+    let data = liberation_sans()?;
+    let face = FontFace::from_bytes(data.clone(), 0)?;
+    let font = Font::from_bytes(data, 0)?;
+    // Positions a few thousandths of a point off the advances, at 72 pt: adjustments of a
+    // fraction of a thousandth of the em.
+    let mut run = GlyphRun::new(&font, Pt(72.0), Pt(-32000.0), Pt(0.0));
+    let mut x = 0.0;
+    for (i, ch) in "Typewriter".chars().enumerate() {
+        let (id, advance) = glyph_of(&face, ch, 72.0)?;
+        run.push_cluster(ch.encode_utf8(&mut [0; 4]), [glyph(id, x, 0.0)]);
+        x += advance + [0.002, -0.003, 0.0045][i % 3];
+    }
+    assert_positions_within(&[run], 1e-4)?;
+    // Forty n's at 1000 pt, stretched by an awkward scale: the widths of the /W array
+    // (four decimals of 556.15234375) and the scale written with Tz (123.4568) are not
+    // exact, and the drift they would build up has to be corrected.
+    let scale = 1.234_567_89;
+    let (n, advance) = glyph_of(&face, 'n', 1000.0)?;
+    let mut run =
+        GlyphRun::new(&font, Pt(1000.0), Pt(-32000.0), Pt(0.0)).with_horizontal_scale(scale);
+    for i in 0..40 {
+        run.push_cluster("n", [glyph(n, f64::from(i) * advance * scale, 0.0)]);
+    }
+    assert_positions_within(&[run], 1e-3)?;
     Ok(())
 }
 

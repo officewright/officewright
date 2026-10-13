@@ -132,7 +132,7 @@ impl Document {
     /// Embedded fonts are reduced to the glyphs the document shows now. Nothing is
     /// written to `out` unless the whole document can be. The file is PDF 1.4, or PDF 1.5
     /// if some text needs replacement text for text extraction: where two characters share
-    /// a glyph of an embedded font, or a cluster of a [`GlyphRun`] cannot be given by the
+    /// a glyph of an embedded font, or a cluster of a glyph run cannot be given by the
     /// ToUnicode map.
     ///
     /// # Errors
@@ -346,6 +346,7 @@ impl Document {
 }
 
 impl Page {
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
     /// The most clipping paths that can be in effect at once. Each is saved with the
     /// graphics state, which every PDF reader can nest 28 deep (PDF Reference 1.4,
     /// Appendix C), and drawing takes one more level.
@@ -411,6 +412,7 @@ impl Page {
         Ok(())
     }
 
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
     /// Draws a run of glyphs at the positions it gives them.
     ///
     /// This is how text that a layout engine has shaped is drawn: the run says which
@@ -426,8 +428,8 @@ impl Page {
     /// - [`Error::InvalidFontSize`] for a size outside [`Font::MIN_SIZE`] to
     ///   [`Font::MAX_SIZE`]; [`Error::InvalidPosition`] if the origin, a glyph's offset
     ///   or a glyph's position is outside -32767 to 32767 pt; and [`Error::OutOfRange`]
-    ///   for a horizontal scale outside 0.01 to 10, a skew outside -1 to 1, or a stroke
-    ///   width outside 0 to 32767 pt.
+    ///   for a horizontal scale outside 0.01 to 10, a skew outside -1 to 1, a stroke width
+    ///   outside 0 to 32767 pt, or a cluster's text longer than 16382 UTF-16 code units.
     ///
     /// On error the page is unchanged.
     pub fn draw_glyphs(&mut self, run: &GlyphRun) -> Result<()> {
@@ -443,6 +445,7 @@ impl Page {
         Ok(())
     }
 
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
     /// Fills the inside of `path` with `color`, by the nonzero winding number rule.
     ///
     /// # Errors
@@ -458,6 +461,7 @@ impl Page {
         Ok(())
     }
 
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
     /// Strokes the outline of `path` as `stroke` says. Open subpaths get the stroke's caps
     /// at their ends, closed ones joins at every corner.
     ///
@@ -489,6 +493,7 @@ impl Page {
         Ok(())
     }
 
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
     /// Clips everything drawn on the page from now on to the inside of `path`, by the
     /// nonzero winding number rule, until [`pop_clip`](Self::pop_clip) removes it. Clipping
     /// paths nest: what is drawn shows only inside all of those in effect. The end of the
@@ -524,6 +529,7 @@ impl Page {
         Ok(())
     }
 
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
     /// Removes the clipping path added last by [`push_clip`](Self::push_clip).
     ///
     /// # Errors

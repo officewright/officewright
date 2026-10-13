@@ -48,7 +48,9 @@ crates/
                         shapes with HarfRust behind a private module; feature `fuzzing` opens entry points
                         for the fuzz targets, examples and font tests, which are not API
   officewright-doc      DOC/DOCX/RTF          (counterpart of Spire.Doc)
-  officewright-pdf      PDF read/write        (counterpart of Spire.PDF)
+  officewright-pdf      PDF read/write        (counterpart of Spire.PDF); the drawing primitives the layout engine
+                        paints with are public, but exempt from semver until 1.0 and hidden in the docs unless
+                        feature `unstable-drawing`
   officewright-xls      XLS/XLSX              (counterpart of Spire.XLS)
   officewright-slides   PPT/PPTX              (counterpart of Spire.Presentation)
   officewright-ffi      C ABI; built by cargo-c (`cargo cinstall`) into the native lib `officewright`
@@ -95,7 +97,7 @@ scripts/corpus-import.py   checks make-reference.ps1 results and turns them into
 2. New behaviour has tests; a bug fix has a regression test that failed before the fix.
 3. Every new public item has a doc comment; non-trivial public APIs have a runnable doc example.
 4. A new parser comes with a fuzz target in `fuzz/`.
-5. Every public Rust feature that users need is exposed through the C ABI in the same PR, with the header regenerated and covered by `tests/c` and `tests/ffi-python`. A crate that no user-facing feature uses yet (a building block such as `officewright-font`) gets its C ABI in the PR that makes it user-facing. Work the maintainer planned as a chain of stacked PRs gets its C ABI in the PR of the chain the plan names: the DOCX reader in the last one, once the document model is complete. The PDF drawing primitives of `officewright-pdf` (glyph runs, paths, strokes, clipping) have no C ABI: they are what the layout engine paints with, and users get them through DOCX to PDF, whose C ABI comes with it; a PDF drawing API for users would get a plan, and its C ABI, of its own.
+5. Every public Rust feature that users need is exposed through the C ABI in the same PR, with the header regenerated and covered by `tests/c` and `tests/ffi-python`. A crate that no user-facing feature uses yet (a building block such as `officewright-font`) gets its C ABI in the PR that makes it user-facing. Work the maintainer planned as a chain of stacked PRs gets its C ABI in the PR of the chain the plan names: the DOCX reader in the last one, once the document model is complete. The PDF drawing primitives of `officewright-pdf` (glyph runs, paths, strokes, clipping) are what the layout engine paints with, not an API for users: like the layout IR they are public but hidden in the docs unless feature `unstable-drawing`, exempt from semver until 1.0, not passed on by the facade, and have no C ABI. Users get them through DOCX to PDF, whose C ABI comes with it; a drawing API for users, Rust and C ABI together, gets a plan of its own after DOCX to PDF.
 6. Never weaken a check to make it pass (no `#[allow]` without a `// reason:` comment, no skipped tests, no lowered lint levels).
 
 ## Rust conventions
@@ -193,7 +195,7 @@ Not before the C ABI is stable. When they come: .NET (`netstandard2.0` + `net8.0
 - Conventional Commits with the crate as scope: `feat(pdf): write xref streams`, `fix(ffi): free buffer on error path`, `docs(readme): ...`, `ci: ...`. Breaking changes use `!` (`feat(pdf)!: ...`).
 - One logical change per commit; no "wip"/"fix stuff" commits.
 - Until Milestone 1 is merged, commit to `main`. After that, work on branches (`feat/<topic>`, `fix/<topic>`), open a PR, merge only with green CI. `main` is protected.
-- Releases (later): release-plz generates versions and CHANGELOG from commit messages; cargo-semver-checks runs before publishing, without the feature `unstable-ir` of `officewright-layout` (the IR is exempt until 1.0).
+- Releases (later): release-plz generates versions and CHANGELOG from commit messages; cargo-semver-checks runs before publishing, without the feature `unstable-ir` of `officewright-layout` and `unstable-drawing` of `officewright-pdf` (the IR and the drawing primitives are exempt until 1.0).
 
 ## Review process
 

@@ -66,12 +66,14 @@ pub enum Error {
     },
     /// The document has no pages; a PDF needs at least one.
     NoPages,
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
     /// A [`GlyphRun`](crate::GlyphRun) is in a standard font. Glyphs are drawn by their
     /// IDs in an embedded font; a standard font is addressed through WinAnsiEncoding.
     NotEmbedded {
         /// The font's name.
         font: String,
     },
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
     /// A glyph ID is not less than the number of glyphs of the font.
     InvalidGlyph {
         /// The glyph ID.
@@ -79,12 +81,14 @@ pub enum Error {
         /// The font's name.
         font: String,
     },
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
     /// A cluster of a [`GlyphRun`](crate::GlyphRun) has no glyphs, so nothing would show
     /// its text.
     EmptyCluster {
         /// The cluster's index in its run, from 0.
         cluster: usize,
     },
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
     /// A number for drawing is outside the range it must be in.
     OutOfRange {
         /// What the number is, such as "line width".
@@ -96,11 +100,14 @@ pub enum Error {
         /// The largest value allowed.
         max: f64,
     },
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
     /// A dash pattern has only lengths of 0, which draws nothing (ISO 32000-1, 8.4.3.6);
     /// a solid line has an empty pattern.
     InvalidDash,
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
     /// [`Page::pop_clip`](crate::Page::pop_clip) found no clipping path to remove.
     NoClip,
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
     /// More clipping paths would be in effect at once than every PDF reader can nest:
     /// [`Page::MAX_CLIPS`](crate::Page::MAX_CLIPS).
     TooManyClips,
