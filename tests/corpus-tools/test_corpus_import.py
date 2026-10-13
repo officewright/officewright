@@ -14,6 +14,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 from pngcheck import png_pixels
 
@@ -38,6 +39,86 @@ name                                 type              encoding         emb sub 
 ABCDEF+Calibri                       CID TrueType      Identity-H       yes yes yes      9  0
 Garamond                             TrueType          WinAnsi          no  no  no      12  0
 """
+
+# The same after the importer embedded Garamond into its copy.
+PDFFONTS_EMBEDDED = PDFFONTS.replace(
+    "Garamond                             TrueType          WinAnsi          no  no  no ",
+    "Garamond                             TrueType          WinAnsi          yes no  no ",
+)
+assert PDFFONTS_EMBEDDED != PDFFONTS
+
+# qpdf --json=2 output (abridged) for that document: Calibri's descriptor embeds a font file,
+# Garamond's does not; a second Garamond descriptor (another encoding) embeds one already.
+OBJECTS = {
+    "qpdf": [
+        {"jsonversion": 2, "maxobjectid": 12},
+        {
+            "obj:7 0 R": {"value": {"/Type": "/FontDescriptor", "/FontName": "/Garamond",
+                                    "/FontFile2": "8 0 R"}},
+            "obj:9 0 R": {"value": {"/Type": "/FontDescriptor", "/FontName": "/ABCDEF+Calibri",
+                                    "/FontFile2": "10 0 R"}},
+            "obj:10 0 R": {"stream": {"dict": {"/Length1": 1000}}},
+            "obj:11 0 R": {"value": {"/Type": "/Font", "/BaseFont": "/Garamond",
+                                     "/FontDescriptor": "12 0 R"}},
+            "obj:12 0 R": {"value": {"/Type": "/FontDescriptor", "/FontName": "/Garamond",
+                                     "/Flags": 32, "/Ascent": 891}},
+        },
+    ]
+}
+
+
+def name_table(names):
+    """A name table with Windows Unicode records, US English, for the given IDs."""
+    records, storage = b"", b""
+    for name_id, text in sorted(names.items()):
+        data = text.encode("utf-16-be")
+        records += struct.pack(">HHHHHH", 3, 1, 0x409, name_id, len(data), len(storage))
+        storage += data
+    return struct.pack(">HHH", 0, len(names), 6 + len(records)) + records + storage
+
+
+def face_tables(postscript, full_name, version, cff):
+    # head with a stale checkSumAdjustment (bytes 8 to 12), which a cut-out face must fix.
+    head = struct.pack(">IIII", 0x00010000, 0x00010000, 0x12345678, 0x5F0F3CF5) + bytes(38)
+    tables = {b"name": name_table({4: full_name, 5: version, 6: postscript}), b"head": head}
+    tables[b"CFF " if cff else b"glyf"] = b"\x00" * 8
+    return sorted(tables.items())
+
+
+def directory(version, tables, start):
+    """An offset table and its records for tables laid out from start, and the tables."""
+    head = version + struct.pack(">HHHH", len(tables), 16, 0, 0)
+    records, body = b"", b""
+    for tag, data in tables:
+        records += struct.pack(">4sIII", tag, 0, start + len(body), len(data))
+        body += data + b"\x00" * (-len(data) % 4)
+    return head + records, body
+
+
+def sfnt(postscript, full_name="Test Font", version="Version 1.0", cff=False):
+    """A font file with a name table and one outline table, enough for the importer."""
+    tables = face_tables(postscript, full_name, version, cff)
+    head, body = directory(b"OTTO" if cff else b"\x00\x01\x00\x00", tables, 12 + 16 * len(tables))
+    return head + body
+
+
+def collection(*faces):
+    """A TrueType collection of faces given as (postscript, full_name, version)."""
+    header_size = 12 + 4 * len(faces)
+    tables = [face_tables(*face, False) for face in faces]
+    directories_size = sum(12 + 16 * len(face) for face in tables)
+    heads, bodies, offsets = b"", b"", []
+    for face in tables:
+        offsets.append(header_size + len(heads))
+        head, body = directory(
+            b"\x00\x01\x00\x00", face, header_size + directories_size + len(bodies)
+        )
+        heads += head
+        bodies += body
+    header = b"ttcf" + struct.pack(">HHI", 1, 0, len(faces))
+    header += struct.pack(f">{len(faces)}I", *offsets)
+    return header + heads + bodies
+
 
 # pdftotext -bbox-layout output for three pages, one line on the first.
 BBOX = """\
@@ -111,13 +192,23 @@ class Import(unittest.TestCase):
         self.xmp = ""
         self.bbox = BBOX
         self.raster_pages = 3
+        self.font_dir = self.temp / "fonts"
+        self.font_dir.mkdir()
+        self.garamond = sfnt("Garamond", "Garamond", "Version 2.40")
+        (self.font_dir / "GARA.TTF").write_bytes(self.garamond)
+        self.pdffonts = PDFFONTS
+        self.copy_fonts = PDFFONTS_EMBEDDED
+        self.updates = []
+        self.rasterized = []
         self.tools = importer.Tools(
             info=lambda path: self.info,
             xmp=lambda path: self.xmp,
-            fonts=lambda path: PDFFONTS,
+            fonts=self.fonts,
             raster=self.raster,
             bbox=lambda path: self.bbox,
             version=lambda: "24.02.0",
+            objects=lambda path: json.dumps(OBJECTS),
+            update=self.update,
         )
         for doc in rules.documents()[:2]:
             self.add_result(doc)
@@ -157,7 +248,22 @@ class Import(unittest.TestCase):
         (self.results / f"{doc.name}.json").write_text(json.dumps(record), encoding="utf-8")
         return record
 
+    def fonts(self, pdf):
+        return self.copy_fonts if pdf.name == "embedded.pdf" else self.pdffonts
+
+    def update(self, pdf, update, copy):
+        """qpdf --update-from-json: records the update with the data of each new stream."""
+        update = json.loads(update.read_text(encoding="utf-8"))
+        data = {
+            key: Path(value["stream"]["datafile"]).read_bytes()
+            for key, value in update["qpdf"][1].items()
+            if "stream" in value
+        }
+        self.updates.append((pdf.name, update, data))
+        copy.write_bytes(pdf.read_bytes())
+
     def raster(self, pdf, directory):
+        self.rasterized.append(pdf.name)
         pages = []
         for number in range(1, self.raster_pages + 1):
             page = directory / f"page-{number}.pgm"
@@ -176,14 +282,20 @@ class Import(unittest.TestCase):
         record["resaved_sha256"] = sha256(resaved.read_bytes())
         self.save_record(record)
 
-    def run_import(self, dry_run=False, allow_locale=False):
+    def run_import(self, dry_run=False, allow_locale=False, font_dirs=None):
         return importer.import_results(
-            self.results, "word-rules", self.corpus, self.tools, dry_run, allow_locale
+            self.results,
+            "word-rules",
+            self.corpus,
+            self.tools,
+            dry_run,
+            allow_locale,
+            [self.font_dir] if font_dirs is None else font_dirs,
         )
 
-    def refused(self):
+    def refused(self, **arguments):
         with self.assertRaises(importer.Refused) as caught:
-            self.run_import()
+            self.run_import(**arguments)
         self.assertFalse((self.corpus / "reference").exists(), "nothing may be copied")
         return str(caught.exception)
 
@@ -211,7 +323,8 @@ class Import(unittest.TestCase):
             "Microsoft Print to PDF; fonts Word substituted: none; w:compat settings Word "
             "dropped from the re-saved copy: none; fields as saved; PDF not "
             f"committed, SHA-256 {pdf_sha256}; rasters and geometry by poppler 24.02.0 at 110 dpi, "
-            "grey; fonts the PDF does not embed, rasterized with poppler's substitutes: Garamond |",
+            "grey; fonts the PDF does not embed, rasterized with the maintainer's installed "
+            f"copies: Garamond (Garamond, Version 2.40, SHA-256 {sha256(self.garamond)}) |",
             sources,
         )
 
@@ -329,6 +442,97 @@ class Import(unittest.TestCase):
 
                 self.tools = importer.Tools(**{**self.tools.__dict__, "raster": unexpected})
                 self.assertIn("pdftoppm wrote an unexpected image", self.refused())
+
+    def test_rasterizes_a_copy_with_the_fonts_the_pdf_does_not_embed(self):
+        self.run_import()
+        self.assertEqual(self.rasterized, ["embedded.pdf", "embedded.pdf"])
+        source, update, data = self.updates[0]
+        self.assertTrue(source.endswith(".pdf") and source != "embedded.pdf")
+        header, objects = update["qpdf"]
+        self.assertEqual((header["jsonversion"], header["maxobjectid"]), (2, 13))
+        # Garamond's descriptor gains the file, keeps everything else; Calibri's, which
+        # embeds a font already, is not touched.
+        self.assertEqual(
+            objects["obj:12 0 R"]["value"],
+            {"/Type": "/FontDescriptor", "/FontName": "/Garamond", "/Flags": 32,
+             "/Ascent": 891, "/FontFile2": "13 0 R"},
+        )
+        self.assertEqual(objects["obj:13 0 R"]["stream"]["dict"], {"/Length1": len(self.garamond)})
+        self.assertEqual(data, {"obj:13 0 R": self.garamond})
+        self.assertEqual(sorted(objects), ["obj:12 0 R", "obj:13 0 R"])
+
+    def test_a_cff_font_is_embedded_as_opentype(self):
+        noto = sfnt("Garamond", "Garamond", "Version 3", cff=True)
+        (self.font_dir / "GARA.TTF").unlink()
+        (self.font_dir / "Garamond.otf").write_bytes(noto)
+        self.run_import()
+        objects = self.updates[0][1]["qpdf"][1]
+        self.assertEqual(objects["obj:12 0 R"]["value"]["/FontFile3"], "13 0 R")
+        self.assertNotIn("/FontFile2", objects["obj:12 0 R"]["value"])
+        self.assertEqual(objects["obj:13 0 R"]["stream"]["dict"], {"/Subtype": "/OpenType"})
+        self.assertEqual(self.updates[0][2], {"obj:13 0 R": noto})
+
+    def test_geometry_names_the_font_file_by_version_and_hash_not_by_path(self):
+        self.run_import()
+        folder = self.corpus / "reference" / "word-rules" / "E-line-fonts"
+        geometry = json.loads((folder / "geometry.json").read_text(encoding="utf-8"))
+        self.assertEqual(geometry["fonts_not_embedded"], ["Garamond"])
+        self.assertEqual(
+            geometry["fonts_rasterized_with"],
+            [{"font": "Garamond", "full_name": "Garamond", "version": "Version 2.40",
+              "sha256": sha256(self.garamond)}],
+        )
+        written = (folder / "geometry.json").read_text(encoding="utf-8")
+        written += (self.corpus / "SOURCES.md").read_text(encoding="utf-8")
+        for secret in (str(self.font_dir), str(self.temp), "GARA.TTF"):
+            self.assertNotIn(secret, written)
+
+    def test_refuses_a_font_no_font_folder_has(self):
+        message = self.refused(font_dirs=[])
+        self.assertIn("Garamond is not embedded in the PDF", message)
+        self.assertIn("--font-dir", message)
+        (self.font_dir / "GARA.TTF").write_bytes(sfnt("Garamond-Bold"))
+        self.assertIn("Garamond is not embedded in the PDF", self.refused())
+
+    def test_a_dry_run_checks_the_fonts_but_embeds_nothing(self):
+        self.assertIn("Garamond is not embedded", self.refused(dry_run=True, font_dirs=[]))
+        self.run_import(dry_run=True)
+        self.assertEqual((self.updates, self.rasterized), ([], []))
+
+    def test_refuses_different_fonts_of_the_same_name(self):
+        (self.font_dir / "gara2.ttf").write_bytes(self.garamond)  # the same font twice is fine
+        self.run_import()
+        shutil.rmtree(self.corpus / "reference")
+        (self.font_dir / "gara3.ttf").write_bytes(sfnt("Garamond", "Garamond", "Version 2.41"))
+        message = self.refused()
+        self.assertIn("different fonts of that name: GARA.TTF, gara2.ttf, gara3.ttf", message)
+
+    def test_refuses_a_style_word_synthesizes(self):
+        self.pdffonts = PDFFONTS.replace("Garamond          ", "Garamond,Bold     ")
+        self.assertIn("Garamond,Bold: Word names a style it synthesizes", self.refused())
+
+    def test_refuses_a_copy_that_still_does_not_embed_the_font(self):
+        self.copy_fonts = PDFFONTS
+        self.assertIn("still not embedded after embedding: Garamond", self.refused())
+
+    def test_refuses_a_font_name_that_would_break_the_row(self):
+        (self.font_dir / "GARA.TTF").write_bytes(sfnt("Garamond", "Gara|mond"))
+        self.assertIn("unexpected name or version in GARA.TTF", self.refused())
+
+    def test_a_face_of_a_collection_is_cut_out(self):
+        (self.font_dir / "GARA.TTF").unlink()
+        (self.font_dir / "fonts.ttc").write_bytes(
+            collection(("Other", "Other", "Version 1"), ("Garamond", "Garamond", "Version 2.40"))
+        )
+        self.run_import()
+        data = self.updates[0][2]["obj:13 0 R"]
+        # The cut-out face is a font of its own with the face's tables.
+        (self.temp / "cut.ttf").write_bytes(data)
+        (face,) = importer.font_faces(self.temp / "cut.ttf")
+        self.assertEqual((face.postscript, face.collection, face.cff), ("Garamond", False, False))
+        folder = self.corpus / "reference" / "word-rules" / "E-line-fonts"
+        geometry = json.loads((folder / "geometry.json").read_text(encoding="utf-8"))
+        self.assertEqual(geometry["fonts_rasterized_with"][0]["face_in_collection"], 1)
 
     def test_refuses_fonts_word_embedded(self):
         record = self.add_result(rules.documents()[0])
@@ -551,9 +755,100 @@ class Pdffonts(unittest.TestCase):
         )
         self.assertEqual(importer.not_embedded(PDFFONTS + rows), ["Garamond", "NotEmbedded"])
 
+    def test_a_font_that_is_not_an_object_of_its_own_is_read(self):
+        row = "Direct" + " " * 31 + "TrueType          WinAnsi          no  no  no  [none]"
+        self.assertEqual(importer.not_embedded(PDFFONTS + row + "\n"), ["Direct", "Garamond"])
+
+    def test_a_name_with_spaces_is_read_whole(self):
+        row = "Segoe UI" + " " * 29 + "TrueType          WinAnsi          no  no  no      15  0"
+        self.assertEqual(importer.not_embedded(PDFFONTS + row + "\n"), ["Garamond", "Segoe UI"])
+
+    def test_a_row_it_cannot_read_is_refused(self):
+        with self.assertRaises(importer.Refused):
+            importer.not_embedded(PDFFONTS + "Odd                Mystery  WinAnsi no no no 16 0\n")
+
     def test_a_type_with_spaces_is_read(self):
         row = "Helvetica" + " " * 28 + "Type 1            WinAnsi          no  no  no       3  0"
         self.assertEqual(importer.not_embedded(PDFFONTS + row + "\n"), ["Garamond", "Helvetica"])
+
+
+class FontFiles(unittest.TestCase):
+    def setUp(self):
+        self.temp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.temp)
+
+    def test_an_unreadable_face_is_refused_when_it_is_needed(self):
+        good = collection(("Other", "Other", "1"), ("Garamond", "Garamond", "2"))
+        # The name table is fine, but the face's glyf record (the first of glyf, head and
+        # name) points past the end of the file.
+        (second,) = struct.unpack(">I", good[16:20])
+        record = second + 12
+        broken = bytearray(good)
+        broken[record + 8 : record + 12] = struct.pack(">I", len(good) + 100)
+        (self.temp / "broken.ttc").write_bytes(bytes(broken))
+        index = importer.font_index([self.temp])
+        self.assertIn("Garamond", index)
+        with self.assertRaises(importer.Refused) as caught:
+            importer.drawn_font("Garamond", index)
+        self.assertIn("Garamond: the font file cannot be read: broken.ttc", str(caught.exception))
+
+    def test_a_folder_that_cannot_be_listed_is_refused(self):
+        with mock.patch.object(Path, "iterdir", side_effect=PermissionError("denied")):
+            with self.assertRaises(importer.Refused) as caught:
+                importer.font_index([self.temp])
+        self.assertIn("cannot be listed", str(caught.exception))
+
+    def test_files_that_are_not_fonts_are_skipped(self):
+        (self.temp / "broken.ttf").write_bytes(b"\x00\x01\x00\x00" + b"\xff" * 3)
+        (self.temp / "empty.otf").write_bytes(b"")
+        (self.temp / "notes.txt").write_bytes(sfnt("Hidden"))
+        (self.temp / "font.ttf").write_bytes(sfnt("Found"))
+        self.assertEqual(sorted(importer.font_index([self.temp])), ["Found"])
+
+    def test_a_missing_folder_is_refused(self):
+        with self.assertRaises(importer.Refused):
+            importer.font_index([self.temp / "missing"])
+
+    def test_us_english_windows_names_come_first(self):
+        mac = "Mac Name".encode("mac_roman")
+        german = "Deutscher Name".encode("utf-16-be")
+        english = "English Name".encode("utf-16-be")
+        records = [(1, 0, 0, 4, mac), (3, 1, 0x407, 4, german), (3, 1, 0x409, 4, english),
+                   (1, 0, 0, 6, b"OnlyMac")]
+        storage, packed = b"", b""
+        for platform, encoding, language, name_id, data in records:
+            packed += struct.pack(">HHHHHH", platform, encoding, language, name_id, len(data),
+                                  len(storage))
+            storage += data
+        table = struct.pack(">HHH", 0, len(records), 6 + len(packed)) + packed + storage
+        self.assertEqual(importer.name_strings(table), {4: "English Name", 6: "OnlyMac"})
+
+    def test_the_cut_out_face_keeps_its_tables(self):
+        data = collection(("First", "First", "1"), ("Second", "Second Font", "2"))
+        (self.temp / "pair.ttc").write_bytes(data)
+        faces = importer.font_faces(self.temp / "pair.ttc")
+        self.assertEqual([(f.index, f.postscript) for f in faces], [(0, "First"), (1, "Second")])
+        cut = importer.face_bytes(faces[1])
+        (self.temp / "cut.ttf").write_bytes(cut)
+        read = lambda offset, size: cut[offset : offset + size]
+        tables = importer.table_directory(read, 0)
+        (second,) = struct.unpack(">I", data[16:20])
+        original = importer.table_directory(lambda o, n: data[o : o + n], second)
+        self.assertEqual(sorted(tables), sorted(original))
+        for tag, (offset, length) in tables.items():
+            start, size = original[tag]
+            if tag != b"head":
+                self.assertEqual(cut[offset : offset + length], data[start : start + size])
+            self.assertEqual(offset % 4, 0)
+        # Each table's checksum and head's checkSumAdjustment are right for the new file.
+        (count,) = struct.unpack(">H", cut[4:6])
+        for record in range(12, 12 + 16 * count, 16):
+            tag, checksum, offset, length = struct.unpack(">4sIII", cut[record : record + 16])
+            table = bytearray(cut[offset : offset + length])
+            if tag == b"head":
+                table[8:12] = bytes(4)
+            self.assertEqual(checksum, importer.checksum32(table), tag)
+        self.assertEqual(importer.checksum32(cut), 0xB1B0AFBA)
 
 
 class PageOrder(unittest.TestCase):

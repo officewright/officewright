@@ -161,6 +161,10 @@ if [ "$os" != windows ]; then
 	step "PDF output (qpdf, pdftotext, pdffonts, pdftoppm)"
 	cargo build -p officewright-cli
 	OW_CLI=${CARGO_TARGET_DIR:-target}/debug/officewright "$python" -B -m unittest discover -s tests/pdf-output -v
+
+	step "reference font embedding (qpdf, pdffonts, pdftoppm)"
+	# corpus-import.py embeds the fonts Word did not embed before rasterizing its PDFs.
+	"$python" -B -m unittest discover -s tests/corpus-tools/poppler -v
 fi
 
 printf '\nAll checks passed.\n'
