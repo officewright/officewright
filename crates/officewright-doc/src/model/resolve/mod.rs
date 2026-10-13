@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::format::{CharacterFormat, ParagraphFormat};
+use super::properties::ThemeFont;
 use super::styles::StyleKind;
 use super::views::{Paragraph, Run};
 use super::{Document, Kind, Node};
@@ -36,6 +37,10 @@ pub struct Formats<'a> {
     paragraphs: StyleLevels<ParagraphLevel>,
     character_defaults: Option<Arc<CharacterLevel>>,
     paragraph_defaults: Option<Arc<ParagraphLevel>>,
+    /// The typeface each theme font stands for, once looked up.
+    theme_fonts: HashMap<ThemeFont, Option<Arc<str>>>,
+    /// Word's font when nothing gives one, shared by every run that has it.
+    default_font: Arc<str>,
     /// The index of the default paragraph style, once looked up.
     default_paragraph_style: Option<Option<usize>>,
     /// The definition each list instance named so far uses.
@@ -87,6 +92,8 @@ impl<'a> Formats<'a> {
             paragraphs: StyleLevels::default(),
             character_defaults: None,
             paragraph_defaults: None,
+            theme_fonts: HashMap::new(),
+            default_font: Arc::from(character::DEFAULT_FONT),
             default_paragraph_style: None,
             instances: HashMap::new(),
             links: HashMap::new(),

@@ -20,10 +20,12 @@ use super::properties::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct FontFamilies {
-    pub(crate) ascii: Box<str>,
-    pub(crate) high_ansi: Box<str>,
-    pub(crate) east_asia: Box<str>,
-    pub(crate) complex_script: Box<str>,
+    // Shared with the levels of the hierarchy that give them, and between runs: a name
+    // can be as long as the part it is written in.
+    pub(crate) ascii: Arc<str>,
+    pub(crate) high_ansi: Arc<str>,
+    pub(crate) east_asia: Arc<str>,
+    pub(crate) complex_script: Arc<str>,
     pub(crate) hint: Option<FontHint>,
 }
 
@@ -77,9 +79,9 @@ pub struct CharacterFormat {
     pub(crate) kerning: Option<Pt>,
     pub(crate) highlight: Option<Highlight>,
     pub(crate) shading: Option<Shading>,
-    pub(crate) language_latin: Option<Box<str>>,
-    pub(crate) language_east_asia: Option<Box<str>>,
-    pub(crate) language_bidi: Option<Box<str>>,
+    pub(crate) language_latin: Option<Arc<str>>,
+    pub(crate) language_east_asia: Option<Arc<str>>,
+    pub(crate) language_bidi: Option<Arc<str>>,
 }
 
 macro_rules! flags {

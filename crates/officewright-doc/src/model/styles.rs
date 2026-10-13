@@ -98,6 +98,12 @@ impl<'a> Styles<'a> {
             })
     }
 
+    /// Whether the document defaults give run properties (a `w:rPr` in
+    /// `w:docDefaults/w:rPrDefault`); Word gives its own when they do not.
+    pub(crate) fn has_default_run_properties(self) -> bool {
+        self.defaults(["rPrDefault", "rPr"]).is_some()
+    }
+
     /// The paragraph properties of the document defaults
     /// (`w:docDefaults/w:pPrDefault`), the bottom of every paragraph's formatting.
     pub fn default_paragraph_properties(self) -> ParagraphProperties {
