@@ -641,12 +641,14 @@ fn cuts_font_names_to_what_readers_accept() -> TestResult {
     // ISO 32000-1, Annex C: a reader has to accept names of up to 127 bytes. Every name
     // of the font in the file takes that much here: the font's own name is cut after
     // 120 bytes in a TrueType subset, which adds a tag of seven, after 109 in a CFF
-    // subset, whose Type 0 font adds "-Identity-H" too, and after 127 in a whole font.
+    // subset, whose Type 0 font adds "-Identity-H" too, and after 127 in a whole font
+    // (116 with CFF outlines). The fsType 0x0100 forbids subsetting.
     let long = "Long".repeat(50);
     let cases = [
         (minimal()?, None, 120, [127, 127, 127]),
         (noto_sans()?, None, 109, [127, 116, 116]),
         (liberation_sans()?, Some(0x0100), 127, [127, 127, 127]),
+        (noto_sans()?, Some(0x0100), 116, [127, 116, 116]),
     ];
     for (data, fs_type, kept, lengths) in cases {
         let mut data = with_postscript_name(data, &long)?;
