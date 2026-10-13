@@ -841,14 +841,62 @@ fn accessors_read_back_what_the_setters_wrote() {
     assert_eq!(props.tabs(), tabs);
     assert!(props.word_wrap());
     assert_eq!(props.spacing().line(), LineSpacing::Multiple(1.0));
+
+    let style = Document::default().add_run_style(RunStyle::default());
+    let kind = |inline: Inline| match inline {
+        Inline::Break { kind, .. } => kind,
+        other => panic!("not a break: {other:?}"),
+    };
+    assert_eq!(
+        kind(Inline::line_break(BreakClear::All, style)),
+        BreakKind::Line(BreakClear::All)
+    );
+    assert_eq!(kind(Inline::page_break(style)), BreakKind::Page);
+    assert_eq!(kind(Inline::column_break(style)), BreakKind::Column);
 }
 
 #[test]
 fn compat_flags_map_names_both_ways() {
-    for flag in CompatFlag::NAMED {
-        assert_eq!(CompatFlag::from_name(flag.name()), flag);
-        assert!(!matches!(flag, CompatFlag::Other(_)));
+    let named = [
+        ("doNotExpandShiftReturn", CompatFlag::DoNotExpandShiftReturn),
+        (
+            "doNotUseIndentAsNumberingTabStop",
+            CompatFlag::DoNotUseIndentAsNumberingTabStop,
+        ),
+        (
+            "doNotUseHTMLParagraphAutoSpacing",
+            CompatFlag::DoNotUseHTMLParagraphAutoSpacing,
+        ),
+        ("noLeading", CompatFlag::NoLeading),
+        (
+            "splitPgBreakAndParaMark",
+            CompatFlag::SplitPgBreakAndParaMark,
+        ),
+        ("growAutofit", CompatFlag::GrowAutofit),
+        (
+            "doNotAutofitConstrainedTables",
+            CompatFlag::DoNotAutofitConstrainedTables,
+        ),
+        ("layoutRawTableWidth", CompatFlag::LayoutRawTableWidth),
+        ("layoutTableRowsApart", CompatFlag::LayoutTableRowsApart),
+        (
+            "allowSpaceOfSameStyleInTable",
+            CompatFlag::AllowSpaceOfSameStyleInTable,
+        ),
+        (
+            "doNotVertAlignCellWithSp",
+            CompatFlag::DoNotVertAlignCellWithSp,
+        ),
+        (
+            "doNotBreakWrappedTables",
+            CompatFlag::DoNotBreakWrappedTables,
+        ),
+    ];
+    for (name, flag) in &named {
+        assert_eq!(&CompatFlag::from_name(name), flag);
+        assert_eq!(flag.name(), *name);
     }
+    assert_eq!(CompatFlag::NAMED.len(), named.len());
     let other = CompatFlag::from_name("useFELayout");
     assert_eq!(other, CompatFlag::Other("useFELayout".into()));
     assert_eq!(other.name(), "useFELayout");
