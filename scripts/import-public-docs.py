@@ -51,6 +51,7 @@ TABLE_HEADER = "| File | Origin | Licence | Changes |"
 TABLE_TITLE = "## Public-domain and CC0 documents (`business/`)"
 
 EMAIL = re.compile(rb"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+EMAIL_TEXT = re.compile(EMAIL.pattern.decode())
 # A path into a user profile: C:\Users\<name>, /Users/<name>, file:///C:/Users/...
 PROFILE_PATH = re.compile(rb"(?i)(\\|/)(users|documents and settings)(\\|/)")
 # Addresses that name no person: fictional domains.
@@ -766,14 +767,23 @@ def problems(
                 continue
             if REVISION.search(body):
                 found.append(f"{name} has tracked changes or an author")
-            for paragraph in re.findall(rb"<w:p[ >].*?</w:p>", body, re.S):
-                text = b"".join(re.findall(rb"<w:t(?: [^>]*)?>([^<]*)</w:t>", paragraph))
-                for phone in PHONE.findall(text.decode("utf-8", "replace")):
-                    if phone not in allowed_phones:
-                        found.append(f"{name} holds the phone number {phone}")
+            # Text as it reads: the runs between two paragraph ends joined, so that a number
+            # or address split over runs is seen, and text after a text box nested in a
+            # paragraph is too (a nested paragraph ends inside the outer one).
+            segments = [
+                b"".join(re.findall(rb"<w:t(?: [^>]*)?>([^<]*)</w:t>", segment)).decode(
+                    "utf-8", "replace"
+                )
+                for segment in body.split(b"</w:p>")
+            ]
+            for phone in sorted({p for text in segments for p in PHONE.findall(text)}):
+                if phone not in allowed_phones:
+                    found.append(f"{name} holds the phone number {phone}")
             if PROFILE_PATH.search(body):
                 found.append(f"{name} holds a user profile path")
-            for address in set(EMAIL.findall(body)):
+            addresses = set(EMAIL.findall(body))
+            addresses |= {a.encode("utf-8") for text in segments for a in EMAIL_TEXT.findall(text)}
+            for address in sorted(addresses):
                 text = address.decode("utf-8", "replace")
                 if text not in allowed_emails and not FICTIONAL.search(address):
                     found.append(f"{name} holds the address {text}")
@@ -827,6 +837,24 @@ def with_rows(sources: str, rows: list[str]) -> str:
     return sources[: anchor + 1] + table + "\n" + sources[anchor:]
 
 
+def same_package(committed: bytes, cleaned: bytes) -> bool:
+    """Whether two packages hold the same parts: pictures compared by their pixels, since
+    another zlib build compresses the same placeholder into other bytes."""
+    if committed == cleaned:
+        return True
+    with zipfile.ZipFile(io.BytesIO(committed)) as a, zipfile.ZipFile(io.BytesIO(cleaned)) as b:
+        if a.namelist() != b.namelist():
+            return False
+        for name in a.namelist():
+            left, right = a.read(name), b.read(name)
+            if MEDIA.match(name):
+                if not (is_placeholder(left) and image_size(left) == image_size(right)):
+                    return False
+            elif left != right:
+                return False
+    return True
+
+
 # --- main -------------------------------------------------------------------------------
 
 
@@ -869,7 +897,7 @@ def main() -> int:
             doc.name
             for doc, cleaned in results
             if not (OUT_DIR / f"{doc.name}.docx").is_file()
-            or (OUT_DIR / f"{doc.name}.docx").read_bytes() != cleaned.data
+            or not same_package((OUT_DIR / f"{doc.name}.docx").read_bytes(), cleaned.data)
         ]
         if sources != SOURCES_MD.read_text(encoding="utf-8"):
             stale.append("SOURCES.md")

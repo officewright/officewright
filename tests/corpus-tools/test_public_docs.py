@@ -47,6 +47,18 @@ def png(width, height):
             + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
 
 
+def grey_png(width, height, rows, level=9):
+    """An 8-bit grey PNG of the given filtered rows, compressed at the given level."""
+
+    def chunk(kind, body):
+        crc = struct.pack(">I", zlib.crc32(kind + body))
+        return struct.pack(">I", len(body)) + kind + body + crc
+
+    header = struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header)
+            + chunk(b"IDAT", zlib.compress(rows, level)) + chunk(b"IEND", b""))
+
+
 REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 PKG = "http://schemas.openxmlformats.org/package/2006/relationships"
 
@@ -306,6 +318,75 @@ class Cleaning(unittest.TestCase):
             with self.subTest(message), self.assertRaises(public.Refused) as caught:
                 public.clean(data, DOC)
             self.assertIn(message.strip(), str(caught.exception))
+
+    def test_text_after_a_nested_text_box_and_split_addresses_are_read(self):
+        nested = (
+            "<w:document xmlns:w='w'><w:body><w:p><w:r><w:t>See </w:t></w:r><w:r><w:pict>"
+            "<w:txbxContent><w:p><w:r><w:t>box</w:t></w:r></w:p></w:txbxContent></w:pict></w:r>"
+            "<w:r><w:t>or call (202) 555-0142</w:t></w:r></w:p>"
+            "<w:p><w:r><w:t>Write to jane.roe@ag</w:t></w:r><w:r><w:t>ency.gov</w:t></w:r></w:p>"
+            "</w:body></w:document>"
+        )
+        found = "; ".join(public.problems(package(**{"word/document.xml": nested})))
+        self.assertIn("document.xml holds the phone number (202) 555-0142", found)
+        self.assertIn("document.xml holds the address jane.roe@agency.gov", found)
+
+    def test_an_author_attribute_alone_is_a_problem(self):
+        authored = "<w:document xmlns:w='w'><w:p w:author='jroe'/></w:document>"
+        found = "; ".join(public.problems(package(**{"word/document.xml": authored})))
+        self.assertIn("document.xml has tracked changes or an author", found)
+
+    def test_more_refusals(self):
+        with self.assertRaises(public.Refused) as caught:
+            public.clean(package(**{"word/vbaProject.bin": b"macro"}), DOC)
+        self.assertIn("has macros", str(caught.exception))
+        lost = public.PublicDoc(
+            "lost", "nara", "https://www.example.gov/x.docx", "2026-10-13", "0" * 64,
+            replacements=(public.Replacement("word/missing.xml", "x", "0" * 64, "y"),),
+        )
+        with self.assertRaises(public.Refused) as caught:
+            public.clean(package(), lost)
+        self.assertIn("no part word/missing.xml", str(caught.exception))
+
+    def test_a_placeholder_must_be_8_bit_grey_and_not_oversized(self):
+        good = public.placeholder(4, 3)
+        deep = good[:24] + b"\x10" + good[25:]  # bit depth 16 in IHDR
+        self.assertFalse(public.is_placeholder(deep))
+        self.assertTrue(public.is_placeholder(good))
+        self.assertEqual(public.image_size(public.placeholder(5000, 10)), (public.MAX_SIDE, 10))
+        side = public.MAX_SIDE + 1
+        self.assertFalse(public.is_placeholder(grey_png(side, 1, public.placeholder_rows(side, 1))))
+
+    def test_packages_compare_pictures_by_pixels(self):
+        cleaned = public.clean(package(), DOC).data
+        parts = parts_of(cleaned)
+        recompressed = grey_png(96, 96, public.placeholder_rows(96, 96), level=1)
+        self.assertNotEqual(recompressed, parts["word/media/image1.png"])
+
+        def repacked(**changes):
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w") as archive:
+                for name, data in {**parts, **changes}.items():
+                    archive.writestr(name, data)
+            return buffer.getvalue()
+
+        same = repacked(**{"word/media/image1.png": recompressed})
+        self.assertTrue(public.same_package(same, cleaned))
+        other = repacked(**{"word/media/image1.png": png(96, 96)})
+        self.assertFalse(public.same_package(other, cleaned))
+        self.assertFalse(public.same_package(repacked(**{"word/settings.xml": b"<x/>"}), cleaned))
+
+    def test_the_sources_row_names_everything(self):
+        doc = public.PublicDoc("letter-x", "nara", "https://www.example.gov/a|b.docx",
+                               "2026-10-13", "f" * 64)
+        row = public.sources_row(doc, ["one change", "another | change"])
+        source = public.SOURCES["nara"]
+        self.assertTrue(row.startswith("| business/letter-x.docx | "))
+        for text in ("https://www.example.gov/a\\|b.docx", "downloaded 2026-10-13", "f" * 64,
+                     source.licence, f'"{source.quote}"', source.statement_url,
+                     "one change; another \\| change"):
+            self.assertIn(text, row)
+        self.assertEqual(row.count(" | "), 3)
 
     def test_an_original_must_be_the_listed_file(self):
         folder = Path(tempfile.mkdtemp())
