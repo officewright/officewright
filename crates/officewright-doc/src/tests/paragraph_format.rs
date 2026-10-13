@@ -1368,3 +1368,48 @@ fn keeps_a_bounded_number_of_style_and_list_level_combinations() {
     }
     assert_eq!(formats.work().combinations, 2200);
 }
+
+#[test]
+fn an_override_of_a_level_does_not_change_the_level_for_other_instances() {
+    // Instances 1 and 2 use one definition; 2 replaces level 0 with one indented 2 in.
+    // Paragraphs of one style in each keep their own level's indentation, in either
+    // order.
+    let numbering = [
+        definition(10, ""),
+        r#"<w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num>"#.to_owned(),
+        r#"<w:num w:numId="2"><w:abstractNumId w:val="10"/><w:lvlOverride w:ilvl="0"><w:lvl w:ilvl="0"><w:pPr><w:ind w:left="2880"/></w:pPr></w:lvl></w:lvlOverride></w:num>"#.to_owned(),
+    ]
+    .concat();
+    let styles = [defaults(""), style("paragraph", "Body", None, "")].concat();
+    let item = |id: i64| {
+        paragraph(
+            "Body",
+            &format!(r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="{id}"/></w:numPr>"#),
+        )
+    };
+    let body = [item(1), item(2), item(1)].concat();
+    let indents: Vec<_> = formats(&build(&body, &styles, Some(&numbering)))
+        .iter()
+        .map(|format| format.start_indent().0)
+        .collect();
+    assert_eq!(indents, [36.0, 144.0, 36.0]);
+}
+
+#[test]
+fn a_style_on_a_based_on_cycle_still_lies_over_the_defaults() {
+    // A and B are based on each other, which Word does not allow: each is taken with
+    // its own properties, over the document defaults.
+    let styles = [
+        defaults(
+            r#"<w:spacing w:after="200"/><w:tabs><w:tab w:val="left" w:pos="7000"/></w:tabs>"#,
+        ),
+        style("paragraph", "A", Some("B"), r#"<w:jc w:val="center"/>"#),
+        style("paragraph", "B", Some("A"), r#"<w:ind w:left="720"/>"#),
+    ]
+    .concat();
+    let body = [paragraph("A", ""), paragraph("B", "")].concat();
+    for format in formats(&build(&body, &styles, None)) {
+        assert_eq!(format.after_spacing(), Pt(10.0));
+        assert_eq!(tabs(&format), [tab(TabKind::Left, 350.0)]);
+    }
+}
