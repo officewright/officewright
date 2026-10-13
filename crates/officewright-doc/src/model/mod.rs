@@ -2,8 +2,10 @@
 //! read from.
 
 pub(crate) mod fonts;
+pub(crate) mod format;
 pub(crate) mod numbering;
 pub(crate) mod properties;
+mod resolve;
 pub(crate) mod section;
 pub(crate) mod settings;
 pub(crate) mod styles;
@@ -20,6 +22,7 @@ use officewright_core::Pt;
 pub use fonts::{
     EmbeddedFontReference, EmbeddedFontStyle, FontDeclaration, FontFamily, FontPitch, FontSignature,
 };
+pub use format::{CharacterFormat, FontFamilies};
 pub use numbering::{
     LegacyNumbering, LevelOverride, LevelSuffix, ListDefinition, ListInstance, ListLevel,
     MultiLevelType, Numbering,
@@ -30,6 +33,7 @@ pub use properties::{
     ParagraphProperties, RunFonts, RunProperties, Shading, ShadingPattern, Spacing, TabKind,
     TabLeader, TabStop, ThemeColor, ThemeFont, Underline, UnderlineStyle, VerticalPosition,
 };
+pub use resolve::Formats;
 pub use section::{
     ChapterSeparator, Column, Columns, DocumentGrid, DocumentGridKind, HeaderFooterKind,
     HeaderFooterReference, LineNumberRestart, LineNumbering, NotePosition, NoteProperties,
@@ -250,6 +254,34 @@ impl Document {
         Styles::new(self)
     }
 
+    /// Resolves the formatting in effect of runs and paragraph marks: the document
+    /// defaults, the styles and direct formatting combined as Word combines them, with
+    /// theme fonts and colours resolved. Keep it for all the runs of the document: it
+    /// remembers what it has worked out about each style.
+    ///
+    /// ```
+    /// # fn main() -> officewright_doc::Result<()> {
+    /// use officewright_doc::{Block, Document};
+    ///
+    /// let document = Document::open("tests/data/theme.docx")?;
+    /// let mut formats = document.formats();
+    /// for section in document.sections() {
+    ///     for block in section.blocks() {
+    ///         if let Block::Paragraph(paragraph) = block {
+    ///             for run in paragraph.runs() {
+    ///                 let format = formats.run(run);
+    ///                 println!("{} {} pt", format.fonts().ascii(), format.size().0);
+    ///             }
+    ///         }
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn formats(&self) -> Formats<'_> {
+        Formats::new(self)
+    }
+
     /// The numbering of the document (`numbering.xml`): its list definitions and list
     /// instances; none when it has no numbering part.
     pub fn numbering(&self) -> Numbering<'_> {
@@ -358,10 +390,17 @@ pub(crate) struct SectionData {
 #[derive(Debug)]
 pub(crate) struct Node {
     pub(crate) kind: Kind,
+    /// The node this one is a child of; [`Node::NO_PARENT`] for a block of a section.
+    pub(crate) parent: u32,
     /// Property elements (`w:pPr`, `w:rPr`, `w:tblPr`, `w:tcPr`, `w:sdtPr`, …) as read,
     /// until the properties are typed.
     pub(crate) properties: Vec<Span>,
     pub(crate) children: Vec<u32>,
+}
+
+impl Node {
+    /// The parent of a block that belongs to a section, not to another node.
+    pub(crate) const NO_PARENT: u32 = u32::MAX;
 }
 
 #[derive(Debug)]

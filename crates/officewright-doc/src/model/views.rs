@@ -71,6 +71,14 @@ impl<'a> Paragraph<'a> {
         })
     }
 
+    pub(super) fn node(self) -> &'a Node {
+        self.node
+    }
+
+    pub(super) fn document(self) -> &'a Document {
+        self.document
+    }
+
     /// The paragraph's id, to find it again with [`Document::paragraph`].
     pub fn id(self) -> ParagraphId {
         self.document.paragraph_id(self.index)
@@ -317,6 +325,20 @@ pub struct Run<'a> {
 }
 
 impl<'a> Run<'a> {
+    pub(super) fn node(self) -> &'a Node {
+        self.node
+    }
+
+    pub(super) fn document(self) -> &'a Document {
+        self.document
+    }
+
+    /// The run's formatting in effect, with its styles and the document defaults; see
+    /// [`Document::formats`], which is faster for many runs.
+    pub fn format(self) -> super::CharacterFormat {
+        super::Formats::new(self.document).run(self)
+    }
+
     /// What the run contains, in document order.
     pub fn content(self) -> impl Iterator<Item = RunContent<'a>> + 'a {
         let document = self.document;

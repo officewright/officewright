@@ -12,3 +12,5 @@ flate = "flate"
 # OpenType tags, not misspellings: the glyph location table and the width axis.
 loca = "loca"
 wdth = "wdth"
+# The ISO 15924 code of the Bengali script, by which themes name a script's font.
+beng = "beng"
