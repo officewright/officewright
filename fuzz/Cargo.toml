@@ -10,6 +10,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4.13"
+officewright-doc = { path = "../crates/officewright-doc" }
 officewright-font = { path = "../crates/officewright-font" }
 officewright-opc = { path = "../crates/officewright-opc" }
 officewright-pdf = { path = "../crates/officewright-pdf" }
@@ -23,6 +24,13 @@ skrifa = { version = "0.48.0", default-features = false, features = ["std"] }
 # flags, and libfuzzer-sys bundles LLVM's libFuzzer (NCSA license), which officewright
 # never ships, so the workspace-wide checks and `cargo deny` leave it out.
 [workspace]
+
+[[bin]]
+name = "docx_open"
+path = "fuzz_targets/docx_open.rs"
+test = false
+doc = false
+bench = false
 
 [[bin]]
 name = "font_parse"

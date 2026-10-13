@@ -124,6 +124,14 @@ name = "officewright-core"
 version = "0.1.0"
 
 [[package]]
+name = "officewright-doc"
+version = "0.1.0"
+dependencies = [
+ "officewright-core",
+ "officewright-opc",
+]
+
+[[package]]
 name = "officewright-font"
 version = "0.1.0"
 dependencies = [
@@ -137,6 +145,7 @@ name = "officewright-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "officewright-doc",
  "officewright-font",
  "officewright-opc",
  "officewright-pdf",

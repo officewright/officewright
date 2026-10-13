@@ -166,6 +166,10 @@ version = "0.1.0"
 [[package]]
 name = "officewright-doc"
 version = "0.1.0"
+dependencies = [
+ "officewright-core",
+ "officewright-opc",
+]
 
 [[package]]
 name = "officewright-ffi"
