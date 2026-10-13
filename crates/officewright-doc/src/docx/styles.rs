@@ -6,6 +6,7 @@ use officewright_opc::xml::{Event, Input, NsId};
 
 use super::capture::{Budget, Capture};
 use super::properties::{on_off_attribute, paragraph_properties, run_properties};
+use super::table_properties::{cell_properties, row_properties, table_properties};
 use super::{R, R_STRICT, W, W_STRICT, shorten};
 use crate::diagnostic::{DiagnosticKind, Diagnostics};
 use crate::model::styles::{StyleData, StyleKind};
@@ -184,8 +185,15 @@ fn style(c: &mut Capture<'_, '_, '_>, names: &Names, span: Span, offset: usize) 
         styles.by_id.insert(data.id.clone(), index);
     }
     c.document.styles.styles.push(data);
-    check_properties(c, names, span, &["pPr"], Properties::Paragraph, offset);
-    check_properties(c, names, span, &["rPr"], Properties::Run, offset);
+    for (local, which) in [
+        ("pPr", Properties::Paragraph),
+        ("rPr", Properties::Run),
+        ("tblPr", Properties::Table),
+        ("trPr", Properties::Row),
+        ("tcPr", Properties::Cell),
+    ] {
+        check_properties(c, names, span, &[local], which, offset);
+    }
 }
 
 /// Which properties an element holds.
@@ -193,6 +201,10 @@ fn style(c: &mut Capture<'_, '_, '_>, names: &Names, span: Span, offset: usize) 
 pub(super) enum Properties {
     Run,
     Paragraph,
+    /// `w:tblPr` or `w:tblPrEx`.
+    Table,
+    Row,
+    Cell,
 }
 
 /// Reports the values that are not valid in the property element found by following
@@ -227,12 +239,14 @@ pub(super) fn check_properties(
                 omitted += 1;
             }
         };
-        match (element, which) {
-            (Some(r_pr), Properties::Run) => drop(run_properties(r_pr, names, &mut report)),
-            (Some(p_pr), Properties::Paragraph) => {
-                drop(paragraph_properties(p_pr, names, &mut report));
+        if let Some(element) = element {
+            match which {
+                Properties::Run => drop(run_properties(element, names, &mut report)),
+                Properties::Paragraph => drop(paragraph_properties(element, names, &mut report)),
+                Properties::Table => drop(table_properties(element, names, &mut report)),
+                Properties::Row => drop(row_properties(element, names, &mut report)),
+                Properties::Cell => drop(cell_properties(element, names, &mut report)),
             }
-            (None, _) => {}
         }
     }
     c.diagnostics.omit(omitted);

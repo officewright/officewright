@@ -792,9 +792,15 @@ impl Reading<'_, '_, '_> {
                 *table = columns;
             }
         }
-        let which = match self.c.document.node(node).map(|node| &node.kind) {
-            Some(Kind::Run { .. }) => Some(Properties::Run),
-            Some(Kind::Paragraph) => Some(Properties::Paragraph),
+        let local = self.c.document.element(span).local_name();
+        let which = match (self.c.document.node(node).map(|node| &node.kind), local) {
+            (Some(Kind::Run { .. }), "rPr") => Some(Properties::Run),
+            (Some(Kind::Paragraph), "pPr") => Some(Properties::Paragraph),
+            (Some(Kind::Table { .. }), "tblPr") | (Some(Kind::Row), "tblPrEx") => {
+                Some(Properties::Table)
+            }
+            (Some(Kind::Row), "trPr") => Some(Properties::Row),
+            (Some(Kind::Cell), "tcPr") => Some(Properties::Cell),
             _ => None,
         };
         if let Some(which) = which {

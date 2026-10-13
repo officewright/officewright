@@ -4,6 +4,7 @@
 pub(crate) mod properties;
 mod section;
 pub(crate) mod styles;
+pub(crate) mod table_properties;
 mod text;
 mod views;
 pub(crate) mod xml;
@@ -20,6 +21,12 @@ pub use properties::{
 };
 pub use section::{Orientation, PageMargins, SectionProperties, SectionStart};
 pub use styles::{Style, StyleKind, Styles};
+pub use table_properties::{
+    CellBorders, CellMargins, CellMerge, HeightRule, HorizontalAlignment, PositionAnchor,
+    RowHeight, TableBorders, TableCellProperties, TableJustification, TableLayout, TableLook,
+    TableOverlap, TablePosition, TableProperties, TableRowProperties, TableWidth, TextDirection,
+    VerticalAlignment, VerticalJustification,
+};
 pub use views::{
     Block, Break, BreakClear, BreakKind, ContentControl, FieldCharKind, Hyperlink, Inline, Opaque,
     Paragraph, Revision, RevisionKind, Run, RunContent, Section, SimpleField, Table, TableCell,

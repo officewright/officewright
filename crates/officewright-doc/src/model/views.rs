@@ -3,10 +3,12 @@
 
 use officewright_core::Pt;
 
+use super::xml::Element;
 use super::xml::Span;
 use super::{
     ControlLevel, Document, HyperlinkData, Kind, Node, ParagraphId, ParagraphProperties,
-    RevisionData, RunItem, RunProperties, SectionData, SectionProperties, TableId, text,
+    RevisionData, RunItem, RunProperties, SectionData, SectionProperties, TableCellProperties,
+    TableId, TableProperties, TableRowProperties, text,
 };
 
 /// A section of a document: its page setup and the blocks laid out with it.
@@ -148,6 +150,21 @@ impl<'a> Table<'a> {
         columns.iter().copied()
     }
 
+    /// The table properties written on the table (its `w:tblPr`), without those of its
+    /// style.
+    pub fn properties(self) -> TableProperties {
+        property_element(self.document, self.node, "tblPr").map_or_else(
+            TableProperties::default,
+            |tbl_pr| {
+                crate::docx::table_properties::table_properties(
+                    tbl_pr,
+                    &self.document.names,
+                    &mut |_, _, _| {},
+                )
+            },
+        )
+    }
+
     /// The rows, in document order, including rows inside content controls around them.
     pub fn rows(self) -> impl Iterator<Item = TableRow<'a>> + 'a {
         let document = self.document;
@@ -166,6 +183,36 @@ pub struct TableRow<'a> {
 }
 
 impl<'a> TableRow<'a> {
+    /// The row properties written on the row (its `w:trPr`).
+    pub fn properties(self) -> TableRowProperties {
+        property_element(self.document, self.node, "trPr").map_or_else(
+            TableRowProperties::default,
+            |tr_pr| {
+                crate::docx::table_properties::row_properties(
+                    tr_pr,
+                    &self.document.names,
+                    &mut |_, _, _| {},
+                )
+            },
+        )
+    }
+
+    /// The table properties the row sets for itself, in place of the table's (its
+    /// `w:tblPrEx`): the standard notes they are written mostly for legacy documents
+    /// and where two tables were joined (§17.4.61).
+    pub fn table_property_exceptions(self) -> TableProperties {
+        property_element(self.document, self.node, "tblPrEx").map_or_else(
+            TableProperties::default,
+            |tbl_pr_ex| {
+                crate::docx::table_properties::table_properties(
+                    tbl_pr_ex,
+                    &self.document.names,
+                    &mut |_, _, _| {},
+                )
+            },
+        )
+    }
+
     /// The cells, in document order, including cells inside content controls around
     /// them.
     pub fn cells(self) -> impl Iterator<Item = TableCell<'a>> + 'a {
@@ -185,6 +232,20 @@ pub struct TableCell<'a> {
 }
 
 impl<'a> TableCell<'a> {
+    /// The cell properties written on the cell (its `w:tcPr`).
+    pub fn properties(self) -> TableCellProperties {
+        property_element(self.document, self.node, "tcPr").map_or_else(
+            TableCellProperties::default,
+            |tc_pr| {
+                crate::docx::table_properties::cell_properties(
+                    tc_pr,
+                    &self.document.names,
+                    &mut |_, _, _| {},
+                )
+            },
+        )
+    }
+
     /// The paragraphs, tables and other blocks in the cell.
     pub fn blocks(self) -> impl Iterator<Item = Block<'a>> + 'a {
         blocks(self.document, &self.node.children)
@@ -666,4 +727,12 @@ fn walk<'a>(
             }
         }
     })
+}
+
+/// The property element of a node with this local name in the main namespace.
+fn property_element<'a>(document: &'a Document, node: &Node, local: &str) -> Option<Element<'a>> {
+    node.properties
+        .iter()
+        .map(|&span| document.element(span))
+        .find(|element| element.is(&document.names.w, local))
 }

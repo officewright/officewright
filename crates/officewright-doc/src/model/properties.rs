@@ -10,11 +10,14 @@
 use officewright_core::Pt;
 
 /// Defines a public enum of the values of a simple type of WordprocessingML, with each
-/// variant documented by the value it is written as, and the function that reads it.
+/// variant documented by the value it is written as, and the function that reads it. A
+/// variant may list further spellings after `|`, such as the Strict one of a value.
 macro_rules! xml_enum {
     (
         $(#[$meta:meta])*
-        $name:ident { $($(#[$variant_meta:meta])* $variant:ident = $value:literal,)* }
+        $name:ident {
+            $($(#[$variant_meta:meta])* $variant:ident = $value:literal $(| $alias:literal)*,)*
+        }
     ) => {
         $(#[$meta])*
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -31,13 +34,14 @@ macro_rules! xml_enum {
             /// The value written as `value`, if it is one.
             pub(crate) fn from_xml(value: &str) -> Option<Self> {
                 match value {
-                    $($value => Some(Self::$variant),)*
+                    $($value $(| $alias)* => Some(Self::$variant),)*
                     _ => None,
                 }
             }
         }
     };
 }
+pub(crate) use xml_enum;
 
 xml_enum! {
     /// A font of the document's theme (ST_Theme), which a

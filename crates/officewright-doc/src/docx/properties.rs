@@ -97,7 +97,7 @@ pub(crate) fn run_properties(
 
 /// An on/off property (ST_OnOff): `w:val` absent, `true`, `on` or `1` sets it, `false`,
 /// `off` or `0` clears it.
-fn on_off(element: Element<'_>, names: &Names, report: Report<'_>) -> Option<bool> {
+pub(super) fn on_off(element: Element<'_>, names: &Names, report: Report<'_>) -> Option<bool> {
     match element.attribute(&names.w, "val") {
         None => Some(true),
         Some(_) => on_off_attribute(element, names, "val", report),
@@ -126,7 +126,7 @@ pub(crate) fn on_off_attribute(
 }
 
 /// An attribute read with `parse`, reported when it does not parse.
-fn value<T>(
+pub(super) fn value<T>(
     element: Element<'_>,
     names: &Names,
     attribute: &str,
@@ -170,7 +170,7 @@ fn color(element: Element<'_>, names: &Names, attributes: [&str; 4], report: Rep
     }
 }
 
-fn shading(element: Element<'_>, names: &Names, report: Report<'_>) -> Shading {
+pub(super) fn shading(element: Element<'_>, names: &Names, report: Report<'_>) -> Shading {
     Shading {
         pattern: value(element, names, "val", ShadingPattern::from_xml, report),
         color: color(
@@ -297,7 +297,7 @@ fn borders(element: Element<'_>, names: &Names, report: Report<'_>) -> Paragraph
 }
 
 /// One border (CT_Border): style, colour, width in eighths of a point, space in points.
-fn border(element: Element<'_>, names: &Names, report: Report<'_>) -> Border {
+pub(super) fn border(element: Element<'_>, names: &Names, report: Report<'_>) -> Border {
     // The width of an art border (page borders only) is in points, not eighths; this
     // reads line borders, and art borders read as having no style.
     let points = |eighths: f64| {
@@ -424,6 +424,6 @@ fn indentation(element: Element<'_>, names: &Names, report: Report<'_>) -> Inden
     }
 }
 
-fn integer(value: &str) -> Option<i64> {
+pub(super) fn integer(value: &str) -> Option<i64> {
     value.parse().ok()
 }
