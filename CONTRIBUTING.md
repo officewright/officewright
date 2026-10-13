@@ -8,6 +8,11 @@ Before your first pull request can be merged, you must agree to the
 You keep the copyright in your contribution; the agreement lets the project ship it under
 its license and under commercial licenses.
 
+## Security problems
+
+Do not report them in public issues or pull requests: [SECURITY.md](SECURITY.md) says how
+to report them privately.
+
 ## Clean-room policy
 
 This policy is not negotiable. A contribution that breaks it will be reverted.
@@ -76,6 +81,12 @@ ci: cache the external corpus
 ```
 
 Breaking changes use `!` (`feat(pdf)!: ...`). One logical change per commit.
+
+## Pull requests
+
+Open a pull request as a draft. The template lists what its description needs: what
+changed and why, the risks, new dependencies, and how to check the change by hand. The
+title becomes the commit message on `main`, so it follows the commit convention above.
 
 ## Test documents
 
