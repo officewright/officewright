@@ -534,6 +534,9 @@ mod tests {
             ssim: vec![ssim_mean],
             ssim_mean,
             ssim_min: ssim_mean,
+            pdf_valid: None,
+            fonts_not_embedded: None,
+            word_fonts: None,
         });
         result
     }
