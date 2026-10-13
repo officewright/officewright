@@ -24,7 +24,7 @@ const MAX_STRING_BYTES: usize = 32767;
 
 /// The most UTF-16 code units of text a cluster may have: its replacement text, two bytes
 /// a unit after a two-byte byte order mark, must fit in a string.
-const MAX_CLUSTER_UNITS: usize = (MAX_STRING_BYTES - 2) / 2;
+pub(crate) const MAX_CLUSTER_UNITS: usize = (MAX_STRING_BYTES - 2) / 2;
 
 /// The smallest and largest horizontal scale of a run: 1 % to 1000 %, which covers Word's
 /// character scale (`w:w`, 1 % to 600 %).
@@ -260,11 +260,9 @@ impl GlyphRun {
             }
             let units = text.encode_utf16().count();
             if units > MAX_CLUSTER_UNITS {
-                return Err(Error::OutOfRange {
-                    what: "cluster text length in UTF-16 code units",
-                    value: units as f64,
-                    min: 0.0,
-                    max: MAX_CLUSTER_UNITS as f64,
+                return Err(Error::ClusterTooLong {
+                    cluster: index,
+                    units,
                 });
             }
             for placed in glyphs {

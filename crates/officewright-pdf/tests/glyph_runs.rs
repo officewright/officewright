@@ -493,7 +493,8 @@ fn a_cluster_text_must_fit_in_a_string() -> TestResult {
         .ok_or("too long")?;
     assert_eq!(
         err.to_string(),
-        "cluster text length in UTF-16 code units 16383 is outside the 0 to 16382 range"
+        "cluster 0 of the glyph run has 16383 UTF-16 code units of text, more than the 16382 \
+         its replacement text can hold"
     );
     // The limit counts UTF-16 code units: U+1D400 takes two, so 8191 of them fit and
     // 8192 do not.
@@ -512,7 +513,16 @@ fn a_cluster_text_must_fit_in_a_string() -> TestResult {
         .draw_glyphs(&wide(8192))
         .err()
         .ok_or("too long")?;
-    assert!(err.to_string().contains(" 16384 is outside"), "{err}");
+    assert!(
+        matches!(
+            err,
+            Error::ClusterTooLong {
+                cluster: 0,
+                units: 16384
+            }
+        ),
+        "{err:?}"
+    );
     Ok(())
 }
 
