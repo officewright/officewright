@@ -69,7 +69,8 @@ tests/corpus/reference/ ground truth from PDFs of Microsoft Word/Excel/PowerPoin
                         as a 110 dpi grey PNG and geometry.json (lines, words, page breaks); the PDFs are not
                         committed, their SHA-256 and the app version are in SOURCES.md
 tests/corpus/resaved/   the copy Word saved of each document before exporting its reference PDF
-tests/corpus-tools/     tests of make-rule-docs.py and corpus-import.py (Python) and of make-reference.ps1
+tests/corpus-tools/     tests of make-rule-docs.py and corpus-import.py, and that every test font is credited
+                        with its SHA-256 (Python), and of make-reference.ps1
                         without Word (Windows PowerShell, Windows only); poppler/ checks corpus-import.py's
                         font embedding with the real qpdf and poppler (Linux, macOS)
 tests/fonts/            unmodified OFL test fonts with their license files, listed in THIRD-PARTY-NOTICES.md;
