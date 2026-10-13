@@ -442,8 +442,10 @@ mod tests {
         check_memory(&mut result, 1024);
         assert_eq!(result.status, Status::Opened);
         result.peak_rss_kb = Some(1024 * 1024 + 1);
+        result.expected_reason = Some("listed".to_owned());
         check_memory(&mut result, 1024);
         assert_eq!(result.status, Status::Memory);
+        assert_eq!(result.expected_reason, None);
         assert_eq!(
             result.error.as_deref(),
             Some("peak memory 1024 MiB, over the limit of 1024 MiB")

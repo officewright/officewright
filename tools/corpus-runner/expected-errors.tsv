@@ -4,8 +4,8 @@
 # not documents Word opens belong here: encrypted, another format under a Word extension,
 # or broken on purpose. A document Word opens but officewright does not is a bug, not an
 # expected error.
-corpus-ext/libreoffice/sw/qa/core/data/ooxml/fail/EDB-36788-1.docx	a broken ZIP archive found by a fuzzer
-corpus-ext/libreoffice/sw/qa/core/data/ooxml/fail/LIBREOFFICE-DBDAZAEC.docx	a broken ZIP archive found by a fuzzer
+corpus-ext/libreoffice/sw/qa/core/data/ooxml/fail/EDB-36788-1.docx	broken on purpose: LibreOffice's tests expect it not to load (ooxml/fail)
+corpus-ext/libreoffice/sw/qa/core/data/ooxml/fail/LIBREOFFICE-DBDAZAEC.docx	broken on purpose: LibreOffice's tests expect it not to load (ooxml/fail)
 corpus-ext/libreoffice/sw/qa/core/data/ooxml/fail/ofz14422-1.docx	a broken ZIP archive found by a fuzzer
 corpus-ext/libreoffice/sw/qa/core/data/ooxml/fail/ofz37458-1.docx	a broken ZIP archive found by a fuzzer
 corpus-ext/libreoffice/sw/qa/core/data/ooxml/fail/ofz4825-1.docx	a broken ZIP archive found by a fuzzer

@@ -106,13 +106,20 @@ fn listed_errors_are_expected() -> io::Result<()> {
 #[test]
 fn a_misbehaving_child_is_a_result_and_fails_the_run() -> io::Result<()> {
     let corpus = Corpus::new("misbehave")?;
-    for (how, status) in [
-        ("panic", "panic"),
-        ("allocation", "memory"),
-        ("abort", "crash"),
-        ("hang", "timeout"),
+    // The default time-out leaves a slow machine room to start a child; only the hang waits.
+    for (how, timeout, status) in [
+        ("panic", "30", "panic"),
+        ("allocation", "30", "memory"),
+        ("abort", "30", "crash"),
+        ("hang", "1", "timeout"),
     ] {
-        let (code, output) = corpus.run(&["--timeout", "1", "docs/good.docx"], Some(how))?;
+        let started = std::time::Instant::now();
+        let (code, output) = corpus.run(&["--timeout", timeout, "docs/good.docx"], Some(how))?;
+        assert!(
+            started.elapsed().as_secs() < 25,
+            "{how} took {:?}",
+            started.elapsed()
+        );
         assert_eq!(code, 1, "{how}: {output}");
         assert!(output.contains("1 files in"), "{how}: {output}");
         assert!(output.contains(&format!(": 1 {status}")), "{how}: {output}");
@@ -181,6 +188,19 @@ fn the_baseline_holds_every_status() -> io::Result<()> {
         "{output}"
     );
     assert!(output.contains("--update-baseline"), "{output}");
+    // The nightly run over the external corpora fails only on worse files.
+    let allow = ["--allow-better"];
+    let (code, output) = corpus.run(
+        &[&base[..], &expected[..], &allow[..], &["docs"]].concat(),
+        None,
+    )?;
+    assert_eq!(code, 0, "{output}");
+    assert!(
+        output.contains("better than the baseline: docs/nested/BROKEN.DOCX"),
+        "{output}"
+    );
+    let (code, output) = corpus.run(&[&base[..], &allow[..], &["docs"]].concat(), Some("panic"))?;
+    assert_eq!(code, 1, "worse still fails: {output}");
 
     // A file the baseline does not know, and one it knows that is gone.
     std::fs::rename(
@@ -207,10 +227,61 @@ fn paths_outside_the_root_and_bad_options_are_refused() -> io::Result<()> {
     let (code, output) = corpus.run(&["--root", "docs/nested", "docs"], None)?;
     assert_eq!(code, 2, "{output}");
     assert!(output.contains("is not under the root"), "{output}");
+    let (code, output) =
+        corpus.run(&["--root", "docs/nested", "docs/nested/../good.docx"], None)?;
+    assert_eq!(code, 2, "a path through .. leaves the root: {output}");
+    assert!(output.contains("is not under the root"), "{output}");
     let (code, output) = corpus.run(&["docs/notes-missing"], None)?;
+    assert_eq!(code, 2, "{output}");
+    let (code, output) = corpus.run(&["--allow-better", "docs"], None)?;
     assert_eq!(code, 2, "{output}");
     let (code, output) = corpus.run(&["--jobs", "many", "docs"], None)?;
     assert_eq!(code, 2, "{output}");
     assert!(output.contains("usage:"), "{output}");
+    Ok(())
+}
+
+#[test]
+fn a_baseline_of_another_format_is_refused() -> io::Result<()> {
+    let corpus = Corpus::new("format")?;
+    corpus.write("baseline.json", "{\"format\": 2, \"files\": {}}")?;
+    let (code, output) = corpus.run(&["--baseline", "baseline.json", "docs"], None)?;
+    assert_eq!(code, 2, "{output}");
+    assert!(
+        output.contains("baseline format 2, this runner reads format 1"),
+        "{output}"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn links_are_followed_when_named_and_to_documents() -> io::Result<()> {
+    use std::os::unix::fs::symlink;
+    let corpus = Corpus::new("links")?;
+    let dir = &corpus.dir;
+    std::fs::create_dir_all(dir.join("walked"))?;
+    symlink(dir.join("docs/good.docx"), dir.join("walked/linked.docx"))?;
+    symlink(dir.join("docs"), dir.join("walked/linked-dir"))?;
+    symlink(
+        dir.join("docs/missing.docx"),
+        dir.join("walked/broken.docx"),
+    )?;
+    symlink(dir.join("docs"), dir.join("named"))?;
+    // Inside a walked directory: the link to a document is run, the broken one is reported,
+    // the link to a directory is not walked.
+    let (code, output) = corpus.run(&["walked"], None)?;
+    assert_eq!(code, 0, "{output}");
+    assert!(output.contains("2 files in"), "{output}");
+    assert!(
+        output.contains("unexpected-error walked/broken.docx: io:"),
+        "{output}"
+    );
+    assert!(!output.contains("linked-dir"), "{output}");
+    // A link named on the command line is walked.
+    let (code, output) = corpus.run(&["named"], None)?;
+    assert_eq!(code, 0, "{output}");
+    assert!(output.contains("2 files in"), "{output}");
+    assert!(output.contains("named/nested/BROKEN.DOCX"), "{output}");
     Ok(())
 }

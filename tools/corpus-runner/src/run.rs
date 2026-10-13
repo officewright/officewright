@@ -53,7 +53,7 @@ fn run(options: &Options) -> Result<bool, String> {
     let launcher = Launcher::new(options)?;
 
     let started = Instant::now();
-    let report = Report::new(run_all(&launcher, &files, &expected, options));
+    let report = Report::new(run_all(&launcher, &files, &expected, options)?);
     print_summary(&report, started.elapsed());
     for file in &report.files {
         if file.status == Status::Opened && expected.contains_key(&file.path) {
@@ -86,6 +86,13 @@ fn run(options: &Options) -> Result<bool, String> {
         } else {
             let baseline: Baseline = serde_json::from_str(&read(path)?)
                 .map_err(|error| format!("{}: {error}", path.display()))?;
+            if baseline.format != 1 {
+                return Err(format!(
+                    "{}: baseline format {}, this runner reads format 1",
+                    path.display(),
+                    baseline.format
+                ));
+            }
             let changes = report::compare(&baseline, &report);
             for line in &changes.worse {
                 println!("worse than the baseline: {line}");
@@ -99,7 +106,7 @@ fn run(options: &Options) -> Result<bool, String> {
                     changes.worse.len()
                 );
                 passed = false;
-            } else if !changes.better.is_empty() {
+            } else if !changes.better.is_empty() && !options.allow_better {
                 println!(
                     "FAILED: {} files are better than the baseline; accept them by running with \
                      --update-baseline and committing {}",
@@ -113,30 +120,40 @@ fn run(options: &Options) -> Result<bool, String> {
     Ok(passed)
 }
 
-/// Adds the file, or the Word documents under the directory, sorted.
+/// Adds the file, or the Word documents under the directory, sorted. A path named on the
+/// command line is followed if it is a symbolic link.
 fn collect(path: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
     let metadata =
-        std::fs::symlink_metadata(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    if !metadata.is_dir() {
+        std::fs::metadata(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    if metadata.is_dir() {
+        walk(path, files)
+    } else {
         // A file named on the command line is run whatever its extension.
         files.push(path.to_path_buf());
-        return Ok(());
+        Ok(())
     }
-    let mut entries = std::fs::read_dir(path)
+}
+
+/// The Word documents under the directory. A symbolic link to a document is followed (a
+/// broken one is run, and reported as an error); a link to a directory is not, so a link
+/// cannot make the walk loop.
+fn walk(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
         .and_then(|entries| {
             entries
                 .map(|entry| entry.map(|entry| entry.path()))
                 .collect()
         })
-        .map_err(|error| format!("{}: {error}", path.display()))
-        .map(|entries: Vec<PathBuf>| entries)?;
+        .map_err(|error| format!("{}: {error}", dir.display()))?;
     entries.sort();
     for entry in entries {
-        let metadata = std::fs::symlink_metadata(&entry)
+        let link = std::fs::symlink_metadata(&entry)
             .map_err(|error| format!("{}: {error}", entry.display()))?;
-        if metadata.is_dir() {
-            collect(&entry, files)?;
-        } else if metadata.is_file() && is_word_document(&entry) {
+        if link.is_dir() {
+            walk(&entry, files)?;
+        } else if is_word_document(&entry)
+            && !std::fs::metadata(&entry).is_ok_and(|target| target.is_dir())
+        {
             files.push(entry);
         }
     }
@@ -156,13 +173,21 @@ fn is_word_document(path: &Path) -> bool {
 /// The file's path under the root, with forward slashes, the same on every system.
 fn relative(root: &Path, file: &Path) -> Result<String, String> {
     let full = std::path::absolute(file).map_err(|error| format!("{}: {error}", file.display()))?;
-    let rest = full.strip_prefix(root).map_err(|_| {
+    let outside = || {
         format!(
             "{} is not under the root {}; pass --root",
             file.display(),
             root.display()
         )
-    })?;
+    };
+    let rest = full.strip_prefix(root).map_err(|_| outside())?;
+    // std::path::absolute keeps "..": a path through it may lead out of the root.
+    if rest
+        .components()
+        .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        return Err(outside());
+    }
     let parts: Vec<String> = rest
         .components()
         .map(|part| part.as_os_str().to_string_lossy().into_owned())
@@ -213,18 +238,33 @@ impl Launcher {
     }
 }
 
-/// Opens every file in a child process, `options.jobs` at a time.
+/// Opens every file in a child process, `options.jobs` at a time. A failure of the runner
+/// itself, not of a file, stops the run.
 fn run_all(
     launcher: &Launcher,
     files: &[(String, PathBuf)],
     expected: &BTreeMap<String, String>,
     options: &Options,
-) -> Vec<FileResult> {
+) -> Result<Vec<FileResult>, String> {
     let next = AtomicUsize::new(0);
     let results = Mutex::new(Vec::with_capacity(files.len()));
+    let fatal = Mutex::new(None);
     let work = || {
         while let Some((name, file)) = files.get(next.fetch_add(1, Ordering::Relaxed)) {
-            let (exit, elapsed) = run_child(launcher, file, options.timeout);
+            if fatal
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_some()
+            {
+                break;
+            }
+            let (exit, elapsed) = match run_child(launcher, file, options.timeout) {
+                Ok(done) => done,
+                Err(error) => {
+                    *fatal.lock().unwrap_or_else(PoisonError::into_inner) = Some(error);
+                    break;
+                }
+            };
             let milliseconds = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
             let mut result = report::classify(
                 name,
@@ -251,11 +291,19 @@ fn run_all(
             work();
         }
     });
-    results.into_inner().unwrap_or_else(PoisonError::into_inner)
+    if let Some(error) = fatal.into_inner().unwrap_or_else(PoisonError::into_inner) {
+        return Err(error);
+    }
+    Ok(results.into_inner().unwrap_or_else(PoisonError::into_inner))
 }
 
-/// Runs `corpus-runner open FILE`, stopping it after the time-out.
-fn run_child(launcher: &Launcher, file: &Path, timeout: Duration) -> (ChildExit, Duration) {
+/// Runs `corpus-runner open FILE`, stopping it after the time-out. `Err` is a failure of
+/// the runner: the child could not be watched.
+fn run_child(
+    launcher: &Launcher,
+    file: &Path,
+    timeout: Duration,
+) -> Result<(ChildExit, Duration), String> {
     let started = Instant::now();
     let child = Command::new(&launcher.program)
         .args(&launcher.leading)
@@ -272,7 +320,7 @@ fn run_child(launcher: &Launcher, file: &Path, timeout: Duration) -> (ChildExit,
                 stderr: format!("cannot start the child: {error}"),
                 ..ChildExit::default()
             };
-            return (exit, started.elapsed());
+            return Ok((exit, started.elapsed()));
         }
     };
     // The pipes are drained while the child runs, so a full pipe cannot block it.
@@ -285,11 +333,7 @@ fn run_child(launcher: &Launcher, file: &Path, timeout: Duration) -> (ChildExit,
             // Killing fails only when the child has already exited.
             let _ = child.kill();
             let _ = child.wait();
-            let exit = ChildExit {
-                stderr: "cannot start a thread to read the child's output".to_owned(),
-                ..ChildExit::default()
-            };
-            return (exit, started.elapsed());
+            return Err("cannot start a thread to read a child's output".to_owned());
         }
     };
     let mut timed_out = false;
@@ -307,7 +351,11 @@ fn run_child(launcher: &Launcher, file: &Path, timeout: Duration) -> (ChildExit,
                 std::thread::sleep(pause);
                 pause = (pause * 2).min(Duration::from_millis(20));
             }
-            Err(_) => break None,
+            Err(_) => {
+                // The child's state is unknown: stop it, so the pipes close.
+                let _ = child.kill();
+                break child.wait().ok();
+            }
         }
     };
     let elapsed = started.elapsed();
@@ -319,7 +367,7 @@ fn run_child(launcher: &Launcher, file: &Path, timeout: Duration) -> (ChildExit,
         stderr: joined(stderr),
         timed_out,
     };
-    (exit, elapsed)
+    Ok((exit, elapsed))
 }
 
 fn drain(mut pipe: impl Read + Send + 'static) -> std::io::Result<JoinHandle<String>> {

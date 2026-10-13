@@ -21,14 +21,19 @@ printf '==> %s\n' "corpus runner (Word documents of corpus-ext)"
 # The Word documents of Apache POI and LibreOffice: git sources, so fetching them verifies
 # them. Each child gets the 1 GiB address-space limit of CLAUDE.md through prlimit; the
 # report is uploaded by nightly.yml. The run fails on a panic, hang, memory blow-up or
-# crash; unexpected errors are listed in the report without failing it.
-scripts/fetch-corpus.sh poi libreoffice
-cargo build --release -p corpus-runner
+# crash, and on a file worse than tools/corpus-runner/baseline-ext.json; a better file
+# only shows in the output until the baseline is updated. A failed fetch or build fails
+# the night but does not stop the fuzzing.
 corpus_failed=
-target/release/corpus-runner run --enforce-memory-limit \
-	--expected tools/corpus-runner/expected-errors.tsv \
-	--report target/corpus-report.json corpus-ext/poi corpus-ext/libreoffice ||
+if scripts/fetch-corpus.sh poi libreoffice && cargo build --release -p corpus-runner; then
+	target/release/corpus-runner run --enforce-memory-limit \
+		--expected tools/corpus-runner/expected-errors.tsv \
+		--baseline tools/corpus-runner/baseline-ext.json --allow-better \
+		--report target/corpus-report.json corpus-ext/poi corpus-ext/libreoffice ||
+		corpus_failed=1
+else
 	corpus_failed=1
+fi
 
 printf '==> %s\n' "fuzzing (30 min per target)"
 # Each target is seeded with files of the format it reads; libFuzzer keeps the inputs it

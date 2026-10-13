@@ -1,14 +1,17 @@
 //! Runs officewright over corpora of documents and compares the results with a baseline.
 //!
 //! ```text
-//! corpus-runner run [--root DIR] [--report FILE] [--baseline FILE [--update-baseline]]
+//! corpus-runner run [--root DIR] [--report FILE]
+//!                   [--baseline FILE [--update-baseline | --allow-better]]
 //!                   [--expected FILE] [--timeout SECONDS] [--memory-limit MIB]
 //!                   [--enforce-memory-limit] [--jobs N] PATH...
 //! ```
 //!
 //! Every Word document under the paths (`.docx`, `.docm`, `.dotx`, `.dotm`) is opened in a
 //! child process of its own (this program with `open FILE`), so a panic, a hang or a memory
-//! blow-up in one file is a result for that file, not the end of the run. A child that
+//! blow-up in one file is a result for that file, not the end of the run. A path named here
+//! is followed if it is a symbolic link; inside a directory, links to documents are followed
+//! and links to directories are not. A child that
 //! takes longer than the time-out (30 s) is stopped. Paths in the report, the baseline and
 //! the expected-errors file are relative to the root (by default the current directory)
 //! with forward slashes. Each file ends as
@@ -27,7 +30,8 @@
 //! runs out of memory or crashes. With `--baseline` it also fails when any file's status
 //! differs from the baseline's, or the set of files does: worse is a regression, and better
 //! is accepted by running with `--update-baseline`, which writes the baseline, and committing
-//! it, so that progress shows in the diff.
+//! it, so that progress shows in the diff. With `--allow-better` only worse files fail, for
+//! the nightly run over the external corpora, whose baseline is updated by hand.
 #![forbid(unsafe_code)]
 
 mod child;
@@ -39,7 +43,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 const USAGE: &str = "usage: corpus-runner run [--root DIR] [--report FILE] \
-[--baseline FILE [--update-baseline]] [--expected FILE] [--timeout SECONDS] \
+[--baseline FILE [--update-baseline | --allow-better]] [--expected FILE] [--timeout SECONDS] \
 [--memory-limit MIB] [--enforce-memory-limit] [--jobs N] PATH...
        corpus-runner open FILE";
 
@@ -74,6 +78,8 @@ pub struct Options {
     pub baseline: Option<PathBuf>,
     /// Write the baseline instead of comparing with it.
     pub update_baseline: bool,
+    /// Files better than the baseline do not fail the run.
+    pub allow_better: bool,
     /// The expected-errors file.
     pub expected: Option<PathBuf>,
     /// How long a child may take for one file.
@@ -93,6 +99,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         report: None,
         baseline: None,
         update_baseline: false,
+        allow_better: false,
         expected: None,
         timeout: Duration::from_secs(30),
         memory_limit_mb: 1024,
@@ -112,6 +119,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--baseline" => options.baseline = Some(PathBuf::from(value("--baseline")?)),
             "--expected" => options.expected = Some(PathBuf::from(value("--expected")?)),
             "--update-baseline" => options.update_baseline = true,
+            "--allow-better" => options.allow_better = true,
             "--enforce-memory-limit" => options.enforce_memory_limit = true,
             "--timeout" => {
                 let seconds = value("--timeout")?;
@@ -140,8 +148,8 @@ fn parse(args: &[String]) -> Result<Options, String> {
     if options.paths.is_empty() {
         return Err("no paths to run over".to_owned());
     }
-    if options.update_baseline && options.baseline.is_none() {
-        return Err("--update-baseline needs --baseline".to_owned());
+    if (options.update_baseline || options.allow_better) && options.baseline.is_none() {
+        return Err("--update-baseline and --allow-better need --baseline".to_owned());
     }
     Ok(options)
 }
