@@ -140,7 +140,7 @@ fn style(c: &mut Capture<'_, '_, '_>, names: &Names, span: Span, offset: usize) 
         .map(Box::<str>::from);
     let data = id.as_ref().map(|id| StyleData {
         kind: *kind.as_ref().unwrap_or(&StyleKind::Paragraph),
-        id: id.clone(),
+        id: std::sync::Arc::from(id.as_ref()),
         name: child("name"),
         based_on: child("basedOn"),
         next: child("next"),
@@ -173,7 +173,7 @@ fn style(c: &mut Capture<'_, '_, '_>, names: &Names, span: Span, offset: usize) 
     };
     let styles = &mut c.document.styles;
     let index = styles.styles.len();
-    if styles.by_id.contains_key(&data.id) {
+    if styles.by_id.contains_key(&*data.id) {
         let id = data.id.clone();
         c.diagnose(offset, DiagnosticKind::UnexpectedContent, || {
             format!(
@@ -182,7 +182,7 @@ fn style(c: &mut Capture<'_, '_, '_>, names: &Names, span: Span, offset: usize) 
             )
         });
     } else {
-        styles.by_id.insert(data.id.clone(), index);
+        styles.by_id.insert(Box::from(&*data.id), index);
     }
     c.document.styles.styles.push(data);
     for (local, which) in [

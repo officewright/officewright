@@ -49,12 +49,9 @@ pub struct Formats<'a> {
     /// Each list instance's levels that paragraphs use, with the instance's overrides,
     /// and the numbers they start from.
     instance_levels: HashMap<(i64, usize), paragraph::InstanceLevel>,
-    /// What each list level used so far gives to its paragraphs, by the level's address.
-    list_layers: HashMap<usize, Arc<ParagraphLevel>>,
-    /// What the document defaults, a paragraph style and a list level give together, by
-    /// the style's index and the list level's address. The levels are kept by `lists`
-    /// and `definitions` for as long as this, so an address names one level.
-    inherited: HashMap<(Option<usize>, Option<usize>), Arc<ParagraphLevel>>,
+    /// The level of each definition whose `w:pStyle` names a paragraph style, by the
+    /// definition and the style's index.
+    style_levels: HashMap<(i64, usize), Option<i64>>,
     /// How much work the caches saved, for tests.
     #[cfg(test)]
     work: Work,
@@ -64,9 +61,7 @@ pub struct Formats<'a> {
 #[cfg(test)]
 #[derive(Debug, Default)]
 pub(crate) struct Work {
-    /// Combinations of a style and a list level worked out.
-    pub(crate) inherited: usize,
-    /// Definitions an instance names, followed through their links.
+    /// Definitions whose link (`w:numStyleLink`) was read.
     pub(crate) links: usize,
     /// Numbering styles whose list reference was read.
     pub(crate) numbering_styles: usize,
@@ -74,6 +69,8 @@ pub(crate) struct Work {
     pub(crate) definitions: usize,
     /// Levels of instances replaced by an override's level.
     pub(crate) replacements: usize,
+    /// Definitions searched for the level whose `w:pStyle` names a style.
+    pub(crate) style_levels: usize,
 }
 
 impl<'a> Formats<'a> {
@@ -90,8 +87,7 @@ impl<'a> Formats<'a> {
             numbering_styles: HashMap::new(),
             definitions: HashMap::new(),
             instance_levels: HashMap::new(),
-            list_layers: HashMap::new(),
-            inherited: HashMap::new(),
+            style_levels: HashMap::new(),
             #[cfg(test)]
             work: Work::default(),
         }

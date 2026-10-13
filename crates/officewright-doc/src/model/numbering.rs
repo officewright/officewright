@@ -396,8 +396,10 @@ pub struct ListLevel {
     pub(crate) picture_bullet: Option<i64>,
     pub(crate) legacy: Option<LegacyNumbering>,
     pub(crate) justification: Option<Justification>,
-    pub(crate) paragraph_properties: ParagraphProperties,
-    pub(crate) run_properties: RunProperties,
+    /// Boxed and absent when empty, so that a level that sets little is small: a
+    /// document can name many.
+    pub(crate) paragraph_properties: Option<Box<ParagraphProperties>>,
+    pub(crate) run_properties: Option<Box<RunProperties>>,
     pub(crate) tentative: Option<bool>,
     pub(crate) template_code: Option<u32>,
 }
@@ -475,12 +477,16 @@ impl ListLevel {
     /// Word allows the alignment, indentation and tab stops only (MS-OI29500
     /// §17.9.22(b)), though it writes others too.
     pub fn paragraph_properties(&self) -> &ParagraphProperties {
-        &self.paragraph_properties
+        static NONE: std::sync::LazyLock<ParagraphProperties> =
+            std::sync::LazyLock::new(ParagraphProperties::default);
+        self.paragraph_properties.as_deref().unwrap_or(&NONE)
     }
 
     /// The run properties of the label (its `w:rPr`).
     pub fn run_properties(&self) -> &RunProperties {
-        &self.run_properties
+        static NONE: std::sync::LazyLock<RunProperties> =
+            std::sync::LazyLock::new(RunProperties::default);
+        self.run_properties.as_deref().unwrap_or(&NONE)
     }
 
     /// The level is tentative (`w:tentative`): the standard keeps such levels out of the

@@ -61,7 +61,7 @@ impl FontFamilies {
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct CharacterFormat {
-    pub(crate) style: Option<Box<str>>,
+    pub(crate) style: Option<Arc<str>>,
     pub(crate) fonts: FontFamilies,
     pub(crate) size: Pt,
     pub(crate) size_complex_script: Pt,
@@ -256,7 +256,7 @@ impl ParagraphFlag {
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct ParagraphFormat {
-    pub(crate) style: Option<Box<str>>,
+    pub(crate) style: Option<Arc<str>>,
     pub(crate) justification: Justification,
     pub(crate) start_indent: Pt,
     pub(crate) end_indent: Pt,
@@ -420,8 +420,9 @@ impl ParagraphFormat {
     /// its position (ECMA-376 §17.3.1.38). A hanging indent makes a stop too, which the
     /// layout adds.
     ///
-    /// At most 64, those at the lowest positions, and at most 64 from each level: Word's
-    /// own format adds or removes at most 64 stops in one change ([MS-DOC] 2.9.179).
+    /// At most 64, those at the lowest positions; each level gives at most 64 set and 64
+    /// cleared: Word's own format adds at most 64 stops and removes at most 64 in one
+    /// change ([MS-DOC] 2.9.179, 2.9.180).
     pub fn tabs(&self) -> &[TabStop] {
         &self.tabs
     }

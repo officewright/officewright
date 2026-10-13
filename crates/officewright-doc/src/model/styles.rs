@@ -24,7 +24,8 @@ pub(crate) struct StyleTable {
 #[derive(Debug)]
 pub(crate) struct StyleData {
     pub(crate) kind: StyleKind,
-    pub(crate) id: Box<str>,
+    /// Shared, so that a format in effect names its style without copying the id.
+    pub(crate) id: std::sync::Arc<str>,
     pub(crate) name: Option<Box<str>>,
     pub(crate) based_on: Option<Box<str>>,
     pub(crate) next: Option<Box<str>>,

@@ -103,7 +103,7 @@ impl Formats<'_> {
         CharacterFormat {
             style: character_style
                 .and_then(|index| document.styles.styles.get(index))
-                .map(|style| style.id.clone()),
+                .map(|style| Arc::clone(&style.id)),
             fonts: effect.fonts(document),
             size: effect.size.unwrap_or(DEFAULT_SIZE),
             size_complex_script: effect.size_complex_script.unwrap_or(DEFAULT_SIZE),

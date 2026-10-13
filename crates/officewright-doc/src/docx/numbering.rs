@@ -18,7 +18,7 @@ use crate::model::numbering::{
     DefinitionData, InstanceData, LegacyNumbering, LevelOverride, LevelSuffix, ListLevel,
     MultiLevelType, long_hex,
 };
-use crate::model::properties::{Justification, NumberFormat};
+use crate::model::properties::{Justification, NumberFormat, ParagraphProperties, RunProperties};
 use crate::model::xml::{Element, Span};
 use crate::model::{Document, Names};
 use crate::units::twips_measure;
@@ -306,20 +306,28 @@ pub(crate) fn level(lvl: Element<'_>, names: &Names, report: Report<'_>) -> Opti
             "lvlJc" => {
                 level.justification = value(child, names, "val", Justification::from_xml, report);
             }
-            "pPr" => level.paragraph_properties = paragraph_properties(child, names, report),
-            "rPr" => level.run_properties = run_properties(child, names, report),
+            "pPr" => {
+                let properties = paragraph_properties(child, names, report);
+                level.paragraph_properties =
+                    (properties != ParagraphProperties::default()).then(|| Box::new(properties));
+            }
+            "rPr" => {
+                let properties = run_properties(child, names, report);
+                level.run_properties =
+                    (properties != RunProperties::default()).then(|| Box::new(properties));
+            }
             _ => {}
         }
     }
     Some(level)
 }
 
-/// A `w:lvlOverride`; `None` when its `w:ilvl` is not a number.
 /// The level a `w:lvlOverride` overrides (`w:ilvl`), read without the rest of it.
 pub(crate) fn override_level(element: Element<'_>, names: &Names) -> Option<i64> {
     value(element, names, "ilvl", integer, &mut |_, _, _| {})
 }
 
+/// A `w:lvlOverride`; `None` when its `w:ilvl` is not a number.
 pub(crate) fn level_override(
     element: Element<'_>,
     names: &Names,

@@ -40,6 +40,19 @@ fn build(body: &str, styles: &str, numbering: Option<&str>) -> Document {
     document
 }
 
+/// As [`build`], for a document whose damage the reader reports.
+fn build_damaged(body: &str, styles: &str, numbering: &str) -> Document {
+    let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/></Relationships>"#;
+    let styles = format!(r#"<w:styles xmlns:w="{W}">{styles}</w:styles>"#);
+    let numbering = format!(r#"<w:numbering xmlns:w="{W}">{numbering}</w:numbering>"#);
+    let extra = [
+        ("word/_rels/document.xml.rels", rels),
+        ("word/styles.xml", styles.as_str()),
+        ("word/numbering.xml", numbering.as_str()),
+    ];
+    Document::from_bytes(package(DOCUMENT, &document_xml(body), &extra)).unwrap()
+}
+
 /// `w:docDefaults` with these paragraph properties.
 fn defaults(p_pr: &str) -> String {
     format!("<w:docDefaults><w:pPrDefault><w:pPr>{p_pr}</w:pPr></w:pPrDefault></w:docDefaults>")
@@ -715,7 +728,8 @@ fn follows_each_link_once_and_shares_the_levels_it_leads_to() {
             .iter()
             .all(|list| Arc::ptr_eq(list.level.as_ref().unwrap(), &first))
     );
-    assert_eq!(formats.work().links, 300);
+    // Each linking definition's link is read once, and so is the definition they reach.
+    assert_eq!(formats.work().links, 301);
     assert_eq!(formats.work().numbering_styles, 1);
     assert_eq!(formats.work().definitions, 1);
 }
@@ -756,35 +770,44 @@ fn reads_only_the_overrides_of_the_levels_paragraphs_use() {
 }
 
 #[test]
-fn works_out_each_style_and_list_level_once() {
+fn works_out_each_list_definition_and_style_match_once() {
+    // 400 list paragraphs of one style, whose level the definition's w:pStyle names: the
+    // definition is parsed once and searched for the style once.
     let numbering = [
-        definition(10, ""),
+        definition(10, r#"<w:pStyle w:val="Body"/>"#),
         r#"<w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num>"#.to_owned(),
     ]
     .concat();
     let styles = [
         defaults(""),
-        style("paragraph", "Body", None, r#"<w:jc w:val="both"/>"#),
+        style(
+            "paragraph",
+            "Body",
+            None,
+            r#"<w:numPr><w:numId w:val="1"/></w:numPr><w:jc w:val="both"/>"#,
+        ),
     ]
     .concat();
-    let listed = paragraph(
-        "Body",
-        r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>"#,
-    );
-    let plain = paragraph("Body", "");
-    let body = [listed.as_str(), plain.as_str()].repeat(200).concat();
+    let body = paragraph("Body", "").repeat(400);
     let document = build(&body, &styles, Some(&numbering));
     let mut formats = document.formats();
-    for (n, paragraph) in paragraphs(&document).into_iter().enumerate() {
-        // The list level's alignment wins over the style's (MS-OI29500 §17.7.2(a)).
-        let expected = if n % 2 == 0 {
-            Justification::Right
-        } else {
-            Justification::Both
-        };
-        assert_eq!(formats.paragraph(paragraph).justification(), expected);
-    }
-    assert_eq!(formats.work().inherited, 2);
+    let results: Vec<_> = paragraphs(&document)
+        .into_iter()
+        .map(|paragraph| formats.paragraph(paragraph))
+        .collect();
+    // The list level's alignment wins over the style's (MS-OI29500 §17.7.2(a)).
+    assert!(results.iter().all(|format| {
+        format.justification() == Justification::Right && format.list().unwrap().level_number() == 2
+    }));
+    // The paragraphs share the style's id rather than copying it: an id may be long.
+    let id = results[0].style.clone().unwrap();
+    assert!(
+        results
+            .iter()
+            .all(|format| Arc::ptr_eq(format.style.as_ref().unwrap(), &id))
+    );
+    assert_eq!(formats.work().definitions, 1);
+    assert_eq!(formats.work().style_levels, 1);
 }
 
 #[test]
@@ -934,8 +957,7 @@ fn adds_the_tab_stops_of_the_list_level() {
 fn takes_the_level_a_definition_links_to_the_style_before_the_styles_own() {
     // The style writes level 0, level 2 of the definition names the style: the level of
     // w:pStyle comes first (ECMA-376 §17.9.23). Word calls the combination unpredictable
-    // (MS-OI29500 §17.3.1.19(a)); word-rules/E-list-level-inherit.docx case 04 shows what
-    // it does.
+    // (MS-OI29500 §17.3.1.19(a)); a rule document for Word to render is pending.
     let numbering = [
         definition(10, r#"<w:pStyle w:val="Linked"/>"#),
         r#"<w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num>"#.to_owned(),
@@ -953,4 +975,188 @@ fn takes_the_level_a_definition_links_to_the_style_before_the_styles_own() {
     .concat();
     let format = &formats(&build(&paragraph("Linked", ""), &styles, Some(&numbering)))[0];
     assert_eq!(format.list().unwrap().level_number(), 2);
+}
+
+#[test]
+fn bounds_set_and_cleared_tab_stops_apart() {
+    // [MS-DOC] 2.9.179 and 2.9.180: one change adds at most 64 stops and removes at most
+    // 64, so cleared stops do not take the place of set ones.
+    let set: String = (1..=64)
+        .map(|n| format!(r#"<w:tab w:val="left" w:pos="{}"/>"#, 100 * n))
+        .collect();
+    let styles = [
+        defaults(""),
+        style(
+            "paragraph",
+            "Tabbed",
+            None,
+            &format!("<w:tabs>{set}</w:tabs>"),
+        ),
+    ]
+    .concat();
+    let clear = |count: i64| -> String {
+        let cleared: String = (1..=count)
+            .map(|n| format!(r#"<w:tab w:val="clear" w:pos="{}"/>"#, 100 * n))
+            .collect();
+        format!(r#"<w:tabs>{cleared}<w:tab w:val="right" w:pos="7000"/></w:tabs>"#)
+    };
+    let body = [
+        paragraph("Tabbed", &clear(64)),
+        paragraph("Tabbed", &clear(10)),
+    ]
+    .concat();
+    let results = formats(&build(&body, &styles, None));
+    assert_eq!(tabs(&results[0]), [tab(TabKind::Right, 350.0)]);
+    assert_eq!(results[1].tabs().len(), 55);
+    assert_eq!(results[1].tabs()[0].position(), Pt(55.0));
+    assert_eq!(results[1].tabs()[54].position(), Pt(350.0));
+}
+
+#[test]
+fn inherits_the_list_instance_and_level_through_based_on_styles() {
+    let numbering = [
+        definition(10, ""),
+        r#"<w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num>"#.to_owned(),
+    ]
+    .concat();
+    let styles = [
+        defaults(""),
+        style(
+            "paragraph",
+            "Instance",
+            None,
+            r#"<w:numPr><w:numId w:val="1"/></w:numPr>"#,
+        ),
+        style(
+            "paragraph",
+            "InstanceThenLevel",
+            Some("Instance"),
+            r#"<w:numPr><w:ilvl w:val="2"/></w:numPr>"#,
+        ),
+        style(
+            "paragraph",
+            "Level",
+            None,
+            r#"<w:numPr><w:ilvl w:val="1"/></w:numPr>"#,
+        ),
+        style(
+            "paragraph",
+            "LevelThenInstance",
+            Some("Level"),
+            r#"<w:numPr><w:numId w:val="1"/></w:numPr>"#,
+        ),
+    ]
+    .concat();
+    let body = [
+        paragraph("InstanceThenLevel", ""),
+        paragraph("LevelThenInstance", ""),
+    ]
+    .concat();
+    let levels: Vec<_> = formats(&build(&body, &styles, Some(&numbering)))
+        .iter()
+        .map(|format| {
+            format
+                .list()
+                .map(|list| (list.instance(), list.level_number()))
+        })
+        .collect();
+    assert_eq!(levels, [Some((1, 2)), Some((1, 1))]);
+}
+
+#[test]
+fn follows_each_link_once_through_definitions_on_the_way() {
+    // 300 definitions link through NS1 to definition 500, which links through NS2 to
+    // definition 600: each definition's link is read once.
+    let mut numbering = definition(600, "");
+    numbering.push_str(
+        r#"<w:abstractNum w:abstractNumId="500"><w:numStyleLink w:val="NS2"/></w:abstractNum><w:num w:numId="5000"><w:abstractNumId w:val="500"/></w:num><w:num w:numId="6000"><w:abstractNumId w:val="600"/></w:num>"#,
+    );
+    for id in 1..=300 {
+        numbering.push_str(&format!(
+            r#"<w:abstractNum w:abstractNumId="{id}"><w:numStyleLink w:val="NS1"/></w:abstractNum><w:num w:numId="{id}"><w:abstractNumId w:val="{id}"/></w:num>"#
+        ));
+    }
+    let styles = [
+        defaults(""),
+        style(
+            "numbering",
+            "NS1",
+            None,
+            r#"<w:numPr><w:numId w:val="5000"/></w:numPr>"#,
+        ),
+        style(
+            "numbering",
+            "NS2",
+            None,
+            r#"<w:numPr><w:numId w:val="6000"/></w:numPr>"#,
+        ),
+    ]
+    .concat();
+    let body: String = (1..=300)
+        .map(|id| {
+            paragraph(
+                "",
+                &format!(r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="{id}"/></w:numPr>"#),
+            )
+        })
+        .collect();
+    let document = build(&body, &styles, Some(&numbering));
+    let mut formats = document.formats();
+    for paragraph in paragraphs(&document) {
+        assert_eq!(
+            formats.paragraph(paragraph).list().unwrap().definition(),
+            Some(600)
+        );
+    }
+    assert_eq!(formats.work().links, 302);
+    assert_eq!(formats.work().numbering_styles, 2);
+    assert_eq!(formats.work().definitions, 1);
+}
+
+#[test]
+fn takes_the_first_override_of_a_level_and_the_last_num_pr_of_a_numbering_style() {
+    let numbering = [
+        definition(10, ""),
+        r#"<w:num w:numId="1"><w:abstractNumId w:val="10"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="5"/></w:lvlOverride><w:lvlOverride w:ilvl="0"><w:startOverride w:val="9"/></w:lvlOverride></w:num>"#.to_owned(),
+        definition(11, ""),
+        r#"<w:num w:numId="2"><w:abstractNumId w:val="11"/></w:num>"#.to_owned(),
+        r#"<w:abstractNum w:abstractNumId="30"><w:numStyleLink w:val="Linked"/></w:abstractNum><w:num w:numId="3"><w:abstractNumId w:val="30"/></w:num>"#.to_owned(),
+    ]
+    .concat();
+    let styles = [
+        defaults(""),
+        // A w:pPr with two w:numPr: the last counts, as for any paragraph properties.
+        style(
+            "numbering",
+            "Linked",
+            None,
+            r#"<w:numPr><w:numId w:val="1"/></w:numPr><w:numPr><w:numId w:val="2"/></w:numPr>"#,
+        ),
+    ]
+    .concat();
+    let numbered = |id: i64| {
+        paragraph(
+            "",
+            &format!(r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="{id}"/></w:numPr>"#),
+        )
+    };
+    let body = [numbered(1), numbered(3)].concat();
+    // The reader reports the second override of level 0.
+    let results = formats(&build_damaged(&body, &styles, &numbering));
+    assert_eq!(results[0].list().unwrap().start(), 5);
+    // Instance 3's definition links through Linked to instance 2's definition, 11.
+    assert_eq!(results[1].list().unwrap().definition(), Some(11));
+}
+
+#[test]
+fn an_instance_without_its_definition_has_no_levels_even_with_overrides() {
+    let numbering = r#"<w:num w:numId="1"><w:abstractNumId w:val="99"/><w:lvlOverride w:ilvl="0"><w:lvl w:ilvl="0"><w:lvlText w:val="*"/><w:pPr><w:ind w:left="2880"/></w:pPr></w:lvl></w:lvlOverride></w:num>"#;
+    let body = paragraph(
+        "",
+        r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>"#,
+    );
+    let format = &formats(&build(&body, &defaults(""), Some(numbering)))[0];
+    let list = format.list().unwrap();
+    assert_eq!((list.definition(), list.level()), (None, None));
+    assert_eq!(format.start_indent(), Pt(0.0));
 }
