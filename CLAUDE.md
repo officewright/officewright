@@ -37,7 +37,7 @@ Office does not follow ECMA-376/ISO 29500 literally, and users judge us against 
 crates/
   officewright          facade crate; features doc, pdf, xls, slides; re-exports format crates, and
                         officewright-font as `font` with the pdf feature
-  officewright-core     units (Pt, twips, EMU), PageSize, Error/Result; later colour
+  officewright-core     units (Pt, twips, EMU), PageSize, Color (sRGB), Error/Result
   officewright-font     font loading (TrueType/OpenType, collections), metrics, cmap, subsetting for
                         embedding, system font index and font substitution with a report
   officewright-opc      ZIP, XML, OPC packages and Markup Compatibility (ECMA-376 Parts 2 and 3) shared
