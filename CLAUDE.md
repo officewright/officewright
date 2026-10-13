@@ -232,6 +232,7 @@ The maintainer does not review Rust code. Correctness rests on the automated gat
 
 ### 3. Fixes
 - Every blocker is fixed. Every should-fix is fixed or answered in the PR. The reviewer re-checks the blockers; repeat until the reviewer's last comment says "no blockers".
+- Before merging, the author reads every comment GitHub Copilot left on the PR. A real defect is fixed, with a test that fails without the fix (and the fix goes to the reviewer like any other change); every other comment gets a short reply in the PR saying why not (wrong, already handled, out of scope). Copilot comments do not block the merge by themselves: the independent reviewer decides what blocks.
 
 ### 4. Merge (maintainer)
 Merge only when all hold:
