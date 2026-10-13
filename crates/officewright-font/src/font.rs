@@ -122,6 +122,27 @@ impl WinMetrics {
     }
 }
 
+/// The position and thickness of a line drawn through or under text, in font design
+/// units, as the font stores them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DecorationMetrics {
+    position: i16,
+    thickness: i16,
+}
+
+impl DecorationMetrics {
+    /// The distance from the baseline to the top of the line, positive above it.
+    pub fn position(self) -> i16 {
+        self.position
+    }
+
+    /// The thickness of the line.
+    pub fn thickness(self) -> i16 {
+        self.thickness
+    }
+}
+
 /// The vertical metrics a font declares, each set as the font has it.
 ///
 /// Fonts carry three sets, and applications disagree on which one to use: Word on
@@ -197,6 +218,8 @@ struct Face {
     fixed_pitch: bool,
     cap_height: Option<i16>,
     x_height: Option<i16>,
+    underline: Option<DecorationMetrics>,
+    strikeout: Option<DecorationMetrics>,
     has_char_map: bool,
     symbol: bool,
 }
@@ -356,6 +379,22 @@ impl FontFace {
     pub fn x_height(&self) -> Option<i16> {
         self.0.face.x_height
     }
+
+    /// Where the font puts an underline: `underlinePosition` and `underlineThickness`
+    /// from the `post` table, `None` without one. The OpenType specification defines the
+    /// position as the top of the underline, not its centre as PostScript's `FontInfo`
+    /// does. The values are as stored: a thickness of 0 or a position above the baseline
+    /// is returned as it is.
+    pub fn underline_metrics(&self) -> Option<DecorationMetrics> {
+        self.0.face.underline
+    }
+
+    /// Where the font puts a strikeout: `yStrikeoutPosition` and `yStrikeoutSize` from
+    /// the `OS/2` table, `None` without one. The position is the top of the stroke, as
+    /// for [`underline_metrics`](Self::underline_metrics). The values are as stored.
+    pub fn strikeout_metrics(&self) -> Option<DecorationMetrics> {
+        self.0.face.strikeout
+    }
 }
 
 impl fmt::Debug for FontFace {
@@ -484,6 +523,14 @@ impl Face {
             fixed_pitch: post.as_ref().is_some_and(|post| post.is_fixed_pitch() != 0),
             cap_height: os2.as_ref().and_then(Os2::s_cap_height),
             x_height: os2.as_ref().and_then(Os2::sx_height),
+            underline: post.as_ref().map(|post| DecorationMetrics {
+                position: post.underline_position().to_i16(),
+                thickness: post.underline_thickness().to_i16(),
+            }),
+            strikeout: os2.as_ref().map(|os2| DecorationMetrics {
+                position: os2.y_strikeout_position(),
+                thickness: os2.y_strikeout_size(),
+            }),
             has_char_map: charmap.has_map(),
             symbol: charmap.is_symbol(),
         })
@@ -636,6 +683,44 @@ mod tests {
         let win = metrics.win().unwrap();
         assert_eq!((win.ascent(), win.descent()), (900, 250));
         assert!(!metrics.use_typo_metrics());
+    }
+
+    #[test]
+    fn reads_underline_and_strikeout_as_stored() {
+        // The test font's post and OS/2 tables: underline at -100, 50 thick; strikeout at
+        // 250, 50 thick.
+        let font = load(&TestFont::new("Test Sans")).unwrap();
+        let underline = font.underline_metrics().unwrap();
+        assert_eq!((underline.position(), underline.thickness()), (-100, 50));
+        let strikeout = font.strikeout_metrics().unwrap();
+        assert_eq!((strikeout.position(), strikeout.thickness()), (250, 50));
+
+        let without_post = load(&TestFont::new("Test Sans").without_table(b"post")).unwrap();
+        assert_eq!(without_post.underline_metrics(), None);
+        assert!(without_post.strikeout_metrics().is_some());
+        let without_os2 = load(&TestFont::new("Test Sans").without_table(b"OS/2")).unwrap();
+        assert_eq!(without_os2.strikeout_metrics(), None);
+        assert!(without_os2.underline_metrics().is_some());
+
+        // A version 3 post table with an underline above the baseline and no thickness:
+        // returned as stored, not corrected.
+        let mut post = Vec::new();
+        post.extend_from_slice(&0x0003_0000_u32.to_be_bytes());
+        post.extend_from_slice(&0_u32.to_be_bytes()); // italicAngle
+        post.extend_from_slice(&30_i16.to_be_bytes()); // underlinePosition
+        post.extend_from_slice(&0_i16.to_be_bytes()); // underlineThickness
+        post.extend_from_slice(&[0; 20]); // isFixedPitch and the memory fields
+        let odd = load(&TestFont::new("Test Sans").with_table(b"post", post.clone())).unwrap();
+        let underline = odd.underline_metrics().unwrap();
+        assert_eq!((underline.position(), underline.thickness()), (30, 0));
+
+        // A post table cut short is a damaged face, not one without an underline.
+        post.truncate(10);
+        let err = load(&TestFont::new("Test Sans").with_table(b"post", post)).unwrap_err();
+        assert!(
+            matches!(err, Error::MalformedTable { table: "post", .. }),
+            "{err:?}"
+        );
     }
 
     #[test]
