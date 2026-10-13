@@ -73,7 +73,8 @@ tests/corpus/reference/ ground truth from PDFs of Microsoft Word/Excel/PowerPoin
                         as a 110 dpi grey PNG and geometry.json (lines, words, page breaks); the PDFs are not
                         committed, their SHA-256 and the app version are in SOURCES.md
 tests/corpus/resaved/   the copy Word saved of each document before exporting its reference PDF
-tests/corpus-tools/     tests of make-rule-docs.py and corpus-import.py (Python) and of make-reference.ps1
+tests/corpus-tools/     tests of make-rule-docs.py and corpus-import.py, and that every test font is credited
+                        with its SHA-256 (Python), and of make-reference.ps1
                         without Word (Windows PowerShell, Windows only); poppler/ checks corpus-import.py's
                         font embedding with the real qpdf and poppler (Linux, macOS)
 tests/fonts/            unmodified OFL test fonts with their license files, listed in THIRD-PARTY-NOTICES.md;
@@ -98,7 +99,7 @@ scripts/corpus-import.py   checks make-reference.ps1 results and turns them into
 2. New behaviour has tests; a bug fix has a regression test that failed before the fix.
 3. Every new public item has a doc comment; non-trivial public APIs have a runnable doc example.
 4. A new parser comes with a fuzz target in `fuzz/`.
-5. Every public Rust feature that users need is exposed through the C ABI in the same PR, with the header regenerated and covered by `tests/c` and `tests/ffi-python`. A crate that no user-facing feature uses yet (a building block such as `officewright-font`) gets its C ABI in the PR that makes it user-facing. Work the maintainer planned as a chain of stacked PRs gets its C ABI in the PR of the chain the plan names: the DOCX reader in the last one, once the document model is complete. The PDF drawing primitives of `officewright-pdf` (glyph runs, paths, strokes, clipping, images) are what the layout engine paints with, not an API for users: like the layout IR they are public but hidden in the docs unless feature `unstable-drawing`, exempt from semver until 1.0, not passed on by the facade, and have no C ABI. Users get them through DOCX to PDF, whose C ABI comes with it; a drawing API for users, Rust and C ABI together, gets a plan of its own after DOCX to PDF.
+5. Every public Rust feature that users need is exposed through the C ABI in the same PR, with the header regenerated and covered by `tests/c` and `tests/ffi-python`. A crate that no user-facing feature uses yet (a building block such as `officewright-font`) gets its C ABI in the PR that makes it user-facing. Work the maintainer planned as a chain of stacked PRs gets its C ABI in the PR of the chain the plan names: the DOCX reader in the last one, once the document model is complete. The PDF drawing primitives of `officewright-pdf` (glyph runs, paths, strokes, clipping, images) are what the layout engine paints with, not an API for users: like the layout IR they are public but hidden in the docs unless feature `unstable-drawing`, exempt from semver until 1.0, the facade does not pass the feature on, and they have no C ABI. Users get them through DOCX to PDF, whose C ABI comes with it; a drawing API for users, Rust and C ABI together, gets a plan of its own after DOCX to PDF.
 6. Never weaken a check to make it pass (no `#[allow]` without a `// reason:` comment, no skipped tests, no lowered lint levels).
 
 ## Rust conventions
@@ -255,7 +256,8 @@ cargo fmt --check and cargo clippy -D warnings on the fuzz/ workspace (Linux/mac
 cargo deny check && cargo machete
 cargo package --list -p officewright-pdf, -font, -layout, -cli: no third-party data in the published crates
 typos && taplo fmt --check && shellcheck scripts/*.sh .githooks/pre-commit && actionlint
-tests/corpus-tools (Python unittest): committed rule documents equal make-rule-docs.py output; corpus-import.py refusals
+tests/corpus-tools (Python unittest): committed rule documents equal make-rule-docs.py output; corpus-import.py refusals;
+  every file in tests/fonts is listed with its SHA-256 in THIRD-PARTY-NOTICES.md
 tests/corpus-tools/poppler (Linux, macOS): fonts corpus-import.py embeds are what poppler draws
 tests/corpus-tools/test_make_reference.ps1 (Windows): a Word step that hangs is stopped, checked and never waited on forever
 scripts/install-capi.sh target/capi --debug, copy the header, git diff --exit-code crates/officewright-ffi/include/officewright.h

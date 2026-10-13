@@ -89,6 +89,15 @@ pub enum Error {
         cluster: usize,
     },
     #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
+    /// The text of a cluster of a [`GlyphRun`](crate::GlyphRun) has more than 16382 UTF-16
+    /// code units, too many for its replacement text to fit in a PDF string.
+    ClusterTooLong {
+        /// The cluster's index in its run, from 0.
+        cluster: usize,
+        /// The number of UTF-16 code units of its text.
+        units: usize,
+    },
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
     /// A number for drawing is outside the range it must be in.
     OutOfRange {
         /// What the number is, such as "line width".
@@ -264,6 +273,12 @@ impl fmt::Display for Error {
             Self::EmptyCluster { cluster } => {
                 write!(f, "cluster {cluster} of the glyph run has no glyphs")
             }
+            Self::ClusterTooLong { cluster, units } => write!(
+                f,
+                "cluster {cluster} of the glyph run has {units} UTF-16 code units of text, more \
+                 than the {} its replacement text can hold",
+                crate::glyphs::MAX_CLUSTER_UNITS
+            ),
             Self::OutOfRange {
                 what,
                 value,
@@ -379,6 +394,7 @@ impl From<Error> for officewright_core::Error {
             | Error::NotEmbedded { .. }
             | Error::InvalidGlyph { .. }
             | Error::EmptyCluster { .. }
+            | Error::ClusterTooLong { .. }
             | Error::OutOfRange { .. }
             | Error::InvalidDash
             | Error::NoClip

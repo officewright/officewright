@@ -479,13 +479,14 @@ impl Page {
     /// # Errors
     ///
     /// - [`Error::NotEmbedded`] if the run's font is a standard font.
-    /// - [`Error::InvalidGlyph`] if a glyph ID is not in the font, and
-    ///   [`Error::EmptyCluster`] if a cluster has no glyphs.
+    /// - [`Error::InvalidGlyph`] if a glyph ID is not in the font,
+    ///   [`Error::EmptyCluster`] if a cluster has no glyphs, and [`Error::ClusterTooLong`]
+    ///   if a cluster's text has more than 16382 UTF-16 code units.
     /// - [`Error::InvalidFontSize`] for a size outside [`Font::MIN_SIZE`] to
     ///   [`Font::MAX_SIZE`]; [`Error::InvalidPosition`] if the origin, a glyph's offset
     ///   or a glyph's position is outside -32767 to 32767 pt; and [`Error::OutOfRange`]
-    ///   for a horizontal scale outside 0.01 to 10, a skew outside -1 to 1, a stroke width
-    ///   outside 0 to 32767 pt, or a cluster's text longer than 16382 UTF-16 code units.
+    ///   for a horizontal scale outside 0.01 to 10, a skew outside -1 to 1, or a stroke
+    ///   width outside 0 to 32767 pt.
     ///
     /// On error the page is unchanged.
     pub fn draw_glyphs(&mut self, run: &GlyphRun) -> Result<()> {
@@ -1251,6 +1252,10 @@ mod tests {
                 font: "F".to_owned(),
             },
             Error::EmptyCluster { cluster: 0 },
+            Error::ClusterTooLong {
+                cluster: 1,
+                units: 20000,
+            },
             Error::OutOfRange {
                 what: "skew",
                 value: 2.0,

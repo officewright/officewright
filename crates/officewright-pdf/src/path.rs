@@ -413,8 +413,9 @@ mod tests {
             GraphicsPath::new(Pt(0.0), Pt(f64::NAN)),
             GraphicsPath::rect(Pt(1.0), Pt(0.0), ok, Pt(0.0)),
             GraphicsPath::rect(Pt(0.0), Pt(0.0), Pt(0.0), Pt(f64::INFINITY)),
-            // Both corners are in range, but the width written with `re` is not.
+            // Both corners are in range, but the width or height written with `re` is not.
             GraphicsPath::rect(Pt(20000.0), Pt(0.0), Pt(-40000.0), Pt(10.0)),
+            GraphicsPath::rect(Pt(0.0), Pt(20000.0), Pt(10.0), Pt(-40000.0)),
         ];
         for at in 0..3 {
             let mut points = [Pt(0.0); 6];
