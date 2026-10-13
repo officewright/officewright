@@ -3,9 +3,11 @@ use std::sync::Arc;
 use std::{fmt, fs};
 
 use officewright_core::Pt;
-use officewright_font::{CharMap, EmbeddingLicense, FontFace, FontRequest, FontResolver};
+use officewright_font::{
+    CharMap, EmbeddingLicense, FontFace, FontRequest, FontResolver, OutlineFormat,
+};
 
-use crate::{Error, Result, encoding, helvetica, script};
+use crate::{Error, Result, embed, encoding, helvetica, script};
 
 /// A font to draw and measure text with.
 ///
@@ -49,7 +51,8 @@ impl Eq for Kind {}
 #[derive(Debug)]
 pub(crate) struct Embedded {
     pub(crate) face: FontFace,
-    /// The PostScript name, or a name made from the family names if the face has none.
+    /// The PostScript name, or a name made from the family names if the face has none,
+    /// cut to what the PDF's names can hold.
     pub(crate) name: String,
     /// The license forbids subsetting, so every glyph is embedded.
     pub(crate) whole: bool,
@@ -252,6 +255,9 @@ impl Font {
         if face.is_variable() {
             notes.push(EmbeddingNote::DefaultInstance);
         }
+        // The probe above refuses outlines other than TrueType and CFF.
+        let cff = face.outline_format() == Some(OutlineFormat::Cff);
+        let name = embed::fit_font_name(&name, whole, cff).to_owned();
         Ok(Self {
             kind: Kind::Embedded(Arc::new(Embedded {
                 face,
@@ -264,6 +270,11 @@ impl Font {
 
     /// The font's name: the standard font's name, such as "Helvetica", or an embedded
     /// font's PostScript name, the name it has in the PDF.
+    ///
+    /// A PostScript name too long for the PDF is cut between characters: with the
+    /// six-letter tag a subset's name starts with, and the "-Identity-H" a CFF font's
+    /// Type 0 font adds, every name of the font in the file takes at most the 127 bytes
+    /// readers have to accept (ISO 32000-1, Annex C).
     pub fn name(&self) -> &str {
         match &self.kind {
             Kind::Standard(StandardFont::Helvetica) => "Helvetica",
