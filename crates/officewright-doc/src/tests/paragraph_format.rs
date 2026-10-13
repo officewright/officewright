@@ -327,6 +327,7 @@ fn takes_the_outline_level_of_built_in_headings_from_their_ids() {
             r#"<w:outlineLvl w:val="4"/>"#,
         ),
         style("paragraph", "Heading+1", None, ""),
+        style("paragraph", "Heading9", None, ""),
     ]
     .concat();
     let body = [
@@ -336,6 +337,7 @@ fn takes_the_outline_level_of_built_in_headings_from_their_ids() {
         paragraph("Chapter", r#"<w:outlineLvl w:val="0"/>"#),
         paragraph("Heading01", ""),
         paragraph("Heading+1", ""),
+        paragraph("Heading9", ""),
     ]
     .concat();
     let levels: Vec<_> = formats(&build(&body, &styles, None))
@@ -343,7 +345,10 @@ fn takes_the_outline_level_of_built_in_headings_from_their_ids() {
         .map(ParagraphFormat::outline_level)
         .collect();
     // MS-OI29500 §17.3.1.20(a): Heading1 to Heading9 by their ids; 9 is body text.
-    assert_eq!(levels, [Some(1), Some(3), None, Some(0), Some(4), None]);
+    assert_eq!(
+        levels,
+        [Some(1), Some(3), None, Some(0), Some(4), None, Some(8)]
+    );
 }
 
 /// An abstract numbering definition with levels 0 to 2, each indented by its number.
@@ -1363,8 +1368,8 @@ fn keeps_a_bounded_number_of_style_and_list_level_combinations() {
                 [tab(TabKind::Left, (2000.0 + n as f64) / 20.0)],
                 "pass {pass}, paragraph {n}"
             );
+            assert!(formats.kept_combinations() <= 1024);
         }
-        assert!(formats.kept_combinations() <= 1024);
     }
     assert_eq!(formats.work().combinations, 2200);
 }
