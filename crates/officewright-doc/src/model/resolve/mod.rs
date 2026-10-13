@@ -187,9 +187,9 @@ impl<'a> Formats<'a> {
                 .map(|&span| document.element(span))
                 .find(|element| element.is(&document.names.w, "pPr"))
                 .and_then(|p_pr| {
-                    p_pr.children_through_fallback(document.names.mc)
-                        .into_iter()
-                        .rfind(|child| child.is(&document.names.w, "pStyle"))
+                    p_pr.children_through_alternates(document.names.mc)
+                        .filter(|child| child.is(&document.names.w, "pStyle"))
+                        .last()
                         .and_then(|p_style| p_style.attribute(&document.names.w, "val"))
                 })
         });

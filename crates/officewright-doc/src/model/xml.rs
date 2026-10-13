@@ -55,6 +55,12 @@ pub(crate) enum Token {
     Start {
         name: XmlName,
         attributes: Box<[XmlAttribute]>,
+        /// Whether the element is the branch of its `mc:AlternateContent` that the reader
+        /// of its part takes: the first `mc:Choice` all of whose `Requires` namespaces
+        /// the reader implements, else the `mc:Fallback` (ECMA-376 Part 3, §10.2).
+        /// Decided as the element is read, while the prefixes `Requires` names are still
+        /// in scope; false for every other element.
+        taken: bool,
     },
     End,
     Text(Box<str>),
@@ -88,6 +94,30 @@ impl Span {
             strings,
         }
     }
+
+    /// The elements a reader reads in place of the element of this span: the element
+    /// itself or, for an `mc:AlternateContent`, the children of the branch it takes,
+    /// each read through its own alternates as
+    /// [`Element::children_through_alternates`] reads them.
+    pub(crate) fn through_alternates<'d>(
+        self,
+        tokens: &'d [Token],
+        strings: &'d Strings,
+        mc: Option<Sym>,
+    ) -> impl Iterator<Item = Span> + 'd {
+        let element = self.of(tokens, strings);
+        let alternate = mc.is_some() && element.is(&[mc], "AlternateContent");
+        let (whole, inside) = if alternate {
+            (None, Some(Alternates::new(element, mc, true)))
+        } else {
+            (Some(0..element.tokens.len()), None)
+        };
+        let start = self.start as usize;
+        whole
+            .into_iter()
+            .chain(inside.into_iter().flatten())
+            .map(move |range| Span::new(start + range.start, start + range.end))
+    }
 }
 
 /// An element: its start tag, what it contains and its end.
@@ -100,7 +130,9 @@ pub(crate) struct Element<'d> {
 impl<'d> Element<'d> {
     fn start(self) -> Option<(&'d XmlName, &'d [XmlAttribute])> {
         match self.tokens.first() {
-            Some(Token::Start { name, attributes }) => Some((name, attributes)),
+            Some(Token::Start {
+                name, attributes, ..
+            }) => Some((name, attributes)),
             _ => None,
         }
     }
@@ -149,27 +181,21 @@ impl<'d> Element<'d> {
     }
 
     /// The child elements, with each `mc:AlternateContent` replaced by the children of
-    /// its `mc:Fallback`, the branch a consumer takes when no `mc:Choice` is selectable
-    /// (ECMA-376 Part 3, §10.2). A choice that requires only namespaces officewright
-    /// implements would be selectable, but the prefixes `Requires` names are not kept
-    /// with the tokens, so property elements are always read through the fallback.
-    pub(crate) fn children_through_fallback(self, mc: Option<Sym>) -> Vec<Element<'d>> {
-        let mut out = Vec::new();
-        let mut pending: Vec<Element<'d>> = self.children().collect();
-        pending.reverse();
-        while let Some(child) = pending.pop() {
-            if mc.is_some() && child.is(&[mc], "AlternateContent") {
-                let fallback = child.children().find(|branch| branch.is(&[mc], "Fallback"));
-                if let Some(fallback) = fallback {
-                    let mut inner: Vec<Element<'d>> = fallback.children().collect();
-                    inner.reverse();
-                    pending.extend(inner);
-                }
-            } else {
-                out.push(child);
-            }
-        }
-        out
+    /// the branch the reader of the part takes (ECMA-376 Part 3, §10.2): the first
+    /// `mc:Choice` that requires only namespaces it implements, else the `mc:Fallback`,
+    /// else nothing. The branch was chosen as the part was read (see `Token::Start`).
+    /// One pass over the element's tokens, however deep alternates nest in each other.
+    pub(crate) fn children_through_alternates(
+        self,
+        mc: Option<Sym>,
+    ) -> impl Iterator<Item = Element<'d>> + 'd {
+        let (tokens, strings) = (self.tokens, self.strings);
+        Alternates::new(self, mc, false).filter_map(move |range| {
+            Some(Element {
+                tokens: tokens.get(range)?,
+                strings,
+            })
+        })
     }
 
     /// The child elements, each with everything in it.
@@ -212,7 +238,9 @@ impl<'d> Element<'d> {
         let mut open: Vec<(&str, Vec<Option<&str>>)> = Vec::new();
         for token in self.tokens {
             match token {
-                Token::Start { name, attributes } => {
+                Token::Start {
+                    name, attributes, ..
+                } => {
                     let qname = strings.get(name.qname);
                     out.push('<');
                     out.push_str(qname);
@@ -290,6 +318,106 @@ impl<'d> Element<'d> {
         }
         out
     }
+}
+
+/// The elements read in place of the children of an element, as ranges of its tokens;
+/// see [`Element::children_through_alternates`]. Each token is looked at once: an element
+/// is passed over by finding its end tag, an alternate or a taken branch is entered.
+struct Alternates<'d> {
+    tokens: &'d [Token],
+    strings: &'d Strings,
+    mc: Option<Sym>,
+    /// The token to look at next.
+    next: usize,
+    /// The element's end tag, where the walk stops.
+    end: usize,
+    /// For each `mc:AlternateContent` and each taken branch open at `next`, outermost
+    /// first: whether it is an `mc:AlternateContent`, whose children are branches.
+    open: Vec<bool>,
+}
+
+impl<'d> Alternates<'d> {
+    /// The walk over the children of `element`, or with `inside` over the children of
+    /// the branch `element`, an `mc:AlternateContent`, takes.
+    fn new(element: Element<'d>, mc: Option<Sym>, inside: bool) -> Self {
+        Self {
+            tokens: element.tokens,
+            strings: element.strings,
+            mc,
+            next: 1,
+            end: element.tokens.len().saturating_sub(1),
+            open: if inside { vec![true] } else { Vec::new() },
+        }
+    }
+
+    /// The index of the end tag of the element whose start tag is at `start`.
+    fn end_of(&self, start: usize) -> Option<usize> {
+        let mut depth = 0usize;
+        for (i, token) in self.tokens.iter().enumerate().skip(start) {
+            #[cfg(test)]
+            STEPS.set(STEPS.get() + 1);
+            match token {
+                Token::Start { .. } => depth += 1,
+                Token::End => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                Token::Text(_) | Token::Comment(_) | Token::ProcessingInstruction { .. } => {}
+            }
+        }
+        None
+    }
+}
+
+impl Iterator for Alternates<'_> {
+    type Item = std::ops::Range<usize>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.next < self.end {
+            let i = self.next;
+            #[cfg(test)]
+            STEPS.set(STEPS.get() + 1);
+            match self.tokens.get(i)? {
+                Token::Start { name, taken, .. } => {
+                    if self.open.last() == Some(&true) {
+                        // A branch, or anything else an mc:AlternateContent holds.
+                        if *taken {
+                            self.open.push(false);
+                            self.next = i + 1;
+                        } else {
+                            self.next = self.end_of(i)? + 1;
+                        }
+                    } else if self.mc.is_some()
+                        && name.namespace == self.mc
+                        && local(self.strings.get(name.qname)) == "AlternateContent"
+                    {
+                        self.open.push(true);
+                        self.next = i + 1;
+                    } else {
+                        let end = self.end_of(i)?;
+                        self.next = end + 1;
+                        return Some(i..end + 1);
+                    }
+                }
+                Token::End => {
+                    self.open.pop();
+                    self.next = i + 1;
+                }
+                Token::Text(_) | Token::Comment(_) | Token::ProcessingInstruction { .. } => {
+                    self.next = i + 1;
+                }
+            }
+        }
+        None
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The tokens [`Alternates`] has looked at on this thread, for tests of its cost.
+    pub(crate) static STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn prefix(qname: &str) -> Option<&str> {

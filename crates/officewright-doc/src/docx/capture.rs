@@ -33,6 +33,8 @@ pub(super) struct Capture<'d, 'p, 't> {
     pub(super) diagnostics: &'d mut Diagnostics,
     budget: &'d mut Budget,
     uris: HashMap<NsId, Sym>,
+    /// The reader's Markup Compatibility namespace, once a capture has asked for it.
+    mc: Option<NsId>,
     locator: Locator<'t>,
     /// The offset of the event read last, where a limit is exceeded.
     pub(super) at: usize,
@@ -52,13 +54,18 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
             diagnostics,
             budget,
             uris: HashMap::new(),
+            mc: None,
             locator: Locator::new(text),
             at: 0,
         }
     }
 
     /// Reads an element and everything in it into a fragment. Only the element itself
-    /// went through Markup Compatibility: what is inside is kept as written.
+    /// went through Markup Compatibility: what is inside is kept as written, except
+    /// that the branch of each `mc:AlternateContent` that `mce` would take is marked,
+    /// while the prefixes its `Requires` names can still be resolved (see
+    /// `Token::Start`). A choice whose `Requires` is missing or names an undeclared
+    /// prefix is not taken: what is inside is not read yet, so it is not an error.
     pub(super) fn capture(
         &mut self,
         reader: &mut Reader<'_>,
@@ -67,7 +74,16 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
     ) -> Result<Span> {
         self.spend(1)?;
         let start = self.document.tokens.len();
-        let token = self.start_token(reader, &tag)?;
+        let mc = *self
+            .mc
+            .get_or_insert_with(|| reader.intern(officewright_opc::mce::NAMESPACE));
+        // The depth of each open mc:AlternateContent, and whether a branch of it has
+        // been taken.
+        let mut alternates: Vec<(usize, bool)> = Vec::new();
+        if tag.name().is(mc, "AlternateContent") {
+            alternates.push((1, false));
+        }
+        let token = self.start_token(reader, &tag, false)?;
         self.document.tokens.push(token);
         let mut depth = 1usize;
         while depth > 0 {
@@ -78,12 +94,28 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
                 .map_err(|err| Error::from(err.in_part(self.part)))?;
             match event {
                 Some(Event::Start(tag)) => {
-                    let token = self.start_token(reader, &tag)?;
-                    self.document.tokens.push(token);
+                    let name = tag.name();
+                    let mut taken = false;
+                    if let Some((at, branch_taken)) = alternates.last_mut() {
+                        if *at == depth && !*branch_taken {
+                            taken = name.is(mc, "Fallback")
+                                || (name.is(mc, "Choice")
+                                    && mce.is_selectable(reader, &tag).unwrap_or(false));
+                            *branch_taken = taken;
+                        }
+                    }
                     depth += 1;
+                    if name.is(mc, "AlternateContent") {
+                        alternates.push((depth, false));
+                    }
+                    let token = self.start_token(reader, &tag, taken)?;
+                    self.document.tokens.push(token);
                 }
                 Some(Event::End(_)) => {
                     self.document.tokens.push(Token::End);
+                    if alternates.last().is_some_and(|(at, _)| *at == depth) {
+                        alternates.pop();
+                    }
                     depth -= 1;
                 }
                 Some(Event::Text(text)) => self.document.tokens.push(Token::Text(text.into())),
@@ -106,7 +138,12 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
 
     /// A start tag as a token, its names interned in the document. Its attributes count
     /// against the node limit, as each costs memory of its own.
-    pub(super) fn start_token(&mut self, reader: &Reader<'_>, tag: &StartTag<'_>) -> Result<Token> {
+    pub(super) fn start_token(
+        &mut self,
+        reader: &Reader<'_>,
+        tag: &StartTag<'_>,
+        taken: bool,
+    ) -> Result<Token> {
         self.spend(tag.attributes().len())?;
         let name = self.name(reader, tag.name());
         let attributes = tag
@@ -117,7 +154,11 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
                 value: attribute.value().into(),
             })
             .collect();
-        Ok(Token::Start { name, attributes })
+        Ok(Token::Start {
+            name,
+            attributes,
+            taken,
+        })
     }
 
     fn name(&mut self, reader: &Reader<'_>, name: officewright_opc::xml::Name<'_>) -> XmlName {
@@ -138,6 +179,15 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
             .intern(reader.namespace_uri(namespace));
         self.uris.insert(namespace, uri);
         uri
+    }
+
+    /// The elements to read in place of the element of `span`, a child of a part's root:
+    /// the element itself or, for an `mc:AlternateContent`, the children of the branch
+    /// it takes.
+    pub(super) fn through_alternates(&self, span: Span) -> Vec<Span> {
+        let document = &self.document;
+        span.through_alternates(&document.tokens, &document.strings, document.names.mc)
+            .collect()
     }
 
     /// Skips an element the model reads nothing more from.

@@ -221,8 +221,7 @@ impl Formats<'_> {
         let instance = document.styles.styles.get(index).and_then(|style| {
             let style = document.element(style.element);
             let p_pr = style
-                .children_through_fallback(document.names.mc)
-                .into_iter()
+                .children_through_alternates(document.names.mc)
                 .find(|child| child.is(&document.names.w, "pPr"))?;
             crate::docx::properties::numbering_of(p_pr, &document.names)?.instance
         });

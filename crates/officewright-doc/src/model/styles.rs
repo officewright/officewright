@@ -118,8 +118,7 @@ impl<'a> Styles<'a> {
         let mut element = document.element(document.styles.defaults?);
         for local in path {
             element = element
-                .children_through_fallback(document.names.mc)
-                .into_iter()
+                .children_through_alternates(document.names.mc)
                 .find(|child| child.is(&document.names.w, local))?;
         }
         Some(element)
@@ -234,8 +233,7 @@ impl<'a> Style<'a> {
         let document = self.document;
         document
             .element(self.data.element)
-            .children_through_fallback(document.names.mc)
-            .into_iter()
+            .children_through_alternates(document.names.mc)
             .find(|child| child.is(&document.names.w, local))
     }
 

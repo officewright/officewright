@@ -1,10 +1,10 @@
 //! The font table part (`w:fonts`, ECMA-376 Part 1, §17.8): each `w:font` is read, and
 //! every element is kept for writing. Attributes are kept as written; typed values are
 //! checked, and a child written twice is ignored after the first, with a diagnostic, as
-//! in `w:sectPr`. An `mc:AlternateContent` directly under `w:fonts` is kept whole, so a
-//! font in it is not read; no document of the corpus has one.
+//! in `w:sectPr`. An `mc:AlternateContent` directly under `w:fonts` is kept whole, and
+//! the fonts in the branch it takes are read.
 
-use officewright_opc::mce::{Disposition, Processor};
+use officewright_opc::mce::Processor;
 use officewright_opc::xml::{Event, Input};
 
 use super::capture::{Budget, Capture, Notes};
@@ -42,7 +42,7 @@ pub(super) fn read(
         match event {
             Event::Start(tag) => {
                 c.at = tag.offset();
-                let disposition = mce.start(&reader, &tag).map_err(opc)?;
+                mce.start(&reader, &tag).map_err(opc)?;
                 if !in_root {
                     if !w.iter().any(|&namespace| tag.name().is(namespace, "fonts")) {
                         let message = format!(
@@ -55,27 +55,28 @@ pub(super) fn read(
                     continue;
                 }
                 let offset = tag.offset();
-                let understood = disposition == Disposition::Understood
-                    && tag.name().namespace().is_some_and(|ns| w.contains(&ns));
-                let local = tag.name().local();
-                // Every element is kept with the document's tokens for writing.
+                // Every element is kept with the document's tokens for writing. An
+                // mc:AlternateContent is kept whole, and the children of the branch it
+                // takes are read in its place.
                 let span = c.capture(&mut reader, &mut mce, tag)?;
-                if !(understood && local == "font") {
-                    continue;
-                }
-                let mut read = None;
-                let mut notes = c.notes();
-                c.check(span, offset, |element, report| {
-                    read = font(element, &names, report, &mut notes);
-                });
-                c.diagnose_notes(offset, notes);
-                let Some(font) = read else {
-                    c.diagnose(offset, DiagnosticKind::UnexpectedContent, || {
-                        "a w:font without a w:name is ignored".into()
+                for span in c.through_alternates(span) {
+                    if c.document.element(span).local_in(&names.w) != Some("font") {
+                        continue;
+                    }
+                    let mut read = None;
+                    let mut notes = c.notes();
+                    c.check(span, offset, |element, report| {
+                        read = font(element, &names, report, &mut notes);
                     });
-                    continue;
-                };
-                fonts.push(font);
+                    c.diagnose_notes(offset, notes);
+                    let Some(font) = read else {
+                        c.diagnose(offset, DiagnosticKind::UnexpectedContent, || {
+                            "a w:font without a w:name is ignored".into()
+                        });
+                        continue;
+                    };
+                    fonts.push(font);
+                }
             }
             Event::End(_) => mce.end(),
             _ => {}
@@ -121,7 +122,7 @@ fn font(
         embedded: Vec::new(),
     };
     let mut seen: Vec<&str> = Vec::new();
-    for child in element.children_through_fallback(names.mc) {
+    for child in element.children_through_alternates(names.mc) {
         let Some(local) = child.local_in(w) else {
             continue;
         };

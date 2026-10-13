@@ -232,22 +232,21 @@ impl<'a> ListDefinition<'a> {
     pub fn level(self, number: usize) -> Option<ListLevel> {
         let document = self.document;
         self.children()
-            .into_iter()
             .filter(|child| child.is(&document.names.w, "lvl"))
             .find(|&child| level_index(child, document) == Some(number))
             .and_then(|lvl| crate::docx::numbering::level(lvl, &document.names, &mut |_, _, _| {}))
     }
 
-    fn children(self) -> Vec<Element<'a>> {
+    fn children(self) -> impl Iterator<Item = Element<'a>> + 'a {
         let document = self.document;
         document
             .element(self.data.element)
-            .children_through_fallback(document.names.mc)
+            .children_through_alternates(document.names.mc)
     }
 
     fn child(self, local: &str) -> Option<Element<'a>> {
         let w = &self.document.names.w;
-        self.children().into_iter().find(|child| child.is(w, local))
+        self.children().find(|child| child.is(w, local))
     }
 
     fn string(self, local: &str) -> Option<&'a str> {
@@ -285,8 +284,7 @@ impl<'a> ListInstance<'a> {
         let number = i64::try_from(number).ok()?;
         document
             .element(self.data.element)
-            .children_through_fallback(document.names.mc)
-            .into_iter()
+            .children_through_alternates(document.names.mc)
             .filter(|child| child.is(&document.names.w, "lvlOverride"))
             .find(|element| {
                 crate::docx::numbering::override_level(*element, &document.names) == Some(number)
@@ -304,8 +302,7 @@ impl<'a> ListInstance<'a> {
         let mut seen = [false; 9];
         document
             .element(self.data.element)
-            .children_through_fallback(document.names.mc)
-            .into_iter()
+            .children_through_alternates(document.names.mc)
             .filter(|child| child.is(&document.names.w, "lvlOverride"))
             .filter_map(|element| {
                 crate::docx::numbering::level_override(element, &document.names, &mut |_, _, _| {})

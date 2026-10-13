@@ -1042,6 +1042,78 @@ fn reads_run_properties_through_the_fallback_of_alternate_content() {
 }
 
 #[test]
+fn takes_the_first_choice_of_alternate_content_that_officewright_can_read() {
+    // Issue #116: in property elements as in the body, a choice that requires only
+    // namespaces the reader implements is taken (ECMA-376 Part 3, §10.2).
+    let r_pr = [
+        // The choice requires w: it is taken, not the fallback.
+        r#"<mc:AlternateContent><mc:Choice Requires="w"><w:b/></mc:Choice><mc:Fallback><w:i/></mc:Fallback></mc:AlternateContent>"#,
+        // w14 is declared but not implemented: the fallback.
+        r#"<mc:AlternateContent><mc:Choice Requires="w14"><w:caps/></mc:Choice><mc:Fallback><w:smallCaps/></mc:Fallback></mc:AlternateContent>"#,
+        // The first choice that can be taken: not one that also requires w14, nor one
+        // whose prefix is not declared, nor a later one, nor the fallback.
+        r#"<mc:AlternateContent><mc:Choice Requires="w w14"><w:strike/></mc:Choice><mc:Choice Requires="w99"><w:strike/></mc:Choice><mc:Choice Requires=" r  w "><w:dstrike/></mc:Choice><mc:Choice Requires="w"><w:strike/></mc:Choice><mc:Fallback><w:strike/></mc:Fallback></mc:AlternateContent>"#,
+        // No choice can be taken and there is no fallback: nothing is read.
+        r#"<mc:AlternateContent><mc:Choice Requires="w14"><w:vanish/></mc:Choice></mc:AlternateContent>"#,
+        // A choice without Requires is not taken; alternates nest.
+        r#"<mc:AlternateContent><mc:Choice><w:emboss/></mc:Choice><mc:Fallback><mc:AlternateContent><mc:Choice Requires="w"><w:imprint/></mc:Choice><mc:Fallback><w:outline/></mc:Fallback></mc:AlternateContent></mc:Fallback></mc:AlternateContent>"#,
+    ]
+    .concat();
+    let document = open(&format!(
+        "<w:p><w:r><w:rPr>{r_pr}<w:shadow/></w:rPr><w:t>x</w:t></w:r></w:p>"
+    ));
+    assert!(messages(&document).is_empty(), "{:?}", messages(&document));
+    let properties = first_run(&document).properties();
+    let read = [
+        ("b", properties.bold()),
+        ("i", properties.italic()),
+        ("caps", properties.caps()),
+        ("smallCaps", properties.small_caps()),
+        ("strike", properties.strike()),
+        ("dstrike", properties.double_strike()),
+        ("vanish", properties.vanish()),
+        ("emboss", properties.emboss()),
+        ("imprint", properties.imprint()),
+        ("outline", properties.outline()),
+        ("shadow", properties.shadow()),
+    ];
+    let set: Vec<&str> = read
+        .iter()
+        .filter(|(_, value)| *value == Some(true))
+        .map(|(name, _)| *name)
+        .collect();
+    assert_eq!(set, ["b", "smallCaps", "dstrike", "imprint", "shadow"]);
+    assert!(
+        read.iter()
+            .all(|(_, value)| value.is_none() || *value == Some(true))
+    );
+}
+
+#[test]
+fn reads_properties_under_nested_alternate_content_in_linear_time() {
+    // Issue #113: each mc:AlternateContent in a property element made every element
+    // below it be walked again, so 10,000 nested ones around 100,000 elements cost a
+    // billion steps. Each token is now looked at a bounded number of times.
+    let (depth, n) = (10_000, 100_000);
+    let body = format!(
+        "<w:p><w:r><w:rPr>{}{}<w:b/>{}</w:rPr><w:t>x</w:t></w:r></w:p>",
+        r#"<mc:AlternateContent><mc:Choice Requires="w14"><w:i/></mc:Choice><mc:Fallback>"#
+            .repeat(depth),
+        "<w:x/>".repeat(n),
+        "</mc:Fallback></mc:AlternateContent>".repeat(depth)
+    );
+    let document = open_in_linear_time(&body);
+    let run = first_run(&document);
+    model::xml::STEPS.set(0);
+    let properties = run.properties();
+    let steps = model::xml::STEPS.get();
+    assert_eq!((properties.bold(), properties.italic()), (Some(true), None));
+    // The tokens of the w:rPr: 2 per empty element, 8 per level of nesting.
+    let tokens = 2 * (n + 1) + 8 * depth + 2;
+    assert!(steps <= 2 * tokens, "{steps} steps for {tokens} tokens");
+}
+
+#[test]
 fn reads_styles_and_the_document_defaults() {
     let styles = format!(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="{W}"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:asciiTheme="minorHAnsi"/><w:sz w:val="22"/><w:lang w:val="en-GB"/></w:rPr></w:rPrDefault><w:pPrDefault/></w:docDefaults><w:latentStyles w:defQFormat="0"/><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:link w:val="Heading1Char"/><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style><w:style w:type="character" w:customStyle="1" w:styleId="Heading1Char"><w:name w:val="Heading 1 Char"/><w:rPr><w:b/></w:rPr></w:style><w:style w:type="character" w:default="1" w:styleId="DefaultParagraphFont"/><w:style w:type="table" w:default="1" w:styleId="TableNormal"/><w:style w:type="numbering" w:styleId="NoList"/></w:styles>"#
@@ -2945,6 +3017,81 @@ fn repairs_damaged_font_declarations() {
     assert!(messages[4].ends_with(": a w:embedRegular without r:id is ignored"));
     assert!(messages[5].ends_with(": a second w:embedBold in a w:font is ignored"));
     assert!(messages[6].ends_with(r#": w:charset w:val="+F" is not valid; it is ignored"#));
+}
+
+#[test]
+fn reads_the_branch_alternate_content_takes_at_the_top_of_parts() {
+    // Issue #116: an mc:AlternateContent directly under the root of the settings,
+    // numbering, styles, font table and theme was kept without being read.
+    const MC: &str = r#"xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" mc:Ignorable="w14""#;
+    let settings = format!(
+        r#"<w:settings xmlns:w="{W}" {MC}><mc:AlternateContent><mc:Choice Requires="w"><w:defaultTabStop w:val="360"/></mc:Choice><mc:Fallback><w:defaultTabStop w:val="720"/></mc:Fallback></mc:AlternateContent><mc:AlternateContent><mc:Choice Requires="w14"><w:mirrorMargins/></mc:Choice><mc:Fallback><w:evenAndOddHeaders/></mc:Fallback></mc:AlternateContent></w:settings>"#
+    );
+    let numbering = format!(
+        r#"<w:numbering xmlns:w="{W}" {MC}><mc:AlternateContent><mc:Choice Requires="w"><w:abstractNum w:abstractNumId="1"/></mc:Choice><mc:Fallback><w:abstractNum w:abstractNumId="2"/></mc:Fallback></mc:AlternateContent><mc:AlternateContent><mc:Choice Requires="w14"><w:num w:numId="5"><w:abstractNumId w:val="2"/></w:num></mc:Choice><mc:Fallback><w:num w:numId="3"><w:abstractNumId w:val="1"/></w:num></mc:Fallback></mc:AlternateContent></w:numbering>"#
+    );
+    // Alternates nest here too, and one without a branch to take gives nothing.
+    let styles = format!(
+        r#"<w:styles xmlns:w="{W}" {MC}><mc:AlternateContent><mc:Choice Requires="w"><mc:AlternateContent><mc:Choice Requires="w14"><w:style w:styleId="Nested"/></mc:Choice><mc:Fallback><w:style w:styleId="Chosen"/><w:docDefaults><w:rPrDefault><w:rPr><w:b/></w:rPr></w:rPrDefault></w:docDefaults></mc:Fallback></mc:AlternateContent></mc:Choice><mc:Fallback><w:style w:styleId="Fallback"/></mc:Fallback></mc:AlternateContent><mc:AlternateContent><mc:Choice Requires="w14"><w:style w:styleId="Unread"/></mc:Choice></mc:AlternateContent><w:style w:styleId="Plain"/></w:styles>"#
+    );
+    let fonts = format!(
+        r#"<w:fonts xmlns:w="{W}" {MC}><mc:AlternateContent><mc:Choice Requires="w"><w:font w:name="Chosen"/></mc:Choice><mc:Fallback><w:font w:name="Fallback"/></mc:Fallback></mc:AlternateContent></w:fonts>"#
+    );
+    let theme = format!(
+        r#"<a:theme xmlns:a="{A}" {MC}><mc:AlternateContent><mc:Choice Requires="a"><a:themeElements><a:clrScheme name="Chosen"/></a:themeElements></mc:Choice><mc:Fallback><a:themeElements><a:clrScheme name="Fallback"/></a:themeElements></mc:Fallback></mc:AlternateContent></a:theme>"#
+    );
+    let parts = [
+        ("settings", "settings.xml", settings),
+        ("numbering", "numbering.xml", numbering),
+        ("styles", "styles.xml", styles),
+        ("fontTable", "fontTable.xml", fonts),
+        ("theme", "theme/theme1.xml", theme),
+    ];
+    let relationships: String = parts
+        .iter()
+        .enumerate()
+        .map(|(n, (kind, target, _))| {
+            format!(
+                r#"<Relationship Id="rId{n}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{kind}" Target="{target}"/>"#
+            )
+        })
+        .collect();
+    let rels = format!(
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{relationships}</Relationships>"#
+    );
+    let mut extra = vec![("word/_rels/document.xml.rels".to_owned(), rels)];
+    for (_, target, xml) in parts {
+        extra.push((format!("word/{target}"), xml));
+    }
+    let extra: Vec<(&str, &str)> = extra.iter().map(|(a, b)| (&**a, &**b)).collect();
+    let document =
+        Document::from_bytes(package(DOCUMENT, &document_xml("<w:p/>"), &extra)).unwrap();
+    assert!(messages(&document).is_empty(), "{:?}", messages(&document));
+
+    let settings = document.settings();
+    assert_eq!(settings.default_tab_stop(), Some(Pt(18.0)));
+    assert_eq!(
+        (settings.mirror_margins(), settings.even_and_odd_headers()),
+        (None, Some(true))
+    );
+    let numbering = document.numbering();
+    let definitions: Vec<i64> = numbering.definitions().map(|d| d.id()).collect();
+    assert_eq!(definitions, [1]);
+    let instances: Vec<(i64, Option<i64>)> = numbering
+        .instances()
+        .map(|i| (i.id(), i.definition().map(|d| d.id())))
+        .collect();
+    assert_eq!(instances, [(3, Some(1))]);
+    let styles: Vec<&str> = document.styles().iter().map(|s| s.id()).collect();
+    assert_eq!(styles, ["Chosen", "Plain"]);
+    assert_eq!(
+        document.styles().default_run_properties().bold(),
+        Some(true)
+    );
+    let fonts: Vec<&str> = document.fonts().iter().map(|f| f.name()).collect();
+    assert_eq!(fonts, ["Chosen"]);
+    let colors = document.theme().unwrap().colors().unwrap();
+    assert_eq!(colors.name(), Some("Chosen"));
 }
 
 #[test]

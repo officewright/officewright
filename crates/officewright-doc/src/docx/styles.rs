@@ -1,7 +1,7 @@
 //! The styles part (`w:styles`, ECMA-376 Part 1, §17.7): the document defaults, the
 //! latent styles and the styles, each kept whole with the attributes the model types.
 
-use officewright_opc::mce::{Disposition, Processor};
+use officewright_opc::mce::Processor;
 use officewright_opc::xml::{Event, Input, NsId};
 
 use super::capture::{Budget, Capture};
@@ -37,7 +37,7 @@ pub(super) fn read(
         match event {
             Event::Start(tag) => {
                 c.at = tag.offset();
-                let disposition = mce.start(&reader, &tag).map_err(opc)?;
+                mce.start(&reader, &tag).map_err(opc)?;
                 if !in_root {
                     if !is_w(&tag.name(), &w, "styles") {
                         let message = format!(
@@ -50,51 +50,11 @@ pub(super) fn read(
                     continue;
                 }
                 let offset = tag.offset();
-                let understood = disposition == Disposition::Understood
-                    && tag.name().namespace().is_some_and(|ns| w.contains(&ns));
-                let local = tag.name().local();
+                // An mc:AlternateContent is kept whole, and the children of the branch it
+                // takes are read in its place.
                 let span = c.capture(&mut reader, &mut mce, tag)?;
-                match local {
-                    "docDefaults" | "latentStyles" if understood => {
-                        let defaults = local == "docDefaults";
-                        let slot = if defaults {
-                            &mut c.document.styles.defaults
-                        } else {
-                            &mut c.document.styles.latent
-                        };
-                        if slot.is_some() {
-                            c.diagnose(offset, DiagnosticKind::UnexpectedContent, || {
-                                format!("a second w:{local} is ignored")
-                            });
-                        } else {
-                            *slot = Some(span);
-                            if defaults {
-                                let run = ["rPrDefault", "rPr"];
-                                check_properties(
-                                    &mut c,
-                                    &names,
-                                    span,
-                                    &run,
-                                    Properties::Run,
-                                    offset,
-                                );
-                                let paragraph = ["pPrDefault", "pPr"];
-                                check_properties(
-                                    &mut c,
-                                    &names,
-                                    span,
-                                    &paragraph,
-                                    Properties::Paragraph,
-                                    offset,
-                                );
-                            }
-                        }
-                    }
-                    "style" if understood => style(&mut c, &names, span, offset),
-                    // Kept with the document's tokens for writing; nothing refers to it. An
-                    // mc:AlternateContent here is kept whole too, so a style in it is not
-                    // read; no document of the corpus has one.
-                    _ => {}
+                for span in c.through_alternates(span) {
+                    child(&mut c, &names, span, offset);
                 }
             }
             Event::End(_) => mce.end(),
@@ -102,6 +62,35 @@ pub(super) fn read(
         }
     }
     Ok(())
+}
+
+/// Reads a child of `w:styles`.
+fn child(c: &mut Capture<'_, '_, '_>, names: &Names, span: Span, offset: usize) {
+    let defaults = match c.document.element(span).local_in(&names.w) {
+        Some("docDefaults") => true,
+        Some("latentStyles") => false,
+        Some("style") => return style(c, names, span, offset),
+        // Kept with the document's tokens for writing; nothing refers to it.
+        _ => return,
+    };
+    let (local, slot) = if defaults {
+        ("docDefaults", &mut c.document.styles.defaults)
+    } else {
+        ("latentStyles", &mut c.document.styles.latent)
+    };
+    if slot.is_some() {
+        c.diagnose(offset, DiagnosticKind::UnexpectedContent, || {
+            format!("a second w:{local} is ignored")
+        });
+        return;
+    }
+    *slot = Some(span);
+    if defaults {
+        let run = ["rPrDefault", "rPr"];
+        check_properties(c, names, span, &run, Properties::Run, offset);
+        let paragraph = ["pPrDefault", "pPr"];
+        check_properties(c, names, span, &paragraph, Properties::Paragraph, offset);
+    }
 }
 
 fn is_w(name: &officewright_opc::xml::Name<'_>, w: &[NsId; 2], local: &str) -> bool {
@@ -222,8 +211,7 @@ pub(super) fn check_properties(
         for local in path {
             element = element.and_then(|parent| {
                 parent
-                    .children_through_fallback(names.mc)
-                    .into_iter()
+                    .children_through_alternates(names.mc)
                     .find(|child| child.is(&names.w, local))
             });
         }
