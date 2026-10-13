@@ -614,7 +614,7 @@ fn resolve_scripts(placed: &[Placed]) -> Vec<Script> {
 
 /// The ISO 15924 code of a script; `Zyyy` for common characters.
 fn iso15924(script: Script) -> [u8; 4] {
-    let mut code = [b'Z', b'y', b'y', b'y'];
+    let mut code = *b"Zyyy";
     if let Some(name) = script.short_name().as_bytes().get(..4) {
         code.copy_from_slice(name);
     }
