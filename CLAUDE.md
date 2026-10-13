@@ -59,9 +59,10 @@ tests/c/                C tests compiled against the generated header and the st
 tests/ffi-python/       Python ctypes tests loading the shared library — proves the ABI is usable
                         from a non-C language with no build step
 tests/pdf-output/       checks text-to-pdf output, in Helvetica and with Liberation Sans (TrueType) and Noto Sans
-                        (CFF) from tests/fonts embedded, with qpdf, pdftotext, pdffonts and pdftoppm (Linux,
-                        macOS; Windows has no official poppler build, and the golden snapshot proves the bytes
-                        are the same)
+                        (CFF) from tests/fonts embedded, and the page of glyph runs and vector graphics that
+                        officewright-pdf's example `primitives` draws in both fonts, with qpdf, pdftotext,
+                        pdffonts and pdftoppm (Linux, macOS; Windows has no official poppler build, and the
+                        golden snapshot proves the bytes are the same)
 tests/corpus/           small curated real documents (committed) + SOURCES.md + baseline.json
 tests/corpus/word-rules/  documents written by scripts/make-rule-docs.py, one undocumented Word rule each
 tests/corpus/poi/        unmodified Apache POI test documents (Apache-2.0) with POI's LICENSE and NOTICE
@@ -94,7 +95,7 @@ scripts/corpus-import.py   checks make-reference.ps1 results and turns them into
 2. New behaviour has tests; a bug fix has a regression test that failed before the fix.
 3. Every new public item has a doc comment; non-trivial public APIs have a runnable doc example.
 4. A new parser comes with a fuzz target in `fuzz/`.
-5. Every public Rust feature that users need is exposed through the C ABI in the same PR, with the header regenerated and covered by `tests/c` and `tests/ffi-python`. A crate that no user-facing feature uses yet (a building block such as `officewright-font`) gets its C ABI in the PR that makes it user-facing. Work the maintainer planned as a chain of stacked PRs gets its C ABI in the PR of the chain the plan names: the DOCX reader in the last one, once the document model is complete.
+5. Every public Rust feature that users need is exposed through the C ABI in the same PR, with the header regenerated and covered by `tests/c` and `tests/ffi-python`. A crate that no user-facing feature uses yet (a building block such as `officewright-font`) gets its C ABI in the PR that makes it user-facing. Work the maintainer planned as a chain of stacked PRs gets its C ABI in the PR of the chain the plan names: the DOCX reader in the last one, once the document model is complete. The PDF drawing primitives of `officewright-pdf` (glyph runs, paths, strokes, clipping) have no C ABI: they are what the layout engine paints with, and users get them through DOCX to PDF, whose C ABI comes with it; a PDF drawing API for users would get a plan, and its C ABI, of its own.
 6. Never weaken a check to make it pass (no `#[allow]` without a `// reason:` comment, no skipped tests, no lowered lint levels).
 
 ## Rust conventions
@@ -263,7 +264,10 @@ scripts/check-capi.sh target/capi (release.yml runs the same script on every unp
 PDF output of officewright text-to-pdf (tests/pdf-output): qpdf --check without warnings, pdftotext reads the input back;
   with Liberation Sans and Noto Sans of tests/fonts embedded: pdffonts lists each embedded, subset and with a ToUnicode map,
   pdftotext reads back every Latin, Greek and Cyrillic character both fonts have, pdftoppm renders a subset exactly as the
-  whole font; characters that share a glyph read back through ActualText (Linux, macOS)
+  whole font; characters that share a glyph read back through ActualText; the example primitives' page in both fonts:
+  qpdf --check, pdffonts, pdftotext reads every text as written (ligatures, small capitals, a cluster of three glyphs),
+  pdftoppm renders the subset exactly as the whole font and the shapes, colours and clips where the page puts them
+  (Linux, macOS)
 corpus-runner over tests/corpus (committed corpus), compared with tests/corpus/baseline.json
 ```
 

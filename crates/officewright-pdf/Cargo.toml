@@ -9,7 +9,12 @@ license-file.workspace = true
 repository.workspace = true
 # Adobe's AFM files and the test fonts are not under Officewright's license, so the AFM
 # files and the tests that read them stay in the repository; see THIRD-PARTY-NOTICES.md.
-exclude = ["data/afm", "tests/helvetica_afm.rs", "tests/embedded_fonts.rs"]
+exclude = [
+  "data/afm",
+  "tests/helvetica_afm.rs",
+  "tests/embedded_fonts.rs",
+  "tests/glyph_runs.rs",
+]
 
 [dependencies]
 # Flate (zlib) compression of content and font streams. officewright-opc reads ZIP
