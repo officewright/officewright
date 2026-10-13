@@ -18,8 +18,9 @@
 //! The layout engine draws on pages with primitives that are public but exempt from
 //! semantic versioning until officewright 1.0: glyph runs (glyphs of an embedded font at
 //! explicit positions, with the text they stand for), filled and stroked paths, dashed
-//! strokes and clipping paths. Their documentation is hidden unless the feature
-//! `unstable-drawing` is on; a drawing API for users will have a plan of its own.
+//! strokes, clipping paths, and JPEG and PNG images. Their documentation is hidden unless
+//! the feature `unstable-drawing` is on; a drawing API for users will have a plan of its
+//! own.
 //!
 //! ```
 //! use officewright_pdf::{Document, Font, PageSize, Pt, StandardFont};
@@ -41,6 +42,7 @@ mod error;
 mod font;
 mod glyphs;
 mod helvetica;
+mod image;
 mod path;
 mod script;
 mod stream;
@@ -51,6 +53,8 @@ pub use error::{Error, Result};
 pub use font::{EmbeddingNote, Font, StandardFont};
 #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
 pub use glyphs::{GlyphRun, PlacedGlyph};
+#[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
+pub use image::Image;
 #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
 pub use officewright_core::Color;
 pub use officewright_core::{PageSize, Pt};

@@ -16,15 +16,17 @@ use crate::{Error, Font, Result};
 /// for longer text is shown with replacement text. A ligature stands for a few characters.
 const MAX_MAPPED_UNITS: usize = 32;
 
-/// The most elements an array may have in PDF 1.4 (PDF Reference 1.4, Appendix C), and the
-/// most bytes a string may have in the PDF 1.5 that replacement text makes a file: 32767
-/// (ISO 32000-1, Annex C; PDF 1.4 allows 65535).
+/// The most elements an array may have in PDF 1.4 (PDF Reference 1.4, Appendix C).
 const MAX_ARRAY_ELEMENTS: usize = 8191;
-const MAX_STRING_BYTES: usize = 32767;
+
+/// The most bytes a string may have in PDF 1.5, which replacement text makes a file:
+/// 32767 (ISO 32000-1, Annex C; PDF 1.4 allows 65535). Every string this crate writes in
+/// a content stream keeps to it, whatever the file's version.
+pub(crate) const MAX_STRING_BYTES: usize = 32767;
 
 /// The most UTF-16 code units of text a cluster may have: its replacement text, two bytes
 /// a unit after a two-byte byte order mark, must fit in a string.
-const MAX_CLUSTER_UNITS: usize = (MAX_STRING_BYTES - 2) / 2;
+pub(crate) const MAX_CLUSTER_UNITS: usize = (MAX_STRING_BYTES - 2) / 2;
 
 /// The smallest and largest horizontal scale of a run: 1 % to 1000 %, which covers Word's
 /// character scale (`w:w`, 1 % to 600 %).
@@ -260,11 +262,9 @@ impl GlyphRun {
             }
             let units = text.encode_utf16().count();
             if units > MAX_CLUSTER_UNITS {
-                return Err(Error::OutOfRange {
-                    what: "cluster text length in UTF-16 code units",
-                    value: units as f64,
-                    min: 0.0,
-                    max: MAX_CLUSTER_UNITS as f64,
+                return Err(Error::ClusterTooLong {
+                    cluster: index,
+                    units,
                 });
             }
             for placed in glyphs {

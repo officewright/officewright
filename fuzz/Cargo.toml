@@ -50,6 +50,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "jpeg_header"
+path = "fuzz_targets/jpeg_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "package"
 path = "fuzz_targets/package.rs"
 test = false
@@ -59,6 +66,13 @@ bench = false
 [[bin]]
 name = "pdf_embed"
 path = "fuzz_targets/pdf_embed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "png_decode"
+path = "fuzz_targets/png_decode.rs"
 test = false
 doc = false
 bench = false

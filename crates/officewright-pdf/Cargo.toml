@@ -18,7 +18,7 @@ exclude = [
 
 [features]
 # Shows the drawing primitives the layout engine paints with (glyph runs, paths, strokes,
-# clipping) in the documentation. They are public and compiled either way, and exempt
+# clipping, images) in the documentation. They are public and compiled either way, and exempt
 # from semver until 1.0; the facade does not pass the feature on.
 unstable-drawing = []
 
