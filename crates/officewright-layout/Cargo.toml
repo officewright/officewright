@@ -8,5 +8,13 @@ license.workspace = true
 license-file.workspace = true
 repository.workspace = true
 
+[features]
+# Shows the layout IR (the `ir` module) in the documentation. The module is public and
+# compiled either way; it is exempt from semver until 1.0.
+unstable-ir = []
+
+[dependencies]
+officewright-core.workspace = true
+
 [lints]
 workspace = true
