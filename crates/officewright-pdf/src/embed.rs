@@ -9,6 +9,7 @@ use officewright_font::{GlyphId, Subset};
 
 use crate::document::number;
 use crate::font::{Embedded, Lookup};
+use crate::glyphs::MAX_STRING_BYTES;
 use crate::stream::stream_object;
 use crate::{Compression, Error, Result};
 
@@ -109,6 +110,10 @@ impl<'a> Prepared<'a> {
     /// first; the other is shown in a marked-content span whose `/ActualText` gives
     /// the character (ISO 32000-1, 14.9.4), so text extraction returns the text as
     /// written. Such a span is a PDF 1.5 feature.
+    ///
+    /// Long text is shown with several strings, each within the 32767 bytes readers
+    /// have to handle in PDF 1.5 (ISO 32000-1, Annex C); one `Tj` after another moves
+    /// on as one would.
     pub(crate) fn show(&self, out: &mut Vec<u8>, lookup: &Lookup<'_>, text: &str) -> Result<bool> {
         let mut runs: Vec<(bool, Vec<(u16, char)>)> = Vec::new();
         for (offset, ch) in text.char_indices() {
@@ -123,19 +128,22 @@ impl<'a> Prepared<'a> {
         if runs.is_empty() {
             out.extend_from_slice(b"<> Tj");
         }
-        for (i, (mapped, run)) in runs.iter().enumerate() {
+        let pieces = runs
+            .iter()
+            .flat_map(|(mapped, run)| pieces(run).map(move |piece| (*mapped, piece)));
+        for (i, (mapped, piece)) in pieces.enumerate() {
             if i > 0 {
                 out.push(b'\n');
             }
             let mut cids = String::from("<");
-            for (cid, _) in run {
+            for (cid, _) in piece {
                 let _ = write!(cids, "{cid:04X}");
             }
             cids.push('>');
-            if *mapped {
+            if mapped {
                 out.extend_from_slice(format!("{cids} Tj").as_bytes());
             } else {
-                let actual: String = run.iter().map(|&(_, ch)| ch).collect();
+                let actual: String = piece.iter().map(|&(_, ch)| ch).collect();
                 out.extend_from_slice(
                     format!(
                         "/Span << /ActualText {} >> BDC {cids} Tj EMC",
@@ -335,6 +343,36 @@ pub(crate) fn text_string(text: &str) -> String {
     out
 }
 
+/// The most UTF-16 code units of text in a piece of a run that [`Prepared::show`] writes
+/// with one string. Its replacement text, two bytes a unit after a two-byte byte order
+/// mark, then fits in a string, and so do its CIDs, two bytes for each character, which
+/// has one or two units.
+const MAX_PIECE_UNITS: usize = (MAX_STRING_BYTES - 2) / 2;
+
+/// `run` cut into pieces of at most [`MAX_PIECE_UNITS`] UTF-16 code units of text; an
+/// empty run is one empty piece.
+fn pieces(run: &[(u16, char)]) -> impl Iterator<Item = &[(u16, char)]> {
+    let mut rest = run;
+    let mut done = false;
+    std::iter::from_fn(move || {
+        if done {
+            return None;
+        }
+        let mut units = 0;
+        let end = rest
+            .iter()
+            .position(|&(_, ch)| {
+                units += ch.len_utf16();
+                units > MAX_PIECE_UNITS
+            })
+            .unwrap_or(rest.len());
+        let (piece, after) = rest.split_at(end);
+        rest = after;
+        done = rest.is_empty();
+        Some(piece)
+    })
+}
+
 /// `name` as a PDF name object: bytes outside the regular characters are written as
 /// `#` and two hexadecimal digits (ISO 32000-1, 7.3.5).
 pub(crate) fn pdf_name(name: &str) -> String {
@@ -371,6 +409,27 @@ fn subset_tag(name: &str, data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cuts_runs_where_their_strings_would_pass_the_limit() {
+        let lengths = |run: &[(u16, char)]| -> Vec<usize> {
+            // The pieces follow one another and together are the run.
+            assert_eq!(pieces(run).collect::<Vec<_>>().concat(), run);
+            pieces(run).map(<[_]>::len).collect()
+        };
+        // Every element different, so a piece in the wrong place shows.
+        let numbered = |count: usize, ch: char| -> Vec<(u16, char)> {
+            (0..count).map(|i| (i as u16, ch)).collect()
+        };
+        // One unit a character: 16,382 of them a piece.
+        assert_eq!(lengths(&numbered(40_000, 'A')), [16_382, 16_382, 7_236]);
+        // Characters outside the Basic Multilingual Plane take two units.
+        assert_eq!(lengths(&numbered(10_000, '\u{1F600}')), [8_191, 1_809]);
+        let mixed: Vec<(u16, char)> = [(1, 'A'), (1, '\u{1F600}')].repeat(6_000);
+        // 5,460 pairs of three units and one A: 16,381 units; the next character makes 16,383.
+        assert_eq!(lengths(&mixed), [10_921, 1_079]);
+        assert_eq!(lengths(&[]), [0]);
+    }
 
     #[test]
     fn escapes_names() {
