@@ -1544,23 +1544,38 @@ fn reads_the_paragraph_style_as_the_paragraph_properties_do() {
 }
 
 #[test]
-fn reads_the_style_of_a_paragraph_once_for_its_runs() {
-    // Reading a paragraph's style walks its w:pPr, which can be long: the runs of a
-    // paragraph share one reading.
+fn reads_the_style_of_each_paragraph_once_for_the_document() {
+    // Issue #143: Run::format, and a Formats asked about another paragraph between two
+    // runs of one paragraph, walked the paragraph's whole w:pPr for every run. Each
+    // paragraph's style is now worked out once, when the document is read.
     let styles = [
         defaults(""),
         style("paragraph", "Centred", None, r#"<w:jc w:val="center"/>"#),
     ]
     .concat();
+    let filler = "<w:x/>".repeat(10_000);
     let runs = r#"<w:r><w:t>x</w:t></w:r>"#.repeat(300);
-    let body =
-        format!(r#"<w:p><w:pPr><w:pStyle w:val="Centred"/></w:pPr>{runs}</w:p><w:p>{runs}</w:p>"#);
+    let body = format!(
+        r#"<w:p><w:pPr><w:pStyle w:val="Centred"/>{filler}</w:pPr>{runs}</w:p><w:p><w:pPr>{filler}<w:pStyle w:val="Centred"/><w:pStyle w:val="Missing"/></w:pPr>{runs}</w:p>"#
+    );
     let document = build(&body, &styles, None);
+    let [first, second] = paragraphs(&document)[..] else {
+        panic!("two paragraphs");
+    };
+    crate::model::xml::STEPS.set(0);
     let mut formats = document.formats();
-    for paragraph in paragraphs(&document) {
-        for run in paragraph.runs() {
-            assert_eq!(formats.run(run), run.format());
-        }
+    let mut calls = 0;
+    for (a, b) in first.runs().zip(second.runs()) {
+        // Alternating between the paragraphs, and each run on its own.
+        assert_eq!(formats.run(a), a.format());
+        assert_eq!(formats.run(b), b.format());
+        calls += 4;
     }
-    assert_eq!(formats.work().paragraph_styles, 2);
+    let steps = crate::model::xml::STEPS.get();
+    // A walk of either w:pPr per run would take 20,000 steps or more each time; a run's
+    // formatting now walks only the few elements of the defaults and the style.
+    assert!(steps < calls * 100, "{steps} steps for {calls} calls");
+    // The last w:pStyle counts, and one naming no style leaves the default style.
+    assert_eq!(formats.paragraph(first).style(), Some("Centred"));
+    assert_eq!(formats.paragraph(second).style(), None);
 }

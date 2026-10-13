@@ -82,7 +82,7 @@ fn walk(document: &Document, children: &[u32], out: &mut String) {
             tasks.extend(node.children.iter().rev().map(|&i| Task::Node(i)));
         };
         match &node.kind {
-            Kind::Paragraph => {
+            Kind::Paragraph { .. } => {
                 tasks.push(Task::Push('\n'));
                 push_children(&mut tasks);
             }
