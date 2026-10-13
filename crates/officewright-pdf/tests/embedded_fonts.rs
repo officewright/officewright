@@ -618,11 +618,16 @@ fn resolves_families_and_reports_the_substitutions() -> TestResult {
         Font::resolve(&mut resolver, &FontRequest::new("Arial"))?,
         liberation
     );
+    // The bold face of tests/fonts is used as it is.
     let bold = Font::resolve(
         &mut resolver,
         &FontRequest::new("Liberation Sans").bold(true),
     )?;
-    assert_eq!(bold, liberation);
+    assert_eq!(bold.name(), "LiberationSans-Bold");
+    // Noto Sans has no bold face there, so its regular face is drawn bold, and the
+    // report says so.
+    let noto_bold = Font::resolve(&mut resolver, &FontRequest::new("Noto Sans").bold(true))?;
+    assert_eq!(noto_bold, noto);
     let calibri = Font::resolve(&mut resolver, &FontRequest::new("Calibri"))?;
     assert_eq!(calibri.name(), "Carlito-Regular");
     // Verdana has no metric-compatible substitute, so a common sans-serif font stands
@@ -638,7 +643,7 @@ fn resolves_families_and_reports_the_substitutions() -> TestResult {
         report,
         [
             "\"Arial\" → \"Liberation Sans\" (metric-compatible substitute)",
-            "\"Liberation Sans\" bold → \"Liberation Sans\" with synthetic bold",
+            "\"Noto Sans\" bold → \"Noto Sans\" with synthetic bold",
             "\"Calibri\" → \"Carlito\" (metric-compatible substitute)",
             "\"Verdana\" → \"Liberation Sans\" (fallback; not installed)",
         ]
