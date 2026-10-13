@@ -5,6 +5,7 @@ pull request); these tests keep the committed files, the generator and SOURCES.m
 and check the package structure that Word needs to open a file at all.
 """
 
+import dataclasses
 import importlib.util
 import shutil
 import sys
@@ -152,7 +153,11 @@ class Packages(unittest.TestCase):
             named = set()
             for name in ("word/document.xml", "word/styles.xml"):
                 for fonts in part(parts, name).iter(f"{W}rFonts"):
-                    named.update(fonts.attrib.values())
+                    for attribute, value in fonts.attrib.items():
+                        # A theme attribute names the theme's font for its slot.
+                        if attribute.endswith("Theme"):
+                            value = rules.THEME_FONTS[rules.THEME_SLOTS[value]]
+                        named.add(value)
             self.assertEqual(table, named, doc.name)
 
     def test_compatibility_settings_match_the_name(self):
@@ -187,6 +192,27 @@ class Packages(unittest.TestCase):
             numbering = part(parts, "word/numbering.xml")
             defined = {n.get(f"{W}numId") for n in numbering.iter(f"{W}num")}
             self.assertLessEqual(used, defined, doc.name)
+
+    def test_styles_named_are_defined(self):
+        # Word falls back to Normal for a style it does not find, so a mistyped name would
+        # only show in the render.
+        for doc in self.docs:
+            parts = rules.parts(doc)
+            styles = part(parts, "word/styles.xml")
+            defined = {s.get(f"{W}styleId") for s in styles.iter(f"{W}style")}
+            named = {
+                n.get(f"{W}val")
+                for root in (part(parts, "word/document.xml"), styles)
+                for tag in ("pStyle", "rStyle", "basedOn")
+                for n in root.iter(f"{W}{tag}")
+            }
+            self.assertLessEqual(named, defined, doc.name)
+
+    def test_refuses_a_colour_mapping_attribute_that_does_not_exist(self):
+        doc = next(doc for doc in self.docs if doc.color_mapping)
+        mistyped = dataclasses.replace(doc, color_mapping=(("t3", "accent3"),))
+        with self.assertRaisesRegex(ValueError, "no attribute t3"):
+            rules.settings_xml(mistyped)
 
 
 if __name__ == "__main__":
