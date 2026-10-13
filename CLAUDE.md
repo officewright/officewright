@@ -228,12 +228,12 @@ The maintainer does not review Rust code. Correctness rests on the automated gat
 - Reviews the diff against CLAUDE.md, the Definition of done and the clean-room policy. Focus: parsers and FFI safety, tests that cannot fail or test the implementation instead of behaviour, missing edge cases, public API and C ABI stability.
 - For critical paths, temporarily breaks the code and confirms a test catches it.
 - Checks the release gate table where one is required: a value worse on the branch than on main is a **blocker** unless the PR explains it and the maintainer agreed to it in a PR comment. The exception concerns this review only; the baseline check and the merge conditions below stay as they are.
-- Reads Copilot's review comments on the PR (`gh api repos/{owner}/{repo}/pulls/<n>/comments`; `gh pr view` does not show inline comments) and the author's replies, and raises as a finding any defect the author dismissed wrongly.
+- Reads Copilot's findings on the PR and the author's replies (`gh api --paginate repos/{owner}/{repo}/pulls/<n>/comments` for the inline ones and `.../pulls/<n>/reviews` for the review bodies with the low-confidence ones; `gh pr view` shows neither), and raises as a finding any defect the author dismissed wrongly.
 - Verifies each finding adversarially, then posts one PR comment listing findings tagged **blocker**, **should-fix** or **nit**.
 
 ### 3. Fixes
 - Every blocker is fixed. Every should-fix is fixed or answered in the PR. The reviewer re-checks the blockers; repeat until the reviewer's last comment says "no blockers".
-- GitHub Copilot's review comments: the author answers every finding in Copilot's reviews (the inline comments and the low-confidence ones folded into the review body) before asking for the independent review, and any that come later as they arrive, each in that comment's thread. A real defect is fixed as the Definition of done requires (a bug fix with a regression test that fails without it), and the fix goes to the reviewer like any other change; every other finding gets a short reply saying why not: wrong, already handled, or out of scope with a link to the issue that tracks it. Whether a Copilot finding is a blocker is for the independent reviewer to decide; Copilot's own wording never makes it one.
+- GitHub Copilot's review comments: the author marks the PR ready for review, which is when Copilot reviews it, waits for that review and answers every finding in it before asking for the independent review, and any that come later as they arrive. Every finding gets a reply: "fixed in <commit>", with the fix made as the Definition of done requires (a bug fix with a regression test that fails without it), or a short reason why not: wrong, already handled, or out of scope with a link to the issue that tracks it. Inline findings are answered in their thread; the low-confidence ones Copilot folds into the review body, which have no thread, in one PR comment quoting each. A fix, or a finding dismissed after the reviewer's last comment, goes to the reviewer like any other change. Whether a Copilot finding is a blocker is for the independent reviewer to decide; Copilot's own wording never makes it one.
 
 ### 4. Merge (maintainer)
 Merge only when all hold:
@@ -241,7 +241,7 @@ Merge only when all hold:
 - the reviewer's last comment says "no blockers";
 - the maintainer ran the "How to check by hand" steps and the output looks right;
 - corpus numbers are not below the baseline;
-- every Copilot finding has a fix or a reply (step 3).
+- Copilot's review has arrived (or the PR says why there is none), and every finding in it has a reply (step 3).
 
 PRs are squash-merged; the PR title must be a Conventional Commit, since it becomes the commit message on main.
 
