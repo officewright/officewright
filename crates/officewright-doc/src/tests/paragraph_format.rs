@@ -1505,6 +1505,10 @@ fn reads_the_paragraph_style_as_the_paragraph_properties_do() {
     let body = [
         r#"<w:p><w:pPr><mc:AlternateContent><mc:Choice Requires="w99"><w:pStyle w:val="Right"/></mc:Choice><mc:Fallback><w:pStyle w:val="Centred"/></mc:Fallback></mc:AlternateContent></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
         r#"<w:p><w:pPr><w:pStyle w:val="Centred"/><w:pStyle w:val="Right"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
+        // The last w:pStyle names no style: the paragraph has the default style.
+        r#"<w:p><w:pPr><w:pStyle w:val="Centred"/><w:pStyle/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
+        // Of two w:pPr, the first counts.
+        r#"<w:p><w:pPr><w:pStyle w:val="Right"/></w:pPr><w:pPr><w:pStyle w:val="Centred"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
     ]
     .concat();
     let document = build(&body, &styles, None);
@@ -1525,6 +1529,30 @@ fn reads_the_paragraph_style_as_the_paragraph_properties_do() {
         [
             (Some("Centred".to_owned()), Justification::Center),
             (Some("Right".to_owned()), Justification::Right),
+            (None, Justification::Start),
+            (Some("Right".to_owned()), Justification::Right),
         ]
     );
+}
+
+#[test]
+fn reads_the_style_of_a_paragraph_once_for_its_runs() {
+    // Reading a paragraph's style walks its w:pPr, which can be long: the runs of a
+    // paragraph share one reading.
+    let styles = [
+        defaults(""),
+        style("paragraph", "Centred", None, r#"<w:jc w:val="center"/>"#),
+    ]
+    .concat();
+    let runs = r#"<w:r><w:t>x</w:t></w:r>"#.repeat(300);
+    let body =
+        format!(r#"<w:p><w:pPr><w:pStyle w:val="Centred"/></w:pPr>{runs}</w:p><w:p>{runs}</w:p>"#);
+    let document = build(&body, &styles, None);
+    let mut formats = document.formats();
+    for paragraph in paragraphs(&document) {
+        for run in paragraph.runs() {
+            assert_eq!(formats.run(run), run.format());
+        }
+    }
+    assert_eq!(formats.work().paragraph_styles, 2);
 }

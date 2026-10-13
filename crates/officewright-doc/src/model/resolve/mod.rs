@@ -38,6 +38,9 @@ pub struct Formats<'a> {
     paragraph_defaults: Option<Arc<ParagraphLevel>>,
     /// The index of the default paragraph style, once looked up.
     default_paragraph_style: Option<Option<usize>>,
+    /// The last paragraph whose style was looked up, and the style: the runs of a
+    /// paragraph come one after another, and reading the style walks its `w:pPr`.
+    last_paragraph: Option<(&'a Node, Option<usize>)>,
     /// The definition each list instance named so far uses.
     instances: HashMap<i64, Option<Arc<paragraph::InstanceDefinition>>>,
     /// The definition each definition an instance names leads to through
@@ -77,6 +80,8 @@ pub(crate) struct Work {
     pub(crate) replacements: usize,
     /// A style's level and a list level laid over each other.
     pub(crate) combinations: usize,
+    /// Paragraphs whose `w:pPr` was read for their style.
+    pub(crate) paragraph_styles: usize,
 }
 
 impl<'a> Formats<'a> {
@@ -88,6 +93,7 @@ impl<'a> Formats<'a> {
             character_defaults: None,
             paragraph_defaults: None,
             default_paragraph_style: None,
+            last_paragraph: None,
             instances: HashMap::new(),
             links: HashMap::new(),
             numbering_styles: HashMap::new(),
@@ -156,6 +162,24 @@ impl<'a> Formats<'a> {
     /// is read as [`Paragraph::properties`] reads it: through `mc:AlternateContent`, the
     /// last of several winning.
     fn paragraph_style(&mut self, node: Option<&'a Node>) -> Option<usize> {
+        if let (Some(node), Some((last, style))) = (node, self.last_paragraph) {
+            if std::ptr::eq(node, last) {
+                return style;
+            }
+        }
+        #[cfg(test)]
+        if node.is_some() {
+            self.work.paragraph_styles += 1;
+        }
+        let style = self.read_paragraph_style(node);
+        if let Some(node) = node {
+            self.last_paragraph = Some((node, style));
+        }
+        style
+    }
+
+    /// [`paragraph_style`](Self::paragraph_style), read from the paragraph's `w:pPr`.
+    fn read_paragraph_style(&mut self, node: Option<&'a Node>) -> Option<usize> {
         let document = self.document;
         let written = node.and_then(|node| {
             node.properties
@@ -299,8 +323,8 @@ impl<L: Layer> StyleLevels<L> {
 }
 
 /// How many styles the resolver uses, the first ones of the styles part: as many as
-/// Word's binary format holds, whose count of styles is less than 0x0FFE ([MS-DOC]
-/// 2.9.274 Stshif.cstd). MS-OI29500 §17.7.4.17(c) says that Word does not open a
+/// Word's binary format has entries for, fewer than 0x0FFE ([MS-DOC] 2.9.274
+/// Stshif.cstd), some of which may be empty. MS-OI29500 §17.7.4.17(c) says that Word does not open a
 /// document with more than 4,079, yet Word 2010 saved LibreOffice's test document
 /// `fdo76101.docx` with 4,091. The bound keeps what the resolver keeps per style small.
 const MAX_STYLES: usize = 4093;
