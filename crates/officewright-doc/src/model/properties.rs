@@ -388,8 +388,8 @@ impl Language {
 /// effect comes from the styles and the document defaults.
 ///
 /// Properties officewright does not type yet (text effects, emphasis marks, East Asian
-/// layout, borders around runs, …) are kept with the document as written.
-#[doc(alias = "CharacterFormat")]
+/// layout, borders around runs, …) are kept with the document as written. The formatting
+/// in effect is [`CharacterFormat`](super::CharacterFormat).
 #[derive(Clone, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub struct RunProperties {

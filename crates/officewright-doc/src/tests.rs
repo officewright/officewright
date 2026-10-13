@@ -2976,3 +2976,5 @@ fn repairs_a_damaged_theme() {
     assert!(messages[4].ends_with(": a second a:font for the script Jpan is ignored"));
     assert!(messages[5].ends_with(": a second a:themeElements is ignored"));
 }
+
+mod format;
