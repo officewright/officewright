@@ -6,7 +6,8 @@
 //! cargo run --release -p officewright-doc --example docx_dump -- --summary FILE.docx...
 //! ```
 //!
-//! With one file it prints the compatibility mode, the sections with their page setup,
+//! With one file it prints the theme's fonts, the compatibility mode, the sections with
+//! their page setup,
 //! columns and headers and footers, and their blocks. With
 //! `--runs` it also prints:
 //! - the style, alignment and list of each paragraph, with the list's label template;
@@ -56,6 +57,21 @@ fn dump(document: &Document, runs: bool) {
         "{} styles; default font size {:?}",
         styles.iter().len(),
         defaults.size().map(|size| size.0)
+    );
+    let theme_fonts = document
+        .theme()
+        .and_then(|theme| theme.fonts())
+        .map(|fonts| {
+            format!(
+                "{} / {}",
+                fonts.major().latin().unwrap_or("?"),
+                fonts.minor().latin().unwrap_or("?")
+            )
+        });
+    println!(
+        "theme fonts (headings / body): {}; {} fonts declared",
+        theme_fonts.as_deref().unwrap_or("no theme"),
+        document.fonts().len()
     );
     let settings = document.settings();
     println!(
