@@ -216,6 +216,88 @@ class Packages(unittest.TestCase):
             }
             self.assertLessEqual(named, defined, doc.name)
 
+    def test_run_properties_follow_the_schema_order(self):
+        # CT_RPr is a sequence (ECMA-376 Part 1, 17.3.2.28); Word refuses a document whose
+        # run properties are out of order.
+        order = [
+            "rStyle",
+            "rFonts",
+            "b",
+            "bCs",
+            "i",
+            "iCs",
+            "caps",
+            "smallCaps",
+            "strike",
+            "dstrike",
+            "outline",
+            "shadow",
+            "emboss",
+            "imprint",
+            "noProof",
+            "snapToGrid",
+            "vanish",
+            "webHidden",
+            "color",
+            "spacing",
+            "w",
+            "kern",
+            "position",
+            "sz",
+            "szCs",
+            "highlight",
+            "u",
+            "effect",
+            "bdr",
+            "shd",
+            "fitText",
+            "vertAlign",
+            "rtl",
+            "cs",
+            "em",
+            "lang",
+            "eastAsianLayout",
+            "specVanish",
+            "oMath",
+        ]
+        for doc in self.docs:
+            parts = rules.parts(doc)
+            for name in ("word/document.xml", "word/styles.xml"):
+                for properties in part(parts, name).iter(f"{W}rPr"):
+                    tags = [child.tag.replace(W, "") for child in properties]
+                    places = [order.index(tag) for tag in tags]
+                    self.assertEqual(places, sorted(set(places)), f"{doc.name}: {tags}")
+
+    def test_cases_have_the_formatting_their_labels_name(self):
+        def runs(doc):
+            body = part(rules.parts(doc), "word/document.xml")
+            for paragraph in body.iter(f"{W}p"):
+                texts = [
+                    "".join(t.text or "" for t in r.iter(f"{W}t")) for r in paragraph.iter(f"{W}r")
+                ]
+                props = [r.find(f"{W}rPr") for r in paragraph.iter(f"{W}r")]
+                yield [
+                    (text, set() if p is None else {c.tag.replace(W, "") for c in p})
+                    for text, p in zip(texts, props)
+                    if text
+                ]
+
+        italic = next(doc for doc in self.docs if doc.name == "E-italic-missing")
+        cases = 0
+        for ((label, tags),) in runs(italic):
+            words = label.split(":")[0]
+            self.assertEqual("italic" in words, {"i", "iCs"} <= tags, label)
+            self.assertEqual("bold" in words, {"b", "bCs"} <= tags, label)
+            cases += 1
+        self.assertEqual(cases, 16)
+        for mode in (12, 14, 15):
+            doc = next(doc for doc in self.docs if doc.name == f"E-smallcaps-{mode}")
+            self.assertEqual(doc.mode, mode)
+            for (label, label_tags), (word, tags) in runs(doc):
+                self.assertNotIn("smallCaps", label_tags, label)
+                self.assertEqual("small caps" in label, "smallCaps" in tags, label)
+                self.assertEqual(word.upper(), "HAMBURG", label)
+
     def test_refuses_a_colour_mapping_attribute_that_does_not_exist(self):
         doc = next(doc for doc in self.docs if doc.color_mapping)
         mistyped = dataclasses.replace(doc, color_mapping=(("t3", "accent3"),))
