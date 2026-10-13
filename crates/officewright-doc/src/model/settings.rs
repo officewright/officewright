@@ -19,7 +19,7 @@ impl CompatibilityMode {
     pub const WORD_2007: Self = Self(12);
     /// Word 2010.
     pub const WORD_2010: Self = Self(14);
-    /// Word 2013 and later.
+    /// Word 2013 and later. Word 2010 ignores this mode ([MS-DOCX] 2.3.5).
     pub const WORD_2013: Self = Self(15);
 
     /// The mode with this number.
@@ -153,6 +153,10 @@ xml_enum! {
 
 /// Which colours of the theme's scheme the document's theme colours stand for
 /// (`w:clrSchemeMapping`): text 1, for one, is usually dark 1.
+///
+/// A colour not written (`None`) stands for the scheme's colour of the same name
+/// (§17.15.1.20); for text 1 and text 2, which the scheme has no colours of, Word takes
+/// dark 1 and dark 2 (MS-OI29500 §17.15.1.20(a), (b)).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ColorSchemeMapping {
@@ -207,6 +211,9 @@ impl ColorSchemeMapping {
 /// setting the document does not give is `None`. The rest of the part is kept for
 /// writing.
 ///
+/// The schema allows each setting once; when one is written twice, the last counts,
+/// even when its value is not valid.
+///
 /// ```
 /// # fn main() -> officewright_doc::Result<()> {
 /// use officewright_doc::{CompatibilityMode, Document};
@@ -260,7 +267,8 @@ impl Settings {
             .unwrap_or(CompatibilityMode::WORD_2007)
     }
 
-    /// Every compatibility setting written (`w:compatSetting`), the mode among them.
+    /// Every compatibility setting written (`w:compatSetting`), the mode among them; one
+    /// without `w:name` is left out.
     pub fn compatibility_settings(&self) -> &[CompatibilitySetting] {
         &self.compatibility_settings
     }
@@ -282,7 +290,9 @@ impl Settings {
         self.compatibility_options.iter().copied()
     }
 
-    /// The distance between default tab stops (`w:defaultTabStop`).
+    /// The distance between default tab stops (`w:defaultTabStop`); 36 pt when it is not
+    /// written (§17.15.1.25). Word reads it as a short of at least 0 (MS-OI29500
+    /// §17.15.1.25(a)).
     pub fn default_tab_stop(&self) -> Option<Pt> {
         self.default_tab_stop
     }
@@ -317,12 +327,16 @@ impl Settings {
         self.auto_hyphenation
     }
 
-    /// The most lines in a row that may end with a hyphen (`w:consecutiveHyphenLimit`).
+    /// The most lines in a row that may end with a hyphen (`w:consecutiveHyphenLimit`);
+    /// 0, or none written, is no limit (§17.15.1.22). Word reads it as an unsigned short
+    /// (MS-OI29500 §17.15.1.22(a)).
     pub fn consecutive_hyphen_limit(&self) -> Option<i64> {
         self.consecutive_hyphen_limit
     }
 
-    /// How far from the end margin a word may be hyphenated (`w:hyphenationZone`).
+    /// How far from the end margin a word may be hyphenated (`w:hyphenationZone`). When
+    /// it is not written the standard takes 18 pt, but Word a value that depends on the
+    /// language of the operating system (MS-OI29500 §17.15.1.53(a)).
     pub fn hyphenation_zone(&self) -> Option<Pt> {
         self.hyphenation_zone
     }
@@ -332,23 +346,27 @@ impl Settings {
         self.do_not_hyphenate_caps
     }
 
-    /// The decimal separator that decimal tab stops align on (`w:decimalSymbol`).
+    /// The radix point for evaluating fields (`w:decimalSymbol`). Word ignores it and
+    /// takes the system's locale (MS-OI29500 §17.15.1.23(a)).
     pub fn decimal_symbol(&self) -> Option<&str> {
         self.decimal_symbol.as_deref()
     }
 
-    /// The list separator of fields (`w:listSeparator`).
+    /// The list separator for evaluating fields (`w:listSeparator`). Word ignores it and
+    /// takes the system's locale (MS-OI29500 §17.15.1.56(a)).
     pub fn list_separator(&self) -> Option<&str> {
         self.list_separator.as_deref()
     }
 
-    /// The style id new tables get (`w:defaultTableStyle`).
+    /// The style id new tables get (`w:defaultTableStyle`); Word takes `TableGrid` when
+    /// none is written (MS-OI29500 §17.15.1.24(a)).
     pub fn default_table_style(&self) -> Option<&str> {
         self.default_table_style.as_deref()
     }
 
     /// The document's footnote placement and numbering (`w:footnotePr`), which
-    /// sections may change.
+    /// sections may change. Word takes the placement from the sections only
+    /// (MS-OI29500 §17.11.21(a)).
     pub fn footnotes(&self) -> Option<&NoteProperties> {
         self.footnotes.as_ref()
     }
@@ -370,7 +388,9 @@ impl Settings {
         &self.endnote_separators
     }
 
-    /// The languages whose fonts the theme's fonts stand for (`w:themeFontLang`).
+    /// The languages whose fonts the theme's fonts stand for (`w:themeFontLang`). When it
+    /// is not written, Word works them out from its install language and the system's
+    /// keyboards (MS-OI29500 §17.15.1.88(a)).
     pub fn theme_font_languages(&self) -> Option<&Language> {
         self.theme_font_languages.as_ref()
     }

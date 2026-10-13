@@ -2295,3 +2295,38 @@ fn reads_strict_settings() {
         Some(CompatibilityMode::WORD_2013)
     );
 }
+
+#[test]
+fn shares_the_node_limit_with_the_settings_part() {
+    // From the review of #44: 100 paragraphs cost 100 nodes; a w:compat of 100 empty
+    // options costs 202 (each option a start and an end, the w:compat its own two).
+    let body = "<w:p/>".repeat(100);
+    let settings = format!(
+        r#"<w:settings xmlns:w="{W}"><w:compat>{}</w:compat></w:settings>"#,
+        "<w:useFELayout/>".repeat(100)
+    );
+    let data = package(
+        DOCUMENT,
+        &document_xml(&body),
+        &[
+            (
+                "word/_rels/document.xml.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/></Relationships>"#,
+            ),
+            ("word/settings.xml", &settings),
+        ],
+    );
+    let options = LoadOptions::new().with_limits(Limits::new().with_max_nodes(250));
+    match options.open_bytes(data.clone()).unwrap_err() {
+        Error::LimitExceeded {
+            limit: Limit::Nodes,
+            context,
+            ..
+        } => {
+            assert!(context.starts_with("/word/settings.xml"), "{context}");
+        }
+        other => panic!("{other}"),
+    }
+    let options = LoadOptions::new().with_limits(Limits::new().with_max_nodes(350));
+    assert!(options.open_bytes(data).is_ok());
+}

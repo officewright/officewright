@@ -64,7 +64,9 @@ pub(super) fn read(
                 let understood = disposition == Disposition::Understood
                     && tag.name().namespace().is_some_and(|ns| w.contains(&ns));
                 let local = tag.name().local();
-                // Every setting is kept with the document's tokens for writing.
+                // Every setting is kept with the document's tokens for writing. An
+                // mc:AlternateContent here is kept whole too, so a setting in it is not
+                // read; no document of the corpus has one.
                 let span = c.capture(&mut reader, &mut mce, tag)?;
                 if understood {
                     c.check(span, offset, |element, report| {

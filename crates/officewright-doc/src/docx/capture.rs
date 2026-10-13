@@ -182,7 +182,6 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
             .push(kind, || format!("{place}: {}", message()));
     }
 
-    /// The part, line and column of an offset, as errors name them.
     /// Runs `read` over the element of `span` and reports the values it finds not valid
     /// as diagnostics at `offset`. Values are collected only while diagnostics have room
     /// for them; the rest are counted, so damage that is not reported costs no memory.
@@ -216,6 +215,7 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
         }
     }
 
+    /// The part, line and column of an offset, as errors name them.
     pub(super) fn place(&mut self, offset: usize) -> String {
         let (line, column) = self.locator.locate(offset);
         format!("{}, line {line}, column {column}", self.part)
