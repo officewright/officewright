@@ -2,10 +2,11 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, BufReader, Cursor};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 use std::{error, fmt};
 
+use crate::coverage::Coverage;
 use crate::error::{Error, Result};
 use crate::face::{EmbeddingPermissions, FaceProperties, FontNames, OutlineFormat};
 use crate::font::FontFace;
@@ -38,6 +39,21 @@ pub struct FaceInfo {
     origin: FontOrigin,
     properties: FaceProperties,
     keys: NameKeys,
+    coverage: CoverageCell,
+}
+
+/// The characters a face maps, read on the first query and kept, shared by the clones
+/// of the book.
+#[derive(Clone, Default)]
+struct CoverageCell(Arc<OnceLock<Coverage>>);
+
+impl fmt::Debug for CoverageCell {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0.get() {
+            Some(coverage) => write!(f, "{} ranges", coverage.range_count()),
+            None => f.write_str("not read"),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -166,6 +182,21 @@ impl FaceInfo {
 
     pub(crate) fn keys(&self) -> &NameKeys {
         &self.keys
+    }
+
+    /// The characters the face maps. The first call reads its `cmap`; a face that
+    /// cannot be read any more, or whose `cmap` is damaged, maps nothing, and is not
+    /// read again.
+    fn coverage(&self) -> &Coverage {
+        self.coverage.0.get_or_init(|| {
+            let coverage = match &self.source {
+                Source::File(path) => File::open(path)
+                    .ok()
+                    .and_then(|file| index::read_coverage(&mut BufReader::new(file), self.index)),
+                Source::Memory(data) => index::read_coverage(&mut Cursor::new(&**data), self.index),
+            };
+            coverage.unwrap_or_default()
+        })
     }
 }
 
@@ -360,6 +391,35 @@ impl FontBook {
         self.add_faces(&Source::Memory(data), origin, faces)
     }
 
+    /// The faces whose character map has a glyph for `ch`, in the order of
+    /// [`faces`](Self::faces): every face that covers `ch`, and no other.
+    ///
+    /// A face covers the characters that the subtable [`FontFace::char_map`] uses maps to
+    /// a glyph other than 0. For a symbol font that is the characters U+F020 to U+F0FF it
+    /// lists; the U+0020 to U+00FF that [`FontFace::glyph_id`] also finds, as Windows
+    /// does, do not count, so a symbol font never stands in for Latin text.
+    ///
+    /// Adding fonts does not read their character maps. The first query reads the `cmap`
+    /// table of each face, and only that, and keeps what it maps, so later queries cost a
+    /// lookup per face; the clones of the book share it. A face whose file can no longer
+    /// be read, or whose `cmap` is damaged, covers nothing and is not read again.
+    ///
+    /// ```
+    /// use officewright_font::FontBook;
+    ///
+    /// let mut book = FontBook::new();
+    /// book.add_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data"))?;
+    /// assert_eq!(book.faces_covering('A').len(), 1);
+    /// assert!(book.faces_covering('\u{4E00}').is_empty());
+    /// # Ok::<(), officewright_font::Error>(())
+    /// ```
+    pub fn faces_covering(&self, ch: char) -> Vec<FaceId> {
+        self.faces()
+            .filter(|(_, face)| face.coverage().contains(ch))
+            .map(|(id, _)| id)
+            .collect()
+    }
+
     /// The faces in the book, in the order they were added.
     pub fn faces(&self) -> impl ExactSizeIterator<Item = (FaceId, &FaceInfo)> {
         self.faces
@@ -530,6 +590,7 @@ impl FontBook {
                         origin,
                         properties: face.properties,
                         keys,
+                        coverage: CoverageCell::default(),
                     });
                     added += 1;
                 }
@@ -1182,6 +1243,150 @@ mod tests {
             book.load(FaceId(3)),
             Err(Error::FaceIndexOutOfRange { index: 3, count: 0 })
         ));
+    }
+
+    /// The family names of `ids`, in order.
+    fn families(book: &FontBook, ids: &[FaceId]) -> Vec<String> {
+        ids.iter()
+            .map(|&id| book.face(id).unwrap().names().family().unwrap().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn finds_the_faces_that_cover_a_character_in_book_order() {
+        let mut book = FontBook::new();
+        for font in [
+            TestFont::new("Test Symbol").symbol(),
+            TestFont::new("Test Sans"),
+            TestFont::new("Test Serif"),
+        ] {
+            book.add_bytes(font.build(), FontOrigin::User).unwrap();
+        }
+        // The test fonts map the space, A, U+00B4 and U+00C1 (at U+F0xx in the symbol
+        // font).
+        for ch in [' ', 'A', '\u{B4}', '\u{C1}'] {
+            let covering = book.faces_covering(ch);
+            assert_eq!(
+                families(&book, &covering),
+                ["Test Sans", "Test Serif"],
+                "{ch:?}"
+            );
+        }
+        for ch in ['\u{F020}', '\u{F041}', '\u{F0C1}'] {
+            let covering = book.faces_covering(ch);
+            assert_eq!(families(&book, &covering), ["Test Symbol"], "{ch:?}");
+        }
+        // The symbol font's U+0020 to U+00FF alias does not count, though glyph_id finds
+        // it, as Windows does.
+        let symbol = book.load(FaceId(0)).unwrap();
+        assert!(symbol.glyph_id('A').is_some());
+        for ch in ['B', '\u{4E00}', '\u{F042}', '\0', char::MAX] {
+            assert!(book.faces_covering(ch).is_empty(), "{ch:?}");
+        }
+    }
+
+    #[test]
+    fn covers_per_face_of_a_collection() {
+        let ttc = testing::collection(&[
+            TestFont::new("Test Symbol").symbol().build(),
+            TestFont::new("Test Sans").build(),
+        ]);
+        let mut book = FontBook::new();
+        book.add_bytes(ttc, FontOrigin::User).unwrap();
+        assert_eq!(families(&book, &book.faces_covering('A')), ["Test Sans"]);
+        assert_eq!(
+            families(&book, &book.faces_covering('\u{F041}')),
+            ["Test Symbol"]
+        );
+    }
+
+    #[test]
+    fn a_damaged_character_map_covers_nothing() {
+        let mut book = FontBook::new();
+        // The index does not read cmap, so the face is added.
+        let damaged = TestFont::new("Test Damaged").with_table(b"cmap", vec![0, 0, 0, 9, 0xFF]);
+        book.add_bytes(damaged.build(), FontOrigin::User).unwrap();
+        book.add_bytes(TestFont::new("Test Sans").build(), FontOrigin::User)
+            .unwrap();
+        assert_eq!(families(&book, &book.faces_covering('A')), ["Test Sans"]);
+        // A face without cmap covers nothing either.
+        let mut book = FontBook::new();
+        let bare = TestFont::new("Test Bare").without_table(b"cmap");
+        book.add_bytes(bare.build(), FontOrigin::User).unwrap();
+        assert!(book.faces_covering('A').is_empty());
+    }
+
+    #[test]
+    fn a_file_that_went_away_covers_nothing_and_is_not_read_again() {
+        let dir = TempDir::new("coverage-gone");
+        let path = dir.0.join("sans.ttf");
+        let font = TestFont::new("Test Sans").build();
+        fs::write(&path, &font).unwrap();
+        let mut book = FontBook::new();
+        book.add_dir(&dir.0).unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(book.faces_covering('A').is_empty());
+        // Back again: the book keeps what the first query found.
+        fs::write(&path, &font).unwrap();
+        assert!(book.faces_covering('A').is_empty());
+        // A new book reads it.
+        let mut fresh = FontBook::new();
+        fresh.add_dir(&dir.0).unwrap();
+        assert_eq!(fresh.faces_covering('A').len(), 1);
+    }
+
+    #[test]
+    fn coverage_is_read_once_and_survives_a_rescan() {
+        let dir = TempDir::new("coverage-rescan");
+        fs::write(dir.0.join("a.ttf"), TestFont::new("Test Sans").build()).unwrap();
+        let mut book = FontBook::new();
+        book.add_dir(&dir.0).unwrap();
+        assert_eq!(families(&book, &book.faces_covering('A')), ["Test Sans"]);
+        // A font installed since, and the first one changed on disk: a book does not read
+        // an added file again, its coverage included.
+        fs::write(dir.0.join("b.ttf"), TestFont::new("Test Serif").build()).unwrap();
+        fs::write(
+            dir.0.join("a.ttf"),
+            TestFont::new("Test Sans").symbol().build(),
+        )
+        .unwrap();
+        assert_eq!(book.add_dir(&dir.0).unwrap(), 1);
+        assert_eq!(
+            families(&book, &book.faces_covering('A')),
+            ["Test Sans", "Test Serif"]
+        );
+    }
+
+    #[test]
+    fn clones_and_threads_get_the_same_answers() {
+        fn send_and_sync<T: Send + Sync>() {}
+        send_and_sync::<FontBook>();
+        let mut book = FontBook::new();
+        book.add_bytes(TestFont::new("Test Sans").build(), FontOrigin::User)
+            .unwrap();
+        book.add_bytes(
+            TestFont::new("Test Symbol").symbol().build(),
+            FontOrigin::User,
+        )
+        .unwrap();
+        let copy = book.clone();
+        let answers: Vec<Vec<FaceId>> = std::thread::scope(|scope| {
+            let threads: Vec<_> = (0..8)
+                .map(|i| {
+                    let book = if i % 2 == 0 { &book } else { &copy };
+                    scope.spawn(move || book.faces_covering('A'))
+                })
+                .collect();
+            threads.into_iter().map(|t| t.join().unwrap()).collect()
+        });
+        assert!(
+            answers.iter().all(|answer| *answer == [FaceId(0)]),
+            "{answers:?}"
+        );
+        assert_eq!(copy.faces_covering('\u{F041}'), [FaceId(1)]);
+        // What was read is shown as a count, not as the ranges themselves.
+        let debug = format!("{:?}", book.face(FaceId(0)).unwrap());
+        assert!(debug.contains("coverage: 4 ranges"), "{debug}");
     }
 
     #[test]

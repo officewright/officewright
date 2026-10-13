@@ -14,6 +14,10 @@ use skrifa::raw::tables::name::Name;
 use skrifa::raw::types::Tag;
 use skrifa::raw::{FontData, FontRead, TableDirectory, TableProvider};
 
+use skrifa::charmap::Charmap;
+use skrifa::raw::FontRef;
+
+use crate::coverage::Coverage;
 use crate::error::{Cause, Error};
 use crate::face::{FaceProperties, english_rank};
 use crate::font::{all_records, optional, required};
@@ -56,6 +60,113 @@ const MAX_FACES: u32 = 1024;
 
 /// The most named instances read from one variable font; real ones have a few dozen.
 const MAX_INSTANCES: usize = 256;
+
+/// The largest `cmap` table the coverage of a face is read from. Fonts with the whole
+/// of Unicode need a few hundred kilobytes.
+const MAX_CMAP: u32 = 16 << 20;
+
+/// The characters face `face` of a font file maps to a glyph, as
+/// [`FontFace::char_map`](crate::FontFace::char_map) maps them, read like the index
+/// reads: the table directory, the `cmap` table and the start of `maxp`, nothing else.
+/// `None` if the face cannot be read.
+pub(crate) fn read_coverage<R: Read + Seek>(reader: &mut R, face: u32) -> Option<Coverage> {
+    let file_len = reader.seek(SeekFrom::End(0)).ok()?;
+    let mut file = BoundedReader {
+        reader,
+        file_len,
+        budget: MAX_READ_PER_FILE,
+        exhausted: false,
+    };
+    let header = file.read_at(0, 12).ok()??;
+    let offset = if header.get(..4) == Some(b"ttcf") {
+        if face >= be_u32(&header, 8)? {
+            return None;
+        }
+        let at = 12 + 4 * u64::from(face);
+        let offset = file.read_at(at, 4).ok()??;
+        u64::from(be_u32(&offset, 0)?)
+    } else if face == 0 {
+        0
+    } else {
+        return None;
+    };
+    let header = file.read_at(offset, 12).ok()??;
+    let table_count = be_u16(&header, 4)?;
+    let directory = file
+        .read_at(offset, 12 + 16 * u64::from(table_count))
+        .ok()??;
+    let directory = TableDirectory::read(FontData::new(&directory)).ok()?;
+    let record = |tag: &[u8; 4]| {
+        directory
+            .table_records()
+            .iter()
+            .find(|record| record.tag() == Tag::new(tag))
+    };
+    let Some(cmap) = record(b"cmap") else {
+        return Some(Coverage::default());
+    };
+    if cmap.length() > MAX_CMAP {
+        return None;
+    }
+    let cmap = file
+        .read_at(u64::from(cmap.offset()), u64::from(cmap.length()))
+        .ok()??;
+    // numGlyphs is at bytes 4 and 5; the parser wants the whole table of its version.
+    let maxp = record(b"maxp")?;
+    let maxp = file
+        .read_at(u64::from(maxp.offset()), u64::from(maxp.length().min(32)))
+        .ok()??;
+    let font = two_table_font(&cmap, &maxp)?;
+    let font = FontRef::new(&font).ok()?;
+    let glyph_count = u32::from(font.maxp().ok()?.num_glyphs());
+    let charmap = Charmap::new(&font);
+    // Glyph 0 means "not mapped" and is left out of the mappings; a glyph past the end of
+    // the font is a damaged entry, which `CharMap::map` does not map either. Each code
+    // point the subtable lists is looked up too, as `CharMap::map` looks it up: in a
+    // damaged subtable, such as one with overlapping segments, the two can disagree.
+    let maps = |code_point: u32| {
+        charmap
+            .map(code_point)
+            .is_some_and(|glyph| glyph.to_u32() < glyph_count)
+    };
+    Some(Coverage::from_code_points(
+        charmap
+            .mappings()
+            .filter(|&(code_point, glyph)| glyph.to_u32() < glyph_count && maps(code_point))
+            .map(|(code_point, _)| code_point),
+    ))
+}
+
+/// A font file that holds only a `cmap` and a `maxp` table: all a character map needs.
+fn two_table_font(cmap: &[u8], maxp: &[u8]) -> Option<Vec<u8>> {
+    // The table directory: version 1.0, 2 tables, and the binary search fields for 2.
+    let mut font = Vec::with_capacity(44 + cmap.len() + 3 + maxp.len());
+    font.extend_from_slice(&0x0001_0000_u32.to_be_bytes());
+    for value in [2_u16, 32, 1, 0] {
+        font.extend_from_slice(&value.to_be_bytes());
+    }
+    let cmap_offset = 44_u32;
+    let cmap_len = u32::try_from(cmap.len()).ok()?;
+    // Tables start on four-byte boundaries.
+    let maxp_offset = cmap_offset
+        .checked_add(cmap_len)?
+        .checked_next_multiple_of(4)?;
+    let maxp_len = u32::try_from(maxp.len()).ok()?;
+    // Records sorted by tag, with checksums the parser does not check.
+    for (tag, offset, len) in [
+        (b"cmap", cmap_offset, cmap_len),
+        (b"maxp", maxp_offset, maxp_len),
+    ] {
+        font.extend_from_slice(tag);
+        font.extend_from_slice(&0_u32.to_be_bytes());
+        font.extend_from_slice(&offset.to_be_bytes());
+        font.extend_from_slice(&len.to_be_bytes());
+    }
+    font.extend_from_slice(cmap);
+    font.resize(usize::try_from(maxp_offset).ok()?, 0);
+    font.extend_from_slice(maxp);
+    Some(font)
+}
 
 /// Why a font file could not be indexed.
 #[derive(Debug)]
