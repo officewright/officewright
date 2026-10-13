@@ -315,6 +315,11 @@ pub(crate) fn level(lvl: Element<'_>, names: &Names, report: Report<'_>) -> Opti
 }
 
 /// A `w:lvlOverride`; `None` when its `w:ilvl` is not a number.
+/// The level a `w:lvlOverride` overrides (`w:ilvl`), read without the rest of it.
+pub(crate) fn override_level(element: Element<'_>, names: &Names) -> Option<i64> {
+    value(element, names, "ilvl", integer, &mut |_, _, _| {})
+}
+
 pub(crate) fn level_override(
     element: Element<'_>,
     names: &Names,

@@ -628,3 +628,329 @@ fn takes_the_list_level_of_the_document_defaults() {
     let format = &formats(&build(&paragraph("", ""), &styles, Some(&numbering)))[0];
     assert_eq!(format.list().unwrap().level_number(), 2);
 }
+
+#[test]
+fn keeps_at_most_64_tab_stops_at_the_lowest_positions() {
+    // [MS-DOC] 2.9.179: Word's own format adds at most 64 stops in one change. Without a
+    // bound, stops every paragraph of a style inherits would cost each paragraph their
+    // number.
+    let stops = |from: i64, count: i64| -> String {
+        let tabs: String = (0..count)
+            .map(|n| format!(r#"<w:tab w:val="left" w:pos="{}"/>"#, from + 100 * n))
+            .collect();
+        format!("<w:tabs>{tabs}</w:tabs>")
+    };
+    let styles = [
+        defaults(&stops(10_000, 100)),
+        style("paragraph", "Tabbed", None, &stops(100, 100)),
+    ]
+    .concat();
+    let body = [paragraph("Tabbed", ""), paragraph("Tabbed", &stops(50, 3))].concat();
+    let mut results = formats(&build(&body, &styles, None));
+    // Stops at one level only, with nothing to merge them with.
+    results.extend(formats(&build(
+        &paragraph("", &stops(100, 100)),
+        &defaults(""),
+        None,
+    )));
+    for format in &results {
+        assert_eq!(format.tabs().len(), 64);
+        assert!(
+            format
+                .tabs()
+                .windows(2)
+                .all(|pair| pair[0].position().0 < pair[1].position().0)
+        );
+    }
+    assert_eq!(results[0].tabs()[0].position(), Pt(5.0));
+    assert_eq!(results[0].tabs()[63].position(), Pt(320.0));
+    // The paragraph's own stops come first by position.
+    assert_eq!(results[1].tabs()[0].position(), Pt(2.5));
+    assert_eq!(results[1].tabs()[1].position(), Pt(5.0));
+    assert_eq!(results[2].tabs()[63].position(), Pt(320.0));
+}
+
+#[test]
+fn follows_each_link_once_and_shares_the_levels_it_leads_to() {
+    // 300 definitions that only link to one numbering style, two instances of each and
+    // two paragraphs per instance: the links are followed once per definition and the
+    // definition they lead to is parsed once.
+    let mut numbering = definition(9000, "");
+    numbering.push_str(r#"<w:num w:numId="1000"><w:abstractNumId w:val="9000"/></w:num>"#);
+    for id in 1..=300 {
+        numbering.push_str(&format!(
+            r#"<w:abstractNum w:abstractNumId="{id}"><w:numStyleLink w:val="Linked"/></w:abstractNum><w:num w:numId="{id}"><w:abstractNumId w:val="{id}"/></w:num><w:num w:numId="{}"><w:abstractNumId w:val="{id}"/></w:num>"#,
+            id + 2000
+        ));
+    }
+    let styles = [
+        defaults(""),
+        style(
+            "numbering",
+            "Linked",
+            None,
+            r#"<w:tabs><w:tab w:val="left" w:pos="720"/></w:tabs><w:numPr><w:numId w:val="1000"/></w:numPr>"#,
+        ),
+    ]
+    .concat();
+    let body: String = (1..=300)
+        .flat_map(|id| [id, id, id + 2000, id + 2000])
+        .map(|id| {
+            paragraph(
+                "",
+                &format!(r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="{id}"/></w:numPr>"#),
+            )
+        })
+        .collect();
+    let document = build(&body, &styles, Some(&numbering));
+    let mut formats = document.formats();
+    let lists: Vec<_> = paragraphs(&document)
+        .into_iter()
+        .map(|paragraph| formats.paragraph(paragraph).list().cloned().unwrap())
+        .collect();
+    assert!(lists.iter().all(|list| list.definition() == Some(9000)));
+    let first = lists[0].level.clone().unwrap();
+    assert!(
+        lists
+            .iter()
+            .all(|list| Arc::ptr_eq(list.level.as_ref().unwrap(), &first))
+    );
+    assert_eq!(formats.work().links, 300);
+    assert_eq!(formats.work().numbering_styles, 1);
+    assert_eq!(formats.work().definitions, 1);
+}
+
+#[test]
+fn reads_only_the_overrides_of_the_levels_paragraphs_use() {
+    // Overrides of every level, and many of levels that do not exist: only the level the
+    // paragraphs use is replaced, once.
+    let mut overrides: String = (0..9)
+        .map(|level| {
+            format!(
+                r#"<w:lvlOverride w:ilvl="{level}"><w:lvl w:ilvl="{level}"><w:lvlText w:val="R{level}"/></w:lvl></w:lvlOverride>"#
+            )
+        })
+        .collect();
+    for level in 100..1100 {
+        overrides.push_str(&format!(
+            r#"<w:lvlOverride w:ilvl="{level}"><w:lvl w:ilvl="0"/></w:lvlOverride>"#
+        ));
+    }
+    let numbering = [
+        definition(10, ""),
+        format!(r#"<w:num w:numId="1"><w:abstractNumId w:val="10"/>{overrides}</w:num>"#),
+    ]
+    .concat();
+    let item = paragraph(
+        "",
+        r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>"#,
+    );
+    let body = [item.as_str(); 50].concat();
+    let document = build(&body, &defaults(""), Some(&numbering));
+    let mut formats = document.formats();
+    for paragraph in paragraphs(&document) {
+        let format = formats.paragraph(paragraph);
+        assert_eq!(format.list().unwrap().level().unwrap().text(), Some("R0"));
+    }
+    assert_eq!(formats.work().replacements, 1);
+}
+
+#[test]
+fn works_out_each_style_and_list_level_once() {
+    let numbering = [
+        definition(10, ""),
+        r#"<w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num>"#.to_owned(),
+    ]
+    .concat();
+    let styles = [
+        defaults(""),
+        style("paragraph", "Body", None, r#"<w:jc w:val="both"/>"#),
+    ]
+    .concat();
+    let listed = paragraph(
+        "Body",
+        r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>"#,
+    );
+    let plain = paragraph("Body", "");
+    let body = [listed.as_str(), plain.as_str()].repeat(200).concat();
+    let document = build(&body, &styles, Some(&numbering));
+    let mut formats = document.formats();
+    for (n, paragraph) in paragraphs(&document).into_iter().enumerate() {
+        // The list level's alignment wins over the style's (MS-OI29500 §17.7.2(a)).
+        let expected = if n % 2 == 0 {
+            Justification::Right
+        } else {
+            Justification::Both
+        };
+        assert_eq!(formats.paragraph(paragraph).justification(), expected);
+    }
+    assert_eq!(formats.work().inherited, 2);
+}
+
+#[test]
+fn reads_each_on_off_property_from_its_own_element() {
+    // One paragraph per property, the property set at the style level; every other
+    // property keeps its default. Widow control, word wrap and snapping to the grid are
+    // on when not given, so the style turns those off.
+    type Getter = fn(&ParagraphFormat) -> bool;
+    let flags: [(&str, Getter, bool); 11] = [
+        ("keepNext", ParagraphFormat::keep_next, false),
+        ("keepLines", ParagraphFormat::keep_lines, false),
+        ("pageBreakBefore", ParagraphFormat::page_break_before, false),
+        ("widowControl", ParagraphFormat::widow_control, true),
+        (
+            "suppressLineNumbers",
+            ParagraphFormat::suppress_line_numbers,
+            false,
+        ),
+        (
+            "suppressAutoHyphens",
+            ParagraphFormat::suppress_auto_hyphens,
+            false,
+        ),
+        (
+            "contextualSpacing",
+            ParagraphFormat::contextual_spacing,
+            false,
+        ),
+        ("mirrorIndents", ParagraphFormat::mirror_indents, false),
+        ("wordWrap", ParagraphFormat::word_wrap, true),
+        ("bidi", ParagraphFormat::right_to_left, false),
+        ("snapToGrid", ParagraphFormat::snap_to_grid, true),
+    ];
+    for (element, _, default) in &flags {
+        let written = if *default {
+            format!(r#"<w:{element} w:val="0"/>"#)
+        } else {
+            format!("<w:{element}/>")
+        };
+        let styles = [defaults(""), style("paragraph", "Flag", None, &written)].concat();
+        let format = &formats(&build(&paragraph("Flag", ""), &styles, None))[0];
+        for (other, getter, other_default) in &flags {
+            let expected = if other == element {
+                !other_default
+            } else {
+                *other_default
+            };
+            assert_eq!(getter(format), expected, "w:{other} with w:{element} set");
+        }
+    }
+}
+
+#[test]
+fn takes_each_border_and_unit_from_the_level_that_gives_it() {
+    let border = |side: &str, kind: &str| {
+        format!(r#"<w:{side} w:val="{kind}" w:sz="4" w:space="1" w:color="auto"/>"#)
+    };
+    let styles = [
+        defaults(&format!(
+            r#"<w:pBdr>{}{}</w:pBdr><w:spacing w:beforeAutospacing="1" w:afterLines="50"/><w:ind w:rightChars="100"/>"#,
+            border("between", "dotted"),
+            border("bar", "dashed"),
+        )),
+        style(
+            "paragraph",
+            "Sides",
+            None,
+            &format!(
+                r#"<w:pBdr>{}{}</w:pBdr><w:spacing w:afterAutospacing="1"/><w:ind w:right="200"/>"#,
+                border("left", "double"),
+                border("right", "thick"),
+            ),
+        ),
+    ]
+    .concat();
+    // Direct formatting gives other attributes of the same elements: what the levels
+    // below give stays.
+    let body = paragraph(
+        "Sides",
+        &format!(
+            r#"<w:pBdr>{}{}</w:pBdr><w:spacing w:line="300" w:lineRule="auto"/><w:ind w:left="100" w:firstLineChars="100" w:hangingChars="200"/>"#,
+            border("top", "single"),
+            border("bottom", "wave"),
+        ),
+    );
+    let format = &formats(&build(&body, &styles, None))[0];
+    let borders = format.borders();
+    let side = |border: Option<&Border>| border.and_then(Border::style);
+    assert_eq!(
+        [
+            side(borders.top()),
+            side(borders.bottom()),
+            side(borders.start()),
+            side(borders.end()),
+            side(borders.between()),
+            side(borders.bar()),
+        ],
+        [
+            Some(BorderStyle::Single),
+            Some(BorderStyle::Wave),
+            Some(BorderStyle::Double),
+            Some(BorderStyle::Thick),
+            Some(BorderStyle::Dotted),
+            Some(BorderStyle::Dashed),
+        ]
+    );
+    assert_eq!(format.end_indent_chars(), Some(100));
+    assert_eq!(format.end_indent(), Pt(10.0));
+    assert_eq!(format.after_spacing_lines(), Some(50));
+    assert!(format.before_auto_spacing() && format.after_auto_spacing());
+    // In one w:ind the hanging indent wins in character units too (ECMA-376 §17.3.1.12).
+    assert_eq!(format.first_line_indent_chars(), Some(-200));
+}
+
+#[test]
+fn adds_the_tab_stops_of_the_list_level() {
+    let level = r#"<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:pPr><w:tabs><w:tab w:val="num" w:pos="1080"/></w:tabs><w:ind w:left="1440" w:hanging="360"/></w:pPr></w:lvl>"#;
+    let numbering = format!(
+        r#"<w:abstractNum w:abstractNumId="10">{level}</w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num>"#
+    );
+    let styles = [
+        defaults(""),
+        style(
+            "paragraph",
+            "Tabbed",
+            None,
+            r#"<w:tabs><w:tab w:val="left" w:pos="720"/></w:tabs>"#,
+        ),
+    ]
+    .concat();
+    let body = paragraph(
+        "Tabbed",
+        r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr><w:tabs><w:tab w:val="right" w:pos="2880"/></w:tabs>"#,
+    );
+    let format = &formats(&build(&body, &styles, Some(&numbering)))[0];
+    assert_eq!(
+        tabs(format),
+        [
+            tab(TabKind::Left, 36.0),
+            tab(TabKind::Number, 54.0),
+            tab(TabKind::Right, 144.0),
+        ]
+    );
+}
+
+#[test]
+fn takes_the_level_a_definition_links_to_the_style_before_the_styles_own() {
+    // The style writes level 0, level 2 of the definition names the style: the level of
+    // w:pStyle comes first (ECMA-376 §17.9.23). Word calls the combination unpredictable
+    // (MS-OI29500 §17.3.1.19(a)); word-rules/E-list-level-inherit.docx case 04 shows what
+    // it does.
+    let numbering = [
+        definition(10, r#"<w:pStyle w:val="Linked"/>"#),
+        r#"<w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num>"#.to_owned(),
+    ]
+    .concat();
+    let styles = [
+        defaults(""),
+        style(
+            "paragraph",
+            "Linked",
+            None,
+            r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>"#,
+        ),
+    ]
+    .concat();
+    let format = &formats(&build(&paragraph("Linked", ""), &styles, Some(&numbering)))[0];
+    assert_eq!(format.list().unwrap().level_number(), 2);
+}

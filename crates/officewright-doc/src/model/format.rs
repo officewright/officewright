@@ -419,6 +419,9 @@ impl ParagraphFormat {
     /// [`TabKind::Clear`](super::TabKind::Clear) removing the one a lower level set at
     /// its position (ECMA-376 §17.3.1.38). A hanging indent makes a stop too, which the
     /// layout adds.
+    ///
+    /// At most 64, those at the lowest positions, and at most 64 from each level: Word's
+    /// own format adds or removes at most 64 stops in one change ([MS-DOC] 2.9.179).
     pub fn tabs(&self) -> &[TabStop] {
         &self.tabs
     }

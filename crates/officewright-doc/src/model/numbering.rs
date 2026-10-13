@@ -279,6 +279,23 @@ impl<'a> ListInstance<'a> {
         Numbering::new(self.document).definition(self.data.definition?)
     }
 
+    /// The first override of level `number`, the only one parsed.
+    pub(crate) fn override_of(self, number: usize) -> Option<LevelOverride> {
+        let document = self.document;
+        let number = i64::try_from(number).ok()?;
+        document
+            .element(self.data.element)
+            .children_through_fallback(document.names.mc)
+            .into_iter()
+            .filter(|child| child.is(&document.names.w, "lvlOverride"))
+            .find(|element| {
+                crate::docx::numbering::override_level(*element, &document.names) == Some(number)
+            })
+            .and_then(|element| {
+                crate::docx::numbering::level_override(element, &document.names, &mut |_, _, _| {})
+            })
+    }
+
     /// The overrides of levels of the definition (`w:lvlOverride`), in document order.
     /// One whose `w:ilvl` is not a number is left out, and so is a second override of
     /// a level 0 to 8, as a definition's second level of one number is.

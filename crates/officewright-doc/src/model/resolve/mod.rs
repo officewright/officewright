@@ -36,15 +36,44 @@ pub struct Formats<'a> {
     paragraph_defaults: Option<Arc<ParagraphLevel>>,
     /// The index of the default paragraph style, once looked up.
     default_paragraph_style: Option<Option<usize>>,
-    /// The levels of each list instance named so far.
-    lists: HashMap<i64, Option<Arc<paragraph::ListLevels>>>,
-    /// The parsed levels of each list definition named so far, which its instances
+    /// The definition each list instance named so far uses.
+    instances: HashMap<i64, Option<Arc<paragraph::InstanceDefinition>>>,
+    /// The definition each definition an instance names leads to through
+    /// `w:numStyleLink`.
+    links: HashMap<i64, Option<i64>>,
+    /// The list instance each numbering style named by a link so far names.
+    numbering_styles: HashMap<usize, Option<i64>>,
+    /// The parsed levels of each list definition used so far, which its instances
     /// share.
     definitions: HashMap<i64, Arc<paragraph::DefinitionLevels>>,
+    /// Each list instance's levels that paragraphs use, with the instance's overrides,
+    /// and the numbers they start from.
+    instance_levels: HashMap<(i64, usize), paragraph::InstanceLevel>,
+    /// What each list level used so far gives to its paragraphs, by the level's address.
+    list_layers: HashMap<usize, Arc<ParagraphLevel>>,
     /// What the document defaults, a paragraph style and a list level give together, by
     /// the style's index and the list level's address. The levels are kept by `lists`
     /// and `definitions` for as long as this, so an address names one level.
     inherited: HashMap<(Option<usize>, Option<usize>), Arc<ParagraphLevel>>,
+    /// How much work the caches saved, for tests.
+    #[cfg(test)]
+    work: Work,
+}
+
+/// How many times each kind of work was done, for tests that the caches are used.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct Work {
+    /// Combinations of a style and a list level worked out.
+    pub(crate) inherited: usize,
+    /// Definitions an instance names, followed through their links.
+    pub(crate) links: usize,
+    /// Numbering styles whose list reference was read.
+    pub(crate) numbering_styles: usize,
+    /// Definitions whose levels were parsed.
+    pub(crate) definitions: usize,
+    /// Levels of instances replaced by an override's level.
+    pub(crate) replacements: usize,
 }
 
 impl<'a> Formats<'a> {
@@ -56,9 +85,15 @@ impl<'a> Formats<'a> {
             character_defaults: None,
             paragraph_defaults: None,
             default_paragraph_style: None,
-            lists: HashMap::new(),
+            instances: HashMap::new(),
+            links: HashMap::new(),
+            numbering_styles: HashMap::new(),
             definitions: HashMap::new(),
+            instance_levels: HashMap::new(),
+            list_layers: HashMap::new(),
             inherited: HashMap::new(),
+            #[cfg(test)]
+            work: Work::default(),
         }
     }
 
@@ -97,6 +132,12 @@ impl<'a> Formats<'a> {
     #[cfg(test)]
     pub(crate) fn style_reads(&self) -> usize {
         self.characters.reads + self.paragraphs.reads
+    }
+
+    /// How much other work was done, for tests that the caches are used.
+    #[cfg(test)]
+    pub(crate) fn work(&self) -> &Work {
+        &self.work
     }
 
     /// The index of the paragraph style of the paragraph `node`: its `w:pStyle` when it
