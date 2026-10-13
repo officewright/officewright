@@ -18,6 +18,7 @@
 
 mod book;
 mod cff;
+mod coverage;
 mod error;
 mod face;
 mod font;
@@ -31,7 +32,10 @@ mod testing;
 pub use book::{FaceId, FaceInfo, FontBook, FontOrigin, SkippedFont};
 pub use error::{Cause, Error, Result};
 pub use face::{EmbeddingLicense, EmbeddingPermissions, FontNames, OutlineFormat};
-pub use font::{BoundingBox, CharMap, FontFace, GlyphId, LineMetrics, VerticalMetrics, WinMetrics};
+pub use font::{
+    BoundingBox, CharMap, DecorationMetrics, FontFace, GlyphId, LineMetrics, VerticalMetrics,
+    WinMetrics,
+};
 pub use resolve::{FontRequest, FontResolver, GenericFamily, Resolution, ResolutionKind};
 pub use subset::Subset;
 pub use system::system_font_dirs;
