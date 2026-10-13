@@ -60,6 +60,8 @@ tests/pdf-output/       checks text-to-pdf output, in Helvetica and with Liberat
                         are the same)
 tests/corpus/           small curated real documents (committed) + SOURCES.md + baseline.json
 tests/corpus/word-rules/  documents written by scripts/make-rule-docs.py, one undocumented Word rule each
+tests/corpus/business/    public-domain and CC0 business documents of US federal agencies, cleaned by
+                          scripts/import-public-docs.py
 tests/corpus/reference/ ground truth from PDFs of Microsoft Word/Excel/PowerPoint, one folder per document: every page
                         as a 110 dpi grey PNG and geometry.json (lines, words, page breaks); the PDFs are not
                         committed, their SHA-256 and the app version are in SOURCES.md
@@ -79,6 +81,7 @@ scripts/package.sh      builds one release archive; release-in-container.sh wrap
 scripts/install-cargo-c.sh  the pinned prebuilt cargo-c, shared by ci.yml and release.yml
 scripts/nightly.sh      long-running checks (see below)
 scripts/make-rule-docs.py  writes tests/corpus/word-rules/ (stored ZIP, fixed dates: same bytes everywhere)
+scripts/import-public-docs.py  cleans the listed public documents into tests/corpus/business/
 scripts/windows/make-reference.ps1  renders the reference PDFs with Word on the maintainer's Windows machine
 scripts/corpus-import.py   checks make-reference.ps1 results and turns them into tests/corpus/ rasters and geometry
 ```
@@ -124,6 +127,7 @@ Unit and snapshot tests (`insta`) cover small handcrafted inputs. Real-world cor
   - LibreOffice `sw/qa`, `sc/qa`, `sd/qa` documents (MPL-2.0): used as test input only, never copied into the repo.
   - Digital Corpora GovDocs1 and the Common Crawl PDF corpus: large-scale robustness runs (samples of 10k–100k files).
 - Ground truth for rendering, `tests/corpus/reference/`: PDFs exported by Microsoft Word/Excel/PowerPoint from the corpus files (`scripts/windows/make-reference.ps1`, COM automation, run by the maintainer on Windows). The PDFs stay with the maintainer, because they hold subsets of Microsoft's fonts. `scripts/corpus-import.py` commits instead every page rasterized by `pdftoppm -r 110 -gray` as a PNG and `geometry.json`: page sizes, the boxes of every line and word (`pdftotext -bbox-layout`, points from the top left), the page count, and Word's page breaks from the re-saved copy. It records each PDF's SHA-256 in SOURCES.md, and refuses a re-saved copy into which Word embedded fonts. Fonts Word only references (Times New Roman, Arial) are embedded into a temporary copy of the PDF before rasterizing, from the maintainer's own installed font files (`--font-dir`, found by PostScript name, never copied into the repository), so every PNG shows Word's glyphs; SOURCES.md and `geometry.json` name those files by version and SHA-256, never by path. Word's printer is Microsoft Print to PDF (a printer that does not answer can stall Word, and with `w:usePrinterMetrics` Word lays out with the printer's metrics; the script warns otherwise). Word saves each document again first and exports from that copy, which goes to `tests/corpus/resaved/` (its `w:lastRenderedPageBreak` marks are Word's page breaks); `scripts/corpus-import.py` brings the results in and refuses any that carry a person's or company's name or a user profile path. LibreOffice exports are a secondary reference, marked as such. Never use output of Spire or Aspose as reference.
+- Business documents from outside, `tests/corpus/business/`: only public-domain (US federal) or CC0 works, and works under CC BY 4.0 with the attribution in THIRD-PARTY-NOTICES.md. `scripts/import-public-docs.py` lists each with its URL, download date, original SHA-256 and licence statement, and commits it cleaned: no person's name or address (document properties, custom XML, text), no picture of the original (every picture becomes a grey placeholder of the same size, so no agency seal, emblem or logo is reused), no attached template; `SOURCES.md` says what was changed.
 - Undocumented Word rules get a generated document each in `tests/corpus/word-rules/` (`scripts/make-rule-docs.py`, written from ECMA-376 markup), so a reference render isolates one rule.
 
 ### What runs against the corpora
