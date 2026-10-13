@@ -295,11 +295,12 @@ impl<L: Layer> StyleLevels<L> {
     }
 }
 
-/// How many styles the resolver uses, the first ones of the styles part. Word does not
-/// open a document with more (MS-OI29500 §17.7.4.17(c)), so a document that has more
-/// lays out as nothing Word shows; the bound keeps what the resolver keeps per style
-/// small.
-const MAX_STYLES: usize = 4079;
+/// How many styles the resolver uses, the first ones of the styles part: as many as
+/// Word's binary format holds, whose count of styles is less than 0x0FFE ([MS-DOC]
+/// 2.9.274 Stshif.cstd). MS-OI29500 §17.7.4.17(c) says that Word does not open a
+/// document with more than 4,079, yet Word 2010 saved LibreOffice's test document
+/// `fdo76101.docx` with 4,091. The bound keeps what the resolver keeps per style small.
+const MAX_STYLES: usize = 4093;
 
 /// How many combinations of a paragraph style and a list level the resolver keeps at a
 /// time: each is a full set of paragraph properties, and the paragraphs of a document

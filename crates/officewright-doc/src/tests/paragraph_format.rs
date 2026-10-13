@@ -1275,12 +1275,12 @@ fn a_clear_up_a_style_chain_removes_a_stop_of_the_defaults() {
 }
 
 #[test]
-fn uses_only_the_styles_word_opens_a_document_with() {
-    // Word does not open a document with more than 4,079 styles (MS-OI29500
-    // §17.7.4.17(c)): the resolver takes the first 4,079 and leaves the rest out, as
-    // the styles of paragraphs, as bases and as the default.
+fn uses_only_as_many_styles_as_words_format_holds() {
+    // Word's binary format holds fewer than 0x0FFE styles ([MS-DOC] 2.9.274): the
+    // resolver takes the first 4,093 and leaves the rest out, as the styles of
+    // paragraphs, as bases and as the default.
     let mut styles = defaults("");
-    for n in 0..4078 {
+    for n in 0..4092 {
         styles.push_str(&style("paragraph", &format!("S{n}"), None, ""));
     }
     styles.push_str(&style(
@@ -1412,4 +1412,74 @@ fn a_style_on_a_based_on_cycle_still_lies_over_the_defaults() {
         assert_eq!(format.after_spacing(), Pt(10.0));
         assert_eq!(tabs(&format), [tab(TabKind::Left, 350.0)]);
     }
+}
+
+#[test]
+fn a_replaced_level_keeps_the_start_and_restart_of_the_definitions() {
+    // MS-OI29500 §17.9.25(b), §17.9.10(b): Word ignores the start and restart of an
+    // override's own level.
+    let numbering = r#"<w:abstractNum w:abstractNumId="10"><w:lvl w:ilvl="0"><w:start w:val="3"/><w:lvlRestart w:val="0"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="10"/><w:lvlOverride w:ilvl="0"><w:lvl w:ilvl="0"><w:start w:val="40"/><w:lvlRestart w:val="1"/><w:lvlText w:val="(%1)"/></w:lvl></w:lvlOverride></w:num>"#;
+    let body = paragraph(
+        "",
+        r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>"#,
+    );
+    let document = build(&body, &defaults(""), Some(numbering));
+    let format = &formats(&document)[0];
+    let list = format.list().unwrap();
+    let level = list.level(&document).unwrap();
+    assert_eq!(level.text(), Some("(%1)"));
+    assert_eq!((level.start(), level.restart()), (Some(3), Some(0)));
+    assert_eq!(list.start(), 3);
+}
+
+#[test]
+fn a_numbering_style_naming_instance_0_leads_nowhere() {
+    // Instance 0 is no list (ECMA-376 §17.9.18), even when a w:num has that id: a
+    // definition linked to a numbering style that names it has no levels.
+    let numbering = [
+        definition(30, ""),
+        r#"<w:num w:numId="0"><w:abstractNumId w:val="30"/></w:num>"#.to_owned(),
+        r#"<w:abstractNum w:abstractNumId="20"><w:numStyleLink w:val="Zero"/></w:abstractNum>"#
+            .to_owned(),
+        r#"<w:num w:numId="4"><w:abstractNumId w:val="20"/></w:num>"#.to_owned(),
+    ]
+    .concat();
+    let styles = [
+        defaults(""),
+        style(
+            "numbering",
+            "Zero",
+            None,
+            r#"<w:numPr><w:numId w:val="0"/></w:numPr>"#,
+        ),
+    ]
+    .concat();
+    let body = paragraph(
+        "",
+        r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="4"/></w:numPr>"#,
+    );
+    let document = build(&body, &styles, Some(&numbering));
+    let format = &formats(&document)[0];
+    let list = format.list().unwrap();
+    assert_eq!((list.definition(), list.level(&document)), (None, None));
+    assert_eq!(format.start_indent(), Pt(0.0));
+}
+
+#[test]
+fn takes_the_first_level_that_names_the_style() {
+    // Two levels of one definition name the style in w:pStyle: the lower one is taken,
+    // a choice no source settles (pending a rule document).
+    let numbering = r#"<w:abstractNum w:abstractNumId="10"><w:lvl w:ilvl="1"><w:pStyle w:val="Item"/></w:lvl><w:lvl w:ilvl="4"><w:pStyle w:val="Item"/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num>"#;
+    let styles = [
+        defaults(""),
+        style(
+            "paragraph",
+            "Item",
+            None,
+            r#"<w:numPr><w:numId w:val="1"/></w:numPr>"#,
+        ),
+    ]
+    .concat();
+    let format = &formats(&build(&paragraph("Item", ""), &styles, Some(numbering)))[0];
+    assert_eq!(format.list().unwrap().level_number(), 1);
 }

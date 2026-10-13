@@ -195,6 +195,9 @@ impl Formats<'_> {
             }
             current = style_index(document, link, StyleKind::Numbering)
                 .and_then(|index| self.numbering_style_instance(index))
+                // Instance 0 is no list (ECMA-376 §17.9.18), even when a `w:num` has
+                // that id.
+                .filter(|&instance| instance != 0)
                 .and_then(|instance| numbering.instance(instance))
                 .and_then(|instance| instance.definition_id());
         };
