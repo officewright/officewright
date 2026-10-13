@@ -28,9 +28,12 @@
 #![forbid(unsafe_code)]
 
 mod error;
+#[cfg(feature = "fuzzing")]
+pub mod fuzzing;
 #[cfg_attr(not(feature = "unstable-ir"), doc(hidden))]
 pub mod ir;
 mod report;
+mod shape;
 
 pub use error::{Error, Result};
 pub use report::{LayoutReport, Location, ReportEntry, ReportKind};

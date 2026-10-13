@@ -44,7 +44,9 @@ crates/
                         by the OOXML readers; ZIP and XML are our own code, DEFLATE is miniz_oxide
   officewright-layout   page layout engine (shaping, text flow, line breaking, tables) — the core of DOCX→PDF;
                         its input is the layout IR (module `ir`), which the format crates build: public,
-                        but exempt from semver until 1.0 and hidden in the docs unless feature `unstable-ir`
+                        but exempt from semver until 1.0 and hidden in the docs unless feature `unstable-ir`;
+                        shapes with HarfRust behind a private module; feature `fuzzing` opens entry points
+                        for the fuzz targets, examples and font tests, which are not API
   officewright-doc      DOC/DOCX/RTF          (counterpart of Spire.Doc)
   officewright-pdf      PDF read/write        (counterpart of Spire.PDF)
   officewright-xls      XLS/XLSX              (counterpart of Spire.XLS)
@@ -247,7 +249,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 cargo test --workspace --all-features
 cargo fmt --check and cargo clippy -D warnings on the fuzz/ workspace (Linux/macOS; cargo-fuzz does not run on Windows)
 cargo deny check && cargo machete
-cargo package --list -p officewright-pdf, -p officewright-font: no third-party data in the published crates
+cargo package --list -p officewright-pdf, -font, -layout, -cli: no third-party data in the published crates
 typos && taplo fmt --check && shellcheck scripts/*.sh .githooks/pre-commit && actionlint
 tests/corpus-tools (Python unittest): committed rule documents equal make-rule-docs.py output; corpus-import.py refusals
 tests/corpus-tools/poppler (Linux, macOS): fonts corpus-import.py embeds are what poppler draws
