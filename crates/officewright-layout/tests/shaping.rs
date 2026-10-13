@@ -6,7 +6,7 @@
 use std::error::Error;
 
 use officewright_font::FontFace;
-use officewright_layout::fuzzing::{Shaped, check_shaping, shape};
+use officewright_layout::fuzzing::{Settings, Shaped, check_shaping, shape};
 use officewright_layout::ir::Ligatures;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -29,6 +29,10 @@ fn noto_sans() -> TestResult<FontFace> {
     font("noto/NotoSans-Regular.otf")
 }
 
+fn ids(shaped: &Shaped) -> Vec<u16> {
+    shaped.glyphs().iter().map(|glyph| glyph.id()).collect()
+}
+
 fn clusters(shaped: &Shaped) -> Vec<usize> {
     shaped
         .glyphs()
@@ -45,6 +49,10 @@ fn total(shaped: &Shaped) -> i64 {
         .sum()
 }
 
+fn with_ligatures(change: fn(Ligatures) -> Ligatures) -> Settings {
+    Settings::new().with_ligatures(change(Ligatures::default()))
+}
+
 /// The texts the `shape_font` fuzz target shapes, so the fonts here are known to pass.
 const TEXTS: &[&str] = &[
     "office AVATAR Wave To fi fl ffi",
@@ -58,91 +66,137 @@ const TEXTS: &[&str] = &[
 ];
 
 #[test]
-fn ligatures_join_letters_only_when_asked() -> TestResult {
+fn standard_ligatures_join_letters_only_when_asked() -> TestResult {
     let face = carlito()?;
-    let plain = shape(&face, "office", false, Ligatures::default(), None);
+    let plain = shape(&face, "office", &Settings::new());
     assert_eq!(clusters(&plain), [0, 1, 2, 3, 4, 5]);
 
-    let joined = shape(
-        &face,
-        "office",
-        false,
-        Ligatures::default().with_standard(true),
-        None,
-    );
+    let joined = shape(&face, "office", &with_ligatures(|l| l.with_standard(true)));
     // Carlito joins "ffi" into one glyph, which stands for the bytes 1 to 3.
     assert_eq!(clusters(&joined), [0, 1, 4, 5]);
     assert!(!joined.is_nominal());
-    // Contextual alternates alone do not join the letters.
+    // Its "ffi" is a standard ligature (`liga`), not a contextual one (`clig`).
     let contextual = shape(
         &face,
         "office",
-        false,
-        Ligatures::default().with_contextual(true),
-        None,
+        &with_ligatures(|l| l.with_contextual(true)),
     );
     assert_eq!(clusters(&contextual), [0, 1, 2, 3, 4, 5]);
     Ok(())
 }
 
 #[test]
+fn discretionary_ligatures_join_letters_only_when_asked() -> TestResult {
+    let face = carlito()?;
+    let plain = shape(&face, "st ct", &Settings::new());
+    assert_eq!(clusters(&plain), [0, 1, 2, 3, 4]);
+    // Carlito has discretionary ligatures for "st" and "ct".
+    let joined = shape(
+        &face,
+        "st ct",
+        &with_ligatures(|l| l.with_discretional(true)),
+    );
+    assert_eq!(clusters(&joined), [0, 2, 3]);
+    Ok(())
+}
+
+#[test]
 fn kerning_applies_only_when_asked() -> TestResult {
     for face in [liberation_sans()?, noto_sans()?] {
-        let plain = shape(&face, "AVATAR", false, Ligatures::default(), None);
-        // Without kerning, every glyph moves the pen by its advance width.
+        let family = face.names().family().unwrap_or("?").to_owned();
+        let plain = shape(&face, "AVATAR", &Settings::new());
+        // Without kerning, every glyph moves the pen by its advance width, and the text
+        // may break anywhere without being shaped again.
         for glyph in plain.glyphs() {
             let advance = face.advance_width(glyph.id().into()).map(i32::from);
-            assert_eq!(Some(glyph.x_advance()), advance);
+            assert_eq!(Some(glyph.x_advance()), advance, "{family}");
+            assert!(!glyph.unsafe_to_break(), "{family}");
         }
-        let kerned = shape(&face, "AVATAR", true, Ligatures::default(), None);
-        assert!(
-            total(&kerned) < total(&plain),
-            "{}",
-            face.names().family().unwrap_or("?")
-        );
+        let kerned = shape(&face, "AVATAR", &Settings::new().with_kerning(true));
+        assert!(total(&kerned) < total(&plain), "{family}");
         assert_eq!(clusters(&kerned), clusters(&plain));
     }
+    // With kerning, a break between two kerned letters needs the run shaped again.
+    let kerned = shape(
+        &liberation_sans()?,
+        "AVATAR",
+        &Settings::new().with_kerning(true),
+    );
+    let flags: Vec<bool> = kerned
+        .glyphs()
+        .iter()
+        .map(|glyph| glyph.unsafe_to_break())
+        .collect();
+    assert_eq!(flags, [false, true, true, true, true, false]);
     Ok(())
 }
 
 #[test]
 fn clusters_are_byte_offsets_in_the_text() -> TestResult {
-    let shaped = shape(
-        &liberation_sans()?,
-        "Жук ёж",
-        false,
-        Ligatures::default(),
-        None,
-    );
+    let shaped = shape(&liberation_sans()?, "Жук ёж", &Settings::new());
     assert_eq!(clusters(&shaped), [0, 2, 4, 6, 7, 9]);
-    assert!(shaped.glyphs().iter().all(|glyph| glyph.id() != 0));
+    assert!(ids(&shaped).iter().all(|id| *id != 0));
     Ok(())
 }
 
 #[test]
 fn a_letter_with_a_combining_accent_takes_the_composed_glyph() -> TestResult {
     let face = noto_sans()?;
-    let composed = shape(&face, "\u{E9}", false, Ligatures::default(), None);
-    let decomposed = shape(&face, "e\u{301}", false, Ligatures::default(), None);
-    assert_eq!(decomposed.glyphs().len(), 1);
-    assert_eq!(decomposed.glyphs()[0].id(), composed.glyphs()[0].id());
+    let composed = shape(&face, "\u{E9}", &Settings::new());
+    let decomposed = shape(&face, "e\u{301}", &Settings::new());
+    assert_eq!(ids(&decomposed), ids(&composed));
     assert_eq!(clusters(&decomposed), [0]);
     Ok(())
 }
 
 #[test]
-fn a_character_the_face_lacks_takes_the_missing_glyph() -> TestResult {
-    let shaped = shape(
-        &liberation_sans()?,
-        "a中b",
-        false,
-        Ligatures::default(),
-        None,
+fn an_accent_without_a_composed_glyph_is_placed_over_its_letter() -> TestResult {
+    // Liberation Sans has no "x" with an acute: the accent is a glyph of its own, in the
+    // letter's cluster, that takes no room and sits where the font's marks put it.
+    let shaped = shape(&liberation_sans()?, "x\u{301}", &Settings::new());
+    let glyphs = shaped.glyphs();
+    assert_eq!(clusters(&shaped), [0, 0]);
+    let accent = glyphs.get(1).ok_or("no accent glyph")?;
+    assert_eq!(accent.x_advance(), 0);
+    assert_eq!((accent.x_offset(), accent.y_offset()), (-249, -340));
+    Ok(())
+}
+
+#[test]
+fn the_language_chooses_the_forms_of_letters() -> TestResult {
+    let face = noto_sans()?;
+    // Romanian writes ş and ţ with a comma below, which Noto Sans has as `locl` forms
+    // for Romanian in the Latin script.
+    let plain = shape(&face, "\u{15F}\u{163}", &Settings::new());
+    let romanian = shape(
+        &face,
+        "\u{15F}\u{163}",
+        &Settings::new().with_language("ro"),
     );
-    let ids: Vec<u16> = shaped.glyphs().iter().map(|glyph| glyph.id()).collect();
+    assert_ne!(ids(&plain), ids(&romanian));
+    let latin = shape(
+        &face,
+        "\u{15F}\u{163}",
+        &Settings::new().with_language("ro").with_script("Latn"),
+    );
+    assert_eq!(ids(&latin), ids(&romanian));
+    // In a script whose language systems lack Romanian, the forms stay the plain ones.
+    let cyrillic = shape(
+        &face,
+        "\u{15F}\u{163}",
+        &Settings::new().with_language("ro").with_script("Cyrl"),
+    );
+    assert_eq!(ids(&cyrillic), ids(&plain));
+    Ok(())
+}
+
+#[test]
+fn a_character_the_face_lacks_takes_the_missing_glyph() -> TestResult {
+    let shaped = shape(&liberation_sans()?, "a中b", &Settings::new());
+    let ids = ids(&shaped);
     assert_eq!(ids.len(), 3);
-    assert_eq!(ids[1], 0);
-    assert!(ids[0] != 0 && ids[2] != 0);
+    assert_eq!(ids.get(1), Some(&0));
+    assert!(ids.first() != Some(&0) && ids.get(2) != Some(&0));
     assert_eq!(clusters(&shaped), [0, 1, 4]);
     assert_eq!(shaped.replaced_glyphs(), 0);
     Ok(())

@@ -63,6 +63,10 @@ ir_struct! {
             check rules::non_negative_if_set, clamp rules::kerning;
         /// The ligatures the text uses.
         copy ligatures: Ligatures = Ligatures::default() => with_ligatures;
+        /// Whether the text uses the font's contextual alternates (`w14:cntxtAlts` of
+        /// [MS-DOCX]): forms of letters chosen by their neighbours. Off when nothing sets
+        /// it.
+        copy contextual_alternates: bool = false => with_contextual_alternates;
         /// The highlight colour behind the text.
         copy highlight: Option<Color> = None => with_highlight;
         /// The shading behind the text.
@@ -220,13 +224,13 @@ ir_struct! {
     /// a document does not say.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct Ligatures {
-        /// Standard ligatures, such as fi.
+        /// Standard ligatures, such as fi (`liga`).
         copy standard: bool = false => with_standard;
-        /// Contextual alternates.
+        /// Contextual ligatures (the OpenType feature `clig`).
         copy contextual: bool = false => with_contextual;
-        /// Historical ligatures.
+        /// Historical ligatures (`hlig`).
         copy historical: bool = false => with_historical;
-        /// Discretionary ligatures.
+        /// Discretionary ligatures (`dlig`).
         copy discretional: bool = false => with_discretional;
     }
 }
