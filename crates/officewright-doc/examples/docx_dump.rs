@@ -6,7 +6,8 @@
 //! cargo run --release -p officewright-doc --example docx_dump -- --summary FILE.docx...
 //! ```
 //!
-//! With one file it prints the sections, their page setup and their blocks. With
+//! With one file it prints the sections, their page setup, columns and headers and
+//! footers, and their blocks. With
 //! `--runs` it also prints:
 //! - the style, alignment and list of each paragraph;
 //! - every run, with the properties written on it;
@@ -62,9 +63,20 @@ fn dump(document: &Document, runs: bool) {
             .page_size()
             .map(|size| format!("{} × {} pt", size.width().0, size.height().0));
         println!(
-            "section {n}: page {}, start {:?}",
+            "section {n}: page {}, start {:?}, {} columns, {} headers, {} footers{}",
             size.as_deref().unwrap_or("not given"),
-            properties.start()
+            properties.start(),
+            properties
+                .columns()
+                .and_then(|columns| columns.count())
+                .unwrap_or(1),
+            properties.headers().len(),
+            properties.footers().len(),
+            if properties.title_page() == Some(true) {
+                ", title page"
+            } else {
+                ""
+            }
         );
         for block in section.blocks() {
             print_block(block, 1, runs);

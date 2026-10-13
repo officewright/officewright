@@ -41,17 +41,21 @@ mod units;
 pub use diagnostic::{Diagnostic, DiagnosticKind};
 pub use error::{Error, Limit, Result};
 pub use model::{
-    Block, Border, BorderStyle, Break, BreakClear, BreakKind, CellBorders, CellMargins, CellMerge,
-    Color, ColorValue, Conformance, ContentControl, Document, DocumentKind, FieldCharKind,
-    FontHint, HeightRule, Highlight, HorizontalAlignment, Hyperlink, Indentation, Inline,
-    Justification, Language, LineSpacing, NumberingReference, Opaque, Orientation, PageMargins,
-    Paragraph, ParagraphBorders, ParagraphId, ParagraphProperties, PositionAnchor, Revision,
-    RevisionKind, RowHeight, Run, RunContent, RunFonts, RunProperties, Section, SectionProperties,
-    SectionStart, Shading, ShadingPattern, SimpleField, Spacing, Style, StyleKind, Styles, TabKind,
-    TabLeader, TabStop, Table, TableBorders, TableCell, TableCellProperties, TableId,
-    TableJustification, TableLayout, TableLook, TableOverlap, TablePosition, TableProperties,
-    TableRow, TableRowProperties, TableWidth, TextDirection, ThemeColor, ThemeFont, Underline,
-    UnderlineStyle, VerticalAlignment, VerticalJustification, VerticalPosition,
+    ArtBorder, Block, Border, BorderStyle, Break, BreakClear, BreakKind, CellBorders, CellMargins,
+    CellMerge, ChapterSeparator, Color, ColorValue, Column, Columns, Conformance, ContentControl,
+    Document, DocumentGrid, DocumentGridKind, DocumentKind, FieldCharKind, FontHint,
+    HeaderFooterKind, HeaderFooterReference, HeightRule, Highlight, HorizontalAlignment, Hyperlink,
+    Indentation, Inline, Justification, Language, LineNumberRestart, LineNumbering, LineSpacing,
+    NotePosition, NoteProperties, NoteRestart, NumberFormat, NumberingReference, Opaque,
+    Orientation, PageBorderDisplay, PageBorderOffset, PageBorderZOrder, PageBorders, PageMargins,
+    PageNumbering, Paragraph, ParagraphBorders, ParagraphId, ParagraphProperties, PositionAnchor,
+    Revision, RevisionKind, RowHeight, Run, RunContent, RunFonts, RunProperties, Section,
+    SectionProperties, SectionStart, Shading, ShadingPattern, SimpleField, Spacing, Style,
+    StyleKind, Styles, TabKind, TabLeader, TabStop, Table, TableBorders, TableCell,
+    TableCellProperties, TableId, TableJustification, TableLayout, TableLook, TableOverlap,
+    TablePosition, TableProperties, TableRow, TableRowProperties, TableWidth, TextDirection,
+    ThemeColor, ThemeFont, Underline, UnderlineStyle, VerticalAlignment, VerticalJustification,
+    VerticalPosition,
 };
 pub use options::{Limits, LoadOptions};
 

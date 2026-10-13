@@ -2,7 +2,7 @@
 //! read from.
 
 pub(crate) mod properties;
-mod section;
+pub(crate) mod section;
 pub(crate) mod styles;
 pub(crate) mod table_properties;
 mod text;
@@ -14,12 +14,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use officewright_core::Pt;
 
 pub use properties::{
-    Border, BorderStyle, Color, ColorValue, FontHint, Highlight, Indentation, Justification,
-    Language, LineSpacing, NumberingReference, ParagraphBorders, ParagraphProperties, RunFonts,
-    RunProperties, Shading, ShadingPattern, Spacing, TabKind, TabLeader, TabStop, ThemeColor,
-    ThemeFont, Underline, UnderlineStyle, VerticalPosition,
+    ArtBorder, Border, BorderStyle, Color, ColorValue, FontHint, Highlight, Indentation,
+    Justification, Language, LineSpacing, NumberFormat, NumberingReference, ParagraphBorders,
+    ParagraphProperties, RunFonts, RunProperties, Shading, ShadingPattern, Spacing, TabKind,
+    TabLeader, TabStop, ThemeColor, ThemeFont, Underline, UnderlineStyle, VerticalPosition,
 };
-pub use section::{Orientation, PageMargins, SectionProperties, SectionStart};
+pub use section::{
+    ChapterSeparator, Column, Columns, DocumentGrid, DocumentGridKind, HeaderFooterKind,
+    HeaderFooterReference, LineNumberRestart, LineNumbering, NotePosition, NoteProperties,
+    NoteRestart, Orientation, PageBorderDisplay, PageBorderOffset, PageBorderZOrder, PageBorders,
+    PageMargins, PageNumbering, SectionProperties, SectionStart,
+};
 pub use styles::{Style, StyleKind, Styles};
 pub use table_properties::{
     CellBorders, CellMargins, CellMerge, HeightRule, HorizontalAlignment, PositionAnchor,
@@ -79,6 +84,8 @@ pub struct Document {
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Names {
     pub(crate) w: [Option<xml::Sym>; 2],
+    /// The relationships namespace of attributes such as `r:id`.
+    pub(crate) r: [Option<xml::Sym>; 2],
     pub(crate) mc: Option<xml::Sym>,
 }
 

@@ -1892,3 +1892,221 @@ fn reads_strict_text_directions_as_their_transitional_equivalents() {
         assert_eq!(cell.text_direction(), Some(direction), "{written}");
     }
 }
+
+#[test]
+fn reads_the_full_properties_of_a_section() {
+    let document = open(
+        r#"<w:p/><w:sectPr><w:headerReference w:type="default" r:id="rId8"/><w:headerReference w:type="first" r:id="rId9"/><w:footerReference w:type="even" r:id="rId10"/><w:footnotePr><w:pos w:val="beneathText"/><w:numFmt w:val="lowerRoman"/><w:numStart w:val="1"/><w:numRestart w:val="eachPage"/></w:footnotePr><w:endnotePr><w:pos w:val="sectEnd"/><w:numFmt w:val="upperLetter"/></w:endnotePr><w:type w:val="continuous"/><w:pgSz w:w="11906" w:h="16838" w:orient="portrait" w:code="9"/><w:pgMar w:top="1134" w:right="850" w:bottom="1134" w:left="1701" w:header="708" w:footer="708" w:gutter="0"/><w:pgBorders w:zOrder="back" w:display="firstPage" w:offsetFrom="page"><w:top w:val="single" w:sz="4" w:space="24" w:color="auto"/><w:left w:val="apples" w:sz="20" w:space="24"/></w:pgBorders><w:lnNumType w:countBy="5" w:start="0" w:distance="360" w:restart="newSection"/><w:pgNumType w:fmt="upperRoman" w:start="3" w:chapStyle="1" w:chapSep="emDash"/><w:cols w:num="2" w:space="708" w:equalWidth="0" w:sep="1"><w:col w:w="3000" w:space="720"/><w:col w:w="5000"/></w:cols><w:formProt w:val="0"/><w:vAlign w:val="center"/><w:noEndnote/><w:titlePg/><w:textDirection w:val="tbRl"/><w:bidi/><w:rtlGutter w:val="0"/><w:docGrid w:type="lines" w:linePitch="360" w:charSpace="4096"/></w:sectPr>"#,
+    );
+    assert!(messages(&document).is_empty(), "{:?}", messages(&document));
+    let section = document.sections().next().unwrap();
+    let properties = section.properties();
+    let headers: Vec<(Option<HeaderFooterKind>, &str)> = properties
+        .headers()
+        .iter()
+        .map(|reference| (reference.kind(), reference.relationship_id()))
+        .collect();
+    assert_eq!(
+        headers,
+        [
+            (Some(HeaderFooterKind::Default), "rId8"),
+            (Some(HeaderFooterKind::First), "rId9")
+        ]
+    );
+    let footer = &properties.footers()[0];
+    assert_eq!(
+        (footer.kind(), footer.relationship_id()),
+        (Some(HeaderFooterKind::Even), "rId10")
+    );
+    let footnotes = properties.footnotes().unwrap();
+    assert_eq!(footnotes.position(), Some(NotePosition::BeneathText));
+    assert_eq!(footnotes.number_format(), Some(NumberFormat::LowerRoman));
+    assert_eq!(
+        (footnotes.start(), footnotes.restart()),
+        (Some(1), Some(NoteRestart::EachPage))
+    );
+    let endnotes = properties.endnotes().unwrap();
+    assert_eq!(endnotes.position(), Some(NotePosition::SectionEnd));
+    assert_eq!(endnotes.number_format(), Some(NumberFormat::UpperLetter));
+    assert_eq!(properties.start(), Some(SectionStart::Continuous));
+    assert_eq!(properties.paper_code(), Some(9));
+    assert_eq!(properties.margins().left(), Some(Pt(85.05)));
+    let borders = properties.page_borders().unwrap();
+    assert_eq!(borders.z_order(), Some(PageBorderZOrder::Back));
+    assert_eq!(borders.display(), Some(PageBorderDisplay::FirstPage));
+    assert_eq!(borders.offset_from(), Some(PageBorderOffset::Page));
+    let top = borders.top().unwrap();
+    assert_eq!(
+        (top.style(), top.art(), top.width()),
+        (Some(BorderStyle::Single), None, Some(Pt(0.5)))
+    );
+    // An art border has no line style, and its width is in points.
+    let left = borders.left().unwrap();
+    assert_eq!(left.style(), None);
+    assert_eq!(left.art().map(ArtBorder::name), Some("apples"));
+    assert_eq!(left.width(), Some(Pt(20.0)));
+    assert_eq!((borders.bottom(), borders.right()), (None, None));
+    let lines = properties.line_numbering().unwrap();
+    assert_eq!((lines.count_by(), lines.start()), (Some(5), Some(0)));
+    assert_eq!(lines.distance(), Some(Pt(18.0)));
+    assert_eq!(lines.restart(), Some(LineNumberRestart::NewSection));
+    let pages = properties.page_numbering().unwrap();
+    assert_eq!(pages.format(), Some(NumberFormat::UpperRoman));
+    assert_eq!((pages.start(), pages.chapter_style()), (Some(3), Some(1)));
+    assert_eq!(pages.chapter_separator(), Some(ChapterSeparator::EmDash));
+    let columns = properties.columns().unwrap();
+    assert_eq!(
+        (columns.count(), columns.space()),
+        (Some(2), Some(Pt(35.4)))
+    );
+    assert_eq!(
+        (columns.equal_width(), columns.separator()),
+        (Some(false), Some(true))
+    );
+    let widths: Vec<(Option<Pt>, Option<Pt>)> = columns
+        .columns()
+        .iter()
+        .map(|column| (column.width(), column.space()))
+        .collect();
+    assert_eq!(
+        widths,
+        [(Some(Pt(150.0)), Some(Pt(36.0))), (Some(Pt(250.0)), None)]
+    );
+    assert_eq!(properties.form_protection(), Some(false));
+    assert_eq!(
+        properties.vertical_justification(),
+        Some(VerticalJustification::Center)
+    );
+    assert_eq!(properties.no_endnote(), Some(true));
+    assert_eq!(properties.title_page(), Some(true));
+    assert_eq!(
+        properties.text_direction(),
+        Some(TextDirection::TopToBottomRightToLeft)
+    );
+    assert_eq!(properties.right_to_left(), Some(true));
+    assert_eq!(properties.right_to_left_gutter(), Some(false));
+    let grid = properties.grid().unwrap();
+    assert_eq!(grid.kind(), Some(DocumentGridKind::Lines));
+    assert_eq!(
+        (grid.line_pitch(), grid.character_space()),
+        (Some(Pt(18.0)), Some(4096))
+    );
+}
+
+#[test]
+fn reads_invalid_section_values_as_not_set() {
+    let document = open(
+        r#"<w:p/><w:sectPr><w:headerReference w:type="odd" r:id="rId1"/><w:footerReference w:type="default"/><w:headerReference w:type="first"/><w:endnotePr><w:pos w:val="pageBottom"/></w:endnotePr><w:footnotePr><w:numRestart w:val="never"/></w:footnotePr><w:type/><w:pgSz w:w="12240" w:h="15840" w:code="letter"/><w:pgBorders w:zOrder="middle"><w:top w:val="lemons" w:sz="4"/></w:pgBorders><w:pgNumType w:fmt="roman"/><w:cols w:num="two" w:sep="maybe"><w:col w:w="-5"/></w:cols><w:titlePg w:val="yes"/><w:docGrid w:type="squares" w:linePitch="18pt"/></w:sectPr>"#,
+    );
+    let properties = document.sections().next().unwrap().properties();
+    // A reference without a valid kind keeps its relationship; one without r:id is left
+    // out.
+    assert_eq!(properties.headers().len(), 1);
+    assert_eq!(properties.headers()[0].kind(), None);
+    assert!(properties.footers().is_empty());
+    // Endnotes go to the end of the section or the document only.
+    assert_eq!(properties.endnotes().unwrap().position(), None);
+    assert_eq!(properties.footnotes().unwrap().restart(), None);
+    // A w:type without w:val is a break to the next page (§17.6.22).
+    assert_eq!(properties.start(), Some(SectionStart::NextPage));
+    assert_eq!(properties.paper_code(), None);
+    assert_eq!(properties.page_size().unwrap().width(), Pt(612.0));
+    let borders = properties.page_borders().unwrap();
+    assert_eq!(borders.z_order(), None);
+    let top = borders.top().unwrap();
+    assert_eq!((top.style(), top.art()), (None, None));
+    assert_eq!(properties.page_numbering().unwrap().format(), None);
+    let columns = properties.columns().unwrap();
+    assert_eq!((columns.count(), columns.separator()), (None, None));
+    assert_eq!(columns.columns()[0].width(), None);
+    assert_eq!(properties.title_page(), None);
+    let grid = properties.grid().unwrap();
+    assert_eq!((grid.kind(), grid.line_pitch()), (None, None));
+    let messages = messages(&document);
+    assert_eq!(messages.len(), 14, "{messages:?}");
+    assert!(
+        messages[0].ends_with(r#": w:headerReference w:type="odd" is not valid; it is ignored"#)
+    );
+    assert!(messages[1].ends_with(r#": w:pos w:val="pageBottom" is not valid; it is ignored"#));
+    assert!(messages[13].ends_with(": 2 header or footer references without r:id are ignored"));
+}
+
+#[test]
+fn reads_art_borders_without_a_diagnostic() {
+    let document = open(
+        r#"<w:p><w:pPr><w:pBdr><w:bottom w:val="zigZag" w:sz="12" w:space="1"/></w:pBdr></w:pPr></w:p>"#,
+    );
+    assert!(messages(&document).is_empty(), "{:?}", messages(&document));
+    let properties = first_paragraph(&document).properties();
+    let bottom = properties.borders().unwrap().bottom().unwrap();
+    assert_eq!(bottom.art().map(ArtBorder::name), Some("zigZag"));
+    assert_eq!((bottom.style(), bottom.width()), (None, Some(Pt(12.0))));
+}
+
+#[test]
+fn reads_strict_header_references() {
+    let xml = r#"<w:document xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main" xmlns:r="http://purl.oclc.org/ooxml/officeDocument/relationships" conformance="strict"><w:body><w:p/><w:sectPr><w:headerReference w:type="default" r:id="rId4"/><w:cols w:space="0.5in"/></w:sectPr></w:body></w:document>"#;
+    let document = Document::from_bytes(package(DOCUMENT, xml, &[])).unwrap();
+    assert!(messages(&document).is_empty(), "{:?}", messages(&document));
+    let properties = document.sections().next().unwrap().properties();
+    assert_eq!(properties.headers()[0].relationship_id(), "rId4");
+    assert_eq!(properties.columns().unwrap().space(), Some(Pt(36.0)));
+}
+
+#[test]
+fn reads_section_properties_through_the_fallback() {
+    // From the review of #43.
+    let document = open(
+        r#"<w:p/><w:sectPr><mc:AlternateContent><mc:Choice Requires="w14"><w:pgSz w:w="1" w:h="1"/><w:titlePg/></mc:Choice><mc:Fallback><w:pgSz w:w="12240" w:h="15840"/><w:headerReference w:type="default" r:id="rId8"/></mc:Fallback></mc:AlternateContent><w:cols w:num="3"/></w:sectPr>"#,
+    );
+    assert!(messages(&document).is_empty(), "{:?}", messages(&document));
+    let properties = document.sections().next().unwrap().properties();
+    assert_eq!(properties.page_size().unwrap().width(), Pt(612.0));
+    assert_eq!(properties.title_page(), None);
+    assert_eq!(properties.headers().len(), 1);
+    assert_eq!(properties.columns().unwrap().count(), Some(3));
+}
+
+#[test]
+fn reads_a_custom_border_as_not_valid() {
+    // Word treats a file with ST_Border's custom as corrupt (MS-OI29500 §17.18.2(d)).
+    let document = open(
+        r#"<w:p/><w:sectPr><w:pgBorders><w:top w:val="custom" w:sz="4" r:id="rId9"/><w:left w:val="zigZagStitch" w:sz="8"/></w:pgBorders></w:sectPr>"#,
+    );
+    let borders = *document
+        .sections()
+        .next()
+        .unwrap()
+        .properties()
+        .page_borders()
+        .unwrap();
+    let top = borders.top().unwrap();
+    assert_eq!((top.style(), top.art()), (None, None));
+    let left = borders.left().unwrap();
+    assert_eq!(left.art().map(ArtBorder::name), Some("zigZagStitch"));
+    assert_eq!(
+        format!("{:?}", left.art().unwrap()),
+        r#"ArtBorder("zigZagStitch")"#
+    );
+    let messages = messages(&document);
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(messages[0].ends_with(r#": w:top w:val="custom" is not valid; it is ignored"#));
+}
+
+#[test]
+fn reports_repeated_section_properties() {
+    let document = open(
+        r#"<w:p/><w:sectPr><w:headerReference w:type="default" r:id="rId1"/><w:headerReference w:type="default" r:id="rId2"/><w:footerReference w:type="default" r:id="rId3"/><w:pgSz w:w="12240" w:h="15840"/><w:pgSz w:w="11906" w:h="16838"/><w:type w:val="continuous"/><w:type w:val="oddPage"/></w:sectPr>"#,
+    );
+    let properties = document.sections().next().unwrap().properties();
+    // The first of each counts; both references of one kind are kept.
+    assert_eq!(properties.page_size().unwrap().width(), Pt(612.0));
+    assert_eq!(properties.start(), Some(SectionStart::Continuous));
+    assert_eq!(properties.headers().len(), 2);
+    assert_eq!(properties.footers().len(), 1);
+    let messages = messages(&document);
+    assert_eq!(messages.len(), 3, "{messages:?}");
+    assert!(messages[0].ends_with(": a second w:headerReference of type default is kept"));
+    assert!(messages[1].ends_with(": a second w:pgSz is ignored"));
+    assert!(messages[2].ends_with(": a second w:type is ignored"));
+}
