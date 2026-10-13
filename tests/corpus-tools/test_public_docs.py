@@ -125,7 +125,7 @@ def package(**changes):
         "word/settings.xml": "<w:settings xmlns:w='w'><w:attachedTemplate r:id='rId1'/>"
         "<w:docVars><w:docVar w:name='owner' w:val='Jane Roe'/></w:docVars><w:zoom/></w:settings>",
         "word/_rels/settings.xml.rels": relationships(
-            (f"{REL}/attachedTemplate", "file:///C:/Users/jroe/Normal.dotm",
+            (f"{REL}/attachedTemplate", "file:///C:/Users/&lt;name&gt;/Normal.dotm",
              ' TargetMode="External"')
         ),
         "word/header1.xml": "<w:hdr xmlns:w='w'/>",

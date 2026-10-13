@@ -52,7 +52,7 @@ TABLE_TITLE = "## Public and openly licensed documents (`business/`)"
 
 EMAIL = re.compile(rb"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 EMAIL_TEXT = re.compile(EMAIL.pattern.decode())
-# A path into a user profile: C:\Users\<name>, /Users/<name>, file:///C:/Users/...
+# A path into a user profile: C:\Users\<name>, /Users/<name>, file:///C:/Users/<name>/...
 PROFILE_PATH = re.compile(rb"(?i)(\\|/)(users|documents and settings)(\\|/)")
 # Addresses that name no person: fictional domains.
 FICTIONAL = re.compile(rb"@example\.(com|gov|org)$")
