@@ -48,12 +48,14 @@ pub struct Formats<'a> {
     /// The parsed levels of each list definition used so far, which its instances
     /// share.
     definitions: HashMap<i64, Arc<paragraph::DefinitionLevels>>,
+    /// What each level of a definition that paragraphs use gives to them.
+    level_layers: HashMap<(i64, usize), Option<Arc<paragraph::ListLayer>>>,
     /// Each list instance's levels that paragraphs use, with the instance's overrides,
     /// and the numbers they start from.
     instance_levels: HashMap<(i64, usize), paragraph::InstanceLevel>,
     /// The defaults and a paragraph style with a list level laid over them, by the
-    /// style, the instance and the level; at most [`MAX_COMBINATIONS`] at a time.
-    combinations: HashMap<(Option<usize>, i64, usize), Arc<ParagraphLevel>>,
+    /// style and where the level comes from; at most [`MAX_COMBINATIONS`] at a time.
+    combinations: HashMap<(Option<usize>, paragraph::LayerSource), Arc<ParagraphLevel>>,
     /// How much work the caches saved, for tests.
     #[cfg(test)]
     work: Work,
@@ -69,6 +71,8 @@ pub(crate) struct Work {
     pub(crate) numbering_styles: usize,
     /// Definitions whose levels were parsed.
     pub(crate) definitions: usize,
+    /// Levels of definitions parsed for what they give to paragraphs.
+    pub(crate) level_layers: usize,
     /// Levels of instances replaced by an override's level.
     pub(crate) replacements: usize,
     /// A style's level and a list level laid over each other.
@@ -88,6 +92,7 @@ impl<'a> Formats<'a> {
             links: HashMap::new(),
             numbering_styles: HashMap::new(),
             definitions: HashMap::new(),
+            level_layers: HashMap::new(),
             instance_levels: HashMap::new(),
             combinations: HashMap::new(),
             #[cfg(test)]

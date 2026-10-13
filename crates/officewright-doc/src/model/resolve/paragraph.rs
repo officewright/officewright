@@ -47,7 +47,7 @@ impl Formats<'_> {
 
         let (list, below_direct) = match self.list(&base, &direct, style) {
             Some((list, Some(layer))) => {
-                let combined = self.combination(style, &list, &base, &layer);
+                let combined = self.combination(style, &base, &layer);
                 (Some(list), combined)
             }
             Some((list, None)) => (Some(list), base),
@@ -71,17 +71,16 @@ impl Formats<'_> {
     }
 
     /// `base`, the defaults with the paragraph style at `style` laid over them, with the
-    /// layer of the list level `list` names laid over that. Kept for the next paragraph
-    /// of that style and level, as long as the cache has room: a combination costs a
-    /// merge of tab stops.
+    /// layer of a list level laid over that. Kept for the next paragraph of that style
+    /// and level, whichever instance of the definition it is in, as long as the cache
+    /// has room: a combination costs a merge of tab stops.
     fn combination(
         &mut self,
         style: Option<usize>,
-        list: &ListFormat,
         base: &ParagraphLevel,
-        layer: &ListLayer,
+        layer: &SourcedLayer,
     ) -> Arc<ParagraphLevel> {
-        let key = (style, list.instance, list.level_number);
+        let key = (style, layer.source);
         if let Some(combined) = self.combinations.get(&key) {
             return Arc::clone(combined);
         }
@@ -90,7 +89,7 @@ impl Formats<'_> {
             self.work.combinations += 1;
         }
         let mut combined = base.clone();
-        combined.overlay_list(layer);
+        combined.overlay_list(&layer.layer);
         combined.settle();
         let combined = Arc::new(combined);
         if self.combinations.len() >= MAX_COMBINATIONS {
@@ -111,7 +110,7 @@ impl Formats<'_> {
         base: &ParagraphLevel,
         direct: &ParagraphLevel,
         style: Option<usize>,
-    ) -> Option<(ListFormat, Option<Arc<ListLayer>>)> {
+    ) -> Option<(ListFormat, Option<SourcedLayer>)> {
         let instance = direct
             .list_instance
             .or(base.list_instance)
@@ -228,9 +227,10 @@ impl Formats<'_> {
         instance
     }
 
-    /// What the resolver needs of the levels of the definition `id`, worked out once and
-    /// shared by every instance that uses it. The levels are parsed once and dropped:
-    /// only what they give to paragraphs is kept.
+    /// The start of each level of the definition `id` and the style it names, worked
+    /// out once and shared by every instance that uses it. The levels are parsed and
+    /// dropped: what a level gives to paragraphs is kept only for the levels paragraphs
+    /// use ([`level_layer`](Self::level_layer)).
     fn definition_levels(&mut self, id: i64) -> Arc<DefinitionLevels> {
         if let Some(levels) = self.definitions.get(&id) {
             return Arc::clone(levels);
@@ -253,7 +253,6 @@ impl Formats<'_> {
                     style: level
                         .paragraph_style()
                         .and_then(|id| style_index(document, id, StyleKind::Paragraph)),
-                    layer: ListLayer::of(&level),
                 });
             }
         }
@@ -294,9 +293,19 @@ impl Formats<'_> {
                 {
                     self.work.replacements += 1;
                 }
-                ListLayer::of(replacement)
+                ListLayer::of(replacement).map(|layer| SourcedLayer {
+                    source: LayerSource::Override(instance, number),
+                    layer,
+                })
             }
-            None => base.and_then(|base| base.layer.clone()),
+            None if base.is_some() => found.definition.and_then(|definition| {
+                let layer = self.level_layer(definition, number)?;
+                Some(SourcedLayer {
+                    source: LayerSource::Definition(definition, number),
+                    layer,
+                })
+            }),
+            None => None,
         };
         let start = override_
             .as_ref()
@@ -306,6 +315,27 @@ impl Formats<'_> {
         self.instance_levels
             .insert((instance, number), (layer.clone(), start));
         (layer, start)
+    }
+
+    /// What level `number` of the definition `definition` gives to paragraphs, worked
+    /// out once per definition and level that a paragraph uses.
+    fn level_layer(&mut self, definition: i64, number: usize) -> Option<Arc<ListLayer>> {
+        if let Some(layer) = self.level_layers.get(&(definition, number)) {
+            return layer.clone();
+        }
+        #[cfg(test)]
+        {
+            self.work.level_layers += 1;
+        }
+        let layer = self
+            .document
+            .numbering()
+            .definition(definition)
+            .and_then(|definition| definition.level(number))
+            .and_then(|level| ListLayer::of(&level));
+        self.level_layers
+            .insert((definition, number), layer.clone());
+        layer
     }
 }
 
@@ -334,7 +364,25 @@ pub(crate) fn list_level(document: &Document, list: &ListFormat) -> Option<ListL
 
 /// What a level of a list instance gives to paragraphs, with the instance's override,
 /// and the number it starts from.
-pub(super) type InstanceLevel = (Option<Arc<ListLayer>>, i64);
+pub(super) type InstanceLevel = (Option<SourcedLayer>, i64);
+
+/// What a list level gives to paragraphs, and where it comes from.
+#[derive(Clone, Debug)]
+pub(super) struct SourcedLayer {
+    source: LayerSource,
+    layer: Arc<ListLayer>,
+}
+
+/// Where what a list level gives to paragraphs comes from: a level of a definition,
+/// which every instance of the definition without an override of that level shares, or
+/// the replacement in an instance's override of a level.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum LayerSource {
+    /// The definition and the level.
+    Definition(i64, usize),
+    /// The instance and the level.
+    Override(i64, usize),
+}
 
 /// What the resolver keeps of the levels of a list definition, 0 to 8.
 #[derive(Debug, Default)]
@@ -364,8 +412,6 @@ struct DefinitionLevel {
     start: Option<i64>,
     /// The index of the paragraph style its `w:pStyle` names.
     style: Option<usize>,
-    /// What it gives to paragraphs; none when it gives nothing.
-    layer: Option<Arc<ListLayer>>,
 }
 
 /// The definition a list instance uses, after a numbering style's link, and its levels.

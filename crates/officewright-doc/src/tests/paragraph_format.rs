@@ -615,6 +615,10 @@ fn instances_of_one_definition_share_its_levels() {
         .collect();
     assert_eq!(formats.work().definitions, 1);
     assert_eq!(formats.work().replacements, 1);
+    // The instances without an override share the definition's level, laid over the
+    // defaults once; the override's level gives nothing to lay.
+    assert_eq!(formats.work().level_layers, 1);
+    assert_eq!(formats.work().combinations, 1);
     let text = |format: &ParagraphFormat| format.list().unwrap().level(&document).unwrap().text;
     assert!(
         results[..2000]
@@ -1274,33 +1278,51 @@ fn a_clear_up_a_style_chain_removes_a_stop_of_the_defaults() {
 fn uses_only_the_styles_word_opens_a_document_with() {
     // Word does not open a document with more than 4,079 styles (MS-OI29500
     // §17.7.4.17(c)): the resolver takes the first 4,079 and leaves the rest out, as
-    // the styles of a paragraph and as bases.
+    // the styles of paragraphs, as bases and as the default.
     let mut styles = defaults("");
-    for n in 0..4079 {
+    for n in 0..4078 {
         styles.push_str(&style("paragraph", &format!("S{n}"), None, ""));
     }
     styles.push_str(&style(
         "paragraph",
-        "Beyond",
-        None,
-        r#"<w:jc w:val="center"/>"#,
+        "Last",
+        Some("Beyond"),
+        r#"<w:jc w:val="right"/>"#,
     ));
     styles.push_str(&style(
         "paragraph",
-        "S0Again",
-        Some("Beyond"),
-        r#"<w:ind w:left="720"/>"#,
+        "Beyond",
+        None,
+        r#"<w:jc w:val="center"/><w:ind w:left="720"/>"#,
     ));
+    styles.push_str(
+        r#"<w:style w:type="paragraph" w:default="1" w:styleId="LateDefault"><w:name w:val="LateDefault"/><w:pPr><w:jc w:val="both"/></w:pPr></w:style>"#,
+    );
     let body = [
-        paragraph("S4078", r#"<w:jc w:val="right"/>"#),
+        paragraph("Last", ""),
         paragraph("Beyond", ""),
+        paragraph("", ""),
     ]
     .concat();
     let formats = formats(&build(&body, &styles, None));
-    assert_eq!(formats[0].style(), Some("S4078"));
-    assert_eq!(formats[0].justification(), Justification::Right);
-    assert_eq!(formats[1].style(), None);
-    assert_eq!(formats[1].justification(), Justification::Start);
+    let found: Vec<_> = formats
+        .iter()
+        .map(|format| {
+            (
+                format.style(),
+                format.justification(),
+                format.start_indent(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        found,
+        [
+            (Some("Last"), Justification::Right, Pt(0.0)),
+            (None, Justification::Start, Pt(0.0)),
+            (None, Justification::Start, Pt(0.0)),
+        ]
+    );
 }
 
 #[test]
