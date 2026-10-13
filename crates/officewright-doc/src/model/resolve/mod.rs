@@ -1,0 +1,264 @@
+//! Resolving the formatting in effect (ECMA-376 Part 1, §17.7.2): the document defaults,
+//! the paragraph's style, numbering, the run's character style and direct formatting,
+//! combined as Word combines them.
+
+mod character;
+mod paragraph;
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use super::format::{CharacterFormat, ParagraphFormat};
+use super::styles::StyleKind;
+use super::views::{Paragraph, Run};
+use super::{Document, Kind, Node};
+
+use character::CharacterLevel;
+use paragraph::ParagraphLevel;
+
+/// Styles whose child elements Word ignores, `w:basedOn`, `w:pPr` and `w:rPr` among
+/// them (MS-OI29500 §17.7.4.17(a)).
+const IGNORED_STYLES: [&str; 3] = ["NoList", "DefaultParagraphFont", "TableNormal"];
+
+/// Resolves the formatting in effect of paragraphs, runs and paragraph marks, keeping
+/// what it has worked out about styles for the next ones: use one for a whole
+/// document. It borrows the document; threads that format at the same time each use
+/// their own.
+#[derive(Debug)]
+pub struct Formats<'a> {
+    document: &'a Document,
+    /// What each style gives to runs together with the styles it is based on.
+    characters: StyleLevels<CharacterLevel>,
+    /// What each paragraph style gives to paragraphs together with the styles it is
+    /// based on.
+    paragraphs: StyleLevels<ParagraphLevel>,
+    character_defaults: Option<Arc<CharacterLevel>>,
+    paragraph_defaults: Option<Arc<ParagraphLevel>>,
+    /// The index of the default paragraph style, once looked up.
+    default_paragraph_style: Option<Option<usize>>,
+    /// The levels of each list instance named so far.
+    lists: HashMap<i64, Option<Arc<paragraph::ListLevels>>>,
+}
+
+impl<'a> Formats<'a> {
+    pub(super) fn new(document: &'a Document) -> Self {
+        Self {
+            document,
+            characters: StyleLevels::default(),
+            paragraphs: StyleLevels::default(),
+            character_defaults: None,
+            paragraph_defaults: None,
+            default_paragraph_style: None,
+            lists: HashMap::new(),
+        }
+    }
+
+    /// The formatting of a paragraph in effect.
+    pub fn paragraph(&mut self, paragraph: Paragraph<'a>) -> ParagraphFormat {
+        if !std::ptr::eq(paragraph.document(), self.document) {
+            // A paragraph of another document takes that document's styles.
+            return Formats::new(paragraph.document()).paragraph(paragraph);
+        }
+        let style = self.paragraph_style(Some(paragraph.node()));
+        self.resolve_paragraph(style, &paragraph.properties())
+    }
+
+    /// The formatting of a run in effect.
+    pub fn run(&mut self, run: Run<'a>) -> CharacterFormat {
+        if !std::ptr::eq(run.document(), self.document) {
+            return Formats::new(run.document()).run(run);
+        }
+        let direct = run.properties();
+        let paragraph = self.paragraph_style(paragraph_of(self.document, run.node()));
+        self.resolve_run(paragraph, &direct)
+    }
+
+    /// The formatting of a paragraph's mark in effect, which decides, among other
+    /// things, the height of an empty paragraph.
+    pub fn paragraph_mark(&mut self, paragraph: Paragraph<'a>) -> CharacterFormat {
+        if !std::ptr::eq(paragraph.document(), self.document) {
+            return Formats::new(paragraph.document()).paragraph_mark(paragraph);
+        }
+        let direct = paragraph.properties().mark;
+        let style = self.paragraph_style(Some(paragraph.node()));
+        self.resolve_run(style, &direct)
+    }
+
+    /// How many times a style's own properties were read, for tests of the work done.
+    #[cfg(test)]
+    pub(crate) fn style_reads(&self) -> usize {
+        self.characters.reads + self.paragraphs.reads
+    }
+
+    /// The index of the paragraph style of the paragraph `node`: its `w:pStyle` when it
+    /// names a paragraph style, else the default paragraph style (the first, as
+    /// [`Styles::default_style`](super::Styles::default_style) gives it).
+    fn paragraph_style(&mut self, node: Option<&'a Node>) -> Option<usize> {
+        let document = self.document;
+        let written = node.and_then(|node| {
+            node.properties
+                .iter()
+                .map(|&span| document.element(span))
+                .find(|element| element.is(&document.names.w, "pPr"))
+                .and_then(|p_pr| {
+                    p_pr.children()
+                        .find(|child| child.is(&document.names.w, "pStyle"))
+                        .and_then(|p_style| p_style.attribute(&document.names.w, "val"))
+                })
+        });
+        let written = written.and_then(|id| style_index(document, id, StyleKind::Paragraph));
+        written.or_else(|| {
+            *self.default_paragraph_style.get_or_insert_with(|| {
+                document
+                    .styles
+                    .styles
+                    .iter()
+                    .position(|style| style.kind == StyleKind::Paragraph && style.is_default)
+            })
+        })
+    }
+}
+
+/// What one level of the style hierarchy gives, for runs or for paragraphs.
+trait Layer: Clone + Default {
+    /// What the style at `index` writes itself; nothing for the styles whose children
+    /// Word ignores.
+    fn of_style(document: &Document, index: usize) -> Self;
+
+    /// Lays `above` over this level: what it gives replaces what this one gives.
+    fn overlay(&mut self, above: &Self);
+}
+
+/// What each style gives together with the styles it is based on, by the style's index
+/// in the document's styles: one entry per style, whatever the length of the chains.
+#[derive(Debug)]
+struct StyleLevels<L> {
+    levels: HashMap<usize, Arc<L>>,
+    /// How many times a style's own properties were read.
+    #[cfg(test)]
+    reads: usize,
+}
+
+impl<L> Default for StyleLevels<L> {
+    fn default() -> Self {
+        Self {
+            levels: HashMap::new(),
+            #[cfg(test)]
+            reads: 0,
+        }
+    }
+}
+
+impl<L: Layer> StyleLevels<L> {
+    /// What the style at `index` gives together with the styles it is based on, the
+    /// style's own properties winning (ECMA-376 §17.7.4.3; for toggle properties the
+    /// first value found up the chain, §17.7.3).
+    ///
+    /// Each style is worked out once, from the style it is based on. A style on a cycle
+    /// of `w:basedOn`, which Word does not allow (MS-OI29500 §17.7.4.3(a)), is taken
+    /// with its own properties only, so that the result does not depend on which style
+    /// of the cycle is asked for first.
+    fn level(&mut self, document: &Document, index: usize) -> Arc<L> {
+        if let Some(level) = self.levels.get(&index) {
+            return Arc::clone(level);
+        }
+        // The styles up the chain that are not worked out yet, the asked one first, up
+        // to one that is, the root, or the first style met twice.
+        let mut path = Vec::new();
+        let mut seen = HashSet::new();
+        let mut current = Some(index);
+        let mut base = None;
+        let mut cycle_from = None;
+        while let Some(style) = current {
+            if let Some(level) = self.levels.get(&style) {
+                base = Some(Arc::clone(level));
+                break;
+            }
+            if !seen.insert(style) {
+                cycle_from = path.iter().position(|&other| other == style);
+                break;
+            }
+            path.push(style);
+            current = parent(document, style);
+        }
+        // The styles of the cycle, if any, are at the end of `path`.
+        let cycle: &[usize] = cycle_from
+            .and_then(|from| path.get(from..))
+            .unwrap_or_default();
+        for &style in cycle {
+            let level = Arc::new(self.own(document, style));
+            self.levels.insert(style, level);
+        }
+        let tail = path
+            .get(..cycle_from.unwrap_or(path.len()))
+            .unwrap_or_default();
+        let mut below = base.or_else(|| {
+            let first = cycle.first()?;
+            self.levels.get(first).map(Arc::clone)
+        });
+        for &style in tail.iter().rev() {
+            let mut level = below.as_deref().cloned().unwrap_or_default();
+            level.overlay(&self.own(document, style));
+            let level = Arc::new(level);
+            self.levels.insert(style, Arc::clone(&level));
+            below = Some(level);
+        }
+        self.levels
+            .get(&index)
+            .map_or_else(Arc::default, Arc::clone)
+    }
+
+    /// What the style at `index` writes itself.
+    fn own(&mut self, document: &Document, index: usize) -> L {
+        #[cfg(test)]
+        {
+            self.reads += 1;
+        }
+        let ignored = document
+            .styles
+            .styles
+            .get(index)
+            .is_none_or(|style| IGNORED_STYLES.contains(&&*style.id));
+        if ignored {
+            L::default()
+        } else {
+            L::of_style(document, index)
+        }
+    }
+}
+
+/// The index of the style with this id when it is of `kind`.
+fn style_index(document: &Document, id: &str, kind: StyleKind) -> Option<usize> {
+    let index = *document.styles.by_id.get(id)?;
+    let style = document.styles.styles.get(index)?;
+    (style.kind == kind).then_some(index)
+}
+
+/// The style the style at `index` is based on: none when its `w:basedOn` names no style
+/// of its kind (ECMA-376 §17.7.4.3) or when Word ignores the style's children.
+fn parent(document: &Document, index: usize) -> Option<usize> {
+    let style = document.styles.styles.get(index)?;
+    if IGNORED_STYLES.contains(&&*style.id) {
+        return None;
+    }
+    style_index(document, style.based_on.as_deref()?, style.kind)
+}
+
+/// The paragraph a node is in, through the containers between them.
+fn paragraph_of<'a>(document: &'a Document, node: &'a Node) -> Option<&'a Node> {
+    let mut current = node;
+    for _ in 0..document.nodes.len() {
+        if matches!(current.kind, Kind::Paragraph) {
+            return Some(current);
+        }
+        current = document.node(current.parent)?;
+    }
+    None
+}
+
+/// Sets `slot` to `value` when there is one.
+fn overwrite<T>(slot: &mut Option<T>, value: Option<T>) {
+    if value.is_some() {
+        *slot = value;
+    }
+}

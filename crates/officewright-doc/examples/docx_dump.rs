@@ -10,7 +10,8 @@
 //! their page setup,
 //! columns and headers and footers, and their blocks. With
 //! `--runs` it also prints:
-//! - the style, alignment and list of each paragraph, with the list's label template;
+//! - the style, alignment and list of each paragraph, with the list's label template, and
+//!   its formatting in effect;
 //! - every run, with the properties written on it and its formatting in effect;
 //! - the style, width and layout of each table, and the width and merging of its cells.
 //!
@@ -23,8 +24,8 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use officewright_doc::{
-    Block, CharacterFormat, ColorValue, Document, Error, Formats, Inline, Numbering, Run,
-    RunContent,
+    Block, CharacterFormat, ColorValue, Document, Error, Formats, Inline, Numbering,
+    ParagraphFormat, Run, RunContent,
 };
 
 fn main() -> ExitCode {
@@ -179,6 +180,10 @@ fn print_block<'a>(
                 if !written.is_empty() {
                     println!("{indent}  properties:{written}");
                 }
+                println!(
+                    "{indent}  in effect: {}",
+                    paragraph_in_effect(&formats.paragraph(paragraph))
+                );
                 for run in paragraph.runs() {
                     println!("{indent}  run {:?}{}", run.text(), describe(run));
                     println!("{indent}    in effect: {}", in_effect(&formats.run(run)));
@@ -319,6 +324,7 @@ fn resolve_every_run(document: &Document) -> usize {
     while let Some(block) = blocks.pop() {
         match block {
             Block::Paragraph(paragraph) => {
+                let _ = formats.paragraph(paragraph);
                 let _ = formats.paragraph_mark(paragraph);
                 for run in paragraph.runs() {
                     let _ = formats.run(run);
@@ -337,6 +343,32 @@ fn resolve_every_run(document: &Document) -> usize {
         }
     }
     count
+}
+
+/// The formatting of a paragraph in effect, briefly.
+fn paragraph_in_effect(format: &ParagraphFormat) -> String {
+    let mut out = format!(
+        "{:?} indent {}/{}/{} pt spacing {}/{} pt line {:?}",
+        format.justification(),
+        format.start_indent().0,
+        format.end_indent().0,
+        format.first_line_indent().0,
+        format.before_spacing().0,
+        format.after_spacing().0,
+        format.line_spacing()
+    );
+    if let Some(list) = format.list() {
+        out.push_str(&format!(
+            " list {} level {} from {}",
+            list.instance(),
+            list.level_number(),
+            list.start()
+        ));
+    }
+    if !format.tabs().is_empty() {
+        out.push_str(&format!(" {} tabs", format.tabs().len()));
+    }
+    out
 }
 
 /// The formatting of a run in effect, briefly.

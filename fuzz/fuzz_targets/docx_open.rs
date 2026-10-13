@@ -1,8 +1,8 @@
 //! Opens the input as a Word document and walks everything the model read from it:
 //! sections, blocks, tables, inline content and runs, the text, and the XML of every
 //! element kept without being understood, which must read back as XML. The formatting in
-//! effect of every run and paragraph mark is resolved, and must not depend on what the
-//! resolver remembered from earlier runs.
+//! effect of every paragraph, run and paragraph mark is resolved, and must not depend on
+//! what the resolver remembered from earlier ones.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
@@ -68,6 +68,11 @@ fuzz_target!(|data: &[u8]| {
                 let _ = paragraph.properties();
                 let _ = paragraph.text();
                 let _ = formats.paragraph_mark(paragraph);
+                let format = formats.paragraph(paragraph);
+                if compared < 256 {
+                    compared += 1;
+                    assert_eq!(format, paragraph.format());
+                }
                 for run in paragraph.runs() {
                     let format = formats.run(run);
                     if compared < 256 {
