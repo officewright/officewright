@@ -102,12 +102,7 @@ pub(crate) fn read_coverages<R: Read + Seek>(
     let Ok(file_len) = reader.seek(SeekFrom::End(0)) else {
         return vec![nothing; faces.len()];
     };
-    let mut file = BoundedReader {
-        reader,
-        file_len,
-        budget: limits.read,
-        exhausted: false,
-    };
+    let mut file = BoundedReader::new(reader, file_len, limits.read);
     let mut allowance = Allowance {
         steps: limits.steps,
         ranges: limits.ranges,
@@ -247,13 +242,13 @@ pub(crate) type Faces = Vec<(u32, Result<IndexedFace, Error>)>;
 
 /// Indexes every face of a font file or collection.
 pub(crate) fn read_faces<R: Read + Seek>(reader: &mut R) -> Result<Faces, IndexError> {
+    read_faces_within(reader, MAX_READ_PER_FILE)
+}
+
+/// [`read_faces`], reading at most `limit` bytes of the file.
+fn read_faces_within<R: Read + Seek>(reader: &mut R, limit: u64) -> Result<Faces, IndexError> {
     let file_len = reader.seek(SeekFrom::End(0))?;
-    let mut file = BoundedReader {
-        reader,
-        file_len,
-        budget: MAX_READ_PER_FILE,
-        exhausted: false,
-    };
+    let mut file = BoundedReader::new(reader, file_len, limit);
     let not_a_font = |message: &str| {
         IndexError::Font(Error::NotAFont {
             source: Cause::new(message),
@@ -292,10 +287,10 @@ pub(crate) fn read_faces<R: Read + Seek>(reader: &mut R) -> Result<Faces, IndexE
                 Err(Error::MalformedFace {
                     face: rest,
                     source: Cause::new(format!(
-                        "faces {rest} to {} were not read: the file exceeds the {} MiB the \
-                         index reads per file",
+                        "faces {rest} to {} were not read: the file exceeds the {} the index \
+                         reads per file",
                         count - 1,
-                        MAX_READ_PER_FILE >> 20
+                        file.limit()
                     )),
                 }),
             ));
@@ -478,12 +473,36 @@ impl<'a> TableProvider<'a> for TablesRef<'a> {
 struct BoundedReader<'r, R> {
     reader: &'r mut R,
     file_len: u64,
+    /// The budget the reader started with.
+    limit: u64,
+    /// What is left of it.
     budget: u64,
     /// Whether a read was refused because the budget is spent.
     exhausted: bool,
 }
 
-impl<R: Read + Seek> BoundedReader<'_, R> {
+impl<'r, R: Read + Seek> BoundedReader<'r, R> {
+    /// A reader of a file of `file_len` bytes that reads at most `limit` bytes of it.
+    fn new(reader: &'r mut R, file_len: u64, limit: u64) -> Self {
+        Self {
+            reader,
+            file_len,
+            limit,
+            budget: limit,
+            exhausted: false,
+        }
+    }
+
+    /// The budget the reader started with, in MiB when it is a whole number of them.
+    fn limit(&self) -> String {
+        const MIB: u64 = 1 << 20;
+        if self.limit >= MIB && self.limit % MIB == 0 {
+            format!("{} MiB", self.limit / MIB)
+        } else {
+            format!("{} bytes", self.limit)
+        }
+    }
+
     /// Reads `len` bytes at `offset`, `None` if they are not all in the file or the
     /// budget is spent.
     fn read_at(&mut self, offset: u64, len: u64) -> io::Result<Option<Vec<u8>>> {
@@ -511,8 +530,8 @@ impl<R: Read + Seek> BoundedReader<'_, R> {
     fn refusal(&self, what: &str) -> String {
         if self.exhausted {
             format!(
-                "{what} is past the {} MiB the index reads per file",
-                MAX_READ_PER_FILE >> 20
+                "{what} is past the {} the index reads per file",
+                self.limit()
             )
         } else {
             format!("{what} is past the end of the file")
@@ -990,12 +1009,7 @@ mod tests {
     fn refusals_say_whether_the_file_or_the_budget_ran_out() {
         let data = [0u8; 100];
         let mut cursor = Cursor::new(&data[..]);
-        let mut file = BoundedReader {
-            reader: &mut cursor,
-            file_len: 100,
-            budget: 50,
-            exhausted: false,
-        };
+        let mut file = BoundedReader::new(&mut cursor, 100, 50);
         assert_eq!(file.read_at(90, 10).unwrap().map(|d| d.len()), Some(10));
         assert_eq!(file.read_at(95, 10).unwrap(), None);
         assert_eq!(
@@ -1005,8 +1019,38 @@ mod tests {
         assert_eq!(file.read_at(0, 41).unwrap(), None);
         assert_eq!(
             file.refusal("the table"),
-            "the table is past the 64 MiB the index reads per file"
+            "the table is past the 50 bytes the index reads per file"
         );
+    }
+
+    #[test]
+    fn faces_past_the_limit_are_reported_with_it() {
+        let font = TestFont::new("Test Sans").build();
+        let ttc = testing::collection(&[font.clone(), font.clone(), font.clone()]);
+        // Room for the header and the first face's directory and tables, not more.
+        let limit = (12 + 4 * 3 + font.len() + 100) as u64;
+        let faces = read_faces_within(&mut Cursor::new(&ttc), limit).unwrap();
+        let (_, Err(last)) = faces.last().unwrap() else {
+            panic!("the last face was read: {faces:?}");
+        };
+        assert!(
+            cause(last).ends_with(&format!(
+                "were not read: the file exceeds the {limit} bytes the index reads per file"
+            )),
+            "{}",
+            cause(last)
+        );
+    }
+
+    #[test]
+    fn refusals_give_the_limit_in_mib_when_it_is_whole() {
+        let mut cursor = Cursor::new(Vec::new());
+        let mut limit = |limit| BoundedReader::new(&mut cursor, 0, limit).limit();
+        assert_eq!(limit(64 << 20), "64 MiB");
+        assert_eq!(limit(1 << 20), "1 MiB");
+        assert_eq!(limit((3 << 20) + 1), "3145729 bytes");
+        assert_eq!(limit(1000), "1000 bytes");
+        assert_eq!(limit(0), "0 bytes");
     }
 
     #[test]
