@@ -59,6 +59,14 @@ excludes from the licence) is replaced by a grey placeholder of the same size.
 `tests/corpus/SOURCES.md` gives each file's URL, download date, original SHA-256 and its
 changes; `scripts/import-public-docs.py` makes them.
 
+Derived from these documents, under the same licence and credit: the copies Microsoft Word
+saved of the three State aid forms (`tests/corpus/resaved/business/form-ec-state-aid-notification-de.docx`,
+`-bg.docx` and `-el.docx`) and their reference renders
+(`tests/corpus/reference/business/form-ec-state-aid-notification-de/`, `-bg/` and `-el/`:
+every page as a grey image, the position of every line and word, and the formatting Word
+computes). Changes: Word saved each document again, and its PDF of it was rasterized and
+measured by `scripts/corpus-import.py`.
+
 ## Test fonts
 
 Fonts in `tests/fonts/`, at the repository root and so outside every crate. They are
