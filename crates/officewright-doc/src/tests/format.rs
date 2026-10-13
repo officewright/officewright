@@ -196,8 +196,34 @@ fn combines_defaults_paragraph_style_character_style_and_direct_formatting() {
     assert_eq!(languages[3], Some("de-DE"));
 }
 
-/// Bold of each run of `body`, with the toggle styles of `word-rules/E-style-toggles`.
-fn bold(defaults_r_pr: &str, body: &str) -> Vec<bool> {
+/// The cases of `word-rules/E-style-toggles.docx` and `E-style-toggles-defaults.docx`
+/// (scripts/make-rule-docs.py): paragraph style, character style, direct formatting.
+const TOGGLE_CASES: [(&str, &str, &str); 20] = [
+    ("", "", ""),
+    ("ParaBold", "", ""),
+    ("ParaBoldAgain", "", ""),
+    ("ParaBoldOff", "", ""),
+    ("", "CharBold", ""),
+    ("", "CharBoldAgain", ""),
+    ("", "CharBoldOff", ""),
+    ("ParaBold", "CharBold", ""),
+    ("ParaBold", "CharBoldAgain", ""),
+    ("ParaBold", "CharBoldOff", ""),
+    ("ParaBold", "CharBold", "<w:b/>"),
+    ("ParaBold", "CharBold", r#"<w:b w:val="0"/>"#),
+    ("ParaBold", "", r#"<w:b w:val="0"/>"#),
+    ("", "", "<w:b/>"),
+    ("", "CharBold", r#"<w:b w:val="0"/>"#),
+    ("ParaBoldInherit", "", ""),
+    ("", "CharBoldInherit", ""),
+    ("ParaBold", "CharBoldInherit", ""),
+    ("ParaBoldOffInherit", "", ""),
+    ("", "CharBoldOffInherit", ""),
+];
+
+/// Bold of each case of [`TOGGLE_CASES`], with the styles of the rule documents and
+/// these run properties in the document defaults.
+fn bold(defaults_r_pr: &str) -> Vec<bool> {
     let styles = [
         defaults(defaults_r_pr),
         style("paragraph", "ParaBold", None, "<w:b/>"),
@@ -208,60 +234,113 @@ fn bold(defaults_r_pr: &str, body: &str) -> Vec<bool> {
             Some("ParaBold"),
             r#"<w:b w:val="0"/>"#,
         ),
+        style("paragraph", "ParaBoldInherit", Some("ParaBold"), ""),
+        style("paragraph", "ParaBoldOffInherit", Some("ParaBoldOff"), ""),
         style("character", "CharBold", None, "<w:b/>"),
         style("character", "CharBoldAgain", Some("CharBold"), "<w:b/>"),
-        style("character", "CharBoldOff", None, r#"<w:b w:val="0"/>"#),
-        style("paragraph", "ParaBoldInherit", Some("ParaBold"), ""),
+        style(
+            "character",
+            "CharBoldOff",
+            Some("CharBold"),
+            r#"<w:b w:val="0"/>"#,
+        ),
         style("character", "CharBoldInherit", Some("CharBold"), ""),
+        style("character", "CharBoldOffInherit", Some("CharBoldOff"), ""),
     ]
     .concat();
-    runs(&build(body, &styles, None, None))
+    let body: String = TOGGLE_CASES
+        .iter()
+        .map(|(p_style, r_style, direct)| {
+            let r_style = if r_style.is_empty() {
+                String::new()
+            } else {
+                format!(r#"<w:rStyle w:val="{r_style}"/>"#)
+            };
+            paragraph(p_style, &[&format!("{r_style}{direct}")])
+        })
+        .collect();
+    runs(&build(&body, &styles, None, None))
         .iter()
         .map(CharacterFormat::bold)
         .collect()
 }
 
-const CHAR_BOLD: &str = r#"<w:rStyle w:val="CharBold"/>"#;
-
 #[test]
-fn a_paragraph_style_sets_a_toggle_property_and_a_character_style_toggles_it() {
-    let body = [
-        paragraph("ParaBold", &[""]),
-        // Word sets the value of a paragraph style rather than toggling it
-        // (MS-OI29500 §17.7.8(a)).
-        paragraph("ParaBoldAgain", &[""]),
-        paragraph("ParaBoldOff", &[""]),
-        paragraph("", &[CHAR_BOLD]),
-        paragraph("", &[r#"<w:rStyle w:val="CharBoldAgain"/>"#]),
-        paragraph("ParaBold", &[CHAR_BOLD]),
-        paragraph("ParaBold", &[r#"<w:rStyle w:val="CharBoldOff"/>"#]),
-        paragraph("ParaBold", &[&format!("{CHAR_BOLD}<w:b/>")]),
-        paragraph("ParaBold", &[r#"<w:b w:val="0"/>"#]),
-        paragraph("", &["<w:b/>"]),
-        // Styles based on bold ones without a w:b of their own (ECMA-376 §17.7.3).
-        paragraph("ParaBoldInherit", &[""]),
-        paragraph("", &[r#"<w:rStyle w:val="CharBoldInherit"/>"#]),
-        paragraph("ParaBold", &[r#"<w:rStyle w:val="CharBoldInherit"/>"#]),
-    ]
-    .concat();
+fn combines_toggle_properties_level_by_level() {
+    // Each style level gives the first value up its basedOn chain, and the levels combine
+    // (ECMA-376 §17.7.3): a paragraph style sets the value (MS-OI29500 §17.7.8(a)), a
+    // character style that gives true flips it, direct formatting sets it.
     let expected = [
-        true, true, false, true, false, false, true, true, false, true, true, true, false,
+        false, true, true, false, // no style; paragraph styles
+        true, true, false, // character styles: on, on based on on, off based on on
+        false, false, true, // the same in a bold paragraph style
+        true, false, false, true, false, // direct formatting
+        true, true, false, false, false, // styles that inherit on and off
     ];
-    assert_eq!(bold("", &body), expected);
+    assert_eq!(bold(""), expected);
 }
 
 #[test]
-fn starts_toggle_properties_from_the_document_defaults() {
+fn combines_toggle_properties_with_document_defaults_of_true() {
     // Provisional until the reference render of word-rules/E-style-toggles-defaults.docx:
-    // the document default is the value a character style toggles.
-    let body = [
-        paragraph("", &[""]),
-        paragraph("", &[CHAR_BOLD]),
-        paragraph("ParaBoldOff", &[""]),
-        paragraph("ParaBoldOff", &[CHAR_BOLD]),
-    ]
-    .concat();
-    assert_eq!(bold("<w:b/>", &body), [true, false, false, true]);
+    // MS-OI29500 §17.7.3(a) and (b), true when an even number of levels give false.
+    let expected = [
+        true, true, true, false, // no style; paragraph styles
+        true, true, false, // character styles
+        true, true, false, // the same in a bold paragraph style
+        true, false, false, true, false, // direct formatting
+        true, true, true, false, false, // styles that inherit on and off
+    ];
+    assert_eq!(bold("<w:b/>"), expected);
+}
+
+#[test]
+fn treats_every_toggle_property_as_one_and_no_other() {
+    // The toggle properties of ECMA-376 §17.7.3: on in a paragraph style and in a
+    // character style, they cancel out; any other on/off property stays on.
+    type Getter = fn(&CharacterFormat) -> bool;
+    let toggles: [(&str, Getter); 12] = [
+        ("b", CharacterFormat::bold),
+        ("bCs", CharacterFormat::bold_complex_script),
+        ("i", CharacterFormat::italic),
+        ("iCs", CharacterFormat::italic_complex_script),
+        ("caps", CharacterFormat::caps),
+        ("smallCaps", CharacterFormat::small_caps),
+        ("strike", CharacterFormat::strike),
+        ("outline", CharacterFormat::outline),
+        ("shadow", CharacterFormat::shadow),
+        ("emboss", CharacterFormat::emboss),
+        ("imprint", CharacterFormat::imprint),
+        ("vanish", CharacterFormat::hidden),
+    ];
+    let others: [(&str, Getter); 6] = [
+        ("dstrike", CharacterFormat::double_strike),
+        ("noProof", CharacterFormat::no_proof),
+        ("snapToGrid", CharacterFormat::snap_to_grid),
+        ("rtl", CharacterFormat::right_to_left),
+        ("cs", CharacterFormat::complex_script),
+        ("oMath", CharacterFormat::math),
+    ];
+    for (element, getter, expected) in toggles
+        .iter()
+        .map(|(element, getter)| (element, getter, false))
+        .chain(
+            others
+                .iter()
+                .map(|(element, getter)| (element, getter, true)),
+        )
+    {
+        let on = format!("<w:{element}/>");
+        let styles = [
+            defaults(""),
+            style("paragraph", "P", None, &on),
+            style("character", "C", None, &on),
+        ]
+        .concat();
+        let body = paragraph("P", &[r#"<w:rStyle w:val="C"/>"#]);
+        let format = first_run(&build(&body, &styles, None, None)).format();
+        assert_eq!(getter(&format), expected, "w:{element}");
+    }
 }
 
 #[test]
@@ -361,12 +440,13 @@ fn resolves_theme_fonts_through_the_theme_and_the_theme_font_languages() {
     assert_eq!(
         fonts,
         [
-            // The minor complex script font is empty: the theme's font for Arabic, the
-            // script of the theme font language ar-SA, stands in.
-            ["Minor Latin", "Minor Latin", "Minor EA", "Minor Arab"],
-            ["Major Latin", "Major Latin", "Major Jpan", "Major CS"],
-            ["Direct", "Major Latin", "Major Jpan", "Major CS"],
-            ["Minor Latin", "Major Latin", "Major Jpan", "Major CS"],
+            // The theme's font for the script of the theme font language comes first
+            // (ECMA-376 §17.15.1.88): Jpan for ja-JP, Arab for ar-SA; en-US has none, so
+            // the latin font.
+            ["Minor Latin", "Minor Latin", "Minor Jpan", "Minor Arab"],
+            ["Major Latin", "Major Latin", "Major Jpan", "Major Arab"],
+            ["Direct", "Major Latin", "Major Jpan", "Major Arab"],
+            ["Minor Latin", "Major Latin", "Major Jpan", "Major Arab"],
         ]
     );
     let hints: Vec<_> = runs(&document)
@@ -388,11 +468,36 @@ fn falls_back_to_the_written_font_when_a_theme_font_cannot_be_resolved() {
     assert_eq!(format.fonts().ascii(), "Calibri");
     assert_eq!(format.fonts().high_ansi(), "Times New Roman");
     // A theme, but no theme font language for the empty East Asian slot.
-    let theme = theme().replace(r#"<a:ea typeface="Minor EA"/>"#, r#"<a:ea typeface=""/>"#);
-    let document = build(&body, &styles, None, Some(&theme));
+    let theme_empty_ea =
+        theme().replace(r#"<a:ea typeface="Minor EA"/>"#, r#"<a:ea typeface=""/>"#);
+    let document = build(&body, &styles, None, Some(&theme_empty_ea));
     let format = first_run(&document).format();
     assert_eq!(format.fonts().ascii(), "Minor Latin");
     assert_eq!(format.fonts().east_asia(), "MS Mincho");
+    // No East Asian theme font language: the theme's ea font.
+    let latin_only = r#"<w:themeFontLang w:val="en-US"/>"#;
+    let document = build(&body, &styles, Some(latin_only), Some(&theme()));
+    assert_eq!(
+        first_run(&document).format().fonts().east_asia(),
+        "Minor EA"
+    );
+}
+
+#[test]
+fn takes_the_latin_theme_font_for_the_script_of_the_theme_font_language() {
+    // ECMA-376 §17.15.1.88's example: with w:val="ja-JP", Latin text takes the theme's
+    // font for Japanese.
+    let styles = defaults(r#"<w:rFonts w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi"/>"#);
+    let settings = r#"<w:themeFontLang w:val="ja-JP"/>"#;
+    let document = build(
+        &paragraph("", &[""]),
+        &styles,
+        Some(settings),
+        Some(&theme()),
+    );
+    let format = first_run(&document).format();
+    assert_eq!(format.fonts().ascii(), "Minor Jpan");
+    assert_eq!(format.fonts().high_ansi(), "Minor Jpan");
 }
 
 #[test]
@@ -511,8 +616,11 @@ fn takes_the_style_and_colour_of_an_underline_from_the_hierarchy_one_by_one() {
 fn resolves_the_other_run_properties() {
     let styles = [
         defaults(
-            r#"<w:kern w:val="28"/><w:highlight w:val="yellow"/><w:shd w:val="clear" w:color="auto" w:fill="D9E2F3"/><w:vertAlign w:val="superscript"/><w:position w:val="4"/><w:spacing w:val="10"/><w:szCs w:val="30"/>"#,
+            r#"<w:kern w:val="28"/><w:shd w:val="clear" w:color="auto" w:fill="D9E2F3"/><w:vertAlign w:val="superscript"/><w:position w:val="4"/><w:spacing w:val="10"/><w:szCs w:val="30"/>"#,
         ),
+        // Word does not allow a highlight in the document defaults (MS-OI29500
+        // §17.7.5.4(a)); a paragraph style gives it.
+        style("paragraph", "Marked", None, r#"<w:highlight w:val="yellow"/>"#),
         style(
             "character",
             "Plain",
@@ -521,7 +629,7 @@ fn resolves_the_other_run_properties() {
         ),
     ]
     .concat();
-    let body = paragraph("", &["", r#"<w:rStyle w:val="Plain"/>"#]);
+    let body = paragraph("Marked", &["", r#"<w:rStyle w:val="Plain"/>"#]);
     let formats = runs(&build(&body, &styles, None, None));
     let [first, second] = &formats[..] else {
         panic!("two runs");
@@ -574,14 +682,24 @@ fn stops_at_cycles_and_ignores_the_styles_word_ignores() {
         style("paragraph", "A", Some("B"), r#"<w:sz w:val="30"/>"#),
         style("paragraph", "B", Some("A"), r#"<w:sz w:val="40"/><w:i/>"#),
         style("paragraph", "Self", Some("Self"), r#"<w:sz w:val="50"/>"#),
-        // Word ignores what DefaultParagraphFont sets (MS-OI29500 §17.7.4.17(a)).
-        style("character", "DefaultParagraphFont", None, "<w:b/>"),
+        style("paragraph", "IntoCycle", Some("A"), "<w:b/>"),
+        // Word ignores the children of DefaultParagraphFont, its w:basedOn among them
+        // (MS-OI29500 §17.7.4.17(a)).
+        style("character", "Underlined", None, r#"<w:sz w:val="60"/>"#),
+        style(
+            "character",
+            "DefaultParagraphFont",
+            Some("Underlined"),
+            "<w:b/>",
+        ),
         style("character", "Based", Some("DefaultParagraphFont"), "<w:i/>"),
     ]
     .concat();
     let body = [
         paragraph("A", &[""]),
+        paragraph("B", &[""]),
         paragraph("Self", &[""]),
+        paragraph("IntoCycle", &[""]),
         paragraph(
             "",
             &[
@@ -591,20 +709,34 @@ fn stops_at_cycles_and_ignores_the_styles_word_ignores() {
         ),
     ]
     .concat();
-    let formats = runs(&build(&body, &styles, None, None));
-    let summary: Vec<_> = formats
+    let document = build(&body, &styles, None, None);
+    let summary = |formats: &[CharacterFormat]| -> Vec<(f64, bool, bool)> {
+        formats
+            .iter()
+            .map(|format| (format.size().0, format.bold(), format.italic()))
+            .collect()
+    };
+    // A style on a cycle is taken with its own properties; a style based on one of them
+    // gets that style's.
+    let expected = [
+        (15.0, false, false),
+        (20.0, false, true),
+        (25.0, false, false),
+        (15.0, true, false),
+        (10.0, false, false),
+        (10.0, false, true),
+    ];
+    assert_eq!(summary(&runs(&document)), expected);
+    // The same whichever style of the cycle is asked for first.
+    let mut formats = document.formats();
+    let runs_of: Vec<_> = paragraphs(&document)
         .iter()
-        .map(|format| (format.size().0, format.bold(), format.italic()))
+        .flat_map(|paragraph| paragraph.runs())
         .collect();
-    assert_eq!(
-        summary,
-        [
-            (15.0, false, true),
-            (25.0, false, false),
-            (10.0, false, false),
-            (10.0, false, true),
-        ]
-    );
+    let backwards: Vec<_> = runs_of.iter().rev().map(|&run| formats.run(run)).collect();
+    let mut backwards = summary(&backwards);
+    backwards.reverse();
+    assert_eq!(backwards, expected);
 }
 
 #[test]
@@ -621,12 +753,41 @@ fn follows_a_long_chain_of_styles() {
         Some("S9"),
         r#"<w:sz w:val="30"/>"#,
     ));
-    let body = [paragraph("Leaf", &[""]), paragraph("S1999", &[""])].concat();
-    let formats = runs(&build(&body, &styles, None, None));
-    assert!(formats[0].bold());
-    assert_eq!(formats[0].size(), Pt(15.0));
-    // A chain longer than the limit is cut at its root.
-    assert!(!formats[1].bold());
+    let mut body = [paragraph("Leaf", &[""]), paragraph("S1999", &[""])].concat();
+    for i in (0..2000).rev() {
+        body.push_str(&paragraph(&format!("S{i}"), &[""]));
+    }
+    let document = build(&body, &styles, None, None);
+    let mut formats = document.formats();
+    let all: Vec<_> = paragraphs(&document)
+        .iter()
+        .flat_map(|paragraph| paragraph.runs())
+        .map(|run| formats.run(run))
+        .collect();
+    assert_eq!(all[0].size(), Pt(15.0));
+    assert!(all.iter().all(CharacterFormat::bold));
+    // Each style is read once, whatever the length of the chains and the order the
+    // styles are asked for: work and memory grow with the number of styles.
+    assert_eq!(formats.style_reads(), 2001);
+}
+
+#[test]
+fn a_size_of_zero_is_not_a_size() {
+    // Word writes w:sz="0" in some linked character styles, such as DocumentMapChar.
+    let styles = [
+        defaults(r#"<w:sz w:val="24"/><w:szCs w:val="24"/>"#),
+        style(
+            "character",
+            "DocumentMapChar",
+            None,
+            r#"<w:sz w:val="0"/><w:szCs w:val="0"/>"#,
+        ),
+    ]
+    .concat();
+    let body = paragraph("", &[r#"<w:rStyle w:val="DocumentMapChar"/>"#]);
+    let format = first_run(&build(&body, &styles, None, None)).format();
+    assert_eq!(format.size(), Pt(12.0));
+    assert_eq!(format.size_complex_script(), Pt(12.0));
 }
 
 #[test]

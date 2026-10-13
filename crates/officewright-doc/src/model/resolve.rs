@@ -2,7 +2,7 @@
 //! the paragraph's style, the run's character style and direct formatting, combined as
 //! Word combines them, with theme fonts and theme colours resolved.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use officewright_core::Pt;
@@ -13,7 +13,7 @@ use super::properties::{
     UnderlineStyle, VerticalPosition,
 };
 use super::settings::{ColorSchemeIndex, ColorSchemeMapping};
-use super::styles::{StyleData, StyleKind};
+use super::styles::StyleKind;
 use super::views::{Paragraph, Run};
 use super::{Document, Kind, Node};
 
@@ -25,14 +25,11 @@ const DEFAULT_FONT: &str = "Times New Roman";
 /// corpus file `word-rules/E-defaults-empty.docx`.
 const DEFAULT_SIZE: Pt = Pt(10.0);
 
-/// How far a `w:basedOn` chain is followed; Word does not allow cycles
-/// (MS-OI29500 §17.7.4.3(a)), and a cycle or a longer chain stops here.
-const MAX_CHAIN: usize = 64;
-
-/// Styles whose children Word ignores (MS-OI29500 §17.7.4.17(a)).
+/// Styles whose child elements Word ignores, `w:basedOn` and `w:rPr` among them
+/// (MS-OI29500 §17.7.4.17(a)).
 const IGNORED_STYLES: [&str; 3] = ["NoList", "DefaultParagraphFont", "TableNormal"];
 
-/// The properties ECMA-376 §17.7.3 makes toggle properties.
+/// The toggle properties of ECMA-376 §17.7.3.
 const TOGGLES: [Toggle; 12] = [
     Toggle::Bold,
     Toggle::BoldComplexScript,
@@ -55,21 +52,27 @@ const TOGGLES: [Toggle; 12] = [
 #[derive(Debug)]
 pub struct Formats<'a> {
     document: &'a Document,
-    /// The run properties of each style's `w:basedOn` chain, the root first, by the
-    /// style's index in the document's styles.
-    chains: HashMap<usize, Arc<Vec<RunProperties>>>,
-    defaults: Option<Arc<RunProperties>>,
+    /// What each style gives together with the styles it is based on, by the style's
+    /// index in the document's styles: one entry per style, whatever the length of the
+    /// chains.
+    levels: HashMap<usize, Arc<Level>>,
+    defaults: Option<Arc<Level>>,
     /// The index of the default paragraph style, once looked up.
     default_paragraph_style: Option<Option<usize>>,
+    /// How many times a style's own properties were read.
+    #[cfg(test)]
+    style_reads: usize,
 }
 
 impl<'a> Formats<'a> {
     pub(super) fn new(document: &'a Document) -> Self {
         Self {
             document,
-            chains: HashMap::new(),
+            levels: HashMap::new(),
             defaults: None,
             default_paragraph_style: None,
+            #[cfg(test)]
+            style_reads: 0,
         }
     }
 
@@ -93,6 +96,21 @@ impl<'a> Formats<'a> {
         let direct = paragraph.properties().mark;
         let style = self.paragraph_style(Some(paragraph.node()));
         self.resolve(style, &direct)
+    }
+
+    /// How many times a style's own properties were read, for tests of the work done.
+    #[cfg(test)]
+    pub(crate) fn style_reads(&self) -> usize {
+        self.style_reads
+    }
+
+    /// What the style at `index` writes itself, as a level.
+    fn own_level(&mut self, index: usize) -> Level {
+        #[cfg(test)]
+        {
+            self.style_reads += 1;
+        }
+        Level::of(&own_properties(self.document, index))
     }
 
     /// The index of the paragraph style of the paragraph `node`: its `w:pStyle` when it
@@ -124,7 +142,9 @@ impl<'a> Formats<'a> {
     }
 
     /// Combines the levels of the hierarchy for a run whose paragraph style has the index
-    /// `paragraph_style` and whose own properties are `direct`.
+    /// `paragraph_style` and whose own properties are `direct`. A run without a
+    /// `w:rStyle` gets no character style: Word's default character style is
+    /// DefaultParagraphFont, whose children it ignores.
     fn resolve(
         &mut self,
         paragraph_style: Option<usize>,
@@ -132,45 +152,45 @@ impl<'a> Formats<'a> {
     ) -> CharacterFormat {
         let document = self.document;
         let defaults = self.defaults();
-        let paragraph = paragraph_style
-            .map(|index| self.chain(index))
-            .unwrap_or_default();
+        let paragraph = paragraph_style.map(|index| self.level(index));
         let character_style = direct
             .style
             .as_deref()
             .and_then(|id| style_index(document, id, StyleKind::Character));
-        let character = character_style
-            .map(|index| self.chain(index))
-            .unwrap_or_default();
+        let character = character_style.map(|index| self.level(index));
+        let direct = Level::of(direct);
 
-        let mut layered = Layered::default();
-        layered.apply(&defaults);
+        // Each level replaces what it gives.
+        let mut effect = Level::clone(&defaults);
         for level in paragraph.iter().chain(character.iter()) {
-            layered.apply(level);
+            effect.overlay(level);
         }
-        layered.apply(direct);
+        effect.overlay(&direct);
 
+        // On/off properties: toggle properties by ECMA-376 §17.7.3, the others by the
+        // last level that gives them.
+        let value = |level: Option<&Level>, toggle: usize| {
+            level.and_then(|level| level.toggles.get(toggle).copied().flatten())
+        };
         let mut toggles = [false; Toggle::COUNT];
         for (index, slot) in toggles.iter_mut().enumerate() {
-            let value = |props: &RunProperties| props.toggles.get(index).copied().flatten();
             let is = |toggle: Toggle| toggle as usize == index;
+            let levels = (
+                value(Some(&defaults), index),
+                value(paragraph.as_deref(), index),
+                value(character.as_deref(), index),
+                value(Some(&direct), index),
+            );
             *slot = if TOGGLES.into_iter().any(is) {
-                toggle(
-                    value(&defaults),
-                    paragraph.iter().map(value),
-                    character.iter().map(value),
-                    value(direct),
-                )
+                toggle(levels.0, levels.1, levels.2, levels.3)
             } else {
-                // Not a toggle property: the last level that sets it counts. Word ignores
-                // webHidden in a character style (MS-OI29500 §17.3.2.44(a)).
-                let character = character.iter().filter(|_| !is(Toggle::WebHidden));
-                std::iter::once(&*defaults)
-                    .chain(paragraph.iter())
-                    .chain(character)
-                    .chain(std::iter::once(direct))
-                    .rev()
-                    .find_map(value)
+                // Word ignores webHidden in a character style (MS-OI29500 §17.3.2.44(a)).
+                let character = levels.2.filter(|_| !is(Toggle::WebHidden));
+                levels
+                    .3
+                    .or(character)
+                    .or(levels.1)
+                    .or(levels.0)
                     .unwrap_or(false)
             };
         }
@@ -185,79 +205,106 @@ impl<'a> Formats<'a> {
             style: character_style
                 .and_then(|index| document.styles.styles.get(index))
                 .map(|style| style.id.clone()),
-            fonts: layered.fonts(document),
-            size: layered.size.unwrap_or(DEFAULT_SIZE),
-            size_complex_script: layered.size_complex_script.unwrap_or(DEFAULT_SIZE),
+            fonts: effect.fonts(document),
+            size: effect.size.unwrap_or(DEFAULT_SIZE),
+            size_complex_script: effect.size_complex_script.unwrap_or(DEFAULT_SIZE),
             toggles,
-            color: layered
+            color: effect
                 .color
                 .as_ref()
                 .map_or(ColorValue::Auto, |color| resolve_color(document, color)),
-            underline: layered
+            underline: effect
                 .underline_style
                 .filter(|style| *style != UnderlineStyle::None),
-            underline_color: layered
+            underline_color: effect
                 .underline_color
                 .as_ref()
                 .map_or(ColorValue::Auto, |color| resolve_color(document, color)),
-            vertical_position: layered
+            vertical_position: effect
                 .vertical_position
                 .unwrap_or(VerticalPosition::Baseline),
-            position: layered.position.unwrap_or(Pt(0.0)),
-            spacing: layered.spacing.unwrap_or(Pt(0.0)),
-            scale: layered.scale.unwrap_or(100),
+            position: effect.position.unwrap_or(Pt(0.0)),
+            spacing: effect.spacing.unwrap_or(Pt(0.0)),
+            scale: effect.scale.unwrap_or(100),
             // A kerning size of 0 is no kerning, as Word writes it.
-            kerning: layered.kerning.filter(|size| size.0 > 0.0),
-            highlight: layered
+            kerning: effect.kerning.filter(|size| size.0 > 0.0),
+            highlight: effect
                 .highlight
                 .filter(|highlight| *highlight != Highlight::None),
-            shading: layered.shading,
-            language_latin: layered.languages[0].clone(),
-            language_east_asia: layered.languages[1].clone(),
-            language_bidi: layered.languages[2].clone(),
+            shading: effect.shading,
+            language_latin: effect.languages[0].clone(),
+            language_east_asia: effect.languages[1].clone(),
+            language_bidi: effect.languages[2].clone(),
         }
     }
 
-    /// The run properties of the document defaults.
-    fn defaults(&mut self) -> Arc<RunProperties> {
+    /// What the document defaults give.
+    fn defaults(&mut self) -> Arc<Level> {
         let document = self.document;
-        Arc::clone(
-            self.defaults.get_or_insert_with(|| {
-                Arc::new(super::Styles::new(document).default_run_properties())
-            }),
-        )
+        Arc::clone(self.defaults.get_or_insert_with(|| {
+            Arc::new(Level::of(
+                &super::Styles::new(document).default_run_properties(),
+            ))
+        }))
     }
 
-    /// The run properties of the `w:basedOn` chain of the style at `index`, the root
-    /// first. A `w:basedOn` naming a style of another kind is ignored (ECMA-376 Part 1,
-    /// §17.7.4.3).
-    fn chain(&mut self, index: usize) -> Arc<Vec<RunProperties>> {
-        if let Some(chain) = self.chains.get(&index) {
-            return Arc::clone(chain);
+    /// What the style at `index` gives together with the styles it is based on, the
+    /// style's own properties winning (ECMA-376 §17.7.4.3; for toggle properties the
+    /// first value found up the chain, §17.7.3).
+    ///
+    /// Each style is worked out once, from the style it is based on. A style on a cycle
+    /// of `w:basedOn`, which Word does not allow (MS-OI29500 §17.7.4.3(a)), is taken
+    /// with its own properties only, so that the result does not depend on which style
+    /// of the cycle is asked for first.
+    fn level(&mut self, index: usize) -> Arc<Level> {
+        if let Some(level) = self.levels.get(&index) {
+            return Arc::clone(level);
         }
         let document = self.document;
-        let mut styles: Vec<&StyleData> = Vec::new();
-        let mut current = document.styles.styles.get(index);
+        // The styles up the chain that are not worked out yet, the asked one first, up
+        // to one that is, the root, or the first style met twice.
+        let mut path = Vec::new();
+        let mut seen = HashSet::new();
+        let mut current = Some(index);
+        let mut base = None;
+        let mut cycle_from = None;
         while let Some(style) = current {
-            if styles.len() >= MAX_CHAIN || styles.iter().any(|seen| std::ptr::eq(*seen, style)) {
+            if let Some(level) = self.levels.get(&style) {
+                base = Some(Arc::clone(level));
                 break;
             }
-            styles.push(style);
-            current = style
-                .based_on
-                .as_deref()
-                .and_then(|id| style_index(document, id, style.kind))
-                .and_then(|index| document.styles.styles.get(index));
+            if !seen.insert(style) {
+                cycle_from = path.iter().position(|&other| other == style);
+                break;
+            }
+            path.push(style);
+            current = parent(document, style);
         }
-        let chain: Vec<RunProperties> = styles
-            .iter()
-            .rev()
-            .filter(|style| !IGNORED_STYLES.contains(&&*style.id))
-            .map(|style| super::Style::from_data(document, style).run_properties())
-            .collect();
-        let chain = Arc::new(chain);
-        self.chains.insert(index, Arc::clone(&chain));
-        chain
+        // The styles of the cycle, if any, are at the end of `path`.
+        let cycle: &[usize] = cycle_from
+            .and_then(|from| path.get(from..))
+            .unwrap_or_default();
+        for &style in cycle {
+            let level = Arc::new(self.own_level(style));
+            self.levels.insert(style, level);
+        }
+        let tail = path
+            .get(..cycle_from.unwrap_or(path.len()))
+            .unwrap_or_default();
+        let mut below = base.or_else(|| {
+            let first = cycle.first()?;
+            self.levels.get(first).map(Arc::clone)
+        });
+        for &style in tail.iter().rev() {
+            let mut level = below.as_deref().cloned().unwrap_or_default();
+            level.overlay(&self.own_level(style));
+            let level = Arc::new(level);
+            self.levels.insert(style, Arc::clone(&level));
+            below = Some(level);
+        }
+        self.levels
+            .get(&index)
+            .map_or_else(Arc::default, Arc::clone)
     }
 }
 
@@ -266,6 +313,28 @@ fn style_index(document: &Document, id: &str, kind: StyleKind) -> Option<usize> 
     let index = *document.styles.by_id.get(id)?;
     let style = document.styles.styles.get(index)?;
     (style.kind == kind).then_some(index)
+}
+
+/// The style the style at `index` is based on: none when its `w:basedOn` names no style
+/// of its kind (ECMA-376 §17.7.4.3) or when Word ignores the style's children.
+fn parent(document: &Document, index: usize) -> Option<usize> {
+    let style = document.styles.styles.get(index)?;
+    if IGNORED_STYLES.contains(&&*style.id) {
+        return None;
+    }
+    style_index(document, style.based_on.as_deref()?, style.kind)
+}
+
+/// The run properties the style at `index` writes itself; none for the styles whose
+/// children Word ignores.
+fn own_properties(document: &Document, index: usize) -> RunProperties {
+    document
+        .styles
+        .styles
+        .get(index)
+        .filter(|style| !IGNORED_STYLES.contains(&&*style.id))
+        .map(|style| super::Style::from_data(document, style).run_properties())
+        .unwrap_or_default()
 }
 
 /// The paragraph a node is in, through the containers between them.
@@ -280,28 +349,28 @@ fn paragraph_of<'a>(document: &'a Document, node: &'a Node) -> Option<&'a Node> 
     None
 }
 
-/// The value of a toggle property in effect.
+/// The value of a toggle property in effect, from the value each level of the hierarchy
+/// gives: the document defaults, the paragraph style and the character style, each the
+/// first value up its `w:basedOn` chain, and direct formatting.
 ///
-/// The document defaults give the starting value. A paragraph style sets the value
-/// rather than toggling it, as Word does (MS-OI29500 §17.7.8(a)). In a character style an
-/// on value toggles the value so far and an off value leaves it, as ECMA-376 §17.7.3
-/// says; direct formatting sets the value. How Word combines a document default of on
-/// with the styles (MS-OI29500 §17.7.3(a), (b)) is to be confirmed by the reference
-/// renders of `word-rules/E-style-toggles.docx` and `E-style-toggles-defaults.docx`.
+/// Direct formatting sets the value (ECMA-376 §17.7.3). A paragraph style sets it rather
+/// than combining with what is below, as Word does (MS-OI29500 §17.7.8(a)). A character
+/// style flips the value when its own differs from the document defaults': with defaults
+/// of false that is the standard's XOR of the levels that give true; with defaults of
+/// true it is Word's rule that the value is true when an even number of levels give
+/// false, a level without a value taking the defaults' (MS-OI29500 §17.7.3(a), (b)).
+/// The reference renders of `word-rules/E-style-toggles.docx` and
+/// `E-style-toggles-defaults.docx` are to confirm it.
 fn toggle(
     defaults: Option<bool>,
-    paragraph: impl Iterator<Item = Option<bool>>,
-    character: impl Iterator<Item = Option<bool>>,
+    paragraph: Option<bool>,
+    character: Option<bool>,
     direct: Option<bool>,
 ) -> bool {
-    let mut value = defaults.unwrap_or(false);
-    for level in paragraph.flatten() {
-        value = level;
-    }
-    for level in character {
-        if level == Some(true) {
-            value = !value;
-        }
+    let default = defaults.unwrap_or(false);
+    let mut value = paragraph.unwrap_or(default);
+    if character.is_some_and(|character| character != default) {
+        value = !value;
     }
     direct.unwrap_or(value)
 }
@@ -315,12 +384,14 @@ enum FontSlot {
     Theme(ThemeFont, Option<Box<str>>),
 }
 
-/// What the levels set so far, the last one winning each property.
-#[derive(Debug, Default)]
-struct Layered {
+/// What one level of the hierarchy gives — the document defaults, a style with the
+/// styles it is based on, or direct formatting — or what several levels give together.
+#[derive(Clone, Debug, Default)]
+struct Level {
     /// ascii, hAnsi, eastAsia, cs.
     fonts: [Option<FontSlot>; 4],
     hint: Option<FontHint>,
+    toggles: [Option<bool>; Toggle::COUNT],
     color: Option<Color>,
     underline_style: Option<UnderlineStyle>,
     underline_color: Option<Color>,
@@ -336,60 +407,75 @@ struct Layered {
     languages: [Option<Box<str>>; 3],
 }
 
-impl Layered {
-    fn apply(&mut self, properties: &RunProperties) {
+impl Level {
+    /// What one `w:rPr` gives.
+    fn of(properties: &RunProperties) -> Self {
         let fonts = &properties.fonts;
-        // In one w:rFonts the theme attribute wins over the font; across levels, the last
-        // level that writes either wins (MS-OI29500 §17.3.2.26(e)).
-        let slots = [
-            (&fonts.ascii, fonts.ascii_theme),
-            (&fonts.high_ansi, fonts.high_ansi_theme),
-            (&fonts.east_asia, fonts.east_asia_theme),
-            (&fonts.complex_script, fonts.complex_script_theme),
-        ];
-        for (slot, (name, theme)) in self.fonts.iter_mut().zip(slots) {
-            if let Some(theme) = theme {
-                let written = name.as_deref().map(Into::into);
-                *slot = Some(FontSlot::Theme(theme, written));
-            } else if let Some(name) = name {
-                *slot = Some(FontSlot::Name(name.as_str().into()));
-            }
-        }
-        overwrite(&mut self.hint, fonts.hint);
-        if properties.color.is_some() {
-            self.color = properties.color;
-        }
-        if let Some(underline) = &properties.underline {
+        // In one w:rFonts the theme attribute wins over the font (§17.3.2.26).
+        let slot = |name: &Option<String>, theme: Option<ThemeFont>| match theme {
+            Some(theme) => Some(FontSlot::Theme(theme, name.as_deref().map(Into::into))),
+            None => name.as_deref().map(|name| FontSlot::Name(name.into())),
+        };
+        let underline = properties.underline.as_ref();
+        let language = &properties.language;
+        // Word writes a size of 0 in some linked character styles (Word's own
+        // DocumentMapChar and BalloonTextChar in documents of the corpus); it is not a
+        // size, so the level gives none.
+        let size = |size: Option<Pt>| size.filter(|size| size.0 > 0.0);
+        Self {
+            fonts: [
+                slot(&fonts.ascii, fonts.ascii_theme),
+                slot(&fonts.high_ansi, fonts.high_ansi_theme),
+                slot(&fonts.east_asia, fonts.east_asia_theme),
+                slot(&fonts.complex_script, fonts.complex_script_theme),
+            ],
+            hint: fonts.hint,
+            toggles: properties.toggles,
+            color: properties.color,
             // The style and the colour of an underline come from the hierarchy one by
             // one (MS-OI29500 §17.3.2.40(a), (c)).
-            overwrite(&mut self.underline_style, underline.style);
-            if underline.color.value.is_some() || underline.color.theme.is_some() {
-                self.underline_color = Some(underline.color);
-            }
+            underline_style: underline.and_then(|underline| underline.style),
+            underline_color: underline
+                .map(|underline| underline.color)
+                .filter(|color| color.value.is_some() || color.theme.is_some()),
+            size: size(properties.size),
+            size_complex_script: size(properties.size_complex_script),
+            vertical_position: properties.vertical_position,
+            position: properties.position,
+            spacing: properties.spacing,
+            scale: properties.scale,
+            kerning: properties.kerning,
+            highlight: properties.highlight,
+            shading: properties.shading,
+            languages: [&language.latin, &language.east_asia, &language.bidi]
+                .map(|language| language.as_deref().map(Into::into)),
         }
-        overwrite(&mut self.size, properties.size);
-        overwrite(
-            &mut self.size_complex_script,
-            properties.size_complex_script,
-        );
-        overwrite(&mut self.vertical_position, properties.vertical_position);
-        overwrite(&mut self.position, properties.position);
-        overwrite(&mut self.spacing, properties.spacing);
-        overwrite(&mut self.scale, properties.scale);
-        overwrite(&mut self.kerning, properties.kerning);
-        overwrite(&mut self.highlight, properties.highlight);
-        if properties.shading.is_some() {
-            self.shading = properties.shading;
+    }
+
+    /// Lays `above` over this level: what it gives replaces what this one gives. A font
+    /// or a theme font written later replaces either (MS-OI29500 §17.3.2.26(e)).
+    fn overlay(&mut self, above: &Level) {
+        for (slot, font) in self.fonts.iter_mut().zip(&above.fonts) {
+            overwrite(slot, font.clone());
         }
-        let language = &properties.language;
-        for (slot, value) in
-            self.languages
-                .iter_mut()
-                .zip([&language.latin, &language.east_asia, &language.bidi])
-        {
-            if let Some(value) = value {
-                *slot = Some(value.as_str().into());
-            }
+        overwrite(&mut self.hint, above.hint);
+        for (slot, value) in self.toggles.iter_mut().zip(above.toggles) {
+            overwrite(slot, value);
+        }
+        overwrite(&mut self.color, above.color);
+        overwrite(&mut self.underline_style, above.underline_style);
+        overwrite(&mut self.underline_color, above.underline_color);
+        overwrite(&mut self.size, above.size);
+        overwrite(&mut self.size_complex_script, above.size_complex_script);
+        overwrite(&mut self.vertical_position, above.vertical_position);
+        overwrite(&mut self.position, above.position);
+        overwrite(&mut self.spacing, above.spacing);
+        overwrite(&mut self.scale, above.scale);
+        overwrite(&mut self.kerning, above.kerning);
+        overwrite(&mut self.highlight, above.highlight);
+        overwrite(&mut self.shading, above.shading);
+        for (slot, language) in self.languages.iter_mut().zip(&above.languages) {
+            overwrite(slot, language.clone());
         }
     }
 
@@ -420,12 +506,13 @@ fn overwrite<T>(slot: &mut Option<T>, value: Option<T>) {
     }
 }
 
-/// The typeface a theme font stands for. For East Asian and complex-script slots left
-/// empty in the theme, the font the theme gives for the script of the document's theme
-/// font language (`w:themeFontLang`).
+/// The typeface a theme font stands for (ECMA-376 §17.15.1.88): with `w:themeFontLang`,
+/// the theme's font for the script of the language it gives for the slot (`w:val` for
+/// ascii and hAnsi, `w:eastAsia`, `w:bidi`); else, or when the theme has no font for
+/// that script, the theme's latin, ea or cs font.
 fn theme_font(document: &Document, font: ThemeFont) -> Option<String> {
     let scheme = document.theme.as_ref()?.fonts()?;
-    let (collection, kind) = match font {
+    let (collection, slot) = match font {
         ThemeFont::MajorAscii | ThemeFont::MajorHAnsi => (scheme.major(), Slot::Latin),
         ThemeFont::MajorEastAsia => (scheme.major(), Slot::EastAsia),
         ThemeFont::MajorBidi => (scheme.major(), Slot::ComplexScript),
@@ -434,21 +521,23 @@ fn theme_font(document: &Document, font: ThemeFont) -> Option<String> {
         ThemeFont::MinorBidi => (scheme.minor(), Slot::ComplexScript),
     };
     let languages = document.settings.theme_font_languages();
-    let (written, language) = match kind {
-        Slot::Latin => (collection.latin(), None),
+    let (language, by_slot) = match slot {
+        Slot::Latin => (languages.and_then(|l| l.latin()), collection.latin()),
         Slot::EastAsia => (
+            languages.and_then(|l| l.east_asia()),
             collection.east_asian(),
-            languages.and_then(|languages| languages.east_asia()),
         ),
         Slot::ComplexScript => (
+            languages.and_then(|l| l.bidi()),
             collection.complex_script(),
-            languages.and_then(|languages| languages.bidi()),
         ),
     };
-    written
-        .filter(|typeface| !typeface.is_empty())
-        .or_else(|| collection.script(script_of(language?)?))
-        .map(Into::into)
+    let not_empty = |typeface: &&str| !typeface.is_empty();
+    let by_language = language
+        .and_then(script_of)
+        .and_then(|script| collection.script(script))
+        .filter(not_empty);
+    by_language.or(by_slot.filter(not_empty)).map(Into::into)
 }
 
 #[derive(Clone, Copy)]
@@ -458,12 +547,32 @@ enum Slot {
     ComplexScript,
 }
 
-/// The ISO 15924 code of the usual script of a language, as themes name scripts for
-/// their fonts (`Jpan`, `Arab`…), for the languages whose scripts themes list.
+/// The scripts themes give fonts for, by their ISO 15924 codes (Office's own `Uigh` and
+/// `Viet` among them), as a script subtag of a language tag names them.
+const THEME_SCRIPTS: [&str; 34] = [
+    "Arab", "Armn", "Beng", "Cans", "Cher", "Cyrl", "Ethi", "Geor", "Grek", "Gujr", "Guru", "Hang",
+    "Hans", "Hant", "Hebr", "Jpan", "Khmr", "Knda", "Laoo", "Latn", "Mlym", "Mong", "Orya", "Sinh",
+    "Syrc", "Taml", "Telu", "Thaa", "Thai", "Tibt", "Uigh", "Viet", "Yiii", "Deva",
+];
+
+/// The ISO 15924 code of the script of a language tag, as themes name scripts for their
+/// fonts (`Jpan`, `Arab`…): the tag's script subtag when it has one (`zh-Hant`,
+/// `mn-Mong-CN`), else the usual script of the language.
 fn script_of(language: &str) -> Option<&'static str> {
     let mut parts = language.split(['-', '_']);
     let primary = parts.next()?.to_ascii_lowercase();
-    let region = parts.next().unwrap_or("").to_ascii_uppercase();
+    let mut region = String::new();
+    for subtag in parts {
+        if let Some(script) = THEME_SCRIPTS
+            .iter()
+            .find(|script| script.eq_ignore_ascii_case(subtag))
+        {
+            return Some(script);
+        }
+        if region.is_empty() && subtag.len() == 2 {
+            region = subtag.to_ascii_uppercase();
+        }
+    }
     Some(match primary.as_str() {
         "ja" => "Jpan",
         "ko" => "Hang",
@@ -491,7 +600,10 @@ fn script_of(language: &str) -> Option<&'static str> {
         "ml" => "Mlym",
         "lo" => "Laoo",
         "si" => "Sinh",
-        "mn" => "Mong",
+        // Mongolian is written in the Mongolian script in China, in Cyrillic elsewhere.
+        "mn" if region == "CN" => "Mong",
+        "ru" | "uk" | "be" | "bg" | "mk" | "kk" | "ky" | "tg" | "mn" => "Cyrl",
+        "el" => "Grek",
         "vi" => "Viet",
         "ug" => "Uigh",
         "ka" => "Geor",
@@ -626,6 +738,26 @@ fn from_hsl(hue: f64, saturation: f64, luminance: f64) -> (u8, u8, u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_the_script_of_a_language_tag() {
+        let cases = [
+            ("ja-JP", Some("Jpan")),
+            ("zh-CN", Some("Hans")),
+            ("zh-TW", Some("Hant")),
+            ("zh-Hant", Some("Hant")),
+            ("zh-Hans-HK", Some("Hans")),
+            ("mn-MN", Some("Cyrl")),
+            ("mn-Mong-CN", Some("Mong")),
+            ("sr-Latn-RS", Some("Latn")),
+            ("ar_SA", Some("Arab")),
+            ("en-US", None),
+            ("", None),
+        ];
+        for (language, script) in cases {
+            assert_eq!(script_of(language), script, "{language}");
+        }
+    }
 
     #[test]
     fn a_full_tint_or_shade_keeps_the_colour() {

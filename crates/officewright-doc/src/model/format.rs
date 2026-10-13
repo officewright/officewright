@@ -201,7 +201,8 @@ impl CharacterFormat {
         self.highlight
     }
 
-    /// The shading behind the text, as written at the level that gives it.
+    /// The shading behind the text, as written at the level that gives it: theme colours
+    /// in it are not resolved yet.
     pub fn shading(&self) -> Option<&Shading> {
         self.shading.as_ref()
     }
