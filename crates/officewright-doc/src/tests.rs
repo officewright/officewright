@@ -1506,8 +1506,8 @@ fn reads_the_properties_written_on_a_table() {
         ),
         (Some(Pt(9.0)), Some(Pt(0.0)), Some(Pt(7.2)))
     );
-    assert_eq!(position.vertical_anchor(), Some(TableAnchor::Page));
-    assert_eq!(position.horizontal_anchor(), Some(TableAnchor::Margin));
+    assert_eq!(position.vertical_anchor(), Some(PositionAnchor::Page));
+    assert_eq!(position.horizontal_anchor(), Some(PositionAnchor::Margin));
     assert_eq!(
         position.horizontal_alignment(),
         Some(HorizontalAlignment::Center)
@@ -1610,7 +1610,7 @@ fn reads_the_properties_of_rows_and_cells() {
     let cell = rows[0].cells().next().unwrap().properties();
     assert_eq!(cell.width(), Some(TableWidth::Length(Pt(72.0))));
     assert_eq!(cell.grid_span(), Some(2));
-    assert_eq!(cell.vertical_merge(), Some(Merge::Restart));
+    assert_eq!(cell.vertical_merge(), Some(CellMerge::Restart));
     assert_eq!(cell.horizontal_merge(), None);
     let borders = cell.borders().unwrap();
     assert_eq!(borders.sides().start().unwrap().width(), Some(Pt(1.5)));
@@ -1640,8 +1640,8 @@ fn reads_the_properties_of_rows_and_cells() {
     assert_eq!(cell.hide_mark(), Some(true));
     // w:vMerge without w:val continues the merge above.
     let merged = rows[1].cells().next().unwrap().properties();
-    assert_eq!(merged.vertical_merge(), Some(Merge::Continue));
-    assert_eq!(merged.horizontal_merge(), Some(Merge::Restart));
+    assert_eq!(merged.vertical_merge(), Some(CellMerge::Continue));
+    assert_eq!(merged.horizontal_merge(), Some(CellMerge::Restart));
 }
 
 #[test]
@@ -1653,12 +1653,22 @@ fn reads_table_widths_as_word_does() {
         let width = first_table(&document).properties().width();
         (width, messages(&document).len())
     };
-    // pct without a percent sign is in fiftieths of a percent (MS-OI29500 §17.4.87(a)).
+    // pct without a percent sign is in fiftieths of a percent (MS-OI29500 §17.4.87(a)),
+    // an xsd:decimal.
     assert_eq!(
         width(r#"w:w="4625" w:type="pct""#),
         (Some(TableWidth::Percent(92.5)), 0)
     );
-    // A percent sign makes a percentage whatever the type (§17.4.87(b)).
+    assert_eq!(
+        width(r#"w:w="4625.5" w:type="pct""#),
+        (Some(TableWidth::Percent(92.51)), 0)
+    );
+    assert_eq!(
+        width(r#"w:w="+2500" w:type="pct""#),
+        (Some(TableWidth::Percent(50.0)), 0)
+    );
+    // A percent sign makes a percentage whatever the type (§17.4.87(b)); the type is
+    // still checked.
     assert_eq!(
         width(r#"w:w="50%" w:type="pct""#),
         (Some(TableWidth::Percent(50.0)), 0)
@@ -1668,8 +1678,16 @@ fn reads_table_widths_as_word_does() {
         (Some(TableWidth::Percent(9.0)), 0)
     );
     assert_eq!(width(r#"w:w="9%""#), (Some(TableWidth::Percent(9.0)), 0));
+    assert_eq!(
+        width(r#"w:w="50%" w:type="bogus""#),
+        (Some(TableWidth::Percent(50.0)), 1)
+    );
     // dxa is the type assumed when none is written (§17.4.87).
     assert_eq!(width(r#"w:w="70""#), (Some(TableWidth::Length(Pt(3.5))), 0));
+    assert_eq!(
+        width(r#"w:w="108.0" w:type="dxa""#),
+        (Some(TableWidth::Length(Pt(5.4))), 0)
+    );
     assert_eq!(
         width(r#"w:w="1in" w:type="dxa""#),
         (Some(TableWidth::Length(Pt(72.0))), 0)
@@ -1679,16 +1697,34 @@ fn reads_table_widths_as_word_does() {
         (Some(TableWidth::Length(Pt(81.85))), 0)
     );
     assert_eq!(
+        width(r#"w:w="-1.5pc""#),
+        (Some(TableWidth::Length(Pt(-18.0))), 0)
+    );
+    assert_eq!(
         width(r#"w:w="0" w:type="auto""#),
         (Some(TableWidth::Auto), 0)
     );
     assert_eq!(width(r#"w:type="nil""#), (Some(TableWidth::Nil), 0));
-    // Not valid: read as not set, with a diagnostic.
-    assert_eq!(width(r#"w:w="4625.5" w:type="pct""#), (None, 1));
-    assert_eq!(width(r#"w:w="5cm" w:type="pct""#), (None, 1));
-    assert_eq!(width(r#"w:w="wide" w:type="dxa""#), (None, 1));
-    assert_eq!(width(r#"w:w="x%""#), (None, 1));
-    assert_eq!(width(r#"w:w="100" w:type="twips""#), (None, 1));
+    // A w Word ignores under auto is still checked.
+    assert_eq!(
+        width(r#"w:w="wide" w:type="auto""#),
+        (Some(TableWidth::Auto), 1)
+    );
+    // Not valid by the schema: read as not set, with a diagnostic.
+    for attributes in [
+        r#"w:w="1e2%""#,
+        r#"w:w="+50%""#,
+        r#"w:w=".5%""#,
+        r#"w:w="5.%""#,
+        r#"w:w="x%""#,
+        r#"w:w="5cm" w:type="pct""#,
+        r#"w:w="wide" w:type="dxa""#,
+        r#"w:w="1e3""#,
+        r#"w:w="5 cm""#,
+        r#"w:w="100" w:type="twips""#,
+    ] {
+        assert_eq!(width(attributes), (None, 1), "{attributes}");
+    }
     // dxa without a width gives none.
     assert_eq!(width(r#"w:type="dxa""#), (None, 0));
 }
@@ -1717,10 +1753,15 @@ fn reads_the_look_of_a_table_as_word_does() {
     assert_eq!(look(r#"w:val="04A0""#), ([yes, no, yes, no, no, yes], 0));
     assert_eq!(look(r#"w:val="01e0""#), ([yes, yes, yes, yes, no, no], 0));
     assert_eq!(look(r#"w:val="0000""#), ([no; 6], 0));
-    // With any of the attributes the mask is not read (MS-OI29500 §17.4.55(c)).
+    // With any of the attributes the mask is not read (MS-OI29500 §17.4.55(c)), but it
+    // is checked.
     assert_eq!(
         look(r#"w:val="04A0" w:firstRow="0""#),
         ([no, None, None, None, None, None], 0)
+    );
+    assert_eq!(
+        look(r#"w:val="4A0" w:firstRow="1""#),
+        ([yes, None, None, None, None, None], 1)
     );
     // Not four hexadecimal digits: nothing is set.
     assert_eq!(look(r#"w:val="4A0""#), ([None; 6], 1));
@@ -1818,4 +1859,36 @@ fn reads_strict_table_properties() {
     assert_eq!(properties.justification(), Some(TableJustification::Start));
     let cell = table.rows().next().unwrap().cells().next().unwrap();
     assert!(cell.properties().borders().unwrap().sides().end().is_some());
+}
+
+#[test]
+fn reads_strict_text_directions_as_their_transitional_equivalents() {
+    // The pairs ECMA-376 makes equivalent, as MS-OI29500 §17.18.93 quotes them.
+    for (written, direction) in [
+        ("lrTb", TextDirection::LeftToRightTopToBottom),
+        ("tb", TextDirection::LeftToRightTopToBottom),
+        ("tbRl", TextDirection::TopToBottomRightToLeft),
+        ("rl", TextDirection::TopToBottomRightToLeft),
+        ("btLr", TextDirection::BottomToTopLeftToRight),
+        ("lr", TextDirection::BottomToTopLeftToRight),
+        ("lrTbV", TextDirection::LeftToRightTopToBottomRotated),
+        ("tbV", TextDirection::LeftToRightTopToBottomRotated),
+        ("tbRlV", TextDirection::TopToBottomRightToLeftRotated),
+        ("rlV", TextDirection::TopToBottomRightToLeftRotated),
+        ("tbLrV", TextDirection::TopToBottomLeftToRightRotated),
+        ("lrV", TextDirection::TopToBottomLeftToRightRotated),
+    ] {
+        let document = open(&format!(
+            r#"<w:tbl><w:tr><w:tc><w:tcPr><w:textDirection w:val="{written}"/></w:tcPr><w:p/></w:tc></w:tr></w:tbl>"#
+        ));
+        let cell = first_table(&document)
+            .rows()
+            .next()
+            .unwrap()
+            .cells()
+            .next()
+            .unwrap()
+            .properties();
+        assert_eq!(cell.text_direction(), Some(direction), "{written}");
+    }
 }

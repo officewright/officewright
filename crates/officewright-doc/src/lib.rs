@@ -41,16 +41,16 @@ mod units;
 pub use diagnostic::{Diagnostic, DiagnosticKind};
 pub use error::{Error, Limit, Result};
 pub use model::{
-    Block, Border, BorderStyle, Break, BreakClear, BreakKind, CellBorders, CellMargins, Color,
-    ColorValue, Conformance, ContentControl, Document, DocumentKind, FieldCharKind, FontHint,
-    HeightRule, Highlight, HorizontalAlignment, Hyperlink, Indentation, Inline, Justification,
-    Language, LineSpacing, Merge, NumberingReference, Opaque, Orientation, PageMargins, Paragraph,
-    ParagraphBorders, ParagraphId, ParagraphProperties, Revision, RevisionKind, RowHeight, Run,
-    RunContent, RunFonts, RunProperties, Section, SectionProperties, SectionStart, Shading,
-    ShadingPattern, SimpleField, Spacing, Style, StyleKind, Styles, TabKind, TabLeader, TabStop,
-    Table, TableAnchor, TableBorders, TableCell, TableCellProperties, TableId, TableJustification,
-    TableLayout, TableLook, TableOverlap, TablePosition, TableProperties, TableRow,
-    TableRowProperties, TableWidth, TextDirection, ThemeColor, ThemeFont, Underline,
+    Block, Border, BorderStyle, Break, BreakClear, BreakKind, CellBorders, CellMargins, CellMerge,
+    Color, ColorValue, Conformance, ContentControl, Document, DocumentKind, FieldCharKind,
+    FontHint, HeightRule, Highlight, HorizontalAlignment, Hyperlink, Indentation, Inline,
+    Justification, Language, LineSpacing, NumberingReference, Opaque, Orientation, PageMargins,
+    Paragraph, ParagraphBorders, ParagraphId, ParagraphProperties, PositionAnchor, Revision,
+    RevisionKind, RowHeight, Run, RunContent, RunFonts, RunProperties, Section, SectionProperties,
+    SectionStart, Shading, ShadingPattern, SimpleField, Spacing, Style, StyleKind, Styles, TabKind,
+    TabLeader, TabStop, Table, TableBorders, TableCell, TableCellProperties, TableId,
+    TableJustification, TableLayout, TableLook, TableOverlap, TablePosition, TableProperties,
+    TableRow, TableRowProperties, TableWidth, TextDirection, ThemeColor, ThemeFont, Underline,
     UnderlineStyle, VerticalAlignment, VerticalJustification, VerticalPosition,
 };
 pub use options::{Limits, LoadOptions};

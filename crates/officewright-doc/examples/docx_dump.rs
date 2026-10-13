@@ -122,7 +122,7 @@ fn print_block(block: Block<'_>, depth: usize, runs: bool) {
             if runs {
                 let properties = table.properties();
                 println!(
-                    "{indent}  properties: style={:?} width={:?} layout={:?} floating={}",
+                    "{indent}  properties: style={:?} width={:?} layout={:?} position written={}",
                     properties.style(),
                     properties.width(),
                     properties.layout(),

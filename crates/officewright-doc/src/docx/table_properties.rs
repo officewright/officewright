@@ -4,9 +4,9 @@
 use super::properties::{Report, border, integer, on_off, on_off_attribute, shading, value};
 use crate::model::Names;
 use crate::model::table_properties::{
-    CellBorders, CellMargins, HeightRule, HorizontalAlignment, Merge, RowHeight, TableAnchor,
-    TableBorders, TableCellProperties, TableJustification, TableLayout, TableLook, TableOverlap,
-    TablePosition, TableProperties, TableRowProperties, TableWidth, TextDirection,
+    CellBorders, CellMargins, CellMerge, HeightRule, HorizontalAlignment, PositionAnchor,
+    RowHeight, TableBorders, TableCellProperties, TableJustification, TableLayout, TableLook,
+    TableOverlap, TablePosition, TableProperties, TableRowProperties, TableWidth, TextDirection,
     VerticalAlignment, VerticalJustification,
 };
 use crate::model::xml::Element;
@@ -122,59 +122,116 @@ pub(crate) fn cell_properties(
     properties
 }
 
-/// A table measurement (CT_TblWidth, §17.4.87).
+/// A table measurement (CT_TblWidth, §17.4.87). Both attributes are checked against
+/// their schema types even where Word's precedence ignores one of them.
 fn width(element: Element<'_>, names: &Names, report: Report<'_>) -> Option<TableWidth> {
-    let w = &names.w;
-    // Word reads a w with a percent sign as whole percent, whatever the type
-    // (MS-OI29500 §17.4.87(b)).
-    if let Some(percent) = element
-        .attribute(w, "w")
-        .and_then(|written| written.trim().strip_suffix('%'))
-    {
-        return value(
-            element,
-            names,
-            "w",
-            |_| {
-                percent
-                    .parse::<f64>()
-                    .ok()
-                    .filter(|number| number.is_finite())
-                    .map(TableWidth::Percent)
-            },
-            report,
-        );
+    #[derive(Clone, Copy)]
+    enum Kind {
+        Auto,
+        Nil,
+        Pct,
+        Dxa,
     }
-    match element.attribute(w, "type") {
-        Some("auto") => Some(TableWidth::Auto),
-        Some("nil") => Some(TableWidth::Nil),
-        // Without a percent sign a percentage is in fiftieths of a percent
-        // (MS-OI29500 §17.4.87(a)); Word reads it as a short (§17.4.87(c)).
-        Some("pct") => value(
-            element,
-            names,
-            "w",
-            |v| {
-                let fiftieths: i32 = v.trim().parse().ok()?;
-                Some(TableWidth::Percent(f64::from(fiftieths) / 50.0))
-            },
-            report,
-        ),
-        // dxa is the type assumed when none is written (§17.4.87). The schema allows a
-        // negative width; Word expects one only for tblInd (MS-OI29500 §17.4.87(d)), and
-        // what it does with others is left to the resolution step.
-        None | Some("dxa") => value(
-            element,
-            names,
-            "w",
-            |v| twips_measure(v, true).map(TableWidth::Length),
-            report,
-        ),
+    let local = element.local_name();
+    let value = value(element, names, "w", width_value, report);
+    // dxa is the type assumed when none is written (§17.4.87).
+    let kind = match element.attribute(&names.w, "type") {
+        None | Some("dxa") => Some(Kind::Dxa),
+        Some("auto") => Some(Kind::Auto),
+        Some("nil") => Some(Kind::Nil),
+        Some("pct") => Some(Kind::Pct),
         Some(other) => {
-            report(element.local_name(), "type", other);
+            report(local, "type", other);
             None
         }
+    };
+    // Word reads a w with a percent sign as whole percent, whatever the type
+    // (MS-OI29500 §17.4.87(b)).
+    if let Some(WidthValue::Percent(percent)) = value {
+        return Some(TableWidth::Percent(percent));
     }
+    match (kind?, value) {
+        (Kind::Auto, _) => Some(TableWidth::Auto),
+        (Kind::Nil, _) => Some(TableWidth::Nil),
+        // Without a percent sign a percentage is in fiftieths of a percent
+        // (MS-OI29500 §17.4.87(a)).
+        (Kind::Pct, Some(WidthValue::Number(fiftieths))) => {
+            Some(TableWidth::Percent(fiftieths / 50.0))
+        }
+        // A length is no percentage.
+        (Kind::Pct, Some(WidthValue::Length(_))) => {
+            report(
+                local,
+                "w",
+                element.attribute(&names.w, "w").unwrap_or_default(),
+            );
+            None
+        }
+        // The schema allows a negative width; Word expects one only for tblInd
+        // (MS-OI29500 §17.4.87(d)), and what it does with others is left to the
+        // resolution step.
+        (Kind::Dxa, Some(WidthValue::Number(twips))) => {
+            Some(TableWidth::Length(officewright_core::Pt(twips / 20.0)))
+        }
+        (Kind::Dxa, Some(WidthValue::Length(length))) => Some(TableWidth::Length(length)),
+        (_, Some(WidthValue::Percent(_)) | None) => None,
+    }
+}
+
+/// What the `w:w` of a table measurement holds (ST_MeasurementOrPercent).
+#[derive(Clone, Copy)]
+enum WidthValue {
+    /// ST_UnqualifiedPercentage, an `xsd:decimal`: twips or fiftieths of a percent by
+    /// the type.
+    Number(f64),
+    /// ST_Percentage: a number with a percent sign.
+    Percent(f64),
+    /// ST_UniversalMeasure: a number with a unit.
+    Length(officewright_core::Pt),
+}
+
+fn width_value(value: &str) -> Option<WidthValue> {
+    if let Some(number) = value.strip_suffix('%') {
+        return pattern_number(number).map(WidthValue::Percent);
+    }
+    if let Some(number) = decimal(value) {
+        return Some(WidthValue::Number(number));
+    }
+    let unit_start = value.len().checked_sub(2)?;
+    let (number, unit) = (value.get(..unit_start)?, value.get(unit_start..)?);
+    let per_unit = match unit {
+        "pt" => 1.0,
+        "in" => 72.0,
+        "mm" => 72.0 / 25.4,
+        "cm" => 72.0 / 2.54,
+        "pc" | "pi" => 12.0,
+        _ => return None,
+    };
+    pattern_number(number)
+        .map(|number| WidthValue::Length(officewright_core::Pt(number * per_unit)))
+}
+
+/// The number of ST_Percentage and ST_UniversalMeasure: `-?[0-9]+(\.[0-9]+)?`.
+fn pattern_number(value: &str) -> Option<f64> {
+    let digits = value.strip_prefix('-').unwrap_or(value);
+    let all_digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    let valid = match digits.split_once('.') {
+        Some((whole, fraction)) => all_digits(whole) && all_digits(fraction),
+        None => all_digits(digits),
+    };
+    valid.then(|| value.parse().ok()).flatten()
+}
+
+/// An `xsd:decimal`: an optional sign, then digits with an optional point, at least one
+/// digit in all; spaces around it are collapsed away.
+fn decimal(value: &str) -> Option<f64> {
+    let value = value.trim_matches([' ', '\t', '\n', '\r']);
+    let digits = value.strip_prefix(['+', '-']).unwrap_or(value);
+    let (whole, fraction) = digits.split_once('.').unwrap_or((digits, ""));
+    let only_digits = |part: &str| part.bytes().all(|b| b.is_ascii_digit());
+    (only_digits(whole) && only_digits(fraction) && !(whole.is_empty() && fraction.is_empty()))
+        .then(|| value.parse().ok())
+        .flatten()
 }
 
 fn justification(
@@ -185,11 +242,11 @@ fn justification(
     value(element, names, "val", TableJustification::from_xml, report)
 }
 
-/// `w:vMerge` or `w:hMerge`: without `w:val` the cell continues the merge (§17.4.85).
-fn merge(element: Element<'_>, names: &Names, report: Report<'_>) -> Option<Merge> {
+/// `w:vMerge` or `w:hMerge`: without `w:val` the cell continues the merge (§17.4.84).
+fn merge(element: Element<'_>, names: &Names, report: Report<'_>) -> Option<CellMerge> {
     match element.attribute(&names.w, "val") {
-        None => Some(Merge::Continue),
-        Some(_) => value(element, names, "val", Merge::from_xml, report),
+        None => Some(CellMerge::Continue),
+        Some(_) => value(element, names, "val", CellMerge::from_xml, report),
     }
 }
 
@@ -243,9 +300,9 @@ fn margins(element: Element<'_>, names: &Names, report: Report<'_>) -> CellMargi
 }
 
 /// `w:tblLook`. Word reads the bit mask in `w:val` only when none of the six attributes
-/// is written (MS-OI29500 §17.4.55(c)). The bits are those of Word's 2003 schema for the
-/// first four; the two banding bits are those Word writes next to `w:noHBand` and
-/// `w:noVBand` (the 875 `w:tblLook` of corpus-ext that have both agree).
+/// is written (MS-OI29500 §17.4.55(c)); the mask is checked either way. Its bits are
+/// those of ECMA-376 1st edition, Part 4, §2.4.52, the clause ISO/IEC 29500-4 §14.4.12
+/// keeps; where Word writes both, the 875 `w:tblLook` of corpus-ext agree.
 fn look(element: Element<'_>, names: &Names, report: Report<'_>) -> TableLook {
     const ATTRIBUTES: [&str; 6] = [
         "firstRow",
@@ -256,6 +313,18 @@ fn look(element: Element<'_>, names: &Names, report: Report<'_>) -> TableLook {
         "noVBand",
     ];
     let w = &names.w;
+    // ST_ShortHexNumber: two bytes, four hexadecimal digits.
+    let mask = value(
+        element,
+        names,
+        "val",
+        |v| {
+            (v.len() == 4 && v.bytes().all(|b| b.is_ascii_hexdigit()))
+                .then(|| u16::from_str_radix(v, 16).ok())
+                .flatten()
+        },
+        report,
+    );
     if ATTRIBUTES
         .iter()
         .any(|attribute| element.attribute(w, attribute).is_some())
@@ -270,18 +339,6 @@ fn look(element: Element<'_>, names: &Names, report: Report<'_>) -> TableLook {
             no_vertical_bands: flag("noVBand"),
         };
     }
-    // ST_ShortHexNumber: two bytes, four hexadecimal digits.
-    let mask = value(
-        element,
-        names,
-        "val",
-        |v| {
-            (v.len() == 4 && v.bytes().all(|b| b.is_ascii_hexdigit()))
-                .then(|| u16::from_str_radix(v, 16).ok())
-                .flatten()
-        },
-        report,
-    );
     let Some(mask) = mask else {
         return TableLook::default();
     };
@@ -311,8 +368,20 @@ fn position(element: Element<'_>, names: &Names, report: Report<'_>) -> TablePos
         right_from_text: length("rightFromText", false, report),
         top_from_text: length("topFromText", false, report),
         bottom_from_text: length("bottomFromText", false, report),
-        horizontal_anchor: value(element, names, "horzAnchor", TableAnchor::from_xml, report),
-        vertical_anchor: value(element, names, "vertAnchor", TableAnchor::from_xml, report),
+        horizontal_anchor: value(
+            element,
+            names,
+            "horzAnchor",
+            PositionAnchor::from_xml,
+            report,
+        ),
+        vertical_anchor: value(
+            element,
+            names,
+            "vertAnchor",
+            PositionAnchor::from_xml,
+            report,
+        ),
         horizontal_alignment: value(
             element,
             names,

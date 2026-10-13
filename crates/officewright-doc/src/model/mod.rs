@@ -22,9 +22,9 @@ pub use properties::{
 pub use section::{Orientation, PageMargins, SectionProperties, SectionStart};
 pub use styles::{Style, StyleKind, Styles};
 pub use table_properties::{
-    CellBorders, CellMargins, HeightRule, HorizontalAlignment, Merge, RowHeight, TableAnchor,
-    TableBorders, TableCellProperties, TableJustification, TableLayout, TableLook, TableOverlap,
-    TablePosition, TableProperties, TableRowProperties, TableWidth, TextDirection,
+    CellBorders, CellMargins, CellMerge, HeightRule, HorizontalAlignment, PositionAnchor,
+    RowHeight, TableBorders, TableCellProperties, TableJustification, TableLayout, TableLook,
+    TableOverlap, TablePosition, TableProperties, TableRowProperties, TableWidth, TextDirection,
     VerticalAlignment, VerticalJustification,
 };
 pub use views::{

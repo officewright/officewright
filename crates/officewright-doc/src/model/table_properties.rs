@@ -52,8 +52,9 @@ xml_enum! {
 }
 
 xml_enum! {
-    /// What a floating table is positioned against (ST_HAnchor and ST_VAnchor).
-    TableAnchor {
+    /// What a position is measured from (ST_HAnchor and ST_VAnchor), for floating tables
+    /// and frames.
+    PositionAnchor {
         /// The paragraph or the column of text.
         Text = "text",
         Margin = "margin",
@@ -101,7 +102,7 @@ xml_enum! {
 
 xml_enum! {
     /// How a cell takes part in a merge with its neighbours (ST_Merge).
-    Merge {
+    CellMerge {
         /// Starts a merged group.
         Restart = "restart",
         /// Joins the group before it.
@@ -110,22 +111,30 @@ xml_enum! {
 }
 
 xml_enum! {
-    /// The direction text flows in a cell or a section (ST_TextDirection): the first part
-    /// names the direction of the characters, the second that of the lines, and `V`
-    /// marks East Asian characters turned upright.
+    /// The direction text flows in a cell or a section (ST_TextDirection), named by the
+    /// Transitional value: first the direction in which a line fills, then the
+    /// direction in which lines follow each other. The Strict values name only the
+    /// second and are read as the Transitional value the standard makes them
+    /// equivalent to (MS-OI29500 §17.18.93 quotes the pairs).
     TextDirection {
-        TopToBottom = "tb",
-        RightToLeft = "rl",
-        LeftToRight = "lr",
-        TopToBottomVertical = "tbV",
-        RightToLeftVertical = "rlV",
-        LeftToRightVertical = "lrV",
-        BottomToTopLeftToRight = "btLr",
-        LeftToRightTopToBottom = "lrTb",
-        LeftToRightTopToBottomVertical = "lrTbV",
-        TopToBottomLeftToRightVertical = "tbLrV",
-        TopToBottomRightToLeft = "tbRl",
-        TopToBottomRightToLeftVertical = "tbRlV",
+        /// Lines fill left to right and follow top to bottom: horizontal text (`tb` in
+        /// Strict).
+        LeftToRightTopToBottom = "lrTb" | "tb",
+        /// Lines fill top to bottom and follow right to left: vertical text (`rl` in
+        /// Strict).
+        TopToBottomRightToLeft = "tbRl" | "rl",
+        /// Lines fill bottom to top and follow left to right: text turned to run up
+        /// (`lr` in Strict).
+        BottomToTopLeftToRight = "btLr" | "lr",
+        /// As [`LeftToRightTopToBottom`](Self::LeftToRightTopToBottom), with East
+        /// Asian characters rotated 270° (`tbV` in Strict).
+        LeftToRightTopToBottomRotated = "lrTbV" | "tbV",
+        /// As [`TopToBottomRightToLeft`](Self::TopToBottomRightToLeft), with all text
+        /// rotated 90° (`rlV` in Strict).
+        TopToBottomRightToLeftRotated = "tbRlV" | "rlV",
+        /// Lines fill top to bottom and follow left to right, with all text rotated 90°
+        /// (`lrV` in Strict).
+        TopToBottomLeftToRightRotated = "tbLrV" | "lrV",
     }
 }
 
@@ -295,8 +304,13 @@ impl TableLook {
     }
 }
 
-/// Where a floating table sits (`w:tblpPr`). A table with this element is taken out of
-/// the flow of text, which wraps around it.
+/// Where a floating table sits (`w:tblpPr`), as written.
+///
+/// Word does not float every table that has the element. It ignores the element when
+/// none of its attributes is written, when the table is in a text box, a note or a
+/// comment, and when `tblpX` and `tblpY` are 0 with a horizontal anchor of `text` and a
+/// vertical anchor that is not. Without anchors it takes `margin` vertically and `text`
+/// horizontally, where the standard says `page` (MS-OI29500 §17.4.57(b), (c)).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub struct TablePosition {
@@ -304,8 +318,8 @@ pub struct TablePosition {
     pub(crate) right_from_text: Option<Pt>,
     pub(crate) top_from_text: Option<Pt>,
     pub(crate) bottom_from_text: Option<Pt>,
-    pub(crate) horizontal_anchor: Option<TableAnchor>,
-    pub(crate) vertical_anchor: Option<TableAnchor>,
+    pub(crate) horizontal_anchor: Option<PositionAnchor>,
+    pub(crate) vertical_anchor: Option<PositionAnchor>,
     pub(crate) horizontal_alignment: Option<HorizontalAlignment>,
     pub(crate) x: Option<Pt>,
     pub(crate) vertical_alignment: Option<VerticalAlignment>,
@@ -334,12 +348,12 @@ impl TablePosition {
     }
 
     /// What the horizontal position is measured from (`w:horzAnchor`).
-    pub fn horizontal_anchor(&self) -> Option<TableAnchor> {
+    pub fn horizontal_anchor(&self) -> Option<PositionAnchor> {
         self.horizontal_anchor
     }
 
     /// What the vertical position is measured from (`w:vertAnchor`).
-    pub fn vertical_anchor(&self) -> Option<TableAnchor> {
+    pub fn vertical_anchor(&self) -> Option<PositionAnchor> {
         self.vertical_anchor
     }
 
@@ -349,7 +363,9 @@ impl TablePosition {
         self.horizontal_alignment
     }
 
-    /// The horizontal position as a distance from the anchor (`w:tblpX`).
+    /// The horizontal position as a distance from the anchor (`w:tblpX`). Word writes
+    /// 1 twip for a distance of 0, to avoid the case it ignores, and reads 1 twip back
+    /// as 0 (MS-OI29500 §17.4.57(e)); the value here is as written.
     pub fn x(&self) -> Option<Pt> {
         self.x
     }
@@ -360,7 +376,8 @@ impl TablePosition {
         self.vertical_alignment
     }
 
-    /// The vertical position as a distance from the anchor (`w:tblpY`).
+    /// The vertical position as a distance from the anchor (`w:tblpY`), as written: 1
+    /// twip is a distance of 0 in Word, as for [`x`](Self::x).
     pub fn y(&self) -> Option<Pt> {
         self.y
     }
@@ -439,8 +456,8 @@ impl TableProperties {
         self.cell_spacing
     }
 
-    /// The indentation from the start margin (`w:tblInd`). Unlike the other widths it
-    /// may be negative.
+    /// The indentation from the start margin (`w:tblInd`). It is the only width Word
+    /// expects to be negative (MS-OI29500 §17.4.87(d)); others are kept as written.
     pub fn indentation(&self) -> Option<TableWidth> {
         self.indentation
     }
@@ -504,7 +521,7 @@ impl RowHeight {
 }
 
 /// The properties of a table row as written (`w:trPr`).
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub struct TableRowProperties {
     pub(crate) grid_before: Option<i64>,
@@ -578,8 +595,8 @@ impl TableRowProperties {
 pub struct TableCellProperties {
     pub(crate) width: Option<TableWidth>,
     pub(crate) grid_span: Option<i64>,
-    pub(crate) horizontal_merge: Option<Merge>,
-    pub(crate) vertical_merge: Option<Merge>,
+    pub(crate) horizontal_merge: Option<CellMerge>,
+    pub(crate) vertical_merge: Option<CellMerge>,
     pub(crate) borders: Option<CellBorders>,
     pub(crate) shading: Option<Shading>,
     pub(crate) no_wrap: Option<bool>,
@@ -603,13 +620,13 @@ impl TableCellProperties {
 
     /// The cell's part in a horizontal merge (`w:hMerge`), an older way of writing what
     /// [`grid_span`](Self::grid_span) says.
-    pub fn horizontal_merge(&self) -> Option<Merge> {
+    pub fn horizontal_merge(&self) -> Option<CellMerge> {
         self.horizontal_merge
     }
 
-    /// The cell's part in a vertical merge (`w:vMerge`); [`Merge::Continue`] when the
-    /// element has no `w:val`, as the standard says.
-    pub fn vertical_merge(&self) -> Option<Merge> {
+    /// The cell's part in a vertical merge (`w:vMerge`); [`CellMerge::Continue`] when
+    /// the element has no `w:val`, as the standard says (§17.4.84).
+    pub fn vertical_merge(&self) -> Option<CellMerge> {
         self.vertical_merge
     }
 

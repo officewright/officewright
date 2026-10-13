@@ -198,7 +198,8 @@ impl<'a> TableRow<'a> {
     }
 
     /// The table properties the row sets for itself, in place of the table's (its
-    /// `w:tblPrEx`): Word writes them when rows of different tables are joined.
+    /// `w:tblPrEx`): the standard notes they are written mostly for legacy documents
+    /// and where two tables were joined (§17.4.61).
     pub fn table_property_exceptions(self) -> TableProperties {
         property_element(self.document, self.node, "tblPrEx").map_or_else(
             TableProperties::default,
