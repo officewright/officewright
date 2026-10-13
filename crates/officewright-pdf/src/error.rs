@@ -237,13 +237,15 @@ impl From<Error> for officewright_core::Error {
             Error::Io(source) | Error::Write { source, .. } | Error::Read { source, .. } => {
                 Self::Io { message, source }
             }
-            // The font error decides the kind; the message keeps every reason, since an
-            // invalid argument carries no source.
+            // The font error decides the kind; the message keeps every reason, since only
+            // an I/O error carries its source.
             Error::Font { source, .. } | Error::Embed { source, .. } => {
                 let message = format!("{message}: {}", chain(&source));
                 match Self::from(source) {
                     Self::Io { source, .. } => Self::Io { message, source },
                     Self::Unsupported(_) => Self::Unsupported(message),
+                    Self::Malformed(_) => Self::Malformed(message),
+                    Self::LimitExceeded(_) => Self::LimitExceeded(message),
                     _ => Self::InvalidArgument(message),
                 }
             }

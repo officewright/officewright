@@ -162,13 +162,10 @@ impl From<Error> for officewright_core::Error {
         let message = err.to_string();
         match err {
             Error::Unsupported(_) => Self::Unsupported(message),
-            // officewright_core::Error has no category for malformed input yet; the
-            // bytes passed in are the argument that is wrong.
-            Error::Zip { .. }
-            | Error::Entry { .. }
-            | Error::Xml { .. }
-            | Error::Package { .. }
-            | Error::LimitExceeded { .. } => Self::InvalidArgument(message),
+            Error::Zip { .. } | Error::Entry { .. } | Error::Xml { .. } | Error::Package { .. } => {
+                Self::Malformed(message)
+            }
+            Error::LimitExceeded { .. } => Self::LimitExceeded(message),
         }
     }
 }
@@ -232,7 +229,7 @@ mod tests {
         .into();
         assert!(matches!(
             malformed,
-            officewright_core::Error::InvalidArgument(ref m) if m == "zip archive: bad signature at byte 4"
+            officewright_core::Error::Malformed(ref m) if m == "zip archive: bad signature at byte 4"
         ));
         let xml: officewright_core::Error = Error::Xml {
             part: Some("/a.xml".into()),
@@ -243,7 +240,7 @@ mod tests {
         .into();
         assert!(matches!(
             xml,
-            officewright_core::Error::InvalidArgument(ref m) if m == "/a.xml, line 1, column 2: expected a name"
+            officewright_core::Error::Malformed(ref m) if m == "/a.xml, line 1, column 2: expected a name"
         ));
         let limit: officewright_core::Error = Error::LimitExceeded {
             limit: Limit::PartSize,
@@ -253,7 +250,7 @@ mod tests {
         .into();
         assert!(matches!(
             limit,
-            officewright_core::Error::InvalidArgument(ref m)
+            officewright_core::Error::LimitExceeded(ref m)
                 if m == "zip entry a.xml: uncompressed size in bytes exceeds the limit of 10"
         ));
         let package: officewright_core::Error = Error::Package {
@@ -262,7 +259,7 @@ mod tests {
         .into();
         assert!(matches!(
             package,
-            officewright_core::Error::InvalidArgument(ref m) if m == "two parts are named /a.xml, ignoring case"
+            officewright_core::Error::Malformed(ref m) if m == "two parts are named /a.xml, ignoring case"
         ));
     }
 }

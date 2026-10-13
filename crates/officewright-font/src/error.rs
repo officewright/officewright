@@ -176,10 +176,10 @@ impl error::Error for Error {
 }
 
 impl From<Error> for officewright_core::Error {
-    /// A file that cannot be read is an I/O error. A font that cannot be read or subset
-    /// is an invalid argument, since the caller passed it; outlines that cannot be
-    /// subset yet are unsupported. The message keeps the reason the font parser or the
-    /// subsetter gave.
+    /// A file that cannot be read is an I/O error. Data that is not a font, or a font
+    /// that cannot be read or subset, is malformed; a face index or glyph the font does
+    /// not have is an invalid argument; outlines that cannot be subset yet are
+    /// unsupported. The message keeps the reason the font parser or the subsetter gave.
     fn from(err: Error) -> Self {
         let mut message = err.to_string();
         if let Some(cause) = error::Error::source(&err) {
@@ -192,14 +192,15 @@ impl From<Error> for officewright_core::Error {
             Error::Read { source, .. } => Self::Io { message, source },
             Error::UnsupportedOutlines { .. } => Self::Unsupported(message),
             Error::NotAFont { .. }
-            | Error::FaceIndexOutOfRange { .. }
             | Error::MalformedFace { .. }
             | Error::MissingTable { .. }
             | Error::MalformedTable { .. }
             | Error::InvalidUnitsPerEm { .. }
-            | Error::GlyphOutOfRange { .. }
             | Error::Subset { .. }
-            | Error::SubsetterPanicked { .. } => Self::InvalidArgument(message),
+            | Error::SubsetterPanicked { .. } => Self::Malformed(message),
+            Error::FaceIndexOutOfRange { .. } | Error::GlyphOutOfRange { .. } => {
+                Self::InvalidArgument(message)
+            }
         }
     }
 }
@@ -256,12 +257,18 @@ mod tests {
             source: Cause::new("the table declares 2 records but holds 0"),
         };
         match officewright_core::Error::from(damaged) {
-            officewright_core::Error::InvalidArgument(message) => assert_eq!(
+            officewright_core::Error::Malformed(message) => assert_eq!(
                 message,
                 "font face 0: table 'cmap' is damaged: the table declares 2 records but holds 0"
             ),
             other => panic!("{other:?}"),
         }
+        // A face the file does not have is the caller's mistake.
+        assert!(matches!(
+            officewright_core::Error::from(Error::FaceIndexOutOfRange { index: 3, count: 1 }),
+            officewright_core::Error::InvalidArgument(message)
+                if message == "font face 3 does not exist, the file has 1 face"
+        ));
         let cff2 = Error::UnsupportedOutlines {
             face: 1,
             format: Some(OutlineFormat::Cff2),
