@@ -10,10 +10,18 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+# Inflates the reference pages, PNG files; already the DEFLATE of officewright-opc.
+miniz_oxide = { version = "0.9.1", default-features = false, features = [
+  "with-alloc",
+] }
 officewright-doc.workspace = true
 # Approved for this tool only (issue #36): the report and the baseline are JSON.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[dev-dependencies]
+# Writes the PDFs the tests read back through pdftotext and pdftoppm.
+officewright-pdf.workspace = true
 
 [lints]
 workspace = true

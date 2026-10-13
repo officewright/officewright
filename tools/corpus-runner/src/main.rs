@@ -4,7 +4,9 @@
 //! corpus-runner run [--root DIR] [--report FILE]
 //!                   [--baseline FILE [--update-baseline | --allow-better]]
 //!                   [--expected FILE] [--timeout SECONDS] [--memory-limit MIB]
-//!                   [--enforce-memory-limit] [--jobs N] PATH...
+//!                   [--enforce-memory-limit] [--jobs N] [--references DIR --ours DIR]
+//!                   PATH...
+//! corpus-runner score --ours FILE.pdf --reference DIR
 //! ```
 //!
 //! Every Word document under the paths (`.docx`, `.docm`, `.dotx`, `.dotm`) is opened in a
@@ -32,11 +34,26 @@
 //! is accepted by running with `--update-baseline`, which writes the baseline, and committing
 //! it, so that progress shows in the diff. With `--allow-better` only worse files fail, for
 //! the nightly run over the external corpora, whose baseline is updated by hand.
+//!
+//! With `--references tests/corpus/reference --ours DIR`, every document that has a
+//! reference folder (its `geometry.json` names the document, relative to the folder above
+//! `reference/`) is also scored: our PDF of it, `DIR/<that path>.pdf`, against Word's
+//! pages and geometry. The scores (page counts, text, line endings, word positions, page
+//! breaks, SSIM per page) go into the report, and the baseline keeps the fractions among
+//! them: a drop of more than 0.01 fails, as a rise does until it is accepted. `score`
+//! prints the same metrics for one PDF and one reference folder. Both need pdftotext and
+//! pdftoppm (poppler).
 #![forbid(unsafe_code)]
 
+mod align;
 mod child;
+mod geometry;
+mod metrics;
+mod raster;
 mod report;
 mod run;
+mod ssim;
+mod text;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -44,13 +61,15 @@ use std::time::Duration;
 
 const USAGE: &str = "usage: corpus-runner run [--root DIR] [--report FILE] \
 [--baseline FILE [--update-baseline | --allow-better]] [--expected FILE] [--timeout SECONDS] \
-[--memory-limit MIB] [--enforce-memory-limit] [--jobs N] PATH...
+[--memory-limit MIB] [--enforce-memory-limit] [--jobs N] [--references DIR --ours DIR] PATH...
+       corpus-runner score --ours FILE.pdf --reference DIR
        corpus-runner open FILE";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.split_first() {
         Some((command, [file])) if command == "open" => child::main(file),
+        Some((command, rest)) if command == "score" => score(rest),
         Some((command, rest)) if command == "run" => match parse(rest) {
             Ok(options) => run::main(&options),
             Err(message) => {
@@ -60,6 +79,33 @@ fn main() -> ExitCode {
         },
         _ => {
             eprintln!("{USAGE}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// Prints the metrics of one PDF of ours against one reference folder, as JSON.
+fn score(args: &[String]) -> ExitCode {
+    let (ours, reference) = match args {
+        [a, ours, b, reference] if a == "--ours" && b == "--reference" => (ours, reference),
+        [b, reference, a, ours] if a == "--ours" && b == "--reference" => (ours, reference),
+        _ => {
+            eprintln!("{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+    let scored = metrics::Rendering::reference(std::path::Path::new(reference)).and_then(|word| {
+        let ours = metrics::Rendering::pdf(std::path::Path::new(ours))?;
+        serde_json::to_string_pretty(&metrics::score(&ours, &word))
+            .map_err(|error| error.to_string())
+    });
+    match scored {
+        Ok(json) => {
+            println!("{json}");
+            ExitCode::SUCCESS
+        }
+        Err(message) => {
+            eprintln!("corpus-runner: {message}");
             ExitCode::from(2)
         }
     }
@@ -90,6 +136,10 @@ pub struct Options {
     pub enforce_memory_limit: bool,
     /// How many children run at once.
     pub jobs: usize,
+    /// The reference folders (`tests/corpus/reference`).
+    pub references: Option<PathBuf>,
+    /// The folder of our PDFs to score against them, named like the documents.
+    pub ours: Option<PathBuf>,
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
@@ -105,6 +155,8 @@ fn parse(args: &[String]) -> Result<Options, String> {
         memory_limit_mb: 1024,
         enforce_memory_limit: false,
         jobs: std::thread::available_parallelism().map_or(1, |n| n.get()),
+        references: None,
+        ours: None,
     };
     let mut args = args.iter();
     while let Some(arg) = args.next() {
@@ -118,6 +170,8 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--report" => options.report = Some(PathBuf::from(value("--report")?)),
             "--baseline" => options.baseline = Some(PathBuf::from(value("--baseline")?)),
             "--expected" => options.expected = Some(PathBuf::from(value("--expected")?)),
+            "--references" => options.references = Some(PathBuf::from(value("--references")?)),
+            "--ours" => options.ours = Some(PathBuf::from(value("--ours")?)),
             "--update-baseline" => options.update_baseline = true,
             "--allow-better" => options.allow_better = true,
             "--enforce-memory-limit" => options.enforce_memory_limit = true,
@@ -150,6 +204,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
     }
     if (options.update_baseline || options.allow_better) && options.baseline.is_none() {
         return Err("--update-baseline and --allow-better need --baseline".to_owned());
+    }
+    if options.references.is_some() != options.ours.is_some() {
+        return Err("--references and --ours go together".to_owned());
     }
     Ok(options)
 }
@@ -189,6 +246,7 @@ mod tests {
             &["--jobs"][..],
             &["--update-baseline", "a"][..],
             &["--nonsense", "a"][..],
+            &["--ours", "pdfs", "a"][..],
             &[][..],
         ] {
             assert!(parse(&strings(args)).is_err(), "{args:?}");
