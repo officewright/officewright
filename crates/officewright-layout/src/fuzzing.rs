@@ -162,6 +162,26 @@ pub fn shape(face: &FontFace, text: &str, settings: &Settings) -> Shaped {
     }
 }
 
+/// Shapes each request, a face of `faces` by its index, a text and settings, in turn with
+/// one shaper, as the layout shapes the runs of a document: what one run leaves in the
+/// shaper's caches must not change how another is shaped.
+pub fn shape_in_turn(faces: &[FontFace], requests: &[(usize, &str, Settings)]) -> Vec<Shaped> {
+    let faces: Vec<ShapingFace> = faces.iter().cloned().map(ShapingFace::new).collect();
+    let mut shaper = Shaper::new();
+    requests
+        .iter()
+        .filter_map(|(face, text, settings)| {
+            let face = faces.get(*face)?;
+            let run = shaper.shape(face, text, &settings.request());
+            Some(Shaped {
+                glyphs: glyphs(&run),
+                nominal: run.is_nominal(),
+                replaced: run.replaced_glyphs(),
+            })
+        })
+        .collect()
+}
+
 /// Shapes each text in `face` with kerning, ligatures and contextual alternates off and
 /// on, and once more with a script and a language given, and checks what the layout
 /// relies on: every glyph is one the face has, and the clusters are character
@@ -402,8 +422,10 @@ fn glyphs(run: &ShapedRun) -> Vec<Glyph> {
 
 /// Itemizes and shapes a paragraph as [`paragraph`] does and checks what the layout
 /// relies on: the runs are the paragraph's text in order, each a whole number of
-/// characters and at most 4096 bytes; every glyph is one its face has; clusters are
-/// character boundaries of the run's text that never go backwards.
+/// characters and at most 4096 bytes, none but the first starting with a mark or joiner;
+/// their source text follows in order and covers the paragraph's; every glyph is one its
+/// face has; clusters are character boundaries of the run's text that never go
+/// backwards.
 ///
 /// # Errors
 ///
@@ -413,6 +435,44 @@ pub fn check_paragraph(
     document: &Document,
     inlines: &[Inline],
 ) -> Result<(), String> {
+    let mut fonts = Fonts::new(book);
+    let itemized = itemize(document, inlines, &mut fonts, &Location::default());
+    // The source text: each run's part follows the one before, and together they are
+    // all of it.
+    let mut source_end = 0;
+    let mut previous: Option<&crate::itemize::TextRun> = None;
+    for (index, item) in itemized.items.iter().enumerate() {
+        let Item::Text(run) = item else {
+            previous = None;
+            continue;
+        };
+        // A run that follows another without an item between starts with a character
+        // that starts a cluster, unless the one before was cut for its length and had
+        // no cluster start to cut at.
+        let text = itemized.text.get(run.range.clone()).unwrap_or_default();
+        let cut =
+            previous.is_some_and(|before| before.range.len() + 4 > crate::itemize::MAX_RUN_BYTES);
+        if previous.is_some() && !cut && text.starts_with(crate::itemize::attaches) {
+            return Err(format!(
+                "item {index} starts with a mark or joiner: {text:?}"
+            ));
+        }
+        previous = Some(run);
+        if run.source.start != source_end || itemized.source.get(run.source.clone()).is_none() {
+            return Err(format!(
+                "item {index}: source {:?} after {source_end} of {} bytes",
+                run.source,
+                itemized.source.len()
+            ));
+        }
+        source_end = run.source.end;
+    }
+    if source_end != itemized.source.len() {
+        return Err(format!(
+            "the runs' source ends at {source_end} of {} bytes",
+            itemized.source.len()
+        ));
+    }
     let paragraph = paragraph(book, document, inlines);
     let joined: String = paragraph.runs.iter().map(|run| run.text.as_str()).collect();
     if joined != paragraph.text {

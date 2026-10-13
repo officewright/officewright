@@ -52,6 +52,12 @@ impl ShapingFace {
     }
 }
 
+/// The canonical combining class of `ch` (Unicode's `ccc`), from HarfRust's tables: 0 for
+/// characters that are not combining marks or that combine without reordering.
+pub(crate) fn combining_class(ch: char) -> u8 {
+    harfrust::unicode::combining_class(u32::from(ch))
+}
+
 /// A face's bytes, for HarfRust.
 struct FaceBytes(FontFace);
 
@@ -92,7 +98,7 @@ impl Features {
     ///
     /// Word turns kerning, standard and contextual ligatures and contextual alternates off
     /// unless the run asks for them only in the scripts its standard shaping covers
-    /// (Latin, Greek, Cyrillic, and characters common to scripts). Other scripts need
+    /// ([`STANDARD_SCRIPTS`]). Other scripts need
     /// some of them: Arabic fonts keep letter connections in `calt`, and Word kerns
     /// Arabic whatever the run says, so there those features keep HarfRust's defaults.
     /// The historical and discretionary ligatures follow the run in every script.
@@ -155,6 +161,17 @@ pub(crate) struct ShapedRun {
 }
 
 impl ShapedRun {
+    /// A run without glyphs, shaped nominally or with `replaced` glyphs replaced, for
+    /// the tests of what is reported about shaping.
+    #[cfg(test)]
+    pub(crate) fn for_tests(nominal: bool, replaced: usize) -> Self {
+        Self {
+            glyphs: Vec::new(),
+            nominal,
+            replaced,
+        }
+    }
+
     /// The glyphs, left to right.
     pub(crate) fn glyphs(&self) -> &[ShapedGlyph] {
         &self.glyphs
@@ -685,5 +702,50 @@ mod tests {
         assert!(glyphs.iter().all(|glyph| glyph.x_advance == 10
             && (glyph.x_offset, glyph.y_offset) == (1, 2)
             && glyph.unsafe_to_break));
+    }
+
+    #[test]
+    fn standard_scripts_follow_the_run_and_others_keep_the_shapers_defaults() {
+        let tags = |features: Vec<Feature>| -> Vec<String> {
+            features
+                .iter()
+                .map(|feature| format!("{}={}", feature.tag, feature.value))
+                .collect()
+        };
+        let off = Features::default();
+        for script in [
+            Script::LATIN,
+            Script::ARMENIAN,
+            Script::GEORGIAN,
+            Script::RUNIC,
+            Script::OGHAM,
+        ] {
+            let features = tags(off.opentype(Some(script)));
+            assert!(
+                features.contains(&"kern=0".to_owned()),
+                "{script:?}: {features:?}"
+            );
+        }
+        let features = tags(off.opentype(Some(Script::ARABIC)));
+        assert!(
+            !features.iter().any(|f| f.starts_with("kern")),
+            "{features:?}"
+        );
+    }
+
+    #[test]
+    fn features_come_from_the_formatting() {
+        let style = RunStyle::default()
+            .with_kern_min(Some(Pt(10.0)))
+            .with_ligatures(Ligatures::default().with_discretional(true))
+            .with_contextual_alternates(true);
+        let features = Features::of(&style, Pt(10.0));
+        assert!(features.kerning && features.contextual_alternates);
+        assert!(features.ligatures.discretional() && !features.ligatures.standard());
+        assert!(!Features::of(&style, Pt(9.5)).kerning);
+        assert_eq!(
+            Features::of(&RunStyle::default(), Pt(72.0)),
+            Features::default()
+        );
     }
 }

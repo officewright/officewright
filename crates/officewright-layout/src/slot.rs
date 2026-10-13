@@ -154,6 +154,15 @@ const LATIN1_CHINESE: [(u32, u32); 6] = [
     (0xFC, 0xFC),
 ];
 
+/// Whether the BCP 47 tag `tag` is of one of `languages`, by its primary subtag in any
+/// case: `zh-Hant` and `ZH-cn` are `zh`, `zha` (Zhuang) is not.
+pub(crate) fn language_is(tag: &str, languages: &[&str]) -> bool {
+    let primary = tag.split(['-', '_']).next().unwrap_or_default();
+    languages
+        .iter()
+        .any(|language| primary.eq_ignore_ascii_case(language))
+}
+
 fn within(code: u32, ranges: &[(u32, u32)]) -> bool {
     ranges
         .iter()
@@ -174,10 +183,10 @@ pub(crate) fn slot(ch: char, style: &RunStyle) -> Slot {
     }
     let code = u32::from(ch);
     let hint = fonts.hint() == FontHint::EastAsia;
-    let chinese = style.language().east_asia().is_some_and(|tag| {
-        tag.get(..2)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("zh"))
-    });
+    let chinese = style
+        .language()
+        .east_asia()
+        .is_some_and(|tag| language_is(tag, &["zh"]));
     let chinese_charset = matches!(
         fonts.east_asia_charset(),
         EastAsiaCharset::ChineseBig5 | EastAsiaCharset::Gb2312
@@ -201,6 +210,11 @@ pub(crate) fn slot(ch: char, style: &RunStyle) -> Slot {
         Rule::Latin1 => east_asia_if(
             hint && (within(code, &LATIN1_HINT) || (chinese && within(code, &LATIN1_CHINESE))),
         ),
+        // The note: "If hint is eastAsia, and the language of the run is either Chinese
+        // Traditional or Chinese Simplified, or the character set of the eastAsia font is
+        // Chinese5 or GB2312 then eastAsia font is used." Read as the hint and either
+        // condition; the other reading, the language with the hint or the character set
+        // alone, awaits a Word reference that tells them apart.
         Rule::ChineseByHint => east_asia_if(hint && (chinese || chinese_charset)),
         Rule::ChineseLanguageByHint => east_asia_if(hint && chinese),
         Rule::PresentationForms if code >= 0xFB1D => Slot::Ascii,
@@ -376,7 +390,12 @@ mod tests {
             assert_eq!(at(code, &chinese(hinted())), E);
             assert_eq!(at(code, &charset(hinted(), EastAsiaCharset::Gb2312)), H);
         }
-        // A Chinese language tag in any case; another language is not Chinese.
+        // The character set alone, without the hint, does not count.
+        assert_eq!(at(0x0100, &charset(style(), EastAsiaCharset::Gb2312)), H);
+        // A Chinese language tag in any case; another language, Zhuang (zha) among
+        // them, is not Chinese.
+        let zhuang = hinted().with_language(Language::default().with_east_asia(Some("zha".into())));
+        assert_eq!(at(0x0100, &zhuang), H);
         let traditional =
             hinted().with_language(Language::default().with_east_asia(Some("ZH-tw".into())));
         assert_eq!(at(0x0100, &traditional), E);

@@ -197,7 +197,7 @@ fn draws_each_character_in_a_font_that_has_it() -> TestResult {
         .map(|entry| entry.message())
         .collect();
     assert!(
-        messages.contains(&"no font has U+4E2D '中'; the missing-glyph shape is drawn"),
+        messages.contains(&"no font has 1 character of the Han script, such as U+4E2D '中'; the missing-glyph shape is drawn"),
         "{messages:?}"
     );
     assert!(
@@ -261,5 +261,85 @@ fn every_paragraph_keeps_what_the_layout_relies_on() -> TestResult {
                 .map_err(|err| format!("{text}: {err}"))?;
         }
     }
+    Ok(())
+}
+
+#[test]
+fn a_bold_character_drawn_by_a_regular_fallback_is_bold_synthetically() -> TestResult {
+    let book = book()?;
+    let mut document = Document::default();
+    let id = document.add_run_style(
+        RunStyle::default()
+            .with_fonts(RunFonts::new("Calibri"))
+            .with_bold(true),
+    );
+    // Carlito Bold draws A; Ԕ only Noto Sans has, and only regular.
+    let paragraph = fuzzing::paragraph(&book, &document, &[Inline::text("AԔ", id)]);
+    let runs: Vec<(&str, Option<&str>, bool)> = paragraph
+        .runs()
+        .iter()
+        .map(|run| (run.text(), run.face(), run.synthetic_bold()))
+        .collect();
+    assert_eq!(
+        runs,
+        [
+            ("A", Some("Carlito"), false),
+            ("Ԕ", Some("Noto Sans"), true)
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn the_runs_language_reaches_the_shaper() -> TestResult {
+    let book = book()?;
+    let shaped = |language: Option<&str>| -> TestResult<Vec<u16>> {
+        let mut document = Document::default();
+        let mut style = RunStyle::default().with_fonts(RunFonts::new("Noto Sans"));
+        if let Some(tag) = language {
+            style = style.with_language(
+                officewright_layout::ir::Language::default().with_latin(Some(tag.into())),
+            );
+        }
+        let id = document.add_run_style(style);
+        let paragraph = fuzzing::paragraph(&book, &document, &[Inline::text("\u{15F}\u{163}", id)]);
+        let run = paragraph.runs().first().ok_or("no run")?;
+        Ok(run.glyphs().iter().map(|glyph| glyph.id()).collect())
+    };
+    // Romanian ş and ţ with a comma below: Noto Sans' `locl` forms.
+    assert_ne!(shaped(None)?, shaped(Some("ro"))?);
+    Ok(())
+}
+
+#[test]
+fn shaping_runs_in_turn_gives_what_each_gives_alone() -> TestResult {
+    let faces = [
+        face("carlito/Carlito-Regular.ttf")?,
+        face("noto/NotoSans-Regular.otf")?,
+    ];
+    let plain = fuzzing::Settings::new();
+    let kerned = fuzzing::Settings::new().with_kerning(true);
+    let romanian = fuzzing::Settings::new().with_language("ro");
+    let requests = [
+        (0, "AVATAR", plain.clone()),
+        (0, "AVATAR", kerned.clone()),
+        (1, "\u{15F}\u{163} AVATAR", plain.clone()),
+        (1, "\u{15F}\u{163} AVATAR", romanian.clone()),
+        (1, "\u{15F}\u{163} AVATAR", plain.clone()),
+        (0, "AVATAR", plain),
+    ];
+    let in_turn = fuzzing::shape_in_turn(&faces, &requests);
+    assert_eq!(in_turn.len(), requests.len());
+    for ((face, text, settings), shaped) in requests.iter().zip(&in_turn) {
+        let face = faces.get(*face).ok_or("no face")?;
+        assert_eq!(
+            *shaped,
+            fuzzing::shape(face, text, settings),
+            "{text} with {settings:?}"
+        );
+    }
+    // The cases differ, so a shaper that mixed them up would show.
+    assert_ne!(in_turn.first(), in_turn.get(1));
+    assert_ne!(in_turn.get(2), in_turn.get(3));
     Ok(())
 }

@@ -75,3 +75,60 @@ pub(crate) fn book(fonts: Vec<Vec<u8>>) -> FontBook {
     }
     book
 }
+
+/// `font` with a new `name` table that names the family `family`, appended at the end of
+/// the file; the old table stays, unused.
+pub(crate) fn with_family(font: Vec<u8>, family: &str) -> Vec<u8> {
+    let names = [
+        (1u16, family.to_owned()),
+        (2, "Regular".to_owned()),
+        (4, family.to_owned()),
+        (6, family.replace(' ', "")),
+    ];
+    let mut strings = Vec::new();
+    let mut records = Vec::new();
+    for (id, text) in &names {
+        let bytes: Vec<u8> = text.encode_utf16().flat_map(u16::to_be_bytes).collect();
+        for value in [
+            3u16,
+            1,
+            0x409,
+            *id,
+            bytes.len() as u16,
+            strings.len() as u16,
+        ] {
+            records.extend_from_slice(&value.to_be_bytes());
+        }
+        strings.extend_from_slice(&bytes);
+    }
+    let mut table = Vec::new();
+    for value in [0u16, names.len() as u16, (6 + records.len()) as u16] {
+        table.extend_from_slice(&value.to_be_bytes());
+    }
+    table.extend_from_slice(&records);
+    table.extend_from_slice(&strings);
+    let mut font = font;
+    while font.len() % 4 != 0 {
+        font.push(0);
+    }
+    let offset = font.len() as u32;
+    font.extend_from_slice(&table);
+    let tables = usize::from(u16::from_be_bytes([font[4], font[5]]));
+    let record = (0..tables)
+        .map(|i| 12 + 16 * i)
+        .find(|&record| &font[record..record + 4] == b"name")
+        .expect("a name table");
+    font[record + 8..record + 12].copy_from_slice(&offset.to_be_bytes());
+    font[record + 12..record + 16].copy_from_slice(&(table.len() as u32).to_be_bytes());
+    font
+}
+
+/// `font` marked italic in `OS/2` `fsSelection` and `head` `macStyle`.
+pub(crate) fn italic(font: Vec<u8>) -> Vec<u8> {
+    let at = table(&font, b"OS/2") + 62;
+    let selection = (u16::from_be_bytes([font[at], font[at + 1]]) | 1) & !0x40;
+    let font = patched(font, b"OS/2", 62, &selection.to_be_bytes());
+    let at = table(&font, b"head") + 44;
+    let style = u16::from_be_bytes([font[at], font[at + 1]]) | 2;
+    patched(font, b"head", 44, &style.to_be_bytes())
+}

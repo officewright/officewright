@@ -14,9 +14,9 @@ use officewright_font::FaceId;
 use unicode_script::{Script, UnicodeScript};
 
 use crate::fonts::{Choice, Fonts};
-use crate::ir::{BreakKind, Document, Inline, RunStyle, RunStyleId};
+use crate::ir::{BreakKind, Document, Inline, RunFonts, RunStyle, RunStyleId};
 use crate::report::{Location, ReportKind};
-use crate::shape::{Features, ShapeRequest, ShapedRun, Shaper};
+use crate::shape::{Features, ShapeRequest, ShapedRun, Shaper, combining_class};
 use crate::slot::{Slot, slot};
 use crate::symbol::SymbolFont;
 
@@ -45,16 +45,19 @@ pub(crate) enum Item {
     Text(TextRun),
     Tab(RunStyleId),
     Break(BreakKind, RunStyleId),
-    /// An inline object, by its position among the paragraph's inlines.
-    Object(usize),
-    /// An anchored object, by its position among the paragraph's inlines; it takes no
-    /// room in the line.
-    Anchored(usize),
-    /// A note reference, by its position among the paragraph's inlines.
-    NoteReference(usize, RunStyleId),
+    /// An inline object, by its path.
+    Object(InlinePath),
+    /// An anchored object, by its path; it takes no room in the line.
+    Anchored(InlinePath),
+    /// A note reference, by its path.
+    NoteReference(InlinePath, RunStyleId),
     /// A note's own number or a separator, which the notes layout fills in.
     NoteMark(RunStyleId),
 }
+
+/// Where an inline is: its position among the paragraph's inlines, then, for an inline in
+/// a field's result, its position there, and so on into fields within fields.
+pub(crate) type InlinePath = Vec<usize>;
 
 /// A run of text in one formatting, face and script.
 #[derive(Clone, Debug, PartialEq)]
@@ -67,6 +70,9 @@ pub(crate) struct TextRun {
     /// The face; `None` when there is no font at all, and nothing can be drawn.
     pub(crate) face: Option<FaceId>,
     pub(crate) size: Pt,
+    /// The size the formatting gives, before small capitals reduce it: what kerning
+    /// compares with its threshold.
+    pub(crate) formatted_size: Pt,
     pub(crate) synthetic_bold: bool,
     pub(crate) synthetic_italic: bool,
     /// The script, as an ISO 15924 code such as `Latn`; `Zyyy` for text that only has
@@ -82,9 +88,12 @@ struct Look {
     style: RunStyleId,
     face: Option<FaceId>,
     size: Pt,
+    /// The size the formatting gives, before small capitals reduce it.
+    formatted_size: Pt,
     synthetic_bold: bool,
     synthetic_italic: bool,
-    language: Option<String>,
+    /// Shared between the characters of a language, as each character has a look.
+    language: Option<Arc<str>>,
 }
 
 /// A character on its way into a run.
@@ -111,6 +120,8 @@ pub(crate) fn itemize(
         location,
         out: Itemized::default(),
         pending: Vec::new(),
+        path: Vec::new(),
+        languages: Vec::new(),
     };
     builder.inlines(inlines);
     builder.flush();
@@ -124,11 +135,18 @@ struct Builder<'d, 'f, 'a> {
     out: Itemized,
     /// The characters since the last item that is not text.
     pending: Vec<Placed>,
+    /// The path of the inline being itemized.
+    path: InlinePath,
+    /// The languages seen, shared by the looks that have them.
+    languages: Vec<Arc<str>>,
 }
 
 /// Characters that stay with the character before them, in its run and face: joiners,
-/// variation selectors, the soft hyphen, bidirectional controls and combining marks.
-fn attaches(ch: char) -> bool {
+/// variation selectors, the soft hyphen, bidirectional controls, marks of the Inherited
+/// script and every mark with a canonical combining class (Hebrew points, Arabic
+/// harakat, viramas). Spacing marks of combining class 0, such as Devanagari vowel
+/// signs, take the font chosen for them.
+pub(crate) fn attaches(ch: char) -> bool {
     matches!(
         ch,
         '\u{00AD}'
@@ -140,31 +158,42 @@ fn attaches(ch: char) -> bool {
             | '\u{FE00}'..='\u{FE0F}'
             | '\u{E0100}'..='\u{E01EF}'
     ) || ch.script() == Script::Inherited
+        || combining_class(ch) > 0
 }
 
 impl Builder<'_, '_, '_> {
     fn inlines(&mut self, inlines: &[Inline]) {
         for (index, inline) in inlines.iter().enumerate() {
-            match inline {
-                Inline::Text { text, style, .. } => self.text(text, *style),
-                Inline::Symbol {
-                    font, code, style, ..
-                } => self.symbol(font, *code, *style),
-                Inline::SoftHyphen { style, .. } => self.text("\u{00AD}", *style),
-                Inline::NoBreakHyphen { style, .. } => self.text("\u{2011}", *style),
-                Inline::Field(field) => self.inlines(field.result()),
-                Inline::Tab { style, .. } => self.item(Item::Tab(*style)),
-                Inline::Break { kind, style, .. } => self.item(Item::Break(*kind, *style)),
-                Inline::Object(_) => self.item(Item::Object(index)),
-                Inline::Anchored(_) => self.item(Item::Anchored(index)),
-                Inline::NoteReference { style, .. } => {
-                    self.item(Item::NoteReference(index, *style));
-                }
-                Inline::NoteNumber { style, .. }
-                | Inline::Separator { style, .. }
-                | Inline::ContinuationSeparator { style, .. } => {
-                    self.item(Item::NoteMark(*style));
-                }
+            self.path.push(index);
+            self.inline(inline);
+            self.path.pop();
+        }
+    }
+
+    fn inline(&mut self, inline: &Inline) {
+        let path = self.path.clone();
+        match inline {
+            Inline::Text { text, style, .. } => self.text(text, *style),
+            Inline::Symbol {
+                font, code, style, ..
+            } => self.symbol(font, *code, *style),
+            Inline::SoftHyphen { style, .. } => self.text("\u{00AD}", *style),
+            Inline::NoBreakHyphen { style, .. } => self.text("\u{2011}", *style),
+            // A field shows its stored result. The fields the layout computes (PAGE,
+            // NUMPAGES, SECTIONPAGES) are itemized again with their value by
+            // pagination (PR 8), which then replaces their result.
+            Inline::Field(field) => self.inlines(field.result()),
+            Inline::Tab { style, .. } => self.item(Item::Tab(*style)),
+            Inline::Break { kind, style, .. } => self.item(Item::Break(*kind, *style)),
+            Inline::Object(_) => self.item(Item::Object(path)),
+            Inline::Anchored(_) => self.item(Item::Anchored(path)),
+            Inline::NoteReference { style, .. } => {
+                self.item(Item::NoteReference(path, *style));
+            }
+            Inline::NoteNumber { style, .. }
+            | Inline::Separator { style, .. }
+            | Inline::ContinuationSeparator { style, .. } => {
+                self.item(Item::NoteMark(*style));
             }
         }
     }
@@ -181,10 +210,15 @@ impl Builder<'_, '_, '_> {
     /// Adds `text` in style `id`.
     fn text(&mut self, text: &str, id: RunStyleId) {
         let style = self.style(id);
+        self.text_in(text, id, &style);
+    }
+
+    /// Adds `text` in style `id`, with the formatting `style`.
+    fn text_in(&mut self, text: &str, id: RunStyleId, style: &RunStyle) {
         let turkic = style
             .language()
             .latin()
-            .is_some_and(|tag| tag.starts_with("tr") || tag.starts_with("az"));
+            .is_some_and(|tag| crate::slot::language_is(tag, &["tr", "az"]));
         for ch in text.chars() {
             let source_start = self.out.source.len();
             self.out.source.push(ch);
@@ -198,7 +232,7 @@ impl Builder<'_, '_, '_> {
             };
             let small = style.small_caps() && !style.caps() && lowercase;
             for drawn in drawn {
-                self.character(drawn, source.clone(), id, &style, small);
+                self.character(drawn, source.clone(), id, style, small);
             }
         }
     }
@@ -206,25 +240,42 @@ impl Builder<'_, '_, '_> {
     /// Adds symbol `code` of `font` (`w:sym`).
     fn symbol(&mut self, font: &str, code: u16, id: RunStyleId) {
         let style = self.style(id);
+        let code = u32::from(code);
+        // A code that is neither a symbol font's (U+F020 to U+F0FF) nor a byte is a
+        // Unicode character in that font.
+        if !(0xF000..=0xF0FF).contains(&code) && code > 0xFF {
+            if let Some(ch) = char::from_u32(code) {
+                let fonts = RunFonts::new(font);
+                self.text_in(&ch.to_string(), id, &style.clone().with_fonts(fonts));
+                return;
+            }
+        }
         let (bold, italic) = (style.bold(), style.italic());
         let choice = self.fonts.choose(font, bold, italic);
-        let private = char::from_u32(0xF000 | u32::from(code & 0xFF));
         let source_start = self.out.source.len();
-        if let Some(ch) = char::from_u32(u32::from(code)) {
+        if let Some(ch) = char::from_u32(code) {
             self.out.source.push(ch);
         }
         let source = source_start..self.out.source.len();
-        // The font itself, which maps its codes at U+F020 to U+F0FF.
-        if let (true, Some(face), Some(ch)) = (choice.installed, choice.face, private) {
-            if self.fonts.has_glyph(face, ch) {
-                let look = self.look(id, &style, choice, style.size(), Slot::Ascii);
-                self.push(ch, source, look);
-                return;
+        // The font itself: a symbol font maps its codes at U+F020 to U+F0FF, another font
+        // has them as characters U+0020 to U+00FF.
+        let low = code & 0xFF;
+        let codes = [0xF000 | low, low].into_iter().filter_map(char::from_u32);
+        if let (true, Some(face)) = (choice.installed, choice.face) {
+            for ch in codes {
+                if self.fonts.has_glyph(face, ch) {
+                    let look =
+                        self.look(id, &style, choice, style.size(), style.size(), Slot::Ascii);
+                    self.push(ch, source, look);
+                    return;
+                }
             }
         }
         // A symbol font that is not installed: its code as the Unicode character it
         // stands for, from a font that has it.
-        let unicode = SymbolFont::of(font).and_then(|symbol| symbol.unicode(u32::from(code)));
+        let unicode = SymbolFont::of(font)
+            .filter(|_| !choice.installed)
+            .and_then(|symbol| symbol.unicode(code));
         match unicode {
             Some(ch) => {
                 self.fonts.report_once(
@@ -236,38 +287,61 @@ impl Builder<'_, '_, '_> {
                     ),
                 );
                 let face = self.face_for(ch, choice, &style, bold, italic, font);
-                let look = self.look(id, &style, face, style.size(), Slot::Ascii);
+                let look = self.look(id, &style, face, style.size(), style.size(), Slot::Ascii);
                 self.push(ch, source, look);
             }
             None => {
+                let why = if choice.installed {
+                    "the font has no such symbol"
+                } else {
+                    "the font is not installed"
+                };
                 self.fonts.report_once(
                     ReportKind::GlyphMissing,
                     self.location,
-                    format!(
-                        "symbol {code:04X} of \"{font}\" cannot be drawn: the font is not installed"
-                    ),
+                    format!("symbol {code:04X} of \"{font}\" cannot be drawn: {why}"),
                 );
-                let ch = private.unwrap_or('\u{FFFD}');
-                let look = self.look(id, &style, choice, style.size(), Slot::Ascii);
+                let ch = char::from_u32(0xF000 | low).unwrap_or('\u{FFFD}');
+                let look = self.look(id, &style, choice, style.size(), style.size(), Slot::Ascii);
                 self.push(ch, source, look);
             }
         }
     }
 
     /// The look of a character in `style`, in the face of `choice`.
-    fn look(&self, id: RunStyleId, style: &RunStyle, choice: Choice, size: Pt, slot: Slot) -> Look {
+    fn look(
+        &mut self,
+        id: RunStyleId,
+        style: &RunStyle,
+        choice: Choice,
+        size: Pt,
+        formatted_size: Pt,
+        slot: Slot,
+    ) -> Look {
         let language = match slot {
             Slot::EastAsia => style.language().east_asia(),
             Slot::ComplexScript => style.language().bidi(),
             Slot::Ascii | Slot::HighAnsi => style.language().latin(),
         };
+        let language =
+            language.map(
+                |tag| match self.languages.iter().find(|known| &***known == tag) {
+                    Some(known) => Arc::clone(known),
+                    None => {
+                        let tag: Arc<str> = Arc::from(tag);
+                        self.languages.push(Arc::clone(&tag));
+                        tag
+                    }
+                },
+            );
         Look {
             style: id,
             face: choice.face,
             size,
+            formatted_size,
             synthetic_bold: choice.synthetic_bold,
             synthetic_italic: choice.synthetic_italic,
-            language: language.map(str::to_owned),
+            language,
         }
     }
 
@@ -282,8 +356,9 @@ impl Builder<'_, '_, '_> {
     ) {
         if attaches(ch) {
             if let Some(previous) = self.pending.last() {
-                let look = previous.look.clone();
-                self.push(ch, source, look);
+                // In its base's run, face and script.
+                let (look, script) = (previous.look.clone(), previous.script);
+                self.push_as(ch, source, look, script);
                 return;
             }
         }
@@ -294,14 +369,16 @@ impl Builder<'_, '_, '_> {
         } else {
             (style.bold(), style.italic())
         };
-        let mut size = if complex {
+        let formatted_size = if complex {
             style.size_complex_script()
         } else {
             style.size()
         };
-        if small {
-            size = Pt(size.0 * SMALL_CAPS_SCALE);
-        }
+        let size = if small {
+            Pt(formatted_size.0 * SMALL_CAPS_SCALE)
+        } else {
+            formatted_size
+        };
         let family = slot.family(style.fonts()).to_owned();
         let choice = self.fonts.choose(&family, bold, italic);
         // A symbol font that is not installed: its codes stand for Unicode characters,
@@ -322,7 +399,7 @@ impl Builder<'_, '_, '_> {
             None => ch,
         };
         let face = self.face_for(ch, choice, style, bold, italic, &family);
-        let look = self.look(id, style, face, size, slot);
+        let look = self.look(id, style, face, size, formatted_size, slot);
         self.push(ch, source, look);
     }
 
@@ -358,33 +435,24 @@ impl Builder<'_, '_, '_> {
             }
         }
         if let Some(covering) = self.fonts.covering(ch, family, bold, italic) {
-            return Choice {
-                face: Some(covering),
-                synthetic_bold: false,
-                synthetic_italic: false,
-                installed: false,
-            };
+            return covering;
         }
-        self.fonts.report_once(
-            ReportKind::GlyphMissing,
-            self.location,
-            format!(
-                "no font has U+{:04X} '{}'; the missing-glyph shape is drawn",
-                u32::from(ch),
-                ch.escape_debug()
-            ),
-        );
+        self.fonts.missing(ch);
         choice
     }
 
     fn push(&mut self, ch: char, source: Range<usize>, look: Look) {
+        self.push_as(ch, source, look, ch.script());
+    }
+
+    fn push_as(&mut self, ch: char, source: Range<usize>, look: Look, script: Script) {
         let start = self.out.text.len();
         self.out.text.push(ch);
         self.pending.push(Placed {
             text: start..self.out.text.len(),
             source,
             look,
-            script: ch.script(),
+            script,
         });
     }
 
@@ -410,15 +478,28 @@ impl Builder<'_, '_, '_> {
                 bytes += len;
                 end += 1;
             }
-            // A run cut for its length ends after its last space, where it has one.
+            // A run cut for its length ends after its last space, where it has one; else
+            // where a cluster starts: not before a mark or joiner, which would start the
+            // next run without its base (and get a dotted circle), and not between the
+            // characters drawn for one character of the source (SS for ß).
             if too_long {
-                let after_space = (start + 1..end).rev().find(|&i| {
+                let text_at = |i: usize| {
                     pending
-                        .get(i - 1)
+                        .get(i)
                         .and_then(|placed| self.out.text.get(placed.text.clone()))
-                        .is_some_and(|text| text.chars().all(char::is_whitespace))
-                });
-                if let Some(cut) = after_space {
+                        .and_then(|text| text.chars().next())
+                };
+                let after_space = (start + 1..end)
+                    .rev()
+                    .find(|&i| text_at(i - 1).is_some_and(char::is_whitespace));
+                let starts_cluster = |i: usize| {
+                    let joins = text_at(i).is_some_and(attaches);
+                    let same_source =
+                        pending.get(i).map(|p| &p.source) == pending.get(i - 1).map(|p| &p.source);
+                    !joins && !same_source
+                };
+                let cluster = (start + 1..=end).rev().find(|&i| starts_cluster(i));
+                if let Some(cut) = after_space.or(cluster) {
                     end = cut;
                 }
             }
@@ -435,7 +516,8 @@ impl Builder<'_, '_, '_> {
                 synthetic_bold: first.look.synthetic_bold,
                 synthetic_italic: first.look.synthetic_italic,
                 script: iso15924(script),
-                language: first.look.language.clone(),
+                formatted_size: first.look.formatted_size,
+                language: first.look.language.as_deref().map(str::to_owned),
             }));
             start = end;
         }
@@ -510,37 +592,49 @@ pub(crate) fn shape_runs(
             continue;
         };
         let style = document.run_style(run.style).cloned().unwrap_or_default();
-        let request = ShapeRequest {
-            features: Features::of(&style, run.size),
-            script: Some(run.script).filter(|code| code != b"Zyyy"),
-            language: run.language.clone(),
-        };
+        let request = request(run, &style);
         let text = itemized.text.get(run.range.clone()).unwrap_or_default();
         let result = shaper.shape(&face, text, &request);
         let name = face.face().names().family().unwrap_or("a font").to_owned();
-        if result.is_nominal() {
-            fonts.report_once(
-                ReportKind::FeatureUnsupported,
-                location,
-                format!(
-                    "the layout tables of \"{name}\" cannot be used; its text is drawn \
-                     without kerning, ligatures or mark positioning"
-                ),
-            );
-        }
-        if result.replaced_glyphs() > 0 {
-            fonts.report_once(
-                ReportKind::GlyphMissing,
-                location,
-                format!(
-                    "the layout tables of \"{name}\" name glyphs it does not have; the \
-                     missing-glyph shape is drawn instead"
-                ),
-            );
-        }
+        report_shaping(fonts, &result, &name, location);
         shaped.push(Some(result));
     }
     shaped
+}
+
+/// What a run of `style` asks the shaper for: the features of its formatting at the size
+/// the formatting gives, its script unless it has only common characters, its language.
+pub(crate) fn request(run: &TextRun, style: &RunStyle) -> ShapeRequest {
+    ShapeRequest {
+        features: Features::of(style, run.formatted_size),
+        script: Some(run.script).filter(|code| code != b"Zyyy"),
+        language: run.language.clone(),
+    }
+}
+
+/// Reports, once per face, a run shaped without the face's layout tables or with glyphs
+/// the tables name but the face lacks.
+fn report_shaping(fonts: &mut Fonts<'_>, result: &ShapedRun, name: &str, location: &Location) {
+    if result.is_nominal() {
+        fonts.report_once(
+            ReportKind::FeatureUnsupported,
+            location,
+            format!(
+                "the layout tables of \"{name}\" cannot be used; its text is drawn \
+                     without kerning, ligatures or mark positioning"
+            ),
+        );
+    }
+    if result.replaced_glyphs() > 0 {
+        fonts.report_once(
+            ReportKind::GlyphMissing,
+            location,
+            format!(
+                "the layout tables of \"{name}\" name glyphs it does not have; the \
+                     missing-glyph shape is drawn instead"
+            ),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -777,8 +871,9 @@ mod tests {
     fn reports_a_character_no_font_has_and_draws_the_missing_glyph_shape() {
         let mut setup = Setup::new(vec![minimal()]);
         let style = setup.style(plain(TEST));
-        let (itemized, report, families) = setup.run(&[Inline::text("AB\u{4E2D}B", style)]);
-        // B and 中 stay in the chosen face; 中 is another script.
+        let (itemized, report, families) = setup.run(&[Inline::text("AB\u{4E2D}BC", style)]);
+        // B, C and 中 stay in the chosen face; 中 is another script. The report counts
+        // the characters of each script once.
         assert_eq!(families, [TEST, TEST, TEST]);
         assert_eq!(runs(&itemized).len(), 3);
         assert_eq!(
@@ -786,11 +881,13 @@ mod tests {
             [
                 (
                     ReportKind::GlyphMissing,
-                    "no font has U+0042 'B'; the missing-glyph shape is drawn"
+                    "no font has 1 character of the Han script, such as U+4E2D '\u{4E2D}'; the \
+                     missing-glyph shape is drawn"
                 ),
                 (
                     ReportKind::GlyphMissing,
-                    "no font has U+4E2D '\u{4E2D}'; the missing-glyph shape is drawn"
+                    "no font has 2 characters of the Latin script, such as U+0042 'B'; the \
+                     missing-glyph shape is drawn"
                 ),
             ]
         );
@@ -982,5 +1079,273 @@ mod tests {
         assert!(Features::of(setup.document.run_style(kerned).unwrap(), Pt(14.0)).kerning);
         assert!(!Features::of(setup.document.run_style(unkerned).unwrap(), Pt(10.0)).kerning);
         assert!(!Features::of(&plain(TEST), Pt(72.0)).kerning);
+    }
+
+    fn first_run(itemized: &Itemized) -> &TextRun {
+        match itemized.items.first() {
+            Some(Item::Text(run)) => run,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_fallback_face_draws_bold_and_italic_it_lacks_synthetically() {
+        let mut setup = Setup::new(vec![
+            without_a_acute("Officewright Lite"),
+            renamed(minimal(), "Officewright Zzzz"),
+        ]);
+        let bold = setup.style(plain("Officewright Lite").with_bold(true).with_italic(true));
+        let (itemized, _, families) = setup.run(&[Inline::text("\u{C1}", bold)]);
+        assert_eq!(families, ["Officewright Zzzz"]);
+        let run = first_run(&itemized);
+        assert!(run.synthetic_bold && run.synthetic_italic, "{run:?}");
+        // A face of the asked style draws it as it is.
+        let mut setup = Setup::new(vec![
+            without_a_acute("Officewright Lite"),
+            crate::testing::italic(renamed(minimal(), "Officewright Zzzz")),
+        ]);
+        let italic = setup.style(plain("Officewright Lite").with_italic(true));
+        let (itemized, _, _) = setup.run(&[Inline::text("\u{C1}", italic)]);
+        assert!(!first_run(&itemized).synthetic_italic);
+    }
+
+    #[test]
+    fn prefers_the_same_style_over_the_same_family_name() {
+        // Zzzz shares the family's first word but is upright; the other is italic.
+        let mut setup = Setup::new(vec![
+            renamed(minimal(), "Officewright Zzzz"),
+            crate::testing::italic(renamed(minimal(), "Zzzzzzzzzzzzz Ita")),
+            without_a_acute("Officewright Lite"),
+        ]);
+        let italic = setup.style(plain("Officewright Lite").with_italic(true));
+        let (_, _, families) = setup.run(&[Inline::text("\u{C1}", italic)]);
+        assert_eq!(families, ["Zzzzzzzzzzzzz Ita"]);
+    }
+
+    #[test]
+    fn gives_objects_in_field_results_their_path() {
+        let mut setup = Setup::new(vec![minimal()]);
+        let style = setup.style(plain(TEST));
+        let note = setup
+            .document
+            .add_note(crate::ir::Note::new(crate::ir::NoteKind::Footnote, []));
+        let inner = Field::new(FieldKind::Other("REF".into()), style).with_result([
+            Inline::text("A", style),
+            Inline::note_reference(note, false, style),
+        ]);
+        let outer =
+            Field::new(FieldKind::Other("IF".into()), style).with_result([Inline::Field(inner)]);
+        let (itemized, _, _) = setup.run(&[
+            Inline::note_reference(note, false, style),
+            Inline::text("A", style),
+            Inline::Field(outer),
+        ]);
+        let paths: Vec<&InlinePath> = itemized
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::NoteReference(path, _) => Some(path),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(paths, [&vec![0], &vec![2, 0, 1]]);
+    }
+
+    #[test]
+    fn cuts_long_runs_only_where_a_cluster_starts() {
+        let mut setup = Setup::new(vec![minimal()]);
+        let style = setup.style(plain(TEST));
+        // e and a combining acute, 3 bytes, with no space: the cut must not start a run
+        // with the mark.
+        let text = "e\u{301}".repeat(2000);
+        let (itemized, _, _) = setup.run(&[Inline::text(&text, style)]);
+        let pieces = runs(&itemized);
+        assert!(pieces.len() > 1);
+        for (text, _, _) in &pieces {
+            assert!(text.len() <= MAX_RUN_BYTES);
+            assert!(!text.starts_with('\u{301}'));
+        }
+        // ß drawn as SS in capitals: both S stay in one run, and the runs' source does not
+        // overlap.
+        let caps = setup.style(plain(TEST).with_caps(true));
+        // An A first, so that the limit falls between the two S of one ß.
+        let text = format!("A{}", "\u{DF}".repeat(3000));
+        let (itemized, _, _) = setup.run(&[Inline::text(&text, caps)]);
+        let mut end = 0;
+        for item in &itemized.items {
+            let Item::Text(run) = item else { continue };
+            assert_eq!(run.source.start, end, "{run:?}");
+            end = run.source.end;
+            // ß is two bytes, and so is SS: a run cut between two S would not match.
+            assert_eq!(run.range.len(), run.source.len());
+        }
+        assert_eq!(end, itemized.source.len());
+    }
+
+    #[test]
+    fn keeps_marks_with_a_combining_class_and_bidi_controls_with_their_base() {
+        let mut setup = Setup::new(vec![minimal()]);
+        let style = setup.style(plain(TEST));
+        let other = setup.style(plain(TEST).with_size(Pt(20.0)));
+        // A Hebrew point (class 10) is of the Hebrew script, not Inherited.
+        let (itemized, _, _) = setup.run(&[
+            Inline::text("A", style),
+            Inline::text("\u{5B0}\u{202A}", other),
+        ]);
+        assert_eq!(
+            runs(&itemized),
+            [("A\u{5B0}\u{202A}", "A\u{5B0}\u{202A}", 10.0)]
+        );
+    }
+
+    #[test]
+    fn keeps_installed_symbol_fonts() {
+        // A font named Symbol that has A (U+0041), but not U+F041 or U+F0B7.
+        let symbol = crate::testing::with_family(minimal(), "Symbol");
+        let mut setup = Setup::new(vec![minimal(), symbol]);
+        let style = setup.style(plain(TEST));
+        let symbol_text = setup.style(plain("Symbol"));
+        let (itemized, report, families) = setup.run(&[
+            Inline::text("A", symbol_text),
+            Inline::symbol("Symbol", 0x0041, style),
+        ]);
+        // Text and the symbol code stay A, drawn in the installed Symbol.
+        assert_eq!(itemized.text, "AA");
+        assert_eq!(families, ["Symbol", "Symbol"]);
+        assert!(report.is_empty(), "{report:?}");
+        let (_, report, _) = setup.run(&[Inline::symbol("Symbol", 0xF0B7, style)]);
+        assert_eq!(
+            messages(&report),
+            [(
+                ReportKind::GlyphMissing,
+                "symbol F0B7 of \"Symbol\" cannot be drawn: the font has no such symbol"
+            )]
+        );
+    }
+
+    #[test]
+    fn reads_symbol_codes_that_are_unicode_characters_as_such() {
+        let mut setup = Setup::new(vec![minimal()]);
+        let style = setup.style(plain(TEST));
+        let (itemized, _, _) = setup.run(&[
+            Inline::symbol(TEST, 0x00C1, style),
+            Inline::symbol(TEST, 0x2022, style),
+            Inline::symbol("Wingdings", 0xF071, style),
+        ]);
+        // Á of the font itself, U+2022 as a character, Wingdings' shadowed box as Unicode.
+        assert_eq!(itemized.text, "\u{C1}\u{2022}\u{2751}");
+    }
+
+    #[test]
+    fn capitals_win_over_small_capitals() {
+        let mut setup = Setup::new(vec![minimal()]);
+        let both = setup.style(plain(TEST).with_caps(true).with_small_caps(true));
+        let (itemized, _, _) = setup.run(&[Inline::text("a", both)]);
+        assert_eq!(runs(&itemized), [("A", "a", 10.0)]);
+    }
+
+    #[test]
+    fn east_asian_text_takes_the_east_asian_language() {
+        let mut setup = Setup::new(vec![minimal()]);
+        let style = setup.style(
+            plain(TEST).with_language(
+                Language::default()
+                    .with_latin(Some("en-US".into()))
+                    .with_east_asia(Some("ja-JP".into())),
+            ),
+        );
+        let (itemized, _, _) = setup.run(&[Inline::text("A\u{6F22}", style)]);
+        let languages: Vec<Option<&str>> = itemized
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Text(run) => Some(run.language.as_deref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(languages, [Some("en-US"), Some("ja-JP")]);
+    }
+
+    #[test]
+    fn capitalizes_i_the_turkic_way_by_the_primary_language() {
+        let mut setup = Setup::new(vec![minimal()]);
+        for (tag, expected) in [
+            ("az-Latn-AZ", "\u{130}"),
+            ("TR", "\u{130}"),
+            ("trv", "I"),
+            ("en", "I"),
+        ] {
+            let style = setup.style(
+                plain(TEST)
+                    .with_caps(true)
+                    .with_language(Language::default().with_latin(Some(tag.into()))),
+            );
+            let (itemized, _, _) = setup.run(&[Inline::text("i", style)]);
+            assert_eq!(itemized.text, expected, "{tag}");
+        }
+    }
+
+    #[test]
+    fn kerning_compares_the_formatted_size_with_the_threshold() {
+        let mut setup = Setup::new(vec![minimal()]);
+        // Small capitals of a 12 pt run kerned from 12 pt: drawn at 9.6 pt, kerned all
+        // the same, as the capitals next to them.
+        let id = setup.style(
+            plain(TEST)
+                .with_size(Pt(12.0))
+                .with_kern_min(Some(Pt(12.0)))
+                .with_small_caps(true)
+                .with_ligatures(crate::ir::Ligatures::default().with_standard(true))
+                .with_contextual_alternates(true)
+                .with_language(Language::default().with_latin(Some("ro".into()))),
+        );
+        let (itemized, _, _) = setup.run(&[Inline::text("a", id)]);
+        let run = first_run(&itemized);
+        assert_eq!(run.size, Pt(12.0 * SMALL_CAPS_SCALE));
+        let asked = request(run, setup.document.run_style(id).unwrap());
+        assert!(asked.features.kerning);
+        assert!(asked.features.ligatures.standard());
+        assert!(asked.features.contextual_alternates);
+        assert_eq!(asked.script, Some(*b"Latn"));
+        assert_eq!(asked.language.as_deref(), Some("ro"));
+        // Below the threshold, no kerning; common characters only, no script.
+        let small = setup.style(
+            plain(TEST)
+                .with_size(Pt(11.99))
+                .with_kern_min(Some(Pt(12.0))),
+        );
+        let (itemized, _, _) = setup.run(&[Inline::text("12", small)]);
+        let asked = request(
+            first_run(&itemized),
+            setup.document.run_style(small).unwrap(),
+        );
+        assert!(!asked.features.kerning);
+        assert_eq!(asked.script, None);
+    }
+
+    #[test]
+    fn reports_runs_shaped_without_the_faces_layout_tables() {
+        let book = book(vec![minimal()]);
+        let mut fonts = Fonts::new(&book);
+        let location = Location::default();
+        report_shaping(&mut fonts, &ShapedRun::for_tests(false, 0), "F", &location);
+        report_shaping(&mut fonts, &ShapedRun::for_tests(true, 0), "F", &location);
+        report_shaping(&mut fonts, &ShapedRun::for_tests(true, 2), "F", &location);
+        let report = fonts.into_report();
+        assert_eq!(
+            messages(&report),
+            [
+                (
+                    ReportKind::FeatureUnsupported,
+                    "the layout tables of \"F\" cannot be used; its text is drawn without \
+                     kerning, ligatures or mark positioning"
+                ),
+                (
+                    ReportKind::GlyphMissing,
+                    "the layout tables of \"F\" name glyphs it does not have; the \
+                     missing-glyph shape is drawn instead"
+                ),
+            ]
+        );
     }
 }
