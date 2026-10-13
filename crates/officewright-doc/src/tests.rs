@@ -2330,3 +2330,249 @@ fn shares_the_node_limit_with_the_settings_part() {
     let options = LoadOptions::new().with_limits(Limits::new().with_max_nodes(350));
     assert!(options.open_bytes(data).is_ok());
 }
+
+fn with_numbering(body: &str, numbering_xml: &str) -> Document {
+    Document::from_bytes(package(
+        DOCUMENT,
+        &document_xml(body),
+        &[
+            (
+                "word/_rels/document.xml.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/></Relationships>"#,
+            ),
+            ("word/numbering.xml", numbering_xml),
+        ],
+    ))
+    .unwrap()
+}
+
+#[test]
+fn reads_list_definitions_and_instances() {
+    let numbering = format!(
+        r#"<w:numbering xmlns:w="{W}"><w:abstractNum w:abstractNumId="0"><w:nsid w:val="1A2B3C4D"/><w:multiLevelType w:val="hybridMultilevel"/><w:tmpl w:val="0409000F"/><w:name w:val="Legal"/><w:styleLink w:val="LegalList"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr><w:rPr><w:b/></w:rPr></w:lvl><w:lvl w:ilvl="1" w:tplc="04090019" w:tentative="1"><w:start w:val="0"/><w:numFmt w:val="bullet"/><w:lvlRestart w:val="0"/><w:pStyle w:val="Heading2"/><w:isLgl/><w:suff w:val="space"/><w:lvlText w:val=""/><w:lvlPicBulletId w:val="3"/><w:legacy w:legacy="1" w:legacySpace="120" w:legacyIndent="-360"/></w:lvl></w:abstractNum><w:abstractNum w:abstractNumId="5"><w:numStyleLink w:val="LegalList"/></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="5"/></w:lvlOverride><w:lvlOverride w:ilvl="1"><w:lvl w:ilvl="1"><w:start w:val="3"/><w:numFmt w:val="upperRoman"/><w:lvlText w:null="1"/></w:lvl></w:lvlOverride></w:num><w:num w:numId="2"><w:abstractNumId w:val="7"/></w:num></w:numbering>"#
+    );
+    let document = with_numbering(
+        r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr></w:p>"#,
+        &numbering,
+    );
+    assert!(messages(&document).is_empty(), "{:?}", messages(&document));
+    let numbering = document.numbering();
+    assert_eq!(numbering.definitions().len(), 2);
+    assert_eq!(numbering.instances().len(), 2);
+    // From a paragraph's list reference to its instance, definition and level.
+    let reference = *first_paragraph(&document).properties().numbering().unwrap();
+    let instance = numbering.instance(reference.instance().unwrap()).unwrap();
+    assert_eq!((instance.id(), instance.definition_id()), (1, Some(0)));
+    let definition = instance.definition().unwrap();
+    assert_eq!(definition.id(), 0);
+    assert_eq!(definition.identifier(), Some(0x1A2B_3C4D));
+    assert_eq!(definition.template(), Some(0x0409_000F));
+    assert_eq!(
+        definition.multi_level_type(),
+        Some(MultiLevelType::HybridMultilevel)
+    );
+    assert_eq!(definition.name(), Some("Legal"));
+    assert_eq!(definition.style_link(), Some("LegalList"));
+    assert_eq!(definition.numbering_style_link(), None);
+    let levels = definition.levels();
+    assert_eq!(levels.len(), 2);
+    let first = &levels[0];
+    assert_eq!(first.level(), 0);
+    assert_eq!(
+        (first.start(), first.number_format()),
+        (Some(1), Some(NumberFormat::Decimal))
+    );
+    assert_eq!(first.text(), Some("%1."));
+    assert_eq!(first.justification(), Some(Justification::Left));
+    let indentation = first.paragraph_properties().indentation().unwrap();
+    assert_eq!(
+        (indentation.start(), indentation.hanging()),
+        (Some(Pt(36.0)), Some(Pt(18.0)))
+    );
+    assert_eq!(first.run_properties().bold(), Some(true));
+    assert_eq!((first.tentative(), first.restart()), (None, None));
+    let second = definition.level(1).unwrap();
+    assert_eq!(second.tentative(), Some(true));
+    assert_eq!(second.template_code(), Some(0x0409_0019));
+    assert_eq!(second.number_format(), Some(NumberFormat::Bullet));
+    assert_eq!((second.start(), second.restart()), (Some(0), Some(0)));
+    assert_eq!(second.paragraph_style(), Some("Heading2"));
+    assert_eq!(second.legal(), Some(true));
+    assert_eq!(second.suffix(), Some(LevelSuffix::Space));
+    assert_eq!(second.text(), Some(""));
+    assert_eq!(second.picture_bullet(), Some(3));
+    let legacy = second.legacy().unwrap();
+    assert_eq!(
+        (legacy.legacy(), legacy.space(), legacy.indent()),
+        (Some(true), Some(Pt(6.0)), Some(Pt(-18.0)))
+    );
+    assert_eq!(definition.level(2), None);
+    // The overrides of the instance.
+    let overrides = instance.overrides();
+    assert_eq!(overrides.len(), 2);
+    assert_eq!((overrides[0].level(), overrides[0].start()), (0, Some(5)));
+    assert_eq!(overrides[0].definition(), None);
+    let replaced = overrides[1].definition().unwrap();
+    assert_eq!((replaced.level(), replaced.start()), (1, Some(3)));
+    assert_eq!(replaced.number_format(), Some(NumberFormat::UpperRoman));
+    // w:null on stands for an empty template.
+    assert_eq!(replaced.text(), Some(""));
+    // A definition that stands for a numbering style.
+    let linked = numbering.definition(5).unwrap();
+    assert_eq!(linked.numbering_style_link(), Some("LegalList"));
+    assert!(linked.levels().is_empty());
+    // An instance whose definition is missing.
+    let orphan = numbering.instance(2).unwrap();
+    assert_eq!(orphan.definition_id(), Some(7));
+    assert!(orphan.definition().is_none());
+    assert!(numbering.instance(3).is_none());
+    // A document without a numbering part has no lists.
+    let plain = open("<w:p/>");
+    assert_eq!(plain.numbering().definitions().len(), 0);
+}
+
+#[test]
+fn reads_the_number_format_of_word_custom_formats_through_the_fallback() {
+    // Word writes a custom format in the choice of mc:AlternateContent and decimal in the
+    // fallback, as in LibreOffice's arabic-zero3-numbering.docx.
+    let numbering = format!(
+        r#"<w:numbering xmlns:w="{W}" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" mc:Ignorable="w14"><w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:start w:val="1"/><mc:AlternateContent><mc:Choice Requires="w14"><w:numFmt w:val="custom" w:format="001, 002, 003, ..."/></mc:Choice><mc:Fallback><w:numFmt w:val="decimal"/></mc:Fallback></mc:AlternateContent><w:lvlText w:val="%1"/></w:lvl></w:abstractNum></w:numbering>"#
+    );
+    let document = with_numbering("<w:p/>", &numbering);
+    assert!(messages(&document).is_empty(), "{:?}", messages(&document));
+    let level = document
+        .numbering()
+        .definition(1)
+        .unwrap()
+        .level(0)
+        .unwrap();
+    assert_eq!(level.number_format(), Some(NumberFormat::Decimal));
+}
+
+#[test]
+fn repairs_damaged_numbering() {
+    let numbering = format!(
+        r#"<w:numbering xmlns:w="{W}"><w:abstractNum><w:lvl w:ilvl="0"/></w:abstractNum><w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:numFmt w:val="roman"/><w:suff w:val="tabs"/></w:lvl><w:lvl w:ilvl="0"><w:start w:val="9"/></w:lvl><w:lvl w:ilvl="9"><w:start w:val="1"/></w:lvl></w:abstractNum><w:abstractNum w:abstractNumId="1"/><w:num><w:abstractNumId w:val="1"/></w:num><w:num w:numId="4"><w:abstractNumId w:val="one"/><w:lvlOverride w:ilvl="x"/></w:num><w:num w:numId="4"><w:abstractNumId w:val="1"/></w:num></w:numbering>"#
+    );
+    let document = with_numbering("<w:p/>", &numbering);
+    let numbering_view = document.numbering();
+    // Every element is kept, the first with an id is the one looked up.
+    assert_eq!(numbering_view.definitions().len(), 2);
+    assert_eq!(numbering_view.instances().len(), 2);
+    let definition = numbering_view.definition(1).unwrap();
+    let levels = definition.levels();
+    // The level with w:ilvl 9 is left out, and the second level 0 is ignored.
+    assert_eq!(levels.len(), 1);
+    assert_eq!(
+        (
+            levels[0].number_format(),
+            levels[0].suffix(),
+            levels[0].start()
+        ),
+        (None, None, None)
+    );
+    let instance = numbering_view.instance(4).unwrap();
+    assert_eq!(instance.definition_id(), None);
+    assert!(instance.overrides().is_empty());
+    let messages = messages(&document);
+    assert_eq!(messages.len(), 10, "{messages:?}");
+    assert!(messages[0].ends_with(": a w:abstractNum without a valid w:abstractNumId is ignored"));
+    assert!(messages[1].ends_with(": a second w:lvl with w:ilvl 0 is ignored"));
+    assert!(messages[2].ends_with(r#": w:numFmt w:val="roman" is not valid; it is ignored"#));
+    assert!(messages[3].ends_with(r#": w:suff w:val="tabs" is not valid; it is ignored"#));
+    assert!(messages[4].ends_with(r#": w:lvl w:ilvl="9" is not valid; it is ignored"#));
+    assert!(messages[5].ends_with(
+        ": a second w:abstractNum with id 1 is ignored where definitions are looked up by id"
+    ));
+    assert!(messages[6].ends_with(": a w:num without a valid w:numId is ignored"));
+    assert!(messages[7].ends_with(r#": w:abstractNumId w:val="one" is not valid; it is ignored"#));
+    assert!(messages[8].ends_with(r#": w:lvlOverride w:ilvl="x" is not valid; it is ignored"#));
+    assert!(
+        messages[9]
+            .ends_with(": a second w:num with id 4 is ignored where instances are looked up by id")
+    );
+    // A numbering part that is not w:numbering refuses the document.
+    let data = package(
+        DOCUMENT,
+        &document_xml("<w:p/>"),
+        &[
+            (
+                "word/_rels/document.xml.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/></Relationships>"#,
+            ),
+            ("word/numbering.xml", "<x/>"),
+        ],
+    );
+    assert_eq!(
+        Document::from_bytes(data).unwrap_err().to_string(),
+        "/word/numbering.xml, line 1, column 1: the root element is <x>, not w:numbering"
+    );
+}
+
+#[test]
+fn reads_strict_numbering() {
+    let numbering_xml = r#"<w:numbering xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="lowerLetter"/><w:pPr><w:ind w:start="0.5in" w:hanging="0.25in"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#;
+    let xml = r#"<w:document xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main" conformance="strict"><w:body><w:p/></w:body></w:document>"#;
+    let document = Document::from_bytes(package(
+        DOCUMENT,
+        xml,
+        &[
+            (
+                "word/_rels/document.xml.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://purl.oclc.org/ooxml/officeDocument/relationships/numbering" Target="numbering.xml"/></Relationships>"#,
+            ),
+            ("word/numbering.xml", numbering_xml),
+        ],
+    ))
+    .unwrap();
+    assert!(messages(&document).is_empty(), "{:?}", messages(&document));
+    let level = document
+        .numbering()
+        .instance(1)
+        .unwrap()
+        .definition()
+        .unwrap()
+        .level(0)
+        .unwrap();
+    assert_eq!(level.number_format(), Some(NumberFormat::LowerLetter));
+    assert_eq!(
+        level.paragraph_properties().indentation().unwrap().start(),
+        Some(Pt(36.0))
+    );
+}
+
+#[test]
+fn shares_the_node_limit_with_the_numbering_part() {
+    // 100 paragraphs cost 100 nodes; 100 empty definitions with an id cost 300, as 100
+    // one-attribute styles do: 400 in all, more than the numbering part alone.
+    let body = "<w:p/>".repeat(100);
+    let mut numbering = format!(r#"<w:numbering xmlns:w="{W}">"#);
+    for n in 0..100 {
+        numbering.push_str(&format!(r#"<w:abstractNum w:abstractNumId="{n}"/>"#));
+    }
+    numbering.push_str("</w:numbering>");
+    let data = package(
+        DOCUMENT,
+        &document_xml(&body),
+        &[
+            (
+                "word/_rels/document.xml.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/></Relationships>"#,
+            ),
+            ("word/numbering.xml", &numbering),
+        ],
+    );
+    let options = LoadOptions::new().with_limits(Limits::new().with_max_nodes(350));
+    match options.open_bytes(data.clone()).unwrap_err() {
+        Error::LimitExceeded {
+            limit: Limit::Nodes,
+            context,
+            ..
+        } => {
+            assert!(context.starts_with("/word/numbering.xml"), "{context}");
+        }
+        other => panic!("{other}"),
+    }
+    let options = LoadOptions::new().with_limits(Limits::new().with_max_nodes(400));
+    assert!(options.open_bytes(data).is_ok());
+}
