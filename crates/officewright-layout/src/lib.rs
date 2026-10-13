@@ -28,12 +28,19 @@
 #![forbid(unsafe_code)]
 
 mod error;
+mod fonts;
 #[cfg(feature = "fuzzing")]
 pub mod fuzzing;
 #[cfg_attr(not(feature = "unstable-ir"), doc(hidden))]
 pub mod ir;
+mod itemize;
+mod metrics;
 mod report;
 mod shape;
+mod slot;
+mod symbol;
+#[cfg(test)]
+mod testing;
 
 pub use error::{Error, Result};
 pub use report::{LayoutReport, Location, ReportEntry, ReportKind};

@@ -231,6 +231,7 @@ dependencies = [
  "harfrust",
  "officewright-core",
  "officewright-font",
+ "unicode-script",
 ]
 
 [[package]]

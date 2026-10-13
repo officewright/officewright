@@ -71,11 +71,15 @@ def half_points(points: float) -> int:
     return int(value)
 
 
-def rpr(font: str | None = None, size: float | None = None) -> str:
+def rpr(font: str | None = None, size: float | None = None, toggles: str = "") -> str:
+    """Run properties; toggles (w:b, w:i, w:smallCaps ...) go between w:rFonts and w:sz,
+    in the order of the schema."""
     parts = []
     if font:
         f = attr(font)
         parts.append(f'<w:rFonts w:ascii="{f}" w:hAnsi="{f}" w:eastAsia="{f}" w:cs="{f}"/>')
+    if toggles:
+        parts.append(toggles)
     if size is not None:
         hp = half_points(size)
         parts.append(f'<w:sz w:val="{hp}"/><w:szCs w:val="{hp}"/>')
@@ -86,14 +90,18 @@ def text(value: str) -> str:
     return f'<w:t xml:space="preserve">{escape(value)}</w:t>'
 
 
-def run(value: str, font: str | None = None, size: float | None = None) -> str:
-    return f"<w:r>{rpr(font, size)}{text(value)}</w:r>"
+def run(value: str, font: str | None = None, size: float | None = None, toggles: str = "") -> str:
+    return f"<w:r>{rpr(font, size, toggles)}{text(value)}</w:r>"
 
 
 def lines(values: list[str], font: str | None = None, size: float | None = None) -> str:
     """One run whose lines are separated by line breaks (w:br)."""
     inner = "<w:br/>".join(text(v) for v in values)
     return f"<w:r>{rpr(font, size)}{inner}</w:r>"
+
+
+def line_break_run() -> str:
+    return "<w:r><w:br/></w:r>"
 
 
 def tab(font: str | None = None, size: float | None = None) -> str:
@@ -295,6 +303,22 @@ class Doc:
     color_mapping: tuple[tuple[str, str], ...] = ()
 
 
+def line_fonts_body(fonts: list[str]) -> str:
+    """One page per font with a shaded paragraph of ten lines at 11 pt and one at 12 pt."""
+    body = []
+    for i, font in enumerate(fonts):
+        for size, fill in ((11, GREY), (12, DARK_GREY)):
+            values = [f"{font} {size} pt, line {n:02d}: Hamburgefonts gjpqy" for n in range(1, 11)]
+            body.append(
+                para(
+                    lines(values, font, size),
+                    page_break_before=i > 0 and size == 11,
+                    shading=fill,
+                )
+            )
+    return "".join(body)
+
+
 def line_fonts() -> Doc:
     fonts = [
         "Calibri",
@@ -310,22 +334,93 @@ def line_fonts() -> Doc:
         "Liberation Sans",
         "Noto Sans",
     ]
-    body = []
-    for i, font in enumerate(fonts):
-        for size, fill in ((11, GREY), (12, DARK_GREY)):
-            values = [f"{font} {size} pt, line {n:02d}: Hamburgefonts gjpqy" for n in range(1, 11)]
-            body.append(
-                para(
-                    lines(values, font, size),
-                    page_break_before=i > 0 and size == 11,
-                    shading=fill,
-                )
-            )
     return Doc(
         "E-line-fonts",
         "Single line height per font: one page per font with a shaded paragraph of ten "
         "lines at 11 pt and one at 12 pt; Aptos, Cascadia Mono and Noto Sans set "
         "USE_TYPO_METRICS",
+        line_fonts_body(fonts),
+    )
+
+
+def line_fonts_truetype() -> Doc:
+    # Word ignored USE_TYPO_METRICS for the CFF build of Noto Sans (installed for the user)
+    # and honoured it for Aptos and Cascadia Mono (TrueType outlines). The TrueType build of
+    # the same Noto Sans version has the same metrics and names, so rendered with it
+    # installed instead, this document tells the outline format from the installation.
+    return Doc(
+        "E-line-fonts-truetype",
+        "Single line height as in E-line-fonts, for Noto Sans rendered with the TrueType "
+        "build of Noto Sans 2.015 installed for the user instead of the CFF build (same "
+        "metrics and names; USE_TYPO_METRICS set), and for Aptos (flag set, TrueType) and "
+        "Liberation Sans (flag clear) as controls",
+        line_fonts_body(["Noto Sans", "Aptos", "Liberation Sans"]),
+    )
+
+
+# Liberation Sans and Carlito have no smcp feature (Carlito has c2sc only); Noto Sans has one,
+# so its rows show whether Word uses the font's small capitals or synthesises them.
+SMALL_CAPS_FONTS = ["Liberation Sans", "Carlito", "Noto Sans"]
+# Sizes whose 80 % falls between half-points (7.2, 8.4, 8.8, 10.4, 16.8, 57.6 pt) and on one
+# (32 pt), so that the reference shows whether and how Word rounds the reduced size.
+SMALL_CAPS_SIZES = [9, 10.5, 11, 13, 21, 40, 72]
+
+
+def small_caps(mode: int) -> Doc:
+    if mode == 12:
+        setting = "no compatibilityMode setting, so Word's default, mode 12"
+    else:
+        setting = f"compatibility mode {mode}"
+    body = []
+    for font in SMALL_CAPS_FONTS:
+        for size in SMALL_CAPS_SIZES:
+            for label, word, toggles in (
+                ("small caps", "hamburg", "<w:smallCaps/>"),
+                ("capitals", "HAMBURG", ""),
+                ("mixed small caps", "Hamburg", "<w:smallCaps/>"),
+            ):
+                body.append(
+                    para(
+                        run(f"{font} {size} pt, {label}:", font, 10)
+                        + line_break_run()
+                        + run(word, font, size, toggles)
+                    )
+                )
+    return Doc(
+        f"E-smallcaps-{mode}",
+        "Small capitals: per font (Liberation Sans and Carlito, without an smcp feature, and "
+        "Noto Sans, with one, rendered with its TrueType build installed as for "
+        "E-line-fonts-truetype) and size (9 to 72 pt), a paragraph with 'hamburg' in small "
+        "caps, one with 'HAMBURG' typed in capitals and one with 'Hamburg' in small caps; "
+        "their widths and heights give the size Word reduces small capitals to; "
+        f"{setting}",
+        "".join(body),
+        mode=mode,
+    )
+
+
+def italic_missing() -> Doc:
+    # Issue #82: a family with Bold Italic but no Italic face. Rendered with Noto Sans
+    # installed as Regular, Bold and Bold Italic only; Liberation Sans, installed complete,
+    # shows each face as it is.
+    body = []
+    for font in ("Noto Sans", "Liberation Sans"):
+        for size in (11, 20):
+            for label, toggles in (
+                ("regular", ""),
+                ("italic", "<w:i/><w:iCs/>"),
+                ("bold", "<w:b/><w:bCs/>"),
+                ("bold italic", "<w:b/><w:bCs/><w:i/><w:iCs/>"),
+            ):
+                body.append(
+                    para(run(f"{font} {size} pt {label}: Hamburgefonts gjpqy", font, size, toggles))
+                )
+    return Doc(
+        "E-italic-missing",
+        "Italic text in a family without an Italic face (issue #82): Noto Sans, rendered "
+        "with only its Regular, Bold and Bold Italic faces installed, and Liberation Sans, "
+        "installed complete, at 11 and 20 pt in regular, italic, bold and bold italic; one "
+        "paragraph per case",
         "".join(body),
     )
 
@@ -872,6 +967,11 @@ def documents() -> list[Doc]:
         theme_fonts(),
         tab_hanging(False, 14),
         tab_hanging(True, 14),
+        line_fonts_truetype(),
+        small_caps(12),
+        small_caps(14),
+        small_caps(15),
+        italic_missing(),
     ]
 
 
