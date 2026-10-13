@@ -6,8 +6,9 @@ Please do not report security problems in public issues, pull requests or discus
 
 Report them privately through GitHub's private vulnerability reporting:
 <https://github.com/officewright/officewright/security/advisories/new>, also reachable as
-**Report a vulnerability** on the repository's security page. Only you and the maintainer
-see the report and the discussion of it.
+**Report a vulnerability** on the repository's security page. The report and the
+discussion of it are not public: only you, the maintainer and anyone the maintainer asks
+to help with the fix can see them.
 
 Include what you can of:
 
