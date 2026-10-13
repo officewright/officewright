@@ -15,6 +15,7 @@
 # Third-party data is kept byte for byte as published (Helvetica.afm has CRLF endings).
 crates/officewright-pdf/data/afm/* -text
 tests/fonts/** -text
+tests/corpus/poi/** -text
 
 # Exact bytes matter: the fixture has a CRLF line ending and a form feed.
 tests/pdf-output/sample.txt -text

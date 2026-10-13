@@ -26,6 +26,13 @@ printf '==> %s\n' "corpus runner (Word documents of corpus-ext)"
 # the night but does not stop the fuzzing.
 corpus_failed=
 if scripts/fetch-corpus.sh poi libreoffice && cargo build --release -p corpus-runner; then
+	# The committed POI documents are unmodified copies of the fetched ones.
+	for file in tests/corpus/poi/*.docx; do
+		if ! cmp -s "$file" "corpus-ext/poi/test-data/document/${file##*/}"; then
+			echo "nightly.sh: $file is not POI's file of that name" >&2
+			corpus_failed=1
+		fi
+	done
 	target/release/corpus-runner run --enforce-memory-limit \
 		--expected tools/corpus-runner/expected-errors.tsv \
 		--baseline tools/corpus-runner/baseline-ext.json --allow-better \
@@ -44,7 +51,7 @@ printf '==> %s\n' "fuzzing (30 min per target)"
 # script if either fails.
 seeds() {
 	case $1 in
-	docx_open) echo tests/corpus/word-rules tests/corpus/resaved crates/officewright-doc/tests/data ;;
+	docx_open) echo tests/corpus/word-rules tests/corpus/resaved tests/corpus/poi crates/officewright-doc/tests/data ;;
 	font_* | pdf_embed) echo tests/fonts crates/officewright-font/tests/data ;;
 	package) echo fuzz/seeds/package ;;
 	xml) echo fuzz/seeds/xml ;;
@@ -75,7 +82,7 @@ if [ -n "$crashed" ]; then
 	failed=1
 fi
 if [ -n "$corpus_failed" ]; then
-	echo "nightly.sh: the corpus runner failed (report in target/corpus-report.json)" >&2
+	echo "nightly.sh: the corpus checks failed (messages above; report in target/corpus-report.json)" >&2
 	failed=1
 fi
 if [ -n "$failed" ]; then

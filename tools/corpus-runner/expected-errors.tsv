@@ -1,5 +1,6 @@
-# Files of the external corpora (corpus-ext/, fetched by scripts/fetch-corpus.sh) that do
-# not open, and why that is right. tools/corpus-runner counts them as passing.
+# Files of the committed corpus (tests/corpus/) and of the external corpora (corpus-ext/,
+# fetched by scripts/fetch-corpus.sh) that do not open, and why that is right.
+# tools/corpus-runner counts them as passing.
 # Tab-separated: the path from the repository root, then the reason. Only inputs that are
 # not documents Word opens belong here: encrypted, another format under a Word extension,
 # or broken on purpose. A document Word opens but officewright does not is a bug, not an
@@ -40,3 +41,4 @@ corpus-ext/poi/test-data/document/cpansearch.perl.org_src_tobyink_acme-rundoc-0.
 corpus-ext/poi/test-data/document/crash-517626e815e0afa9decd0ebb6d1dee63fb9907dd.docx	a broken ZIP archive found by a fuzzer
 corpus-ext/poi/test-data/document/deep-table-cell.docx	XML nested deeper than Limits::max_xml_depth (256), a deliberate bound
 corpus-ext/poi/test-data/document/truncated62886.docx	a truncated ZIP archive, on purpose
+tests/corpus/poi/deep-table-cell.docx	XML nested deeper than Limits::max_xml_depth (256), a deliberate bound
