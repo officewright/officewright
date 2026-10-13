@@ -15,9 +15,11 @@
 //! [`Document::clamp`] brings values a document may hold, but Word does not accept,
 //! within Word's limits, and reports each change.
 
+mod image;
 mod inline;
 mod list;
 pub(crate) mod macros;
+mod note;
 mod paragraph;
 mod rules;
 mod section;
@@ -31,11 +33,17 @@ mod tests;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+pub use image::{
+    AnchoredContent, AnchoredObject, Crop, HorizontalAlign, HorizontalAnchor, HorizontalPlacement,
+    HorizontalReference, ImageData, ImageFormat, Insets, Picture, Size, VerticalAlign,
+    VerticalAnchor, VerticalPlacement, VerticalReference, Wrap,
+};
 pub use inline::{BreakClear, BreakKind, Field, FieldKind, Inline};
 pub use list::{
     Level, LevelAlignment, LevelOverride, LevelTextPart, ListDefinition, ListInstance, ListItem,
     Restart, Suffix,
 };
+pub use note::{Note, NoteKind, NotePosition, NoteProps, NoteRestart, NoteSeparators};
 pub use paragraph::{
     Alignment, Block, Border, BorderStyle, Indent, LineSpacing, Paragraph, ParagraphBorders,
     ParagraphProps, Shading, ShadingPattern, Spacing, StyleKey, TabKind, TabLeader, TabStop,
@@ -59,7 +67,8 @@ use crate::{LayoutReport, Result};
 use walk::{Checker, Clamper};
 
 /// A document in the layout IR: its settings, the run styles its text uses, its list
-/// definitions and their instances, and its sections.
+/// definitions and their instances, its images, its footnotes and endnotes, and its
+/// sections.
 ///
 /// ```
 /// use officewright_core::{PageSize, Pt};
@@ -90,6 +99,10 @@ pub struct Document {
     run_styles: Vec<RunStyle>,
     lists: Vec<ListDefinition>,
     list_instances: Vec<ListInstance>,
+    images: Vec<ImageData>,
+    notes: Vec<Note>,
+    footnote_separators: NoteSeparators,
+    endnote_separators: NoteSeparators,
     sections: Vec<Section>,
 }
 
@@ -102,6 +115,10 @@ impl Document {
             run_styles: Vec::new(),
             lists: Vec::new(),
             list_instances: Vec::new(),
+            images: Vec::new(),
+            notes: Vec::new(),
+            footnote_separators: NoteSeparators::default(),
+            endnote_separators: NoteSeparators::default(),
             sections: Vec::new(),
         }
     }
@@ -159,6 +176,54 @@ impl Document {
         self.entry(id.document, id.index, &self.list_instances)
     }
 
+    /// Adds the data of an image and returns its id, which only this document and its
+    /// clones accept.
+    pub fn add_image(&mut self, image: ImageData) -> ImageId {
+        let index = self.images.len();
+        self.images.push(image);
+        ImageId {
+            document: self.tag,
+            index,
+        }
+    }
+
+    /// The image data with this id; `None` for an id of another document.
+    pub fn image(&self, id: ImageId) -> Option<&ImageData> {
+        self.entry(id.document, id.index, &self.images)
+    }
+
+    /// Adds a footnote or an endnote and returns its id, which only this document and its
+    /// clones accept.
+    pub fn add_note(&mut self, note: Note) -> NoteId {
+        let index = self.notes.len();
+        self.notes.push(note);
+        NoteId {
+            document: self.tag,
+            index,
+        }
+    }
+
+    /// The note with this id; `None` for an id of another document.
+    pub fn note(&self, id: NoteId) -> Option<&Note> {
+        self.entry(id.document, id.index, &self.notes)
+    }
+
+    /// Sets the lines that separate the notes of a kind from the text.
+    pub fn set_note_separators(&mut self, kind: NoteKind, separators: NoteSeparators) {
+        match kind {
+            NoteKind::Footnote => self.footnote_separators = separators,
+            NoteKind::Endnote => self.endnote_separators = separators,
+        }
+    }
+
+    /// The lines that separate the notes of a kind from the text.
+    pub fn note_separators(&self, kind: NoteKind) -> &NoteSeparators {
+        match kind {
+            NoteKind::Footnote => &self.footnote_separators,
+            NoteKind::Endnote => &self.endnote_separators,
+        }
+    }
+
     /// Adds a section after the last one.
     pub fn add_section(&mut self, section: Section) {
         self.sections.push(section);
@@ -173,7 +238,8 @@ impl Document {
     /// breaks: every length is a finite number, lengths that WordprocessingML only has
     /// unsigned are not negative, every id is of this document, text holds no control
     /// characters, list levels are 0 to 8, tables have rows, rows have cells and cells
-    /// have content, the document has a section. It does not change the document.
+    /// have content, notes hold no note references, the document has a section. It does
+    /// not change the document.
     ///
     /// # Errors
     ///
@@ -197,6 +263,12 @@ impl Document {
         checker.visit("run_styles", &self.run_styles)?;
         checker.visit("lists", &self.lists)?;
         checker.visit("list_instances", &self.list_instances)?;
+        checker.visit("images", &self.images)?;
+        checker.set_in_note(true);
+        checker.visit("notes", &self.notes)?;
+        checker.visit("footnote_separators", &self.footnote_separators)?;
+        checker.visit("endnote_separators", &self.endnote_separators)?;
+        checker.set_in_note(false);
         if self.sections.is_empty() {
             return Err(checker.error("has no section"));
         }
@@ -226,6 +298,10 @@ impl Document {
         clamper.visit("run_styles", &mut self.run_styles);
         clamper.visit("lists", &mut self.lists);
         clamper.visit("list_instances", &mut self.list_instances);
+        clamper.visit("images", &mut self.images);
+        clamper.visit("notes", &mut self.notes);
+        clamper.visit("footnote_separators", &mut self.footnote_separators);
+        clamper.visit("endnote_separators", &mut self.endnote_separators);
         clamper.visit("sections", &mut self.sections);
         clamper.finish()
     }
@@ -310,4 +386,8 @@ document_ids! {
     ListId in lists, "list definition";
     /// A list instance of a [`Document`], from [`Document::add_list_instance`].
     ListInstanceId in list_instances, "list instance";
+    /// The data of an image of a [`Document`], from [`Document::add_image`].
+    ImageId in images, "image";
+    /// A footnote or an endnote of a [`Document`], from [`Document::add_note`].
+    NoteId in notes, "note";
 }

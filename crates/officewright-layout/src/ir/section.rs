@@ -3,6 +3,7 @@
 use officewright_core::{PageSize, Pt};
 
 use super::macros::{ir_struct, no_rules};
+use super::note::NoteProps;
 use super::paragraph::Block;
 use super::rules::{self, WORD_MAX_LENGTH};
 use super::walk::{Checker, Clamper};
@@ -30,6 +31,10 @@ ir_struct! {
         /// Where the body text sits between the top and bottom margins. Only
         /// [`Top`](PageVerticalAlign::Top) is laid out yet.
         copy vertical_align: PageVerticalAlign => with_vertical_align;
+        /// How its footnotes are numbered and placed.
+        ref footnotes: NoteProps => with_footnotes;
+        /// How its endnotes are numbered and placed.
+        ref endnotes: NoteProps => with_endnotes;
         /// The body text, in reading order.
         vec blocks: Block => with_blocks;
     }
@@ -37,7 +42,8 @@ ir_struct! {
 
 impl Section {
     /// A section of one column on pages of this setup, starting on a new page, with no
-    /// headers, footers or blocks.
+    /// headers, footers or blocks, and notes as a document has them when it says
+    /// nothing.
     pub fn new(page: PageSetup) -> Self {
         Self {
             page,
@@ -48,6 +54,8 @@ impl Section {
             title_page: false,
             page_numbering: PageNumbering::default(),
             vertical_align: PageVerticalAlign::Top,
+            footnotes: NoteProps::footnotes(),
+            endnotes: NoteProps::endnotes(),
             blocks: Vec::new(),
         }
     }
