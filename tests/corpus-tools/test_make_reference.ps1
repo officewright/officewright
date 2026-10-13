@@ -223,9 +223,12 @@ Exit-Stuck 'test' ''
     Check 'a placeholder never leaves: unresolved has no name' ($unknown.theme -eq 'unresolved' -and $null -eq $unknown.name -and $broken.theme -eq 'unresolved' -and $null -eq $broken.name)
     Check 'a theme without that font gives no name' ($empty.theme -eq 'majorEastAsia' -and $null -eq $empty.name)
     $flat = '<pkg:part pkg:name="/word/styles.xml"><w:rFonts w:asciiTheme="majorHAnsi"/></pkg:part>' +
-        '<pkg:part pkg:name="/word/document.xml"><w:r><w:rPr><w:rFonts w:asciiTheme="minorEastAsia" w:hAnsiTheme="minorEastAsia"/></w:rPr></w:r></pkg:part>'
-    Check 'the theme kind is read from the document part only' ((Get-ThemeKind $flat) -eq 'minorEastAsia')
-    Check 'no theme in the document part gives null' ($null -eq (Get-ThemeKind '<pkg:part pkg:name="/word/document.xml"><w:r/></pkg:part>'))
+        '<pkg:part pkg:name="/word/document.xml"><w:p><w:pPr><w:rPr><w:rFonts w:asciiTheme="majorBidi"/></w:rPr></w:pPr>' +
+        '<w:r><w:rPr><w:rFonts w:asciiTheme="minorEastAsia" w:hAnsiTheme="minorEastAsia"/></w:rPr><w:t>x</w:t></w:r></w:p></pkg:part>'
+    Check 'the theme kind is read from the run x only' ((Get-ThemeKind $flat) -eq 'minorEastAsia')
+    $complex = '<pkg:part pkg:name="/word/document.xml"><w:r><w:rPr><w:rFonts w:cstheme="majorBidi"/></w:rPr><w:t>x</w:t></w:r></pkg:part>'
+    Check 'another theme attribute is taken when asciiTheme is missing' ((Get-ThemeKind $complex) -eq 'majorBidi')
+    Check 'no theme on the run gives null' ($null -eq (Get-ThemeKind '<pkg:part pkg:name="/word/document.xml"><w:r><w:t>x</w:t></w:r></pkg:part>'))
     $mixed = Get-FontRecord (New-Font '' 9999999 9999999 0) $theme
     Check 'mixed font values are null' ($null -eq $mixed.name -and $null -eq $mixed.size -and $null -eq $mixed.bold)
 

@@ -413,12 +413,15 @@ function Get-TextExcerpt([string] $Text) {
 }
 
 function Get-ThemeKind([string] $Xml) {
-    # The theme font Word wrote for the text of a scratch document, from its
-    # Range.WordOpenXML: an ST_Theme value such as minorHAnsi or majorEastAsia. Only the
-    # main document part is read, since the styles part names theme fonts too.
+    # The theme font Word wrote for the run "x" of a scratch document, from its
+    # Range.WordOpenXML: an ST_Theme value such as minorHAnsi or majorEastAsia. Only that
+    # run's properties are read: the styles part and paragraph marks name theme fonts too.
     $part = [regex]::Match($Xml, '(?s)pkg:name="/word/document\.xml".*?</pkg:part>').Value
-    $match = [regex]::Match($part, 'w:asciiTheme="((?:major|minor)(?:HAnsi|Ascii|EastAsia|Bidi))"')
-    if ($match.Success) { return $match.Groups[1].Value }
+    $run = [regex]::Match($part, '(?s)<w:r>(?:(?!</w:r>).)*?<w:t(?: [^>]*)?>x</w:t>').Value
+    foreach ($attribute in @('asciiTheme', 'hAnsiTheme', 'eastAsiaTheme', 'cstheme')) {
+        $match = [regex]::Match($run, "w:$attribute=`"((?:major|minor)(?:HAnsi|Ascii|EastAsia|Bidi))`"")
+        if ($match.Success) { return $match.Groups[1].Value }
+    }
     return $null
 }
 
@@ -723,6 +726,7 @@ try {
     # write the theme font it stands for into that document's XML.
     $classify = {
         param($Placeholder)
+        $step = $progress.Step
         $progress.Step = 'Documents.Add (classifying a theme font)'
         $scratch = $global:word.Documents.Add()
         try {
@@ -731,8 +735,15 @@ try {
             $range.Font.Name = $Placeholder
             $xml = [string]$range.WordOpenXML
         } finally {
-            $scratch.Close(0)
-            [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($scratch)
+            try {
+                $scratch.Close(0)
+            } catch {
+                # Left open, it would stop the next document as a document of the user's.
+                throw "the scratch document for classifying a theme font did not close: $($_.Exception.Message)"
+            } finally {
+                [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($scratch)
+            }
+            $progress.Step = $step
         }
         Get-ThemeKind $xml
     }

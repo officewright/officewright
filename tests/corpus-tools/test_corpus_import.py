@@ -857,6 +857,15 @@ class Formatting(Import):
         count = len(body) + 1
         self.assertIn(f"formatting as Word computes it: {count} paragraphs, with runs", sources)
 
+    def test_a_style_name_may_have_253_characters(self):
+        doc = rules.documents()[0]
+        record = self.add_result(doc)
+        export = word_export(importer.read_parts(self.results / record["resaved_file"]))
+        export["stories"][0]["paragraphs"][0]["style"] = "S" * 253
+        self.add_v3(export)
+        self.run_import()
+        self.assertEqual(self.committed(doc)["stories"][0]["paragraphs"][0]["style"], "S" * 253)
+
     def test_misaligned_paragraphs_get_no_style_ids(self):
         doc = rules.documents()[0]
         record = self.add_result(doc)
@@ -888,6 +897,10 @@ class Formatting(Import):
                 lambda e: first(e)["font"].update(theme="unresolved"), {}
             ),
             "does not match its record (complete)": (None, {"formatting_complete": False}),
+            "unexpected style name": (lambda e: first(e).update(style="S" * 254), {}),
+            "unexpected runs_note (not text)": (lambda e: e.update(runs_note=["x"]), {}),
+            "unexpected alignment (not text)": (lambda e: first(e).update(alignment=["left"]), {}),
+            "unexpected theme font (not text)": (lambda e: first(e)["font"].update(theme={}), {}),
         }
         doc = rules.documents()[0]
         for message, (edit, changes) in cases.items():

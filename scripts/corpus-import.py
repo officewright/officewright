@@ -557,7 +557,7 @@ def checked_font(font: object, where: str) -> dict:
         isinstance(name, str) and FONT.match(name) and not name.startswith("+")
     ):
         raise ValueError(f"{where}: unexpected font name")
-    if theme is not None and theme not in THEMES:
+    if theme is not None and not (isinstance(theme, str) and theme in THEMES):
         raise ValueError(f"{where}: unexpected theme font")
     if theme == "unresolved" and name is not None:
         raise ValueError(f"{where}: an unresolved theme font has a name")
@@ -584,12 +584,15 @@ def read_formatting(data: bytes) -> dict:
     for key in ("complete", "runs"):
         if not isinstance(export.get(key), bool):
             raise ValueError(f"{key} is not true or false")
-    if export.get("runs_note", "") not in RUNS_NOTES:
+    note = export.get("runs_note", "")
+    if not isinstance(note, str) or note not in RUNS_NOTES:
         raise ValueError("unexpected runs_note")
     stories = []
     for s_index, story in enumerate(as_list(export.get("stories"), "stories")):
         where = f"story {s_index}"
-        if not isinstance(story, dict) or story.get("story") not in STORIES:
+        if not isinstance(story, dict) or not isinstance(story.get("story"), str) or (
+            story["story"] not in STORIES
+        ):
             raise ValueError(f"{where} is not a known story")
         instance = story.get("instance")
         if not isinstance(instance, int) or isinstance(instance, bool) or instance < 0:
@@ -606,10 +609,10 @@ def read_formatting(data: bytes) -> dict:
             if style is not None and not (isinstance(style, str) and STYLE_NAME.match(style)):
                 raise ValueError(f"{at}: unexpected style name")
             rule, alignment = paragraph.get("line_spacing_rule"), paragraph.get("alignment")
-            if not (rule in LINE_RULES or (isinstance(rule, str) and OTHER.match(rule))):
+            if not (isinstance(rule, str) and (rule in LINE_RULES or OTHER.match(rule))):
                 raise ValueError(f"{at}: unexpected line spacing rule")
             if not (
-                alignment in ALIGNMENTS or (isinstance(alignment, str) and OTHER.match(alignment))
+                isinstance(alignment, str) and (alignment in ALIGNMENTS or OTHER.match(alignment))
             ):
                 raise ValueError(f"{at}: unexpected alignment")
             label, level = paragraph.get("list_string"), paragraph.get("list_level")
