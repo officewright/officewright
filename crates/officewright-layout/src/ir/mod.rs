@@ -34,9 +34,9 @@ mod tests;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub use image::{
-    AnchoredContent, AnchoredObject, Crop, HorizontalAlign, HorizontalAnchor, HorizontalPlacement,
-    HorizontalReference, ImageData, ImageFormat, Insets, Picture, Size, VerticalAlign,
-    VerticalAnchor, VerticalPlacement, VerticalReference, Wrap,
+    AnchorHorizontalAlign, AnchorVerticalAlign, AnchoredObject, Crop, HorizontalAnchor,
+    HorizontalPlacement, HorizontalReference, ImageData, ImageFormat, InlineObject, Insets,
+    ObjectContent, Picture, Size, VerticalAnchor, VerticalPlacement, VerticalReference, Wrap,
 };
 pub use inline::{BreakClear, BreakKind, Field, FieldKind, Inline};
 pub use list::{

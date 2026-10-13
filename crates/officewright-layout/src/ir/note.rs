@@ -3,6 +3,8 @@
 use super::macros::{ir_struct, no_rules};
 use super::paragraph::Block;
 use super::section::NumberFormat;
+use super::walk::{Checker, Clamper};
+use crate::Result;
 
 ir_struct! {
     /// A footnote or an endnote: its content, laid out where its reference sends it.
@@ -69,9 +71,10 @@ ir_struct! {
     pub struct NoteProps {
         /// Where the notes go.
         copy position: NotePosition => with_position;
-        /// How their numbers are written. Word writes bullet numbering as decimal
-        /// (MS-OI29500 2.1.306 b, 2.1.307 b), which the producer passes as decimal.
-        ref format: NumberFormat => with_format;
+        /// How their numbers are written; [`None`](NumberFormat::None) writes none. Word
+        /// writes bullet numbering as decimal (MS-OI29500 2.1.306 b, 2.1.307 b), and
+        /// `clamp` does the same.
+        ref format: NumberFormat => with_format, clamp bullets_as_decimal;
         /// The number of the first note, from 0 to 65535 in Word (MS-OI29500 2.1.308 a).
         copy start: u16 => with_start;
         /// When the numbers start again.
@@ -105,7 +108,9 @@ impl NoteProps {
     }
 }
 
-/// Where the notes of a section go.
+/// Where the notes of a section go. Footnotes go to any of these (ST_FtnPos), endnotes
+/// only to the end of the section or the document (the endnote positions of ECMA-376 Part 1,
+/// §17.18.26).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum NotePosition {
@@ -134,9 +139,12 @@ pub enum NoteRestart {
 
 ir_struct! {
     /// The lines that separate the notes of a kind from the text above them, from the
-    /// document's special notes. Empty content draws nothing; a producer gives a
-    /// document without them Word's separator, a paragraph holding
-    /// [`Inline::separator`](super::Inline::separator).
+    /// document's special notes. Empty content draws nothing. For a document without
+    /// them the producer gives what Word draws then: a paragraph in the style of the
+    /// note text holding [`Inline::separator`](super::Inline::separator) as the
+    /// separator, one holding
+    /// [`Inline::continuation_separator`](super::Inline::continuation_separator) as the
+    /// continuation separator, and no continuation notice.
     #[derive(Clone, Debug, Default, PartialEq)]
     pub struct NoteSeparators {
         /// Above the notes on a page.
@@ -146,6 +154,27 @@ ir_struct! {
         /// Below notes that continue on the next page.
         vec continuation_notice: Block => with_continuation_notice;
     }
+}
+
+/// Word writes the numbers of notes that a document numbers with bullets in decimal
+/// (MS-OI29500 2.1.306 b, 2.1.307 b).
+fn bullets_as_decimal(format: &mut NumberFormat, clamper: &mut Clamper) {
+    if *format == NumberFormat::Bullet {
+        clamper.clamped("notes numbered with bullets are numbered in decimal, as in Word".into());
+        *format = NumberFormat::Decimal;
+    }
+}
+
+/// Endnotes go to the end of a section or of the document (ECMA-376 Part 1, §17.18.26).
+pub(crate) fn endnote_position(props: &NoteProps, checker: &mut Checker<'_>) -> Result<()> {
+    let place = match props.position {
+        NotePosition::SectionEnd | NotePosition::DocumentEnd => return Ok(()),
+        NotePosition::PageBottom => "at the bottom of the page",
+        NotePosition::BeneathText => "beneath the text",
+    };
+    Err(checker.error(format!(
+        "endnotes placed {place}; endnotes go to the end of the section or of the document"
+    )))
 }
 
 no_rules!(NoteKind, NotePosition, NoteRestart);

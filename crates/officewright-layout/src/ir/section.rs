@@ -3,7 +3,7 @@
 use officewright_core::{PageSize, Pt};
 
 use super::macros::{ir_struct, no_rules};
-use super::note::NoteProps;
+use super::note::{NoteProps, endnote_position};
 use super::paragraph::Block;
 use super::rules::{self, WORD_MAX_LENGTH};
 use super::walk::{Checker, Clamper};
@@ -34,7 +34,7 @@ ir_struct! {
         /// How its footnotes are numbered and placed.
         ref footnotes: NoteProps => with_footnotes;
         /// How its endnotes are numbered and placed.
-        ref endnotes: NoteProps => with_endnotes;
+        ref endnotes: NoteProps => with_endnotes, check endnote_position;
         /// The body text, in reading order.
         vec blocks: Block => with_blocks;
     }

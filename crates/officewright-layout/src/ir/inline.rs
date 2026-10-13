@@ -1,6 +1,6 @@
 //! The text and objects inside a paragraph.
 
-use super::image::{AnchoredObject, Picture};
+use super::image::{AnchoredObject, InlineObject};
 use super::macros::{ir_struct, no_rules};
 use super::section::NumberFormat;
 use super::walk::{Check, Checker, Clamp, Clamper};
@@ -61,12 +61,14 @@ pub enum Inline {
         /// The formatting.
         style: RunStyleId,
     },
-    /// A picture in the line, which sits on the baseline like a large character.
-    Picture(Picture),
+    /// A drawing object in the line, such as a picture, which sits on the baseline like a
+    /// large character.
+    Object(InlineObject),
     /// A floating object anchored here. It takes no room in the line.
     Anchored(Box<AnchoredObject>),
     /// The reference to a footnote or an endnote: its number in the text. Word ignores
-    /// one in a text box (MS-OI29500 2.1.305 a).
+    /// one in a comment or a text box (MS-OI29500 2.1.305 a); one in a header or footer is
+    /// laid out as in the body until a Word reference render shows otherwise.
     #[non_exhaustive]
     NoteReference {
         /// The note.
@@ -187,9 +189,9 @@ impl Inline {
     }
 }
 
-impl From<Picture> for Inline {
-    fn from(picture: Picture) -> Self {
-        Self::Picture(picture)
+impl From<InlineObject> for Inline {
+    fn from(object: InlineObject) -> Self {
+        Self::Object(object)
     }
 }
 
@@ -220,7 +222,7 @@ impl Check for Inline {
             | Self::NoteNumber { style }
             | Self::Separator { style }
             | Self::ContinuationSeparator { style } => checker.visit("style", style),
-            Self::Picture(picture) => picture.check(checker),
+            Self::Object(object) => object.check(checker),
             Self::Anchored(object) => object.check(checker),
             Self::NoteReference { note, style, .. } => {
                 // Notes are laid out where they are referenced, so a reference in a note
@@ -247,10 +249,16 @@ impl Check for Inline {
     }
 }
 
-// Nothing in an inline is clamped, and fields are not walked into, so that a document
-// that was not validated cannot make the walk recurse deeply.
+// Fields are not walked into, so that a document that was not validated cannot make the
+// walk recurse deeply; drawing objects hold no blocks, so walking them is bounded.
 impl Clamp for Inline {
-    fn clamp(&mut self, _: &mut Clamper) {}
+    fn clamp(&mut self, clamper: &mut Clamper) {
+        match self {
+            Self::Object(object) => object.clamp(clamper),
+            Self::Anchored(object) => object.clamp(clamper),
+            _ => {}
+        }
+    }
 }
 
 /// What a break ends.

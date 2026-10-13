@@ -1482,9 +1482,9 @@ fn a_deep_nest_of_tables_stops_both_walks_at_the_limit() {
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
 
 /// A document with an image, a footnote and an endnote, both referenced from the body,
-/// and a picture and an anchored object of that image in the body; `change` may alter
-/// the picture before it is placed.
-fn image_and_note_document(change: impl FnOnce(Picture) -> Picture) -> Document {
+/// and an inline object and an anchored object showing that image in the body; `change`
+/// may alter the inline object before it is placed.
+fn image_and_note_document(change: impl FnOnce(InlineObject) -> InlineObject) -> Document {
     let mut document = Document::default();
     let style = document.add_run_style(RunStyle::default());
     let image = document.add_image(ImageData::new(ImageFormat::Png, PNG));
@@ -1501,18 +1501,23 @@ fn image_and_note_document(change: impl FnOnce(Picture) -> Picture) -> Document 
             .with_separator([separator.into()])
             .with_continuation_separator([continuation.into()]),
     );
-    let picture = change(
-        Picture::new(image, Size::new(Pt(144.0), Pt(72.0)))
-            .with_crop(Some(Crop::default().with_left(0.1).with_bottom(-0.05)))
-            .with_effect_extent(Insets::default().with_top(Pt(2.0)).with_right(Pt(2.0)))
-            .with_rotation(90.0)
-            .with_flip_horizontal(true),
+    let picture = Picture::new(image)
+        .with_crop(Some(Crop::default().with_left(0.1).with_bottom(-0.05)))
+        .with_rotation(-90.0)
+        .with_flip_horizontal(true);
+    let object = change(
+        InlineObject::new(
+            ObjectContent::Picture(picture),
+            Size::new(Pt(144.0), Pt(72.0)),
+        )
+        .with_effect_extent(Insets::default().with_top(Pt(2.0)).with_right(Pt(2.0))),
     );
     let logo = AnchoredObject::new(
-        AnchoredContent::Picture(Picture::new(image, Size::new(Pt(100.0), Pt(40.0)))),
+        ObjectContent::Picture(Picture::new(image)),
+        Size::new(Pt(100.0), Pt(40.0)),
         HorizontalAnchor::default()
             .with_relative_to(HorizontalReference::Page)
-            .with_placement(HorizontalPlacement::Align(HorizontalAlign::Right)),
+            .with_placement(HorizontalPlacement::Align(AnchorHorizontalAlign::Right)),
         VerticalAnchor::default()
             .with_relative_to(VerticalReference::TopMargin)
             .with_placement(VerticalPlacement::Offset(Pt(-10.0))),
@@ -1525,7 +1530,7 @@ fn image_and_note_document(change: impl FnOnce(Picture) -> Picture) -> Document 
         Inline::anchored(logo),
         Inline::text("Text", style),
         Inline::note_reference(footnote, false, style),
-        picture.into(),
+        object.into(),
         Inline::note_reference(endnote, true, style),
         Inline::text("*", style),
     ]);
@@ -1539,7 +1544,7 @@ fn image_and_note_document(change: impl FnOnce(Picture) -> Picture) -> Document 
 
 #[test]
 fn images_anchored_objects_and_notes_validate_and_read_back() {
-    let mut document = image_and_note_document(|picture| picture);
+    let mut document = image_and_note_document(|object| object);
     assert!(document.validate().is_ok());
     let report = document.clamp();
     assert!(report.is_empty(), "{:?}", entries(&report));
@@ -1547,9 +1552,10 @@ fn images_anchored_objects_and_notes_validate_and_read_back() {
     let Block::Paragraph(paragraph) = &document.sections()[0].blocks()[0] else {
         panic!("not a paragraph");
     };
-    let Inline::Picture(picture) = &paragraph.inlines()[3] else {
-        panic!("not a picture");
+    let Inline::Object(object) = &paragraph.inlines()[3] else {
+        panic!("not an inline object");
     };
+    let ObjectContent::Picture(picture) = object.content();
     let image = document.image(picture.image()).expect("the image");
     assert_eq!((image.format(), &**image.bytes()), (&ImageFormat::Png, PNG));
     let Inline::NoteReference {
@@ -1576,13 +1582,20 @@ fn images_anchored_objects_and_notes_validate_and_read_back() {
             .separator()
             .is_empty()
     );
-    assert!(Document::default().image(picture.image()).is_none());
-    assert!(Document::default().note(*note).is_none());
+
+    // Another document has an image and a note at the same positions, but these ids are
+    // not its own.
+    let mut other = Document::default();
+    other.add_image(ImageData::new(ImageFormat::Png, PNG));
+    other.add_note(Note::new(NoteKind::Footnote, []));
+    other.add_note(Note::new(NoteKind::Endnote, []));
+    assert!(other.image(picture.image()).is_none());
+    assert!(other.note(*note).is_none());
 }
 
 #[test]
 fn notes_hold_no_note_references() {
-    let mut document = image_and_note_document(|picture| picture);
+    let mut document = image_and_note_document(|object| object);
     let style = document.add_run_style(RunStyle::default());
     let first = document.add_note(Note::new(NoteKind::Footnote, []));
     let inner = Paragraph::new(style).with_inlines([
@@ -1595,74 +1608,118 @@ fn notes_hold_no_note_references() {
         "notes[3].blocks[0].inlines[1]: a note reference inside a note or its separators"
     );
 
-    let mut document = image_and_note_document(|picture| picture);
-    let style = document.add_run_style(RunStyle::default());
-    let note = document.add_note(Note::new(NoteKind::Endnote, []));
-    let separator =
-        Paragraph::new(style).with_inlines([Inline::note_reference(note, false, style)]);
-    document.set_note_separators(
-        NoteKind::Endnote,
-        NoteSeparators::default().with_continuation_notice([separator.into()]),
-    );
-    assert_eq!(
-        invalid(&document),
-        "endnote_separators.continuation_notice[0].inlines[0]: a note reference inside a note \
-         or its separators"
-    );
+    for kind in [NoteKind::Footnote, NoteKind::Endnote] {
+        let mut document = image_and_note_document(|object| object);
+        let style = document.add_run_style(RunStyle::default());
+        let note = document.add_note(Note::new(kind, []));
+        let notice =
+            Paragraph::new(style).with_inlines([Inline::note_reference(note, false, style)]);
+        document.set_note_separators(
+            kind,
+            NoteSeparators::default().with_continuation_notice([notice.into()]),
+        );
+        let separators = match kind {
+            NoteKind::Footnote => "footnote_separators",
+            NoteKind::Endnote => "endnote_separators",
+        };
+        assert_eq!(
+            invalid(&document),
+            format!(
+                "{separators}.continuation_notice[0].inlines[0]: a note reference inside a note \
+                 or its separators"
+            )
+        );
+    }
 }
 
 #[test]
-fn image_and_note_ids_belong_to_their_document() {
+fn image_note_and_style_ids_belong_to_their_document() {
     let mut other = Document::default();
     let foreign_image = other.add_image(ImageData::new(ImageFormat::Jpeg, Vec::new()));
     let foreign_note = other.add_note(Note::new(NoteKind::Footnote, []));
+    let foreign_style = other.add_run_style(RunStyle::default());
+    let foreign = "the run style id is of another document";
 
-    let document = image_and_note_document(|picture| picture.with_image(foreign_image));
+    let document = image_and_note_document(|object| {
+        object.with_content(ObjectContent::Picture(Picture::new(foreign_image)))
+    });
     assert_eq!(
         invalid(&document),
-        "sections[0].blocks[0].inlines[3].image: the image id is of another document"
+        "sections[0].blocks[0].inlines[3].content.image: the image id is of another document"
     );
 
-    let mut document = image_and_note_document(|picture| picture);
-    let style = document.add_run_style(RunStyle::default());
-    document.add_section(
-        Section::new(PageSetup::default()).with_blocks([Paragraph::new(style)
-            .with_inlines([Inline::note_reference(foreign_note, false, style)])
-            .into()]),
-    );
-    assert_eq!(
-        invalid(&document),
-        "sections[1].blocks[0].inlines[0].note: the note id is of another document"
-    );
+    // A document with a style and a note of its own, and one inline in its body.
+    let in_body = |make: &dyn Fn(RunStyleId, NoteId) -> Inline| {
+        let mut document = Document::default();
+        let style = document.add_run_style(RunStyle::default());
+        let note = document.add_note(Note::new(NoteKind::Footnote, []));
+        let paragraph = Paragraph::new(style).with_inlines([make(style, note)]);
+        document.add_section(Section::new(PageSetup::default()).with_blocks([paragraph.into()]));
+        document
+    };
+    type Make = Box<dyn Fn(RunStyleId, NoteId) -> Inline>;
+    let cases: [(Make, String); 5] = [
+        (
+            Box::new(move |style, _| Inline::note_reference(foreign_note, false, style)),
+            "note: the note id is of another document".into(),
+        ),
+        (
+            Box::new(move |_, note| Inline::note_reference(note, false, foreign_style)),
+            format!("style: {foreign}"),
+        ),
+        (
+            Box::new(move |_, _| Inline::note_number(foreign_style)),
+            format!("style: {foreign}"),
+        ),
+        (
+            Box::new(move |_, _| Inline::separator(foreign_style)),
+            format!("style: {foreign}"),
+        ),
+        (
+            Box::new(move |_, _| Inline::continuation_separator(foreign_style)),
+            format!("style: {foreign}"),
+        ),
+    ];
+    for (make, problem) in cases {
+        assert_eq!(
+            invalid(&in_body(&*make)),
+            format!("sections[0].blocks[0].inlines[0].{problem}")
+        );
+    }
 }
 
 #[test]
-fn picture_and_anchor_lengths_are_finite_and_sizes_not_negative() {
-    type PictureChange = fn(Picture) -> Picture;
-    let cases: [(PictureChange, &str); 6] = [
+fn drawing_lengths_are_finite_and_sizes_not_negative() {
+    type ObjectChange = fn(InlineObject) -> InlineObject;
+    fn picture(object: InlineObject, change: fn(Picture) -> Picture) -> InlineObject {
+        let ObjectContent::Picture(picture) = object.content();
+        let changed = change(*picture);
+        object.with_content(ObjectContent::Picture(changed))
+    }
+    let cases: [(ObjectChange, &str); 6] = [
         (
-            |p| p.with_size(Size::new(Pt(-1.0), Pt(10.0))),
+            |o| o.with_size(Size::new(Pt(-1.0), Pt(10.0))),
             "size.width: -1 pt is negative",
         ),
         (
-            |p| p.with_size(Size::new(Pt(10.0), Pt(-1.0))),
+            |o| o.with_size(Size::new(Pt(10.0), Pt(-1.0))),
             "size.height: -1 pt is negative",
         ),
         (
-            |p| p.with_crop(Some(Crop::default().with_top(f64::NAN))),
-            "crop.top: NaN is not a finite number",
+            |o| o.with_size(Size::new(Pt(f64::NEG_INFINITY), Pt(1.0))),
+            "size.width: -inf is not a finite length",
         ),
         (
-            |p| p.with_rotation(f64::INFINITY),
-            "rotation: inf is not a finite number",
-        ),
-        (
-            |p| p.with_effect_extent(Insets::default().with_bottom(Pt(f64::NAN))),
+            |o| o.with_effect_extent(Insets::default().with_bottom(Pt(f64::NAN))),
             "effect_extent.bottom: NaN is not a finite length",
         ),
         (
-            |p| p.with_size(Size::new(Pt(f64::NEG_INFINITY), Pt(1.0))),
-            "size.width: -inf is not a finite length",
+            |o| picture(o, |p| p.with_crop(Some(Crop::default().with_top(f64::NAN)))),
+            "content.crop.top: NaN is not a finite number",
+        ),
+        (
+            |o| picture(o, |p| p.with_rotation(f64::INFINITY)),
+            "content.rotation: inf is not a finite number",
         ),
     ];
     for (change, problem) in cases {
@@ -1673,13 +1730,15 @@ fn picture_and_anchor_lengths_are_finite_and_sizes_not_negative() {
         );
     }
 
-    let anchored = |change: ObjectChange| {
+    type AnchorChange = fn(AnchoredObject) -> AnchoredObject;
+    let anchored = |change: AnchorChange| {
         let mut document = Document::default();
         let style = document.add_run_style(RunStyle::default());
         let image =
             document.add_image(ImageData::new(ImageFormat::Other("emf".into()), Vec::new()));
         let object = change(AnchoredObject::new(
-            AnchoredContent::Picture(Picture::new(image, Size::default())),
+            ObjectContent::Picture(Picture::new(image)),
+            Size::default(),
             HorizontalAnchor::default(),
             VerticalAnchor::default(),
         ));
@@ -1687,8 +1746,7 @@ fn picture_and_anchor_lengths_are_finite_and_sizes_not_negative() {
         document.add_section(Section::new(PageSetup::default()).with_blocks([paragraph.into()]));
         document
     };
-    type ObjectChange = fn(AnchoredObject) -> AnchoredObject;
-    let cases: [(ObjectChange, &str); 7] = [
+    let cases: [(AnchorChange, &str); 8] = [
         (
             |o| o.with_distances(Insets::default().with_left(Pt(-1.0))),
             "distances.left: -1 pt is negative",
@@ -1724,12 +1782,12 @@ fn picture_and_anchor_lengths_are_finite_and_sizes_not_negative() {
             "vertical.placement: NaN is not a finite length",
         ),
         (
-            |o| {
-                let AnchoredContent::Picture(picture) = o.content();
-                let picture = picture.with_size(Size::new(Pt(-2.0), Pt(1.0)));
-                o.with_content(AnchoredContent::Picture(picture))
-            },
-            "content.size.width: -2 pt is negative",
+            |o| o.with_size(Size::new(Pt(-2.0), Pt(1.0))),
+            "size.width: -2 pt is negative",
+        ),
+        (
+            |o| o.with_effect_extent(Insets::default().with_left(Pt(f64::INFINITY))),
+            "effect_extent.left: inf is not a finite length",
         ),
     ];
     for (change, problem) in cases {
@@ -1738,12 +1796,13 @@ fn picture_and_anchor_lengths_are_finite_and_sizes_not_negative() {
             format!("sections[0].blocks[0].inlines[0].{problem}")
         );
     }
-    // Negative effect extents and offsets are valid: effects may sit inside the picture,
+    // Negative effect extents and offsets are valid: effects may sit inside the frame,
     // and objects may lie left of or above their reference.
     let document = anchored(|o| {
         o.with_horizontal(
             HorizontalAnchor::default().with_placement(HorizontalPlacement::Offset(Pt(-30.0))),
         )
+        .with_effect_extent(Insets::default().with_left(Pt(-3.0)))
     });
     assert!(document.validate().is_ok());
 }
@@ -1753,27 +1812,30 @@ fn note_defaults_are_what_a_document_means_when_it_says_nothing() {
     let section = Section::new(PageSetup::default());
     assert_eq!(section.footnotes(), &NoteProps::footnotes());
     assert_eq!(section.endnotes(), &NoteProps::endnotes());
-    let footnotes = NoteProps::footnotes();
-    assert_eq!(
+    // ECMA-376 Part 1, §17.11.18 to §17.11.22.
+    for (props, position, format) in [
         (
-            footnotes.position(),
-            footnotes.format(),
-            footnotes.start(),
-            footnotes.restart()
-        ),
-        (
+            NoteProps::footnotes(),
             NotePosition::PageBottom,
-            &NumberFormat::Decimal,
-            1,
-            NoteRestart::Continuous
-        )
-    );
-    // MS-OI29500 2.1.306 a: Word numbers endnotes i, ii, iii by default.
-    let endnotes = NoteProps::endnotes();
-    assert_eq!(
-        (endnotes.position(), endnotes.format()),
-        (NotePosition::DocumentEnd, &NumberFormat::LowerRoman)
-    );
+            NumberFormat::Decimal,
+        ),
+        // MS-OI29500 2.1.306 a: Word numbers endnotes i, ii, iii by default.
+        (
+            NoteProps::endnotes(),
+            NotePosition::DocumentEnd,
+            NumberFormat::LowerRoman,
+        ),
+    ] {
+        assert_eq!(
+            (
+                props.position(),
+                props.format(),
+                props.start(),
+                props.restart()
+            ),
+            (position, &format, 1, NoteRestart::Continuous)
+        );
+    }
     assert_eq!(
         VerticalAnchor::default().relative_to(),
         VerticalReference::Paragraph
@@ -1785,8 +1847,83 @@ fn note_defaults_are_what_a_document_means_when_it_says_nothing() {
 }
 
 #[test]
+fn notes_numbered_with_bullets_are_numbered_in_decimal() {
+    let mut document = Document::default();
+    document.add_section(
+        Section::new(PageSetup::default())
+            .with_footnotes(NoteProps::footnotes().with_format(NumberFormat::Bullet))
+            .with_endnotes(NoteProps::endnotes().with_format(NumberFormat::Bullet)),
+    );
+    let message = "notes numbered with bullets are numbered in decimal, as in Word";
+    assert_eq!(
+        entries(&document.clamp()),
+        [
+            format!("sections[0].footnotes.format: {message}"),
+            format!("sections[0].endnotes.format: {message}"),
+        ]
+    );
+    assert_eq!(
+        document.sections()[0].endnotes().format(),
+        &NumberFormat::Decimal
+    );
+    assert!(document.clamp().is_empty());
+}
+
+#[test]
+fn endnotes_go_to_the_end_of_a_section_or_the_document() {
+    for (position, place) in [
+        (NotePosition::PageBottom, "at the bottom of the page"),
+        (NotePosition::BeneathText, "beneath the text"),
+    ] {
+        let mut document = Document::default();
+        document.add_section(
+            Section::new(PageSetup::default())
+                .with_endnotes(NoteProps::endnotes().with_position(position)),
+        );
+        assert_eq!(
+            invalid(&document),
+            format!(
+                "sections[0].endnotes: endnotes placed {place}; endnotes go to the end of the \
+                 section or of the document"
+            )
+        );
+    }
+    // Footnotes may go to any of the four places (ST_FtnPos).
+    let mut document = Document::default();
+    document.add_section(
+        Section::new(PageSetup::default())
+            .with_footnotes(NoteProps::footnotes().with_position(NotePosition::SectionEnd))
+            .with_endnotes(NoteProps::endnotes().with_position(NotePosition::SectionEnd)),
+    );
+    assert!(document.validate().is_ok());
+}
+
+#[test]
+fn note_and_separator_inlines_are_what_their_constructors_say() {
+    let mut document = Document::default();
+    let style = document.add_run_style(RunStyle::default());
+    let note = document.add_note(Note::new(NoteKind::Footnote, []));
+    assert!(matches!(
+        Inline::note_number(style),
+        Inline::NoteNumber { .. }
+    ));
+    assert!(matches!(Inline::separator(style), Inline::Separator { .. }));
+    assert!(matches!(
+        Inline::continuation_separator(style),
+        Inline::ContinuationSeparator { .. }
+    ));
+    assert!(matches!(
+        Inline::note_reference(note, false, style),
+        Inline::NoteReference {
+            custom_mark: false,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn clamp_reaches_into_notes_and_separators() {
-    let mut document = image_and_note_document(|picture| picture);
+    let mut document = image_and_note_document(|object| object);
     let style = document.add_run_style(RunStyle::default());
     let tab = |position| {
         ParagraphProps::default().with_tabs([TabStop::default().with_position(Pt(position))])
@@ -1795,11 +1932,13 @@ fn clamp_reaches_into_notes_and_separators() {
         NoteKind::Footnote,
         [Paragraph::new(style).with_props(tab(1700.0)).into()],
     ));
-    document.set_note_separators(
-        NoteKind::Endnote,
-        NoteSeparators::default()
-            .with_separator([Paragraph::new(style).with_props(tab(-1700.0)).into()]),
-    );
+    for kind in [NoteKind::Footnote, NoteKind::Endnote] {
+        document.set_note_separators(
+            kind,
+            NoteSeparators::default()
+                .with_separator([Paragraph::new(style).with_props(tab(-1700.0)).into()]),
+        );
+    }
     let locations: Vec<String> = document
         .clamp()
         .iter()
@@ -1809,6 +1948,7 @@ fn clamp_reaches_into_notes_and_separators() {
         locations,
         [
             "notes[2].blocks[0].props.tabs[0].position",
+            "footnote_separators.separator[0].props.tabs[0].position",
             "endnote_separators.separator[0].props.tabs[0].position",
         ]
     );
@@ -2048,14 +2188,18 @@ fn a_negative_exact_row_height_is_clamped_in_one_go() {
 }
 
 #[test]
-fn picture_and_anchor_defaults_are_neutral() {
+fn drawing_defaults_are_neutral() {
     let mut document = Document::default();
     let image = document.add_image(ImageData::new(ImageFormat::Jpeg, Vec::new()));
-    let picture = Picture::new(image, Size::new(Pt(10.0), Pt(20.0)));
+    let picture = Picture::new(image);
     assert_eq!(picture.crop(), None);
-    assert_eq!(picture.effect_extent(), Insets::default());
     assert_eq!(picture.rotation(), 0.0);
     assert!(!picture.flip_horizontal() && !picture.flip_vertical());
+    let object = InlineObject::new(
+        ObjectContent::Picture(picture),
+        Size::new(Pt(10.0), Pt(20.0)),
+    );
+    assert_eq!(object.effect_extent(), Insets::default());
     let insets = Insets::default();
     assert_eq!(
         (insets.left(), insets.top(), insets.right(), insets.bottom()),
@@ -2068,10 +2212,12 @@ fn picture_and_anchor_defaults_are_neutral() {
     );
 
     let object = AnchoredObject::new(
-        AnchoredContent::Picture(picture),
+        ObjectContent::Picture(picture),
+        Size::default(),
         HorizontalAnchor::default(),
         VerticalAnchor::default(),
     );
+    assert_eq!(object.effect_extent(), Insets::default());
     assert_eq!(object.wrap(), Wrap::None);
     assert!(!object.behind_text());
     assert!(object.layout_in_cell() && object.allow_overlap());
