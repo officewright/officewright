@@ -1,11 +1,17 @@
-//! Formatting in effect: what Word shows once the style hierarchy, the document defaults
-//! and the theme are resolved (ECMA-376 Part 1, §17.7.2), as opposed to the properties
-//! written at one level, which [`RunProperties`](super::RunProperties) gives.
+//! Formatting in effect: what Word shows once the style hierarchy, the document defaults,
+//! numbering and the theme are resolved (ECMA-376 Part 1, §17.7.2), as opposed to the
+//! properties written at one level, which [`RunProperties`](super::RunProperties) and
+//! [`ParagraphProperties`](super::ParagraphProperties) give.
 
 use officewright_core::Pt;
 
+use std::sync::Arc;
+
+use super::Document;
+use super::numbering::ListLevel;
 use super::properties::{
-    ColorValue, FontHint, Highlight, Shading, Toggle, UnderlineStyle, VerticalPosition,
+    ColorValue, FontHint, Highlight, Justification, LineSpacing, ParagraphBorders, Shading,
+    TabStop, Toggle, UnderlineStyle, VerticalPosition,
 };
 
 /// The font families of a run in effect, by the kind of character, with theme fonts
@@ -56,7 +62,7 @@ impl FontFamilies {
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct CharacterFormat {
-    pub(crate) style: Option<Box<str>>,
+    pub(crate) style: Option<Arc<str>>,
     pub(crate) fonts: FontFamilies,
     pub(crate) size: Pt,
     pub(crate) size_complex_script: Pt,
@@ -220,5 +226,260 @@ impl CharacterFormat {
     /// The language of complex script text.
     pub fn language_bidi(&self) -> Option<&str> {
         self.language_bidi.as_deref()
+    }
+}
+
+/// The on/off properties of a paragraph in effect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ParagraphFlag {
+    KeepNext,
+    KeepLines,
+    PageBreakBefore,
+    WidowControl,
+    SuppressLineNumbers,
+    SuppressAutoHyphens,
+    ContextualSpacing,
+    MirrorIndents,
+    WordWrap,
+    RightToLeft,
+    SnapToGrid,
+}
+
+impl ParagraphFlag {
+    pub(crate) const COUNT: usize = 11;
+}
+
+/// The formatting of a paragraph in effect, as Word lays it out: the document defaults,
+/// the paragraph's style, its list level and its direct formatting combined.
+///
+/// Tables do not contribute yet: inside a table the formatting a table style gives is
+/// left out.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct ParagraphFormat {
+    pub(crate) style: Option<Arc<str>>,
+    pub(crate) justification: Justification,
+    pub(crate) start_indent: Pt,
+    pub(crate) end_indent: Pt,
+    pub(crate) first_line_indent: Pt,
+    pub(crate) start_indent_chars: Option<i64>,
+    pub(crate) end_indent_chars: Option<i64>,
+    pub(crate) first_line_indent_chars: Option<i64>,
+    pub(crate) before_spacing: Pt,
+    pub(crate) after_spacing: Pt,
+    pub(crate) before_spacing_lines: Option<i64>,
+    pub(crate) after_spacing_lines: Option<i64>,
+    pub(crate) before_auto_spacing: bool,
+    pub(crate) after_auto_spacing: bool,
+    pub(crate) line_spacing: LineSpacing,
+    pub(crate) flags: [bool; ParagraphFlag::COUNT],
+    pub(crate) borders: ParagraphBorders,
+    pub(crate) shading: Option<Shading>,
+    pub(crate) tabs: Arc<[TabStop]>,
+    pub(crate) outline_level: Option<u8>,
+    pub(crate) list: Option<ListFormat>,
+}
+
+macro_rules! paragraph_flags {
+    ($($(#[$meta:meta])* $name:ident: $flag:ident,)*) => {
+        $(
+            $(#[$meta])*
+            pub fn $name(&self) -> bool {
+                self.flags.get(ParagraphFlag::$flag as usize).copied().unwrap_or(false)
+            }
+        )*
+    };
+}
+
+impl ParagraphFormat {
+    /// The paragraph style applied, by its id: the one `w:pStyle` names, or the default
+    /// paragraph style.
+    pub fn style(&self) -> Option<&str> {
+        self.style.as_deref()
+    }
+
+    /// The alignment of the lines; [`Justification::Start`] when nothing gives one
+    /// (MS-OI29500 §17.3.1.13(a)).
+    pub fn justification(&self) -> Justification {
+        self.justification
+    }
+
+    /// The indent from the start edge of the text area (left in a left-to-right
+    /// paragraph). [`start_indent_chars`](Self::start_indent_chars) replaces it when
+    /// it is given.
+    pub fn start_indent(&self) -> Pt {
+        self.start_indent
+    }
+
+    /// The indent from the end edge of the text area.
+    pub fn end_indent(&self) -> Pt {
+        self.end_indent
+    }
+
+    /// The indent of the first line from the start indent; negative for a hanging
+    /// indent.
+    pub fn first_line_indent(&self) -> Pt {
+        self.first_line_indent
+    }
+
+    /// The start indent in hundredths of a character, when given in character units:
+    /// it then replaces [`start_indent`](Self::start_indent), as Word does even when the
+    /// indent in points comes from a later level (MS-OI29500 §17.3.1.12(b)).
+    pub fn start_indent_chars(&self) -> Option<i64> {
+        self.start_indent_chars
+    }
+
+    /// The end indent in hundredths of a character, when given in character units.
+    pub fn end_indent_chars(&self) -> Option<i64> {
+        self.end_indent_chars
+    }
+
+    /// The first line indent in hundredths of a character, negative for a hanging
+    /// indent, when given in character units.
+    pub fn first_line_indent_chars(&self) -> Option<i64> {
+        self.first_line_indent_chars
+    }
+
+    /// The space above the paragraph.
+    pub fn before_spacing(&self) -> Pt {
+        self.before_spacing
+    }
+
+    /// The space below the paragraph.
+    pub fn after_spacing(&self) -> Pt {
+        self.after_spacing
+    }
+
+    /// The space above in hundredths of a line, when given in line units: it then
+    /// replaces [`before_spacing`](Self::before_spacing) (MS-OI29500 §17.3.1.33(a)).
+    pub fn before_spacing_lines(&self) -> Option<i64> {
+        self.before_spacing_lines
+    }
+
+    /// The space below in hundredths of a line, when given in line units.
+    pub fn after_spacing_lines(&self) -> Option<i64> {
+        self.after_spacing_lines
+    }
+
+    /// The space above is chosen by the application, as HTML spaces paragraphs
+    /// (`w:beforeAutospacing`).
+    pub fn before_auto_spacing(&self) -> bool {
+        self.before_auto_spacing
+    }
+
+    /// The space below is chosen by the application (`w:afterAutospacing`).
+    pub fn after_auto_spacing(&self) -> bool {
+        self.after_auto_spacing
+    }
+
+    /// The height of the lines; single when nothing gives one.
+    pub fn line_spacing(&self) -> LineSpacing {
+        self.line_spacing
+    }
+
+    paragraph_flags! {
+        /// Kept on the page of the next paragraph.
+        keep_next: KeepNext,
+        /// All lines kept on one page.
+        keep_lines: KeepLines,
+        /// Starts a new page.
+        page_break_before: PageBreakBefore,
+        /// A single first or last line is not left alone on a page; on when nothing
+        /// says otherwise (ECMA-376 §17.3.1.44).
+        widow_control: WidowControl,
+        /// Left out of line numbering.
+        suppress_line_numbers: SuppressLineNumbers,
+        /// Not hyphenated automatically.
+        suppress_auto_hyphens: SuppressAutoHyphens,
+        /// The space above and below is left out between paragraphs of the same style.
+        contextual_spacing: ContextualSpacing,
+        /// The start and end indents swap on even pages.
+        mirror_indents: MirrorIndents,
+        /// Latin words wrap whole; off lets a word break at any character. On when
+        /// nothing says otherwise (ECMA-376 §17.3.1.45).
+        word_wrap: WordWrap,
+        /// A right-to-left paragraph.
+        right_to_left: RightToLeft,
+        /// The lines snap to the document grid when it has one; on when nothing says
+        /// otherwise (ECMA-376 §17.3.1.32).
+        snap_to_grid: SnapToGrid,
+    }
+
+    /// The borders, each side from the level that gives it.
+    pub fn borders(&self) -> &ParagraphBorders {
+        &self.borders
+    }
+
+    /// The shading behind the paragraph, as written at the level that gives it: theme
+    /// colours in it are not resolved yet.
+    pub fn shading(&self) -> Option<&Shading> {
+        self.shading.as_ref()
+    }
+
+    /// The custom tab stops by position, those of every level added up, a stop of kind
+    /// [`TabKind::Clear`](super::TabKind::Clear) removing the one a lower level set at
+    /// its position (ECMA-376 §17.3.1.38). A hanging indent makes a stop too, which the
+    /// layout adds.
+    ///
+    /// At most 64, those at the lowest positions; each level gives at most 64 set and 64
+    /// cleared: Word's own format adds at most 64 stops and removes at most 64 in one
+    /// change ([MS-DOC] 2.9.179, 2.9.180).
+    pub fn tabs(&self) -> &[TabStop] {
+        &self.tabs
+    }
+
+    /// The outline level, 0 for the top, for tables of contents; `None` for body text.
+    /// Word takes it from the style id for Heading1 to Heading9 (MS-OI29500
+    /// §17.3.1.20(a)); a style based on one of them has the `w:outlineLvl` it inherits
+    /// like any other property, not the level of its base's id.
+    pub fn outline_level(&self) -> Option<u8> {
+        self.outline_level
+    }
+
+    /// The list the paragraph is an item of, with its level.
+    pub fn list(&self) -> Option<&ListFormat> {
+        self.list.as_ref()
+    }
+}
+
+/// The list a paragraph is an item of: the list instance, the definition whose levels
+/// apply and the level, with the instance's overrides applied.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct ListFormat {
+    pub(crate) instance: i64,
+    pub(crate) definition: Option<i64>,
+    pub(crate) level_number: usize,
+    pub(crate) start: i64,
+}
+
+impl ListFormat {
+    /// The list instance (`w:numId`).
+    pub fn instance(&self) -> i64 {
+        self.instance
+    }
+
+    /// The definition whose levels apply (`w:abstractNumId`), through a numbering
+    /// style's link (`w:numStyleLink`) when the instance's definition has one.
+    pub fn definition(&self) -> Option<i64> {
+        self.definition
+    }
+
+    /// The level, 0 to 8.
+    pub fn level_number(&self) -> usize {
+        self.level_number
+    }
+
+    /// The level's definition, an override's when the instance has one; `None` when
+    /// the definition has no such level. `document` is the document of the paragraph:
+    /// the level is parsed from it on each call, since a document can name many.
+    pub fn level(&self, document: &Document) -> Option<ListLevel> {
+        super::resolve::list_level(document, self)
+    }
+
+    /// The number the level starts from: the instance's override (`w:startOverride`),
+    /// else the level's `w:start`, else 0 (ECMA-376 §17.9.25).
+    pub fn start(&self) -> i64 {
+        self.start
     }
 }

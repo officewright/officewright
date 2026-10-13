@@ -279,6 +279,23 @@ impl<'a> ListInstance<'a> {
         Numbering::new(self.document).definition(self.data.definition?)
     }
 
+    /// The first override of level `number`, the only one parsed.
+    pub(crate) fn override_of(self, number: usize) -> Option<LevelOverride> {
+        let document = self.document;
+        let number = i64::try_from(number).ok()?;
+        document
+            .element(self.data.element)
+            .children_through_fallback(document.names.mc)
+            .into_iter()
+            .filter(|child| child.is(&document.names.w, "lvlOverride"))
+            .find(|element| {
+                crate::docx::numbering::override_level(*element, &document.names) == Some(number)
+            })
+            .and_then(|element| {
+                crate::docx::numbering::level_override(element, &document.names, &mut |_, _, _| {})
+            })
+    }
+
     /// The overrides of levels of the definition (`w:lvlOverride`), in document order.
     /// One whose `w:ilvl` is not a number is left out, and so is a second override of
     /// a level 0 to 8, as a definition's second level of one number is.
@@ -379,8 +396,10 @@ pub struct ListLevel {
     pub(crate) picture_bullet: Option<i64>,
     pub(crate) legacy: Option<LegacyNumbering>,
     pub(crate) justification: Option<Justification>,
-    pub(crate) paragraph_properties: ParagraphProperties,
-    pub(crate) run_properties: RunProperties,
+    /// Boxed and absent when empty, so that a level that sets little is small: a
+    /// document can name many.
+    pub(crate) paragraph_properties: Option<Box<ParagraphProperties>>,
+    pub(crate) run_properties: Option<Box<RunProperties>>,
     pub(crate) tentative: Option<bool>,
     pub(crate) template_code: Option<u32>,
 }
@@ -458,12 +477,16 @@ impl ListLevel {
     /// Word allows the alignment, indentation and tab stops only (MS-OI29500
     /// §17.9.22(b)), though it writes others too.
     pub fn paragraph_properties(&self) -> &ParagraphProperties {
-        &self.paragraph_properties
+        static NONE: std::sync::LazyLock<ParagraphProperties> =
+            std::sync::LazyLock::new(ParagraphProperties::default);
+        self.paragraph_properties.as_deref().unwrap_or(&NONE)
     }
 
     /// The run properties of the label (its `w:rPr`).
     pub fn run_properties(&self) -> &RunProperties {
-        &self.run_properties
+        static NONE: std::sync::LazyLock<RunProperties> =
+            std::sync::LazyLock::new(RunProperties::default);
+        self.run_properties.as_deref().unwrap_or(&NONE)
     }
 
     /// The level is tentative (`w:tentative`): the standard keeps such levels out of the

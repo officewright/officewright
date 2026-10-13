@@ -22,7 +22,7 @@ use officewright_core::Pt;
 pub use fonts::{
     EmbeddedFontReference, EmbeddedFontStyle, FontDeclaration, FontFamily, FontPitch, FontSignature,
 };
-pub use format::{CharacterFormat, FontFamilies};
+pub use format::{CharacterFormat, FontFamilies, ListFormat, ParagraphFormat};
 pub use numbering::{
     LegacyNumbering, LevelOverride, LevelSuffix, ListDefinition, ListInstance, ListLevel,
     MultiLevelType, Numbering,
@@ -254,10 +254,10 @@ impl Document {
         Styles::new(self)
     }
 
-    /// Resolves the formatting in effect of runs and paragraph marks: the document
-    /// defaults, the styles and direct formatting combined as Word combines them, with
-    /// theme fonts and colours resolved. Keep it for all the runs of the document: it
-    /// remembers what it has worked out about each style.
+    /// Resolves the formatting in effect of paragraphs, runs and paragraph marks: the
+    /// document defaults, the styles, numbering and direct formatting combined as Word
+    /// combines them, with theme fonts and colours resolved. Keep it for the whole
+    /// document: it remembers what it has worked out about each style and list.
     ///
     /// ```
     /// # fn main() -> officewright_doc::Result<()> {
@@ -268,6 +268,8 @@ impl Document {
     /// for section in document.sections() {
     ///     for block in section.blocks() {
     ///         if let Block::Paragraph(paragraph) = block {
+    ///             let format = formats.paragraph(paragraph);
+    ///             println!("indented {} pt", format.start_indent().0);
     ///             for run in paragraph.runs() {
     ///                 let format = formats.run(run);
     ///                 println!("{} {} pt", format.fonts().ascii(), format.size().0);

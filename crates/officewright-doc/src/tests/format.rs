@@ -4,7 +4,12 @@ use super::*;
 
 /// A document whose body is `body`, with a styles part holding `styles` (the children
 /// of `w:styles`), and a settings part and a theme when given.
-fn build(body: &str, styles: &str, settings: Option<&str>, theme: Option<&str>) -> Document {
+pub(super) fn build(
+    body: &str,
+    styles: &str,
+    settings: Option<&str>,
+    theme: Option<&str>,
+) -> Document {
     let rel = |id: &str, kind: &str, target: &str| {
         format!(
             r#"<Relationship Id="{id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{kind}" Target="{target}"/>"#
@@ -39,12 +44,12 @@ fn build(body: &str, styles: &str, settings: Option<&str>, theme: Option<&str>) 
 }
 
 /// `w:docDefaults` with these run properties.
-fn defaults(r_pr: &str) -> String {
+pub(super) fn defaults(r_pr: &str) -> String {
     format!("<w:docDefaults><w:rPrDefault><w:rPr>{r_pr}</w:rPr></w:rPrDefault></w:docDefaults>")
 }
 
 /// A style of `kind` with these run properties and, after them, `rest`.
-fn style(kind: &str, id: &str, based_on: Option<&str>, r_pr: &str) -> String {
+pub(super) fn style(kind: &str, id: &str, based_on: Option<&str>, r_pr: &str) -> String {
     let based_on = based_on.map_or_else(String::new, |id| format!(r#"<w:basedOn w:val="{id}"/>"#));
     format!(
         r#"<w:style w:type="{kind}" w:styleId="{id}"><w:name w:val="{id}"/>{based_on}<w:rPr>{r_pr}</w:rPr></w:style>"#
@@ -52,7 +57,7 @@ fn style(kind: &str, id: &str, based_on: Option<&str>, r_pr: &str) -> String {
 }
 
 /// The paragraphs of the body, in order.
-fn paragraphs(document: &Document) -> Vec<Paragraph<'_>> {
+pub(super) fn paragraphs(document: &Document) -> Vec<Paragraph<'_>> {
     document
         .sections()
         .flat_map(|section| section.blocks())
@@ -75,7 +80,7 @@ fn runs(document: &Document) -> Vec<CharacterFormat> {
 
 /// A paragraph with the paragraph style `style` (none when empty) and one run per
 /// entry of `runs`, each with these run properties.
-fn paragraph(style: &str, runs: &[&str]) -> String {
+pub(super) fn paragraph(style: &str, runs: &[&str]) -> String {
     let p_pr = if style.is_empty() {
         String::new()
     } else {

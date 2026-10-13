@@ -267,6 +267,16 @@ pub(crate) fn paragraph_properties(
     properties
 }
 
+/// The list reference of a `w:pPr` (its last `w:numPr`, as
+/// [`paragraph_properties`] reads it), without reading its other properties.
+pub(crate) fn numbering_of(p_pr: Element<'_>, names: &Names) -> Option<NumberingReference> {
+    p_pr.children_through_fallback(names.mc)
+        .into_iter()
+        .rev()
+        .find(|child| child.is(&names.w, "numPr"))
+        .map(|num_pr| numbering(num_pr, names, &mut |_, _, _| {}))
+}
+
 fn numbering(element: Element<'_>, names: &Names, report: Report<'_>) -> NumberingReference {
     let mut reference = NumberingReference::default();
     for child in element.children_through_fallback(names.mc) {
