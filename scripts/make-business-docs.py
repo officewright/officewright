@@ -559,7 +559,7 @@ def heading_styles(doc: Doc) -> str:
 def styles_xml(doc: Doc) -> str:
     east = doc.east_asia or doc.font
     half = round(doc.size * 2)
-    lang = doc.lang
+    lang = "en-US" if doc.east_asia else doc.lang
     east_lang = doc.lang if doc.east_asia else "en-US"
     hidden = '<w:uiPriority w:val="99"/><w:semiHidden/><w:unhideWhenUsed/>'
     return (
@@ -632,7 +632,8 @@ def settings_xml(doc: Doc) -> str:
         '<w:defaultTabStop w:val="720"/>'
         f'<w:characterSpacingControl w:val="{spacing}"/>'
         f"{notes}<w:compat>{compat}</w:compat>"
-        f'<w:themeFontLang w:val="{doc.lang}" w:eastAsia="{east}" w:bidi="ar-SA"/>'
+        f'<w:themeFontLang w:val="{"en-US" if doc.east_asia else doc.lang}" w:eastAsia="{east}"'
+        ' w:bidi="ar-SA"/>'
         f'<w:decimalSymbol w:val="{doc.decimal}"/>'
         f'<w:listSeparator w:val="{doc.list_separator}"/>'
         "</w:settings>"
@@ -655,8 +656,14 @@ def sect_pr(doc: Doc, refs: list[tuple[str, str, str]]) -> str:
     )
 
 
+def closed(content: str) -> str:
+    """The content, with the empty paragraph Word adds after a story's last table (it adds
+    one on opening when a story ends with a table, which the re-saved copy would show)."""
+    return content + p() if not content or content.endswith("</w:tbl>") else content
+
+
 def story(tag: str, content: str) -> str:
-    return f"<w:{tag} {NAMESPACES}>{content or p()}</w:{tag}>"
+    return f"<w:{tag} {NAMESPACES}>{closed(content)}</w:{tag}>"
 
 
 def footnotes_xml(notes: list[str]) -> str:
@@ -675,13 +682,13 @@ def footnotes_xml(notes: list[str]) -> str:
     return f"<w:footnotes {NAMESPACES}>{separator}{body}</w:footnotes>"
 
 
-def core_xml(doc: Doc) -> str:
+def core_xml(doc: Doc, twin: bool = False) -> str:
     return (
         '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/'
         'metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" '
         'xmlns:dcterms="http://purl.org/dc/terms/" '
         'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
-        f"<dc:title>{escape(doc.name)}</dc:title>"
+        f"<dc:title>{escape(doc.name + ('-open' if twin else ''))}</dc:title>"
         f"<dc:description>{escape(doc.purpose)}</dc:description>"
         "<dc:creator>Officewright</dc:creator>"
         "<cp:lastModifiedBy>Officewright</cp:lastModifiedBy>"
@@ -703,8 +710,16 @@ def relationships(rels: list[tuple[str, str, str, bool]]) -> str:
     return f'<Relationships xmlns="{ns}">{entries}</Relationships>'
 
 
+def fonts_named(xml: str) -> set[str]:
+    """The font names of the w:rFonts elements in the markup."""
+    names = set()
+    for element in re.findall(r"<w:rFonts\b[^>]*>", xml):
+        names.update(re.findall(r'w:(?:ascii|hAnsi|eastAsia|cs)="([^"]+)"', element))
+    return names
+
+
 def font_table_xml(xml: str) -> str:
-    names = set(re.findall(r'w:(?:ascii|hAnsi|eastAsia|cs)="([^"]+)"', xml))
+    names = fonts_named(xml)
     entries = "".join(f'<w:font w:name="{attr(name)}"/>' for name in sorted(names))
     return f'<w:fonts xmlns:w="{W_NS}">{entries}</w:fonts>'
 
@@ -712,11 +727,15 @@ def font_table_xml(xml: str) -> str:
 def open_fonts(xml: str) -> str:
     """The same markup with the open metric-compatible fonts named instead."""
     pattern = "|".join(re.escape(name) for name in OPEN_FONTS)
-    return re.sub(
-        rf'(w:(?:ascii|hAnsi|eastAsia|cs|name)=")({pattern})(")',
-        lambda m: m.group(1) + OPEN_FONTS[m.group(2)] + m.group(3),
-        xml,
-    )
+
+    def swap(element: re.Match) -> str:
+        return re.sub(
+            rf'(w:(?:ascii|hAnsi|eastAsia|cs|name)=")({pattern})(")',
+            lambda m: m.group(1) + OPEN_FONTS[m.group(2)] + m.group(3),
+            element.group(0),
+        )
+
+    return re.sub(r"<w:(?:rFonts|font)\b[^>]*>", swap, xml)
 
 
 def parts(doc: Doc, twin: bool = False) -> list[tuple[str, bytes]]:
@@ -749,7 +768,8 @@ def parts(doc: Doc, twin: bool = False) -> list[tuple[str, bytes]]:
     for rid, url in doc.links.items():
         word_rels.append((rid, "hyperlink", url, True))
     document = (
-        f"<w:document {NAMESPACES}><w:body>{doc.body}{sect_pr(doc, refs)}</w:body></w:document>"
+        f"<w:document {NAMESPACES}><w:body>{closed(doc.body)}{sect_pr(doc, refs)}</w:body>"
+        "</w:document>"
     )
     overrides = [
         ("/word/document.xml", f"{CT_W}.document.main+xml"),
@@ -797,7 +817,7 @@ def parts(doc: Doc, twin: bool = False) -> list[tuple[str, bytes]]:
     result = [
         ("[Content_Types].xml", xml_part(content_types)),
         ("_rels/.rels", xml_part(root_rels)),
-        ("docProps/core.xml", xml_part(core_xml(doc))),
+        ("docProps/core.xml", xml_part(core_xml(doc, twin))),
         ("word/document.xml", xml_part(texts["word/document.xml"])),
         ("word/styles.xml", xml_part(texts["word/styles.xml"])),
         ("word/settings.xml", xml_part(settings_xml(doc))),
@@ -979,7 +999,7 @@ def cv_sidebar() -> Doc:
     sidebar = (
         p(picture("rIdImg1", 1, "Photo", 3.0, 3.75), align="center", before=6)
         + side_head("Contact")
-        + p(r("Riverside Lane 12\nGreenfield, MA 01301", size=9))
+        + p(r("Riverside Lane 12\nAshby Hollow, MA 00000", size=9))
         + p(r("(555) 014-7781", size=9), before=3)
         + p(r("m.okafor@example.com", size=9), before=3)
         + side_head("Skills")
@@ -1656,7 +1676,7 @@ def invoice_decimal() -> Doc:
 
 
 def invoice_long() -> Doc:
-    """About 70 lines over three pages: the header row repeats, rows do not split."""
+    """About 70 lines over several pages: the header row repeats, rows do not split."""
     rows = [
         [
             cell(p(r(h, bold=True), align=a), fill="D9E2F3")
@@ -1721,9 +1741,9 @@ def invoice_long() -> Doc:
     footer = p(r("Order 55-2093\t\t"), page_of("Page {page} of {pages}"), style="Footer")
     return Doc(
         "invoice-en-long",
-        "Three-page invoice of 70 lines: a header row repeated on every page, rows that may not"
-        " split, a long description that wraps, totals kept with their rule, an underscore leader"
-        " signature line; Calibri 10, Letter",
+        "Invoice of 70 lines over several pages: a header row repeated on every page, rows that"
+        " may not split, a long description that wraps, totals kept with their rule, an"
+        " underscore leader signature line; Calibri 10, Letter",
         "en-US",
         body,
         "Calibri",
@@ -1823,17 +1843,18 @@ def invoice_receipt() -> Doc:
         ("Sparkling water", 2, 1.80),
         ("Sandwich, egg & cress", 1, 4.95),
     ]
+    total = sum(qty * price for _, qty, price in lines)
     body = (
         p(r("THE COPPER KETTLE", bold=True), align="center")
         + p(r("18 Market Square, Hollowmere"), align="center")
         + p(r("Tel (555) 019-2200"), align="center", after=6)
-        + p(r("Receipt 0045-2291   12/03/2026 08:41"), border_bottom="000000", after=4)
+        + p(r("Receipt 0045-2291   03/12/2026 08:41"), border_bottom="000000", after=4)
         + "".join(
             p(r(f"{qty} x {name}\t{qty * price:.2f}"), tabs=(right,)) for name, qty, price in lines
         )
-        + p(r("SUBTOTAL\t25.85"), tabs=(right,), before=4, border_bottom="000000")
-        + p(r("TOTAL\t25.85", bold=True), tabs=(right,), before=2)
-        + p(r("CARD\t25.85"), tabs=(right,))
+        + p(r(f"SUBTOTAL\t{total:.2f}"), tabs=(right,), before=4, border_bottom="000000")
+        + p(r(f"TOTAL\t{total:.2f}", bold=True), tabs=(right,), before=2)
+        + p(r(f"CARD\t{total:.2f}"), tabs=(right,))
         + p(r("Thank you, see you soon!"), align="center", before=10)
     )
     return Doc(
@@ -1941,7 +1962,7 @@ def contract_uk() -> Doc:
                 "ЦІНА ТА ПОРЯДОК РОЗРАХУНКІВ",
                 [
                     (
-                        "Загальна сума договору складає 248 600,00 грн (двісті сорок вісім тисяч"
+                        "Загальна сума договору становить 248 600,00 грн (двісті сорок вісім тисяч"
                         " шістсот гривень 00 копійок), у тому числі ПДВ 20 % – 41 433,33 грн."
                     ),
                     (
@@ -2990,16 +3011,8 @@ def variants(docs: list[Doc]) -> list[tuple[str, Doc, bool]]:
 def sources_row(name: str, doc: Doc, twin: bool) -> str:
     purpose = doc.purpose
     if twin:
-        used = sorted(
-            {
-                OPEN_FONTS[f]
-                for f in OPEN_FONTS
-                if f
-                in "".join(
-                    x.decode("utf-8", "replace") for n, x in parts(doc) if n.endswith(".xml")
-                )
-            }
-        )
+        markup = "".join(x.decode("utf-8") for n, x in parts(doc, True) if n.endswith(".xml"))
+        used = sorted(fonts_named(markup) & set(OPEN_FONTS.values()))
         purpose += f"; open-font twin ({', '.join(used)})"
     return (
         f"| generated/{name} | Written by scripts/make-business-docs.py; fictional people,"

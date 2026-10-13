@@ -49,7 +49,7 @@ class Committed(unittest.TestCase):
                 self.assertEqual(f"{doc.name}-open.docx" in names, not doc.name.endswith("-zh"))
 
     def test_twins_name_only_open_fonts_and_originals_name_office_fonts(self):
-        pattern = r'w:(?:ascii|hAnsi|cs|eastAsia|name)="([^"]+)"'
+        pattern = r'<w:(?:rFonts|font)\b[^>]*\bw:(?:ascii|hAnsi|cs|eastAsia|name)="([^"]+)"'
         for name, doc, twin in gen.variants(gen.documents()):
             fonts = set(re.findall(pattern, "".join(xml_parts(GENERATED / name).values())))
             with self.subTest(name):
@@ -82,7 +82,26 @@ class Committed(unittest.TestCase):
                 if expected:
                     self.assertEqual(doc.lang, expected)
                     styles = xml_parts(GENERATED / name)["word/styles.xml"]
-                    self.assertIn(f'w:lang w:val="{expected}"', styles)
+                    # Chinese is the East Asian language; Latin text in it is English.
+                    if expected == "zh-CN":
+                        self.assertIn('w:lang w:val="en-US" w:eastAsia="zh-CN"', styles)
+                    else:
+                        self.assertIn(f'w:lang w:val="{expected}" w:eastAsia="en-US"', styles)
+
+    def test_fonts_in_the_font_table_are_fonts(self):
+        for path in sorted(GENERATED.glob("*.docx")):
+            table = xml_parts(path)["word/fontTable.xml"]
+            names = set(re.findall(r'w:name="([^"]+)"', table))
+            with self.subTest(path.name):
+                self.assertFalse({n for n in names if re.fullmatch(r"[a-z]{2}-[A-Z]{2}", n)})
+                self.assertTrue(names)
+
+    def test_no_story_ends_with_a_table(self):
+        for path in sorted(GENERATED.glob("*.docx")):
+            for name, xml in xml_parts(path).items():
+                if re.match(r"word/(document|header\d+|footer\d+)\.xml$", name):
+                    with self.subTest(f"{path.name} {name}"):
+                        self.assertNotRegex(xml, r"</w:tbl>(<w:sectPr\b.*)?</w:(body|hdr|ftr)>")
 
     def test_packages_are_well_formed(self):
         for path in sorted(GENERATED.glob("*.docx")):
@@ -91,6 +110,7 @@ class Committed(unittest.TestCase):
                 types = archive.read("[Content_Types].xml").decode()
                 defaults = set(re.findall(r'Extension="([^"]+)"', types))
                 overrides = set(re.findall(r'PartName="/([^"]+)"', types))
+                kinds = dict(re.findall(r'PartName="/([^"]+)" ContentType="([^"]+)"', types))
                 for name in names:
                     if name.endswith((".xml", ".rels")):
                         ElementTree.fromstring(archive.read(name))
@@ -98,6 +118,15 @@ class Committed(unittest.TestCase):
                         self.assertTrue(
                             name in overrides or name.rsplit(".", 1)[-1] in defaults, name
                         )
+                    # The main parts need their own content types; the xml default is not one.
+                    kind = re.match(
+                        r"word/(document|styles|settings|fontTable|numbering|footnotes"
+                        r"|header|footer)\d*\.xml$",
+                        name,
+                    )
+                    if kind:
+                        expected = {"document": "document.main"}.get(kind.group(1), kind.group(1))
+                        self.assertEqual(kinds.get(name), f"{gen.CT_W}.{expected}+xml", name)
                     if name.endswith(".rels"):
                         base = posixpath.dirname(posixpath.dirname(name))
                         for rel in re.findall(
