@@ -19,8 +19,8 @@
 /// When every field has a default, the struct implements `Default` with them. A `check`
 /// rule is a function `fn(&Stored, &mut Checker) -> Result<()>` that `validate` runs on the
 /// field after its own checks; a `clamp` rule is a function `fn(&mut Stored, &mut
-/// Clamper)` that `clamp` runs on it. A `clamp rule;` after the struct runs on the whole
-/// struct, after its fields.
+/// Clamper)` that `clamp` runs on it. A `check rule;` or `clamp rule;` after the struct
+/// runs on the whole struct, after its fields.
 macro_rules! ir_struct {
     (@storage copy $ty:ty) => { $ty };
     (@storage ref $ty:ty) => { $ty };
@@ -62,6 +62,7 @@ macro_rules! ir_struct {
                     $(, check $check:path)? $(, clamp $clamp:path)?;
             )*
         }
+        $(check $struct_check:path;)?
         $(clamp $struct_clamp:path;)?
     ) => {
         $(#[$meta])*
@@ -101,6 +102,7 @@ macro_rules! ir_struct {
                     $($check(&self.$field, checker)?;)?
                     checker.leave();
                 )*
+                $($struct_check(self, checker)?;)?
                 Ok(())
             }
         }
@@ -128,6 +130,7 @@ macro_rules! ir_struct {
                     $(, check $check:path)? $(, clamp $clamp:path)?;
             )*
         }
+        $(check $struct_check:path;)?
         $(clamp $struct_clamp:path;)?
     ) => {
         ir_struct! {
@@ -139,6 +142,7 @@ macro_rules! ir_struct {
                     $kind $field: $ty => $setter $(, check $check)? $(, clamp $clamp)?;
                 )*
             }
+            $(check $struct_check;)?
             $(clamp $struct_clamp;)?
         }
 
@@ -161,6 +165,7 @@ macro_rules! ir_struct {
                     $(, check $check:path)? $(, clamp $clamp:path)?;
             )*
         }
+        $(check $struct_check:path;)?
         $(clamp $struct_clamp:path;)?
     ) => {
         ir_struct! {
@@ -172,6 +177,7 @@ macro_rules! ir_struct {
                     $kind $field: $ty => $setter $(, check $check)? $(, clamp $clamp)?;
                 )*
             }
+            $(check $struct_check;)?
             $(clamp $struct_clamp;)?
         }
     };

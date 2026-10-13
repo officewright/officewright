@@ -4,8 +4,8 @@
 
 use officewright_core::{Color, PageSize, Pt};
 
+use super::Document;
 use super::macros::no_rules;
-use super::{Document, RunStyleId};
 use crate::report::{LayoutReport, Location, ReportKind, Step};
 use crate::{Error, Result};
 
@@ -20,12 +20,19 @@ pub(crate) trait Clamp {
     fn clamp(&mut self, clamper: &mut Clamper);
 }
 
+/// How deep tables in tables may nest: a table in a table is at depth 2. Each level of
+/// nesting takes three XML elements in a DOCX, so documents within the DOCX reader's
+/// default limit of 256 nested elements nest tables less deep than this.
+pub const MAX_TABLE_DEPTH: usize = 100;
+
 /// The state of a `Document::validate` walk.
 pub(crate) struct Checker<'a> {
     document: &'a Document,
     location: Location,
     /// Whether the walk is inside the stored result of a field.
     in_field_result: bool,
+    /// How many tables the walk is inside.
+    table_depth: usize,
 }
 
 impl<'a> Checker<'a> {
@@ -34,6 +41,7 @@ impl<'a> Checker<'a> {
             document,
             location: Location::default(),
             in_field_result: false,
+            table_depth: 0,
         }
     }
 
@@ -71,6 +79,24 @@ impl<'a> Checker<'a> {
         self.in_field_result = value;
     }
 
+    /// Steps into a table, failing when that nests tables deeper than
+    /// [`MAX_TABLE_DEPTH`].
+    pub(crate) fn enter_table(&mut self) -> Result<()> {
+        if self.table_depth >= MAX_TABLE_DEPTH {
+            return Err(Error::NestingTooDeep {
+                location: self.location.clone(),
+                limit: MAX_TABLE_DEPTH,
+            });
+        }
+        self.table_depth += 1;
+        Ok(())
+    }
+
+    /// Steps back out of the table last entered.
+    pub(crate) fn leave_table(&mut self) {
+        self.table_depth = self.table_depth.saturating_sub(1);
+    }
+
     /// The error for a problem with the value being checked.
     pub(crate) fn error(&self, problem: impl Into<String>) -> Error {
         Error::InvalidDocument {
@@ -85,6 +111,8 @@ impl<'a> Checker<'a> {
 pub(crate) struct Clamper {
     location: Location,
     report: LayoutReport,
+    /// How many tables the walk is inside.
+    table_depth: usize,
 }
 
 impl Clamper {
@@ -103,6 +131,22 @@ impl Clamper {
         self.enter(field);
         value.clamp(self);
         self.leave();
+    }
+
+    /// Steps into a table, unless that nests tables deeper than [`MAX_TABLE_DEPTH`]:
+    /// then it returns false and the walk leaves the table alone, which `validate`
+    /// rejects.
+    pub(crate) fn enter_table(&mut self) -> bool {
+        if self.table_depth >= MAX_TABLE_DEPTH {
+            return false;
+        }
+        self.table_depth += 1;
+        true
+    }
+
+    /// Steps back out of the table last entered.
+    pub(crate) fn leave_table(&mut self) {
+        self.table_depth = self.table_depth.saturating_sub(1);
     }
 
     /// Records that the value being clamped was changed.
@@ -130,12 +174,6 @@ impl Check for PageSize {
     fn check(&self, checker: &mut Checker<'_>) -> Result<()> {
         checker.visit("width", &self.width())?;
         checker.visit("height", &self.height())
-    }
-}
-
-impl Check for RunStyleId {
-    fn check(&self, checker: &mut Checker<'_>) -> Result<()> {
-        checker.document().check_run_style(*self, checker)
     }
 }
 
@@ -182,10 +220,6 @@ impl Clamp for Pt {
 }
 
 impl Clamp for PageSize {
-    fn clamp(&mut self, _: &mut Clamper) {}
-}
-
-impl Clamp for RunStyleId {
     fn clamp(&mut self, _: &mut Clamper) {}
 }
 

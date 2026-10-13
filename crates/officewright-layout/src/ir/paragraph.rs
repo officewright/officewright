@@ -4,9 +4,11 @@ use officewright_core::Pt;
 
 use super::RunStyleId;
 use super::inline::Inline;
+use super::list::ListItem;
 use super::macros::{ir_struct, no_rules};
 use super::rules;
 use super::style::ColorValue;
+use super::table::Table;
 use super::walk::{Check, Checker, Clamp, Clamper};
 use crate::Result;
 
@@ -16,6 +18,8 @@ use crate::Result;
 pub enum Block {
     /// A paragraph.
     Paragraph(Paragraph),
+    /// A table.
+    Table(Table),
 }
 
 impl From<Paragraph> for Block {
@@ -24,10 +28,22 @@ impl From<Paragraph> for Block {
     }
 }
 
+impl From<Table> for Block {
+    fn from(table: Table) -> Self {
+        Self::Table(table)
+    }
+}
+
 impl Check for Block {
     fn check(&self, checker: &mut Checker<'_>) -> Result<()> {
         match self {
             Self::Paragraph(paragraph) => paragraph.check(checker),
+            Self::Table(table) => {
+                checker.enter_table()?;
+                table.check(checker)?;
+                checker.leave_table();
+                Ok(())
+            }
         }
     }
 }
@@ -36,6 +52,12 @@ impl Clamp for Block {
     fn clamp(&mut self, clamper: &mut Clamper) {
         match self {
             Self::Paragraph(paragraph) => paragraph.clamp(clamper),
+            Self::Table(table) => {
+                if clamper.enter_table() {
+                    table.clamp(clamper);
+                    clamper.leave_table();
+                }
+            }
         }
     }
 }
@@ -51,6 +73,8 @@ ir_struct! {
         /// The formatting of the paragraph mark. It gives an empty paragraph its height,
         /// and the last line of a paragraph includes it in its height.
         copy mark: RunStyleId => with_mark;
+        /// The list the paragraph is an item of.
+        copy list: Option<ListItem> => with_list;
     }
 }
 
@@ -61,6 +85,7 @@ impl Paragraph {
             props: ParagraphProps::default(),
             inlines: Vec::new(),
             mark,
+            list: None,
         }
     }
 }
