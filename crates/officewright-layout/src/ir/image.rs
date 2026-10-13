@@ -138,6 +138,34 @@ ir_struct! {
     /// A floating object (`wp:anchor`), anchored to the paragraph it appears in. Text
     /// does not wrap around it yet: it is drawn at its position, and any wrapping is
     /// reported.
+    ///
+    /// ```
+    /// use officewright_core::Pt;
+    /// use officewright_layout::ir::{
+    ///     AnchoredContent, AnchoredObject, Document, HorizontalAlign, HorizontalAnchor,
+    ///     HorizontalPlacement, HorizontalReference, ImageData, ImageFormat, Inline, PageSetup,
+    ///     Paragraph, Picture, RunStyle, Section, Size, VerticalAnchor, VerticalPlacement,
+    ///     VerticalReference,
+    /// };
+    ///
+    /// let mut document = Document::default();
+    /// let style = document.add_run_style(RunStyle::default());
+    /// let logo = document.add_image(ImageData::new(ImageFormat::Png, b"\x89PNG\r\n\x1a\n".to_vec()));
+    /// // A logo at the right edge of the page, a quarter inch below the top edge.
+    /// let object = AnchoredObject::new(
+    ///     AnchoredContent::Picture(Picture::new(logo, Size::new(Pt(120.0), Pt(36.0)))),
+    ///     HorizontalAnchor::default()
+    ///         .with_relative_to(HorizontalReference::Page)
+    ///         .with_placement(HorizontalPlacement::Align(HorizontalAlign::Right)),
+    ///     VerticalAnchor::default()
+    ///         .with_relative_to(VerticalReference::Page)
+    ///         .with_placement(VerticalPlacement::Offset(Pt(18.0))),
+    /// );
+    /// let header = Paragraph::new(style).with_inlines([Inline::anchored(object)]);
+    /// document.add_section(Section::new(PageSetup::default()).with_blocks([header.into()]));
+    /// document.validate()?;
+    /// # Ok::<(), officewright_layout::Error>(())
+    /// ```
     #[derive(Clone, Debug, PartialEq)]
     pub struct AnchoredObject {
         /// What the object shows.

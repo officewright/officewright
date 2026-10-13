@@ -65,7 +65,8 @@ pub enum Inline {
     Picture(Picture),
     /// A floating object anchored here. It takes no room in the line.
     Anchored(Box<AnchoredObject>),
-    /// The reference to a footnote or an endnote: its number in the text.
+    /// The reference to a footnote or an endnote: its number in the text. Word ignores
+    /// one in a text box (MS-OI29500 2.1.305 a).
     #[non_exhaustive]
     NoteReference {
         /// The note.

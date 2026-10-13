@@ -6,6 +6,29 @@ use super::section::NumberFormat;
 
 ir_struct! {
     /// A footnote or an endnote: its content, laid out where its reference sends it.
+    ///
+    /// ```
+    /// use officewright_layout::ir::{
+    ///     Document, Inline, Note, NoteKind, PageSetup, Paragraph, RunStyle, Section,
+    ///     VerticalPosition,
+    /// };
+    ///
+    /// let mut document = Document::default();
+    /// let text = document.add_run_style(RunStyle::default());
+    /// let mark = document.add_run_style(RunStyle::default().with_vertical(VerticalPosition::Superscript));
+    /// // The note starts with its own number, then its text.
+    /// let note = document.add_note(Note::new(
+    ///     NoteKind::Footnote,
+    ///     [Paragraph::new(text)
+    ///         .with_inlines([Inline::note_number(mark), Inline::text(" Since 2019.", text)])
+    ///         .into()],
+    /// ));
+    /// let paragraph = Paragraph::new(text)
+    ///     .with_inlines([Inline::text("The rule applies", text), Inline::note_reference(note, false, mark)]);
+    /// document.add_section(Section::new(PageSetup::default()).with_blocks([paragraph.into()]));
+    /// document.validate()?;
+    /// # Ok::<(), officewright_layout::Error>(())
+    /// ```
     #[derive(Clone, Debug, PartialEq)]
     pub struct Note {
         /// Whether it is a footnote or an endnote.
@@ -37,9 +60,11 @@ pub enum NoteKind {
 
 ir_struct! {
     /// How the footnotes or the endnotes of a section are numbered and placed, after the
-    /// producer has applied the document's settings and the section's own. Word takes
-    /// the placement of footnotes from the section, not the document (MS-OI29500
-    /// 2.1.309 a).
+    /// producer has applied the document's settings and the section's own (ECMA-376
+    /// Part 1, §17.11). Word takes the placement of footnotes from the section, not the
+    /// document (MS-OI29500 2.1.309 a); the placement of endnotes is the document's, and
+    /// a section's is ignored (§17.11.22), so the producer gives every section the
+    /// document's.
     #[derive(Clone, Debug, PartialEq)]
     pub struct NoteProps {
         /// Where the notes go.
@@ -56,7 +81,8 @@ ir_struct! {
 
 impl NoteProps {
     /// Footnotes as a document has them when it says nothing: at the bottom of the
-    /// page, numbered 1, 2, 3 through the document.
+    /// page, numbered 1, 2, 3 through the document (ECMA-376 Part 1, §17.11.18 to
+    /// §17.11.21).
     pub fn footnotes() -> Self {
         Self {
             position: NotePosition::PageBottom,
@@ -67,7 +93,8 @@ impl NoteProps {
     }
 
     /// Endnotes as a document has them when it says nothing: at the end of the
-    /// document, numbered i, ii, iii, Word's default (MS-OI29500 2.1.306 a).
+    /// document (ECMA-376 Part 1, §17.11.22), numbered i, ii, iii, Word's default
+    /// (MS-OI29500 2.1.306 a).
     pub fn endnotes() -> Self {
         Self {
             position: NotePosition::DocumentEnd,

@@ -2026,3 +2026,44 @@ fn a_negative_exact_row_height_is_clamped_in_one_go() {
     assert_eq!(document.clamp().len(), 2);
     assert!(document.clamp().is_empty());
 }
+
+#[test]
+fn picture_and_anchor_defaults_are_neutral() {
+    let mut document = Document::default();
+    let image = document.add_image(ImageData::new(ImageFormat::Jpeg, Vec::new()));
+    let picture = Picture::new(image, Size::new(Pt(10.0), Pt(20.0)));
+    assert_eq!(picture.crop(), None);
+    assert_eq!(picture.effect_extent(), Insets::default());
+    assert_eq!(picture.rotation(), 0.0);
+    assert!(!picture.flip_horizontal() && !picture.flip_vertical());
+    let insets = Insets::default();
+    assert_eq!(
+        (insets.left(), insets.top(), insets.right(), insets.bottom()),
+        (Pt(0.0), Pt(0.0), Pt(0.0), Pt(0.0))
+    );
+    let crop = Crop::default();
+    assert_eq!(
+        (crop.left(), crop.top(), crop.right(), crop.bottom()),
+        (0.0, 0.0, 0.0, 0.0)
+    );
+
+    let object = AnchoredObject::new(
+        AnchoredContent::Picture(picture),
+        HorizontalAnchor::default(),
+        VerticalAnchor::default(),
+    );
+    assert_eq!(object.wrap(), Wrap::None);
+    assert!(!object.behind_text());
+    assert!(object.layout_in_cell() && object.allow_overlap());
+    assert_eq!(object.z_order(), 0);
+    assert_eq!(object.distances(), Insets::default());
+    assert_eq!(
+        HorizontalAnchor::default().placement(),
+        HorizontalPlacement::Offset(Pt(0.0))
+    );
+    assert_eq!(
+        VerticalAnchor::default().placement(),
+        VerticalPlacement::Offset(Pt(0.0))
+    );
+    assert!(NoteSeparators::default().separator().is_empty());
+}
