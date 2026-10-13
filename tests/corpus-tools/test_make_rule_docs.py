@@ -214,10 +214,15 @@ class Packages(unittest.TestCase):
             parts = rules.parts(doc)
             styles = part(parts, "word/styles.xml")
             defined = {s.get(f"{W}styleId") for s in styles.iter(f"{W}style")}
+            # A list level names a paragraph style too (w:pStyle), and a definition a
+            # numbering style (w:numStyleLink, w:styleLink).
+            roots = [part(parts, "word/document.xml"), styles]
+            if any(name == "word/numbering.xml" for name, _ in parts):
+                roots.append(part(parts, "word/numbering.xml"))
             named = {
                 n.get(f"{W}val")
-                for root in (part(parts, "word/document.xml"), styles)
-                for tag in ("pStyle", "rStyle", "basedOn")
+                for root in roots
+                for tag in ("pStyle", "rStyle", "basedOn", "numStyleLink", "styleLink")
                 for n in root.iter(f"{W}{tag}")
             }
             self.assertLessEqual(named, defined, doc.name)
