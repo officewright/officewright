@@ -163,6 +163,7 @@ name = "officewright-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "officewright-core",
  "officewright-doc",
  "officewright-font",
  "officewright-layout",
@@ -179,6 +180,7 @@ dependencies = [
  "harfrust",
  "officewright-core",
  "officewright-font",
+ "unicode-script",
 ]
 
 [[package]]

@@ -1,10 +1,20 @@
 [default]
-# MSVC's object-file option, used in scripts/check.sh.
-extend-ignore-re = ['-Fo"']
+extend-ignore-re = [
+  # MSVC's object-file option, used in scripts/check.sh.
+  '-Fo"',
+  # Unicode code points in Rust escapes and in text: hexadecimal, not words.
+  '\\u\{[0-9A-Fa-f]{1,6}\}',
+  'U\+[0-9A-Fa-f]{4,6}',
+]
 
 [files]
 # Test documents are third-party content; only our own text is spell-checked.
-extend-exclude = ["tests/corpus/*", "!tests/corpus/SOURCES.md"]
+extend-exclude = [
+  "tests/corpus/*",
+  "!tests/corpus/SOURCES.md",
+  # Unicode's Adobe Symbol mapping, kept as published.
+  "crates/officewright-layout/data/*",
+]
 
 [default.extend-words]
 # PDF's Flate filter (FlateDecode, ISO 32000-1, 7.4.4), not a misspelling of "flat".
@@ -13,6 +23,8 @@ flate = "flate"
 parms = "parms"
 # PNG's Paeth filter (PNG specification, 9.4), named after Alan W. Paeth, not "path".
 paeth = "paeth"
+# Unicode's spelling of the Greek letter in character names (GREEK SMALL LETTER LAMDA).
+lamda = "lamda"
 # OpenType tags, not misspellings: the glyph location table and the width axis.
 loca = "loca"
 wdth = "wdth"
