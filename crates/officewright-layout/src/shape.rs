@@ -267,6 +267,28 @@ impl Shaper {
     }
 }
 
+impl Shaper {
+    /// The bytes of `text` at which a cluster starts when HarfRust shapes it in `face`,
+    /// in order: a mark, a joiner or the rest of an Indic syllable is in the cluster of
+    /// the character before it. `None` when HarfRust cannot read the face, which then
+    /// knows no clusters. The run is not cached.
+    pub(crate) fn cluster_starts(
+        &mut self,
+        face: &ShapingFace,
+        text: &str,
+        request: &ShapeRequest,
+    ) -> Option<Vec<usize>> {
+        let run = shape(face, text, request, &mut self.plans);
+        if run.nominal {
+            return None;
+        }
+        let mut starts: Vec<usize> = run.glyphs.iter().map(|glyph| glyph.cluster).collect();
+        starts.sort_unstable();
+        starts.dedup();
+        Some(starts)
+    }
+}
+
 /// About how many bytes a cache entry takes: its glyphs, the text and the language it
 /// keeps, and the key, the run and the map slot themselves.
 fn cost(key: &CacheKey, run: &ShapedRun) -> usize {

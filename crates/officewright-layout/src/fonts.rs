@@ -38,8 +38,8 @@ pub(crate) struct Fonts<'a> {
     covering: HashMap<(char, bool, bool, String), Vec<FaceId>>,
     /// The families and the fallbacks reported for them.
     fallbacks: HashSet<(String, String)>,
-    /// The characters no font has, by script.
-    missing: BTreeMap<&'static str, BTreeSet<char>>,
+    /// The characters no font has, by script, with the place of the first.
+    missing: BTreeMap<&'static str, (Location, BTreeSet<char>)>,
     /// What is reported once per layout run.
     reported: HashSet<String>,
     report: LayoutReport,
@@ -183,11 +183,15 @@ impl<'a> Fonts<'a> {
         }
     }
 
-    /// Counts `ch` as drawn with the missing-glyph shape because no font has it; the
-    /// report gives one entry per script.
-    pub(crate) fn missing(&mut self, ch: char) {
+    /// Counts `ch`, at `location`, as drawn with the missing-glyph shape because no font
+    /// has it; the report gives one entry per script, at the place of its first.
+    pub(crate) fn missing(&mut self, ch: char, location: &Location) {
         let script = ch.script().full_name();
-        self.missing.entry(script).or_default().insert(ch);
+        self.missing
+            .entry(script)
+            .or_insert_with(|| (location.clone(), BTreeSet::new()))
+            .1
+            .insert(ch);
     }
 
     /// Adds `message` to the report under `kind` once per layout run.
@@ -201,7 +205,7 @@ impl<'a> Fonts<'a> {
     /// resolver made.
     pub(crate) fn into_report(self) -> LayoutReport {
         let mut report = self.report;
-        for (script, chars) in &self.missing {
+        for (script, (location, chars)) in self.missing {
             let Some(&first) = chars.first() else {
                 continue;
             };
@@ -213,7 +217,7 @@ impl<'a> Fonts<'a> {
             };
             report.push(
                 ReportKind::GlyphMissing,
-                Location::default(),
+                location,
                 format!(
                     "no font has {count} {characters} of the {script} script, such as U+{:04X} \
                      '{}'; the missing-glyph shape is drawn",

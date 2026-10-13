@@ -343,3 +343,27 @@ fn shaping_runs_in_turn_gives_what_each_gives_alone() -> TestResult {
     assert_ne!(in_turn.get(2), in_turn.get(3));
     Ok(())
 }
+
+#[test]
+fn a_run_cut_for_its_length_starts_where_a_cluster_starts() -> TestResult {
+    // Noto Sans has a dotted circle (U+25CC), which HarfRust draws before a mark that
+    // starts a run: check_paragraph looks for it at the start of every run cut for its
+    // length.
+    let book = book()?;
+    let mut document = Document::default();
+    let id = document.add_run_style(RunStyle::default().with_fonts(RunFonts::new("Noto Sans")));
+    let texts = [
+        "\u{E01}\u{E34}".repeat(2000),
+        "\u{915}\u{93F}".repeat(2000),
+        "\u{915}\u{94D}\u{937}".repeat(2000),
+        format!("{} \u{E34}\u{E01}", "\u{E01}".repeat(1364)),
+        format!("e{}", "\u{301}".repeat(2100)),
+    ];
+    for text in &texts {
+        fuzzing::check_paragraph(&book, &document, &[Inline::text(text, id)])
+            .map_err(|err| format!("{:?}: {err}", text.get(..12)))?;
+        let paragraph = fuzzing::paragraph(&book, &document, &[Inline::text(text, id)]);
+        assert!(paragraph.runs().len() > 1, "{:?}", text.get(..12));
+    }
+    Ok(())
+}

@@ -24,8 +24,8 @@ use crate::symbol::SymbolFont;
 /// reference shows it (`E-smallcaps.docx`).
 pub(crate) const SMALL_CAPS_SCALE: f64 = 0.8;
 
-/// The most bytes of text a run has: a longer one is cut, at a space where there is one,
-/// so that shaping time and memory stay bounded per run.
+/// The most bytes of text a run has: a longer one is cut where a cluster starts, after a
+/// space where there is one, so that shaping time and memory stay bounded per run.
 pub(crate) const MAX_RUN_BYTES: usize = 4096;
 
 /// A paragraph's content, itemized.
@@ -122,6 +122,7 @@ pub(crate) fn itemize(
         pending: Vec::new(),
         path: Vec::new(),
         languages: Vec::new(),
+        shaper: Shaper::with_capacity(0),
     };
     builder.inlines(inlines);
     builder.flush();
@@ -139,6 +140,8 @@ struct Builder<'d, 'f, 'a> {
     path: InlinePath,
     /// The languages seen, shared by the looks that have them.
     languages: Vec<Arc<str>>,
+    /// Shapes the text of a run cut for its length, to find where its clusters start.
+    shaper: Shaper,
 }
 
 /// Characters that stay with the character before them, in its run and face: joiners,
@@ -450,7 +453,7 @@ impl Builder<'_, '_, '_> {
             }
             return covering;
         }
-        self.fonts.missing(ch);
+        self.fonts.missing(ch, self.location);
         choice
     }
 
@@ -491,26 +494,36 @@ impl Builder<'_, '_, '_> {
                 bytes += len;
                 end += 1;
             }
-            // A run cut for its length ends after its last space, where it has one; else
-            // where a cluster starts: not before a mark or joiner, which would start the
-            // next run without its base (and get a dotted circle), and not between the
-            // characters drawn for one character of the source (SS for ß).
+            // A run cut for its length ends where a cluster starts, as HarfRust forms
+            // clusters in the run's face: a mark, a joiner or the rest of an Indic
+            // syllable stays with its base, which the next run would otherwise draw after
+            // a dotted circle. Nor is it cut between the characters drawn for one
+            // character of the source (SS for ß). It ends after its last space that is
+            // followed by such a start, else at the last such start. In a face HarfRust
+            // cannot read, only marks and joiners stay with their base.
             if too_long {
+                let script = scripts.get(start).copied().unwrap_or(Script::Common);
+                let clusters = self.cluster_starts(&pending, start..end + 1, script);
                 let text_at = |i: usize| {
                     pending
                         .get(i)
                         .and_then(|placed| self.out.text.get(placed.text.clone()))
                         .and_then(|text| text.chars().next())
                 };
-                let after_space = (start + 1..end)
-                    .rev()
-                    .find(|&i| text_at(i - 1).is_some_and(char::is_whitespace));
                 let starts_cluster = |i: usize| {
                     let joins = text_at(i).is_some_and(attaches);
                     let same_source =
                         pending.get(i).map(|p| &p.source) == pending.get(i - 1).map(|p| &p.source);
-                    !joins && !same_source
+                    let shaped = clusters.as_ref().is_none_or(|starts| {
+                        pending
+                            .get(i)
+                            .is_some_and(|placed| starts.binary_search(&placed.text.start).is_ok())
+                    });
+                    !joins && !same_source && shaped
                 };
+                let after_space = (start + 1..=end).rev().find(|&i| {
+                    text_at(i - 1).is_some_and(char::is_whitespace) && starts_cluster(i)
+                });
                 let cluster = (start + 1..=end).rev().find(|&i| starts_cluster(i));
                 if let Some(cut) = after_space.or(cluster) {
                     end = cut;
@@ -534,6 +547,30 @@ impl Builder<'_, '_, '_> {
             }));
             start = end;
         }
+    }
+}
+
+impl Builder<'_, '_, '_> {
+    /// The bytes of the drawn text at which HarfRust starts a cluster when it shapes
+    /// the characters `range` of `pending`, which have one look, in their face, script
+    /// and language; `None` without a face HarfRust can read.
+    fn cluster_starts(
+        &mut self,
+        pending: &[Placed],
+        range: Range<usize>,
+        script: Script,
+    ) -> Option<Vec<usize>> {
+        let first = pending.get(range.start)?;
+        let last = pending.get(range.end.checked_sub(1)?)?;
+        let face = self.fonts.face(first.look.face?)?;
+        let text = self.out.text.get(first.text.start..last.text.end)?;
+        let request = ShapeRequest {
+            features: Features::default(),
+            script: Some(iso15924(script)).filter(|code| code != b"Zyyy"),
+            language: first.look.language.as_deref().map(str::to_owned),
+        };
+        let starts = self.shaper.cluster_starts(&face, text, &request)?;
+        Some(starts.into_iter().map(|at| at + first.text.start).collect())
     }
 }
 
@@ -1401,5 +1438,85 @@ mod tests {
         let (itemized, _, families) = setup.run(&[Inline::text("\u{149}", style)]);
         assert_eq!(runs(&itemized), [("\u{2BC}N", "\u{149}", 10.0)]);
         assert_eq!(families, ["Officewright Zzzz"]);
+    }
+
+    #[test]
+    fn cuts_long_runs_where_harfrust_starts_a_cluster() {
+        let mut setup = Setup::new(vec![minimal()]);
+        let style = setup.style(plain(TEST));
+        // Thai sara i (U+0E34) and Devanagari vowel sign i (U+093F) are marks of combining
+        // class 0; the limit falls before one of them, after its base.
+        for pair in ["\u{E01}\u{E34}", "\u{915}\u{93F}"] {
+            let text = pair.repeat(2000);
+            let (itemized, _, _) = setup.run(&[Inline::text(&text, style)]);
+            let pieces = runs(&itemized);
+            assert!(pieces.len() > 1);
+            for (text, _, _) in &pieces {
+                assert!(text.len() <= MAX_RUN_BYTES);
+                assert!(
+                    text.starts_with(|ch: char| pair.starts_with(ch)),
+                    "{pair:?}"
+                );
+            }
+        }
+        // A space followed by a mark is no place to cut either: the mark belongs to the
+        // space. The run ends at the next cluster instead.
+        let text = format!("{} \u{E34}\u{E01}", "\u{E01}".repeat(1364));
+        let (itemized, _, _) = setup.run(&[Inline::text(&text, style)]);
+        let pieces = runs(&itemized);
+        assert_eq!(pieces.len(), 2);
+        assert_eq!(pieces.get(1).map(|piece| piece.0), Some("\u{E01}"));
+        // After a space followed by a base, it is.
+        let text = format!("{} \u{E01}\u{E34}\u{E01}", "\u{E01}".repeat(1363));
+        let (itemized, _, _) = setup.run(&[Inline::text(&text, style)]);
+        let pieces = runs(&itemized);
+        assert_eq!(
+            pieces.get(1).map(|piece| piece.0),
+            Some("\u{E01}\u{E34}\u{E01}")
+        );
+    }
+
+    #[test]
+    fn orders_fallbacks_for_each_requested_family() {
+        // Both families lack Á; each falls back to the face that shares its first word,
+        // although the other comes first in the book.
+        let mut setup = Setup::new(vec![
+            without_a_acute("Alphaaaaaaaa Lite"),
+            without_a_acute("Betaaaaaaaaa Lite"),
+            renamed(minimal(), "Alphaaaaaaaa Zzzz"),
+            renamed(minimal(), "Betaaaaaaaaa Zzzz"),
+        ]);
+        let alpha = setup.style(plain("Alphaaaaaaaa Lite"));
+        let beta = setup.style(plain("Betaaaaaaaaa Lite"));
+        let (_, _, families) =
+            setup.run(&[Inline::text("\u{C1}", alpha), Inline::text("\u{C1}", beta)]);
+        assert_eq!(families, ["Alphaaaaaaaa Zzzz", "Betaaaaaaaaa Zzzz"]);
+    }
+
+    #[test]
+    fn reports_missing_characters_at_the_paragraph_of_the_first() {
+        let mut setup = Setup::new(vec![minimal()]);
+        let style = setup.style(plain(TEST));
+        let book = &setup.book;
+        let mut fonts = Fonts::new(book);
+        let at = |index: usize| {
+            let mut location = Location::default();
+            location.push(crate::report::Step::Field("blocks"));
+            location.push(crate::report::Step::Index(index));
+            location
+        };
+        for index in [3, 5] {
+            itemize(
+                &setup.document,
+                &[Inline::text("\u{4E2D}\u{6587}", style)],
+                &mut fonts,
+                &at(index),
+            );
+        }
+        let report = fonts.into_report();
+        let entry = report.iter().next().unwrap();
+        assert_eq!(entry.kind(), ReportKind::GlyphMissing);
+        assert_eq!(entry.location(), &at(3));
+        assert_eq!(report.len(), 1, "{report:?}");
     }
 }

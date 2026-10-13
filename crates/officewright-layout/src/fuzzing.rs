@@ -7,7 +7,7 @@ use officewright_font::{FontBook, FontFace};
 
 use crate::fonts::Fonts;
 use crate::ir::{Document, Inline, Ligatures, RunStyle};
-use crate::itemize::{Item, itemize, shape_runs};
+use crate::itemize::{Item, TextRun, itemize, shape_runs};
 use crate::metrics::{self, TypoRule};
 use crate::report::{LayoutReport, Location};
 use crate::shape::{Features, ShapeRequest, ShapedRun, Shaper, ShapingFace};
@@ -422,10 +422,12 @@ fn glyphs(run: &ShapedRun) -> Vec<Glyph> {
 
 /// Itemizes and shapes a paragraph as [`paragraph`] does and checks what the layout
 /// relies on: the runs are the paragraph's text in order, each a whole number of
-/// characters and at most 4096 bytes, none but the first starting with a mark or joiner;
-/// their source text follows in order and covers the paragraph's; every glyph is one its
-/// face has; clusters are character boundaries of the run's text that never go
-/// backwards.
+/// characters and at most 4096 bytes; a run that follows another of the same formatting,
+/// face and script, cut for its length, starts where HarfRust starts a cluster (it draws
+/// no dotted circle before it), and one that follows another run does not start with a
+/// mark or joiner; their source text follows in order and covers the paragraph's; every
+/// glyph is one its face has; clusters are character boundaries of the run's text that
+/// never go backwards.
 ///
 /// # Errors
 ///
@@ -436,28 +438,58 @@ pub fn check_paragraph(
     inlines: &[Inline],
 ) -> Result<(), String> {
     let mut fonts = Fonts::new(book);
-    let itemized = itemize(document, inlines, &mut fonts, &Location::default());
+    let location = Location::default();
+    let itemized = itemize(document, inlines, &mut fonts, &location);
+    let mut shaper = Shaper::new();
+    let shaped = shape_runs(document, &itemized, &mut fonts, &mut shaper, &location);
+    let mut shaped = shaped.iter().map(Option::as_deref);
     // The source text: each run's part follows the one before, and together they are
     // all of it.
     let mut source_end = 0;
-    let mut previous: Option<&crate::itemize::TextRun> = None;
+    let mut previous: Option<(&TextRun, Option<&ShapedRun>)> = None;
     for (index, item) in itemized.items.iter().enumerate() {
         let Item::Text(run) = item else {
             previous = None;
             continue;
         };
-        // A run that follows another without an item between starts with a character
-        // that starts a cluster, unless the one before was cut for its length and had
-        // no cluster start to cut at.
+        let this = shaped.next().flatten();
         let text = itemized.text.get(run.range.clone()).unwrap_or_default();
-        let cut =
-            previous.is_some_and(|before| before.range.len() + 4 > crate::itemize::MAX_RUN_BYTES);
-        if previous.is_some() && !cut && text.starts_with(crate::itemize::attaches) {
-            return Err(format!(
-                "item {index} starts with a mark or joiner: {text:?}"
-            ));
+        if let Some((before, before_shaped)) = previous {
+            let cut = before.face == run.face
+                && before.style == run.style
+                && before.size == run.size
+                && before.formatted_size == run.formatted_size
+                && before.synthetic_bold == run.synthetic_bold
+                && before.synthetic_italic == run.synthetic_italic
+                && before.script == run.script
+                && before.language == run.language;
+            if cut {
+                // A run cut for its length starts where a cluster starts, so HarfRust
+                // puts no dotted circle before it; unless the run before is one cluster,
+                // with nowhere to be cut.
+                let one_cluster = before_shaped
+                    .is_none_or(|before| before.glyphs().iter().all(|glyph| glyph.cluster == 0));
+                let dotted_circle = run
+                    .face
+                    .and_then(|id| fonts.face(id))
+                    .and_then(|face| face.face().glyph_id('\u{25CC}'));
+                let first = this.and_then(|shaped| shaped.glyphs().first());
+                let starts_with_circle = first
+                    .is_some_and(|glyph| glyph.cluster == 0 && Some(glyph.glyph) == dotted_circle);
+                if starts_with_circle && !one_cluster && !text.starts_with('\u{25CC}') {
+                    return Err(format!(
+                        "item {index}, cut for its length, starts inside a cluster: {:?}",
+                        text.chars().take(8).collect::<String>()
+                    ));
+                }
+            } else if text.starts_with(crate::itemize::attaches) {
+                // A mark or joiner stays in the run of the character before it.
+                return Err(format!(
+                    "item {index} starts with a mark or joiner: {text:?}"
+                ));
+            }
         }
-        previous = Some(run);
+        previous = Some((run, this));
         if run.source.start != source_end || itemized.source.get(run.source.clone()).is_none() {
             return Err(format!(
                 "item {index}: source {:?} after {source_end} of {} bytes",
