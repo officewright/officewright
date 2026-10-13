@@ -727,16 +727,20 @@ fn stops_at_cycles_and_ignores_the_styles_word_ignores() {
         (10.0, false, true),
     ];
     assert_eq!(summary(&runs(&document)), expected);
-    // The same whichever style of the cycle is asked for first.
-    let mut formats = document.formats();
+    // The same whichever style of the cycle is asked for first: above, A (paragraph 0);
+    // here B (paragraph 1), then the others backwards.
     let runs_of: Vec<_> = paragraphs(&document)
         .iter()
         .flat_map(|paragraph| paragraph.runs())
         .collect();
-    let backwards: Vec<_> = runs_of.iter().rev().map(|&run| formats.run(run)).collect();
-    let mut backwards = summary(&backwards);
-    backwards.reverse();
-    assert_eq!(backwards, expected);
+    let mut formats = document.formats();
+    let mut from_b: Vec<_> = [1, 0, 5, 4, 3, 2]
+        .iter()
+        .map(|&index| (index, formats.run(runs_of[index])))
+        .collect();
+    from_b.sort_by_key(|(index, _)| *index);
+    let from_b: Vec<_> = from_b.into_iter().map(|(_, format)| format).collect();
+    assert_eq!(summary(&from_b), expected);
 }
 
 #[test]
