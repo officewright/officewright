@@ -1,0 +1,27 @@
+name: Feature request
+description: Something Officewright should do that it does not do yet.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What you need
+      description: What you want to do, and with which format (DOCX, DOC, XLSX, XLS, PPTX, PPT, PDF).
+    validations:
+      required: true
+  - type: dropdown
+    id: interface
+    attributes:
+      label: How you would use it
+      options:
+        - Rust crates
+        - C library (from C, C++ or another language)
+        - Command-line tool
+        - A package for another language (not available yet)
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you use now
+      description: Optional. How you solve this today, if at all.

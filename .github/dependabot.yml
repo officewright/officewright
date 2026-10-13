@@ -1,0 +1,30 @@
+# Dependabot opens pull requests that update existing dependencies; each still goes
+# through CI, including the MSRV job and `cargo deny`. New dependencies are added by hand.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    # The fuzz targets are a workspace of their own.
+    directories:
+      - "/"
+      - "/fuzz"
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        update-types:
+          - minor
+          - patch
+    commit-message:
+      prefix: chore
+      include: scope
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: ci
+      include: scope
