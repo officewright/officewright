@@ -1194,6 +1194,94 @@ fn table_widths_and_margins_are_not_negative() {
 }
 
 #[test]
+fn every_length_of_a_table_that_word_keeps_unsigned_is_checked() {
+    let minus = Pt(-1.0);
+    let in_props = |props: TableProps| {
+        document_with(|style| vec![table(style, 1, 1).with_props(props).into()])
+    };
+    let in_row = |row: fn(Row) -> Row| {
+        document_with(|style| {
+            let table = table(style, 1, 1);
+            let rows: Vec<Row> = table.rows().iter().cloned().map(row).collect();
+            vec![table.with_rows(rows).into()]
+        })
+    };
+    let in_cell = |cell: Cell| {
+        document_with(|style| {
+            let cell = cell.with_blocks([Paragraph::new(style).into()]);
+            let row = Row::default().with_cells([cell]);
+            vec![
+                Table::default()
+                    .with_grid([Pt(10.0)])
+                    .with_rows([row])
+                    .into(),
+            ]
+        })
+    };
+    let margins = |change: fn(CellMargins) -> CellMargins| change(CellMargins::default());
+    let cases = [
+        (
+            in_props(TableProps::default().with_cell_margins(margins(|m| m.with_top(Pt(-1.0))))),
+            "props.cell_margins.top",
+        ),
+        (
+            in_props(TableProps::default().with_cell_margins(margins(|m| m.with_start(Pt(-1.0))))),
+            "props.cell_margins.start",
+        ),
+        (
+            in_props(TableProps::default().with_cell_margins(margins(|m| m.with_bottom(Pt(-1.0))))),
+            "props.cell_margins.bottom",
+        ),
+        (
+            in_props(TableProps::default().with_cell_margins(margins(|m| m.with_end(Pt(-1.0))))),
+            "props.cell_margins.end",
+        ),
+        (
+            in_props(TableProps::default().with_cell_spacing(minus)),
+            "props.cell_spacing",
+        ),
+        (
+            in_props(TableProps::default().with_width(PreferredWidth::Points(minus))),
+            "props.width",
+        ),
+        (
+            in_row(|row| row.with_width_before(PreferredWidth::Points(Pt(-1.0)))),
+            "rows[0].width_before",
+        ),
+        (
+            in_row(|row| row.with_width_after(PreferredWidth::Points(Pt(-1.0)))),
+            "rows[0].width_after",
+        ),
+        (
+            in_row(|row| row.with_height(RowHeight::AtLeast(Pt(-1.0)))),
+            "rows[0].height",
+        ),
+        (
+            in_row(|row| row.with_height(RowHeight::Exact(Pt(-1.0)))),
+            "rows[0].height",
+        ),
+        (
+            in_cell(Cell::default().with_width(PreferredWidth::Points(minus))),
+            "rows[0].cells[0].width",
+        ),
+        (
+            in_cell(Cell::default().with_margins(Some(margins(|m| m.with_top(Pt(-1.0)))))),
+            "rows[0].cells[0].margins.top",
+        ),
+        (
+            in_cell(Cell::default().with_margins(Some(margins(|m| m.with_end(Pt(-1.0)))))),
+            "rows[0].cells[0].margins.end",
+        ),
+    ];
+    for (document, location) in cases {
+        assert_eq!(
+            invalid(&document),
+            format!("sections[0].blocks[0].{location}: -1 pt is negative")
+        );
+    }
+}
+
+#[test]
 fn rows_and_spans_are_clamped_to_words_limits() {
     let mut document = document_with(|style| {
         let cell = |span| {
