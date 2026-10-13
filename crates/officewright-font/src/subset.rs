@@ -99,8 +99,10 @@ impl FontFace {
     /// [`Error::GlyphOutOfRange`] if a glyph is not in the face,
     /// [`Error::UnsupportedOutlines`] for a face without outlines or with CFF2
     /// outlines, [`Error::MalformedTable`] for a `CFF ` table with a real number the
-    /// subsetter cannot write back, and [`Error::Subset`] or [`Error::SubsetterPanicked`]
-    /// if the face is damaged in a way that only subsetting finds.
+    /// subsetter cannot write back, [`Error::SubsetUnsupported`] if the face uses
+    /// something the subsetter does not implement yet, and [`Error::Subset`] or
+    /// [`Error::SubsetterPanicked`] if the face is damaged in a way that only subsetting
+    /// finds.
     pub fn subset(&self, glyphs: impl IntoIterator<Item = GlyphId>) -> Result<Subset> {
         let face = self.index();
         let outline_format = match self.outline_format() {
@@ -125,10 +127,7 @@ impl FontFace {
         let remapper = GlyphRemapper::new_from_glyphs_sorted(&ids);
         let data = self.data();
         let data = catch_subsetter_panic(face, || subsetter::subset(data, face, &remapper))?
-            .map_err(|err| Error::Subset {
-                face,
-                source: Cause::new(err.to_string()),
-            })?;
+            .map_err(|err| subsetter_error(face, &err))?;
         // The output is read back: a subset the font parser cannot read would only
         // fail later, in a PDF viewer.
         let unreadable = |reason: String| Error::Subset {
@@ -196,6 +195,16 @@ fn panic_message(payload: &(dyn Any + Send)) -> String {
     }
 }
 
+/// The error for what the subsetter reported about face `face`: a feature it does not
+/// implement yet makes the face unsupported, anything else damaged.
+fn subsetter_error(face: u32, err: &subsetter::Error) -> Error {
+    let source = Cause::new(err.to_string());
+    match err {
+        subsetter::Error::Unimplemented => Error::SubsetUnsupported { face, source },
+        _ => Error::Subset { face, source },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,6 +212,38 @@ mod tests {
 
     fn font() -> FontFace {
         FontFace::from_bytes(TestFont::new("Test Sans").build(), 0).unwrap()
+    }
+
+    #[test]
+    fn what_the_subsetter_lacks_is_unsupported_and_damage_is_malformed() {
+        let unsupported = subsetter_error(2, &subsetter::Error::Unimplemented);
+        assert!(matches!(
+            unsupported,
+            Error::SubsetUnsupported { face: 2, .. }
+        ));
+        match officewright_core::Error::from(unsupported) {
+            officewright_core::Error::Unsupported(message) => assert_eq!(
+                message,
+                "cannot subset font face 2: it uses a feature the subsetter does not support \
+                 yet: unsupported feature in font"
+            ),
+            other => panic!("{other:?}"),
+        }
+        for err in [
+            subsetter::Error::MalformedFont,
+            subsetter::Error::CFFError,
+            subsetter::Error::OverflowError,
+        ] {
+            let damaged = subsetter_error(0, &err);
+            assert!(matches!(damaged, Error::Subset { face: 0, .. }), "{err}");
+            assert!(
+                matches!(
+                    officewright_core::Error::from(damaged),
+                    officewright_core::Error::Malformed(_)
+                ),
+                "{err}"
+            );
+        }
     }
 
     #[test]

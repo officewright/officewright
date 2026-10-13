@@ -2,6 +2,7 @@
 //! read from.
 
 pub(crate) mod fonts;
+pub(crate) mod numbering;
 pub(crate) mod properties;
 pub(crate) mod section;
 pub(crate) mod settings;
@@ -18,6 +19,10 @@ use officewright_core::Pt;
 
 pub use fonts::{
     EmbeddedFontReference, EmbeddedFontStyle, FontDeclaration, FontFamily, FontPitch, FontSignature,
+};
+pub use numbering::{
+    LegacyNumbering, LevelOverride, LevelSuffix, ListDefinition, ListInstance, ListLevel,
+    MultiLevelType, Numbering,
 };
 pub use properties::{
     ArtBorder, Border, BorderStyle, Color, ColorValue, FontHint, Highlight, Indentation,
@@ -85,6 +90,7 @@ pub struct Document {
     pub(crate) names: Names,
     pub(crate) styles: styles::StyleTable,
     pub(crate) settings: settings::Settings,
+    pub(crate) numbering: numbering::NumberingTable,
     pub(crate) theme: Option<theme::Theme>,
     pub(crate) fonts: Vec<fonts::FontDeclaration>,
     pub(crate) sections: Vec<SectionData>,
@@ -166,6 +172,7 @@ impl Document {
             names: Names::default(),
             styles: styles::StyleTable::default(),
             settings: settings::Settings::default(),
+            numbering: numbering::NumberingTable::default(),
             theme: None,
             fonts: Vec::new(),
             sections: Vec::new(),
@@ -241,6 +248,12 @@ impl Document {
     /// The styles of the document (`styles.xml`); none when it has no styles part.
     pub fn styles(&self) -> Styles<'_> {
         Styles::new(self)
+    }
+
+    /// The numbering of the document (`numbering.xml`): its list definitions and list
+    /// instances; none when it has no numbering part.
+    pub fn numbering(&self) -> Numbering<'_> {
+        Numbering::new(self)
     }
 
     /// The theme of the document (its theme part), whose colours and fonts theme colours

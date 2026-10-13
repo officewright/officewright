@@ -3,6 +3,7 @@
 mod body;
 mod capture;
 mod fonts;
+pub(crate) mod numbering;
 pub(crate) mod properties;
 mod section;
 mod settings;
@@ -78,6 +79,18 @@ pub(crate) fn read(data: Vec<u8>, limits: &Limits) -> Result<Document> {
             &mut budget,
         )?;
     }
+    if let Some(part) = related(&package, &main, &NUMBERING) {
+        let name = part.name().as_str();
+        let xml = part.read()?;
+        numbering::read(
+            &mut document,
+            &xml,
+            name,
+            limits,
+            &mut diagnostics,
+            &mut budget,
+        )?;
+    }
     if let Some(part) = related(&package, &main, &THEME) {
         let name = part.name().as_str();
         let xml = part.read()?;
@@ -117,6 +130,12 @@ pub(crate) fn read(data: Vec<u8>, limits: &Limits) -> Result<Document> {
     document.diagnostics = diagnostics.finish();
     Ok(document)
 }
+
+/// The relationship type of the numbering part, Transitional and Strict.
+const NUMBERING: [&str; 2] = [
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/numbering",
+];
 
 /// The relationship type of the theme part, Transitional and Strict.
 const THEME: [&str; 2] = [

@@ -10,7 +10,7 @@
 //! their page setup,
 //! columns and headers and footers, and their blocks. With
 //! `--runs` it also prints:
-//! - the style, alignment and list of each paragraph;
+//! - the style, alignment and list of each paragraph, with the list's label template;
 //! - every run, with the properties written on it;
 //! - the style, width and layout of each table, and the width and merging of its cells.
 //!
@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use officewright_doc::{Block, Document, Error, Inline, Run, RunContent};
+use officewright_doc::{Block, Document, Error, Inline, Numbering, Run, RunContent};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -108,8 +108,9 @@ fn dump(document: &Document, runs: bool) {
                 ""
             }
         );
+        let numbering = document.numbering();
         for block in section.blocks() {
-            print_block(block, 1, runs);
+            print_block(numbering, block, 1, runs);
         }
     }
     for diagnostic in document.diagnostics() {
@@ -117,7 +118,7 @@ fn dump(document: &Document, runs: bool) {
     }
 }
 
-fn print_block(block: Block<'_>, depth: usize, runs: bool) {
+fn print_block(numbering: Numbering<'_>, block: Block<'_>, depth: usize, runs: bool) {
     let indent = "  ".repeat(depth);
     match block {
         Block::Paragraph(paragraph) => {
@@ -144,12 +145,25 @@ fn print_block(block: Block<'_>, depth: usize, runs: bool) {
                 if let Some(justification) = properties.justification() {
                     written.push_str(&format!(" justification={justification:?}"));
                 }
-                if let Some(numbering) = properties.numbering() {
+                if let Some(reference) = properties.numbering() {
                     written.push_str(&format!(
                         " list={:?} level={:?}",
-                        numbering.instance(),
-                        numbering.level()
+                        reference.instance(),
+                        reference.level()
                     ));
+                    // The label as the list's definition writes it, without overrides.
+                    let level = reference
+                        .instance()
+                        .and_then(|id| numbering.instance(id)?.definition())
+                        .zip(reference.level().and_then(|l| usize::try_from(l).ok()))
+                        .and_then(|(definition, level)| definition.level(level));
+                    if let Some(level) = level {
+                        written.push_str(&format!(
+                            " label={:?} format={:?}",
+                            level.text().unwrap_or_default(),
+                            level.number_format()
+                        ));
+                    }
                 }
                 if !written.is_empty() {
                     println!("{indent}  properties:{written}");
@@ -185,7 +199,7 @@ fn print_block(block: Block<'_>, depth: usize, runs: bool) {
                         println!("{indent}  cell {r},{c}");
                     }
                     for block in cell.blocks() {
-                        print_block(block, depth + 2, runs);
+                        print_block(numbering, block, depth + 2, runs);
                     }
                 }
             }
@@ -193,7 +207,7 @@ fn print_block(block: Block<'_>, depth: usize, runs: bool) {
         Block::ContentControl(control) => {
             println!("{indent}content control");
             for block in control.blocks() {
-                print_block(block, depth + 1, runs);
+                print_block(numbering, block, depth + 1, runs);
             }
         }
         Block::Other(other) => println!("{indent}kept as written: {}", other.local_name()),
