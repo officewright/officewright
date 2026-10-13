@@ -359,6 +359,36 @@ const METRIC_COMPATIBLE: [(&str, &str, GenericFamily); 4] = [
 const SIMILAR_DESIGNS: [(&str, &str, GenericFamily); 1] =
     [("cambria", "Caladea", GenericFamily::Serif)];
 
+/// The other font of a pair of [`METRIC_COMPATIBLE`] or [`SIMILAR_DESIGNS`] that a
+/// family belongs to, whichever side it is on.
+#[derive(Clone, Copy)]
+struct Pair {
+    other: &'static str,
+    generic: GenericFamily,
+    /// Whether `other` is the free font, not the Microsoft one.
+    other_is_free: bool,
+}
+
+impl Pair {
+    /// The pair of `pairs` that the family with the normalized name `family` is in.
+    fn of(pairs: &[(&'static str, &'static str, GenericFamily)], family: &str) -> Option<Self> {
+        pairs.iter().find_map(|&(microsoft, free, generic)| {
+            if microsoft == family {
+                Some((free, true))
+            } else if name_key(free) == family {
+                Some((microsoft, false))
+            } else {
+                None
+            }
+            .map(|(other, other_is_free)| Self {
+                other,
+                generic,
+                other_is_free,
+            })
+        })
+    }
+}
+
 /// Fallback families for each generic family, in order of preference: the Microsoft
 /// font, its metric-compatible substitutes, then fonts common on macOS and Linux. A
 /// requested family that is in one of these lists has that generic family.
@@ -425,9 +455,10 @@ impl FontBook {
     /// 4. A named instance of a variable font, such as "Bahnschrift SemiBold". Only the
     ///    default instance of a variable font is used yet; the resolution says so.
     /// 5. The metric-compatible substitute: Carlito for Calibri, Liberation Sans, Serif
-    ///    and Mono for Arial, Times New Roman and Courier New.
-    /// 6. A font of similar design that lays out differently: Caladea for Cambria. It
-    ///    is reported as a fallback.
+    ///    and Mono for Arial, Times New Roman and Courier New, and the other way round,
+    ///    so a document written in Carlito uses Calibri where only Calibri is installed.
+    /// 6. A font of similar design that lays out differently: Caladea for Cambria, and
+    ///    Cambria for Caladea. It is reported as a fallback.
     /// 7. A common font of the request's generic family, or of the family's own if it
     ///    is a known one, else sans-serif.
     ///
@@ -478,15 +509,12 @@ impl FontBook {
         }
         // The family the name stands for: the alias target, or the name itself.
         let family = alias.map_or(key, name_key);
-        let known = METRIC_COMPATIBLE
-            .iter()
-            .find(|(name, _, _)| *name == family);
-        let substitute = known.map(|(_, substitute, _)| *substitute);
-        if let Some(face) = substitute.and_then(|substitute| self.find_any(substitute, request)) {
+        let known = Pair::of(&METRIC_COMPATIBLE, &family);
+        if let Some(face) = known.and_then(|pair| self.find_any(pair.other, request)) {
             return resolution(Some(face), ResolutionKind::MetricCompatible);
         }
-        let similar_design = SIMILAR_DESIGNS.iter().find(|(name, _, _)| *name == family);
-        if let Some(face) = similar_design.and_then(|(_, name, _)| self.find_any(name, request)) {
+        let similar_design = Pair::of(&SIMILAR_DESIGNS, &family);
+        if let Some(face) = similar_design.and_then(|pair| self.find_any(pair.other, request)) {
             return Resolution {
                 similar_design: true,
                 ..resolution(Some(face), ResolutionKind::Fallback)
@@ -494,7 +522,7 @@ impl FontBook {
         }
         let generic = request
             .generic
-            .or(known.or(similar_design).map(|(_, _, generic)| *generic))
+            .or(known.or(similar_design).map(|pair| pair.generic))
             .or_else(|| {
                 FALLBACKS
                     .iter()
@@ -507,10 +535,13 @@ impl FontBook {
             .find(|(candidate, _)| *candidate == generic)
             .map(|(_, names)| names.as_slice())
             .unwrap_or_default();
-        // Neither substitute is installed; the report names the one there is.
-        let uninstalled = substitute
-            .map(|name| (name, Likeness::Metrics))
-            .or(similar_design.map(|(_, name, _)| (*name, Likeness::Design)));
+        // Neither substitute is installed; the report names the free one there is, the
+        // font a user can install.
+        let free = |pair: Option<Pair>, likeness| {
+            pair.filter(|pair| pair.other_is_free)
+                .map(|pair| (pair.other, likeness))
+        };
+        let uninstalled = free(known, Likeness::Metrics).or(free(similar_design, Likeness::Design));
         for name in fallbacks {
             if let Some(face) = self.find_any(name, request) {
                 return Resolution {
@@ -1060,6 +1091,63 @@ mod tests {
         // Caladea stands in for Cambria only.
         let resolution = book.resolve(&FontRequest::new("Garamond").generic(GenericFamily::Serif));
         assert_eq!(resolution.family(), Some("Liberation Serif"));
+    }
+
+    #[test]
+    fn a_free_twin_falls_back_to_its_microsoft_counterpart() {
+        let book = book(&[
+            system(TestFont::new("Calibri")),
+            system(TestFont::new("Calibri").style("Bold", 700, false)),
+            system(TestFont::new("Times New Roman")),
+            system(TestFont::new("Cambria")),
+            system(TestFont::new("Liberation Sans")),
+        ]);
+        let resolution = book.resolve(&FontRequest::new("Carlito").bold(true));
+        assert_eq!(resolution.family(), Some("Calibri"));
+        assert_eq!(resolution.kind(), ResolutionKind::MetricCompatible);
+        assert!(!resolution.synthetic_bold());
+        assert_eq!(
+            resolution.to_string(),
+            "\"Carlito\" bold → \"Calibri\" (metric-compatible substitute)"
+        );
+        let resolution = book.resolve(&FontRequest::new("liberation serif"));
+        assert_eq!(resolution.family(), Some("Times New Roman"));
+        assert_eq!(resolution.kind(), ResolutionKind::MetricCompatible);
+        let resolution = book.resolve(&FontRequest::new("Caladea"));
+        assert_eq!(resolution.family(), Some("Cambria"));
+        assert_eq!(resolution.kind(), ResolutionKind::Fallback);
+        assert_eq!(
+            resolution.to_string(),
+            "\"Caladea\" → \"Cambria\" (fallback of similar design; it is not \
+             metric-compatible, so text may lay out differently than in Word)"
+        );
+        // Neither font of the pair: a fallback of the pair's generic family, and no
+        // advice to install the Microsoft font.
+        let resolution = book.resolve(&FontRequest::new("Liberation Mono"));
+        assert_eq!(resolution.kind(), ResolutionKind::Missing);
+        let book = book_with_serif_and_sans();
+        for (family, fallback) in [
+            ("Caladea", "Liberation Serif"),
+            ("Carlito", "Liberation Sans"),
+        ] {
+            let resolution = book.resolve(&FontRequest::new(family));
+            assert_eq!(resolution.family(), Some(fallback), "{family}");
+            assert_eq!(resolution.kind(), ResolutionKind::Fallback);
+            assert_eq!(resolution.uninstalled_substitute(), None);
+            assert_eq!(resolution.uninstalled_similar_design(), None);
+            assert_eq!(
+                resolution.to_string(),
+                format!("\"{family}\" → \"{fallback}\" (fallback; not installed)")
+            );
+        }
+    }
+
+    /// A book of Liberation Sans and Liberation Serif.
+    fn book_with_serif_and_sans() -> FontBook {
+        book(&[
+            system(TestFont::new("Liberation Sans")),
+            system(TestFont::new("Liberation Serif")),
+        ])
     }
 
     #[test]
