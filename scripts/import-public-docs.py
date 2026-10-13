@@ -619,8 +619,10 @@ REVISION = re.compile(
 )
 # Phone numbers as North American forms write them.
 PHONE = re.compile(r"\(\d{3}\)\s?\d{3}[-.\s]\d{4}|\b1?-?\d{3}[-.]\d{3}[-.]\d{4}\b")
+# docMetadata/LabelInfo.xml holds sensitivity labels, as docProps/custom.xml may.
 DROPPED = re.compile(
-    r"^(docProps/custom\.xml|docProps/thumbnail\.[^/]+|customXml/.*|word/people\.xml)$"
+    r"^(docProps/custom\.xml|docProps/thumbnail\.[^/]+|customXml/.*|docMetadata/.*"
+    r"|word/people\.xml)$"
 )
 
 
@@ -734,6 +736,7 @@ def clean(original: bytes, doc: PublicDoc) -> Cleaned:
                 "custom properties" if n == "docProps/custom.xml"
                 else "thumbnail" if n.startswith("docProps/thumbnail")
                 else "comment authors" if n == "word/people.xml"
+                else "sensitivity label" if n.startswith("docMetadata/")
                 else "custom XML parts"
                 for n in dropped
             }
@@ -746,7 +749,7 @@ def clean(original: bytes, doc: PublicDoc) -> Cleaned:
         )
     out = []
     pending = list(doc.replacements)
-    settings_changed = False
+    settings_removed: list[str] = []
     for info, data in entries:
         name = info.filename
         if name in dropped:
@@ -769,9 +772,14 @@ def clean(original: bytes, doc: PublicDoc) -> Cleaned:
             text = text_of(name, data)
             if "<w:mailMerge" in text:
                 raise Refused(f"{doc.name}: has a mail merge data source")
-            edited = re.sub(r"<w:attachedTemplate\b[^>]*/>", "", text)
-            edited = re.sub(r"<w:docVars>.*?</w:docVars>", "", edited, flags=re.S)
-            settings_changed = edited != text
+            edited = text
+            for pattern, what in (
+                (r"<w:attachedTemplate\b[^>]*/>", "attached template"),
+                (r"<w:docVars>.*?</w:docVars>", "document variables"),
+            ):
+                edited, count = re.subn(pattern, "", edited, flags=re.S)
+                if count:
+                    settings_removed.append(what)
             data = edited.encode("utf-8")
         for replacement in [r for r in pending if r.part == name]:
             data = replace(doc.name, name, data, replacement)
@@ -781,8 +789,8 @@ def clean(original: bytes, doc: PublicDoc) -> Cleaned:
         raise Refused(f"{doc.name}: no part {pending[0].part} for a replacement")
     if people:
         changes.insert(0, "document properties emptied: " + ", ".join(people))
-    if settings_changed:
-        changes.append("settings: attached template and document variables removed")
+    if settings_removed:
+        changes.append(f"settings: {' and '.join(settings_removed)} removed")
     if doc.replaced:
         changes.append(doc.replaced)
     buffer = io.BytesIO()

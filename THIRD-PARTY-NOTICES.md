@@ -39,15 +39,17 @@ provided appropriate credit is given and changes are indicated."
 
 Test documents in `tests/corpus/business/`, outside every crate and never published:
 
-- `form-ec-state-aid-notification-de.docx`, `-bg.docx`, `-el.docx`: the Part I general
-  information form for notifying State aid, in German, Bulgarian and Greek. Source:
-  European Commission, Directorate-General for Competition,
+- `form-ec-state-aid-notification-de.docx`, `form-ec-state-aid-notification-bg.docx` and
+  `form-ec-state-aid-notification-el.docx`: the Part I general information form for
+  notifying State aid, in German, Bulgarian and Greek. Source: European Commission,
+  Directorate-General for Competition,
   <https://competition-policy.ec.europa.eu/state-aid/legislation/forms-notifications-and-reporting_en>
   (archive `forms_notifications_and_reporting_part_I.zip`).
-- `contract-ec-data-processing-clauses-de.docx`, `-bg.docx`, `-el.docx`: the annex with
-  the standard contractual clauses between controllers and processors (Commission
-  Implementing Decision (EU) 2021/915), in German, Bulgarian and Greek. Source: European
-  Commission,
+- `contract-ec-data-processing-clauses-de.docx`,
+  `contract-ec-data-processing-clauses-bg.docx` and
+  `contract-ec-data-processing-clauses-el.docx`: the annex with the standard contractual
+  clauses between controllers and processors (Commission Implementing Decision (EU)
+  2021/915), in German, Bulgarian and Greek. Source: European Commission,
   <https://commission.europa.eu/publications/standard-contractual-clauses-controllers-and-processors-eueea_en>
   (archive `strandard_contractual_clauses_eu-eea.zip`).
 

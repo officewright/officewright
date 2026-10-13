@@ -6,6 +6,7 @@ SOURCES.md row names its URL, download date, original SHA-256 and licence statem
 cleaning itself is tested on a small package made here.
 """
 
+import dataclasses
 import hashlib
 import importlib.util
 import io
@@ -14,6 +15,7 @@ import tempfile
 import struct
 import sys
 import unittest
+import unittest.mock
 import zipfile
 import zlib
 from pathlib import Path
@@ -249,6 +251,23 @@ class Cleaning(unittest.TestCase):
         self.assertEqual(rows[5][5], 0xE0)
         self.assertFalse(public.is_placeholder(png(20, 10)))
 
+    def test_the_settings_note_names_what_was_removed(self):
+        def note(settings):
+            cleaned = public.clean(package(**{"word/settings.xml": settings}), DOC)
+            return [c for c in cleaned.changes if c.startswith("settings:")]
+
+        variables = '<w:settings xmlns:w="w"><w:docVars><w:docVar/></w:docVars></w:settings>'
+        self.assertEqual(note(variables), ["settings: document variables removed"])
+        self.assertEqual(note('<w:settings xmlns:w="w"><w:zoom/></w:settings>'), [])
+        both = "settings: attached template and document variables removed"
+        self.assertEqual(self.cleaned.changes.count(both), 1)
+
+    def test_label_information_is_dropped(self):
+        cleaned = public.clean(package(**{"docMetadata/LabelInfo.xml": "<labelList/>"}), DOC)
+        self.assertNotIn("docMetadata/LabelInfo.xml", parts_of(cleaned.data))
+        self.assertIn("removed: custom XML parts, custom properties, sensitivity label, thumbnail",
+                      cleaned.changes)
+
     def test_template_and_variables_leave_the_settings(self):
         settings = self.parts["word/settings.xml"].decode()
         self.assertNotIn("attachedTemplate", settings)
@@ -375,6 +394,9 @@ class Cleaning(unittest.TestCase):
         other = repacked(**{"word/media/image1.png": png(96, 96)})
         self.assertFalse(public.same_package(other, cleaned))
         self.assertFalse(public.same_package(repacked(**{"word/settings.xml": b"<x/>"}), cleaned))
+        smaller = grey_png(48, 48, public.placeholder_rows(48, 48))
+        self.assertTrue(public.is_placeholder(smaller))
+        self.assertFalse(public.same_package(repacked(**{"word/media/image1.png": smaller}), cleaned))
 
     def test_the_sources_row_names_everything(self):
         doc = public.PublicDoc("letter-x", "nara", "https://www.example.gov/a|b.docx",
@@ -398,6 +420,67 @@ class Cleaning(unittest.TestCase):
         with self.assertRaises(public.Refused) as caught:
             public.original(DOC, folder, fetch=False)
         self.assertIn("SHA-256 differs", str(caught.exception))
+
+    def test_a_document_is_taken_out_of_its_archive(self):
+        folder = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, folder)
+        member = package()
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("forms/Part_I_de.docx", member)
+            archive.writestr("forms/Part_I_bg.docx", b"other")
+        doc = public.PublicDoc("test", "eu-commission", "https://www.example.eu/a.zip",
+                               "2026-10-13", hashlib.sha256(member).hexdigest(),
+                               member="forms/Part_I_de.docx")
+
+        def serve(request, timeout):
+            self.assertEqual(request.full_url, doc.url)
+            return io.BytesIO(buffer.getvalue())
+
+        with unittest.mock.patch.object(public.urllib.request, "urlopen", serve):
+            self.assertEqual(public.original(doc, folder, fetch=True), member)
+            self.assertEqual((folder / "test.docx").read_bytes(), member)
+            (folder / "test.docx").unlink()
+            missing = dataclasses.replace(doc, member="forms/Part_I_el.docx")
+            with self.assertRaises(public.Refused) as caught:
+                public.original(missing, folder, fetch=True)
+            self.assertIn("forms/Part_I_el.docx is not in the archive", str(caught.exception))
+            self.assertFalse((folder / "test.docx").exists())
+
+    def test_check_mode_finds_a_stale_document(self):
+        folder = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, folder)
+        original = package()
+        (folder / "originals").mkdir()
+        (folder / "originals" / "test.docx").write_bytes(original)
+        doc = dataclasses.replace(DOC, sha256=hashlib.sha256(original).hexdigest())
+        sources = folder / "SOURCES.md"
+        sources.write_text("# Sources\n\n## Reference renders\n", encoding="utf-8")
+
+        def run(*flags):
+            argv = ["import-public-docs.py", str(folder / "originals"), *flags]
+            with unittest.mock.patch.multiple(public, DOCUMENTS=[doc], OUT_DIR=folder / "out",
+                                              SOURCES_MD=sources), \
+                    unittest.mock.patch.object(sys, "argv", argv), \
+                    unittest.mock.patch("sys.stdout", io.StringIO()), \
+                    unittest.mock.patch("sys.stderr", io.StringIO()) as stderr:
+                return public.main(), stderr.getvalue()
+
+        self.assertEqual(run("--check")[0], 1)
+        self.assertEqual(run(), (0, ""))
+        self.assertEqual(run("--check"), (0, ""))
+        (folder / "out" / "test.docx").write_bytes(original)
+        code, message = run("--check")
+        self.assertEqual(code, 1)
+        self.assertIn("differs: test", message)
+        run()
+        table = sources.read_text(encoding="utf-8")
+        self.assertIn("| business/test.docx |", table)
+        sources.write_text(table.replace("| business/test.docx |", "| business/x.docx |"),
+                           encoding="utf-8")
+        code, message = run("--check")
+        self.assertEqual(code, 1)
+        self.assertIn("differs: SOURCES.md", message)
 
     def test_the_sources_table_is_inserted_then_replaced(self):
         sources = "# Corpus sources\n\n## Documents\n\nrows\n\n## Reference renders\n\nmore\n"
@@ -451,9 +534,7 @@ class Committed(unittest.TestCase):
         self.assertTrue(attributed)
         for doc in attributed:
             with self.subTest(doc.name):
-                stem = doc.name.rsplit("-", 1)[0]
-                self.assertIn(f"`{stem}-", notices)
-                self.assertIn(doc.name.rsplit("-", 1)[1], notices)
+                self.assertIn(f"`{doc.name}.docx`", notices)
 
     def test_a_member_of_an_archive_is_named_in_its_row(self):
         doc = next(d for d in public.DOCUMENTS if d.member)
