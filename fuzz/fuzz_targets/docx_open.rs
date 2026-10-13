@@ -18,6 +18,11 @@ fuzz_target!(|data: &[u8]| {
     };
     let _ = document.text();
     let _ = document.diagnostics();
+    let settings = document.settings();
+    let _ = (
+        settings.effective_compatibility_mode(),
+        settings.compatibility_options().count(),
+    );
     let styles = document.styles();
     let _ = styles.default_run_properties();
     let _ = styles.default_paragraph_properties();

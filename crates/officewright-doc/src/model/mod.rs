@@ -3,6 +3,7 @@
 
 pub(crate) mod properties;
 pub(crate) mod section;
+pub(crate) mod settings;
 pub(crate) mod styles;
 pub(crate) mod table_properties;
 mod text;
@@ -24,6 +25,10 @@ pub use section::{
     HeaderFooterReference, LineNumberRestart, LineNumbering, NotePosition, NoteProperties,
     NoteRestart, Orientation, PageBorderDisplay, PageBorderOffset, PageBorderZOrder, PageBorders,
     PageMargins, PageNumbering, SectionProperties, SectionStart,
+};
+pub use settings::{
+    ColorSchemeIndex, ColorSchemeMapping, CompatibilityMode, CompatibilityOption,
+    CompatibilitySetting, Settings,
 };
 pub use styles::{Style, StyleKind, Styles};
 pub use table_properties::{
@@ -73,6 +78,7 @@ pub struct Document {
     pub(crate) strings: Strings,
     pub(crate) names: Names,
     pub(crate) styles: styles::StyleTable,
+    pub(crate) settings: settings::Settings,
     pub(crate) sections: Vec<SectionData>,
     pub(crate) kind: DocumentKind,
     pub(crate) conformance: Conformance,
@@ -149,6 +155,7 @@ impl Document {
             strings: Strings::default(),
             names: Names::default(),
             styles: styles::StyleTable::default(),
+            settings: settings::Settings::default(),
             sections: Vec::new(),
             kind: DocumentKind::Document,
             conformance: Conformance::Transitional,
@@ -222,6 +229,12 @@ impl Document {
     /// The styles of the document (`styles.xml`); none when it has no styles part.
     pub fn styles(&self) -> Styles<'_> {
         Styles::new(self)
+    }
+
+    /// The settings of the document (`settings.xml`); none set when it has no settings
+    /// part.
+    pub fn settings(&self) -> &Settings {
+        &self.settings
     }
 
     /// What kind of package the document came from.

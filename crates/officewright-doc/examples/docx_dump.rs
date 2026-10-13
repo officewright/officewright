@@ -6,8 +6,8 @@
 //! cargo run --release -p officewright-doc --example docx_dump -- --summary FILE.docx...
 //! ```
 //!
-//! With one file it prints the sections, their page setup, columns and headers and
-//! footers, and their blocks. With
+//! With one file it prints the compatibility mode, the sections with their page setup,
+//! columns and headers and footers, and their blocks. With
 //! `--runs` it also prints:
 //! - the style, alignment and list of each paragraph;
 //! - every run, with the properties written on it;
@@ -56,6 +56,20 @@ fn dump(document: &Document, runs: bool) {
         "{} styles; default font size {:?}",
         styles.iter().len(),
         defaults.size().map(|size| size.0)
+    );
+    let settings = document.settings();
+    println!(
+        "compatibility mode {} ({}), {} legacy options set",
+        settings.effective_compatibility_mode().value(),
+        if settings.compatibility_mode().is_some() {
+            "written"
+        } else {
+            "none written, Word 2007's"
+        },
+        settings
+            .compatibility_options()
+            .filter(|&(_, on)| on)
+            .count()
     );
     for (n, section) in document.sections().enumerate() {
         let properties = section.properties();

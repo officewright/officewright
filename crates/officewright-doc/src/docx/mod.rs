@@ -4,6 +4,7 @@ mod body;
 mod capture;
 pub(crate) mod properties;
 mod section;
+mod settings;
 mod styles;
 pub(crate) mod table_properties;
 
@@ -71,9 +72,27 @@ pub(crate) fn read(data: Vec<u8>, limits: &Limits) -> Result<Document> {
             &mut budget,
         )?;
     }
+    if let Some(part) = related(&package, &main, &SETTINGS) {
+        let name = part.name().as_str();
+        let xml = part.read()?;
+        settings::read(
+            &mut document,
+            &xml,
+            name,
+            limits,
+            &mut diagnostics,
+            &mut budget,
+        )?;
+    }
     document.diagnostics = diagnostics.finish();
     Ok(document)
 }
+
+/// The relationship type of the settings part, Transitional and Strict.
+const SETTINGS: [&str; 2] = [
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/settings",
+];
 
 /// The relationship type of the styles part, Transitional and Strict.
 const STYLES: [&str; 2] = [
