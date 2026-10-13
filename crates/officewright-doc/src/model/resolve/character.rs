@@ -1,21 +1,19 @@
-//! Resolving the formatting in effect (ECMA-376 Part 1, §17.7.2): the document defaults,
-//! the paragraph's style, the run's character style and direct formatting, combined as
-//! Word combines them, with theme fonts and theme colours resolved.
+//! The formatting of runs in effect: the document defaults, the paragraph style, the
+//! character style and direct formatting, with theme fonts and theme colours resolved.
 
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use officewright_core::Pt;
 
-use super::format::{CharacterFormat, FontFamilies};
-use super::properties::{
+use super::{Formats, Layer, overwrite, style_index};
+use crate::model::Document;
+use crate::model::format::{CharacterFormat, FontFamilies};
+use crate::model::properties::{
     Color, ColorValue, FontHint, Highlight, RunProperties, Shading, ThemeColor, ThemeFont, Toggle,
     UnderlineStyle, VerticalPosition,
 };
-use super::settings::{ColorSchemeIndex, ColorSchemeMapping};
-use super::styles::StyleKind;
-use super::views::{Paragraph, Run};
-use super::{Document, Kind, Node};
+use crate::model::settings::{ColorSchemeIndex, ColorSchemeMapping};
+use crate::model::styles::StyleKind;
 
 /// Word's font when nothing in the hierarchy gives one (MS-OI29500 §17.3.2.26(c)).
 const DEFAULT_FONT: &str = "Times New Roman";
@@ -24,10 +22,6 @@ const DEFAULT_FONT: &str = "Times New Roman";
 /// application (§17.3.2.38); 10 pt is to be confirmed by the reference render of the
 /// corpus file `word-rules/E-defaults-empty.docx`.
 const DEFAULT_SIZE: Pt = Pt(10.0);
-
-/// Styles whose child elements Word ignores, `w:basedOn` and `w:rPr` among them
-/// (MS-OI29500 §17.7.4.17(a)).
-const IGNORED_STYLES: [&str; 3] = ["NoList", "DefaultParagraphFont", "TableNormal"];
 
 /// The toggle properties of ECMA-376 §17.7.3.
 const TOGGLES: [Toggle; 12] = [
@@ -45,123 +39,34 @@ const TOGGLES: [Toggle; 12] = [
     Toggle::Vanish,
 ];
 
-/// Resolves the formatting in effect of runs and paragraph marks, keeping what it has
-/// worked out about styles for the next ones: use one for the runs of a whole
-/// document. It borrows the document; threads that format runs at the same time each
-/// use their own.
-#[derive(Debug)]
-pub struct Formats<'a> {
-    document: &'a Document,
-    /// What each style gives together with the styles it is based on, by the style's
-    /// index in the document's styles: one entry per style, whatever the length of the
-    /// chains.
-    levels: HashMap<usize, Arc<Level>>,
-    defaults: Option<Arc<Level>>,
-    /// The index of the default paragraph style, once looked up.
-    default_paragraph_style: Option<Option<usize>>,
-    /// How many times a style's own properties were read.
-    #[cfg(test)]
-    style_reads: usize,
-}
-
-impl<'a> Formats<'a> {
-    pub(super) fn new(document: &'a Document) -> Self {
-        Self {
-            document,
-            levels: HashMap::new(),
-            defaults: None,
-            default_paragraph_style: None,
-            #[cfg(test)]
-            style_reads: 0,
-        }
-    }
-
-    /// The formatting of a run in effect.
-    pub fn run(&mut self, run: Run<'a>) -> CharacterFormat {
-        if !std::ptr::eq(run.document(), self.document) {
-            // A run of another document takes that document's styles.
-            return Formats::new(run.document()).run(run);
-        }
-        let direct = run.properties();
-        let paragraph = self.paragraph_style(paragraph_of(self.document, run.node()));
-        self.resolve(paragraph, &direct)
-    }
-
-    /// The formatting of a paragraph's mark in effect, which decides, among other
-    /// things, the height of an empty paragraph.
-    pub fn paragraph_mark(&mut self, paragraph: Paragraph<'a>) -> CharacterFormat {
-        if !std::ptr::eq(paragraph.document(), self.document) {
-            return Formats::new(paragraph.document()).paragraph_mark(paragraph);
-        }
-        let direct = paragraph.properties().mark;
-        let style = self.paragraph_style(Some(paragraph.node()));
-        self.resolve(style, &direct)
-    }
-
-    /// How many times a style's own properties were read, for tests of the work done.
-    #[cfg(test)]
-    pub(crate) fn style_reads(&self) -> usize {
-        self.style_reads
-    }
-
-    /// What the style at `index` writes itself, as a level.
-    fn own_level(&mut self, index: usize) -> Level {
-        #[cfg(test)]
-        {
-            self.style_reads += 1;
-        }
-        Level::of(&own_properties(self.document, index))
-    }
-
-    /// The index of the paragraph style of the paragraph `node`: its `w:pStyle` when it
-    /// names a paragraph style, else the default paragraph style (the first, as
-    /// [`Styles::default_style`](super::Styles::default_style) gives it).
-    fn paragraph_style(&mut self, node: Option<&'a Node>) -> Option<usize> {
-        let document = self.document;
-        let written = node.and_then(|node| {
-            node.properties
-                .iter()
-                .map(|&span| document.element(span))
-                .find(|element| element.is(&document.names.w, "pPr"))
-                .and_then(|p_pr| {
-                    p_pr.children()
-                        .find(|child| child.is(&document.names.w, "pStyle"))
-                        .and_then(|p_style| p_style.attribute(&document.names.w, "val"))
-                })
-        });
-        let written = written.and_then(|id| style_index(document, id, StyleKind::Paragraph));
-        written.or_else(|| {
-            *self.default_paragraph_style.get_or_insert_with(|| {
-                document
-                    .styles
-                    .styles
-                    .iter()
-                    .position(|style| style.kind == StyleKind::Paragraph && style.is_default)
-            })
-        })
-    }
-
+impl Formats<'_> {
     /// Combines the levels of the hierarchy for a run whose paragraph style has the index
     /// `paragraph_style` and whose own properties are `direct`. A run without a
     /// `w:rStyle` gets no character style: Word's default character style is
     /// DefaultParagraphFont, whose children it ignores.
-    fn resolve(
+    pub(super) fn resolve_run(
         &mut self,
         paragraph_style: Option<usize>,
         direct: &RunProperties,
     ) -> CharacterFormat {
         let document = self.document;
-        let defaults = self.defaults();
-        let paragraph = paragraph_style.map(|index| self.level(index));
+        let defaults = self.run_defaults();
+        let paragraph = paragraph_style.map(|index| {
+            self.characters
+                .level(document, index, &CharacterLevel::default())
+        });
         let character_style = direct
             .style
             .as_deref()
             .and_then(|id| style_index(document, id, StyleKind::Character));
-        let character = character_style.map(|index| self.level(index));
-        let direct = Level::of(direct);
+        let character = character_style.map(|index| {
+            self.characters
+                .level(document, index, &CharacterLevel::default())
+        });
+        let direct = CharacterLevel::of(direct);
 
         // Each level replaces what it gives.
-        let mut effect = Level::clone(&defaults);
+        let mut effect = CharacterLevel::clone(&defaults);
         for level in paragraph.iter().chain(character.iter()) {
             effect.overlay(level);
         }
@@ -169,7 +74,7 @@ impl<'a> Formats<'a> {
 
         // On/off properties: toggle properties by ECMA-376 §17.7.3, the others by the
         // last level that gives them.
-        let value = |level: Option<&Level>, toggle: usize| {
+        let value = |level: Option<&CharacterLevel>, toggle: usize| {
             level.and_then(|level| level.toggles.get(toggle).copied().flatten())
         };
         let mut toggles = [false; Toggle::COUNT];
@@ -204,7 +109,7 @@ impl<'a> Formats<'a> {
         CharacterFormat {
             style: character_style
                 .and_then(|index| document.styles.styles.get(index))
-                .map(|style| style.id.clone()),
+                .map(|style| Arc::clone(&style.id)),
             fonts: effect.fonts(document),
             size: effect.size.unwrap_or(DEFAULT_SIZE),
             size_complex_script: effect.size_complex_script.unwrap_or(DEFAULT_SIZE),
@@ -238,115 +143,15 @@ impl<'a> Formats<'a> {
         }
     }
 
-    /// What the document defaults give.
-    fn defaults(&mut self) -> Arc<Level> {
+    /// What the document defaults give to runs.
+    fn run_defaults(&mut self) -> Arc<CharacterLevel> {
         let document = self.document;
-        Arc::clone(self.defaults.get_or_insert_with(|| {
-            Arc::new(Level::of(
-                &super::Styles::new(document).default_run_properties(),
+        Arc::clone(self.character_defaults.get_or_insert_with(|| {
+            Arc::new(CharacterLevel::of(
+                &crate::model::Styles::new(document).default_run_properties(),
             ))
         }))
     }
-
-    /// What the style at `index` gives together with the styles it is based on, the
-    /// style's own properties winning (ECMA-376 §17.7.4.3; for toggle properties the
-    /// first value found up the chain, §17.7.3).
-    ///
-    /// Each style is worked out once, from the style it is based on. A style on a cycle
-    /// of `w:basedOn`, which Word does not allow (MS-OI29500 §17.7.4.3(a)), is taken
-    /// with its own properties only, so that the result does not depend on which style
-    /// of the cycle is asked for first.
-    fn level(&mut self, index: usize) -> Arc<Level> {
-        if let Some(level) = self.levels.get(&index) {
-            return Arc::clone(level);
-        }
-        let document = self.document;
-        // The styles up the chain that are not worked out yet, the asked one first, up
-        // to one that is, the root, or the first style met twice.
-        let mut path = Vec::new();
-        let mut seen = HashSet::new();
-        let mut current = Some(index);
-        let mut base = None;
-        let mut cycle_from = None;
-        while let Some(style) = current {
-            if let Some(level) = self.levels.get(&style) {
-                base = Some(Arc::clone(level));
-                break;
-            }
-            if !seen.insert(style) {
-                cycle_from = path.iter().position(|&other| other == style);
-                break;
-            }
-            path.push(style);
-            current = parent(document, style);
-        }
-        // The styles of the cycle, if any, are at the end of `path`.
-        let cycle: &[usize] = cycle_from
-            .and_then(|from| path.get(from..))
-            .unwrap_or_default();
-        for &style in cycle {
-            let level = Arc::new(self.own_level(style));
-            self.levels.insert(style, level);
-        }
-        let tail = path
-            .get(..cycle_from.unwrap_or(path.len()))
-            .unwrap_or_default();
-        let mut below = base.or_else(|| {
-            let first = cycle.first()?;
-            self.levels.get(first).map(Arc::clone)
-        });
-        for &style in tail.iter().rev() {
-            let mut level = below.as_deref().cloned().unwrap_or_default();
-            level.overlay(&self.own_level(style));
-            let level = Arc::new(level);
-            self.levels.insert(style, Arc::clone(&level));
-            below = Some(level);
-        }
-        self.levels
-            .get(&index)
-            .map_or_else(Arc::default, Arc::clone)
-    }
-}
-
-/// The index of the style with this id when it is of `kind`.
-fn style_index(document: &Document, id: &str, kind: StyleKind) -> Option<usize> {
-    let index = *document.styles.by_id.get(id)?;
-    let style = document.styles.styles.get(index)?;
-    (style.kind == kind).then_some(index)
-}
-
-/// The style the style at `index` is based on: none when its `w:basedOn` names no style
-/// of its kind (ECMA-376 §17.7.4.3) or when Word ignores the style's children.
-fn parent(document: &Document, index: usize) -> Option<usize> {
-    let style = document.styles.styles.get(index)?;
-    if IGNORED_STYLES.contains(&&*style.id) {
-        return None;
-    }
-    style_index(document, style.based_on.as_deref()?, style.kind)
-}
-
-/// The run properties the style at `index` writes itself; none for the styles whose
-/// children Word ignores.
-fn own_properties(document: &Document, index: usize) -> RunProperties {
-    document
-        .styles
-        .styles
-        .get(index)
-        .filter(|style| !IGNORED_STYLES.contains(&&*style.id))
-        .map(|style| super::Style::from_data(document, style).run_properties())
-        .unwrap_or_default()
-}
-
-/// The paragraph a node is in, through the containers between them.
-fn paragraph_of<'a>(document: &'a Document, node: &'a Node) -> Option<&'a Node> {
-    let mut current = node;
-    for _ in 0..document.nodes.len() {
-        if matches!(current.kind, Kind::Paragraph) {
-            return Some(current);
-        }
-        current = document.node(current.parent)?;
-    }
-    None
 }
 
 /// The value of a toggle property in effect, from the value each level of the hierarchy
@@ -387,7 +192,7 @@ enum FontSlot {
 /// What one level of the hierarchy gives — the document defaults, a style with the
 /// styles it is based on, or direct formatting — or what several levels give together.
 #[derive(Clone, Debug, Default)]
-struct Level {
+pub(super) struct CharacterLevel {
     /// ascii, hAnsi, eastAsia, cs.
     fonts: [Option<FontSlot>; 4],
     hint: Option<FontHint>,
@@ -407,7 +212,7 @@ struct Level {
     languages: [Option<Box<str>>; 3],
 }
 
-impl Level {
+impl CharacterLevel {
     /// What one `w:rPr` gives.
     fn of(properties: &RunProperties) -> Self {
         let fonts = &properties.fonts;
@@ -452,9 +257,42 @@ impl Level {
         }
     }
 
+    /// The font families, theme fonts resolved through the document's theme.
+    fn fonts(&self, document: &Document) -> FontFamilies {
+        let [ascii, high_ansi, east_asia, complex_script] =
+            self.fonts.clone().map(|slot| match slot {
+                Some(FontSlot::Name(name)) => name,
+                Some(FontSlot::Theme(theme, written)) => theme_font(document, theme)
+                    .map(Into::into)
+                    .or(written)
+                    .unwrap_or_else(|| DEFAULT_FONT.into()),
+                None => DEFAULT_FONT.into(),
+            });
+        FontFamilies {
+            ascii,
+            high_ansi,
+            east_asia,
+            complex_script,
+            hint: self.hint,
+        }
+    }
+}
+
+impl Layer for CharacterLevel {
+    fn of_style(document: &Document, index: usize) -> Self {
+        document
+            .styles
+            .styles
+            .get(index)
+            .map(|style| {
+                Self::of(&crate::model::Style::from_data(document, style).run_properties())
+            })
+            .unwrap_or_default()
+    }
+
     /// Lays `above` over this level: what it gives replaces what this one gives. A font
     /// or a theme font written later replaces either (MS-OI29500 §17.3.2.26(e)).
-    fn overlay(&mut self, above: &Level) {
+    fn overlay(&mut self, above: &Self) {
         for (slot, font) in self.fonts.iter_mut().zip(&above.fonts) {
             overwrite(slot, font.clone());
         }
@@ -477,32 +315,6 @@ impl Level {
         for (slot, language) in self.languages.iter_mut().zip(&above.languages) {
             overwrite(slot, language.clone());
         }
-    }
-
-    /// The font families, theme fonts resolved through the document's theme.
-    fn fonts(&self, document: &Document) -> FontFamilies {
-        let [ascii, high_ansi, east_asia, complex_script] =
-            self.fonts.clone().map(|slot| match slot {
-                Some(FontSlot::Name(name)) => name,
-                Some(FontSlot::Theme(theme, written)) => theme_font(document, theme)
-                    .map(Into::into)
-                    .or(written)
-                    .unwrap_or_else(|| DEFAULT_FONT.into()),
-                None => DEFAULT_FONT.into(),
-            });
-        FontFamilies {
-            ascii,
-            high_ansi,
-            east_asia,
-            complex_script,
-            hint: self.hint,
-        }
-    }
-}
-
-fn overwrite<T>(slot: &mut Option<T>, value: Option<T>) {
-    if value.is_some() {
-        *slot = value;
     }
 }
 

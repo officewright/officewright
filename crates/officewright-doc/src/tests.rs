@@ -2978,3 +2978,4 @@ fn repairs_a_damaged_theme() {
 }
 
 mod format;
+mod paragraph_format;

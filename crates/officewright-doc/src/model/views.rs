@@ -79,6 +79,13 @@ impl<'a> Paragraph<'a> {
         self.document
     }
 
+    /// The paragraph's formatting in effect, with its style, its list level and the
+    /// document defaults; see [`Document::formats`], which is faster for many
+    /// paragraphs.
+    pub fn format(self) -> super::ParagraphFormat {
+        super::Formats::new(self.document).paragraph(self)
+    }
+
     /// The paragraph's id, to find it again with [`Document::paragraph`].
     pub fn id(self) -> ParagraphId {
         self.document.paragraph_id(self.index)

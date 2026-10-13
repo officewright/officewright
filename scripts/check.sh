@@ -116,7 +116,7 @@ if printf '%s\n' "$packaged" | grep -E '^tests/(metric_compatible|third_party_fo
 	fail "officewright-font would publish the file above"
 fi
 packaged=$(cargo package --list --allow-dirty --quiet -p officewright-layout)
-if printf '%s\n' "$packaged" | grep -E '^tests/shaping\.rs$'; then
+if printf '%s\n' "$packaged" | grep -E '^(data/|tests/(shaping|fonts|symbol_table)\.rs$)'; then
 	fail "officewright-layout would publish the file above"
 fi
 packaged=$(cargo package --list --allow-dirty --quiet -p officewright-cli)
@@ -135,6 +135,10 @@ shellcheck scripts/*.sh .githooks/pre-commit
 
 step "actionlint"
 actionlint
+
+step "committed files: no Python bytecode, no home directory paths"
+scripts/check-added-files.sh
+"$python" -B -m unittest discover -s tests/scripts -v
 
 step "corpus tools (tests/corpus-tools)"
 # The committed rule documents must be what scripts/make-rule-docs.py writes.

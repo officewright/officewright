@@ -27,6 +27,27 @@ Adobe's terms, from `MustRead.html`:
 
 > This file and the 14 PostScript(R) AFM files it accompanies may be used, copied, and distributed for any purpose and without charge, with or without modification, provided that all copyright notices are retained; that the AFM files are not distributed without this file; that all modifications to this file or any of the AFM files are prominently noted in the modified file(s); and that this paragraph is not modified. Adobe Systems has no responsibility or obligation to support the use of the AFM files.
 
+## Adobe Symbol encoding to Unicode
+
+Copyright (c) 1991-2011 Unicode, Inc. All Rights reserved.
+
+- File: `crates/officewright-layout/data/symbol.txt`, "Adobe Symbol Encoding to Unicode",
+  table version 1.0 of 2011 July 12, byte for byte as published at
+  <https://unicode.org/Public/MAPPINGS/VENDORS/ADOBE/symbol.txt>
+  (SHA-256 `deb78ca840a429311939b9d165890873f71fb23ef223ceeb144a6c6d641a7e52`).
+- Derived work: the table of Symbol codes in `crates/officewright-layout/src/symbol.rs`
+  (each code of the Symbol font with its Unicode character; of two, the Greek letter,
+  else the first; codes mapped only to the Corporate Use Subarea are left out), with the
+  notice below attached. That table is compiled into the `officewright-layout` crate and
+  the `officewright` native library; the file is not.
+  `crates/officewright-layout/tests/symbol_table.rs` checks the table against the file.
+
+Unicode's terms, from the file:
+
+> This file is provided as-is by Unicode, Inc. (The Unicode Consortium). No claims are made as to fitness for any particular purpose. No warranties of any kind are expressed or implied. The recipient agrees to determine applicability of information provided. If this file has been provided on magnetic media by Unicode, Inc., the sole remedy for any claim will be exchange of defective media within 90 days of receipt.
+>
+> Unicode, Inc. hereby grants the right to freely use the information supplied in this file in the creation of products supporting the Unicode Standard, and to make copies of this file in any form for internal or external distribution as long as this notice remains attached.
+
 ## Documents of the European Union
 
 © European Union. Licensed under the Creative Commons Attribution 4.0
