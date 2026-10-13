@@ -214,7 +214,11 @@ xml_enum! {
 }
 
 /// Where the footnotes or endnotes of a section go and how they are numbered
-/// (`w:footnotePr`, `w:endnotePr`).
+/// (`w:footnotePr`, `w:endnotePr`), as written.
+///
+/// Word takes the placement of footnotes from the section and ignores the document's
+/// (MS-OI29500 §17.11.21(a)). Its default format for endnotes is lower roman, not
+/// decimal, and it numbers notes in decimal where `bullet` is written (§17.11.17).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct NoteProperties {
@@ -275,6 +279,10 @@ xml_enum! {
 
 /// The borders around the pages of a section (`w:pgBorders`). The schema's defaults,
 /// when nothing is written: in front of the text, measured from the text.
+///
+/// The relationship of a custom border picture (`r:id`) and the corner pictures
+/// (`r:topLeft` and the like) are not read; Word ignores them too (MS-OI29500 §17.6.2,
+/// §17.6.7, §17.6.15 and §17.6.21, notes (a)).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub struct PageBorders {
@@ -350,7 +358,9 @@ impl LineNumbering {
         self.count_by
     }
 
-    /// The first number (`w:start`).
+    /// The starting value as written (`w:start`). The standard calls it the first
+    /// number, but Word counts it as the numbers to skip: 3 starts numbering at 4
+    /// (MS-OI29500 §17.6.8(b)).
     pub fn start(&self) -> Option<i64> {
         self.start
     }
@@ -414,6 +424,11 @@ impl PageNumbering {
 
 /// The text columns of a section (`w:cols`). The schema's defaults, when nothing is
 /// written: one column, 36 pt apart.
+///
+/// Word allows 1 to 45 columns, takes equal widths when `w:equalWidth` is not written,
+/// assumes one column when `w:num` is not, and requires `w:num` to match the `w:col`
+/// elements of columns that are not equally wide (MS-OI29500 §17.6.4). The values here
+/// are as written.
 #[derive(Clone, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub struct Columns {
@@ -465,7 +480,8 @@ impl Column {
         self.width
     }
 
-    /// The space after the column (`w:space`).
+    /// The space after the column (`w:space`); Word takes 0 when it is not written
+    /// (MS-OI29500 §17.6.3(a)).
     pub fn space(&self) -> Option<Pt> {
         self.space
     }
@@ -506,8 +522,10 @@ impl DocumentGrid {
         self.line_pitch
     }
 
-    /// The extra space added to the width of characters on the grid, as written
-    /// (`w:charSpace`).
+    /// The character pitch of the grid, as written (`w:charSpace`): the difference
+    /// between it and the pitch of characters in the size of the Normal style's font,
+    /// in points times 4096 (§17.6.5). It needs that size to mean a length, so it stays
+    /// the integer written.
     pub fn character_space(&self) -> Option<i64> {
         self.character_space
     }

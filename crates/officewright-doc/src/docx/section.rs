@@ -23,22 +23,59 @@ pub(super) fn read(
     place: &str,
     diagnostics: &mut Diagnostics,
 ) -> SectionProperties {
-    let mut report = |element: &str, attribute: &str, value: &str| {
-        diagnostics.push(DiagnosticKind::InvalidValue, || {
-            format!(
-                "{place}: w:{element} w:{attribute}=\"{}\" is not valid; it is ignored",
-                shorten(value)
-            )
-        });
-    };
-    let report: Report<'_> = &mut report;
     let w = &names.w;
     let mut properties = SectionProperties::default();
     let mut unreferenced = 0u32;
+    let mut seen: Vec<&str> = Vec::new();
+    // Headers and footers, by kind: default, even, first.
+    let mut seen_references = [[false; 3]; 2];
     for child in sect_pr.children_through_fallback(names.mc) {
         let Some(local) = child.local_in(w) else {
             continue;
         };
+        // Each of these is written once at most (EG_SectPrContents); as for a second
+        // w:docDefaults, the first one counts.
+        if SECTION_CONTENTS.contains(&local) {
+            if seen.contains(&local) {
+                diagnostics.push(DiagnosticKind::UnexpectedContent, || {
+                    format!("{place}: a second w:{local} is ignored")
+                });
+                continue;
+            }
+            seen.push(local);
+        }
+        if matches!(local, "headerReference" | "footerReference") {
+            // Two of one kind are not conformant (§17.10.5); both are kept, and which
+            // one Word uses is not measured.
+            let kind = child
+                .attribute(w, "type")
+                .and_then(HeaderFooterKind::from_xml);
+            let index = match kind {
+                Some(HeaderFooterKind::Default) => Some(0),
+                Some(HeaderFooterKind::Even) => Some(1),
+                Some(HeaderFooterKind::First) => Some(2),
+                None => None,
+            };
+            let row = seen_references.get_mut(usize::from(local == "footerReference"));
+            if let Some(seen) = index.and_then(|index| row?.get_mut(index)) {
+                if *seen {
+                    diagnostics.push(DiagnosticKind::UnexpectedContent, || {
+                        let kind = child.attribute(w, "type").unwrap_or_default();
+                        format!("{place}: a second w:{local} of type {kind} is kept")
+                    });
+                }
+                *seen = true;
+            }
+        }
+        let mut report = |element: &str, attribute: &str, value: &str| {
+            diagnostics.push(DiagnosticKind::InvalidValue, || {
+                format!(
+                    "{place}: w:{element} w:{attribute}=\"{}\" is not valid; it is ignored",
+                    shorten(value)
+                )
+            });
+        };
+        let report: Report<'_> = &mut report;
         let length = |attribute, signed: bool, report: Report<'_>| {
             value(
                 child,
@@ -68,7 +105,8 @@ pub(super) fn read(
             "endnotePr" => properties.endnotes = Some(notes(child, names, true, report)),
             "type" => {
                 properties.start = match child.attribute(w, "val") {
-                    // Without the attribute the type is nextPage (§17.6.22).
+                    // Without the attribute the type is nextPage (§17.6.22); Word
+                    // requires the attribute (MS-OI29500 §17.6.22(a)).
                     None => Some(SectionStart::NextPage),
                     Some(_) => value(child, names, "val", section_start, report),
                 };
@@ -149,6 +187,29 @@ pub(super) fn read(
     }
     properties
 }
+
+/// The children of `w:sectPr` that may be written once only.
+const SECTION_CONTENTS: [&str; 19] = [
+    "footnotePr",
+    "endnotePr",
+    "type",
+    "pgSz",
+    "pgMar",
+    "paperSrc",
+    "pgBorders",
+    "lnNumType",
+    "pgNumType",
+    "cols",
+    "formProt",
+    "vAlign",
+    "noEndnote",
+    "titlePg",
+    "textDirection",
+    "bidi",
+    "rtlGutter",
+    "docGrid",
+    "printerSettings",
+];
 
 fn section_start(value: &str) -> Option<SectionStart> {
     match value {

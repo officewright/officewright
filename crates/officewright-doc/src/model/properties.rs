@@ -1088,8 +1088,18 @@ impl ParagraphProperties {
 
 /// An art border (ST_Border): a row of small pictures, such as `apples`, that Word offers
 /// around pages.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+///
+/// ST_Border's last value, `custom` (a picture of the document's own), is not one:
+/// Word treats a file that writes it as corrupt (MS-OI29500 §17.18.2(d)), so a border
+/// naming it reads as not valid.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ArtBorder(u8);
+
+impl std::fmt::Debug for ArtBorder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ArtBorder").field(&self.name()).finish()
+    }
+}
 
 impl ArtBorder {
     /// The name the document writes, such as `apples`.
@@ -1107,8 +1117,8 @@ impl ArtBorder {
     }
 }
 
-/// The art borders of ST_Border, in the order of the schema.
-const ART_BORDERS: [&str; 166] = [
+/// The art borders of ST_Border, in the order of the schema, without `custom`.
+const ART_BORDERS: [&str; 165] = [
     "apples",
     "archedScallops",
     "babyPacifier",
@@ -1274,7 +1284,6 @@ const ART_BORDERS: [&str; 166] = [
     "zanyTriangles",
     "zigZag",
     "zigZagStitch",
-    "custom",
 ];
 
 xml_enum! {
@@ -1344,7 +1353,7 @@ xml_enum! {
         ThaiCounting = "thaiCounting",
         BahtText = "bahtText",
         DollarText = "dollarText",
-        /// A format of the document's own, given by `w:format`.
+        /// A format of the document's own, given by `w:format`, which is not read yet.
         Custom = "custom",
     }
 }

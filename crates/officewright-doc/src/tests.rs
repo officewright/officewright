@@ -2052,3 +2052,61 @@ fn reads_strict_header_references() {
     assert_eq!(properties.headers()[0].relationship_id(), "rId4");
     assert_eq!(properties.columns().unwrap().space(), Some(Pt(36.0)));
 }
+
+#[test]
+fn reads_section_properties_through_the_fallback() {
+    // From the review of #43.
+    let document = open(
+        r#"<w:p/><w:sectPr><mc:AlternateContent><mc:Choice Requires="w14"><w:pgSz w:w="1" w:h="1"/><w:titlePg/></mc:Choice><mc:Fallback><w:pgSz w:w="12240" w:h="15840"/><w:headerReference w:type="default" r:id="rId8"/></mc:Fallback></mc:AlternateContent><w:cols w:num="3"/></w:sectPr>"#,
+    );
+    assert!(messages(&document).is_empty(), "{:?}", messages(&document));
+    let properties = document.sections().next().unwrap().properties();
+    assert_eq!(properties.page_size().unwrap().width(), Pt(612.0));
+    assert_eq!(properties.title_page(), None);
+    assert_eq!(properties.headers().len(), 1);
+    assert_eq!(properties.columns().unwrap().count(), Some(3));
+}
+
+#[test]
+fn reads_a_custom_border_as_not_valid() {
+    // Word treats a file with ST_Border's custom as corrupt (MS-OI29500 §17.18.2(d)).
+    let document = open(
+        r#"<w:p/><w:sectPr><w:pgBorders><w:top w:val="custom" w:sz="4" r:id="rId9"/><w:left w:val="zigZagStitch" w:sz="8"/></w:pgBorders></w:sectPr>"#,
+    );
+    let borders = *document
+        .sections()
+        .next()
+        .unwrap()
+        .properties()
+        .page_borders()
+        .unwrap();
+    let top = borders.top().unwrap();
+    assert_eq!((top.style(), top.art()), (None, None));
+    let left = borders.left().unwrap();
+    assert_eq!(left.art().map(ArtBorder::name), Some("zigZagStitch"));
+    assert_eq!(
+        format!("{:?}", left.art().unwrap()),
+        r#"ArtBorder("zigZagStitch")"#
+    );
+    let messages = messages(&document);
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(messages[0].ends_with(r#": w:top w:val="custom" is not valid; it is ignored"#));
+}
+
+#[test]
+fn reports_repeated_section_properties() {
+    let document = open(
+        r#"<w:p/><w:sectPr><w:headerReference w:type="default" r:id="rId1"/><w:headerReference w:type="default" r:id="rId2"/><w:footerReference w:type="default" r:id="rId3"/><w:pgSz w:w="12240" w:h="15840"/><w:pgSz w:w="11906" w:h="16838"/><w:type w:val="continuous"/><w:type w:val="oddPage"/></w:sectPr>"#,
+    );
+    let properties = document.sections().next().unwrap().properties();
+    // The first of each counts; both references of one kind are kept.
+    assert_eq!(properties.page_size().unwrap().width(), Pt(612.0));
+    assert_eq!(properties.start(), Some(SectionStart::Continuous));
+    assert_eq!(properties.headers().len(), 2);
+    assert_eq!(properties.footers().len(), 1);
+    let messages = messages(&document);
+    assert_eq!(messages.len(), 3, "{messages:?}");
+    assert!(messages[0].ends_with(": a second w:headerReference of type default is kept"));
+    assert!(messages[1].ends_with(": a second w:pgSz is ignored"));
+    assert!(messages[2].ends_with(": a second w:type is ignored"));
+}
