@@ -37,12 +37,14 @@ Office does not follow ECMA-376/ISO 29500 literally, and users judge us against 
 crates/
   officewright          facade crate; features doc, pdf, xls, slides; re-exports format crates, and
                         officewright-font as `font` with the pdf feature
-  officewright-core     units (Pt, twips, EMU), PageSize, Error/Result; later colour
+  officewright-core     units (Pt, twips, EMU), PageSize, Color (sRGB), Error/Result
   officewright-font     font loading (TrueType/OpenType, collections), metrics, cmap, subsetting for
                         embedding, system font index and font substitution with a report
   officewright-opc      ZIP, XML, OPC packages and Markup Compatibility (ECMA-376 Parts 2 and 3) shared
                         by the OOXML readers; ZIP and XML are our own code, DEFLATE is miniz_oxide
-  officewright-layout   page layout engine (shaping, text flow, line breaking, tables) — the core of DOCX→PDF
+  officewright-layout   page layout engine (shaping, text flow, line breaking, tables) — the core of DOCX→PDF;
+                        its input is the layout IR (module `ir`), which the format crates build: public,
+                        but exempt from semver until 1.0 and hidden in the docs unless feature `unstable-ir`
   officewright-doc      DOC/DOCX/RTF          (counterpart of Spire.Doc)
   officewright-pdf      PDF read/write        (counterpart of Spire.PDF)
   officewright-xls      XLS/XLSX              (counterpart of Spire.XLS)
@@ -187,7 +189,7 @@ Not before the C ABI is stable. When they come: .NET (`netstandard2.0` + `net8.0
 - Conventional Commits with the crate as scope: `feat(pdf): write xref streams`, `fix(ffi): free buffer on error path`, `docs(readme): ...`, `ci: ...`. Breaking changes use `!` (`feat(pdf)!: ...`).
 - One logical change per commit; no "wip"/"fix stuff" commits.
 - Until Milestone 1 is merged, commit to `main`. After that, work on branches (`feat/<topic>`, `fix/<topic>`), open a PR, merge only with green CI. `main` is protected.
-- Releases (later): release-plz generates versions and CHANGELOG from commit messages; cargo-semver-checks runs before publishing.
+- Releases (later): release-plz generates versions and CHANGELOG from commit messages; cargo-semver-checks runs before publishing, without the feature `unstable-ir` of `officewright-layout` (the IR is exempt until 1.0).
 
 ## Review process
 

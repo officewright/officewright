@@ -192,6 +192,9 @@ dependencies = [
 [[package]]
 name = "officewright-layout"
 version = "0.1.0"
+dependencies = [
+ "officewright-core",
+]
 
 [[package]]
 name = "officewright-opc"
