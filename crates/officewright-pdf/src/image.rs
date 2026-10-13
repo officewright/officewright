@@ -209,11 +209,11 @@ impl Image {
     /// - [`Error::UnsupportedImage`] for data in another format, and for JPEG and PNG
     ///   features PDF cannot show: lossless, hierarchical and arithmetic-coded JPEG,
     ///   12-bit JPEG, JPEG with 2 components or a height given only after the first
-    ///   scan, PNG with a compression or filter method other than the standard one or with
-    ///   a critical chunk this reader does not know.
+    ///   scan, PNG with a compression or filter method other than the standard one or
+    ///   with a critical chunk this reader does not know.
     /// - [`Error::MalformedImage`] for a damaged file: truncated, with a wrong checksum
-    ///   of a critical PNG chunk, missing or invalid headers, or compressed data that does not decompress
-    ///   to the size its header gives.
+    ///   of a critical PNG chunk, missing or invalid headers, or compressed data that
+    ///   does not decompress to the size its header gives.
     /// - [`Error::ImageTooLarge`] for a PNG whose pixel data would exceed 256 MiB.
     pub fn from_bytes(data: impl Into<Arc<[u8]>>) -> Result<Self> {
         Self::read(data.into(), None)
