@@ -49,9 +49,9 @@ class Committed(unittest.TestCase):
                 self.assertEqual(f"{doc.name}-open.docx" in names, not doc.name.endswith("-zh"))
 
     def test_twins_name_only_open_fonts_and_originals_name_office_fonts(self):
-        pattern = r'<w:(?:rFonts|font)\b[^>]*\bw:(?:ascii|hAnsi|cs|eastAsia|name)="([^"]+)"'
         for name, doc, twin in gen.variants(gen.documents()):
-            fonts = set(re.findall(pattern, "".join(xml_parts(GENERATED / name).values())))
+            markup = "".join(xml_parts(GENERATED / name).values())
+            fonts = gen.fonts_named(markup) | set(re.findall(r'<w:font w:name="([^"]+)"', markup))
             with self.subTest(name):
                 if twin:
                     self.assertEqual(fonts & OFFICE, set())
