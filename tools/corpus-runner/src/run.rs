@@ -11,6 +11,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::Options;
+use crate::metrics;
 use crate::report::{self, Baseline, ChildExit, FileResult, Report, Status};
 
 /// The extensions of the Word documents a directory is searched for.
@@ -51,9 +52,18 @@ fn run(options: &Options) -> Result<bool, String> {
         return Err("no Word documents under the paths".to_owned());
     }
     let launcher = Launcher::new(options)?;
+    let index = reference_index(options)?;
+    let mut scoring = BTreeMap::new();
+    for (name, file) in &files {
+        let absolute =
+            std::path::absolute(file).map_err(|error| format!("{}: {error}", file.display()))?;
+        if let Some(pair) = index.get(&absolute) {
+            scoring.insert(name.clone(), pair.clone());
+        }
+    }
 
     let started = Instant::now();
-    let report = Report::new(run_all(&launcher, &files, &expected, options)?);
+    let report = Report::new(run_all(&launcher, &files, &expected, &scoring, options)?);
     print_summary(&report, started.elapsed());
     for file in &report.files {
         if file.status == Status::Opened && expected.contains_key(&file.path) {
@@ -244,6 +254,7 @@ fn run_all(
     launcher: &Launcher,
     files: &[(String, PathBuf)],
     expected: &BTreeMap<String, String>,
+    scoring: &BTreeMap<String, (PathBuf, PathBuf)>,
     options: &Options,
 ) -> Result<Vec<FileResult>, String> {
     let next = AtomicUsize::new(0);
@@ -273,6 +284,12 @@ fn run_all(
                 milliseconds,
             );
             report::check_memory(&mut result, options.memory_limit_mb);
+            if let Some((folder, pdf)) = scoring.get(name) {
+                match score_file(folder, pdf) {
+                    Ok(scores) => result.scores = Some(scores),
+                    Err(error) => result.score_error = Some(error),
+                }
+            }
             results
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -295,6 +312,70 @@ fn run_all(
         return Err(error);
     }
     Ok(results.into_inner().unwrap_or_else(PoisonError::into_inner))
+}
+
+/// Each document that has a reference folder, by its absolute path: the folder, and where
+/// our PDF of it is. A reference's `geometry.json` names its document relative to the
+/// folder above the references.
+fn reference_index(options: &Options) -> Result<BTreeMap<PathBuf, (PathBuf, PathBuf)>, String> {
+    #[derive(serde::Deserialize)]
+    struct Named {
+        document: String,
+    }
+    let (Some(references), Some(ours)) = (&options.references, &options.ours) else {
+        return Ok(BTreeMap::new());
+    };
+    let references = std::path::absolute(references)
+        .map_err(|error| format!("{}: {error}", references.display()))?;
+    let corpus = references
+        .parent()
+        .ok_or_else(|| format!("{} has no parent folder", references.display()))?;
+    let folders = |dir: &Path| -> Result<Vec<PathBuf>, String> {
+        let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+            .and_then(|entries| {
+                entries
+                    .map(|entry| entry.map(|entry| entry.path()))
+                    .collect()
+            })
+            .map_err(|error| format!("{}: {error}", dir.display()))?;
+        found.retain(|path| path.is_dir());
+        found.sort();
+        Ok(found)
+    };
+    let mut index = BTreeMap::new();
+    for group in folders(&references)? {
+        for folder in folders(&group)? {
+            let json = folder.join("geometry.json");
+            if !json.is_file() {
+                continue;
+            }
+            let named: Named = serde_json::from_str(&read(&json)?)
+                .map_err(|error| format!("{}: {error}", json.display()))?;
+            if named
+                .document
+                .split('/')
+                .any(|part| part.is_empty() || part == "." || part == "..")
+            {
+                return Err(format!(
+                    "{}: document {} is not a plain path",
+                    json.display(),
+                    named.document
+                ));
+            }
+            let pdf = ours.join(Path::new(&named.document).with_extension("pdf"));
+            index.insert(corpus.join(&named.document), (folder, pdf));
+        }
+    }
+    Ok(index)
+}
+
+fn score_file(reference: &Path, pdf: &Path) -> Result<metrics::Scores, String> {
+    if !pdf.is_file() {
+        return Err(format!("no PDF of ours at {}", pdf.display()));
+    }
+    let word = metrics::Rendering::reference(reference)?;
+    let ours = metrics::Rendering::pdf(pdf)?;
+    Ok(metrics::score(&ours, &word))
 }
 
 /// Runs `corpus-runner open FILE`, stopping it after the time-out. `Err` is a failure of
@@ -409,6 +490,28 @@ fn print_summary(report: &Report, elapsed: Duration) {
     {
         let kb = largest.peak_rss_kb.unwrap_or_default();
         println!("peak memory: {} MiB, {}", kb / 1024, largest.path);
+    }
+    let scored: Vec<&metrics::Scores> = report
+        .files
+        .iter()
+        .filter_map(|file| file.scores.as_ref())
+        .collect();
+    if !scored.is_empty() {
+        let mean = |value: fn(&metrics::Scores) -> f64| {
+            scored.iter().map(|scores| value(scores)).sum::<f64>() / scored.len() as f64
+        };
+        println!(
+            "scored {} documents: means text_score {:.4}, line_agreement {:.4}, ssim_mean {:.4}",
+            scored.len(),
+            mean(|scores| scores.text_score),
+            mean(|scores| scores.line_agreement),
+            mean(|scores| scores.ssim_mean)
+        );
+    }
+    for file in &report.files {
+        if let Some(error) = &file.score_error {
+            println!("  {:<16} {}: {error}", "not scored", file.path);
+        }
     }
     for file in &report.files {
         if file.status != Status::Opened {
