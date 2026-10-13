@@ -33,9 +33,9 @@ writes.
 | word-rules/E-defaults-empty.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | The font and size Word applies when neither the document defaults nor any style gives them, alone and with a style that gives only one of the two |
 | word-rules/E-theme-colors.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Theme colours of runs as Word resolves them: through a colour mapping that maps text 2 and background 2 to accents 3 and 4, with themeTint and themeShade alone and together, against a w:val that disagrees |
 | word-rules/E-theme-fonts.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Theme fonts across the style hierarchy: whether a font or a theme font written at a later level replaces the other, and which wins when one w:rFonts gives both |
-
 | word-rules/E-tab-hanging-14.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Where a tab after a label goes when the paragraph has a hanging indent, for typed labels and list labels, without the compat flag doNotUseIndentAsNumberingTabStop (default tab stops every 36 pt), in compatibility mode 14 |
 | word-rules/E-tab-hanging-noindenttab-14.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Where a tab after a label goes when the paragraph has a hanging indent, for typed labels and list labels, with the compat flag doNotUseIndentAsNumberingTabStop (default tab stops every 36 pt), in compatibility mode 14 |
+
 ## Apache POI test documents (`poi/`)
 
 Unmodified copies of documents from Apache POI's `test-data/document` at commit
