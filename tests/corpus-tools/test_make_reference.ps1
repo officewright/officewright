@@ -318,16 +318,24 @@ Exit-Stuck 'test' ''
     # the check on runs whose lengths are known notices it.
     $single = Get-RunRecords (New-Range $runs 0 9 -LosesUnit) $later $theme
     Check 'a MoveEnd without its unit reads one run per character' ($single.Count -eq 9) "$($single.Count)"
-    Check 'the run reader passes its check with Word as documented' (Test-RunReader (New-Range $runs 0 9))
-    Check 'the run reader passes its check with the quirks of the first K2 run' (Test-RunReader (New-Range $runs 0 9 -Quirky))
-    Check 'the run reader fails its check when MoveEnd drops its unit' (-not (Test-RunReader (New-Range $runs 0 9 -LosesUnit)))
-    Check 'the run reader fails its check when Word does not move' (-not (Test-RunReader (New-Range $runs 0 9 99)))
-    $shifted = @(
-        (New-Object PSObject -Property @{ Length = 1; Font = (New-Font 'Arial' 10) }),
-        (New-Object PSObject -Property @{ Length = 1; Font = (New-Font 'Arial' 10 -1) }),
-        (New-Object PSObject -Property @{ Length = 7; Font = (New-Font 'Arial' 10) })
-    )
-    Check 'the run reader fails its check on runs of other lengths' (-not (Test-RunReader (New-Range $shifted 0 9)))
+    Check 'the run reader passes its check with Word as documented' ((Get-RunReaderFault (New-Range $runs 0 9)) -eq '')
+    Check 'the run reader passes its check with the quirks of the first K2 run' ((Get-RunReaderFault (New-Range $runs 0 9 -Quirky)) -eq '')
+    $lost = Get-RunReaderFault (New-Range $runs 0 9 -LosesUnit)
+    Check 'the run reader fails its check when MoveEnd drops its unit, saying what it read' ($lost -like '*read 9 runs: 1 bold=False, 1 bold=False*') $lost
+    $stuck = Get-RunReaderFault (New-Range $runs 0 9 99)
+    Check 'the run reader fails its check when Word does not move, with the message' ($stuck -like 'reading failed: *did not move*') $stuck
+    # Runs that differ from the scratch document's in one length or one bold flag each.
+    function New-Runs($First, $FirstBold, $Second, $SecondBold) {
+        return @(
+            (New-Object PSObject -Property @{ Length = $First; Font = (New-Font 'Arial' 10 $FirstBold) }),
+            (New-Object PSObject -Property @{ Length = $Second; Font = (New-Font 'Arial' 12 $SecondBold) }),
+            (New-Object PSObject -Property @{ Length = 9 - $First - $Second; Font = (New-Font 'Arial' 10) })
+        )
+    }
+    foreach ($case in @(@(4, 0, 3, -1), @(5, 0, 2, -1), @(5, -1, 3, -1), @(5, 0, 3, 0))) {
+        $other = New-Runs $case[0] $case[1] $case[2] $case[3]
+        Check "the run reader fails its check on runs $($case -join '/')" ((Get-RunReaderFault (New-Range $other 0 9)) -ne '')
+    }
 
     function New-Paragraph($Text, $Runs, $Builtin, $StyleName, $ListType = 0, $ListString = '', $Step = 13, $Delay = 0) {
         $length = 0
@@ -395,6 +403,18 @@ Exit-Stuck 'test' ''
     } finally {
         $isolated.Dispose()
     }
+    # Every function of this script that the worker's code calls must be in the text it gets:
+    # a missing one fails every document in Word, or loses a value inside a try.
+    $shippedAst = [System.Management.Automation.Language.Parser]::ParseInput((Get-FormattingFunctions), [ref]$null, [ref]$null)
+    $shipped = @($shippedAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false) | ForEach-Object { $_.Name })
+    $defined = @($functions | ForEach-Object { $_.Name })
+    $assignment = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq '$FormattingScript' }, $false)
+    $workerErrors = $null
+    $workerAst = [System.Management.Automation.Language.Parser]::ParseInput($assignment.Right.Expression.Value, [ref]$null, [ref]$workerErrors)
+    $called = @(@($shippedAst, $workerAst) | ForEach-Object { $_.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true) } | ForEach-Object { $_.GetCommandName() } | Where-Object { $defined -contains $_ } | Sort-Object -Unique)
+    $missing = @($called | Where-Object { $shipped -notcontains $_ })
+    Check 'the formatting step parses' ($workerErrors.Count -eq 0 -and $called -contains 'Export-Formatting' -and $called -contains 'Get-RunReaderFault') ($called -join ', ')
+    Check 'the worker gets every function its code calls' ($missing.Count -eq 0) ($missing -join ', ')
     $json = ConvertTo-Json -InputObject $export -Depth 10 -Compress
     Check 'the export is JSON with the run lengths' ($json.Contains('"runs":[{"length":5') -and $json.Contains('"format":1'))
 

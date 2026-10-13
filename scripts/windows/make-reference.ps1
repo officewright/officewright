@@ -21,7 +21,8 @@
          colour Word gives no RGB value for by its ST_ThemeColor value, such as accent1, with
          its tint or shade); and, when that takes no longer than the paragraphs did, the same
          font properties for every run of formatting. The runs are read only after the run
-         reader gave the known runs of a scratch document;
+         reader gave the known runs of a scratch document; the console says what it read
+         otherwise;
       6. writes <name>.json: hashes, Word version and build, the printer, page count,
          compatibility mode, and the fonts the document asks for that neither Windows nor
          Word has.
@@ -639,18 +640,22 @@ function Get-RunRecords($Range, [DateTime] $Deadline, $Themes) {
     return , $runs.ToArray()
 }
 
-function Test-RunReader($Range) {
-    # Whether Get-RunRecords reads the runs of a paragraph that starts with five characters
-    # not bold and three bold: a Word that dropped the unit or the count of MoveEnd would
-    # give one run per character, which no other check notices.
+function Get-RunReaderFault($Range) {
+    # '' when Get-RunRecords reads the runs of a paragraph that starts with five characters
+    # not bold and three bold; otherwise what it read, for the console only (Word's messages
+    # are in the language of its user interface). A Word that dropped the unit or the count
+    # of MoveEnd would give one run per character, which no other check notices.
     $themes = @{ Fonts = @{}; Seen = @{}; Classify = { $null } }
     try {
         $runs = Get-RunRecords $Range ([DateTime]::UtcNow.AddSeconds(60)) $themes
     } catch {
-        return $false
+        return "reading failed: $($_.Exception.Message)"
     }
-    return ($null -ne $runs -and $runs.Count -ge 2 -and $runs[0].length -eq 5 -and $runs[1].length -eq 3 -and
-        $runs[0].font.bold -eq $false -and $runs[1].font.bold -eq $true)
+    if ($null -eq $runs) { return 'reading took longer than a minute' }
+    if ($runs.Count -ge 2 -and $runs[0].length -eq 5 -and $runs[1].length -eq 3 -and
+        $runs[0].font.bold -eq $false -and $runs[1].font.bold -eq $true) { return '' }
+    $read = @($runs | Select-Object -First 12 | ForEach-Object { "$($_.length) bold=$($_.font.bold)" })
+    return "expected 5 bold=False, 3 bold=True, ...; read $($runs.Count) runs: $($read -join ', ')"
 }
 
 function Export-Formatting($Document, [int] $BudgetSeconds, $Themes, $Progress, [bool] $RunReaderOk = $true) {
@@ -800,7 +805,7 @@ function Get-FormattingFunctions {
     $names = @(
         'ConvertTo-PointValue', 'ConvertTo-Flag', 'ConvertTo-HexColor', 'Get-ThemeColorName', 'Get-AlignmentName',
         'Get-LineRuleName', 'Get-StoryName', 'Get-TextExcerpt', 'Get-ThemeKind', 'Get-FontRecord',
-        'Get-ParagraphRecord', 'Get-RunRecords', 'Test-RunReader', 'Export-Formatting'
+        'Get-ParagraphRecord', 'Get-RunRecords', 'Get-RunReaderFault', 'Export-Formatting'
     )
     return ($names | ForEach-Object {
             "function $_ {`n$((Get-Item "function:$_").ScriptBlock.ToString())`n}"
@@ -895,23 +900,30 @@ if ($word.Documents.Count -gt 0) {
     # Not ours, as in the rendering step.
     return New-Object PSObject -Property @{ Foreign = $true }
 }
-# The run reader's check on a scratch document: "aaaaa" not bold, "bbb" bold, "cc".
+# The run reader's check on a scratch document: "aaaaa" not bold, "bbb" bold, "cc". A check
+# that cannot be made costs the runs, not the paragraphs.
 $progress.Step = 'Documents.Add (checking the run reader)'
-$scratch = $word.Documents.Add()
+$runReaderFault = ''
+$scratch = $null
 try {
+    $scratch = $word.Documents.Add()
     $scratch.Range(0, 0).InsertAfter('aaaaabbbcc')
     $scratch.Range(0, 10).Font.Bold = 0
     $scratch.Range(5, 8).Font.Bold = -1
     $progress.Step = 'checking the run reader'
-    $runReaderOk = Test-RunReader $scratch.Paragraphs.Item(1).Range
+    $runReaderFault = Get-RunReaderFault $scratch.Paragraphs.Item(1).Range
+} catch {
+    $runReaderFault = "the scratch document could not be set up: $($_.Exception.Message)"
 } finally {
-    try {
-        $scratch.Close(0)
-    } catch {
-        # Left open, it would stop the next document as a document of the user's.
-        throw "the scratch document for checking the run reader did not close: $($_.Exception.Message)"
-    } finally {
-        [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($scratch)
+    if ($null -ne $scratch) {
+        try {
+            $scratch.Close(0)
+        } catch {
+            # Left open, it would stop the next document as a document of the user's.
+            throw "the scratch document for checking the run reader did not close: $($_.Exception.Message)"
+        } finally {
+            [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($scratch)
+        }
     }
 }
 $progress.Step = 'Documents.Open (formatting)'
@@ -956,7 +968,9 @@ try {
         Get-ThemeKind $xml
     }
     $themes = @{ Fonts = $fonts; Seen = @{}; Classify = $classify }
-    $result = Export-Formatting $doc $BudgetSeconds $themes $progress $runReaderOk
+    $result = Export-Formatting $doc $BudgetSeconds $themes $progress ($runReaderFault -eq '')
+    # For the console: the export carries only the fixed note.
+    if ($runReaderFault) { $result.RunError = "check of the run reader: $runReaderFault" }
 } finally {
     $progress.Step = 'closing the re-saved copy (formatting)'
     $doc.Close(0)
