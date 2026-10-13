@@ -523,7 +523,6 @@ pub(crate) fn name_table(records: &[(u16, u16, u16, u16, &str)]) -> Vec<u8> {
     t
 }
 
-/// Builds a font collection (`ttcf`) from single fonts.
 /// A `cmap` table with one Windows Unicode BMP subtable in format 4, made of `segments`
 /// as given, `(startCode, endCode, idDelta)` each, with no glyph ID array, and the
 /// closing segment at U+FFFF after them. Nothing is checked, so a test can build a
@@ -614,6 +613,7 @@ pub(crate) fn cmap_of(records: &[(u16, u16, Vec<u8>)]) -> Vec<u8> {
     t
 }
 
+/// Builds a font collection (`ttcf`) from single fonts.
 pub(crate) fn collection(fonts: &[Vec<u8>]) -> Vec<u8> {
     let mut ttc = Vec::new();
     ttc.extend_from_slice(b"ttcf");

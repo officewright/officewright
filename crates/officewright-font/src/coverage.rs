@@ -30,7 +30,8 @@ impl Coverage {
     /// format 4 subtable, so it grows with the table rather than with the characters it
     /// maps; it is taken from `allowance`. `None` if the table cannot be read, if its
     /// subtable is damaged in a way that makes a lookup disagree with its segments or
-    /// groups (out of order or overlapping), or if it would go past `allowance`.
+    /// groups (out of order or overlapping), or if it would go past `allowance`. A format
+    /// 4 subtable never covers U+FFFF, and groups past U+10FFFF cover nothing.
     pub(crate) fn of_cmap(
         data: &[u8],
         glyph_count: u16,
@@ -51,11 +52,14 @@ impl Coverage {
                 let mut previous = None;
                 for group in table.groups() {
                     allowance.steps = allowance.steps.checked_sub(1)?;
-                    let (start, end) = in_order(
+                    let Some((start, end)) = in_order(
                         &mut previous,
                         group.start_char_code(),
                         group.end_char_code(),
-                    )?;
+                    )?
+                    else {
+                        continue;
+                    };
                     // Glyphs follow the code points, modulo 2^32 as the lookup computes them.
                     let base = u64::from(group.start_glyph_id());
                     for (from, to) in valid_offsets(base, 1 << 32, glyphs, u64::from(end - start)) {
@@ -67,11 +71,14 @@ impl Coverage {
                 let mut previous = None;
                 for group in table.groups() {
                     allowance.steps = allowance.steps.checked_sub(1)?;
-                    let (start, end) = in_order(
+                    let Some((start, end)) = in_order(
                         &mut previous,
                         group.start_char_code(),
                         group.end_char_code(),
-                    )?;
+                    )?
+                    else {
+                        continue;
+                    };
                     // Every code point of the group maps to the same glyph.
                     if (1..glyphs).contains(&u64::from(group.glyph_id())) {
                         ranges.push(start, 0, u64::from(end - start))?;
@@ -149,7 +156,20 @@ fn format4(
         allowance.steps = allowance.steps.checked_sub(1)?;
         let start = u32::from(starts.get(segment)?.get());
         let end = u32::from(ends.get(segment)?.get());
-        let (start, end) = in_order(&mut previous, start, end)?;
+        // The closing segment the format requires starts at U+FFFF, and some fonts repeat
+        // it. A lookup of U+FFFF, a noncharacter, may then land on any copy, so a format 4
+        // subtable never covers it, and the copies do not make it out of order: they sort
+        // after every other code point.
+        if start == 0xFFFF && previous == Some(0xFFFF) {
+            continue;
+        }
+        let Some((start, end)) = in_order(&mut previous, start, end)? else {
+            continue;
+        };
+        let end = end.min(0xFFFE);
+        if start > end {
+            continue;
+        }
         // idDelta is signed; modulo 65536 it is the same as its bits read unsigned.
         let delta = u64::from(deltas.get(segment)?.get() as u16);
         let offset = usize::from(offsets.get(segment)?.get());
@@ -179,15 +199,17 @@ fn format4(
     Some(())
 }
 
-/// `start` and `end` of a segment or group, if it comes after `previous` without
-/// overlapping it, as the lookup's binary search needs; it becomes `previous`.
-fn in_order(previous: &mut Option<u32>, start: u32, end: u32) -> Option<(u32, u32)> {
+/// `start` and `end` of a segment or group, cut at the last code point, if it comes
+/// after `previous` without overlapping it, as the lookup's binary search needs; it
+/// becomes `previous`. `Some(None)` for a group past the last code point: no character
+/// is in it, and the search never stops in it as long as the groups after it are in
+/// order too, as they still have to be.
+fn in_order(previous: &mut Option<u32>, start: u32, end: u32) -> Option<Option<(u32, u32)>> {
     if start > end || previous.is_some_and(|previous| previous >= start) {
         return None;
     }
     *previous = Some(end);
-    // Nothing past the last code point can be asked for.
-    (start <= LAST).then_some((start, end.min(LAST)))
+    Some((start <= LAST).then_some((start, end.min(LAST))))
 }
 
 /// The offsets `k` from 0 to `last` for which `(base + k) % modulus`, a glyph, is from 1
@@ -291,12 +313,33 @@ mod tests {
     #[test]
     fn segments_and_groups_must_be_in_order() {
         let mut previous = None;
-        assert_eq!(in_order(&mut previous, 0x41, 0x44), Some((0x41, 0x44)));
+        assert_eq!(
+            in_order(&mut previous, 0x41, 0x44),
+            Some(Some((0x41, 0x44)))
+        );
         assert_eq!(in_order(&mut previous, 0x44, 0x50), None);
         let mut previous = None;
         assert_eq!(in_order(&mut previous, 0x50, 0x41), None);
         let mut previous = Some(0x10);
-        assert_eq!(in_order(&mut previous, 0x11, 0x11_0005), Some((0x11, LAST)));
+        assert_eq!(
+            in_order(&mut previous, 0x11, 0x11_0005),
+            Some(Some((0x11, LAST)))
+        );
+        // Past the last code point: nothing, but what follows must still be in order.
+        assert_eq!(in_order(&mut previous, 0x11_0006, 0x11_0007), Some(None));
+        assert_eq!(in_order(&mut previous, 0x11_0007, 0x11_0008), None);
+    }
+
+    #[test]
+    fn format_4_never_covers_u_ffff() {
+        // U+FFF0 to U+FFFF map to glyphs 1 to 16 of 20, then comes the closing segment.
+        let cmap = crate::testing::cmap_format4(&[(0xFFF0, 0xFFFF, 1_u16.wrapping_sub(0xFFF0))]);
+        let mut allowance = Allowance {
+            steps: 100,
+            ranges: 100,
+        };
+        let coverage = Coverage::of_cmap(&cmap, 20, &mut allowance).unwrap();
+        assert_eq!(coverage.0, [(0xFFF0, 0xFFFE)]);
     }
 
     #[test]

@@ -417,11 +417,13 @@ impl FontBook {
     ///
     /// A face covers the characters that the subtable [`FontFace::char_map`] uses maps to
     /// a glyph other than 0 and inside the font, exactly the characters
-    /// [`CharMap::map`](crate::CharMap::map) maps, with two exceptions. A symbol font covers
-    /// the characters its subtable lists, normally U+F020 to U+F0FF; the U+0020 to U+00FF
-    /// that [`FontFace::glyph_id`] also finds, as Windows does, do not count, so a symbol
-    /// font never stands in for Latin text. And a subtable whose segments or groups are
-    /// out of order or overlap, so that a lookup cannot be trusted, covers nothing.
+    /// [`CharMap::map`](crate::CharMap::map) maps, with three exceptions. A symbol font
+    /// covers the characters its subtable lists, normally U+F020 to U+F0FF; the U+0020 to
+    /// U+00FF that [`FontFace::glyph_id`] also finds, as Windows does, do not count, so a
+    /// symbol font never stands in for Latin text. A subtable whose segments or groups are
+    /// out of order or overlap, so that a lookup cannot be trusted, covers nothing; a
+    /// repeated closing segment of a format 4 subtable does not count as overlap. And a
+    /// format 4 subtable never covers U+FFFF, a noncharacter.
     ///
     /// Adding fonts does not read their character maps. The first query reads, for every
     /// face added from the same file or buffer, its table directory, its `cmap` table and
@@ -1462,7 +1464,7 @@ mod tests {
         // included) starts reading, as an idRangeOffset.
         let at = |i: u16, count: u16, index: u16| 2 * (count - i + index);
         let array = [0, 1, 2, 9, 3, 0, 4, 1, 2, 3, 4, 5, 0, 1, 2, 3];
-        let cases: [(&str, Vec<u8>); 8] = [
+        let cases: [(&str, Vec<u8>); 10] = [
             (
                 "glyph array",
                 cmap_of(&[(
@@ -1481,6 +1483,18 @@ mod tests {
                 )]),
             ),
             (
+                "a repeated closing segment",
+                cmap_of(&[(
+                    3,
+                    1,
+                    format4(&[(0x41, 0x43, d(0x41, 1), 0), (0xFFFF, 0xFFFF, 1, 0)], &[]),
+                )]),
+            ),
+            (
+                "groups past the end of Unicode",
+                testing::cmap_groups(13, &[(0x41, 0x41, 2), (0x11_0000, 0x11_0010, 2)]),
+            ),
+            (
                 "deltas that wrap",
                 testing::cmap_format4(&[(0x10, 0x20, 0xFFEE), (0xFFF0, 0xFFFE, 0x12)]),
             ),
@@ -1490,6 +1504,8 @@ mod tests {
                     12,
                     &[
                         (0x1000, 0x1010, u32::MAX - 2),
+                        // Glyphs from 65,536 on: none of them in the font.
+                        (0x3000, 0x3010, 0x1_0000),
                         (0x2_0000, 0x2_0003, 1),
                         (0x10_FFF0, 0x10_FFFF, 1),
                     ],
@@ -1561,6 +1577,28 @@ mod tests {
                 covered += usize::from(covers);
             }
             assert!(covered > 0, "{name} covers nothing");
+        }
+    }
+
+    #[test]
+    fn groups_past_the_end_of_unicode_are_still_in_order() {
+        // A lookup of A first meets group 2, past A, so it searches on to its right, and
+        // finds nothing: the group past the end of Unicode does not end the order check.
+        for format in [12, 13] {
+            let cmap = testing::cmap_groups(
+                format,
+                &[
+                    (0x41, 0x41, 2),
+                    (0x11_0000, 0x11_0000, 2),
+                    (0x10, 0x10, 2),
+                    (0x11, 0x11, 2),
+                ],
+            );
+            let mut book = FontBook::new();
+            let font = TestFont::new("Test Map").with_table(b"cmap", cmap);
+            book.add_bytes(font.build(), FontOrigin::User).unwrap();
+            assert_eq!(book.load(FaceId(0)).unwrap().glyph_id('A'), None);
+            assert!(book.faces_covering('A').is_empty(), "format {format}");
         }
     }
 
