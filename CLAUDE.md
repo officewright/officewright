@@ -228,7 +228,7 @@ The maintainer does not review Rust code. Correctness rests on the automated gat
 - Reviews the diff against CLAUDE.md, the Definition of done and the clean-room policy. Focus: parsers and FFI safety, tests that cannot fail or test the implementation instead of behaviour, missing edge cases, public API and C ABI stability.
 - For critical paths, temporarily breaks the code and confirms a test catches it.
 - Checks the release gate table where one is required: a value worse on the branch than on main is a **blocker** unless the PR explains it and the maintainer agreed to it in a PR comment. The exception concerns this review only; the baseline check and the merge conditions below stay as they are.
-- Reads Copilot's findings on the PR and the author's replies (`gh api --paginate repos/{owner}/{repo}/pulls/<n>/comments` for the inline ones and `.../pulls/<n>/reviews` for the review bodies with the low-confidence ones; `gh pr view` shows neither), and raises as a finding any defect the author dismissed wrongly.
+- Reads Copilot's findings on the PR and the author's replies (`gh api --paginate repos/{owner}/{repo}/pulls/<n>/comments` for the inline ones and `.../pulls/<n>/reviews` for the review bodies with the low-confidence ones, whose replies are PR comments, `gh pr view <n> --comments`; `gh pr view` shows neither kind of finding), and raises as a finding any defect the author dismissed wrongly.
 - Verifies each finding adversarially, then posts one PR comment listing findings tagged **blocker**, **should-fix** or **nit**.
 
 ### 3. Fixes
