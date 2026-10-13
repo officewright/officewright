@@ -4,17 +4,19 @@ use std::{fs, io};
 
 use officewright_core::{PageSize, Pt};
 
+use officewright_core::Color;
+
 use crate::embed::{EXTRA_OBJECTS, Prepared, Usage};
 use crate::font::check_font_size;
 use crate::stream::stream_object;
-use crate::{Compression, Error, Font, Result};
+use crate::{Compression, Error, Font, GlyphRun, GraphicsPath, Result, Stroke};
 
 /// Pages smaller or larger than this are outside ISO 32000-1, Annex C.
 const PAGE_SIDE: std::ops::RangeInclusive<f64> = 3.0..=14400.0;
 
-/// Text positions stay within this many points of the origin: 32767 is the largest
-/// real number every PDF 1.4 reader has to handle (PDF Reference 1.4, Appendix C), far
-/// beyond the largest page.
+/// Positions stay within this many points of the origin: 32767 is the largest real number
+/// every PDF 1.4 reader has to handle (PDF Reference 1.4, Appendix C), far beyond the
+/// largest page.
 pub(crate) const MAX_POSITION: f64 = 32767.0;
 
 /// The largest byte offset the 10-digit fields of a cross-reference table can hold.
@@ -39,6 +41,9 @@ pub struct Page {
     /// The content stream. Text stays text until the document is written, when the text
     /// of every page is known.
     content: Vec<Content>,
+    /// How many clipping paths are in effect: the `q` operators of push_clip that no
+    /// pop_clip has closed yet.
+    clips: usize,
 }
 
 /// A piece of a page's content stream.
@@ -51,6 +56,12 @@ enum Content {
         /// The font's index in the page's fonts.
         font: usize,
         text: String,
+    },
+    /// A run of glyphs that has been checked.
+    Glyphs {
+        /// The index of the run's font in the page's fonts.
+        font: usize,
+        run: GlyphRun,
     },
 }
 
@@ -77,6 +88,7 @@ impl Document {
             size,
             fonts: Vec::new(),
             content: Vec::new(),
+            clips: 0,
         });
         #[allow(clippy::indexing_slicing)] // reason: the page was just pushed at `index`
         let page = &mut self.pages[index];
@@ -119,8 +131,9 @@ impl Document {
     ///
     /// Embedded fonts are reduced to the glyphs the document shows now. Nothing is
     /// written to `out` unless the whole document can be. The file is PDF 1.4, or PDF 1.5
-    /// if two characters share a glyph of an embedded font and one of them needs
-    /// replacement text for text extraction.
+    /// if some text needs replacement text for text extraction: where two characters share
+    /// a glyph of an embedded font, or a cluster of a glyph run cannot be given by the
+    /// ToUnicode map.
     ///
     /// # Errors
     ///
@@ -155,18 +168,26 @@ impl Document {
         // untouched. First the glyphs each embedded font shows, over all pages.
         let mut usages = vec![Usage::default(); fonts.len()];
         for (page, map) in self.pages.iter().zip(&page_fonts) {
-            for (font, text) in page.texts() {
+            for piece in &page.content {
+                let (Content::Text { font, .. } | Content::Glyphs { font, .. }) = piece else {
+                    continue;
+                };
                 // reason: `map` has an entry for each of the page's fonts, which are the
-                // only fonts its texts use
+                // only fonts its texts and runs use
                 #[allow(clippy::indexing_slicing)]
-                let font = map[font];
-                if let (Some(font), Some(usage)) = (fonts.get(font), usages.get_mut(font)) {
-                    if font.embedded().is_some() {
+                let font = map[*font];
+                let (Some(font), Some(usage)) = (fonts.get(font), usages.get_mut(font)) else {
+                    continue;
+                };
+                match piece {
+                    Content::Text { text, .. } if font.embedded().is_some() => {
                         let lookup = font.lookup();
                         for (offset, ch) in text.char_indices() {
-                            usage.add(lookup.glyph(ch, offset)?.id, ch);
+                            usage.add(lookup.glyph(ch, offset)?.id, ch.encode_utf8(&mut [0; 4]));
                         }
                     }
+                    Content::Glyphs { run, .. } => run.record(usage),
+                    _ => {}
                 }
             }
         }
@@ -325,6 +346,12 @@ impl Document {
 }
 
 impl Page {
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
+    /// The most clipping paths that can be in effect at once. Each is saved with the
+    /// graphics state, which every PDF reader can nest 28 deep (PDF Reference 1.4,
+    /// Appendix C), and drawing takes one more level.
+    pub const MAX_CLIPS: usize = 27;
+
     /// The page size.
     pub fn size(&self) -> PageSize {
         self.size
@@ -361,10 +388,7 @@ impl Page {
     /// On error the page is unchanged.
     pub fn add_text(&mut self, x: Pt, y: Pt, font: &Font, font_size: Pt, text: &str) -> Result<()> {
         check_font_size(font_size)?;
-        let positions = -MAX_POSITION..=MAX_POSITION;
-        if !positions.contains(&x.0) || !positions.contains(&y.0) {
-            return Err(Error::InvalidPosition { x, y });
-        }
+        check_position(x, y)?;
         let lookup = font.lookup();
         for (offset, ch) in text.char_indices() {
             lookup.glyph(ch, offset)?;
@@ -388,6 +412,138 @@ impl Page {
         Ok(())
     }
 
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
+    /// Draws a run of glyphs at the positions it gives them.
+    ///
+    /// This is how text that a layout engine has shaped is drawn: the run says which
+    /// glyphs of an embedded font go where and which text each cluster of them stands
+    /// for, and nothing is measured, kerned or refused by script here. A run without
+    /// clusters draws nothing. See [`GlyphRun`] for an example.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NotEmbedded`] if the run's font is a standard font.
+    /// - [`Error::InvalidGlyph`] if a glyph ID is not in the font, and
+    ///   [`Error::EmptyCluster`] if a cluster has no glyphs.
+    /// - [`Error::InvalidFontSize`] for a size outside [`Font::MIN_SIZE`] to
+    ///   [`Font::MAX_SIZE`]; [`Error::InvalidPosition`] if the origin, a glyph's offset
+    ///   or a glyph's position is outside -32767 to 32767 pt; and [`Error::OutOfRange`]
+    ///   for a horizontal scale outside 0.01 to 10, a skew outside -1 to 1, a stroke width
+    ///   outside 0 to 32767 pt, or a cluster's text longer than 16382 UTF-16 code units.
+    ///
+    /// On error the page is unchanged.
+    pub fn draw_glyphs(&mut self, run: &GlyphRun) -> Result<()> {
+        run.check()?;
+        if run.glyphs().is_empty() {
+            return Ok(());
+        }
+        let font = self.font_index(run.font());
+        self.content.push(Content::Glyphs {
+            font,
+            run: run.clone(),
+        });
+        Ok(())
+    }
+
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
+    /// Fills the inside of `path` with `color`, by the nonzero winding number rule.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidPosition`] if a point of the path is outside -32767 to 32767 pt.
+    /// On error the page is unchanged.
+    pub fn fill_path(&mut self, path: &GraphicsPath, color: Color) -> Result<()> {
+        path.check()?;
+        let mut operators = format!("q\n{} rg\n", crate::path::color(color));
+        path.write(&mut operators);
+        operators.push_str("f\nQ\n");
+        self.push_operators(operators.as_bytes());
+        Ok(())
+    }
+
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
+    /// Strokes the outline of `path` as `stroke` says. Open subpaths get the stroke's caps
+    /// at their ends, closed ones joins at every corner.
+    ///
+    /// ```
+    /// use officewright_pdf::{Color, Document, GraphicsPath, PageSize, Pt, Stroke};
+    ///
+    /// // A frame around a box of text, 0.75 pt wide in grey.
+    /// let mut doc = Document::new();
+    /// let frame = GraphicsPath::rect(Pt(70.0), Pt(690.0), Pt(200.0), Pt(30.0));
+    /// doc.add_page(PageSize::A4)?
+    ///     .stroke_path(&frame, &Stroke::new(Pt(0.75), Color::rgb(128, 128, 128)))?;
+    /// # Ok::<(), officewright_pdf::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidPosition`] if a point of the path is outside -32767 to 32767 pt;
+    /// [`Error::OutOfRange`] if the line width, a dash length or the dash phase is outside
+    /// 0 to 32767 pt or the dash pattern has more than 8191 lengths; [`Error::InvalidDash`]
+    /// if all its lengths are 0. On error the page is unchanged.
+    pub fn stroke_path(&mut self, path: &GraphicsPath, stroke: &Stroke) -> Result<()> {
+        path.check()?;
+        stroke.check()?;
+        let mut operators = String::from("q\n");
+        stroke.write(&mut operators);
+        path.write(&mut operators);
+        operators.push_str("S\nQ\n");
+        self.push_operators(operators.as_bytes());
+        Ok(())
+    }
+
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
+    /// Clips everything drawn on the page from now on to the inside of `path`, by the
+    /// nonzero winding number rule, until [`pop_clip`](Self::pop_clip) removes it. Clipping
+    /// paths nest: what is drawn shows only inside all of those in effect. The end of the
+    /// page removes those still in effect.
+    ///
+    /// ```
+    /// use officewright_pdf::{Color, Document, GraphicsPath, PageSize, Pt};
+    ///
+    /// let mut doc = Document::new();
+    /// let page = doc.add_page(PageSize::A4)?;
+    /// // Only the left half of the square is drawn.
+    /// page.push_clip(&GraphicsPath::rect(Pt(100.0), Pt(100.0), Pt(50.0), Pt(100.0)))?;
+    /// page.fill_path(&GraphicsPath::rect(Pt(100.0), Pt(100.0), Pt(100.0), Pt(100.0)), Color::BLACK)?;
+    /// page.pop_clip()?;
+    /// # Ok::<(), officewright_pdf::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidPosition`] if a point of the path is outside -32767 to 32767 pt, and
+    /// [`Error::TooManyClips`] if [`MAX_CLIPS`](Self::MAX_CLIPS) clipping paths are in
+    /// effect already. On error the page is unchanged.
+    pub fn push_clip(&mut self, path: &GraphicsPath) -> Result<()> {
+        path.check()?;
+        if self.clips >= Self::MAX_CLIPS {
+            return Err(Error::TooManyClips);
+        }
+        let mut operators = String::from("q\n");
+        path.write(&mut operators);
+        operators.push_str("W n\n");
+        self.push_operators(operators.as_bytes());
+        self.clips += 1;
+        Ok(())
+    }
+
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
+    /// Removes the clipping path added last by [`push_clip`](Self::push_clip).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NoClip`] if no clipping path is in effect.
+    pub fn pop_clip(&mut self) -> Result<()> {
+        if self.clips == 0 {
+            return Err(Error::NoClip);
+        }
+        self.push_operators(b"Q\n");
+        self.clips -= 1;
+        Ok(())
+    }
+
     /// The index of `font` in the page's fonts, adding it on its first use. The font at
     /// index `i` is the page's font resource `/F(i + 1)`.
     fn font_index(&mut self, font: &Font) -> usize {
@@ -407,14 +563,6 @@ impl Page {
         }
     }
 
-    /// The page's texts, each with the index of its font in the page's fonts.
-    fn texts(&self) -> impl Iterator<Item = (usize, &str)> {
-        self.content.iter().filter_map(|piece| match piece {
-            Content::Text { font, text } => Some((*font, text.as_str())),
-            Content::Operators(_) => None,
-        })
-    }
-
     /// Writes the content stream, encoding the text, and says whether it needed
     /// replacement text. `map` gives the document's index of each of the page's fonts,
     /// and `encoders` the document's fonts.
@@ -431,7 +579,27 @@ impl Page {
                     let encoder = &encoders[map[*font]];
                     actual_text |= encoder.show(&mut stream, text)?;
                 }
+                Content::Glyphs { font, run } => {
+                    // reason: as for text
+                    #[allow(clippy::indexing_slicing)]
+                    let encoder = &encoders[map[*font]];
+                    match encoder {
+                        Encoder::Embedded(_, prepared) => {
+                            actual_text |= run.write(&mut stream, font + 1, prepared);
+                        }
+                        // draw_glyphs refuses runs in a standard font.
+                        Encoder::Standard(font) => {
+                            return Err(Error::NotEmbedded {
+                                font: font.name().to_owned(),
+                            });
+                        }
+                    }
+                }
             }
+        }
+        // The clipping paths still in effect end with the page.
+        for _ in 0..self.clips {
+            stream.extend_from_slice(b"Q\n");
         }
         Ok((stream, actual_text))
     }
@@ -457,6 +625,16 @@ impl Encoder<'_> {
             }
             Self::Embedded(font, prepared) => prepared.show(out, &font.lookup(), text),
         }
+    }
+}
+
+/// Fails unless (`x`, `y`) is within -32767 to 32767 pt of the origin.
+pub(crate) fn check_position(x: Pt, y: Pt) -> Result<()> {
+    let positions = -MAX_POSITION..=MAX_POSITION;
+    if positions.contains(&x.0) && positions.contains(&y.0) {
+        Ok(())
+    } else {
+        Err(Error::InvalidPosition { x, y })
     }
 }
 
@@ -819,6 +997,180 @@ mod tests {
         let pdf = String::from_utf8_lossy(&doc.to_bytes().unwrap()).into_owned();
         assert!(pdf.contains("/F1 32767 Tf\n-32767 32767 Td"), "{pdf}");
         assert!(pdf.contains("/F1 0.01 Tf\n0 0 Td"), "{pdf}");
+    }
+
+    /// The content stream of the only page of `doc`, uncompressed.
+    fn content(doc: &mut Document) -> String {
+        doc.set_compression(Compression::None);
+        let pdf = String::from_utf8_lossy(&doc.to_bytes().unwrap()).into_owned();
+        let (_, stream) = pdf.split_once("stream\n").unwrap();
+        let (content, _) = stream.split_once("\nendstream").unwrap();
+        content.to_owned()
+    }
+
+    #[test]
+    fn fills_and_strokes_paths_in_a_state_of_their_own() {
+        let mut doc = Document::new();
+        let page = doc.add_page(PageSize::A4).unwrap();
+        let mut triangle = GraphicsPath::new(Pt(10.0), Pt(20.0));
+        triangle.line_to(Pt(30.0), Pt(20.0)).close();
+        page.fill_path(&triangle, Color::rgb(255, 0, 0)).unwrap();
+        page.stroke_path(
+            &GraphicsPath::rect(Pt(1.0), Pt(2.0), Pt(3.0), Pt(4.0)),
+            &Stroke::new(Pt(0.5), Color::rgb(0, 0, 255)).with_dash(&[Pt(2.0)], Pt(1.0)),
+        )
+        .unwrap();
+        // Text after the shapes is black again: their colours ended with their Q.
+        page.add_text(Pt(72.0), Pt(700.0), &helvetica(), Pt(12.0), "x")
+            .unwrap();
+        assert_eq!(
+            content(&mut doc),
+            "q\n1 0 0 rg\n10 20 m\n30 20 l\nh\nf\nQ\n\
+             q\n0.5 w\n[2] 1 d\n0 0 1 RG\n1 2 3 4 re\nS\nQ\n\
+             BT\n/F1 12 Tf\n72 700 Td\n(x) Tj\nET\n"
+        );
+    }
+
+    #[test]
+    fn clips_until_popped_and_closes_the_rest_at_the_end_of_the_page() {
+        let mut doc = Document::new();
+        let page = doc.add_page(PageSize::A4).unwrap();
+        let clip = GraphicsPath::rect(Pt(0.0), Pt(0.0), Pt(100.0), Pt(50.0));
+        page.push_clip(&clip).unwrap();
+        page.fill_path(&clip, Color::BLACK).unwrap();
+        page.pop_clip().unwrap();
+        assert!(matches!(page.pop_clip(), Err(Error::NoClip)));
+        page.push_clip(&clip).unwrap();
+        page.push_clip(&clip).unwrap();
+        page.pop_clip().unwrap();
+        let content = content(&mut doc);
+        assert_eq!(
+            content,
+            "q\n0 0 100 50 re\nW n\nq\n0 0 0 rg\n0 0 100 50 re\nf\nQ\nQ\n\
+             q\n0 0 100 50 re\nW n\nq\n0 0 100 50 re\nW n\nQ\n\
+             Q\n"
+        );
+        // Every q has its Q.
+        let operators: Vec<&str> = content.split_whitespace().collect();
+        let saves = operators.iter().filter(|&&op| op == "q").count();
+        assert_eq!(saves, operators.iter().filter(|&&op| op == "Q").count());
+    }
+
+    #[test]
+    fn nests_at_most_max_clips_clipping_paths() {
+        let mut doc = Document::new();
+        let page = doc.add_page(PageSize::A4).unwrap();
+        let clip = GraphicsPath::rect(Pt(0.0), Pt(0.0), Pt(100.0), Pt(50.0));
+        for _ in 0..Page::MAX_CLIPS {
+            page.push_clip(&clip).unwrap();
+        }
+        let before = page.content.len();
+        assert!(matches!(page.push_clip(&clip), Err(Error::TooManyClips)));
+        assert_eq!(page.content.len(), before);
+        // The deepest drawing still fits in the 28 levels every reader nests.
+        page.fill_path(&clip, Color::BLACK).unwrap();
+        let mut depth: usize = 0;
+        let mut deepest = 0;
+        for op in content(&mut doc).split_whitespace() {
+            match op {
+                "q" => depth += 1,
+                "Q" => depth -= 1,
+                _ => {}
+            }
+            deepest = deepest.max(depth);
+        }
+        assert_eq!((deepest, depth), (28, 0));
+        assert_eq!(
+            Error::TooManyClips.to_string(),
+            "more than 27 clipping paths would be in effect at once"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_shapes_and_leaves_the_page_unchanged() {
+        let mut doc = Document::new();
+        let page = doc.add_page(PageSize::A4).unwrap();
+        let far = GraphicsPath::new(Pt(0.0), Pt(40000.0));
+        let fine = GraphicsPath::rect(Pt(0.0), Pt(0.0), Pt(1.0), Pt(1.0));
+        let solid = Stroke::new(Pt(1.0), Color::BLACK);
+        let position = |result: Result<()>| matches!(result, Err(Error::InvalidPosition { .. }));
+        assert!(position(page.fill_path(&far, Color::BLACK)));
+        assert!(position(page.stroke_path(&far, &solid)));
+        assert!(position(page.push_clip(&far)));
+        assert!(matches!(
+            page.stroke_path(&fine, &Stroke::new(Pt(-1.0), Color::BLACK)),
+            Err(Error::OutOfRange {
+                what: "line width",
+                ..
+            })
+        ));
+        assert!(matches!(
+            page.stroke_path(&fine, &solid.clone().with_dash(&[Pt(0.0)], Pt(0.0))),
+            Err(Error::InvalidDash)
+        ));
+        assert!(page.content.is_empty());
+        assert_eq!(page.clips, 0);
+        assert_eq!(
+            Error::InvalidPosition {
+                x: Pt(0.0),
+                y: Pt(40000.0)
+            }
+            .to_string(),
+            "position (0, 40000) pt is outside the -32767 to 32767 pt range"
+        );
+    }
+
+    #[test]
+    fn glyph_runs_need_an_embedded_font() {
+        let mut doc = Document::new();
+        let page = doc.add_page(PageSize::A4).unwrap();
+        let mut run = GlyphRun::new(&helvetica(), Pt(12.0), Pt(0.0), Pt(0.0));
+        run.push_cluster(
+            "A",
+            [crate::PlacedGlyph::new(
+                crate::GlyphId::new(65),
+                Pt(0.0),
+                Pt(0.0),
+            )],
+        );
+        let err = page.draw_glyphs(&run).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "glyphs can be drawn only in an embedded font, and Helvetica is a standard font"
+        );
+        assert!(page.content.is_empty() && page.fonts.is_empty());
+    }
+
+    #[test]
+    fn new_errors_are_invalid_arguments() {
+        for err in [
+            Error::NotEmbedded {
+                font: "Helvetica".to_owned(),
+            },
+            Error::InvalidGlyph {
+                glyph: 7,
+                font: "F".to_owned(),
+            },
+            Error::EmptyCluster { cluster: 0 },
+            Error::OutOfRange {
+                what: "skew",
+                value: 2.0,
+                min: -1.0,
+                max: 1.0,
+            },
+            Error::InvalidDash,
+            Error::NoClip,
+            Error::TooManyClips,
+        ] {
+            let message = err.to_string();
+            assert!(
+                matches!(
+                    officewright_core::Error::from(err),
+                    officewright_core::Error::InvalidArgument(m) if m == message
+                ),
+                "{message}"
+            );
+        }
     }
 
     #[test]
