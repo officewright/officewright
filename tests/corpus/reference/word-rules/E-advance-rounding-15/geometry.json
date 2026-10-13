@@ -8,6 +8,14 @@
  "fonts_not_embedded": [
   "TimesNewRomanPSMT"
  ],
+ "fonts_rasterized_with": [
+  {
+   "font": "TimesNewRomanPSMT",
+   "full_name": "Times New Roman",
+   "version": "Version 7.12",
+   "sha256": "931c5de5c70401d9324d5014c123802b4fb753000360ceb2f56c589403cd58c5"
+  }
+ ],
  "compat_flags_dropped": [],
  "compat_flags_added": [
   "useWord2013TrackBottomHyphenation=1"
