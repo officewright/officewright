@@ -139,6 +139,16 @@ impl<'a> Formats<'a> {
         self.resolve_run(style, &direct, None)
     }
 
+    /// The formatting in effect of the mark of a paragraph that has the default
+    /// paragraph style and no properties of its own, such as the empty paragraph Word
+    /// adds at the end of a cell that ends with a table.
+    // reason: only the translation into the layout IR asks for it.
+    #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
+    pub(crate) fn default_mark(&mut self) -> CharacterFormat {
+        let style = self.paragraph_style(None);
+        self.resolve_run(style, &super::properties::RunProperties::default(), None)
+    }
+
     /// The formatting of a list item's label, its number or bullet, in effect: the
     /// paragraph mark's, with the run properties of the list level laid over it, whose
     /// on/off values set the value as direct formatting does. Word does not allow the

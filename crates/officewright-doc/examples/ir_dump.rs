@@ -56,12 +56,7 @@ fn main() -> ExitCode {
             section.columns().count(),
             section.start()
         );
-        for block in section.blocks() {
-            match block {
-                ir::Block::Paragraph(paragraph) => print_paragraph(ir, paragraph),
-                other => println!("  {other:?}"),
-            }
-        }
+        print_blocks(ir, section.blocks(), "  ");
     }
     for entry in translation.left_out() {
         println!("left out: {entry}");
@@ -76,12 +71,43 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn print_paragraph(ir: &ir::Document, paragraph: &ir::Paragraph) {
+fn print_blocks(ir: &ir::Document, blocks: &[ir::Block], indent: &str) {
+    for block in blocks {
+        match block {
+            ir::Block::Paragraph(paragraph) => print_paragraph(ir, paragraph, indent),
+            ir::Block::Table(table) => {
+                let props = table.props();
+                println!(
+                    "{indent}table {:?} {:?}, indent {} pt, grid {:?}",
+                    props.layout(),
+                    props.width(),
+                    props.indent().0,
+                    table.grid().iter().map(|width| width.0).collect::<Vec<_>>()
+                );
+                for (n, row) in table.rows().iter().enumerate() {
+                    println!("{indent}  row {n} height {:?}", row.height());
+                    for cell in row.cells() {
+                        println!(
+                            "{indent}    cell span {} {:?} {:?}",
+                            cell.grid_span(),
+                            cell.width(),
+                            cell.vertical_merge()
+                        );
+                        print_blocks(ir, cell.blocks(), &format!("{indent}      "));
+                    }
+                }
+            }
+            other => println!("{indent}{other:?}"),
+        }
+    }
+}
+
+fn print_paragraph(ir: &ir::Document, paragraph: &ir::Paragraph, margin: &str) {
     let props = paragraph.props();
     let indent = props.indent();
     let spacing = props.spacing();
     let mut line = format!(
-        "  paragraph {:?}, indent {}/{}/{} pt, spacing {}/{} pt, line {:?}, style key {}",
+        "{margin}paragraph {:?}, indent {}/{}/{} pt, spacing {}/{} pt, line {:?}, style key {}",
         props.alignment(),
         indent.start().0,
         indent.end().0,
@@ -107,9 +133,9 @@ fn print_paragraph(ir: &ir::Document, paragraph: &ir::Paragraph) {
         ));
     }
     println!("{line}");
-    println!("    mark {}", style(ir, paragraph.mark()));
+    println!("{margin}  mark {}", style(ir, paragraph.mark()));
     for inline in paragraph.inlines() {
-        println!("    {}", describe(ir, inline));
+        println!("{margin}  {}", describe(ir, inline));
     }
 }
 
