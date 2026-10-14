@@ -46,17 +46,18 @@ impl Translator<'_> {
         if let Some(&found) = self.notes.get(&(endnote, id)) {
             return Some(found);
         }
-        // Places in a note are written from the document's list of notes, and its tables
-        // nest from the note, not from where the reference is.
+        // Places in a note are written from the document's list of notes. Its tables
+        // count their depth on from the tables around the reference: the note is
+        // translated where the reference is, and the IR's limit on nesting is what bounds
+        // that recursion. Counted from the note, 84 tables around a reference to a note
+        // of 84, which the default limits allow, overflowed a 2 MiB stack.
         let path = std::mem::replace(
             &mut self.path,
             vec![Step::Field("notes"), Step::Index(self.notes_added)],
         );
-        let depth = std::mem::take(&mut self.table_depth);
         self.in_note = true;
         let blocks = self.blocks(note.blocks());
         self.in_note = false;
-        self.table_depth = depth;
         self.path = path;
         let kind = if endnote {
             ir::NoteKind::Endnote

@@ -2456,9 +2456,7 @@ fn lists_every_reference_left_out_and_places_notes_in_their_order() {
 }
 
 #[test]
-fn nests_a_note_s_tables_from_the_note() {
-    // A reference inside tables 75 deep, to a note whose tables nest 30 deep: the note's
-    // tables count their depth from the note, so all 30 are kept.
+fn bounds_a_note_s_tables_by_the_tables_around_its_reference() {
     let nested = |depth: usize, inner: &str| {
         format!(
             "{}{inner}{}",
@@ -2466,40 +2464,62 @@ fn nests_a_note_s_tables_from_the_note() {
             "</w:tc></w:tr></w:tbl><w:p/>".repeat(depth)
         )
     };
-    let footnotes = format!(
-        r#"<w:footnotes xmlns:w="{W}"><w:footnote w:id="1">{}</w:footnote></w:footnotes>"#,
-        nested(30, "<w:p/>")
-    );
-    let body = nested(
-        75,
-        r#"<w:p><w:r><w:footnoteReference w:id="1"/></w:r></w:p>"#,
-    );
-    let translation = translate(&with_parts(
-        &body,
-        &[("footnotes", "footnotes.xml", footnotes)],
-    ));
-    assert!(
-        translation.left_out().is_empty(),
-        "{:?}",
-        translation.left_out()
-    );
-    // The note, through the reference at the bottom of the body's tables.
-    let mut blocks = translation.document().sections()[0].blocks();
-    while let Some(ir::Block::Table(table)) = blocks.first() {
-        blocks = table.rows()[0].cells()[0].blocks();
-    }
-    let ir::Block::Paragraph(paragraph) = &blocks[0] else {
-        panic!("a paragraph");
+    let note_depth = |around: usize, inside: usize| {
+        let footnotes = format!(
+            r#"<w:footnotes xmlns:w="{W}"><w:footnote w:id="1">{}</w:footnote></w:footnotes>"#,
+            nested(inside, "<w:p/>")
+        );
+        let body = nested(
+            around,
+            r#"<w:p><w:r><w:footnoteReference w:id="1"/></w:r></w:p>"#,
+        );
+        let translation = translate(&with_parts(
+            &body,
+            &[("footnotes", "footnotes.xml", footnotes)],
+        ));
+        // The note, through the reference at the bottom of the body's tables.
+        let mut blocks = translation.document().sections()[0].blocks();
+        while let Some(ir::Block::Table(table)) = blocks.first() {
+            blocks = table.rows()[0].cells()[0].blocks();
+        }
+        let ir::Block::Paragraph(paragraph) = &blocks[0] else {
+            panic!("a paragraph");
+        };
+        let ir::Inline::NoteReference { note, .. } = &paragraph.inlines()[0] else {
+            panic!("a note reference");
+        };
+        let note = translation.document().note(*note).unwrap();
+        let mut depth = 0;
+        let mut blocks = note.blocks();
+        while let Some(ir::Block::Table(table)) = blocks.first() {
+            depth += 1;
+            blocks = table.rows()[0].cells()[0].blocks();
+        }
+        let listed: Vec<String> = translation
+            .left_out()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        (depth, listed)
     };
-    let ir::Inline::NoteReference { note, .. } = &paragraph.inlines()[0] else {
-        panic!("a note reference");
-    };
-    let note = translation.document().note(*note).unwrap();
-    let mut depth = 0;
-    let mut blocks = note.blocks();
-    while let Some(ir::Block::Table(table)) = blocks.first() {
-        depth += 1;
-        blocks = table.rows()[0].cells()[0].blocks();
-    }
-    assert_eq!(depth, 30);
+    // A note's tables count their depth on from the tables around its reference, which
+    // bounds the translation's recursion by the IR's limit: 75 around and 30 inside keep
+    // 25, and the rest is listed.
+    let (depth, listed) = note_depth(75, 30);
+    assert_eq!(depth, 25);
+    // The 26th table, inside 25 others.
+    let place = format!(
+        "notes[0].blocks[0]{}",
+        ".rows[0].cells[0].blocks[0]".repeat(25)
+    );
+    assert_eq!(
+        listed,
+        [format!(
+            "{place}: a table nested more than 100 deep is left out"
+        )]
+    );
+    // The deepest the default limits allow on both sides translates within a test
+    // thread's stack.
+    let (depth, _) = note_depth(83, 83);
+    assert_eq!(depth, 17);
 }
