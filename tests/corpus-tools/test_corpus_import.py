@@ -1208,6 +1208,46 @@ class RenderedPages(unittest.TestCase):
         sdt = f"<w:sdt><w:sdtContent><w:p>{self.MARK}</w:p></w:sdtContent></w:sdt>"
         self.assertEqual(self.pages(sdt + f"<w:p>{self.MARK}</w:p>"), 3)
 
+    def test_rows_inside_wrappers_count_once(self):
+        cell = f"<w:tc><w:p>{self.MARK}</w:p></w:tc>"
+        in_sdt = f"<w:sdt><w:sdtContent><w:tr>{cell}{cell}</w:tr></w:sdtContent></w:sdt>"
+        in_xml = f'<w:customXml w:element="row"><w:tr>{cell}</w:tr></w:customXml>'
+        self.assertEqual(self.pages(f"<w:tbl><w:tblPr/>{in_sdt}{in_xml}</w:tbl>"), 3)
+
+
+class Summary(unittest.TestCase):
+    """What the import prints about each document."""
+
+    def item(self, statistic, pages, drawn=()):
+        return importer.Checked(
+            record={"file": "report.docx", "pages": statistic},
+            pdf=Path("report.pdf"),
+            resaved=Path("report.resaved.docx"),
+            row="",
+            geometry={"page_count": pages, "compat_flags_dropped": []},
+            drawn=list(drawn),
+        )
+
+    def test_the_count_is_the_imported_one_with_word_s_statistic_noted(self):
+        lines = importer.summary([self.item(30, 35), self.item(1, 1)], "imported")
+        self.assertEqual(lines[0], "imported report.docx: 35 pages")
+        self.assertIn("Word's page statistic said 30", lines[1])
+        self.assertEqual(lines[2], "imported report.docx: 1 page")
+        self.assertEqual(lines[3], "corpus-import.py: imported 2 reference renders")
+
+    def test_a_substituted_font_is_named_with_its_substitute(self):
+        face = importer.FontFace(
+            path=Path("arial.ttf"), index=0, collection=False, postscript="ArialMT",
+            full_name="Arial", version="Version 7.06", cff=False,
+        )
+        drawn = importer.DrawnFont("Helvetica", face, b"", "ArialMT")
+        lines = importer.summary([self.item(1, 1, [drawn])], "imported")
+        self.assertEqual(
+            lines[1],
+            "  note: Helvetica is not embedded; rasterized with Arial Version 7.06, as Windows "
+            "substitutes it for Helvetica",
+        )
+
 
 class FontFiles(unittest.TestCase):
     def setUp(self):

@@ -459,24 +459,33 @@ def rendered_pages(parts: dict[str, bytes]) -> int:
 
     A break inside a table row is marked in every cell the break splits, so the marks of one
     row, nested tables included, count once; marks of paragraphs outside tables count each.
+    Rows and paragraphs may sit inside wrappers such as content controls (w:sdt) and custom
+    XML elements.
     """
     root = ElementTree.fromstring(parts["word/document.xml"])
     body = root.find(f"{W}body")
     if body is None:
         raise ValueError("word/document.xml has no body")
+    mark = f"{W}lastRenderedPageBreak"
+
+    def rows(container: ElementTree.Element) -> int:
+        """The rows of a table, however wrapped, that hold a mark."""
+        total = 0
+        for child in container:
+            if local_name(child.tag) == "tr":
+                total += next(child.iter(mark), None) is not None
+            else:
+                total += rows(child)
+        return total
 
     def count(container: ElementTree.Element) -> int:
         total = 0
         for child in container:
             name = local_name(child.tag)
             if name == "tbl":
-                total += sum(
-                    1
-                    for row in child.findall(f"{W}tr")
-                    if next(row.iter(f"{W}lastRenderedPageBreak"), None) is not None
-                )
+                total += rows(child)
             elif name == "p":
-                total += sum(1 for _ in child.iter(f"{W}lastRenderedPageBreak"))
+                total += sum(1 for _ in child.iter(mark))
             else:
                 total += count(child)
         return total
@@ -1571,20 +1580,36 @@ def main() -> int:
         print(f"corpus-import.py: {error}", file=sys.stderr)
         return 1
     verb = "would import" if args.dry_run else "imported"
-    for item in checked:
-        pages = item.record["pages"]
-        print(f"{verb} {item.record['file']}: {pages} page{'s' if pages != 1 else ''}")
-        for flag in item.geometry["compat_flags_dropped"]:
-            print(f"  note: Word dropped the w:compat setting {flag} from the re-saved copy")
-        if item.formatting_note:
-            print(f"  {item.formatting_note}")
-        for font in item.drawn:
-            print(
-                f"  note: {font.name} is not embedded; rasterized with "
-                f"{font.face.full_name} {font.face.version}"
-            )
-    print(f"corpus-import.py: {verb} {len(checked)} reference renders")
+    for line in summary(checked, verb):
+        print(line)
     return 0
+
+
+def summary(checked: list[Checked], verb: str) -> list[str]:
+    """What the import says about each document, and the count."""
+    lines = []
+    for item in checked:
+        pages = item.geometry["page_count"]
+        lines.append(f"{verb} {item.record['file']}: {pages} page{'s' if pages != 1 else ''}")
+        if pages != item.record["pages"]:
+            lines.append(
+                f"  note: Word's page statistic said {item.record['pages']}; the PDF and Word's "
+                "rendered page breaks agree on the count above"
+            )
+        for flag in item.geometry["compat_flags_dropped"]:
+            lines.append(f"  note: Word dropped the w:compat setting {flag} from the re-saved copy")
+        if item.formatting_note:
+            lines.append(f"  {item.formatting_note}")
+        for font in item.drawn:
+            substitute = ""
+            if font.substitute:
+                substitute = f", as Windows substitutes it for {font.name}"
+            lines.append(
+                f"  note: {font.name} is not embedded; rasterized with "
+                f"{font.face.full_name} {font.face.version}{substitute}"
+            )
+    lines.append(f"corpus-import.py: {verb} {len(checked)} reference renders")
+    return lines
 
 
 if __name__ == "__main__":
