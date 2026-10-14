@@ -3,9 +3,9 @@
 use std::collections::HashMap;
 
 use super::Document;
-use super::properties::{ParagraphProperties, RunProperties};
+use super::properties::{ParagraphProperties, RunProperties, xml_enum};
 use super::table_properties::{TableCellProperties, TableProperties, TableRowProperties};
-use super::xml::Span;
+use super::xml::{Element, Span};
 
 /// The styles of a document as stored: each with its typed attributes and its element
 /// kept whole, the document defaults and the latent styles.
@@ -235,6 +235,28 @@ impl<'a> Style<'a> {
             })
     }
 
+    /// The conditional formats of a table style (`w:tblStylePr`), in document order:
+    /// what the style gives the parts of a table, such as its first row or every other
+    /// band of rows, which the table's `w:tblLook` turns on. One of a type that is not
+    /// one is left out.
+    pub fn conditional_formats(self) -> impl Iterator<Item = ConditionalFormat<'a>> + 'a {
+        let document = self.document;
+        document
+            .element(self.data.element)
+            .children_through_alternates(document.names.mc)
+            .filter(|child| child.is(&document.names.w, "tblStylePr"))
+            .filter_map(move |element| {
+                let condition = element
+                    .attribute(&document.names.w, "type")
+                    .and_then(TableStyleCondition::from_xml)?;
+                Some(ConditionalFormat {
+                    document,
+                    condition,
+                    element,
+                })
+            })
+    }
+
     /// The child of the `w:style` element with this local name.
     fn child(self, local: &str) -> Option<super::xml::Element<'a>> {
         let document = self.document;
@@ -251,6 +273,123 @@ impl<'a> Style<'a> {
         self.child("rPr")
             .map_or_else(RunProperties::default, |r_pr| {
                 crate::docx::properties::run_properties(r_pr, &document.names, &mut |_, _, _| {})
+            })
+    }
+}
+
+xml_enum! {
+    /// The part of a table a conditional format of a table style applies to
+    /// (ST_TblStyleOverrideType).
+    TableStyleCondition {
+        /// The whole table.
+        WholeTable = "wholeTable",
+        /// The first row.
+        FirstRow = "firstRow",
+        /// The last row.
+        LastRow = "lastRow",
+        /// The first column.
+        FirstColumn = "firstCol",
+        /// The last column.
+        LastColumn = "lastCol",
+        /// The odd bands of columns.
+        OddColumnBand = "band1Vert",
+        /// The even bands of columns.
+        EvenColumnBand = "band2Vert",
+        /// The odd bands of rows.
+        OddRowBand = "band1Horz",
+        /// The even bands of rows.
+        EvenRowBand = "band2Horz",
+        /// The top right cell.
+        TopRightCell = "neCell",
+        /// The top left cell.
+        TopLeftCell = "nwCell",
+        /// The bottom right cell.
+        BottomRightCell = "seCell",
+        /// The bottom left cell.
+        BottomLeftCell = "swCell",
+    }
+}
+
+/// A conditional format of a table style (`w:tblStylePr`): the properties it gives the
+/// part of a table its condition names, as written.
+#[derive(Clone, Copy, Debug)]
+pub struct ConditionalFormat<'a> {
+    document: &'a Document,
+    condition: TableStyleCondition,
+    element: Element<'a>,
+}
+
+impl<'a> ConditionalFormat<'a> {
+    /// The part of the table it applies to.
+    pub fn condition(self) -> TableStyleCondition {
+        self.condition
+    }
+
+    /// The child of the `w:tblStylePr` element with this local name.
+    fn child(self, local: &str) -> Option<Element<'a>> {
+        let names = &self.document.names;
+        self.element
+            .children_through_alternates(names.mc)
+            .find(|child| child.is(&names.w, local))
+    }
+
+    /// The paragraph properties it gives (its `w:pPr`).
+    pub fn paragraph_properties(self) -> ParagraphProperties {
+        self.child("pPr")
+            .map_or_else(ParagraphProperties::default, |p_pr| {
+                crate::docx::properties::paragraph_properties(
+                    p_pr,
+                    &self.document.names,
+                    &mut |_, _, _| {},
+                )
+            })
+    }
+
+    /// The run properties it gives (its `w:rPr`).
+    pub fn run_properties(self) -> RunProperties {
+        self.child("rPr")
+            .map_or_else(RunProperties::default, |r_pr| {
+                crate::docx::properties::run_properties(
+                    r_pr,
+                    &self.document.names,
+                    &mut |_, _, _| {},
+                )
+            })
+    }
+
+    /// The table properties it gives (its `w:tblPr`).
+    pub fn table_properties(self) -> TableProperties {
+        self.child("tblPr")
+            .map_or_else(TableProperties::default, |tbl_pr| {
+                crate::docx::table_properties::table_properties(
+                    tbl_pr,
+                    &self.document.names,
+                    &mut |_, _, _| {},
+                )
+            })
+    }
+
+    /// The row properties it gives (its `w:trPr`).
+    pub fn row_properties(self) -> TableRowProperties {
+        self.child("trPr")
+            .map_or_else(TableRowProperties::default, |tr_pr| {
+                crate::docx::table_properties::row_properties(
+                    tr_pr,
+                    &self.document.names,
+                    &mut |_, _, _| {},
+                )
+            })
+    }
+
+    /// The cell properties it gives (its `w:tcPr`).
+    pub fn cell_properties(self) -> TableCellProperties {
+        self.child("tcPr")
+            .map_or_else(TableCellProperties::default, |tc_pr| {
+                crate::docx::table_properties::cell_properties(
+                    tc_pr,
+                    &self.document.names,
+                    &mut |_, _, _| {},
+                )
             })
     }
 }
