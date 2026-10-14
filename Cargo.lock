@@ -233,6 +233,7 @@ dependencies = [
  "insta",
  "officewright-core",
  "officewright-font",
+ "officewright-pdf",
  "unicode-linebreak",
  "unicode-script",
 ]

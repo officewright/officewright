@@ -296,13 +296,14 @@ class Cleaning(unittest.TestCase):
             "<w:r><w:t>Call (202) 55</w:t></w:r><w:r><w:t>5-0199</w:t></w:r></w:ins></w:p>"
             "</w:footnotes>",
             "word/activeX/activeX1.bin": b"\x00TextBox",
+            "word/activeX/activeX1.xml": "<ax:ocx xmlns:ax='ax'/>",
         })))
         for expected in ("docProps/custom.xml is still there", "holds the address jane.roe",
                          "image1.emf is not our placeholder", "image2.png is not our placeholder",
                          "dc:creator is not empty", "Company is not empty",
                          "holds a user profile path", "footnotes.xml has tracked changes",
                          "holds the phone number (202) 555-0199",
-                         "activeX1.bin is a binary part"):
+                         "activeX1.bin is a binary part", "activeX1.xml is embedded"):
             self.assertIn(expected, found)
         self.assertEqual(public.problems(self.cleaned.data, ()), [])
         listed = package(**{"word/document.xml": "<w:document xmlns:w='w'><w:p><w:r><w:t>"
