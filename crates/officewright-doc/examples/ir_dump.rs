@@ -7,8 +7,9 @@
 //!
 //! It prints the settings; each section's page and columns, its headers and footers; each
 //! paragraph's formatting, list item and mark; and its content, each piece with its run
-//! style, and each note reference with its note's text. Then it lists what
-//! the translation left out, and whether the IR passes `validate`.
+//! style, and each note reference with its note's text; each table's properties, borders
+//! and rows, and each cell's span, alignment, shading, and its own margins and borders.
+//! Then it lists what the translation left out, and whether the IR passes `validate`.
 
 use std::process::ExitCode;
 
@@ -97,15 +98,36 @@ fn print_blocks(ir: &ir::Document, blocks: &[ir::Block], indent: &str) {
                     props.indent().0,
                     table.grid().iter().map(|width| width.0).collect::<Vec<_>>()
                 );
+                println!(
+                    "{indent}  {:?}, spacing {} pt, {:?}, shading {:?}",
+                    props.alignment(),
+                    props.cell_spacing().0,
+                    props.cell_margins(),
+                    props.shading()
+                );
+                println!("{indent}  {:?}", props.borders());
                 for (n, row) in table.rows().iter().enumerate() {
-                    println!("{indent}  row {n} height {:?}", row.height());
+                    println!(
+                        "{indent}  row {n} height {:?}, header {}, cant split {}",
+                        row.height(),
+                        row.header(),
+                        row.cant_split()
+                    );
                     for cell in row.cells() {
                         println!(
-                            "{indent}    cell span {} {:?} {:?}",
+                            "{indent}    cell span {} {:?} {:?}, {:?}, shading {:?}",
                             cell.grid_span(),
                             cell.width(),
-                            cell.vertical_merge()
+                            cell.vertical_merge(),
+                            cell.vertical_align(),
+                            cell.shading()
                         );
+                        if let Some(margins) = cell.margins() {
+                            println!("{indent}      own {margins:?}");
+                        }
+                        if cell.borders() != ir::CellBorders::default() {
+                            println!("{indent}      {:?}", cell.borders());
+                        }
                         print_blocks(ir, cell.blocks(), &format!("{indent}      "));
                     }
                 }
