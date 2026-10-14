@@ -124,6 +124,14 @@ pub struct FontNames {
 /// The bound keeps a malicious name table from making the index quadratic.
 const MAX_LOCALIZED_NAMES: usize = 64;
 
+/// The longest name string read, in bytes: 512 UTF-16 code units, far more than any name
+/// a face is looked up or embedded by (Windows takes 31 characters of a family name, a
+/// PostScript name has at most 63). Longer strings are skipped, which bounds the work of
+/// reading a table: without it, 5,460 records of 64 KB each made a face take a second to
+/// load, and records that repeat long strings differing only at their end made each new
+/// one be compared in full with every name kept.
+const MAX_NAME_BYTES: u16 = 1024;
+
 impl FontNames {
     pub(crate) fn read(name: &Name<'_>) -> Self {
         let data = name.string_data();
@@ -141,6 +149,9 @@ impl FontNames {
                 17 => 5,
                 _ => continue,
             };
+            if record.length() > MAX_NAME_BYTES {
+                continue;
+            }
             let Ok(string) = record.string(data) else {
                 continue;
             };
@@ -345,6 +356,76 @@ mod tests {
         let data = crate::testing::name_table(records);
         use skrifa::raw::{FontData, FontRead};
         FontNames::read(&Name::read(FontData::new(&data)).unwrap())
+    }
+
+    /// A raw `name` table: Windows, Unicode BMP, US English records of name ID 1, each
+    /// (offset, length) into `storage`.
+    fn raw_name_table(records: &[(u16, u16)], storage: &[u8]) -> Vec<u8> {
+        let count = u16::try_from(records.len()).unwrap();
+        let mut table = Vec::new();
+        for value in [0, count, 6 + 12 * count] {
+            table.extend(value.to_be_bytes());
+        }
+        for &(offset, length) in records {
+            for value in [3, 1, 0x409, 1, length, offset] {
+                table.extend(u16::to_be_bytes(value));
+            }
+        }
+        table.extend_from_slice(storage);
+        table
+    }
+
+    fn read_raw(table: &[u8]) -> FontNames {
+        use skrifa::raw::{FontData, FontRead};
+        FontNames::read(&Name::read(FontData::new(table)).unwrap())
+    }
+
+    #[test]
+    fn skips_names_longer_than_1024_bytes() {
+        let utf16 = |text: String| {
+            text.encode_utf16()
+                .flat_map(u16::to_be_bytes)
+                .collect::<Vec<u8>>()
+        };
+        let at_limit = utf16("A".repeat(512));
+        let past_limit = utf16("B".repeat(513));
+        let storage = [past_limit.clone(), at_limit.clone()].concat();
+        let names = read_raw(&raw_name_table(&[(0, 1026), (1026, 1024)], &storage));
+        assert_eq!(names.family(), Some("A".repeat(512).as_str()));
+        assert_eq!(names.families().count(), 1);
+    }
+
+    #[test]
+    fn reads_tables_built_to_be_slow_quickly() {
+        // 5,460 records, as many as a table whose strings start within 64 KB can have,
+        // each pointing at the same string of 65,534 bytes; and 5,460 records whose first
+        // 63 strings of 1,024 bytes differ only at their end, the rest repeating the 63rd,
+        // so that each is compared in full with every name kept.
+        let long = "A"
+            .repeat(32_767)
+            .encode_utf16()
+            .flat_map(u16::to_be_bytes)
+            .collect::<Vec<u8>>();
+        let same = raw_name_table(&vec![(0, 65_534); 5460], &long);
+        let tails: String = (0..64)
+            .map(|i| char::from_u32(0x4E00 + i).unwrap())
+            .collect();
+        let storage = format!("{}{tails}", "A".repeat(511))
+            .encode_utf16()
+            .flat_map(u16::to_be_bytes)
+            .collect::<Vec<u8>>();
+        let records: Vec<(u16, u16)> = (0..5460u16).map(|i| (2 * i.min(62) + 2, 1024)).collect();
+        let differing = raw_name_table(&records, &storage);
+        let started = std::time::Instant::now();
+        let (same, differing) = (read_raw(&same), read_raw(&differing));
+        // Unbounded, the first took seconds to read even in a release build.
+        assert!(
+            started.elapsed().as_secs_f64() < 1.0,
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(same.family(), None);
+        assert_eq!(differing.families().count(), 63);
     }
 
     #[test]
