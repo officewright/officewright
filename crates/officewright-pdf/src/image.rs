@@ -529,12 +529,15 @@ fn read_frame(segment: &[u8]) -> std::result::Result<Frame, Problem> {
 
 /// Checks a JPEG scan header of `length` bytes, `segment` after the length, against its
 /// `frame` as libjpeg does (ITU T.81, B.2.3): 1 to 4 components, so that the header is
-/// `6 + 2 × components` bytes long, each a component of the frame, in the frame's order,
-/// and in an interleaved scan at most 10 blocks in each minimum coded unit.
+/// `6 + 2 × components` bytes long, each a different component of the frame, and in an
+/// interleaved scan at most 10 blocks in each minimum coded unit.
 ///
-/// T.81 gives each component of a frame its own identifier, but some files repeat one,
-/// and libjpeg decodes them: each component the scan names is the frame's next one, after
-/// those it named before, with that identifier.
+/// Which component an identifier names follows libjpeg, which is both looser and
+/// stricter than T.81. T.81 wants the frame's identifiers distinct and the scan in the
+/// frame's order; libjpeg decodes frames that repeat an identifier and some scans out of
+/// order, and takes for the scan's component k (from 0) the frame's first component at
+/// position k or later with its identifier. That rule matched libjpeg-turbo, through
+/// `qpdf --check`, on all of 1394 generated scans.
 fn check_scan(segment: &[u8], length: usize, frame: &Frame) -> std::result::Result<(), Problem> {
     let count = segment.first().copied().unwrap_or(0);
     if !(1..=4).contains(&count) {
@@ -557,14 +560,17 @@ fn check_scan(segment: &[u8], length: usize, frame: &Frame) -> std::result::Resu
         .take(count.into())
         .copied()
         .collect();
-    // The frame's components after the last one the scan named.
-    let mut rest = frame.components.as_slice();
+    // The positions in the frame of the components named so far.
+    let mut taken = Vec::with_capacity(ids.len());
     let mut blocks = 0;
     for (named, &id) in ids.iter().enumerate() {
-        let found = rest
+        let found = frame
+            .components
             .iter()
             .enumerate()
-            .find(|(_, component)| component.0 == id);
+            .skip(named)
+            .find(|(_, component)| component.0 == id)
+            .filter(|(at, _)| !taken.contains(at));
         let Some((at, &(_, horizontal, vertical))) = found else {
             let in_frame = frame.components.iter().filter(|c| c.0 == id).count();
             let before = ids
@@ -583,8 +589,8 @@ fn check_scan(segment: &[u8], length: usize, frame: &Frame) -> std::result::Resu
                 "the JPEG scan header names component {id}{reason}"
             )));
         };
+        taken.push(at);
         blocks += u32::from(horizontal) * u32::from(vertical);
-        rest = rest.get(at + 1..).unwrap_or_default();
     }
     if count > 1 && blocks > 10 {
         return Err(malformed(format!(
@@ -2007,6 +2013,13 @@ pub(crate) mod tests {
         for scan in scans {
             Image::from_bytes(with_scan(&repeated, scan)).unwrap();
         }
+        // Out of the frame's order, which libjpeg takes: 3, 2 and 1, 3 of 1, 2, 3.
+        for scan in [
+            [2, 3, 0, 2, 0x11, 0, 0x3F, 0],
+            [2, 1, 0, 3, 0x11, 0, 0x3F, 0],
+        ] {
+            Image::from_bytes(with_scan(&good, &scan)).unwrap();
+        }
         let zeros = patched(
             &patched(&patched(&good, frame + 10, 0), frame + 13, 0),
             frame + 16,
@@ -2265,14 +2278,20 @@ pub(crate) mod tests {
                 with_scan(&good, &[2, 1, 0, 1, 0x11, 0, 0x3F, 0]),
                 "the JPEG scan header names component 1 more often than the frame header has it",
             ),
-            // Components out of the frame's order (B.2.3): 1, 3, 2 and 3, 2, 1.
+            // Components out of an order libjpeg takes: the scan's component k is the
+            // frame's first one at position k or later with its identifier, so 1, 3, 2
+            // and 3, 2, 1 fail at their last component.
             (
                 with_scan(&good, &[3, 1, 0, 3, 0x11, 2, 0x11, 0, 0x3F, 0]),
                 "the JPEG scan header names component 2 out of the frame header's order",
             ),
             (
                 with_scan(&good, &[3, 3, 0, 2, 0x11, 1, 0x11, 0, 0x3F, 0]),
-                "the JPEG scan header names component 2 out of the frame header's order",
+                "the JPEG scan header names component 1 out of the frame header's order",
+            ),
+            (
+                with_scan(&good, &[2, 2, 0, 2, 0x11, 0, 0x3F, 0]),
+                "the JPEG scan header names component 2 more often than the frame header has it",
             ),
             // A frame whose three components are all 1, scanned as 1, 2, 3.
             (
@@ -2282,13 +2301,40 @@ pub(crate) mod tests {
                 ),
                 "the JPEG scan header names component 2, which the frame header does not have",
             ),
-            // A second frame header (B.2.1).
+            // A second frame header (B.2.1), of the same kind or another.
             (
                 [&good[..frame], &good[frame..frame + 19], &good[frame..]].concat(),
                 &format!(
                     "the JPEG file has a second frame header, at byte {}",
                     frame + 19
                 ),
+            ),
+            (
+                [
+                    &good[..frame + 19],
+                    &patched(&good, frame + 1, 0xC2)[frame..],
+                ]
+                .concat(),
+                &format!(
+                    "the JPEG file has a second frame header, at byte {}",
+                    frame + 19
+                ),
+            ),
+            // Over 10 blocks in scans of two and three components: 4 × 3 + 1 and
+            // 3 × 3 + 1 + 1.
+            (
+                with_scan(
+                    &patched(&good, frame + 11, 0x43),
+                    &[2, 1, 0, 2, 0x11, 0, 0x3F, 0],
+                ),
+                "the JPEG scan interleaves 13 blocks in each minimum coded unit, not at most 10",
+            ),
+            (
+                with_scan(
+                    &patched(&good, frame + 11, 0x33),
+                    &[3, 1, 0, 2, 0x11, 3, 0x11, 0, 0x3F, 0],
+                ),
+                "the JPEG scan interleaves 11 blocks in each minimum coded unit, not at most 10",
             ),
             // 2 × 2 + 2 × 2 + 2 × 1 + 1 × 1 = 11 blocks in one scan.
             (
