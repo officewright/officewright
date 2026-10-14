@@ -1098,6 +1098,34 @@ mod tests {
     }
 
     #[test]
+    fn a_cluster_cut_to_several_glyphs_keeps_its_text() {
+        // "EFG" of a glyph left of the page's reach and two on it.
+        let mut item = run(10.0, 50.0, &[]);
+        let glyph = |x: f64| DrawnGlyph {
+            glyph: officewright_font::GlyphId::new(1),
+            x: Pt(x),
+            y: Pt(0.0),
+        };
+        item.clusters = vec![Cluster {
+            text: "EFG".to_owned(),
+            glyphs: vec![glyph(-200.0), glyph(30.0), glyph(40.0)],
+        }];
+        let (drawn, _) = painted(
+            &Document::default(),
+            crate::testing::minimal(),
+            &[DisplayItem::Glyphs(item)],
+        );
+        let [Drawn::Glyphs(cut)] = drawn.as_slice() else {
+            panic!("one run");
+        };
+        let texts: Vec<(String, usize)> = cut
+            .clusters()
+            .map(|(text, glyphs)| (text.to_owned(), glyphs.len()))
+            .collect();
+        assert_eq!(texts, [("EFG".to_owned(), 2)]);
+    }
+
+    #[test]
     fn a_cluster_cut_down_to_one_glyph_stands_for_no_text() {
         // "AB" of a glyph left of the page's reach and one on it; then "CD" whole.
         let mut item = run(10.0, 50.0, &[]);
