@@ -11,7 +11,7 @@
 //! columns and headers and footers, and their blocks. With
 //! `--runs` it also prints:
 //! - the style, alignment and list of each paragraph, with the list's label template, and
-//!   its formatting in effect;
+//!   its formatting in effect, and the formatting of its list label;
 //! - every run, with the properties written on it and its formatting in effect;
 //! - the style, width and layout of each table, and the width and merging of its cells.
 //!
@@ -184,6 +184,9 @@ fn print_block<'a>(
                     "{indent}  in effect: {}",
                     paragraph_in_effect(&formats.paragraph(paragraph))
                 );
+                if let Some(label) = formats.list_label(paragraph) {
+                    println!("{indent}  label in effect: {}", in_effect(&label));
+                }
                 for run in paragraph.runs() {
                     println!("{indent}  run {:?}{}", run.text(), describe(run));
                     println!("{indent}    in effect: {}", in_effect(&formats.run(run)));
