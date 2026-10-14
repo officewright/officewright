@@ -12,9 +12,38 @@ use super::{Document, ImageData, Names};
 /// EMUs (English Metric Units) to a point.
 const EMU_PER_POINT: f64 = 12_700.0;
 
+/// The range of ST_Coordinate, in EMUs, which every length of a drawing is within.
+const COORDINATES: std::ops::RangeInclusive<f64> = -27_273_042_329_600.0..=27_273_042_316_900.0;
+
 /// A drawing in a run (`w:drawing`): a frame in the line (`wp:inline`) or floating
 /// (`wp:anchor`), and what it shows. Pictures are read; shapes, charts and other graphics
-/// show as no picture.
+/// show as no picture, and [`to_xml`](Self::to_xml) gives them as written.
+///
+/// ```
+/// # fn main() -> officewright_doc::Result<()> {
+/// use officewright_doc::{Block, Document, RunContent};
+///
+/// let document = Document::open("tests/data/hello.docx")?;
+/// for section in document.sections() {
+///     for block in section.blocks() {
+///         let Block::Paragraph(paragraph) = block else {
+///             continue;
+///         };
+///         for item in paragraph.runs().flat_map(|run| run.content()) {
+///             let RunContent::Drawing(drawing) = item else {
+///                 continue;
+///             };
+///             let size = (drawing.width(), drawing.height());
+///             match drawing.picture().and_then(|picture| picture.image()) {
+///                 Some(image) => println!("{size:?}: {}", image.content_type()),
+///                 None => println!("{size:?}: {}", drawing.to_xml()),
+///             }
+///         }
+///     }
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone, Copy, Debug)]
 pub struct Drawing<'a> {
     document: &'a Document,
@@ -29,6 +58,12 @@ impl<'a> Drawing<'a> {
             element,
             image,
         }
+    }
+
+    /// The drawing as written, `w:drawing` and everything in it, as XML with the
+    /// namespace declarations it needs.
+    pub fn to_xml(self) -> String {
+        self.document.element(self.element).to_xml()
     }
 
     /// The frame: its `wp:inline` or `wp:anchor`.
@@ -145,7 +180,9 @@ impl<'a> Drawing<'a> {
                 continue;
             };
             let relative = child.attribute(&[None], "relativeFrom");
-            let align = self.child(child, &names.wp, "align").map(Element::text);
+            let align = self
+                .child(child, &names.wp, "align")
+                .map(|align| align.text().trim().to_owned());
             let offset = self
                 .child(child, &names.wp, "posOffset")
                 .and_then(|offset| coordinate(&offset.text()));
@@ -170,16 +207,46 @@ impl<'a> Drawing<'a> {
                 _ => {}
             }
         }
+        // With simplePos on, the position is wp:simplePos, from the page's top left
+        // corner, in place of wp:positionH and wp:positionV (§20.4.2.3).
+        if flag("simplePos") == Some(true) {
+            let simple = self.child(frame, &names.wp, "simplePos");
+            let at = |name| {
+                simple
+                    .and_then(|simple| simple.attribute(&[None], name))
+                    .and_then(coordinate)
+            };
+            if let (Some(x), Some(y)) = (at("x"), at("y")) {
+                anchor.horizontal_reference = Some(HorizontalReference::Page);
+                anchor.horizontal_align = None;
+                anchor.horizontal_offset = Some(x);
+                anchor.vertical_reference = Some(VerticalReference::Page);
+                anchor.vertical_align = None;
+                anchor.vertical_offset = Some(y);
+            }
+        }
         Some(anchor)
     }
 }
 
 /// A picture (`pic:pic`): an image, cropped, turned and mirrored.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct Picture<'a> {
     document: &'a Document,
     element: Element<'a>,
     image: Option<u32>,
+}
+
+impl std::fmt::Debug for Picture<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Picture")
+            .field("image", &self.image)
+            .field("crop", &self.crop())
+            .field("rotation", &self.rotation())
+            .field("flip_horizontal", &self.flip_horizontal())
+            .field("flip_vertical", &self.flip_vertical())
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'a> Picture<'a> {
@@ -345,7 +412,10 @@ impl Crop {
     }
 }
 
-/// Where a floating drawing is (`wp:anchor`), and how text wraps around it.
+/// Where a floating drawing is (`wp:anchor`), and how text wraps around it. With the
+/// anchor's `simplePos` on, the position is `wp:simplePos`, measured from the page's top
+/// left corner, in place of `wp:positionH` and `wp:positionV` (ECMA-376 Part 1,
+/// §20.4.2.3).
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct Anchor {
@@ -406,14 +476,14 @@ impl Anchor {
         self.behind_text
     }
 
-    /// Whether, anchored in a table cell, it is placed within the cell (`layoutInCell`;
-    /// on when not written).
+    /// Whether, anchored in a table cell, it is placed within the cell (`layoutInCell`,
+    /// which the standard requires; taken as on when missing).
     pub fn layout_in_cell(&self) -> bool {
         self.layout_in_cell
     }
 
-    /// Whether it may overlap other floating objects (`allowOverlap`; on when not
-    /// written).
+    /// Whether it may overlap other floating objects (`allowOverlap`, which the standard
+    /// requires; taken as on when missing).
     pub fn allow_overlap(&self) -> bool {
         self.allow_overlap
     }
@@ -530,27 +600,44 @@ pub(crate) fn embedded_image<'a>(picture: Element<'a>, names: &Names) -> Option<
 
 /// A length of DrawingML (ST_Coordinate and the like), in points: a count of EMUs, or in
 /// Strict a number with a unit (ST_UniversalMeasure: `mm`, `cm`, `in`, `pt`, `pc`,
-/// `pi`).
+/// `pi`). None for one beyond ST_Coordinate's range, such as a number of hundreds of
+/// digits, which `f64` reads as infinity.
 fn coordinate(value: &str) -> Option<Pt> {
     let value = value.trim();
-    if let Ok(emus) = value.parse::<i64>() {
-        return Some(Pt(emus as f64 / EMU_PER_POINT));
-    }
-    let at = value.len().checked_sub(2)?;
-    let (number, unit) = (value.get(..at)?, value.get(at..)?);
-    let per_unit = match unit {
-        "mm" => 72.0 / 25.4,
-        "cm" => 72.0 / 2.54,
-        "in" => 72.0,
-        "pt" => 1.0,
-        "pc" | "pi" => 12.0,
-        _ => return None,
+    let emus = match value.parse::<i64>() {
+        Ok(emus) => emus as f64,
+        Err(_) => {
+            let at = value.len().checked_sub(2)?;
+            let (number, unit) = (value.get(..at)?, value.get(at..)?);
+            let per_unit = match unit {
+                "mm" => 72.0 / 25.4,
+                "cm" => 72.0 / 2.54,
+                "in" => 72.0,
+                "pt" => 1.0,
+                "pc" | "pi" => 12.0,
+                _ => return None,
+            };
+            measure_number(number)? * per_unit * EMU_PER_POINT
+        }
     };
-    let number: f64 = number
-        .parse()
-        .ok()
-        .filter(|number: &f64| number.is_finite())?;
-    Some(Pt(number * per_unit))
+    // Infinity and NaN are not in the range either.
+    COORDINATES
+        .contains(&emus)
+        .then(|| Pt(emus / EMU_PER_POINT))
+}
+
+/// The number of ST_UniversalMeasure and ST_Percentage: `-?[0-9]+(\.[0-9]+)?`.
+fn measure_number(value: &str) -> Option<f64> {
+    let digits = value.strip_prefix('-').unwrap_or(value);
+    let all_digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    let valid = match digits.split_once('.') {
+        Some((whole, fraction)) => all_digits(whole) && all_digits(fraction),
+        None => all_digits(digits),
+    };
+    valid
+        .then(|| value.parse().ok())
+        .flatten()
+        .filter(|number: &f64| number.is_finite())
 }
 
 /// A share of DrawingML (ST_Percentage): thousandths of a percent, or in Strict a number
@@ -558,11 +645,7 @@ fn coordinate(value: &str) -> Option<Pt> {
 fn percentage(value: &str) -> Option<f64> {
     let value = value.trim();
     if let Some(percent) = value.strip_suffix('%') {
-        return percent
-            .parse::<f64>()
-            .ok()
-            .filter(|percent| percent.is_finite())
-            .map(|percent| percent / 100.0);
+        return measure_number(percent).map(|percent| percent / 100.0);
     }
     value
         .parse::<i32>()

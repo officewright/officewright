@@ -22,9 +22,10 @@
 //! # }
 //! ```
 //!
-//! What the model does not represent yet (drawings, equations, bookmarks, and the
-//! properties not typed yet) is kept as it was read; such content shows as `Other` with
-//! an [`Opaque`] view.
+//! What the model does not represent yet (equations, bookmarks, and the properties not
+//! typed yet) is kept as it was read; such content shows as `Other` with an [`Opaque`]
+//! view. Drawings show as [`RunContent::Drawing`]: their frame and picture are read, and
+//! [`Drawing::to_xml`] gives a shape, chart or group as written.
 //!
 //! Opening never panics on a damaged file: it either returns an [`Error`], or opens the
 //! document and lists in [`Document::diagnostics`] what it repaired, as Word does.

@@ -233,3 +233,36 @@ fn wrap(wrap: Option<WrapKind>) -> ir::Wrap {
         Some(WrapKind::None) | None => ir::Wrap::None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognises_images_by_their_signature_whatever_the_package_calls_them() {
+        let other = |name: &str| ir::ImageFormat::Other(name.into());
+        let octets = "application/octet-stream";
+        // An EMF's header record says " EMF" at byte 40 ([MS-EMF] 2.3.4.2).
+        let mut emf = vec![1, 0, 0, 0];
+        emf.resize(40, 0);
+        emf.extend_from_slice(b" EMF");
+        let cases: [(&[u8], ir::ImageFormat); 8] = [
+            (b"\x89PNG\r\n\x1a\n", ir::ImageFormat::Png),
+            (b"\xFF\xD8\xFF\xE0", ir::ImageFormat::Jpeg),
+            (b"GIF89a", other("gif")),
+            (b"BM\0\0", other("bmp")),
+            (b"II*\0", other("tiff")),
+            (b"MM\0*", other("tiff")),
+            (&emf, other("emf")),
+            (&[0xD7, 0xCD, 0xC6, 0x9A], other("wmf")),
+        ];
+        for (bytes, expected) in cases {
+            assert_eq!(format(octets, bytes), expected, "{bytes:?}");
+        }
+        // Without a signature, the content type: an EMF whose header lacks " EMF" is
+        // named by it.
+        assert_eq!(format("image/x-emf", &[1, 0, 0, 0]), other("emf"));
+        assert_eq!(format("image/svg+xml", b"<svg"), other("svg"));
+        assert_eq!(format("", b"?"), other("unknown"));
+    }
+}

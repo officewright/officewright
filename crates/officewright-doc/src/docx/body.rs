@@ -1119,12 +1119,25 @@ impl Reading<'_, '_, '_> {
                 });
             return Ok(None);
         };
-        // None for an external target, which is never loaded.
+        // An external target is never loaded; an internal one that names no part is
+        // reported.
         let Some(name) = relationship.target_part() else {
+            if relationship.target_mode() == officewright_opc::TargetMode::Internal {
+                let target = relationship.target().to_owned();
+                self.c
+                    .diagnose(offset, DiagnosticKind::UnexpectedContent, || {
+                        format!(
+                            "a picture's image {} is not a part of the package",
+                            shorten(&target)
+                        )
+                    });
+            }
             return Ok(None);
         };
+        // Each part is read once, however many relationships lead to it, and so is one
+        // that cannot be read.
         if let Some(&index) = self.c.document.image_parts.get(name.as_str()) {
-            return Ok(Some(index));
+            return Ok(index);
         }
         let Some(part) = self.part.package().part(&name) else {
             self.c
@@ -1144,6 +1157,10 @@ impl Reading<'_, '_, '_> {
                     .diagnose(offset, DiagnosticKind::UnexpectedContent, || {
                         format!("a picture's image cannot be read: {err}")
                     });
+                self.c
+                    .document
+                    .image_parts
+                    .insert(name.as_str().into(), None);
                 return Ok(None);
             }
         };
@@ -1153,7 +1170,9 @@ impl Reading<'_, '_, '_> {
             content_type: part.content_type().unwrap_or_default().into(),
             bytes: bytes.into(),
         });
-        document.image_parts.insert(name.as_str().into(), index);
+        document
+            .image_parts
+            .insert(name.as_str().into(), Some(index));
         Ok(Some(index))
     }
 

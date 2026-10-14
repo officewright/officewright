@@ -78,6 +78,8 @@ pub(super) fn image_relationships() -> String {
         image("rIdEmf", "media/image3.emf"),
         image("rIdGif", "media/animation"),
         image("rIdGone", "media/gone.png"),
+        image("rIdGifAgain", "media/animation"),
+        image("rIdWeb", "http://example.com/b.png"),
         r#"<Relationship Id="rIdLink" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="http://example.com/a.png" TargetMode="External"/>"#.to_owned(),
         r#"<Relationship Id="rIdHeader" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>"#.to_owned(),
     ]
@@ -296,7 +298,8 @@ fn reads_what_a_floating_picture_leaves_out_and_a_negative_size() {
         (None, Some(Pt(2.0)))
     );
     assert_eq!(anchor.wrap(), None);
-    // On when not written (ECMA-376 Part 1, §20.4.2.3), the others off.
+    // ECMA-376 Part 1, §20.4.2.3 requires layoutInCell and allowOverlap; missing, they
+    // are taken as on, our choice, and the others as off.
     assert!(anchor.layout_in_cell() && anchor.allow_overlap());
     assert!(!anchor.behind_text());
     assert_eq!(anchor.z_order(), 0);
@@ -313,9 +316,10 @@ fn reports_an_image_that_cannot_be_read_once_and_reads_the_rest() {
     // Two pictures of one damaged image: the package's check of the entry fails, which
     // is reported once; the document still opens.
     let body = format!(
-        "<w:p>{}{}{}</w:p>",
+        "<w:p>{}{}{}{}</w:p>",
         inline_picture("rIdGif"),
         inline_picture("rIdGif"),
+        inline_picture("rIdGifAgain"),
         inline_picture("rIdPng")
     );
     let mut package = images_package(&body);
@@ -329,7 +333,8 @@ fn reports_an_image_that_cannot_be_read_once_and_reads_the_rest() {
         .iter()
         .map(|drawing| drawing.picture().unwrap().image().is_some())
         .collect();
-    assert_eq!(images, [false, false, true]);
+    // Through a second relationship too, the damaged part is not read again.
+    assert_eq!(images, [false, false, false, true]);
     let messages: Vec<String> = document
         .diagnostics()
         .iter()
@@ -383,4 +388,142 @@ fn stops_at_a_limit_of_the_package_while_reading_images() {
             _ => None,
         });
     assert_eq!(image.map(Image::bytes), Some(PNG_BYTES));
+}
+
+/// A run with a floating picture of the image of relationship `id`, whose `wp:anchor` has
+/// these attributes and these children before its `wp:docPr`.
+pub(super) fn anchored(id: &str, attributes: &str, children: &str) -> String {
+    format!(
+        r#"<w:r><w:drawing><wp:anchor xmlns:wp="{WP}" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1" {attributes}>{children}<wp:docPr id="1" name="p"/>{}</wp:anchor></w:drawing></w:r>"#,
+        graphic(id, "", "")
+    )
+}
+
+/// A length of 308 digits and a unit, which is infinite as a number of points.
+pub(super) fn endless() -> String {
+    format!("{}in", "1".repeat(308))
+}
+
+#[test]
+fn reads_lengths_in_every_unit_and_within_a_coordinate_s_range() {
+    let endless = endless();
+    let children = format!(
+        r#"<wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="page"><wp:posOffset>{endless}</wp:posOffset></wp:positionH><wp:positionV relativeFrom="page"><wp:posOffset>6pi</wp:posOffset></wp:positionV><wp:extent cx="{endless}" cy="72pt"/><wp:effectExtent l="{endless}" t="2.54cm" r="25.4mm" b="6pc"/><wp:wrapNone/>"#
+    );
+    let attributes = format!(r#"simplePos="0" distT="{endless}" distB="1in" distL="0" distR="0""#);
+    let document = with_images(&format!(
+        "<w:p>{}</w:p>",
+        anchored("rIdPng", &attributes, &children)
+    ));
+    let drawing = drawings(&document)[0];
+    let near = |length: Pt, points: f64| (length.0 - points).abs() < 1e-9;
+    // Beyond ST_Coordinate's range a length is none, as one not written.
+    assert_eq!(drawing.width(), None);
+    assert!(near(drawing.height().unwrap(), 72.0));
+    let effect = drawing.effect_extent();
+    assert_eq!(effect.left(), Pt(0.0));
+    for side in [effect.top(), effect.right(), effect.bottom()] {
+        assert!(near(side, 72.0), "{side:?}");
+    }
+    let anchor = drawing.anchor().unwrap();
+    assert_eq!(anchor.horizontal_offset(), None);
+    assert!(near(anchor.vertical_offset().unwrap(), 72.0));
+    assert_eq!(anchor.distances().top(), Pt(0.0));
+    assert!(near(anchor.distances().bottom(), 72.0));
+}
+
+#[test]
+fn places_a_picture_by_its_simple_position_when_the_anchor_says_so() {
+    let children = |x: &str| {
+        format!(
+            r#"<wp:simplePos x="{x}" y="1in"/><wp:positionH relativeFrom="column"><wp:align> center </wp:align></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>12700</wp:posOffset></wp:positionV><wp:extent cx="12700" cy="12700"/><wp:wrapNone/>"#
+        )
+    };
+    let document = with_images(&format!(
+        "<w:p>{}{}{}</w:p>",
+        anchored("rIdPng", r#"simplePos="1""#, &children("10cm")),
+        anchored("rIdPng", r#"simplePos="0""#, &children("10cm")),
+        anchored("rIdPng", r#"simplePos="1""#, &children("wide")),
+    ));
+    let anchors: Vec<Anchor> = drawings(&document)
+        .iter()
+        .map(|drawing| drawing.anchor().unwrap())
+        .collect();
+    // On: wp:simplePos, from the page's top left corner (ECMA-376 Part 1, §20.4.2.3).
+    let on = anchors[0];
+    assert_eq!(on.horizontal_reference(), Some(HorizontalReference::Page));
+    assert_eq!(on.horizontal_align(), None);
+    assert!((on.horizontal_offset().unwrap().0 - 100.0 * 72.0 / 25.4).abs() < 1e-9);
+    assert_eq!(on.vertical_reference(), Some(VerticalReference::Page));
+    assert_eq!(on.vertical_offset(), Some(Pt(72.0)));
+    // Off, or a simple position that is not one: wp:positionH and wp:positionV, whose
+    // alignment is read without the spaces around it.
+    for anchor in [anchors[1], anchors[2]] {
+        assert_eq!(
+            anchor.horizontal_reference(),
+            Some(HorizontalReference::Column)
+        );
+        assert_eq!(
+            anchor.horizontal_align(),
+            Some(AnchorHorizontalAlign::Center)
+        );
+        assert_eq!(
+            anchor.vertical_reference(),
+            Some(VerticalReference::Paragraph)
+        );
+        assert_eq!(anchor.vertical_offset(), Some(Pt(1.0)));
+    }
+}
+
+#[test]
+fn reads_a_strict_picture() {
+    let xml = r#"<w:document xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main" xmlns:r="http://purl.oclc.org/ooxml/officeDocument/relationships" conformance="strict"><w:body><w:p><w:r><w:drawing><wp:inline xmlns:wp="http://purl.oclc.org/ooxml/drawingml/wordprocessingDrawing"><wp:extent cx="2in" cy="1in"/><wp:docPr id="1" name="p"/><a:graphic xmlns:a="http://purl.oclc.org/ooxml/drawingml/main"><a:graphicData uri="http://purl.oclc.org/ooxml/drawingml/picture"><pic:pic xmlns:pic="http://purl.oclc.org/ooxml/drawingml/picture"><pic:blipFill><a:blip r:embed="rIdNone"/><a:srcRect l="10%" r="-5.5%"/></pic:blipFill><pic:spPr/></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body></w:document>"#;
+    let document = Document::from_bytes(package(DOCUMENT, xml, &[])).unwrap();
+    let drawing = drawings(&document)[0];
+    assert!(drawing.is_inline());
+    assert_eq!(
+        (drawing.width(), drawing.height()),
+        (Some(Pt(144.0)), Some(Pt(72.0)))
+    );
+    let crop = drawing.picture().unwrap().crop().unwrap();
+    assert!((crop.left() - 0.1).abs() < 1e-12);
+    assert!((crop.right() + 0.055).abs() < 1e-12);
+}
+
+#[test]
+fn reports_an_image_target_that_is_no_part() {
+    // An internal relationship whose target is no part name is reported; an external
+    // one is never loaded and not reported.
+    let document = with_images(&format!(
+        "<w:p>{}{}</w:p>",
+        inline_picture("rIdWeb"),
+        inline_picture("rIdLink")
+    ));
+    let messages: Vec<String> = document
+        .diagnostics()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(
+        messages[0]
+            .ends_with("a picture's image http://example.com/b.png is not a part of the package"),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn shows_a_drawing_as_written_and_a_picture_briefly() {
+    let document = with_images(&format!("<w:p>{}</w:p>", group("rIdPng")));
+    let drawing = drawings(&document)[0];
+    let xml = drawing.to_xml();
+    assert!(xml.starts_with("<w:drawing"), "{xml}");
+    assert!(xml.contains("wpg:wgp"), "{xml}");
+    let document = with_images(&format!("<w:p>{}</w:p>", inline_picture("rIdPng")));
+    let picture = drawings(&document)[0].picture().unwrap();
+    let debug = format!("{picture:?}");
+    assert!(
+        debug.starts_with("Picture {") && debug.len() < 300,
+        "{debug}"
+    );
 }

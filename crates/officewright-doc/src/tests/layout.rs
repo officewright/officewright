@@ -2694,3 +2694,28 @@ fn translates_pictures_with_their_images() {
         ]
     );
 }
+
+#[test]
+fn translates_pictures_whose_lengths_are_out_of_range_into_valid_ir() {
+    // Lengths of 308 digits and a unit, which are infinite as numbers of points, in each
+    // place a drawing has one: none reaches the IR, which `translate` validates.
+    use super::drawing::{anchored, endless, with_images};
+    let e = endless();
+    let children = format!(
+        r#"<wp:simplePos x="{e}" y="0"/><wp:positionH relativeFrom="page"><wp:posOffset>{e}</wp:posOffset></wp:positionH><wp:positionV relativeFrom="page"><wp:posOffset>{e}</wp:posOffset></wp:positionV><wp:extent cx="12700" cy="12700"/><wp:effectExtent l="{e}" t="{e}" r="{e}" b="{e}"/><wp:wrapNone/>"#
+    );
+    for simple in ["0", "1"] {
+        let attributes =
+            format!(r#"simplePos="{simple}" distT="{e}" distB="{e}" distL="{e}" distR="{e}""#);
+        let document = with_images(&format!(
+            "<w:p>{}</w:p>",
+            anchored("rIdPng", &attributes, &children)
+        ));
+        translate(&document);
+    }
+    let inline = format!(
+        r#"<w:p><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><wp:extent cx="{e}" cy="12700"/><wp:effectExtent l="{e}" t="0" r="0" b="0"/><wp:docPr id="1" name="p"/>{}</wp:inline></w:drawing></w:r></w:p>"#,
+        super::drawing::graphic("rIdPng", "", "")
+    );
+    translate(&with_images(&inline));
+}

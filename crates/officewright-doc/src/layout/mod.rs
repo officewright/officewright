@@ -88,8 +88,9 @@ impl Document {
     /// from semver until 1.0.
     ///
     /// Not translated yet, and listed: table styles and a row's table property
-    /// exceptions, drawings, pictures and other objects, equations, and indents and
-    /// spacing given in character or line units, which keep their value in points.
+    /// exceptions, drawings that show no picture (shapes, charts, groups), VML drawings
+    /// (`w:pict`) and other objects, equations, and indents and spacing given in
+    /// character or line units, which keep their value in points.
     ///
     /// Also listed is what the IR has no place for yet: a row's own alignment and cell
     /// spacing where they differ from the table's, a row's hidden end mark, a cell's

@@ -398,7 +398,8 @@ mod tests {
 
     // Rows and anchored objects never dominate a header's memory as documents write
     // them, so their terms in `weight` are tested here: each row is a cell and a
-    // paragraph too, and the translation makes no anchored object yet.
+    // paragraph too, and an anchored object's box is small next to the picture's
+    // image, which the IR holds once.
     #[test]
     fn weighs_rows_and_anchored_objects_at_least_at_their_size() {
         let mut document = ir::Document::default();

@@ -118,7 +118,7 @@ pub struct Document {
     pub(crate) endnotes: HashMap<i64, u32>,
     /// The images pictures show, and where each image part is among them.
     pub(crate) images: Vec<ImageData>,
-    pub(crate) image_parts: HashMap<Box<str>, u32>,
+    pub(crate) image_parts: HashMap<Box<str>, Option<u32>>,
     pub(crate) kind: DocumentKind,
     pub(crate) conformance: Conformance,
     pub(crate) diagnostics: Vec<Diagnostic>,
