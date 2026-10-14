@@ -198,12 +198,12 @@ formatting Word computes for every paragraph of every story (whether its style i
 indents, spacing, line spacing, alignment, the list label and the first character's font),
 and the body paragraphs' style ids and names taken from the re-saved copy. The note
 "formatting as Word computes it" gives the number of paragraphs and says whether the file
-holds the runs of formatting too: "with runs"; "without runs" when Word failed to give them
-or took longer for them than for the paragraphs (its `runs_note` says which); "runs left out
-(size)" when they would make the file larger than 900,000 bytes, which keeps it under 1 MB.
-"incomplete (time budget)" means Word ran out of time before the last paragraph, and "body
-styles not matched to the re-saved copy" that the body paragraphs of the export and of the
-copy did not line up, so the style ids are left out.
+holds the runs of formatting too: "with runs"; "without runs" when Word failed to give them,
+took longer for them than for the paragraphs, or ran out of time (its `runs_note` says
+which); "runs left out (size)" when they would make the file larger than 900,000 bytes,
+which keeps it under 1 MB. "incomplete (time budget)" means Word ran out of time before the
+last paragraph, and "body styles not matched to the re-saved copy" that the body paragraphs
+of the export and of the copy did not line up, so the style ids are left out.
 
 | File | Rendered from | Application and version | Date | Notes |
 |------|---------------|-------------------------|------|-------|
