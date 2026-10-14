@@ -1197,6 +1197,52 @@ class BodyParagraphs(unittest.TestCase):
             (second["style_id"], second["style_name"]), ("AlsoDefault", "Also Default")
         )
 
+    def test_an_empty_paragraph_with_a_hidden_mark_is_not_one_of_words(self):
+        w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+
+        def paragraph(text, mark="", run=""):
+            p_pr = f"<w:pPr><w:rPr>{mark}</w:rPr></w:pPr>" if mark else ""
+            r = f"<w:r><w:rPr>{run}</w:rPr><w:t>{text}</w:t></w:r>" if text or run else ""
+            return f"<w:p>{p_pr}{r}</w:p>"
+
+        hidden = "<w:vanish/>"
+        document = (
+            f"<w:document {w}><w:body>"
+            + paragraph("Before")
+            + paragraph("", hidden)  # left out, as Word leaves it out
+            + paragraph("", '<w:vanish w:val="true"/>')  # left out too
+            + paragraph("Hidden mark", hidden)
+            + paragraph("", '<w:vanish w:val="0"/>')
+            + paragraph("", '<w:vanish w:val="off"/>')
+            + paragraph("")
+            + paragraph("", "<w:b/>")
+            + paragraph("", run=hidden)  # a hidden run, not a hidden mark
+            + paragraph("After")
+            + "</w:body></w:document>"
+        )
+        parts = {"word/document.xml": document.encode()}
+        self.assertEqual(
+            [text for text, _, _ in importer.body_paragraph_styles(parts)],
+            ["Before", "Hidden mark", "", "", "", "", "", "After"],
+        )
+        # So the export of such a document lines up with the copy.
+        font = {"name": "Calibri", "size": 11, "bold": False, "italic": False,
+                "color": "auto", "theme": "minorHAnsi"}
+        export = {"format": 1, "complete": True, "runs": False, "runs_note": "", "stories": [
+            {"story": "main", "instance": 0, "paragraphs": [
+                {"index": i, "text": text, "style": None, "style_builtin": True,
+                 "left_indent": 0, "right_indent": 0, "first_line_indent": 0,
+                 "space_before": 0, "space_after": 0, "space_before_auto": False,
+                 "space_after_auto": False, "line_spacing": 12, "line_spacing_rule": "single",
+                 "alignment": "left", "list_string": "", "list_level": None, "font": font}
+                for i, text in enumerate(["Before", "Hidden mark", "", "", "", "", "", "After"])
+            ]},
+        ]}
+        export = importer.read_formatting(json.dumps(export).encode())
+        result, note = importer.compact_formatting(export, parts, "x", "y")
+        self.assertTrue(result["styles_from_resaved_copy"])
+        self.assertNotIn("not matched", note)
+
     def test_every_spelling_of_true_marks_the_default(self):
         w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
         document = (
