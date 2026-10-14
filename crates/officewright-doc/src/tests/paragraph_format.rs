@@ -1581,6 +1581,52 @@ fn reads_the_style_of_each_paragraph_once_for_the_document() {
 }
 
 #[test]
+fn a_list_label_takes_the_paragraph_style_and_the_marks_character_style() {
+    // Numbered headings take their labels' look from the paragraph style; the level
+    // lies over it and sets its on/off values.
+    let numbering = r#"<w:abstractNum w:abstractNumId="10"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:rPr><w:b w:val="0"/></w:rPr></w:lvl><w:lvl w:ilvl="1"><w:numFmt w:val="bullet"/><w:lvlText w:val="o"/><w:rPr><w:sz w:val="16"/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num>"#;
+    let styles = [
+        defaults(""),
+        r#"<w:style w:type="paragraph" w:styleId="Heading"><w:name w:val="Heading"/><w:rPr><w:b/><w:sz w:val="26"/></w:rPr></w:style>"#.to_owned(),
+        r#"<w:style w:type="character" w:styleId="Strong"><w:name w:val="Strong"/><w:rPr><w:u w:val="single"/></w:rPr></w:style>"#.to_owned(),
+    ]
+    .concat();
+    let item = |level: i64, r_pr: &str| {
+        format!(
+            r#"<w:numPr><w:ilvl w:val="{level}"/><w:numId w:val="1"/></w:numPr><w:rPr>{r_pr}</w:rPr>"#
+        )
+    };
+    let body = [
+        // The style's size and, set by the level, not its bold.
+        paragraph("Heading", &item(0, "")),
+        // The mark's character style.
+        paragraph("", &item(0, r#"<w:rStyle w:val="Strong"/>"#)),
+        // A level that gives only a size.
+        paragraph("", &item(1, r#"<w:sz w:val="28"/>"#)),
+    ]
+    .concat();
+    let document = build(&body, &styles, Some(numbering));
+    let mut formats = document.formats();
+    let labels: Vec<_> = paragraphs(&document)
+        .into_iter()
+        .map(|paragraph| formats.list_label(paragraph).unwrap())
+        .collect();
+    assert_eq!((labels[0].size(), labels[0].bold()), (Pt(13.0), false));
+    assert!(formats.paragraph_mark(paragraphs(&document)[0]).bold());
+    assert_eq!(labels[1].underline(), Some(UnderlineStyle::Single));
+    assert_eq!(labels[2].size(), Pt(8.0));
+
+    // A paragraph of another document is labelled by its own document's numbering and
+    // styles.
+    let numbering = numbering.replace(r#"<w:sz w:val="16"/>"#, r#"<w:sz w:val="20"/>"#);
+    let other = build(&paragraph("", &item(1, "")), &styles, Some(&numbering));
+    let theirs = paragraphs(&other)[0];
+    let label = document.formats().list_label(theirs).unwrap();
+    assert_eq!(label, other.formats().list_label(theirs).unwrap());
+    assert_eq!(label.size(), Pt(10.0));
+}
+
+#[test]
 fn formats_a_list_label_as_the_mark_with_the_level_over_it() {
     // The label takes the paragraph mark's formatting with the level's run properties
     // over it; Word ignores the level's w:rStyle, w:highlight and w:oMath there
