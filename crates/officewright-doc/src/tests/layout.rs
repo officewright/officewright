@@ -396,9 +396,8 @@ fn lists_what_it_leaves_out() {
             "sections[0].blocks[0].inlines: an endnote reference is left out: notes are not translated yet",
             "sections[0].blocks[0].inlines: an absolute position tab is left out (w:ptab)",
             "sections[0].blocks[0].inlines: an equation is left out",
-            "sections[0].blocks[1]: a table is left out: tables are not translated yet",
-            "sections[0].blocks[1]: a block-level w:altChunk is left out",
-            "sections[0].blocks[1]: indents or spacing in character or line units keep their value in points",
+            "sections[0].blocks[2]: a block-level w:altChunk is left out",
+            "sections[0].blocks[2]: indents or spacing in character or line units keep their value in points",
         ]
     );
     assert!(
@@ -1319,6 +1318,7 @@ fn gives_runs_that_differ_in_one_property_different_run_styles() {
         ),
         ("", r#"<w:u w:val="double"/>"#),
         ("", r#"<w:rFonts w:hint="eastAsia"/>"#),
+        ("", r#"<w:rFonts w:hint="cs"/>"#),
         ("", r#"<w:rFonts w:ascii="A"/>"#),
         ("", r#"<w:rFonts w:hAnsi="A"/>"#),
         ("", r#"<w:rFonts w:eastAsia="A"/>"#),
@@ -1424,6 +1424,10 @@ fn shares_run_styles_across_properties_the_ir_does_not_keep() {
         "<w:imprint/>",
         "<w:specVanish/>",
         r#"<w:rStyle w:val="Missing"/>"#,
+        // Values the IR takes as none.
+        r#"<w:rFonts w:hint="default"/>"#,
+        r#"<w:u w:val="none" w:color="FF0000"/>"#,
+        r#"<w:highlight w:val="none"/>"#,
     ] {
         let body = format!(
             r#"<w:p><w:r><w:t>a</w:t></w:r><w:r><w:rPr>{other}</w:rPr><w:t>b</w:t></w:r></w:p>"#
@@ -1589,4 +1593,433 @@ fn lists_a_cut_once_for_runs_that_share_a_style() {
         .map(LeftOut::message)
         .collect();
     assert_eq!(left_out, ["a font name of more than 256 bytes is cut"]);
+}
+
+/// The tables of the first section.
+fn tables(translation: &Translation) -> Vec<&ir::Table> {
+    translation.document().sections()[0]
+        .blocks()
+        .iter()
+        .filter_map(|block| match block {
+            ir::Block::Table(table) => Some(table),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn translates_tables_with_their_rows_and_cells() {
+    let table = r#"<w:tbl><w:tblPr><w:tblStyle w:val="Grid"/><w:tblpPr w:tblpX="100"/><w:bidiVisual/><w:tblW w:w="5000" w:type="pct"/><w:jc w:val="center"/><w:tblCellSpacing w:w="40" w:type="dxa"/><w:tblInd w:w="360" w:type="dxa"/><w:tblBorders><w:top w:val="single" w:sz="8" w:color="FF0000"/><w:bottom w:val="none" w:sz="0"/><w:insideH w:val="nil"/></w:tblBorders><w:shd w:val="clear" w:fill="EEEEEE"/><w:tblLayout w:type="fixed"/><w:tblCellMar><w:left w:w="100" w:type="dxa"/><w:right w:w="10" w:type="pct"/></w:tblCellMar></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="3000"/><w:gridCol w:w="1000"/></w:tblGrid>
+        <w:tr><w:trPr><w:cantSplit/><w:trHeight w:val="400"/><w:tblHeader/></w:trPr>
+            <w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/><w:gridSpan w:val="2"/><w:vMerge w:val="restart"/><w:tcBorders><w:top w:val="none" w:sz="0"/><w:start w:val="single" w:sz="4"/><w:bottom w:val="nil"/></w:tcBorders><w:shd w:val="clear" w:fill="00FF00"/><w:noWrap/><w:tcMar><w:top w:w="50" w:type="dxa"/><w:bottom w:w="0" w:type="auto"/></w:tcMar><w:textDirection w:val="btLr"/><w:vAlign w:val="center"/><w:hideMark/></w:tcPr><w:p><w:r><w:t>a</w:t></w:r></w:p></w:tc>
+            <w:tc><w:tcPr><w:tcW w:w="0" w:type="dxa"/></w:tcPr><w:p/></w:tc></w:tr>
+        <w:tr><w:trPr><w:gridBefore w:val="1"/><w:gridAfter w:val="2"/><w:wBefore w:w="1000" w:type="dxa"/><w:wAfter w:w="20" w:type="pct"/><w:trHeight w:val="300" w:hRule="exact"/></w:trPr><w:tblPrEx><w:shd w:val="clear" w:fill="FF00FF"/></w:tblPrEx>
+            <w:tc><w:tcPr><w:hMerge w:val="restart"/><w:vMerge/></w:tcPr><w:p/></w:tc>
+            <w:tc><w:tcPr><w:hMerge/></w:tcPr><w:p/></w:tc></w:tr>
+        <w:tr><w:tc><w:tbl><w:tr><w:tc><w:p><w:r><w:t>inner</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:tc><w:tc/></w:tr>
+        <w:tr/></w:tbl>"#;
+    let document = open(&format!("{table}<w:p/>"));
+    let translation = translate(&document);
+    let tables = tables(&translation);
+    assert_eq!(tables.len(), 1);
+    let table = tables[0];
+    let rgb =
+        |red, green, blue| ir::ColorValue::Rgb(officewright_core::Color::rgb(red, green, blue));
+    let props = table.props();
+    assert_eq!(props.width(), ir::PreferredWidth::Percent(100.0));
+    assert_eq!(props.layout(), ir::TableLayout::Fixed);
+    assert_eq!(props.indent(), Pt(18.0));
+    assert_eq!(props.alignment(), ir::TableAlignment::Center);
+    assert_eq!(props.cell_spacing(), Pt(2.0));
+    assert!(props.floating() && props.bidi_visual());
+    // A margin in percent is 0 (MS-OI29500 2.1.146 a; from Copilot's review of #159).
+    assert_eq!(
+        props.cell_margins(),
+        ir::CellMargins::default()
+            .with_start(Pt(5.0))
+            .with_end(Pt(0.0))
+    );
+    let borders = props.borders();
+    assert_eq!(
+        borders.top(),
+        ir::BorderSide::Line(
+            ir::Border::default()
+                .with_width(Pt(1.0))
+                .with_color(rgb(255, 0, 0))
+        )
+    );
+    // At the table, a border of style none is none; nil is nil; none written inherits.
+    assert_eq!(borders.bottom(), ir::BorderSide::None);
+    assert_eq!(borders.inside_horizontal(), ir::BorderSide::Nil);
+    assert_eq!(borders.start(), ir::BorderSide::Inherit);
+    assert_eq!(
+        props.shading(),
+        Some(ir::Shading::default().with_fill(rgb(0xEE, 0xEE, 0xEE)))
+    );
+    assert_eq!(table.grid(), [Pt(100.0), Pt(150.0), Pt(50.0)]);
+    // The row without cells is left out.
+    let rows = table.rows();
+    assert_eq!(rows.len(), 3);
+
+    let first = &rows[0];
+    assert_eq!(first.height(), ir::RowHeight::AtLeast(Pt(20.0)));
+    assert!(first.cant_split() && first.header());
+    let cell = &first.cells()[0];
+    assert_eq!(cell.width(), ir::PreferredWidth::Points(Pt(100.0)));
+    assert_eq!(cell.grid_span(), 2);
+    assert_eq!(cell.vertical_merge(), ir::VerticalMerge::Restart);
+    // The cell's top margin, the others from the table.
+    assert_eq!(
+        cell.margins(),
+        Some(
+            ir::CellMargins::default()
+                .with_top(Pt(2.5))
+                .with_start(Pt(5.0))
+                .with_end(Pt(0.0))
+                .with_bottom(Pt(0.0))
+        )
+    );
+    // In a cell, none is looked up in the table (MS-OI29500 2.1.169 a).
+    let cell_borders = cell.borders();
+    assert_eq!(cell_borders.top(), ir::BorderSide::Inherit);
+    assert_eq!(cell_borders.bottom(), ir::BorderSide::Nil);
+    assert!(matches!(cell_borders.start(), ir::BorderSide::Line(_)));
+    assert_eq!(cell_borders.end(), ir::BorderSide::Inherit);
+    assert_eq!(
+        cell.shading(),
+        Some(ir::Shading::default().with_fill(rgb(0, 255, 0)))
+    );
+    assert_eq!(cell.vertical_align(), ir::CellVerticalAlign::Center);
+    assert!(cell.no_wrap() && cell.hide_mark());
+    assert_eq!(
+        cell.text_direction(),
+        ir::TextDirection::BottomToTopLeftToRight
+    );
+    // A width of 0 is automatic.
+    assert_eq!(first.cells()[1].width(), ir::PreferredWidth::Auto);
+
+    let second = &rows[1];
+    assert_eq!(second.height(), ir::RowHeight::Exact(Pt(15.0)));
+    assert_eq!(
+        (second.grid_before(), second.width_before()),
+        (1, ir::PreferredWidth::Points(Pt(50.0)))
+    );
+    assert_eq!(
+        (second.grid_after(), second.width_after()),
+        (2, ir::PreferredWidth::Percent(0.4))
+    );
+    // The cell that continues a horizontal merge widens the one it continues.
+    assert_eq!(second.cells().len(), 1);
+    assert_eq!(second.cells()[0].grid_span(), 2);
+    assert_eq!(
+        second.cells()[0].vertical_merge(),
+        ir::VerticalMerge::Continue
+    );
+
+    // A cell that ends with a table, and an empty cell, end with an empty paragraph.
+    let third = &rows[2];
+    let blocks = third.cells()[0].blocks();
+    assert!(matches!(blocks[0], ir::Block::Table(_)));
+    assert!(matches!(blocks[1], ir::Block::Paragraph(_)));
+    assert_eq!(blocks.len(), 2);
+    assert!(matches!(
+        third.cells()[1].blocks(),
+        [ir::Block::Paragraph(_)]
+    ));
+
+    let left_out: Vec<String> = translation
+        .left_out()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        left_out,
+        [
+            "sections[0].blocks[0]: the table's style is not applied: table styles are not translated yet",
+            "sections[0].blocks[0].rows[1]: the row's table property exceptions are not applied",
+            "sections[0].blocks[0].rows[2].cells[0]: a cell that does not end with a paragraph gets an empty one",
+            "sections[0].blocks[0].rows[2].cells[1]: a cell that does not end with a paragraph gets an empty one",
+            "sections[0].blocks[0].rows[3]: a row without cells is left out",
+        ]
+    );
+}
+
+#[test]
+fn leaves_out_tables_without_rows_and_tables_nested_too_deep() {
+    let depth = ir::MAX_TABLE_DEPTH + 5;
+    let nested = format!(
+        "{}<w:p/>{}",
+        "<w:tbl><w:tr><w:tc>".repeat(depth),
+        "</w:tc></w:tr></w:tbl>".repeat(depth)
+    );
+    let body = format!("<w:tbl><w:tblGrid/></w:tbl>{nested}<w:p/>");
+    let options = LoadOptions::new().with_limits(Limits::new().with_max_xml_depth(1 << 12));
+    let document = options.open_bytes(docx(&body)).unwrap();
+    let translation = translate(&document);
+    let messages: Vec<&str> = translation
+        .left_out()
+        .iter()
+        .map(LeftOut::message)
+        .collect();
+    // Each kept table's cell ends with the table in it, so gets an empty paragraph.
+    let added = "a cell that does not end with a paragraph gets an empty one";
+    let mut expected = vec![
+        "a table without rows is left out",
+        "a table nested more than 100 deep is left out",
+    ];
+    expected.extend([added; ir::MAX_TABLE_DEPTH]);
+    assert_eq!(messages, expected);
+    // The tables down to the limit are kept, each cell ending with a paragraph.
+    let mut kept = 0;
+    let mut blocks = translation.document().sections()[0].blocks();
+    while let Some(ir::Block::Table(table)) = blocks.first() {
+        kept += 1;
+        blocks = table.rows()[0].cells()[0].blocks();
+    }
+    assert_eq!(kept, ir::MAX_TABLE_DEPTH);
+}
+
+#[test]
+fn translates_the_rest_of_table_properties() {
+    let table = r#"<w:tbl><w:tblPr><w:tblW w:w="0" w:type="pct"/><w:jc w:val="right"/><w:tblBorders><w:end w:val="single" w:sz="4"/><w:insideV w:val="dotted" w:sz="4"/></w:tblBorders><w:tblCellMar><w:top w:w="-100" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tblGrid><w:gridCol w:w="-100"/><w:gridCol w:w="1000"/></w:tblGrid>
+        <w:tr><w:trPr><w:gridBefore w:val="-1"/><w:trHeight w:val="400" w:hRule="auto"/></w:trPr>
+            <w:tc><w:tcPr><w:gridSpan w:val="0"/><w:vAlign w:val="bottom"/><w:textDirection w:val="tbRl"/></w:tcPr><w:p/></w:tc></w:tr></w:tbl>"#;
+    let translation = translate(&open(&format!("{table}<w:p/>")));
+    let table = tables(&translation)[0];
+    let props = table.props();
+    // A width of 0 percent is automatic (MS-OI29500 §17.4.71(a)).
+    assert_eq!(props.width(), ir::PreferredWidth::Auto);
+    assert_eq!(props.alignment(), ir::TableAlignment::End);
+    let line =
+        |style| ir::BorderSide::Line(ir::Border::default().with_style(style).with_width(Pt(0.5)));
+    assert_eq!(props.borders().end(), line(ir::BorderStyle::Single));
+    assert_eq!(
+        props.borders().inside_vertical(),
+        line(ir::BorderStyle::Dotted)
+    );
+    // Negative lengths and counts are 0; a span of 0 is 1.
+    assert_eq!(props.cell_margins().top(), Pt(0.0));
+    assert_eq!(table.grid(), [Pt(0.0), Pt(50.0)]);
+    let row = &table.rows()[0];
+    assert_eq!(row.grid_before(), 0);
+    // The rule auto ignores the height.
+    assert_eq!(row.height(), ir::RowHeight::Auto);
+    let cell = &row.cells()[0];
+    assert_eq!(cell.grid_span(), 1);
+    assert_eq!(cell.vertical_align(), ir::CellVerticalAlign::Bottom);
+    assert_eq!(
+        cell.text_direction(),
+        ir::TextDirection::TopToBottomRightToLeft
+    );
+}
+
+#[test]
+fn translates_widths_beyond_range_and_negative_spacing_into_valid_ir() {
+    // Values the IR rejects: the reader reads a width beyond 32 bits of its unit as not
+    // written (#115), and a negative cell spacing is 0. `translate` validates the IR.
+    let long = "1".repeat(400);
+    let table_properties = [
+        format!(r#"<w:tblW w:w="{long}" w:type="dxa"/>"#),
+        format!(r#"<w:tblW w:w="{long}" w:type="pct"/>"#),
+        format!(r#"<w:tblW w:w="{long}%"/>"#),
+        format!(r#"<w:tblInd w:w="{long}" w:type="dxa"/>"#),
+        format!(r#"<w:tblCellSpacing w:w="{long}" w:type="dxa"/>"#),
+        format!(r#"<w:tblCellMar><w:top w:w="{long}" w:type="dxa"/></w:tblCellMar>"#),
+        r#"<w:tblCellSpacing w:w="-40" w:type="dxa"/>"#.to_owned(),
+    ];
+    for written in &table_properties {
+        let body = format!(
+            "<w:tbl><w:tblPr>{written}</w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl><w:p/>"
+        );
+        let translation = translate(&open(&body));
+        assert_eq!(tables(&translation)[0].props().cell_spacing(), Pt(0.0));
+    }
+    let rows = [
+        format!(r#"<w:trPr><w:wBefore w:w="{long}" w:type="dxa"/></w:trPr><w:tc><w:p/></w:tc>"#),
+        format!(r#"<w:trPr><w:wAfter w:w="{long}" w:type="dxa"/></w:trPr><w:tc><w:p/></w:tc>"#),
+        format!(r#"<w:tc><w:tcPr><w:tcW w:w="{long}" w:type="dxa"/></w:tcPr><w:p/></w:tc>"#),
+        format!(r#"<w:tc><w:tcPr><w:tcW w:w="{long}" w:type="pct"/></w:tcPr><w:p/></w:tc>"#),
+        format!(
+            r#"<w:tc><w:tcPr><w:tcMar><w:start w:w="{long}" w:type="dxa"/></w:tcMar></w:tcPr><w:p/></w:tc>"#
+        ),
+    ];
+    for row in &rows {
+        translate(&open(&format!("<w:tbl><w:tr>{row}</w:tr></w:tbl><w:p/>")));
+    }
+}
+
+#[test]
+fn folds_long_horizontal_merges_moving_the_widened_cell() {
+    // A cell of many paragraphs, widened by as many continuing cells. The widened cell
+    // is moved, not copied once per continuing cell, which took half a minute at 30,000:
+    // its blocks stay where they were built.
+    let n = 10_000;
+    let body = format!(
+        r#"<w:tbl><w:tr><w:tc><w:tcPr><w:hMerge w:val="restart"/></w:tcPr>{}</w:tc>{}</w:tr></w:tbl><w:p/>"#,
+        "<w:p/>".repeat(n),
+        "<w:tc><w:tcPr><w:hMerge/></w:tcPr><w:p/></w:tc>".repeat(n)
+    );
+    let document = open(&body);
+    let (translation, copies) = work_of(|work| work.cell_copies, || translate(&document));
+    assert_eq!(copies, 0);
+    let cells = tables(&translation)[0].rows()[0].cells();
+    assert_eq!(cells.len(), 1);
+    assert_eq!(usize::from(cells[0].grid_span()), n + 1);
+    assert_eq!(cells[0].blocks().len(), n);
+    assert!(translation.left_out().is_empty());
+}
+
+#[test]
+fn translates_cell_values_word_reads_its_own_way() {
+    let body = r#"<w:tbl><w:tblPr><w:tblBorders><w:start w:val="double" w:sz="4"/></w:tblBorders><w:tblCellMar><w:top w:w="100" w:type="dxa"/><w:start w:w="200" w:type="dxa"/><w:end w:type="nil"/></w:tblCellMar></w:tblPr>
+        <w:tr>
+            <w:tc><w:tcPr><w:tcMar><w:top w:w="0" w:type="nil"/><w:start w:type="nil"/><w:bottom w:w="40" w:type="dxa"/></w:tcMar><w:vAlign w:val="both"/><w:textDirection w:val="lrTbV"/></w:tcPr><w:p/></w:tc>
+            <w:tc><w:tcPr><w:textDirection w:val="tbRlV"/></w:tcPr><w:p/></w:tc>
+            <w:tc><w:tcPr><w:textDirection w:val="tbLrV"/></w:tcPr><w:p/></w:tc>
+            <w:tc><w:tcPr><w:hMerge w:val="restart"/></w:tcPr><w:p/></w:tc>
+            <w:tc><w:tcPr><w:gridSpan w:val="2"/><w:hMerge/></w:tcPr><w:p/></w:tc>
+        </w:tr></w:tbl><w:p/>"#;
+    let translation = translate(&open(body));
+    let table = tables(&translation)[0];
+    let props = table.props();
+    assert_eq!(
+        props.borders().start(),
+        ir::BorderSide::Line(
+            ir::Border::default()
+                .with_style(ir::BorderStyle::Double)
+                .with_width(Pt(0.5))
+        )
+    );
+    // A table's nil margin is taken as not written, as a cell's is.
+    let margins = props.cell_margins();
+    assert_eq!(
+        (
+            margins.top(),
+            margins.start(),
+            margins.bottom(),
+            margins.end()
+        ),
+        (Pt(5.0), Pt(10.0), Pt(0.0), Pt(5.4))
+    );
+    let cells = table.rows()[0].cells();
+    // Word ignores a cell's nil margin, which then comes from the table (MS-OI29500
+    // §17.4.77(a) and the notes on the other sides).
+    let margins = cells[0].margins().unwrap();
+    assert_eq!(
+        (
+            margins.top(),
+            margins.start(),
+            margins.bottom(),
+            margins.end()
+        ),
+        (Pt(5.0), Pt(10.0), Pt(2.0), Pt(5.4))
+    );
+    // Both is top in a cell (MS-OI29500 §17.4.83(a)); so is none.
+    assert_eq!(cells[0].vertical_align(), ir::CellVerticalAlign::Top);
+    assert_eq!(cells[1].vertical_align(), ir::CellVerticalAlign::Top);
+    let directions: Vec<_> = cells[..3].iter().map(ir::Cell::text_direction).collect();
+    assert_eq!(
+        directions,
+        [
+            ir::TextDirection::LeftToRightTopToBottomRotated,
+            ir::TextDirection::TopToBottomRightToLeftRotated,
+            ir::TextDirection::TopToBottomLeftToRightRotated,
+        ]
+    );
+    // A continuing cell adds its own span to the cell it continues.
+    assert_eq!(cells.len(), 4);
+    assert_eq!(cells[3].grid_span(), 3);
+}
+
+#[test]
+fn floats_tables_as_word_does() {
+    let floats = |position: &str| {
+        let body = format!(
+            "<w:tbl><w:tblPr>{position}</w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl><w:p/>"
+        );
+        tables(&translate(&open(&body)))[0].props().floating()
+    };
+    // Word ignores a w:tblpPr without attributes, and one at 0, 0 from the text
+    // horizontally and from anything but the text vertically, with the anchors Word
+    // takes when none is written (MS-OI29500 §17.4.57(b), (c)).
+    for ignored in [
+        "",
+        "<w:tblpPr/>",
+        r#"<w:tblpPr w:tblpX="0" w:tblpY="0"/>"#,
+        r#"<w:tblpPr w:horzAnchor="text" w:vertAnchor="margin" w:tblpX="0" w:tblpY="0"/>"#,
+        r#"<w:tblpPr w:horzAnchor="text" w:vertAnchor="page"/>"#,
+        r#"<w:tblpPr w:leftFromText="180"/>"#,
+    ] {
+        assert!(!floats(ignored), "{ignored}");
+    }
+    for kept in [
+        r#"<w:tblpPr w:vertAnchor="text" w:tblpX="0" w:tblpY="0"/>"#,
+        r#"<w:tblpPr w:horzAnchor="margin"/>"#,
+        // Word writes 1 twip for a distance of 0, so that its table is not ignored.
+        r#"<w:tblpPr w:tblpX="1" w:tblpY="0"/>"#,
+        r#"<w:tblpPr w:tblpX="0" w:tblpY="1"/>"#,
+        r#"<w:tblpPr w:tblpY="-720"/>"#,
+        // A position given as an alignment is no distance of 0 (n779642.docx).
+        r#"<w:tblpPr w:tblpYSpec="bottom"/>"#,
+        r#"<w:tblpPr w:horzAnchor="text" w:vertAnchor="page" w:tblpXSpec="center"/>"#,
+    ] {
+        assert!(floats(kept), "{kept}");
+    }
+}
+
+#[test]
+fn lists_row_and_cell_properties_the_ir_has_no_place_for() {
+    let body = r#"<w:tbl><w:tblPr><w:jc w:val="center"/><w:tblCellSpacing w:w="20" w:type="dxa"/></w:tblPr>
+        <w:tr><w:trPr><w:jc w:val="center"/><w:tblCellSpacing w:w="20" w:type="dxa"/><w:hidden w:val="0"/></w:trPr><w:tc><w:p/></w:tc></w:tr>
+        <w:tr><w:trPr><w:jc w:val="right"/><w:tblCellSpacing w:w="40" w:type="dxa"/><w:hidden/></w:trPr>
+            <w:tc><w:tcPr><w:tcBorders><w:tl2br w:val="single" w:sz="4"/></w:tcBorders><w:tcFitText/></w:tcPr><w:p/></w:tc>
+            <w:tc><w:tcPr><w:tcBorders><w:tl2br w:val="none"/><w:tr2bl w:val="nil"/></w:tcBorders><w:tcFitText w:val="0"/></w:tcPr><w:p/></w:tc>
+            <w:tc><w:tcPr><w:hMerge w:val="restart"/></w:tcPr><w:p/></w:tc>
+            <w:tc><w:tcPr><w:hMerge/></w:tcPr><w:p/></w:tc>
+            <w:tc><w:tcPr><w:hMerge/></w:tcPr><w:p><w:r><w:t>second</w:t></w:r></w:p></w:tc>
+            <w:tc><w:tcPr><w:tcBorders><w:tr2bl w:val="single" w:sz="4"/></w:tcBorders></w:tcPr><w:p/></w:tc>
+        </w:tr></w:tbl><w:p/>"#;
+    let translation = translate(&open(body));
+    let left_out: Vec<String> = translation
+        .left_out()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    // A row that repeats the table's alignment and spacing, as Word writes every row, is
+    // not listed; neither is a continuing cell that is empty.
+    assert_eq!(
+        left_out,
+        [
+            "sections[0].blocks[0].rows[1]: the row's own alignment is not applied; the table's is used",
+            "sections[0].blocks[0].rows[1]: the row's own cell spacing is not applied; the table's is used",
+            "sections[0].blocks[0].rows[1]: the row's hidden end mark (w:hidden) is not applied",
+            "sections[0].blocks[0].rows[1].cells[0]: the cell's text fitting (w:tcFitText) is not applied",
+            "sections[0].blocks[0].rows[1].cells[0]: the cell's diagonal borders are not drawn",
+            "sections[0].blocks[0].rows[1].cells[2]: the content of a cell that continues a horizontal merge is left out",
+            "sections[0].blocks[0].rows[1].cells[3]: the cell's diagonal borders are not drawn",
+        ]
+    );
+    // The merged cell keeps its own content only.
+    let cells = tables(&translation)[0].rows()[1].cells();
+    assert_eq!(cells.len(), 4);
+    assert_eq!(cells[2].grid_span(), 3);
+    assert!(matches!(cells[2].blocks(), [ir::Block::Paragraph(p)] if p.inlines().is_empty()));
+}
+
+#[test]
+fn gives_the_paragraph_added_to_a_cell_the_default_paragraph_style_s_mark() {
+    let styles = format!(
+        r#"<w:styles xmlns:w="{W}"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:rPr><w:sz w:val="40"/></w:rPr></w:style></w:styles>"#
+    );
+    let document = with_parts(
+        "<w:tbl><w:tr><w:tc><w:tbl><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl></w:tc></w:tr></w:tbl><w:p/>",
+        &[("styles", "styles.xml", styles)],
+    );
+    let translation = translate(&document);
+    let blocks = tables(&translation)[0].rows()[0].cells()[0].blocks();
+    let [ir::Block::Table(_), ir::Block::Paragraph(added)] = blocks else {
+        panic!("no paragraph added after the nested table");
+    };
+    let ir = translation.document();
+    assert_eq!(ir.run_style(added.mark()).unwrap().size(), Pt(20.0));
 }

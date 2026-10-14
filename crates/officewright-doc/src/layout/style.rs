@@ -149,15 +149,25 @@ impl<'f> StyleKey<'f> {
         Self {
             strings: [Some(a), Some(b), Some(c), Some(d), e, f, g],
             values: Values {
-                hint: *hint,
+                // The IR takes no hint and the hint default alike.
+                hint: hint.filter(|hint| *hint != FontHint::Default),
                 sizes: [size.0.to_bits(), size_complex_script.0.to_bits()],
                 toggles,
-                colors: [*color, *underline_color],
+                // The underline's colour only counts with an underline.
+                colors: [
+                    *color,
+                    if underline.is_some() {
+                        *underline_color
+                    } else {
+                        ColorValue::Auto
+                    },
+                ],
                 underline: *underline,
                 vertical_position: *vertical_position,
                 offsets: [position.0.to_bits(), spacing.0.to_bits()],
                 scale: *scale,
                 kerning: kerning.map(|kerning| kerning.0.to_bits()),
+                // The resolver gives the highlight none as no highlight already.
                 highlight: *highlight,
                 // A shading of pattern nil is no shading at all.
                 shading: shading.filter(|shading| shading.pattern() != Some(ShadingPattern::Nil)),
