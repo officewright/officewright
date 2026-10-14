@@ -454,6 +454,36 @@ def page_geometry(bbox: str) -> list[dict]:
     return pages
 
 
+def rendered_pages(parts: dict[str, bytes]) -> int:
+    """The pages Word's rendered page breaks make: one more than the breaks.
+
+    A break inside a table row is marked in every cell the break splits, so the marks of one
+    row, nested tables included, count once; marks of paragraphs outside tables count each.
+    """
+    root = ElementTree.fromstring(parts["word/document.xml"])
+    body = root.find(f"{W}body")
+    if body is None:
+        raise ValueError("word/document.xml has no body")
+
+    def count(container: ElementTree.Element) -> int:
+        total = 0
+        for child in container:
+            name = local_name(child.tag)
+            if name == "tbl":
+                total += sum(
+                    1
+                    for row in child.findall(f"{W}tr")
+                    if next(row.iter(f"{W}lastRenderedPageBreak"), None) is not None
+                )
+            elif name == "p":
+                total += sum(1 for _ in child.iter(f"{W}lastRenderedPageBreak"))
+            else:
+                total += count(child)
+        return total
+
+    return count(body) + 1
+
+
 def rendered_page_breaks(parts: dict[str, bytes]) -> list[dict]:
     """Word's page breaks: the w:lastRenderedPageBreak marks of a saved document.
 
@@ -1074,6 +1104,19 @@ def checksum32(data: bytes) -> int:
     return sum(struct.unpack(f">{len(padded) // 4}I", padded)) & 0xFFFFFFFF
 
 
+# Fonts the PDF names that Windows draws with another installed font, by the PostScript name
+# of the face it draws them with. Windows' FontSubstitutes registry key maps Helvetica to
+# Arial, and Word lays such text out with Arial: the widths in Word's PDFs for Helvetica are
+# Arial's, and those for Helvetica,Bold are Arial Bold's (business/contract-hhs-teaming-
+# agreement, K2 run). After the comma, Word names the style of the face it substituted.
+SUBSTITUTES = {
+    "Helvetica": "ArialMT",
+    "Helvetica,Bold": "Arial-BoldMT",
+    "Helvetica,Italic": "Arial-ItalicMT",
+    "Helvetica,BoldItalic": "Arial-BoldItalicMT",
+}
+
+
 @dataclass(frozen=True)
 class DrawnFont:
     """A font the PDF does not embed, and the face the rasters draw it with."""
@@ -1081,6 +1124,8 @@ class DrawnFont:
     name: str
     face: FontFace
     data: bytes
+    # The PostScript name of the face Windows substitutes for the font, if it does.
+    substitute: str = ""
 
     def describe(self) -> dict:
         entry = {
@@ -1089,6 +1134,8 @@ class DrawnFont:
             "version": self.face.version,
             "sha256": hashlib.sha256(self.face.path.read_bytes()).hexdigest(),
         }
+        if self.substitute:
+            entry["windows_substitute"] = self.substitute
         if self.face.collection:
             entry["face_in_collection"] = self.face.index
         return entry
@@ -1096,16 +1143,21 @@ class DrawnFont:
 
 def drawn_font(name: str, index: dict[str, list[FontFace]]) -> DrawnFont:
     """The face for a font the PDF names without embedding it; refused unless exactly one."""
-    if "," in name:
+    substitute = SUBSTITUTES.get(name, "")
+    postscript = substitute or name
+    if "," in postscript:
         raise Refused(
             f"{name}: Word names a style it synthesizes after the comma, which an embedded "
             "face would lose"
         )
-    faces = index.get(name, [])
+    faces = index.get(postscript, [])
     if not faces:
+        wanted = "that PostScript name"
+        if substitute:
+            wanted = f"the PostScript name {substitute}, which Windows draws it with"
         raise Refused(
             f"{name} is not embedded in the PDF, and no --font-dir folder has a font with "
-            "that PostScript name (under WSL: /mnt/c/Windows/Fonts, and "
+            f"{wanted} (under WSL: /mnt/c/Windows/Fonts, and "
             "/mnt/c/Users/<name>/AppData/Local/Microsoft/Windows/Fonts for fonts installed "
             "for one user)"
         )
@@ -1127,7 +1179,7 @@ def drawn_font(name: str, index: dict[str, list[FontFace]]) -> DrawnFont:
             f"{name}: unexpected name or version in {face.path.name}: "
             f"{face.full_name!r}, {face.version!r}"
         )
-    return DrawnFont(name, face, data)
+    return DrawnFont(name, face, data, substitute)
 
 
 def embedding_update(objects: dict, fonts: dict[str, Path], cff: dict[str, bool]) -> dict:
@@ -1189,6 +1241,17 @@ def with_fonts_embedded(pdf: Path, drawn: list[DrawnFont], directory: Path, tool
     return copy
 
 
+def drawn_font_note(font: DrawnFont) -> str:
+    """How SOURCES.md names a font the rasters draw with the maintainer's copy."""
+    substitute = ""
+    if font.substitute:
+        substitute = f"drawn with {font.substitute} as Windows substitutes it, "
+    return (
+        f"{font.name} ({substitute}{font.face.full_name}, "
+        f"{font.face.version or 'no version'}, SHA-256 {font.describe()['sha256']})"
+    )
+
+
 def reference_row(
     group: str,
     record: dict,
@@ -1196,6 +1259,8 @@ def reference_row(
     poppler: str,
     dropped: list[str],
     formatting_note: str = "",
+    pages: int | None = None,
+    pages_note: str = "",
 ) -> str:
     base = Path(record["file"]).stem
     windows = record["windows_version"]
@@ -1205,9 +1270,11 @@ def reference_row(
     printer = f"printer {REFERENCE_PRINTER}"
     if record["printer"] != REFERENCE_PRINTER:
         printer = f"printer other than {REFERENCE_PRINTER}, name not recorded"
+    if pages is None:
+        pages = record["pages"]
     notes = [
         f"compatibility mode {record['compatibility_mode']}",
-        f"{record['pages']} page{'s' if record['pages'] != 1 else ''}",
+        f"{pages} page{'s' if pages != 1 else ''}",
         printer,
         "fonts Word substituted: " + (", ".join(record["fonts_missing"]) or "none"),
         "w:compat settings Word dropped from the re-saved copy: " + (", ".join(dropped) or "none"),
@@ -1216,14 +1283,12 @@ def reference_row(
         f"rasters and geometry by poppler {poppler} at {RASTER_DPI} dpi, grey",
         "fonts the PDF does not embed, rasterized with the maintainer's installed copies: "
         + (
-            ", ".join(
-                f"{font.name} ({font.face.full_name}, {font.face.version or 'no version'}, "
-                f"SHA-256 {font.describe()['sha256']})"
-                for font in drawn
-            )
+            ", ".join(drawn_font_note(font) for font in drawn)
             or "none"
         ),
     ]
+    if pages_note:
+        notes.append(pages_note)
     if formatting_note:
         notes.append(formatting_note)
     return (
@@ -1305,6 +1370,7 @@ def check_result(
         dropped = sorted(compat_flags(original_parts) - compat_flags(resaved_parts))
         added = sorted(compat_flags(resaved_parts) - compat_flags(original_parts))
         page_breaks = rendered_page_breaks(resaved_parts)
+        pages_rendered = rendered_pages(resaved_parts)
     except (zipfile.BadZipFile, ElementTree.ParseError, ValueError, KeyError) as error:
         raise Refused(f"{record['file']}: cannot read a package: {error}") from error
     problems += pdf_privacy_problems(info, tools.xmp(pdf), pdf.read_bytes())
@@ -1319,9 +1385,18 @@ def check_result(
                 f"{record['file']}: {source} compatibility mode {value}, the input asks for {mode}"
             )
     pages = pdf_pages(info)
+    pages_note = ""
     if pages != record["pages"]:
-        raise Refused(
-            f"{record['file']}: Word counted {record['pages']} pages, the PDF has {pages}"
+        # Word's page statistic can disagree with its own layout: the PDF is accepted when
+        # the page breaks Word rendered into the re-saved copy make as many pages.
+        if pages != pages_rendered:
+            raise Refused(
+                f"{record['file']}: Word counted {record['pages']} pages, the PDF has {pages}, "
+                f"and Word's rendered page breaks make {pages_rendered}"
+            )
+        pages_note = (
+            f"Word's page statistic said {record['pages']} pages; the PDF and the page breaks "
+            f"Word rendered into the re-saved copy have {pages}"
         )
     try:
         geometry_pages = page_geometry(tools.bbox(pdf))
@@ -1352,7 +1427,9 @@ def check_result(
     formatting, formatting_note = None, ""
     if record["script_version"] >= 3:
         formatting, formatting_note = checked_formatting(record, results, resaved_parts, group)
-    row = reference_row(group, record, drawn, poppler, dropped, formatting_note)
+    row = reference_row(
+        group, record, drawn, poppler, dropped, formatting_note, pages, pages_note
+    )
     return Checked(record, pdf, resaved, row, geometry, drawn, formatting, formatting_note)
 
 

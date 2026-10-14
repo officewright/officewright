@@ -4,6 +4,7 @@ The poppler tools are replaced by fixed output, so the checks run where poppler 
 installed (Windows) and do not depend on its version.
 """
 
+import dataclasses
 import hashlib
 import importlib.util
 import json
@@ -719,6 +720,109 @@ class Import(unittest.TestCase):
         self.info = "Author:          \nPages:           4\n"
         self.assertIn("Word counted 3 pages, the PDF has 4", self.refused())
 
+    def mark_page_breaks(self, record, count):
+        """Two or fewer w:lastRenderedPageBreak marks in the re-saved copy's paragraphs."""
+        anchors = [
+            b'<w:t xml:space="preserve">Calibri 11 pt, line 01',
+            b'<w:t xml:space="preserve">Cambria 11 pt, line 02',
+        ]
+        self.change_resaved(record, {"word/document.xml": [
+            (anchor, b"<w:lastRenderedPageBreak/>" + anchor) for anchor in anchors[:count]
+        ]})
+
+    def test_accepts_a_page_count_word_rendered_but_did_not_report(self):
+        # Word's statistic says 2 pages; its PDF and its two rendered breaks make 3.
+        doc = rules.documents()[0]
+        record = self.add_result(doc, pages=2)
+        self.mark_page_breaks(record, 2)
+        self.run_import()
+        geometry = json.loads(
+            (self.corpus / "reference" / "word-rules" / doc.name / "geometry.json")
+            .read_text(encoding="utf-8")
+        )
+        self.assertEqual(geometry["page_count"], 3)
+        row = next(
+            line for line in (self.corpus / "SOURCES.md").read_text(encoding="utf-8").splitlines()
+            if line.startswith(f"| reference/word-rules/{doc.name}/ ")
+        )
+        self.assertIn("; 3 pages;", row)
+        self.assertIn(
+            "Word's page statistic said 2 pages; the PDF and the page breaks Word rendered "
+            "into the re-saved copy have 3",
+            row,
+        )
+
+    def test_refuses_a_page_count_neither_word_figure_confirms(self):
+        record = self.add_result(rules.documents()[0], pages=2)
+        self.mark_page_breaks(record, 1)
+        self.assertIn(
+            "Word counted 2 pages, the PDF has 3, and Word's rendered page breaks make 2",
+            self.refused(),
+        )
+
+    def use_helvetica(self, arial=True):
+        """A PDF that names Helvetica and Helvetica,Bold without embedding them."""
+        columns = "TrueType          WinAnsi          no  no  no "
+        listing = PDFFONTS.replace(
+            f"{'Garamond':<37}{columns}     12  0\n",
+            f"{'Helvetica':<37}{columns}     12  0\n{'Helvetica,Bold':<37}{columns}     14  0\n",
+        )
+        self.assertNotEqual(listing, PDFFONTS)
+        self.pdffonts = listing
+        self.copy_fonts = listing.replace("no  no  no ", "yes no  no ")
+        objects = {"qpdf": [
+            {"jsonversion": 2, "maxobjectid": 14},
+            {
+                "obj:12 0 R": {"value": {"/Type": "/FontDescriptor", "/FontName": "/Helvetica"}},
+                "obj:14 0 R": {"value": {"/Type": "/FontDescriptor",
+                                         "/FontName": "/Helvetica,Bold"}},
+            },
+        ]}
+        self.tools = dataclasses.replace(self.tools, objects=lambda path: json.dumps(objects))
+        self.arial = sfnt("ArialMT", "Arial", "Version 7.06")
+        self.arial_bold = sfnt("Arial-BoldMT", "Arial Bold", "Version 7.06")
+        if arial:
+            (self.font_dir / "arial.ttf").write_bytes(self.arial)
+            (self.font_dir / "arialbd.ttf").write_bytes(self.arial_bold)
+
+    def test_helvetica_is_drawn_with_arial_as_windows_substitutes_it(self):
+        self.use_helvetica()
+        self.run_import()
+        embedded = {}
+        for _, update, data in self.updates:
+            for key, value in update["qpdf"][1].items():
+                if "value" in value:
+                    name = value["value"]["/FontName"]
+                    stream = value["value"]["/FontFile2"].replace(" 0 R", "")
+                    embedded[name] = data[f"obj:{stream} 0 R"]
+        self.assertEqual(embedded["/Helvetica"], self.arial)
+        self.assertEqual(embedded["/Helvetica,Bold"], self.arial_bold)
+        doc = rules.documents()[0]
+        geometry = json.loads(
+            (self.corpus / "reference" / "word-rules" / doc.name / "geometry.json")
+            .read_text(encoding="utf-8")
+        )
+        drawn = {font["font"]: font for font in geometry["fonts_rasterized_with"]}
+        self.assertEqual(
+            (drawn["Helvetica"]["windows_substitute"], drawn["Helvetica"]["full_name"]),
+            ("ArialMT", "Arial"),
+        )
+        self.assertEqual(drawn["Helvetica,Bold"]["windows_substitute"], "Arial-BoldMT")
+        sources = (self.corpus / "SOURCES.md").read_text(encoding="utf-8")
+        self.assertIn(
+            "Helvetica,Bold (drawn with Arial-BoldMT as Windows substitutes it, Arial Bold, "
+            f"Version 7.06, SHA-256 {sha256(self.arial_bold)})",
+            sources,
+        )
+
+    def test_helvetica_without_arial_is_refused(self):
+        self.use_helvetica(arial=False)
+        self.assertIn(
+            "Helvetica is not embedded in the PDF, and no --font-dir folder has a font with the "
+            "PostScript name ArialMT, which Windows draws it with",
+            self.refused(),
+        )
+
     def test_refuses_another_format_version(self):
         self.add_result(rules.documents()[0], script_version=1)
         self.assertIn("format 1", self.refused())
@@ -1074,6 +1178,37 @@ class BodyParagraphs(unittest.TestCase):
         self.assertIn("body styles not matched to the re-saved copy", note)
 
 
+class RenderedPages(unittest.TestCase):
+    """The pages Word's w:lastRenderedPageBreak marks make."""
+
+    def pages(self, body):
+        document = (
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            f"<w:body>{body}</w:body></w:document>"
+        )
+        return importer.rendered_pages({"word/document.xml": document.encode()})
+
+    MARK = "<w:r><w:lastRenderedPageBreak/><w:t>x</w:t></w:r>"
+
+    def test_no_marks_make_one_page(self):
+        self.assertEqual(self.pages("<w:p><w:r><w:t>x</w:t></w:r></w:p>"), 1)
+
+    def test_every_mark_of_a_paragraph_counts(self):
+        self.assertEqual(self.pages(f"<w:p>{self.MARK}{self.MARK}</w:p><w:p>{self.MARK}</w:p>"), 4)
+
+    def test_the_marks_of_one_table_row_count_once(self):
+        cell = f"<w:tc><w:p>{self.MARK}</w:p></w:tc>"
+        nested = f"<w:tc><w:tbl><w:tr>{cell}{cell}</w:tr></w:tbl></w:tc>"
+        plain = "<w:tc><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc>"
+        rows = f"<w:tr>{cell}{cell}{nested}</w:tr><w:tr>{plain}</w:tr><w:tr>{cell}</w:tr>"
+        table = f"<w:tbl>{rows}</w:tbl>"
+        self.assertEqual(self.pages(table), 3)
+
+    def test_marks_inside_content_controls_count(self):
+        sdt = f"<w:sdt><w:sdtContent><w:p>{self.MARK}</w:p></w:sdtContent></w:sdt>"
+        self.assertEqual(self.pages(sdt + f"<w:p>{self.MARK}</w:p>"), 3)
+
+
 class FontFiles(unittest.TestCase):
     def setUp(self):
         self.temp = Path(tempfile.mkdtemp())
@@ -1093,6 +1228,20 @@ class FontFiles(unittest.TestCase):
         with self.assertRaises(importer.Refused) as caught:
             importer.drawn_font("Garamond", index)
         self.assertIn("Garamond: the font file cannot be read: broken.ttc", str(caught.exception))
+
+    def test_only_the_substituted_styles_of_helvetica_may_have_a_comma(self):
+        (self.temp / "arial.ttf").write_bytes(sfnt("ArialMT", "Arial", "Version 7.06"))
+        (self.temp / "ariali.ttf").write_bytes(sfnt("Arial-ItalicMT", "Arial Italic", "7.06"))
+        index = importer.font_index([self.temp])
+        self.assertEqual(importer.drawn_font("Helvetica", index).substitute, "ArialMT")
+        self.assertEqual(
+            importer.drawn_font("Helvetica,Italic", index).face.full_name, "Arial Italic"
+        )
+        self.assertEqual(importer.drawn_font("ArialMT", index).substitute, "")
+        for name in ("Helvetica,Oblique", "ArialMT,Bold"):
+            with self.assertRaises(importer.Refused) as caught:
+                importer.drawn_font(name, index)
+            self.assertIn(f"{name}: Word names a style it synthesizes", str(caught.exception))
 
     def test_a_folder_that_cannot_be_listed_is_refused(self):
         with mock.patch.object(Path, "iterdir", side_effect=PermissionError("denied")):
