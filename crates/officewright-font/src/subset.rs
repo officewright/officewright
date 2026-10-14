@@ -130,7 +130,7 @@ impl FontFace {
         crate::name_offsets::check(&font, self.data(), face)?;
         if subsetter_table(&font, self.data(), b"glyf").is_none() {
             crate::cff::check_reals(&font, self.data(), face)?;
-            crate::cff::check_hints(&font, self.data(), face, &ids)?;
+            crate::cff::check_programs(&font, self.data(), face, &ids)?;
         }
         let remapper = GlyphRemapper::new_from_glyphs_sorted(&ids);
         let data = self.data();
@@ -203,16 +203,16 @@ pub(crate) fn subsetter_table<'a>(
 /// subsetter 0.2.6 still has `unwrap()`, `unreachable!()` and unchecked arithmetic on
 /// paths that malformed fonts can reach. A damaged font must give `Err`, never a panic,
 /// also inside a dependency, so the panic is caught here until upstream returns errors
-/// on those paths; panics that fuzzing finds are reported there. The three found so
-/// far are not left to this guard: the checks in `name_offsets.rs` and `cff.rs` refuse
-/// the faces before the subsetter runs, since the panic hook would still print them.
-/// They are an overflow in its `name` table code
+/// on those paths; panics that fuzzing finds are reported there. The four found so far
+/// are not left to this guard: the checks in `name_offsets.rs` and `cff.rs` refuse the
+/// faces before the subsetter runs, since the panic hook would still print them. They
+/// are an overflow in its `name` table code
 /// (<https://github.com/typst/subsetter/issues/30>), `unreachable!()` for a CFF real
-/// number too large for an `f32` (<https://github.com/typst/subsetter/issues/31>), and
-/// an overflow of a glyph's stem-hint count
-/// (<https://github.com/typst/subsetter/issues/33>). A fourth is still left to it: a
-/// `debug_assert!` on a CID-keyed font with more than 255 Font DICTs (officewright issue
-/// #234).
+/// number too large for an `f32` (<https://github.com/typst/subsetter/issues/31>), an
+/// overflow of a glyph's stem-hint count
+/// (<https://github.com/typst/subsetter/issues/33>), and a `debug_assert!` that a
+/// CID-keyed font has at most 255 Font DICTs
+/// (<https://github.com/typst/subsetter/issues/34>).
 /// Catching relies on unwinding, like the C ABI: built with `-C panic=abort` the process
 /// aborts instead. The default panic hook still prints the message to stderr, since a
 /// library must not replace the process-wide hook.

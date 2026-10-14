@@ -415,11 +415,17 @@ fn real(data: &[u8]) -> Option<(Option<String>, usize)> {
     None
 }
 
-/// Fails if a glyph the subsetter decompiles when it keeps `glyphs` of the `CFF ` table it
-/// takes from `font` (its file `data`) declares more stem hints than it can count. The
-/// subsetter decompiles `.notdef` and then the kept glyphs in order, and stops at the
+/// The most Font DICTs subsetter 0.2.6 takes in a CID-keyed font: it asserts at most 255
+/// lists of local subroutines, one fewer than the 256 that FDSelect's one-byte numbers
+/// can address (<https://github.com/typst/subsetter/issues/34>).
+const MAX_FONT_DICTS: usize = 255;
+
+/// Fails if the subsetter would panic on the `CFF ` table it takes from `font` (its file
+/// `data`) when it keeps `glyphs`: when the table is CID-keyed with more Font DICTs than
+/// it takes, or when a glyph it decompiles declares more stem hints than it can count.
+/// The subsetter decompiles `.notdef` and then the kept glyphs in order, and stops at the
 /// first it cannot read; so does this check, leaving that error to the subsetter.
-pub(crate) fn check_hints(
+pub(crate) fn check_programs(
     font: &FontRef<'_>,
     data: &[u8],
     face: u32,
@@ -431,6 +437,17 @@ pub(crate) fn check_hints(
     let Some(programs) = Programs::read(cff) else {
         return Ok(());
     };
+    // A well-formed font, so the subsetter's limit, not damage.
+    if programs.local.len() > MAX_FONT_DICTS {
+        return Err(Error::SubsetUnsupported {
+            face,
+            source: Cause::new(format!(
+                "the CFF table has {} Font DICTs, more than the subsetter takes \
+                 ({MAX_FONT_DICTS})",
+                programs.local.len()
+            )),
+        });
+    }
     let mut kept = glyphs.to_vec();
     kept.sort_unstable();
     kept.dedup();
@@ -1378,6 +1395,45 @@ mod tests {
         glyphs
     }
 
+    /// Whether subsetter 0.2.6 itself panics on the test font with `cff` as its outlines,
+    /// kept to `glyphs`.
+    fn subsetter_panics(cff: Vec<u8>, glyphs: &[u16]) -> bool {
+        let font = crate::testing::TestFont::new("Test Sans")
+            .with_table(b"CFF ", cff)
+            .without_table(b"glyf")
+            .without_table(b"loca")
+            .build();
+        let remapper = subsetter::GlyphRemapper::new_from_glyphs_sorted(glyphs);
+        std::panic::catch_unwind(|| subsetter::subset(&font, 0, &remapper)).is_err()
+    }
+
+    #[test]
+    fn refuses_more_font_dicts_than_the_subsetter_takes() {
+        // Glyphs 0 to 2 in Font DICT 0, 3 and 4 in Font DICT 1, of 255 or 256.
+        let format3 = [3, 0, 2, 0, 0, 0, 0, 3, 1, 0, 5];
+        for count in [255, 256] {
+            let cff = programs(
+                &glyphs_with(4, vec![14]),
+                &[],
+                &vec![vec![]; count],
+                Some(&format3),
+            );
+            let refused = subset_glyphs(cff.clone(), &[4]).err();
+            if count > MAX_FONT_DICTS {
+                let Some(Error::SubsetUnsupported { source, .. }) = refused else {
+                    panic!("{count} Font DICTs: {refused:?}");
+                };
+                assert!(source.to_string().contains("256 Font DICTs"), "{source}");
+            } else {
+                assert!(refused.is_none(), "{count} Font DICTs: {refused:?}");
+            }
+            // The subsetter's assertion holds only with debug assertions.
+            if cfg!(debug_assertions) {
+                assert_eq!(subsetter_panics(cff, &[4]), count > 255, "{count}");
+            }
+        }
+    }
+
     /// The test font with `cff` as its outlines, subset to `glyphs`.
     fn subset_glyphs(cff: Vec<u8>, glyphs: &[u16]) -> Result<crate::subset::Subset> {
         let font = crate::testing::TestFont::new("Test Sans")
@@ -1512,15 +1568,6 @@ mod tests {
         // The subsetter itself panics exactly where the check refuses, on fonts around the
         // limit built every way above. It panics only with overflow checks, which come
         // with debug assertions, as in `cargo test`; without them its count wraps.
-        let subsetter_panics = |cff: Vec<u8>, glyphs: &[u16]| {
-            let font = crate::testing::TestFont::new("Test Sans")
-                .with_table(b"CFF ", cff)
-                .without_table(b"glyf")
-                .without_table(b"loca")
-                .build();
-            let remapper = subsetter::GlyphRemapper::new_from_glyphs_sorted(glyphs);
-            std::panic::catch_unwind(|| subsetter::subset(&font, 0, &remapper)).is_err()
-        };
         let mut cases: Vec<(String, Vec<u8>, u16, bool)> = Vec::new();
         for hints in [65_534, 65_535, 65_536, 65_537, 65_543] {
             for mask in [false, true] {
