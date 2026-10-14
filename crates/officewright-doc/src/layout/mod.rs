@@ -68,7 +68,8 @@ const MAX_LEFT_OUT: usize = 1000;
 /// Whether Word uses OpenType features in a document: ligatures and contextual
 /// alternates, which it uses only when the compatibility setting
 /// `enableOpenTypeFeatures` is on, off by default ([MS-DOCX] 2.3.3). Of the setting
-/// written twice, the last counts, as for the other compatibility settings.
+/// written twice, the last counts, as for the other compatibility settings. The note
+/// names kerning too, which the translation does not gate yet (see `translate_run_style`).
 fn open_type_features(document: &Document) -> bool {
     document
         .settings()

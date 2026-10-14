@@ -327,6 +327,9 @@ impl Translator<'_> {
             .with_position(format.position())
             .with_letter_spacing(format.spacing())
             .with_scale(format.scale())
+            // Not gated by enableOpenTypeFeatures, though its note ([MS-DOCX] 2.3.3) names
+            // kerning with a link to w:kern (§17.3.2.19): Word 2007 kerned without the
+            // setting. Word's renders asked in #184 decide.
             .with_kern_min(format.kerning())
             .with_highlight(format.highlight().and_then(highlight))
             .with_shading(format.shading().and_then(|shading| self.shading(shading)))
