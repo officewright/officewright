@@ -19,7 +19,7 @@ use skrifa::raw::tables::maxp::Maxp;
 
 use crate::coverage::{Allowance, Coverage};
 use crate::error::{Cause, Error};
-use crate::face::{FaceProperties, english_rank, name_text};
+use crate::face::{FaceProperties, NameReader, english_rank};
 use crate::font::{all_records, optional, required};
 
 /// How much of a table the index reads.
@@ -390,8 +390,8 @@ fn index_face(tables: &[(Tag, Vec<u8>)], present: &[Tag], face: u32) -> Result<I
 }
 
 /// The named instances of a variable font. Instances whose record or name cannot be
-/// read are left out, and so are those whose name is too long to be kept
-/// ([`name_text`]).
+/// read are left out, and so are those whose name is too long to be kept or read past
+/// the budget of decoded records ([`NameReader`]).
 fn named_instances(fvar: &Fvar<'_>, name: &Name<'_>) -> Vec<NamedInstance> {
     let (Ok(axes), Ok(records)) = (fvar.axes(), fvar.instances()) else {
         return Vec::new();
@@ -411,7 +411,7 @@ fn named_instances(fvar: &Fvar<'_>, name: &Name<'_>) -> Vec<NamedInstance> {
         .iter()
         .map(|record| (record.subfamily_name_id.to_u16(), (u8::MAX, String::new())))
         .collect();
-    let data = name.string_data();
+    let mut reader = NameReader::new(name);
     for record in name.name_record() {
         let Some(best) = names.get_mut(&record.name_id().to_u16()) else {
             continue;
@@ -420,7 +420,7 @@ fn named_instances(fvar: &Fvar<'_>, name: &Name<'_>) -> Vec<NamedInstance> {
         if rank >= best.0 {
             continue;
         }
-        if let Some(text) = name_text(record, data) {
+        if let Some(text) = reader.text(record) {
             *best = (rank, text);
         }
     }
@@ -1127,6 +1127,34 @@ mod tests {
             .map(|i| &i.name)
             .collect();
         assert_eq!(names, [&at_limit]);
+    }
+
+    #[test]
+    fn an_instance_name_too_long_gives_way_to_one_of_a_lower_rank() {
+        let axes = [(b"wght", 100.0, 400.0, 900.0)];
+        let instances: [(u16, &[f64]); 1] = [(256, &[600.0])];
+        let long = "A".repeat(513);
+        let font = TestFont::new("Test Var")
+            .with_table(
+                b"name",
+                testing::name_table(&[
+                    (3, 1, 0x409, 1, "Test Var"),
+                    (3, 1, 0x409, 256, &long),
+                    (1, 0, 0, 256, "SemiBold"),
+                ]),
+            )
+            .with_table(b"fvar", testing::fvar(&axes, &instances))
+            .build();
+        let faces = index(&font).unwrap();
+        let names: Vec<_> = faces[0]
+            .1
+            .as_ref()
+            .unwrap()
+            .instances
+            .iter()
+            .map(|i| &i.name)
+            .collect();
+        assert_eq!(names, ["SemiBold"]);
     }
 
     #[test]

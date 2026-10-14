@@ -109,8 +109,9 @@ impl EmbeddingPermissions {
 /// (name ID 16) is "Calibri". Documents may also use a localized family name, so every
 /// language's family name is kept.
 ///
-/// A name longer than 512 bytes of UTF-8, which no real font has, is left out, as if the
-/// font did not have it.
+/// A name longer than 512 bytes of UTF-8, or held in a record longer than 1,024 bytes,
+/// which no real font has, is left out, as if the font did not have it; so is a name
+/// read after the face's records have given 64 KiB.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FontNames {
     family: Option<String>,
@@ -136,25 +137,49 @@ const MAX_LOCALIZED_NAMES: usize = 64;
 /// of UTF-8.
 const MAX_NAME_BYTES: usize = 512;
 
-/// The text of a name record, trimmed of white space and NULs; `None` when it cannot be
-/// read, is empty, or is longer than [`MAX_NAME_BYTES`]. A record longer than twice that
-/// is not decoded at all: the encodings read give a byte of UTF-8 or more for every two
-/// bytes of UTF-16 or one of Mac Roman, so only padding could make it short enough. That
-/// bounds the work of reading a table: without it, 5,460 records of 64 KB each made a
-/// face take a second to load, and records that repeat long strings differing only at
-/// their end made each new one be compared in full with every name kept.
-pub(crate) fn name_text(record: &NameRecord, data: FontData<'_>) -> Option<String> {
-    if usize::from(record.length()) > 2 * MAX_NAME_BYTES {
-        return None;
+/// The most bytes of name records decoded for one face in one pass over its `name`
+/// table: real fonts' names take a few kilobytes. A table may hold 65,535 records that
+/// share their strings, so without it the work of reading names grew with the records.
+const MAX_NAME_RECORD_BYTES_READ: usize = 64 * 1024;
+
+/// Reads the text of a face's name records, decoding at most
+/// [`MAX_NAME_RECORD_BYTES_READ`] bytes of them.
+pub(crate) struct NameReader<'a> {
+    data: FontData<'a>,
+    budget: usize,
+}
+
+impl<'a> NameReader<'a> {
+    pub(crate) fn new(name: &Name<'a>) -> Self {
+        Self {
+            data: name.string_data(),
+            budget: MAX_NAME_RECORD_BYTES_READ,
+        }
     }
-    let text: String = record.string(data).ok()?.chars().collect();
-    let text = text.trim_matches(|c: char| c.is_whitespace() || c == '\0');
-    (!text.is_empty() && text.len() <= MAX_NAME_BYTES).then(|| text.to_owned())
+
+    /// The text of a name record, trimmed of white space and NULs; `None` when it cannot
+    /// be read, is empty, or is longer than [`MAX_NAME_BYTES`], and when the record does
+    /// not fit in what is left of the budget. A record longer than twice the longest name
+    /// is not decoded and does not count: the encodings read give a byte of UTF-8 or more
+    /// for every two bytes of UTF-16 or one of Mac Roman, so only padding could make it
+    /// short enough. Without these bounds, records of 64 KB each made a face take a
+    /// second to load, and records that repeat long strings differing only at their end
+    /// made each new one be compared in full with every name kept.
+    pub(crate) fn text(&mut self, record: &NameRecord) -> Option<String> {
+        let length = usize::from(record.length());
+        if length > 2 * MAX_NAME_BYTES || length > self.budget {
+            return None;
+        }
+        self.budget -= length;
+        let text: String = record.string(self.data).ok()?.chars().collect();
+        let text = text.trim_matches(|c: char| c.is_whitespace() || c == '\0');
+        (!text.is_empty() && text.len() <= MAX_NAME_BYTES).then(|| text.to_owned())
+    }
 }
 
 impl FontNames {
     pub(crate) fn read(name: &Name<'_>) -> Self {
-        let data = name.string_data();
+        let mut reader = NameReader::new(name);
         let mut names = Self::default();
         // Rank of the string currently in each English slot (lower is better).
         let mut ranks = [u8::MAX; 6];
@@ -169,7 +194,7 @@ impl FontNames {
                 17 => 5,
                 _ => continue,
             };
-            let Some(text) = name_text(record, data) else {
+            let Some(text) = reader.text(record) else {
                 continue;
             };
             let rank = english_rank(record.platform_id(), record.language_id());
@@ -370,18 +395,17 @@ mod tests {
         FontNames::read(&Name::read(FontData::new(&data)).unwrap())
     }
 
-    /// A raw `name` table of family names (name ID 1), each record (platform, offset,
-    /// length) into `storage`: Windows Unicode BMP in US English (3), or Macintosh Roman
-    /// in English (1).
-    fn raw_name_table(records: &[(u16, u16, u16)], storage: &[u8]) -> Vec<u8> {
+    /// A raw `name` table, each record (platform, name ID, offset, length) into
+    /// `storage`: Windows Unicode BMP in US English (3), or Macintosh Roman in English (1).
+    fn raw_name_table(records: &[(u16, u16, u16, u16)], storage: &[u8]) -> Vec<u8> {
         let count = u16::try_from(records.len()).unwrap();
         let mut table = Vec::new();
         for value in [0, count, 6 + 12 * count] {
             table.extend(value.to_be_bytes());
         }
-        for &(platform, offset, length) in records {
+        for &(platform, id, offset, length) in records {
             let (encoding, language) = if platform == 1 { (0, 0) } else { (1, 0x409) };
-            for value in [platform, encoding, language, 1, length, offset] {
+            for value in [platform, encoding, language, id, length, offset] {
                 table.extend(u16::to_be_bytes(value));
             }
         }
@@ -418,7 +442,7 @@ mod tests {
         let (mut records, mut storage) = (Vec::new(), Vec::new());
         for (platform, bytes) in parts {
             let (offset, length) = (storage.len(), bytes.len());
-            records.push((platform, offset as u16, length as u16));
+            records.push((platform, 1, offset as u16, length as u16));
             storage.extend(bytes);
         }
         let names = read_raw(&raw_name_table(&records, &storage));
@@ -436,18 +460,52 @@ mod tests {
         assert_eq!(names.family(), Some("A".repeat(512).as_str()));
     }
 
+    /// 64 family names (ID 1), all the one string `family`, then a full name (ID 4) of
+    /// 1,000 bytes; Windows US English.
+    fn families_then_full_name(family: &str) -> FontNames {
+        let late = utf16(&format!("Late {}", "L".repeat(495)));
+        let family = utf16(family);
+        let (length, late_length) = (family.len() as u16, late.len() as u16);
+        let mut records = vec![(3, 1, 0, length); 64];
+        records.push((3, 4, length, late_length));
+        read_raw(&raw_name_table(&records, &[family, late].concat()))
+    }
+
+    #[test]
+    fn decodes_at_most_64_kib_of_records_a_face() {
+        // 64 records of 1,024 bytes use up the budget: the full name after them is not read.
+        let names = families_then_full_name(&"A".repeat(512));
+        assert_eq!(names.family(), Some("A".repeat(512).as_str()));
+        assert_eq!(names.full_name(), None);
+        // Records over 1,024 bytes are not decoded, so they leave the budget whole.
+        let names = families_then_full_name(&"B".repeat(513));
+        assert_eq!(names.family(), None);
+        assert!(
+            names
+                .full_name()
+                .is_some_and(|name| name.starts_with("Late "))
+        );
+    }
+
+    #[test]
+    fn a_name_too_long_gives_way_to_one_of_a_lower_rank() {
+        let long = "A".repeat(513);
+        let names = names(&[(3, 1, 0x409, 1, &long), (1, 0, 0, 1, "Short")]);
+        assert_eq!(names.family(), Some("Short"));
+    }
+
     #[test]
     fn reads_tables_built_to_be_slow_quickly() {
-        // 5,460 records, as many as a table whose strings start within 64 KB can have,
-        // each pointing at the same string of 65,534 bytes; and 5,460 records whose first
-        // 63 strings of 512 characters differ only at their end, the rest repeating the
-        // 63rd, so that each is compared in full with every name kept.
+        // 5,460 records each pointing at the same string of 65,534 bytes; and 5,460
+        // records whose first 63 strings of 512 characters differ only at their end, the
+        // rest repeating the 63rd, so that each is compared in full with every name kept.
         let long = utf16(&"A".repeat(32_767));
-        let same = raw_name_table(&vec![(3, 0, 65_534); 5460], &long);
+        let same = raw_name_table(&vec![(3, 1, 0, 65_534); 5460], &long);
         let tails: String = (0..64).map(|i| char::from(b'0' + i)).collect();
         let storage = utf16(&format!("{}{tails}", "A".repeat(511)));
-        let records: Vec<(u16, u16, u16)> =
-            (0..5460u16).map(|i| (3, 2 * i.min(62) + 2, 1024)).collect();
+        let records: Vec<(u16, u16, u16, u16)> = (0..5460u16)
+            .map(|i| (3, 1, 2 * i.min(62) + 2, 1024))
+            .collect();
         let differing = raw_name_table(&records, &storage);
         let started = std::time::Instant::now();
         let (same, differing) = (read_raw(&same), read_raw(&differing));
