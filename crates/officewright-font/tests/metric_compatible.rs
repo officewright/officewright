@@ -42,6 +42,9 @@ const GRID: f64 = 0.12;
 /// How far the one distance per paragraph that is off the grid is off: 0.02 or 0.03 pt.
 const OFF_GRID: f64 = 0.03;
 
+/// The lines `E-line-fonts` sets of each font at each size, as one paragraph.
+const LINES: u32 = 10;
+
 /// The most that Word's boxes for a font in tests/fonts may be off from its advance
 /// widths before the comparison is taken to be broken (a font in tests/fonts that is not
 /// the version Word had, say) rather than a measure of precision. The render shows up to
@@ -316,35 +319,40 @@ fn substitutes_space_lines_as_word_spaced_the_original() -> TestResult {
             "{family}"
         );
         for (&size, lines) in sizes {
-            let mut pages = BTreeMap::<u32, Vec<f64>>::new();
-            for line in lines {
-                pages.entry(line.page).or_default().push(line.top);
-            }
-            let ours = line_height(&face, f64::from(size))?;
-            let mut paragraphs = 0;
-            for tops in pages.values() {
-                let (Some(first), Some(last)) = (tops.first(), tops.last()) else {
-                    continue;
-                };
-                let intervals = f64::from(u32::try_from(tops.len())?) - 1.0;
-                if intervals < 1.0 {
-                    continue;
-                }
-                paragraphs += 1;
-                let words = (last - first) / intervals;
-                let limit = (GRID + OFF_GRID) / intervals;
-                if (ours - words).abs() > limit {
-                    writeln!(
-                        failures,
-                        "{name} for {family} at {size} pt: lines {ours:.3} pt apart, Word's \
-                         {words:.3} pt (measured to {limit:.3} pt)"
-                    )?;
-                }
-            }
+            // The tolerance comes from the number of lines, so a reference whose lines
+            // pdftotext merged or dropped, or that a page break split, would loosen it:
+            // each font and size must have its ten lines, in order, on one page.
+            // A line without a number counts as its whole text, so it fails the check too.
+            let numbers: Vec<&str> = lines
+                .iter()
+                .map(|line| {
+                    line.text
+                        .split_once(" pt, line ")
+                        .and_then(|(_, rest)| rest.split_once(':'))
+                        .map_or(line.text.as_str(), |(number, _)| number)
+                })
+                .collect();
+            let expected: Vec<String> = (1..=LINES).map(|n| format!("{n:02}")).collect();
+            assert_eq!(numbers, expected, "{family} at {size} pt: the lines");
             assert!(
-                paragraphs > 0,
-                "{family} at {size} pt: no page with two lines"
+                lines.windows(2).all(|pair| pair[0].page == pair[1].page),
+                "{family} at {size} pt: lines on more than one page"
             );
+            let (first, last) = lines
+                .first()
+                .zip(lines.last())
+                .ok_or_else(|| format!("{family} at {size} pt: no lines"))?;
+            let ours = line_height(&face, f64::from(size))?;
+            let intervals = f64::from(LINES - 1);
+            let words = (last.top - first.top) / intervals;
+            let limit = (GRID + OFF_GRID) / intervals;
+            if (ours - words).abs() > limit {
+                writeln!(
+                    failures,
+                    "{name} for {family} at {size} pt: lines {ours:.3} pt apart, Word's \
+                     {words:.3} pt (measured to {limit:.3} pt)"
+                )?;
+            }
         }
     }
     assert!(failures.is_empty(), "{failures}");
