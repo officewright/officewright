@@ -221,10 +221,11 @@ impl Resolution {
     }
 
     /// Whether the face is the bold one of its family although bold was not requested:
-    /// no other face of the family is installed, and boldness cannot be taken away, so
-    /// the text comes out bolder than requested. A heavy family of its own, such as Arial
-    /// Black, is not bold in this sense, and neither is a face the request names by its
-    /// full or PostScript name.
+    /// the family has no regular face installed (upright, of a weight closer to 400), and
+    /// boldness cannot be taken away, so the text comes out bolder than requested. A face
+    /// counts as bold when its style bits and its subfamily name say so: a heavy family of
+    /// its own, such as Arial Black, does not, and neither does a face the request names
+    /// by its full or PostScript name.
     pub fn unrequested_bold(&self) -> bool {
         self.unrequested_bold
     }
@@ -299,15 +300,16 @@ impl fmt::Display for Resolution {
                 None => f.write_str(" (fallback; not installed)")?,
             },
         }
-        if self.unrequested_bold {
-            f.write_str(" in bold, no other face of the family being installed")?;
-        }
         match (self.synthetic_bold, self.synthetic_italic) {
-            (true, true) => f.write_str(" with synthetic bold and italic"),
-            (true, false) => f.write_str(" with synthetic bold"),
-            (false, true) => f.write_str(" with synthetic italic"),
-            (false, false) => Ok(()),
+            (true, true) => f.write_str(" with synthetic bold and italic")?,
+            (true, false) => f.write_str(" with synthetic bold")?,
+            (false, true) => f.write_str(" with synthetic italic")?,
+            (false, false) => {}
         }
+        if self.unrequested_bold {
+            f.write_str(", in bold: the family has no regular face installed")?;
+        }
+        Ok(())
     }
 }
 
@@ -688,7 +690,10 @@ impl FontBook {
 ///
 /// For italic text the weight comes before the slant, as in Word: with Noto Sans
 /// Regular, Bold and Bold Italic installed and no Italic, Word draws italic text in
-/// Regular slanted by a third, not in Bold Italic (`E-italic-missing`, issue #82).
+/// Regular slanted by a third, not in Bold Italic (`E-italic-missing`, issue #82). The
+/// same order gives bold italic text in a family without a Bold Italic face the Bold face
+/// slanted rather than the Italic face emboldened, which no Word reference shows yet
+/// (issue #245).
 fn style_distance(weight: u16, italic: bool, request: &FontRequest) -> (bool, u16, bool) {
     let target: u16 = if request.bold { 700 } else { 400 };
     (
@@ -875,7 +880,7 @@ mod tests {
             system(
                 TestFont::new("Test Sans Semibold")
                     .typographic("Test Sans", "Semibold")
-                    .weight_class(600),
+                    .style("Regular", 600, false),
             ),
             system(TestFont::new("Test Serif").style("Bold", 700, false)),
         ]);
@@ -1040,13 +1045,23 @@ mod tests {
         assert!(resolution.is_substitution());
         assert_eq!(
             resolution.to_string(),
-            "\"Test Sans\" → \"Test Sans\" in bold, no other face of the family being installed"
+            "\"Test Sans\" → \"Test Sans\", in bold: the family has no regular face installed"
         );
         let resolution = bold.resolve(&FontRequest::new("Test Sans").italic(true));
         assert_eq!(
             resolution.to_string(),
-            "\"Test Sans\" italic → \"Test Sans\" in bold, no other face of the family being \
-             installed with synthetic italic"
+            "\"Test Sans\" italic → \"Test Sans\" with synthetic italic, in bold: the family has \
+             no regular face installed"
+        );
+        // An Italic face is not a regular one: regular text still gets the Bold face.
+        let bold_and_italic = book(&[
+            system(TestFont::new("Test Sans").style("Bold", 700, false)),
+            system(TestFont::new("Test Sans").style("Italic", 400, true)),
+        ]);
+        assert!(
+            bold_and_italic
+                .resolve(&FontRequest::new("Test Sans"))
+                .unrequested_bold()
         );
         let resolution = bold.resolve(&FontRequest::new("Test Sans").bold(true));
         assert!(!resolution.unrequested_bold());
@@ -1059,21 +1074,63 @@ mod tests {
             Some(900)
         );
         assert!(!resolution.is_substitution());
-        // Either bit makes a face bold: fsSelection alone, macStyle alone.
+        // Either bit makes a face bold: fsSelection alone, macStyle alone, and macStyle
+        // in a face without an OS/2 table.
         let selection = book(&[system(
             TestFont::new("Test Sans")
                 .style("Bold", 700, false)
                 .mac_style(0),
         )]);
         let mac = book(&[system(
-            TestFont::new("Test Sans").weight_class(700).mac_style(1),
+            TestFont::new("Test Sans")
+                .style("Bold", 400, false)
+                .mac_style(1),
         )]);
-        for book in [selection, mac] {
+        let no_os2 = book(&[system(
+            TestFont::new("Test Sans")
+                .style("Bold", 700, false)
+                .without_table(b"OS/2"),
+        )]);
+        for book in [selection, mac, no_os2] {
             assert!(
                 book.resolve(&FontRequest::new("Test Sans"))
                     .unrequested_bold()
             );
         }
+        let no_os2_regular = book(&[system(
+            TestFont::new("Test Sans")
+                .style("Bold", 700, false)
+                .mac_style(0)
+                .without_table(b"OS/2"),
+        )]);
+        assert!(
+            !no_os2_regular
+                .resolve(&FontRequest::new("Test Sans"))
+                .unrequested_bold()
+        );
+        // Without a subfamily name, the bits decide.
+        let unnamed = book(&[system(
+            TestFont::new("Test Sans")
+                .style("Bold", 700, false)
+                .with_table(
+                    b"name",
+                    crate::testing::name_table(&[(3, 1, 0x409, 1, "Test Sans")]),
+                ),
+        )]);
+        assert!(
+            unnamed
+                .resolve(&FontRequest::new("Test Sans"))
+                .unrequested_bold()
+        );
+        // Bits that say bold in a face whose subfamily is Regular, a family of its own.
+        let semibold = book(&[system(
+            TestFont::new("Test Sans UI Semibold").style("Regular", 600, false),
+        )]);
+        assert!(
+            !semibold
+                .resolve(&FontRequest::new("Test Sans UI Semibold"))
+                .is_substitution()
+        );
         // An italic face is not reported for upright text: an italic family of its own
         // cannot be told from an italic face whose upright one is missing.
         let italic = book(&[system(
@@ -1117,8 +1174,8 @@ mod tests {
         assert!(resolution.unrequested_bold());
         assert_eq!(
             resolution.to_string(),
-            "\"Carlito\" → \"Calibri\" (metric-compatible substitute) in bold, no other face \
-             of the family being installed"
+            "\"Carlito\" → \"Calibri\" (metric-compatible substitute), in bold: the family has \
+             no regular face installed"
         );
     }
 

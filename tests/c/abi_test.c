@@ -477,7 +477,7 @@ static void fonts_by_name(const char *fonts, const char *dir) {
     EXPECT(ow_font_resolver_substitution(resolver, 0, &kind, &message), OW_STATUS_OK, NULL);
     CHECK(kind == OW_RESOLUTION_EXACT);
     CHECK(message != NULL &&
-          strstr(message, "in bold, no other face of the family being installed") != NULL);
+          strstr(message, ", in bold: the family has no regular face installed") != NULL);
     ow_font_resolver_free(resolver);
     ow_pdf_font_free(bold);
 

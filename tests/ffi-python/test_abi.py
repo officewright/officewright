@@ -459,7 +459,7 @@ class AbiTest(unittest.TestCase):
             [
                 (
                     OW_RESOLUTION_EXACT,
-                    '"Liberation Sans" → "Liberation Sans" in bold, no other face of the family being installed',
+                    '"Liberation Sans" → "Liberation Sans", in bold: the family has no regular face installed',
                 )
             ],
         )
