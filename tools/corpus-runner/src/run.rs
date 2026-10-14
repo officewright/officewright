@@ -38,7 +38,9 @@ fn run(options: &Options) -> Result<bool, String> {
     };
     let mut found = Vec::new();
     for path in &options.paths {
-        collect(path, &mut found)?;
+        // Resolved before the child opens it, so that it opens the file the report names:
+        // the system would follow a symbolic link before "..", the name would not.
+        collect(&lexical_absolute(path)?, &mut found)?;
     }
     let mut files = found
         .into_iter()

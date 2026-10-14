@@ -320,6 +320,41 @@ fn paths_through_dots_inside_the_root_are_resolved() -> io::Result<()> {
         String::from_utf8_lossy(&from_docs.stderr)
     );
     assert_eq!(path_of("c.json")?, "docs/good.docx");
+    // Two spellings of one file are one file.
+    let (code, output) = corpus.run(
+        &[
+            "--report",
+            "d.json",
+            "docs/good.docx",
+            "docs/nested/../good.docx",
+        ],
+        None,
+    )?;
+    assert_eq!(code, 0, "{output}");
+    let report: serde_json::Value = serde_json::from_str(&corpus.read("d.json")?).unwrap();
+    assert_eq!(report["files"].as_array().unwrap().len(), 1, "{report}");
+    Ok(())
+}
+
+/// A symbolic link before ".." does not make the child open another file than the one the
+/// report names: the path is resolved by name before it is opened.
+#[cfg(unix)]
+#[test]
+fn the_file_opened_is_the_file_named_after_a_link() -> io::Result<()> {
+    let corpus = Corpus::new("link")?;
+    // docs/link points into a folder whose good.docx is broken; by name,
+    // docs/link/../good.docx is docs/good.docx, which opens.
+    std::fs::create_dir_all(corpus.dir.join("elsewhere/inner"))?;
+    std::fs::write(corpus.dir.join("elsewhere/good.docx"), b"not a zip archive")?;
+    std::os::unix::fs::symlink(
+        corpus.dir.join("elsewhere/inner"),
+        corpus.dir.join("docs/link"),
+    )?;
+    let (code, output) = corpus.run(&["--report", "r.json", "docs/link/../good.docx"], None)?;
+    assert_eq!(code, 0, "{output}");
+    let report: serde_json::Value = serde_json::from_str(&corpus.read("r.json")?).unwrap();
+    assert_eq!(report["files"][0]["path"], "docs/good.docx");
+    assert_eq!(report["files"][0]["status"], "opened", "{report}");
     Ok(())
 }
 
@@ -416,8 +451,13 @@ fn documents_with_a_reference_are_scored_or_say_why_not() -> io::Result<()> {
         report["files"][1].get("score_error").is_none(),
         "no reference, nothing to score"
     );
-    // A path through ".." finds its reference too: the paths are compared resolved.
-    let dots = [&options[..4], &["docs/nested/../good.docx"]].concat();
+    // A path through ".." finds its reference too, and so does a reference folder named
+    // through "..": the paths are compared resolved.
+    let dots = [
+        &["--references", "docs/../references", "--ours", "ours"][..],
+        &["docs/nested/../good.docx"],
+    ]
+    .concat();
     let (code, output) = corpus.run(&dots, None)?;
     assert_eq!(code, 0, "{output}");
     assert!(
