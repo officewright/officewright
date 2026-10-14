@@ -253,7 +253,10 @@ fn length(width: Option<TableWidth>) -> Option<Pt> {
     }
 }
 
-/// Cell margins: those written, the others from `below`.
+/// Cell margins: those written, the others from `below`. A margin written as a
+/// percentage or automatic is 0: Word reads it so at the start and end (MS-OI29500
+/// 2.1.146 a, 2.1.125 a), as the IR's `CellMargins` describes, and it is taken so at the
+/// top and bottom too; `nil` is a width of 0.
 fn cell_margins(
     written: Option<&crate::model::CellMargins>,
     below: &ir::CellMargins,
@@ -261,8 +264,11 @@ fn cell_margins(
     let Some(written) = written else {
         return *below;
     };
-    let side =
-        |width: Option<TableWidth>, default: Pt| Pt(length(width).unwrap_or(default).0.max(0.0));
+    let side = |width: Option<TableWidth>, default: Pt| match width {
+        None => default,
+        Some(TableWidth::Length(length)) => Pt(length.0.max(0.0)),
+        Some(_) => Pt(0.0),
+    };
     ir::CellMargins::default()
         .with_top(side(written.top(), below.top()))
         .with_start(side(written.start(), below.start()))

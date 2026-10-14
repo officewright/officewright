@@ -1604,9 +1604,9 @@ fn tables(translation: &Translation) -> Vec<&ir::Table> {
 
 #[test]
 fn translates_tables_with_their_rows_and_cells() {
-    let table = r#"<w:tbl><w:tblPr><w:tblStyle w:val="Grid"/><w:tblpPr w:tblpX="100"/><w:bidiVisual/><w:tblW w:w="5000" w:type="pct"/><w:jc w:val="center"/><w:tblCellSpacing w:w="40" w:type="dxa"/><w:tblInd w:w="360" w:type="dxa"/><w:tblBorders><w:top w:val="single" w:sz="8" w:color="FF0000"/><w:bottom w:val="none" w:sz="0"/><w:insideH w:val="nil"/></w:tblBorders><w:shd w:val="clear" w:fill="EEEEEE"/><w:tblLayout w:type="fixed"/><w:tblCellMar><w:left w:w="100" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="3000"/><w:gridCol w:w="1000"/></w:tblGrid>
+    let table = r#"<w:tbl><w:tblPr><w:tblStyle w:val="Grid"/><w:tblpPr w:tblpX="100"/><w:bidiVisual/><w:tblW w:w="5000" w:type="pct"/><w:jc w:val="center"/><w:tblCellSpacing w:w="40" w:type="dxa"/><w:tblInd w:w="360" w:type="dxa"/><w:tblBorders><w:top w:val="single" w:sz="8" w:color="FF0000"/><w:bottom w:val="none" w:sz="0"/><w:insideH w:val="nil"/></w:tblBorders><w:shd w:val="clear" w:fill="EEEEEE"/><w:tblLayout w:type="fixed"/><w:tblCellMar><w:left w:w="100" w:type="dxa"/><w:right w:w="10" w:type="pct"/></w:tblCellMar></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="3000"/><w:gridCol w:w="1000"/></w:tblGrid>
         <w:tr><w:trPr><w:cantSplit/><w:trHeight w:val="400"/><w:tblHeader/></w:trPr>
-            <w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/><w:gridSpan w:val="2"/><w:vMerge w:val="restart"/><w:tcBorders><w:top w:val="none" w:sz="0"/><w:start w:val="single" w:sz="4"/><w:bottom w:val="nil"/></w:tcBorders><w:shd w:val="clear" w:fill="00FF00"/><w:noWrap/><w:tcMar><w:top w:w="50" w:type="dxa"/></w:tcMar><w:textDirection w:val="btLr"/><w:vAlign w:val="center"/><w:hideMark/></w:tcPr><w:p><w:r><w:t>a</w:t></w:r></w:p></w:tc>
+            <w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/><w:gridSpan w:val="2"/><w:vMerge w:val="restart"/><w:tcBorders><w:top w:val="none" w:sz="0"/><w:start w:val="single" w:sz="4"/><w:bottom w:val="nil"/></w:tcBorders><w:shd w:val="clear" w:fill="00FF00"/><w:noWrap/><w:tcMar><w:top w:w="50" w:type="dxa"/><w:bottom w:w="0" w:type="auto"/></w:tcMar><w:textDirection w:val="btLr"/><w:vAlign w:val="center"/><w:hideMark/></w:tcPr><w:p><w:r><w:t>a</w:t></w:r></w:p></w:tc>
             <w:tc><w:tcPr><w:tcW w:w="0" w:type="dxa"/></w:tcPr><w:p/></w:tc></w:tr>
         <w:tr><w:trPr><w:gridBefore w:val="1"/><w:gridAfter w:val="2"/><w:wBefore w:w="1000" w:type="dxa"/><w:wAfter w:w="20" w:type="pct"/><w:trHeight w:val="300" w:hRule="exact"/></w:trPr><w:tblPrEx><w:shd w:val="clear" w:fill="FF00FF"/></w:tblPrEx>
             <w:tc><w:tcPr><w:hMerge w:val="restart"/><w:vMerge/></w:tcPr><w:p/></w:tc>
@@ -1627,9 +1627,12 @@ fn translates_tables_with_their_rows_and_cells() {
     assert_eq!(props.alignment(), ir::TableAlignment::Center);
     assert_eq!(props.cell_spacing(), Pt(2.0));
     assert!(props.floating() && props.bidi_visual());
+    // A margin in percent is 0 (MS-OI29500 2.1.146 a; from Copilot's review of #159).
     assert_eq!(
         props.cell_margins(),
-        ir::CellMargins::default().with_start(Pt(5.0))
+        ir::CellMargins::default()
+            .with_start(Pt(5.0))
+            .with_end(Pt(0.0))
     );
     let borders = props.borders();
     assert_eq!(
@@ -1667,6 +1670,8 @@ fn translates_tables_with_their_rows_and_cells() {
             ir::CellMargins::default()
                 .with_top(Pt(2.5))
                 .with_start(Pt(5.0))
+                .with_end(Pt(0.0))
+                .with_bottom(Pt(0.0))
         )
     );
     // In a cell, none is looked up in the table (MS-OI29500 2.1.169 a).
