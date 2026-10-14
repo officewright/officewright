@@ -1423,6 +1423,10 @@ fn shares_run_styles_across_properties_the_ir_does_not_keep() {
         "<w:imprint/>",
         "<w:specVanish/>",
         r#"<w:rStyle w:val="Missing"/>"#,
+        // Values the IR takes as none.
+        r#"<w:rFonts w:hint="default"/>"#,
+        r#"<w:u w:val="none" w:color="FF0000"/>"#,
+        r#"<w:highlight w:val="none"/>"#,
     ] {
         let body = format!(
             r#"<w:p><w:r><w:t>a</w:t></w:r><w:r><w:rPr>{other}</w:rPr><w:t>b</w:t></w:r></w:p>"#
