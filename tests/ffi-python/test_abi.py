@@ -614,14 +614,18 @@ class AbiTest(unittest.TestCase):
         self.check(lib.ow_render_options_set_compression(options, 9), INVALID_ARGUMENT)
         self.check(lib.ow_doc_document_open_path(None, byref(doc)), NULL_ARGUMENT)
         self.assertEqual(last_error(), "path is null")
-        # Font data that is not a font fails when it is read, at the conversion.
-        broken = c_void_p()
-        self.check(lib.ow_render_options_new(byref(broken)))
-        self.addCleanup(lib.ow_render_options_free, broken)
-        self.check(lib.ow_render_options_set_system_fonts(broken, 0))
-        self.check(lib.ow_render_options_add_font_bytes(broken, b"no font", 7))
+        # Font data or a file that is not a font is refused when it is added, and leaves
+        # the options as they were.
+        refused = c_void_p()
+        self.check(lib.ow_render_options_new(byref(refused)))
+        self.addCleanup(lib.ow_render_options_free, refused)
+        self.check(lib.ow_render_options_set_system_fonts(refused, 0))
+        self.check(lib.ow_render_options_add_font_bytes(refused, b"no font", 7), MALFORMED)
+        self.check(lib.ow_render_options_add_font_file(refused, str(HELLO_DOCX).encode()), MALFORMED)
+        self.assertTrue(last_error().startswith(f"{HELLO_DOCX}: "))
         hello = self.open_docx(HELLO_DOCX)
-        self.check(lib.ow_doc_document_save_pdf_bytes(hello, broken, byref(data), byref(length), None), MALFORMED)
+        self.check(lib.ow_doc_document_save_pdf_bytes(hello, refused, byref(data), byref(length), None))
+        lib.ow_bytes_free(data, length)
 
 
 if __name__ == "__main__":

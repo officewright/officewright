@@ -5,6 +5,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
 use officewright_doc::{LayoutReport, RenderOptions, ReportKind};
@@ -267,11 +268,12 @@ fn render_options(args: &ArgMatches) -> Result<RenderOptions, String> {
         options = options.with_font_dir(dir);
     }
     for file in args.get_many::<PathBuf>("font").into_iter().flatten() {
-        let data =
-            fs::read(file).map_err(|err| format!("cannot read {}: {err}", file.display()))?;
+        let data: Arc<[u8]> = fs::read(file)
+            .map_err(|err| format!("cannot read {}: {err}", file.display()))?
+            .into();
         // Read now, so that an error names the file.
         FontBook::new()
-            .add_bytes(data.clone(), FontOrigin::User)
+            .add_bytes(Arc::clone(&data), FontOrigin::User)
             .map_err(|err| format!("{}: {}", file.display(), describe(&err)))?;
         options = options.with_font_data(data);
     }

@@ -1133,8 +1133,8 @@ pub struct OwDocDocument(officewright_doc::Document);
 ///
 /// Created by `ow_render_options_new` with the defaults (at most 100,000 pages, the
 /// system's fonts, Flate compression) and released by `ow_render_options_free`. It is
-/// read, never changed, by a conversion, so one may serve many. Used by one thread at a
-/// time; may be moved between threads.
+/// read, never changed, by a conversion, so one may serve many conversions, one after
+/// another. Used by one thread at a time; may be moved between threads.
 pub struct OwRenderOptions(RenderOptions);
 
 /// What a conversion did otherwise than Word would: fonts it substituted, glyphs it
@@ -1264,9 +1264,8 @@ pub unsafe extern "C" fn ow_doc_document_open_bytes(
 /// NULL if the call fails.
 ///
 /// Fails with `OW_STATUS_IO` if the file cannot be written or a font folder of the
-/// options cannot be read, `OW_STATUS_MALFORMED` if a font of the options is not a font,
-/// and `OW_STATUS_LIMIT_EXCEEDED` if the document takes more pages than the options allow
-/// or nests tables deeper than the layout follows. `OW_STATUS_INVALID_ARGUMENT` here
+/// options cannot be read, and `OW_STATUS_LIMIT_EXCEEDED` if the document takes more
+/// pages than the options allow or nests tables deeper than the layout follows. `OW_STATUS_INVALID_ARGUMENT` here
 /// would mean that officewright translated the document wrongly, a defect worth
 /// reporting with the document.
 ///
@@ -1449,8 +1448,8 @@ pub unsafe extern "C" fn ow_render_options_add_font_dir(
 
 /// Adds the font file (TrueType, OpenType or a collection) in the `len` bytes at
 /// `data`, which the library copies; its fonts are used before the folders' and the
-/// system's. It is read when a document is converted, which fails with
-/// `OW_STATUS_MALFORMED` if it is not a font.
+/// system's. Fails with `OW_STATUS_MALFORMED` if the data is not a font or every face in
+/// it is damaged, leaving the options unchanged.
 ///
 /// # Safety
 ///
@@ -1467,15 +1466,15 @@ pub unsafe extern "C" fn ow_render_options_add_font_bytes(
         let options = unsafe { options_mut(options) }?;
         // SAFETY: the caller passes NULL or `len` readable bytes.
         let bytes = unsafe { bytes_arg(data, len, "data") }?;
-        options.0 = std::mem::take(&mut options.0).with_font_data(bytes.to_vec());
-        Ok(())
+        add_font(options, Arc::from(bytes))
     })
 }
 
 /// Adds the font file (TrueType, OpenType or a collection) at `path` (UTF-8), which the
 /// library reads now; its fonts are used before the folders' and the system's, as those
 /// of `ow_render_options_add_font_bytes` are. Fails with `OW_STATUS_IO` if the file cannot
-/// be read; a file that is not a font fails the conversion with `OW_STATUS_MALFORMED`.
+/// be read and `OW_STATUS_MALFORMED` if it is not a font or every face in it is damaged,
+/// with the path in the message, leaving the options unchanged.
 ///
 /// # Safety
 ///
@@ -1495,9 +1494,19 @@ pub unsafe extern "C" fn ow_render_options_add_font_file(
             status: OwStatus::Io,
             message: format!("cannot read {path}: {source}"),
         })?;
-        options.0 = std::mem::take(&mut options.0).with_font_data(data);
-        Ok(())
+        add_font(options, Arc::from(data)).map_err(|failure| Failure {
+            status: failure.status,
+            message: format!("{path}: {}", failure.message),
+        })
     })
+}
+
+/// Adds `data` to the options once it has been read as a font, so that data that is not
+/// one fails here, where the caller can tell which it is, rather than at the conversion.
+fn add_font(options: &mut OwRenderOptions, data: Arc<[u8]>) -> Result<(), Failure> {
+    FontBook::new().add_bytes(Arc::clone(&data), FontOrigin::User)?;
+    options.0 = std::mem::take(&mut options.0).with_font_data(data);
+    Ok(())
 }
 
 /// Sets how the PDF's streams are compressed: `OW_COMPRESSION_FLATE`, the default, or
@@ -2526,18 +2535,33 @@ mod tests {
             );
             assert!(kind == OW_REPORT_KIND_OTHER && location.is_null() && message.is_null());
             ow_layout_report_free(report);
-            // Damaged font data fails the conversion, and gives no report.
+            // Font data that is not a font is refused at once, and leaves the options as
+            // they were.
             let mut damaged = ptr::null_mut();
             assert_eq!(ow_render_options_new(&mut damaged), OwStatus::Ok);
             assert_eq!(ow_render_options_set_system_fonts(damaged, 0), OwStatus::Ok);
             assert_eq!(
                 ow_render_options_add_font_bytes(damaged, b"no font".as_ptr(), 7),
+                OwStatus::Malformed
+            );
+            assert!(last_error().starts_with("data is not a TrueType or OpenType font"));
+            assert_eq!(
+                ow_doc_document_save_pdf_bytes(doc, damaged, &mut data, &mut len, ptr::null_mut()),
+                OwStatus::Ok
+            );
+            ow_bytes_free(data, len);
+            // A conversion that fails (a font folder that cannot be read) gives no PDF and
+            // no report.
+            let missing = CString::new("/nonexistent/officewright/fonts").unwrap();
+            assert_eq!(
+                ow_render_options_add_font_dir(damaged, missing.as_ptr()),
                 OwStatus::Ok
             );
             let mut report = ptr::dangling_mut::<OwLayoutReport>();
+            let (mut data, mut len) = (ptr::dangling_mut::<u8>(), 7);
             assert_eq!(
                 ow_doc_document_save_pdf_bytes(doc, damaged, &mut data, &mut len, &mut report),
-                OwStatus::Malformed
+                OwStatus::Io
             );
             assert!(report.is_null() && data.is_null() && len == 0);
             // NULL handles.
@@ -2700,6 +2724,13 @@ mod tests {
                 ow_render_options_add_font_file(options, ptr::null()),
                 OwStatus::NullArgument
             );
+            // A file that is not a font: refused at once, with its path.
+            let docx = CString::new(hello_docx_path().to_str().unwrap()).unwrap();
+            assert_eq!(
+                ow_render_options_add_font_file(options, docx.as_ptr()),
+                OwStatus::Malformed
+            );
+            assert!(last_error().starts_with(&format!("{}: data is not", docx.to_str().unwrap())));
             ow_render_options_free(options);
             let mut options = ptr::null_mut();
             assert_eq!(ow_render_options_new(&mut options), OwStatus::Ok);

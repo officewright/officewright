@@ -572,6 +572,10 @@ static void docx_to_pdf(const char *fonts, const char *out_dir) {
     CHECK(contains(data, len, "Carlito-Regular"));
     ow_bytes_free(data, len);
     EXPECT(ow_render_options_add_font_file(from_file, unwritable), OW_STATUS_IO, "cannot read");
+    /* Data or a file that is not a font: refused at once, the file by its path. */
+    EXPECT(ow_render_options_add_font_bytes(from_file, (const uint8_t *)"no font", 7),
+           OW_STATUS_MALFORMED, "not a TrueType");
+    EXPECT(ow_render_options_add_font_file(from_file, hello), OW_STATUS_MALFORMED, "hello.docx");
     ow_render_options_free(from_file);
 
     /* From memory: the document opens the same. */
