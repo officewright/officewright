@@ -416,8 +416,10 @@ const CMAP_SUFFIX: &str = "-Identity-H";
 /// subset tag unless the `whole` font is embedded, and with the CMap name for CFF
 /// outlines (`cff`), every name the font has in the file takes at most
 /// [`MAX_NAME_BYTES`] as written. A name is cut between characters, so never inside the
-/// escapes of one.
-pub(crate) fn fit_font_name(name: &str, whole: bool, cff: bool) -> &str {
+/// escapes of one. Null characters, which a PDF name cannot hold even escaped
+/// (ISO 32000-1, 7.3.5), are left out first.
+pub(crate) fn fit_font_name(name: &str, whole: bool, cff: bool) -> String {
+    let name: String = name.chars().filter(|&ch| ch != '\0').collect();
     let mut room = MAX_NAME_BYTES;
     if !whole {
         // The tag and the plus sign after it.
@@ -438,7 +440,7 @@ pub(crate) fn fit_font_name(name: &str, whole: bool, cff: bool) -> &str {
             used > room
         })
         .map_or(name.len(), |(at, _)| at);
-    name.get(..end).unwrap_or(name)
+    name.get(..end).unwrap_or(&name).to_owned()
 }
 
 /// Six capital letters that tell this subset from others (ISO 32000-1, 9.6.4): a hash of
@@ -507,13 +509,21 @@ mod tests {
         assert_eq!(fit_font_name(&accents, false, false), accents);
         let accents = format!("{}é", "A".repeat(115));
         assert_eq!(fit_font_name(&accents, false, false), &accents[..115]);
+        // Null characters are left out, wherever they are, before the name is cut.
+        assert_eq!(fit_font_name("Foo\0Bar", false, false), "FooBar");
+        assert_eq!(fit_font_name("\0Foo\0\0", true, true), "Foo");
+        let nulls = format!("{}\0{}", "A".repeat(119), "B".repeat(10));
+        assert_eq!(
+            fit_font_name(&nulls, false, false),
+            format!("{}B", "A".repeat(119))
+        );
         for name in [long.as_str(), &signs, &accents, &"é".repeat(30), "a/b(c)"] {
             for (whole, cff) in [(false, false), (true, false), (false, true), (true, true)] {
                 let fit = fit_font_name(name, whole, cff);
                 let tag = if whole { 0 } else { 7 };
                 let suffix = if cff { CMAP_SUFFIX.len() } else { 0 };
                 // Without the slash.
-                let written = pdf_name(fit).len() - 1;
+                let written = pdf_name(&fit).len() - 1;
                 assert!(
                     written + tag + suffix <= MAX_NAME_BYTES,
                     "{name:?} {whole} {cff}"

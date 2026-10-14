@@ -8,7 +8,7 @@ use officewright_core::Pt;
 
 use crate::fonts::Fonts;
 use crate::ir::{CompatFlag, Document, Paragraph, ParagraphProps};
-use crate::itemize::{Itemized, itemize, shape_runs};
+use crate::itemize::{FieldValues, Itemized, itemize_with, shape_runs};
 use crate::lines::{Breaker, Input, Line};
 use crate::report::Location;
 use crate::shape::Shaper;
@@ -36,7 +36,7 @@ impl ParagraphLayout {
 }
 
 /// Lays out `paragraph` of `document` in a column `width` wide; `location` is its place,
-/// for the report.
+/// for the report. Its fields show the results the document stores.
 pub(crate) fn lay_out(
     document: &Document,
     paragraph: &Paragraph,
@@ -45,7 +45,19 @@ pub(crate) fn lay_out(
     shaper: &mut Shaper,
     location: &Location,
 ) -> ParagraphLayout {
-    let itemized = itemize(document, paragraph.inlines(), fonts, location);
+    lay_out_with(document, paragraph, width, (fonts, shaper), location, None)
+}
+
+/// [`lay_out`], with `fields` the values of the fields the layout computes.
+pub(crate) fn lay_out_with(
+    document: &Document,
+    paragraph: &Paragraph,
+    width: Pt,
+    (fonts, shaper): (&mut Fonts<'_>, &mut Shaper),
+    location: &Location,
+    fields: Option<&FieldValues>,
+) -> ParagraphLayout {
+    let itemized = itemize_with(document, paragraph.inlines(), fonts, location, fields);
     let shaped = shape_runs(document, &itemized, fonts, shaper, location);
     let input = Input {
         document,
