@@ -263,6 +263,17 @@ class Packages(unittest.TestCase):
                 for n in root.iter(f"{W}{tag}")
             }
             self.assertLessEqual(named, defined, doc.name)
+            # And of the right type: a paragraph or a list level names a paragraph style, a
+            # run or a paragraph mark a character style, and a style is based on its own type.
+            kind = {s.get(f"{W}styleId"): s.get(f"{W}type") for s in styles.iter(f"{W}style")}
+            for root in roots:
+                for tag, expected in (("pStyle", "paragraph"), ("rStyle", "character")):
+                    for n in root.iter(f"{W}{tag}"):
+                        self.assertEqual(kind[n.get(f"{W}val")], expected, doc.name)
+            for style in styles.iter(f"{W}style"):
+                base = style.find(f"{W}basedOn")
+                if base is not None:
+                    self.assertEqual(kind[base.get(f"{W}val")], style.get(f"{W}type"), doc.name)
 
     def test_refuses_a_colour_mapping_value_that_is_not_a_theme_colour(self):
         doc = next(doc for doc in self.docs if doc.color_mapping)
