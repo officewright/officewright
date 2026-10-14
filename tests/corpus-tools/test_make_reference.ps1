@@ -337,12 +337,19 @@ Exit-Stuck 'test' ''
         Check "the run reader fails its check on runs $($case -join '/')" ((Get-RunReaderFault (New-Range $other 0 9)) -ne '')
     }
 
-    function New-Paragraph($Text, $Runs, $Builtin, $StyleName, $ListType = 0, $ListString = '', $Step = 13, $Delay = 0) {
+    function New-Paragraph($Text, $Runs, $Builtin, $StyleName, $ListType = 0, $ListString = '', $Step = 13, $Delay = 0, $ReadDelay = 0) {
         $length = 0
         foreach ($run in $Runs) { $length += $run.Length }
         $range = New-Range $Runs 0 $length $Step $Delay
         $characters = New-Object PSObject -Property @{ First = (New-Object PSObject -Property @{ Font = $Runs[0].Font }) }
-        $range | Add-Member NoteProperty Text $Text
+        if ($ReadDelay -gt 0) {
+            # A paragraph whose text takes $ReadDelay milliseconds to read, as in a slow Word.
+            $range | Add-Member NoteProperty ReadDelay $ReadDelay
+            $range | Add-Member NoteProperty PlainText $Text
+            $range | Add-Member ScriptProperty Text { Start-Sleep -Milliseconds $this.ReadDelay; $this.PlainText }
+        } else {
+            $range | Add-Member NoteProperty Text $Text
+        }
         $range | Add-Member NoteProperty Characters $characters
         $range | Add-Member NoteProperty ListFormat (New-Object PSObject -Property @{ ListType = $ListType; ListString = $ListString; ListLevelNumber = 2 })
         $format = New-Object PSObject -Property @{
@@ -379,8 +386,39 @@ Exit-Stuck 'test' ''
     Check 'every story and linked story is exported, separators left out' ($names -eq 'main/0,primary-header/0,primary-header/1') $names
     Check 'paragraphs are numbered per story' (@($export.stories[0].paragraphs).Count -eq 2 -and $export.stories[0].paragraphs[1].index -eq 1)
     Check 'runs are kept when they take no longer than the paragraphs' ($export.runs -eq $true -and @($export.stories[0].paragraphs[0].runs).Count -eq 3 -and $export.complete -eq $true)
-    $late = (Export-Formatting $document 0 $theme $progress).Export
-    Check 'a document over its time budget is marked incomplete, without runs' ($late.complete -eq $false -and $late.runs -eq $false -and $late.runs_note -eq 'not collected: the paragraphs did not fit in the time budget')
+    # Each paragraph takes 50 ms to read, longer than any tick of the clock, so with a budget
+    # of 0 the second one starts after the deadline on fast and slow runners alike. The fast
+    # paragraphs above take about 1 ms in all, and whether the clock ticked during that pass
+    # decided the result (#166). The linked header and the second story must not be read
+    # after the deadline either.
+    $sluggish = New-Object PSObject -Property @{ StoryRanges = @(
+            (New-Story 7 @(
+                    (New-Paragraph ('First' + [char]13) $runs $true '' -ReadDelay 50),
+                    (New-Paragraph ('Second' + [char]13) $runs $true '' -ReadDelay 50)
+                ) (New-Story 7 @((New-Paragraph ('Linked' + [char]13) $runs $true '')))),
+            (New-Story 1 @((New-Paragraph ('Body' + [char]13) $runs $true '')))
+        )
+    }
+    $late = (Export-Formatting $sluggish 0 $theme $progress).Export
+    $lateStories = @($late.stories)
+    $lateCounts = @($lateStories | ForEach-Object { @($_.paragraphs).Count }) -join '/'
+    Check 'a document over its time budget is marked incomplete, without runs' ($late.complete -eq $false -and $lateStories.Count -eq 1 -and @($lateStories[0].paragraphs).Count -lt 2 -and $late.runs -eq $false -and $late.runs_note -eq 'not collected: the paragraphs did not fit in the time budget') "complete $($late.complete), runs $($late.runs), paragraphs per story $lateCounts, $($late.runs_note)"
+    # The budget holds for the whole document, not for each story: each story here fits in
+    # 1 s, both do not, and the last paragraph is reached 1.2 s or more after the start.
+    $twoStories = New-Object PSObject -Property @{ StoryRanges = @(
+            (New-Story 7 @(
+                    (New-Paragraph ('First' + [char]13) $runs $true '' -ReadDelay 400),
+                    (New-Paragraph ('Second' + [char]13) $runs $true '' -ReadDelay 400)
+                )),
+            (New-Story 1 @(
+                    (New-Paragraph ('Third' + [char]13) $runs $true '' -ReadDelay 400),
+                    (New-Paragraph ('Fourth' + [char]13) $runs $true '' -ReadDelay 400)
+                ))
+        )
+    }
+    $overall = (Export-Formatting $twoStories 1 $theme $progress).Export
+    $overallCounts = @(@($overall.stories) | ForEach-Object { @($_.paragraphs).Count }) -join '/'
+    Check 'the time budget holds for the whole document, not for each story' ($overall.complete -eq $false) "complete $($overall.complete), paragraphs per story $overallCounts"
     $unchecked = (Export-Formatting $document 600 $theme $progress $false).Export
     Check 'runs are left out with a fixed note when the run reader failed its check' ($unchecked.complete -eq $true -and $unchecked.runs -eq $false -and $unchecked.runs_note -eq 'left out: Word failed the check of the run reader' -and -not $unchecked.stories[0].paragraphs[0].Contains('runs')) "$($unchecked.runs_note)"
     $failing = New-Object PSObject -Property @{ StoryRanges = @((New-Story 1 @((New-Paragraph ('Body' + [char]13) $runs $true '' 0 '' 99)))) }

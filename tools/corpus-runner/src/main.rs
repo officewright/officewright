@@ -155,12 +155,25 @@ fn gate(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let measures = gate::measure(&branch, same_fonts);
+    let measures = gate::measure_against(&branch, main.as_ref(), same_fonts);
     let before = main.as_ref().map(|main| gate::measure(main, same_fonts));
     match &main {
         Some(main) => {
             println!("main: {}\n", gate::census(main, same_fonts));
             println!("branch: {}\n", gate::census(&branch, same_fonts));
+            let lacking = gate::missing(&branch, main);
+            if !lacking.files.is_empty() {
+                println!(
+                    "Files of main the branch report lacks: {}\n",
+                    lacking.files.join(", ")
+                );
+            }
+            if !lacking.references.is_empty() {
+                println!(
+                    "Reference documents of main the branch report did not score: {}\n",
+                    lacking.references.join(", ")
+                );
+            }
         }
         None => println!("{}\n", gate::census(&branch, same_fonts)),
     }
