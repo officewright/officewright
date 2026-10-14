@@ -24,17 +24,18 @@ impl<'b> Input<'b> {
     /// [`Error::Xml`](crate::Error::Xml) for bytes that are not valid UTF-8 or UTF-16,
     /// or for a character XML does not allow.
     pub fn decode(bytes: &'b [u8]) -> Result<Self> {
+        // UTF-16 is decoded with its line ends normalised, into a string of the size it
+        // needs: a part decodes with at most one copy of its text besides its bytes.
         let text = match bytes {
-            [0xEF, 0xBB, 0xBF, rest @ ..] => utf8(rest)?,
+            [0xEF, 0xBB, 0xBF, rest @ ..] => normalize(utf8(rest)?),
             [0xFF, 0xFE, rest @ ..] => utf16(rest, u16::from_le_bytes)?,
             [0xFE, 0xFF, rest @ ..] => utf16(rest, u16::from_be_bytes)?,
             [0x3C, 0x00, 0x3F, 0x00, ..] => utf16(bytes, u16::from_le_bytes)?,
             [0x00, 0x3C, 0x00, 0x3F, ..] => utf16(bytes, u16::from_be_bytes)?,
-            _ => utf8(bytes)?,
+            _ => normalize(utf8(bytes)?),
         };
-        Ok(Self {
-            text: normalize(text)?,
-        })
+        check(&text)?;
+        Ok(Self { text })
     }
 
     /// The decoded text.
@@ -45,6 +46,15 @@ impl<'b> Input<'b> {
     /// A reader over the text.
     pub fn reader(&self, limits: &Limits) -> Reader<'_> {
         Reader::new(&self.text, limits)
+    }
+
+    /// The room the text owns, 0 when it is borrowed from the bytes.
+    #[cfg(test)]
+    pub(super) fn capacity(&self) -> usize {
+        match &self.text {
+            Cow::Borrowed(_) => 0,
+            Cow::Owned(text) => text.capacity(),
+        }
     }
 }
 
@@ -60,16 +70,32 @@ fn utf8(bytes: &[u8]) -> Result<Cow<'_, str>> {
         })
 }
 
+/// UTF-16 decoded, with its line ends normalised as it goes.
 fn utf16(bytes: &[u8], unit: fn([u8; 2]) -> u16) -> Result<Cow<'static, str>> {
-    let mut text = String::with_capacity(bytes.len() / 2);
-    let units = bytes
-        .chunks_exact(2)
-        .map(|pair| <[u8; 2]>::try_from(pair).map_or(0, unit));
-    for c in char::decode_utf16(units) {
+    let units = || {
+        bytes
+            .chunks_exact(2)
+            .map(|pair| <[u8; 2]>::try_from(pair).map_or(0, unit))
+    };
+    // The length in UTF-8: a surrogate pair is 4 bytes, so each half counts 2. Line ends
+    // that normalisation shortens leave a byte or so unused.
+    let length = units()
+        .map(|unit| match unit {
+            0..=0x7F => 1,
+            0x80..=0x7FF | 0xD800..=0xDFFF => 2,
+            _ => 3,
+        })
+        .sum();
+    let mut text = String::with_capacity(length);
+    let mut after_carriage_return = false;
+    for c in char::decode_utf16(units()) {
         match c {
+            Ok('\r') => text.push('\n'),
+            Ok('\n') if after_carriage_return => {}
             Ok(c) => text.push(c),
             Err(_) => return Err(error_at(&text, text.len(), "invalid UTF-16")),
         }
+        after_carriage_return = c == Ok('\r');
     }
     if bytes.len() % 2 != 0 {
         return Err(error_at(
@@ -81,21 +107,11 @@ fn utf16(bytes: &[u8], unit: fn([u8; 2]) -> u16) -> Result<Cow<'static, str>> {
     Ok(Cow::Owned(text))
 }
 
-fn normalize(text: Cow<'_, str>) -> Result<Cow<'_, str>> {
-    let mut carriage_return = false;
-    for (at, c) in text.char_indices() {
-        if c == '\r' {
-            carriage_return = true;
-        } else if !is_char(c) {
-            return Err(error_at(
-                &text,
-                at,
-                format!("character U+{:04X} is not allowed in XML", u32::from(c)),
-            ));
-        }
-    }
-    if !carriage_return {
-        return Ok(text);
+/// Line ends normalised to `\n` (XML 1.0, section 2.11); a copy only when the text has a
+/// carriage return.
+fn normalize(text: Cow<'_, str>) -> Cow<'_, str> {
+    if !text.contains('\r') {
+        return text;
     }
     let mut normalized = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
@@ -107,5 +123,17 @@ fn normalize(text: Cow<'_, str>) -> Result<Cow<'_, str>> {
             normalized.push(c);
         }
     }
-    Ok(Cow::Owned(normalized))
+    Cow::Owned(normalized)
+}
+
+/// Checks that every character is one XML allows.
+fn check(text: &str) -> Result<()> {
+    match text.char_indices().find(|(_, c)| !is_char(*c)) {
+        Some((at, c)) => Err(error_at(
+            text,
+            at,
+            format!("character U+{:04X} is not allowed in XML", u32::from(c)),
+        )),
+        None => Ok(()),
+    }
 }
