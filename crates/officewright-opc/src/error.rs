@@ -74,6 +74,8 @@ pub enum Limit {
     XmlAttributes,
     /// [`Limits::max_mce_names`](crate::Limits::max_mce_names).
     MceNames,
+    /// [`Limits::max_xml_namespaces`](crate::Limits::max_xml_namespaces).
+    XmlNamespaces,
 }
 
 impl Error {
@@ -151,6 +153,7 @@ impl fmt::Display for Limit {
             Self::XmlDepth => "xml element nesting depth",
             Self::XmlAttributes => "number of attributes on an xml element",
             Self::MceNames => "number of names in a markup compatibility attribute",
+            Self::XmlNamespaces => "number of namespaces an xml part declares",
         })
     }
 }

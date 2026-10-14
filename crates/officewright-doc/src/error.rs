@@ -63,6 +63,8 @@ pub enum Limit {
     MceNames,
     /// [`Limits::max_nodes`](crate::Limits::max_nodes).
     Nodes,
+    /// [`Limits::max_xml_namespaces`](crate::Limits::max_xml_namespaces).
+    XmlNamespaces,
 }
 
 impl fmt::Display for Error {
@@ -103,6 +105,7 @@ impl fmt::Display for Limit {
             Self::XmlAttributes => "number of attributes on one xml element",
             Self::MceNames => "number of names in one markup compatibility attribute",
             Self::Nodes => "number of elements in the document",
+            Self::XmlNamespaces => "number of namespaces one xml part declares",
         })
     }
 }
@@ -127,6 +130,7 @@ impl From<officewright_opc::Error> for Error {
                     L::XmlDepth => Limit::XmlDepth,
                     L::XmlAttributes => Limit::XmlAttributes,
                     L::MceNames => Limit::MceNames,
+                    L::XmlNamespaces => Limit::XmlNamespaces,
                     // A limit added to officewright-opc but not to this enum yet; its
                     // message still says which.
                     _ => {

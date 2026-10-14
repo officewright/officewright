@@ -421,6 +421,73 @@ fn enforces_the_depth_and_attribute_limits() {
 }
 
 #[test]
+fn bounds_the_namespaces_a_part_declares() {
+    let limits = Limits::new().with_max_xml_namespaces(2);
+    // A URI declared again, under any prefix, counts once.
+    let two = b"<a xmlns='urn:1'><b xmlns:p='urn:2'/><c xmlns:q='urn:2' xmlns:r='urn:1'/></a>";
+    assert!(trace_bytes(two, &limits).is_ok());
+    assert!(matches!(
+        trace_bytes(b"<a xmlns='urn:1'><b xmlns:p='urn:2'/>\n<c xmlns:q='urn:3'/></a>", &limits),
+        Err(Error::LimitExceeded {
+            limit: Limit::XmlNamespaces,
+            maximum: 2,
+            context,
+        }) if context == "line 2, column 1"
+    ));
+    // xml's own namespace does not count; one a consumer looks for counts once the
+    // document declares it.
+    let xml = b"<a xmlns:xml='http://www.w3.org/XML/1998/namespace' xmlns='urn:x'><b xmlns:p='urn:y'/></a>";
+    let input = Input::decode(xml).unwrap();
+    let mut reader = input.reader(&Limits::new().with_max_xml_namespaces(1));
+    reader.intern("urn:y");
+    let result = loop {
+        match reader.read_event() {
+            Ok(Some(_)) => {}
+            other => break other,
+        }
+    };
+    assert!(matches!(
+        result,
+        Err(Error::LimitExceeded {
+            limit: Limit::XmlNamespaces,
+            ..
+        })
+    ));
+    assert!(trace_bytes(xml, &Limits::new().with_max_xml_namespaces(2)).is_ok());
+}
+
+#[test]
+fn forgets_prefixes_no_open_element_binds() {
+    // Each element binds a prefix of its own; the bindings do not keep them once the
+    // element is closed.
+    let elements: String = (0..1000)
+        .map(|n| format!("<a xmlns:p{n}='urn:u'/>"))
+        .collect();
+    let xml = format!("<r xmlns:k='urn:k'><s xmlns:k='urn:j'>{elements}</s><t/></r>");
+    let input = Input::decode(xml.as_bytes()).unwrap();
+    let mut reader = input.reader(&Limits::new());
+    let mut most = 0;
+    let mut at_t = None;
+    while let Some(event) = reader.read_event().unwrap() {
+        most = most.max(reader.bound_prefixes());
+        if matches!(&event, Event::Start(tag) if tag.name().local() == "t") {
+            at_t = Some(reader.bound_prefixes());
+        }
+    }
+    // k, and one p at a time.
+    assert_eq!(most, 2);
+    // Back at the root's level, k is bound to urn:k again.
+    assert_eq!(at_t, Some(1));
+    assert_eq!(reader.bound_prefixes(), 0);
+    let trace = trace_bytes(
+        b"<r xmlns:k='urn:k'><s xmlns:k='urn:j'/><k:t/></r>",
+        &Limits::new(),
+    )
+    .unwrap();
+    assert_eq!(trace[3], "<{urn:k}t>");
+}
+
+#[test]
 fn finds_duplicates_among_many_attributes() {
     let attributes: String = (0..40).map(|i| format!(" a{i}='{i}'")).collect();
     assert!(trace_bytes(format!("<a{attributes}/>").as_bytes(), &Limits::new()).is_ok());
