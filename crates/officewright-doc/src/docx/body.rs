@@ -251,6 +251,18 @@ impl Reading<'_, '_, '_> {
     ) -> Result<()> {
         let name = tag.name();
         if self.stack.is_empty() {
+            // A header or footer part is read by its root, whichever kind of relationship
+            // reached it first: each reference's kind is checked against it later.
+            let other = match self.story {
+                Story::Header => Some(Story::Footer),
+                Story::Footer => Some(Story::Header),
+                _ => None,
+            };
+            if let Some(other) = other.filter(|other| {
+                name.is(self.w[0], other.root()) || name.is(self.w[1], other.root())
+            }) {
+                self.story = other;
+            }
             let root = self.story.root();
             let conformance = if name.is(self.w[0], root) {
                 Conformance::Transitional

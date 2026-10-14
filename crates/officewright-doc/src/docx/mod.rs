@@ -195,7 +195,9 @@ pub(crate) fn read(data: Vec<u8>, limits: &Limits) -> Result<Document> {
 
 /// The headers and footers in effect for each section: those it names, and for each
 /// kind it does not name, the one in effect for the section before it (ECMA-376 Part 1,
-/// §17.10.5). A reference whose relationship leads to no header or footer counts as not
+/// §17.10.5). Read literally, the standard gives a section without an even header the
+/// odd one; Word inherits each kind on its own, the default one included, as here
+/// (MS-OI29500 §17.10.5(b)). A reference whose relationship leads to no header or footer counts as not
 /// written, and so does a `w:footerReference` that leads to a header or a
 /// `w:headerReference` that leads to a footer. A reference without `w:type` is of the
 /// default kind.

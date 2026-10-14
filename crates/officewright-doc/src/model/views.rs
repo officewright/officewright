@@ -58,13 +58,22 @@ pub(crate) fn kind_index(kind: HeaderFooterKind) -> usize {
     }
 }
 
-/// A header or a footer: a story of its own part, which sections name.
+/// A header or a footer: a story of its own part, which sections name. Two are equal
+/// when they are the same story of the same document, as for sections that inherit one.
 #[derive(Clone, Copy, Debug)]
 pub struct HeaderFooter<'a> {
     document: &'a Document,
     data: &'a StoryData,
     index: u32,
 }
+
+impl PartialEq for HeaderFooter<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.document, other.document) && self.index == other.index
+    }
+}
+
+impl Eq for HeaderFooter<'_> {}
 
 impl<'a> HeaderFooter<'a> {
     fn at(document: &'a Document, index: Option<u32>) -> Option<Self> {

@@ -64,17 +64,24 @@ fuzz_target!(|data: &[u8]| {
     // not grow with their number × chain length.
     let (mut paragraphs_compared, mut runs_compared) = (0, 0);
     let mut blocks: Vec<Block<'_>> = document.sections().flat_map(|s| s.blocks()).collect();
-    // The headers, footers and notes, each walked like the body.
+    // The headers, footers and notes, each walked like the body. A story a section
+    // inherits from the section before is walked once: thousands of sections may inherit
+    // one header.
+    let mut previous = [None; 6];
     for section in document.sections() {
-        for kind in [
+        let stories = [
             HeaderFooterKind::Default,
             HeaderFooterKind::First,
             HeaderFooterKind::Even,
-        ] {
-            for story in [section.header(kind), section.footer(kind)]
-                .into_iter()
-                .flatten()
-            {
+        ]
+        .into_iter()
+        .flat_map(|kind| [section.header(kind), section.footer(kind)]);
+        for (last, story) in previous.iter_mut().zip(stories) {
+            let Some(story) = story else {
+                continue;
+            };
+            if *last != Some(story) {
+                *last = Some(story);
                 blocks.extend(story.blocks());
             }
         }
