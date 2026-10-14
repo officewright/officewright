@@ -389,14 +389,19 @@ Exit-Stuck 'test' ''
     # Each paragraph takes 50 ms to read, longer than any tick of the clock, so with a budget
     # of 0 the second one starts after the deadline on fast and slow runners alike. The fast
     # paragraphs above take about 1 ms in all, and whether the clock ticked during that pass
-    # decided the result (#166).
-    $sluggish = New-Object PSObject -Property @{ StoryRanges = @((New-Story 1 @(
+    # decided the result (#166). The linked header and the second story must not be read
+    # after the deadline either.
+    $sluggish = New-Object PSObject -Property @{ StoryRanges = @(
+            (New-Story 7 @(
                     (New-Paragraph ('First' + [char]13) $runs $true '' -ReadDelay 50),
                     (New-Paragraph ('Second' + [char]13) $runs $true '' -ReadDelay 50)
-                )))
+                ) (New-Story 7 @((New-Paragraph ('Linked' + [char]13) $runs $true '')))),
+            (New-Story 1 @((New-Paragraph ('Body' + [char]13) $runs $true '')))
+        )
     }
     $late = (Export-Formatting $sluggish 0 $theme $progress).Export
-    Check 'a document over its time budget is marked incomplete, without runs' ($late.complete -eq $false -and @($late.stories[0].paragraphs).Count -lt 2 -and $late.runs -eq $false -and $late.runs_note -eq 'not collected: the paragraphs did not fit in the time budget') "complete $($late.complete), $(@($late.stories[0].paragraphs).Count) paragraphs, $($late.runs_note)"
+    $lateStories = @($late.stories)
+    Check 'a document over its time budget is marked incomplete, without runs' ($late.complete -eq $false -and $lateStories.Count -eq 1 -and @($lateStories[0].paragraphs).Count -lt 2 -and $late.runs -eq $false -and $late.runs_note -eq 'not collected: the paragraphs did not fit in the time budget') "complete $($late.complete), $($lateStories.Count) stories, $(@($lateStories[0].paragraphs).Count) paragraphs, $($late.runs_note)"
     $unchecked = (Export-Formatting $document 600 $theme $progress $false).Export
     Check 'runs are left out with a fixed note when the run reader failed its check' ($unchecked.complete -eq $true -and $unchecked.runs -eq $false -and $unchecked.runs_note -eq 'left out: Word failed the check of the run reader' -and -not $unchecked.stories[0].paragraphs[0].Contains('runs')) "$($unchecked.runs_note)"
     $failing = New-Object PSObject -Property @{ StoryRanges = @((New-Story 1 @((New-Paragraph ('Body' + [char]13) $runs $true '' 0 '' 99)))) }
