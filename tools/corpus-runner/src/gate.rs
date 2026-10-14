@@ -1009,6 +1009,16 @@ mod tests {
             "{}",
             branch[1].text
         );
+        // A reference the branch tried and failed to score is a refusal once, not lacking too.
+        let mut failed = good();
+        named(&mut failed, "c/letter.docx").scores = None;
+        named(&mut failed, "c/letter.docx").score_error = Some("pdftoppm failed".to_owned());
+        assert!(missing(&failed, &good()).is_empty());
+        let measures = measure_against(&failed, Some(&good()), false);
+        assert_eq!(
+            measures[1].text,
+            "0 unexpected errors, 0 reference documents not opened, 1 not scored"
+        );
     }
 
     /// Rows 7 and 9 take their largest and lowest values from S and T documents only, like
