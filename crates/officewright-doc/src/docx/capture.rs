@@ -64,8 +64,10 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
     /// went through Markup Compatibility: what is inside is kept as written, except
     /// that the branch of each `mc:AlternateContent` that `mce` would take is marked,
     /// while the prefixes its `Requires` names can still be resolved (see
-    /// `Token::Start`). A choice whose `Requires` is missing or names an undeclared
-    /// prefix is not taken: what is inside is not read yet, so it is not an error.
+    /// `Token::Start`). A choice whose `Requires` is missing or empty, names an
+    /// undeclared prefix, or lists more than
+    /// [`Limits::max_mce_names`](officewright_opc::Limits::max_mce_names) names is not
+    /// taken: what is inside is not read yet, so it is not an error.
     pub(super) fn capture(
         &mut self,
         reader: &mut Reader<'_>,
