@@ -27,8 +27,9 @@ impl Document {
     /// An embedded font is used for the text whose font the font book finds it by: its
     /// family, typographic family, full or PostScript name, or a named instance. A subset
     /// Word embeds under a name of its own (`___WRD_EMBED_SUB_` and a number) is found by
-    /// none, so other fonts are used, and the report says so (#216). At most 1,024 faces
-    /// of embedded fonts are used; the report counts those left out.
+    /// none, so other fonts are used, and the report says so (#216). At most 256 faces
+    /// of embedded fonts are used, and no program with a name longer than any font's
+    /// (#226); the report says what is left out.
     ///
     /// # Errors
     ///
@@ -131,9 +132,9 @@ impl Document {
 
     /// Adds the programs of the fonts the document embeds to `fonts`, ahead of the
     /// caller's and the system's, each program once however many styles share it, and
-    /// at most [`MAX_EMBEDDED_FACES`] faces in all. Returns an entry for each program the
-    /// font book cannot read, which is left out; for each the text cannot reach by the
-    /// font's name; and one for those past the limit, which are left out.
+    /// at most [`MAX_EMBEDDED_FACES`] faces in all. Returns an entry for each program
+    /// left out, because it cannot be read or has a name longer than any font's, and for
+    /// each the text cannot reach by the font's name; and one for those past the limit.
     fn add_embedded_fonts(&self, fonts: &mut FontBook) -> Vec<ReportEntry> {
         let mut added = HashSet::new();
         let mut entries = Vec::new();
@@ -161,9 +162,27 @@ impl Document {
                     continue;
                 }
                 faces += count;
+                // The font book keeps each name a face has, however long; a document's
+                // program could hold names of megabytes. Until it bounds them (#226),
+                // such a program does not reach a font book.
+                if has_long_name(&program.0) {
+                    entries.push(ReportEntry::new(
+                        ReportKind::FontEmbedding,
+                        Location::document(),
+                        format!(
+                            "{} has a name longer than {MAX_NAME_BYTES} bytes, which no font has, \
+                             so it is left out and other fonts are used",
+                            what()
+                        ),
+                    ));
+                    continue;
+                }
+                // Whether the text reaches the program, asked of a book that holds only
+                // it, which is gone before the program goes into `fonts`.
+                let reach = reaches(&program.0, font.name());
                 match fonts.add_bytes(Arc::clone(&program.0), FontOrigin::Document) {
                     Ok(_) => {
-                        if let Some(family) = unreachable_family(&program.0, font.name()) {
+                        if let Some(Err(family)) = reach {
                             entries.push(ReportEntry::new(
                                 ReportKind::FontSubstituted,
                                 Location::document(),
@@ -191,11 +210,16 @@ impl Document {
             }
         }
         if past_limit > 0 {
+            let programs = if past_limit == 1 {
+                "program is"
+            } else {
+                "programs are"
+            };
             entries.push(ReportEntry::new(
                 ReportKind::FontEmbedding,
                 Location::document(),
                 format!(
-                    "{past_limit} embedded font programs are left out, past {MAX_EMBEDDED_FACES} \
+                    "{past_limit} embedded font {programs} left out, past {MAX_EMBEDDED_FACES} \
                      faces in all, so other fonts are used"
                 ),
             ));
@@ -206,16 +230,91 @@ impl Document {
 
 /// The most faces the document's embedded fonts may add to the font book, a collection
 /// counting each of its faces. Word embeds at most four programs a font; the limit is
-/// our choice, far above what documents embed and small enough that a few kilobytes of
-/// collections cannot fill the memory.
-const MAX_EMBEDDED_FACES: usize = 1024;
+/// our choice, far above what documents embed (24 programs in all in the corpora) and
+/// small enough that collections of a few kilobytes cannot fill the memory.
+const MAX_EMBEDDED_FACES: usize = 256;
 
-/// The family `program` holds, described for the report, when the font book would not
-/// find it by `name`: a font book with only the program finds no face of that name, by
-/// any of the ways the font book finds names (the family, an alias, another of the
-/// font's names, a named instance). A subset Word embeds under a name of its own
-/// (`___WRD_EMBED_SUB_` and a number) is such a program.
-fn unreachable_family(program: &Arc<[u8]>, name: &str) -> Option<String> {
+/// The longest name, in bytes, that an embedded program may have among those the font
+/// book keeps. Real fonts' are short: Windows allows 31 characters in a face name and
+/// OpenType 63 in a PostScript name. Our choice, until the font book bounds them (#226).
+const MAX_NAME_BYTES: u16 = 512;
+
+/// Whether a face of `program` has a name the font book keeps (the family, subfamily,
+/// full, PostScript and typographic names, and those of instances and axes, ID 256 and
+/// up) longer than [`MAX_NAME_BYTES`]. Only the lengths of the name records are read
+/// (OpenType's `name` table), not the names; a face whose tables cannot be found has
+/// none, and the font book says why it cannot read it.
+fn has_long_name(program: &[u8]) -> bool {
+    let u16_at = |at: Option<usize>| {
+        let at = at?;
+        let bytes = program.get(at..at.checked_add(2)?)?;
+        <[u8; 2]>::try_from(bytes).ok().map(u16::from_be_bytes)
+    };
+    let u32_at = |at: Option<usize>| {
+        let at = at?;
+        let bytes = program.get(at..at.checked_add(4)?)?;
+        <[u8; 4]>::try_from(bytes)
+            .ok()
+            .map(|bytes| u32::from_be_bytes(bytes) as usize)
+    };
+    // `base + step * index + extra`, none past the address space.
+    let place = |base: usize, step: usize, index: usize, extra: usize| {
+        step.checked_mul(index)?
+            .checked_add(base)?
+            .checked_add(extra)
+    };
+    // The offsets of the faces' table directories: one for a font, each of a collection's.
+    let faces: Vec<usize> = if program.starts_with(b"ttcf") {
+        let count = u32_at(Some(8)).unwrap_or(0);
+        (0..count.min(MAX_EMBEDDED_FACES))
+            .filter_map(|face| u32_at(place(12, 4, face, 0)))
+            .collect()
+    } else {
+        vec![0]
+    };
+    let mut seen = HashSet::new();
+    for face in faces {
+        let tables = usize::from(u16_at(face.checked_add(4)).unwrap_or(0));
+        let name = (0..tables).find_map(|table| {
+            let record = place(face, 16, table, 12)?;
+            let tag = program.get(record..record.checked_add(4)?)?;
+            if tag == b"name" {
+                u32_at(record.checked_add(8))
+            } else {
+                None
+            }
+        });
+        let Some(name) = name else {
+            continue;
+        };
+        // The faces of a collection often share one name table.
+        if !seen.insert(name) {
+            continue;
+        }
+        let count = usize::from(u16_at(name.checked_add(2)).unwrap_or(0));
+        for record in 0..count {
+            let (Some(id), Some(length)) = (
+                u16_at(place(name, 12, record, 6 + 6)),
+                u16_at(place(name, 12, record, 6 + 8)),
+            ) else {
+                break;
+            };
+            let kept = matches!(id, 1 | 2 | 4 | 6 | 16 | 17 | 21 | 22) || id >= 256;
+            if kept && length > MAX_NAME_BYTES {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Whether the font book would find `program` by `name`: `Some(Ok(()))` when a font
+/// book holding only the program finds a face by its family, an alias, another of its
+/// names or a named instance, or takes it for a metric-compatible substitute of the
+/// name; `Some(Err(family))` with the family the program holds, described for the
+/// report, when it does not, as for a subset Word embeds under a name of its own
+/// (`___WRD_EMBED_SUB_` and a number); none when no font book can read it.
+fn reaches(program: &Arc<[u8]>, name: &str) -> Option<std::result::Result<(), String>> {
     let mut alone = FontBook::new();
     alone
         .add_bytes(Arc::clone(program), FontOrigin::Document)
@@ -227,9 +326,10 @@ fn unreachable_family(program: &Arc<[u8]>, name: &str) -> Option<String> {
             | ResolutionKind::Alias
             | ResolutionKind::OtherName
             | ResolutionKind::VariableInstance
+            | ResolutionKind::MetricCompatible
     );
     if found {
-        return None;
+        return Some(Ok(()));
     }
     let family = alone
         .faces()
@@ -239,5 +339,5 @@ fn unreachable_family(program: &Arc<[u8]>, name: &str) -> Option<String> {
             || "a font without a family name".to_owned(),
             |family| format!("a font named {}", shorten(family)),
         );
-    Some(family)
+    Some(Err(family))
 }

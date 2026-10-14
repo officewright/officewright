@@ -440,63 +440,187 @@ fn collection(program: &[u8], faces: u32) -> Vec<u8> {
     bytes
 }
 
-#[test]
-fn uses_at_most_a_thousand_and_twenty_four_embedded_faces() {
-    // A collection takes a few kilobytes for a thousand faces; the faces are what costs,
-    // so the document's embedded fonts add at most 1,024.
-    let report = |faces: u32| {
-        let program = collection(&test_font(), faces);
-        let document = Document::from_bytes(package_with_body_and_fonts(
-            &text_in_test_font("A"),
-            &font("Officewright Test", r#"<w:embedRegular r:id="rId1"/>"#),
-            &relationship("rId1", "fonts/font1.odttf"),
-            &[("word/fonts/font1.odttf", &program)],
-        ))
-        .unwrap();
-        let (pdf, report) = document.save_pdf_bytes(&without_system_fonts()).unwrap();
-        (names(&pdf, b"+OfficewrightTest"), entries(&report))
-    };
-    let (used, listed) = report(1024);
-    assert!(used, "{listed:?}");
-    assert!(
-        !listed.iter().any(|entry| entry.contains("left out")),
-        "{listed:?}"
-    );
-    let (used, listed) = report(1025);
-    assert!(!used, "{listed:?}");
-    // The faces of all the programs count together: two collections of 600 faces each,
-    // the second past the limit.
-    let program = collection(&test_font(), 600);
-    let document = Document::from_bytes(package_with_body_and_fonts(
+/// A document whose text is in "Officewright Test", with the fonts `fonts` (each a name
+/// and a program) embedded as regular, in that order.
+fn embedding(fonts: &[(&str, &[u8])]) -> Document {
+    let declared: String = fonts
+        .iter()
+        .enumerate()
+        .map(|(n, (name, _))| font(name, &format!(r#"<w:embedRegular r:id="rId{n}"/>"#)))
+        .collect();
+    let relationships: String = (0..fonts.len())
+        .map(|n| relationship(&format!("rId{n}"), &format!("fonts/font{n}.odttf")))
+        .collect();
+    let paths: Vec<String> = (0..fonts.len())
+        .map(|n| format!("word/fonts/font{n}.odttf"))
+        .collect();
+    let files: Vec<(&str, &[u8])> = paths
+        .iter()
+        .zip(fonts)
+        .map(|(path, (_, program))| (path.as_str(), *program))
+        .collect();
+    Document::from_bytes(package_with_body_and_fonts(
         &text_in_test_font("A"),
-        &font(
-            "Officewright Test",
-            r#"<w:embedRegular r:id="rId1"/><w:embedBold r:id="rId2"/>"#,
-        ),
-        &[
-            relationship("rId1", "fonts/font1.odttf"),
-            relationship("rId2", "fonts/font2.odttf"),
-        ]
-        .concat(),
-        &[
-            ("word/fonts/font1.odttf", &program),
-            ("word/fonts/font2.odttf", &program),
-        ],
+        &declared,
+        &relationships,
+        &files,
     ))
-    .unwrap();
-    let (_, report) = document.save_pdf_bytes(&without_system_fonts()).unwrap();
-    let two = entries(&report);
+    .unwrap()
+}
+
+#[test]
+fn uses_at_most_two_hundred_and_fifty_six_embedded_faces() {
+    // A collection takes a few kilobytes for a thousand faces; the faces are what costs,
+    // so the document's embedded fonts add at most 256.
+    let render = |document: &Document| {
+        let (pdf, report) = document.save_pdf_bytes(&without_system_fonts()).unwrap();
+        (pdf, report)
+    };
+    let (pdf, report) = render(&embedding(&[(
+        "Officewright Test",
+        &collection(&test_font(), 256),
+    )]));
+    assert!(names(&pdf, b"+OfficewrightTest"));
     assert!(
-        two.iter()
-            .any(|entry| entry.starts_with("document: 1 embedded font programs are left out")),
-        "{two:?}"
+        !entries(&report)
+            .iter()
+            .any(|entry| entry.contains("left out")),
+        "{:?}",
+        entries(&report)
     );
+    let (pdf, report) = render(&embedding(&[(
+        "Officewright Test",
+        &collection(&test_font(), 257),
+    )]));
+    assert!(!names(&pdf, b"+OfficewrightTest"));
+    let entry = report
+        .iter()
+        .find(|entry| entry.message().contains("left out"))
+        .unwrap();
+    assert_eq!(entry.kind(), ReportKind::FontEmbedding);
+    assert_eq!(
+        entry.to_string(),
+        "document: 1 embedded font program is left out, past 256 faces in all, so other \
+         fonts are used"
+    );
+    // The faces of all the programs count together: of two collections of 200 faces,
+    // the second is past the limit; a program after it that fits is still used.
+    let big = |name: &str| collection(&named(&test_font(), name), 200);
+    let (first, second) = (big("Officewright Big1"), big("Officewright Big2"));
+    let third = test_font();
+    let (pdf, report) = render(&embedding(&[
+        ("Officewright Big1", &first),
+        ("Officewright Big2", &second),
+        ("Officewright Test", &third),
+    ]));
+    assert!(names(&pdf, b"+OfficewrightTest"));
+    let listed = entries(&report);
     assert!(
         listed.iter().any(|entry| entry
-            == "document: 1 embedded font programs are left out, past 1024 faces in all, so \
+            == "document: 1 embedded font program is left out, past 256 faces in all, so \
                 other fonts are used"),
         "{listed:?}"
     );
+    // The same within one font: its bold program is past the limit, its italic one,
+    // after it, is still used.
+    let document = Document::from_bytes(package_with_body_and_fonts(
+        &text_in_test_font("A"),
+        &font(
+            "Mixed",
+            r#"<w:embedRegular r:id="rId0"/><w:embedBold r:id="rId1"/><w:embedItalic r:id="rId2"/>"#,
+        ),
+        &(0..3)
+            .map(|n| relationship(&format!("rId{n}"), &format!("fonts/font{n}.odttf")))
+            .collect::<String>(),
+        &[
+            ("word/fonts/font0.odttf", &first),
+            ("word/fonts/font1.odttf", &second),
+            ("word/fonts/font2.odttf", &third),
+        ],
+    ))
+    .unwrap();
+    let (pdf, _) = render(&document);
+    assert!(names(&pdf, b"+OfficewrightTest"));
+    // Two past it.
+    let (_, report) = render(&embedding(&[
+        ("Officewright Big1", &first),
+        ("Officewright Big2", &second),
+        ("Officewright Big3", &big("Officewright Big3")),
+    ]));
+    assert!(
+        entries(&report)
+            .iter()
+            .any(|entry| entry.starts_with("document: 2 embedded font programs are left out")),
+        "{:?}",
+        entries(&report)
+    );
+}
+
+/// The test font with a family name of `bytes` bytes (`bytes / 2` letters A), its own
+/// name table replaced by one at its end that has only that name.
+fn with_family_of(bytes: u16) -> Vec<u8> {
+    let mut program = test_font();
+    let table_at = program.len() as u32;
+    let mut table = Vec::new();
+    table.extend([0u16, 1, 18].iter().flat_map(|n| n.to_be_bytes()));
+    table.extend(
+        [3u16, 1, 0x409, 1, bytes, 0]
+            .iter()
+            .flat_map(|n| n.to_be_bytes()),
+    );
+    table.extend(std::iter::repeat_n([0u8, b'A'], usize::from(bytes / 2)).flatten());
+    let tables = usize::from(u16::from_be_bytes([program[4], program[5]]));
+    let record = (0..tables)
+        .map(|table| 12 + 16 * table)
+        .find(|&at| &program[at..at + 4] == b"name")
+        .unwrap();
+    program[record + 8..record + 12].copy_from_slice(&table_at.to_be_bytes());
+    program[record + 12..record + 16].copy_from_slice(&(table.len() as u32).to_be_bytes());
+    program.extend(table);
+    program
+}
+
+#[test]
+fn leaves_out_a_program_with_a_name_longer_than_any_font_s() {
+    // The font book keeps names however long (#226): a program with a family of 600
+    // bytes is left out before it reaches one; one of 500 bytes is not.
+    let left_out = |bytes: u16| {
+        let document = embedding(&[("Officewright Test", &with_family_of(bytes))]);
+        let (_, report) = document.save_pdf_bytes(&without_system_fonts()).unwrap();
+        report
+            .iter()
+            .find(|entry| entry.message().contains("longer than"))
+            .map(|entry| (entry.kind(), entry.to_string()))
+    };
+    assert_eq!(
+        left_out(600),
+        Some((
+            ReportKind::FontEmbedding,
+            "document: the w:embedRegular of the font Officewright Test has a name longer \
+             than 512 bytes, which no font has, so it is left out and other fonts are used"
+                .to_owned()
+        ))
+    );
+    assert_eq!(left_out(500), None);
+}
+
+#[test]
+fn takes_a_program_found_by_an_alias_or_as_a_metric_compatible_substitute() {
+    // Neither is reported as a font the text cannot reach: the font book finds Times New
+    // Roman for "Times New Roman CYR", and takes Liberation Sans for Arial. The names are
+    // padded with spaces to the test font's length; the font book trims them.
+    for (family, name) in [
+        ("Times New Roman  ", "Times New Roman CYR"),
+        ("Liberation Sans  ", "Arial"),
+    ] {
+        let document = embedding(&[(name, &named(&test_font(), family))]);
+        let (_, report) = document.save_pdf_bytes(&without_system_fonts()).unwrap();
+        let listed = entries(&report);
+        assert!(
+            !listed.iter().any(|entry| entry.contains("cannot reach")),
+            "{name}: {listed:?}"
+        );
+    }
 }
 
 #[test]
