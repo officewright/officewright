@@ -9,8 +9,8 @@ use crate::model::NoteType;
 
 impl Translator<'_> {
     /// The IR note a reference to the note `id` names, added the first time; none,
-    /// listed, for a reference inside a note, which the IR does not hold, and for a note
-    /// that does not exist or is not a normal note.
+    /// listed each time, for a reference inside a note, which the IR does not hold, and
+    /// for a note that does not exist or is not a normal note.
     pub(super) fn note_reference(&mut self, endnote: bool, id: i64) -> Option<ir::NoteId> {
         let name = if endnote { "endnote" } else { "footnote" };
         if self.in_note {
@@ -19,46 +19,54 @@ impl Translator<'_> {
             });
             return None;
         }
-        if let Some(found) = self.notes.get(&(endnote, id)) {
-            return *found;
-        }
         let document = self.document;
         let note = if endnote {
             document.endnote(id)
         } else {
             document.footnote(id)
-        }
-        .filter(|note| note.note_type() == NoteType::Normal);
-        let found = match note {
-            Some(note) => {
-                // Places in a note are written from the document's list of notes.
-                let path = std::mem::replace(
-                    &mut self.path,
-                    vec![Step::Field("notes"), Step::Index(self.notes_added)],
-                );
-                self.in_note = true;
-                let blocks = self.blocks(note.blocks());
-                self.in_note = false;
-                self.path = path;
-                let kind = if endnote {
-                    ir::NoteKind::Endnote
-                } else {
-                    ir::NoteKind::Footnote
-                };
-                self.notes_added += 1;
-                Some(self.ir.add_note(ir::Note::new(kind, blocks)))
-            }
-            None => {
-                self.leave_out(ReportKind::FeatureUnsupported, || {
-                    format!(
-                        "a reference to {name} {id}, which the document does not have, is left out"
-                    )
-                });
-                None
-            }
         };
+        let Some(note) = note.filter(|note| note.note_type() == NoteType::Normal) else {
+            let special = note.map(|note| note.note_type());
+            self.leave_out(ReportKind::FeatureUnsupported, || match special {
+                Some(NoteType::Separator) => {
+                    format!("a reference to {name} {id}, which is the separator, is left out")
+                }
+                Some(NoteType::ContinuationSeparator) => format!(
+                    "a reference to {name} {id}, which is the continuation separator, is left out"
+                ),
+                Some(NoteType::ContinuationNotice) => format!(
+                    "a reference to {name} {id}, which is the continuation notice, is left out"
+                ),
+                _ => format!(
+                    "a reference to {name} {id}, which the document does not have, is left out"
+                ),
+            });
+            return None;
+        };
+        if let Some(&found) = self.notes.get(&(endnote, id)) {
+            return Some(found);
+        }
+        // Places in a note are written from the document's list of notes, and its tables
+        // nest from the note, not from where the reference is.
+        let path = std::mem::replace(
+            &mut self.path,
+            vec![Step::Field("notes"), Step::Index(self.notes_added)],
+        );
+        let depth = std::mem::take(&mut self.table_depth);
+        self.in_note = true;
+        let blocks = self.blocks(note.blocks());
+        self.in_note = false;
+        self.table_depth = depth;
+        self.path = path;
+        let kind = if endnote {
+            ir::NoteKind::Endnote
+        } else {
+            ir::NoteKind::Footnote
+        };
+        self.notes_added += 1;
+        let found = self.ir.add_note(ir::Note::new(kind, blocks));
         self.notes.insert((endnote, id), found);
-        found
+        Some(found)
     }
 
     /// The separators of footnotes and of endnotes: the first note of each special type.

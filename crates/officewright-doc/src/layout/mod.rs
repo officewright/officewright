@@ -208,7 +208,7 @@ struct Translator<'a> {
     /// The weight of the headers and footers copied into sections so far.
     copied: usize,
     /// The IR note of each note referred to so far: whether it is an endnote, and its id.
-    notes: HashMap<(bool, i64), Option<ir::NoteId>>,
+    notes: HashMap<(bool, i64), ir::NoteId>,
     /// Whether the blocks being translated are a note's, which holds no note references.
     in_note: bool,
     /// How many notes the IR has.

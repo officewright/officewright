@@ -255,35 +255,46 @@ impl<'a> Translator<'a> {
 /// whose XML is larger may copy as much as its XML. Smaller in tests, which reach it.
 const MAX_COPIED: usize = if cfg!(test) { 1 << 20 } else { 64 << 20 };
 
-/// About how many bytes of memory a copy of some blocks takes: each block, row, cell and
-/// inline, and the text and names the inlines own. Tables nest no deeper than the IR
-/// allows, and the results of fields hold no fields.
+/// How many bytes of memory a copy of some blocks takes: every allocation a clone makes.
+/// That is each block, row, cell, inline and tab stop, and what they own: a table's grid,
+/// a paragraph's tab stops, the text of inlines, a symbol's font name, a field's name, its
+/// number format's name and its result, an anchored object. A part that is small in the
+/// document can take much more in the IR: a table of thousands of grid columns, or empty
+/// paragraphs whose style gives 64 tab stops. Tables nest no deeper than the IR allows,
+/// and the results of fields hold no fields.
 fn weight(blocks: &[ir::Block]) -> usize {
     blocks
         .iter()
         .map(|block| {
             size_of::<ir::Block>()
                 + match block {
-                    ir::Block::Paragraph(paragraph) => inlines_weight(paragraph.inlines()),
-                    ir::Block::Table(table) => table
-                        .rows()
-                        .iter()
-                        .map(|row| {
-                            size_of::<ir::Row>()
-                                + row
-                                    .cells()
-                                    .iter()
-                                    .map(|cell| size_of::<ir::Cell>() + weight(cell.blocks()))
-                                    .sum::<usize>()
-                        })
-                        .sum(),
+                    ir::Block::Paragraph(paragraph) => {
+                        size_of_val(paragraph.props().tabs()) + inlines_weight(paragraph.inlines())
+                    }
+                    ir::Block::Table(table) => {
+                        size_of_val(table.grid())
+                            + table
+                                .rows()
+                                .iter()
+                                .map(|row| {
+                                    size_of::<ir::Row>()
+                                        + row
+                                            .cells()
+                                            .iter()
+                                            .map(|cell| {
+                                                size_of::<ir::Cell>() + weight(cell.blocks())
+                                            })
+                                            .sum::<usize>()
+                                })
+                                .sum::<usize>()
+                    }
                     _ => 0,
                 }
         })
         .sum()
 }
 
-/// About how many bytes of memory a copy of some inlines takes.
+/// How many bytes of memory a copy of some inlines takes, as [`weight`] counts them.
 fn inlines_weight(inlines: &[ir::Inline]) -> usize {
     inlines
         .iter()
@@ -292,7 +303,17 @@ fn inlines_weight(inlines: &[ir::Inline]) -> usize {
                 + match inline {
                     ir::Inline::Text { text, .. } => text.len(),
                     ir::Inline::Symbol { font, .. } => font.len(),
-                    ir::Inline::Field(field) => inlines_weight(field.result()),
+                    ir::Inline::Field(field) => {
+                        let name = match field.kind() {
+                            ir::FieldKind::Other(name) => name.len(),
+                            _ => 0,
+                        };
+                        let format = match field.format() {
+                            Some(ir::NumberFormat::Other(name)) => name.len(),
+                            _ => 0,
+                        };
+                        name + format + inlines_weight(field.result())
+                    }
                     ir::Inline::Anchored(_) => size_of::<ir::AnchoredObject>(),
                     _ => 0,
                 }
