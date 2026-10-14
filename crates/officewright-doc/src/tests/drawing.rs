@@ -527,3 +527,80 @@ fn shows_a_drawing_as_written_and_a_picture_briefly() {
         "{debug}"
     );
 }
+
+#[test]
+fn reads_lengths_and_shares_only_of_the_schema_s_pattern_and_range() {
+    // ST_Coordinate's range in EMUs is -27273042329600 to 27273042316900: the edges are
+    // read, one past them is not, nor 400,000,000 inches.
+    let width = |cx: &str| {
+        let document = with_images(&format!(
+            "<w:p>{}</w:p>",
+            anchored(
+                "rIdPng",
+                r#"simplePos="0""#,
+                &format!(
+                    r#"<wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="page"><wp:posOffset>{cx}</wp:posOffset></wp:positionH><wp:positionV relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="12700" cy="12700"/><wp:wrapNone/>"#
+                )
+            )
+        ));
+        drawings(&document)[0].anchor().unwrap().horizontal_offset()
+    };
+    assert_eq!(
+        width("27273042316900"),
+        Some(Pt(27_273_042_316_900.0 / 12_700.0))
+    );
+    assert_eq!(
+        width("-27273042329600"),
+        Some(Pt(-27_273_042_329_600.0 / 12_700.0))
+    );
+    for value in [
+        "27273042316901",
+        "-27273042329601",
+        "400000000in",
+        // Not of the pattern -?[0-9]+(\.[0-9]+)? before the unit.
+        "1e2in",
+        "+1in",
+        ".5in",
+        "1.in",
+        "infin",
+    ] {
+        assert_eq!(width(value), None, "{value}");
+    }
+    // A crop in percent of the same pattern; others are not read.
+    let crop = |l: &str| {
+        let fill = format!(r#"<a:srcRect l="{l}"/>"#);
+        let picture = format!(
+            r#"<w:r><w:drawing><wp:inline xmlns:wp="{WP}"><wp:extent cx="12700" cy="12700"/><wp:docPr id="1" name="p"/>{}</wp:inline></w:drawing></w:r>"#,
+            graphic("rIdPng", &fill, "")
+        );
+        let document = with_images(&format!("<w:p>{picture}</w:p>"));
+        drawings(&document)[0]
+            .picture()
+            .unwrap()
+            .crop()
+            .unwrap()
+            .left()
+    };
+    assert!((crop("12.5%") - 0.125).abs() < 1e-12);
+    for value in ["1e3%", "inf%", "+5%", ".5%"] {
+        assert_eq!(crop(value), 0.0, "{value}");
+    }
+    // A simple position without y is not one: the other position counts.
+    let document = with_images(&format!(
+        "<w:p>{}</w:p>",
+        anchored(
+            "rIdPng",
+            r#"simplePos="1""#,
+            r#"<wp:simplePos x="12700"/><wp:positionH relativeFrom="column"><wp:posOffset>25400</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>38100</wp:posOffset></wp:positionV><wp:extent cx="12700" cy="12700"/><wp:wrapNone/>"#
+        )
+    ));
+    let anchor = drawings(&document)[0].anchor().unwrap();
+    assert_eq!(
+        (anchor.horizontal_reference(), anchor.horizontal_offset()),
+        (Some(HorizontalReference::Column), Some(Pt(2.0)))
+    );
+    assert_eq!(
+        (anchor.vertical_reference(), anchor.vertical_offset()),
+        (Some(VerticalReference::Paragraph), Some(Pt(3.0)))
+    );
+}
