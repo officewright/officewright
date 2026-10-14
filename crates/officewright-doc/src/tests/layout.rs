@@ -2036,7 +2036,7 @@ fn gives_the_paragraph_added_to_a_cell_the_default_paragraph_style_s_mark() {
 #[test]
 fn translates_ligatures_and_contextual_alternates() {
     let document = open(
-        r#"<w:p><w:r><w:rPr><w14:ligatures w14:val="standardHistorical"/><w14:cntxtAlts/></w:rPr><w:t>x</w:t></w:r><w:r><w:t>y</w:t></w:r></w:p>"#,
+        r#"<w:p><w:r><w:rPr><w14:ligatures w14:val="standardHistoricalDiscretional"/><w14:cntxtAlts/></w:rPr><w:t>x</w:t></w:r><w:r><w:t>y</w:t></w:r></w:p>"#,
     );
     let translation = translate(&document);
     let ir = translation.document();
@@ -2047,6 +2047,7 @@ fn translates_ligatures_and_contextual_alternates() {
         ir::Ligatures::default()
             .with_standard(true)
             .with_historical(true)
+            .with_discretional(true)
     );
     assert!(set.contextual_alternates());
     // Without a styles part, Word's defaults: standard and contextual ligatures.

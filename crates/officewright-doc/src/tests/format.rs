@@ -1146,8 +1146,16 @@ fn resolves_ligatures_and_contextual_alternates() {
         &format!(
             r#"<w14:ligatures {W14} w14:val="Standard"/><w14:cntxtAlts {W14} w14:val="maybe"/>"#
         ),
+        &format!(r#"<w14:cntxtAlts {W14} w14:val="on"/>"#),
     ];
-    let body = [paragraph("", &written), paragraph("Plain", &[""])].concat();
+    // Under a style with contextual alternates on: a value that is not one inherits
+    // them; "off" sets them off.
+    let plain = [
+        "",
+        &format!(r#"<w14:cntxtAlts {W14} w14:val="maybe"/>"#),
+        &format!(r#"<w14:cntxtAlts {W14} w14:val="off"/>"#),
+    ];
+    let body = [paragraph("", &written), paragraph("Plain", &plain)].concat();
     let document = build(&body, &styles, None, None);
     let found: Vec<(Ligatures, bool)> = runs(&document)
         .iter()
@@ -1163,8 +1171,11 @@ fn resolves_ligatures_and_contextual_alternates() {
                 false
             ),
             (all, false),
+            (all, true),
             // The paragraph style's none and contextual alternates.
             (Ligatures::default(), true),
+            (Ligatures::default(), true),
+            (Ligatures::default(), false),
         ]
     );
     let properties = paragraphs(&document)[0].runs().nth(1).unwrap().properties();
