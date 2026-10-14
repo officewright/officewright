@@ -370,9 +370,11 @@ fn u32_at(data: &[u8], at: usize) -> Option<u32> {
 }
 
 /// Reads the size and components of a JPEG file from its frame header (ITU T.81, B.2),
-/// and whether it has Adobe's `APP14` segment. The frame header and the first scan header
-/// are checked as libjpeg checks them when it reads them, so that a file a viewer cannot
-/// start to decode is refused; damage in the coded data is not looked for.
+/// and whether it has Adobe's `APP14` segment. The frame header, and the components the
+/// first scan header names, are checked as libjpeg checks them when it reads them, so
+/// that a file whose headers a viewer cannot read is refused. Not checked: whether the
+/// tables the headers name are defined, the progressive parameters of the scan, and the
+/// coded data.
 fn read_jpeg(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> {
     let mut at = 2;
     let mut frame = None;
@@ -532,11 +534,11 @@ fn read_frame(segment: &[u8]) -> std::result::Result<Frame, Problem> {
 /// `6 + 2 × components` bytes long, each a different component of the frame, and in an
 /// interleaved scan at most 10 blocks in each minimum coded unit.
 ///
-/// Which component an identifier names follows libjpeg, which is both looser and
-/// stricter than T.81. T.81 wants the frame's identifiers distinct and the scan in the
-/// frame's order; libjpeg decodes frames that repeat an identifier and some scans out of
-/// order, and takes for the scan's component k (from 0) the frame's first component at
-/// position k or later with its identifier. That rule matched libjpeg-turbo, through
+/// Which component an identifier names follows libjpeg, which is looser than T.81. T.81
+/// wants the frame's identifiers distinct and the scan in the frame's order; libjpeg
+/// also decodes frames that repeat an identifier and some scans out of order, and takes
+/// for the scan's component k (from 0) the frame's first component at position k or
+/// later with its identifier. That rule matched libjpeg-turbo, through
 /// `qpdf --check`, on all of 1394 generated scans.
 fn check_scan(segment: &[u8], length: usize, frame: &Frame) -> std::result::Result<(), Problem> {
     let count = segment.first().copied().unwrap_or(0);
@@ -2013,7 +2015,8 @@ pub(crate) mod tests {
         for scan in scans {
             Image::from_bytes(with_scan(&repeated, scan)).unwrap();
         }
-        // Out of the frame's order, which libjpeg takes: 3, 2 and 1, 3 of 1, 2, 3.
+        // Scans of a frame 1, 2, 3 that libjpeg takes: 3, 2, out of the frame's order,
+        // and 1, 3, which leaves a component out.
         for scan in [
             [2, 3, 0, 2, 0x11, 0, 0x3F, 0],
             [2, 1, 0, 3, 0x11, 0, 0x3F, 0],
@@ -2292,6 +2295,25 @@ pub(crate) mod tests {
             (
                 with_scan(&good, &[2, 2, 0, 2, 0x11, 0, 0x3F, 0]),
                 "the JPEG scan header names component 2 more often than the frame header has it",
+            ),
+            // With repeated identifiers, the component at position k or later is the one
+            // taken: 2, 2 of a frame 1, 2, 2 takes the first 2 twice, and 1, 1 of a frame
+            // 1, 1, 3 counts the blocks of the second 1, 4 × 4 (libjpeg: "Invalid
+            // component ID 2 in SOS" and "Sampling factors too large for interleaved
+            // scan").
+            (
+                with_scan(
+                    &patched(&good, frame + 16, 2),
+                    &[2, 2, 0, 2, 0x11, 0, 0x3F, 0],
+                ),
+                "the JPEG scan header names component 2 out of the frame header's order",
+            ),
+            (
+                with_scan(
+                    &patched(&patched(&good, frame + 13, 1), frame + 14, 0x44),
+                    &[2, 1, 0, 1, 0x11, 0, 0x3F, 0],
+                ),
+                "the JPEG scan interleaves 17 blocks in each minimum coded unit, not at most 10",
             ),
             // A frame whose three components are all 1, scanned as 1, 2, 3.
             (
