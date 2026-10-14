@@ -339,6 +339,74 @@ class Cleaning(unittest.TestCase):
                 public.clean(data, DOC)
             self.assertIn(message.strip(), str(caught.exception))
 
+    def test_embedded_parts_are_found_by_what_they_are_not_by_their_usual_name(self):
+        ms = "http://schemas.microsoft.com/office/2006/relationships"
+        types = (
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Default Extension="ocx" ContentType="application/vnd.ms-office.activeX"/>'
+            '<Override PartName="/word/controls/control1.xml" '
+            'ContentType="application/vnd.ms-office.activeX+xml"/>'
+            "<Override PartName='/word/Controls/Upper.xml' "
+            "ContentType='APPLICATION/VND.MS-OFFICE.ACTIVEX+XML'/>"
+            '<Override PartName="/word/styles.xml" ContentType="application/vnd.'
+            'openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>'
+        )
+        document_rels = relationships(
+            (f"{REL}/control", "controls/control2.xml", ""),
+            (f"{REL}/oleObject", "objects/oleObject1.bin", ""),
+            (f"{REL}/package", "objects/Sheet1.xlsx", ""),
+            (f"{REL}/control", "https://example.gov/control.xml", ' TargetMode="External"'),
+            (f"{REL}/styles", "styles.xml", ""),
+            (f"{REL}/control", "controls/missing.xml", ""),
+        ).replace("</Relationships>", f"<Relationship Id='rId9' Type='{REL}/control' "
+                  "Target='/word/controls/control3.xml'/></Relationships>")
+        parts = {
+            "[Content_Types].xml": types.encode(),
+            "word/_rels/document.xml.rels": document_rels.encode(),
+            "word/_rels/fontTable.xml.rels": relationships(
+                (f"{REL}/font", "extras/font1.odttf", "")).encode(),
+            "word/controls/_rels/control2.xml.rels": relationships(
+                (f"{ms}/activeXControlBinary", "control2.bin", "")).encode(),
+            "word/ActiveX/activeX1.xml": b"<ax:ocx xmlns:ax='a'/>",  # the other case
+            "word/Fonts/font2.odttf": b"x",
+            "word/controls/control1.xml": b"<ax:ocx xmlns:ax='a'/>",  # by its content type
+            "word/controls/upper.xml": b"<ax:ocx xmlns:ax='a'/>",  # named in another case
+            "word/controls/control2.xml": b"<ax:ocx xmlns:ax='a'/>",  # by its relationship
+            "word/controls/control2.bin": b"\x00",
+            "word/controls/control3.xml": b"<ax:ocx xmlns:ax='a'/>",
+            "word/controls/legacy.ocx": b"\x00",  # by the content type of its extension
+            "word/extras/font1.odttf": b"x",
+            "word/objects/oleObject1.bin": b"\x00",
+            "word/objects/Sheet1.xlsx": b"PK",
+            "word/styles.xml": b"<w:styles xmlns:w='w'/>",
+            "word/document.xml": b"<w:document xmlns:w='w'/>",
+        }
+        found = [
+            "word/ActiveX/activeX1.xml", "word/Fonts/font2.odttf",
+            "word/controls/control1.xml", "word/controls/control2.bin",
+            "word/controls/control2.xml", "word/controls/control3.xml",
+            "word/controls/legacy.ocx", "word/controls/missing.xml", "word/controls/upper.xml",
+            "word/extras/font1.odttf", "word/objects/Sheet1.xlsx", "word/objects/oleObject1.bin",
+        ]
+        self.assertEqual(public.embedded_parts(parts), found)
+        # Both the import and the check of committed files go by it.
+        data = package(**{name: data for name, data in parts.items()
+                          if name != "word/document.xml"})
+        problems = public.problems(data)
+        for name in found:
+            with self.subTest(name):
+                self.assertIn(f"{name} is embedded", problems)
+        with self.assertRaises(public.Refused) as caught:
+            public.clean(package(**{"word/controls/control1.xml": "<ax:ocx xmlns:ax='a'/>",
+                                    "[Content_Types].xml": types}), DOC)
+        self.assertIn(
+            "embeds word/Controls/Upper.xml, word/controls/control1.xml", str(caught.exception)
+        )
+        with self.assertRaises(public.Refused) as caught:
+            public.clean(package(**{"word/VBAProject.bin": b"\x00"}), DOC)
+        self.assertIn("has macros", str(caught.exception))
+
     def test_text_after_a_nested_text_box_and_split_addresses_are_read(self):
         nested = (
             "<w:document xmlns:w='w'><w:body><w:p><w:r><w:t>See </w:t></w:r><w:r><w:pict>"
