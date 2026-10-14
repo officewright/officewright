@@ -2,14 +2,17 @@
 //! tests/fonts, as the layout does: the first bytes describe up to four run styles
 //! (fonts, among them missing ones and the symbol fonts Symbol and Wingdings; bold,
 //! italic, capitals, small capitals, complex script, right to left, the East Asian hint,
-//! kerning; size), the rest are pieces of text, symbols, tabs and soft hyphens in those styles.
+//! kerning; size), the rest are pieces of text, symbols, tabs, soft hyphens, and page and
+//! column breaks in those styles.
 //! The paragraph must keep what the layout relies on (`check_paragraph`), and break into
 //! lines that hold its text in order, in a column, with a line spacing, an alignment, a
 //! hanging indent and tab stops the first bytes give too (`check_lines`). Up to four
 //! copies of it, kept with the next, kept together, with or without widow control and
 //! a page break before as the first bytes say, are then laid out on pages of a height
 //! they give, the last of them in a second section of a start the first bytes give when
-//! they say so, with every line on exactly one page inside its body (`check_pages`).
+//! they say so, with every line on exactly one page inside its body (`check_pages`);
+//! with the paragraph as their header and its page number and count as their footer
+//! when the first bytes say so.
 #![no_main]
 
 use std::path::Path;
@@ -21,8 +24,9 @@ use officewright_core::Pt;
 use officewright_font::{FontBook, FontOrigin};
 use officewright_layout::fuzzing::{check_lines, check_pages, check_paragraph};
 use officewright_layout::ir::{
-    Alignment, Document, FontHint, Indent, Inline, LineSpacing, Margins, PageSetup, Paragraph,
-    ParagraphProps, RunFonts, RunStyle, Section, SectionStart, Spacing, TabKind, TabStop,
+    Alignment, Document, Field, FieldKind, FontHint, HeaderFooterSet, Indent, Inline, LineSpacing,
+    Margins, PageSetup, Paragraph, ParagraphProps, RunFonts, RunStyle, Section, SectionStart,
+    Spacing, TabKind, TabStop,
 };
 
 const FAMILIES: [&str; 8] = [
@@ -112,13 +116,12 @@ fuzz_target!(|data: &[u8]| {
                 u16::from(body.first().copied().unwrap_or(0)) | 0xF000,
                 style,
             ),
-            _ => {
-                if head & 0x40 == 0 {
-                    Inline::tab(style)
-                } else {
-                    Inline::soft_hyphen(style)
-                }
-            }
+            _ => match head >> 6 {
+                0 => Inline::tab(style),
+                1 => Inline::soft_hyphen(style),
+                2 => Inline::page_break(style),
+                _ => Inline::column_break(style),
+            },
         });
     }
     if let Err(problem) = check_paragraph(book(), &document, &inlines) {
@@ -196,7 +199,17 @@ fuzz_target!(|data: &[u8]| {
     } else {
         Vec::new()
     };
-    document.add_section(Section::new(setup).with_blocks(blocks));
+    let mut section = Section::new(setup).with_blocks(blocks);
+    if flags & 64 != 0 {
+        let numbers = Paragraph::new(first).with_inlines([
+            Inline::Field(Field::new(FieldKind::Page, first)),
+            Inline::Field(Field::new(FieldKind::NumPages, first)),
+        ]);
+        section = section
+            .with_headers(HeaderFooterSet::default().with_primary([paragraph.clone().into()]))
+            .with_footers(HeaderFooterSet::default().with_primary([numbers.into()]));
+    }
+    document.add_section(section);
     if !second.is_empty() {
         let starts = [
             SectionStart::NextPage,

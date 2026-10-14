@@ -208,9 +208,12 @@ fn the_pages_of_space_before_top_keep_what_the_layout_relies_on() -> TestResult 
 /// A document built from `seed`: up to three sections of random starts, page heights and
 /// numbering, each of up to five random paragraphs (`random_paragraph`) kept with the
 /// next, kept together, with or without widow control, with page breaks before, some of
-/// them in tables.
+/// them in tables; headers and footers of random paragraphs and page fields, a title
+/// page and even-page headers some of the time.
 fn random_document(seed: u64) -> Document {
-    use officewright_layout::ir::{PageNumbering, SectionStart};
+    use officewright_layout::ir::{
+        DocumentSettings, Field, FieldKind, HeaderFooterSet, PageNumbering, SectionStart,
+    };
 
     let mut state = seed
         .wrapping_mul(2862933555777941757)
@@ -228,7 +231,8 @@ fn random_document(seed: u64) -> Document {
         SectionStart::OddPage,
         SectionStart::NextColumn,
     ];
-    let mut document = Document::default();
+    let mut document =
+        Document::new(DocumentSettings::default().with_even_and_odd_headers(next(2) == 0));
     for section in 0..1 + next(3) {
         let mut blocks = Vec::new();
         let mut width = 100.0;
@@ -257,6 +261,39 @@ fn random_document(seed: u64) -> Document {
                     .with_left(Pt(10.0))
                     .with_right(Pt(10.0)),
             );
+        // A header and a footer: a random paragraph, or a page field, or nothing.
+        let mut frame = |document: &mut Document, salt: u64| -> Vec<Block> {
+            match next(3) {
+                0 => Vec::new(),
+                1 => {
+                    let (paragraph, _) = random_paragraph(seed * 131 + salt, document);
+                    vec![paragraph.into()]
+                }
+                _ => {
+                    let style = document.add_run_style(
+                        RunStyle::default()
+                            .with_fonts(RunFonts::new("Calibri"))
+                            .with_size(Pt(1.0 + next(30) as f64)),
+                    );
+                    let kinds = [
+                        FieldKind::Page,
+                        FieldKind::NumPages,
+                        FieldKind::SectionPages,
+                    ];
+                    let fields = kinds
+                        .into_iter()
+                        .map(|kind| Inline::Field(Field::new(kind, style)));
+                    vec![paragraph(
+                        style,
+                        ParagraphProps::default(),
+                        fields.collect(),
+                    )]
+                }
+            }
+        };
+        let header = frame(&mut document, section * 2 + 1);
+        let footer = frame(&mut document, section * 2 + 2);
+        let first = frame(&mut document, section * 2 + 3);
         let numbering = if next(4) == 0 {
             PageNumbering::default().with_start(Some(next(5) as u32))
         } else {
@@ -264,6 +301,18 @@ fn random_document(seed: u64) -> Document {
         };
         document.add_section(
             Section::new(setup)
+                .with_headers(
+                    HeaderFooterSet::default()
+                        .with_primary(header.clone())
+                        .with_even(footer.clone())
+                        .with_first(first),
+                )
+                .with_footers(
+                    HeaderFooterSet::default()
+                        .with_primary(footer)
+                        .with_even(header),
+                )
+                .with_title_page(next(2) == 0)
                 .with_start(
                     starts
                         .get(next(starts.len() as u64) as usize)

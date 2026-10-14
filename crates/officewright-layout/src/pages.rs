@@ -14,9 +14,10 @@ use crate::display::{DisplayItem, LeaderBudget, Painting, Point};
 use crate::error::{Error, Result};
 use crate::fonts::Fonts;
 use crate::ir::{
-    Block, CompatFlag, CompatMode, Document, MAX_TABLE_DEPTH, PageSetup, PageVerticalAlign,
-    Paragraph, Section, SectionStart,
+    Block, CompatFlag, CompatMode, Document, FieldKind, Inline, MAX_TABLE_DEPTH, PageSetup,
+    PageVerticalAlign, Paragraph, Section, SectionStart,
 };
+use crate::itemize::FieldValues;
 use crate::lines::LineEnd;
 use crate::paragraph::{self, ParagraphLayout};
 use crate::report::{Location, ReportKind, Step};
@@ -37,9 +38,13 @@ pub(crate) struct Page {
     /// Its number as page numbers show it.
     pub(crate) number: u32,
     pub(crate) body: Body,
-    /// The parts of paragraphs on it, top to bottom.
+    /// The parts of paragraphs of the body on it, top to bottom.
     pub(crate) fragments: Vec<Fragment>,
+    /// What it draws: its header and footer, then its body.
     pub(crate) items: Vec<DisplayItem>,
+    /// Whether it is a blank page an odd- or even-page section start put in, which has
+    /// no header or footer.
+    pub(crate) blank: bool,
 }
 
 /// The area of a page the body text flows in, in points from the page's top left
@@ -184,25 +189,135 @@ pub(crate) fn paginate(
     max_pages: usize,
 ) -> Result<Paginated> {
     let flow = flow(document, fonts)?;
-    let mut pager = Pager {
-        document,
-        fonts,
-        shaper,
-        max_pages,
-        pages: Vec::new(),
-        cursor: 0.0,
-        above: None,
-        next_number: 1,
-        leaders: LeaderBudget::default(),
+    // `NUMPAGES` and `SECTIONPAGES` depend on the layout they are part of: each pass lays
+    // out with the counts the one before found, until they agree.
+    let counted = counts_pages(document);
+    let mut totals = Totals {
+        pages: 1,
+        sections: vec![1; document.sections().len()],
     };
-    let lines = pager.run(&flow)?;
-    if pager.pages.is_empty() {
-        pager.new_page(0, &PageSetup::default())?;
+    let mut pass = 1;
+    loop {
+        let mut pager = Pager {
+            document,
+            fonts: &mut *fonts,
+            shaper: &mut *shaper,
+            max_pages,
+            pages: Vec::new(),
+            cursor: 0.0,
+            above: None,
+            next_number: 1,
+            leaders: LeaderBudget::default(),
+            totals: totals.clone(),
+        };
+        let lines = pager.run(&flow)?;
+        if pager.pages.is_empty() {
+            pager.new_page(0, &PageSetup::default())?;
+        }
+        let found = Totals::of(&pager.pages, document);
+        if !counted || found == totals || pass == MAX_PASSES {
+            if counted && found != totals {
+                pager.fonts.report_once(
+                    ReportKind::FieldCached,
+                    &Location::default(),
+                    format!(
+                        "the number of pages changed in each of {MAX_PASSES} layouts; NUMPAGES \
+                         and SECTIONPAGES show the count of the one before the last"
+                    ),
+                );
+            }
+            return Ok(Paginated {
+                pages: pager.pages,
+                lines,
+            });
+        }
+        totals = found;
+        pass += 1;
     }
-    Ok(Paginated {
-        pages: pager.pages,
-        lines,
+}
+
+/// The most times a document is laid out for its page counts to settle; a document whose
+/// count changes every time (it must oscillate) keeps the last one.
+const MAX_PASSES: u32 = 3;
+
+/// The page counts `NUMPAGES` and `SECTIONPAGES` show.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Totals {
+    pages: u32,
+    /// Of every section.
+    sections: Vec<u32>,
+}
+
+impl Totals {
+    /// The counts of `pages` of `document`: all of them, but one less when the first
+    /// section has a title page and numbers its pages from 0 (MS-OI29500 2.1.489 a).
+    fn of(pages: &[Page], document: &Document) -> Self {
+        let count = |section: usize| {
+            u32::try_from(pages.iter().filter(|page| page.section == section).count())
+                .unwrap_or(u32::MAX)
+        };
+        let all = u32::try_from(pages.len()).unwrap_or(u32::MAX);
+        let less = document.sections().first().is_some_and(|section| {
+            section.title_page() && section.page_numbering().start() == Some(0)
+        });
+        Self {
+            pages: all.saturating_sub(u32::from(less)),
+            sections: (0..document.sections().len()).map(count).collect(),
+        }
+    }
+
+    fn section(&self, section: usize) -> u32 {
+        self.sections.get(section).copied().unwrap_or(1)
+    }
+}
+
+/// Whether a paragraph of `document`, in its body or in a header or footer, has a
+/// `NUMPAGES` or `SECTIONPAGES` field.
+fn counts_pages(document: &Document) -> bool {
+    fn in_inlines(inlines: &[Inline]) -> bool {
+        inlines.iter().any(|inline| {
+            matches!(inline, Inline::Field(field)
+                if matches!(field.kind(), FieldKind::NumPages | FieldKind::SectionPages))
+        })
+    }
+    fn in_blocks(blocks: &[Block], depth: usize) -> bool {
+        blocks.iter().any(|block| match block {
+            Block::Paragraph(paragraph) => in_inlines(paragraph.inlines()),
+            Block::Table(table) => {
+                depth < MAX_TABLE_DEPTH
+                    && table.rows().iter().any(|row| {
+                        row.cells()
+                            .iter()
+                            .any(|cell| in_blocks(cell.blocks(), depth + 1))
+                    })
+            }
+        })
+    }
+    document.sections().iter().any(|section| {
+        let sets = [section.headers(), section.footers()];
+        in_blocks(section.blocks(), 0)
+            || sets.iter().any(|set| {
+                in_blocks(set.primary(), 0) || in_blocks(set.first(), 0) || in_blocks(set.even(), 0)
+            })
     })
+}
+
+/// Which of its section's headers and footers a page has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    /// That of the section's first page.
+    First,
+    /// That of even pages.
+    Even,
+    /// That of every other page.
+    Primary,
+}
+
+/// A header or footer laid out for a page: its paragraphs, each with its top from the
+/// frame's top, and its height.
+struct Frame<'d> {
+    parts: Vec<(Flowed<'d>, ParagraphLayout, f64)>,
+    height: f64,
 }
 
 /// What is laid out so far, to return to when a keep rule moves paragraphs.
@@ -245,12 +360,14 @@ struct Pager<'d, 'f, 'b> {
     next_number: u32,
     /// The leader glyphs the run may still draw.
     leaders: LeaderBudget,
+    /// The page counts of the pass before, for `NUMPAGES` and `SECTIONPAGES`.
+    totals: Totals,
 }
 
-impl Pager<'_, '_, '_> {
+impl<'d> Pager<'d, '_, '_> {
     /// Places every paragraph of `flow`, section by section. Returns the number of lines
     /// of each.
-    fn run(&mut self, flow: &[Flowed<'_>]) -> Result<Vec<usize>> {
+    fn run(&mut self, flow: &[Flowed<'d>]) -> Result<Vec<usize>> {
         let sections = self.document.sections();
         let mut layouts: Vec<Option<ParagraphLayout>> = Vec::new();
         layouts.resize_with(flow.len(), || None);
@@ -304,15 +421,18 @@ impl Pager<'_, '_, '_> {
                 broke_page = true;
             }
             let checkpoint = self.checkpoint(index);
+            let values = self.field_values(flowed.section);
             let layout = match layouts.get_mut(index) {
                 Some(Some(layout)) => layout,
-                Some(slot) => slot.insert(paragraph::lay_out(
+                // Fields show the values of the page it is laid out for: where it starts,
+                // unless keep and widow rules move it further.
+                Some(slot) => slot.insert(paragraph::lay_out_with(
                     self.document,
                     flowed.paragraph,
                     self.body()?.width,
-                    self.fonts,
-                    self.shaper,
+                    (&mut *self.fonts, &mut *self.shaper),
                     &flowed.location,
+                    Some(&values),
                 )),
                 None => break,
             };
@@ -460,7 +580,7 @@ impl Pager<'_, '_, '_> {
                 // it counts. Hypothesis until a Word render (`E-section-odd.docx`).
                 let odd = self.next_number % 2 == 1;
                 if odd == (section.start() == SectionStart::EvenPage) {
-                    self.new_page(index, section.page())?;
+                    self.add_page(index, section.page(), true)?;
                 }
                 self.new_page(index, section.page())?;
                 Ok(true)
@@ -681,25 +801,196 @@ impl Pager<'_, '_, '_> {
     /// Adds a page of section `section` with `setup`, and moves the cursor to the top of
     /// its body.
     fn new_page(&mut self, section: usize, setup: &PageSetup) -> Result<()> {
+        self.add_page(section, setup, false)
+    }
+
+    /// Adds a page of section `section` with `setup`, `blank` or with the header and
+    /// footer it has, and moves the cursor to the top of its body: below the header and
+    /// above the footer where they reach past the margins, unless a margin is negative,
+    /// which fixes it (ECMA-376 Part 1, §17.6.11). Hypothesis until Word renders
+    /// (`E-header-tall.docx`, `E-header-space-after.docx`): no gap is added between them,
+    /// and the space after the last paragraph of a header or footer is part of its height.
+    fn add_page(&mut self, section: usize, setup: &PageSetup, blank: bool) -> Result<()> {
         if self.pages.len() >= self.max_pages {
             return Err(Error::TooManyPages {
                 limit: self.max_pages,
             });
         }
-        let body = body(setup);
+        let number = self.next_number;
+        let mut body = body(setup);
+        let mut items = Vec::new();
+        if let Some(ir) = self.document.sections().get(section).filter(|_| !blank) {
+            let first = self
+                .pages
+                .iter()
+                .rev()
+                .find(|page| !page.blank)
+                .is_none_or(|page| page.section != section);
+            let kind = if ir.title_page() && first {
+                Kind::First
+            } else if self.document.settings().even_and_odd_headers() && number % 2 == 0 {
+                Kind::Even
+            } else {
+                Kind::Primary
+            };
+            let values = FieldValues {
+                page: number,
+                ..self.field_values(section)
+            };
+            let margins = setup.margins();
+            let header = self.frame(ir, section, true, kind, &values, body.width)?;
+            let footer = self.frame(ir, section, false, kind, &values, body.width)?;
+            let header_top = margins.header().0;
+            let footer_bottom = setup.size().height().0 - margins.footer().0;
+            // An empty header or footer takes no room (design 6.4).
+            if margins.top().0 >= 0.0 && !header.parts.is_empty() {
+                body.top = Pt(body.top.0.max(header_top + header.height));
+            }
+            if margins.bottom().0 >= 0.0 && !footer.parts.is_empty() {
+                body.bottom = Pt(body.bottom.0.min(footer_bottom - footer.height));
+            }
+            self.paint_frame(
+                header,
+                Point {
+                    x: body.left,
+                    y: Pt(header_top),
+                },
+                &mut items,
+            );
+            let footer_top = footer_bottom - footer.height;
+            self.paint_frame(
+                footer,
+                Point {
+                    x: body.left,
+                    y: Pt(footer_top),
+                },
+                &mut items,
+            );
+        }
         self.pages.push(Page {
             section,
             width: setup.size().width(),
             height: setup.size().height(),
-            number: self.next_number,
+            number,
             body,
             fragments: Vec::new(),
-            items: Vec::new(),
+            items,
+            blank,
         });
         self.next_number = self.next_number.saturating_add(1);
         self.cursor = body.top.0;
         self.above = None;
         Ok(())
+    }
+
+    /// The values of the fields of section `section` on the current page.
+    fn field_values(&self, section: usize) -> FieldValues {
+        let format = self
+            .document
+            .sections()
+            .get(section)
+            .map(|section| section.page_numbering().format().clone())
+            .unwrap_or_default();
+        FieldValues {
+            page: self
+                .pages
+                .last()
+                .map_or(self.next_number, |page| page.number),
+            format,
+            pages: self.totals.pages,
+            section_pages: self.totals.section(section),
+        }
+    }
+
+    /// The header (`header`) or footer of `kind` of section `section`, laid out `width`
+    /// wide with the field values `values`: its paragraphs one under the other with the
+    /// space between them, the space before the first and after the last included.
+    fn frame(
+        &mut self,
+        ir: &'d Section,
+        section: usize,
+        header: bool,
+        kind: Kind,
+        values: &FieldValues,
+        width: Pt,
+    ) -> Result<Frame<'d>> {
+        let set = if header { ir.headers() } else { ir.footers() };
+        let (blocks, name) = match kind {
+            Kind::First => (set.first(), "first"),
+            Kind::Even => (set.even(), "even"),
+            Kind::Primary => (set.primary(), "primary"),
+        };
+        let mut location = Location::default();
+        location.push(Step::Field("sections"));
+        location.push(Step::Index(section));
+        location.push(Step::Field(if header { "headers" } else { "footers" }));
+        location.push(Step::Field(name));
+        let mut table = None;
+        let mut flowed = Vec::new();
+        let mut walk = Walk {
+            section,
+            location: &mut location,
+            table: &mut table,
+            out: &mut flowed,
+        };
+        walk.blocks(blocks, false, 0)?;
+        if let Some(location) = table {
+            self.fonts.report_once(
+                ReportKind::FeatureUnsupported,
+                &location,
+                "tables are not laid out yet: the paragraphs of their cells follow one another \
+                 at the full width"
+                    .to_owned(),
+            );
+        }
+        let mut parts = Vec::new();
+        let mut height = 0.0;
+        let mut above: Option<&'d Paragraph> = None;
+        for part in flowed {
+            let props = part.paragraph.props();
+            height += match above {
+                Some(above) => paragraph::space_between(self.document, above.props(), props).0,
+                None => paragraph::space_before(self.document, props).0,
+            };
+            let layout = paragraph::lay_out_with(
+                self.document,
+                part.paragraph,
+                width,
+                (&mut *self.fonts, &mut *self.shaper),
+                &part.location,
+                Some(values),
+            );
+            let top = height;
+            height += layout.height().0;
+            above = Some(part.paragraph);
+            parts.push((part, layout, top));
+        }
+        if let Some(last) = above {
+            height += paragraph::space_after(self.document, last.props()).0;
+        }
+        Ok(Frame { parts, height })
+    }
+
+    /// Adds to `items` what `frame` draws, its top left corner at `origin`.
+    fn paint_frame(&mut self, frame: Frame<'d>, origin: Point, items: &mut Vec<DisplayItem>) {
+        for (part, layout, top) in &frame.parts {
+            let at = Point {
+                x: origin.x,
+                y: Pt(origin.y.0 + top),
+            };
+            let mut painting = Painting {
+                document: self.document,
+                paragraph: part.paragraph,
+                layout,
+                fonts: self.fonts,
+                location: &part.location,
+                background: None,
+                leaders: &mut self.leaders,
+            };
+            let lines = 0..layout.lines.len();
+            painting.paint_shading(lines.clone(), at, items);
+            painting.paint(lines, at, items);
+        }
     }
 
     /// The body of the current page.
@@ -790,8 +1081,8 @@ mod tests {
 
     use super::*;
     use crate::ir::{
-        BreakClear, Cell, Inline, LineSpacing, Margins, ParagraphProps, Row, RunFonts, RunStyle,
-        RunStyleId, Spacing, Table,
+        BreakClear, Cell, HeaderFooterSet, Inline, LineSpacing, Margins, ParagraphProps, Row,
+        RunFonts, RunStyle, RunStyleId, Spacing, Table,
     };
     use crate::report::LayoutReport;
     use crate::testing::{book, minimal};
@@ -1691,6 +1982,258 @@ mod tests {
                 .entries()
                 .iter()
                 .any(|entry| entry.message().contains("borders")),
+            "{report:?}"
+        );
+    }
+
+    /// A header or footer of `count` lines of 20 pt.
+    fn frame_of(style: RunStyleId, count: usize) -> Vec<Block> {
+        vec![lines(style, count, spacing(0.0, 0.0))]
+    }
+
+    /// The setup of [`setup`] with a header and footer distance of 10 pt.
+    fn close_frames() -> PageSetup {
+        setup().with_margins(
+            Margins::default()
+                .with_top(Pt(20.0))
+                .with_bottom(Pt(20.0))
+                .with_left(Pt(20.0))
+                .with_right(Pt(20.0))
+                .with_header(Pt(10.0))
+                .with_footer(Pt(10.0)),
+        )
+    }
+
+    /// The texts the glyph runs of `page` stand for, top to bottom.
+    fn texts(page: &Page) -> Vec<String> {
+        page.items
+            .iter()
+            .filter_map(|item| match item {
+                DisplayItem::Glyphs(run) => {
+                    Some(run.clusters.iter().map(|c| c.text.as_str()).collect())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn headers_push_the_body_down_and_footers_up_unless_the_margin_is_fixed() {
+        let document = |top: f64| {
+            document(|style| {
+                let margins = close_frames().margins().with_top(Pt(top));
+                vec![
+                    Section::new(close_frames().with_margins(margins))
+                        .with_headers(HeaderFooterSet::default().with_primary(frame_of(style, 3)))
+                        .with_footers(HeaderFooterSet::default().with_primary(frame_of(style, 2)))
+                        .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+                ]
+            })
+        };
+        let (first, _) = laid(&document(20.0), 100);
+        let page = &first.expect("pages").pages[0];
+        // The header's 60 pt from 10 pt reach 70, past the top margin; the footer's 40 pt
+        // end 10 pt above the page's bottom at 190, so it starts at 150.
+        assert_eq!((page.body.top, page.body.bottom), (Pt(70.0), Pt(150.0)));
+        assert_eq!(page.fragments[0].top, Pt(70.0));
+        // A negative top margin is fixed: the body starts 20 pt down, under the header.
+        let (fixed, _) = laid(&document(-20.0), 100);
+        assert_eq!(fixed.expect("pages").pages[0].body.top, Pt(20.0));
+    }
+
+    #[test]
+    fn a_header_s_height_takes_the_space_around_its_paragraphs() {
+        // A header line of 20 pt, 3 pt above it and 5 pt below, from 10 pt: the body
+        // starts at 38 (hypothesis, `E-header-space-after.docx`).
+        let document = document(|style| {
+            vec![
+                Section::new(close_frames())
+                    .with_headers(HeaderFooterSet::default().with_primary(vec![lines(
+                        style,
+                        1,
+                        spacing(3.0, 5.0),
+                    )]))
+                    .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+            ]
+        });
+        let (laid, _) = laid(&document, 100);
+        assert_eq!(laid.expect("pages").pages[0].body.top, Pt(38.0));
+    }
+
+    #[test]
+    fn pages_take_the_first_even_or_primary_header_and_blank_pages_none() {
+        // Headers of 1, 2 and 3 lines of 20 pt at 10 pt put the body at 30, 50 and 70.
+        let tops = |title_page: bool, even_and_odd: bool| {
+            let mut document = Document::new(
+                crate::ir::DocumentSettings::default().with_even_and_odd_headers(even_and_odd),
+            );
+            let style = document.add_run_style(
+                RunStyle::default()
+                    .with_fonts(RunFonts::new("Officewright Test"))
+                    .with_size(Pt(10.0)),
+            );
+            let headers = HeaderFooterSet::default()
+                .with_first(frame_of(style, 1))
+                .with_even(frame_of(style, 2))
+                .with_primary(frame_of(style, 3));
+            let blocks: Vec<Block> = (0..3)
+                .map(|_| lines(style, 1, spacing(0.0, 0.0).with_page_break_before(true)))
+                .collect();
+            document.add_section(
+                Section::new(close_frames())
+                    .with_title_page(title_page)
+                    .with_headers(headers.clone())
+                    .with_blocks(blocks),
+            );
+            // An odd-page section after page 3: page 4 is blank, and page 5 is the first
+            // of the section.
+            document.add_section(
+                Section::new(close_frames())
+                    .with_start(SectionStart::OddPage)
+                    .with_title_page(title_page)
+                    .with_headers(headers)
+                    .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+            );
+            let (laid, _) = laid(&document, 100);
+            laid.expect("pages")
+                .pages
+                .iter()
+                .map(|page| (page.body.top.0, page.blank))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            tops(false, false),
+            [
+                (70.0, false),
+                (70.0, false),
+                (70.0, false),
+                (20.0, true),
+                (70.0, false)
+            ]
+        );
+        assert_eq!(
+            tops(true, true),
+            [
+                (30.0, false),
+                (50.0, false),
+                (70.0, false),
+                (20.0, true),
+                (30.0, false)
+            ]
+        );
+    }
+
+    #[test]
+    fn page_fields_show_the_page_the_pages_and_the_section_s_pages() {
+        use crate::ir::{Field, FieldKind, NumberFormat, PageNumbering};
+        let field = |kind, style, format: Option<NumberFormat>| {
+            Inline::Field(Field::new(kind, style).with_format(format))
+        };
+        let document = document(|style| {
+            let footer = |format| {
+                vec![
+                    Paragraph::new(style)
+                        .with_props(spacing(0.0, 0.0))
+                        .with_inlines([
+                            field(FieldKind::Page, style, format),
+                            Inline::text(" ", style),
+                            field(FieldKind::NumPages, style, None),
+                            Inline::text(" ", style),
+                            field(FieldKind::SectionPages, style, None),
+                        ])
+                        .into(),
+                ]
+            };
+            let pages = |count: usize| -> Vec<Block> {
+                (0..count)
+                    .map(|_| lines(style, 1, spacing(0.0, 0.0).with_page_break_before(true)))
+                    .collect()
+            };
+            vec![
+                Section::new(close_frames())
+                    .with_footers(HeaderFooterSet::default().with_primary(footer(None)))
+                    .with_page_numbering(
+                        PageNumbering::default().with_format(NumberFormat::UpperRoman),
+                    )
+                    .with_blocks(pages(2)),
+                Section::new(close_frames())
+                    .with_footers(
+                        HeaderFooterSet::default()
+                            .with_primary(footer(Some(NumberFormat::LowerLetter))),
+                    )
+                    .with_blocks(pages(3)),
+            ]
+        });
+        let (laid, _) = laid(&document, 100);
+        let laid = laid.expect("pages");
+        let footers: Vec<String> = laid
+            .pages
+            .iter()
+            .map(|page| texts(page).first().cloned().unwrap_or_default())
+            .collect();
+        // Section 1 numbers its pages in capital Roman numerals; section 2 continues the
+        // numbers, and its field writes them as letters.
+        assert_eq!(footers, ["I 5 2", "II 5 2", "c 5 3", "d 5 3", "e 5 3"]);
+    }
+
+    #[test]
+    fn numpages_leaves_out_a_title_page_numbered_0() {
+        use crate::ir::{Field, FieldKind, PageNumbering};
+        let document = document(|style| {
+            let footer = vec![
+                Paragraph::new(style)
+                    .with_inlines([Inline::Field(Field::new(FieldKind::NumPages, style))])
+                    .into(),
+            ];
+            vec![
+                Section::new(close_frames())
+                    .with_title_page(true)
+                    .with_page_numbering(PageNumbering::default().with_start(Some(0)))
+                    .with_footers(
+                        HeaderFooterSet::default()
+                            .with_first(footer.clone())
+                            .with_primary(footer),
+                    )
+                    .with_blocks(
+                        (0..3)
+                            .map(|_| {
+                                lines(style, 1, spacing(0.0, 0.0).with_page_break_before(true))
+                            })
+                            .collect::<Vec<Block>>(),
+                    ),
+            ]
+        });
+        let (laid, _) = laid(&document, 100);
+        let laid = laid.expect("pages");
+        let numbers: Vec<u32> = laid.pages.iter().map(|page| page.number).collect();
+        assert_eq!(numbers, [0, 1, 2]);
+        assert!(
+            laid.pages
+                .iter()
+                .all(|page| texts(page).first().map(String::as_str) == Some("2"))
+        );
+    }
+
+    #[test]
+    fn other_fields_show_their_stored_result_and_are_reported() {
+        use crate::ir::{Field, FieldKind};
+        let document = document(|style| {
+            let date = Field::new(FieldKind::Other("DATE".into()), style)
+                .with_result([Inline::text("A A", style)]);
+            one_section(vec![
+                Paragraph::new(style)
+                    .with_inlines([Inline::Field(date)])
+                    .into(),
+            ])
+        });
+        let (laid, report) = laid(&document, 100);
+        let laid = laid.expect("pages");
+        assert_eq!(texts(&laid.pages[0]).concat(), "A A");
+        assert!(
+            report
+                .entries()
+                .iter()
+                .any(|entry| entry.kind() == ReportKind::FieldCached),
             "{report:?}"
         );
     }
