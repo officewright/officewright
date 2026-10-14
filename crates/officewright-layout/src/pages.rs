@@ -3192,6 +3192,96 @@ mod tests {
     }
 
     #[test]
+    fn a_page_field_is_reported_only_where_it_shows_the_wrong_page() {
+        use crate::ir::{FieldKind, NumberFormat, PageNumbering};
+        // A paragraph without widow control after `before` lines, of lines "A" and a
+        // `PAGE` field as `pieces` says, with line breaks between.
+        let split = |before: usize, pieces: &[bool], numbering: PageNumbering| {
+            document(|style| {
+                let mut blocks: Vec<Block> = (0..before)
+                    .map(|_| lines(style, 1, spacing(0.0, 0.0)))
+                    .collect();
+                let mut inlines = Vec::new();
+                for (at, field) in pieces.iter().enumerate() {
+                    if at > 0 {
+                        inlines.push(Inline::line_break(BreakClear::None, style));
+                    }
+                    inlines.push(if *field {
+                        Inline::Field(crate::ir::Field::new(FieldKind::Page, style))
+                    } else {
+                        Inline::text("A", style)
+                    });
+                }
+                blocks.push(
+                    Paragraph::new(style)
+                        .with_props(spacing(0.0, 0.0).with_widow_control(false))
+                        .with_inlines(inlines)
+                        .into(),
+                );
+                vec![
+                    Section::new(setup())
+                        .with_page_numbering(numbering.clone())
+                        .with_blocks(blocks),
+                ]
+            })
+        };
+        let reported = |document: &Document| {
+            let (laid, report) = laid(document, 100);
+            assert_eq!(laid.expect("pages").pages.len(), 2);
+            messages(&report)
+                .iter()
+                .any(|m| m.contains("split over pages"))
+        };
+        let decimal = PageNumbering::default();
+        // The field starts page 2's text, right after a line break.
+        assert!(reported(&split(7, &[false, true], decimal.clone())));
+        // The field is on the second of the paragraph's two lines on page 1.
+        assert!(!reported(&split(6, &[false, true, false, false], decimal)));
+        // On page 2 the field shows nothing: Chicago marks stop at 116.
+        let chicago = PageNumbering::default()
+            .with_format(NumberFormat::Chicago)
+            .with_start(Some(117));
+        assert!(!reported(&split(7, &[false, true], chicago)));
+    }
+
+    #[test]
+    fn a_footer_cut_from_its_top_paints_each_paragraph_with_its_own_properties() {
+        use crate::ir::{ColorValue, Shading};
+        use officewright_core::Color;
+        // Thirty footer paragraphs of 20 pt on a page 200 pt high, only the last shaded:
+        // the last ten are drawn, and one shading with them.
+        let document = document(|style| {
+            let shaded = spacing(0.0, 0.0).with_shading(Some(
+                Shading::default().with_fill(ColorValue::Rgb(Color::rgb(0, 0, 255))),
+            ));
+            let footer = (0..30)
+                .map(|n| {
+                    let props = if n == 29 {
+                        shaded.clone()
+                    } else {
+                        spacing(0.0, 0.0)
+                    };
+                    text_paragraph(style, &format!("F{n}"), props)
+                })
+                .collect::<Vec<Block>>();
+            vec![
+                Section::new(close_frames())
+                    .with_footers(HeaderFooterSet::default().with_primary(footer))
+                    .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+            ]
+        });
+        let (laid, _) = laid(&document, 100);
+        let page = &laid.expect("pages").pages[0];
+        let shading = page
+            .items
+            .iter()
+            .filter(|item| matches!(item, DisplayItem::Rect { color, .. } if *color == Color::rgb(0, 0, 255)))
+            .count();
+        assert_eq!(shading, 1);
+        assert!(texts(page).iter().any(|text| text == "F29"));
+    }
+
+    #[test]
     fn numpages_leaves_out_a_title_page_numbered_0() {
         use crate::ir::{Field, FieldKind, PageNumbering};
         let document = document(|style| {
