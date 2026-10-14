@@ -34,7 +34,7 @@ impl Translator<'_> {
                 // Places in a note are written from the document's list of notes.
                 let path = std::mem::replace(
                     &mut self.path,
-                    vec![Step::Field("notes"), Step::Index(self.notes.len())],
+                    vec![Step::Field("notes"), Step::Index(self.notes_added)],
                 );
                 self.in_note = true;
                 let blocks = self.blocks(note.blocks());
@@ -45,6 +45,7 @@ impl Translator<'_> {
                 } else {
                     ir::NoteKind::Footnote
                 };
+                self.notes_added += 1;
                 Some(self.ir.add_note(ir::Note::new(kind, blocks)))
             }
             None => {
@@ -63,25 +64,28 @@ impl Translator<'_> {
     /// The separators of footnotes and of endnotes: the first note of each special type.
     /// Without them, the IR's defaults draw what Word draws.
     pub(super) fn note_separators(&mut self) {
-        for (endnote, kind) in [
-            (false, ir::NoteKind::Footnote),
-            (true, ir::NoteKind::Endnote),
+        for (endnote, kind, place) in [
+            (false, ir::NoteKind::Footnote, "footnote_separators"),
+            (true, ir::NoteKind::Endnote, "endnote_separators"),
         ] {
             let mut parts: [Option<Vec<ir::Block>>; 3] = [None, None, None];
             let document = self.document;
             for note in document.notes().filter(|note| note.is_endnote() == endnote) {
-                let slot = match note.note_type() {
-                    NoteType::Separator => 0,
-                    NoteType::ContinuationSeparator => 1,
-                    NoteType::ContinuationNotice => 2,
+                let (slot, field) = match note.note_type() {
+                    NoteType::Separator => (0, "separator"),
+                    NoteType::ContinuationSeparator => (1, "continuation_separator"),
+                    NoteType::ContinuationNotice => (2, "continuation_notice"),
                     NoteType::Normal => continue,
                 };
                 if parts.get(slot).is_some_and(Option::is_some) {
                     continue;
                 }
+                let path =
+                    std::mem::replace(&mut self.path, vec![Step::Field(place), Step::Field(field)]);
                 self.in_note = true;
-                let blocks = self.blocks(note.blocks());
+                let blocks = self.blocks_in(None, note.blocks());
                 self.in_note = false;
+                self.path = path;
                 if let Some(part) = parts.get_mut(slot) {
                     *part = Some(blocks);
                 }

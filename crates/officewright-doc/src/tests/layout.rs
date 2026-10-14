@@ -2130,17 +2130,29 @@ fn translates_headers_and_footers_in_effect() {
     let document = with_parts(
         body,
         &[
-            ("header", "header1.xml", story("hdr", "default header")),
+            (
+                "header",
+                "header1.xml",
+                story(
+                    "hdr",
+                    r#"default header</w:t></w:r><w:r><w:ptab w:relativeTo="margin" w:alignment="right" w:leader="none"/></w:r><w:r><w:t>"#,
+                ),
+            ),
             ("header", "header2.xml", story("hdr", "first header")),
             ("footer", "footer1.xml", story("ftr", "default footer")),
             ("footer", "footer2.xml", story("ftr", "even footer")),
         ],
     );
     let translation = translate(&document);
-    assert!(
-        translation.left_out().is_empty(),
-        "{:?}",
-        translation.left_out()
+    // Translated once for both sections, and placed as the IR's report places it.
+    let left_out: Vec<String> = translation
+        .left_out()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        left_out,
+        ["sections[0].headers.primary[0].inlines: an absolute position tab is left out (w:ptab)"]
     );
     let sections = translation.document().sections();
     let (first, second) = (&sections[0], &sections[1]);
@@ -2156,47 +2168,60 @@ fn translates_headers_and_footers_in_effect() {
 }
 
 #[test]
-fn bounds_the_copies_of_headers_in_sections() {
-    // In tests the bound is 1,000 blocks and inlines: a header of 50 paragraphs of one
-    // text each weighs 100, so of the 31 sections, which all have it, 10 get it and the
-    // 21 after them do not.
-    let header = format!(
-        r#"<w:hdr xmlns:w="{W}">{}</w:hdr>"#,
-        "<w:p><w:r><w:t>h</w:t></w:r></w:p>".repeat(50)
-    );
-    let section = r#"<w:p><w:pPr><w:sectPr><w:headerReference w:type="default" r:id="rId0"/></w:sectPr></w:pPr></w:p>"#;
-    let body = format!("{}<w:p/>", section.repeat(30));
-    let document = with_parts(&body, &[("header", "header1.xml", header)]);
-    let translation = translate(&document);
-    let with_header = translation
-        .document()
-        .sections()
-        .iter()
-        .filter(|section| !section.headers().primary().is_empty())
-        .count();
-    assert_eq!(with_header, 10);
-    let left_out: Vec<&str> = translation
-        .left_out()
-        .iter()
-        .map(LeftOut::message)
-        .collect();
-    assert_eq!(left_out.len(), 21, "{left_out:?}");
-    assert!(left_out[0].starts_with("a header is left out"));
+fn bounds_the_copies_of_headers_in_sections_by_their_memory() {
+    // In tests the copies may take 1 MiB, or as much as the document's XML if that is
+    // more. A header of one 200,000-byte text in 31 sections is two blocks and inlines,
+    // but each copy takes over 200,000 bytes.
+    let copies = |body_text: usize| {
+        let header = format!(
+            r#"<w:hdr xmlns:w="{W}"><w:p><w:r><w:t>{}</w:t></w:r></w:p></w:hdr>"#,
+            "h".repeat(200_000)
+        );
+        let section = r#"<w:p><w:pPr><w:sectPr><w:headerReference w:type="default" r:id="rId0"/></w:sectPr></w:pPr></w:p>"#;
+        let body = format!(
+            "{}<w:p><w:r><w:t>{}</w:t></w:r></w:p>",
+            section.repeat(30),
+            "b".repeat(body_text)
+        );
+        let document = with_parts(&body, &[("header", "header1.xml", header)]);
+        let translation = translate(&document);
+        let with_header = translation
+            .document()
+            .sections()
+            .iter()
+            .filter(|section| !section.headers().primary().is_empty())
+            .count();
+        let left_out: Vec<String> = translation
+            .left_out()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        (with_header, left_out)
+    };
+    let (with_header, left_out) = copies(0);
+    assert_eq!(with_header, 5);
+    assert_eq!(left_out.len(), 26, "{left_out:?}");
     assert_eq!(
-        translation.left_out()[0].location(),
-        "sections[10].headers.primary"
+        left_out[0],
+        "sections[5].headers.primary: a header is left out: the copies of headers and \
+         footers in sections have reached the size of the document"
     );
+    // A document of 3,000,000 bytes more XML may copy that much more.
+    let (with_header, _) = copies(3_000_000);
+    assert!((14..=16).contains(&with_header), "{with_header}");
 }
 
 #[test]
 fn translates_notes_where_the_text_refers_to_them() {
     let notes = |root: &str, note: &str, extra: &str| {
         format!(
-            r#"<w:{root} xmlns:w="{W}"><w:{note} w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:{note}><w:{note} w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:{note}>{extra}<w:{note} w:id="1"><w:p><w:r><w:{note}Ref/></w:r><w:r><w:t xml:space="preserve"> note one</w:t></w:r><w:r><w:footnoteReference w:id="2"/></w:r></w:p></w:{note}><w:{note} w:id="2"><w:p><w:r><w:t>note two</w:t></w:r></w:p></w:{note}></w:{root}>"#
+            r#"<w:{root} xmlns:w="{W}"><w:{note} w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r><w:r><w:ptab w:relativeTo="margin" w:alignment="right" w:leader="none"/></w:r></w:p></w:{note}><w:{note} w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:{note}>{extra}<w:{note} w:id="1"><w:p><w:r><w:{note}Ref/></w:r><w:r><w:t xml:space="preserve"> note one</w:t></w:r><w:r><w:footnoteReference w:id="2"/></w:r></w:p></w:{note}><w:{note} w:id="2"><w:p><w:r><w:t>note two</w:t></w:r></w:p></w:{note}></w:{root}>"#
         )
     };
     let notice = r#"<w:footnote w:type="continuationNotice" w:id="3"><w:p><w:r><w:t>continued</w:t></w:r></w:p></w:footnote>"#;
-    let body = r#"<w:p><w:r><w:t>a</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r><w:r><w:footnoteReference w:id="1"/></w:r><w:r><w:endnoteReference w:id="2"/></w:r><w:r><w:footnoteReference w:id="-1"/></w:r></w:p>"#;
+    // The reference to the separator, which is no note, comes first: the notes are
+    // still numbered from 0 in the places of what is left out.
+    let body = r#"<w:p><w:r><w:footnoteReference w:id="-1"/></w:r><w:r><w:t>a</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r><w:r><w:footnoteReference w:id="1"/></w:r><w:r><w:endnoteReference w:id="2"/></w:r></w:p>"#;
     let document = with_parts(
         body,
         &[
@@ -2263,8 +2288,10 @@ fn translates_notes_where_the_text_refers_to_them() {
     assert_eq!(
         left_out,
         [
-            "notes[0].blocks[0].inlines: a reference to a footnote inside a note is left out",
             "sections[0].blocks[0].inlines: a reference to footnote -1, which the document does not have, is left out",
+            "notes[0].blocks[0].inlines: a reference to a footnote inside a note is left out",
+            "footnote_separators.separator[0].inlines: an absolute position tab is left out (w:ptab)",
+            "endnote_separators.separator[0].inlines: an absolute position tab is left out (w:ptab)",
         ]
     );
 }

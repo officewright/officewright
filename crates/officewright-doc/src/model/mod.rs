@@ -114,6 +114,9 @@ pub struct Document {
     pub(crate) kind: DocumentKind,
     pub(crate) conformance: Conformance,
     pub(crate) diagnostics: Vec<Diagnostic>,
+    /// The bytes of the XML parts read into the document's stories, a measure of its
+    /// size.
+    pub(crate) xml_size: usize,
 }
 
 /// Where the namespaces the model reads are in a document's strings: WordprocessingML,
@@ -203,6 +206,7 @@ impl Document {
             kind: DocumentKind::Document,
             conformance: Conformance::Transitional,
             diagnostics: Vec::new(),
+            xml_size: 0,
         }
     }
 

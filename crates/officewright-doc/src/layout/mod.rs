@@ -210,6 +210,8 @@ struct Translator<'a> {
     notes: HashMap<(bool, i64), Option<ir::NoteId>>,
     /// Whether the blocks being translated are a note's, which holds no note references.
     in_note: bool,
+    /// How many notes the IR has.
+    notes_added: usize,
 }
 
 impl<'a> Translator<'a> {
@@ -230,6 +232,7 @@ impl<'a> Translator<'a> {
             copied: 0,
             notes: HashMap::new(),
             in_note: false,
+            notes_added: 0,
         }
     }
 
@@ -260,7 +263,19 @@ impl<'a> Translator<'a> {
 
     /// The blocks of a story, through content controls, which the IR does not have.
     fn blocks(&mut self, blocks: impl Iterator<Item = Block<'a>> + 'a) -> Vec<ir::Block> {
+        self.blocks_in(Some("blocks"), blocks)
+    }
+
+    /// Blocks held in the field `field` of what is being translated, or, with none, in
+    /// the list of blocks the current place names (a header, a note separator): the
+    /// place of each is written as the layout's report writes it.
+    fn blocks_in(
+        &mut self,
+        field: Option<&'static str>,
+        blocks: impl Iterator<Item = Block<'a>> + 'a,
+    ) -> Vec<ir::Block> {
         let mut out = Vec::new();
+        let steps = if field.is_some() { 2 } else { 1 };
         // Content controls nest: walked with a stack of their blocks, never recursively.
         let mut pending: Vec<Box<dyn Iterator<Item = Block<'a>> + 'a>> = vec![Box::new(blocks)];
         while let Some(top) = pending.last_mut() {
@@ -268,8 +283,10 @@ impl<'a> Translator<'a> {
                 pending.pop();
                 continue;
             };
-            self.path
-                .extend([Step::Field("blocks"), Step::Index(out.len())]);
+            if let Some(field) = field {
+                self.path.push(Step::Field(field));
+            }
+            self.path.push(Step::Index(out.len()));
             match block {
                 Block::Paragraph(paragraph) => {
                     out.push(paragraph::paragraph(self, paragraph).into());
@@ -289,7 +306,7 @@ impl<'a> Translator<'a> {
                     }
                 }
             }
-            self.path.truncate(self.path.len().saturating_sub(2));
+            self.path.truncate(self.path.len().saturating_sub(steps));
         }
         out
     }

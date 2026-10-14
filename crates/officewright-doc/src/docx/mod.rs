@@ -18,7 +18,7 @@ use officewright_opc::{Package, Part, PartName};
 use crate::diagnostic::Diagnostics;
 use crate::model::Names;
 use crate::model::xml::Strings;
-use crate::model::{Document, DocumentKind, HeaderFooterKind, kind_index};
+use crate::model::{Document, DocumentKind, HeaderFooterKind, StoryKind, kind_index};
 use crate::{Error, Limits, Result};
 use body::Story;
 use capture::Budget;
@@ -196,23 +196,37 @@ pub(crate) fn read(data: Vec<u8>, limits: &Limits) -> Result<Document> {
 /// The headers and footers in effect for each section: those it names, and for each
 /// kind it does not name, the one in effect for the section before it (ECMA-376 Part 1,
 /// §17.10.5). A reference whose relationship leads to no header or footer counts as not
-/// written. A reference without `w:type` is of the default kind.
+/// written, and so does a `w:footerReference` that leads to a header or a
+/// `w:headerReference` that leads to a footer. A reference without `w:type` is of the
+/// default kind.
 fn effective_headers_and_footers(document: &mut Document) {
     let mut headers = [None; 3];
     let mut footers = [None; 3];
     let map = &document.header_footers;
+    let stories = &document.stories;
     for section in &mut document.sections {
         let lists = [
-            (section.properties.headers(), &mut headers),
-            (section.properties.footers(), &mut footers),
+            (
+                section.properties.headers(),
+                StoryKind::Header,
+                &mut headers,
+            ),
+            (
+                section.properties.footers(),
+                StoryKind::Footer,
+                &mut footers,
+            ),
         ];
-        for (references, effective) in lists {
+        for (references, story, effective) in lists {
             for reference in references {
                 let kind = reference.kind().unwrap_or(HeaderFooterKind::Default);
-                if let (Some(&index), Some(slot)) = (
-                    map.get(reference.relationship_id()),
-                    effective.get_mut(kind_index(kind)),
-                ) {
+                let index = map.get(reference.relationship_id()).filter(|&&index| {
+                    usize::try_from(index)
+                        .ok()
+                        .and_then(|index| stories.get(index))
+                        .is_some_and(|found| found.kind == story)
+                });
+                if let (Some(&index), Some(slot)) = (index, effective.get_mut(kind_index(kind))) {
                     *slot = Some(index);
                 }
             }

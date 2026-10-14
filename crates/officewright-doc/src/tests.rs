@@ -3408,3 +3408,39 @@ fn splits_no_content_control_at_a_section_break_in_a_header() {
     };
     assert_eq!(block_text(control.blocks()), ["a", "b"]);
 }
+
+#[test]
+fn a_reference_to_a_part_of_the_other_kind_is_not_written() {
+    // rId0 leads to a header, rId1 to a footer part, and rId2 with the type of a footer
+    // to the header part rId0 leads to: the reader reads that part once, as a header.
+    let story = |root: &str, text: &str| {
+        format!(r#"<w:{root} xmlns:w="{W}"><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:{root}>"#)
+    };
+    let body = r#"<w:p><w:pPr><w:sectPr><w:headerReference w:type="default" r:id="rId0"/><w:footerReference w:type="default" r:id="rId1"/></w:sectPr></w:pPr></w:p><w:p/><w:sectPr><w:footerReference w:type="default" r:id="rId0"/><w:headerReference w:type="default" r:id="rId1"/><w:footerReference w:type="first" r:id="rId2"/></w:sectPr>"#;
+    let document = with_parts(
+        body,
+        &[
+            ("header", "header1.xml", story("hdr", "header")),
+            ("footer", "footer1.xml", story("ftr", "footer")),
+            ("footer", "header1.xml", story("hdr", "header")),
+        ],
+    );
+    let text = |story: Option<HeaderFooter<'_>>| {
+        let story = story.unwrap();
+        (story.is_header(), block_text(story.blocks()))
+    };
+    let sections: Vec<Section<'_>> = document.sections().collect();
+    // The second section's references to parts of the other kind count as not written:
+    // it inherits the first section's header and footer.
+    for section in &sections {
+        assert_eq!(
+            text(section.header(HeaderFooterKind::Default)),
+            (true, vec!["header".to_owned()])
+        );
+        assert_eq!(
+            text(section.footer(HeaderFooterKind::Default)),
+            (false, vec!["footer".to_owned()])
+        );
+    }
+    assert!(sections[1].footer(HeaderFooterKind::First).is_none());
+}

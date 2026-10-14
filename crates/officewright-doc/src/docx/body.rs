@@ -161,6 +161,7 @@ pub(super) fn read(
     budget: &mut Budget,
     story: Story,
 ) -> Result<()> {
+    document.xml_size = document.xml_size.saturating_add(xml.len());
     let part_name = part.name().as_str();
     let input = Input::decode(xml).map_err(|err| Error::from(err.in_part(part_name)))?;
     let mut reader = input.reader(limits.package());

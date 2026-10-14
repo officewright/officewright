@@ -215,11 +215,11 @@ impl<'a> Translator<'a> {
             };
             self.path.extend([Step::Field(place), Step::Field(field)]);
             if !self.header_footers.contains_key(&story.index()) {
-                let blocks = self.blocks(story.blocks());
+                let blocks = self.blocks_in(None, story.blocks());
                 let weight = weight(&blocks);
                 self.header_footers.insert(story.index(), (blocks, weight));
             }
-            let limit = MAX_COPIED.max(self.document.nodes.len());
+            let limit = MAX_COPIED.max(self.document.xml_size);
             let copy = match self.header_footers.get(&story.index()) {
                 Some((blocks, weight)) if self.copied.saturating_add(*weight) <= limit => {
                     self.copied += weight;
@@ -249,28 +249,53 @@ impl<'a> Translator<'a> {
     }
 }
 
-/// How many blocks and inlines of headers and footers a translation copies into its
-/// sections at least, however small the document: a header of a few lines in every
-/// section of a document of thousands of sections is not damage. Smaller in tests, which
-/// reach it.
-const MAX_COPIED: usize = if cfg!(test) { 1_000 } else { 1_000_000 };
+/// How much memory the copies of headers and footers in sections take at most, in
+/// bytes as [`weight`] counts them, however small the document: a header of a few lines
+/// in every section of a document of thousands of sections is not damage. A document
+/// whose XML is larger may copy as much as its XML. Smaller in tests, which reach it.
+const MAX_COPIED: usize = if cfg!(test) { 1 << 20 } else { 64 << 20 };
 
-/// The blocks and inlines of some blocks, those in tables included. Tables nest no
-/// deeper than the IR allows.
+/// About how many bytes of memory a copy of some blocks takes: each block, row, cell and
+/// inline, and the text and names the inlines own. Tables nest no deeper than the IR
+/// allows, and the results of fields hold no fields.
 fn weight(blocks: &[ir::Block]) -> usize {
     blocks
         .iter()
-        .map(|block| match block {
-            ir::Block::Paragraph(paragraph) => 1 + paragraph.inlines().len(),
-            ir::Block::Table(table) => {
-                1 + table
-                    .rows()
-                    .iter()
-                    .flat_map(|row| row.cells())
-                    .map(|cell| weight(cell.blocks()))
-                    .sum::<usize>()
-            }
-            _ => 1,
+        .map(|block| {
+            size_of::<ir::Block>()
+                + match block {
+                    ir::Block::Paragraph(paragraph) => inlines_weight(paragraph.inlines()),
+                    ir::Block::Table(table) => table
+                        .rows()
+                        .iter()
+                        .map(|row| {
+                            size_of::<ir::Row>()
+                                + row
+                                    .cells()
+                                    .iter()
+                                    .map(|cell| size_of::<ir::Cell>() + weight(cell.blocks()))
+                                    .sum::<usize>()
+                        })
+                        .sum(),
+                    _ => 0,
+                }
+        })
+        .sum()
+}
+
+/// About how many bytes of memory a copy of some inlines takes.
+fn inlines_weight(inlines: &[ir::Inline]) -> usize {
+    inlines
+        .iter()
+        .map(|inline| {
+            size_of::<ir::Inline>()
+                + match inline {
+                    ir::Inline::Text { text, .. } => text.len(),
+                    ir::Inline::Symbol { font, .. } => font.len(),
+                    ir::Inline::Field(field) => inlines_weight(field.result()),
+                    ir::Inline::Anchored(_) => size_of::<ir::AnchoredObject>(),
+                    _ => 0,
+                }
         })
         .sum()
 }
