@@ -70,9 +70,10 @@ pub(crate) struct TextRun {
     pub(crate) range: Range<usize>,
     /// Its bytes of [`Itemized::source`].
     pub(crate) source: Range<usize>,
-    /// Where its drawn text has more characters than its source, as capitals do for `ß`
-    /// (`SS`): the bytes of the source of every drawn character, by the drawn
-    /// character's first byte. Empty when they correspond one to one.
+    /// Where its drawn characters do not correspond one to one to its source characters,
+    /// as capitals for `ß` (`SS`) and a symbol whose code is no character: the bytes of
+    /// the source of every drawn character, by the drawn character's first byte. Empty
+    /// when they correspond one to one.
     pub(crate) sources: Vec<(usize, Range<usize>)>,
     pub(crate) style: RunStyleId,
     /// The face; `None` when there is no font at all, and nothing can be drawn.
@@ -545,9 +546,12 @@ impl Builder<'_, '_, '_> {
             };
             let script = scripts.get(start).copied().unwrap_or(Script::Common);
             let placed = pending.get(start..end).unwrap_or(&[]);
-            let expanded = placed
-                .windows(2)
-                .any(|pair| matches!(pair, [a, b] if a.source == b.source));
+            // Drawn characters that share a source character, or have none (a symbol
+            // whose code is no character).
+            let expanded = placed.iter().any(|placed| placed.source.is_empty())
+                || placed
+                    .windows(2)
+                    .any(|pair| matches!(pair, [a, b] if a.source == b.source));
             let sources = if expanded {
                 placed
                     .iter()
@@ -601,7 +605,7 @@ impl Builder<'_, '_, '_> {
 /// The size text of `style` is drawn at, from the size its formatting gives: smaller
 /// for the lowercase letters of small capitals (`small`), and for superscripts and
 /// subscripts.
-fn drawn_size(style: &RunStyle, formatted: Pt, small: bool) -> Pt {
+pub(crate) fn drawn_size(style: &RunStyle, formatted: Pt, small: bool) -> Pt {
     let mut size = formatted.0;
     if small {
         size *= SMALL_CAPS_SCALE;

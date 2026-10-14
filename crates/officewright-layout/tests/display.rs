@@ -10,9 +10,10 @@ use officewright_core::{Color, Pt};
 use officewright_font::FontBook;
 use officewright_layout::fuzzing::{self, Painted};
 use officewright_layout::ir::{
-    Alignment, ColorValue, Document, ImageData, ImageFormat, Inline, InlineObject, ObjectContent,
-    Paragraph, ParagraphProps, Picture, RunFonts, RunStyle, RunStyleId, Shading, ShadingPattern,
-    Size, TabKind, TabLeader, TabStop, Underline, UnderlineKind, VerticalPosition,
+    Alignment, ColorValue, CompatFlag, Document, DocumentSettings, ImageData, ImageFormat, Inline,
+    InlineObject, ObjectContent, Paragraph, ParagraphProps, Picture, RunFonts, RunStyle,
+    RunStyleId, Shading, ShadingPattern, Size, TabKind, TabLeader, TabStop, Underline,
+    UnderlineKind, VerticalPosition,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -144,10 +145,13 @@ fn capitals_that_draw_more_characters_keep_their_text_on_the_line_that_draws_it(
         .iter()
         .map(|run| run.split('"').nth(1).unwrap_or_default())
         .collect();
-    assert_eq!(texts.concat(), words, "{}", painted.text());
-    for text in &texts {
-        assert!(!text.is_empty(), "{}", painted.text());
-    }
+    // One word a line, the space after it hanging past the end in a run of its own.
+    assert_eq!(
+        texts,
+        ["straße", " ", "maße", " ", "fuß", " ", "groß"],
+        "{}",
+        painted.text()
+    );
     Ok(())
 }
 
@@ -461,10 +465,152 @@ fn a_bar_tab_draws_a_line_through_every_line() -> TestResult {
         .iter()
         .map(|line| ends(line))
         .collect();
-    // Liberation Sans 11 pt lines are 12.65 pt, 253 twips, high.
-    assert_eq!(
-        bars,
-        [((400, 0), (400, 253)), ((400, 253), (400, 506))],
+    // One line through both lines: Liberation Sans 11 pt lines are 12.65 pt, 253 twips,
+    // high.
+    assert_eq!(bars, [((400, 0), (400, 506))], "{}", painted.text());
+    Ok(())
+}
+
+/// The run style `base` with `style` changes, added to `document`.
+fn styled(document: &mut Document, style: impl Fn(RunStyle) -> RunStyle) -> RunStyleId {
+    document.add_run_style(style(base()))
+}
+
+#[test]
+fn a_leader_of_a_tiny_font_in_a_wide_tab_is_a_line() -> TestResult {
+    // 1 pt at 1 % width: a period of Liberation Sans is 0.003 pt wide, and the tab would
+    // take hundreds of thousands of them. Also in a column far wider than any page.
+    let book = book()?;
+    let mut document = Document::default();
+    let tiny = styled(&mut document, |style| {
+        style.with_size(Pt(1.0)).with_scale(1)
+    });
+    for (column, stop) in [(1584.0, 1500.0), (1e20, 1e19)] {
+        let props = ParagraphProps::default().with_tabs([TabStop::default()
+            .with_position(Pt(stop))
+            .with_leader(TabLeader::Dot)]);
+        let paragraph = Paragraph::new(tiny)
+            .with_props(props)
+            .with_inlines([Inline::text("A", tiny), Inline::tab(tiny)]);
+        let painted = fuzzing::paint(&book, &document, &[paragraph], column);
+        let leaders = items(&painted, "line");
+        assert!(
+            leaders.len() == 1 && leaders[0].contains(" dotted "),
+            "{}",
+            painted.text()
+        );
+        assert_eq!(items(&painted, "glyphs").len(), 1, "{}", painted.text());
+        assert!(
+            painted
+                .report()
+                .entries()
+                .iter()
+                .any(|entry| entry.message().contains("tab leader")),
+            "{:?}",
+            painted.report()
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn an_underlined_tab_is_underlined_but_by_a_words_only_underline() -> TestResult {
+    // A fill-in line: "Name:" and an underlined tab to 200 pt.
+    let book = book()?;
+    let mut document = Document::default();
+    let style = document.add_run_style(base());
+    let underlined = styled(&mut document, |style| {
+        style.with_underline(Some(Underline::default()))
+    });
+    let words = styled(&mut document, |style| {
+        style.with_underline(Some(Underline::default().with_kind(UnderlineKind::Words)))
+    });
+    let props = ParagraphProps::default().with_tabs([TabStop::default().with_position(Pt(200.0))]);
+    let line = |tab: RunStyleId| {
+        Paragraph::new(style)
+            .with_props(props.clone())
+            .with_inlines([Inline::text("Name:", style), Inline::tab(tab)])
+    };
+    let painted = paint(&book, &document, &[line(underlined)]);
+    let lines = items(&painted, "line");
+    let [line_item] = lines.as_slice() else {
+        return Err(painted.text().into());
+    };
+    let ((_, _), (end, _)) = ends(line_item);
+    assert_eq!(end, 4000, "{line_item}");
+    let painted = paint(&book, &document, &[line(words)]);
+    assert!(items(&painted, "line").is_empty(), "{}", painted.text());
+    Ok(())
+}
+
+#[test]
+fn hanging_spaces_have_no_highlight_and_the_underline_only_with_ul_trail_space() -> TestResult {
+    let book = book()?;
+    let paint_with = |flags: Vec<CompatFlag>| {
+        let mut document = Document::new(DocumentSettings::default().with_compat_flags(flags));
+        let marked = styled(&mut document, |style| {
+            style
+                .with_highlight(Some(Color::rgb(255, 255, 0)))
+                .with_underline(Some(Underline::default()))
+        });
+        let text = format!("{}{}", "word ".repeat(30), " ".repeat(35));
+        let justified = ParagraphProps::default().with_alignment(Alignment::Both);
+        let paragraph = Paragraph::new(marked)
+            .with_props(justified)
+            .with_inlines([Inline::text(text, marked)]);
+        fuzzing::paint(&book, &document, &[paragraph], 100.0)
+    };
+    let painted = paint_with(Vec::new());
+    assert!(!items(&painted, "rect").is_empty(), "{}", painted.text());
+    for rect in items(&painted, "rect") {
+        let ((x, _), (width, _)) = (at(rect), dims(rect));
+        assert!(x + width <= 2000, "{rect}\n{}", painted.text());
+    }
+    for line in items(&painted, "line") {
+        let ((_, _), (end, _)) = ends(line);
+        assert!(end <= 2000, "{line}\n{}", painted.text());
+    }
+    // With `ulTrailSpace`, the hanging spaces are underlined too.
+    let painted = paint_with(vec![CompatFlag::Other("ulTrailSpace".to_owned())]);
+    assert!(
+        items(&painted, "line")
+            .iter()
+            .any(|line| ends(line).1.0 > 2000),
+        "{}",
+        painted.text()
+    );
+    Ok(())
+}
+
+#[test]
+fn a_words_only_underline_covers_the_hyphen_at_a_soft_hyphen() -> TestResult {
+    // A paragraph that starts with a space: the hyphen is still part of its word.
+    let book = book()?;
+    let mut document = Document::default();
+    let words = styled(&mut document, |style| {
+        style.with_underline(Some(Underline::default().with_kind(UnderlineKind::Words)))
+    });
+    let paragraph = Paragraph::new(words).with_inlines([
+        Inline::text(" Extraordinarily", words),
+        Inline::soft_hyphen(words),
+        Inline::text("longwordsplit here", words),
+    ]);
+    let painted = fuzzing::paint(&book, &document, &[paragraph], 80.0);
+    let first_line: Vec<&str> = items(&painted, "line")
+        .into_iter()
+        .filter(|line| ends(line).0.1 < 253)
+        .collect();
+    // The hyphen drawn at the soft hyphen: a run that stands for no text.
+    let hyphen_run = items(&painted, "glyphs")
+        .into_iter()
+        .find(|run| run.contains(" \"\" "))
+        .ok_or_else(|| format!("no hyphen:\n{}", painted.text()))?;
+    let hyphen_x = at(hyphen_run).0;
+    assert!(
+        first_line.iter().any(|line| {
+            let ((from, _), (to, _)) = ends(line);
+            from <= hyphen_x && to > hyphen_x
+        }),
         "{}",
         painted.text()
     );
