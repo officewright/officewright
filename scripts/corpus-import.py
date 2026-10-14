@@ -454,45 +454,6 @@ def page_geometry(bbox: str) -> list[dict]:
     return pages
 
 
-def rendered_pages(parts: dict[str, bytes]) -> int:
-    """The pages Word's rendered page breaks make: one more than the breaks.
-
-    A break inside a table row is marked in every cell the break splits, so the marks of one
-    row, nested tables included, count once; marks of paragraphs outside tables count each.
-    Rows and paragraphs may sit inside wrappers such as content controls (w:sdt) and custom
-    XML elements.
-    """
-    root = ElementTree.fromstring(parts["word/document.xml"])
-    body = root.find(f"{W}body")
-    if body is None:
-        raise ValueError("word/document.xml has no body")
-    mark = f"{W}lastRenderedPageBreak"
-
-    def rows(container: ElementTree.Element) -> int:
-        """The rows of a table, however wrapped, that hold a mark."""
-        total = 0
-        for child in container:
-            if local_name(child.tag) == "tr":
-                total += next(child.iter(mark), None) is not None
-            else:
-                total += rows(child)
-        return total
-
-    def count(container: ElementTree.Element) -> int:
-        total = 0
-        for child in container:
-            name = local_name(child.tag)
-            if name == "tbl":
-                total += rows(child)
-            elif name == "p":
-                total += sum(1 for _ in child.iter(mark))
-            else:
-                total += count(child)
-        return total
-
-    return count(body) + 1
-
-
 def rendered_page_breaks(parts: dict[str, bytes]) -> list[dict]:
     """Word's page breaks: the w:lastRenderedPageBreak marks of a saved document.
 
@@ -1116,13 +1077,12 @@ def checksum32(data: bytes) -> int:
 # Fonts the PDF names that Windows draws with another installed font, by the PostScript name
 # of the face it draws them with. Windows' FontSubstitutes registry key maps Helvetica to
 # Arial, and Word lays such text out with Arial: the widths in Word's PDFs for Helvetica are
-# Arial's, and those for Helvetica,Bold are Arial Bold's (business/contract-hhs-teaming-
-# agreement, K2 run). After the comma, Word names the style of the face it substituted.
+# Arial's, and those for Helvetica,Bold are Arial Bold's, a real bold face of weight 700
+# (business/contract-hhs-teaming-agreement, K2 run). After the comma, Word names the style of
+# the face it substituted. Only the names Word's PDFs have shown are listed.
 SUBSTITUTES = {
     "Helvetica": "ArialMT",
     "Helvetica,Bold": "Arial-BoldMT",
-    "Helvetica,Italic": "Arial-ItalicMT",
-    "Helvetica,BoldItalic": "Arial-BoldItalicMT",
 }
 
 
@@ -1268,8 +1228,6 @@ def reference_row(
     poppler: str,
     dropped: list[str],
     formatting_note: str = "",
-    pages: int | None = None,
-    pages_note: str = "",
 ) -> str:
     base = Path(record["file"]).stem
     windows = record["windows_version"]
@@ -1279,11 +1237,9 @@ def reference_row(
     printer = f"printer {REFERENCE_PRINTER}"
     if record["printer"] != REFERENCE_PRINTER:
         printer = f"printer other than {REFERENCE_PRINTER}, name not recorded"
-    if pages is None:
-        pages = record["pages"]
     notes = [
         f"compatibility mode {record['compatibility_mode']}",
-        f"{pages} page{'s' if pages != 1 else ''}",
+        f"{record['pages']} page{'s' if record['pages'] != 1 else ''}",
         printer,
         "fonts Word substituted: " + (", ".join(record["fonts_missing"]) or "none"),
         "w:compat settings Word dropped from the re-saved copy: " + (", ".join(dropped) or "none"),
@@ -1296,8 +1252,6 @@ def reference_row(
             or "none"
         ),
     ]
-    if pages_note:
-        notes.append(pages_note)
     if formatting_note:
         notes.append(formatting_note)
     return (
@@ -1379,7 +1333,6 @@ def check_result(
         dropped = sorted(compat_flags(original_parts) - compat_flags(resaved_parts))
         added = sorted(compat_flags(resaved_parts) - compat_flags(original_parts))
         page_breaks = rendered_page_breaks(resaved_parts)
-        pages_rendered = rendered_pages(resaved_parts)
     except (zipfile.BadZipFile, ElementTree.ParseError, ValueError, KeyError) as error:
         raise Refused(f"{record['file']}: cannot read a package: {error}") from error
     problems += pdf_privacy_problems(info, tools.xmp(pdf), pdf.read_bytes())
@@ -1394,18 +1347,9 @@ def check_result(
                 f"{record['file']}: {source} compatibility mode {value}, the input asks for {mode}"
             )
     pages = pdf_pages(info)
-    pages_note = ""
     if pages != record["pages"]:
-        # Word's page statistic can disagree with its own layout: the PDF is accepted when
-        # the page breaks Word rendered into the re-saved copy make as many pages.
-        if pages != pages_rendered:
-            raise Refused(
-                f"{record['file']}: Word counted {record['pages']} pages, the PDF has {pages}, "
-                f"and Word's rendered page breaks make {pages_rendered}"
-            )
-        pages_note = (
-            f"Word's page statistic said {record['pages']} pages; the PDF and the page breaks "
-            f"Word rendered into the re-saved copy have {pages}"
+        raise Refused(
+            f"{record['file']}: Word counted {record['pages']} pages, the PDF has {pages}"
         )
     try:
         geometry_pages = page_geometry(tools.bbox(pdf))
@@ -1436,9 +1380,7 @@ def check_result(
     formatting, formatting_note = None, ""
     if record["script_version"] >= 3:
         formatting, formatting_note = checked_formatting(record, results, resaved_parts, group)
-    row = reference_row(
-        group, record, drawn, poppler, dropped, formatting_note, pages, pages_note
-    )
+    row = reference_row(group, record, drawn, poppler, dropped, formatting_note)
     return Checked(record, pdf, resaved, row, geometry, drawn, formatting, formatting_note)
 
 
@@ -1591,11 +1533,6 @@ def summary(checked: list[Checked], verb: str) -> list[str]:
     for item in checked:
         pages = item.geometry["page_count"]
         lines.append(f"{verb} {item.record['file']}: {pages} page{'s' if pages != 1 else ''}")
-        if pages != item.record["pages"]:
-            lines.append(
-                f"  note: Word's page statistic said {item.record['pages']}; the PDF and Word's "
-                "rendered page breaks agree on the count above"
-            )
         for flag in item.geometry["compat_flags_dropped"]:
             lines.append(f"  note: Word dropped the w:compat setting {flag} from the re-saved copy")
         if item.formatting_note:

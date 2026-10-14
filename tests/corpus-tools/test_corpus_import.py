@@ -720,46 +720,6 @@ class Import(unittest.TestCase):
         self.info = "Author:          \nPages:           4\n"
         self.assertIn("Word counted 3 pages, the PDF has 4", self.refused())
 
-    def mark_page_breaks(self, record, count):
-        """Two or fewer w:lastRenderedPageBreak marks in the re-saved copy's paragraphs."""
-        anchors = [
-            b'<w:t xml:space="preserve">Calibri 11 pt, line 01',
-            b'<w:t xml:space="preserve">Cambria 11 pt, line 02',
-        ]
-        self.change_resaved(record, {"word/document.xml": [
-            (anchor, b"<w:lastRenderedPageBreak/>" + anchor) for anchor in anchors[:count]
-        ]})
-
-    def test_accepts_a_page_count_word_rendered_but_did_not_report(self):
-        # Word's statistic says 2 pages; its PDF and its two rendered breaks make 3.
-        doc = rules.documents()[0]
-        record = self.add_result(doc, pages=2)
-        self.mark_page_breaks(record, 2)
-        self.run_import()
-        geometry = json.loads(
-            (self.corpus / "reference" / "word-rules" / doc.name / "geometry.json")
-            .read_text(encoding="utf-8")
-        )
-        self.assertEqual(geometry["page_count"], 3)
-        row = next(
-            line for line in (self.corpus / "SOURCES.md").read_text(encoding="utf-8").splitlines()
-            if line.startswith(f"| reference/word-rules/{doc.name}/ ")
-        )
-        self.assertIn("; 3 pages;", row)
-        self.assertIn(
-            "Word's page statistic said 2 pages; the PDF and the page breaks Word rendered "
-            "into the re-saved copy have 3",
-            row,
-        )
-
-    def test_refuses_a_page_count_neither_word_figure_confirms(self):
-        record = self.add_result(rules.documents()[0], pages=2)
-        self.mark_page_breaks(record, 1)
-        self.assertIn(
-            "Word counted 2 pages, the PDF has 3, and Word's rendered page breaks make 2",
-            self.refused(),
-        )
-
     def use_helvetica(self, arial=True):
         """A PDF that names Helvetica and Helvetica,Bold without embedding them."""
         columns = "TrueType          WinAnsi          no  no  no "
@@ -1178,49 +1138,12 @@ class BodyParagraphs(unittest.TestCase):
         self.assertIn("body styles not matched to the re-saved copy", note)
 
 
-class RenderedPages(unittest.TestCase):
-    """The pages Word's w:lastRenderedPageBreak marks make."""
-
-    def pages(self, body):
-        document = (
-            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
-            f"<w:body>{body}</w:body></w:document>"
-        )
-        return importer.rendered_pages({"word/document.xml": document.encode()})
-
-    MARK = "<w:r><w:lastRenderedPageBreak/><w:t>x</w:t></w:r>"
-
-    def test_no_marks_make_one_page(self):
-        self.assertEqual(self.pages("<w:p><w:r><w:t>x</w:t></w:r></w:p>"), 1)
-
-    def test_every_mark_of_a_paragraph_counts(self):
-        self.assertEqual(self.pages(f"<w:p>{self.MARK}{self.MARK}</w:p><w:p>{self.MARK}</w:p>"), 4)
-
-    def test_the_marks_of_one_table_row_count_once(self):
-        cell = f"<w:tc><w:p>{self.MARK}</w:p></w:tc>"
-        nested = f"<w:tc><w:tbl><w:tr>{cell}{cell}</w:tr></w:tbl></w:tc>"
-        plain = "<w:tc><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc>"
-        rows = f"<w:tr>{cell}{cell}{nested}</w:tr><w:tr>{plain}</w:tr><w:tr>{cell}</w:tr>"
-        table = f"<w:tbl>{rows}</w:tbl>"
-        self.assertEqual(self.pages(table), 3)
-
-    def test_marks_inside_content_controls_count(self):
-        sdt = f"<w:sdt><w:sdtContent><w:p>{self.MARK}</w:p></w:sdtContent></w:sdt>"
-        self.assertEqual(self.pages(sdt + f"<w:p>{self.MARK}</w:p>"), 3)
-
-    def test_rows_inside_wrappers_count_once(self):
-        cell = f"<w:tc><w:p>{self.MARK}</w:p></w:tc>"
-        in_sdt = f"<w:sdt><w:sdtContent><w:tr>{cell}{cell}</w:tr></w:sdtContent></w:sdt>"
-        in_xml = f'<w:customXml w:element="row"><w:tr>{cell}</w:tr></w:customXml>'
-        self.assertEqual(self.pages(f"<w:tbl><w:tblPr/>{in_sdt}{in_xml}</w:tbl>"), 3)
-
-
 class Summary(unittest.TestCase):
     """What the import prints about each document."""
 
-    def item(self, statistic, pages, drawn=()):
+    def item(self, word_pages, pages, drawn=()):
         return importer.Checked(
-            record={"file": "report.docx", "pages": statistic},
+            record={"file": "report.docx", "pages": word_pages},
             pdf=Path("report.pdf"),
             resaved=Path("report.resaved.docx"),
             row="",
@@ -1228,12 +1151,16 @@ class Summary(unittest.TestCase):
             drawn=list(drawn),
         )
 
-    def test_the_count_is_the_imported_one_with_word_s_statistic_noted(self):
-        lines = importer.summary([self.item(30, 35), self.item(1, 1)], "imported")
-        self.assertEqual(lines[0], "imported report.docx: 35 pages")
-        self.assertIn("Word's page statistic said 30", lines[1])
-        self.assertEqual(lines[2], "imported report.docx: 1 page")
-        self.assertEqual(lines[3], "corpus-import.py: imported 2 reference renders")
+    def test_each_document_and_the_count(self):
+        lines = importer.summary([self.item(35, 35), self.item(1, 1)], "would import")
+        self.assertEqual(
+            lines,
+            [
+                "would import report.docx: 35 pages",
+                "would import report.docx: 1 page",
+                "corpus-import.py: would import 2 reference renders",
+            ],
+        )
 
     def test_a_substituted_font_is_named_with_its_substitute(self):
         face = importer.FontFace(
@@ -1271,14 +1198,15 @@ class FontFiles(unittest.TestCase):
 
     def test_only_the_substituted_styles_of_helvetica_may_have_a_comma(self):
         (self.temp / "arial.ttf").write_bytes(sfnt("ArialMT", "Arial", "Version 7.06"))
+        (self.temp / "arialbd.ttf").write_bytes(sfnt("Arial-BoldMT", "Arial Bold", "7.06"))
         (self.temp / "ariali.ttf").write_bytes(sfnt("Arial-ItalicMT", "Arial Italic", "7.06"))
         index = importer.font_index([self.temp])
         self.assertEqual(importer.drawn_font("Helvetica", index).substitute, "ArialMT")
-        self.assertEqual(
-            importer.drawn_font("Helvetica,Italic", index).face.full_name, "Arial Italic"
-        )
+        self.assertEqual(importer.drawn_font("Helvetica,Bold", index).face.full_name, "Arial Bold")
         self.assertEqual(importer.drawn_font("ArialMT", index).substitute, "")
-        for name in ("Helvetica,Oblique", "ArialMT,Bold"):
+        # Styles Word's PDFs have not shown are not guessed.
+        refused = ("Helvetica,Italic", "Helvetica,BoldItalic", "Helvetica,Oblique", "ArialMT,Bold")
+        for name in refused:
             with self.assertRaises(importer.Refused) as caught:
                 importer.drawn_font(name, index)
             self.assertIn(f"{name}: Word names a style it synthesizes", str(caught.exception))
