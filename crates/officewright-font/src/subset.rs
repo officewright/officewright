@@ -123,11 +123,13 @@ impl FontFace {
             ids.push(glyph.to_u16());
         }
         // What subsetter 0.2.6 would panic on is refused first, in the tables it takes.
-        // The CFF check runs for TrueType outlines too: where the parser's lookup and the
-        // subsetter's differ, the subsetter may miss the `glyf` table and take `CFF `.
+        // It reads `CFF ` only when it finds no `glyf` table, which is decided by its
+        // lookup, not by the outline format the font parser reports.
         let font = crate::font::font_ref(self.data(), face)?;
         crate::name_offsets::check(&font, self.data(), face)?;
-        crate::cff::check_reals(&font, self.data(), face)?;
+        if subsetter_table(&font, self.data(), b"glyf").is_none() {
+            crate::cff::check_reals(&font, self.data(), face)?;
+        }
         let remapper = GlyphRemapper::new_from_glyphs_sorted(&ids);
         let data = self.data();
         let data = catch_subsetter_panic(face, || subsetter::subset(data, face, &remapper))?
@@ -204,7 +206,9 @@ pub(crate) fn subsetter_table<'a>(
 /// faces before the subsetter runs, since the panic hook would still print them. They
 /// are an overflow in its `name` table code
 /// (<https://github.com/typst/subsetter/issues/30>) and `unreachable!()` for a CFF real
-/// number too large for an `f32` (<https://github.com/typst/subsetter/issues/31>).
+/// number too large for an `f32` (<https://github.com/typst/subsetter/issues/31>). A
+/// third, an overflow of a glyph's stem-hint count, is still left to it (officewright
+/// issue #180).
 /// Catching relies on unwinding, like the C ABI: built with `-C panic=abort` the process
 /// aborts instead. The default panic hook still prints the message to stderr, since a
 /// library must not replace the process-wide hook.

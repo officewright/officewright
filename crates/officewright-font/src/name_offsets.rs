@@ -296,6 +296,36 @@ mod tests {
     }
 
     #[test]
+    fn checks_the_name_table_of_the_face_being_subset() {
+        // A collection of a sound face and one whose `name` table overflows: each face is
+        // checked against its own table.
+        let bad = raw_name_table(&[(3, 1, 1, 4, 0xFFFE)], &vec![0; 0x1_0002]);
+        let collection = crate::testing::collection(&[
+            TestFont::new("Test Sans").build(),
+            TestFont::new("Test Sans").with_table(b"name", bad).build(),
+        ]);
+        FontFace::from_bytes(collection.clone(), 0)
+            .unwrap()
+            .subset([])
+            .unwrap();
+        let err = FontFace::from_bytes(collection, 1)
+            .unwrap()
+            .subset([])
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::MalformedTable {
+                    face: 1,
+                    table: "name",
+                    ..
+                }
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn checks_the_name_table_the_subsetter_takes() {
         // Two to four `name` records, one of them with the overflow, in each position:
         // the bisection takes the same position every time, so exactly one position is

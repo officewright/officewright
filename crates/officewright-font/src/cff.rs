@@ -38,6 +38,12 @@ const PRIVATE: u16 = 18;
 /// The FDArray operator (12 36): the offset of the Font DICT INDEX.
 const FD_ARRAY: u16 = 12 << 8 | 36;
 
+/// The ROS operator (12 30), which makes a font CID-keyed.
+const ROS: u16 = 12 << 8 | 30;
+
+/// The FontMatrix operator (12 7).
+const FONT_MATRIX: u16 = 12 << 8 | 7;
+
 /// Fails if a DICT the subsetter rewrites, in the `CFF ` table it takes from `font` (its
 /// file `data`), has a real number that is finite in the font but too large for an
 /// `f32`. Structures that cannot be read are left to the subsetter, which reports them as
@@ -57,43 +63,93 @@ pub(crate) fn check_reals(font: &FontRef<'_>, data: &[u8], face: u32) -> Result<
             });
         }
     }
+    if let Some(real) = overflowing_font_matrix(cff) {
+        return Err(Error::MalformedTable {
+            face,
+            table: "CFF ",
+            source: Cause::new(format!(
+                "the FontMatrix entry {real} of a Font DICT is too large to subset"
+            )),
+        });
+    }
     Ok(())
+}
+
+/// The first entry of a Font DICT's FontMatrix that the subsetter scales past the `f32`
+/// range, in its decimal form. When the Top DICT of a CID-keyed font has no FontMatrix,
+/// subsetter 0.2.6 writes one of 0.001 there and multiplies each Font DICT's by 1000
+/// (`rewrite_font_dict_index` in `src/cff/dict/font_dict.rs`), in `f64` and then back to
+/// `f32`; an entry past `f32::MAX` / 1000 becomes infinite and reaches the same
+/// `unreachable!()` as a real that is infinite already
+/// (<https://github.com/typst/subsetter/issues/31>). Only the first four entries are
+/// scaled; integers stay far within the range.
+fn overflowing_font_matrix(cff: &[u8]) -> Option<String> {
+    let top = operators(top_dict(cff)?);
+    let cid_keyed = top.iter().any(|(operator, _)| *operator == ROS);
+    let own_matrix = top.iter().any(|(operator, _)| *operator == FONT_MATRIX);
+    if !cid_keyed || own_matrix {
+        return None;
+    }
+    font_dicts(cff, &top)
+        .into_iter()
+        .flat_map(operators)
+        .filter(|(operator, operands)| *operator == FONT_MATRIX && operands.len() == 6)
+        .flat_map(|(_, operands)| operands.into_iter().take(4))
+        .find_map(|operand| match operand {
+            Operand::Real(text) => {
+                let value: f32 = text.parse().ok()?;
+                ((f64::from(value) * 1000.0) as f32)
+                    .is_infinite()
+                    .then_some(text)
+            }
+            Operand::Integer(_) => None,
+        })
 }
 
 /// The DICTs of a `CFF ` table that the subsetter reads and rewrites.
 fn dicts(cff: &[u8]) -> Vec<&[u8]> {
     let mut dicts = Vec::new();
-    // The header's third byte is its size, where the Name INDEX starts; the Top DICT
-    // INDEX follows it, and the subsetter reads only its first DICT.
-    let top = cff
-        .get(2)
-        .and_then(|&header_size| skip_index(cff, usize::from(header_size)))
-        .and_then(|after_names| index(cff, after_names))
-        .and_then(|top_dicts| top_dicts.get(0));
-    let Some(top) = top else {
+    let Some(top) = top_dict(cff) else {
         return dicts;
     };
     dicts.push(top);
-    for (operator, operands) in operators(top) {
-        match operator {
-            PRIVATE => dicts.extend(range(&operands).and_then(|range| cff.get(range))),
-            FD_ARRAY => {
-                let Some(font_dicts) = offset(&operands).and_then(|at| index(cff, at)) else {
-                    continue;
-                };
-                for font_dict in (0..font_dicts.len()).filter_map(|i| font_dicts.get(i)) {
-                    dicts.push(font_dict);
-                    for (operator, operands) in operators(font_dict) {
-                        if operator == PRIVATE {
-                            dicts.extend(range(&operands).and_then(|range| cff.get(range)));
-                        }
-                    }
-                }
+    let top = operators(top);
+    for (operator, operands) in &top {
+        if *operator == PRIVATE {
+            dicts.extend(range(operands).and_then(|range| cff.get(range)));
+        }
+    }
+    for font_dict in font_dicts(cff, &top) {
+        dicts.push(font_dict);
+        for (operator, operands) in operators(font_dict) {
+            if operator == PRIVATE {
+                dicts.extend(range(&operands).and_then(|range| cff.get(range)));
             }
-            _ => {}
         }
     }
     dicts
+}
+
+/// The Top DICT the subsetter reads: the first of the Top DICT INDEX, which follows the
+/// header (whose third byte is its size) and the Name INDEX.
+fn top_dict(cff: &[u8]) -> Option<&[u8]> {
+    cff.get(2)
+        .and_then(|&header_size| skip_index(cff, usize::from(header_size)))
+        .and_then(|after_names| index(cff, after_names))
+        .and_then(|top_dicts| top_dicts.get(0))
+}
+
+/// The Font DICTs of the FDArray that the Top DICT's operators `top` point to.
+fn font_dicts<'a>(cff: &'a [u8], top: &[(u16, Vec<Operand>)]) -> Vec<&'a [u8]> {
+    top.iter()
+        .filter(|(operator, _)| *operator == FD_ARRAY)
+        .filter_map(|(_, operands)| offset(operands).and_then(|at| index(cff, at)))
+        .flat_map(|font_dicts| {
+            (0..font_dicts.len())
+                .filter_map(|i| font_dicts.get(i))
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 /// An INDEX (CFF specification, 5) as the subsetter reads it.
@@ -333,6 +389,7 @@ fn real(data: &[u8]) -> Option<(Option<String>, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::face::OutlineFormat;
 
     #[test]
     fn reads_real_numbers_as_the_subsetter_does() {
@@ -412,6 +469,172 @@ mod tests {
         );
         assert_eq!(range(&operators(&[0xAF, 0x8A, 0x12])[0].1), None);
         assert_eq!(range(&operators(&[0xAF, 0xAF, 0xAF, 0x12])[0].1), None);
+    }
+
+    /// A CFF table of one glyph (`.notdef`, endchar) whose Top DICT has `top` before its
+    /// offsets, with a Private DICT holding `private`, and, when `font_dict` is given, an
+    /// FDArray of one Font DICT holding it and pointing at that Private DICT. Offsets are
+    /// five-byte integers, so the layout does not depend on them.
+    fn cff_table(top: &[u8], private: &[u8], font_dict: Option<&[u8]>) -> Vec<u8> {
+        fn index(items: &[&[u8]]) -> Vec<u8> {
+            if items.is_empty() {
+                return vec![0, 0];
+            }
+            let mut out = vec![0, items.len() as u8, 1, 1];
+            let mut end = 1;
+            for item in items {
+                end += item.len() as u8;
+                out.push(end);
+            }
+            for item in items {
+                out.extend_from_slice(item);
+            }
+            out
+        }
+        let int5 = |value: usize| [&[29][..], &(value as i32).to_be_bytes()].concat();
+        let top_dict = |charstrings: usize, fd_array: usize, fd_select: usize, at: usize| {
+            let mut dict = top.to_vec();
+            dict.extend(int5(charstrings));
+            dict.push(17);
+            if font_dict.is_some() {
+                dict.extend(int5(fd_array));
+                dict.extend([12, 36]);
+                dict.extend(int5(fd_select));
+                dict.extend([12, 37]);
+            } else {
+                dict.extend(int5(private.len()));
+                dict.extend(int5(at));
+                dict.push(18);
+            }
+            dict
+        };
+        let font_dict_of = |at: usize| {
+            let mut dict = font_dict.unwrap_or_default().to_vec();
+            dict.extend(int5(private.len()));
+            dict.extend(int5(at));
+            dict.push(18);
+            dict
+        };
+        let head = [1, 0, 4, 1];
+        let names = index(&[b"A"]);
+        let strings = index(&[b"Adobe", b"Identity"]);
+        let charstrings_data = index(&[&[14]]);
+        let fd_select = [0, 0];
+        let top_len = index(&[&top_dict(0, 0, 0, 0)]).len();
+        let charstrings = head.len() + names.len() + top_len + strings.len() + 2;
+        let fd_select_at = charstrings + charstrings_data.len();
+        let fd_array = fd_select_at
+            + if font_dict.is_some() {
+                fd_select.len()
+            } else {
+                0
+            };
+        let font_dicts_len = if font_dict.is_some() {
+            index(&[&font_dict_of(0)]).len()
+        } else {
+            0
+        };
+        let private_at = fd_array + font_dicts_len;
+        let mut cff = head.to_vec();
+        cff.extend(names);
+        cff.extend(index(&[&top_dict(
+            charstrings,
+            fd_array,
+            fd_select_at,
+            private_at,
+        )]));
+        cff.extend(strings);
+        cff.extend([0, 0]);
+        cff.extend(charstrings_data);
+        if font_dict.is_some() {
+            cff.extend(fd_select);
+            cff.extend(index(&[&font_dict_of(private_at)]));
+        }
+        cff.extend_from_slice(private);
+        cff
+    }
+
+    /// ROS Adobe-Identity-0: strings 391 and 392 of the String INDEX, and 0.
+    const ROS_ADOBE_IDENTITY: [u8; 7] = [248, 27, 248, 28, 139, 12, 30];
+
+    /// FontMatrix [`first` 0 0 0.001 0 0], `first` a real number's bytes.
+    fn font_matrix(first: &[u8]) -> Vec<u8> {
+        let thousandth = [30, 0x0A, 0x00, 0x1F];
+        [first, &[139, 139], &thousandth, &[139, 139, 12, 7]].concat()
+    }
+
+    /// The real numbers 1E36, 1E30 and 0.001.
+    const E36: [u8; 4] = [30, 0x1B, 0x36, 0xFF];
+    const E30: [u8; 4] = [30, 0x1B, 0x30, 0xFF];
+    const THOUSANDTH: [u8; 4] = [30, 0x0A, 0x00, 0x1F];
+
+    /// A Private DICT with defaultWidthX 0, and one with defaultWidthX 1E99999.
+    const PRIVATE_ZERO: [u8; 2] = [139, 20];
+    const PRIVATE_INFINITE: [u8; 6] = [30, 0x1B, 0x99, 0x99, 0x9F, 20];
+
+    #[test]
+    fn refuses_font_matrices_the_subsetter_scales_past_f32() {
+        // A CID-keyed font without a FontMatrix in its Top DICT: the subsetter multiplies
+        // the Font DICT's by 1000, and 1E36 becomes infinite.
+        let cid = |matrix: &[u8]| cff_table(&ROS_ADOBE_IDENTITY, &PRIVATE_ZERO, Some(matrix));
+        let err = subset_with(cid(&font_matrix(&E36)), false).unwrap_err();
+        assert!(
+            matches!(err, Error::MalformedTable { table: "CFF ", .. }),
+            "{err}"
+        );
+        assert_eq!(
+            std::error::Error::source(&err).unwrap().to_string(),
+            "the FontMatrix entry 1E36 of a Font DICT is too large to subset"
+        );
+        // 1E30 times 1000 fits; so do the usual 0.001.
+        subset_with(cid(&font_matrix(&E30)), false).unwrap();
+        subset_with(cid(&font_matrix(&THOUSANDTH)), false).unwrap();
+        // With a FontMatrix of its own in the Top DICT, the Font DICT's is written as it
+        // is, and 1E36 fits in an f32.
+        let top = [&ROS_ADOBE_IDENTITY[..], &font_matrix(&THOUSANDTH)].concat();
+        let own = cff_table(&top, &PRIVATE_ZERO, Some(&font_matrix(&E36)));
+        subset_with(own, false).unwrap();
+        // The translation is not scaled: 1E36 as its first entry fits.
+        let thousandth = [30, 0x0A, 0x00, 0x1F];
+        let translated = [
+            &thousandth[..],
+            &[139, 139],
+            &thousandth,
+            &E36,
+            &[139, 12, 7],
+        ]
+        .concat();
+        subset_with(cid(&translated), false).unwrap();
+        // A font that is not CID-keyed: the subsetter does not read the FDArray.
+        let sid = cff_table(&[], &PRIVATE_ZERO, Some(&font_matrix(&E36)));
+        subset_with(sid, false).unwrap();
+    }
+
+    #[test]
+    fn checks_the_cff_table_only_where_the_subsetter_reads_it() {
+        // A CFF table whose Private DICT has 1E99999 is refused as the outlines.
+        let infinite = cff_table(&[], &PRIVATE_INFINITE, None);
+        let err = subset_with(infinite.clone(), false).unwrap_err();
+        assert!(
+            matches!(err, Error::MalformedTable { table: "CFF ", .. }),
+            "{err}"
+        );
+        // Next to a `glyf` table, the subsetter takes TrueType outlines and never reads
+        // it, so the face subsets.
+        let subset = subset_with(infinite, true).unwrap();
+        assert_eq!(subset.outline_format(), OutlineFormat::TrueType);
+    }
+
+    /// Subsets the test font with `cff` as its outlines, and `glyf` and `loca` kept or
+    /// not.
+    fn subset_with(cff: Vec<u8>, truetype: bool) -> Result<crate::subset::Subset> {
+        let mut font = crate::testing::TestFont::new("Test Sans").with_table(b"CFF ", cff);
+        if !truetype {
+            font = font.without_table(b"glyf").without_table(b"loca");
+        }
+        crate::font::FontFace::from_bytes(font.build(), 0)
+            .unwrap()
+            .subset([])
     }
 
     #[test]
