@@ -1069,3 +1069,136 @@ fn a_style_is_not_based_on_a_style_of_another_kind() {
         .collect();
     assert_eq!(summary, [(false, true), (false, true)]);
 }
+
+#[test]
+fn reads_every_set_of_ligatures_and_nothing_else() {
+    let kinds = ["standard", "contextual", "historical", "discretional"];
+    let mut valid = vec![
+        ("none".to_owned(), [false; 4]),
+        ("all".to_owned(), [true; 4]),
+    ];
+    for set in 1u8..15 {
+        let flags = [0, 1, 2, 3].map(|bit| set & (1 << bit) != 0);
+        if flags.iter().filter(|on| **on).count() == 4 {
+            continue;
+        }
+        let mut name = String::new();
+        for (kind, on) in kinds.iter().zip(flags) {
+            if !on {
+                continue;
+            }
+            if name.is_empty() {
+                name.push_str(kind);
+            } else {
+                name.push_str(&kind[..1].to_ascii_uppercase());
+                name.push_str(&kind[1..]);
+            }
+        }
+        valid.push((name, flags));
+    }
+    // The 16 values of ST_Ligatures ([MS-DOCX] 2.6.4.3).
+    assert_eq!(valid.len(), 16);
+    for (value, [standard, contextual, historical, discretional]) in &valid {
+        let ligatures = Ligatures::from_xml(value).unwrap_or_else(|| panic!("{value}"));
+        assert_eq!(
+            (
+                ligatures.standard(),
+                ligatures.contextual(),
+                ligatures.historical(),
+                ligatures.discretional()
+            ),
+            (*standard, *contextual, *historical, *discretional),
+            "{value}"
+        );
+    }
+    for invalid in [
+        "",
+        "Standard",
+        "standardstandard",
+        "contextualStandard",
+        "standardContextualHistoricalDiscretional",
+        "allContextual",
+        "noneStandard",
+    ] {
+        assert_eq!(Ligatures::from_xml(invalid), None, "{invalid}");
+    }
+}
+
+#[test]
+fn resolves_ligatures_and_contextual_alternates() {
+    const W14: &str = r#"xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml""#;
+    let styles = [
+        defaults(&format!(r#"<w14:ligatures {W14} w14:val="all"/>"#)),
+        style(
+            "paragraph",
+            "Plain",
+            None,
+            &format!(r#"<w14:ligatures {W14} w14:val="none"/><w14:cntxtAlts {W14}/>"#),
+        ),
+    ]
+    .concat();
+    let written = [
+        "",
+        &format!(
+            r#"<w14:ligatures {W14} w14:val="historicalDiscretional"/><w14:cntxtAlts {W14} w14:val="0"/>"#
+        ),
+        // A value that is not one is not read, and not reported.
+        &format!(
+            r#"<w14:ligatures {W14} w14:val="Standard"/><w14:cntxtAlts {W14} w14:val="maybe"/>"#
+        ),
+        // w14's ST_OnOff: true and 1 are on; on is no value of it ([MS-DOCX] 2.6.4.9).
+        &format!(r#"<w14:cntxtAlts {W14} w14:val="true"/>"#),
+        &format!(r#"<w14:cntxtAlts {W14} w14:val="1"/>"#),
+        &format!(r#"<w14:cntxtAlts {W14} w14:val="on"/>"#),
+    ];
+    // Under a style with contextual alternates on: a value that is not one, off among
+    // them, inherits them; false sets them off.
+    let plain = [
+        "",
+        &format!(r#"<w14:cntxtAlts {W14} w14:val="maybe"/>"#),
+        &format!(r#"<w14:cntxtAlts {W14} w14:val="off"/>"#),
+        &format!(r#"<w14:cntxtAlts {W14} w14:val="false"/>"#),
+    ];
+    let body = [paragraph("", &written), paragraph("Plain", &plain)].concat();
+    let document = build(&body, &styles, None, None);
+    let found: Vec<(Ligatures, bool)> = runs(&document)
+        .iter()
+        .map(|format| (format.ligatures(), format.contextual_alternates()))
+        .collect();
+    let all = Ligatures::from_xml("all").unwrap();
+    assert_eq!(
+        found,
+        [
+            (all, false),
+            (
+                Ligatures::from_xml("historicalDiscretional").unwrap(),
+                false
+            ),
+            (all, false),
+            (all, true),
+            (all, true),
+            (all, false),
+            // The paragraph style's none and contextual alternates.
+            (Ligatures::default(), true),
+            (Ligatures::default(), true),
+            (Ligatures::default(), true),
+            (Ligatures::default(), false),
+        ]
+    );
+    let properties = paragraphs(&document)[0].runs().nth(1).unwrap().properties();
+    assert_eq!(properties.contextual_alternates(), Some(false));
+
+    // Without run properties in the document defaults, Word's own: standard and
+    // contextual ligatures (the re-saved copy of word-rules/E-defaults-empty.docx).
+    let document = open("<w:p><w:r><w:t>x</w:t></w:r></w:p>");
+    assert_eq!(
+        first_run(&document).format().ligatures(),
+        Ligatures::from_xml("standardContextual").unwrap()
+    );
+    // With them, none unless they say.
+    let document = build(&paragraph("", &[""]), &defaults(""), None, None);
+    assert_eq!(
+        first_run(&document).format().ligatures(),
+        Ligatures::default()
+    );
+}

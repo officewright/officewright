@@ -9,8 +9,8 @@ use super::{Formats, Layer, overwrite, style_index};
 use crate::model::Document;
 use crate::model::format::{CharacterFormat, FontFamilies};
 use crate::model::properties::{
-    Color, ColorValue, FontHint, Highlight, RunProperties, Shading, ThemeColor, ThemeFont, Toggle,
-    UnderlineStyle, VerticalPosition,
+    Color, ColorValue, FontHint, Highlight, Ligatures, RunProperties, Shading, ThemeColor,
+    ThemeFont, Toggle, UnderlineStyle, VerticalPosition,
 };
 use crate::model::settings::{ColorSchemeIndex, ColorSchemeMapping};
 use crate::model::styles::StyleKind;
@@ -158,6 +158,8 @@ impl Formats<'_> {
             language_latin: effect.languages[0].clone(),
             language_east_asia: effect.languages[1].clone(),
             language_bidi: effect.languages[2].clone(),
+            ligatures: effect.ligatures.unwrap_or_default(),
+            contextual_alternates: effect.contextual_alternates.unwrap_or(false),
         }
     }
 
@@ -214,10 +216,9 @@ impl Formats<'_> {
 /// `w:docDefaults/w:rPrDefault`): those it writes into `w:rPrDefault` when it saves such
 /// a document again (the re-saved copy of the corpus file
 /// `word-rules/E-defaults-empty.docx`, Word 16.0.17932), whose render shows Calibri
-/// 11 pt. They are the theme's minor fonts, 11 pt and kerning from 1 pt. Word also writes
-/// languages there, which may be those of its user's editing settings and are left out,
-/// and standard contextual ligatures (`w14:ligatures`), which officewright does not
-/// read yet.
+/// 11 pt. They are the theme's minor fonts, 11 pt, kerning from 1 pt and standard and
+/// contextual ligatures (`w14:ligatures`). Word also writes languages there, which may
+/// be those of its user's editing settings and are left out.
 fn word_run_defaults() -> CharacterLevel {
     let theme = |font| Some(FontSlot::Theme(font, None));
     CharacterLevel {
@@ -230,6 +231,11 @@ fn word_run_defaults() -> CharacterLevel {
         size: Some(Pt(11.0)),
         size_complex_script: Some(Pt(11.0)),
         kerning: Some(Pt(1.0)),
+        ligatures: Some(Ligatures {
+            standard: true,
+            contextual: true,
+            ..Ligatures::default()
+        }),
         ..CharacterLevel::default()
     }
 }
@@ -291,6 +297,8 @@ pub(super) struct CharacterLevel {
     highlight: Option<Highlight>,
     shading: Option<Shading>,
     languages: [Option<Arc<str>>; 3],
+    ligatures: Option<Ligatures>,
+    contextual_alternates: Option<bool>,
 }
 
 impl CharacterLevel {
@@ -326,6 +334,8 @@ impl CharacterLevel {
             highlight,
             shading,
             languages,
+            ligatures,
+            contextual_alternates,
         } = self;
         fonts.iter().any(Option::is_some)
             || hint.is_some()
@@ -343,6 +353,8 @@ impl CharacterLevel {
             || highlight.is_some()
             || shading.is_some()
             || languages.iter().any(Option::is_some)
+            || ligatures.is_some()
+            || contextual_alternates.is_some()
     }
 
     /// What one `w:rPr` gives.
@@ -386,6 +398,8 @@ impl CharacterLevel {
             shading: properties.shading,
             languages: [&language.latin, &language.east_asia, &language.bidi]
                 .map(|language| language.as_deref().map(Into::into)),
+            ligatures: properties.ligatures,
+            contextual_alternates: properties.contextual_alternates,
         }
     }
 }
@@ -427,6 +441,8 @@ impl Layer for CharacterLevel {
         for (slot, language) in self.languages.iter_mut().zip(&above.languages) {
             overwrite(slot, language.clone());
         }
+        overwrite(&mut self.ligatures, above.ligatures);
+        overwrite(&mut self.contextual_alternates, above.contextual_alternates);
     }
 }
 
