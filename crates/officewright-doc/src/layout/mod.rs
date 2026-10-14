@@ -24,12 +24,14 @@ use crate::model::{Block, Document, Formats};
 #[cfg(test)]
 thread_local! {
     /// Work the translation did on this thread, for tests of its cost: inlines added to
-    /// paragraphs and field results, bytes of font names compared to share run styles,
-    /// run styles built, and comparisons of compatibility flags.
+    /// paragraphs and field results, bytes of names and tags looked up to share run
+    /// styles, run styles built, places tried to cut names, and comparisons of
+    /// compatibility flags.
     pub(crate) static WORK: std::cell::Cell<Work> = const { std::cell::Cell::new(Work {
         inlines: 0,
         compared: 0,
         built: 0,
+        cut_steps: 0,
         flags: 0,
     }) };
 }
@@ -41,6 +43,7 @@ pub(crate) struct Work {
     pub(crate) inlines: usize,
     pub(crate) compared: usize,
     pub(crate) built: usize,
+    pub(crate) cut_steps: usize,
     pub(crate) flags: usize,
 }
 

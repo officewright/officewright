@@ -156,17 +156,12 @@ fn gives_each_distinct_run_format_one_run_style() {
         .iter()
         .flat_map(|paragraph| paragraph.inlines().iter().map(style_of))
         .collect();
-    // Four run styles for five formats: the run in the bold character style and the bold
-    // run differ only in the style they name, which the IR does not keep, so they share
-    // one. The nil shading is no shading, as in the plain run, but is written, so it has a
-    // style of its own, equal to the plain run's. The second paragraph repeats the first's
+    // Three run styles for five formats: the run in the bold character style and the bold
+    // run differ only in the style they name, which the IR does not keep, and the nil
+    // shading is no shading, as in the plain run. The second paragraph repeats the first's
     // styles.
-    assert_eq!(ids[1], ids[2]);
-    let distinct = [ids[0], ids[1], ids[3], ids[4]];
-    for (n, id) in distinct.iter().enumerate() {
-        assert!(distinct[..n].iter().all(|other| other != id), "style {n}");
-    }
-    assert_eq!(ir.run_style(ids[4]), ir.run_style(ids[0]));
+    assert_eq!((ids[1], ids[4]), (ids[2], ids[0]));
+    assert!(ids[0] != ids[1] && ids[1] != ids[3] && ids[0] != ids[3]);
     assert_eq!(&ids[..5], &ids[5..]);
     assert_eq!(ir.run_style(ids[4]).unwrap().shading(), None);
     assert!(ir.run_style(ids[2]).unwrap().bold());
@@ -230,14 +225,14 @@ fn cuts_font_names_no_font_has() {
         .unwrap()
         .fonts()
         .clone();
-    assert_eq!(fonts.ascii(), "N".repeat(128));
+    assert_eq!(fonts.ascii(), "N".repeat(256));
     let messages: Vec<&str> = translation
         .left_out()
         .iter()
         .map(LeftOut::message)
         .collect();
-    assert_eq!(messages, ["a font name of more than 128 bytes is cut"]);
-    // The cut counts bytes and falls at the end of a character: 42 characters of three
+    assert_eq!(messages, ["a font name of more than 256 bytes is cut"]);
+    // The cut counts bytes and falls at the end of a character: 85 characters of three
     // bytes each.
     let document = open(&format!(
         r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="{}"/></w:rPr><w:t>x</w:t></w:r></w:p>"#,
@@ -252,7 +247,7 @@ fn cuts_font_names_no_font_has() {
         .fonts()
         .ascii()
         .to_owned();
-    assert_eq!(ascii, "€".repeat(42));
+    assert_eq!(ascii, "€".repeat(85));
 }
 
 #[test]
@@ -739,7 +734,7 @@ fn translates_settings_and_sections() {
 #[test]
 fn translates_the_rest_of_paragraph_formatting() {
     let body = [
-        r#"<w:p><w:pPr><w:keepLines/><w:pageBreakBefore/><w:widowControl w:val="0"/><w:spacing w:before="100" w:beforeAutospacing="1"/><w:tabs><w:tab w:val="center" w:leader="hyphen" w:pos="2000"/></w:tabs><w:pBdr><w:between w:val="single" w:sz="4" w:space="1" w:color="000000" w:shadow="1"/></w:pBdr><w:jc w:val="distribute"/></w:pPr></w:p>"#,
+        r#"<w:p><w:pPr><w:keepLines/><w:pageBreakBefore/><w:widowControl w:val="0"/><w:wordWrap w:val="0"/><w:suppressAutoHyphens/><w:spacing w:before="100" w:beforeAutospacing="1"/><w:tabs><w:tab w:val="center" w:leader="hyphen" w:pos="2000"/></w:tabs><w:pBdr><w:between w:val="single" w:sz="4" w:space="1" w:color="000000" w:shadow="1"/></w:pBdr><w:jc w:val="distribute"/></w:pPr></w:p>"#,
         r#"<w:p><w:pPr><w:jc w:val="lowKashida"/></w:pPr></w:p>"#,
         // A hanging indent in character units is a negative count of them.
         r#"<w:p><w:pPr><w:ind w:hangingChars="100"/></w:pPr></w:p>"#,
@@ -749,6 +744,8 @@ fn translates_the_rest_of_paragraph_formatting() {
     let found = paragraphs(&translation);
     let first = found[0].props();
     assert!(first.keep_lines() && first.page_break_before() && !first.widow_control());
+    assert!(!first.word_wrap() && first.suppress_auto_hyphens());
+    assert!(found[1].props().word_wrap() && !found[1].props().suppress_auto_hyphens());
     assert!(first.spacing().before_auto() && !first.spacing().after_auto());
     assert_eq!(
         first.tabs(),
@@ -909,13 +906,13 @@ fn bounds_what_long_names_and_tags_copy() {
     for inline in paragraphs(&translation)[0].inlines() {
         let style = match inline {
             ir::Inline::Symbol { font, style, .. } => {
-                assert_eq!(font.len(), 128);
+                assert_eq!(font.len(), 256);
                 *style
             }
             inline => style_of(inline),
         };
         let style = ir.run_style(style).unwrap();
-        assert_eq!(style.fonts().ascii().len(), 128);
+        assert_eq!(style.fonts().ascii().len(), 256);
         let language = style.language();
         assert_eq!(
             (language.latin(), language.east_asia(), language.bidi()),
@@ -928,7 +925,7 @@ fn bounds_what_long_names_and_tags_copy() {
         .map(LeftOut::message)
         .collect();
     assert!(left_out.contains(&"a language tag of more than 64 bytes is left out"));
-    assert!(left_out.contains(&"a font name of more than 128 bytes is cut"));
+    assert!(left_out.contains(&"a font name of more than 256 bytes is cut"));
     // A tag of 64 bytes is passed on.
     let styles = format!(
         r#"<w:styles xmlns:w="{W}"><w:docDefaults><w:rPrDefault><w:rPr><w:lang w:val="{}"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>"#,
@@ -1082,7 +1079,8 @@ fn shares_run_styles_of_long_names_comparing_bounded_parts() {
         .map(style_of)
         .collect();
     assert_eq!(styles.len(), 1);
-    assert!(work <= RUNS * 2 * 4 * 128, "{work} bytes compared");
+    // At most seven names and tags of 256 bytes per key, of each run and the mark.
+    assert!(work <= (RUNS + 1) * 7 * 256, "{work} bytes looked up");
 }
 
 #[test]
@@ -1138,7 +1136,7 @@ fn looks_fonts_up_with_bounded_folding() {
     let translation = translate(&document);
     let folded = crate::model::FOLDED.get() - before;
     assert_eq!(translation.document().sections()[0].blocks().len(), 1);
-    assert!(folded <= 200 * 500 + 2_001 * 128, "{folded} bytes folded");
+    assert!(folded <= 200 * 500 + 2_001 * 256, "{folded} bytes folded");
 }
 
 #[test]
@@ -1252,24 +1250,24 @@ fn takes_a_fields_style_from_an_inner_fields_result() {
 #[test]
 fn lists_each_cut_name_and_tag() {
     // One document per attribute whose value is longer than the IR keeps.
-    let long_name = "N".repeat(200);
+    let long_name = "N".repeat(300);
     let long_tag = "t".repeat(80);
     let cases = [
         (
             format!(r#"<w:rFonts w:ascii="{long_name}"/>"#),
-            "a font name of more than 128 bytes is cut",
+            "a font name of more than 256 bytes is cut",
         ),
         (
             format!(r#"<w:rFonts w:hAnsi="{long_name}"/>"#),
-            "a font name of more than 128 bytes is cut",
+            "a font name of more than 256 bytes is cut",
         ),
         (
             format!(r#"<w:rFonts w:eastAsia="{long_name}"/>"#),
-            "a font name of more than 128 bytes is cut",
+            "a font name of more than 256 bytes is cut",
         ),
         (
             format!(r#"<w:rFonts w:cs="{long_name}"/>"#),
-            "a font name of more than 128 bytes is cut",
+            "a font name of more than 256 bytes is cut",
         ),
         (
             format!(r#"<w:lang w:val="{long_tag}"/>"#),
@@ -1302,11 +1300,11 @@ fn lists_each_cut_name_and_tag() {
         .iter()
         .map(LeftOut::message)
         .collect();
-    assert_eq!(left_out, ["a font name of more than 128 bytes is cut"]);
+    assert_eq!(left_out, ["a font name of more than 256 bytes is cut"]);
     let ir::Inline::Symbol { font, .. } = &paragraphs(&translation)[0].inlines()[0] else {
         panic!("a symbol");
     };
-    assert_eq!(font.len(), 128);
+    assert_eq!(font.len(), 256);
 }
 
 #[test]
@@ -1337,9 +1335,68 @@ fn gives_runs_that_differ_in_one_property_different_run_styles() {
         ("", r#"<w:sz w:val="30"/>"#),
         ("", r#"<w:szCs w:val="30"/>"#),
         ("", r#"<w:shd w:val="clear" w:fill="00FF00"/>"#),
+        ("", "<w:b/>"),
         ("", "<w:i/>"),
+        ("", "<w:bCs/>"),
+        ("", "<w:iCs/>"),
+        ("", "<w:cs/>"),
+        ("", "<w:rtl/>"),
+        ("", "<w:strike/>"),
         ("", "<w:dstrike/>"),
+        ("", "<w:caps/>"),
         ("", "<w:smallCaps/>"),
+        ("", "<w:vanish/>"),
+        // Values against values, not against none.
+        (
+            r#"<w:color w:val="FF0000"/>"#,
+            r#"<w:color w:val="00FF00"/>"#,
+        ),
+        (
+            r#"<w:u w:val="single" w:color="FF0000"/>"#,
+            r#"<w:u w:val="single" w:color="00FF00"/>"#,
+        ),
+        (r#"<w:u w:val="single"/>"#, r#"<w:u w:val="dotted"/>"#),
+        (
+            r#"<w:rFonts w:hint="eastAsia"/>"#,
+            r#"<w:rFonts w:hint="cs"/>"#,
+        ),
+        (r#"<w:rFonts w:ascii="A"/>"#, r#"<w:rFonts w:ascii="B"/>"#),
+        (
+            r#"<w:rFonts w:eastAsia="A"/>"#,
+            r#"<w:rFonts w:eastAsia="B"/>"#,
+        ),
+        (r#"<w:lang w:val="de-DE"/>"#, r#"<w:lang w:val="fr-FR"/>"#),
+        (
+            r#"<w:lang w:eastAsia="ja-JP"/>"#,
+            r#"<w:lang w:eastAsia="ko-KR"/>"#,
+        ),
+        (r#"<w:lang w:bidi="ar-SA"/>"#, r#"<w:lang w:bidi="he-IL"/>"#),
+        (r#"<w:kern w:val="24"/>"#, r#"<w:kern w:val="28"/>"#),
+        (r#"<w:position w:val="4"/>"#, r#"<w:position w:val="6"/>"#),
+        (r#"<w:position w:val="4"/>"#, r#"<w:spacing w:val="4"/>"#),
+        (r#"<w:spacing w:val="20"/>"#, r#"<w:spacing w:val="40"/>"#),
+        (r#"<w:w w:val="80"/>"#, r#"<w:w w:val="90"/>"#),
+        (
+            r#"<w:vertAlign w:val="subscript"/>"#,
+            r#"<w:vertAlign w:val="superscript"/>"#,
+        ),
+        (
+            r#"<w:highlight w:val="yellow"/>"#,
+            r#"<w:highlight w:val="green"/>"#,
+        ),
+        (r#"<w:sz w:val="30"/>"#, r#"<w:sz w:val="32"/>"#),
+        (
+            r#"<w:sz w:val="30"/>"#,
+            r#"<w:sz w:val="30"/><w:szCs w:val="32"/>"#,
+        ),
+        (
+            r#"<w:shd w:val="clear" w:fill="00FF00"/>"#,
+            r#"<w:shd w:val="clear" w:fill="0000FF"/>"#,
+        ),
+        (
+            r#"<w:color w:val="FF0000"/>"#,
+            r#"<w:u w:val="single" w:color="FF0000"/>"#,
+        ),
     ];
     for (a, b) in pairs {
         let body = format!(
@@ -1352,4 +1409,83 @@ fn gives_runs_that_differ_in_one_property_different_run_styles() {
         let ir = translation.document();
         assert_ne!(ir.run_style(first), ir.run_style(second), "{b}");
     }
+}
+
+#[test]
+fn shares_run_styles_across_properties_the_ir_does_not_keep() {
+    // Properties the IR does not keep do not split run styles, which would also split
+    // the layout's shaping runs.
+    for other in [
+        "<w:noProof/>",
+        "<w:webHidden/>",
+        "<w:outline/>",
+        "<w:shadow/>",
+        "<w:emboss/>",
+        "<w:imprint/>",
+        "<w:specVanish/>",
+        r#"<w:rStyle w:val="Missing"/>"#,
+    ] {
+        let body = format!(
+            r#"<w:p><w:r><w:t>a</w:t></w:r><w:r><w:rPr>{other}</w:rPr><w:t>b</w:t></w:r></w:p>"#
+        );
+        let translation = translate(&open(&body));
+        let inlines = paragraphs(&translation)[0].inlines();
+        assert_eq!(style_of(&inlines[0]), style_of(&inlines[1]), "{other}");
+    }
+}
+
+#[test]
+fn cuts_names_in_a_bounded_number_of_steps() {
+    // 2,000 runs under defaults whose names have 100,000 characters: each cut tries a few
+    // places from the 256th byte back, not every place of the name.
+    let name = "N".repeat(100_000);
+    let styles = format!(
+        r#"<w:styles xmlns:w="{W}"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="{name}" w:hAnsi="{name}" w:eastAsia="{name}" w:cs="{name}"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>"#
+    );
+    let body = format!("<w:p>{}</w:p>", "<w:r><w:t>x</w:t></w:r>".repeat(2_000));
+    let document = with_parts(&body, &[("styles", "styles.xml", styles)]);
+    let (_, steps) = work_of(|work| work.cut_steps, || document.to_layout_ir());
+    // At most four tries per name (a character has at most four bytes), four names per
+    // key, a key for each run and the mark, and a cut for each name of the style built.
+    assert!(steps <= (2_001 + 1) * 4 * 4, "{steps} steps");
+}
+
+#[test]
+fn cuts_names_and_tags_only_past_their_bounds() {
+    let report = |properties: &str| {
+        let body = format!(r#"<w:p><w:r><w:rPr>{properties}</w:rPr><w:t>x</w:t></w:r></w:p>"#);
+        let translation = translate(&open(&body));
+        translation
+            .left_out()
+            .iter()
+            .map(|entry| entry.message().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let name = |length: usize| format!(r#"<w:rFonts w:ascii="{}"/>"#, "N".repeat(length));
+    let tag = |length: usize| format!(r#"<w:lang w:val="{}"/>"#, "t".repeat(length));
+    assert!(report(&name(256)).is_empty());
+    assert_eq!(
+        report(&name(257)),
+        ["a font name of more than 256 bytes is cut"]
+    );
+    // A name of 257 bytes after one of 256 that it starts with: their cut names are
+    // the same, but only the second was cut, so it gets a style of its own, and the cut
+    // is listed.
+    let body = format!(
+        r#"<w:p><w:r><w:rPr>{}</w:rPr><w:t>a</w:t></w:r><w:r><w:rPr>{}</w:rPr><w:t>b</w:t></w:r></w:p>"#,
+        name(256),
+        name(257)
+    );
+    let translation = translate(&open(&body));
+    let left_out: Vec<&str> = translation
+        .left_out()
+        .iter()
+        .map(LeftOut::message)
+        .collect();
+    assert_eq!(left_out, ["a font name of more than 256 bytes is cut"]);
+    assert!(report(&tag(64)).is_empty());
+    assert_eq!(
+        report(&tag(65)),
+        ["a language tag of more than 64 bytes is left out"]
+    );
 }
