@@ -498,6 +498,9 @@ static void docx_to_pdf(const char *fonts, const char *out_dir) {
     char unwritable[1024];
     char carlito[1024];
     OwRenderOptions *from_file = NULL;
+    OwRenderOptions *from_memory = NULL;
+    uint8_t *carlito_data = NULL;
+    size_t carlito_len = 0;
     OwRenderOptions *options = NULL;
     OwDocDocument *doc = NULL;
     OwDocDocument *from_bytes = NULL;
@@ -577,6 +580,22 @@ static void docx_to_pdf(const char *fonts, const char *out_dir) {
            OW_STATUS_MALFORMED, "not a TrueType");
     EXPECT(ow_render_options_add_font_file(from_file, hello), OW_STATUS_MALFORMED, "hello.docx");
     ow_render_options_free(from_file);
+
+    /* The same font from memory. */
+    EXPECT(ow_render_options_new(&from_memory), OW_STATUS_OK, NULL);
+    EXPECT(ow_render_options_set_system_fonts(from_memory, 0), OW_STATUS_OK, NULL);
+    carlito_data = read_file(carlito, &carlito_len);
+    CHECK(carlito_data != NULL);
+    if (carlito_data != NULL) {
+        EXPECT(ow_render_options_add_font_bytes(from_memory, carlito_data, carlito_len),
+               OW_STATUS_OK, NULL);
+        free(carlito_data);
+    }
+    EXPECT(ow_doc_document_save_pdf_bytes(doc, from_memory, &data, &len, NULL), OW_STATUS_OK,
+           NULL);
+    CHECK(contains(data, len, "Carlito-Regular"));
+    ow_bytes_free(data, len);
+    ow_render_options_free(from_memory);
 
     /* From memory: the document opens the same. */
     docx = read_file(hello, &docx_len);

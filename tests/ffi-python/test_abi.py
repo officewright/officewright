@@ -588,6 +588,22 @@ class AbiTest(unittest.TestCase):
         self.check(lib.ow_render_options_add_font_file(options, b"/nonexistent/font.ttf"), IO)
         self.assertTrue(last_error().startswith("cannot read /nonexistent/font.ttf"))
 
+    def test_a_font_from_memory(self):
+        options = c_void_p()
+        self.check(lib.ow_render_options_new(byref(options)))
+        self.addCleanup(lib.ow_render_options_free, options)
+        self.check(lib.ow_render_options_set_system_fonts(options, 0))
+        carlito = (FONTS / "carlito" / "Carlito-Regular.ttf").read_bytes()
+        self.check(lib.ow_render_options_add_font_bytes(options, carlito, len(carlito)))
+        doc = self.open_docx(HELLO_DOCX)
+        data = POINTER(c_uint8)()
+        length = c_size_t()
+        self.check(lib.ow_doc_document_save_pdf_bytes(doc, options, byref(data), byref(length), None))
+        try:
+            self.assertIn(b"Carlito-Regular", ctypes.string_at(data, length.value))
+        finally:
+            lib.ow_bytes_free(data, length)
+
     def test_conversion_errors_have_a_status_and_a_message(self):
         options = self.render_options()
         # More pages than allowed: no PDF and no report.

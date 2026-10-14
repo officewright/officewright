@@ -1264,10 +1264,11 @@ pub unsafe extern "C" fn ow_doc_document_open_bytes(
 /// NULL if the call fails.
 ///
 /// Fails with `OW_STATUS_IO` if the file cannot be written or a font folder of the
-/// options cannot be read, and `OW_STATUS_LIMIT_EXCEEDED` if the document takes more
-/// pages than the options allow or nests tables deeper than the layout follows. `OW_STATUS_INVALID_ARGUMENT` here
-/// would mean that officewright translated the document wrongly, a defect worth
-/// reporting with the document.
+/// options cannot be read, `OW_STATUS_MALFORMED` if a font the PDF embeds is damaged
+/// where only embedding looks (a glyph's outline, say), and `OW_STATUS_LIMIT_EXCEEDED`
+/// if the document takes more pages than the options allow or nests tables deeper than
+/// the layout follows. `OW_STATUS_INVALID_ARGUMENT` here would mean that officewright
+/// translated the document wrongly, a defect worth reporting with the document.
 ///
 /// # Safety
 ///
@@ -1449,7 +1450,9 @@ pub unsafe extern "C" fn ow_render_options_add_font_dir(
 /// Adds the font file (TrueType, OpenType or a collection) in the `len` bytes at
 /// `data`, which the library copies; its fonts are used before the folders' and the
 /// system's. Fails with `OW_STATUS_MALFORMED` if the data is not a font or every face in
-/// it is damaged, leaving the options unchanged.
+/// it is damaged, leaving the options unchanged. The check reads what identifies the
+/// font, not every glyph: a font damaged deeper is accepted here, and the conversion that
+/// embeds it fails with `OW_STATUS_MALFORMED`.
 ///
 /// # Safety
 ///
@@ -1474,7 +1477,8 @@ pub unsafe extern "C" fn ow_render_options_add_font_bytes(
 /// library reads now; its fonts are used before the folders' and the system's, as those
 /// of `ow_render_options_add_font_bytes` are. Fails with `OW_STATUS_IO` if the file cannot
 /// be read and `OW_STATUS_MALFORMED` if it is not a font or every face in it is damaged,
-/// with the path in the message, leaving the options unchanged.
+/// with the path in the message, leaving the options unchanged. Like that of
+/// `ow_render_options_add_font_bytes`, the check does not read every glyph.
 ///
 /// # Safety
 ///
@@ -2450,7 +2454,7 @@ mod tests {
             let pdf = std::slice::from_raw_parts(data, len).to_vec();
             ow_bytes_free(data, len);
             assert!(pdf.starts_with(b"%PDF-"));
-            // The minimal font stands in for the document's, which the options lack.
+            // The options lack the document's font (Calibri), and the report says so.
             let entries = report_entries(report);
             assert!(
                 entries.iter().any(
@@ -2460,6 +2464,13 @@ mod tests {
                 "{entries:?}"
             );
             ow_layout_report_free(report);
+            // The minimal font, given from memory, is in the book the options make.
+            let book = (*options).0.font_book().unwrap();
+            let families: Vec<&str> = book
+                .faces()
+                .filter_map(|(_, face)| face.names().family())
+                .collect();
+            assert_eq!(families, ["Officewright Test"]);
             // Through a path, without a report: the same file.
             let dir =
                 std::env::temp_dir().join(format!("officewright-ffi-docx-{}", std::process::id()));

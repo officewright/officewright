@@ -809,10 +809,11 @@ enum OwStatus ow_doc_document_open_bytes(const uint8_t *data,
  * NULL if the call fails.
  *
  * Fails with `OW_STATUS_IO` if the file cannot be written or a font folder of the
- * options cannot be read, and `OW_STATUS_LIMIT_EXCEEDED` if the document takes more
- * pages than the options allow or nests tables deeper than the layout follows. `OW_STATUS_INVALID_ARGUMENT` here
- * would mean that officewright translated the document wrongly, a defect worth
- * reporting with the document.
+ * options cannot be read, `OW_STATUS_MALFORMED` if a font the PDF embeds is damaged
+ * where only embedding looks (a glyph's outline, say), and `OW_STATUS_LIMIT_EXCEEDED`
+ * if the document takes more pages than the options allow or nests tables deeper than
+ * the layout follows. `OW_STATUS_INVALID_ARGUMENT` here would mean that officewright
+ * translated the document wrongly, a defect worth reporting with the document.
  *
  * # Safety
  *
@@ -903,7 +904,9 @@ enum OwStatus ow_render_options_add_font_dir(struct OwRenderOptions *options, co
  * Adds the font file (TrueType, OpenType or a collection) in the `len` bytes at
  * `data`, which the library copies; its fonts are used before the folders' and the
  * system's. Fails with `OW_STATUS_MALFORMED` if the data is not a font or every face in
- * it is damaged, leaving the options unchanged.
+ * it is damaged, leaving the options unchanged. The check reads what identifies the
+ * font, not every glyph: a font damaged deeper is accepted here, and the conversion that
+ * embeds it fails with `OW_STATUS_MALFORMED`.
  *
  * # Safety
  *
@@ -919,7 +922,8 @@ enum OwStatus ow_render_options_add_font_bytes(struct OwRenderOptions *options,
  * library reads now; its fonts are used before the folders' and the system's, as those
  * of `ow_render_options_add_font_bytes` are. Fails with `OW_STATUS_IO` if the file cannot
  * be read and `OW_STATUS_MALFORMED` if it is not a font or every face in it is damaged,
- * with the path in the message, leaving the options unchanged.
+ * with the path in the message, leaving the options unchanged. Like that of
+ * `ow_render_options_add_font_bytes`, the check does not read every glyph.
  *
  * # Safety
  *
