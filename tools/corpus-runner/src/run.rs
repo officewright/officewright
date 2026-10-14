@@ -379,7 +379,7 @@ fn score_file(reference: &Path, pdf: &Path) -> Result<metrics::Scores, String> {
     let (valid, not_embedded) = metrics::check_pdf(pdf)?;
     scores.pdf_valid = Some(valid);
     scores.fonts_not_embedded = Some(not_embedded);
-    scores.word_fonts = metrics::word_fonts(reference)?;
+    scores.read_word_fonts(reference)?;
     Ok(scores)
 }
 
