@@ -83,6 +83,14 @@ impl Formats<'_> {
         Some(level.label)
     }
 
+    /// The definition the list instance `instance` uses, after a numbering style's
+    /// link, as paragraphs resolve it; none when there is no such instance or definition.
+    // reason: only the translation into the layout IR asks for it.
+    #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
+    pub(crate) fn list_definition(&mut self, instance: i64) -> Option<i64> {
+        self.instance(instance)?.definition
+    }
+
     /// What the document defaults give to paragraphs.
     fn paragraph_defaults(&mut self) -> Arc<ParagraphLevel> {
         let document = self.document;

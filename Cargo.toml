@@ -15,6 +15,7 @@ repository = "https://github.com/officewright/officewright"
 officewright-core = { path = "crates/officewright-core", version = "0.1.0" }
 officewright-doc = { path = "crates/officewright-doc", version = "0.1.0" }
 officewright-font = { path = "crates/officewright-font", version = "0.1.0" }
+officewright-layout = { path = "crates/officewright-layout", version = "0.1.0" }
 officewright-opc = { path = "crates/officewright-opc", version = "0.1.0" }
 officewright-pdf = { path = "crates/officewright-pdf", version = "0.1.0" }
 officewright-slides = { path = "crates/officewright-slides", version = "0.1.0" }

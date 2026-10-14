@@ -397,6 +397,16 @@ fn paragraph_of<'a>(document: &'a Document, node: &'a Node) -> Option<&'a Node> 
     None
 }
 
+impl Document {
+    /// A colour as written, in effect: a theme colour through the colour mapping and
+    /// the theme, with its tint or shade; else the value written, or automatic.
+    // reason: only the translation into the layout IR asks for it outside the resolver.
+    #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
+    pub(crate) fn resolve_color(&self, color: &super::properties::Color) -> super::ColorValue {
+        character::resolve_color(self, color)
+    }
+}
+
 /// Sets `slot` to `value` when there is one.
 fn overwrite<T>(slot: &mut Option<T>, value: Option<T>) {
     if value.is_some() {

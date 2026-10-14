@@ -544,7 +544,7 @@ fn script_of(language: &str) -> Option<&'static str> {
 
 /// A colour in effect: a theme colour through the colour mapping and the theme, with its
 /// tint or shade; else the value written, or automatic.
-fn resolve_color(document: &Document, color: &Color) -> ColorValue {
+pub(super) fn resolve_color(document: &Document, color: &Color) -> ColorValue {
     let themed = color
         .theme
         .filter(|theme| *theme != ThemeColor::None)

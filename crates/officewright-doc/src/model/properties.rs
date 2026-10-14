@@ -38,6 +38,15 @@ macro_rules! xml_enum {
                     _ => None,
                 }
             }
+
+            /// The value as WordprocessingML writes it.
+            // reason: only some value sets are passed on by name so far.
+            #[allow(dead_code)]
+            pub(crate) fn to_xml(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $value,)*
+                }
+            }
         }
     };
 }
@@ -237,7 +246,7 @@ impl Color {
 }
 
 /// A colour value (ST_HexColor).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ColorValue {
     /// Chosen by the application: for text, black, or white on a dark background.

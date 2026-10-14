@@ -1,0 +1,692 @@
+//! The translation into the layout IR: [`Document::to_layout_ir`].
+
+use officewright_layout::ReportKind;
+use officewright_layout::ir;
+
+use super::*;
+
+/// A document whose body is `body`, with parts related to the main part, each given by
+/// the last segment of its relationship type, its target under `word/` and its XML.
+fn with_parts(body: &str, parts: &[(&str, &str, String)]) -> Document {
+    let relationships: String = parts
+        .iter()
+        .enumerate()
+        .map(|(n, (kind, target, _))| {
+            format!(
+                r#"<Relationship Id="rId{n}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{kind}" Target="{target}"/>"#
+            )
+        })
+        .collect();
+    let rels = format!(
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{relationships}</Relationships>"#
+    );
+    let mut extra = vec![("word/_rels/document.xml.rels".to_owned(), rels)];
+    for (_, target, xml) in parts {
+        extra.push((format!("word/{target}"), xml.clone()));
+    }
+    let extra: Vec<(&str, &str)> = extra.iter().map(|(a, b)| (&**a, &**b)).collect();
+    Document::from_bytes(package(DOCUMENT, &document_xml(body), &extra)).unwrap()
+}
+
+/// The translation of a document, which must be valid IR.
+fn translate(document: &Document) -> Translation {
+    let translation = document.to_layout_ir();
+    if let Err(err) = translation.document().validate() {
+        panic!("not valid: {err}");
+    }
+    translation
+}
+
+/// The paragraphs of the first section.
+fn paragraphs(translation: &Translation) -> Vec<&ir::Paragraph> {
+    translation.document().sections()[0]
+        .blocks()
+        .iter()
+        .map(|block| match block {
+            ir::Block::Paragraph(paragraph) => paragraph,
+            other => panic!("not a paragraph: {other:?}"),
+        })
+        .collect()
+}
+
+/// An inline, briefly; fields with their results.
+fn describe(inline: &ir::Inline) -> String {
+    match inline {
+        ir::Inline::Text { text, .. } => format!("text {text}"),
+        ir::Inline::Tab { .. } => "tab".to_owned(),
+        ir::Inline::Break { kind, .. } => format!("break {kind:?}"),
+        ir::Inline::Symbol { font, code, .. } => format!("symbol {font} {code:04X}"),
+        ir::Inline::SoftHyphen { .. } => "soft hyphen".to_owned(),
+        ir::Inline::NoBreakHyphen { .. } => "no-break hyphen".to_owned(),
+        ir::Inline::Field(field) => {
+            let result: Vec<String> = field.result().iter().map(describe).collect();
+            format!(
+                "field {:?} {:?} [{}]",
+                field.kind(),
+                field.format(),
+                result.join(", ")
+            )
+        }
+        other => format!("{other:?}"),
+    }
+}
+
+/// The inlines of each paragraph of the first section, briefly.
+fn contents(translation: &Translation) -> Vec<Vec<String>> {
+    paragraphs(translation)
+        .into_iter()
+        .map(|paragraph| paragraph.inlines().iter().map(describe).collect())
+        .collect()
+}
+
+fn style_of(inline: &ir::Inline) -> ir::RunStyleId {
+    match inline {
+        ir::Inline::Text { style, .. } => *style,
+        other => panic!("not text: {other:?}"),
+    }
+}
+
+#[test]
+fn translates_text_tabs_breaks_symbols_and_hyphens() {
+    let document = open(
+        r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Arial"/></w:rPr><w:t>a	b</w:t><w:tab/><w:br/><w:br w:type="page"/><w:br w:type="column"/><w:br w:clear="all"/><w:cr/><w:sym w:font="Wingdings" w:char="F0FC"/><w:sym w:char="F020"/><w:softHyphen/><w:noBreakHyphen/><w:t xml:space="preserve">c&#x85;d&#10;e</w:t></w:r></w:p>"#,
+    );
+    let translation = translate(&document);
+    assert_eq!(
+        contents(&translation),
+        [[
+            "text a",
+            "tab",
+            "text b",
+            "tab",
+            "break Line(None)",
+            "break Page",
+            "break Column",
+            "break Line(All)",
+            "break Line(None)",
+            "symbol Wingdings F0FC",
+            // A symbol without a font is in the run's font.
+            "symbol Arial F020",
+            "soft hyphen",
+            "no-break hyphen",
+            // Control characters are not IR text: a line feed is a space, others go.
+            "text cd e",
+        ]]
+    );
+    assert!(
+        translation.left_out().is_empty(),
+        "{:?}",
+        translation.left_out()
+    );
+}
+
+#[test]
+fn gives_each_distinct_run_format_one_run_style() {
+    let styles = [
+        format::defaults(r#"<w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:eastAsia="SimSun" w:cs="Arial"/><w:sz w:val="22"/><w:lang w:val="en-GB" w:eastAsia="zh-CN"/>"#),
+        format::style("character", "Strong", None, "<w:b/>"),
+    ]
+    .concat();
+    let runs = [
+        "",
+        r#"<w:rStyle w:val="Strong"/>"#,
+        "<w:b/>",
+        r#"<w:color w:val="FF0000"/><w:u w:val="double" w:color="00FF00"/><w:highlight w:val="darkCyan"/><w:vertAlign w:val="superscript"/><w:w w:val="80"/><w:spacing w:val="20"/><w:kern w:val="24"/><w:caps/><w:vanish/><w:shd w:val="pct20" w:color="0000FF" w:fill="FFFF00"/>"#,
+        // A shading of pattern nil is no shading at all, not even its fill.
+        r#"<w:shd w:val="nil" w:fill="FFFF00"/>"#,
+    ];
+    let body = format::paragraph("", &runs).repeat(2);
+    let fonts = format!(
+        r#"<w:fonts xmlns:w="{W}"><w:font w:name="SimSun"><w:charset w:val="86"/></w:font></w:fonts>"#
+    );
+    let document = with_parts(
+        &body,
+        &[
+            (
+                "styles",
+                "styles.xml",
+                format!(r#"<w:styles xmlns:w="{W}">{styles}</w:styles>"#),
+            ),
+            ("fontTable", "fontTable.xml", fonts),
+        ],
+    );
+    let translation = translate(&document);
+    let ir = translation.document();
+    let ids: Vec<ir::RunStyleId> = paragraphs(&translation)
+        .iter()
+        .flat_map(|paragraph| paragraph.inlines().iter().map(style_of))
+        .collect();
+    // Five formats: the run in the bold character style names its style, so its format
+    // is not the bold run's. The second paragraph repeats the first's styles.
+    for (n, id) in ids[..5].iter().enumerate() {
+        assert!(ids[..n].iter().all(|other| other != id), "run {n}");
+    }
+    assert_eq!(&ids[..5], &ids[5..]);
+    assert_eq!(ir.run_style(ids[4]).unwrap().shading(), None);
+    assert!(ir.run_style(ids[2]).unwrap().bold());
+
+    let plain = ir.run_style(ids[0]).unwrap();
+    assert_eq!(plain.fonts().ascii(), "Arial");
+    assert_eq!(plain.fonts().east_asia(), "SimSun");
+    assert_eq!(
+        plain.fonts().east_asia_charset(),
+        ir::EastAsiaCharset::Gb2312
+    );
+    assert_eq!(plain.size(), Pt(11.0));
+    assert_eq!(plain.language().latin(), Some("en-GB"));
+    assert_eq!(plain.language().east_asia(), Some("zh-CN"));
+    assert!(!plain.bold());
+    assert!(ir.run_style(ids[1]).unwrap().bold());
+
+    let rich = ir.run_style(ids[3]).unwrap();
+    let rgb =
+        |red, green, blue| ir::ColorValue::Rgb(officewright_core::Color::rgb(red, green, blue));
+    assert_eq!(rich.color(), rgb(255, 0, 0));
+    assert_eq!(
+        rich.underline(),
+        Some(
+            ir::Underline::default()
+                .with_kind(ir::UnderlineKind::Double)
+                .with_color(rgb(0, 255, 0))
+        )
+    );
+    assert_eq!(
+        rich.highlight(),
+        Some(officewright_core::Color::rgb(0, 0x80, 0x80))
+    );
+    assert_eq!(rich.vertical(), ir::VerticalPosition::Superscript);
+    assert_eq!(rich.scale(), 80);
+    assert_eq!(rich.letter_spacing(), Pt(1.0));
+    assert_eq!(rich.kern_min(), Some(Pt(12.0)));
+    assert!(rich.caps() && rich.hidden());
+    assert_eq!(
+        rich.shading(),
+        Some(
+            ir::Shading::default()
+                .with_pattern(ir::ShadingPattern::Percent20)
+                .with_color(rgb(0, 0, 255))
+                .with_fill(rgb(255, 255, 0))
+        )
+    );
+}
+
+#[test]
+fn cuts_font_names_no_font_has() {
+    let name = "N".repeat(300);
+    let document = open(&format!(
+        r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="{name}"/></w:rPr><w:t>x</w:t></w:r></w:p>"#
+    ));
+    let translation = translate(&document);
+    let style = style_of(&paragraphs(&translation)[0].inlines()[0]);
+    let fonts = translation
+        .document()
+        .run_style(style)
+        .unwrap()
+        .fonts()
+        .clone();
+    assert_eq!(fonts.ascii(), "N".repeat(256));
+    let messages: Vec<&str> = translation
+        .left_out()
+        .iter()
+        .map(LeftOut::message)
+        .collect();
+    assert_eq!(messages, ["a font name of more than 256 characters is cut"]);
+}
+
+#[test]
+fn shares_run_styles_among_many_runs_with_bounded_work() {
+    // 2,000 runs of 1,000 distinct sizes: one style per size, and each repetition finds
+    // its style again.
+    let runs: String = (0..2000)
+        .map(|n| {
+            format!(
+                r#"<w:r><w:rPr><w:sz w:val="{}"/></w:rPr><w:t>x</w:t></w:r>"#,
+                2 + n % 1000
+            )
+        })
+        .collect();
+    let document = open(&format!("<w:p>{runs}</w:p>"));
+    let translation = translate(&document);
+    let ids: Vec<ir::RunStyleId> = paragraphs(&translation)[0]
+        .inlines()
+        .iter()
+        .map(style_of)
+        .collect();
+    for (n, id) in ids.iter().enumerate() {
+        assert_eq!(*id, ids[n % 1000], "run {n}");
+    }
+    assert_ne!(ids[0], ids[1]);
+}
+
+/// A complex field: its beginning, instruction, separator, result runs and end.
+fn field(instruction: &str, result: &str) -> String {
+    format!(
+        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve">{instruction}</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>{result}<w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+    )
+}
+
+fn text_run(text: &str) -> String {
+    format!(r#"<w:r><w:t xml:space="preserve">{text}</w:t></w:r>"#)
+}
+
+#[test]
+fn assembles_fields_with_their_results() {
+    let nested = [
+        text_run("1 "),
+        field("PAGE", &text_run("2")),
+        text_run(" 3"),
+    ]
+    .concat();
+    let body = [
+        format!(
+            "<w:p>{}</w:p>",
+            field(" PAGE \\* roman ", r#"<w:r><w:rPr><w:b/></w:rPr><w:t>iv</w:t></w:r>"#)
+        ),
+        // A field inside the result of another is part of its result.
+        format!("<w:p>{}</w:p>", field("DATE \\@ \"d MMMM\"", &nested)),
+        // A field without a separator has no result.
+        r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>NUMPAGES</w:instrText><w:fldChar w:fldCharType="end"/></w:r></w:p>"#.to_owned(),
+        // A field that does not end in its paragraph keeps the result it has there.
+        format!(
+            "<w:p>{}{}</w:p>",
+            r#"<w:r><w:fldChar w:fldCharType="begin"/><w:instrText>SECTIONPAGES</w:instrText><w:fldChar w:fldCharType="separate"/></w:r>"#,
+            text_run("5")
+        ),
+        // A separator and an end without a beginning are stray.
+        format!(
+            "<w:p>{}{}</w:p>",
+            r#"<w:r><w:fldChar w:fldCharType="separate"/><w:fldChar w:fldCharType="end"/></w:r>"#,
+            text_run("x")
+        ),
+        r#"<w:p><w:fldSimple w:instr=" PAGE \* ALPHABETIC "><w:r><w:t>B</w:t></w:r></w:fldSimple></w:p>"#.to_owned(),
+        // Content before the separator is the instruction, which shows nothing.
+        format!(
+            "<w:p>{}</w:p>",
+            field("PAGE", &text_run("7")).replace(
+                r#"<w:r><w:fldChar w:fldCharType="separate"/>"#,
+                &format!("{}{}", text_run("hidden"), r#"<w:r><w:fldChar w:fldCharType="separate"/>"#)
+            )
+        ),
+    ]
+    .concat();
+    let document = open(&body);
+    let translation = translate(&document);
+    assert_eq!(
+        contents(&translation),
+        [
+            vec!["field Page Some(LowerRoman) [text iv]"],
+            vec![r#"field Other("DATE") None [text 1 , text 2, text  3]"#],
+            vec!["field NumPages None []"],
+            vec!["field SectionPages None [text 5]"],
+            vec!["text x"],
+            vec!["field Page Some(UpperLetter) [text B]"],
+            vec!["field Page None [text 7]"],
+        ]
+    );
+    // A computed value takes the style of the result's first piece.
+    let ir = translation.document();
+    let ir::Inline::Field(page) = &paragraphs(&translation)[0].inlines()[0] else {
+        panic!("a field");
+    };
+    assert!(ir.run_style(page.style()).unwrap().bold());
+}
+
+#[test]
+fn takes_revisions_as_accepted_and_sees_through_containers() {
+    let document = open(
+        r#"<w:p><w:ins w:id="1" w:author="A"><w:r><w:t>in </w:t></w:r></w:ins><w:del w:id="2" w:author="A"><w:r><w:delText>gone</w:delText></w:r></w:del><w:moveFrom w:id="3" w:author="A"><w:r><w:t>away</w:t></w:r></w:moveFrom><w:moveTo w:id="4" w:author="A"><w:r><w:t>here </w:t></w:r></w:moveTo><w:hyperlink w:anchor="top"><w:r><w:t>link </w:t></w:r></w:hyperlink><w:sdt><w:sdtContent><w:r><w:t>control</w:t></w:r></w:sdtContent></w:sdt><w:bookmarkStart w:id="0" w:name="b"/><w:bookmarkEnd w:id="0"/><w:proofErr w:type="spellStart"/></w:p><w:bookmarkStart w:id="1" w:name="between"/><w:sdt><w:sdtContent><w:p><w:r><w:t>in a block control</w:t></w:r></w:p></w:sdtContent></w:sdt><w:bookmarkEnd w:id="1"/>"#,
+    );
+    let translation = translate(&document);
+    assert_eq!(
+        contents(&translation),
+        [
+            vec!["text in ", "text here ", "text link ", "text control"],
+            vec!["text in a block control"],
+        ]
+    );
+    // Bookmarks and proofing marks need no layout and are not listed.
+    assert!(
+        translation.left_out().is_empty(),
+        "{:?}",
+        translation.left_out()
+    );
+}
+
+#[test]
+fn lists_what_it_leaves_out() {
+    let document = open(
+        r#"<w:p><w:r><w:drawing/></w:r><w:r><w:footnoteReference w:id="1"/><w:endnoteReference w:id="2"/><w:ptab w:relativeTo="margin" w:alignment="right" w:leader="none"/></w:r><m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"/></w:p><w:tbl><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl><w:altChunk r:id="rId9"/><w:p><w:pPr><w:ind w:leftChars="200"/></w:pPr></w:p><w:sectPr><w:headerReference w:type="default" r:id="rId8"/></w:sectPr>"#,
+    );
+    let translation = translate(&document);
+    let left_out: Vec<String> = translation
+        .left_out()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        left_out,
+        [
+            "sections[0]: the section's headers and footers are left out: they are not translated yet",
+            "sections[0].blocks[0].inlines: a drawing is left out (w:drawing)",
+            "sections[0].blocks[0].inlines: a footnote reference is left out: notes are not translated yet",
+            "sections[0].blocks[0].inlines: an endnote reference is left out: notes are not translated yet",
+            "sections[0].blocks[0].inlines: an absolute position tab is left out (w:ptab)",
+            "sections[0].blocks[0].inlines: an equation is left out",
+            "sections[0].blocks[1]: a table is left out: tables are not translated yet",
+            "sections[0].blocks[1]: a block-level w:altChunk is left out",
+            "sections[0].blocks[1]: indents or spacing in character or line units keep their value in points",
+        ]
+    );
+    assert!(
+        translation
+            .left_out()
+            .iter()
+            .all(|entry| entry.kind() == ReportKind::FeatureUnsupported)
+    );
+}
+
+#[test]
+fn lists_at_most_a_thousand_entries() {
+    let references = r#"<w:r><w:footnoteReference w:id="1"/></w:r>"#.repeat(1200);
+    let document = open(&format!("<w:p>{references}</w:p>"));
+    let translation = translate(&document);
+    let left_out = translation.left_out();
+    assert_eq!(left_out.len(), 1001);
+    assert_eq!(left_out[1000].message(), "200 more entries are not listed");
+    assert_eq!(left_out[1000].location(), "document");
+}
+
+#[test]
+fn translates_paragraph_formatting() {
+    let theme = format!(
+        r#"<a:theme xmlns:a="{A}" name="T"><a:themeElements><a:clrScheme name="C"><a:dk1><a:srgbClr val="000000"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="111111"/></a:dk2><a:lt2><a:srgbClr val="EEEEEE"/></a:lt2><a:accent1><a:srgbClr val="4F81BD"/></a:accent1><a:accent2><a:srgbClr val="C0504D"/></a:accent2><a:accent3><a:srgbClr val="030303"/></a:accent3><a:accent4><a:srgbClr val="040404"/></a:accent4><a:accent5><a:srgbClr val="050505"/></a:accent5><a:accent6><a:srgbClr val="060606"/></a:accent6><a:hlink><a:srgbClr val="0000FF"/></a:hlink><a:folHlink><a:srgbClr val="800080"/></a:folHlink></a:clrScheme><a:fontScheme name="F"><a:majorFont><a:latin typeface="Major"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont><a:minorFont><a:latin typeface="Minor"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont></a:fontScheme><a:fmtScheme name="S"/></a:themeElements></a:theme>"#
+    );
+    let styles = format!(
+        r#"<w:styles xmlns:w="{W}"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Heading"><w:name w:val="Heading"/><w:pPr><w:keepNext/><w:pBdr><w:top w:val="double" w:sz="8" w:space="2" w:color="FF0000" w:themeColor="accent1"/><w:bottom w:val="none" w:sz="4"/></w:pBdr><w:shd w:val="clear" w:color="auto" w:fill="DDDDDD" w:themeFill="accent2"/><w:tabs><w:tab w:val="right" w:leader="dot" w:pos="9000"/><w:tab w:val="decimal" w:pos="4000"/></w:tabs><w:spacing w:before="240" w:after="120" w:line="360" w:lineRule="auto"/><w:ind w:left="720" w:right="360" w:hanging="360"/><w:contextualSpacing/><w:jc w:val="center"/><w:outlineLvl w:val="1"/></w:pPr></w:style><w:style w:type="paragraph" w:styleId="Other"><w:name w:val="Other"/></w:style></w:styles>"#
+    );
+    let body = [
+        r#"<w:p><w:pPr><w:pStyle w:val="Heading"/><w:tabs><w:tab w:val="clear" w:pos="4000"/></w:tabs></w:pPr></w:p>"#,
+        r#"<w:p><w:pPr><w:pStyle w:val="Heading"/><w:spacing w:line="300" w:lineRule="exact"/><w:jc w:val="both"/></w:pPr></w:p>"#,
+        r#"<w:p><w:pPr><w:pStyle w:val="Other"/><w:spacing w:line="280" w:lineRule="atLeast"/><w:jc w:val="right"/></w:pPr></w:p>"#,
+        "<w:p/>",
+    ]
+    .concat();
+    let document = with_parts(
+        &body,
+        &[
+            ("styles", "styles.xml", styles),
+            ("theme", "theme/theme1.xml", theme),
+        ],
+    );
+    let translation = translate(&document);
+    let found = paragraphs(&translation);
+    let heading = found[0].props();
+    assert_eq!(heading.alignment(), ir::Alignment::Center);
+    assert_eq!(
+        heading.indent(),
+        ir::Indent::default()
+            .with_start(Pt(36.0))
+            .with_end(Pt(18.0))
+            .with_first_line(Pt(-18.0))
+    );
+    assert_eq!(
+        heading.spacing(),
+        ir::Spacing::default()
+            .with_before(Pt(12.0))
+            .with_after(Pt(6.0))
+            .with_line(ir::LineSpacing::Multiple(1.5))
+    );
+    assert!(heading.keep_next() && heading.contextual_spacing());
+    assert_eq!(heading.outline_level(), Some(1));
+    // The cleared stop of the style is gone.
+    assert_eq!(
+        heading.tabs(),
+        [ir::TabStop::default()
+            .with_position(Pt(450.0))
+            .with_kind(ir::TabKind::End)
+            .with_leader(ir::TabLeader::Dot)]
+    );
+    // Theme colours are resolved; a border of style none is no border.
+    let rgb =
+        |red, green, blue| ir::ColorValue::Rgb(officewright_core::Color::rgb(red, green, blue));
+    let borders = heading.borders();
+    assert_eq!(
+        borders.top(),
+        Some(
+            ir::Border::default()
+                .with_style(ir::BorderStyle::Double)
+                .with_width(Pt(1.0))
+                .with_space(Pt(2.0))
+                .with_color(rgb(0x4F, 0x81, 0xBD))
+        )
+    );
+    assert_eq!(borders.bottom(), None);
+    assert_eq!(
+        heading.shading(),
+        Some(ir::Shading::default().with_fill(rgb(0xC0, 0x50, 0x4D)))
+    );
+    let exact = found[1].props();
+    assert_eq!(exact.alignment(), ir::Alignment::Both);
+    assert_eq!(exact.spacing().line(), ir::LineSpacing::Exact(Pt(15.0)));
+    let other = found[2].props();
+    assert_eq!(other.alignment(), ir::Alignment::End);
+    assert_eq!(other.spacing().line(), ir::LineSpacing::AtLeast(Pt(14.0)));
+    // One key per paragraph style, for contextual spacing; a paragraph without w:pStyle
+    // has the default style's.
+    let keys: Vec<u32> = found
+        .iter()
+        .map(|paragraph| paragraph.props().style_key().value())
+        .collect();
+    assert_eq!(keys[0], keys[1]);
+    assert!(keys[0] != keys[2] && keys[2] != keys[3] && keys[0] != keys[3]);
+    // Without any paragraph style, the key is 0.
+    let plain = translate(&open("<w:p/>"));
+    assert_eq!(paragraphs(&plain)[0].props().style_key().value(), 0);
+}
+
+#[test]
+fn translates_lists_as_paragraphs_use_them() {
+    let numbering = format!(
+        r#"<w:numbering xmlns:w="{W}"><w:abstractNum w:abstractNumId="10"><w:lvl w:ilvl="0"><w:start w:val="3"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="right"/></w:lvl><w:lvl w:ilvl="1"><w:numFmt w:val="lowerLetter"/><w:lvlRestart w:val="0"/><w:lvlText w:val="%1.%2)"/><w:suff w:val="space"/><w:isLgl/></w:lvl><w:lvl w:ilvl="3"><w:numFmt w:val="bullet"/><w:lvlText w:val="%1"/><w:lvlRestart w:val="2"/><w:suff w:val="nothing"/><w:rPr><w:b/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num><w:num w:numId="2"><w:abstractNumId w:val="10"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="5"/></w:lvlOverride><w:lvlOverride w:ilvl="1"><w:lvl w:ilvl="1"><w:numFmt w:val="lowerRoman"/><w:lvlText w:val="(%2)"/></w:lvl></w:lvlOverride></w:num><w:num w:numId="3"><w:abstractNumId w:val="99"/></w:num></w:numbering>"#
+    );
+    let item = |instance: i64, level: i64| {
+        format!(
+            r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="{level}"/><w:numId w:val="{instance}"/></w:numPr></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#
+        )
+    };
+    let body = [
+        item(1, 0),
+        item(1, 3),
+        item(2, 0),
+        item(2, 1),
+        item(3, 0),
+        item(1, 0),
+    ]
+    .concat();
+    let document = with_parts(&body, &[("numbering", "numbering.xml", numbering)]);
+    let translation = translate(&document);
+    let ir = translation.document();
+    let items: Vec<Option<ir::ListItem>> =
+        paragraphs(&translation).iter().map(|p| p.list()).collect();
+    let [
+        Some(first),
+        Some(bullet),
+        Some(second),
+        Some(roman),
+        None,
+        Some(again),
+    ] = items[..]
+    else {
+        panic!("{items:?}");
+    };
+    // One IR instance per instance of the document.
+    assert_eq!(first.instance(), again.instance());
+    assert_eq!(first.instance(), bullet.instance());
+    assert_ne!(first.instance(), second.instance());
+    assert_eq!((first.level(), bullet.level(), roman.level()), (0, 3, 1));
+    // The label of the bullet level is bold.
+    assert!(ir.run_style(bullet.label_style()).unwrap().bold());
+    assert!(!ir.run_style(first.label_style()).unwrap().bold());
+
+    // Both instances use one definition.
+    let one = ir.list_instance(first.instance()).unwrap();
+    let two = ir.list_instance(second.instance()).unwrap();
+    assert_eq!(one.definition(), two.definition());
+    assert!(one.overrides().is_empty());
+    let definition = ir.list(one.definition()).unwrap();
+    let levels = definition.levels();
+    // Levels up to the last one written; level 2, left out, is empty.
+    assert_eq!(levels.len(), 4);
+    use ir::LevelTextPart::{Literal, Placeholder};
+    assert_eq!(
+        levels[0],
+        ir::Level::default()
+            .with_start(3)
+            .with_text([Placeholder(0), Literal(".".into())])
+            .with_alignment(ir::LevelAlignment::End)
+    );
+    assert_eq!(
+        levels[1],
+        ir::Level::default()
+            .with_format(ir::NumberFormat::LowerLetter)
+            .with_restart(ir::Restart::Never)
+            .with_text([
+                Placeholder(0),
+                Literal(".".into()),
+                Placeholder(1),
+                Literal(")".into())
+            ])
+            .with_suffix(ir::Suffix::Space)
+            .with_legal(true)
+    );
+    assert_eq!(levels[2], ir::Level::default());
+    // A bullet's text is shown as it is.
+    assert_eq!(
+        levels[3],
+        ir::Level::default()
+            .with_format(ir::NumberFormat::Bullet)
+            .with_text([Literal("%1".into())])
+            .with_restart(ir::Restart::AfterLevel(1))
+            .with_suffix(ir::Suffix::Nothing)
+    );
+    // Instance 2's overrides: a start, and a replacement level.
+    let overrides = two.overrides();
+    assert_eq!(overrides.len(), 2);
+    assert_eq!((overrides[0].level(), overrides[0].start()), (0, Some(5)));
+    assert_eq!(overrides[0].replacement(), &None);
+    assert_eq!(
+        overrides[1].replacement(),
+        &Some(
+            ir::Level::default()
+                .with_format(ir::NumberFormat::LowerRoman)
+                .with_text([Literal("(".into()), Placeholder(1), Literal(")".into())])
+        )
+    );
+}
+
+#[test]
+fn translates_settings_and_sections() {
+    let settings = format!(
+        r#"<w:settings xmlns:w="{W}"><w:evenAndOddHeaders/><w:defaultTabStop w:val="360"/><w:autoHyphenation/><w:consecutiveHyphenLimit w:val="2"/><w:hyphenationZone w:val="200"/><w:doNotHyphenateCaps/><w:footnotePr><w:pos w:val="sectEnd"/><w:numFmt w:val="upperLetter"/></w:footnotePr><w:compat><w:doNotExpandShiftReturn/><w:usePrinterMetrics/><w:noLeading w:val="0"/><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="14"/><w:compatSetting w:name="enableOpenTypeFeatures" w:uri="http://schemas.microsoft.com/office/word" w:val="1"/><w:compatSetting w:name="differentiateMultirowTableHeaders" w:uri="http://schemas.microsoft.com/office/word" w:val="0"/></w:compat><w:decimalSymbol w:val=","/></w:settings>"#
+    );
+    let body = r#"<w:p><w:pPr><w:sectPr><w:footnotePr><w:pos w:val="beneathText"/><w:numStart w:val="2"/><w:numRestart w:val="eachPage"/></w:footnotePr><w:type w:val="continuous"/><w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/><w:pgMar w:top="1000" w:right="1100" w:bottom="1200" w:left="1300" w:header="400" w:footer="500" w:gutter="100"/><w:pgNumType w:fmt="lowerRoman" w:start="3"/><w:cols w:num="2" w:space="720" w:sep="1"/><w:titlePg/><w:vAlign w:val="center"/></w:sectPr></w:pPr></w:p><w:p/><w:sectPr><w:cols w:num="2" w:equalWidth="0"><w:col w:w="3000" w:space="400"/><w:col w:w="5000"/></w:cols></w:sectPr>"#;
+    let document = with_parts(body, &[("settings", "settings.xml", settings)]);
+    let translation = translate(&document);
+    let ir = translation.document();
+    let settings = ir.settings();
+    assert_eq!(settings.compat_mode(), ir::CompatMode::Word2010);
+    let flags: Vec<&str> = settings
+        .compat_flags()
+        .iter()
+        .map(ir::CompatFlag::name)
+        .collect();
+    assert_eq!(
+        flags,
+        [
+            "doNotExpandShiftReturn",
+            "usePrinterMetrics",
+            "enableOpenTypeFeatures"
+        ]
+    );
+    assert_eq!(settings.default_tab_stop(), Pt(18.0));
+    assert_eq!(settings.decimal_separator(), ',');
+    assert!(settings.even_and_odd_headers());
+    assert_eq!(
+        settings.hyphenation(),
+        ir::Hyphenation::default()
+            .with_auto(true)
+            .with_zone(Pt(10.0))
+            .with_consecutive_limit(2)
+            .with_hyphenate_caps(false)
+    );
+
+    let sections = ir.sections();
+    assert_eq!(sections.len(), 2);
+    let first = &sections[0];
+    let page = first.page();
+    assert_eq!(
+        page.size(),
+        officewright_core::PageSize::new(Pt(841.9), Pt(595.3))
+    );
+    assert_eq!(page.orientation(), ir::Orientation::Landscape);
+    assert_eq!(
+        page.margins(),
+        ir::Margins::default()
+            .with_top(Pt(50.0))
+            .with_right(Pt(55.0))
+            .with_bottom(Pt(60.0))
+            .with_left(Pt(65.0))
+            .with_header(Pt(20.0))
+            .with_footer(Pt(25.0))
+            .with_gutter(Pt(5.0))
+    );
+    assert_eq!(
+        first.columns(),
+        &ir::Columns::default()
+            .with_count(2)
+            .with_spacing(Pt(36.0))
+            .with_separator(true)
+    );
+    assert_eq!(first.start(), ir::SectionStart::Continuous);
+    assert!(first.title_page());
+    assert_eq!(
+        first.page_numbering(),
+        &ir::PageNumbering::default()
+            .with_format(ir::NumberFormat::LowerRoman)
+            .with_start(Some(3))
+    );
+    assert_eq!(first.vertical_align(), ir::PageVerticalAlign::Center);
+    // Footnotes: the settings' number format, the section's position over the settings',
+    // its start and restart.
+    assert_eq!(
+        first.footnotes(),
+        &ir::NoteProps::footnotes()
+            .with_format(ir::NumberFormat::UpperLetter)
+            .with_position(ir::NotePosition::BeneathText)
+            .with_start(2)
+            .with_restart(ir::NoteRestart::EachPage)
+    );
+    assert_eq!(first.endnotes(), &ir::NoteProps::endnotes());
+    assert_eq!(first.blocks().len(), 1);
+
+    // No page size: Letter; columns of their own widths.
+    let last = &sections[1];
+    assert_eq!(last.page().size(), officewright_core::PageSize::LETTER);
+    assert_eq!(last.page().margins(), ir::Margins::default());
+    assert_eq!(
+        last.columns().widths(),
+        [
+            ir::Column::default()
+                .with_width(Pt(150.0))
+                .with_spacing(Pt(20.0)),
+            ir::Column::default().with_width(Pt(250.0)),
+        ]
+    );
+    assert_eq!(last.start(), ir::SectionStart::NextPage);
+    assert_eq!(
+        last.footnotes(),
+        &ir::NoteProps::footnotes()
+            .with_format(ir::NumberFormat::UpperLetter)
+            .with_position(ir::NotePosition::SectionEnd)
+    );
+}

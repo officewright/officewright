@@ -3154,4 +3154,6 @@ fn repairs_a_damaged_theme() {
 }
 
 mod format;
+#[cfg(feature = "pdf")]
+mod layout;
 mod paragraph_format;
