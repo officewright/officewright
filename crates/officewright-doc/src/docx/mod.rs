@@ -22,6 +22,8 @@ use capture::Budget;
 
 /// The main namespace of WordprocessingML, Transitional.
 const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+/// The namespace of Word 2010's extensions ([MS-DOCX] 2.6).
+const W14: &str = "http://schemas.microsoft.com/office/word/2010/wordml";
 /// The main namespace of WordprocessingML, Strict.
 const W_STRICT: &str = "http://purl.oclc.org/ooxml/wordprocessingml/main";
 /// The relationships namespace of attributes such as `r:id`, Transitional and Strict.
@@ -44,6 +46,7 @@ impl Names {
             r: [Some(strings.intern(R)), Some(strings.intern(R_STRICT))],
             a: [Some(strings.intern(A)), Some(strings.intern(A_STRICT))],
             mc: Some(strings.intern(officewright_opc::mce::NAMESPACE)),
+            w14: Some(strings.intern(W14)),
         }
     }
 }

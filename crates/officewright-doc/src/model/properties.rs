@@ -417,6 +417,86 @@ pub struct RunProperties {
     pub(crate) highlight: Option<Highlight>,
     pub(crate) shading: Option<Shading>,
     pub(crate) language: Language,
+    pub(crate) ligatures: Option<Ligatures>,
+    pub(crate) contextual_alternates: Option<bool>,
+}
+
+/// The kinds of ligatures text uses (`w14:ligatures`, [MS-DOCX] 2.6.1.17, of type
+/// ST_Ligatures, 2.6.4.3):
+/// each of the 16 values names a set of the four kinds, `none` and `all` among them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct Ligatures {
+    pub(crate) standard: bool,
+    pub(crate) contextual: bool,
+    pub(crate) historical: bool,
+    pub(crate) discretional: bool,
+}
+
+impl Ligatures {
+    /// The kinds, in the order the values name them.
+    const KINDS: [&'static str; 4] = ["standard", "contextual", "historical", "discretional"];
+
+    /// Standard ligatures, such as fi.
+    pub fn standard(&self) -> bool {
+        self.standard
+    }
+
+    /// Contextual ligatures.
+    pub fn contextual(&self) -> bool {
+        self.contextual
+    }
+
+    /// Historical ligatures.
+    pub fn historical(&self) -> bool {
+        self.historical
+    }
+
+    /// Discretionary ligatures.
+    pub fn discretional(&self) -> bool {
+        self.discretional
+    }
+
+    /// The set a value names: `none`, `all`, or one to three kinds joined in camel case
+    /// in the order of [`KINDS`](Self::KINDS), such as `standardContextual`.
+    pub(crate) fn from_xml(value: &str) -> Option<Self> {
+        let set = |kinds: [bool; 4]| {
+            let [standard, contextual, historical, discretional] = kinds;
+            Self {
+                standard,
+                contextual,
+                historical,
+                discretional,
+            }
+        };
+        match value {
+            "none" => return Some(Self::default()),
+            "all" => return Some(set([true; 4])),
+            _ => {}
+        }
+        let mut kinds = [false; 4];
+        let mut rest = value;
+        for (index, kind) in Self::KINDS.iter().enumerate() {
+            // The first kind is written in lower case, the later ones capitalised.
+            let written = if rest.len() == value.len() {
+                (*kind).to_owned()
+            } else {
+                let mut chars = kind.chars();
+                chars
+                    .next()
+                    .map(|first| first.to_ascii_uppercase().to_string() + chars.as_str())
+                    .unwrap_or_default()
+            };
+            if let Some(after) = rest.strip_prefix(written.as_str()) {
+                if let Some(slot) = kinds.get_mut(index) {
+                    *slot = true;
+                }
+                rest = after;
+            }
+        }
+        let count = kinds.iter().filter(|kind| **kind).count();
+        (rest.is_empty() && (1..=3).contains(&count)).then(|| set(kinds))
+    }
 }
 
 /// The on/off properties of a run, by the element that sets them.
@@ -598,6 +678,17 @@ impl RunProperties {
     /// The languages of the text (`w:lang`).
     pub fn language(&self) -> &Language {
         &self.language
+    }
+
+    /// The kinds of ligatures (`w14:ligatures`, [MS-DOCX] 2.6.1.17).
+    pub fn ligatures(&self) -> Option<Ligatures> {
+        self.ligatures
+    }
+
+    /// Whether the text uses the font's contextual alternates (`w14:cntxtAlts`,
+    /// [MS-DOCX] 2.6.1.2).
+    pub fn contextual_alternates(&self) -> Option<bool> {
+        self.contextual_alternates
     }
 }
 

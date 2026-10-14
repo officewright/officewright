@@ -320,9 +320,9 @@ impl<'a> Translator<'a> {
 }
 
 /// A preferred width of a table, a cell or the space before or after a row: automatic
-/// when it is written so, as `nil` or as 0 (MS-OI29500 §17.4.71(a) for a cell's), or not
-/// written; a negative one, which Word does not expect (MS-OI29500 §17.4.87(d)), is
-/// automatic too.
+/// when it is written so, as `nil` or as 0 (MS-OI29500 §17.4.63(a), (b) for a table's,
+/// §17.4.71(a), (b) for a cell's), or not written; a negative one, which Word does not
+/// expect (MS-OI29500 §17.4.87(d)), is automatic too.
 fn preferred(width: Option<TableWidth>) -> ir::PreferredWidth {
     match width {
         Some(TableWidth::Length(length)) if length.0 > 0.0 => ir::PreferredWidth::Points(length),
@@ -368,7 +368,8 @@ fn floats(position: Option<&TablePosition>) -> bool {
     // A distance as written, 0 when it is not: Word writes 1 twip for 0 to avoid this
     // case (§17.4.57(e)). A position given as an alignment (`tblpXSpec`, `tblpYSpec`),
     // which wins over the distance, is no distance of 0: Word 2007 writes tables placed
-    // at the bottom of the page so (n779642.docx of LibreOffice's tests).
+    // at the bottom of the margin so (n779642.docx of LibreOffice's tests), the margin
+    // being what Word measures from without a vertical anchor (§17.4.57(c)).
     let at_zero = |distance: Option<Pt>, aligned: bool| {
         !aligned && distance.is_none_or(|distance| distance.0 == 0.0)
     };
@@ -398,9 +399,10 @@ fn has_content(cell: TableCell<'_>) -> bool {
 /// percent or auto is taken as 0 as well, which no note confirms yet. Word ignores a
 /// side of a cell's `w:tcMar` of type `nil` (MS-OI29500 §17.4.2(a), §17.4.10(a),
 /// §17.4.77(a), and the same note for the start), so that side comes from the table.
-/// For the table's bottom margin the notes point to the same rule (§17.4.5), and a
-/// table's `nil` is taken as not written on every side, which a Word render is to
-/// confirm (#172).
+/// The notes on the table's top and bottom margins, and the one on every table
+/// measurement, point to the same rule (§17.4.75, §17.4.5, §17.4.87), so a table's
+/// `nil` is taken as not written on every side; at the start and end, whose notes speak
+/// only of percent and auto, a Word render is to confirm it (#172).
 fn cell_margins(
     written: Option<&crate::model::CellMargins>,
     below: &ir::CellMargins,

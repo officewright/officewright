@@ -10,8 +10,8 @@ use std::sync::Arc;
 use super::Document;
 use super::numbering::ListLevel;
 use super::properties::{
-    ColorValue, FontHint, Highlight, Justification, LineSpacing, ParagraphBorders, Shading,
-    TabStop, Toggle, UnderlineStyle, VerticalPosition,
+    ColorValue, FontHint, Highlight, Justification, Ligatures, LineSpacing, ParagraphBorders,
+    Shading, TabStop, Toggle, UnderlineStyle, VerticalPosition,
 };
 
 /// The font families of a run in effect, by the kind of character, with theme fonts
@@ -82,6 +82,8 @@ pub struct CharacterFormat {
     pub(crate) language_latin: Option<Arc<str>>,
     pub(crate) language_east_asia: Option<Arc<str>>,
     pub(crate) language_bidi: Option<Arc<str>>,
+    pub(crate) ligatures: Ligatures,
+    pub(crate) contextual_alternates: bool,
 }
 
 macro_rules! flags {
@@ -228,6 +230,20 @@ impl CharacterFormat {
     /// The language of complex script text.
     pub fn language_bidi(&self) -> Option<&str> {
         self.language_bidi.as_deref()
+    }
+
+    /// The kinds of ligatures the text uses; none when nothing in the hierarchy says. When
+    /// the document defaults give no run properties at all, Word's own defaults apply,
+    /// which give standard and contextual ligatures; document defaults that give run
+    /// properties but no ligatures give none.
+    pub fn ligatures(&self) -> Ligatures {
+        self.ligatures
+    }
+
+    /// Whether the text uses the font's contextual alternates; off when nothing in the
+    /// hierarchy says.
+    pub fn contextual_alternates(&self) -> bool {
+        self.contextual_alternates
     }
 }
 

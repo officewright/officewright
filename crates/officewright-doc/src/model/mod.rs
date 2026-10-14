@@ -30,9 +30,10 @@ pub use numbering::{
 };
 pub use properties::{
     ArtBorder, Border, BorderStyle, Color, ColorValue, FontHint, Highlight, Indentation,
-    Justification, Language, LineSpacing, NumberFormat, NumberingReference, ParagraphBorders,
-    ParagraphProperties, RunFonts, RunProperties, Shading, ShadingPattern, Spacing, TabKind,
-    TabLeader, TabStop, ThemeColor, ThemeFont, Underline, UnderlineStyle, VerticalPosition,
+    Justification, Language, Ligatures, LineSpacing, NumberFormat, NumberingReference,
+    ParagraphBorders, ParagraphProperties, RunFonts, RunProperties, Shading, ShadingPattern,
+    Spacing, TabKind, TabLeader, TabStop, ThemeColor, ThemeFont, Underline, UnderlineStyle,
+    VerticalPosition,
 };
 pub use resolve::Formats;
 pub(crate) use resolve::assign_paragraph_styles;
@@ -117,6 +118,8 @@ pub(crate) struct Names {
     /// The main namespace of DrawingML, of the theme.
     pub(crate) a: [Option<xml::Sym>; 2],
     pub(crate) mc: Option<xml::Sym>,
+    /// Word 2010's extensions, such as `w14:ligatures`.
+    pub(crate) w14: Option<xml::Sym>,
 }
 
 /// What a WordprocessingML package holds, from the content type of its main part.

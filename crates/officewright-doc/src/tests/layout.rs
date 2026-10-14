@@ -200,6 +200,9 @@ fn gives_each_distinct_run_format_one_run_style() {
     assert_eq!(rich.letter_spacing(), Pt(1.0));
     assert_eq!(rich.kern_min(), Some(Pt(12.0)));
     assert!(rich.caps() && rich.hidden());
+    // Without ligatures in the defaults, none; contextual alternates off.
+    assert_eq!(rich.ligatures(), ir::Ligatures::default());
+    assert!(!rich.contextual_alternates());
     assert_eq!(
         rich.shading(),
         Some(
@@ -1346,7 +1349,18 @@ fn gives_runs_that_differ_in_one_property_different_run_styles() {
         ("", "<w:caps/>"),
         ("", "<w:smallCaps/>"),
         ("", "<w:vanish/>"),
+        ("", r#"<w14:ligatures w14:val="standard"/>"#),
+        ("", r#"<w14:ligatures w14:val="historical"/>"#),
+        ("", "<w14:cntxtAlts/>"),
         // Values against values, not against none.
+        (
+            r#"<w14:ligatures w14:val="standard"/>"#,
+            r#"<w14:ligatures w14:val="historical"/>"#,
+        ),
+        (
+            r#"<w14:ligatures w14:val="historical"/>"#,
+            r#"<w14:ligatures w14:val="discretional"/>"#,
+        ),
         (
             r#"<w:color w:val="FF0000"/>"#,
             r#"<w:color w:val="00FF00"/>"#,
@@ -1402,7 +1416,8 @@ fn gives_runs_that_differ_in_one_property_different_run_styles() {
         let body = format!(
             r#"<w:p><w:r><w:rPr>{a}</w:rPr><w:t>a</w:t></w:r><w:r><w:rPr>{b}</w:rPr><w:t>b</w:t></w:r></w:p>"#
         );
-        let translation = translate(&open(&body));
+        // OpenType features on, so that ligatures and alternates count.
+        let translation = translate(&open_type(&body));
         let inlines = paragraphs(&translation)[0].inlines();
         let (first, second) = (style_of(&inlines[0]), style_of(&inlines[1]));
         assert_ne!(first, second, "{b}");
@@ -1428,6 +1443,9 @@ fn shares_run_styles_across_properties_the_ir_does_not_keep() {
         r#"<w:rFonts w:hint="default"/>"#,
         r#"<w:u w:val="none" w:color="FF0000"/>"#,
         r#"<w:highlight w:val="none"/>"#,
+        // Without enableOpenTypeFeatures, which these documents leave off.
+        r#"<w14:ligatures w14:val="all"/>"#,
+        "<w14:cntxtAlts/>",
     ] {
         let body = format!(
             r#"<w:p><w:r><w:t>a</w:t></w:r><w:r><w:rPr>{other}</w:rPr><w:t>b</w:t></w:r></w:p>"#
@@ -1787,7 +1805,7 @@ fn translates_the_rest_of_table_properties() {
     let translation = translate(&open(&format!("{table}<w:p/>")));
     let table = tables(&translation)[0];
     let props = table.props();
-    // A width of 0 percent is automatic (MS-OI29500 §17.4.71(a)).
+    // A width of 0 percent is automatic (MS-OI29500 §17.4.63(a)).
     assert_eq!(props.width(), ir::PreferredWidth::Auto);
     assert_eq!(props.alignment(), ir::TableAlignment::End);
     let line =
@@ -2022,4 +2040,87 @@ fn gives_the_paragraph_added_to_a_cell_the_default_paragraph_style_s_mark() {
     };
     let ir = translation.document();
     assert_eq!(ir.run_style(added.mark()).unwrap().size(), Pt(20.0));
+}
+
+#[test]
+fn translates_ligatures_and_contextual_alternates() {
+    let body = r#"<w:p><w:r><w:rPr><w14:ligatures w14:val="standardHistorical"/><w14:cntxtAlts/></w:rPr><w:t>x</w:t></w:r><w:r><w:t>y</w:t></w:r></w:p>"#;
+    let translation = translate(&open_type(body));
+    let ir = translation.document();
+    let inlines = paragraphs(&translation)[0].inlines();
+    let set = ir.run_style(style_of(&inlines[0])).unwrap();
+    assert_eq!(
+        set.ligatures(),
+        ir::Ligatures::default()
+            .with_standard(true)
+            .with_historical(true)
+    );
+    assert!(set.contextual_alternates());
+    // Without a styles part, Word's defaults: standard and contextual ligatures.
+    let defaults = ir.run_style(style_of(&inlines[1])).unwrap();
+    assert_eq!(
+        defaults.ligatures(),
+        ir::Ligatures::default()
+            .with_standard(true)
+            .with_contextual(true)
+    );
+    assert!(!defaults.contextual_alternates());
+    // Without enableOpenTypeFeatures, Word uses neither ([MS-DOCX] 2.3.3), and the two
+    // runs share a run style. The mark asks for both too, so that the style built first,
+    // the mark's, is built from a format that asks for them.
+    let marked = body.replace(
+        "<w:p>",
+        r#"<w:p><w:pPr><w:rPr><w14:ligatures w14:val="all"/><w14:cntxtAlts/></w:rPr></w:pPr>"#,
+    );
+    let translation = translate(&open(&marked));
+    let paragraph = paragraphs(&translation)[0];
+    let inlines = paragraph.inlines();
+    let ir = translation.document();
+    for id in [paragraph.mark(), style_of(&inlines[0])] {
+        let style = ir.run_style(id).unwrap();
+        assert_eq!(style.ligatures(), ir::Ligatures::default());
+        assert!(!style.contextual_alternates());
+    }
+    assert_eq!(style_of(&inlines[0]), style_of(&inlines[1]));
+    // The setting on as any on/off value writes on.
+    for on in ["true", "on", " 1 "] {
+        let settings = format!(
+            r#"<w:compatSetting w:name="enableOpenTypeFeatures" w:uri="http://schemas.microsoft.com/office/word" w:val="{on}"/>"#
+        );
+        let translation = translate(&with_compat(body, &settings));
+        let inlines = paragraphs(&translation)[0].inlines();
+        let style = translation
+            .document()
+            .run_style(style_of(&inlines[0]))
+            .unwrap();
+        assert!(style.contextual_alternates(), "{on}");
+    }
+    // The setting off, or turned off by a later one, is the same.
+    for settings in [
+        r#"<w:compatSetting w:name="enableOpenTypeFeatures" w:uri="http://schemas.microsoft.com/office/word" w:val="0"/>"#,
+        r#"<w:compatSetting w:name="enableOpenTypeFeatures" w:uri="http://schemas.microsoft.com/office/word" w:val="1"/><w:compatSetting w:name="enableOpenTypeFeatures" w:uri="http://schemas.microsoft.com/office/word" w:val="0"/>"#,
+    ] {
+        let translation = translate(&with_compat(body, settings));
+        let inlines = paragraphs(&translation)[0].inlines();
+        let style = translation
+            .document()
+            .run_style(style_of(&inlines[0]))
+            .unwrap();
+        assert_eq!(style.ligatures(), ir::Ligatures::default(), "{settings}");
+    }
+}
+
+/// A document whose settings hold `compat_settings` among its compatibility settings.
+fn with_compat(body: &str, compat_settings: &str) -> Document {
+    let settings =
+        format!(r#"<w:settings xmlns:w="{W}"><w:compat>{compat_settings}</w:compat></w:settings>"#);
+    with_parts(body, &[("settings", "settings.xml", settings)])
+}
+
+/// A document that turns OpenType features on, as Word 2010 and later do.
+fn open_type(body: &str) -> Document {
+    with_compat(
+        body,
+        r#"<w:compatSetting w:name="enableOpenTypeFeatures" w:uri="http://schemas.microsoft.com/office/word" w:val="1"/>"#,
+    )
 }

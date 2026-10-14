@@ -1581,6 +1581,21 @@ fn reads_the_style_of_each_paragraph_once_for_the_document() {
 }
 
 #[test]
+fn a_list_level_that_gives_only_ligatures_gives_them_to_its_label() {
+    let numbering = r#"<w:abstractNum w:abstractNumId="10"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:rPr><w14:ligatures xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" w14:val="all"/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num>"#;
+    let item = r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>"#;
+    let document = build(&paragraph("", item), &defaults(""), Some(numbering));
+    let label = document
+        .formats()
+        .list_label(paragraphs(&document)[0])
+        .unwrap();
+    assert_eq!(
+        label.ligatures(),
+        crate::Ligatures::from_xml("all").unwrap()
+    );
+}
+
+#[test]
 fn a_list_label_takes_the_paragraph_style_and_the_marks_character_style() {
     // Numbered headings take their labels' look from the paragraph style; the level
     // lies over it and sets its on/off values.

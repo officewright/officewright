@@ -26,8 +26,8 @@ use crate::model::{Block, Document, Formats};
 thread_local! {
     /// Work the translation did on this thread, for tests of its cost: inlines added to
     /// paragraphs and field results, bytes of names and tags looked up to share run
-    /// styles, run styles built, places tried to cut names, and comparisons of
-    /// compatibility flags.
+    /// styles, run styles built, places tried to cut names, comparisons of compatibility
+    /// flags, and table cells copied where a horizontal merge should move them.
     pub(crate) static WORK: std::cell::Cell<Work> = const { std::cell::Cell::new(Work {
         inlines: 0,
         compared: 0,
@@ -63,6 +63,21 @@ fn work(count: impl FnOnce(&mut Work)) {
 /// The most entries a translation lists, the last of which counts the others when there
 /// are more.
 const MAX_LEFT_OUT: usize = 1000;
+
+/// Whether Word uses OpenType features in a document: ligatures and contextual
+/// alternates, which it uses only when the compatibility setting
+/// `enableOpenTypeFeatures` is on, off by default ([MS-DOCX] 2.3.3). Of the setting
+/// written twice, the last counts, as for the other compatibility settings.
+fn open_type_features(document: &Document) -> bool {
+    document
+        .settings()
+        .compatibility_settings()
+        .iter()
+        .rev()
+        .find(|setting| setting.name() == "enableOpenTypeFeatures")
+        .and_then(|setting| setting.value())
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "on"))
+}
 
 impl Document {
     /// The document in the layout IR of `officewright-layout`, with what the IR does not
@@ -172,6 +187,8 @@ enum Step {
 /// The state of one translation.
 struct Translator<'a> {
     document: &'a Document,
+    /// Whether the document's compatibility setting `enableOpenTypeFeatures` is on.
+    open_type_features: bool,
     formats: Formats<'a>,
     ir: ir::Document,
     run_styles: style::RunStyles,
@@ -199,6 +216,7 @@ impl<'a> Translator<'a> {
             omitted: 0,
             path: Vec::new(),
             table_depth: 0,
+            open_type_features: open_type_features(document),
         }
     }
 
