@@ -428,6 +428,50 @@ fn draws_a_conditional_format_s_borders_around_and_inside_its_group_of_cells() {
         [inside_h, bottom, start, end]
     );
 
+    // The last column and the last row are groups too.
+    let document = open_with(
+        &style("lastCol"),
+        &table(
+            &look(&none.replace(r#"w:lastColumn="0""#, r#"w:lastColumn="1""#)),
+            3,
+            2,
+        ),
+    );
+    let mut formats = document.formats();
+    assert_eq!(
+        side_widths(&mut formats, cell_at(&document, 0, 1)),
+        [top, inside_h, start, end]
+    );
+    assert_eq!(
+        side_widths(&mut formats, cell_at(&document, 2, 1)),
+        [inside_h, bottom, start, end]
+    );
+    assert_eq!(
+        side_widths(&mut formats, cell_at(&document, 1, 0)),
+        [None; 4]
+    );
+    let document = open_with(
+        &style("lastRow"),
+        &table(
+            &look(&none.replace(r#"w:lastRow="0""#, r#"w:lastRow="1""#)),
+            2,
+            3,
+        ),
+    );
+    let mut formats = document.formats();
+    assert_eq!(
+        side_widths(&mut formats, cell_at(&document, 1, 0)),
+        [top, bottom, start, inside_v]
+    );
+    assert_eq!(
+        side_widths(&mut formats, cell_at(&document, 1, 2)),
+        [top, bottom, inside_v, end]
+    );
+    assert_eq!(
+        side_widths(&mut formats, cell_at(&document, 0, 0)),
+        [None; 4]
+    );
+
     // A band of two rows, and the band after it cut short by the table's end.
     let document = open_with(
         &style("band1Horz"),
@@ -502,14 +546,15 @@ fn draws_a_conditional_format_s_borders_around_and_inside_its_group_of_cells() {
 fn keeps_the_style_s_border_where_a_cell_sets_its_own_to_none() {
     // A cell's own border of style none takes the table style's, as an omitted one does
     // (MS-OI29500 §17.4.66(a)); nil is no border.
-    let styles = r#"<w:style w:type="table" w:styleId="Lined"><w:name w:val="Lined"/><w:tblStylePr w:type="firstRow"><w:tcPr><w:tcBorders><w:top w:val="single" w:sz="8"/><w:bottom w:val="single" w:sz="8"/></w:tcBorders></w:tcPr></w:tblStylePr></w:style>"#;
+    let styles = r#"<w:style w:type="table" w:styleId="Lined"><w:name w:val="Lined"/><w:tblStylePr w:type="firstRow"><w:tcPr><w:tcBorders><w:top w:val="single" w:sz="8"/><w:bottom w:val="single" w:sz="8"/></w:tcBorders></w:tcPr></w:tblStylePr><w:tblStylePr w:type="lastCol"><w:tcPr><w:tcBorders><w:start w:val="dotted" w:sz="8"/><w:end w:val="dashed" w:sz="8"/></w:tcBorders></w:tcPr></w:tblStylePr></w:style>"#;
     let cell = |borders: &str| {
         format!(r#"<w:tc><w:tcPr><w:tcBorders>{borders}</w:tcBorders></w:tcPr><w:p/></w:tc>"#)
     };
     let body = format!(
-        r#"<w:tbl><w:tblPr><w:tblStyle w:val="Lined"/><w:tblLook w:firstRow="1"/></w:tblPr><w:tblGrid/><w:tr>{}{}</w:tr></w:tbl><w:p/>"#,
+        r#"<w:tbl><w:tblPr><w:tblStyle w:val="Lined"/><w:tblLook w:firstRow="1" w:lastColumn="1"/></w:tblPr><w:tblGrid/><w:tr>{}{}{}</w:tr></w:tbl><w:p/>"#,
         cell(r#"<w:top w:val="none"/><w:bottom w:val="nil"/><w:start w:val="none"/>"#),
         cell(r#"<w:top w:val="double" w:sz="4"/>"#),
+        cell(r#"<w:start w:val="none"/><w:end w:val="none"/>"#),
     );
     let document = open_with(styles, &body);
     let mut formats = document.formats();
@@ -537,6 +582,44 @@ fn keeps_the_style_s_border_where_a_cell_sets_its_own_to_none() {
             .top()
             .and_then(Border::style),
         Some(BorderStyle::Double)
+    );
+    // The start and end sides too, from the last column's format.
+    let third = formats.cell_properties(cell_at(&document, 0, 2));
+    let sides = third.borders().unwrap().sides();
+    assert_eq!(
+        sides.start().and_then(Border::style),
+        Some(BorderStyle::Dotted)
+    );
+    assert_eq!(
+        sides.end().and_then(Border::style),
+        Some(BorderStyle::Dashed)
+    );
+}
+
+#[test]
+fn lays_a_derived_style_s_format_over_its_base_s_of_the_same_type() {
+    // The first row's format of a style based on another adds to the base's: the
+    // derived shading and the base's border.
+    let styles = format!(
+        r#"<w:style w:type="table" w:styleId="Base"><w:name w:val="Base"/><w:tblStylePr w:type="firstRow"><w:tcPr><w:tcBorders><w:top w:val="single" w:sz="8"/></w:tcBorders><w:shd w:val="clear" w:fill="111111"/></w:tcPr></w:tblStylePr></w:style><w:style w:type="table" w:styleId="Derived"><w:name w:val="Derived"/><w:basedOn w:val="Base"/><w:tblStylePr w:type="firstRow">{}</w:tblStylePr></w:style>"#,
+        shading("222222")
+    );
+    let document = open_with(
+        &styles,
+        &table(
+            r#"<w:tblStyle w:val="Derived"/><w:tblLook w:firstRow="1"/>"#,
+            2,
+            1,
+        ),
+    );
+    assert_eq!(fills(&document), [["222222"], ["-"]]);
+    let mut formats = document.formats();
+    let first = formats.cell_properties(cell_at(&document, 0, 0));
+    assert!(
+        first
+            .borders()
+            .and_then(|borders| borders.sides().top())
+            .is_some()
     );
 }
 
