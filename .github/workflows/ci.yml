@@ -94,10 +94,12 @@ jobs:
         with:
           toolchain: "1.85"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      # The corpus runner's tests read PDFs back through pdftotext and pdftoppm.
-      - name: Install poppler
+      # The corpus runner's tests read PDFs back through pdftotext and pdftoppm, and score
+      # them with qpdf and pdffonts.
+      - name: Install poppler and qpdf
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends poppler-utils
+          sudo apt-get install -y --no-install-recommends poppler-utils qpdf
           pdftotext -v
+          qpdf --version
       - run: cargo test --workspace --all-features

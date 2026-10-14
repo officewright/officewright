@@ -15,6 +15,7 @@ pub(crate) mod theme;
 mod views;
 pub(crate) mod xml;
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use officewright_core::Pt;
@@ -98,6 +99,8 @@ pub struct Document {
     pub(crate) numbering: numbering::NumberingTable,
     pub(crate) theme: Option<theme::Theme>,
     pub(crate) fonts: Vec<fonts::FontDeclaration>,
+    /// Where the first declaration of each font name is, by the name in lower case.
+    pub(crate) font_index: HashMap<String, u32>,
     pub(crate) sections: Vec<SectionData>,
     pub(crate) kind: DocumentKind,
     pub(crate) conformance: Conformance,
@@ -180,6 +183,7 @@ impl Document {
             numbering: numbering::NumberingTable::default(),
             theme: None,
             fonts: Vec::new(),
+            font_index: HashMap::new(),
             sections: Vec::new(),
             kind: DocumentKind::Document,
             conformance: Conformance::Transitional,
@@ -255,10 +259,11 @@ impl Document {
         Styles::new(self)
     }
 
-    /// Resolves the formatting in effect of paragraphs, runs and paragraph marks: the
-    /// document defaults, the styles, numbering and direct formatting combined as Word
-    /// combines them, with theme fonts and colours resolved. Keep it for the whole
-    /// document: it remembers what it has worked out about each style and list.
+    /// Resolves the formatting in effect of paragraphs, runs, paragraph marks and list
+    /// labels: the document defaults, the styles, numbering and direct formatting
+    /// combined as Word combines them, with theme fonts and colours resolved. Keep it for
+    /// the whole document: it remembers what it has worked out about each style and
+    /// list.
     ///
     /// ```
     /// # fn main() -> officewright_doc::Result<()> {
@@ -310,13 +315,8 @@ impl Document {
     /// own PANOSE and signature (`fdo77727.docx` declares five Noto Sans); this gives
     /// the first, and [`fonts`](Self::fonts) all of them.
     pub fn font(&self, name: &str) -> Option<&FontDeclaration> {
-        let folded = |text: &str| {
-            text.chars()
-                .flat_map(char::to_lowercase)
-                .collect::<Vec<_>>()
-        };
-        let wanted = folded(name);
-        self.fonts.iter().find(|font| folded(font.name()) == wanted)
+        let index = self.font_index.get(&fold_case(name))?;
+        self.fonts.get(usize::try_from(*index).ok()?)
     }
 
     /// The settings of the document (`settings.xml`); none set when it has no settings
@@ -486,4 +486,18 @@ pub(crate) enum RunItem {
     CommentReference(i64),
     LastRenderedPageBreak,
     Other(Span),
+}
+
+/// A font name in lower case, as [`Document::font`] compares names.
+pub(crate) fn fold_case(name: &str) -> String {
+    #[cfg(test)]
+    FOLDED.set(FOLDED.get().saturating_add(name.len()));
+    name.chars().flat_map(char::to_lowercase).collect()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The bytes of font names folded to lower case on this thread, for tests of the cost
+    /// of looking fonts up.
+    pub(crate) static FOLDED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
