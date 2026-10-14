@@ -1774,6 +1774,43 @@ fn leaves_out_tables_without_rows_and_tables_nested_too_deep() {
 }
 
 #[test]
+fn translates_tables_nested_to_the_limit_on_a_small_stack() {
+    // The translation recurses once per nested table. With full debug info, as CI builds
+    // tests, this takes about 0.85 MiB: some 66 KiB, and 8 KiB a level for the IR's limit
+    // of 100 levels; less in release. Before the frames on that path were made small
+    // (#187), it took about 2 MiB. The thread's stack of 1.5 MiB leaves room for other
+    // platforms and compilers; this test fails if a level nearly doubles, to about
+    // 15 KiB.
+    let depth = ir::MAX_TABLE_DEPTH;
+    let body = format!(
+        "{}<w:p/>{}",
+        "<w:tbl><w:tr><w:tc>".repeat(depth),
+        "</w:tc></w:tr></w:tbl><w:p/>".repeat(depth)
+    );
+    let options = LoadOptions::new().with_limits(Limits::new().with_max_xml_depth(1 << 12));
+    let document = options.open_bytes(docx(&body)).unwrap();
+    let kept = std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("100 nested tables on 1.5 MiB of stack".into())
+            .stack_size(1_536 * 1024)
+            .spawn_scoped(scope, || {
+                let translation = document.to_layout_ir();
+                let mut kept = 0;
+                let mut blocks = translation.document().sections()[0].blocks();
+                while let Some(ir::Block::Table(table)) = blocks.first() {
+                    kept += 1;
+                    blocks = table.rows()[0].cells()[0].blocks();
+                }
+                kept
+            })
+            .unwrap()
+            .join()
+            .unwrap()
+    });
+    assert_eq!(kept, depth);
+}
+
+#[test]
 fn translates_the_rest_of_table_properties() {
     let table = r#"<w:tbl><w:tblPr><w:tblW w:w="0" w:type="pct"/><w:jc w:val="right"/><w:tblBorders><w:end w:val="single" w:sz="4"/><w:insideV w:val="dotted" w:sz="4"/></w:tblBorders><w:tblCellMar><w:top w:w="-100" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tblGrid><w:gridCol w:w="-100"/><w:gridCol w:w="1000"/></w:tblGrid>
         <w:tr><w:trPr><w:gridBefore w:val="-1"/><w:trHeight w:val="400" w:hRule="auto"/></w:trPr>
@@ -2718,4 +2755,35 @@ fn translates_pictures_whose_lengths_are_out_of_range_into_valid_ir() {
         super::drawing::graphic("rIdPng", "", "")
     );
     translate(&with_images(&inline));
+}
+
+#[test]
+fn lists_a_cell_s_own_entries_before_those_of_its_content() {
+    // A cell's properties are listed before its content, and the paragraph added to a
+    // cell that ends with a table last, as a value the translation changed.
+    let body = r#"<w:tbl><w:tr><w:tc><w:tcPr><w:tcFitText/></w:tcPr><w:p><w:r><w:ptab w:relativeTo="margin" w:alignment="left" w:leader="none"/></w:r></w:p><w:tbl><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl></w:tc></w:tr></w:tbl><w:p/>"#;
+    let translation = translate(&open(body));
+    let entries: Vec<(String, ReportKind)> = translation
+        .left_out()
+        .iter()
+        .map(|entry| (entry.to_string(), entry.kind()))
+        .collect();
+    let cell = "sections[0].blocks[0].rows[0].cells[0]";
+    assert_eq!(
+        entries,
+        [
+            (
+                format!("{cell}: the cell's text fitting (w:tcFitText) is not applied"),
+                ReportKind::FeatureUnsupported
+            ),
+            (
+                format!("{cell}.blocks[0].inlines: an absolute position tab is left out (w:ptab)"),
+                ReportKind::FeatureUnsupported
+            ),
+            (
+                format!("{cell}: a cell that does not end with a paragraph gets an empty one"),
+                ReportKind::ValueClamped
+            ),
+        ]
+    );
 }
