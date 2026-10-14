@@ -1,7 +1,7 @@
 {
  "format": 1,
  "document": "word-rules/E-tab-hanging.docx",
- "pdf_sha256": "ac6a103845f6c760e9f70a67a473092f7033e87258b5b45be10a4eec6fb73ac5",
+ "pdf_sha256": "2615891fbf473c4bab3b13e61200e8e181dffe7acece9f4941543b74a3ddafe3",
  "made_with": "pdftotext 24.02.0 -bbox-layout",
  "units": "points, origin at the top left of the page, y downwards",
  "page_count": 1,

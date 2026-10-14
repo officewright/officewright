@@ -2019,7 +2019,9 @@ mod tests {
             std::env::temp_dir().join(format!("officewright-ffi-damaged-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("minimal.ttf");
-        fs::copy(minimal_font_path(), &path).unwrap();
+        // Read and write rather than `fs::copy`: on Linux it calls `copy_file_range`, which Miri
+        // does not support, and the nightly run tests this crate under Miri.
+        fs::write(&path, fs::read(minimal_font_path()).unwrap()).unwrap();
         let book = new_book();
         let mut added = 0;
         // SAFETY: a live handle, a NUL-terminated path and a valid out-pointer.
