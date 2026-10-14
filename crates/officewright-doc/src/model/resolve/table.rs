@@ -10,13 +10,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::{Formats, Layer, style_index};
+use crate::model::table_properties::GroupEdges;
 use crate::model::{
     Document, Kind, Style, StyleKind, Table, TableCell, TableCellProperties, TableLook,
     TableProperties, TableRow, TableRowProperties, TableStyleCondition,
 };
 
-/// The conditional formats other than the whole table's, in the order Word applies them,
-/// later ones over earlier ones (MS-OI29500 §17.7.6.6(a)).
+/// The conditional formats Word applies, in the order it applies them, later ones over
+/// earlier ones (MS-OI29500 §17.7.6.6(a)); the whole table's it ignores (§17.18.89(a)).
 const ORDER: [TableStyleCondition; 12] = [
     TableStyleCondition::OddRowBand,
     TableStyleCondition::EvenRowBand,
@@ -56,13 +57,13 @@ impl TablePart {
     }
 }
 
-/// What a table style gives with the styles it is based on: its own properties with its
-/// whole-table conditional format over them, and each other conditional format, by its
-/// place in [`ORDER`].
+/// What a table style gives with the styles it is based on: its own properties, and each
+/// conditional format it has, by its place in [`ORDER`], boxed so that a style with few
+/// formats takes little room.
 #[derive(Clone, Debug, Default)]
 pub(super) struct TableStyleLevel {
     whole: TablePart,
-    conditions: [TablePart; 12],
+    conditions: [Option<Box<TablePart>>; 12],
     /// Whether the style gives paragraph or run properties, which are not applied yet.
     gives_text: bool,
     /// Whether a conditional format gives table properties, which are not applied.
@@ -81,43 +82,41 @@ impl Layer for TableStyleLevel {
         let mut level = Self {
             whole: TablePart {
                 table: style.table_properties().of_table_style(false),
-                row: style.row_properties(),
+                row: style.row_properties().of_table_style(),
                 cell: style.cell_properties().of_table_style(false),
             },
             gives_text: style.paragraph_properties() != Default::default()
                 || style.run_properties() != Default::default(),
             ..Self::default()
         };
-        // Of two conditional formats of one type, the first counts.
+        // Of two conditional formats of one type, the first counts, as for elements
+        // written twice elsewhere; our choice, not yet confirmed against Word (#172).
         let mut seen = 0u16;
-        let mut whole_seen = false;
         for format in style.conditional_formats() {
-            let part = TablePart {
-                table: format.table_properties().of_table_style(true),
-                row: format.row_properties(),
-                cell: format.cell_properties().of_table_style(true),
-            };
-            level.gives_text |= format.paragraph_properties() != Default::default()
-                || format.run_properties() != Default::default();
+            // Word neither applies nor keeps a whole-table conditional format (MS-OI29500
+            // §17.18.89(a)).
             if format.condition() == TableStyleCondition::WholeTable {
-                if !whole_seen {
-                    level.whole.overlay(&part);
-                    whole_seen = true;
-                }
                 continue;
             }
-            level.gives_conditional_table |= part.table != TableProperties::default();
             let bit = bit(format.condition());
             if seen & bit != 0 {
                 continue;
             }
             seen |= bit;
+            let part = TablePart {
+                table: format.table_properties().of_table_style(true),
+                row: format.row_properties().of_table_style(),
+                cell: format.cell_properties().of_table_style(true),
+            };
+            level.gives_text |= format.paragraph_properties() != Default::default()
+                || format.run_properties() != Default::default();
+            level.gives_conditional_table |= part.table != TableProperties::default();
             if let Some(slot) = ORDER
                 .iter()
                 .position(|&known| known == format.condition())
                 .and_then(|place| level.conditions.get_mut(place))
             {
-                slot.overlay(&part);
+                *slot = Some(Box::new(part));
             }
         }
         level
@@ -126,7 +125,9 @@ impl Layer for TableStyleLevel {
     fn overlay(&mut self, above: &Self) {
         self.whole.overlay(&above.whole);
         for (below, above) in self.conditions.iter_mut().zip(&above.conditions) {
-            below.overlay(above);
+            if let Some(above) = above {
+                below.get_or_insert_with(Box::default).overlay(above);
+            }
         }
         self.gives_text |= above.gives_text;
         self.gives_conditional_table |= above.gives_conditional_table;
@@ -141,8 +142,43 @@ pub(super) struct TableContext {
     properties: TableProperties,
     look: TableLook,
     rows: HashMap<u32, u16>,
-    /// The conditions each cell meets, and those any cell of its row meets.
-    cells: HashMap<u32, (u16, u16)>,
+    cells: HashMap<u32, CellPlace>,
+}
+
+/// Where a cell is among the parts of its table.
+#[derive(Clone, Copy, Debug, Default)]
+struct CellPlace {
+    /// The conditions the cell meets.
+    conditions: u16,
+    /// The conditions any cell of its row meets.
+    row: u16,
+    /// For each condition the cell meets, by its place in [`ORDER`], 4 bits: whether the
+    /// cell's top, bottom, start and end lie on the edges of the condition's group of
+    /// cells.
+    edges: u64,
+}
+
+const TOP: u64 = 1;
+const BOTTOM: u64 = 2;
+const START: u64 = 4;
+const END: u64 = 8;
+
+impl CellPlace {
+    fn meets(&mut self, condition: TableStyleCondition, edges: u64) {
+        let bit = bit(condition);
+        self.conditions |= bit;
+        self.edges |= edges << (4 * bit.trailing_zeros());
+    }
+
+    fn edges(self, place: usize) -> GroupEdges {
+        let edges = self.edges >> (4 * place);
+        GroupEdges {
+            top: edges & TOP != 0,
+            bottom: edges & BOTTOM != 0,
+            start: edges & START != 0,
+            end: edges & END != 0,
+        }
+    }
 }
 
 /// Word's options when a table has no `w:tblLook`: 0x04A0, the first row and the first
@@ -158,28 +194,55 @@ fn default_look() -> TableLook {
     }
 }
 
-/// Which band of `size` items, counted from 0, holds the item at `at` among `count`,
-/// with `skip_first` and `skip_last` items at the ends out of the bands: none for an item
-/// outside the bands or when the size is 0, which Word takes for no bands (MS-OI29500
-/// §17.7.6.5, §17.7.6.7).
-fn band(at: usize, count: usize, size: i64, skip_first: bool, skip_last: bool) -> Option<usize> {
+/// The band of `size` items, counted from 0, that holds the item at `at` among `count`,
+/// and whether the item is the band's first and its last; with `skip_first` and
+/// `skip_last` items at the ends out of the bands. None for an item outside the bands or
+/// when the size is 0, which Word takes for no bands (MS-OI29500 §17.7.6.5(c),
+/// §17.7.6.7(b)). Leaving the first and last row or column out of the bands when they
+/// are formatted on their own is what Word's built-in styles show; our choice, not yet
+/// confirmed against Word (#172).
+fn band(
+    at: usize,
+    count: usize,
+    size: i64,
+    skip_first: bool,
+    skip_last: bool,
+) -> Option<(usize, bool, bool)> {
     let size = usize::try_from(size).ok().filter(|&size| size > 0)?;
     let first = usize::from(skip_first);
     let end = count.checked_sub(usize::from(skip_last))?;
-    (at >= first && at < end).then(|| (at - first) / size)
+    if at < first || at >= end {
+        return None;
+    }
+    let offset = at - first;
+    let last = offset % size == size - 1 || at + 1 == end;
+    Some((offset / size, offset % size == 0, last))
 }
 
 /// The odd band (the first, counted from 1) or the even one.
-fn band_condition(band: usize, odd: TableStyleCondition, even: TableStyleCondition) -> u16 {
-    bit(if band % 2 == 0 { odd } else { even })
+fn band_condition(
+    band: usize,
+    odd: TableStyleCondition,
+    even: TableStyleCondition,
+) -> TableStyleCondition {
+    if band % 2 == 0 { odd } else { even }
+}
+
+/// The bits of the edges a cell lies on: top, bottom, start and end.
+fn edge_bits(top: bool, bottom: bool, start: bool, end: bool) -> u64 {
+    [(top, TOP), (bottom, BOTTOM), (start, START), (end, END)]
+        .into_iter()
+        .filter(|&(on_edge, _)| on_edge)
+        .fold(0, |bits, (_, edge)| bits | edge)
 }
 
 impl<'a> Formats<'a> {
     /// The table properties in effect: those of the table's style (`w:tblStyle`, else
-    /// the default table style) and the styles it is based on, its whole-table
-    /// conditional format, then the table's own. Word does not allow some properties in a
-    /// style (the width, layout, look, position, overlap and direction, MS-OI29500
-    /// §17.7.6.4(a)); they come from the table only.
+    /// the default table style) and the styles it is based on, then the table's own.
+    /// Word ignores a style's whole-table conditional format (MS-OI29500 §17.18.89(a)).
+    /// Word does not allow some properties in a style (the width, layout, look,
+    /// position, overlap and direction, §17.7.6.4(a)); they come from the table only.
+    /// The band sizes come from the style only (§17.4.59(a)).
     ///
     /// ```
     /// # fn main() -> officewright_doc::Result<()> {
@@ -220,7 +283,8 @@ impl<'a> Formats<'a> {
 
     /// The row properties in effect: the table style's, those of the conditional
     /// formats for the parts of the table the row is in (its bands, the first or the
-    /// last row), then the row's own.
+    /// last row), then the row's own. A style gives no grid or widths before or after
+    /// the cells, no height and no hidden mark (MS-OI29500 §17.7.6.10, §17.7.6.11).
     pub fn row_properties(&mut self, row: TableRow<'a>) -> TableRowProperties {
         let (document, index) = row.place();
         if !std::ptr::eq(document, self.document) {
@@ -236,8 +300,10 @@ impl<'a> Formats<'a> {
         let conditions = context.rows.get(&index).copied().unwrap_or(0);
         let mut properties = style.whole.row.clone();
         for (place, part) in style.conditions.iter().enumerate() {
-            if conditions & (1 << place) != 0 {
-                properties.overlay(&part.row);
+            if let Some(part) = part {
+                if conditions & (1 << place) != 0 {
+                    properties.overlay(&part.row);
+                }
             }
         }
         properties.overlay(&own);
@@ -246,9 +312,14 @@ impl<'a> Formats<'a> {
 
     /// The cell properties in effect: the table style's, those of the conditional
     /// formats for the parts of the table the cell is in, in the order Word applies them
-    /// (MS-OI29500 §17.7.6.6(a)), then the cell's own. A conditional format's no
-    /// wrapping, margins and vertical alignment apply to every cell of a row one of whose
-    /// cells it applies to (MS-OI29500 §17.7.6.8(a)).
+    /// (MS-OI29500 §17.7.6.6(a)), then the cell's own.
+    ///
+    /// - A conditional format's borders belong to its group of cells, such as the first
+    ///   column: the cell takes the group's outer borders on the sides that lie on the
+    ///   group's edges, and `w:insideH` or `w:insideV` on the others.
+    /// - A conditional format's no wrapping, margins and vertical alignment apply to every
+    ///   cell of a row one of whose cells it applies to (§17.7.6.8(a)).
+    /// - A border the cell itself sets to `none` takes the style's (§17.4.66(a)).
     ///
     /// ```
     /// # fn main() -> officewright_doc::Result<()> {
@@ -265,7 +336,6 @@ impl<'a> Formats<'a> {
     ///     let cell = row.cells().next().expect("a cell");
     ///     let properties = formats.cell_properties(cell);
     ///     fills.push(properties.shading().and_then(|shading| shading.fill().value()));
-    ///     println!("{:?}", formats.cell_conditions(cell));
     /// }
     /// assert_eq!(fills, [Some(ColorValue::Rgb(0x44, 0x72, 0xC4)), None]);
     /// let first = table.rows().next().and_then(|row| row.cells().next()).expect("a cell");
@@ -289,16 +359,19 @@ impl<'a> Formats<'a> {
         let Some(style) = &context.style else {
             return own;
         };
-        let (conditions, row) = context.cells.get(&index).copied().unwrap_or((0, 0));
+        let cell_place = context.cells.get(&index).copied().unwrap_or_default();
         let mut properties = style.whole.cell.clone();
         for (place, part) in style.conditions.iter().enumerate() {
-            if conditions & (1 << place) != 0 {
-                properties.overlay(&part.cell);
-            } else if row & (1 << place) != 0 {
+            let Some(part) = part else {
+                continue;
+            };
+            if cell_place.conditions & (1 << place) != 0 {
+                properties.overlay(&part.cell.in_group(cell_place.edges(place)));
+            } else if cell_place.row & (1 << place) != 0 {
                 properties.overlay(&part.cell.of_whole_rows());
             }
         }
-        properties.overlay(&own);
+        properties.overlay(&own.over_style(&properties));
         properties
     }
 
@@ -311,7 +384,7 @@ impl<'a> Formats<'a> {
         }
         let conditions = self
             .context_of(index)
-            .and_then(|context| context.cells.get(&index).map(|&(cell, _)| cell))
+            .and_then(|context| context.cells.get(&index).map(|place| place.conditions))
             .unwrap_or(0);
         ORDER
             .iter()
@@ -381,7 +454,7 @@ impl<'a> Formats<'a> {
             .as_ref()
             .map(|style| style.whole.table.clone())
             .unwrap_or_default();
-        properties.overlay(&own);
+        properties.overlay(&own.without_band_sizes());
         let look = properties.look.map_or_else(default_look, |look| TableLook {
             first_row: Some(look.first_row.unwrap_or(false)),
             last_row: Some(look.last_row.unwrap_or(false)),
@@ -393,22 +466,24 @@ impl<'a> Formats<'a> {
         let on = |option: Option<bool>| option.unwrap_or(false);
         let (first_row, last_row) = (on(look.first_row), on(look.last_row));
         let (first_column, last_column) = (on(look.first_column), on(look.last_column));
-        let row_band = if on(look.no_horizontal_bands) {
-            0
-        } else {
-            properties.row_band_size.unwrap_or(0)
+        // Word keeps a band size within 0 to 3 (MS-OI29500 §17.7.6.5(a), §17.7.6.7(c));
+        // taking a larger one as 3 is our choice (#172).
+        let band_size = |no_bands: Option<bool>, size: Option<i64>| {
+            if on(no_bands) {
+                0
+            } else {
+                size.unwrap_or(0).min(3)
+            }
         };
-        let column_band = if on(look.no_vertical_bands) {
-            0
-        } else {
-            properties.column_band_size.unwrap_or(0)
-        };
+        let row_band = band_size(look.no_horizontal_bands, properties.row_band_size);
+        let column_band = band_size(look.no_vertical_bands, properties.column_band_size);
         let rows: Vec<TableRow<'a>> = table.rows().collect();
         let mut row_conditions = HashMap::new();
-        let mut cell_conditions = HashMap::new();
+        let mut cell_places = HashMap::new();
         for (at, row) in rows.iter().enumerate() {
             let top = at == 0;
             let bottom = at + 1 == rows.len();
+            let row_band = band(at, rows.len(), row_band, first_row, last_row);
             let mut conditions = 0;
             if first_row && top {
                 conditions |= bit(TableStyleCondition::FirstRow);
@@ -416,12 +491,12 @@ impl<'a> Formats<'a> {
             if last_row && bottom {
                 conditions |= bit(TableStyleCondition::LastRow);
             }
-            if let Some(band) = band(at, rows.len(), row_band, first_row, last_row) {
-                conditions |= band_condition(
+            if let Some((band, _, _)) = row_band {
+                conditions |= bit(band_condition(
                     band,
                     TableStyleCondition::OddRowBand,
                     TableStyleCondition::EvenRowBand,
-                );
+                ));
             }
             let (_, row_index) = row.place();
             row_conditions.insert(row_index, conditions);
@@ -431,20 +506,49 @@ impl<'a> Formats<'a> {
             for (column, cell) in cells.iter().enumerate() {
                 let left = column == 0;
                 let right = column + 1 == cells.len();
-                let mut conditions = conditions;
-                if first_column && left {
-                    conditions |= bit(TableStyleCondition::FirstColumn);
+                let mut place = CellPlace::default();
+                // A band of rows spans its rows' cells, a band of columns its columns'
+                // cells in every row; the first or last row or column is one row or column.
+                if let Some((band, first, last)) = row_band {
+                    let condition = band_condition(
+                        band,
+                        TableStyleCondition::OddRowBand,
+                        TableStyleCondition::EvenRowBand,
+                    );
+                    place.meets(condition, edge_bits(first, last, left, right));
                 }
-                if last_column && right {
-                    conditions |= bit(TableStyleCondition::LastColumn);
-                }
-                if let Some(band) =
+                if let Some((band, first, last)) =
                     band(column, cells.len(), column_band, first_column, last_column)
                 {
-                    conditions |= band_condition(
+                    let condition = band_condition(
                         band,
                         TableStyleCondition::OddColumnBand,
                         TableStyleCondition::EvenColumnBand,
+                    );
+                    place.meets(condition, edge_bits(top, bottom, first, last));
+                }
+                if first_column && left {
+                    place.meets(
+                        TableStyleCondition::FirstColumn,
+                        edge_bits(top, bottom, true, true),
+                    );
+                }
+                if last_column && right {
+                    place.meets(
+                        TableStyleCondition::LastColumn,
+                        edge_bits(top, bottom, true, true),
+                    );
+                }
+                if first_row && top {
+                    place.meets(
+                        TableStyleCondition::FirstRow,
+                        edge_bits(true, true, left, right),
+                    );
+                }
+                if last_row && bottom {
+                    place.meets(
+                        TableStyleCondition::LastRow,
+                        edge_bits(true, true, left, right),
                     );
                 }
                 // A corner cell is styled on its own when both its row and its column are
@@ -472,18 +576,19 @@ impl<'a> Formats<'a> {
                     ),
                 ] {
                     if row_on && column_on {
-                        conditions |= bit(corner);
+                        place.meets(corner, edge_bits(true, true, true, true));
                     }
                 }
                 let (_, cell_index) = cell.place();
-                in_row.push((cell_index, conditions));
+                in_row.push((cell_index, place));
                 self.table_of.insert(cell_index, index);
             }
             let union = in_row
                 .iter()
-                .fold(0, |union, (_, conditions)| union | conditions);
-            for (cell_index, conditions) in in_row {
-                cell_conditions.insert(cell_index, (conditions, union));
+                .fold(0, |union, (_, place)| union | place.conditions);
+            for (cell_index, mut place) in in_row {
+                place.row = union;
+                cell_places.insert(cell_index, place);
             }
         }
         let context = Arc::new(TableContext {
@@ -491,7 +596,7 @@ impl<'a> Formats<'a> {
             properties,
             look,
             rows: row_conditions,
-            cells: cell_conditions,
+            cells: cell_places,
         });
         self.tables.insert(index, Arc::clone(&context));
         Some(context)

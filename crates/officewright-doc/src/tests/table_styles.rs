@@ -128,9 +128,10 @@ fn applies_a_table_styles_conditional_formats_in_words_order() {
             TableStyleCondition::TopRightCell,
         ]
     );
-    // The whole table's format and the last column's.
+    // The last column's; Word ignores the whole table's format (MS-OI29500
+    // §17.18.89(a)), so its no wrapping is not taken.
     let last = formats.cell_properties(cells[2]);
-    assert_eq!(last.no_wrap(), Some(true));
+    assert_eq!(last.no_wrap(), None);
     assert_eq!(
         last.vertical_justification(),
         Some(VerticalJustification::Center)
@@ -277,11 +278,12 @@ fn lays_the_rows_and_cells_own_properties_and_partial_looks_over_the_style() {
     // The row's own over the style's.
     assert_eq!(formats.row_properties(rows[0]).cant_split(), Some(false));
     assert_eq!(formats.row_properties(rows[1]).cant_split(), Some(true));
-    // Borders side by side: the style's top and the first row's bottom.
+    // The first row's bottom border; the whole table's top border is not taken, as Word
+    // ignores whole-table formats (MS-OI29500 §17.18.89(a)).
     let cell = rows[0].cells().next().unwrap();
     let properties = formats.cell_properties(cell);
     let borders = properties.borders().unwrap().sides();
-    assert!(borders.top().is_some() && borders.bottom().is_some());
+    assert!(borders.top().is_none() && borders.bottom().is_some());
     assert!(borders.start().is_none());
     assert_eq!(properties.width(), None);
     // The first column is off, so its format is not taken.
@@ -297,9 +299,9 @@ fn lays_the_rows_and_cells_own_properties_and_partial_looks_over_the_style() {
 }
 
 #[test]
-fn takes_the_first_whole_table_format_and_leaves_off_what_a_look_does_not_give() {
-    // Two whole-table formats, of which the first counts, and a span in the style's own
-    // cell properties, which Word does not allow (MS-OI29500 §17.7.6.8(b)).
+fn ignores_whole_table_formats_and_leaves_off_what_a_look_does_not_give() {
+    // Two whole-table formats, which Word ignores (MS-OI29500 §17.18.89(a)), and a span
+    // in the style's own cell properties, which Word does not allow (§17.7.6.8(b)).
     let styles = format!(
         r#"<w:style w:type="table" w:styleId="Twice"><w:name w:val="Twice"/><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:tblStylePr w:type="wholeTable">{}</w:tblStylePr><w:tblStylePr w:type="wholeTable">{}</w:tblStylePr><w:tblStylePr w:type="firstRow">{}</w:tblStylePr></w:style>"#,
         shading("123456"),
@@ -316,7 +318,447 @@ fn takes_the_first_whole_table_format_and_leaves_off_what_a_look_does_not_give()
     let mut formats = document.formats();
     let styled = first_table(&document);
     assert_eq!(formats.table_look(styled).first_row(), Some(false));
-    assert_eq!(fills(&document), [["123456"], ["123456"]]);
+    assert_eq!(fills(&document), [["-"], ["-"]]);
     let cell = styled.rows().next().unwrap().cells().next().unwrap();
     assert_eq!(formats.cell_properties(cell).grid_span(), None);
+}
+
+/// The cell at `row` and `column` of the first table.
+fn cell_at(document: &Document, row: usize, column: usize) -> TableCell<'_> {
+    first_table(document)
+        .rows()
+        .nth(row)
+        .and_then(|row| row.cells().nth(column))
+        .unwrap()
+}
+
+/// The widths in points of a cell's top, bottom, start and end borders in effect.
+fn side_widths<'a>(formats: &mut Formats<'a>, cell: TableCell<'a>) -> [Option<f64>; 4] {
+    let properties = formats.cell_properties(cell);
+    let width = |side: Option<&Border>| side.and_then(Border::width).map(|width| width.0);
+    match properties.borders() {
+        Some(borders) => {
+            let sides = borders.sides();
+            [
+                width(sides.top()),
+                width(sides.bottom()),
+                width(sides.start()),
+                width(sides.end()),
+            ]
+        }
+        None => [None; 4],
+    }
+}
+
+/// `w:tcBorders` whose sides tell themselves apart by their width: top 1 pt, bottom
+/// 1.5 pt, start 2 pt, end 2.5 pt, inside horizontal 3 pt, inside vertical 3.5 pt.
+fn group_borders() -> &'static str {
+    r#"<w:tcPr><w:tcBorders><w:top w:val="single" w:sz="8"/><w:bottom w:val="single" w:sz="12"/><w:start w:val="single" w:sz="16"/><w:end w:val="single" w:sz="20"/><w:insideH w:val="single" w:sz="24"/><w:insideV w:val="single" w:sz="28"/></w:tcBorders></w:tcPr>"#
+}
+
+#[test]
+fn draws_a_conditional_format_s_borders_around_and_inside_its_group_of_cells() {
+    // The borders of a conditional format belong to its group of cells: the outer ones
+    // on the group's edges, w:insideH and w:insideV on the edges inside it (ISO/IEC
+    // 29500-1, insideH and insideV of tcBorders).
+    let (top, bottom, start, end, inside_h, inside_v) = (
+        Some(1.0),
+        Some(1.5),
+        Some(2.0),
+        Some(2.5),
+        Some(3.0),
+        Some(3.5),
+    );
+    let style = |kind: &str| {
+        format!(
+            r#"<w:style w:type="table" w:styleId="Group"><w:name w:val="Group"/><w:tblPr><w:tblStyleRowBandSize w:val="2"/><w:tblStyleColBandSize w:val="2"/></w:tblPr><w:tblStylePr w:type="{kind}">{}</w:tblStylePr></w:style>"#,
+            group_borders()
+        )
+    };
+    let look = |look: &str| format!(r#"<w:tblStyle w:val="Group"/><w:tblLook {look}/>"#);
+    let none = r#"w:firstRow="0" w:lastRow="0" w:firstColumn="0" w:lastColumn="0" w:noHBand="1" w:noVBand="1""#;
+
+    // The first row: one row of three cells.
+    let document = open_with(
+        &style("firstRow"),
+        &table(
+            &look(&none.replace(r#"w:firstRow="0""#, r#"w:firstRow="1""#)),
+            2,
+            3,
+        ),
+    );
+    let mut formats = document.formats();
+    assert_eq!(
+        side_widths(&mut formats, cell_at(&document, 0, 0)),
+        [top, bottom, start, inside_v]
+    );
+    assert_eq!(
+        side_widths(&mut formats, cell_at(&document, 0, 1)),
+        [top, bottom, inside_v, inside_v]
+    );
+    assert_eq!(
+        side_widths(&mut formats, cell_at(&document, 0, 2)),
+        [top, bottom, inside_v, end]
+    );
+    assert_eq!(
+        side_widths(&mut formats, cell_at(&document, 1, 0)),
+        [None; 4]
+    );
+
+    // The first column: one column of three rows.
+    let document = open_with(
+        &style("firstCol"),
+        &table(
+            &look(&none.replace(r#"w:firstColumn="0""#, r#"w:firstColumn="1""#)),
+            3,
+            2,
+        ),
+    );
+    let mut formats = document.formats();
+    assert_eq!(
+        side_widths(&mut formats, cell_at(&document, 0, 0)),
+        [top, inside_h, start, end]
+    );
+    assert_eq!(
+        side_widths(&mut formats, cell_at(&document, 1, 0)),
+        [inside_h, inside_h, start, end]
+    );
+    assert_eq!(
+        side_widths(&mut formats, cell_at(&document, 2, 0)),
+        [inside_h, bottom, start, end]
+    );
+
+    // A band of two rows, and the band after it cut short by the table's end.
+    let document = open_with(
+        &style("band1Horz"),
+        &table(
+            &look(&none.replace(r#"w:noHBand="1""#, r#"w:noHBand="0""#)),
+            5,
+            2,
+        ),
+    );
+    let mut formats = document.formats();
+    assert_eq!(
+        side_widths(&mut formats, cell_at(&document, 0, 0)),
+        [top, inside_h, start, inside_v]
+    );
+    assert_eq!(
+        side_widths(&mut formats, cell_at(&document, 1, 1)),
+        [inside_h, bottom, inside_v, end]
+    );
+    assert_eq!(
+        side_widths(&mut formats, cell_at(&document, 2, 0)),
+        [None; 4]
+    );
+    assert_eq!(
+        side_widths(&mut formats, cell_at(&document, 4, 0)),
+        [top, bottom, start, inside_v]
+    );
+
+    // A band of two columns, over every row.
+    let document = open_with(
+        &style("band1Vert"),
+        &table(
+            &look(&none.replace(r#"w:noVBand="1""#, r#"w:noVBand="0""#)),
+            2,
+            3,
+        ),
+    );
+    let mut formats = document.formats();
+    assert_eq!(
+        side_widths(&mut formats, cell_at(&document, 0, 0)),
+        [top, inside_h, start, inside_v]
+    );
+    assert_eq!(
+        side_widths(&mut formats, cell_at(&document, 1, 1)),
+        [inside_h, bottom, inside_v, end]
+    );
+    assert_eq!(
+        side_widths(&mut formats, cell_at(&document, 0, 2)),
+        [None; 4]
+    );
+
+    // A corner is a group of its own.
+    let document = open_with(
+        &style("nwCell"),
+        &table(
+            &look(
+                &none
+                    .replace(r#"w:firstRow="0""#, r#"w:firstRow="1""#)
+                    .replace(r#"w:firstColumn="0""#, r#"w:firstColumn="1""#),
+            ),
+            2,
+            2,
+        ),
+    );
+    let mut formats = document.formats();
+    assert_eq!(
+        side_widths(&mut formats, cell_at(&document, 0, 0)),
+        [top, bottom, start, end]
+    );
+}
+
+#[test]
+fn keeps_the_style_s_border_where_a_cell_sets_its_own_to_none() {
+    // A cell's own border of style none takes the table style's, as an omitted one does
+    // (MS-OI29500 §17.4.66(a)); nil is no border.
+    let styles = r#"<w:style w:type="table" w:styleId="Lined"><w:name w:val="Lined"/><w:tblStylePr w:type="firstRow"><w:tcPr><w:tcBorders><w:top w:val="single" w:sz="8"/><w:bottom w:val="single" w:sz="8"/></w:tcBorders></w:tcPr></w:tblStylePr></w:style>"#;
+    let cell = |borders: &str| {
+        format!(r#"<w:tc><w:tcPr><w:tcBorders>{borders}</w:tcBorders></w:tcPr><w:p/></w:tc>"#)
+    };
+    let body = format!(
+        r#"<w:tbl><w:tblPr><w:tblStyle w:val="Lined"/><w:tblLook w:firstRow="1"/></w:tblPr><w:tblGrid/><w:tr>{}{}</w:tr></w:tbl><w:p/>"#,
+        cell(r#"<w:top w:val="none"/><w:bottom w:val="nil"/><w:start w:val="none"/>"#),
+        cell(r#"<w:top w:val="double" w:sz="4"/>"#),
+    );
+    let document = open_with(styles, &body);
+    let mut formats = document.formats();
+    let first = formats.cell_properties(cell_at(&document, 0, 0));
+    let sides = first.borders().unwrap().sides();
+    assert_eq!(
+        sides.top().and_then(Border::style),
+        Some(BorderStyle::Single)
+    );
+    assert_eq!(
+        sides.bottom().and_then(Border::style),
+        Some(BorderStyle::Nil)
+    );
+    // Where the style has no border, the cell's none stays.
+    assert_eq!(
+        sides.start().and_then(Border::style),
+        Some(BorderStyle::None)
+    );
+    let second = formats.cell_properties(cell_at(&document, 0, 1));
+    assert_eq!(
+        second
+            .borders()
+            .unwrap()
+            .sides()
+            .top()
+            .and_then(Border::style),
+        Some(BorderStyle::Double)
+    );
+}
+
+#[test]
+fn leaves_out_the_row_properties_word_does_not_take_from_a_style() {
+    // Word does not allow the grid and widths before and after the cells or the height
+    // in a table style's rows, and ignores w:hidden there (MS-OI29500 §17.7.6.10,
+    // §17.7.6.11); a row's own height stays.
+    let row = r#"<w:trPr><w:gridBefore w:val="2"/><w:gridAfter w:val="1"/><w:wBefore w:w="2000" w:type="dxa"/><w:wAfter w:w="1000" w:type="dxa"/><w:trHeight w:val="2000" w:hRule="exact"/><w:hidden/><w:cantSplit/></w:trPr>"#;
+    let styles = format!(
+        r#"<w:style w:type="table" w:styleId="Rows"><w:name w:val="Rows"/>{row}<w:tblStylePr w:type="firstRow">{}</w:tblStylePr></w:style>"#,
+        row.replace("<w:cantSplit/>", "<w:tblHeader/>")
+    );
+    let body = r#"<w:tbl><w:tblPr><w:tblStyle w:val="Rows"/><w:tblLook w:firstRow="1"/></w:tblPr><w:tblGrid/><w:tr><w:tc><w:p/></w:tc></w:tr><w:tr><w:trPr><w:trHeight w:val="400"/></w:trPr><w:tc><w:p/></w:tc></w:tr></w:tbl><w:p/>"#;
+    let document = open_with(&styles, body);
+    let mut formats = document.formats();
+    let rows: Vec<TableRow<'_>> = first_table(&document).rows().collect();
+    let first = formats.row_properties(rows[0]);
+    assert_eq!(
+        (
+            first.grid_before(),
+            first.grid_after(),
+            first.width_before(),
+            first.width_after()
+        ),
+        (None, None, None, None)
+    );
+    assert_eq!((first.height(), first.hidden()), (None, None));
+    assert_eq!(
+        (first.cant_split(), first.header()),
+        (Some(true), Some(true))
+    );
+    let second = formats.row_properties(rows[1]);
+    assert_eq!(second.height().and_then(RowHeight::height), Some(Pt(20.0)));
+    assert_eq!(second.header(), None);
+    assert!(
+        document.to_layout_ir().left_out().is_empty(),
+        "{:?}",
+        document.to_layout_ir().left_out()
+    );
+}
+
+#[test]
+fn bands_by_the_style_s_band_size_at_most_three() {
+    // A table's own band size is not allowed (MS-OI29500 §17.4.59(a)); Word keeps a
+    // style's within 0 to 3 (§17.7.6.7(c)), and one larger is taken as 3.
+    let styles = format!(
+        r#"<w:style w:type="table" w:styleId="Wide"><w:name w:val="Wide"/><w:tblPr><w:tblStyleRowBandSize w:val="5"/></w:tblPr><w:tblStylePr w:type="band1Horz">{}</w:tblStylePr><w:tblStylePr w:type="band2Horz">{}</w:tblStylePr></w:style>"#,
+        shading("111111"),
+        shading("222222")
+    );
+    let body = table(
+        r#"<w:tblStyle w:val="Wide"/><w:tblStyleRowBandSize w:val="1"/><w:tblLook w:firstRow="0" w:noHBand="0"/>"#,
+        8,
+        1,
+    );
+    let document = open_with(&styles, &body);
+    let column: Vec<String> = fills(&document).into_iter().flatten().collect();
+    assert_eq!(
+        column,
+        [
+            "111111", "111111", "111111", "222222", "222222", "222222", "111111", "111111"
+        ]
+    );
+    let mut formats = document.formats();
+    assert_eq!(
+        formats
+            .table_properties(first_table(&document))
+            .row_band_size(),
+        Some(5)
+    );
+}
+
+#[test]
+fn applies_the_formats_of_one_cell_in_word_s_order() {
+    let style = |formats: &[(&str, &str)]| {
+        let parts: String = formats
+            .iter()
+            .map(|(kind, fill)| {
+                format!(
+                    r#"<w:tblStylePr w:type="{kind}">{}</w:tblStylePr>"#,
+                    shading(fill)
+                )
+            })
+            .collect();
+        format!(
+            r#"<w:style w:type="table" w:styleId="Order"><w:name w:val="Order"/><w:tblPr><w:tblStyleRowBandSize w:val="1"/><w:tblStyleColBandSize w:val="1"/></w:tblPr>{parts}</w:style>"#
+        )
+    };
+    let fill = |styles: &str, look: &str, rows: usize, columns: usize| {
+        let body = table(
+            &format!(r#"<w:tblStyle w:val="Order"/><w:tblLook {look}/>"#),
+            rows,
+            columns,
+        );
+        fills(&open_with(styles, &body))
+    };
+    // Row bands, then column bands (MS-OI29500 §17.7.6.6(a)).
+    let bands = style(&[("band1Vert", "0000AA"), ("band1Horz", "AA0000")]);
+    assert_eq!(
+        fill(
+            &bands,
+            r#"w:firstRow="0" w:firstColumn="0" w:noHBand="0" w:noVBand="0""#,
+            1,
+            1
+        ),
+        [["0000AA"]]
+    );
+    // The first column, then the last.
+    let columns = style(&[("lastCol", "BBBBBB"), ("firstCol", "AAAAAA")]);
+    assert_eq!(
+        fill(
+            &columns,
+            r#"w:firstRow="0" w:firstColumn="1" w:lastColumn="1" w:noHBand="1""#,
+            1,
+            1
+        ),
+        [["BBBBBB"]]
+    );
+    // The first row, then the last; only the table's last row is its last.
+    let rows = style(&[("lastRow", "BBBBBB"), ("firstRow", "AAAAAA")]);
+    assert_eq!(
+        fill(&rows, r#"w:firstRow="0" w:lastRow="1" w:noHBand="1""#, 3, 1),
+        [["-"], ["-"], ["BBBBBB"]]
+    );
+    // The top left corner, then the top right.
+    let corners = style(&[("neCell", "BBBBBB"), ("nwCell", "AAAAAA")]);
+    assert_eq!(
+        fill(
+            &corners,
+            r#"w:firstRow="1" w:firstColumn="1" w:lastColumn="1" w:noHBand="1""#,
+            1,
+            1
+        ),
+        [["BBBBBB"]]
+    );
+    // Column bands leave out the first and last column when those are on.
+    let banded = style(&[("band1Vert", "111111"), ("band2Vert", "222222")]);
+    assert_eq!(
+        fill(
+            &banded,
+            r#"w:firstRow="0" w:firstColumn="1" w:lastColumn="1" w:noHBand="1" w:noVBand="0""#,
+            1,
+            5
+        ),
+        [["-", "111111", "222222", "111111", "-"]]
+    );
+}
+
+#[test]
+fn takes_what_a_format_gives_whole_rows_and_leaves_out_what_a_style_may_not_give() {
+    // The first column's no wrapping, margins and vertical alignment reach every cell of
+    // its rows; its shading, text direction and diagonal border only its own cells.
+    let styles = r#"<w:style w:type="table" w:styleId="Column"><w:name w:val="Column"/><w:tblPr><w:jc w:val="center"/><w:tblpPr w:tblpX="100" w:tblpY="100"/></w:tblPr><w:tcPr><w:textDirection w:val="tbRl"/></w:tcPr><w:tblStylePr w:type="firstCol"><w:tcPr><w:tcBorders><w:tl2br w:val="single" w:sz="4"/></w:tcBorders><w:shd w:val="clear" w:fill="AAAAAA"/><w:noWrap/><w:tcMar><w:top w:w="100" w:type="dxa"/></w:tcMar><w:vAlign w:val="bottom"/></w:tcPr></w:tblStylePr></w:style><w:style w:type="table" w:styleId="Derived"><w:name w:val="Derived"/><w:basedOn w:val="Column"/></w:style>"#;
+    let body = table(
+        r#"<w:tblStyle w:val="Derived"/><w:tblLook w:firstRow="0" w:firstColumn="1" w:noHBand="1"/>"#,
+        2,
+        2,
+    );
+    let document = open_with(styles, &body);
+    let mut formats = document.formats();
+    let first = formats.cell_properties(cell_at(&document, 1, 0));
+    assert!(
+        first
+            .borders()
+            .unwrap()
+            .top_left_to_bottom_right()
+            .is_some()
+    );
+    assert!(first.shading().is_some());
+    assert_eq!(first.text_direction(), None);
+    let second = formats.cell_properties(cell_at(&document, 1, 1));
+    assert_eq!(second.no_wrap(), Some(true));
+    assert!(second.margins().and_then(CellMargins::top).is_some());
+    assert_eq!(
+        second.vertical_justification(),
+        Some(VerticalJustification::Bottom)
+    );
+    assert!(second.shading().is_none() && second.borders().is_none());
+    // Through the style it is based on, the table takes the alignment, not the position.
+    let properties = formats.table_properties(first_table(&document));
+    assert_eq!(properties.justification(), Some(TableJustification::Center));
+    assert!(properties.position().is_none());
+    // A cell's conditions are its own, not its row's.
+    assert_eq!(
+        formats.cell_conditions(cell_at(&document, 0, 0)),
+        [TableStyleCondition::FirstColumn]
+    );
+    assert!(formats.cell_conditions(cell_at(&document, 0, 1)).is_empty());
+}
+
+#[test]
+fn takes_the_default_table_style_and_reports_text_a_style_gives_through_a_format_or_a_base() {
+    let styles = format!(
+        r#"<w:style w:type="table" w:styleId="First"><w:name w:val="First"/>{}</w:style><w:style w:type="table" w:default="1" w:styleId="Chosen"><w:name w:val="Chosen"/>{}</w:style><w:style w:type="table" w:styleId="Bold"><w:name w:val="Bold"/><w:rPr><w:b/></w:rPr></w:style><w:style w:type="table" w:styleId="OnBold"><w:name w:val="OnBold"/><w:basedOn w:val="Bold"/></w:style><w:style w:type="table" w:styleId="Header"><w:name w:val="Header"/><w:tblStylePr w:type="firstRow"><w:rPr><w:b/></w:rPr></w:tblStylePr></w:style>"#,
+        shading("111111"),
+        shading("222222")
+    );
+    // Without w:tblStyle, the default table style.
+    let document = open_with(&styles, &table("", 1, 1));
+    assert_eq!(fills(&document), [["222222"]]);
+    let unapplied = "what the table's style gives paragraphs and runs is not applied yet";
+    // Text in a whole-table format, which Word ignores with the rest of it, is no text
+    // the style gives.
+    let whole = r#"<w:style w:type="table" w:styleId="Whole"><w:name w:val="Whole"/><w:tblStylePr w:type="wholeTable"><w:rPr><w:b/></w:rPr></w:tblStylePr></w:style>"#;
+    let document = open_with(whole, &table(r#"<w:tblStyle w:val="Whole"/>"#, 1, 1));
+    assert!(
+        document.to_layout_ir().left_out().is_empty(),
+        "{:?}",
+        document.to_layout_ir().left_out()
+    );
+    for id in ["OnBold", "Header"] {
+        let document = open_with(
+            &styles,
+            &table(&format!(r#"<w:tblStyle w:val="{id}"/>"#), 1, 1),
+        );
+        let messages: Vec<String> = document
+            .to_layout_ir()
+            .left_out()
+            .iter()
+            .map(|entry| entry.message().to_owned())
+            .collect();
+        assert_eq!(messages, [unapplied], "{id}");
+    }
 }

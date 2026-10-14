@@ -271,6 +271,9 @@ impl<'a> Translator<'a> {
                 "the cell's diagonal borders are not drawn".into()
             });
         }
+        // A cell has no inner edges for its own w:insideH and w:insideV (ISO/IEC 29500-1,
+        // insideH of tcBorders); a table style's reach the cell's sides through the groups
+        // of cells its conditional formats apply to (`Formats::cell_properties`).
         let written = properties.borders().map(|borders| borders.sides());
         let borders = ir::CellBorders::default()
             .with_top(self.side(written.and_then(TableBorders::top), true))
