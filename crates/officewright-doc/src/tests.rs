@@ -1090,6 +1090,35 @@ fn takes_the_first_choice_of_alternate_content_that_officewright_can_read() {
 }
 
 #[test]
+fn takes_the_fallback_after_a_choice_with_alternates_of_its_own() {
+    // From the review of #147: the fallback after a choice that is not taken and holds
+    // an mc:AlternateContent of its own, and branches written on lines of their own,
+    // with white space, a comment and a processing instruction between them.
+    let r_pr = r#"<w:rPr>
+        <mc:AlternateContent>
+            <!-- w14 is not implemented -->
+            <mc:Choice Requires="w14">
+                <mc:AlternateContent>
+                    <mc:Choice Requires="w"><w:i/></mc:Choice>
+                </mc:AlternateContent>
+            </mc:Choice>
+            <?officewright test?>
+            <mc:Fallback>
+                <w:b/>
+            </mc:Fallback>
+        </mc:AlternateContent>
+        <w:caps/>
+    </w:rPr>"#;
+    let document = open(&format!("<w:p><w:r>{r_pr}<w:t>x</w:t></w:r></w:p>"));
+    assert!(messages(&document).is_empty(), "{:?}", messages(&document));
+    let properties = first_run(&document).properties();
+    assert_eq!(
+        (properties.bold(), properties.italic(), properties.caps()),
+        (Some(true), None, Some(true))
+    );
+}
+
+#[test]
 fn reads_properties_under_nested_alternate_content_in_linear_time() {
     // Issue #113: each mc:AlternateContent in a property element made every element
     // below it be walked again, so 10,000 nested ones around 100,000 elements cost a
