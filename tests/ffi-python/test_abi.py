@@ -425,9 +425,9 @@ class AbiTest(unittest.TestCase):
         self.addCleanup(lib.ow_font_resolver_free, resolver)
         return resolver
 
-    def resolve(self, resolver, family, bold=0, expected=OK):
+    def resolve(self, resolver, family, bold=0, italic=0, expected=OK):
         font = c_void_p(1)
-        self.check(lib.ow_pdf_font_resolve(resolver, family.encode(), bold, 0, byref(font)), expected)
+        self.check(lib.ow_pdf_font_resolve(resolver, family.encode(), bold, italic, byref(font)), expected)
         if expected == OK:
             self.addCleanup(lib.ow_pdf_font_free, font)
         else:
@@ -472,6 +472,37 @@ class AbiTest(unittest.TestCase):
         self.check(lib.ow_pdf_document_from_text("Привет".encode(), 595.0, 842.0, arial, 12.0, byref(doc)))
         self.addCleanup(lib.ow_pdf_document_free, doc)
         self.assertIn(b"+LiberationSans", self.save_bytes(doc))
+
+    def test_styles_a_family_without_some_faces_as_word_does(self):
+        # Liberation Sans without its Italic face: italic text slants Regular, as Word
+        # does, rather than take Bold Italic.
+        book = self.new_book()
+        added = c_size_t()
+        for style in ("Regular", "Bold", "BoldItalic"):
+            path = FONTS / "liberation" / f"LiberationSans-{style}.ttf"
+            self.check(lib.ow_font_book_add_file(book, str(path).encode(), byref(added)))
+        resolver = self.resolver(book)
+        self.resolve(resolver, "Liberation Sans", italic=1)
+        self.resolve(resolver, "Liberation Sans", bold=1, italic=1)
+        self.assertEqual(
+            self.substitutions(resolver),
+            [(OW_RESOLUTION_EXACT, '"Liberation Sans" italic → "Liberation Sans" with synthetic italic')],
+        )
+        # Only its Bold face: regular text comes out bold, and the report says so.
+        book = self.new_book()
+        bold = FONTS / "liberation" / "LiberationSans-Bold.ttf"
+        self.check(lib.ow_font_book_add_file(book, str(bold).encode(), byref(added)))
+        resolver = self.resolver(book)
+        self.resolve(resolver, "Liberation Sans")
+        self.assertEqual(
+            self.substitutions(resolver),
+            [
+                (
+                    OW_RESOLUTION_EXACT,
+                    '"Liberation Sans" → "Liberation Sans", in bold: the family has no regular face installed',
+                )
+            ],
+        )
 
     def test_reports_a_family_nothing_stands_in_for(self):
         resolver = self.resolver(self.new_book())

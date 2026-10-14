@@ -293,6 +293,9 @@ fn push_unique(names: &mut Vec<String>, name: &str) {
 pub(crate) struct FaceProperties {
     pub(crate) names: FontNames,
     pub(crate) weight: u16,
+    /// Whether OS/2's fsSelection or head's macStyle marks the face as its family's
+    /// bold.
+    pub(crate) bold: bool,
     pub(crate) italic: bool,
     pub(crate) embedding: EmbeddingPermissions,
     pub(crate) outlines: Option<OutlineFormat>,
@@ -309,7 +312,7 @@ impl FaceProperties {
         let mac_style = head.mac_style();
         let mac_bold = mac_style.contains(MacStyle::BOLD);
         let mac_italic = mac_style.contains(MacStyle::ITALIC);
-        let (weight, italic, embedding) = match os2 {
+        let (weight, bold, italic, embedding) = match os2 {
             Some(os2) => {
                 let selection = os2.fs_selection();
                 let bold = selection.contains(SelectionFlags::BOLD) || mac_bold;
@@ -320,10 +323,11 @@ impl FaceProperties {
                 let italic = selection.intersects(SelectionFlags::ITALIC | SelectionFlags::OBLIQUE)
                     || mac_italic;
                 let embedding = EmbeddingPermissions::from_fs_type(os2.fs_type(), os2.version());
-                (weight, italic, embedding)
+                (weight, bold, italic, embedding)
             }
             None => (
                 default_weight(mac_bold),
+                mac_bold,
                 mac_italic,
                 EmbeddingPermissions::default(),
             ),
@@ -340,6 +344,7 @@ impl FaceProperties {
         Self {
             names: name.map(FontNames::read).unwrap_or_default(),
             weight,
+            bold,
             italic,
             embedding,
             outlines,
