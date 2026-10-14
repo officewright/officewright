@@ -49,7 +49,9 @@ crates/
                         and shapes with HarfRust, behind private modules; feature `fuzzing` opens entry points
                         for the fuzz targets, examples and font tests, which are not API; `data/symbol.txt`
                         (Unicode's Adobe Symbol mapping) stays out of the published crate
-  officewright-doc      DOC/DOCX/RTF          (counterpart of Spire.Doc)
+  officewright-doc      DOC/DOCX/RTF          (counterpart of Spire.Doc); feature `pdf` translates a document into
+                        the layout IR (`Document::to_layout_ir`), hidden in the docs and exempt from semver
+                        like the IR unless feature `unstable-ir`
   officewright-pdf      PDF read/write        (counterpart of Spire.PDF); the drawing primitives the layout engine
                         paints with are public, but exempt from semver until 1.0 and hidden in the docs unless
                         feature `unstable-drawing`
@@ -214,7 +216,7 @@ Not before the C ABI is stable. When they come: .NET (`netstandard2.0` + `net8.0
 - Conventional Commits with the crate as scope: `feat(pdf): write xref streams`, `fix(ffi): free buffer on error path`, `docs(readme): ...`, `ci: ...`. Breaking changes use `!` (`feat(pdf)!: ...`).
 - One logical change per commit; no "wip"/"fix stuff" commits.
 - Until Milestone 1 is merged, commit to `main`. After that, work on branches (`feat/<topic>`, `fix/<topic>`), open a PR, merge only with green CI. `main` is protected.
-- Releases (later): release-plz generates versions and CHANGELOG from commit messages; cargo-semver-checks runs before publishing, without the feature `unstable-ir` of `officewright-layout` and `unstable-drawing` of `officewright-pdf` (the IR and the drawing primitives are exempt until 1.0).
+- Releases (later): release-plz generates versions and CHANGELOG from commit messages; cargo-semver-checks runs before publishing, without the features `unstable-ir` of `officewright-layout` and `officewright-doc` and `unstable-drawing` of `officewright-pdf` (the IR, the translation into it and the drawing primitives are exempt until 1.0).
 
 ## Sessions
 
