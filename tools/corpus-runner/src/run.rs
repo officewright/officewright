@@ -111,16 +111,13 @@ fn run(options: &Options) -> Result<bool, String> {
                 println!("better than the baseline: {line}");
             }
             if !changes.worse.is_empty() {
-                println!(
-                    "FAILED: {} files are worse than the baseline",
-                    changes.worse.len()
-                );
+                println!("FAILED: {} worse than the baseline", changes.worse_count());
                 passed = false;
             } else if !changes.better.is_empty() && !options.allow_better {
                 println!(
-                    "FAILED: {} files are better than the baseline; accept them by running with \
+                    "FAILED: {} better than the baseline; accept them by running with \
                      --update-baseline and committing {}",
-                    changes.better.len(),
+                    changes.better_count(),
                     path.display()
                 );
                 passed = false;
@@ -191,12 +188,16 @@ fn relative(root: &Path, file: &Path) -> Result<String, String> {
         )
     };
     let rest = full.strip_prefix(root).map_err(|_| outside())?;
-    // std::path::absolute keeps "..": a path through it may lead out of the root.
+    // std::path::absolute keeps "..": a path through it may lead out of the root, so it is
+    // not resolved but refused, whether or not it stays inside.
     if rest
         .components()
         .any(|part| !matches!(part, std::path::Component::Normal(_)))
     {
-        return Err(outside());
+        return Err(format!(
+            "{}: a path through '..' is not accepted; name the file from the root without it",
+            file.display()
+        ));
     }
     let parts: Vec<String> = rest
         .components()
@@ -399,16 +400,15 @@ fn run_child(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn();
-    let mut child = match child {
-        Ok(child) => child,
-        Err(error) => {
-            let exit = ChildExit {
-                stderr: format!("cannot start the child: {error}"),
-                ..ChildExit::default()
-            };
-            return Ok((exit, started.elapsed()));
-        }
-    };
+    // A child that cannot be started says nothing about the file: like a thread that cannot
+    // be started below, it stops the run.
+    let mut child = child.map_err(|error| {
+        format!(
+            "cannot start {} to open {}: {error}",
+            launcher.program.display(),
+            file.display()
+        )
+    })?;
     // The pipes are drained while the child runs, so a full pipe cannot block it.
     let (stdout, stderr) = match (
         child.stdout.take().map(drain),
@@ -542,4 +542,26 @@ fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), String>
         .map_err(|error| format!("{}: {error}", path.display()))?;
     json.push('\n');
     std::fs::write(path, json).map_err(|error| format!("{}: {error}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A child that cannot be started is a failure of the runner, not a result of the file
+    /// (#68).
+    #[test]
+    fn a_child_that_cannot_start_stops_the_run() {
+        let launcher = Launcher {
+            program: PathBuf::from("/nonexistent/corpus-runner-child"),
+            leading: Vec::new(),
+        };
+        let error = run_child(&launcher, Path::new("docs/a.docx"), Duration::from_secs(5))
+            .err()
+            .unwrap();
+        assert!(
+            error.starts_with("cannot start /nonexistent/corpus-runner-child to open docs/a.docx"),
+            "{error}"
+        );
+    }
 }

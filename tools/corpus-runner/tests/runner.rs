@@ -174,6 +174,10 @@ fn the_baseline_holds_every_status() -> io::Result<()> {
         output
             .contains("worse than the baseline: docs/good.docx: opened in the baseline, now panic")
     );
+    assert!(
+        output.contains("FAILED: 2 files worse than the baseline"),
+        "{output}"
+    );
 
     // Better: an error becomes expected, which must be accepted into the baseline.
     corpus.write(
@@ -185,6 +189,10 @@ fn the_baseline_holds_every_status() -> io::Result<()> {
     assert_eq!(code, 1, "{output}");
     assert!(
         output.contains("better than the baseline: docs/nested/BROKEN.DOCX"),
+        "{output}"
+    );
+    assert!(
+        output.contains("FAILED: 1 file better than the baseline"),
         "{output}"
     );
     assert!(output.contains("--update-baseline"), "{output}");
@@ -228,6 +236,22 @@ fn the_baseline_holds_every_status() -> io::Result<()> {
         output.contains("docs/renamed.docx: not in the baseline (opened)"),
         "{output}"
     );
+    assert!(
+        output.contains("FAILED: 2 files worse than the baseline"),
+        "{output}"
+    );
+    // A file gone from the run that the baseline also has scores for: one file, two changes.
+    corpus.write(
+        "baseline.json",
+        "{\"format\": 1, \"files\": {\"docs/good.docx\": \"opened\", \"docs/nested/BROKEN.DOCX\": \"unexpected-error\", \"docs/renamed.docx\": \"opened\"},
+            \"scores\": {\"docs/good.docx\": {\"text_score\": 1.0}}}",
+    )?;
+    let (code, output) = corpus.run(&[&base[..], &["docs"]].concat(), None)?;
+    assert_eq!(code, 1, "{output}");
+    assert!(
+        output.contains("FAILED: 1 file (2 changes) worse than the baseline"),
+        "{output}"
+    );
     Ok(())
 }
 
@@ -240,7 +264,18 @@ fn paths_outside_the_root_and_bad_options_are_refused() -> io::Result<()> {
     let (code, output) =
         corpus.run(&["--root", "docs/nested", "docs/nested/../good.docx"], None)?;
     assert_eq!(code, 2, "a path through .. leaves the root: {output}");
-    assert!(output.contains("is not under the root"), "{output}");
+    assert!(
+        output.contains("a path through '..' is not accepted"),
+        "{output}"
+    );
+    // Also when it stays inside the root: '..' is refused, not resolved (#68).
+    let (code, output) = corpus.run(&["docs/nested/../good.docx"], None)?;
+    assert_eq!(code, 2, "{output}");
+    assert!(
+        output.contains("a path through '..' is not accepted"),
+        "{output}"
+    );
+    assert!(!output.contains("is not under the root"), "{output}");
     let (code, output) = corpus.run(&["docs/notes-missing"], None)?;
     assert_eq!(code, 2, "{output}");
     let (code, output) = corpus.run(&["--allow-better", "docs"], None)?;

@@ -156,9 +156,10 @@ pub fn check_memory(result: &mut FileResult, limit_mb: u64) {
     if let Some(kb) = result.peak_rss_kb {
         if kb > limit_mb.saturating_mul(1024) && !result.status.is_robustness_failure() {
             result.status = Status::Memory;
+            // Rounded up, so a peak just over the limit does not read as equal to it.
             result.error = Some(format!(
                 "peak memory {} MiB, over the limit of {limit_mb} MiB",
-                kb / 1024
+                kb.div_ceil(1024)
             ));
             result.expected_reason = None;
         }
@@ -264,14 +265,48 @@ impl Baseline {
     }
 }
 
-/// How a run differs from its baseline, one line per file.
+/// How a run differs from its baseline: one line per change, and the files changed. A file
+/// can change in its status and in several scores.
 #[derive(Debug, Default)]
 pub struct Changes {
-    /// Files whose status got worse, or changed between two failures, and files missing
-    /// from the run or from the baseline.
+    /// Statuses that got worse, or changed between two failures, scores that dropped, and
+    /// files missing from the run or from the baseline.
     pub worse: Vec<String>,
-    /// Files whose status got better.
+    /// Statuses and scores that got better.
     pub better: Vec<String>,
+    pub worse_files: BTreeSet<String>,
+    pub better_files: BTreeSet<String>,
+}
+
+impl Changes {
+    fn worse(&mut self, path: &str, line: String) {
+        self.worse_files.insert(path.to_owned());
+        self.worse.push(line);
+    }
+
+    fn better(&mut self, path: &str, line: String) {
+        self.better_files.insert(path.to_owned());
+        self.better.push(line);
+    }
+
+    /// How many files got worse, and in how many changes.
+    pub fn worse_count(&self) -> String {
+        files_and_changes(self.worse_files.len(), self.worse.len())
+    }
+
+    /// How many files got better, and in how many changes.
+    pub fn better_count(&self) -> String {
+        files_and_changes(self.better_files.len(), self.better.len())
+    }
+}
+
+/// "1 file", "3 files", or "2 files (5 changes)" when some file changed more than once.
+pub fn files_and_changes(files: usize, changes: usize) -> String {
+    let mut text = format!("{files} file{}", if files == 1 { "" } else { "s" });
+    if changes > files {
+        text.push_str(&format!(" ({changes} changes)"));
+    }
+    text
 }
 
 pub fn compare(baseline: &Baseline, report: &Report) -> Changes {
@@ -283,9 +318,7 @@ pub fn compare(baseline: &Baseline, report: &Report) -> Changes {
         .collect();
     for (path, &before) in &baseline.files {
         let Some(file) = now.get(path.as_str()) else {
-            changes
-                .worse
-                .push(format!("{path}: in the baseline but not in this run"));
+            changes.worse(path, format!("{path}: in the baseline but not in this run"));
             continue;
         };
         if file.status == before {
@@ -301,19 +334,20 @@ pub fn compare(baseline: &Baseline, report: &Report) -> Changes {
                 .unwrap_or_default()
         );
         if file.status.rank() > before.rank() {
-            changes.better.push(line);
+            changes.better(path, line);
         } else {
-            changes.worse.push(line);
+            changes.worse(path, line);
         }
     }
     let known: BTreeSet<&str> = baseline.files.keys().map(String::as_str).collect();
     for file in &report.files {
         if !known.contains(file.path.as_str()) {
-            changes.worse.push(format!(
+            let line = format!(
                 "{}: not in the baseline ({}); run with --update-baseline and commit it",
                 file.path,
                 name(file.status)
-            ));
+            );
+            changes.worse(&file.path, line);
         }
     }
     compare_scores(baseline, &now, &mut changes);
@@ -327,36 +361,40 @@ fn compare_scores(baseline: &Baseline, now: &BTreeMap<&str, &FileResult>, change
                 .get(path.as_str())
                 .and_then(|file| file.score_error.as_deref())
                 .unwrap_or("not scored in this run");
-            changes
-                .worse
-                .push(format!("{path}: scored in the baseline, now {why}"));
+            changes.worse(path, format!("{path}: scored in the baseline, now {why}"));
             continue;
         };
         let after = tracked(scores);
         for (metric, &old) in before {
             match after.get(metric) {
                 Some(&new) if new < old - SCORE_TOLERANCE => {
-                    changes
-                        .worse
-                        .push(format!("{path}: {metric} {old} in the baseline, now {new}"));
+                    changes.worse(
+                        path,
+                        format!("{path}: {metric} {old} in the baseline, now {new}"),
+                    );
                 }
                 Some(&new) if new > old + SCORE_TOLERANCE => {
-                    changes
-                        .better
-                        .push(format!("{path}: {metric} {old} in the baseline, now {new}"));
+                    changes.better(
+                        path,
+                        format!("{path}: {metric} {old} in the baseline, now {new}"),
+                    );
                 }
                 Some(_) => {}
-                None => changes
-                    .worse
-                    .push(format!("{path}: {metric} {old} in the baseline, now none")),
+                None => changes.worse(
+                    path,
+                    format!("{path}: {metric} {old} in the baseline, now none"),
+                ),
             }
         }
     }
     for (path, file) in now {
         if file.scores.is_some() && !baseline.scores.contains_key(*path) {
-            changes.worse.push(format!(
-                "{path}: scored, but the baseline has no scores for it; run with --update-baseline and commit it"
-            ));
+            changes.worse(
+                path,
+                format!(
+                    "{path}: scored, but the baseline has no scores for it; run with --update-baseline and commit it"
+                ),
+            );
         }
     }
 }
@@ -500,6 +538,7 @@ mod tests {
         ]);
         let changes = compare(&baseline, &after);
         assert_eq!(changes.worse.len(), 5, "{:?}", changes.worse);
+        assert_eq!(changes.worse_files.len(), 5);
         assert!(changes.worse[0].starts_with("a: opened in the baseline, now panic"));
         assert!(changes.worse[1].starts_with("d: in the baseline but not in this run"));
         assert!(changes.worse[2].starts_with("f: opened in the baseline, now expected-error"));
@@ -606,6 +645,43 @@ mod tests {
         assert!(!json.contains("scores"), "no scores, no key: {json}");
     }
 
+    /// A file that regressed in two scores, or in its status and its scores, is one file
+    /// with several changes (#129).
+    #[test]
+    fn changes_count_files_apart_from_lines() {
+        let baseline = Baseline::of(&Report::new(vec![
+            scored("a", 0.99, 0.95),
+            scored("b", 0.99, 0.95),
+        ]));
+        let mut panicked = scored("b", 0.99, 0.95);
+        (panicked.status, panicked.scores) = (Status::Panic, None);
+        let changes = compare(
+            &baseline,
+            &Report::new(vec![scored("a", 0.5, 0.5), panicked]),
+        );
+        // a: three scores dropped (ssim_min moves with ssim_mean here); b: its status and its
+        // scores.
+        assert_eq!(changes.worse.len(), 5, "{:?}", changes.worse);
+        assert_eq!(
+            changes
+                .worse_files
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        assert_eq!(files_and_changes(2, 5), "2 files (5 changes)");
+        assert_eq!(files_and_changes(1, 1), "1 file");
+        assert_eq!(files_and_changes(3, 3), "3 files");
+        let better = compare(
+            &baseline,
+            &Report::new(vec![scored("a", 1.0, 1.0), scored("b", 0.99, 0.95)]),
+        );
+        assert_eq!((better.better.len(), better.better_files.len()), (2, 1));
+        assert_eq!(better.better_count(), "1 file (2 changes)");
+        assert_eq!(changes.worse_count(), "2 files (5 changes)");
+    }
+
     #[test]
     fn memory_over_the_limit_fails_the_file() {
         let mut result = file("a", Status::Opened);
@@ -619,7 +695,7 @@ mod tests {
         assert_eq!(result.expected_reason, None);
         assert_eq!(
             result.error.as_deref(),
-            Some("peak memory 1024 MiB, over the limit of 1024 MiB")
+            Some("peak memory 1025 MiB, over the limit of 1024 MiB")
         );
     }
 
