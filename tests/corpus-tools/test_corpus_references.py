@@ -9,7 +9,8 @@ committed, so a later change cannot slip past them: no person's name, profile pa
 embedded font in a re-saved copy, no language or number format Word added that SOURCES.md
 does not name as accepted, no profile path in geometry.json or formatting.json, no PNG chunk
 the importer does not write, Word's page breaks as the re-saved copy has them, and the
-corpus limits of CLAUDE.md (each file under 1 MB, all under 50 MB).
+corpus limits of CLAUDE.md (each file under 1 MB, all under 50 MB). Every document of
+business/ and generated/ has a reference or a SOURCES.md row saying why it has none.
 """
 
 import importlib.util
@@ -221,6 +222,28 @@ class References(unittest.TestCase):
         for path in re.findall(r"^\| reference/([^ |]+)/ \|", self.sources, re.M):
             with self.subTest(row=path):
                 self.assertTrue((REFERENCE / path / "geometry.json").is_file())
+
+    def test_every_business_document_has_a_reference_or_says_why_not(self):
+        heading = "### Business documents without a committed reference"
+        self.assertEqual(self.sources.count(heading), 1)
+        section = self.sources.split(heading, 1)[1].split("\n#", 1)[0]
+        listed = re.findall(r"^\| `((?:business|generated)/[^ |`]+)\.docx` \|", section, re.M)
+        self.assertTrue(listed)
+        self.assertEqual(len(listed), len(set(listed)))
+        for name in listed:
+            with self.subTest(listed=name):
+                self.assertTrue((CORPUS / f"{name}.docx").is_file())
+                # The SHA-256 of the input Word rendered is the committed file's.
+                (row,) = [r for r in section.splitlines() if r.startswith(f"| `{name}.docx` |")]
+                input_sha = row.strip("| ").split(" | ")[5]
+                self.assertEqual(input_sha, importer.sha256(CORPUS / f"{name}.docx"))
+        for group in ("business", "generated"):
+            for document in sorted((CORPUS / group).glob("*.docx")):
+                name = f"{group}/{document.stem}"
+                with self.subTest(document=name):
+                    # One or the other: a reference, or a row that says why there is none.
+                    has_reference = (REFERENCE / group / document.stem).is_dir()
+                    self.assertNotEqual(has_reference, name in listed)
 
 
 if __name__ == "__main__":
