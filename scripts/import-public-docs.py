@@ -834,7 +834,9 @@ def problems(
             body = archive.read(name)
             if DROPPED.match(name):
                 found.append(f"{name} is still there")
-            if name.startswith(("word/fonts/", "word/embeddings/")) or "vbaProject" in name:
+            if name.startswith(("word/fonts/", "word/embeddings/", "word/activeX/")) or (
+                "vbaProject" in name
+            ):
                 found.append(f"{name} is embedded")
             if MEDIA.match(name) and not is_placeholder(body):
                 found.append(f"{name} is not our placeholder")

@@ -24,11 +24,11 @@ fn cli() -> Command {
                      spaces and a form feed starts a new page.\n\n\
                      Without --font the text is set in Helvetica, which every PDF viewer has, \
                      and only characters in WinAnsiEncoding (Latin text) are supported. With \
-                     --font the font is embedded, reduced to the glyphs the text uses. It \
-                     shows the characters it has of the Latin, Greek, Cyrillic, Armenian, \
-                     Georgian, Han, Hiragana and Katakana scripts and Hangul syllables, one \
-                     glyph per character; scripts that need shaping or right-to-left layout \
-                     are not supported yet.\n\n\
+                     --font the font is embedded, reduced to the glyphs the text uses \
+                     unless its license forbids subsetting. It shows the characters it has \
+                     of the Latin, Greek, Cyrillic, Armenian, Georgian, Han, Hiragana and \
+                     Katakana scripts and Hangul syllables, one glyph per character; scripts \
+                     that need shaping or right-to-left layout are not supported yet.\n\n\
                      --font takes a font file, or a family name looked up among the system \
                      fonts and the fonts in each --font-dir, as Word looks up fonts. When the \
                      family is not there, its metric-compatible substitute (Carlito for \
