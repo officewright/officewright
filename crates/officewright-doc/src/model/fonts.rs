@@ -111,23 +111,39 @@ impl EmbeddedFontReference {
 
     /// The font program, TrueType or OpenType, as the part holds it once its first 32
     /// bytes are no longer obfuscated (ECMA-376 Part 1, §17.8.1). It is read when the
-    /// document is opened. None, with a diagnostic, when the font table's relationships
-    /// or the package do not have the part, the part cannot be read, the key is not a
-    /// GUID, or the bytes are not a font with or without the key; none, too, for a font
-    /// outside the package.
+    /// document is opened. Only its first four bytes are checked; the program itself is
+    /// not read.
+    ///
+    /// None when the font table's relationships do not have the relationship, its target
+    /// is no part of the package or one the package does not have, the part cannot be
+    /// read, the key is not a GUID, or the bytes do not start as a font with or without
+    /// the key. The document's diagnostics report each: a relationship, target or key for
+    /// each font, a part once for each key it is read with, however many fonts name it.
+    /// None, too, and not reported, for a font outside the package, which is never
+    /// loaded.
     ///
     /// ```
     /// # fn main() -> officewright_doc::Result<()> {
-    /// use officewright_doc::Document;
+    /// use officewright_doc::{Document, EmbeddedFontStyle};
     ///
-    /// let document = Document::open("tests/data/hello.docx")?;
+    /// let document = Document::open("tests/data/embedded-font.docx")?;
+    /// let mut programs = Vec::new();
     /// for font in document.fonts() {
     ///     for embedded in font.embedded() {
     ///         if let Some(program) = embedded.program() {
-    ///             println!("{} {:?}: {} bytes", font.name(), embedded.style(), program.len());
+    ///             // A TrueType font starts with 00 01 00 00.
+    ///             programs.push((font.name(), embedded.style(), program.get(..4)));
     ///         }
     ///     }
     /// }
+    /// assert_eq!(
+    ///     programs,
+    ///     [(
+    ///         "Officewright Test",
+    ///         EmbeddedFontStyle::Regular,
+    ///         Some(&[0, 1, 0, 0][..])
+    ///     )]
+    /// );
     /// # Ok(())
     /// # }
     /// ```

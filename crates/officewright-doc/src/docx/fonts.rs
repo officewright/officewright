@@ -230,15 +230,18 @@ fn long_hex(value: &str) -> Option<u32> {
 }
 
 /// Reads the programs of the fonts the font table embeds, from the parts its
-/// relationships lead to: each part read once per key, however many fonts name it.
+/// relationships lead to: each part read, and reported, once per key, however many fonts
+/// name it.
 ///
 /// Word obfuscates an embedded font (ECMA-376 Part 1, §17.8.1): its first 32 bytes are
-/// XORed with the 16 bytes of the GUID of `w:fontKey`, taken in the reverse order of its
-/// hexadecimal digits as written, twice over. The fonts of Word's and LibreOffice's
-/// files in the corpora all turn into fonts so, and none in the order of the GUID's
-/// fields. A program that does not start as a font with the key, but does without it, is
-/// taken as it is; one that does neither is reported and left out. Only a limit of the
-/// package stops the reading.
+/// XORed with the 16 bytes of the GUID of `w:fontKey`, twice over: the bytes its
+/// hexadecimal digits give, read in pairs as written, in reverse order. The fonts of
+/// Word's and LibreOffice's files in the corpora all turn into fonts so, and none in the
+/// order of the GUID's fields. A program that starts as a font with the key is taken so;
+/// one that does only without it is taken as it is; one that does neither is reported
+/// and left out. Only the first four bytes are checked, so a program that starts as a
+/// font may still be damaged further on. Only a limit of the package stops the
+/// reading.
 pub(super) fn read_programs(
     document: &mut Document,
     part: &Part<'_>,
@@ -265,8 +268,18 @@ pub(super) fn read_programs(
                 });
                 continue;
             };
-            // None for a font outside the package, which is never loaded.
+            // A font outside the package is never loaded; an internal target that names
+            // no part is reported.
             let Some(name) = relationship.target_part() else {
+                if relationship.target_mode() == officewright_opc::TargetMode::Internal {
+                    diagnostics.push(DiagnosticKind::UnexpectedContent, || {
+                        format!(
+                            "{} is in {}, which is not a part of the package",
+                            what(),
+                            shorten(relationship.target())
+                        )
+                    });
+                }
                 continue;
             };
             let key = match embedded.key.as_deref().map(font_key) {
@@ -323,8 +336,8 @@ pub(super) fn read_programs(
     Ok(())
 }
 
-/// The 16 bytes of a `w:fontKey` (ST_Guid, `{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}`), in
-/// the reverse order of its hexadecimal digits as written.
+/// The 16 bytes of a `w:fontKey` (ST_Guid, `{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}`):
+/// those its hexadecimal digits give, read in pairs as written, in reverse order.
 fn font_key(value: &str) -> Option<[u8; 16]> {
     let digits = value.trim().strip_prefix('{')?.strip_suffix('}')?;
     let groups: Vec<&str> = digits.split('-').collect();
@@ -334,6 +347,10 @@ fn font_key(value: &str) -> Option<[u8; 16]> {
     }
     let mut bytes = [0u8; 16];
     let hex: String = groups.concat();
+    // Hexadecimal digits only: `from_str_radix` would take a sign too.
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
     for (byte, pair) in bytes.iter_mut().rev().zip(hex.as_bytes().chunks(2)) {
         let pair = std::str::from_utf8(pair).ok()?;
         *byte = u8::from_str_radix(pair, 16).ok()?;

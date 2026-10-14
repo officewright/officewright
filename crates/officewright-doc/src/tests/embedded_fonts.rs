@@ -163,12 +163,26 @@ fn reports_embedded_fonts_it_cannot_read() {
             "Iota",
             &format!(r#"<w:embedRegular r:id="rId8" w:fontKey="{KEY}"/>"#),
         ),
+        // Internal targets that name no part.
+        font("Lambda", r#"<w:embedRegular r:id="rId10"/>"#),
+        font("Mu", r#"<w:embedBold r:id="rId11"/>"#),
+        // A sign among the digits, and a GUID without its braces.
+        font(
+            "Nu",
+            r#"<w:embedRegular r:id="rId4" w:fontKey="{+0112233-4455-6677-8899-AABBCCDDEEFF}"/>"#,
+        ),
+        font(
+            "Xi",
+            r#"<w:embedRegular r:id="rId4" w:fontKey="00112233-4455-6677-8899-AABBCCDDEEFF"/>"#,
+        ),
     ]
     .concat();
     let relationships = [
         relationship("rId4", "fonts/font4.odttf"),
         relationship("rId6", "fonts/gone.odttf"),
         relationship("rId8", "fonts/font8.odttf"),
+        relationship("rId10", "../../../font.odttf"),
+        relationship("rId11", "#font"),
     ]
     .concat();
     let damaged = obfuscated(&truetype(64));
@@ -199,7 +213,7 @@ fn reports_embedded_fonts_it_cannot_read() {
         .iter()
         .map(ToString::to_string)
         .collect();
-    assert_eq!(messages.len(), 6, "{messages:?}");
+    assert_eq!(messages.len(), 10, "{messages:?}");
     let place = "/word/fontTable.xml: ";
     assert_eq!(
         messages[..5],
@@ -227,6 +241,82 @@ fn reports_embedded_fonts_it_cannot_read() {
         )),
         "{messages:?}"
     );
+    assert_eq!(
+        messages[6..],
+        [
+            format!(
+                "{place}the w:embedRegular of the font Lambda is in ../../../font.odttf, which is not a part of the package"
+            ),
+            format!(
+                "{place}the w:embedBold of the font Mu is in #font, which is not a part of the package"
+            ),
+            format!("{place}the w:embedRegular of the font Nu has a w:fontKey that is not a GUID"),
+            format!("{place}the w:embedRegular of the font Xi has a w:fontKey that is not a GUID"),
+        ]
+    );
+}
+
+/// The `w:fontKey` whose key is `bytes`: the GUID whose hexadecimal digits, read in pairs
+/// as written, give them in reverse order.
+fn guid(bytes: [u8; 16]) -> String {
+    let hex: String = bytes.iter().rev().map(|b| format!("{b:02X}")).collect();
+    format!(
+        "{{{}-{}-{}-{}-{}}}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
+    )
+}
+
+#[test]
+fn takes_each_kind_of_font_and_prefers_the_program_the_key_gives() {
+    // A part that starts as OpenType (OTTO) as it is and as an old Apple TrueType font
+    // (true) with the key: the key was given, so its program is the one taken.
+    let mut key = [0x5A; 16];
+    for (k, (a, b)) in key.iter_mut().zip(b"OTTO".iter().zip(b"true")) {
+        *k = a ^ b;
+    }
+    let mut both = b"OTTO".to_vec();
+    both.extend((0..60).map(|n| n as u8));
+    let mut collection = b"ttcf".to_vec();
+    collection.extend((0..60).map(|n| n as u8));
+    let fonts = [
+        font(
+            "Omicron",
+            &format!(r#"<w:embedRegular r:id="rId1" w:fontKey="{}"/>"#, guid(key)),
+        ),
+        font("Pi", r#"<w:embedRegular r:id="rId2"/>"#),
+    ]
+    .concat();
+    let relationships = [
+        relationship("rId1", "fonts/both.odttf"),
+        relationship("rId2", "fonts/collection.odttf"),
+    ]
+    .concat();
+    let document = Document::from_bytes(package_with_fonts(
+        &fonts,
+        &relationships,
+        &[
+            ("word/fonts/both.odttf", &both),
+            ("word/fonts/collection.odttf", &collection),
+        ],
+    ))
+    .unwrap();
+    assert!(
+        document.diagnostics().is_empty(),
+        "{:?}",
+        document.diagnostics()
+    );
+    let starts: Vec<Option<&[u8]>> = programs(&document)
+        .iter()
+        .map(|(_, _, program)| program.and_then(|program| program.get(..4)))
+        .collect();
+    assert_eq!(starts, [Some(&b"true"[..]), Some(&b"ttcf"[..])]);
+    // Past the 32 bytes the key covers, the program is the part's.
+    let taken = programs(&document)[0].2.unwrap();
+    assert_eq!(taken.get(32..), both.get(32..));
 }
 
 #[test]

@@ -1,7 +1,7 @@
 //! Opens the input as a Word document and walks everything the model read from it:
 //! sections, headers, footers and notes, blocks, tables, inline content and runs, the
-//! text, and the XML of every element kept without being understood, which must read back
-//! as XML. The formatting in
+//! text, the programs of embedded fonts, and the XML of every drawing and of every element
+//! kept without being understood, which must read back as XML. The formatting in
 //! effect of every paragraph, run and paragraph mark is resolved, and must not depend on
 //! what the resolver remembered from earlier ones. The document's translation into the
 //! layout IR must be valid IR.
