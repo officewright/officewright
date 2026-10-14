@@ -1471,9 +1471,9 @@ def table_style_bands() -> Doc:
 
 
 def table_style_bands_5() -> Doc:
-    # MS-OI29500 §17.7.6.7(c): Word restricts the band size to 0 to 3 (#172), and the
-    # schema does not allow more. A document of its own, so that a file Word refuses costs
-    # no other case.
+    # MS-OI29500 §17.7.6.7(c): Word restricts the band size to 0 to 3 (#172). ECMA-376's
+    # schema allows any integer, but the Open XML SDK's does not allow more than 3. A
+    # document of its own, so that a file Word refuses costs no other case.
     body = table_case(
         1, "row band size 5, which Word restricts to 0 to 3",
         styled_table("RowBands5", named_cells(8, 3), look_attributes=look(0, 0, 0, 0, 1, 0),
@@ -1531,12 +1531,19 @@ def table_style_not_allowed() -> Doc:
     # MS-OI29500 §17.7.6.4(a): Word does not allow w:tblW and w:tblLayout in a table
     # style's w:tblPr. A document of its own, so that a file Word refuses costs no other
     # case. The tables give no width of their own, over a grid of two 40 pt columns, 80 pt
-    # in all, that each hold one word wider than 40 pt: an autofit column widens for it, a
-    # fixed one does not, and a table that takes the style's 100 pt is wider than the grid.
-    styles = table_style(
-        "Width2000", [], width='<w:tblW w:w="2000" w:type="dxa"/>',
-        layout='<w:tblLayout w:type="fixed"/>',
-    ) + table_style("NoWidth", [])
+    # in all, that each hold one word wider than 40 pt (77.4 pt in Carlito, 176 pt for the
+    # table with the cell margins): an autofit column widens for it, a fixed one does not.
+    # A width alone shows only if it is wider than the autofit table, so Width5000 gives
+    # 250 pt; Width2000's 100 pt shows only together with its fixed layout.
+    styles = "".join(
+        [
+            table_style("Width2000", [], width='<w:tblW w:w="2000" w:type="dxa"/>',
+                        layout='<w:tblLayout w:type="fixed"/>'),
+            table_style("NoWidth", []),
+            table_style("Width5000", [], width='<w:tblW w:w="5000" w:type="dxa"/>'),
+            table_style("FixedOnly", [], layout='<w:tblLayout w:type="fixed"/>'),
+        ]
+    )
     cells = [[para(run("Hamburgefontsiv")), para(run("Hamburgefontsiv"))]]
     narrow = [800, 800]
     body = table_case(
@@ -1545,12 +1552,19 @@ def table_style_not_allowed() -> Doc:
         styled_table("Width2000", cells, grid=narrow),
     ) + table_case(
         2, "the style NoWidth, otherwise the same", styled_table("NoWidth", cells, grid=narrow)
+    ) + table_case(
+        3, "the style Width5000 gives only w:tblW 250 pt, otherwise the same",
+        styled_table("Width5000", cells, grid=narrow),
+    ) + table_case(
+        4, "the style FixedOnly gives only a fixed layout, otherwise the same",
+        styled_table("FixedOnly", cells, grid=narrow),
     )
     return Doc(
         "E-table-style-not-allowed",
-        "Whether Word opens a table style whose w:tblPr holds w:tblW and w:tblLayout, which "
-        "MS-OI29500 says it does not allow, and what width a table without its own width "
-        "takes from it",
+        "Whether Word opens table styles whose w:tblPr holds w:tblW or w:tblLayout, which "
+        "MS-OI29500 says it does not allow, and whether a table without its own width or "
+        "layout takes them: both, the width alone (250 pt, wider than the table's autofit "
+        "176 pt) and the fixed layout alone",
         body,
         styles=styles,
     )
@@ -1566,9 +1580,10 @@ def char_styled(value: str, style_id: str) -> str:
 # E-style-toggles and E-style-toggles-defaults show it for paragraph and character styles.
 # For a table style, the lowest style, two readings remain: it is one more such level (L),
 # or its value is the base the styles above count from (B, a reading of MS-OI29500
-# §17.7.6(b), "a toggle property in a table style sets the value"). At the table style
-# itself both give the same; they part in the styles above it. formatting.json records
-# whether each cell's first character is bold.
+# §17.7.6(b): "Word resets the value of the toggle property to the value specified by the
+# table style if a value is present"). At the table style itself both give the same; they
+# part in the styles above it. formatting.json records whether each cell's first character
+# is bold.
 def table_style_toggles() -> Doc:
     styles = "".join(
         [
@@ -1609,10 +1624,12 @@ def table_style_toggles_defaults() -> Doc:
             style("character", "CharBoldOff", '<w:b w:val="0"/><w:bCs w:val="0"/>'),
         ]
     )
-    # Defaults bold. In Normal, BoldOn gives bold and BoldOff not bold under both readings:
-    # these show that Word applies a table style's w:b at all. Under BoldOff, a run in
-    # CharBoldOff is bold under L (two flips) and not bold under B (same as the base); a
-    # run in CharBold is not bold under L (one flip) and bold under B.
+    # Defaults bold. In Normal, BoldOff gives not bold under both readings, and bold if Word
+    # ignored the table style: it shows that w:b off applies. BoldOn gives bold under both
+    # readings and if ignored; it gives not bold only under the standard's own rule, which
+    # MS-OI29500 §17.7.6(b) quotes: a table style's true toggles the level before it. Under
+    # BoldOff, a run in CharBoldOff is bold under L (two flips) and not bold under B (same
+    # as the base); a run in CharBold is not bold under L (one flip) and bold under B.
     off_cells = [[
         para(run("in Normal")),
         char_styled("in CharBoldOff", "CharBoldOff"),
@@ -1628,10 +1645,11 @@ def table_style_toggles_defaults() -> Doc:
     )
     return Doc(
         "E-table-style-toggles-defaults",
-        "With bold document defaults, whether a table style's w:b on and off apply, and how a "
-        "character style's bold combines with a table style's w:b off: as one more toggle "
-        "level, which gives bold for CharBoldOff and not bold for CharBold, or as the base "
-        "they count from, which gives the reverse",
+        "With bold document defaults, whether a table style's w:b off applies and whether its "
+        "w:b on toggles the defaults off, as the standard says; and how a character style's "
+        "bold combines with a table style's w:b off: as one more toggle level, which gives "
+        "bold for CharBoldOff and not bold for CharBold, or as the base they count from, "
+        "which gives the reverse",
         body,
         styles=styles,
         run_defaults_extra="<w:b/><w:bCs/>",
@@ -1641,8 +1659,9 @@ def table_style_toggles_defaults() -> Doc:
 def table_style_header_rows(setting: int) -> Doc:
     # #172: whether Word gives the first-row format of a table style to every header row
     # (w:tblHeader), by the setting differentiateMultirowTableHeaders ([MS-DOCX] 2.3.4).
-    # The style also bands rows by one: [MS-DOCX] 2.3.4 says the setting decides whether
-    # the rows after the first header row count as header rows for the bands too.
+    # The style also bands rows by one. [MS-DOCX] 2.3.4 says the setting decides whether the
+    # conditional formatting of table rows applies to multi-row headers; whether that
+    # includes the bands is a reading, which the render shows.
     formats = [c for c in CONDITIONS if c[0] == "firstRow"] + ROW_BANDS
     header = table_style("HeaderRows", formats, row_band=1)
     body = table_case(

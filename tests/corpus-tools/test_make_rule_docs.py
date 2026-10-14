@@ -364,6 +364,21 @@ class Packages(unittest.TestCase):
                             repeated, {"tblStylePr", "tr", "tc"}, f"{doc.name}: {tags}"
                         )
 
+    def test_properties_come_first_in_their_element(self):
+        # w:pPr, w:rPr, w:tcPr and w:trPr are the first child of their paragraph, run, cell
+        # or row (CT_P 17.3.1.22, CT_R 17.3.2.25, CT_Tc 17.4.66, CT_Row 17.4.79), after a
+        # row's w:tblPrEx at most.
+        for doc in self.docs:
+            for name, _ in rules.parts(doc):
+                if not name.startswith(("word/document.xml", "word/header", "word/footer")):
+                    continue
+                root = part(rules.parts(doc), name)
+                for parent, props in (("p", "pPr"), ("r", "rPr"), ("tc", "tcPr"), ("tr", "trPr")):
+                    for element in root.iter(f"{W}{parent}"):
+                        tags = [c.tag.replace(W, "") for c in element if c.tag != f"{W}tblPrEx"]
+                        if props in tags:
+                            self.assertEqual(tags.index(props), 0, f"{doc.name}: {tags}")
+
     def test_run_properties_follow_the_schema_order(self):
         # CT_RPr is a sequence (ECMA-376 Part 1, 17.3.2.28); Word refuses a document whose
         # run properties are out of order.
@@ -1045,7 +1060,16 @@ class Packages(unittest.TestCase):
 
         # E-table-style-not-allowed.
         styles, children = doc_parts("E-table-style-not-allowed")
-        (first, with_width), (second, without) = cases(children)
+        (first, with_width), (second, without), (third, wide), (fourth, fixed) = cases(children)
+        self.assertEqual(third, "the style Width5000 gives only w:tblW 250 pt, otherwise the same")
+        self.assertEqual(
+            fourth, "the style FixedOnly gives only a fixed layout, otherwise the same")
+        wide_pr = styles["Width5000"].find(f"{W}tblPr")
+        self.assertEqual(wide_pr.find(f"{W}tblW").attrib, {f"{W}w": "5000", f"{W}type": "dxa"})
+        self.assertIsNone(wide_pr.find(f"{W}tblLayout"))
+        fixed_pr = styles["FixedOnly"].find(f"{W}tblPr")
+        self.assertIsNone(fixed_pr.find(f"{W}tblW"))
+        self.assertEqual(fixed_pr.find(f"{W}tblLayout").get(f"{W}type"), "fixed")
         width = styles["Width2000"].find(f"{W}tblPr")
         self.assertEqual(width.find(f"{W}tblW").attrib, {f"{W}w": "2000", f"{W}type": "dxa"})
         self.assertEqual(width.find(f"{W}tblLayout").get(f"{W}type"), "fixed")
@@ -1053,7 +1077,8 @@ class Packages(unittest.TestCase):
         self.assertIsNone(styles["NoWidth"].find(f"{W}tblPr/{W}tblW"))
         self.assertIn("a grid of two 40 pt columns, each holding one word wider than 40 pt", first)
         self.assertEqual(second, "the style NoWidth, otherwise the same")
-        for table, style_id in ((with_width, "Width2000"), (without, "NoWidth")):
+        for table, style_id in ((with_width, "Width2000"), (without, "NoWidth"),
+                                (wide, "Width5000"), (fixed, "FixedOnly")):
             self.assertEqual(table.find(f"{W}tblPr/{W}tblStyle").get(f"{W}val"), style_id)
             self.assertIsNone(table.find(f"{W}tblPr/{W}tblW"))
             self.assertIsNone(table.find(f"{W}tblPr/{W}tblLayout"))
@@ -1102,11 +1127,15 @@ class Packages(unittest.TestCase):
                                               ("in CharBold", None, "CharBold")])
         self.assertIn("BoldPara (bold)", label)
         self.assertIn("CharBold (bold)", label)
+        # Normal is not a style that flips bold: the predictions count on it.
+        self.assertIsNone(styles["Normal"].find(f"{W}rPr"))
 
         # E-table-style-toggles-defaults: bold defaults; BoldOn over Normal, BoldOff over
         # Normal, CharBoldOff and CharBold.
         doc = next(d for d in self.docs if d.name == "E-table-style-toggles-defaults")
         self.assertEqual(doc.run_defaults_extra, "<w:b/><w:bCs/>")
+        # Over bold defaults, w:b on shows only whether it toggles them off.
+        self.assertIn("whether its w:b on toggles the defaults off", doc.purpose)
         styles, children = doc_parts(doc.name)
         (on_label, on), (off_label, off) = cases(children)
         self.assertEqual(on_label, "the table style BoldOn (w:b on); a paragraph in Normal")
@@ -1146,6 +1175,28 @@ class Packages(unittest.TestCase):
                        for tr in table.findall(f"{W}tr")]
             self.assertEqual(headers, [True, True, False, False, False, False], name)
             self.assertEqual(cell_texts(table), named(6, 3), name)
+
+    def test_markup_word_does_not_allow_stays_in_its_own_document(self):
+        # A file Word refuses must cost no other case: a band size above 3 (MS-OI29500
+        # §17.7.6.7(c)) only in E-table-style-bands-5, and the elements a table style's
+        # w:tblPr may not hold (§17.7.6.4(a)) only in E-table-style-not-allowed.
+        disallowed = {"bidiVisual", "tblLayout", "tblLook", "tblOverlap", "tblpPr", "tblStyle",
+                      "tblW"}
+        for doc in self.docs:
+            styles = part(rules.parts(doc), "word/styles.xml")
+            bands, held = [], set()
+            for style in styles.iter(f"{W}style"):
+                tbl_pr = style.find(f"{W}tblPr")
+                if tbl_pr is None:
+                    continue
+                for tag in ("tblStyleRowBandSize", "tblStyleColBandSize"):
+                    size = tbl_pr.find(f"{W}{tag}")
+                    if size is not None:
+                        bands.append(int(size.get(f"{W}val")))
+                held |= {c.tag.replace(W, "") for c in tbl_pr} & disallowed
+            over = [size for size in bands if not 0 <= size <= 3]
+            self.assertEqual(bool(over), doc.name == "E-table-style-bands-5", doc.name)
+            self.assertEqual(bool(held), doc.name == "E-table-style-not-allowed", doc.name)
 
     def test_refuses_a_setting_word_does_not_write_in_the_mode(self):
         doc = next(doc for doc in self.docs if doc.name == "E-opentype-on")
