@@ -1452,6 +1452,36 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn lists_an_unreadable_directory_once_per_scan_under_each_link() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let dir = TempDir::new("two-links");
+        let (fonts, locked) = (dir.0.join("fonts"), dir.0.join("locked"));
+        fs::create_dir(&fonts).unwrap();
+        fs::create_dir(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        symlink(&locked, fonts.join("b")).unwrap();
+        let mut book = FontBook::new();
+        book.add_dir(&fonts).unwrap();
+        // A second link to the same directory, which the scans reach first.
+        symlink(&locked, fonts.join("a")).unwrap();
+        book.add_dir(&fonts).unwrap();
+        let mut fresh = FontBook::new();
+        fresh.add_dir(&fonts).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        let paths = |book: &FontBook| -> Vec<PathBuf> {
+            book.skipped()
+                .iter()
+                .filter_map(|skipped| skipped.path().map(Path::to_owned))
+                .collect()
+        };
+        // Across scans, under each link reached; in one scan, once, under the first.
+        assert_eq!(paths(&book), [fonts.join("b"), fonts.join("a")]);
+        assert_eq!(paths(&fresh), [fonts.join("a")]);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn a_link_repointed_follows_its_new_target() {
         use std::os::unix::fs::{PermissionsExt, symlink};
 
