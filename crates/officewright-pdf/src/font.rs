@@ -257,7 +257,7 @@ impl Font {
         }
         // The probe above refuses outlines other than TrueType and CFF.
         let cff = face.outline_format() == Some(OutlineFormat::Cff);
-        let name = embed::fit_font_name(&name, whole, cff).to_owned();
+        let name = embed::fit_font_name(&name, whole, cff);
         Ok(Self {
             kind: Kind::Embedded(Arc::new(Embedded {
                 face,
