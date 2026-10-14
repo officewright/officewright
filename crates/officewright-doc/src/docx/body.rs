@@ -1095,9 +1095,11 @@ impl Reading<'_, '_, '_> {
     }
 
     /// The image the relationship `id` of the part leads to, read the first time a
-    /// picture of the package shows it. One the part or the package does not have, or
-    /// that cannot be read, is reported once per relationship of the part, and the
-    /// pictures show none; only a limit of the package stops the reading.
+    /// picture of the package shows it. A relationship the part does not have, a target
+    /// that names no part, and a part the package does not have are reported once per
+    /// relationship of the part; a part that cannot be read is read and reported once
+    /// in the document, however many relationships lead to it. The pictures then show
+    /// none; only a limit of the package stops the reading.
     fn image(&mut self, id: &str, offset: usize) -> Result<Option<u32>> {
         if let Some(&image) = self.images.get(id) {
             return Ok(image);

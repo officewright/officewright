@@ -1298,7 +1298,7 @@ pub fn paginate(
 /// - lines are inside the body of their page, but for a single line that nothing could
 ///   move further, and lines on a page do not overlap;
 /// - each paragraph is on a page with its section's setup, and the first paragraph of a
-///   section that starts on a new page starts its page;
+///   section that starts on a new page starts its page, a page of that section;
 /// - page numbers grow by one within a section, and what pages draw is at finite places.
 pub fn check_pages(book: &FontBook, document: &Document, max_pages: usize) -> Result<(), String> {
     use crate::display::DisplayItem;

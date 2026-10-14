@@ -79,6 +79,23 @@ fn dump(document: &Document, runs: bool) {
         theme_fonts.as_deref().unwrap_or("no theme"),
         document.fonts().len()
     );
+    for font in document.fonts() {
+        for embedded in font.embedded() {
+            let program = match embedded.program() {
+                Some(program) => format!(
+                    "{} bytes starting {:02X?}",
+                    program.len(),
+                    program.get(..4).unwrap_or_default()
+                ),
+                None => "not read".to_owned(),
+            };
+            println!(
+                "  embedded {} {:?}: {program}",
+                font.name(),
+                embedded.style()
+            );
+        }
+    }
     let settings = document.settings();
     println!(
         "compatibility mode {} ({}), {} legacy options set",

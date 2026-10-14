@@ -21,9 +21,11 @@ const COORDINATES: std::ops::RangeInclusive<f64> = -27_273_042_329_600.0..=27_27
 ///
 /// ```
 /// # fn main() -> officewright_doc::Result<()> {
+/// use officewright_core::Pt;
 /// use officewright_doc::{Block, Document, RunContent};
 ///
-/// let document = Document::open("tests/data/hello.docx")?;
+/// let document = Document::open("tests/data/picture.docx")?;
+/// let mut pictures = Vec::new();
 /// for section in document.sections() {
 ///     for block in section.blocks() {
 ///         let Block::Paragraph(paragraph) = block else {
@@ -33,14 +35,20 @@ const COORDINATES: std::ops::RangeInclusive<f64> = -27_273_042_329_600.0..=27_27
 ///             let RunContent::Drawing(drawing) = item else {
 ///                 continue;
 ///             };
-///             let size = (drawing.width(), drawing.height());
-///             match drawing.picture().and_then(|picture| picture.image()) {
-///                 Some(image) => println!("{size:?}: {}", image.content_type()),
-///                 None => println!("{size:?}: {}", drawing.to_xml()),
-///             }
+///             // A picture shows its image; a shape, chart or group is there as XML.
+///             let image = drawing.picture().and_then(|picture| picture.image());
+///             pictures.push((
+///                 drawing.width(),
+///                 drawing.height(),
+///                 image.map(|image| image.content_type().to_owned()),
+///             ));
 ///         }
 ///     }
 /// }
+/// assert_eq!(
+///     pictures,
+///     [(Some(Pt(72.0)), Some(Pt(36.0)), Some("image/png".to_owned()))]
+/// );
 /// # Ok(())
 /// # }
 /// ```
