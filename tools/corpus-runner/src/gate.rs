@@ -20,8 +20,8 @@ const SAME_FONTS: [&str; 5] = [
 const TWINNED: [&str; 4] = ["Arial", "Calibri", "Courier New", "Times New Roman"];
 
 /// How a document's fonts compare with Word's: the same (S), confirmed metric twins (T),
-/// neither (N), or not known: its reference has no formatting export, or one without the
-/// fonts of the runs in which every font named is S or T.
+/// neither (N), or not known: its reference has no formatting export, or an incomplete one
+/// (without the runs, or cut short) in which every font named is S or T.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Class {
     Same,
@@ -46,7 +46,7 @@ pub fn class(scores: &Scores, same_fonts: bool) -> Class {
         // Fonts the export left out cannot take this back.
         Class::Other
     } else if scores.word_fonts_complete != Some(true) {
-        // The runs may hold a font of class N.
+        // The runs, or paragraphs after the time budget, may hold a font of class N.
         Class::Unknown
     } else if fonts.iter().all(same) {
         Class::Same

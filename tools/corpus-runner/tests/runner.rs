@@ -472,3 +472,76 @@ fn the_gate_refuses_a_branch_report_made_without_the_references() -> io::Result<
     );
     Ok(())
 }
+
+/// Whether Word's font table is complete reaches the report, and the gate reads it from
+/// there (#133): an export without the runs gives no class, a complete one gives a class.
+/// Through pdftotext and pdftoppm, which check.sh requires on Linux and macOS.
+#[cfg(unix)]
+#[test]
+fn the_report_says_whether_word_s_fonts_are_all_known() -> io::Result<()> {
+    use officewright_pdf::{Document, Font, PageSize, Pt, StandardFont};
+    let corpus = Corpus::new("word-fonts")?;
+    let reference = corpus.dir.join("references/docs/good");
+    std::fs::create_dir_all(&reference)?;
+    std::fs::write(
+        reference.join("geometry.json"),
+        r#"{"format": 1, "document": "docs/good.docx", "page_count": 0, "pages": []}"#,
+    )?;
+    std::fs::create_dir_all(corpus.dir.join("ours/docs"))?;
+    let mut doc = Document::new();
+    doc.add_page(PageSize::A4)
+        .unwrap()
+        .add_text(
+            Pt(72.0),
+            Pt(770.0),
+            &Font::standard(StandardFont::Helvetica),
+            Pt(12.0),
+            "Ours",
+        )
+        .unwrap();
+    std::fs::write(
+        corpus.dir.join("ours/docs/good.pdf"),
+        doc.to_bytes().unwrap(),
+    )?;
+    let run = |runs: bool| -> io::Result<(serde_json::Value, String)> {
+        std::fs::write(
+            reference.join("formatting.json"),
+            format!(r#"{{"complete": true, "runs": {runs}, "fonts": [{{"name": "Carlito"}}]}}"#),
+        )?;
+        let options = [
+            "--references",
+            "references",
+            "--ours",
+            "ours",
+            "--report",
+            "report.json",
+            "docs/good.docx",
+        ];
+        let (code, output) = corpus.run(&options, None)?;
+        assert_eq!(code, 0, "{output}");
+        let report: serde_json::Value = serde_json::from_str(&corpus.read("report.json")?).unwrap();
+        let gate = Command::new(env!("CARGO_BIN_EXE_corpus-runner"))
+            .current_dir(&corpus.dir)
+            .args(["gate", "report.json"])
+            .output()?;
+        Ok((
+            report["files"][0]["scores"].clone(),
+            String::from_utf8_lossy(&gate.stdout).into_owned(),
+        ))
+    };
+    let (scores, census) = run(false)?;
+    assert_eq!(
+        scores["word_fonts"],
+        serde_json::json!(["Carlito"]),
+        "{scores}"
+    );
+    assert_eq!(scores["word_fonts_complete"], false, "{scores}");
+    assert!(
+        census.contains("S 0, T 0, N 0, no class 1 (1 without the fonts of runs)"),
+        "{census}"
+    );
+    let (scores, census) = run(true)?;
+    assert_eq!(scores["word_fonts_complete"], true, "{scores}");
+    assert!(census.contains("S 1, T 0, N 0, no class 0;"), "{census}");
+    Ok(())
+}
