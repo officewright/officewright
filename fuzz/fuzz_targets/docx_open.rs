@@ -1,7 +1,7 @@
 //! Opens the input as a Word document and walks everything the model read from it:
 //! sections, headers, footers and notes, blocks, tables, inline content and runs, the
-//! text, and the XML of every element kept without being understood, which must read back
-//! as XML. The formatting in
+//! text, the programs of embedded fonts, and the XML of every drawing and of every element
+//! kept without being understood, which must read back as XML. The formatting in
 //! effect of every paragraph, run and paragraph mark is resolved, and must not depend on
 //! what the resolver remembered from earlier ones. The document's translation into the
 //! layout IR must be valid IR.
@@ -10,7 +10,7 @@
 use std::collections::HashSet;
 
 use libfuzzer_sys::fuzz_target;
-use officewright_doc::{Block, HeaderFooterKind, Inline, Limits, LoadOptions, Opaque, RunContent};
+use officewright_doc::{Block, HeaderFooterKind, Inline, Limits, LoadOptions, RunContent};
 use officewright_opc::xml::Input;
 
 fuzz_target!(|data: &[u8]| {
@@ -29,6 +29,9 @@ fuzz_target!(|data: &[u8]| {
     }
     for font in document.fonts() {
         let _ = (font.panose(), font.signature(), font.embedded().len());
+        for embedded in font.embedded() {
+            let _ = embedded.program().map(<[u8]>::len);
+        }
     }
     let settings = document.settings();
     let _ = (
@@ -117,8 +120,9 @@ fuzz_target!(|data: &[u8]| {
                             let _ = run.properties();
                             for item in run.content() {
                                 match item {
-                                    RunContent::Other(opaque) => check(opaque),
+                                    RunContent::Other(opaque) => check(&opaque.to_xml()),
                                     RunContent::Drawing(drawing) => {
+                                        check(&drawing.to_xml());
                                         let _ = (drawing.is_inline(), drawing.width());
                                         let _ = (drawing.height(), drawing.effect_extent());
                                         let _ = drawing.anchor();
@@ -149,7 +153,7 @@ fuzz_target!(|data: &[u8]| {
                             let _ = field.instruction();
                             inlines.extend(field.inlines());
                         }
-                        Inline::Other(opaque) => check(opaque),
+                        Inline::Other(opaque) => check(&opaque.to_xml()),
                         _ => {}
                     }
                 }
@@ -167,7 +171,7 @@ fuzz_target!(|data: &[u8]| {
                 }
             }
             Block::ContentControl(control) => blocks.extend(control.blocks()),
-            Block::Other(opaque) => check(opaque),
+            Block::Other(opaque) => check(&opaque.to_xml()),
             _ => {}
         }
     }
@@ -178,9 +182,8 @@ fuzz_target!(|data: &[u8]| {
     }
 });
 
-/// An element kept as written must write back as well-formed XML.
-fn check(opaque: Opaque<'_>) {
-    let xml = opaque.to_xml();
+/// An element kept as written, or a drawing, must write back as well-formed XML.
+fn check(xml: &str) {
     let input = Input::decode(xml.as_bytes()).unwrap_or_else(|err| panic!("{err}: {xml}"));
     let limits = officewright_opc::Limits::new().with_max_xml_depth(1 << 20);
     let mut reader = input.reader(&limits);
