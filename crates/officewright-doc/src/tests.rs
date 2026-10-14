@@ -3289,6 +3289,22 @@ fn reads_headers_and_footers_and_inherits_them_by_kind() {
         text(second.footer(HeaderFooterKind::Even)),
         Some(vec!["even footer".to_owned()])
     );
+    // A header of another document is not this one's, though it is in the same place.
+    let other = with_parts(
+        body,
+        &[
+            ("header", "header1.xml", story("hdr", "default header")),
+            ("header", "header2.xml", story("hdr", "first header")),
+            ("footer", "footer1.xml", story("ftr", "default footer")),
+            ("header", "header2.xml", story("hdr", "first header")),
+            ("footer", "footer2.xml", story("ftr", "even footer")),
+        ],
+    );
+    let theirs = other.sections().next().unwrap();
+    assert_ne!(
+        theirs.header(HeaderFooterKind::Default),
+        first.header(HeaderFooterKind::Default)
+    );
     // An inherited header is the same story; another one is not.
     assert_eq!(
         second.header(HeaderFooterKind::Default),
@@ -3396,13 +3412,14 @@ fn reads_footnotes_and_endnotes_with_their_separators() {
 
 #[test]
 fn reads_a_header_or_footer_part_by_its_root() {
-    let open_with = |references: &str, relationships: &str, root: &str| {
+    let open_in = |references: &str, relationships: &str, root: &str, namespace: &str| {
         let body = format!(r#"<w:p/><w:sectPr>{references}</w:sectPr>"#);
         let rels = format!(
             r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{relationships}</Relationships>"#
         );
-        let part =
-            format!(r#"<w:{root} xmlns:w="{W}"><w:p><w:r><w:t>x</w:t></w:r></w:p></w:{root}>"#);
+        let part = format!(
+            r#"<w:{root} xmlns:w="{namespace}"><w:p><w:r><w:t>x</w:t></w:r></w:p></w:{root}>"#
+        );
         let data = package(
             DOCUMENT,
             &document_xml(&body),
@@ -3412,6 +3429,9 @@ fn reads_a_header_or_footer_part_by_its_root() {
             ],
         );
         Document::from_bytes(data)
+    };
+    let open_with = |references: &str, relationships: &str, root: &str| {
+        open_in(references, relationships, root, W)
     };
     let relationship = |id: &str, kind: &str| {
         format!(
@@ -3435,6 +3455,16 @@ fn reads_a_header_or_footer_part_by_its_root() {
     // it is not written.
     let document = open_with(references, &relationship("rIdH", "header"), "ftr").unwrap();
     let section = document.sections().next().unwrap();
+    assert!(section.header(HeaderFooterKind::Default).is_none());
+    // So is a w:ftr part in Strict's namespace.
+    let strict = open_in(
+        references,
+        &relationship("rIdH", "header"),
+        "ftr",
+        "http://purl.oclc.org/ooxml/wordprocessingml/main",
+    )
+    .unwrap();
+    let section = strict.sections().next().unwrap();
     assert!(section.header(HeaderFooterKind::Default).is_none());
     // A root that is neither is refused.
     let err = open_with(references, &relationship("rIdH", "header"), "document")

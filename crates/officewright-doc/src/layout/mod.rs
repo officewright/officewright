@@ -203,7 +203,7 @@ struct Translator<'a> {
     /// How many tables the current block is in.
     table_depth: usize,
     /// The translated blocks of each header and footer used so far, by story, and their
-    /// weight (blocks and inlines).
+    /// weight, the bytes a copy of them takes.
     header_footers: HashMap<u32, (Vec<ir::Block>, usize)>,
     /// The weight of the headers and footers copied into sections so far.
     copied: usize,

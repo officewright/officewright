@@ -2214,7 +2214,7 @@ fn bounds_the_copies_of_headers_in_sections_by_their_memory() {
     assert_eq!(
         left_out[0],
         "sections[5].headers.primary: a header is left out: the copies of headers and \
-         footers in sections have reached the size of the document"
+         footers in sections have reached their limit"
     );
     // A document of 3,000,000 bytes more XML may copy that much more.
     let (with_header, _) = copies(3_000_000);
@@ -2390,6 +2390,12 @@ fn bounds_header_copies_by_every_allocation_they_make() {
             .repeat(500),
     );
     assert!(header_copies(&formats, None, &[]) <= 2);
+    // 2,000 symbols whose font is named by 250 bytes.
+    let symbols = paragraph(&format!(
+        r#"<w:r>{}</w:r>"#,
+        format!(r#"<w:sym w:font="{}" w:char="F020"/>"#, "S".repeat(250)).repeat(2_000)
+    ));
+    assert!(header_copies(&symbols, None, &[]) <= 2);
     // The text of a table's cell, and of a field's result: 200,000 bytes.
     let text = "t".repeat(200_000);
     let cell = format!(
@@ -2417,10 +2423,13 @@ fn bounds_header_copies_by_every_allocation_they_make() {
 #[test]
 fn lists_every_reference_left_out_and_places_notes_in_their_order() {
     let footnotes = format!(
-        r#"<w:footnotes xmlns:w="{W}"><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p></w:footnote><w:footnote w:type="separator" w:id="-2"><w:p><w:r><w:t>second separator</w:t></w:r></w:p></w:footnote><w:footnote w:id="1"><w:p><w:r><w:t>one</w:t></w:r></w:p></w:footnote><w:footnote w:id="2"><w:p><w:r><w:footnoteReference w:id="1"/></w:r></w:p></w:footnote></w:footnotes>"#
+        r#"<w:footnotes xmlns:w="{W}"><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p></w:footnote><w:footnote w:type="separator" w:id="-2"><w:p><w:r><w:t>second separator</w:t></w:r></w:p></w:footnote><w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote><w:footnote w:type="continuationNotice" w:id="3"><w:p><w:r><w:t>continued</w:t></w:r></w:p></w:footnote><w:footnote w:id="1"><w:p><w:r><w:t>one</w:t></w:r></w:p></w:footnote><w:footnote w:id="2"><w:p><w:r><w:footnoteReference w:id="1"/></w:r></w:p></w:footnote></w:footnotes>"#
     );
     let references = r#"<w:p><w:r><w:footnoteReference w:id="1"/></w:r><w:r><w:footnoteReference w:id="2"/></w:r><w:r><w:footnoteReference w:id="5"/></w:r><w:r><w:footnoteReference w:id="-1"/></w:r></w:p>"#;
-    let body = references.repeat(2);
+    let body = format!(
+        r#"{}<w:p><w:r><w:footnoteReference w:id="0"/></w:r><w:r><w:footnoteReference w:id="3"/></w:r></w:p>"#,
+        references.repeat(2)
+    );
     let translation = translate(&with_parts(
         &body,
         &[("footnotes", "footnotes.xml", footnotes)],
@@ -2441,6 +2450,8 @@ fn lists_every_reference_left_out_and_places_notes_in_their_order() {
             "sections[0].blocks[0].inlines: a reference to footnote -1, which is the separator, is left out",
             "sections[0].blocks[1].inlines: a reference to footnote 5, which the document does not have, is left out",
             "sections[0].blocks[1].inlines: a reference to footnote -1, which is the separator, is left out",
+            "sections[0].blocks[2].inlines: a reference to footnote 0, which is the continuation separator, is left out",
+            "sections[0].blocks[2].inlines: a reference to footnote 3, which is the continuation notice, is left out",
             "footnote_separators.separator[0].inlines: a reference to a footnote inside a note is left out",
         ]
     );

@@ -37,7 +37,7 @@ impl<'a> Section<'a> {
 
     /// The header of this kind in effect for the section: its own, or the one the
     /// closest earlier section names, as each kind is inherited on its own (ECMA-376
-    /// Part 1, §17.10.5). Which kind a page shows depends on the title page and on the
+    /// Part 1, §17.10.5, as Word reads it: MS-OI29500 §17.10.5(b)). Which kind a page shows depends on the title page and on the
     /// document's different odd and even headers.
     pub fn header(self, kind: HeaderFooterKind) -> Option<HeaderFooter<'a>> {
         HeaderFooter::at(self.document, *self.data.headers.get(kind_index(kind))?)
@@ -74,6 +74,13 @@ impl PartialEq for HeaderFooter<'_> {
 }
 
 impl Eq for HeaderFooter<'_> {}
+
+impl std::hash::Hash for HeaderFooter<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::ptr::hash(self.document, state);
+        self.index.hash(state);
+    }
+}
 
 impl<'a> HeaderFooter<'a> {
     fn at(document: &'a Document, index: Option<u32>) -> Option<Self> {

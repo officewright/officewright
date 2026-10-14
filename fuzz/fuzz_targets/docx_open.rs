@@ -7,6 +7,8 @@
 //! layout IR must be valid IR.
 #![no_main]
 
+use std::collections::HashSet;
+
 use libfuzzer_sys::fuzz_target;
 use officewright_doc::{Block, HeaderFooterKind, Inline, Limits, LoadOptions, Opaque, RunContent};
 use officewright_opc::xml::Input;
@@ -64,25 +66,23 @@ fuzz_target!(|data: &[u8]| {
     // not grow with their number × chain length.
     let (mut paragraphs_compared, mut runs_compared) = (0, 0);
     let mut blocks: Vec<Block<'_>> = document.sections().flat_map(|s| s.blocks()).collect();
-    // The headers, footers and notes, each walked like the body. A story a section
-    // inherits from the section before is walked once: thousands of sections may inherit
-    // one header.
-    let mut previous = [None; 6];
+    // The headers, footers and notes, each walked like the body. Each header and footer
+    // is walked once, however many sections have it: thousands of sections may name or
+    // inherit a few.
+    let mut walked = HashSet::new();
     for section in document.sections() {
-        let stories = [
+        for kind in [
             HeaderFooterKind::Default,
             HeaderFooterKind::First,
             HeaderFooterKind::Even,
-        ]
-        .into_iter()
-        .flat_map(|kind| [section.header(kind), section.footer(kind)]);
-        for (last, story) in previous.iter_mut().zip(stories) {
-            let Some(story) = story else {
-                continue;
-            };
-            if *last != Some(story) {
-                *last = Some(story);
-                blocks.extend(story.blocks());
+        ] {
+            for story in [section.header(kind), section.footer(kind)]
+                .into_iter()
+                .flatten()
+            {
+                if walked.insert(story) {
+                    blocks.extend(story.blocks());
+                }
             }
         }
     }

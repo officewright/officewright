@@ -194,9 +194,9 @@ pub(super) fn section<'a>(t: &mut Translator<'a>, section: Section<'a>) -> ir::S
 
 impl<'a> Translator<'a> {
     /// The headers or footers in effect for a section, each translated once and copied
-    /// into every section that has it. The copies are bounded: past [`MAX_COPIED`]
-    /// blocks and inlines, or the size of the document if that is more, a section gets
-    /// no more of them, and that is listed.
+    /// into every section that has it. The copies are bounded: past [`MAX_COPIED`] bytes
+    /// as [`weight`] counts them, or the size of the document's XML if that is more, a
+    /// section gets no more of them, and that is listed.
     fn header_footer_set(&mut self, section: Section<'a>, header: bool) -> ir::HeaderFooterSet {
         let mut set = ir::HeaderFooterSet::default();
         let place = if header { "headers" } else { "footers" };
@@ -238,7 +238,7 @@ impl<'a> Translator<'a> {
                 None => self.leave_out(ReportKind::FeatureUnsupported, || {
                     format!(
                         "a {} is left out: the copies of headers and footers in sections \
-                         have reached the size of the document",
+                         have reached their limit",
                         if header { "header" } else { "footer" }
                     )
                 }),
@@ -391,3 +391,42 @@ impl PartialEq for Flag {
 }
 
 impl Eq for Flag {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Rows and anchored objects never dominate a header's memory as documents write
+    // them, so their terms in `weight` are tested here: each row is a cell and a
+    // paragraph too, and the translation makes no anchored object yet.
+    #[test]
+    fn weighs_rows_and_anchored_objects_at_least_at_their_size() {
+        let mut document = ir::Document::default();
+        let mark = document.add_run_style(ir::RunStyle::default());
+        let image = document.add_image(ir::ImageData::new(ir::ImageFormat::Png, vec![0u8; 4]));
+        let paragraph = |inlines: Vec<ir::Inline>| -> ir::Block {
+            ir::Paragraph::new(mark).with_inlines(inlines).into()
+        };
+        let row = ir::Row::default().with_cells(vec![
+            ir::Cell::default().with_blocks(vec![paragraph(Vec::new())]),
+        ]);
+        let table = |rows: usize| -> ir::Block {
+            ir::Table::default()
+                .with_rows(vec![row.clone(); rows])
+                .into()
+        };
+        // Each more row weighs at least a row, its cell and its paragraph.
+        let one_more = weight(&[table(2)]) - weight(&[table(1)]);
+        assert!(one_more >= size_of::<ir::Row>() + size_of::<ir::Cell>() + size_of::<ir::Block>());
+        // An anchored object weighs at least its inline and its box.
+        let anchored = ir::Inline::Anchored(Box::new(ir::AnchoredObject::new(
+            ir::ObjectContent::Picture(ir::Picture::new(image)),
+            ir::Size::new(Pt(1.0), Pt(1.0)),
+            ir::HorizontalAnchor::default(),
+            ir::VerticalAnchor::default(),
+        )));
+        let with = weight(&[paragraph(vec![anchored])]);
+        let without = weight(&[paragraph(Vec::new())]);
+        assert!(with - without >= size_of::<ir::Inline>() + size_of::<ir::AnchoredObject>());
+    }
+}
