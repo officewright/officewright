@@ -3290,6 +3290,8 @@ mod format;
 #[cfg(feature = "pdf")]
 mod layout;
 mod paragraph_format;
+#[cfg(feature = "pdf")]
+mod render;
 mod table_styles;
 
 /// The text of the paragraphs of some blocks, one line each.
