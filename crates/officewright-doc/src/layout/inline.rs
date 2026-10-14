@@ -124,6 +124,11 @@ impl<'a> Translator<'a> {
                 RunContent::ContinuationSeparator => {
                     content.push(ir::Inline::continuation_separator(style));
                 }
+                RunContent::Drawing(drawing) => {
+                    if let Some(object) = self.drawing(drawing) {
+                        content.push(object);
+                    }
+                }
                 RunContent::CommentReference(_) | RunContent::LastRenderedPageBreak => {}
                 // The legacy page number: a PAGE field (ECMA-376 Part 1, §17.3.3.22).
                 RunContent::Other(other) if other.local_name() == "pgNum" => {
@@ -142,7 +147,6 @@ impl<'a> Translator<'a> {
                 }
                 RunContent::Other(other) => {
                     let message = match other.local_name() {
-                        "drawing" => "a drawing is left out",
                         "pict" => "a VML drawing is left out",
                         "object" => "an embedded object is left out",
                         "ptab" => "an absolute position tab is left out",

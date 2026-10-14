@@ -22,9 +22,10 @@
 //! # }
 //! ```
 //!
-//! What the model does not represent yet (drawings, equations, bookmarks, and the
-//! properties not typed yet) is kept as it was read; such content shows as `Other` with
-//! an [`Opaque`] view.
+//! What the model does not represent yet (equations, bookmarks, and the properties not
+//! typed yet) is kept as it was read; such content shows as `Other` with an [`Opaque`]
+//! view. Drawings show as [`RunContent::Drawing`]: their frame and picture are read, and
+//! [`Drawing::to_xml`] gives a shape, chart or group as written.
 //!
 //! Opening never panics on a damaged file: it either returns an [`Error`], or opens the
 //! document and lists in [`Document::diagnostics`] what it repaired, as Word does.
@@ -45,26 +46,28 @@ pub use error::{Error, Limit, Result};
 #[cfg(feature = "pdf")]
 pub use layout::{LeftOut, Translation};
 pub use model::{
-    ArtBorder, Block, Border, BorderStyle, Break, BreakClear, BreakKind, CellBorders, CellMargins,
-    CellMerge, ChapterSeparator, CharacterFormat, Color, ColorScheme, ColorSchemeIndex,
-    ColorSchemeMapping, ColorValue, Column, Columns, CompatibilityMode, CompatibilityOption,
-    CompatibilitySetting, Conformance, ContentControl, Document, DocumentGrid, DocumentGridKind,
-    DocumentKind, EmbeddedFontReference, EmbeddedFontStyle, FieldCharKind, FontCollection,
-    FontDeclaration, FontFamilies, FontFamily, FontHint, FontPitch, FontScheme, FontSignature,
-    Formats, HeaderFooter, HeaderFooterKind, HeaderFooterReference, HeightRule, Highlight,
-    HorizontalAlignment, Hyperlink, Indentation, Inline, Justification, Language, LegacyNumbering,
-    LevelOverride, LevelSuffix, Ligatures, LineNumberRestart, LineNumbering, LineSpacing,
-    ListDefinition, ListFormat, ListInstance, ListLevel, MultiLevelType, Note, NotePosition,
-    NoteProperties, NoteRestart, NoteType, NumberFormat, Numbering, NumberingReference, Opaque,
-    Orientation, PageBorderDisplay, PageBorderOffset, PageBorderZOrder, PageBorders, PageMargins,
-    PageNumbering, Paragraph, ParagraphBorders, ParagraphFormat, ParagraphId, ParagraphProperties,
-    PositionAnchor, Revision, RevisionKind, RowHeight, Run, RunContent, RunFonts, RunProperties,
-    SchemeColor, Section, SectionProperties, SectionStart, Settings, Shading, ShadingPattern,
-    SimpleField, Spacing, Style, StyleKind, Styles, SystemColor, TabKind, TabLeader, TabStop,
-    Table, TableBorders, TableCell, TableCellProperties, TableId, TableJustification, TableLayout,
+    Anchor, AnchorHorizontalAlign, AnchorVerticalAlign, ArtBorder, Block, Border, BorderStyle,
+    Break, BreakClear, BreakKind, CellBorders, CellMargins, CellMerge, ChapterSeparator,
+    CharacterFormat, Color, ColorScheme, ColorSchemeIndex, ColorSchemeMapping, ColorValue, Column,
+    Columns, CompatibilityMode, CompatibilityOption, CompatibilitySetting, Conformance,
+    ContentControl, Crop, Document, DocumentGrid, DocumentGridKind, DocumentKind, Drawing,
+    EmbeddedFontReference, EmbeddedFontStyle, FieldCharKind, FontCollection, FontDeclaration,
+    FontFamilies, FontFamily, FontHint, FontPitch, FontScheme, FontSignature, Formats,
+    HeaderFooter, HeaderFooterKind, HeaderFooterReference, HeightRule, Highlight,
+    HorizontalAlignment, HorizontalReference, Hyperlink, Image, Indentation, Inline, Justification,
+    Language, LegacyNumbering, LevelOverride, LevelSuffix, Ligatures, LineNumberRestart,
+    LineNumbering, LineSpacing, ListDefinition, ListFormat, ListInstance, ListLevel,
+    MultiLevelType, Note, NotePosition, NoteProperties, NoteRestart, NoteType, NumberFormat,
+    Numbering, NumberingReference, Offsets, Opaque, Orientation, PageBorderDisplay,
+    PageBorderOffset, PageBorderZOrder, PageBorders, PageMargins, PageNumbering, Paragraph,
+    ParagraphBorders, ParagraphFormat, ParagraphId, ParagraphProperties, Picture, PositionAnchor,
+    Revision, RevisionKind, RowHeight, Run, RunContent, RunFonts, RunProperties, SchemeColor,
+    Section, SectionProperties, SectionStart, Settings, Shading, ShadingPattern, SimpleField,
+    Spacing, Style, StyleKind, Styles, SystemColor, TabKind, TabLeader, TabStop, Table,
+    TableBorders, TableCell, TableCellProperties, TableId, TableJustification, TableLayout,
     TableLook, TableOverlap, TablePosition, TableProperties, TableRow, TableRowProperties,
     TableWidth, TextDirection, Theme, ThemeColor, ThemeFont, Underline, UnderlineStyle,
-    VerticalAlignment, VerticalJustification, VerticalPosition,
+    VerticalAlignment, VerticalJustification, VerticalPosition, VerticalReference, WrapKind,
 };
 pub use options::{Limits, LoadOptions};
 

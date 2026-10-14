@@ -35,6 +35,12 @@ const R_STRICT: &str = "http://purl.oclc.org/ooxml/officeDocument/relationships"
 /// The main namespace of DrawingML, Transitional and Strict.
 const A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
 const A_STRICT: &str = "http://purl.oclc.org/ooxml/drawingml/main";
+/// DrawingML's positioning in WordprocessingML, Transitional and Strict.
+const WP: &str = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
+const WP_STRICT: &str = "http://purl.oclc.org/ooxml/drawingml/wordprocessingDrawing";
+/// DrawingML pictures, Transitional and Strict.
+const PIC: &str = "http://schemas.openxmlformats.org/drawingml/2006/picture";
+const PIC_STRICT: &str = "http://purl.oclc.org/ooxml/drawingml/picture";
 
 /// The relationship type of the main part, Transitional and Strict.
 const OFFICE_DOCUMENT: [&str; 2] = [
@@ -48,6 +54,8 @@ impl Names {
             w: [Some(strings.intern(W)), Some(strings.intern(W_STRICT))],
             r: [Some(strings.intern(R)), Some(strings.intern(R_STRICT))],
             a: [Some(strings.intern(A)), Some(strings.intern(A_STRICT))],
+            wp: [Some(strings.intern(WP)), Some(strings.intern(WP_STRICT))],
+            pic: [Some(strings.intern(PIC)), Some(strings.intern(PIC_STRICT))],
             mc: Some(strings.intern(officewright_opc::mce::NAMESPACE)),
             w14: Some(strings.intern(W14)),
         }
