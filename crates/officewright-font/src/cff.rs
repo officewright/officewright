@@ -1757,6 +1757,18 @@ mod tests {
         if cfg!(debug_assertions) {
             assert!(subsetter_panics(cff, &[2, 1]));
         }
+        // `.notdef`, which every subset keeps, is walked first: it overflows before
+        // glyph 1, which the subsetter cannot read, is reached.
+        let mut glyphs = glyphs_with(0, hinted_glyph(65_536, 29, false));
+        glyphs[1] = vec![12, 0];
+        let cff = programs(&glyphs, &hint_subrs(29), &[vec![]], None);
+        assert!(matches!(
+            subset_glyphs(cff.clone(), &[1]),
+            Err(Error::MalformedTable { .. })
+        ));
+        if cfg!(debug_assertions) {
+            assert!(subsetter_panics(cff, &[1]));
+        }
     }
 
     #[test]
