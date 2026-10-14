@@ -1,29 +1,32 @@
 //! Lays out the paragraphs of a text file one under the other in a column and prints
 //! what they draw, one item a line, positions and sizes in twips from the column's top
 //! left corner: glyph runs with each glyph's place, rectangles, lines and pictures.
+//! With `--page`, lays them out on pages instead, with margins of 1 inch, and prints
+//! each page and what it draws, positions from the page's top left corner.
 //!
 //! ```text
 //! cargo run -p officewright-layout --features fuzzing --example layout_dump -- \
-//!     FONT_DIR FAMILY WIDTH_PT FILE [--size PT] [--justify]
+//!     FONT_DIR FAMILY WIDTH_PT FILE [--size PT] [--justify] [--page HEIGHT_PT]
 //! ```
 //!
-//! Each line of FILE is a paragraph; in it, `\t` is a tab, `\n` a line break, text
-//! between `_` is underlined and text between `*` is bold. For example
-//! `tests/fonts Calibri 468 notes.txt --justify` lays the file out in Carlito, justified,
-//! in the 6.5 inch column of a Letter page with 1 inch margins.
+//! Each line of FILE is a paragraph; in it, `\t` is a tab, `\n` a line break, `\p` a
+//! page break, text between `_` is underlined and text between `*` is bold. For example
+//! `tests/fonts Calibri 468 notes.txt --justify --page 792` lays the file out in
+//! Carlito, justified, on Letter pages with 1 inch margins.
 
 use std::error::Error;
 
-use officewright_core::Pt;
+use officewright_core::{PageSize, Pt};
 use officewright_font::FontBook;
 use officewright_layout::fuzzing;
 use officewright_layout::ir::{
-    Alignment, BreakClear, Document, Inline, Paragraph, ParagraphProps, RunFonts, RunStyle,
-    RunStyleId, Underline,
+    Alignment, BreakClear, Document, Inline, PageSetup, Paragraph, ParagraphProps, RunFonts,
+    RunStyle, RunStyleId, Section, Underline,
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let usage = "usage: layout_dump FONT_DIR FAMILY WIDTH_PT FILE [--size PT] [--justify]";
+    let usage = "usage: layout_dump FONT_DIR FAMILY WIDTH_PT FILE [--size PT] [--justify] \
+                 [--page HEIGHT_PT]";
     let mut args = std::env::args().skip(1);
     let (Some(dir), Some(family), Some(width), Some(file)) =
         (args.next(), args.next(), args.next(), args.next())
@@ -33,10 +36,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let width: f64 = width.parse()?;
     let mut size = 11.0;
     let mut alignment = Alignment::Start;
+    let mut page: Option<f64> = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--size" => size = args.next().ok_or(usage)?.parse()?,
             "--justify" => alignment = Alignment::Both,
+            "--page" => page = Some(args.next().ok_or(usage)?.parse()?),
             _ => return Err(usage.into()),
         }
     }
@@ -67,6 +72,21 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .with_inlines(inlines(line, &styles))
         })
         .collect();
+    if let Some(height) = page {
+        let setup = PageSetup::new(PageSize::new(Pt(width + 144.0), Pt(height)));
+        let blocks = paragraphs.into_iter().map(Into::into).collect::<Vec<_>>();
+        document.add_section(Section::new(setup).with_blocks(blocks));
+        let laid = fuzzing::paginate(&book, &document, 10_000)?;
+        for page in laid.pages() {
+            let (width, height) = page.size();
+            println!("page {} ({width} x {height} pt)", page.number());
+            print!("{}", page.text());
+        }
+        for entry in laid.report().iter() {
+            eprintln!("{:?}: {}", entry.kind(), entry.message());
+        }
+        return Ok(());
+    }
     let painted = fuzzing::paint(&book, &document, &paragraphs, width);
     print!("{}", painted.text());
     for entry in painted.report().iter() {
@@ -99,10 +119,7 @@ fn inlines(line: &str, styles: &Styles) -> Vec<Inline> {
     while let Some(ch) = chars.next() {
         let piece = match ch {
             '_' | '*' => None,
-            '\\' if matches!(chars.peek(), Some('t' | 'n')) => {
-                let next = chars.next();
-                Some(next == Some('t'))
-            }
+            '\\' if matches!(chars.peek(), Some('t' | 'n' | 'p')) => chars.next(),
             _ => {
                 text.push(ch);
                 continue;
@@ -114,16 +131,13 @@ fn inlines(line: &str, styles: &Styles) -> Vec<Inline> {
                 style(underlined, bold),
             ));
         }
+        let current = style(underlined, bold);
         match (ch, piece) {
             ('_', _) => underlined = !underlined,
             ('*', _) => bold = !bold,
-            (_, Some(true)) => inlines.push(Inline::tab(style(underlined, bold))),
-            (_, Some(false)) => {
-                inlines.push(Inline::line_break(
-                    BreakClear::None,
-                    style(underlined, bold),
-                ));
-            }
+            (_, Some('t')) => inlines.push(Inline::tab(current)),
+            (_, Some('n')) => inlines.push(Inline::line_break(BreakClear::None, current)),
+            (_, Some('p')) => inlines.push(Inline::page_break(current)),
             _ => {}
         }
     }

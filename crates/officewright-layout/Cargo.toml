@@ -14,6 +14,8 @@ exclude = [
   "tests/shaping.rs",
   "tests/fonts.rs",
   "tests/lines.rs",
+  "tests/pages.rs",
+  "tests/common",
   "tests/display.rs",
   "tests/snapshots",
   "tests/symbol_table.rs",

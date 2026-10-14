@@ -209,6 +209,11 @@ impl fmt::Debug for Package {
 }
 
 impl<'p> Part<'p> {
+    /// The package the part is in, where the parts its relationships lead to are.
+    pub fn package(&self) -> &'p Package {
+        self.package
+    }
+
     /// The part name.
     pub fn name(&self) -> &'p PartName {
         &self.entry.name

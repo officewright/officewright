@@ -7,6 +7,7 @@
 //! listed in [`Translation::left_out`], so that users know why the output differs from
 //! Word's.
 
+mod drawing;
 mod inline;
 mod list;
 mod notes;
@@ -87,8 +88,9 @@ impl Document {
     /// from semver until 1.0.
     ///
     /// Not translated yet, and listed: table styles and a row's table property
-    /// exceptions, drawings, pictures and other objects, equations, and indents and
-    /// spacing given in character or line units, which keep their value in points.
+    /// exceptions, drawings that show no picture (shapes, charts, groups), VML drawings
+    /// (`w:pict`) and other objects, equations, and indents and spacing given in
+    /// character or line units, which keep their value in points.
     ///
     /// Also listed is what the IR has no place for yet: a row's own alignment and cell
     /// spacing where they differ from the table's, a row's hidden end mark, a cell's
@@ -213,6 +215,11 @@ struct Translator<'a> {
     in_note: bool,
     /// How many notes the IR has.
     notes_added: usize,
+    /// The IR image of each image of the package shown so far, by its place among the
+    /// document's images.
+    images: HashMap<u32, ir::ImageId>,
+    /// The empty image of pictures whose image the package does not have.
+    missing_image: Option<ir::ImageId>,
 }
 
 impl<'a> Translator<'a> {
@@ -234,6 +241,8 @@ impl<'a> Translator<'a> {
             notes: HashMap::new(),
             in_note: false,
             notes_added: 0,
+            images: HashMap::new(),
+            missing_image: None,
         }
     }
 

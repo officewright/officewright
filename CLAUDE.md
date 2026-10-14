@@ -46,8 +46,9 @@ crates/
                         its input is the layout IR (module `ir`), which the format crates build: public,
                         but exempt from semver until 1.0 and hidden in the docs unless feature `unstable-ir`;
                         chooses each character's font by Word's rule (MS-OI29500 2.1.88 b) with fallback,
-                        shapes with HarfRust, and breaks lines first fit by UAX #14 (unicode-linebreak) with
-                        Word's rules on top, behind private modules; feature `fuzzing` opens entry points
+                        shapes with HarfRust, breaks lines first fit by UAX #14 (unicode-linebreak) with
+                        Word's rules on top, and flows paragraphs onto the pages of each section with Word's
+                        keep and widow rules, behind private modules; feature `fuzzing` opens entry points
                         for the fuzz targets, examples and the tests with the test fonts and Word's renders,
                         which are not API; `data/symbol.txt` (Unicode's Adobe Symbol mapping) stays out of
                         the published crate

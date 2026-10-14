@@ -3,6 +3,7 @@
 
 use officewright_core::Pt;
 
+use super::drawing::Drawing;
 use super::xml::Element;
 use super::xml::Span;
 use super::{
@@ -37,8 +38,9 @@ impl<'a> Section<'a> {
 
     /// The header of this kind in effect for the section: its own, or the one the
     /// closest earlier section names, as each kind is inherited on its own (ECMA-376
-    /// Part 1, §17.10.5, as Word reads it: MS-OI29500 §17.10.5(b)). Which kind a page shows depends on the title page and on the
-    /// document's different odd and even headers.
+    /// Part 1, §17.10.5, as Word reads it: MS-OI29500 §17.10.5(b)). Which kind a page
+    /// shows depends on the title page and on the document's different odd and even
+    /// headers.
     pub fn header(self, kind: HeaderFooterKind) -> Option<HeaderFooter<'a>> {
         HeaderFooter::at(self.document, *self.data.headers.get(kind_index(kind))?)
     }
@@ -551,9 +553,13 @@ pub enum RunContent<'a> {
     /// The full-width line above notes continued from the previous page
     /// (`w:continuationSeparator`).
     ContinuationSeparator,
+    /// A drawing (`w:drawing`): a picture, in the line or floating, or a shape, chart or
+    /// other graphic, which shows as no picture.
+    Drawing(Drawing<'a>),
     /// Where Word's last layout broke the page; a hint, not a break.
     LastRenderedPageBreak,
-    /// An element kept without being understood, such as a drawing.
+    /// An element kept without being understood, such as a VML picture (`w:pict`) or an
+    /// embedded object.
     Other(Opaque<'a>),
 }
 
@@ -580,6 +586,9 @@ impl<'a> RunContent<'a> {
             RunItem::NoteNumber => Self::NoteNumber,
             RunItem::Separator => Self::Separator,
             RunItem::ContinuationSeparator => Self::ContinuationSeparator,
+            RunItem::Drawing { element, image } => {
+                Self::Drawing(Drawing::new(document, *element, *image))
+            }
             RunItem::LastRenderedPageBreak => Self::LastRenderedPageBreak,
             RunItem::Other(span) => Self::Other(Opaque::new(document, *span)),
         }

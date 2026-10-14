@@ -25,6 +25,12 @@ pub enum Error {
         /// The deepest nesting the layout follows: a table in a table is at depth 2.
         limit: usize,
     },
+    /// The document takes more pages than the layout was allowed to make.
+    #[non_exhaustive]
+    TooManyPages {
+        /// The most pages allowed.
+        limit: usize,
+    },
 }
 
 impl fmt::Display for Error {
@@ -33,6 +39,9 @@ impl fmt::Display for Error {
             Self::InvalidDocument { location, problem } => write!(f, "{location}: {problem}"),
             Self::NestingTooDeep { location, limit } => {
                 write!(f, "{location}: tables are nested more than {limit} deep")
+            }
+            Self::TooManyPages { limit } => {
+                write!(f, "the document takes more than {limit} pages")
             }
         }
     }
@@ -46,6 +55,7 @@ impl From<Error> for officewright_core::Error {
             // The IR is an argument the caller built, not input read from a file.
             invalid @ Error::InvalidDocument { .. } => Self::InvalidArgument(invalid.to_string()),
             deep @ Error::NestingTooDeep { .. } => Self::LimitExceeded(deep.to_string()),
+            long @ Error::TooManyPages { .. } => Self::LimitExceeded(long.to_string()),
         }
     }
 }
