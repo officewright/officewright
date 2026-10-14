@@ -249,7 +249,14 @@ fn random_document(seed: u64) -> Document {
                 .with_keep_lines(next(4) == 0)
                 .with_widow_control(next(4) != 0)
                 .with_page_break_before(next(6) == 0);
-            let block: Block = paragraph.with_props(props).into();
+            // A page number in some, laid out again when the paragraph lands elsewhere.
+            let mut inlines = paragraph.inlines().to_vec();
+            if next(4) == 0 {
+                let at = next(inlines.len() as u64 + 1) as usize;
+                let field = Inline::Field(Field::new(FieldKind::Page, paragraph.mark()));
+                inlines.insert(at.min(inlines.len()), field);
+            }
+            let block: Block = paragraph.with_props(props).with_inlines(inlines).into();
             blocks.push(if next(5) == 0 { in_table(block) } else { block });
         }
         let height = 10.0 + next(300) as f64;
