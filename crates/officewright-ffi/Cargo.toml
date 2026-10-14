@@ -32,6 +32,8 @@ filename = "officewright"
 
 [dependencies]
 officewright-core.workspace = true
+# Word documents and their conversion into PDF.
+officewright-doc = { workspace = true, features = ["pdf"] }
 officewright-font.workspace = true
 officewright-pdf.workspace = true
 

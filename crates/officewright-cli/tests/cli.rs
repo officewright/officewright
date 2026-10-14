@@ -171,3 +171,43 @@ fn rejects_font_sizes_that_are_not_positive_numbers() -> io::Result<()> {
     assert!(!output.exists());
     fs::remove_dir_all(&dir)
 }
+
+#[test]
+fn a_file_that_is_no_word_document_is_refused() -> io::Result<()> {
+    let dir = scratch("docx-not")?;
+    let input = dir.join("in.docx");
+    fs::write(&input, "not a zip")?;
+    let out = officewright(&[&"docx-to-pdf", &input, &dir.join("out.pdf")])?;
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.starts_with("error: "), "{stderr}");
+    fs::remove_dir_all(&dir)
+}
+
+#[test]
+fn a_page_limit_of_zero_is_a_usage_error() -> io::Result<()> {
+    let out = officewright(&[&"docx-to-pdf", &"in.docx", &"out.pdf", &"--max-pages", &"0"])?;
+    assert_eq!(out.status.code(), Some(2));
+    Ok(())
+}
+
+#[test]
+fn a_font_file_that_is_no_font_is_named() -> io::Result<()> {
+    let dir = scratch("bad-font")?;
+    let font = dir.join("bad.ttf");
+    fs::write(&font, "not a font")?;
+    let out = officewright(&[
+        &"docx-to-pdf",
+        &dir.join("in.docx"),
+        &dir.join("out.pdf"),
+        &"--font",
+        &font,
+    ])?;
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.starts_with(&format!("error: {}: ", font.display())),
+        "{stderr}"
+    );
+    fs::remove_dir_all(&dir)
+}
