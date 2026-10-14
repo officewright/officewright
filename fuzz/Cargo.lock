@@ -146,6 +146,7 @@ name = "officewright-doc"
 version = "0.1.0"
 dependencies = [
  "officewright-core",
+ "officewright-layout",
  "officewright-opc",
 ]
 
