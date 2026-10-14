@@ -117,6 +117,7 @@ declare("ow_render_options_set_max_pages", c_int, c_void_p, c_size_t)
 declare("ow_render_options_set_system_fonts", c_int, c_void_p, ctypes.c_int32)
 declare("ow_render_options_add_font_dir", c_int, c_void_p, c_char_p)
 declare("ow_render_options_add_font_bytes", c_int, c_void_p, c_char_p, c_size_t)
+declare("ow_render_options_add_font_file", c_int, c_void_p, c_char_p)
 declare("ow_render_options_set_compression", c_int, c_void_p, ctypes.c_int32)
 declare("ow_render_options_free", None, c_void_p)
 declare("ow_layout_report_len", c_int, c_void_p, POINTER(c_size_t))
@@ -557,6 +558,35 @@ class AbiTest(unittest.TestCase):
             out = Path(tmp) / "hello.pdf"
             self.check(lib.ow_doc_document_save_pdf_path(from_bytes, str(out).encode(), options, None))
             self.assertEqual(out.read_bytes(), pdf)
+            # With a report; and to a folder that does not exist, the report reset.
+            report = c_void_p()
+            self.check(lib.ow_doc_document_save_pdf_path(from_bytes, str(out).encode(), options, byref(report)))
+            count = c_size_t()
+            self.check(lib.ow_layout_report_len(report, byref(count)))
+            self.assertGreater(count.value, 0)
+            lib.ow_layout_report_free(report)
+            report = c_void_p(1)
+            missing = Path(tmp) / "missing-dir" / "hello.pdf"
+            self.check(lib.ow_doc_document_save_pdf_path(from_bytes, str(missing).encode(), options, byref(report)), IO)
+            self.assertIsNone(report.value)
+
+    def test_a_font_file_by_its_path(self):
+        options = c_void_p()
+        self.check(lib.ow_render_options_new(byref(options)))
+        self.addCleanup(lib.ow_render_options_free, options)
+        self.check(lib.ow_render_options_set_system_fonts(options, 0))
+        carlito = FONTS / "carlito" / "Carlito-Regular.ttf"
+        self.check(lib.ow_render_options_add_font_file(options, str(carlito).encode()))
+        doc = self.open_docx(HELLO_DOCX)
+        data = POINTER(c_uint8)()
+        length = c_size_t()
+        self.check(lib.ow_doc_document_save_pdf_bytes(doc, options, byref(data), byref(length), None))
+        try:
+            self.assertIn(b"Carlito-Regular", ctypes.string_at(data, length.value))
+        finally:
+            lib.ow_bytes_free(data, length)
+        self.check(lib.ow_render_options_add_font_file(options, b"/nonexistent/font.ttf"), IO)
+        self.assertTrue(last_error().startswith("cannot read /nonexistent/font.ttf"))
 
     def test_conversion_errors_have_a_status_and_a_message(self):
         options = self.render_options()

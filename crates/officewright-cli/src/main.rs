@@ -8,7 +8,7 @@ use std::process::ExitCode;
 
 use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
 use officewright_doc::{LayoutReport, RenderOptions, ReportKind};
-use officewright_font::{FontBook, FontRequest, FontResolver};
+use officewright_font::{FontBook, FontOrigin, FontRequest, FontResolver};
 use officewright_pdf::{Error, Font, PageSize, Pt, StandardFont, text_to_pdf};
 
 fn cli() -> Command {
@@ -246,7 +246,11 @@ fn run_docx_to_pdf(args: &ArgMatches) -> Result<(), String> {
         .save_pdf_path(output, &options)
         .map_err(|err| describe(&err))?;
     for entry in report.entries() {
-        eprintln!("note: {}: {}", entry.location(), entry.message());
+        eprintln!(
+            "note: {}: {}",
+            printable(&entry.location().to_string()),
+            printable(entry.message())
+        );
     }
     if let Some(path) = args.get_one::<PathBuf>("report") {
         fs::write(path, report_json(&report))
@@ -265,6 +269,10 @@ fn render_options(args: &ArgMatches) -> Result<RenderOptions, String> {
     for file in args.get_many::<PathBuf>("font").into_iter().flatten() {
         let data =
             fs::read(file).map_err(|err| format!("cannot read {}: {err}", file.display()))?;
+        // Read now, so that an error names the file.
+        FontBook::new()
+            .add_bytes(data.clone(), FontOrigin::User)
+            .map_err(|err| format!("{}: {}", file.display(), describe(&err)))?;
         options = options.with_font_data(data);
     }
     if let Some(&max_pages) = args.get_one::<u64>("max-pages") {
@@ -309,6 +317,20 @@ fn report_kind(kind: ReportKind) -> &'static str {
         ReportKind::FontEmbedding => "font-embedding",
         _ => "other",
     }
+}
+
+/// `text` with its control characters written as `\u{...}`, so that what a document
+/// holds cannot break a line of the notes or move the terminal's cursor.
+fn printable(text: &str) -> String {
+    text.chars()
+        .map(|ch| {
+            if ch.is_control() {
+                format!("\\u{{{:x}}}", u32::from(ch))
+            } else {
+                ch.to_string()
+            }
+        })
+        .collect()
 }
 
 /// `text` as a JSON string, quoted, with quotes, backslashes and control characters
@@ -459,6 +481,44 @@ mod tests {
         let given = options(&["--no-system-fonts", "--max-pages", "7"]);
         assert!(!given.system_fonts());
         assert_eq!(given.max_pages(), 7);
+    }
+
+    #[test]
+    fn every_report_kind_has_its_name() {
+        let names: Vec<&str> = [
+            ReportKind::FontSubstituted,
+            ReportKind::GlyphMissing,
+            ReportKind::FeatureUnsupported,
+            ReportKind::FieldCached,
+            ReportKind::CompatIgnored,
+            ReportKind::ValueClamped,
+            ReportKind::Overflow,
+            ReportKind::FontEmbedding,
+        ]
+        .into_iter()
+        .map(report_kind)
+        .collect();
+        assert_eq!(
+            names,
+            [
+                "font-substituted",
+                "glyph-missing",
+                "feature-unsupported",
+                "field-cached",
+                "compat-ignored",
+                "value-clamped",
+                "overflow",
+                "font-embedding"
+            ]
+        );
+    }
+
+    #[test]
+    fn notes_show_control_characters_escaped() {
+        assert_eq!(
+            printable("a\nerror: b\u{9b}c → d"),
+            "a\\u{a}error: b\\u{9b}c → d"
+        );
     }
 
     #[test]

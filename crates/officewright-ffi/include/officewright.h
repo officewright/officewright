@@ -102,15 +102,16 @@
 #define OW_RESOLUTION_MISSING 7
 
 /**
- * For `ow_pdf_document_set_compression`: page content and embedded fonts are stored as
- * they are, so the page content can be read in a text editor.
+ * For `ow_pdf_document_set_compression` and `ow_render_options_set_compression`: page
+ * content and embedded fonts are stored as they are, so the page content can be read in
+ * a text editor.
  */
 #define OW_COMPRESSION_NONE 0
 
 /**
- * For `ow_pdf_document_set_compression`: page content and embedded fonts are
- * compressed with the Flate filter wherever that makes them smaller. Every PDF reader
- * decompresses Flate, so this is the default.
+ * For `ow_pdf_document_set_compression` and `ow_render_options_set_compression`: page
+ * content and embedded fonts are compressed with the Flate filter wherever that makes
+ * them smaller. Every PDF reader decompresses Flate, so this is the default.
  */
 #define OW_COMPRESSION_FLATE 1
 
@@ -808,9 +809,11 @@ enum OwStatus ow_doc_document_open_bytes(const uint8_t *data,
  * NULL if the call fails.
  *
  * Fails with `OW_STATUS_IO` if the file cannot be written or a font folder of the
- * options cannot be read, `OW_STATUS_MALFORMED` if a font file of the options is not a
- * font, and `OW_STATUS_LIMIT_EXCEEDED` if the document takes more pages than the
- * options allow.
+ * options cannot be read, `OW_STATUS_MALFORMED` if a font of the options is not a font,
+ * and `OW_STATUS_LIMIT_EXCEEDED` if the document takes more pages than the options allow
+ * or nests tables deeper than the layout follows. `OW_STATUS_INVALID_ARGUMENT` here
+ * would mean that officewright translated the document wrongly, a defect worth
+ * reporting with the document.
  *
  * # Safety
  *
@@ -911,6 +914,19 @@ enum OwStatus ow_render_options_add_font_dir(struct OwRenderOptions *options, co
 enum OwStatus ow_render_options_add_font_bytes(struct OwRenderOptions *options,
                                                const uint8_t *data,
                                                size_t len);
+
+/**
+ * Adds the font file (TrueType, OpenType or a collection) at `path` (UTF-8), which the
+ * library reads now; its fonts are used before the folders' and the system's, as those
+ * of `ow_render_options_add_font_bytes` are. Fails with `OW_STATUS_IO` if the file cannot
+ * be read; a file that is not a font fails the conversion with `OW_STATUS_MALFORMED`.
+ *
+ * # Safety
+ *
+ * `options` must be NULL or a live handle not used by another thread during the call;
+ * `path` must be NULL or a NUL-terminated string.
+ */
+enum OwStatus ow_render_options_add_font_file(struct OwRenderOptions *options, const char *path);
 
 /**
  * Sets how the PDF's streams are compressed: `OW_COMPRESSION_FLATE`, the default, or

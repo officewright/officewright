@@ -495,6 +495,9 @@ static void docx_to_pdf(const char *fonts, const char *out_dir) {
     char hello[1024];
     char pages[1024];
     char out[1024];
+    char unwritable[1024];
+    char carlito[1024];
+    OwRenderOptions *from_file = NULL;
     OwRenderOptions *options = NULL;
     OwDocDocument *doc = NULL;
     OwDocDocument *from_bytes = NULL;
@@ -546,6 +549,30 @@ static void docx_to_pdf(const char *fonts, const char *out_dir) {
     EXPECT(ow_doc_document_save_pdf_path(doc, out, options, NULL), OW_STATUS_OK, NULL);
     CHECK(file_equals(out, data, len));
     ow_bytes_free(data, len);
+
+    /* To a file with a report, and to one that cannot be written: the report reset. */
+    report = NULL;
+    EXPECT(ow_doc_document_save_pdf_path(doc, out, options, &report), OW_STATUS_OK, NULL);
+    EXPECT(ow_layout_report_len(report, &count), OW_STATUS_OK, NULL);
+    CHECK(count > 0);
+    ow_layout_report_free(report);
+    snprintf(unwritable, sizeof unwritable, "%s/missing-dir/hello.pdf", out_dir);
+    report = (OwLayoutReport *)1;
+    EXPECT(ow_doc_document_save_pdf_path(doc, unwritable, options, &report), OW_STATUS_IO,
+           "missing-dir");
+    CHECK(report == NULL);
+
+    /* A font file by its path: Carlito alone stands in for Calibri. */
+    snprintf(carlito, sizeof carlito, "%s/carlito/Carlito-Regular.ttf", fonts);
+    EXPECT(ow_render_options_new(&from_file), OW_STATUS_OK, NULL);
+    EXPECT(ow_render_options_set_system_fonts(from_file, 0), OW_STATUS_OK, NULL);
+    EXPECT(ow_render_options_add_font_file(from_file, carlito), OW_STATUS_OK, NULL);
+    EXPECT(ow_doc_document_save_pdf_bytes(doc, from_file, &data, &len, NULL), OW_STATUS_OK,
+           NULL);
+    CHECK(contains(data, len, "Carlito-Regular"));
+    ow_bytes_free(data, len);
+    EXPECT(ow_render_options_add_font_file(from_file, unwritable), OW_STATUS_IO, "cannot read");
+    ow_render_options_free(from_file);
 
     /* From memory: the document opens the same. */
     docx = read_file(hello, &docx_len);
