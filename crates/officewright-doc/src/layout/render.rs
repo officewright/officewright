@@ -26,7 +26,7 @@ impl Document {
     ///
     /// An embedded font is used for the text whose font has a name the program itself
     /// has. A subset Word embeds under a name of its own (`___WRD_EMBED_SUB_` and a
-    /// number) answers to none, so other fonts are used, and the report says so.
+    /// number) answers to none, so other fonts are used, and the report says so (#216).
     ///
     /// # Errors
     ///
@@ -37,7 +37,7 @@ impl Document {
     /// - [`Error::Pdf`](crate::Error::Pdf) when the PDF cannot be written to `out`;
     /// - [`Error::Layout`](crate::Error::Layout) too when the PDF cannot be made, such as
     ///   when a font the document embeds is damaged past what the font book checks and
-    ///   cannot be subset for the PDF.
+    ///   cannot be subset for the PDF (#217).
     ///
     /// ```
     /// # fn main() -> officewright_doc::Result<()> {
