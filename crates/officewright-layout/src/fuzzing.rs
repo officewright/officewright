@@ -958,58 +958,13 @@ impl Painted {
     }
 }
 
-/// Lays out `paragraphs` of `document` one under the other, with the space between
-/// them, in a column `width` points wide with the fonts of `book`, and draws them.
-pub fn paint(
-    book: &FontBook,
-    document: &Document,
-    paragraphs: &[crate::ir::Paragraph],
-    width: f64,
-) -> Painted {
+/// The display list `items` as text, as [`Painted::text`] describes it, with the face
+/// names of `fonts`.
+fn display_text(items: &[crate::display::DisplayItem], fonts: &mut Fonts<'_>) -> String {
     use std::fmt::Write as _;
 
-    use crate::display::{DisplayItem, LineStyle, Painting, Point};
+    use crate::display::{DisplayItem, LineStyle};
 
-    let mut fonts = Fonts::new(book);
-    let mut shaper = Shaper::new();
-    let location = Location::default();
-    let mut items = Vec::new();
-    let mut top = 0.0;
-    let mut leaders = crate::display::LeaderBudget::default();
-    for (index, paragraph) in paragraphs.iter().enumerate() {
-        // The space above the first paragraph is its own; between two, the larger.
-        let previous = index.checked_sub(1).and_then(|i| paragraphs.get(i));
-        top += match previous {
-            Some(previous) => {
-                crate::paragraph::space_between(document, previous.props(), paragraph.props())
-            }
-            None => crate::paragraph::space_before(document, paragraph.props()),
-        }
-        .0;
-        let layout = crate::paragraph::lay_out(
-            document,
-            paragraph,
-            Pt(width),
-            &mut fonts,
-            &mut shaper,
-            &location,
-        );
-        let mut painting = Painting {
-            document,
-            paragraph,
-            layout: &layout,
-            fonts: &mut fonts,
-            location: &location,
-            background: None,
-            leaders: &mut leaders,
-        };
-        let origin = Point {
-            x: Pt(0.0),
-            y: Pt(top),
-        };
-        painting.paint(0..layout.lines.len(), origin, &mut items);
-        top += layout.height().0;
-    }
     let twips = |pt: Pt| (pt.0 * 20.0).round() as i64;
     let hex = |color: officewright_core::Color| {
         format!(
@@ -1020,7 +975,7 @@ pub fn paint(
         )
     };
     let mut text = String::new();
-    for item in &items {
+    for item in items {
         let _ = match item {
             DisplayItem::Glyphs(run) => {
                 let family = fonts
@@ -1134,8 +1089,308 @@ pub fn paint(
             }
         };
     }
+    text
+}
+
+/// Lays out `paragraphs` of `document` one under the other, with the space between
+/// them, in a column `width` points wide with the fonts of `book`, and draws them.
+pub fn paint(
+    book: &FontBook,
+    document: &Document,
+    paragraphs: &[crate::ir::Paragraph],
+    width: f64,
+) -> Painted {
+    use crate::display::{Painting, Point};
+
+    let mut fonts = Fonts::new(book);
+    let mut shaper = Shaper::new();
+    let location = Location::default();
+    let mut items = Vec::new();
+    let mut top = 0.0;
+    let mut leaders = crate::display::LeaderBudget::default();
+    for (index, paragraph) in paragraphs.iter().enumerate() {
+        // The space above the first paragraph is its own; between two, the larger.
+        let previous = index.checked_sub(1).and_then(|i| paragraphs.get(i));
+        top += match previous {
+            Some(previous) => {
+                crate::paragraph::space_between(document, previous.props(), paragraph.props())
+            }
+            None => crate::paragraph::space_before(document, paragraph.props()),
+        }
+        .0;
+        let layout = crate::paragraph::lay_out(
+            document,
+            paragraph,
+            Pt(width),
+            &mut fonts,
+            &mut shaper,
+            &location,
+        );
+        let mut painting = Painting {
+            document,
+            paragraph,
+            layout: &layout,
+            fonts: &mut fonts,
+            location: &location,
+            background: None,
+            leaders: &mut leaders,
+        };
+        let origin = Point {
+            x: Pt(0.0),
+            y: Pt(top),
+        };
+        painting.paint(0..layout.lines.len(), origin, &mut items);
+        top += layout.height().0;
+    }
+    let text = display_text(&items, &mut fonts);
     Painted {
         text,
         report: fonts.into_report(),
     }
+}
+
+/// A document laid out on pages by [`paginate`].
+#[derive(Clone, Debug)]
+pub struct Paginated {
+    pages: Vec<PageDump>,
+    report: LayoutReport,
+}
+
+/// A page of a [`Paginated`] document.
+#[derive(Clone, Debug)]
+pub struct PageDump {
+    number: u32,
+    section: usize,
+    size: (f64, f64),
+    body: (f64, f64, f64, f64),
+    fragments: Vec<FragmentDump>,
+    text: String,
+}
+
+/// Lines of a paragraph on a [`PageDump`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct FragmentDump {
+    paragraph: usize,
+    lines: std::ops::Range<usize>,
+    top: f64,
+    height: f64,
+}
+
+impl Paginated {
+    /// The pages.
+    pub fn pages(&self) -> &[PageDump] {
+        &self.pages
+    }
+
+    /// What the layout did that differs from Word.
+    pub fn report(&self) -> &LayoutReport {
+        &self.report
+    }
+}
+
+impl PageDump {
+    /// Its number as page numbers show it.
+    pub fn number(&self) -> u32 {
+        self.number
+    }
+
+    /// Its section, by its place in the document.
+    pub fn section(&self) -> usize {
+        self.section
+    }
+
+    /// Its width and height, in points.
+    pub fn size(&self) -> (f64, f64) {
+        self.size
+    }
+
+    /// The area the body text flows in: left, top, width and bottom, in points from the
+    /// page's top left corner.
+    pub fn body(&self) -> (f64, f64, f64, f64) {
+        self.body
+    }
+
+    /// The parts of paragraphs on it, top to bottom.
+    pub fn fragments(&self) -> &[FragmentDump] {
+        &self.fragments
+    }
+
+    /// What it draws, as [`Painted::text`] describes it, positions from the page's top
+    /// left corner.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+}
+
+impl FragmentDump {
+    /// The paragraph, by its place among every paragraph of the body in reading order,
+    /// those of table cells included.
+    pub fn paragraph(&self) -> usize {
+        self.paragraph
+    }
+
+    /// Its lines of the paragraph.
+    pub fn lines(&self) -> std::ops::Range<usize> {
+        self.lines.clone()
+    }
+
+    /// The top of its first line, in points from the top of the page.
+    pub fn top(&self) -> f64 {
+        self.top
+    }
+
+    /// The height of its lines.
+    pub fn height(&self) -> f64 {
+        self.height
+    }
+}
+
+/// Lays out the body of `document` on pages with the fonts of `book`, at most
+/// `max_pages` of them.
+pub fn paginate(
+    book: &FontBook,
+    document: &Document,
+    max_pages: usize,
+) -> Result<Paginated, String> {
+    let mut fonts = Fonts::new(book);
+    let mut shaper = Shaper::new();
+    let laid = crate::pages::paginate(document, &mut fonts, &mut shaper, max_pages)
+        .map_err(|err| err.to_string())?;
+    let pages = laid
+        .pages
+        .iter()
+        .map(|page| PageDump {
+            number: page.number,
+            section: page.section,
+            size: (page.width.0, page.height.0),
+            body: (
+                page.body.left.0,
+                page.body.top.0,
+                page.body.width.0,
+                page.body.bottom.0,
+            ),
+            fragments: page
+                .fragments
+                .iter()
+                .map(|fragment| FragmentDump {
+                    paragraph: fragment.paragraph,
+                    lines: fragment.lines.clone(),
+                    top: fragment.top.0,
+                    height: fragment.height.0,
+                })
+                .collect(),
+            text: display_text(&page.items, &mut fonts),
+        })
+        .collect();
+    Ok(Paginated {
+        pages,
+        report: fonts.into_report(),
+    })
+}
+
+/// Lays out `document` on pages, at most `max_pages`, and checks what the rest of the
+/// layout relies on: there is a page; every line of every paragraph is on exactly one
+/// page, in reading order; lines are inside the body of their page, but for a single
+/// line that nothing could move further; lines on a page do not overlap; page numbers
+/// grow by one within a section; and what pages draw is at finite places. A document
+/// that takes more than `max_pages` pages is not an error here.
+pub fn check_pages(book: &FontBook, document: &Document, max_pages: usize) -> Result<(), String> {
+    use crate::display::DisplayItem;
+
+    let mut fonts = Fonts::new(book);
+    let mut shaper = Shaper::new();
+    let laid = match crate::pages::paginate(document, &mut fonts, &mut shaper, max_pages) {
+        Ok(laid) => laid,
+        Err(crate::Error::TooManyPages { .. }) => return Ok(()),
+        Err(err) => return Err(err.to_string()),
+    };
+    if laid.pages.is_empty() {
+        return Err("no page".to_owned());
+    }
+    // Every line once, in order.
+    let mut next = (0usize, 0usize);
+    let skip_empty = |next: &mut (usize, usize)| {
+        while laid.lines.get(next.0).is_some_and(|&count| next.1 >= count) {
+            *next = (next.0 + 1, 0);
+        }
+    };
+    for (number, page) in laid.pages.iter().enumerate() {
+        let mut bottom = f64::NEG_INFINITY;
+        for (position, fragment) in page.fragments.iter().enumerate() {
+            skip_empty(&mut next);
+            if (fragment.paragraph, fragment.lines.start) != next {
+                return Err(format!(
+                    "page {number}: lines {:?} of paragraph {} where line {} of paragraph {} \
+                     comes next",
+                    fragment.lines, fragment.paragraph, next.1, next.0
+                ));
+            }
+            if fragment.lines.is_empty() {
+                return Err(format!("page {number}: an empty fragment"));
+            }
+            next = (fragment.paragraph, fragment.lines.end);
+            let (top, end) = (fragment.top.0, fragment.top.0 + fragment.height.0);
+            if !top.is_finite() || !end.is_finite() {
+                return Err(format!("page {number}: a fragment at {top}"));
+            }
+            if top < bottom - 1e-6 {
+                return Err(format!(
+                    "page {number}: a fragment at {top} overlaps the one above"
+                ));
+            }
+            bottom = end;
+            let forced = position == 0 && fragment.lines.len() == 1;
+            if top < page.body.top.0 - 1e-6 || (end > page.body.bottom.0 + 1e-6 && !forced) {
+                return Err(format!(
+                    "page {number}: lines from {top} to {end} outside the body from {} to {}",
+                    page.body.top.0, page.body.bottom.0
+                ));
+            }
+        }
+        if number > 0 {
+            let previous = laid.pages.get(number - 1);
+            if previous.is_some_and(|previous| {
+                previous.section == page.section && previous.number.saturating_add(1) != page.number
+            }) {
+                return Err(format!(
+                    "page {number}: numbered {} after {:?}",
+                    page.number,
+                    previous.map(|p| p.number)
+                ));
+            }
+        }
+        for item in &page.items {
+            let finite = match item {
+                DisplayItem::Glyphs(run) => {
+                    run.origin.x.0.is_finite() && run.origin.y.0.is_finite()
+                }
+                DisplayItem::Rect {
+                    at, width, height, ..
+                } => {
+                    at.x.0.is_finite()
+                        && at.y.0.is_finite()
+                        && width.0.is_finite()
+                        && height.0.is_finite()
+                }
+                DisplayItem::Line(line) => {
+                    line.from.x.0.is_finite()
+                        && line.from.y.0.is_finite()
+                        && line.to.x.0.is_finite()
+                        && line.to.y.0.is_finite()
+                }
+                DisplayItem::Image(image) => image.at.x.0.is_finite() && image.at.y.0.is_finite(),
+            };
+            if !finite {
+                return Err(format!("page {number}: {item:?} is not at a finite place"));
+            }
+        }
+    }
+    skip_empty(&mut next);
+    if next.0 < laid.lines.len() {
+        return Err(format!(
+            "line {} of paragraph {} is on no page",
+            next.1, next.0
+        ));
+    }
+    Ok(())
 }

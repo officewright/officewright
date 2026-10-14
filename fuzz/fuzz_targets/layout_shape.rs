@@ -5,19 +5,23 @@
 //! kerning; size), the rest are pieces of text, symbols, tabs and soft hyphens in those styles.
 //! The paragraph must keep what the layout relies on (`check_paragraph`), and break into
 //! lines that hold its text in order, in a column, with a line spacing, an alignment, a
-//! hanging indent and tab stops the first bytes give too (`check_lines`).
+//! hanging indent and tab stops the first bytes give too (`check_lines`). Up to four
+//! copies of it, kept with the next, kept together, with or without widow control and
+//! a page break before as the first bytes say, are then laid out on pages of a height
+//! they give, with every line on exactly one page inside its body (`check_pages`).
 #![no_main]
 
 use std::path::Path;
 use std::sync::OnceLock;
 
 use libfuzzer_sys::fuzz_target;
+use officewright_core::PageSize;
 use officewright_core::Pt;
 use officewright_font::{FontBook, FontOrigin};
-use officewright_layout::fuzzing::{check_lines, check_paragraph};
+use officewright_layout::fuzzing::{check_lines, check_pages, check_paragraph};
 use officewright_layout::ir::{
-    Alignment, Document, FontHint, Indent, Inline, LineSpacing, Paragraph, ParagraphProps,
-    RunFonts, RunStyle, Spacing, TabKind, TabStop,
+    Alignment, Document, FontHint, Indent, Inline, LineSpacing, Margins, PageSetup, Paragraph,
+    ParagraphProps, RunFonts, RunStyle, Section, Spacing, TabKind, TabStop,
 };
 
 const FAMILIES: [&str; 8] = [
@@ -159,6 +163,32 @@ fuzz_target!(|data: &[u8]| {
         .with_inlines(inlines);
     let width = 1.0 + f64::from(byte(13)) * 3.0;
     if let Err(problem) = check_lines(book(), &document, &paragraph, width) {
+        panic!("{problem}");
+    }
+    // The same paragraph on pages: a body `width` wide and up to 530 pt high.
+    let flags = byte(14);
+    let props = paragraph
+        .props()
+        .clone()
+        .with_keep_next(flags & 1 != 0)
+        .with_keep_lines(flags & 2 != 0)
+        .with_widow_control(flags & 4 == 0)
+        .with_page_break_before(flags & 8 != 0);
+    let paragraph = paragraph.with_props(props);
+    let height = 20.0 + f64::from(byte(15)) * 2.0;
+    let setup = PageSetup::new(PageSize::new(Pt(width + 20.0), Pt(height + 20.0))).with_margins(
+        Margins::default()
+            .with_top(Pt(10.0))
+            .with_bottom(Pt(10.0))
+            .with_left(Pt(10.0))
+            .with_right(Pt(10.0)),
+    );
+    let copies = 1 + usize::from(flags >> 4 & 3);
+    let blocks = (0..copies)
+        .map(|_| paragraph.clone().into())
+        .collect::<Vec<_>>();
+    document.add_section(Section::new(setup).with_blocks(blocks));
+    if let Err(problem) = check_pages(book(), &document, 512) {
         panic!("{problem}");
     }
 });
