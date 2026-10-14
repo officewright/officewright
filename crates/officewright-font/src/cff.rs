@@ -1599,6 +1599,28 @@ mod tests {
                 1,
                 over,
             ));
+            // A second hintmask keeps the length of the first, one byte for one hint,
+            // and the hints after it overflow or not.
+            let mut glyph = vec![139, 139, 1, 19, 0xFF];
+            glyph.extend(hinted(65_529, 29, 1));
+            glyph.extend([19, 0xFF]);
+            glyph.extend(vec![139; 2 * usize::try_from(hints - 65_530).unwrap()]);
+            glyph.extend([1, 14]);
+            cases.push((
+                format!("{hints} hints, after a second mask"),
+                programs(&glyphs_with(1, glyph), &hint_subrs(29), &[vec![]], None),
+                1,
+                over,
+            ));
+            // A first hintmask at no hints has a mask of no bytes, so the next one is a
+            // first mask too and counts its implicit hints.
+            let glyph = [vec![19], hinted(hints, 29, 19), vec![14]].concat();
+            cases.push((
+                format!("{hints} hints, after a mask of no hints"),
+                programs(&glyphs_with(1, glyph), &hint_subrs(29), &[vec![]], None),
+                1,
+                over,
+            ));
             // CID-keyed: Font DICT 1's own subroutines; or none, its Subrs operand being
             // no offset, with the hints in the global ones; or its last Private operator.
             cases.push((
@@ -1711,7 +1733,7 @@ mod tests {
                 refused,
             ));
         }
-        assert_eq!(cases.len(), 40 + 2 * 12 + 2);
+        assert_eq!(cases.len(), 40 + 2 * 14 + 2);
         for (name, cff, glyph, expected) in cases {
             let refused = matches!(
                 subset_glyphs(cff.clone(), &[glyph]),
@@ -1721,6 +1743,19 @@ mod tests {
             if cfg!(debug_assertions) {
                 assert_eq!(refused, subsetter_panics(cff, &[glyph]), "{name}");
             }
+        }
+        // The kept glyphs are walked in the subsetter's order, sorted: glyph 1 overflows
+        // before glyph 2, which the subsetter cannot read, is reached, also when the
+        // subset names them 2, 1.
+        let mut glyphs = glyphs_with(1, hinted_glyph(65_536, 29, false));
+        glyphs[2] = vec![12, 0];
+        let cff = programs(&glyphs, &hint_subrs(29), &[vec![]], None);
+        assert!(matches!(
+            subset_glyphs(cff.clone(), &[2, 1]),
+            Err(Error::MalformedTable { .. })
+        ));
+        if cfg!(debug_assertions) {
+            assert!(subsetter_panics(cff, &[2, 1]));
         }
     }
 
