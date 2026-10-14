@@ -171,7 +171,7 @@ pub enum ReportKind {
 
 impl ReportKind {
     /// The kind's name, such as `font-substituted`, as `officewright docx-to-pdf
-    /// --report` and the corpus runner write it. A name does not change once released.
+    /// --report` writes it. A name does not change once released.
     pub fn name(self) -> &'static str {
         match self {
             Self::FontSubstituted => "font-substituted",

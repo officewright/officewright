@@ -745,9 +745,23 @@ fn documents_are_rendered_where_the_scoring_finds_them() -> io::Result<()> {
     )?;
     assert!(corpus.dir.join("pdfs/good.pdf").is_file(), "{output}");
     let scored: serde_json::Value = serde_json::from_str(&corpus.read("scored.json")?).unwrap();
-    let good = &scored["files"][0];
-    assert!(good["scores"].is_object(), "{good}\n{output}");
+    assert_scored(&scored["files"][0], &output);
     Ok(())
+}
+
+/// That `file` of a report was scored from the PDF this run rendered. Scoring needs
+/// poppler, which check.sh requires on Linux and macOS; on Windows, which has none, the
+/// scoring must at least have found the PDF.
+fn assert_scored(file: &serde_json::Value, output: &str) {
+    if cfg!(unix) {
+        assert!(file["scores"].is_object(), "{file}\n{output}");
+    } else {
+        let why = file["score_error"].as_str().unwrap_or_default();
+        assert!(
+            !why.is_empty() && !why.starts_with("no PDF of ours"),
+            "{file}\n{output}"
+        );
+    }
 }
 
 #[test]
@@ -887,26 +901,48 @@ fn a_pdf_of_an_earlier_run_is_never_scored() -> io::Result<()> {
         "report.json",
         "docs",
     ];
+    let good = |corpus: &Corpus| -> io::Result<serde_json::Value> {
+        let report: serde_json::Value = serde_json::from_str(&corpus.read("report.json")?).unwrap();
+        Ok(report["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|file| file["path"] == "docs/good.docx")
+            .unwrap()
+            .clone())
+    };
+    let unscored = |file: &serde_json::Value| {
+        assert!(
+            file.get("scores").is_none_or(serde_json::Value::is_null),
+            "{file}"
+        );
+        assert_eq!(file["score_error"], "our PDF was not rendered");
+    };
     let (_, output) = corpus.run(&args, None)?;
     assert!(corpus.dir.join("pdfs/good.pdf").is_file(), "{output}");
-    let report: serde_json::Value = serde_json::from_str(&corpus.read("report.json")?).unwrap();
-    assert!(report["files"][0]["scores"].is_object(), "{output}");
+    assert_scored(&good(&corpus)?, &output);
     // The child dies before it renders: the earlier PDF is gone, and nothing is scored.
     let (code, output) = corpus.run(&args, Some("panic"))?;
     assert_eq!(code, 1, "{output}");
     assert!(!corpus.dir.join("pdfs/good.pdf").exists(), "{output}");
-    let report: serde_json::Value = serde_json::from_str(&corpus.read("report.json")?).unwrap();
-    let good = report["files"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|file| file["path"] == "docs/good.docx")
-        .unwrap();
-    assert!(
-        good.get("scores").is_none_or(serde_json::Value::is_null),
-        "{good}"
-    );
-    assert_eq!(good["score_error"], "our PDF was not rendered");
+    unscored(&good(&corpus)?);
+    // The document opens but its rendering fails (a font folder that does not exist):
+    // not scored either, though it opened.
+    corpus.run(&args, None)?;
+    let mut failing = args.to_vec();
+    failing.splice(0..0, ["--font-dir", "no-fonts"]);
+    let (code, output) = corpus.run(&failing, None)?;
+    assert_eq!(code, 1, "{output}");
+    assert!(output.contains("not rendered: docs/good.docx"), "{output}");
+    let file = good(&corpus)?;
+    assert_eq!(file["status"], "opened", "{file}");
+    unscored(&file);
+    // What stands at the target and cannot be removed stops the run, rather than be
+    // taken for this run's PDF.
+    std::fs::create_dir_all(corpus.dir.join("pdfs/good.pdf/inside"))?;
+    let (code, output) = corpus.run(&args, None)?;
+    assert_eq!(code, 2, "{output}");
+    assert!(output.contains("of an earlier run"), "{output}");
     Ok(())
 }
 
