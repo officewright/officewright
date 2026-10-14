@@ -14,7 +14,11 @@ use officewright_font::FaceId;
 use unicode_script::{Script, UnicodeScript};
 
 use crate::fonts::{Choice, Fonts};
-use crate::ir::{BreakKind, Document, Inline, RunFonts, RunStyle, RunStyleId, VerticalPosition};
+use crate::ir::{
+    BreakKind, Document, Field, FieldKind, Inline, NumberFormat, RunFonts, RunStyle, RunStyleId,
+    VerticalPosition,
+};
+use crate::numbers::number_text;
 use crate::report::{Location, ReportKind};
 use crate::shape::{Features, ShapeRequest, ShapedRun, Shaper, combining_class};
 use crate::slot::{Slot, slot};
@@ -41,6 +45,8 @@ pub(crate) struct Itemized {
     /// The text as the document has it, which the PDF gives for copying and searching.
     pub(crate) source: String,
     pub(crate) items: Vec<Item>,
+    /// The bytes of the drawn text that each `PAGE` field the layout computes shows.
+    pub(crate) page_fields: Vec<Range<usize>>,
 }
 
 /// A piece of a paragraph.
@@ -115,18 +121,47 @@ struct Placed {
     script: Script,
 }
 
+/// The values of the fields the layout computes, for the page a paragraph is laid out
+/// on.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct FieldValues {
+    /// The page's number, for `PAGE`.
+    pub(crate) page: u32,
+    /// How the section writes page numbers, for a `PAGE` field without a format of its
+    /// own.
+    pub(crate) format: NumberFormat,
+    /// The number of pages, for `NUMPAGES`.
+    pub(crate) pages: u32,
+    /// The number of pages of the section, for `SECTIONPAGES`.
+    pub(crate) section_pages: u32,
+}
+
 /// Itemizes `inlines` of a paragraph of `document`. Fonts are chosen through `fonts`,
-/// which also collects what to report; `location` is the paragraph's.
+/// which also collects what to report; `location` is the paragraph's. Every field shows
+/// the result the document stores.
 pub(crate) fn itemize(
     document: &Document,
     inlines: &[Inline],
     fonts: &mut Fonts<'_>,
     location: &Location,
 ) -> Itemized {
+    itemize_with(document, inlines, fonts, location, None)
+}
+
+/// [`itemize`], with `fields` the values of the fields the layout computes: `PAGE`,
+/// `NUMPAGES` and `SECTIONPAGES` show them, written in their format.
+pub(crate) fn itemize_with(
+    document: &Document,
+    inlines: &[Inline],
+    fonts: &mut Fonts<'_>,
+    location: &Location,
+    fields: Option<&FieldValues>,
+) -> Itemized {
     let mut builder = Builder {
         document,
         fonts,
         location,
+        fields,
         out: Itemized::default(),
         pending: Vec::new(),
         path: Vec::new(),
@@ -142,6 +177,8 @@ struct Builder<'d, 'f, 'a> {
     document: &'d Document,
     fonts: &'f mut Fonts<'a>,
     location: &'d Location,
+    /// The values of the fields the layout computes, when it computes them.
+    fields: Option<&'d FieldValues>,
     out: Itemized,
     /// The characters since the last item that is not text.
     pending: Vec<Placed>,
@@ -196,10 +233,7 @@ impl Builder<'_, '_, '_> {
             } => self.symbol(font, *code, *style),
             Inline::SoftHyphen { style, .. } => self.text("\u{00AD}", *style),
             Inline::NoBreakHyphen { style, .. } => self.text("\u{2011}", *style),
-            // A field shows its stored result. The fields the layout computes (PAGE,
-            // NUMPAGES, SECTIONPAGES) are itemized again with their value by
-            // pagination (PR 8), which then replaces their result.
-            Inline::Field(field) => self.inlines(field.result()),
+            Inline::Field(field) => self.field(field),
             Inline::Tab { style, .. } => self.item(Item::Tab(*style)),
             Inline::Break { kind, style, .. } => self.item(Item::Break(*kind, *style)),
             Inline::Object(_) => self.item(Item::Object(path)),
@@ -467,6 +501,47 @@ impl Builder<'_, '_, '_> {
         }
         self.fonts.missing(ch, self.location);
         choice
+    }
+
+    /// A field: `PAGE`, `NUMPAGES` and `SECTIONPAGES` as their value when the layout
+    /// computes them, written in the field's format, else the section's page number
+    /// format for `PAGE` and decimal for the others; every other field, and those without
+    /// values, as the result the document stores.
+    fn field(&mut self, field: &Field) {
+        let Some(values) = self.fields else {
+            self.inlines(field.result());
+            return;
+        };
+        let (number, default) = match field.kind() {
+            FieldKind::Page => (values.page, &values.format),
+            FieldKind::NumPages => (values.pages, &NumberFormat::Decimal),
+            FieldKind::SectionPages => (values.section_pages, &NumberFormat::Decimal),
+            _ => {
+                self.fonts.report_once(
+                    ReportKind::FieldCached,
+                    self.location,
+                    "fields other than PAGE, NUMPAGES and SECTIONPAGES show the result the \
+                     document stores"
+                        .to_owned(),
+                );
+                self.inlines(field.result());
+                return;
+            }
+        };
+        let format = field.format().as_ref().unwrap_or(default);
+        let (text, decimal) = number_text(number, format);
+        if decimal {
+            self.fonts.report_once(
+                ReportKind::FeatureUnsupported,
+                self.location,
+                "numbers in a format the layout does not write are written as decimal".to_owned(),
+            );
+        }
+        let start = self.out.text.len();
+        self.text(&text, field.style());
+        if *field.kind() == FieldKind::Page {
+            self.out.page_fields.push(start..self.out.text.len());
+        }
     }
 
     fn push(&mut self, ch: char, source: Range<usize>, look: Look) {

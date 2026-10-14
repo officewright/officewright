@@ -1,7 +1,7 @@
 {
  "format": 1,
  "document": "word-rules/E-list-shared-abstract.docx",
- "pdf_sha256": "7cb5811e9f861a76a27bd43eaadb22cb2b3a48cd64cb5be984497a93a66fe901",
+ "pdf_sha256": "c39886209934a0cc904e9e6e90bc682f4b84976f28f04e0b902211b138c7c1ec",
  "made_with": "pdftotext 24.02.0 -bbox-layout",
  "units": "points, origin at the top left of the page, y downwards",
  "page_count": 1,

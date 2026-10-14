@@ -52,7 +52,7 @@ pub use settings::{
     ColorSchemeIndex, ColorSchemeMapping, CompatibilityMode, CompatibilityOption,
     CompatibilitySetting, Settings,
 };
-pub use styles::{Style, StyleKind, Styles};
+pub use styles::{ConditionalFormat, Style, StyleKind, Styles, TableStyleCondition};
 pub use table_properties::{
     CellBorders, CellMargins, CellMerge, HeightRule, HorizontalAlignment, PositionAnchor,
     RowHeight, TableBorders, TableCellProperties, TableJustification, TableLayout, TableLook,
@@ -116,8 +116,10 @@ pub struct Document {
     /// The footnotes and the endnotes by their ids; of two with one id, the first.
     pub(crate) footnotes: HashMap<i64, u32>,
     pub(crate) endnotes: HashMap<i64, u32>,
-    /// The images pictures show, and where each image part is among them.
+    /// The images pictures show.
     pub(crate) images: Vec<ImageData>,
+    /// Each image part read so far, by its name: where its image is among `images`, or
+    /// none when it could not be read, so that it is read and reported once.
     pub(crate) image_parts: HashMap<Box<str>, Option<u32>>,
     pub(crate) kind: DocumentKind,
     pub(crate) conformance: Conformance,

@@ -3,7 +3,7 @@
 
 use officewright_core::Pt;
 
-use super::properties::{Border, Shading, xml_enum};
+use super::properties::{Border, BorderStyle, Shading, xml_enum};
 
 /// A width or length in a table (CT_TblWidth): of the table, a cell, the indentation,
 /// the spacing between cells, or a cell margin.
@@ -669,4 +669,252 @@ impl TableCellProperties {
     pub fn hide_mark(&self) -> Option<bool> {
         self.hide_mark
     }
+}
+
+/// Lays `above` over `below`: what `above` gives replaces what `below` gives, side by
+/// side for borders and margins. For the levels of table styles and the table's own
+/// properties.
+fn overwrite<T: Clone>(below: &mut Option<T>, above: &Option<T>) {
+    if above.is_some() {
+        below.clone_from(above);
+    }
+}
+
+impl TableBorders {
+    pub(crate) fn overlay(&mut self, above: &Self) {
+        overwrite(&mut self.top, &above.top);
+        overwrite(&mut self.bottom, &above.bottom);
+        overwrite(&mut self.start, &above.start);
+        overwrite(&mut self.end, &above.end);
+        overwrite(&mut self.inside_horizontal, &above.inside_horizontal);
+        overwrite(&mut self.inside_vertical, &above.inside_vertical);
+    }
+}
+
+impl CellBorders {
+    pub(crate) fn overlay(&mut self, above: &Self) {
+        self.sides.overlay(&above.sides);
+        overwrite(
+            &mut self.top_left_to_bottom_right,
+            &above.top_left_to_bottom_right,
+        );
+        overwrite(
+            &mut self.top_right_to_bottom_left,
+            &above.top_right_to_bottom_left,
+        );
+    }
+}
+
+impl CellMargins {
+    pub(crate) fn overlay(&mut self, above: &Self) {
+        overwrite(&mut self.top, &above.top);
+        overwrite(&mut self.bottom, &above.bottom);
+        overwrite(&mut self.start, &above.start);
+        overwrite(&mut self.end, &above.end);
+    }
+}
+
+/// Lays an optional set of sides over another, side by side.
+fn overlay_sides<T: Clone + Default>(
+    below: &mut Option<T>,
+    above: &Option<T>,
+    overlay: impl FnOnce(&mut T, &T),
+) {
+    if let Some(above) = above {
+        overlay(below.get_or_insert_with(T::default), above);
+    }
+}
+
+impl TableProperties {
+    /// Lays `above` over these properties.
+    pub(crate) fn overlay(&mut self, above: &Self) {
+        overwrite(&mut self.style, &above.style);
+        overwrite(&mut self.position, &above.position);
+        overwrite(&mut self.overlap, &above.overlap);
+        overwrite(&mut self.right_to_left, &above.right_to_left);
+        overwrite(&mut self.row_band_size, &above.row_band_size);
+        overwrite(&mut self.column_band_size, &above.column_band_size);
+        overwrite(&mut self.width, &above.width);
+        overwrite(&mut self.justification, &above.justification);
+        overwrite(&mut self.cell_spacing, &above.cell_spacing);
+        overwrite(&mut self.indentation, &above.indentation);
+        overlay_sides(&mut self.borders, &above.borders, TableBorders::overlay);
+        overwrite(&mut self.shading, &above.shading);
+        overwrite(&mut self.layout, &above.layout);
+        overlay_sides(
+            &mut self.cell_margins,
+            &above.cell_margins,
+            CellMargins::overlay,
+        );
+        overwrite(&mut self.look, &above.look);
+        overwrite(&mut self.caption, &above.caption);
+        overwrite(&mut self.description, &above.description);
+    }
+
+    /// Drops the band sizes, which Word does not allow in a table's own `w:tblPr`
+    /// (MS-OI29500 §17.4.59(a)): a table's bands follow its style's.
+    pub(crate) fn without_band_sizes(mut self) -> Self {
+        self.row_band_size = None;
+        self.column_band_size = None;
+        self
+    }
+
+    /// Drops what Word does not allow in the `w:tblPr` of a table style (MS-OI29500
+    /// §17.7.6.4(a)) and, for a conditional format, also the band sizes (§17.7.6.3(a)).
+    /// The notes say only that Word does not allow them; leaving them out is our choice,
+    /// not yet confirmed against Word (#172).
+    pub(crate) fn of_table_style(mut self, conditional: bool) -> Self {
+        self.right_to_left = None;
+        self.layout = None;
+        self.look = None;
+        self.overlap = None;
+        self.position = None;
+        self.style = None;
+        self.width = None;
+        if conditional {
+            self.row_band_size = None;
+            self.column_band_size = None;
+        }
+        self
+    }
+}
+
+impl TableRowProperties {
+    /// Drops what Word does not allow in the `w:trPr` of a table style or of its
+    /// conditional formats: the grid and widths before and after the cells and the
+    /// height (MS-OI29500 §17.7.6.10(b), §17.7.6.11(a)); and `w:hidden`, which Word
+    /// ignores there (§17.7.6.10(a), §17.7.6.11(b)).
+    pub(crate) fn of_table_style(mut self) -> Self {
+        self.grid_before = None;
+        self.grid_after = None;
+        self.width_before = None;
+        self.width_after = None;
+        self.height = None;
+        self.hidden = None;
+        self
+    }
+
+    /// Lays `above` over these properties.
+    pub(crate) fn overlay(&mut self, above: &Self) {
+        overwrite(&mut self.grid_before, &above.grid_before);
+        overwrite(&mut self.grid_after, &above.grid_after);
+        overwrite(&mut self.width_before, &above.width_before);
+        overwrite(&mut self.width_after, &above.width_after);
+        overwrite(&mut self.cant_split, &above.cant_split);
+        overwrite(&mut self.height, &above.height);
+        overwrite(&mut self.header, &above.header);
+        overwrite(&mut self.cell_spacing, &above.cell_spacing);
+        overwrite(&mut self.justification, &above.justification);
+        overwrite(&mut self.hidden, &above.hidden);
+    }
+}
+
+impl TableCellProperties {
+    /// Drops what Word does not allow in the `w:tcPr` of a table style or of its
+    /// conditional formats: the width, span, merges, fitting, hidden mark and text
+    /// direction (MS-OI29500 §17.7.6.8(b), §17.7.6.9(a)), and in the style's own, the
+    /// borders (§17.7.6.9(b)). As for `w:tblPr`, leaving them out is our choice (#172).
+    pub(crate) fn of_table_style(mut self, conditional: bool) -> Self {
+        self.width = None;
+        self.grid_span = None;
+        self.horizontal_merge = None;
+        self.vertical_merge = None;
+        self.fit_text = None;
+        self.hide_mark = None;
+        self.text_direction = None;
+        if !conditional {
+            self.borders = None;
+        }
+        self
+    }
+
+    /// The properties a conditional format gives one cell of the group of cells it
+    /// applies to, such as its first column: a side of the cell on an edge of the group
+    /// takes the group's border of that side, a side inside the group its `w:insideH` or
+    /// `w:insideV`, the borders of the group's inner edges (ISO/IEC 29500-1, insideH and
+    /// insideV of tcBorders; MS-OI29500 §17.4.23, §17.4.25). An inside border the format
+    /// omits leaves those edges as they are.
+    pub(crate) fn in_group(&self, edges: GroupEdges) -> Self {
+        let mut cell = self.clone();
+        if let Some(borders) = &mut cell.borders {
+            let sides = &borders.sides;
+            let pick = |on_edge: bool, outer: &Option<Border>, inside: &Option<Border>| {
+                *if on_edge { outer } else { inside }
+            };
+            borders.sides = TableBorders {
+                top: pick(edges.top, &sides.top, &sides.inside_horizontal),
+                bottom: pick(edges.bottom, &sides.bottom, &sides.inside_horizontal),
+                start: pick(edges.start, &sides.start, &sides.inside_vertical),
+                end: pick(edges.end, &sides.end, &sides.inside_vertical),
+                inside_horizontal: None,
+                inside_vertical: None,
+            };
+        }
+        cell
+    }
+
+    /// A cell's own properties to lay over those `below` it gets from its table style:
+    /// a side whose border the cell sets to `none` takes the style's border, as an
+    /// omitted one does (MS-OI29500 §17.4.66(a)).
+    pub(crate) fn over_style(mut self, below: &Self) -> Self {
+        let (Some(own), Some(style)) = (&mut self.borders, &below.borders) else {
+            return self;
+        };
+        let none = |border: &Option<Border>| {
+            border
+                .as_ref()
+                .is_some_and(|border| border.style == Some(BorderStyle::None))
+        };
+        for (side, styled) in [
+            (&mut own.sides.top, &style.sides.top),
+            (&mut own.sides.bottom, &style.sides.bottom),
+            (&mut own.sides.start, &style.sides.start),
+            (&mut own.sides.end, &style.sides.end),
+        ] {
+            if none(side) && styled.is_some() {
+                *side = None;
+            }
+        }
+        self
+    }
+
+    /// What Word applies to whole rows of a conditional format's cell properties: no
+    /// wrapping, the margins and the vertical alignment (MS-OI29500 §17.7.6.8(a)).
+    pub(crate) fn of_whole_rows(&self) -> Self {
+        Self {
+            no_wrap: self.no_wrap,
+            margins: self.margins,
+            vertical_justification: self.vertical_justification,
+            ..Self::default()
+        }
+    }
+
+    /// Lays `above` over these properties.
+    pub(crate) fn overlay(&mut self, above: &Self) {
+        overwrite(&mut self.width, &above.width);
+        overwrite(&mut self.grid_span, &above.grid_span);
+        overwrite(&mut self.horizontal_merge, &above.horizontal_merge);
+        overwrite(&mut self.vertical_merge, &above.vertical_merge);
+        overlay_sides(&mut self.borders, &above.borders, CellBorders::overlay);
+        overwrite(&mut self.shading, &above.shading);
+        overwrite(&mut self.no_wrap, &above.no_wrap);
+        overlay_sides(&mut self.margins, &above.margins, CellMargins::overlay);
+        overwrite(&mut self.text_direction, &above.text_direction);
+        overwrite(&mut self.fit_text, &above.fit_text);
+        overwrite(
+            &mut self.vertical_justification,
+            &above.vertical_justification,
+        );
+        overwrite(&mut self.hide_mark, &above.hide_mark);
+    }
+}
+
+/// Which sides of a cell lie on the edges of the group of cells a conditional format of
+/// a table style applies to, such as its first column or a band of rows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct GroupEdges {
+    pub(crate) top: bool,
+    pub(crate) bottom: bool,
+    pub(crate) start: bool,
+    pub(crate) end: bool,
 }

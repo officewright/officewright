@@ -1,6 +1,7 @@
-//! Tables as IR tables: the grid, rows and cells with the properties written on them.
-//! Table styles are not applied yet, a row's table property exceptions are not
-//! translated, and neither are the properties the IR has no place for yet; each is
+//! Tables as IR tables: the grid, rows and cells with their properties in effect, table
+//! styles and their conditional formats applied. What a table style gives paragraphs and
+//! runs, the table properties of its conditional formats, a row's table property
+//! exceptions, and the properties the IR has no place for yet are not applied; each is
 //! listed.
 
 use officewright_core::Pt;
@@ -11,8 +12,8 @@ use super::paragraph::border;
 use super::{Step, Translator};
 use crate::model::{
     Block, Border, BorderStyle, CellMerge, HeightRule, PositionAnchor, Table, TableBorders,
-    TableCell, TableJustification, TableLayout, TablePosition, TableRow, TableWidth, TextDirection,
-    VerticalJustification,
+    TableCell, TableCellProperties, TableJustification, TableLayout, TablePosition, TableRow,
+    TableWidth, TextDirection, VerticalJustification,
 };
 
 impl<'a> Translator<'a> {
@@ -62,10 +63,17 @@ impl<'a> Translator<'a> {
     /// The properties of a table, its style listed when it has one.
     #[inline(never)]
     fn table_props(&mut self, table: Table<'a>) -> ir::TableProps {
-        let properties = table.properties();
-        if properties.style().is_some() {
+        let properties = self.formats.table_properties(table);
+        let (text, conditional_table) = self.formats.table_style_gives_unapplied(table);
+        if text {
             self.leave_out(ReportKind::FeatureUnsupported, || {
-                "the table's style is not applied: table styles are not translated yet".into()
+                "what the table's style gives paragraphs and runs is not applied yet".into()
+            });
+        }
+        if conditional_table {
+            self.leave_out(ReportKind::FeatureUnsupported, || {
+                "the table properties of the table style's conditional formats are not applied"
+                    .into()
             });
         }
         let margins = cell_margins(properties.cell_margins(), &ir::CellMargins::default());
@@ -113,7 +121,7 @@ impl<'a> Translator<'a> {
         #[cfg(test)]
         let mut built_at = 0;
         for cell in row.cells() {
-            let (span, continues) = merge(cell);
+            let (span, continues, properties) = self.merge(cell);
             // A cell that continues a horizontal merge (`w:hMerge`, ISO/IEC 29500-4
             // §14.4.13) widens the cell before it, as a span does. The widened cell is
             // moved, never copied: a copy per continuing cell costs the content times
@@ -144,7 +152,7 @@ impl<'a> Translator<'a> {
             cells.extend(open.take());
             self.path
                 .extend([Step::Field("cells"), Step::Index(cells.len())]);
-            let built = self.cell(cell, span, &table.cell_margins());
+            let built = self.cell(cell, &properties, span, &table.cell_margins());
             #[cfg(test)]
             {
                 built_at = built.blocks().as_ptr().addr();
@@ -167,7 +175,7 @@ impl<'a> Translator<'a> {
     /// is listed.
     #[inline(never)]
     fn row_head(&mut self, row: TableRow<'a>, table: &ir::TableProps) -> ir::Row {
-        let properties = row.properties();
+        let properties = self.formats.row_properties(row);
         if row.table_property_exceptions() != Default::default() {
             self.leave_out(ReportKind::FeatureUnsupported, || {
                 "the row's table property exceptions are not applied".into()
@@ -221,9 +229,15 @@ impl<'a> Translator<'a> {
             .with_width_after(preferred(properties.width_after()))
     }
 
-    /// A cell, with the span it has so far.
-    fn cell(&mut self, cell: TableCell<'a>, span: u16, margins: &ir::CellMargins) -> ir::Cell {
-        let head = self.cell_head(cell, span, margins);
+    /// A cell, with its properties in effect and the span it has so far.
+    fn cell(
+        &mut self,
+        cell: TableCell<'a>,
+        properties: &TableCellProperties,
+        span: u16,
+        margins: &ir::CellMargins,
+    ) -> ir::Cell {
+        let head = self.cell_head(properties, span, margins);
         let blocks = self.cell_blocks(cell.blocks());
         head.with_blocks(blocks)
     }
@@ -231,8 +245,12 @@ impl<'a> Translator<'a> {
     /// A cell's properties as an IR cell without its blocks; what the IR has no place
     /// for is listed.
     #[inline(never)]
-    fn cell_head(&mut self, cell: TableCell<'a>, span: u16, margins: &ir::CellMargins) -> ir::Cell {
-        let properties = cell.properties();
+    fn cell_head(
+        &mut self,
+        properties: &TableCellProperties,
+        span: u16,
+        margins: &ir::CellMargins,
+    ) -> ir::Cell {
         if properties.fit_text() == Some(true) {
             self.leave_out(ReportKind::FeatureUnsupported, || {
                 "the cell's text fitting (w:tcFitText) is not applied".into()
@@ -253,6 +271,9 @@ impl<'a> Translator<'a> {
                 "the cell's diagonal borders are not drawn".into()
             });
         }
+        // A cell has no inner edges for its own w:insideH and w:insideV (ISO/IEC 29500-1,
+        // insideH of tcBorders); a table style's reach the cell's sides through the groups
+        // of cells its conditional formats apply to (`Formats::cell_properties`).
         let written = properties.borders().map(|borders| borders.sides());
         let borders = ir::CellBorders::default()
             .with_top(self.side(written.and_then(TableBorders::top), true))
@@ -304,6 +325,21 @@ impl<'a> Translator<'a> {
         blocks
     }
 
+    /// A cell's span in effect, 1 for none or one out of range, whether it continues a
+    /// horizontal merge, and its properties in effect, read once for the cell. They are
+    /// boxed, so that they take no room in the frames of the cells' translation, which
+    /// recurses.
+    #[inline(never)]
+    fn merge(&mut self, cell: TableCell<'a>) -> (u16, bool, Box<TableCellProperties>) {
+        let properties = Box::new(self.formats.cell_properties(cell));
+        let span = properties
+            .grid_span()
+            .and_then(|span| u16::try_from(span.max(1)).ok())
+            .unwrap_or(1);
+        let continues = properties.horizontal_merge() == Some(CellMerge::Continue);
+        (span, continues, properties)
+    }
+
     /// The empty paragraph added to a cell that does not end with one, listed; built
     /// here, so that the format of its mark takes no room in the frames of the cells'
     /// translation, which recurses.
@@ -343,21 +379,6 @@ fn new_table(props: ir::TableProps, grid: Vec<Pt>, rows: Vec<ir::Row>) -> ir::Ta
         .with_props(props)
         .with_grid(grid)
         .with_rows(rows)
-}
-
-/// A cell's span, 1 for none or one out of range, and whether it continues a horizontal
-/// merge.
-#[inline(never)]
-fn merge(cell: TableCell<'_>) -> (u16, bool) {
-    let properties = cell.properties();
-    let span = properties
-        .grid_span()
-        .and_then(|span| u16::try_from(span.max(1)).ok())
-        .unwrap_or(1);
-    (
-        span,
-        properties.horizontal_merge() == Some(CellMerge::Continue),
-    )
 }
 
 /// A preferred width of a table, a cell or the space before or after a row: automatic

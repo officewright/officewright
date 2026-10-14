@@ -1,16 +1,16 @@
 //! Opens the input as a Word document and walks everything the model read from it:
 //! sections, headers, footers and notes, blocks, tables, inline content and runs, the
-//! text, and the XML of every element kept without being understood, which must read back
-//! as XML. The formatting in
-//! effect of every paragraph, run and paragraph mark is resolved, and must not depend on
-//! what the resolver remembered from earlier ones. The document's translation into the
-//! layout IR must be valid IR.
+//! text, the programs of embedded fonts, and the XML of every drawing and of every
+//! element kept without being understood, which must read back as XML. The formatting in
+//! effect of every paragraph, run, paragraph mark, table, row and cell is resolved, and
+//! must not depend on what the resolver remembered from earlier ones. The document's
+//! translation into the layout IR must be valid IR.
 #![no_main]
 
 use std::collections::HashSet;
 
 use libfuzzer_sys::fuzz_target;
-use officewright_doc::{Block, HeaderFooterKind, Inline, Limits, LoadOptions, Opaque, RunContent};
+use officewright_doc::{Block, HeaderFooterKind, Inline, Limits, LoadOptions, RunContent};
 use officewright_opc::xml::Input;
 
 fuzz_target!(|data: &[u8]| {
@@ -29,6 +29,9 @@ fuzz_target!(|data: &[u8]| {
     }
     for font in document.fonts() {
         let _ = (font.panose(), font.signature(), font.embedded().len());
+        for embedded in font.embedded() {
+            let _ = embedded.program().map(<[u8]>::len);
+        }
     }
     let settings = document.settings();
     let _ = (
@@ -64,7 +67,7 @@ fuzz_target!(|data: &[u8]| {
     // A fresh resolver walks every style chain again, so only the first paragraphs and
     // runs are compared, each with a budget of its own: the checks stay, the cost does
     // not grow with their number × chain length.
-    let (mut paragraphs_compared, mut runs_compared) = (0, 0);
+    let (mut paragraphs_compared, mut runs_compared, mut cells_compared) = (0, 0, 0);
     let mut blocks: Vec<Block<'_>> = document.sections().flat_map(|s| s.blocks()).collect();
     // The headers, footers and notes, each walked like the body. Each header and footer
     // is walked once, however many sections have it: thousands of sections may name or
@@ -117,8 +120,9 @@ fuzz_target!(|data: &[u8]| {
                             let _ = run.properties();
                             for item in run.content() {
                                 match item {
-                                    RunContent::Other(opaque) => check(opaque),
+                                    RunContent::Other(opaque) => check(&opaque.to_xml()),
                                     RunContent::Drawing(drawing) => {
+                                        check(&drawing.to_xml());
                                         let _ = (drawing.is_inline(), drawing.width());
                                         let _ = (drawing.height(), drawing.effect_extent());
                                         let _ = drawing.anchor();
@@ -149,7 +153,7 @@ fuzz_target!(|data: &[u8]| {
                             let _ = field.instruction();
                             inlines.extend(field.inlines());
                         }
-                        Inline::Other(opaque) => check(opaque),
+                        Inline::Other(opaque) => check(&opaque.to_xml()),
                         _ => {}
                     }
                 }
@@ -158,16 +162,30 @@ fuzz_target!(|data: &[u8]| {
                 assert!(document.table(table.id()).is_some());
                 let _ = table.grid_columns().count();
                 let _ = table.properties();
+                let properties = formats.table_properties(table);
+                let _ = formats.table_look(table);
                 for row in table.rows() {
                     let _ = (row.properties(), row.table_property_exceptions());
+                    let row_format = formats.row_properties(row);
                     for cell in row.cells() {
                         let _ = cell.properties();
+                        let cell_format = formats.cell_properties(cell);
+                        let _ = formats.cell_conditions(cell);
+                        // A fresh resolver works the table out again: the first cells
+                        // only, as for paragraphs and runs.
+                        if cells_compared < 64 {
+                            cells_compared += 1;
+                            let mut fresh = document.formats();
+                            assert_eq!(cell_format, fresh.cell_properties(cell));
+                            assert_eq!(row_format, fresh.row_properties(row));
+                            assert_eq!(properties, fresh.table_properties(table));
+                        }
                         blocks.extend(cell.blocks());
                     }
                 }
             }
             Block::ContentControl(control) => blocks.extend(control.blocks()),
-            Block::Other(opaque) => check(opaque),
+            Block::Other(opaque) => check(&opaque.to_xml()),
             _ => {}
         }
     }
@@ -178,9 +196,8 @@ fuzz_target!(|data: &[u8]| {
     }
 });
 
-/// An element kept as written must write back as well-formed XML.
-fn check(opaque: Opaque<'_>) {
-    let xml = opaque.to_xml();
+/// An element kept as written, or a drawing, must write back as well-formed XML.
+fn check(xml: &str) {
     let input = Input::decode(xml.as_bytes()).unwrap_or_else(|err| panic!("{err}: {xml}"));
     let limits = officewright_opc::Limits::new().with_max_xml_depth(1 << 20);
     let mut reader = input.reader(&limits);
