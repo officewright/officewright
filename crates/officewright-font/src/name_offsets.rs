@@ -1,4 +1,5 @@
-//! A check of `name` tables whose offsets the subsetter cannot compute yet.
+//! A check of `name` tables whose offsets the subsetter cannot compute yet, or whose
+//! strings it would take too long to go through.
 //!
 //! subsetter 0.2.6 writes a version 0 `name` table anew with the records it keeps: the
 //! Unicode ones (platform 0, or platform 3 with encoding 0, 1 or 10) with name IDs 0 to 9
@@ -9,8 +10,9 @@
 //! storage past byte 65535 of the table. With overflow checks, as in debug builds, that
 //! panics (<https://github.com/typst/subsetter/issues/30>); without them the subset fails
 //! or, worse, has wrong offsets in its `name` table. No real font has a table like that,
-//! so such a face is refused here, before the subsetter runs. Remove this once a
-//! subsetter release computes the offsets without overflow.
+//! so such a face is refused here, before the subsetter runs. The rules about offsets go
+//! once a subsetter release computes them without overflow; the rule about the size of
+//! the strings below stays, since the subsetter still hashes every string it keeps.
 //!
 //! The table is read the way subsetter 0.2.6 reads it rather than with another parser,
 //! which could reject tables it accepts: a version, a record count, the offset of the
@@ -25,11 +27,14 @@
 //! first) needs this lookup changed with it; the test of several `name` records fails
 //! until it is.
 //!
-//! One rule is ours and comes first, whatever else is wrong with the table: the strings
-//! of the records to keep may take at most 1 MiB in all, counted with repeats. Both this
-//! check and the subsetter hash each of those strings to store it once, and records may
-//! share strings, so 65,535 records of one string of 64 KB made each hash 4 GB
-//! (issue #249). Real fonts' come to a few kilobytes.
+//! One rule is ours: the strings of the records to keep may take at most 1 MiB in all,
+//! counted with repeats. Both this check and the subsetter hash each of those strings to
+//! store it once, and records may share strings, so 65,535 records of one string of 64 KB
+//! made each hash 4 GB (issue #249). Real fonts' come to a few kilobytes. The rule is
+//! checked as soon as the records are read, from their lengths, before any string is
+//! looked up: a table over it is refused even where the subsetter would stop at a string
+//! outside the storage. Tables whose records cannot be read are still left to it, which
+//! hashes nothing then.
 
 use std::collections::HashSet;
 
@@ -51,10 +56,11 @@ const HEADER_SIZE: usize = 6;
 /// repeats: what this check and the subsetter hash.
 const MAX_KEPT_STRING_BYTES: usize = 1 << 20;
 
-/// Fails if the `name` table the subsetter would take for face `face`, in its font file
-/// `data`, would overflow its offsets.
+/// Fails if the subsetter, given the `name` table it would take for face `face` in its
+/// font file `data`, would overflow its offsets or hash more than
+/// [`MAX_KEPT_STRING_BYTES`] of strings.
 pub(crate) fn check(font: &FontRef<'_>, data: &[u8], face: u32) -> Result<()> {
-    match subsetter_table(font, data, b"name").and_then(overflow) {
+    match subsetter_table(font, data, b"name").and_then(refusal) {
         Some(reason) => Err(Error::MalformedTable {
             face,
             table: "name",
@@ -64,8 +70,9 @@ pub(crate) fn check(font: &FontRef<'_>, data: &[u8], face: u32) -> Result<()> {
     }
 }
 
-/// Why subsetter 0.2.6 would overflow on the `name` table `table`, if it would.
-fn overflow(table: &[u8]) -> Option<String> {
+/// Why the `name` table `table` is refused: subsetter 0.2.6 would overflow on it, or it
+/// points at more than [`MAX_KEPT_STRING_BYTES`] of strings to keep.
+fn refusal(table: &[u8]) -> Option<String> {
     let read = |at: usize| -> Option<u16> {
         Some(u16::from_be_bytes(
             table.get(at..at.checked_add(2)?)?.try_into().ok()?,
@@ -267,14 +274,21 @@ mod tests {
                  1048576 read before subsetting"
             )
         );
-        // Records the subsetter drops do not count.
+        // Records the subsetter drops do not count: Macintosh, Windows symbol encoding,
+        // name IDs 10 and 15 and up.
         let mut dropped = records(None);
-        dropped.extend(vec![(1, 0, 1, 32_768, 0); 100]);
+        dropped.extend([
+            (1, 0, 1, 32_768, 0),
+            (3, 2, 1, 32_768, 0),
+            (3, 1, 10, 32_768, 0),
+            (0, 3, 15, 32_768, 0),
+        ]);
         assert_eq!(subset_error(raw_name_table(&dropped, &storage)), None);
         // The rule comes first: here the first string to keep is outside the storage,
-        // where the subsetter would stop with an error of its own.
+        // though within the subsetter's offsets, where it would stop with an error of its
+        // own; without the rule, the table was left to it.
         let mut outside = records(Some(1));
-        outside.insert(0, (3, 1, 1, 2, 65_534));
+        outside.insert(0, (3, 1, 1, 2, 40_000));
         assert!(
             subset_error(raw_name_table(&outside, &storage))
                 .is_some_and(|err| err.contains("1048579 bytes"))
@@ -327,8 +341,8 @@ mod tests {
         // the record is missing.)
         let mut table = raw_name_table(&[(3, 1, 1, 4, 0xFFFE), (3, 1, 2, 0, 0)], &[]);
         table[4..6].copy_from_slice(&6u16.to_be_bytes());
-        assert!(overflow(&table).is_some());
-        assert!(overflow(&table[..table.len() - 1]).is_none());
+        assert!(refusal(&table).is_some());
+        assert!(refusal(&table[..table.len() - 1]).is_none());
         left_to_the_subsetter(table[..table.len() - 1].to_vec());
         // An ordinary table.
         left_to_the_subsetter(name_table(&[(3, 1, 0x0409, 1, "Test Sans")]));
