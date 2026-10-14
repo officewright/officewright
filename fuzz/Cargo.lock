@@ -170,7 +170,6 @@ dependencies = [
  "officewright-opc",
  "officewright-pdf",
  "roxmltree",
- "skrifa",
 ]
 
 [[package]]

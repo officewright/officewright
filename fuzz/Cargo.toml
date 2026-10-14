@@ -21,8 +21,6 @@ officewright-pdf = { path = "../crates/officewright-pdf" }
 # A second XML parser as an oracle: the xml target checks that both accept and reject the
 # same documents and read the same content from them.
 roxmltree = { version = "0.21.1", default-features = false, features = ["std"] }
-# The version officewright-font uses, to read the name table for typst/subsetter#30.
-skrifa = { version = "0.48.0", default-features = false, features = ["std"] }
 
 # A workspace of its own, as cargo-fuzz lays it out: the targets build with nightly-only
 # flags, and libfuzzer-sys bundles LLVM's libFuzzer (NCSA license), which officewright

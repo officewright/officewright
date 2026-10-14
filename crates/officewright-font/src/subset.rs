@@ -99,7 +99,8 @@ impl FontFace {
     /// [`Error::GlyphOutOfRange`] if a glyph is not in the face,
     /// [`Error::UnsupportedOutlines`] for a face without outlines or with CFF2
     /// outlines, [`Error::MalformedTable`] for a `CFF ` table with a real number the
-    /// subsetter cannot write back, [`Error::SubsetUnsupported`] if the face uses
+    /// subsetter cannot write back or a `name` table whose offsets it cannot compute,
+    /// [`Error::SubsetUnsupported`] if the face uses
     /// something the subsetter does not implement yet, and [`Error::Subset`] or
     /// [`Error::SubsetterPanicked`] if the face is damaged in a way that only subsetting
     /// finds.
@@ -121,8 +122,11 @@ impl FontFace {
             }
             ids.push(glyph.to_u16());
         }
+        // What subsetter 0.2.6 would panic on is refused first.
+        let font = crate::font::font_ref(self.data(), face)?;
+        crate::name_offsets::check(&font, self.data(), face)?;
         if outline_format == OutlineFormat::Cff {
-            crate::cff::check_reals(&crate::font::font_ref(self.data(), face)?, face)?;
+            crate::cff::check_reals(&font, face)?;
         }
         let remapper = GlyphRemapper::new_from_glyphs_sorted(&ids);
         let data = self.data();
@@ -171,11 +175,14 @@ fn table_range(font: &FontRef<'_>, tag: &[u8; 4], len: usize) -> Option<Range<us
 /// Runs the subsetter and turns a panic into [`Error::SubsetterPanicked`].
 ///
 /// subsetter 0.2.6 still has `unwrap()`, `unreachable!()` and unchecked arithmetic on
-/// paths that malformed fonts can reach; fuzzing found an overflow panic in its `name`
-/// table code (<https://github.com/typst/subsetter/issues/30>). A damaged font must
-/// give `Err`, never a panic, also inside a dependency, so the panic is caught here
-/// until upstream returns errors on those paths; panics that fuzzing finds are reported
-/// there. Catching relies on unwinding, like the C ABI: built with `-C panic=abort` the
+/// paths that malformed fonts can reach. A damaged font must give `Err`, never a panic,
+/// also inside a dependency, so the panic is caught here until upstream returns errors
+/// on those paths; panics that fuzzing finds are reported there. The two found so far
+/// are not left to this guard: the checks in `name_offsets.rs` and `cff.rs` refuse the
+/// faces before the subsetter runs, since the panic hook would still print them. They
+/// are an overflow in its `name` table code
+/// (<https://github.com/typst/subsetter/issues/30>) and `unreachable!()` for a CFF real
+/// number too large for an `f32`. Catching relies on unwinding, like the C ABI: built with `-C panic=abort` the
 /// process aborts instead. The default panic hook still prints the message to stderr,
 /// since a library must not replace the process-wide hook.
 fn catch_subsetter_panic<T>(face: u32, run: impl FnOnce() -> T + UnwindSafe) -> Result<T> {
@@ -329,32 +336,6 @@ mod tests {
             "cannot subset font face 3: the subsetter crashed on its data (index out of bounds)"
         );
         assert_eq!(catch_subsetter_panic(0, || 7).unwrap(), 7);
-    }
-
-    /// A `name` table with one record whose offset plus length exceeds 65535.
-    pub(crate) fn name_table_with_overflowing_record() -> Vec<u8> {
-        let mut name = Vec::new();
-        for v in [0u16, 1, 18, 3, 1, 0x0409, 1, 4, 0xFFFE] {
-            name.extend_from_slice(&v.to_be_bytes());
-        }
-        name.extend_from_slice(&[0, b'A', 0, b'B']);
-        name
-    }
-
-    #[test]
-    fn a_name_record_past_the_u16_range_is_an_error() {
-        // subsetter 0.2.6 adds the record's offset and length as u16 and panics on
-        // the overflow in builds with overflow checks (found by fuzz/font_subset,
-        // https://github.com/typst/subsetter/issues/30).
-        let data = TestFont::new("Test Sans")
-            .with_table(b"name", name_table_with_overflowing_record())
-            .build();
-        let font = FontFace::from_bytes(data, 0).unwrap();
-        let err = font.subset([]).unwrap_err();
-        assert!(
-            matches!(err, Error::SubsetterPanicked { .. } | Error::Subset { .. }),
-            "{err}"
-        );
     }
 
     #[test]
