@@ -1074,7 +1074,9 @@ class Packages(unittest.TestCase):
         self.assertEqual(width.find(f"{W}tblW").attrib, {f"{W}w": "2000", f"{W}type": "dxa"})
         self.assertEqual(width.find(f"{W}tblLayout").get(f"{W}type"), "fixed")
         self.assertIn("w:tblW 100 pt and a fixed layout", first)
+        # NoWidth is the autofit table the other three are measured against.
         self.assertIsNone(styles["NoWidth"].find(f"{W}tblPr/{W}tblW"))
+        self.assertIsNone(styles["NoWidth"].find(f"{W}tblPr/{W}tblLayout"))
         self.assertIn("a grid of two 40 pt columns, each holding one word wider than 40 pt", first)
         self.assertEqual(second, "the style NoWidth, otherwise the same")
         for table, style_id in ((with_width, "Width2000"), (without, "NoWidth"),
