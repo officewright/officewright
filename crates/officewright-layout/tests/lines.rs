@@ -1800,3 +1800,118 @@ fn a_tab_past_the_end_with_nowhere_to_end_before_it_hangs() -> TestResult {
     }
     Ok(())
 }
+
+#[test]
+fn every_tab_past_the_end_hangs_and_condensed_text_never_moves_back() -> TestResult {
+    use officewright_layout::ir::{Alignment, TabKind};
+
+    let book = book()?;
+    let (mut document, style) = liberation(10.0);
+    // Two tabs after "(" and its space: both hang, with text after them or not.
+    for after in ["", "abc"] {
+        let mut inlines = vec![
+            Inline::text("( ", style),
+            Inline::tab(style),
+            Inline::tab(style),
+        ];
+        if !after.is_empty() {
+            inlines.push(Inline::text(after, style));
+        }
+        let paragraph = Paragraph::new(style).with_inlines(inlines);
+        for width in [4.0, 5.0, 6.0] {
+            fuzzing::check_lines(&book, &document, &paragraph, width)
+                .map_err(|problem| format!("{after:?} in {width} pt: {problem}"))?;
+            let laid = fuzzing::lay_out(&book, &document, &paragraph, width);
+            let first = laid.lines().first().ok_or("no line")?;
+            assert!(
+                first.text().starts_with("( \t\t"),
+                "{:?} in {width} pt",
+                first.text()
+            );
+        }
+    }
+    // Condensed past their width, characters after an end tab take no room, so the line
+    // ends where first fit measured it.
+    let condensed = document.add_run_style(
+        RunStyle::default()
+            .with_fonts(RunFonts::new("Liberation Sans"))
+            .with_size(Pt(10.0))
+            .with_letter_spacing(Pt(-6.0)),
+    );
+    let end_tab = ParagraphProps::default().with_tabs([TabStop::default()
+        .with_position(Pt(50.0))
+        .with_kind(TabKind::End)]);
+    let paragraph = Paragraph::new(style)
+        .with_props(end_tab.clone())
+        .with_inlines([
+            Inline::tab(style),
+            Inline::text("W", style),
+            Inline::text("iii", condensed),
+        ]);
+    fuzzing::check_lines(&book, &document, &paragraph, 55.0)?;
+    // A tab that hangs after the text of an end tab, here "(" that is wider than the
+    // room before the stop, held to the first tab by a word joiner so that no line may
+    // end before the second: the line ends where that text does, so aligned at the end
+    // it reaches the edge and no further.
+    let near_stop = ParagraphProps::default()
+        .with_alignment(Alignment::End)
+        .with_tabs([TabStop::default()
+            .with_position(Pt(8.0))
+            .with_kind(TabKind::End)]);
+    let paragraph = Paragraph::new(style).with_props(near_stop).with_inlines([
+        Inline::text("x", style),
+        Inline::tab(style),
+        Inline::text("\u{2060}(    ", style),
+        Inline::tab(style),
+        Inline::text("y", style),
+    ]);
+    fuzzing::check_lines(&book, &document, &paragraph, 17.0)?;
+    let laid = fuzzing::lay_out(&book, &document, &paragraph, 17.0);
+    let first = laid.lines().first().ok_or("no line")?;
+    let end = first
+        .words()
+        .iter()
+        .map(|word| word.end())
+        .fold(0.0, f64::max);
+    assert!(
+        (end - 17.0).abs() < 1e-9,
+        "{:?} ends at {end}",
+        first.text()
+    );
+    // Justified, a line that ends in a hanging tab still fills the column: its last tab
+    // that does not hang is where the stretching starts (here, there is none).
+    let justified = ParagraphProps::default().with_alignment(Alignment::Both);
+    let paragraph = Paragraph::new(style).with_props(justified).with_inlines([
+        Inline::text("one\u{00A0}two(      ", style),
+        Inline::tab(style),
+        Inline::text("next", style),
+    ]);
+    let width = 50.0;
+    fuzzing::check_lines(&book, &document, &paragraph, width)?;
+    let laid = fuzzing::lay_out(&book, &document, &paragraph, width);
+    let first = laid.lines().first().ok_or("no line")?;
+    assert!(first.text().ends_with('\t'), "{:?}", first.text());
+    assert!((first.width() - width).abs() < 1e-9, "{}", first.width());
+    // The same with other texts and widths, aligned at the start and at the end.
+    for alignment in [Alignment::Start, Alignment::End] {
+        let props = end_tab.clone().with_alignment(alignment);
+        let mut width = 8.0;
+        while width < 60.0 {
+            for text in ["a b", "ab ", "Wa  ", "( "] {
+                let paragraph = Paragraph::new(style)
+                    .with_props(props.clone())
+                    .with_inlines([
+                        Inline::text("x", style),
+                        Inline::tab(style),
+                        Inline::text(text, style),
+                        Inline::tab(style),
+                        Inline::text("y", style),
+                    ]);
+                fuzzing::check_lines(&book, &document, &paragraph, width)
+                    .map_err(|problem| format!("{text:?} {alignment:?} {width} pt: {problem}"))?;
+            }
+            width += 0.5;
+        }
+    }
+    Ok(())
+}

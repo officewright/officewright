@@ -52,8 +52,8 @@ struct Fit {
     hyphen: bool,
     /// Whether the line holds a piece too wide for any line.
     overflow: bool,
-    /// A tab that starts past the end of the line, with no place before it where the
-    /// line may end: it hangs like the spaces there.
+    /// The first tab that starts past the end of the line, with no place before it
+    /// where the line may end: it and the tabs after it hang like the spaces there.
     hanging_tab: Option<usize>,
 }
 
@@ -267,17 +267,14 @@ impl Piece {
         });
         let mut placed = Vec::with_capacity(shaped.len());
         let mut x = self.x.0;
-        // The design units of the cluster so far: a cluster without any, such as a soft
-        // hyphen's, gets no spacing after it.
+        // The design units of the cluster so far, for the spacing after it.
         let mut cluster_units = 0i64;
         for (index, glyph) in shaped.iter().enumerate() {
             let mut advance = f64::from(glyph.x_advance) * scale.per_unit;
             cluster_units += i64::from(glyph.x_advance);
             let next = shaped.get(index + 1);
             if next.is_none_or(|next| next.cluster != glyph.cluster) {
-                if cluster_units != 0 {
-                    advance += scale.letter_spacing.0;
-                }
+                advance += cluster_spacing(cluster_units, scale);
                 cluster_units = 0;
                 if let (Some(start), Some(text)) = (run_start, &text) {
                     let end = next.map_or(text.end, |next| start + next.cluster);
@@ -489,15 +486,8 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                 .iter()
                 .map(|glyph| i64::from(glyph.x_advance))
                 .sum();
-            // The spacing after each character (`w:spacing`) follows what takes room; a
-            // soft hyphen takes none.
             let width = scale.map_or(Pt(0.0), |scale| {
-                let spacing = if advance == 0 {
-                    0.0
-                } else {
-                    scale.letter_spacing.0
-                };
-                Pt(advance as f64 * scale.per_unit + spacing)
+                Pt(advance as f64 * scale.per_unit + cluster_spacing(advance, scale))
             });
             units.push(Unit {
                 range: start + cluster..start + next.max(cluster),
@@ -705,7 +695,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                         if let Some((end, hyphen)) = candidate {
                             return wrap(end, hyphen, overflow, hanging_tab);
                         }
-                        hanging_tab = Some(index);
+                        hanging_tab.get_or_insert(index);
                     }
                     cursor.tab(&self.tabs, right);
                 }
@@ -1002,7 +992,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             .iter()
             .enumerate()
             .rposition(|(index, unit)| match unit.kind {
-                UnitKind::Tab { .. } => Some(index) != hanging_tab,
+                UnitKind::Tab { .. } => hanging_tab.is_none_or(|tab| index < tab),
                 UnitKind::Object { .. } => unit.width.0 > 0.0,
                 UnitKind::Glyphs { .. } => unit.width.0 > 0.0 && !self.is_space_unit(unit),
                 UnitKind::Break { .. } | UnitKind::Zero { .. } => false,
@@ -1138,7 +1128,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         let from = line
             .pieces
             .iter()
-            .rposition(|piece| matches!(piece.kind, PieceKind::Tab { .. }))
+            .rposition(|piece| matches!(piece.kind, PieceKind::Tab { .. }) && !piece.hanging)
             .map_or(0, |tab| tab + 1);
         // The stretched pieces, and how many places each widens.
         let mut counts: Vec<(usize, usize)> = Vec::new();
@@ -1674,6 +1664,19 @@ pub(crate) fn break_text(itemized: &Itemized) -> (String, Vec<usize>) {
         }
     }
     (text, starts)
+}
+
+/// The spacing after a cluster of `units` design units in a run measured by `scale`:
+/// the spacing after each character (`w:spacing`), but none after a cluster that takes no
+/// room, such as a soft hyphen's or a joiner's, and no more condensing than the cluster
+/// is wide, so that text never moves back. Both are hypotheses until a Word render
+/// (`E-spacing-condensed.docx`).
+fn cluster_spacing(units: i64, scale: Scale) -> f64 {
+    if units == 0 {
+        return 0.0;
+    }
+    let advance = units as f64 * scale.per_unit;
+    (advance + scale.letter_spacing.0).max(0.0) - advance
 }
 
 /// Whether bytes `text` of the drawn text are a space that may hang at the end of a
