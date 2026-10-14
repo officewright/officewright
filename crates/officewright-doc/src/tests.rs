@@ -1828,9 +1828,37 @@ fn reads_table_widths_as_word_does() {
         r#"w:w="1e3""#,
         r#"w:w="5 cm""#,
         r#"w:w="100" w:type="twips""#,
+        // Beyond 32 bits of twips or of fiftieths of a percent, as a number of hundreds
+        // of digits, which f64 reads as infinity (#115).
+        &format!(r#"w:w="{}""#, "1".repeat(400)),
+        &format!(r#"w:w="{}" w:type="pct""#, "1".repeat(400)),
+        &format!(r#"w:w="{}%""#, "1".repeat(400)),
+        &format!(r#"w:w="{}pt""#, "1".repeat(400)),
+        r#"w:w="2147483648""#,
+        r#"w:w="-2147483648" w:type="pct""#,
+        r#"w:w="42949673%""#,
+        r#"w:w="107374183pt""#,
+        r#"w:w="1491309in""#,
     ] {
         assert_eq!(width(attributes), (None, 1), "{attributes}");
     }
+    // The largest values that fit.
+    assert_eq!(
+        width(r#"w:w="2147483647""#),
+        (Some(TableWidth::Length(Pt(2_147_483_647.0 / 20.0))), 0)
+    );
+    assert_eq!(
+        width(r#"w:w="-2147483647" w:type="pct""#),
+        (Some(TableWidth::Percent(-2_147_483_647.0 / 50.0)), 0)
+    );
+    assert_eq!(
+        width(r#"w:w="42949672%""#),
+        (Some(TableWidth::Percent(42_949_672.0)), 0)
+    );
+    assert_eq!(
+        width(r#"w:w="107374182pt""#),
+        (Some(TableWidth::Length(Pt(107_374_182.0))), 0)
+    );
     // dxa without a width gives none.
     assert_eq!(width(r#"w:type="dxa""#), (None, 0));
 }

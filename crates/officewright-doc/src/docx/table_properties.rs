@@ -190,12 +190,20 @@ enum WidthValue {
     Length(officewright_core::Pt),
 }
 
+/// A value of `w:w`, or none when it is not one or does not fit in 32 bits of its unit:
+/// twips, or fiftieths of a percent. Lengths elsewhere in a document fit in 32 bits of
+/// twips too (`units::measure`); a value beyond, such as a number of hundreds of digits,
+/// which `f64` reads as infinity, is damage.
 fn width_value(value: &str) -> Option<WidthValue> {
+    // Infinity fails the comparison too.
+    let fits = |number: f64, per_unit: f64| (number * per_unit).abs() <= f64::from(i32::MAX);
     if let Some(number) = value.strip_suffix('%') {
-        return pattern_number(number).map(WidthValue::Percent);
+        return pattern_number(number)
+            .filter(|percent| fits(*percent, 50.0))
+            .map(WidthValue::Percent);
     }
     if let Some(number) = decimal(value) {
-        return Some(WidthValue::Number(number));
+        return fits(number, 1.0).then_some(WidthValue::Number(number));
     }
     let unit_start = value.len().checked_sub(2)?;
     let (number, unit) = (value.get(..unit_start)?, value.get(unit_start..)?);
@@ -208,7 +216,9 @@ fn width_value(value: &str) -> Option<WidthValue> {
         _ => return None,
     };
     pattern_number(number)
-        .map(|number| WidthValue::Length(officewright_core::Pt(number * per_unit)))
+        .map(|number| number * per_unit)
+        .filter(|points| fits(*points, 20.0))
+        .map(|points| WidthValue::Length(officewright_core::Pt(points)))
 }
 
 /// The number of ST_Percentage and ST_UniversalMeasure: `-?[0-9]+(\.[0-9]+)?`.
