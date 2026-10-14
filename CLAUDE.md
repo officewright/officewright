@@ -48,10 +48,10 @@ crates/
                         chooses each character's font by Word's rule (MS-OI29500 2.1.88 b) with fallback,
                         shapes with HarfRust, breaks lines first fit by UAX #14 (unicode-linebreak) with
                         Word's rules on top, and flows paragraphs onto the pages of each section with Word's
-                        keep and widow rules, behind private modules; feature `fuzzing` opens entry points
-                        for the fuzz targets, examples and the tests with the test fonts and Word's renders,
-                        which are not API; `data/symbol.txt` (Unicode's Adobe Symbol mapping) stays out of
-                        the published crate
+                        keep and widow rules, headers, footers and page numbers, behind private modules;
+                        feature `fuzzing` opens entry points for the fuzz targets, examples and the tests
+                        with the test fonts and Word's renders, which are not API; `data/symbol.txt`
+                        (Unicode's Adobe Symbol mapping) stays out of the published crate
   officewright-doc      DOC/DOCX/RTF          (counterpart of Spire.Doc); feature `pdf` translates a document into
                         the layout IR (`Document::to_layout_ir`), hidden in the docs and exempt from semver
                         like the IR unless feature `unstable-ir`
