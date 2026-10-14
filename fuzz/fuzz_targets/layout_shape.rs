@@ -1,9 +1,11 @@
 //! Builds a paragraph from the input and itemizes and shapes it with the test fonts of
 //! tests/fonts, as the layout does: the first bytes describe up to four run styles
 //! (fonts, among them missing ones and the symbol fonts Symbol and Wingdings; bold,
-//! italic, capitals, small capitals, complex script, right to left, the East Asian hint;
-//! size), the rest are pieces of text, symbols, tabs and soft hyphens in those styles.
-//! The paragraph must keep what the layout relies on (`check_paragraph`).
+//! italic, capitals, small capitals, complex script, right to left, the East Asian hint,
+//! kerning; size), the rest are pieces of text, symbols, tabs and soft hyphens in those styles.
+//! The paragraph must keep what the layout relies on (`check_paragraph`), and break into
+//! lines that hold its text in order, in a column, with a line spacing, an alignment, a
+//! hanging indent and tab stops the first bytes give too (`check_lines`).
 #![no_main]
 
 use std::path::Path;
@@ -12,8 +14,11 @@ use std::sync::OnceLock;
 use libfuzzer_sys::fuzz_target;
 use officewright_core::Pt;
 use officewright_font::{FontBook, FontOrigin};
-use officewright_layout::fuzzing::check_paragraph;
-use officewright_layout::ir::{Document, FontHint, Inline, RunFonts, RunStyle};
+use officewright_layout::fuzzing::{check_lines, check_paragraph};
+use officewright_layout::ir::{
+    Alignment, Document, FontHint, Indent, Inline, LineSpacing, Paragraph, ParagraphProps,
+    RunFonts, RunStyle, Spacing, TabKind, TabStop,
+};
 
 const FAMILIES: [&str; 8] = [
     "Calibri",
@@ -72,6 +77,7 @@ fn style(bytes: &[u8]) -> RunStyle {
         .with_small_caps(flags & 16 != 0)
         .with_complex_script(flags & 32 != 0)
         .with_rtl(flags & 64 != 0)
+        .with_kern_min((flags & 128 != 0).then_some(Pt(1.0)))
         .with_size(Pt(1.0 + f64::from(byte(3) % 80)))
 }
 
@@ -111,6 +117,48 @@ fuzz_target!(|data: &[u8]| {
         });
     }
     if let Err(problem) = check_paragraph(book(), &document, &inlines) {
+        panic!("{problem}");
+    }
+    let byte = |i: usize| data.get(i).copied().unwrap_or(0);
+    let alignment = match byte(4) % 5 {
+        0 => Alignment::Start,
+        1 => Alignment::Center,
+        2 => Alignment::End,
+        3 => Alignment::Both,
+        _ => Alignment::Distribute,
+    };
+    let line = match byte(5) % 3 {
+        0 => LineSpacing::Multiple(f64::from(byte(6)) / 64.0),
+        1 => LineSpacing::Exact(Pt(f64::from(byte(6)) / 4.0)),
+        _ => LineSpacing::AtLeast(Pt(f64::from(byte(6)) / 4.0)),
+    };
+    let kinds = [
+        TabKind::Start,
+        TabKind::Center,
+        TabKind::End,
+        TabKind::Decimal,
+        TabKind::Bar,
+    ];
+    let tabs = (0..byte(7) % 4).map(|i| {
+        TabStop::default()
+            .with_position(Pt(f64::from(byte(8 + usize::from(i))) * 2.0))
+            .with_kind(kinds[usize::from(byte(12) >> (2 * i)) % kinds.len()])
+    });
+    let props = ParagraphProps::default()
+        .with_alignment(alignment)
+        .with_spacing(Spacing::default().with_line(line))
+        .with_indent(
+            Indent::default()
+                .with_start(Pt(f64::from(byte(9))))
+                .with_first_line(Pt(-f64::from(byte(10)))),
+        )
+        .with_tabs(tabs)
+        .with_word_wrap(byte(11) & 1 == 0);
+    let paragraph = Paragraph::new(first)
+        .with_props(props)
+        .with_inlines(inlines);
+    let width = 1.0 + f64::from(byte(13)) * 3.0;
+    if let Err(problem) = check_lines(book(), &document, &paragraph, width) {
         panic!("{problem}");
     }
 });

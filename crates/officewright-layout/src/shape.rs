@@ -4,8 +4,8 @@
 //! A run is shaped in the face's design units, left to right; the layout scales the
 //! result to the font size when it places it.
 
-// reason: the layout itself shapes text from PR 6 (paragraph layout) on; until then only
-// the tests and the `fuzzing` module call the shaper.
+// reason: the layout itself shapes text once pagination (plan PR 8) lays out pages; until
+// then only the tests and the `fuzzing` module call the shaper.
 #![cfg_attr(not(any(test, feature = "fuzzing")), allow(dead_code))]
 
 use std::collections::HashMap;
