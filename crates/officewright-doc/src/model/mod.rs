@@ -490,5 +490,14 @@ pub(crate) enum RunItem {
 
 /// A font name in lower case, as [`Document::font`] compares names.
 pub(crate) fn fold_case(name: &str) -> String {
+    #[cfg(test)]
+    FOLDED.set(FOLDED.get().saturating_add(name.len()));
     name.chars().flat_map(char::to_lowercase).collect()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The bytes of font names folded to lower case on this thread, for tests of the cost
+    /// of looking fonts up.
+    pub(crate) static FOLDED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }

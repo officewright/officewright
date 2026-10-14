@@ -21,6 +21,35 @@ use officewright_layout::ir;
 
 use crate::model::{Block, Document, Formats};
 
+#[cfg(test)]
+thread_local! {
+    /// Work the translation did on this thread, for tests of its cost: inlines added to
+    /// paragraphs and field results, bytes of font names compared to share run styles,
+    /// and lookups of compatibility flags.
+    pub(crate) static WORK: std::cell::Cell<Work> = const { std::cell::Cell::new(Work {
+        inlines: 0,
+        compared: 0,
+        flags: 0,
+    }) };
+}
+
+/// The kinds of work [`WORK`] counts.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Work {
+    pub(crate) inlines: usize,
+    pub(crate) compared: usize,
+    pub(crate) flags: usize,
+}
+
+/// Counts work for [`WORK`].
+#[cfg(test)]
+fn work(count: impl FnOnce(&mut Work)) {
+    let mut work = WORK.get();
+    count(&mut work);
+    WORK.set(work);
+}
+
 /// The most entries a translation lists, the last of which counts the others when there
 /// are more.
 const MAX_LEFT_OUT: usize = 1000;

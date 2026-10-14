@@ -165,11 +165,18 @@ fn clear(clear: BreakClear) -> ir::BreakClear {
 
 /// The inlines of a paragraph as they are read, with the complex fields open around
 /// them. Fields nest; the IR holds no field in the result of another, so the result of
-/// an inner field becomes part of the outer one's.
+/// an inner field becomes part of the outer one's. The results of the open fields share
+/// one list, each from where it starts, so an inner field's result is never moved: every
+/// inline is added once, however deep the fields nest.
 #[derive(Default)]
 struct Content {
     out: Vec<ir::Inline>,
+    results: Vec<ir::Inline>,
     fields: Vec<Frame>,
+    /// The places in `fields` of the fields between their beginning and their separator.
+    instructions: Vec<usize>,
+    /// The places in `fields` of the results with no inline that has a style yet.
+    unstyled: Vec<usize>,
 }
 
 /// A field being read.
@@ -177,37 +184,43 @@ enum Frame {
     /// Between its beginning and its separator: its instruction, and the style it began
     /// in.
     Instruction { text: String, style: ir::RunStyleId },
-    /// Its result, and the style of a value the layout computes: that of the result's
-    /// first inline, else the one it began in.
+    /// Its result, from `start` in [`Content::results`], and the style of a value the
+    /// layout computes: that of the result's first inline that has one, else the one it
+    /// began in.
     Result {
         kind: ir::FieldKind,
         format: Option<ir::NumberFormat>,
-        result: Vec<ir::Inline>,
+        start: usize,
         style: ir::RunStyleId,
-        styled: bool,
     },
 }
 
 impl Content {
     fn push(&mut self, inline: ir::Inline) {
-        match self.fields.last_mut() {
+        #[cfg(test)]
+        super::work(|work| work.inlines += 1);
+        match self.fields.last() {
             None => self.out.push(inline),
             // Content between a field's beginning and its separator is its instruction,
             // which shows nothing.
             Some(Frame::Instruction { .. }) => {}
-            Some(Frame::Result {
-                result,
-                style,
-                styled,
-                ..
-            }) => {
-                if !*styled {
-                    if let Some(first) = style_of(&inline) {
-                        *style = first;
-                        *styled = true;
+            Some(Frame::Result { .. }) => {
+                // The inline is the first with a style of every result it reaches that
+                // has none yet: those above the innermost instruction, whose content is
+                // not shown. Each result gets its style once.
+                if let Some(first) = style_of(&inline) {
+                    let above = self.instructions.last().map_or(0, |&at| at + 1);
+                    while let Some(&at) = self.unstyled.last() {
+                        if at < above {
+                            break;
+                        }
+                        if let Some(Frame::Result { style, .. }) = self.fields.get_mut(at) {
+                            *style = first;
+                        }
+                        self.unstyled.pop();
                     }
                 }
-                result.push(inline);
+                self.results.push(inline);
             }
         }
     }
@@ -235,6 +248,7 @@ impl Content {
     }
 
     fn begin(&mut self, style: ir::RunStyleId) {
+        self.instructions.push(self.fields.len());
         self.fields.push(Frame::Instruction {
             text: String::new(),
             style,
@@ -259,44 +273,61 @@ impl Content {
         };
         let (kind, format) = parse(text);
         let style = *style;
+        let start = self.results.len();
         if let Some(top) = self.fields.last_mut() {
             *top = Frame::Result {
                 kind,
                 format,
-                result: Vec::new(),
+                start,
                 style,
-                styled: false,
             };
         }
+        self.instructions.pop();
+        self.unstyled.push(self.fields.len().saturating_sub(1));
     }
 
     fn end(&mut self) {
-        let (kind, format, result, style) = match self.fields.pop() {
+        let at = self.fields.len().saturating_sub(1);
+        let (kind, format, start, style) = match self.fields.pop() {
             // An end without a beginning is stray.
             None => return,
             Some(Frame::Instruction { text, style }) => {
+                self.instructions.pop();
                 let (kind, format) = parse(&text);
-                (kind, format, Vec::new(), style)
+                (kind, format, None, style)
             }
             Some(Frame::Result {
                 kind,
                 format,
-                result,
+                start,
                 style,
-                ..
-            }) => (kind, format, result, style),
+            }) => {
+                if self.unstyled.last() == Some(&at) {
+                    self.unstyled.pop();
+                }
+                (kind, format, Some(start), style)
+            }
         };
-        if self.fields.is_empty() {
-            self.out.push(ir::Inline::Field(
-                ir::Field::new(kind, style)
-                    .with_result(result)
-                    .with_format(format),
-            ));
-        } else {
-            // Inside another field's result, as part of it; inside an instruction, not
-            // shown.
-            for inline in result {
-                self.push(inline);
+        match self.fields.last() {
+            // The outermost field: its result is all the shared list holds from its start.
+            None => {
+                let result: Vec<ir::Inline> = match start {
+                    Some(start) => self.results.drain(start..).collect(),
+                    None => Vec::new(),
+                };
+                self.out.push(ir::Inline::Field(
+                    ir::Field::new(kind, style)
+                        .with_result(result)
+                        .with_format(format),
+                ));
+            }
+            // Inside another field's result, the result stays where it is, part of it.
+            Some(Frame::Result { .. }) => {}
+            // Inside an instruction, it is not shown.
+            Some(Frame::Instruction { .. }) => {
+                if let Some(start) = start {
+                    self.results.truncate(start);
+                }
             }
         }
     }

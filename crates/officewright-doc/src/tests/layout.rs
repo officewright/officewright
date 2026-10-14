@@ -156,11 +156,12 @@ fn gives_each_distinct_run_format_one_run_style() {
         .iter()
         .flat_map(|paragraph| paragraph.inlines().iter().map(style_of))
         .collect();
-    // Five formats: the run in the bold character style names its style, so its format
-    // is not the bold run's. The second paragraph repeats the first's styles.
-    for (n, id) in ids[..5].iter().enumerate() {
-        assert!(ids[..n].iter().all(|other| other != id), "run {n}");
-    }
+    // Three run styles for five formats: formats that give the same IR style share it.
+    // The run in the bold character style and the bold run differ only in the style they
+    // name, which the IR does not keep; the nil shading is no shading, as in the plain
+    // run. The second paragraph repeats the first's styles.
+    assert_eq!((ids[1], ids[4]), (ids[2], ids[0]));
+    assert!(ids[0] != ids[1] && ids[1] != ids[3] && ids[0] != ids[3]);
     assert_eq!(&ids[..5], &ids[5..]);
     assert_eq!(ir.run_style(ids[4]).unwrap().shading(), None);
     assert!(ir.run_style(ids[2]).unwrap().bold());
@@ -230,7 +231,23 @@ fn cuts_font_names_no_font_has() {
         .iter()
         .map(LeftOut::message)
         .collect();
-    assert_eq!(messages, ["a font name of more than 256 characters is cut"]);
+    assert_eq!(messages, ["a font name of more than 256 bytes is cut"]);
+    // The cut counts bytes and falls at the end of a character: 85 characters of three
+    // bytes each.
+    let document = open(&format!(
+        r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="{}"/></w:rPr><w:t>x</w:t></w:r></w:p>"#,
+        "€".repeat(200)
+    ));
+    let translation = translate(&document);
+    let style = style_of(&paragraphs(&translation)[0].inlines()[0]);
+    let ascii = translation
+        .document()
+        .run_style(style)
+        .unwrap()
+        .fonts()
+        .ascii()
+        .to_owned();
+    assert_eq!(ascii, "€".repeat(85));
 }
 
 #[test]
@@ -798,7 +815,7 @@ fn assembles_fields_at_the_edges() {
         // The value of a field takes the style of its result's first piece, else that of
         // its beginning.
         format!(
-            r#"<w:p>{}{}{separate}<w:r><w:rPr><w:b/></w:rPr><w:t>7</w:t></w:r>{end}{}{}{end}</w:p>"#,
+            r#"<w:p>{}{}{separate}<w:r><w:rPr><w:b/></w:rPr><w:t>7</w:t></w:r><w:r><w:rPr><w:u w:val="single"/></w:rPr><w:t>8</w:t></w:r>{end}{}{}{end}</w:p>"#,
             begin("<w:i/>"),
             instruction("PAGE \\* roman \\* arabic"),
             begin("<w:i/>"),
@@ -830,8 +847,9 @@ fn assembles_fields_at_the_edges() {
     let ir::Inline::Field(page) = &found[0].inlines()[0] else {
         panic!("a field");
     };
+    // The first piece's style, not the second's.
     let bold = ir.run_style(page.style()).unwrap();
-    assert!(bold.bold() && !bold.italic());
+    assert!(bold.bold() && !bold.italic() && bold.underline().is_none());
     // Of two number formats, the first counts.
     assert_eq!(page.format(), &Some(ir::NumberFormat::LowerRoman));
     let ir::Inline::Field(pages) = &found[0].inlines()[1] else {
@@ -873,9 +891,11 @@ fn bounds_what_long_names_and_tags_copy() {
     // A font name and a language tag far longer than any are copied cut, or not at all,
     // into each symbol and run style: memory stays in proportion to the document.
     let styles = format!(
-        r#"<w:styles xmlns:w="{W}"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="{}"/><w:lang w:val="{}"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>"#,
+        r#"<w:styles xmlns:w="{W}"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="{}"/><w:lang w:val="{}" w:eastAsia="{}" w:bidi="{}"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>"#,
         "A".repeat(1000),
-        "l".repeat(100)
+        "l".repeat(100),
+        "e".repeat(65),
+        "b".repeat(65)
     );
     let body = r#"<w:p><w:r><w:sym w:char="F020"/><w:sym w:char="F021"/></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>b</w:t></w:r></w:p>"#;
     let document = with_parts(body, &[("styles", "styles.xml", styles)]);
@@ -891,7 +911,11 @@ fn bounds_what_long_names_and_tags_copy() {
         };
         let style = ir.run_style(style).unwrap();
         assert_eq!(style.fonts().ascii().len(), 256);
-        assert_eq!(style.language().latin(), None);
+        let language = style.language();
+        assert_eq!(
+            (language.latin(), language.east_asia(), language.bidi()),
+            (None, None, None)
+        );
     }
     let left_out: Vec<&str> = translation
         .left_out()
@@ -899,7 +923,7 @@ fn bounds_what_long_names_and_tags_copy() {
         .map(LeftOut::message)
         .collect();
     assert!(left_out.contains(&"a language tag of more than 64 bytes is left out"));
-    assert!(left_out.contains(&"a font name of more than 256 characters is cut"));
+    assert!(left_out.contains(&"a font name of more than 256 bytes is cut"));
     // A tag of 64 bytes is passed on.
     let styles = format!(
         r#"<w:styles xmlns:w="{W}"><w:docDefaults><w:rPrDefault><w:rPr><w:lang w:val="{}"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>"#,
@@ -920,14 +944,16 @@ fn bounds_what_long_names_and_tags_copy() {
 #[test]
 fn translates_the_rest_of_settings_and_sections() {
     let settings = format!(
-        r#"<w:settings xmlns:w="{W}"><w:compat><w:usePrinterMetrics/><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="13"/><w:compatSetting w:name="usePrinterMetrics" w:uri="http://schemas.microsoft.com/office/word" w:val="true"/><w:compatSetting w:name="overrideTableStyleFontSizeAndJustification" w:uri="http://schemas.microsoft.com/office/word" w:val="on"/></w:compat></w:settings>"#
+        r#"<w:settings xmlns:w="{W}"><w:compat><w:usePrinterMetrics/><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="13"/><w:compatSetting w:name="usePrinterMetrics" w:uri="http://schemas.microsoft.com/office/word" w:val="true"/><w:compatSetting w:name="overrideTableStyleFontSizeAndJustification" w:uri="http://schemas.microsoft.com/office/word" w:val="on"/><w:compatSetting w:name="doNotFlipMirrorIndents" w:uri="http://schemas.microsoft.com/office/word" w:val="false"/><w:compatSetting w:name="enableOpenTypeFeatures" w:uri="http://schemas.microsoft.com/office/word" w:val="off"/><w:noLeading/><w:noLeading w:val="0"/><w:doNotExpandShiftReturn/><w:doNotExpandShiftReturn/></w:compat></w:settings>"#
     );
     let body = r#"<w:p/><w:sectPr><w:type w:val="evenPage"/><w:pgNumType w:chapStyle="2" w:chapSep="colon"/><w:cols w:space="1080"/></w:sectPr>"#;
     let document = with_parts(body, &[("settings", "settings.xml", settings)]);
     let translation = translate(&document);
     let ir = translation.document();
     assert_eq!(ir.settings().compat_mode(), ir::CompatMode::Word2007);
-    // A flag given twice is passed once; "true" and "on" are on.
+    // A flag given twice is passed once; "true" and "on" are on, "false" and "off" off;
+    // of a legacy option written twice, the last value counts (noLeading is switched off
+    // again).
     let flags: Vec<&str> = ir
         .settings()
         .compat_flags()
@@ -938,6 +964,7 @@ fn translates_the_rest_of_settings_and_sections() {
         flags,
         [
             "usePrinterMetrics",
+            "doNotExpandShiftReturn",
             "overrideTableStyleFontSizeAndJustification"
         ]
     );
@@ -997,5 +1024,154 @@ fn translates_list_overrides_links_and_restarts() {
     assert_eq!(
         (replacement.start(), replacement.restart()),
         (0, ir::Restart::Default)
+    );
+}
+
+/// The work the translation does on this thread while `f` runs, of the kind `kind`
+/// picks.
+fn work_of<T>(kind: fn(crate::layout::Work) -> usize, f: impl FnOnce() -> T) -> (T, usize) {
+    let before = kind(crate::layout::WORK.get());
+    let result = f();
+    (result, kind(crate::layout::WORK.get()) - before)
+}
+
+#[test]
+fn adds_each_inline_of_nested_fields_once() {
+    // 20,000 fields, each in the result of the one before: every inline is added once,
+    // not moved into each field around it (which took quadratic time).
+    const DEPTH: usize = 20_000;
+    let begin = format!(
+        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>PAGE</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>{}"#,
+        text_run("x")
+    );
+    let body = format!(
+        "<w:p>{}{}</w:p>",
+        begin.repeat(DEPTH),
+        r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#.repeat(DEPTH)
+    );
+    let document = open(&body);
+    let (translation, work) = work_of(|work| work.inlines, || document.to_layout_ir());
+    assert!(work <= 2 * DEPTH, "{work} inlines added for {DEPTH} fields");
+    let inlines = paragraphs(&translation)[0].inlines();
+    let [ir::Inline::Field(field)] = inlines else {
+        panic!("one field");
+    };
+    assert_eq!(field.result().len(), DEPTH);
+}
+
+#[test]
+fn shares_run_styles_of_long_names_comparing_bounded_parts() {
+    // 400 runs, each with its own copy of four font names of 2,000 characters: they share
+    // one run style, and comparing them looks at the cut names only (comparing the whole
+    // names would take 16,000 bytes a run).
+    const RUNS: usize = 400;
+    let name = "N".repeat(2_000);
+    let run = format!(
+        r#"<w:r><w:rPr><w:rFonts w:ascii="{name}" w:hAnsi="{name}" w:eastAsia="{name}" w:cs="{name}"/></w:rPr><w:t>x</w:t></w:r>"#
+    );
+    let document = open(&format!("<w:p>{}</w:p>", run.repeat(RUNS)));
+    let (translation, work) = work_of(|work| work.compared, || document.to_layout_ir());
+    let styles: std::collections::HashSet<ir::RunStyleId> = paragraphs(&translation)[0]
+        .inlines()
+        .iter()
+        .map(style_of)
+        .collect();
+    assert_eq!(styles.len(), 1);
+    assert!(work <= RUNS * 2 * 4 * 256 + RUNS, "{work} bytes compared");
+}
+
+#[test]
+fn passes_compatibility_flags_once_with_one_lookup_each() {
+    // 30,000 settings of distinct names and one written 30,000 times: each is looked up
+    // once (a scan of the flags so far took quadratic time).
+    const SETTINGS: usize = 30_000;
+    let mut compat = String::new();
+    for n in 0..SETTINGS {
+        compat.push_str(&format!(
+            r#"<w:compatSetting w:name="s{n}" w:uri="http://schemas.microsoft.com/office/word" w:val="1"/><w:compatSetting w:name="again" w:uri="http://schemas.microsoft.com/office/word" w:val="1"/>"#
+        ));
+    }
+    let settings =
+        format!(r#"<w:settings xmlns:w="{W}"><w:compat>{compat}</w:compat></w:settings>"#);
+    let document = with_parts("<w:p/>", &[("settings", "settings.xml", settings)]);
+    let (translation, work) = work_of(|work| work.flags, || document.to_layout_ir());
+    let flags = translation.document().settings().compat_flags();
+    assert_eq!(flags.len(), SETTINGS + 1);
+    assert!(work <= 2 * SETTINGS + 64, "{work} lookups");
+}
+
+#[test]
+fn looks_fonts_up_with_bounded_folding() {
+    // A font table of 200 names of 500 characters and 2,000 run styles whose East Asian
+    // font has a name of 100,000 characters: the table is folded to lower case once, and
+    // each lookup folds the cut name only.
+    let fonts: String = (0..200)
+        .map(|n| format!(r#"<w:font w:name="F{n:03}{}"/>"#, "x".repeat(496)))
+        .collect();
+    let fonts = format!(r#"<w:fonts xmlns:w="{W}">{fonts}</w:fonts>"#);
+    let styles = format!(
+        r#"<w:styles xmlns:w="{W}"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:eastAsia="{}"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>"#,
+        "E".repeat(100_000)
+    );
+    let runs: String = (0..2000)
+        .map(|n| {
+            format!(
+                r#"<w:r><w:rPr><w:sz w:val="{}"/><w:spacing w:val="{}"/></w:rPr><w:t>x</w:t></w:r>"#,
+                2 + n % 1000,
+                n / 1000
+            )
+        })
+        .collect();
+    let before = crate::model::FOLDED.get();
+    let document = with_parts(
+        &format!("<w:p>{runs}</w:p>"),
+        &[
+            ("styles", "styles.xml", styles),
+            ("fontTable", "fontTable.xml", fonts),
+        ],
+    );
+    let translation = translate(&document);
+    let folded = crate::model::FOLDED.get() - before;
+    assert_eq!(translation.document().sections()[0].blocks().len(), 1);
+    assert!(folded <= 200 * 500 + 2_001 * 256, "{folded} bytes folded");
+}
+
+#[test]
+fn takes_a_fields_style_only_from_what_its_result_shows() {
+    // PAGE's result holds an IF field whose instruction holds a field with a bold result:
+    // that is not shown, so PAGE takes its style from the IF field's result, "y", plain.
+    let field_char = |kind: &str| format!(r#"<w:r><w:fldChar w:fldCharType="{kind}"/></w:r>"#);
+    let instruction = |text: &str| {
+        format!(r#"<w:r><w:instrText xml:space="preserve">{text}</w:instrText></w:r>"#)
+    };
+    let body = [
+        "<w:p>".to_owned(),
+        field_char("begin"),
+        instruction("PAGE"),
+        field_char("separate"),
+        field_char("begin"),
+        instruction("IF "),
+        field_char("begin"),
+        instruction("NUMPAGES"),
+        field_char("separate"),
+        r#"<w:r><w:rPr><w:b/></w:rPr><w:t>x</w:t></w:r>"#.to_owned(),
+        field_char("end"),
+        field_char("separate"),
+        text_run("y"),
+        field_char("end"),
+        field_char("end"),
+        "</w:p>".to_owned(),
+    ]
+    .concat();
+    let translation = translate(&open(&body));
+    let [ir::Inline::Field(page)] = paragraphs(&translation)[0].inlines() else {
+        panic!("one field");
+    };
+    assert_eq!(page.kind(), &ir::FieldKind::Page);
+    let style = translation.document().run_style(page.style()).unwrap();
+    assert!(!style.bold());
+    assert_eq!(
+        page.result().iter().map(describe).collect::<Vec<_>>(),
+        ["text y"]
     );
 }

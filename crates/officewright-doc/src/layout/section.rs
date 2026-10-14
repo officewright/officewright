@@ -1,5 +1,7 @@
 //! The document's settings and its sections as the IR's settings and sections.
 
+use std::collections::HashMap;
+
 use officewright_core::{PageSize, Pt};
 use officewright_layout::ReportKind;
 use officewright_layout::ir;
@@ -19,23 +21,43 @@ pub(super) fn settings(t: &mut Translator<'_>) -> ir::DocumentSettings {
         14 => ir::CompatMode::Word2010,
         15.. => ir::CompatMode::Word2013,
     };
-    // The legacy options that are on, and the compatibility settings set to true.
-    let mut flags: Vec<ir::CompatFlag> = settings
-        .compatibility_options()
-        .filter(|(_, on)| *on)
-        .map(|(option, _)| ir::CompatFlag::from_name(option.to_xml()))
-        .collect();
+    // The legacy options and the compatibility settings, each once, in the order first
+    // written; of one written twice, the last value counts, as the model's docs say. A
+    // setting is on when set to true. The flags are passed when on.
+    let mut values: Vec<(ir::CompatFlag, bool)> = Vec::new();
+    let mut places: HashMap<ir::CompatFlag, usize> = HashMap::new();
+    let mut set = |flag: ir::CompatFlag, on: bool| {
+        #[cfg(test)]
+        super::work(|work| work.flags += 1);
+        match places.get(&flag) {
+            Some(&place) => {
+                if let Some(value) = values.get_mut(place) {
+                    value.1 = on;
+                }
+            }
+            None => {
+                places.insert(flag.clone(), values.len());
+                values.push((flag, on));
+            }
+        }
+    };
+    for (option, on) in settings.compatibility_options() {
+        set(ir::CompatFlag::from_name(option.to_xml()), on);
+    }
     for setting in settings.compatibility_settings() {
+        if setting.name() == "compatibilityMode" {
+            continue;
+        }
         let on = setting
             .value()
             .is_some_and(|value| matches!(value.trim(), "1" | "true" | "on"));
-        if on && setting.name() != "compatibilityMode" {
-            let flag = ir::CompatFlag::from_name(setting.name());
-            if !flags.contains(&flag) {
-                flags.push(flag);
-            }
-        }
+        set(ir::CompatFlag::from_name(setting.name()), on);
     }
+    let flags: Vec<ir::CompatFlag> = values
+        .into_iter()
+        .filter(|(_, on)| *on)
+        .map(|(flag, _)| flag)
+        .collect();
     let decimal_separator = settings
         .decimal_symbol()
         .and_then(|symbol| symbol.chars().next())
