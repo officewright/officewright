@@ -171,3 +171,98 @@ fn rejects_font_sizes_that_are_not_positive_numbers() -> io::Result<()> {
     assert!(!output.exists());
     fs::remove_dir_all(&dir)
 }
+
+/// A path in the repository.
+fn repository(path: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(path)
+}
+
+#[test]
+fn converts_a_word_document_to_pdf_and_writes_its_report() -> io::Result<()> {
+    let dir = scratch("docx")?;
+    let output = dir.join("hello.pdf");
+    let report = dir.join("report.json");
+    let out = officewright(&[
+        &"docx-to-pdf",
+        &repository("crates/officewright-doc/tests/data/hello.docx"),
+        &output,
+        &"--font-dir",
+        &repository("tests/fonts"),
+        &"--no-system-fonts",
+        &"--report",
+        &report,
+    ])?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(fs::read(&output)?.starts_with(b"%PDF-"));
+    // Calibri, which the fonts given lack, is laid out in Carlito: a note, and an entry.
+    let note = "note: document: \"Calibri\" → \"Carlito\" (metric-compatible substitute)\n";
+    assert_eq!(stderr, note);
+    assert_eq!(
+        fs::read_to_string(&report)?,
+        "{\"entries\": [\n    {\"kind\": \"font-substituted\", \"location\": \"document\", \
+         \"message\": \"\\\"Calibri\\\" → \\\"Carlito\\\" (metric-compatible substitute)\"}\n]}\n"
+    );
+    fs::remove_dir_all(&dir)
+}
+
+#[test]
+fn a_word_document_takes_its_fonts_from_files_too() -> io::Result<()> {
+    // Carlito from its file, and no folder: the same substitution.
+    let dir = scratch("docx-font")?;
+    let output = dir.join("hello.pdf");
+    let out = officewright(&[
+        &"docx-to-pdf",
+        &repository("crates/officewright-doc/tests/data/hello.docx"),
+        &output,
+        &"--font",
+        &repository("tests/fonts/carlito/Carlito-Regular.ttf"),
+        &"--no-system-fonts",
+    ])?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(stderr.contains("\"Carlito\""), "{stderr}");
+    assert!(String::from_utf8_lossy(&fs::read(&output)?).contains("Carlito-Regular"));
+    fs::remove_dir_all(&dir)
+}
+
+#[test]
+fn a_word_document_past_the_page_limit_is_refused() -> io::Result<()> {
+    let dir = scratch("docx-pages")?;
+    let output = dir.join("pages.pdf");
+    let out = officewright(&[
+        &"docx-to-pdf",
+        &repository("tests/corpus/word-rules/E-space-before-top.docx"),
+        &output,
+        &"--font-dir",
+        &repository("tests/fonts"),
+        &"--no-system-fonts",
+        &"--max-pages",
+        &"1",
+    ])?;
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.starts_with("error: ") && stderr.contains("pages"),
+        "{stderr}"
+    );
+    assert!(!output.exists());
+    // A limit of 0 pages is a usage error.
+    let usage = officewright(&[&"docx-to-pdf", &"in.docx", &output, &"--max-pages", &"0"])?;
+    assert_eq!(usage.status.code(), Some(2));
+    fs::remove_dir_all(&dir)
+}
+
+#[test]
+fn a_file_that_is_no_word_document_is_refused() -> io::Result<()> {
+    let dir = scratch("docx-not")?;
+    let input = dir.join("in.docx");
+    fs::write(&input, "not a zip")?;
+    let out = officewright(&[&"docx-to-pdf", &input, &dir.join("out.pdf")])?;
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.starts_with("error: "), "{stderr}");
+    fs::remove_dir_all(&dir)
+}

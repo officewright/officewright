@@ -487,6 +487,114 @@ static void fonts_by_name(const char *fonts, const char *dir) {
     ow_font_resolver_free(NULL);
 }
 
+/* Converts the repository's smallest Word document to PDF with the fonts of tests/fonts
+ * alone, in memory and to a file, reads the report, and checks the conversion's errors:
+ * a page limit, a damaged document, NULL arguments. The documents are found from
+ * `fonts`, the repository's tests/fonts. */
+static void docx_to_pdf(const char *fonts, const char *out_dir) {
+    char hello[1024];
+    char pages[1024];
+    char out[1024];
+    OwRenderOptions *options = NULL;
+    OwDocDocument *doc = NULL;
+    OwDocDocument *from_bytes = NULL;
+    OwDocDocument *long_doc = NULL;
+    OwDocDocument *broken = NULL;
+    OwLayoutReport *report = NULL;
+    uint8_t *data = NULL;
+    uint8_t *docx = NULL;
+    size_t len = 0;
+    size_t docx_len = 0;
+    size_t count = 0;
+    size_t i;
+    int32_t kind = -1;
+    int substituted = 0;
+    const char *location = NULL;
+    const char *message = NULL;
+
+    snprintf(hello, sizeof hello, "%s/../../crates/officewright-doc/tests/data/hello.docx", fonts);
+    snprintf(pages, sizeof pages, "%s/../corpus/word-rules/E-space-before-top.docx", fonts);
+    snprintf(out, sizeof out, "%s/hello.pdf", out_dir);
+
+    EXPECT(ow_render_options_new(&options), OW_STATUS_OK, NULL);
+    EXPECT(ow_render_options_set_system_fonts(options, 0), OW_STATUS_OK, NULL);
+    EXPECT(ow_render_options_add_font_dir(options, fonts), OW_STATUS_OK, NULL);
+    EXPECT(ow_doc_document_open_path(hello, &doc), OW_STATUS_OK, NULL);
+
+    /* In memory, with a report: Calibri, which tests/fonts lacks, becomes Carlito. */
+    EXPECT(ow_doc_document_save_pdf_bytes(doc, options, &data, &len, &report), OW_STATUS_OK,
+           NULL);
+    CHECK(len > 5 && memcmp(data, "%PDF-", 5) == 0);
+    EXPECT(ow_layout_report_len(report, &count), OW_STATUS_OK, NULL);
+    CHECK(count > 0);
+    for (i = 0; i < count; i++) {
+        EXPECT(ow_layout_report_entry(report, i, &kind, &location, &message), OW_STATUS_OK,
+               NULL);
+        CHECK(location != NULL && message != NULL && message[0] != '\0');
+        if (kind == OW_REPORT_KIND_FONT_SUBSTITUTED && strstr(message, "Carlito") != NULL &&
+            strcmp(location, "document") == 0) {
+            substituted = 1;
+        }
+    }
+    CHECK(substituted);
+    EXPECT(ow_layout_report_entry(report, count, &kind, &location, &message),
+           OW_STATUS_INVALID_ARGUMENT, "out of range");
+    CHECK(kind == OW_REPORT_KIND_OTHER && location == NULL && message == NULL);
+    ow_layout_report_free(report);
+
+    /* To a file, without a report: the same bytes. */
+    EXPECT(ow_doc_document_save_pdf_path(doc, out, options, NULL), OW_STATUS_OK, NULL);
+    CHECK(file_equals(out, data, len));
+    ow_bytes_free(data, len);
+
+    /* From memory: the document opens the same. */
+    docx = read_file(hello, &docx_len);
+    CHECK(docx != NULL);
+    if (docx != NULL) {
+        EXPECT(ow_doc_document_open_bytes(docx, docx_len, &from_bytes), OW_STATUS_OK, NULL);
+        free(docx);
+    }
+    EXPECT(ow_doc_document_save_pdf_bytes(from_bytes, options, &data, &len, NULL), OW_STATUS_OK,
+           NULL);
+    CHECK(len > 5 && memcmp(data, "%PDF-", 5) == 0);
+    ow_bytes_free(data, len);
+    ow_doc_document_free(from_bytes);
+
+    /* A document of several pages, past a limit of one: no PDF, no report. */
+    EXPECT(ow_doc_document_open_path(pages, &long_doc), OW_STATUS_OK, NULL);
+    EXPECT(ow_render_options_set_max_pages(options, 1), OW_STATUS_OK, NULL);
+    report = (OwLayoutReport *)1;
+    EXPECT(ow_doc_document_save_pdf_bytes(long_doc, options, &data, &len, &report),
+           OW_STATUS_LIMIT_EXCEEDED, "pages");
+    CHECK(data == NULL && len == 0 && report == NULL);
+    EXPECT(ow_render_options_set_max_pages(options, 0), OW_STATUS_INVALID_ARGUMENT, "max_pages");
+    ow_doc_document_free(long_doc);
+
+    /* Damaged input and bad arguments. */
+    broken = (OwDocDocument *)1;
+    EXPECT(ow_doc_document_open_bytes((const uint8_t *)"not a docx", 10, &broken),
+           OW_STATUS_MALFORMED, "");
+    CHECK(broken == NULL);
+    broken = (OwDocDocument *)1;
+    EXPECT(ow_doc_document_open_path(NULL, &broken), OW_STATUS_NULL_ARGUMENT, "path is null");
+    CHECK(broken == NULL);
+    EXPECT(ow_render_options_set_system_fonts(options, 2), OW_STATUS_INVALID_ARGUMENT,
+           "system_fonts is 2");
+    EXPECT(ow_render_options_set_compression(options, 9), OW_STATUS_INVALID_ARGUMENT,
+           "compression is 9");
+    EXPECT(ow_doc_document_save_pdf_bytes(NULL, options, &data, &len, NULL),
+           OW_STATUS_NULL_ARGUMENT, "doc is null");
+    EXPECT(ow_doc_document_save_pdf_path(doc, out, NULL, NULL), OW_STATUS_NULL_ARGUMENT,
+           "options is null");
+    EXPECT(ow_layout_report_len(NULL, &count), OW_STATUS_NULL_ARGUMENT, "report is null");
+
+    ow_doc_document_free(doc);
+    ow_doc_document_free(NULL);
+    ow_render_options_free(options);
+    ow_render_options_free(NULL);
+    ow_layout_report_free(NULL);
+}
+
 int main(int argc, char **argv) {
     uint32_t version = ow_abi_version();
     if (argc != 3) {
@@ -504,6 +612,7 @@ int main(int argc, char **argv) {
     errors();
     embedded_fonts(argv[2]);
     fonts_by_name(argv[2], argv[1]);
+    docx_to_pdf(argv[2], argv[1]);
     if (failures != 0) {
         fprintf(stderr, "%d checks failed\n", failures);
         return 1;
