@@ -322,10 +322,15 @@ fn substitutes_space_lines_as_word_spaced_the_original() -> TestResult {
             // The tolerance comes from the number of lines, so a reference whose lines
             // pdftotext merged or dropped, or that a page break split, would loosen it:
             // each font and size must have its ten lines, in order, on one page.
+            // A line without a number counts as its whole text, so it fails the check too.
             let numbers: Vec<&str> = lines
                 .iter()
-                .filter_map(|line| line.text.split_once(" pt, line ")?.1.split_once(':'))
-                .map(|(number, _)| number)
+                .map(|line| {
+                    line.text
+                        .split_once(" pt, line ")
+                        .and_then(|(_, rest)| rest.split_once(':'))
+                        .map_or(line.text.as_str(), |(number, _)| number)
+                })
                 .collect();
             let expected: Vec<String> = (1..=LINES).map(|n| format!("{n:02}")).collect();
             assert_eq!(numbers, expected, "{family} at {size} pt: the lines");
@@ -333,9 +338,10 @@ fn substitutes_space_lines_as_word_spaced_the_original() -> TestResult {
                 lines.windows(2).all(|pair| pair[0].page == pair[1].page),
                 "{family} at {size} pt: lines on more than one page"
             );
-            let (Some(first), Some(last)) = (lines.first(), lines.last()) else {
-                continue;
-            };
+            let (first, last) = lines
+                .first()
+                .zip(lines.last())
+                .ok_or_else(|| format!("{family} at {size} pt: no lines"))?;
             let ours = line_height(&face, f64::from(size))?;
             let intervals = f64::from(LINES - 1);
             let words = (last.top - first.top) / intervals;
