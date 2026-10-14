@@ -1206,6 +1206,34 @@ mod tests {
             one_section(blocks)
         });
         assert_eq!(pages(&leading).len(), 4);
+        // A column break after two lines, in one column a page break: three pages again.
+        let column = document(|style| {
+            let mut blocks: Vec<Block> =
+                (0..5).map(|_| lines(style, 1, spacing(0.0, 0.0))).collect();
+            let mut inlines = vec![
+                Inline::text("A", style),
+                Inline::line_break(BreakClear::None, style),
+                Inline::text("A", style),
+                Inline::column_break(style),
+            ];
+            for line in 0..6 {
+                if line > 0 {
+                    inlines.push(Inline::line_break(BreakClear::None, style));
+                }
+                inlines.push(Inline::text("A", style));
+            }
+            blocks.push(
+                Paragraph::new(style)
+                    .with_props(spacing(0.0, 0.0).with_keep_next(true))
+                    .with_inlines(inlines)
+                    .into(),
+            );
+            blocks.push(lines(style, 3, spacing(0.0, 0.0).with_keep_lines(true)));
+            one_section(blocks)
+        });
+        let laid = pages(&column);
+        assert_eq!(laid.len(), 3, "{laid:?}");
+        assert_eq!(laid[0].last(), Some(&(5, 0..2, 120.0)));
     }
 
     #[test]
