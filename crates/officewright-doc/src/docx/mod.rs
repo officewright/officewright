@@ -11,13 +11,16 @@ mod styles;
 pub(crate) mod table_properties;
 mod theme;
 
-use officewright_opc::{Package, Part};
+use std::collections::HashMap;
+
+use officewright_opc::{Package, Part, PartName};
 
 use crate::diagnostic::Diagnostics;
 use crate::model::Names;
 use crate::model::xml::Strings;
-use crate::model::{Document, DocumentKind};
+use crate::model::{Document, DocumentKind, HeaderFooterKind, StoryKind, kind_index};
 use crate::{Error, Limits, Result};
+use body::Story;
 use capture::Budget;
 
 /// The main namespace of WordprocessingML, Transitional.
@@ -69,7 +72,62 @@ pub(crate) fn read(data: Vec<u8>, limits: &Limits) -> Result<Document> {
         limits,
         &mut diagnostics,
         &mut budget,
+        Story::Document,
     )?;
+    // The headers and footers the main part relates to, each part read once however
+    // many relationships lead to it, then the notes.
+    let mut read_parts: HashMap<PartName, u32> = HashMap::new();
+    for relationship in main.relationships().iter() {
+        let story = if HEADER.contains(&relationship.relationship_type()) {
+            Story::Header
+        } else if FOOTER.contains(&relationship.relationship_type()) {
+            Story::Footer
+        } else {
+            continue;
+        };
+        let Some(name) = relationship.target_part() else {
+            continue;
+        };
+        let index = match read_parts.get(&name) {
+            Some(&index) => index,
+            None => {
+                let Some(part) = package.part(&name) else {
+                    continue;
+                };
+                let xml = part.read()?;
+                let index = document.stories.len() as u32;
+                body::read(
+                    &mut document,
+                    &xml,
+                    &part,
+                    limits,
+                    &mut diagnostics,
+                    &mut budget,
+                    story,
+                )?;
+                read_parts.insert(name, index);
+                index
+            }
+        };
+        document
+            .header_footers
+            .insert(relationship.id().into(), index);
+    }
+    for (types, story) in [(&FOOTNOTES, Story::Footnotes), (&ENDNOTES, Story::Endnotes)] {
+        if let Some(part) = related(&package, &main, types) {
+            let xml = part.read()?;
+            body::read(
+                &mut document,
+                &xml,
+                &part,
+                limits,
+                &mut diagnostics,
+                &mut budget,
+                story,
+            )?;
+        }
+    }
+    effective_headers_and_footers(&mut document);
     if let Some(part) = related(&package, &main, &STYLES) {
         let name = part.name().as_str();
         let xml = part.read()?;
@@ -134,6 +192,71 @@ pub(crate) fn read(data: Vec<u8>, limits: &Limits) -> Result<Document> {
     document.diagnostics = diagnostics.finish();
     Ok(document)
 }
+
+/// The headers and footers in effect for each section: those it names, and for each
+/// kind it does not name, the one in effect for the section before it (ECMA-376 Part 1,
+/// §17.10.5). Read literally, the standard has a section that names no odd (default)
+/// header inherit the even one; Word inherits the odd one, as here for each kind
+/// (MS-OI29500 §17.10.5(b)). A reference whose relationship leads to no header or footer
+/// counts as not written, and so does a `w:footerReference` that leads to a header or a
+/// `w:headerReference` that leads to a footer. A reference without `w:type` is of the
+/// default kind.
+fn effective_headers_and_footers(document: &mut Document) {
+    let mut headers = [None; 3];
+    let mut footers = [None; 3];
+    let map = &document.header_footers;
+    let stories = &document.stories;
+    for section in &mut document.sections {
+        let lists = [
+            (
+                section.properties.headers(),
+                StoryKind::Header,
+                &mut headers,
+            ),
+            (
+                section.properties.footers(),
+                StoryKind::Footer,
+                &mut footers,
+            ),
+        ];
+        for (references, story, effective) in lists {
+            for reference in references {
+                let kind = reference.kind().unwrap_or(HeaderFooterKind::Default);
+                let index = map.get(reference.relationship_id()).filter(|&&index| {
+                    usize::try_from(index)
+                        .ok()
+                        .and_then(|index| stories.get(index))
+                        .is_some_and(|found| found.kind == story)
+                });
+                if let (Some(&index), Some(slot)) = (index, effective.get_mut(kind_index(kind))) {
+                    *slot = Some(index);
+                }
+            }
+        }
+        section.headers = headers;
+        section.footers = footers;
+    }
+}
+
+/// The relationship type of the header and footer parts, Transitional and Strict.
+const HEADER: [&str; 2] = [
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/header",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/header",
+];
+const FOOTER: [&str; 2] = [
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/footer",
+];
+
+/// The relationship type of the footnotes and endnotes parts, Transitional and Strict.
+const FOOTNOTES: [&str; 2] = [
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/footnotes",
+];
+const ENDNOTES: [&str; 2] = [
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/endnotes",
+];
 
 /// The relationship type of the numbering part, Transitional and Strict.
 const NUMBERING: [&str; 2] = [

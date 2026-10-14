@@ -5,8 +5,9 @@
 //! cargo run -p officewright-doc --features pdf --example ir_dump -- FILE.docx
 //! ```
 //!
-//! It prints the settings; each section's page and columns; each paragraph's formatting,
-//! list item and mark; and its content, each piece with its run style. Then it lists what
+//! It prints the settings; each section's page and columns, its headers and footers; each
+//! paragraph's formatting, list item and mark; and its content, each piece with its run
+//! style, and each note reference with its note's text. Then it lists what
 //! the translation left out, and whether the IR passes `validate`.
 
 use std::process::ExitCode;
@@ -56,6 +57,18 @@ fn main() -> ExitCode {
             section.columns().count(),
             section.start()
         );
+        for (name, set) in [("header", section.headers()), ("footer", section.footers())] {
+            for (kind, blocks) in [
+                ("primary", set.primary()),
+                ("first", set.first()),
+                ("even", set.even()),
+            ] {
+                if !blocks.is_empty() {
+                    println!("  {name} {kind}");
+                    print_blocks(ir, blocks, "    ");
+                }
+            }
+        }
         print_blocks(ir, section.blocks(), "  ");
     }
     for entry in translation.left_out() {
@@ -149,6 +162,10 @@ fn describe(ir: &ir::Document, inline: &ir::Inline) -> String {
         ir::Inline::Symbol { font, code, .. } => format!("symbol {font} {code:04X}"),
         ir::Inline::SoftHyphen { .. } => "soft hyphen".to_owned(),
         ir::Inline::NoBreakHyphen { .. } => "no-break hyphen".to_owned(),
+        ir::Inline::NoteReference { note, .. } => match ir.note(*note) {
+            Some(note) => format!("{:?} reference [{}]", note.kind(), note_text(note)),
+            None => "note reference".to_owned(),
+        },
         ir::Inline::Field(field) => {
             let result: Vec<String> = field
                 .result()
@@ -190,4 +207,25 @@ fn style(ir: &ir::Document, id: ir::RunStyleId) -> String {
         out.push_str(&format!(" {color:?}"));
     }
     out
+}
+
+/// The text of a note, briefly.
+fn note_text(note: &ir::Note) -> String {
+    note.blocks()
+        .iter()
+        .filter_map(|block| match block {
+            ir::Block::Paragraph(paragraph) => Some(
+                paragraph
+                    .inlines()
+                    .iter()
+                    .filter_map(|inline| match inline {
+                        ir::Inline::Text { text, .. } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<String>(),
+            ),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" / ")
 }

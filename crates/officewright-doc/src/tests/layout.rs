@@ -5,29 +5,6 @@ use officewright_layout::ir;
 
 use super::*;
 
-/// A document whose body is `body`, with parts related to the main part, each given by
-/// the last segment of its relationship type, its target under `word/` and its XML.
-fn with_parts(body: &str, parts: &[(&str, &str, String)]) -> Document {
-    let relationships: String = parts
-        .iter()
-        .enumerate()
-        .map(|(n, (kind, target, _))| {
-            format!(
-                r#"<Relationship Id="rId{n}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{kind}" Target="{target}"/>"#
-            )
-        })
-        .collect();
-    let rels = format!(
-        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{relationships}</Relationships>"#
-    );
-    let mut extra = vec![("word/_rels/document.xml.rels".to_owned(), rels)];
-    for (_, target, xml) in parts {
-        extra.push((format!("word/{target}"), xml.clone()));
-    }
-    let extra: Vec<(&str, &str)> = extra.iter().map(|(a, b)| (&**a, &**b)).collect();
-    Document::from_bytes(package(DOCUMENT, &document_xml(body), &extra)).unwrap()
-}
-
 /// The translation of a document, which must be valid IR.
 fn translate(document: &Document) -> Translation {
     let translation = document.to_layout_ir();
@@ -393,10 +370,9 @@ fn lists_what_it_leaves_out() {
     assert_eq!(
         left_out,
         [
-            "sections[0]: the section's headers and footers are left out: they are not translated yet",
             "sections[0].blocks[0].inlines: a drawing is left out (w:drawing)",
-            "sections[0].blocks[0].inlines: a footnote reference is left out: notes are not translated yet",
-            "sections[0].blocks[0].inlines: an endnote reference is left out: notes are not translated yet",
+            "sections[0].blocks[0].inlines: a reference to footnote 1, which the document does not have, is left out",
+            "sections[0].blocks[0].inlines: a reference to endnote 2, which the document does not have, is left out",
             "sections[0].blocks[0].inlines: an absolute position tab is left out (w:ptab)",
             "sections[0].blocks[0].inlines: an equation is left out",
             "sections[0].blocks[2]: a block-level w:altChunk is left out",
@@ -413,8 +389,8 @@ fn lists_what_it_leaves_out() {
 
 #[test]
 fn lists_at_most_a_thousand_entries() {
-    let references = r#"<w:r><w:footnoteReference w:id="1"/></w:r>"#.repeat(1200);
-    let document = open(&format!("<w:p>{references}</w:p>"));
+    let drawings = r#"<w:r><w:drawing/></w:r>"#.repeat(1200);
+    let document = open(&format!("<w:p>{drawings}</w:p>"));
     let translation = translate(&document);
     let left_out = translation.left_out();
     // 999 listed, and one counting the others.
@@ -2123,4 +2099,438 @@ fn open_type(body: &str) -> Document {
         body,
         r#"<w:compatSetting w:name="enableOpenTypeFeatures" w:uri="http://schemas.microsoft.com/office/word" w:val="1"/>"#,
     )
+}
+
+/// The text of the paragraphs of some IR blocks, one line each.
+fn texts(blocks: &[ir::Block]) -> Vec<String> {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            ir::Block::Paragraph(paragraph) => Some(
+                paragraph
+                    .inlines()
+                    .iter()
+                    .filter_map(|inline| match inline {
+                        ir::Inline::Text { text, .. } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<String>(),
+            ),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn translates_headers_and_footers_in_effect() {
+    let story = |root: &str, text: &str| {
+        format!(r#"<w:{root} xmlns:w="{W}"><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:{root}>"#)
+    };
+    let body = r#"<w:p><w:pPr><w:sectPr><w:headerReference w:type="default" r:id="rId0"/><w:headerReference w:type="first" r:id="rId1"/><w:footerReference w:type="default" r:id="rId2"/><w:titlePg/></w:sectPr></w:pPr></w:p><w:p/><w:sectPr><w:footerReference w:type="even" r:id="rId3"/></w:sectPr>"#;
+    let document = with_parts(
+        body,
+        &[
+            (
+                "header",
+                "header1.xml",
+                story(
+                    "hdr",
+                    r#"default header</w:t></w:r><w:r><w:ptab w:relativeTo="margin" w:alignment="right" w:leader="none"/></w:r><w:r><w:t>"#,
+                ),
+            ),
+            ("header", "header2.xml", story("hdr", "first header")),
+            (
+                "footer",
+                "footer1.xml",
+                story(
+                    "ftr",
+                    r#"default footer</w:t></w:r><w:r><w:ptab w:relativeTo="margin" w:alignment="right" w:leader="none"/></w:r><w:r><w:t>"#,
+                ),
+            ),
+            ("footer", "footer2.xml", story("ftr", "even footer")),
+        ],
+    );
+    let translation = translate(&document);
+    // Translated once for both sections, and placed as the IR's report places it.
+    let left_out: Vec<String> = translation
+        .left_out()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        left_out,
+        [
+            "sections[0].headers.primary[0].inlines: an absolute position tab is left out (w:ptab)",
+            "sections[0].footers.primary[0].inlines: an absolute position tab is left out (w:ptab)",
+        ]
+    );
+    let sections = translation.document().sections();
+    let (first, second) = (&sections[0], &sections[1]);
+    assert_eq!(texts(first.headers().primary()), ["default header"]);
+    assert_eq!(texts(first.headers().first()), ["first header"]);
+    assert!(first.headers().even().is_empty());
+    assert_eq!(texts(first.footers().primary()), ["default footer"]);
+    // The second section inherits what it does not name.
+    assert_eq!(texts(second.headers().primary()), ["default header"]);
+    assert_eq!(texts(second.headers().first()), ["first header"]);
+    assert_eq!(texts(second.footers().primary()), ["default footer"]);
+    assert_eq!(texts(second.footers().even()), ["even footer"]);
+}
+
+#[test]
+fn bounds_the_copies_of_headers_in_sections_by_their_memory() {
+    // In tests the copies may take 1 MiB, or as much as the document's XML if that is
+    // more. A header of one 200,000-byte text in 31 sections is two blocks and inlines,
+    // but each copy takes over 200,000 bytes.
+    let copies = |body_text: usize| {
+        let header = format!(
+            r#"<w:hdr xmlns:w="{W}"><w:p><w:r><w:t>{}</w:t></w:r></w:p></w:hdr>"#,
+            "h".repeat(200_000)
+        );
+        let section = r#"<w:p><w:pPr><w:sectPr><w:headerReference w:type="default" r:id="rId0"/></w:sectPr></w:pPr></w:p>"#;
+        let body = format!(
+            "{}<w:p><w:r><w:t>{}</w:t></w:r></w:p>",
+            section.repeat(30),
+            "b".repeat(body_text)
+        );
+        let document = with_parts(&body, &[("header", "header1.xml", header)]);
+        let translation = translate(&document);
+        let with_header = translation
+            .document()
+            .sections()
+            .iter()
+            .filter(|section| !section.headers().primary().is_empty())
+            .count();
+        let left_out: Vec<String> = translation
+            .left_out()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        (with_header, left_out)
+    };
+    let (with_header, left_out) = copies(0);
+    assert_eq!(with_header, 5);
+    assert_eq!(left_out.len(), 26, "{left_out:?}");
+    assert_eq!(
+        left_out[0],
+        "sections[5].headers.primary: a header is left out: the copies of headers and \
+         footers in sections have reached their limit"
+    );
+    // A document of 3,000,000 bytes more XML may copy that much more.
+    let (with_header, _) = copies(3_000_000);
+    assert!((14..=16).contains(&with_header), "{with_header}");
+}
+
+#[test]
+fn translates_notes_where_the_text_refers_to_them() {
+    let notes = |root: &str, note: &str, extra: &str| {
+        format!(
+            r#"<w:{root} xmlns:w="{W}"><w:{note} w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r><w:r><w:ptab w:relativeTo="margin" w:alignment="right" w:leader="none"/></w:r></w:p></w:{note}><w:{note} w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:{note}>{extra}<w:{note} w:id="1"><w:p><w:r><w:{note}Ref/></w:r><w:r><w:t xml:space="preserve"> note one</w:t></w:r><w:r><w:footnoteReference w:id="2"/></w:r></w:p></w:{note}><w:{note} w:id="2"><w:p><w:r><w:t>note two</w:t></w:r></w:p></w:{note}></w:{root}>"#
+        )
+    };
+    let notice = r#"<w:footnote w:type="continuationNotice" w:id="3"><w:p><w:r><w:t>continued</w:t></w:r></w:p></w:footnote>"#;
+    // The reference to the separator, which is no note, comes first: the notes are
+    // still numbered from 0 in the places of what is left out.
+    let body = r#"<w:p><w:r><w:footnoteReference w:id="-1"/></w:r><w:r><w:t>a</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r><w:r><w:footnoteReference w:id="1"/></w:r><w:r><w:endnoteReference w:id="2"/></w:r></w:p>"#;
+    let document = with_parts(
+        body,
+        &[
+            (
+                "footnotes",
+                "footnotes.xml",
+                notes("footnotes", "footnote", notice),
+            ),
+            ("endnotes", "endnotes.xml", notes("endnotes", "endnote", "")),
+        ],
+    );
+    let translation = translate(&document);
+    let ir = translation.document();
+    let references: Vec<ir::NoteId> = paragraphs(&translation)[0]
+        .inlines()
+        .iter()
+        .filter_map(|inline| match inline {
+            ir::Inline::NoteReference { note, .. } => Some(*note),
+            _ => None,
+        })
+        .collect();
+    // Two references to footnote 1 name one IR note; the separator is no note to refer
+    // to.
+    assert_eq!(references.len(), 3);
+    assert_eq!(references[0], references[1]);
+    let footnote = ir.note(references[0]).unwrap();
+    assert_eq!(footnote.kind(), ir::NoteKind::Footnote);
+    assert_eq!(texts(footnote.blocks()), [" note one"]);
+    let ir::Block::Paragraph(paragraph) = &footnote.blocks()[0] else {
+        panic!("a paragraph");
+    };
+    assert!(matches!(
+        paragraph.inlines()[0],
+        ir::Inline::NoteNumber { .. }
+    ));
+    let endnote = ir.note(references[2]).unwrap();
+    assert_eq!(endnote.kind(), ir::NoteKind::Endnote);
+    assert_eq!(texts(endnote.blocks()), ["note two"]);
+    // The separators, from the notes of those types.
+    let separators = ir.note_separators(ir::NoteKind::Footnote);
+    let ir::Block::Paragraph(line) = &separators.separator()[0] else {
+        panic!("a paragraph");
+    };
+    assert!(matches!(line.inlines()[0], ir::Inline::Separator { .. }));
+    let ir::Block::Paragraph(line) = &separators.continuation_separator()[0] else {
+        panic!("a paragraph");
+    };
+    assert!(matches!(
+        line.inlines()[0],
+        ir::Inline::ContinuationSeparator { .. }
+    ));
+    assert_eq!(texts(separators.continuation_notice()), ["continued"]);
+    // Endnotes have no notice: the IR's default.
+    assert!(
+        ir.note_separators(ir::NoteKind::Endnote)
+            .continuation_notice()
+            .is_empty()
+    );
+    let left_out: Vec<String> = translation
+        .left_out()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        left_out,
+        [
+            "sections[0].blocks[0].inlines: a reference to footnote -1, which is the separator, is left out",
+            "notes[0].blocks[0].inlines: a reference to a footnote inside a note is left out",
+            "footnote_separators.separator[0].inlines: an absolute position tab is left out (w:ptab)",
+            "endnote_separators.separator[0].inlines: an absolute position tab is left out (w:ptab)",
+        ]
+    );
+}
+
+#[test]
+fn keeps_tables_in_notes_from_floating() {
+    // Word ignores a w:tblpPr in a note (MS-OI29500 §17.4.57(b)).
+    let table = r#"<w:tbl><w:tblPr><w:tblpPr w:horzAnchor="margin" w:tblpY="100"/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>"#;
+    let footnotes = format!(
+        r#"<w:footnotes xmlns:w="{W}"><w:footnote w:id="1">{table}<w:p/></w:footnote></w:footnotes>"#
+    );
+    let body = format!(r#"{table}<w:p><w:r><w:footnoteReference w:id="1"/></w:r></w:p>"#);
+    let document = with_parts(&body, &[("footnotes", "footnotes.xml", footnotes)]);
+    let translation = translate(&document);
+    assert!(tables(&translation)[0].props().floating());
+    let ir = translation.document();
+    let ir::Block::Paragraph(paragraph) = &ir.sections()[0].blocks()[1] else {
+        panic!("a paragraph");
+    };
+    let ir::Inline::NoteReference { note, .. } = &paragraph.inlines()[0] else {
+        panic!("a note reference");
+    };
+    let ir::Block::Table(in_note) = &ir.note(*note).unwrap().blocks()[0] else {
+        panic!("a table");
+    };
+    assert!(!in_note.props().floating());
+}
+
+/// How many of 31 sections, the first naming the header `header` and the others
+/// inheriting it, get a copy of it; `extra` is more XML, as `(relationship, part)`.
+fn header_copies(header: &str, styles: Option<String>, extra: &[(&str, &str, String)]) -> usize {
+    let header = format!(r#"<w:hdr xmlns:w="{W}">{header}</w:hdr>"#);
+    let section = r#"<w:p><w:pPr><w:sectPr><w:headerReference w:type="default" r:id="rId0"/></w:sectPr></w:pPr></w:p>"#;
+    let body = format!("{}<w:p/>", section.repeat(30));
+    let mut parts = vec![("header", "header1.xml", header)];
+    if let Some(styles) = styles {
+        parts.push(("styles", "styles.xml", styles));
+    }
+    parts.extend(extra.iter().cloned());
+    let translation = translate(&with_parts(&body, &parts));
+    let with_header = translation
+        .document()
+        .sections()
+        .iter()
+        .filter(|section| !section.headers().primary().is_empty())
+        .count();
+    let listed = translation
+        .left_out()
+        .iter()
+        .filter(|entry| entry.message().starts_with("a header is left out"))
+        .count();
+    assert_eq!(with_header + listed, 31);
+    with_header
+}
+
+#[test]
+fn bounds_header_copies_by_every_allocation_they_make() {
+    // In tests the copies may take 1 MiB, or as much as the document's XML. Each header
+    // below is small as XML, or small as blocks and inlines, but each copy takes several
+    // hundred kilobytes, in a different part of the IR each time.
+    let paragraph = |inner: &str| format!("<w:p>{inner}</w:p>");
+    // A table of 50,000 grid columns: 400,000 bytes of grid.
+    let grid = format!(
+        "<w:tbl><w:tblGrid>{}</w:tblGrid><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl><w:p/>",
+        r#"<w:gridCol w:w="10"/>"#.repeat(50_000)
+    );
+    assert!(header_copies(&grid, None, &[]) <= 3);
+    // 1,000 empty paragraphs whose defaults give 64 tab stops each.
+    let tabs: String = (1..=64)
+        .map(|n| format!(r#"<w:tab w:val="left" w:pos="{}"/>"#, n * 100))
+        .collect();
+    let styles = format!(
+        r#"<w:styles xmlns:w="{W}"><w:docDefaults><w:pPrDefault><w:pPr><w:tabs>{tabs}</w:tabs></w:pPr></w:pPrDefault></w:docDefaults></w:styles>"#
+    );
+    assert!(header_copies(&"<w:p/>".repeat(1_000), Some(styles), &[]) <= 1);
+    // 500 fields named by 1,000 bytes, and 500 PAGE fields whose number format is named
+    // by 1,000 bytes.
+    let name = "N".repeat(1_000);
+    let names = paragraph(
+        &format!(r#"<w:fldSimple w:instr="{name}"><w:r><w:t>r</w:t></w:r></w:fldSimple>"#)
+            .repeat(500),
+    );
+    assert!(header_copies(&names, None, &[]) <= 2);
+    let formats = paragraph(
+        &format!(r#"<w:fldSimple w:instr="PAGE \* {name}"><w:r><w:t>1</w:t></w:r></w:fldSimple>"#)
+            .repeat(500),
+    );
+    assert!(header_copies(&formats, None, &[]) <= 2);
+    // 2,000 symbols whose font is named by 250 bytes.
+    let symbols = paragraph(&format!(
+        r#"<w:r>{}</w:r>"#,
+        format!(r#"<w:sym w:font="{}" w:char="F020"/>"#, "S".repeat(250)).repeat(2_000)
+    ));
+    assert!(header_copies(&symbols, None, &[]) <= 2);
+    // The text of a table's cell, and of a field's result: 200,000 bytes.
+    let text = "t".repeat(200_000);
+    let cell = format!(
+        "<w:tbl><w:tr><w:tc><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>"
+    );
+    assert!(header_copies(&cell, None, &[]) <= 6);
+    let result = paragraph(&format!(
+        r#"<w:fldSimple w:instr="PAGE"><w:r><w:t>{text}</w:t></w:r></w:fldSimple>"#
+    ));
+    assert!(header_copies(&result, None, &[]) <= 6);
+    // The XML of every part counts toward what the copies may take: 3,000,000 bytes of
+    // footnotes let the 200,000-byte header be copied about three times as often.
+    let footnotes = format!(
+        r#"<w:footnotes xmlns:w="{W}"><w:footnote w:id="1"><w:p><w:r><w:t>{}</w:t></w:r></w:p></w:footnote></w:footnotes>"#,
+        "f".repeat(3_000_000)
+    );
+    let copies = header_copies(
+        &paragraph(&format!("<w:r><w:t>{text}</w:t></w:r>")),
+        None,
+        &[("footnotes", "footnotes.xml", footnotes)],
+    );
+    assert!((14..=16).contains(&copies), "{copies}");
+}
+
+#[test]
+fn lists_every_reference_left_out_and_places_notes_in_their_order() {
+    let footnotes = format!(
+        r#"<w:footnotes xmlns:w="{W}"><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p></w:footnote><w:footnote w:type="separator" w:id="-2"><w:p><w:r><w:t>second separator</w:t></w:r></w:p></w:footnote><w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote><w:footnote w:type="continuationNotice" w:id="3"><w:p><w:r><w:t>continued</w:t></w:r></w:p></w:footnote><w:footnote w:id="1"><w:p><w:r><w:t>one</w:t></w:r></w:p></w:footnote><w:footnote w:id="2"><w:p><w:r><w:footnoteReference w:id="1"/></w:r></w:p></w:footnote></w:footnotes>"#
+    );
+    let references = r#"<w:p><w:r><w:footnoteReference w:id="1"/></w:r><w:r><w:footnoteReference w:id="2"/></w:r><w:r><w:footnoteReference w:id="5"/></w:r><w:r><w:footnoteReference w:id="-1"/></w:r></w:p>"#;
+    let body = format!(
+        r#"{}<w:p><w:r><w:footnoteReference w:id="0"/></w:r><w:r><w:footnoteReference w:id="3"/></w:r></w:p>"#,
+        references.repeat(2)
+    );
+    let translation = translate(&with_parts(
+        &body,
+        &[("footnotes", "footnotes.xml", footnotes)],
+    ));
+    let left_out: Vec<String> = translation
+        .left_out()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    // Each reference left out is listed, the second paragraph's too. Places in notes
+    // count the notes added: the reference inside the second is in notes[1]. The
+    // separator holds a reference too, which is left out as one inside a note.
+    assert_eq!(
+        left_out,
+        [
+            "notes[1].blocks[0].inlines: a reference to a footnote inside a note is left out",
+            "sections[0].blocks[0].inlines: a reference to footnote 5, which the document does not have, is left out",
+            "sections[0].blocks[0].inlines: a reference to footnote -1, which is the separator, is left out",
+            "sections[0].blocks[1].inlines: a reference to footnote 5, which the document does not have, is left out",
+            "sections[0].blocks[1].inlines: a reference to footnote -1, which is the separator, is left out",
+            "sections[0].blocks[2].inlines: a reference to footnote 0, which is the continuation separator, is left out",
+            "sections[0].blocks[2].inlines: a reference to footnote 3, which is the continuation notice, is left out",
+            "footnote_separators.separator[0].inlines: a reference to a footnote inside a note is left out",
+        ]
+    );
+    // The first separator counts.
+    let separators = translation
+        .document()
+        .note_separators(ir::NoteKind::Footnote);
+    let ir::Block::Paragraph(line) = &separators.separator()[0] else {
+        panic!("a paragraph");
+    };
+    assert!(matches!(line.inlines()[0], ir::Inline::Separator { .. }));
+    assert_eq!(line.inlines().len(), 1);
+}
+
+#[test]
+fn bounds_a_note_s_tables_by_the_tables_around_its_reference() {
+    let nested = |depth: usize, inner: &str| {
+        format!(
+            "{}{inner}{}",
+            "<w:tbl><w:tr><w:tc>".repeat(depth),
+            "</w:tc></w:tr></w:tbl><w:p/>".repeat(depth)
+        )
+    };
+    let note_depth = |around: usize, inside: usize| {
+        let footnotes = format!(
+            r#"<w:footnotes xmlns:w="{W}"><w:footnote w:id="1">{}</w:footnote></w:footnotes>"#,
+            nested(inside, "<w:p/>")
+        );
+        let body = nested(
+            around,
+            r#"<w:p><w:r><w:footnoteReference w:id="1"/></w:r></w:p>"#,
+        );
+        let translation = translate(&with_parts(
+            &body,
+            &[("footnotes", "footnotes.xml", footnotes)],
+        ));
+        // The note, through the reference at the bottom of the body's tables.
+        let mut blocks = translation.document().sections()[0].blocks();
+        while let Some(ir::Block::Table(table)) = blocks.first() {
+            blocks = table.rows()[0].cells()[0].blocks();
+        }
+        let ir::Block::Paragraph(paragraph) = &blocks[0] else {
+            panic!("a paragraph");
+        };
+        let ir::Inline::NoteReference { note, .. } = &paragraph.inlines()[0] else {
+            panic!("a note reference");
+        };
+        let note = translation.document().note(*note).unwrap();
+        let mut depth = 0;
+        let mut blocks = note.blocks();
+        while let Some(ir::Block::Table(table)) = blocks.first() {
+            depth += 1;
+            blocks = table.rows()[0].cells()[0].blocks();
+        }
+        let listed: Vec<String> = translation
+            .left_out()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        (depth, listed)
+    };
+    // A note's tables count their depth on from the tables around its reference, which
+    // bounds the translation's recursion by the IR's limit: 75 around and 30 inside keep
+    // 25, and the rest is listed.
+    let (depth, listed) = note_depth(75, 30);
+    assert_eq!(depth, 25);
+    // The 26th table, inside 25 others.
+    let place = format!(
+        "notes[0].blocks[0]{}",
+        ".rows[0].cells[0].blocks[0]".repeat(25)
+    );
+    assert_eq!(
+        listed,
+        [format!(
+            "{place}: a table nested more than 100 deep is left out"
+        )]
+    );
+    // The deepest the default limits allow on both sides translates within a test
+    // thread's stack.
+    let (depth, _) = note_depth(83, 83);
+    assert_eq!(depth, 17);
 }

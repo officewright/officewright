@@ -421,9 +421,10 @@ pub struct RunProperties {
     pub(crate) contextual_alternates: Option<bool>,
 }
 
-/// The kinds of ligatures text uses (`w14:ligatures`, [MS-DOCX] 2.6.1.17, of type
-/// ST_Ligatures, 2.6.4.3):
-/// each of the 16 values names a set of the four kinds, `none` and `all` among them.
+/// The kinds of ligatures text asks for (`w14:ligatures`, [MS-DOCX] 2.6.1.17, of type
+/// ST_Ligatures, 2.6.4.3): each of the 16 values names a set of the four kinds, `none`
+/// and `all` among them. Word draws them only when the document's compatibility setting
+/// `enableOpenTypeFeatures` is on ([MS-DOCX] 2.3.3).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct Ligatures {
