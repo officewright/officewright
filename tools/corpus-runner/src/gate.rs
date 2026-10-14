@@ -1,8 +1,10 @@
 //! `corpus-runner gate`: the release criteria of Milestone 4 over a run's report, printed as
 //! a markdown table with the target, the value on main and the value on the branch.
 
+use std::collections::HashMap;
+
 use crate::metrics::Scores;
-use crate::report::{Report, Status};
+use crate::report::{FileResult, Report, Status};
 
 /// The fonts of `tests/fonts`, which Word had too when it rendered the references: a
 /// document in these only is laid out with Word's fonts (class S).
@@ -220,8 +222,55 @@ fn file_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
+/// What a report lacks of main's: files main's report has and it does not, and reference
+/// documents main scored or tried to score that it did not.
+#[derive(Debug, Default, PartialEq)]
+pub struct Missing {
+    pub files: Vec<String>,
+    pub references: Vec<String>,
+}
+
+impl Missing {
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty() && self.references.is_empty()
+    }
+}
+
+/// A file the runner tried to score: one with a Word reference.
+fn is_reference(file: &FileResult) -> bool {
+    file.scores.is_some() || file.score_error.is_some()
+}
+
+/// What `report` lacks of `main`. A report made over fewer paths, or without the
+/// references, would otherwise leave main's failing documents out of every row. Files that
+/// only the report has are new documents and count for nothing here.
+pub fn missing(report: &Report, main: &Report) -> Missing {
+    let files: HashMap<&str, &FileResult> = report
+        .files
+        .iter()
+        .map(|file| (file.path.as_str(), file))
+        .collect();
+    let mut out = Missing::default();
+    for before in &main.files {
+        match files.get(before.path.as_str()) {
+            None => out.files.push(before.path.clone()),
+            Some(file) if is_reference(before) && !is_reference(file) => {
+                out.references.push(before.path.clone());
+            }
+            Some(_) => {}
+        }
+    }
+    out
+}
+
 /// The value of every criterion on the report.
 pub fn measure(report: &Report, same_fonts: bool) -> Vec<Measure> {
+    measure_against(report, None, same_fonts)
+}
+
+/// The value of every criterion on the report, which row 2 compares with main's: files and
+/// reference documents of main that the report lacks are refusals too.
+pub fn measure_against(report: &Report, main: Option<&Report>, same_fonts: bool) -> Vec<Measure> {
     let scored: Vec<Scored> = report
         .files
         .iter()
@@ -268,13 +317,27 @@ pub fn measure(report: &Report, same_fonts: bool) -> Vec<Measure> {
         .iter()
         .filter(|file| file.score_error.is_some() && file.status == Status::Opened)
         .count();
+    let lacking = main.map(|main| missing(report, main)).unwrap_or_default();
+    let mut text = format!(
+        "{unexpected} unexpected errors, {refused} reference documents not opened, \
+         {unscored} not scored"
+    );
+    if !lacking.is_empty() {
+        text.push_str(&format!(
+            "; of main's, {} files missing and {} reference documents not scored",
+            lacking.files.len(),
+            lacking.references.len()
+        ));
+    }
+    let lacked = lacking.files.len() + lacking.references.len();
     out.push(Measure {
-        text: format!(
-            "{unexpected} unexpected errors, {refused} reference documents not opened, \
-             {unscored} not scored"
-        ),
-        pass: Some(unexpected + refused + unscored == 0),
-        keys: vec![Key::count(unexpected), Key::count(refused + unscored)],
+        text,
+        pass: Some(unexpected + refused + unscored + lacked == 0),
+        keys: vec![
+            Key::count(unexpected),
+            Key::count(refused + unscored),
+            Key::count(lacked),
+        ],
     });
 
     // 3. Valid output.
@@ -351,13 +414,15 @@ pub fn measure(report: &Report, same_fonts: bool) -> Vec<Measure> {
             .iter()
             .map(|doc| doc.scores.text_score)
             .fold(1.0, f64::min);
-        out.push(Measure::counted(
+        let mut measure = Measure::counted(
             format!(
                 "{below} of {} below 0.99 (lowest {lowest:.4})",
                 scored.len()
             ),
             below,
-        ));
+        );
+        measure.keys.push(Key::higher(round(lowest)));
+        out.push(measure);
     }
 
     // 6. line_agreement.
@@ -413,15 +478,17 @@ pub fn measure(report: &Report, same_fonts: bool) -> Vec<Measure> {
                 .map(|doc| value(pick(doc.scores)))
                 .fold(0.0, f64::max)
         };
-        out.push(Measure::counted(
+        let (dx, dy) = (worst(|s| s.dx_p95), worst(|s| s.dy_p95));
+        let mut measure = Measure::counted(
             format!(
-                "{off} of {} documents off (largest p95: dx {} pt, dy {} pt)",
-                placed.len(),
-                worst(|s| s.dx_p95),
-                worst(|s| s.dy_p95)
+                "{off} of {} documents off (largest p95: dx {dx} pt, dy {dy} pt)",
+                placed.len()
             ),
             off,
-        ));
+        );
+        // The percentiles are rounded to 0.001 pt already.
+        measure.keys.extend([Key::lower(dx), Key::lower(dy)]);
+        out.push(measure);
     }
 
     // 8. page_break_agreement.
@@ -460,13 +527,15 @@ pub fn measure(report: &Report, same_fonts: bool) -> Vec<Measure> {
             .iter()
             .map(|doc| doc.scores.ssim_min)
             .fold(1.0, f64::min);
-        out.push(Measure::counted(
+        let mut measure = Measure::counted(
             format!(
                 "{below} of {} documents below (lowest page {lowest:.4})",
                 gated.len()
             ),
             below,
-        ));
+        );
+        measure.keys.push(Key::higher(round(lowest)));
+        out.push(measure);
     }
 
     // 10. Speed and memory: opening only, until the runner renders.
@@ -626,7 +695,6 @@ pub fn passes(measures: &[Measure]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::report::FileResult;
 
     fn scores(pages: usize, text: f64, lines: usize, agreeing: usize, fonts: &[&str]) -> Scores {
         Scores {
@@ -919,6 +987,145 @@ mod tests {
         );
         assert!(unmeasured[5].worse_than(&main[5]));
         assert!(!main[5].worse_than(&unmeasured[5]));
+    }
+
+    /// A branch report made over fewer files, or without the references, cannot hide main's
+    /// documents: what it lacks of main's counts in row 2 (#130).
+    #[test]
+    fn what_the_branch_lacks_of_main_is_refused() {
+        let main_report = good();
+        let main = measure(&main_report, false);
+        let mut report = good();
+        report.files.retain(|file| file.path != "c/letter.docx");
+        named(&mut report, "c/E-rule.docx").scores = None;
+        assert_eq!(
+            missing(&report, &main_report),
+            Missing {
+                files: vec!["c/letter.docx".to_owned()],
+                references: vec!["c/E-rule.docx".to_owned()],
+            }
+        );
+        let branch = measure_against(&report, Some(&main_report), false);
+        assert_eq!(branch[1].pass, Some(false));
+        assert!(branch[1].worse_than(&main[1]));
+        assert_eq!(
+            branch[1].text,
+            "0 unexpected errors, 0 reference documents not opened, 0 not scored; of main's, \
+             1 files missing and 1 reference documents not scored"
+        );
+        assert!(
+            passes(&measure(&report, false)),
+            "alone, the report looks clean"
+        );
+        // Files and references only the branch has are new, not refusals.
+        let mut grown = good();
+        grown.files.push(file(
+            "c/new.docx",
+            Status::Opened,
+            Some(scores(2, 1.0, 1, 1, &["Carlito"])),
+        ));
+        let plain = named(&mut grown, "c/plain.docx");
+        (plain.status, plain.scores) = (Status::Opened, Some(scores(2, 1.0, 1, 1, &["Carlito"])));
+        assert!(missing(&grown, &main_report).is_empty());
+        let measures = measure_against(&grown, Some(&main_report), false);
+        assert!(
+            !measures[1].text.contains("of main's"),
+            "{}",
+            measures[1].text
+        );
+        assert!(!measures[1].worse_than(&main[1]));
+    }
+
+    /// A reference document of main's that the branch did not try to score is lacking even
+    /// when the branch has the file: a branch report made without the references (#130).
+    #[test]
+    fn a_reference_main_tried_and_the_branch_did_not_is_refused() {
+        let mut main_report = good();
+        let mut tried = file("c/tried.docx", Status::Opened, None);
+        tried.score_error = Some("no PDF of ours".to_owned());
+        main_report.files.push(tried);
+        let mut report = good();
+        report
+            .files
+            .push(file("c/tried.docx", Status::Opened, None));
+        named(&mut report, "c/letter.docx").scores = None;
+        let lacking = missing(&report, &main_report);
+        assert_eq!(
+            lacking,
+            Missing {
+                files: Vec::new(),
+                references: vec!["c/letter.docx".to_owned(), "c/tried.docx".to_owned()],
+            }
+        );
+        assert!(!lacking.is_empty());
+        let branch = measure_against(&report, Some(&main_report), false);
+        assert_eq!(branch[1].pass, Some(false));
+        assert!(
+            branch[1]
+                .text
+                .ends_with("of main's, 0 files missing and 2 reference documents not scored"),
+            "{}",
+            branch[1].text
+        );
+        // A reference the branch tried and failed to score is a refusal once, not lacking too.
+        let mut failed = good();
+        named(&mut failed, "c/letter.docx").scores = None;
+        named(&mut failed, "c/letter.docx").score_error = Some("pdftoppm failed".to_owned());
+        assert!(missing(&failed, &good()).is_empty());
+        let measures = measure_against(&failed, Some(&good()), false);
+        assert_eq!(
+            measures[1].text,
+            "0 unexpected errors, 0 reference documents not opened, 1 not scored"
+        );
+    }
+
+    /// Rows 7 and 9 take their largest and lowest values from S and T documents only, like
+    /// their counts.
+    #[test]
+    fn rows_7_and_9_compare_only_gated_documents() {
+        let main = measure(&good(), false);
+        let mut report = good();
+        let poster = scores_of(&mut report, "c/poster.docx"); // class N
+        (poster.dx_p95, poster.dy_p95, poster.ssim_min) = (Some(5.0), Some(5.0), 0.5);
+        let old = scores_of(&mut report, "c/old.docx"); // no class
+        (old.dx_p95, old.dy_p95, old.ssim_min) = (Some(5.0), Some(5.0), 0.5);
+        let branch = measure(&report, false);
+        for index in [6, 8] {
+            assert_eq!(branch[index].text, main[index].text, "row {}", index + 1);
+            assert!(!branch[index].worse_than(&main[index]), "row {}", index + 1);
+        }
+    }
+
+    /// Rows 5, 7 and 9 print the lowest or largest value, so a worse one is marked even when
+    /// no document crosses a threshold (#131).
+    #[test]
+    fn a_worse_lowest_or_largest_value_is_marked() {
+        let main = measure(&good(), false);
+        let compare = |row: usize, change: &dyn Fn(&mut Report)| {
+            let mut report = good();
+            change(&mut report);
+            let branch = measure(&report, false);
+            let index = row - 1;
+            (branch[index].pass, branch[index].worse_than(&main[index]))
+        };
+        // 5: the lowest text_score, 0.9950 on main.
+        let text =
+            |value: f64| move |r: &mut Report| scores_of(r, "c/letter.docx").text_score = value;
+        assert_eq!(compare(5, &text(0.9949)), (Some(true), true));
+        assert_eq!(compare(5, &text(0.9951)), (Some(true), false));
+        // 7: the largest p95, dx 0.4 pt and dy 1.5 pt on main.
+        let dx =
+            |value: f64| move |r: &mut Report| scores_of(r, "c/E-rule.docx").dx_p95 = Some(value);
+        let dy =
+            |value: f64| move |r: &mut Report| scores_of(r, "c/letter.docx").dy_p95 = Some(value);
+        assert_eq!(compare(7, &dx(0.401)), (Some(true), true));
+        assert_eq!(compare(7, &dy(1.501)), (Some(true), true));
+        assert_eq!(compare(7, &dy(1.0)), (Some(true), false));
+        // 9: the lowest page, 0.96 on main.
+        let page =
+            |value: f64| move |r: &mut Report| scores_of(r, "c/letter.docx").ssim_min = value;
+        assert_eq!(compare(9, &page(0.9599)), (Some(true), true));
+        assert_eq!(compare(9, &page(0.97)), (Some(true), false));
     }
 
     /// Twenty documents in class S, made by `make`, which sees the index of each.
