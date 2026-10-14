@@ -24,6 +24,12 @@
 //! subsetter release that looks tables up otherwise (its main branch sorts the records
 //! first) needs this lookup changed with it; the test of several `name` records fails
 //! until it is.
+//!
+//! One rule is ours and comes first, whatever else is wrong with the table: the strings
+//! of the records to keep may take at most 1 MiB in all, counted with repeats. Both this
+//! check and the subsetter hash each of those strings to store it once, and records may
+//! share strings, so 65,535 records of one string of 64 KB made each hash 4 GB
+//! (issue #249). Real fonts' come to a few kilobytes.
 
 use std::collections::HashSet;
 
@@ -40,6 +46,10 @@ const RECORD_SIZE: usize = 12;
 
 /// The bytes before the records: version, count and storage offset.
 const HEADER_SIZE: usize = 6;
+
+/// The most bytes the strings of the records to keep may take in all, counted with
+/// repeats: what this check and the subsetter hash.
+const MAX_KEPT_STRING_BYTES: usize = 1 << 20;
 
 /// Fails if the `name` table the subsetter would take for face `face`, in its font file
 /// `data`, would overflow its offsets.
@@ -81,12 +91,26 @@ fn overflow(table: &[u8]) -> Option<String> {
             ))
         })
         .collect::<Option<Vec<_>>>()?;
+    let keeps = |platform: u16, encoding: u16, id: u16| {
+        let unicode = platform == 0 || (platform == 3 && matches!(encoding, 0 | 1 | 10));
+        unicode && matches!(id, 0..=9 | 11..=14)
+    };
+    let referenced: usize = records
+        .iter()
+        .filter(|&&(platform, encoding, id, ..)| keeps(platform, encoding, id))
+        .map(|&(.., length, _)| usize::from(length))
+        .sum();
+    if referenced > MAX_KEPT_STRING_BYTES {
+        return Some(format!(
+            "the name records to keep point at {referenced} bytes of strings, more than the \
+             {MAX_KEPT_STRING_BYTES} read before subsetting"
+        ));
+    }
     let mut kept = 0;
     let mut strings = HashSet::new();
     let mut stored = 0;
     for (i, &(platform, encoding, id, length, offset)) in records.iter().enumerate() {
-        let unicode = platform == 0 || (platform == 3 && matches!(encoding, 0 | 1 | 10));
-        if !unicode || !matches!(id, 0..=9 | 11..=14) {
+        if !keeps(platform, encoding, id) {
             continue;
         }
         kept += 1;
@@ -223,6 +247,38 @@ mod tests {
         // So is an equal string elsewhere in the storage.
         let zeros = vec![0; 50_000];
         assert_eq!(subset_error(raw_name_table(&two, &zeros)), None);
+    }
+
+    #[test]
+    fn refuses_strings_to_keep_of_more_than_1_mib_counted_with_repeats() {
+        // 32 records of one string of 32768 bytes, which the subsetter would store once,
+        // come to 1 MiB; a record of one byte more is too much.
+        let storage = vec![0; 32_768];
+        let records = |extra: Option<u16>| {
+            let mut records = vec![(3, 1, 1, 32_768, 0); 32];
+            records.extend(extra.map(|length| (3, 1, 4, length, 0)));
+            records
+        };
+        assert_eq!(subset_error(raw_name_table(&records(None), &storage)), None);
+        assert_eq!(
+            subset_error(raw_name_table(&records(Some(1)), &storage)).as_deref(),
+            Some(
+                "the name records to keep point at 1048577 bytes of strings, more than the \
+                 1048576 read before subsetting"
+            )
+        );
+        // Records the subsetter drops do not count.
+        let mut dropped = records(None);
+        dropped.extend(vec![(1, 0, 1, 32_768, 0); 100]);
+        assert_eq!(subset_error(raw_name_table(&dropped, &storage)), None);
+        // The rule comes first: here the first string to keep is outside the storage,
+        // where the subsetter would stop with an error of its own.
+        let mut outside = records(Some(1));
+        outside.insert(0, (3, 1, 1, 2, 65_534));
+        assert!(
+            subset_error(raw_name_table(&outside, &storage))
+                .is_some_and(|err| err.contains("1048579 bytes"))
+        );
     }
 
     #[test]
