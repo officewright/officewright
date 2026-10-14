@@ -625,8 +625,10 @@ enum OwStatus ow_font_resolver_new(const struct OwFontBook *book,
  * takes its metric-compatible substitute (Carlito for Calibri, Liberation for Arial,
  * Times New Roman and Courier New), else a font of similar design (Caladea for
  * Cambria, which lays out differently) or a common font of the same kind; a style the
- * face lacks is synthetic. Every such substitution is added to the resolver's report
- * (`ow_font_resolver_substitution`); synthetic styles are reported but not drawn yet.
+ * face lacks is synthetic, italic before taking a face of another weight, as Word does,
+ * and a family whose only face is its bold one gives bold text. Every such substitution
+ * is added to the resolver's report (`ow_font_resolver_substitution`); synthetic styles
+ * are reported but not drawn yet.
  *
  * Fails with `OW_STATUS_UNSUPPORTED` if no font could be found or the chosen font's
  * license forbids embedding, `OW_STATUS_INVALID_ARGUMENT` if `bold` or `italic` is not

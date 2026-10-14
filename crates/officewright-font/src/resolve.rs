@@ -154,6 +154,7 @@ pub struct Resolution {
     similar_design: bool,
     synthetic_bold: bool,
     synthetic_italic: bool,
+    unrequested_bold: bool,
 }
 
 impl Resolution {
@@ -219,12 +220,22 @@ impl Resolution {
         self.synthetic_italic
     }
 
+    /// Whether the face is the bold one of its family although bold was not requested:
+    /// no other face of the family is installed, and boldness cannot be taken away, so
+    /// the text comes out bolder than requested. A heavy family of its own, such as Arial
+    /// Black, is not bold in this sense, and neither is a face the request names by its
+    /// full or PostScript name.
+    pub fn unrequested_bold(&self) -> bool {
+        self.unrequested_bold
+    }
+
     /// Whether the output will differ from the document as its author saw it: another
-    /// family, another instance, or a synthesized style.
+    /// family, another instance, a synthesized style, or a face bolder than requested.
     pub fn is_substitution(&self) -> bool {
         !matches!(self.kind, ResolutionKind::Exact | ResolutionKind::Alias)
             || self.synthetic_bold
             || self.synthetic_italic
+            || self.unrequested_bold
     }
 
     /// Whether two resolutions report the same thing.
@@ -236,6 +247,7 @@ impl Resolution {
             && self.kind == other.kind
             && self.synthetic_bold == other.synthetic_bold
             && self.synthetic_italic == other.synthetic_italic
+            && self.unrequested_bold == other.unrequested_bold
     }
 }
 
@@ -286,6 +298,9 @@ impl fmt::Display for Resolution {
                 )?,
                 None => f.write_str(" (fallback; not installed)")?,
             },
+        }
+        if self.unrequested_bold {
+            f.write_str(" in bold, no other face of the family being installed")?;
         }
         match (self.synthetic_bold, self.synthetic_italic) {
             (true, true) => f.write_str(" with synthetic bold and italic"),
@@ -467,8 +482,11 @@ impl FontBook {
     /// 7. A common font of the request's generic family, or of the family's own if it
     ///    is a known one, else sans-serif.
     ///
-    /// Among the faces of the family, the one closest to the requested style wins;
-    /// ties go to document fonts, then user fonts, then system fonts.
+    /// Among the faces of the family, the one closest to the requested style wins:
+    /// upright text takes an upright face if there is one, then the closest weight
+    /// wins, and italic text takes an italic face of that weight if there is one, else
+    /// an upright face slanted (synthetic italic). Ties go to document fonts, then user
+    /// fonts, then system fonts.
     pub fn resolve(&self, request: &FontRequest) -> Resolution {
         let resolution = |face: Option<(FaceId, &FaceInfo)>, kind| {
             let family = face.and_then(|(_, info)| info.names().family().map(str::to_owned));
@@ -484,6 +502,7 @@ impl FontBook {
                 synthetic_bold: face
                     .is_some_and(|(_, info)| request.bold && info.weight() < BOLD_WEIGHT),
                 synthetic_italic: face.is_some_and(|(_, info)| request.italic && !info.is_italic()),
+                unrequested_bold: face.is_some_and(|(_, info)| !request.bold && info.is_bold()),
             }
         };
         let key = name_key(&request.family);
@@ -501,9 +520,13 @@ impl FontBook {
             return resolution(Some(face), ResolutionKind::Alias);
         }
         if let Some((face, other_name)) = self.find_other_name(&key, request) {
+            let named = matches!(other_name, OtherName::Full | OtherName::PostScript);
+            let resolution = resolution(Some(face), ResolutionKind::OtherName);
             return Resolution {
                 other_name: Some(other_name),
-                ..resolution(Some(face), ResolutionKind::OtherName)
+                // A full or PostScript name names the face, its weight included.
+                unrequested_bold: resolution.unrequested_bold && !named,
+                ..resolution
             };
         }
         if let Some((face, instance)) = self.find_instance(&key, request) {
@@ -659,12 +682,20 @@ impl FontBook {
     }
 }
 
-/// How far a face's style is from the requested one: a slant mismatch first (a slant
-/// can be synthesized, but an upright request should not get an italic face either),
-/// then the weight.
-fn style_distance(weight: u16, italic: bool, request: &FontRequest) -> (bool, u16) {
+/// How far a face's style is from the requested one, compared in this order: an italic
+/// face for upright text, since a slant cannot be taken away; how far the weight is
+/// from 400, or 700 for bold; an upright face for italic text, which is slanted instead.
+///
+/// For italic text the weight comes before the slant, as in Word: with Noto Sans
+/// Regular, Bold and Bold Italic installed and no Italic, Word draws italic text in
+/// Regular slanted by a third, not in Bold Italic (`E-italic-missing`, issue #82).
+fn style_distance(weight: u16, italic: bool, request: &FontRequest) -> (bool, u16, bool) {
     let target: u16 = if request.bold { 700 } else { 400 };
-    (italic != request.italic, weight.abs_diff(target))
+    (
+        italic && !request.italic,
+        weight.abs_diff(target),
+        !italic && request.italic,
+    )
 }
 
 fn origin_rank(origin: FontOrigin) -> u8 {
@@ -844,7 +875,7 @@ mod tests {
             system(
                 TestFont::new("Test Sans Semibold")
                     .typographic("Test Sans", "Semibold")
-                    .style("Regular", 600, false),
+                    .weight_class(600),
             ),
             system(TestFont::new("Test Serif").style("Bold", 700, false)),
         ]);
@@ -965,6 +996,130 @@ mod tests {
         assert!(resolution.synthetic_italic());
         assert!(!resolution.synthetic_bold());
         assert!(resolution.is_substitution());
+    }
+
+    #[test]
+    fn italic_text_slants_the_face_of_its_weight_rather_than_take_another_weight() {
+        // Noto Sans of `E-italic-missing`: Regular, Bold and Bold Italic, no Italic. Word
+        // draws italic text in Regular slanted, and bold italic text in Bold Italic.
+        let no_italic = book(&[
+            system(TestFont::new("Test Sans")),
+            system(TestFont::new("Test Sans").style("Bold", 700, false)),
+            system(TestFont::new("Test Sans").style("Bold Italic", 700, true)),
+        ]);
+        let (face, resolution) = resolved(&no_italic, &FontRequest::new("Test Sans").italic(true));
+        assert_eq!((face.weight(), face.is_italic()), (400, false));
+        assert!(resolution.synthetic_italic());
+        assert_eq!(
+            resolution.to_string(),
+            "\"Test Sans\" italic → \"Test Sans\" with synthetic italic"
+        );
+        let request = FontRequest::new("Test Sans").bold(true).italic(true);
+        let (face, resolution) = resolved(&no_italic, &request);
+        assert_eq!((face.weight(), face.is_italic()), (700, true));
+        assert!(!resolution.is_substitution());
+        // A family with an Italic face uses it, added after the upright one.
+        let with_italic = book(&[
+            system(TestFont::new("Test Sans")),
+            system(TestFont::new("Test Sans").style("Bold Italic", 700, true)),
+            system(TestFont::new("Test Sans").style("Italic", 400, true)),
+        ]);
+        let (face, resolution) =
+            resolved(&with_italic, &FontRequest::new("Test Sans").italic(true));
+        assert_eq!((face.weight(), face.is_italic()), (400, true));
+        assert!(!resolution.is_substitution());
+    }
+
+    #[test]
+    fn reports_a_bold_face_for_regular_text() {
+        // Only a bold face: regular text comes out bold, and the report says so.
+        let bold = book(&[system(TestFont::new("Test Sans").style("Bold", 700, false))]);
+        let resolution = bold.resolve(&FontRequest::new("Test Sans"));
+        assert_eq!(resolution.kind(), ResolutionKind::Exact);
+        assert!(resolution.unrequested_bold());
+        assert!(resolution.is_substitution());
+        assert_eq!(
+            resolution.to_string(),
+            "\"Test Sans\" → \"Test Sans\" in bold, no other face of the family being installed"
+        );
+        let resolution = bold.resolve(&FontRequest::new("Test Sans").italic(true));
+        assert_eq!(
+            resolution.to_string(),
+            "\"Test Sans\" italic → \"Test Sans\" in bold, no other face of the family being \
+             installed with synthetic italic"
+        );
+        let resolution = bold.resolve(&FontRequest::new("Test Sans").bold(true));
+        assert!(!resolution.unrequested_bold());
+        assert!(!resolution.is_substitution());
+        // By the style bits, not the weight: a heavy family of its own is regular.
+        let black = book(&[system(TestFont::new("Test Black").weight_class(900))]);
+        let resolution = black.resolve(&FontRequest::new("Test Black"));
+        assert_eq!(
+            resolution.face().map(|id| black.face(id).unwrap().weight()),
+            Some(900)
+        );
+        assert!(!resolution.is_substitution());
+        // Either bit makes a face bold: fsSelection alone, macStyle alone.
+        let selection = book(&[system(
+            TestFont::new("Test Sans")
+                .style("Bold", 700, false)
+                .mac_style(0),
+        )]);
+        let mac = book(&[system(
+            TestFont::new("Test Sans").weight_class(700).mac_style(1),
+        )]);
+        for book in [selection, mac] {
+            assert!(
+                book.resolve(&FontRequest::new("Test Sans"))
+                    .unrequested_bold()
+            );
+        }
+        // An italic face is not reported for upright text: an italic family of its own
+        // cannot be told from an italic face whose upright one is missing.
+        let italic = book(&[system(
+            TestFont::new("Test Sans").style("Italic", 400, true),
+        )]);
+        assert!(
+            !italic
+                .resolve(&FontRequest::new("Test Sans"))
+                .is_substitution()
+        );
+    }
+
+    #[test]
+    fn a_face_named_by_its_full_name_is_not_reported_as_bolder() {
+        let named = book(&[system(
+            TestFont::new("Test Serif").style("Bold", 700, false),
+        )]);
+        let resolution = named.resolve(&FontRequest::new("Test Serif Bold"));
+        assert_eq!(resolution.kind(), ResolutionKind::OtherName);
+        assert!(!resolution.unrequested_bold());
+        let resolution = named.resolve(&FontRequest::new("TestSerif-Bold"));
+        assert_eq!(resolution.kind(), ResolutionKind::OtherName);
+        assert!(!resolution.unrequested_bold());
+        // A typographic family names the family, not the face.
+        let typographic = book(&[system(
+            TestFont::new("Test Serif Display")
+                .typographic("Test Serif Family", "Bold")
+                .style("Bold", 700, false),
+        )]);
+        let resolution = typographic.resolve(&FontRequest::new("Test Serif Family"));
+        assert_eq!(resolution.kind(), ResolutionKind::OtherName);
+        assert!(resolution.unrequested_bold());
+    }
+
+    #[test]
+    fn a_substitute_bolder_than_requested_is_reported_as_such() {
+        // A "Carlito" request in a book with only Calibri Bold (here a family named so).
+        let calibri_bold = book(&[system(TestFont::new("Calibri").style("Bold", 700, false))]);
+        let resolution = calibri_bold.resolve(&FontRequest::new("Carlito"));
+        assert_eq!(resolution.kind(), ResolutionKind::MetricCompatible);
+        assert!(resolution.unrequested_bold());
+        assert_eq!(
+            resolution.to_string(),
+            "\"Carlito\" → \"Calibri\" (metric-compatible substitute) in bold, no other face \
+             of the family being installed"
+        );
     }
 
     #[test]
