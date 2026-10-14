@@ -28,12 +28,14 @@ posting the comment it asks for.
 
 ## Corpus numbers
 
-<!-- Before and after, when the change touches a reader or a writer. -->
+<!-- Before and after, when the change touches a reader or a writer. With the release gate table
+below, only what the table does not show (other formats, status changes in corpus-ext/), or
+"covered by the table". -->
 
 ## Release gate table
 
-<!-- Once `corpus-runner gate` is in main: the table it prints, when the change touches
-DOCX reading, layout or PDF output. Otherwise delete this section. -->
+<!-- The table `corpus-runner gate` prints, when the change touches DOCX reading, layout or
+PDF output. Otherwise delete this section. -->
 
 ## How to check by hand
 
