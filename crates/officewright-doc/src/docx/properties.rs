@@ -462,6 +462,10 @@ fn indentation(element: Element<'_>, names: &Names, report: Report<'_>) -> Inden
     }
 }
 
+/// An `xsd:integer` (ST_DecimalNumber and its kin) as Office accepts it: no whitespace
+/// around it. The schema collapses whitespace, but Office accepts only values whose
+/// whitespace is already normalized (MS-OI29500 2.1.1(a)), so Word does not read `" 2 "`
+/// as 2, and neither does the reader: it reports the value as not valid.
 pub(super) fn integer(value: &str) -> Option<i64> {
     value.parse().ok()
 }
