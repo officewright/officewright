@@ -419,7 +419,14 @@ fn read_jpeg(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> 
             break frame;
         }
         match code {
-            // Baseline, extended sequential and progressive Huffman coding.
+            // Baseline, extended sequential and progressive Huffman coding, one frame
+            // header in a file (B.2.1).
+            0xC0..=0xC2 if frame.is_some() => {
+                return Err(malformed(format!(
+                    "the JPEG file has a second frame header, at byte {}",
+                    at - 2
+                )));
+            }
             0xC0..=0xC2 => frame = Some(read_frame(segment)?),
             // DHT, JPG and DAC are not frame headers.
             0xC4 | 0xC8 | 0xCC => {}
@@ -522,8 +529,12 @@ fn read_frame(segment: &[u8]) -> std::result::Result<Frame, Problem> {
 
 /// Checks a JPEG scan header of `length` bytes, `segment` after the length, against its
 /// `frame` as libjpeg does (ITU T.81, B.2.3): 1 to 4 components, so that the header is
-/// `6 + 2 × components` bytes long, each a component of the frame named once, and in an
-/// interleaved scan at most 10 blocks in each minimum coded unit.
+/// `6 + 2 × components` bytes long, each a component of the frame, in the frame's order,
+/// and in an interleaved scan at most 10 blocks in each minimum coded unit.
+///
+/// T.81 gives each component of a frame its own identifier, but some files repeat one,
+/// and libjpeg decodes them: each component the scan names is the frame's next one, after
+/// those it named before, with that identifier.
 fn check_scan(segment: &[u8], length: usize, frame: &Frame) -> std::result::Result<(), Problem> {
     let count = segment.first().copied().unwrap_or(0);
     if !(1..=4).contains(&count) {
@@ -538,29 +549,42 @@ fn check_scan(segment: &[u8], length: usize, frame: &Frame) -> std::result::Resu
             counted(count, "component")
         )));
     }
-    let mut named = Vec::with_capacity(usize::from(count));
+    let ids: Vec<u8> = segment
+        .get(1..)
+        .unwrap_or_default()
+        .chunks_exact(2)
+        .filter_map(<[u8]>::first)
+        .take(count.into())
+        .copied()
+        .collect();
+    // The frame's components after the last one the scan named.
+    let mut rest = frame.components.as_slice();
     let mut blocks = 0;
-    for specification in segment.get(1..).unwrap_or_default().chunks_exact(2) {
-        let Some(&id) = specification.first() else {
-            continue;
-        };
-        if named.len() == usize::from(count) {
-            break;
-        }
-        if named.contains(&id) {
+    for (named, &id) in ids.iter().enumerate() {
+        let found = rest
+            .iter()
+            .enumerate()
+            .find(|(_, component)| component.0 == id);
+        let Some((at, &(_, horizontal, vertical))) = found else {
+            let in_frame = frame.components.iter().filter(|c| c.0 == id).count();
+            let before = ids
+                .get(..named)
+                .unwrap_or_default()
+                .iter()
+                .filter(|&&x| x == id);
+            let reason = if in_frame == 0 {
+                ", which the frame header does not have"
+            } else if before.count() >= in_frame {
+                " more often than the frame header has it"
+            } else {
+                " out of the frame header's order"
+            };
             return Err(malformed(format!(
-                "the JPEG scan header names component {id} twice"
-            )));
-        }
-        let Some(&(_, horizontal, vertical)) =
-            frame.components.iter().find(|component| component.0 == id)
-        else {
-            return Err(malformed(format!(
-                "the JPEG scan header names component {id}, which the frame header does not have"
+                "the JPEG scan header names component {id}{reason}"
             )));
         };
-        named.push(id);
         blocks += u32::from(horizontal) * u32::from(vertical);
+        rest = rest.get(at + 1..).unwrap_or_default();
     }
     if count > 1 && blocks > 10 {
         return Err(malformed(format!(
@@ -1971,6 +1995,24 @@ pub(crate) mod tests {
         }
         let scan = [4, 1, 0, 2, 0x11, 3, 0x11, 4, 0x11, 0, 0x3F, 0];
         Image::from_bytes(with_scan(&data, &scan)).unwrap();
+        // Identifiers the frame repeats, which T.81 does not allow but libjpeg decodes:
+        // 1, 1, 2 scanned as 1, 1, 2 or one at a time, and 0, 0, 0 scanned together.
+        let good = jpeg(0xC0, 8, 4, 4, 3, false);
+        let repeated = patched(&patched(&good, frame + 13, 1), frame + 16, 2);
+        let scans: [&[u8]; 3] = [
+            &[3, 1, 0, 1, 0x11, 2, 0x11, 0, 0x3F, 0],
+            &[1, 1, 0, 0, 0x3F, 0],
+            &[1, 2, 0x11, 0, 0x3F, 0],
+        ];
+        for scan in scans {
+            Image::from_bytes(with_scan(&repeated, scan)).unwrap();
+        }
+        let zeros = patched(
+            &patched(&patched(&good, frame + 10, 0), frame + 13, 0),
+            frame + 16,
+            0,
+        );
+        Image::from_bytes(with_scan(&zeros, &[3, 0, 0, 0, 0x11, 0, 0x11, 0, 0x3F, 0])).unwrap();
         // The smallest frame header: one component.
         let image = Image::from_bytes(jpeg(0xC1, 8, 1, 1, 1, false)).unwrap();
         assert_eq!((image.width(), image.height()), (1, 1));
@@ -2221,7 +2263,32 @@ pub(crate) mod tests {
             ),
             (
                 with_scan(&good, &[2, 1, 0, 1, 0x11, 0, 0x3F, 0]),
-                "the JPEG scan header names component 1 twice",
+                "the JPEG scan header names component 1 more often than the frame header has it",
+            ),
+            // Components out of the frame's order (B.2.3): 1, 3, 2 and 3, 2, 1.
+            (
+                with_scan(&good, &[3, 1, 0, 3, 0x11, 2, 0x11, 0, 0x3F, 0]),
+                "the JPEG scan header names component 2 out of the frame header's order",
+            ),
+            (
+                with_scan(&good, &[3, 3, 0, 2, 0x11, 1, 0x11, 0, 0x3F, 0]),
+                "the JPEG scan header names component 2 out of the frame header's order",
+            ),
+            // A frame whose three components are all 1, scanned as 1, 2, 3.
+            (
+                with_scan(
+                    &patched(&patched(&good, frame + 13, 1), frame + 16, 1),
+                    &[3, 1, 0, 2, 0x11, 3, 0x11, 0, 0x3F, 0],
+                ),
+                "the JPEG scan header names component 2, which the frame header does not have",
+            ),
+            // A second frame header (B.2.1).
+            (
+                [&good[..frame], &good[frame..frame + 19], &good[frame..]].concat(),
+                &format!(
+                    "the JPEG file has a second frame header, at byte {}",
+                    frame + 19
+                ),
             ),
             // 2 × 2 + 2 × 2 + 2 × 1 + 1 × 1 = 11 blocks in one scan.
             (
@@ -2250,11 +2317,7 @@ pub(crate) mod tests {
             ),
         ];
         for (data, message) in damaged {
-            let err = error(data);
-            assert!(
-                err.starts_with("image data is damaged: ") && err.contains(message),
-                "{err}"
-            );
+            assert_eq!(error(data), format!("image data is damaged: {message}"));
         }
     }
 
