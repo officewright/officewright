@@ -765,11 +765,19 @@ ABCDEF+AVeryLongFontNameThatPushesTheColumns-BoldItalic TrueType WinAnsi no  no 
         assert_eq!(export(true, true), Some(true));
         scores.read_word_fonts(&scratch.path).unwrap();
         assert_eq!(
-            (scores.word_fonts, scores.word_fonts_complete),
-            (Some(vec!["Carlito".to_owned()]), Some(true))
+            (&scores.word_fonts, scores.word_fonts_complete),
+            (&Some(vec!["Carlito".to_owned()]), Some(true))
         );
-        assert_eq!(export(false, true), Some(false));
-        assert_eq!(export(true, false), Some(false));
+        // The report keeps an incomplete export as incomplete.
+        for (runs, complete) in [(false, true), (true, false)] {
+            assert_eq!(export(runs, complete), Some(false));
+            scores.read_word_fonts(&scratch.path).unwrap();
+            assert_eq!(
+                scores.word_fonts_complete,
+                Some(false),
+                "runs {runs}, complete {complete}"
+            );
+        }
         std::fs::write(scratch.path.join("formatting.json"), "{}").unwrap();
         assert!(word_fonts(&scratch.path).is_err());
     }
