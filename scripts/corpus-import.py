@@ -887,7 +887,7 @@ PDFFONTS_TYPES = (
 # columns aside, and a name may hold spaces (a "#20" in the PDF), so the row is read by the
 # known types rather than by column positions.
 # The name is the shortest prefix before a known type. A name whose last word is "CID" and that
-# is too long for its column (36 characters) loses that word to the type "CID TrueType"; the
+# fills its column (36 characters or more) loses that word to the type "CID TrueType"; the
 # emb column is still read right, so such a font is never missed, only named short in a
 # refusal. pdffonts adds a bracketed suffix of two capitals to the type of an OpenType font.
 PDFFONTS_ROW = re.compile(
