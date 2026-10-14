@@ -14,8 +14,8 @@ use crate::{Error, Result, embed, encoding, helvetica, script};
 /// - [`Font::standard`] gives Helvetica, one of the fonts every PDF viewer provides, so
 ///   nothing is embedded. It is used with WinAnsiEncoding, which covers Latin text only.
 /// - [`Font::from_file`], [`Font::from_bytes`] and [`Font::from_face`] give a TrueType or
-///   OpenType font that is embedded in the documents it is drawn in, reduced to the
-///   glyphs they use. It shows every character it has a glyph for in the scripts that
+///   OpenType font that is embedded in the documents it is drawn in and, unless its
+///   license forbids subsetting, reduced to the glyphs they use. It shows every character it has a glyph for in the scripts that
 ///   need no shaping; [`Page::add_text`](crate::Page::add_text) lists them.
 ///
 /// Cloning is cheap: the font data is shared. Two fonts are equal if they are the same
