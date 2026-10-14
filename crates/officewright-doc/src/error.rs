@@ -35,8 +35,9 @@ pub enum Error {
     /// The input is valid but uses something officewright cannot read yet, such as an
     /// encrypted document or a binary Word document.
     Unsupported(String),
-    /// Laying the document out failed, such as when it takes more pages than the
-    /// [`RenderOptions`](crate::RenderOptions) allow.
+    /// Laying the document out or making its PDF failed, such as when it takes more
+    /// pages than the [`RenderOptions`](crate::RenderOptions) allow. The layout engine's
+    /// error is passed through: its message and its cause are this error's.
     #[cfg(feature = "pdf")]
     #[non_exhaustive]
     Layout {
@@ -44,14 +45,16 @@ pub enum Error {
         source: officewright_layout::Error,
     },
     /// A font the [`RenderOptions`](crate::RenderOptions) give cannot be read, or a
-    /// directory of fonts cannot be listed.
+    /// directory of fonts cannot be listed. The font library's error is passed through,
+    /// as for `Layout`.
     #[cfg(feature = "pdf")]
     #[non_exhaustive]
     Font {
         /// The font library's error.
         source: officewright_font::Error,
     },
-    /// The PDF cannot be written: to the file or the writer, or not at all.
+    /// The PDF cannot be written, to the file or the writer. The PDF writer's error is
+    /// passed through, as for `Layout`.
     #[cfg(feature = "pdf")]
     #[non_exhaustive]
     Pdf {
@@ -113,12 +116,14 @@ impl error::Error for Error {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
             Self::Io { source, .. } => Some(source),
+            // The errors of rendering are passed through: their message is this error's,
+            // and their cause its cause, so that no message is said twice.
             #[cfg(feature = "pdf")]
-            Self::Layout { source } => Some(source),
+            Self::Layout { source } => source.source(),
             #[cfg(feature = "pdf")]
-            Self::Font { source } => Some(source),
+            Self::Font { source } => source.source(),
             #[cfg(feature = "pdf")]
-            Self::Pdf { source } => Some(source),
+            Self::Pdf { source } => source.source(),
             _ => None,
         }
     }

@@ -23,24 +23,27 @@ fn main() -> ExitCode {
     };
     let mut options = RenderOptions::new();
     while let Some(arg) = args.next() {
-        match (arg.as_str(), args.next()) {
-            ("--font-dir", Some(dir)) => options = options.with_font_dir(dir),
-            ("--max-pages", Some(n)) => match n.parse() {
-                Ok(n) => options = options.with_max_pages(n),
-                Err(_) => {
-                    eprintln!("--max-pages takes a number, not {n}");
+        match arg.as_str() {
+            "--no-system-fonts" => options = options.with_system_fonts(false),
+            "--font-dir" | "--max-pages" => {
+                let Some(value) = args.next() else {
+                    eprintln!("{arg} takes a value");
                     return ExitCode::FAILURE;
-                }
-            },
-            ("--no-system-fonts", next) => {
-                options = options.with_system_fonts(false);
-                if let Some(next) = next {
-                    eprintln!("unexpected argument {next}");
-                    return ExitCode::FAILURE;
+                };
+                if arg == "--font-dir" {
+                    options = options.with_font_dir(value);
+                } else {
+                    match value.parse() {
+                        Ok(n) => options = options.with_max_pages(n),
+                        Err(_) => {
+                            eprintln!("--max-pages takes a number, not {value}");
+                            return ExitCode::FAILURE;
+                        }
+                    }
                 }
             }
-            (other, _) => {
-                eprintln!("unknown or incomplete argument {other}");
+            other => {
+                eprintln!("unknown argument {other}");
                 return ExitCode::FAILURE;
             }
         }

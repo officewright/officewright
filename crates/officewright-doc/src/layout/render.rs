@@ -6,7 +6,7 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
-use officewright_font::{FontBook, FontOrigin};
+use officewright_font::{FaceInfo, FontBook, FontOrigin};
 use officewright_layout::{LayoutReport, Location, RenderOptions, ReportEntry, ReportKind};
 
 use crate::docx::shorten;
@@ -21,8 +21,12 @@ impl Document {
     /// ([`to_layout_ir`](Self::to_layout_ir)), laid out on pages and painted. Its text is
     /// laid out with the fonts the document embeds first, then those of `options`, then
     /// the system's when `options` use them. The report lists, in this order, what the
-    /// translation leaves out, the embedded fonts that cannot be read, and what the
-    /// layout does differently from Word, such as a font it uses in place of another.
+    /// translation leaves out, the embedded fonts that cannot be read or used, and what
+    /// the layout does differently from Word, such as a font it uses in place of another.
+    ///
+    /// An embedded font is used for the text whose font has a name the program itself
+    /// has. A subset Word embeds under a name of its own (`___WRD_EMBED_SUB_` and a
+    /// number) answers to none, so other fonts are used, and the report says so.
     ///
     /// # Errors
     ///
@@ -30,7 +34,10 @@ impl Document {
     ///   `options` allow ([`RenderOptions::with_max_pages`]);
     /// - [`Error::Font`](crate::Error::Font) when a font `options` give cannot be read, or
     ///   a directory of fonts cannot be listed;
-    /// - [`Error::Pdf`](crate::Error::Pdf) when the PDF cannot be written to `out`.
+    /// - [`Error::Pdf`](crate::Error::Pdf) when the PDF cannot be written to `out`;
+    /// - [`Error::Layout`](crate::Error::Layout) too when the PDF cannot be made, such as
+    ///   when a font the document embeds is damaged past what the font book checks and
+    ///   cannot be subset for the PDF.
     ///
     /// ```
     /// # fn main() -> officewright_doc::Result<()> {
@@ -123,7 +130,9 @@ impl Document {
 
     /// Adds the programs of the fonts the document embeds to `fonts`, ahead of the
     /// caller's and the system's, each program once however many styles share it.
-    /// Returns an entry for each program the font book cannot read, which is left out.
+    /// Returns an entry for each program the font book cannot read, which is left out,
+    /// and for each whose faces answer to none of the font's names, which the text
+    /// cannot reach.
     fn add_embedded_fonts(&self, fonts: &mut FontBook) -> Vec<ReportEntry> {
         let mut added = HashSet::new();
         let mut entries = Vec::new();
@@ -135,21 +144,63 @@ impl Document {
                 if !added.insert(Arc::as_ptr(&program.0).cast::<u8>()) {
                     continue;
                 }
-                if let Err(err) = fonts.add_bytes(Arc::clone(&program.0), FontOrigin::Document) {
-                    // The core error's message keeps the font parser's reason.
-                    let reason = officewright_core::Error::from(err);
-                    entries.push(ReportEntry::new(
-                        ReportKind::FontSubstituted,
-                        Location::document(),
-                        format!(
-                            "the w:{} of the font {} cannot be read, so other fonts are used: {reason}",
-                            embedded.style().to_xml(),
-                            shorten(font.name())
-                        ),
-                    ));
+                let what = || {
+                    format!(
+                        "the w:{} of the font {}",
+                        embedded.style().to_xml(),
+                        shorten(font.name())
+                    )
+                };
+                let before = fonts.len();
+                match fonts.add_bytes(Arc::clone(&program.0), FontOrigin::Document) {
+                    Ok(_) => {
+                        let names = |face: &FaceInfo| {
+                            let names = face.names();
+                            names
+                                .families()
+                                .chain(names.typographic_families())
+                                .chain(names.full_names())
+                                .any(|name| same_name(name, font.name()))
+                        };
+                        if !fonts.faces().skip(before).any(|(_, face)| names(face)) {
+                            let family = fonts
+                                .faces()
+                                .nth(before)
+                                .and_then(|(_, face)| face.names().family())
+                                .map(shorten)
+                                .unwrap_or_default();
+                            entries.push(ReportEntry::new(
+                                ReportKind::FontSubstituted,
+                                Location::document(),
+                                format!(
+                                    "{} holds a font named {family}, which is not that font's \
+                                     name, so other fonts are used",
+                                    what()
+                                ),
+                            ));
+                        }
+                    }
+                    Err(err) => {
+                        // The core error's message keeps the font parser's reason.
+                        let reason = officewright_core::Error::from(err);
+                        entries.push(ReportEntry::new(
+                            ReportKind::FontEmbedding,
+                            Location::document(),
+                            format!(
+                                "{} cannot be read, so other fonts are used: {reason}",
+                                what()
+                            ),
+                        ));
+                    }
                 }
             }
         }
         entries
     }
+}
+
+/// Whether two font names are the same as the font book compares them: without the
+/// spaces around them and whatever their case.
+fn same_name(a: &str, b: &str) -> bool {
+    a.trim().to_lowercase() == b.trim().to_lowercase()
 }

@@ -160,7 +160,7 @@ fn reports_an_embedded_font_it_cannot_read_once_and_renders_without_it() {
         .collect();
     assert_eq!(broken.len(), 1, "{listed:?}");
     let font_entry = &report.entries()[broken[0]];
-    assert_eq!(font_entry.kind(), ReportKind::FontSubstituted);
+    assert_eq!(font_entry.kind(), ReportKind::FontEmbedding);
     assert!(
         font_entry.to_string().starts_with(
             "document: the w:embedRegular of the font Broken cannot be read, so other fonts are used: "
@@ -251,4 +251,160 @@ fn turns_what_stops_the_rendering_into_errors() {
         .unwrap_err();
     assert!(matches!(err, Error::Pdf { .. }), "{err:?}");
     assert!(std::error::Error::source(&err).is_some());
+}
+
+/// The test font with every one of its names `Officewright Test` replaced by `name`, of
+/// the same length: what Word does to a subset it embeds (`___WRD_EMBED_SUB_` and a
+/// number).
+fn named(program: &[u8], name: &str) -> Vec<u8> {
+    renamed_where(program, name, usize::MAX)
+}
+
+/// The test font with its first `count` names `Officewright Test` replaced by `name`.
+fn renamed_where(program: &[u8], name: &str, count: usize) -> Vec<u8> {
+    let utf16 =
+        |text: &str| -> Vec<u8> { text.encode_utf16().flat_map(u16::to_be_bytes).collect() };
+    let (from, to) = (utf16("Officewright Test"), utf16(name));
+    assert_eq!(from.len(), to.len());
+    let mut renamed = program.to_vec();
+    let (mut at, mut replaced) = (0, 0);
+    while let Some(found) = renamed[at..]
+        .windows(from.len())
+        .position(|window| window == from)
+    {
+        if replaced == count {
+            break;
+        }
+        renamed[at + found..at + found + to.len()].copy_from_slice(&to);
+        at += found + to.len();
+        replaced += 1;
+    }
+    assert!(replaced > 0);
+    renamed
+}
+
+#[test]
+fn reports_an_embedded_font_whose_names_the_text_cannot_reach() {
+    // Word renames a subset it embeds; the program answers to none of the font's names.
+    let program = named(&test_font(), "___WRD_EMBED_S_17");
+    let document = Document::from_bytes(package_with_body_and_fonts(
+        &text_in_test_font("A"),
+        &font("Officewright Test", r#"<w:embedRegular r:id="rId1"/>"#),
+        &relationship("rId1", "fonts/font1.odttf"),
+        &[("word/fonts/font1.odttf", &program)],
+    ))
+    .unwrap();
+    let (_, report) = document.save_pdf_bytes(&without_system_fonts()).unwrap();
+    let listed = entries(&report);
+    let entry = report
+        .iter()
+        .find(|entry| entry.message().contains("holds a font named"))
+        .unwrap_or_else(|| panic!("{listed:?}"));
+    assert_eq!(entry.kind(), ReportKind::FontSubstituted);
+    assert_eq!(
+        entry.to_string(),
+        "document: the w:embedRegular of the font Officewright Test holds a font named \
+         ___WRD_EMBED_S_17, which is not that font's name, so other fonts are used"
+    );
+    assert!(
+        listed.iter().any(|entry| entry == NO_TEST_FONT),
+        "{listed:?}"
+    );
+
+    // A font's name in another case, or the program's full name alone, is the font's
+    // name as the font book compares names: nothing to report.
+    let reached = |program: &[u8], name: &str| {
+        let document = Document::from_bytes(package_with_body_and_fonts(
+            &text_in_test_font("A"),
+            &font(name, r#"<w:embedRegular r:id="rId1"/>"#),
+            &relationship("rId1", "fonts/font1.odttf"),
+            &[("word/fonts/font1.odttf", program)],
+        ))
+        .unwrap();
+        let (_, report) = document.save_pdf_bytes(&without_system_fonts()).unwrap();
+        !report
+            .iter()
+            .any(|entry| entry.message().contains("holds a font named"))
+    };
+    assert!(reached(&test_font(), "OFFICEWRIGHT TEST"));
+    // The family renamed, the full name (name ID 4, after it) kept.
+    assert!(reached(
+        &renamed_where(&test_font(), "___WRD_EMBED_S_17", 1),
+        "Officewright Test"
+    ));
+    assert!(!reached(&program, "Officewright Test"));
+}
+
+#[test]
+fn tries_each_program_a_font_embeds() {
+    // A font with a regular program and a damaged bold one: the bold is tried too, and
+    // reported by its own style.
+    let program = test_font();
+    let damaged = truetype(64);
+    let document = Document::from_bytes(package_with_body_and_fonts(
+        &text_in_test_font("A"),
+        &font(
+            "Officewright Test",
+            r#"<w:embedRegular r:id="rId1"/><w:embedBold r:id="rId2"/>"#,
+        ),
+        &[
+            relationship("rId1", "fonts/font1.odttf"),
+            relationship("rId2", "fonts/font2.odttf"),
+        ]
+        .concat(),
+        &[
+            ("word/fonts/font1.odttf", &program),
+            ("word/fonts/font2.odttf", &damaged),
+        ],
+    ))
+    .unwrap();
+    let (pdf, report) = document.save_pdf_bytes(&without_system_fonts()).unwrap();
+    assert!(names(&pdf, b"+OfficewrightTest"));
+    let fonts: Vec<String> = report
+        .iter()
+        .filter(|entry| entry.message().contains("the font Officewright Test"))
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(fonts.len(), 1, "{fonts:?}");
+    assert!(
+        fonts[0]
+            .starts_with("document: the w:embedBold of the font Officewright Test cannot be read"),
+        "{fonts:?}"
+    );
+}
+
+#[test]
+fn says_each_message_of_an_error_once() {
+    // The errors of rendering are passed through, so walking the causes says nothing
+    // twice.
+    let document = open("<w:p/>");
+    let chain = |err: &Error| {
+        let mut messages = vec![err.to_string()];
+        let mut cause = std::error::Error::source(err);
+        while let Some(next) = cause {
+            messages.push(next.to_string());
+            cause = next.source();
+        }
+        messages
+    };
+    let path = std::env::temp_dir().join("officewright-doc-missing-dir/y/out.pdf");
+    let err = document
+        .save_pdf_path(&path, &without_system_fonts())
+        .unwrap_err();
+    let messages = chain(&err);
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert!(messages[0].starts_with("cannot write "), "{messages:?}");
+    assert_ne!(messages[0], messages[1]);
+    let err = document
+        .save_pdf_bytes(&without_system_fonts().with_font_data(b"not a font".to_vec()))
+        .unwrap_err();
+    let messages = chain(&err);
+    let mut unique = messages.clone();
+    unique.dedup();
+    assert_eq!(unique, messages);
+    // The font library's own message.
+    let refused = officewright_font::FontBook::new()
+        .add_bytes(b"not a font".to_vec(), officewright_font::FontOrigin::User)
+        .unwrap_err();
+    assert_eq!(messages[0], refused.to_string());
 }

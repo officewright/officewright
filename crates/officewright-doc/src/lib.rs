@@ -70,10 +70,10 @@ pub use model::{
     UnderlineStyle, VerticalAlignment, VerticalJustification, VerticalPosition, VerticalReference,
     WrapKind,
 };
-/// What [`Document::save_pdf`] and the like report, and the options they take.
+// What `Document::save_pdf` and the like report, the options they take, and how the
+// streams of the PDF are compressed (`RenderOptions::with_compression`).
 #[cfg(feature = "pdf")]
 pub use officewright_layout::{LayoutReport, Location, RenderOptions, ReportEntry, ReportKind};
-/// How the streams of a PDF are compressed, for [`RenderOptions::with_compression`].
 #[cfg(feature = "pdf")]
 pub use officewright_pdf::Compression;
 pub use options::{Limits, LoadOptions};
