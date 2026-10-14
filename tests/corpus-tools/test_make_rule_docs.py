@@ -661,7 +661,14 @@ class Packages(unittest.TestCase):
                 self.assertLessEqual({c.tag.replace(W, "") for c in properties}, known)
             return ", ".join(words)
 
-        for name, count in (("E-list-label-format", 7), ("E-list-label-rstyle", 2)):
+        def check_level(level, text):
+            """Level 0 of a decimal list whose label reads "1."."""
+            self.assertEqual(level.get(f"{W}ilvl"), "0", text)
+            self.assertEqual(level.find(f"{W}start").get(f"{W}val"), "1", text)
+            self.assertEqual(level.find(f"{W}numFmt").get(f"{W}val"), "decimal", text)
+            self.assertEqual(level.find(f"{W}lvlText").get(f"{W}val"), "%1.", text)
+
+        for name, count in (("E-list-label-format", 8), ("E-list-label-rstyle", 2)):
             parts = rules.parts(next(doc for doc in self.docs if doc.name == name))
             styles = {
                 s.get(f"{W}styleId"): s for s in part(parts, "word/styles.xml").iter(f"{W}style")
@@ -700,8 +707,11 @@ class Packages(unittest.TestCase):
                 definition_id = instance.find(f"{W}abstractNumId").get(f"{W}val")
                 used.append((instance.get(f"{W}numId"), definition_id))
                 (level,) = definitions[definition_id].findall(f"{W}lvl")
+                check_level(level, text)
                 override = instance.find(f"{W}lvlOverride/{W}lvl")
                 if override is not None:
+                    self.assertEqual(instance.find(f"{W}lvlOverride").get(f"{W}ilvl"), "0")
+                    check_level(override, text)
                     self.assertIsNone(override.find(f"{W}pStyle"), text)
                     clauses.append(f"definition's level {described(level.find(f'{W}rPr'))}")
                     clauses.append(f"override level {described(override.find(f'{W}rPr'))}")
@@ -710,7 +720,16 @@ class Packages(unittest.TestCase):
                     if linked is not None:
                         style_id = linked.get(f"{W}val")
                         props = styles[style_id].find(f"{W}rPr")
-                        clauses.append(f"level style {style_id} ({described(props)})")
+                        # Whether the style names this list back, as Word writes it.
+                        back = styles[style_id].find(f"{W}pPr/{W}numPr")
+                        if back is not None:
+                            self.assertIsNone(back.find(f"{W}ilvl"), text)
+                            self.assertEqual(back.find(f"{W}numId").get(f"{W}val"),
+                                             instance.get(f"{W}numId"), text)
+                        way = "both ways" if back is not None else "one way"
+                        clauses.append(
+                            f"level style {style_id} ({described(props)}), linked {way}"
+                        )
                     label = level.find(f"{W}rPr")
                     char_style = None if label is None else label.find(f"{W}rStyle")
                     if char_style is not None:
@@ -756,9 +775,12 @@ class Packages(unittest.TestCase):
                 case = text.removeprefix(f"Case {n:02d}: ")
                 seen.append(case)
                 (r,) = sample.findall(f"{W}r")
-                self.assertEqual(r.find(f"{W}t").text, rules.OPEN_TYPE_TEXT, name)
+                # Standard ligatures (fi, ff, ffl) and kerning pairs (AV, VA, Ty).
+                self.assertEqual(r.find(f"{W}t").text, "office affine fluffy AVATAR Type", name)
                 props = r.find(f"{W}rPr")
                 found = set() if props is None else {c.tag for c in props}
+                # No font or size of its own: the document defaults, Calibri 11 pt.
+                self.assertFalse(found & {f"{W}rFonts", f"{W}sz", f"{W}szCs"}, text)
                 self.assertEqual(found, expected[case], text)
                 if props is not None and props.find(f"{W}kern") is not None:
                     self.assertEqual(props.find(f"{W}kern").get(f"{W}val"), "2", text)
@@ -766,6 +788,12 @@ class Packages(unittest.TestCase):
                     value = props.find(f"{W14}ligatures").get(f"{W14}val")
                     self.assertEqual(value, "standard", text)
             self.assertEqual(sorted(seen), sorted(expected), name)
+            styles = part(rules.parts(doc), "word/styles.xml")
+            defaults = styles.find(f"{W}docDefaults/{W}rPrDefault/{W}rPr")
+            self.assertEqual(defaults.find(f"{W}rFonts").get(f"{W}ascii"), "Calibri", name)
+            self.assertEqual(defaults.find(f"{W}sz").get(f"{W}val"), "22", name)
+            normal = next(s for s in styles.iter(f"{W}style") if s.get(f"{W}styleId") == "Normal")
+            self.assertIsNone(normal.find(f"{W}rPr"), name)
             # The w14 namespace is declared, and ignorable, where it is used.
             document = dict(rules.parts(doc))["word/document.xml"].decode()
             self.assertIn('mc:Ignorable="w14"', document)

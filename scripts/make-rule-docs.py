@@ -1131,8 +1131,9 @@ def default_paragraph_style() -> Doc:
 
 
 # Run properties of list labels (#162). Each case is a list of its own, so every label
-# reads "1.", and every difference in formatting the label might take is visible: a size
-# of 20 pt makes the line taller in geometry.json, the rest shows in the rasters.
+# reads "1.", and every difference in formatting the label might take is visible: the
+# label's word box in geometry.json shows whether it took a size of 20 pt (where only the
+# label could take it, the line grows taller too), the rest shows in the rasters.
 BOLD = "<w:b/><w:bCs/>"
 NOT_BOLD = '<w:b w:val="0"/><w:bCs w:val="0"/>'
 ITALIC = "<w:i/><w:iCs/>"
@@ -1156,13 +1157,27 @@ def label_lists(cases: list[tuple[str, dict, str, str]]) -> tuple[str, str]:
     return "".join(definitions) + "".join(instances), "".join(body)
 
 
+def linked_style(style_id: str, instance: int, rpr_xml: str) -> str:
+    """A paragraph style that names a list instance back (w:numPr), as Word writes the style
+    a list level links to with its w:pStyle."""
+    return (
+        f'<w:style w:type="paragraph" w:customStyle="1" w:styleId="{style_id}">'
+        f'<w:name w:val="{style_id}"/><w:basedOn w:val="Normal"/>'
+        f'<w:pPr><w:numPr><w:numId w:val="{instance}"/></w:numPr></w:pPr>'
+        f"<w:rPr>{rpr_xml}</w:rPr></w:style>"
+    )
+
+
 def list_label_format() -> Doc:
+    red_20 = '<w:color w:val="FF0000"/>' + SIZE_20
     styles = "".join(
         [
             style("paragraph", "BoldStyle", BOLD, based_on="Normal"),
             style("character", "MarkCharStyle", SIZE_20 + '<w:u w:val="single"/>'),
-            style("paragraph", "LabelParaStyle", '<w:color w:val="FF0000"/>' + SIZE_20,
-                  based_on="Normal"),
+            # Case 06's level links to it, and it names case 06's instance back.
+            linked_style("LabelParaStyle", 6, red_20),
+            # Case 08's level links to it, but it names no instance.
+            style("paragraph", "LabelParaOneWay", red_20, based_on="Normal"),
         ]
     )
     cases = [
@@ -1174,9 +1189,11 @@ def list_label_format() -> Doc:
          label_level(BOLD + SIZE_20), label_level(ITALIC)),
         ("mark style MarkCharStyle (20 pt, underlined)",
          {"mark": '<w:rStyle w:val="MarkCharStyle"/>'}, label_level(), ""),
-        ("level style LabelParaStyle (red, 20 pt)", {}, label_level(p_style="LabelParaStyle"),
-         ""),
+        ("level style LabelParaStyle (red, 20 pt), linked both ways", {},
+         label_level(p_style="LabelParaStyle"), ""),
         ("mark bold; level 20 pt", {"mark": BOLD}, label_level(SIZE_20), ""),
+        ("level style LabelParaOneWay (red, 20 pt), linked one way", {},
+         label_level(p_style="LabelParaOneWay"), ""),
     ]
     numbering, body = label_lists(cases)
     return Doc(
