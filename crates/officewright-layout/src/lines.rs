@@ -52,6 +52,9 @@ struct Fit {
     hyphen: bool,
     /// Whether the line holds a piece too wide for any line.
     overflow: bool,
+    /// A tab that starts past the end of the line, with no place before it where the
+    /// line may end: it hangs like the spaces there.
+    hanging_tab: Option<usize>,
 }
 
 /// What shaping again at a cut replaced: the units at `first`, now `len` others.
@@ -264,11 +267,18 @@ impl Piece {
         });
         let mut placed = Vec::with_capacity(shaped.len());
         let mut x = self.x.0;
+        // The design units of the cluster so far: a cluster without any, such as a soft
+        // hyphen's, gets no spacing after it.
+        let mut cluster_units = 0i64;
         for (index, glyph) in shaped.iter().enumerate() {
             let mut advance = f64::from(glyph.x_advance) * scale.per_unit;
+            cluster_units += i64::from(glyph.x_advance);
             let next = shaped.get(index + 1);
             if next.is_none_or(|next| next.cluster != glyph.cluster) {
-                advance += scale.letter_spacing.0;
+                if cluster_units != 0 {
+                    advance += scale.letter_spacing.0;
+                }
+                cluster_units = 0;
                 if let (Some(start), Some(text)) = (run_start, &text) {
                     let end = next.map_or(text.end, |next| start + next.cluster);
                     let cluster = itemized.text.get(start + glyph.cluster..end).unwrap_or("");
@@ -479,8 +489,15 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                 .iter()
                 .map(|glyph| i64::from(glyph.x_advance))
                 .sum();
+            // The spacing after each character (`w:spacing`) follows what takes room; a
+            // soft hyphen takes none.
             let width = scale.map_or(Pt(0.0), |scale| {
-                Pt(advance as f64 * scale.per_unit + scale.letter_spacing.0)
+                let spacing = if advance == 0 {
+                    0.0
+                } else {
+                    scale.letter_spacing.0
+                };
+                Pt(advance as f64 * scale.per_unit + spacing)
             });
             units.push(Unit {
                 range: start + cluster..start + next.max(cluster),
@@ -538,6 +555,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                     end_kind: LineEnd::Paragraph,
                     hyphen: false,
                     overflow: false,
+                    hanging_tab: None,
                 };
                 let mut line = self.place(end, fit, false);
                 self.set_height(&mut line, true);
@@ -572,19 +590,18 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                 return (fit.end, line);
             }
             let again = self.fit(start, first);
-            // First fit over the units as they are now shaped ends the line earlier, or
-            // at the same place without its hyphen. Should it not, the line drops its
-            // hyphen, else gives up its last unit that takes room with what follows it;
-            // a single one stays, reported.
+            // Each step goes to a line that ends earlier, or at the same place without
+            // its hyphen (`rank`), so the loop ends: first fit over the units as they
+            // are now shaped, if it gives such a line; else the line drops its hyphen;
+            // else it gives up its last unit that takes room, with what follows it; a
+            // single one stays, reported.
+            let rank = |fit: &Fit| (fit.end, fit.hyphen);
             let last_wide = (start + 1..fit.end)
                 .rev()
                 .find(|&i| self.units.get(i).is_some_and(|unit| unit.width.0 > 0.0));
-            fit = if again != fit && again.end <= fit.end {
+            fit = if rank(&again) < rank(&fit) {
                 again
             } else if fit.hyphen {
-                // The same place without the hyphen that no longer fits: a later place,
-                // which first fit may find over wider units, is not taken, so that the
-                // loop ends.
                 Fit {
                     hyphen: false,
                     ..fit
@@ -593,6 +610,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                 Fit {
                     end,
                     hyphen: false,
+                    hanging_tab: fit.hanging_tab.filter(|&tab| tab < end),
                     ..fit
                 }
             } else {
@@ -659,11 +677,13 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         // whether that place is a soft hyphen.
         let mut candidate: Option<(usize, bool)> = None;
         let mut overflow = false;
-        let wrap = |end: usize, hyphen: bool, overflow: bool| Fit {
+        let mut hanging_tab: Option<usize> = None;
+        let wrap = |end: usize, hyphen: bool, overflow: bool, hanging_tab: Option<usize>| Fit {
             end,
             end_kind: LineEnd::Wrap,
             hyphen,
             overflow,
+            hanging_tab: hanging_tab.filter(|&tab| tab < end),
         };
         let mut index = start;
         while let Some(unit) = self.units.get(index).cloned() {
@@ -674,15 +694,18 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                         end_kind: line_end(*kind),
                         hyphen: false,
                         overflow,
+                        hanging_tab,
                     };
                 }
                 UnitKind::Tab { .. } => {
                     // A tab after spaces that already hang past the end of the line
-                    // starts the next line, if this one may end before it.
+                    // starts the next line, if this one may end before it; else it stays,
+                    // and hangs with the spaces.
                     if cursor.x.0 > right.0 + EPSILON {
                         if let Some((end, hyphen)) = candidate {
-                            return wrap(end, hyphen, overflow);
+                            return wrap(end, hyphen, overflow, hanging_tab);
                         }
+                        hanging_tab = Some(index);
                     }
                     cursor.tab(&self.tabs, right);
                 }
@@ -700,10 +723,10 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                         // fit, between two clusters; a unit alone on its line that does
                         // not fit stays there, reported.
                         if let Some((end, hyphen)) = candidate {
-                            return wrap(end, hyphen, overflow);
+                            return wrap(end, hyphen, overflow, hanging_tab);
                         }
                         if cursor.has_content {
-                            return wrap(index, false, overflow);
+                            return wrap(index, false, overflow, hanging_tab);
                         }
                         self.report_overflow(kind);
                         overflow = true;
@@ -726,6 +749,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                         end_kind: LineEnd::Break,
                         hyphen: false,
                         overflow,
+                        hanging_tab,
                     };
                 }
                 _ => {}
@@ -736,6 +760,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             end_kind: LineEnd::Paragraph,
             hyphen: false,
             overflow,
+            hanging_tab,
         }
     }
 
@@ -971,10 +996,13 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         // The spaces after the last piece of content hang past the end of the line, in
         // pieces of their own: those before the break that ends the line, and those
         // before what takes no room, such as soft hyphens, too.
+        // A tab that starts past the end hangs too.
+        let hanging_tab = fit.hanging_tab.and_then(|tab| tab.checked_sub(start));
         let last_content = units
             .iter()
-            .rposition(|unit| match unit.kind {
-                UnitKind::Tab { .. } => true,
+            .enumerate()
+            .rposition(|(index, unit)| match unit.kind {
+                UnitKind::Tab { .. } => Some(index) != hanging_tab,
                 UnitKind::Object { .. } => unit.width.0 > 0.0,
                 UnitKind::Glyphs { .. } => unit.width.0 > 0.0 && !self.is_space_unit(unit),
                 UnitKind::Break { .. } | UnitKind::Zero { .. } => false,
@@ -983,18 +1011,25 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         for (index, unit) in units.iter().enumerate() {
             if let UnitKind::Tab { item } = unit.kind {
                 // The tab after a pending one settles it; the line's content then ends
-                // at this tab's end.
-                cursor.settle_into(&mut pieces, segment);
-                segment_content = None;
+                // at this tab's end, unless the tab hangs.
+                if let (Some(origin), Some(offset)) = (
+                    cursor.settle_into(&mut pieces, segment),
+                    segment_content.take(),
+                ) {
+                    content_end = Pt(origin + offset);
+                }
+                let hanging = index >= last_content;
                 let (x, width, leader) = cursor.tab(&self.tabs, right);
                 pieces.push(Piece {
                     x,
                     width,
                     kind: PieceKind::Tab { item, leader },
-                    hanging: false,
+                    hanging,
                 });
                 segment = pieces.len();
-                content_end = cursor.x;
+                if !hanging {
+                    content_end = cursor.x;
+                }
                 continue;
             }
             let content = index < last_content;

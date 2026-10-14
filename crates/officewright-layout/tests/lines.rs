@@ -1529,6 +1529,9 @@ fn random_paragraph(seed: u64, document: &mut Document) -> (Paragraph, f64) {
         if next(2) == 0 {
             style = style.with_kern_min(Some(Pt(1.0)));
         }
+        if next(4) == 0 {
+            style = style.with_letter_spacing(Pt(next(6) as f64 - 2.0));
+        }
         document.add_run_style(style)
     };
     let (a, b, c) = (make(), make(), make());
@@ -1701,6 +1704,99 @@ fn a_hyphen_that_does_not_fit_after_shaping_again_is_dropped_before_giving_up() 
             assert!(line.width() <= width + 1e-9, "{width} pt: {lines:?}");
         }
         width += 0.05;
+    }
+    Ok(())
+}
+
+/// A document whose text is in Liberation Sans 10 pt with `spacing` after each
+/// character, and that style.
+fn spaced_out(spacing: f64) -> (Document, RunStyleId) {
+    let mut document = Document::default();
+    let style = document.add_run_style(
+        RunStyle::default()
+            .with_fonts(RunFonts::new("Liberation Sans"))
+            .with_size(Pt(10.0))
+            .with_letter_spacing(Pt(spacing)),
+    );
+    (document, style)
+}
+
+#[test]
+fn breaking_lines_ends_when_a_dropped_hyphen_does_not_help() -> TestResult {
+    // The line ending at the soft hyphen does not fit with its hyphen nor without it
+    // (the tab before it starts past the end); first fit offers the hyphen again. The
+    // breaker must not go back and forth between the two.
+    let book = book()?;
+    let (document, style) = spaced_out(-2.0);
+    for (opening, width) in [
+        ("( ".to_owned(), 1.44),
+        (format!("({}", " ".repeat(120)), 94.10),
+    ] {
+        let paragraph = Paragraph::new(style).with_inlines([
+            Inline::text(opening, style),
+            Inline::tab(style),
+            Inline::text("\u{00AD}WW", style),
+        ]);
+        fuzzing::check_lines(&book, &document, &paragraph, width)
+            .map_err(|problem| format!("{width} pt: {problem}"))?;
+    }
+    Ok(())
+}
+
+#[test]
+fn a_soft_hyphen_takes_no_room_however_the_text_is_spaced() -> TestResult {
+    let book = book()?;
+    // Spaced out by 3 pt: no line starts with the soft hyphen, wherever the line ends.
+    let (document, style) = spaced_out(3.0);
+    let paragraph = Paragraph::new(style).with_inlines([Inline::text("ab\u{00AD}cd", style)]);
+    let mut width = 17.0;
+    while width < 20.2 {
+        fuzzing::check_lines(&book, &document, &paragraph, width)
+            .map_err(|problem| format!("{width} pt: {problem}"))?;
+        width += 0.05;
+    }
+    // Drawn as measured: on one line, the glyphs end where the line does.
+    let laid = fuzzing::lay_out(&book, &document, &paragraph, 200.0);
+    let line = laid.lines().first().ok_or("no line")?;
+    let end = line.words().last().map_or(0.0, |word| word.end());
+    assert!(
+        (end - line.width()).abs() < 1e-9,
+        "{end} against {}",
+        line.width()
+    );
+    // Condensed by 2 pt: "xx " and "ab-cd" fit on lines of their own; the soft hyphen
+    // takes no room to end the first line at.
+    let (document, style) = spaced_out(-2.0);
+    let paragraph = Paragraph::new(style).with_inlines([Inline::text("xx ab\u{00AD}cd", style)]);
+    let mut width = 13.95;
+    while width < 15.2 {
+        let laid = fuzzing::lay_out(&book, &document, &paragraph, width);
+        let lines: Vec<&str> = laid.lines().iter().map(|line| line.text()).collect();
+        assert_eq!(lines, ["xx ", "ab\u{00AD}cd"], "{width} pt");
+        width += 0.05;
+    }
+    Ok(())
+}
+
+#[test]
+fn a_tab_past_the_end_with_nowhere_to_end_before_it_hangs() -> TestResult {
+    // No line may end after "(" and its space (UAX #14), so the tab that starts past the
+    // end stays on the line and hangs, like the space.
+    let book = book()?;
+    let (document, style) = liberation(10.0);
+    let paragraph = Paragraph::new(style).with_inlines([
+        Inline::text("( ", style),
+        Inline::tab(style),
+        Inline::text("abc", style),
+    ]);
+    let mut width = 4.0;
+    while width < 6.2 {
+        fuzzing::check_lines(&book, &document, &paragraph, width)
+            .map_err(|problem| format!("{width} pt: {problem}"))?;
+        let laid = fuzzing::lay_out(&book, &document, &paragraph, width);
+        let first = laid.lines().first().ok_or("no line")?;
+        assert_eq!(first.text(), "( \t", "{width} pt");
+        width += 0.1;
     }
     Ok(())
 }
