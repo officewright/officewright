@@ -36,7 +36,10 @@ const EPSILON: f64 = 1e-9;
 
 /// How many clusters after a cut are shaped again at most when HarfRust marks none of
 /// them safe to break before, which bounds the work per line in a run kerned
-/// throughout; where the shaped pieces meet there, one kerning pair may be lost.
+/// throughout. Where the shaped pieces meet there, the shaping of the one before ends as
+/// at the end of a text: a kerning pair may be lost, and in a joining script the form of
+/// a letter may change. It takes a word of more than this many clusters without a place
+/// safe to break.
 const RESHAPE_WINDOW: usize = 64;
 
 /// Where first fit ends a line.
@@ -49,6 +52,14 @@ struct Fit {
     hyphen: bool,
     /// Whether the line holds a piece too wide for any line.
     overflow: bool,
+}
+
+/// What shaping again at a cut replaced: the units at `first`, now `len` others.
+#[derive(Clone, Debug)]
+struct Splice {
+    first: usize,
+    len: usize,
+    replaced: Vec<Unit>,
 }
 
 /// A line of a paragraph.
@@ -315,6 +326,8 @@ pub(crate) struct Breaker<'p, 'f, 'b> {
     /// The width of the column.
     width: Pt,
     overflow_reported: bool,
+    /// What the last call of `settle` replaced, if it shaped again.
+    splice: Option<Splice>,
 }
 
 impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
@@ -352,6 +365,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             tabs,
             width,
             overflow_reported: false,
+            splice: None,
         };
         breaker.scales = breaker.measure_items();
         breaker.units = breaker.make_units(shaped);
@@ -544,13 +558,16 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         let (_, right) = self.edges(first);
         let mut fit = fit;
         fit.end = self.settle(start, fit.end, fit.end_kind);
+        let mut splice = self.splice.take();
         loop {
             // Every line takes at least one unit, so that breaking ends.
             if fit.end <= start && start < self.units.len() {
                 fit.end = start + 1;
             }
             let mut line = self.place(start, fit, first);
-            let fits = line.start.0 + line.width.0 <= right.0 + EPSILON;
+            // Indents wider than the column leave no room, not less than none.
+            let room = (right.0 - line.start.0).max(0.0);
+            let fits = line.width.0 <= room + EPSILON;
             if fits || fit.end_kind != LineEnd::Wrap || line.overflow {
                 return (fit.end, line);
             }
@@ -577,7 +594,45 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                 line.overflow = true;
                 return (fit.end, line);
             };
+            // The cut given up keeps nothing of its shaping: the text around it is as
+            // first shaped again, for the cut that follows.
+            if let Some(splice) = splice.take() {
+                fit.end = self.undo(splice, fit.end);
+            }
             fit.end = self.settle(start, fit.end, fit.end_kind);
+            splice = self.splice.take();
+        }
+    }
+
+    /// Puts back the units `splice` replaced, and returns the unit `end` of the units
+    /// with the splice as a unit of those without it: the one that starts at the same
+    /// place of the text, or the last before it.
+    fn undo(&mut self, splice: Splice, end: usize) -> usize {
+        let at = self
+            .units
+            .get(end)
+            .map_or(self.text.len(), |unit| unit.range.start);
+        let Splice {
+            first,
+            len,
+            replaced,
+        } = splice;
+        let count = replaced.len();
+        let removed = self.units.len().min(first.saturating_add(len));
+        self.units.splice(first.min(removed)..removed, replaced);
+        if end <= first {
+            end
+        } else if end >= first + len {
+            end - len + count
+        } else {
+            (first..first + count)
+                .rev()
+                .find(|&index| {
+                    self.units
+                        .get(index)
+                        .is_some_and(|unit| unit.range.start <= at)
+                })
+                .unwrap_or(first)
         }
     }
 
@@ -766,6 +821,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
     /// the run a break cuts where its shaping depends on what follows. Returns the
     /// unit after the line's last, which shaping again can move.
     fn settle(&mut self, start: usize, end: usize, line_end: LineEnd) -> usize {
+        self.splice = None;
         if line_end != LineEnd::Wrap || end <= start || end >= self.units.len() {
             return end;
         }
@@ -832,7 +888,13 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         let right_units = self.clusters(item, &right, cut.start..tail.end, offset(cut.start));
         let new_end = first + left_units.len();
         let replacement: Vec<Unit> = left_units.into_iter().chain(right_units).collect();
-        self.units.splice(first..last, replacement);
+        let len = replacement.len();
+        let replaced: Vec<Unit> = self.units.splice(first..last, replacement).collect();
+        self.splice = Some(Splice {
+            first,
+            len,
+            replaced,
+        });
         new_end
     }
 
@@ -904,7 +966,8 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         let last_content = units
             .iter()
             .rposition(|unit| match unit.kind {
-                UnitKind::Tab { .. } | UnitKind::Object { .. } => true,
+                UnitKind::Tab { .. } => true,
+                UnitKind::Object { .. } => unit.width.0 > 0.0,
                 UnitKind::Glyphs { .. } => unit.width.0 > 0.0 && !self.is_space_unit(unit),
                 UnitKind::Break { .. } | UnitKind::Zero { .. } => false,
             })

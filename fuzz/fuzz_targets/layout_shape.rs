@@ -1,8 +1,8 @@
 //! Builds a paragraph from the input and itemizes and shapes it with the test fonts of
 //! tests/fonts, as the layout does: the first bytes describe up to four run styles
 //! (fonts, among them missing ones and the symbol fonts Symbol and Wingdings; bold,
-//! italic, capitals, small capitals, complex script, right to left, the East Asian hint;
-//! size), the rest are pieces of text, symbols, tabs and soft hyphens in those styles.
+//! italic, capitals, small capitals, complex script, right to left, the East Asian hint,
+//! kerning; size), the rest are pieces of text, symbols, tabs and soft hyphens in those styles.
 //! The paragraph must keep what the layout relies on (`check_paragraph`), and break into
 //! lines that hold its text in order, in a column, with a line spacing, an alignment, a
 //! hanging indent and tab stops the first bytes give too (`check_lines`).
@@ -77,6 +77,7 @@ fn style(bytes: &[u8]) -> RunStyle {
         .with_small_caps(flags & 16 != 0)
         .with_complex_script(flags & 32 != 0)
         .with_rtl(flags & 64 != 0)
+        .with_kern_min((flags & 128 != 0).then_some(Pt(1.0)))
         .with_size(Pt(1.0 + f64::from(byte(3) % 80)))
 }
 

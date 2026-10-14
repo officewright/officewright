@@ -1122,6 +1122,17 @@ fn a_line_cut_where_kerning_joins_two_glyphs_is_shaped_again() -> TestResult {
         "{} against {alone}",
         first.width()
     );
+    // Every line is as wide as its text shaped on its own: what was shaped again for a
+    // cut keeps nothing on the lines after it.
+    for line in laid.lines() {
+        let alone = width_of(&book, &document, style, line.text());
+        assert!(
+            (line.width() - alone).abs() < 1e-9,
+            "{:?}: {} against {alone}",
+            line.text(),
+            line.width()
+        );
+    }
     // Shaped on its own the line is wider than first fit measured it; it still fits,
     // ending a cluster earlier where needed.
     for line in laid.lines() {
@@ -1313,6 +1324,7 @@ fn a_line_shaped_again_and_too_wide_ends_at_its_place_before() -> TestResult {
         // soft hyphen without one.
         (sans, "T\u{00AD}onne", 15.0, 20.0),
     ] {
+        let mut lines_before = usize::MAX;
         let mut width = from;
         while width < to {
             let paragraph = Paragraph::new(style).with_inlines([Inline::text(text, style)]);
@@ -1327,6 +1339,29 @@ fn a_line_shaped_again_and_too_wide_ends_at_its_place_before() -> TestResult {
                 .filter(|entry| entry.kind() == officewright_layout::ReportKind::Overflow)
                 .count();
             assert_eq!(overflows, 0, "{text:?} in {width} pt: {lines:?}");
+            // A wider column never takes more lines.
+            assert!(
+                lines.len() <= lines_before,
+                "{text:?} in {width} pt: {lines:?}"
+            );
+            lines_before = lines.len();
+            // A line without a drawn hyphen is as wide as its text shaped on its own.
+            for line in laid
+                .lines()
+                .iter()
+                .filter(|line| !line.text().ends_with('-') || text.contains("-Y"))
+            {
+                if line.text().ends_with('\u{00AD}') || line.text().ends_with("\u{00AD}-") {
+                    continue;
+                }
+                let alone = width_of(&book, &document, style, line.text());
+                assert!(
+                    (line.width() - alone).abs() < 1e-9,
+                    "{text:?} in {width} pt: {:?} is {}, alone {alone}",
+                    line.text(),
+                    line.width()
+                );
+            }
             for line in lines.iter().skip(1) {
                 assert!(
                     !line.starts_with(['-', '\u{00AD}']),
@@ -1336,10 +1371,7 @@ fn a_line_shaped_again_and_too_wide_ends_at_its_place_before() -> TestResult {
             // Where the second word is cut, it is at its soft hyphen or hyphen.
             let first = lines.first().filter(|line| line.len() > "aaa ".len());
             if let Some(first) = first.filter(|_| text.starts_with("aaa")) {
-                assert!(
-                    first.ends_with('-') || first.ends_with("\u{00AD}-"),
-                    "{text:?} in {width} pt: {lines:?}"
-                );
+                assert!(first.ends_with('-'), "{text:?} in {width} pt: {lines:?}");
             }
             width += 0.1;
         }
@@ -1609,5 +1641,38 @@ fn every_line_breaking_keeps_what_pagination_relies_on() -> TestResult {
         fuzzing::check_lines(&book, &document, &paragraph, width)
             .map_err(|problem| format!("seed {seed}, {width} pt: {problem}"))?;
     }
+    Ok(())
+}
+
+#[test]
+fn spaces_before_an_object_of_no_width_hang_and_no_room_is_no_room() -> TestResult {
+    use officewright_layout::ir::{
+        Alignment, ImageData, ImageFormat, InlineObject, ObjectContent, Picture, Size,
+    };
+
+    let book = book()?;
+    let (mut document, style) = liberation(11.0);
+    let image = document.add_image(ImageData::new(ImageFormat::Png, Vec::new()));
+    let object = || {
+        let picture = ObjectContent::Picture(Picture::new(image));
+        Inline::Object(InlineObject::new(picture, Size::new(Pt(0.0), Pt(10.0))))
+    };
+    let right = ParagraphProps::default().with_alignment(Alignment::End);
+    let inlines = vec![Inline::text("word ", style), object()];
+    let with_object = paragraph(style, right, inlines);
+    fuzzing::check_lines(&book, &document, &with_object, 25.0)?;
+    let laid = fuzzing::lay_out(&book, &document, &with_object, 200.0);
+    let end = laid
+        .lines()
+        .first()
+        .and_then(|line| line.words().first())
+        .map(|word| word.end());
+    assert_eq!(end, Some(200.0));
+    // Indents wider than the column leave no room: the spaces of a line still share it.
+    let props = ParagraphProps::default().with_indent(Indent::default().with_start(Pt(40.0)));
+    let indented = paragraph(style, props, vec![Inline::text("    abc", style)]);
+    fuzzing::check_lines(&book, &document, &indented, 20.0)?;
+    let laid = fuzzing::lay_out(&book, &document, &indented, 20.0);
+    assert_eq!(laid.lines().first().map(|line| line.text()), Some("    "));
     Ok(())
 }
