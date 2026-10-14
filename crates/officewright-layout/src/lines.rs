@@ -827,7 +827,8 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         Some((item, shaped))
     }
 
-    /// The width of all of `run`, shaped text of item `item`.
+    /// The width of all of `run`, shaped text of item `item` that is one cluster (the
+    /// hyphen of a soft hyphen).
     fn run_width(&self, item: usize, run: &ShapedRun) -> Pt {
         let Some(scale) = self.scales.get(item).copied().flatten() else {
             return Pt(0.0);
@@ -837,7 +838,8 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             .iter()
             .map(|glyph| i64::from(glyph.x_advance))
             .sum();
-        Pt(advance as f64 * scale.per_unit + scale.letter_spacing.0)
+        // One cluster, measured as `Piece::glyphs` draws it.
+        Pt(advance as f64 * scale.per_unit + cluster_spacing(advance, scale))
     }
 
     /// The end of the line from unit `start` to before unit `end`, after shaping again
@@ -1121,9 +1123,9 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         }
     }
 
-    /// Spreads `room` over the spaces or the clusters of `line` after its last tab,
-    /// leaving out the spaces that hang at its end; distributed text gets nothing after
-    /// its last cluster.
+    /// Spreads `room` over the spaces or the clusters of `line` after its last tab that
+    /// does not hang, leaving out the spaces that hang at its end; distributed text gets
+    /// nothing after its last cluster.
     fn stretch(&self, line: &mut Line, room: f64, how: Stretch) {
         let from = line
             .pieces

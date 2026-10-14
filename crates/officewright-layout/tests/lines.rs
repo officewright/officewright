@@ -1848,7 +1848,22 @@ fn every_tab_past_the_end_hangs_and_condensed_text_never_moves_back() -> TestRes
             Inline::text("W", style),
             Inline::text("iii", condensed),
         ]);
-    fuzzing::check_lines(&book, &document, &paragraph, 55.0)?;
+    let mut width = 50.0;
+    while width < 60.0 {
+        fuzzing::check_lines(&book, &document, &paragraph, width)
+            .map_err(|problem| format!("condensed in {width} pt: {problem}"))?;
+        width += 0.05;
+    }
+    // Drawn as measured: condensed glyphs end where the line does.
+    let paragraph = Paragraph::new(style).with_inlines([Inline::text("iiW", condensed)]);
+    let laid = fuzzing::lay_out(&book, &document, &paragraph, 100.0);
+    let line = laid.lines().first().ok_or("no line")?;
+    let end = line.words().last().map_or(0.0, |word| word.end());
+    assert!(
+        (end - line.width()).abs() < 1e-9,
+        "{end} against {}",
+        line.width()
+    );
     // A tab that hangs after the text of an end tab, here "(" that is wider than the
     // room before the stop, held to the first tab by a word joiner so that no line may
     // end before the second: the line ends where that text does, so aligned at the end
@@ -1913,5 +1928,33 @@ fn every_tab_past_the_end_hangs_and_condensed_text_never_moves_back() -> TestRes
             width += 0.5;
         }
     }
+    Ok(())
+}
+
+#[test]
+fn the_hyphen_at_a_soft_hyphen_is_measured_as_it_is_drawn() -> TestResult {
+    use officewright_layout::ir::Alignment;
+
+    // Condensed by 6 pt, the hyphen takes no room, as every other character: aligned at
+    // the end, the line with it ends at the edge, and no line is less than nothing wide.
+    let book = book()?;
+    let (document, style) = spaced_out(-6.0);
+    let right = ParagraphProps::default().with_alignment(Alignment::End);
+    let paragraph = Paragraph::new(style)
+        .with_props(right.clone())
+        .with_inlines([Inline::text("WWWW\u{00AD}WWWW", style)]);
+    fuzzing::check_lines(&book, &document, &paragraph, 8.0)?;
+    let laid = fuzzing::lay_out(&book, &document, &paragraph, 8.0);
+    let first = laid.lines().first().ok_or("no line")?;
+    let end = first
+        .words()
+        .iter()
+        .map(|word| word.end())
+        .fold(0.0, f64::max);
+    assert!(end <= 8.0 + 1e-9, "{:?} ends at {end}", first.text());
+    let paragraph = Paragraph::new(style)
+        .with_props(right)
+        .with_inlines([Inline::soft_hyphen(style), Inline::text("WWWWWWWW", style)]);
+    fuzzing::check_lines(&book, &document, &paragraph, 10.0)?;
     Ok(())
 }

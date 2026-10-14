@@ -846,7 +846,7 @@ fn piece_text_end(kind: &crate::lines::PieceKind) -> usize {
 /// order, all of it, each byte once; a line wider than its room is one the breaker
 /// marks as holding a piece too wide for any line, and the report says so; a line
 /// starts with a soft hyphen only where a line may end before it; heights and baselines
-/// are numbers, the heights not negative.
+/// are numbers, heights and widths not negative.
 pub fn check_lines(
     book: &FontBook,
     document: &Document,
@@ -913,7 +913,10 @@ pub fn check_lines(
             line.descent.0,
             line.width.0,
         ];
-        if numbers.iter().any(|number| !number.is_finite()) || line.height.0 < 0.0 {
+        if numbers.iter().any(|number| !number.is_finite())
+            || line.height.0 < 0.0
+            || line.width.0 < -1e-9
+        {
             return Err(format!("line {index}: {numbers:?}"));
         }
     }
