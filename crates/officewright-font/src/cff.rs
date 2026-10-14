@@ -4,7 +4,7 @@
 //! writes them back from their decimal form. A real too large for an `f32` becomes
 //! infinity, which it cannot write, and it panics with `unreachable!()` (in
 //! `RealNumber::write`, `src/cff/number.rs`;
-//! <https://github.com/typst/subsetter/issues/32>). `FontFace::subset` would turn that
+//! <https://github.com/typst/subsetter/issues/31>). `FontFace::subset` would turn that
 //! panic into an error, but the panic hook still prints it, and the fuzz targets, whose
 //! hook aborts, would report it on every run. Such a face is damaged, so it is refused
 //! here, before the subsetter runs. Remove this once a subsetter release returns an
