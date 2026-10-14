@@ -417,6 +417,8 @@ fn translates_paragraph_formatting() {
         r#"<w:p><w:pPr><w:pStyle w:val="Heading"/><w:spacing w:line="300" w:lineRule="exact"/><w:jc w:val="both"/></w:pPr></w:p>"#,
         r#"<w:p><w:pPr><w:pStyle w:val="Other"/><w:spacing w:line="280" w:lineRule="atLeast"/><w:jc w:val="right"/></w:pPr></w:p>"#,
         "<w:p/>",
+        r#"<w:p><w:pPr><w:pStyle w:val="Normal"/></w:pPr></w:p>"#,
+        r#"<w:p><w:pPr><w:pStyle w:val="Missing"/></w:pPr></w:p>"#,
     ]
     .concat();
     let document = with_parts(
@@ -487,6 +489,10 @@ fn translates_paragraph_formatting() {
         .collect();
     assert_eq!(keys[0], keys[1]);
     assert!(keys[0] != keys[2] && keys[2] != keys[3] && keys[0] != keys[3]);
+    // Naming the default style, or a style that does not exist, is the same style as
+    // naming none; and no style's key is 0.
+    assert_eq!((keys[4], keys[5]), (keys[3], keys[3]));
+    assert!(keys.iter().all(|&key| key != 0));
     // Without any paragraph style, the key is 0.
     let plain = translate(&open("<w:p/>"));
     assert_eq!(paragraphs(&plain)[0].props().style_key().value(), 0);
@@ -705,5 +711,291 @@ fn translates_settings_and_sections() {
     assert_eq!(
         last.endnotes(),
         &ir::NoteProps::endnotes().with_position(ir::NotePosition::SectionEnd)
+    );
+}
+
+#[test]
+fn translates_the_rest_of_paragraph_formatting() {
+    let body = [
+        r#"<w:p><w:pPr><w:keepLines/><w:pageBreakBefore/><w:widowControl w:val="0"/><w:spacing w:before="100" w:beforeAutospacing="1"/><w:tabs><w:tab w:val="center" w:leader="hyphen" w:pos="2000"/></w:tabs><w:pBdr><w:between w:val="single" w:sz="4" w:space="1" w:color="000000" w:shadow="1"/></w:pBdr><w:jc w:val="distribute"/></w:pPr></w:p>"#,
+        r#"<w:p><w:pPr><w:jc w:val="lowKashida"/></w:pPr></w:p>"#,
+        // A hanging indent in character units is a negative count of them.
+        r#"<w:p><w:pPr><w:ind w:hangingChars="100"/></w:pPr></w:p>"#,
+    ]
+    .concat();
+    let translation = translate(&open(&body));
+    let found = paragraphs(&translation);
+    let first = found[0].props();
+    assert!(first.keep_lines() && first.page_break_before() && !first.widow_control());
+    assert!(first.spacing().before_auto() && !first.spacing().after_auto());
+    assert_eq!(
+        first.tabs(),
+        [ir::TabStop::default()
+            .with_position(Pt(100.0))
+            .with_kind(ir::TabKind::Center)
+            .with_leader(ir::TabLeader::Hyphen)]
+    );
+    assert_eq!(
+        first.borders().between(),
+        Some(
+            ir::Border::default()
+                .with_width(Pt(0.5))
+                .with_space(Pt(1.0))
+                .with_color(ir::ColorValue::Rgb(officewright_core::Color::rgb(0, 0, 0)))
+                .with_shadow(true)
+        )
+    );
+    assert_eq!(first.alignment(), ir::Alignment::Distribute);
+    assert_eq!(found[1].props().alignment(), ir::Alignment::Both);
+    let left_out: Vec<String> = translation
+        .left_out()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        left_out,
+        [
+            "sections[0].blocks[1]: the alignment lowKashida is laid out as justified",
+            "sections[0].blocks[2]: indents or spacing in character or line units keep their value in points",
+        ]
+    );
+    // Without the settings part, Word's default tab stop.
+    assert_eq!(
+        translation.document().settings().default_tab_stop(),
+        Pt(36.0)
+    );
+}
+
+#[test]
+fn translates_every_run_style_property() {
+    let body = r#"<w:p><w:r><w:rPr><w:rFonts w:hint="eastAsia"/><w:bCs/><w:iCs/><w:szCs w:val="30"/><w:dstrike/><w:rtl/><w:cs/><w:highlight w:val="darkCyan"/></w:rPr><w:t>a</w:t></w:r></w:p>"#;
+    let translation = translate(&open(body));
+    let id = style_of(&paragraphs(&translation)[0].inlines()[0]);
+    let style = translation.document().run_style(id).unwrap();
+    assert_eq!(style.fonts().hint(), ir::FontHint::EastAsia);
+    assert!(style.bold_complex_script() && style.italic_complex_script());
+    assert!(!style.bold() && !style.italic());
+    assert_eq!(style.size_complex_script(), Pt(15.0));
+    assert!(style.double_strike() && !style.strike());
+    assert!(style.rtl() && style.complex_script());
+    assert_eq!(
+        style.highlight(),
+        Some(officewright_core::Color::rgb(0x00, 0x80, 0x80))
+    );
+}
+
+#[test]
+fn assembles_fields_at_the_edges() {
+    let begin = |style: &str| {
+        format!(r#"<w:r><w:rPr>{style}</w:rPr><w:fldChar w:fldCharType="begin"/></w:r>"#)
+    };
+    let instruction = |text: &str| {
+        format!(r#"<w:r><w:instrText xml:space="preserve">{text}</w:instrText></w:r>"#)
+    };
+    let separate = r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#;
+    let end = r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#;
+    let body = [
+        // The value of a field takes the style of its result's first piece, else that of
+        // its beginning.
+        format!(
+            r#"<w:p>{}{}{separate}<w:r><w:rPr><w:b/></w:rPr><w:t>7</w:t></w:r>{end}{}{}{end}</w:p>"#,
+            begin("<w:i/>"),
+            instruction("PAGE \\* roman \\* arabic"),
+            begin("<w:i/>"),
+            instruction("NUMPAGES \\* Ordinal"),
+        ),
+        // Two fields open at the paragraph's end: closed there, the inner result part of
+        // the outer one's.
+        format!(
+            r#"<w:p>{}{}{separate}{}{}{}{separate}{}</w:p>"#,
+            begin(""),
+            instruction("PAGE"),
+            text_run("1"),
+            begin(""),
+            instruction("NUMPAGES"),
+            text_run("2"),
+        ),
+        // A page number inside a field is left out; a carriage return in text is a
+        // space; breaks clear to the left and to the right.
+        format!(
+            r#"<w:p><w:fldSimple w:instr="TIME"><w:r><w:pgNum/></w:r><w:r><w:t>12:00</w:t></w:r></w:fldSimple>{}{}{separate}<w:r><w:pgNum/></w:r>{end}<w:r><w:t>a&#13;b</w:t><w:br w:clear="left"/><w:br w:clear="right"/><w:sym w:font="Segoe" w:char="1F600"/></w:r></w:p>"#,
+            begin(""),
+            instruction("SECTIONPAGES"),
+        ),
+    ]
+    .concat();
+    let translation = translate(&open(&body));
+    let ir = translation.document();
+    let found = paragraphs(&translation);
+    let ir::Inline::Field(page) = &found[0].inlines()[0] else {
+        panic!("a field");
+    };
+    let bold = ir.run_style(page.style()).unwrap();
+    assert!(bold.bold() && !bold.italic());
+    // Of two number formats, the first counts.
+    assert_eq!(page.format(), &Some(ir::NumberFormat::LowerRoman));
+    let ir::Inline::Field(pages) = &found[0].inlines()[1] else {
+        panic!("a field");
+    };
+    assert!(ir.run_style(pages.style()).unwrap().italic());
+    assert_eq!(pages.format(), &Some(ir::NumberFormat::Ordinal));
+    assert_eq!(
+        contents(&translation)[1],
+        ["field Page None [text 1, text 2]"]
+    );
+    assert_eq!(
+        contents(&translation)[2],
+        [
+            "field Other(\"TIME\") None [text 12:00]",
+            "field SectionPages None []",
+            "text a b",
+            "break Line(Left)",
+            "break Line(Right)",
+        ]
+    );
+    let left_out: Vec<&str> = translation
+        .left_out()
+        .iter()
+        .map(LeftOut::message)
+        .collect();
+    assert_eq!(
+        left_out,
+        [
+            "a page number (w:pgNum) inside a field is left out",
+            "a page number (w:pgNum) inside a field is left out",
+            "a symbol beyond U+FFFF (1F600) is left out",
+        ]
+    );
+}
+
+#[test]
+fn bounds_what_long_names_and_tags_copy() {
+    // A font name and a language tag far longer than any are copied cut, or not at all,
+    // into each symbol and run style: memory stays in proportion to the document.
+    let styles = format!(
+        r#"<w:styles xmlns:w="{W}"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="{}"/><w:lang w:val="{}"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>"#,
+        "A".repeat(1000),
+        "l".repeat(100)
+    );
+    let body = r#"<w:p><w:r><w:sym w:char="F020"/><w:sym w:char="F021"/></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>b</w:t></w:r></w:p>"#;
+    let document = with_parts(body, &[("styles", "styles.xml", styles)]);
+    let translation = translate(&document);
+    let ir = translation.document();
+    for inline in paragraphs(&translation)[0].inlines() {
+        let style = match inline {
+            ir::Inline::Symbol { font, style, .. } => {
+                assert_eq!(font.len(), 256);
+                *style
+            }
+            inline => style_of(inline),
+        };
+        let style = ir.run_style(style).unwrap();
+        assert_eq!(style.fonts().ascii().len(), 256);
+        assert_eq!(style.language().latin(), None);
+    }
+    let left_out: Vec<&str> = translation
+        .left_out()
+        .iter()
+        .map(LeftOut::message)
+        .collect();
+    assert!(left_out.contains(&"a language tag of more than 64 bytes is left out"));
+    assert!(left_out.contains(&"a font name of more than 256 characters is cut"));
+    // A tag of 64 bytes is passed on.
+    let styles = format!(
+        r#"<w:styles xmlns:w="{W}"><w:docDefaults><w:rPrDefault><w:rPr><w:lang w:val="{}"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>"#,
+        "l".repeat(64)
+    );
+    let document = with_parts(
+        "<w:p><w:r><w:t>c</w:t></w:r></w:p>",
+        &[("styles", "styles.xml", styles)],
+    );
+    let translation = translate(&document);
+    let style = translation
+        .document()
+        .run_style(style_of(&paragraphs(&translation)[0].inlines()[0]))
+        .unwrap();
+    assert_eq!(style.language().latin().map(str::len), Some(64));
+}
+
+#[test]
+fn translates_the_rest_of_settings_and_sections() {
+    let settings = format!(
+        r#"<w:settings xmlns:w="{W}"><w:compat><w:usePrinterMetrics/><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="13"/><w:compatSetting w:name="usePrinterMetrics" w:uri="http://schemas.microsoft.com/office/word" w:val="true"/><w:compatSetting w:name="overrideTableStyleFontSizeAndJustification" w:uri="http://schemas.microsoft.com/office/word" w:val="on"/></w:compat></w:settings>"#
+    );
+    let body = r#"<w:p/><w:sectPr><w:type w:val="evenPage"/><w:pgNumType w:chapStyle="2" w:chapSep="colon"/><w:cols w:space="1080"/></w:sectPr>"#;
+    let document = with_parts(body, &[("settings", "settings.xml", settings)]);
+    let translation = translate(&document);
+    let ir = translation.document();
+    assert_eq!(ir.settings().compat_mode(), ir::CompatMode::Word2007);
+    // A flag given twice is passed once; "true" and "on" are on.
+    let flags: Vec<&str> = ir
+        .settings()
+        .compat_flags()
+        .iter()
+        .map(ir::CompatFlag::name)
+        .collect();
+    assert_eq!(
+        flags,
+        [
+            "usePrinterMetrics",
+            "overrideTableStyleFontSizeAndJustification"
+        ]
+    );
+    let section = &ir.sections()[0];
+    assert_eq!(section.start(), ir::SectionStart::EvenPage);
+    assert_eq!(section.page_numbering().chapter_style(), Some(2));
+    assert_eq!(section.columns().spacing(), Pt(54.0));
+}
+
+#[test]
+fn translates_list_overrides_links_and_restarts() {
+    let level = |ilvl: u8, extra: &str| {
+        format!(
+            r#"<w:lvl w:ilvl="{ilvl}"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%{}."/>{extra}</w:lvl>"#,
+            ilvl + 1
+        )
+    };
+    let numbering = format!(
+        r#"<w:numbering xmlns:w="{W}"><w:abstractNum w:abstractNumId="1"><w:numStyleLink w:val="Outline"/></w:abstractNum><w:abstractNum w:abstractNumId="2"><w:styleLink w:val="Outline"/>{}{}</w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="1"/><w:lvlOverride w:ilvl="8"><w:startOverride w:val="4"/></w:lvlOverride><w:lvlOverride w:ilvl="9"><w:startOverride w:val="4"/></w:lvlOverride><w:lvlOverride w:ilvl="1"><w:lvl w:ilvl="1"><w:start w:val="6"/><w:lvlRestart w:val="0"/><w:numFmt w:val="upperRoman"/><w:lvlText w:val="%2"/></w:lvl></w:lvlOverride></w:num><w:num w:numId="2"><w:abstractNumId w:val="2"/></w:num></w:numbering>"#,
+        level(0, r#"<w:lvlJc w:val="center"/><w:lvlRestart w:val="8"/>"#),
+        level(1, ""),
+    );
+    let styles = format!(
+        r#"<w:styles xmlns:w="{W}"><w:style w:type="numbering" w:styleId="Outline"><w:name w:val="Outline"/><w:pPr><w:numPr><w:numId w:val="2"/></w:numPr></w:pPr></w:style></w:styles>"#
+    );
+    let item =
+        r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr></w:p>"#;
+    let document = with_parts(
+        item,
+        &[
+            ("numbering", "numbering.xml", numbering),
+            ("styles", "styles.xml", styles),
+        ],
+    );
+    let translation = translate(&document);
+    let ir = translation.document();
+    let list = paragraphs(&translation)[0].list().unwrap();
+    let instance = ir.list_instance(list.instance()).unwrap();
+    // The instance's definition links to a numbering style: the levels are those of the
+    // definition the style's instance uses.
+    let definition = ir.list(instance.definition()).unwrap();
+    let first = &definition.levels()[0];
+    assert_eq!(first.alignment(), ir::LevelAlignment::Center);
+    // Word takes 0 to 7 for w:lvlRestart: 8 is the default.
+    assert_eq!(first.restart(), ir::Restart::Default);
+    assert_eq!(definition.levels().len(), 2);
+    // Overrides of levels 0 to 8 only; a replacing level keeps the IR's start and
+    // restart, which Word ignores.
+    let overrides: Vec<u8> = instance
+        .overrides()
+        .iter()
+        .map(ir::LevelOverride::level)
+        .collect();
+    assert_eq!(overrides, [8, 1]);
+    let replacement = instance.overrides()[1].replacement().as_ref().unwrap();
+    assert_eq!(replacement.format(), &ir::NumberFormat::UpperRoman);
+    assert_eq!(
+        (replacement.start(), replacement.restart()),
+        (0, ir::Restart::Default)
     );
 }

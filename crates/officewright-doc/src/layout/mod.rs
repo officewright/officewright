@@ -15,7 +15,6 @@ mod style;
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
 
 use officewright_layout::ReportKind;
 use officewright_layout::ir;
@@ -34,6 +33,22 @@ impl Document {
     /// Not translated yet, and listed: tables, headers and footers, footnotes and
     /// endnotes, drawings, pictures and other objects, equations, and indents and spacing
     /// given in character or line units, which keep their value in points.
+    ///
+    /// ```
+    /// # fn main() -> officewright_doc::Result<()> {
+    /// use officewright_doc::Document;
+    ///
+    /// let document = Document::open("tests/data/hello.docx")?;
+    /// let translation = document.to_layout_ir();
+    /// // The IR is valid for every document the reader opens.
+    /// assert!(translation.document().validate().is_ok());
+    /// assert_eq!(translation.document().sections().len(), 1);
+    /// for entry in translation.left_out() {
+    ///     println!("{entry}");
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     #[cfg_attr(not(feature = "unstable-ir"), doc(hidden))]
     pub fn to_layout_ir(&self) -> Translation {
         Translator::new(self).translate()
@@ -115,9 +130,8 @@ struct Translator<'a> {
     ir: ir::Document,
     run_styles: style::RunStyles,
     lists: list::Lists,
-    /// A key per paragraph style, for contextual spacing; a paragraph without a style has
-    /// 0.
-    style_keys: HashMap<Arc<str>, ir::StyleKey>,
+    /// A key per paragraph style, by its place among the styles, for contextual spacing.
+    style_keys: HashMap<usize, ir::StyleKey>,
     left_out: Vec<LeftOut>,
     /// Entries not listed once the list is full.
     omitted: usize,
@@ -199,17 +213,20 @@ impl<'a> Translator<'a> {
         out
     }
 
-    /// The key of a paragraph style, for contextual spacing.
-    fn style_key(&mut self, style: Option<&str>) -> ir::StyleKey {
-        let Some(style) = style else {
+    /// The key of a paragraph's style, for contextual spacing: one per style, by its
+    /// place among the styles, so that a paragraph without `w:pStyle` has the key of
+    /// the default paragraph style it takes, and no style id is hashed per paragraph.
+    /// Without a paragraph style at all, the key 0, which no style has.
+    fn style_key(&mut self, paragraph: crate::model::Paragraph<'a>) -> ir::StyleKey {
+        let Some(style) = self.formats.paragraph_style_index(paragraph) else {
             return ir::StyleKey::default();
         };
-        if let Some(&key) = self.style_keys.get(style) {
+        if let Some(&key) = self.style_keys.get(&style) {
             return key;
         }
         let number = u32::try_from(self.style_keys.len() + 1).unwrap_or(u32::MAX);
         let key = ir::StyleKey::new(number);
-        self.style_keys.insert(style.into(), key);
+        self.style_keys.insert(style, key);
         key
     }
 

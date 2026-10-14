@@ -94,11 +94,15 @@ impl<'a> Translator<'a> {
                     content.push(ir::Inline::line_break(ir::BreakClear::None, style));
                 }
                 RunContent::Symbol { font, char } => {
-                    let font = font.unwrap_or(format.fonts().ascii());
                     // w:sym writes four hexadecimal digits.
-                    if let Ok(code) = u16::try_from(u32::from(char)) {
-                        content.push(ir::Inline::symbol(font, code, style));
-                    }
+                    let Ok(code) = u16::try_from(u32::from(char)) else {
+                        self.leave_out(ReportKind::FeatureUnsupported, || {
+                            format!("a symbol beyond U+FFFF ({:X}) is left out", u32::from(char))
+                        });
+                        continue;
+                    };
+                    let font = self.font_name(font.unwrap_or(format.fonts().ascii()));
+                    content.push(ir::Inline::symbol(font, code, style));
                 }
                 RunContent::FieldChar(FieldCharKind::Begin) => content.begin(style),
                 RunContent::FieldChar(FieldCharKind::Separate) => content.separate(),
@@ -118,10 +122,18 @@ impl<'a> Translator<'a> {
                 RunContent::CommentReference(_) | RunContent::LastRenderedPageBreak => {}
                 // The legacy page number: a PAGE field (ECMA-376 Part 1, §17.3.3.22).
                 RunContent::Other(other) if other.local_name() == "pgNum" => {
-                    content.push(ir::Inline::Field(ir::Field::new(
-                        ir::FieldKind::Page,
-                        style,
-                    )));
+                    if content.fields.is_empty() {
+                        content.push(ir::Inline::Field(ir::Field::new(
+                            ir::FieldKind::Page,
+                            style,
+                        )));
+                    } else {
+                        // The IR holds no field inside another's result, and the page
+                        // number has no result to stand for it.
+                        self.leave_out(ReportKind::FeatureUnsupported, || {
+                            "a page number (w:pgNum) inside a field is left out".into()
+                        });
+                    }
                 }
                 RunContent::Other(other) => {
                     let message = match other.local_name() {

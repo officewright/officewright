@@ -21,7 +21,7 @@ pub(super) fn paragraph<'a>(t: &mut Translator<'a>, paragraph: Paragraph<'a>) ->
         let level = u8::try_from(list.level_number()).ok()?;
         Some(ir::ListItem::new(instance, level, label))
     });
-    let props = props(t, &format);
+    let props = props(t, &format).with_style_key(t.style_key(paragraph));
     t.path.push(super::Step::Field("inlines"));
     let inlines = t.inlines(paragraph, mark);
     t.path.pop();
@@ -97,7 +97,6 @@ fn props(t: &mut Translator<'_>, format: &ParagraphFormat) -> ir::ParagraphProps
         .with_word_wrap(format.word_wrap())
         .with_suppress_auto_hyphens(format.suppress_auto_hyphens())
         .with_outline_level(format.outline_level())
-        .with_style_key(t.style_key(format.style()))
 }
 
 /// A tab stop; a stop that clears one of a lower level is not in a format.

@@ -17,6 +17,10 @@ use crate::model::{
 /// keeps a copy of the names per run style.
 const MAX_FONT_NAME: usize = 256;
 
+/// The longest language tag passed on, in bytes; a longer one is left out. BCP 47 tags
+/// are far shorter, and the IR keeps a copy of the tags per run style.
+const MAX_LANGUAGE: usize = 64;
+
 /// How many formats with the same key a new one is compared with before it gets a run
 /// style of its own: sharing styles saves memory, it does not change the layout, so the
 /// work it takes stays bounded.
@@ -43,41 +47,43 @@ impl Translator<'_> {
         }
         let style = self.translate_run_style(format);
         let id = self.ir.add_run_style(style);
-        self.run_styles
-            .by_key
-            .entry(key)
-            .or_default()
-            .push((format.clone(), id));
+        // Formats past the ones compared with are not kept.
+        let styles = self.run_styles.by_key.entry(key).or_default();
+        if styles.len() < MAX_COMPARISONS {
+            styles.push((format.clone(), id));
+        }
         id
     }
 
     fn translate_run_style(&mut self, format: &CharacterFormat) -> ir::RunStyle {
         let families = format.fonts();
+        let east_asia = self.font_name(families.east_asia());
+        // Some characters take the East Asian font only for Chinese ones, by the font
+        // table's character set of that font (MS-OI29500 2.1.88 b). The name looked up is
+        // the one cut, so the work stays bounded per run style.
+        let charset = self
+            .document
+            .font(&east_asia)
+            .and_then(|font| font.charset());
         let mut fonts = ir::RunFonts::default()
             .with_ascii(self.font_name(families.ascii()))
             .with_high_ansi(self.font_name(families.high_ansi()))
-            .with_east_asia(self.font_name(families.east_asia()))
+            .with_east_asia(east_asia)
             .with_complex_script(self.font_name(families.complex_script()))
             .with_hint(match families.hint() {
                 None | Some(FontHint::Default) => ir::FontHint::Default,
                 Some(FontHint::EastAsia) => ir::FontHint::EastAsia,
                 Some(FontHint::ComplexScript) => ir::FontHint::ComplexScript,
             });
-        // Some characters take the East Asian font only for Chinese ones, by the font
-        // table's character set of that font (MS-OI29500 2.1.88 b).
-        let charset = self
-            .document
-            .font(families.east_asia())
-            .and_then(|font| font.charset());
         fonts = fonts.with_east_asia_charset(match charset {
             Some(0x88) => ir::EastAsiaCharset::ChineseBig5,
             Some(0x86) => ir::EastAsiaCharset::Gb2312,
             _ => ir::EastAsiaCharset::Other,
         });
         let language = ir::Language::default()
-            .with_latin(format.language().map(str::to_owned))
-            .with_east_asia(format.language_east_asia().map(str::to_owned))
-            .with_bidi(format.language_bidi().map(str::to_owned));
+            .with_latin(self.language(format.language()))
+            .with_east_asia(self.language(format.language_east_asia()))
+            .with_bidi(self.language(format.language_bidi()));
         ir::RunStyle::default()
             .with_fonts(fonts)
             .with_size(format.size())
@@ -113,8 +119,20 @@ impl Translator<'_> {
             .with_language(language)
     }
 
+    /// A language tag as the IR gets it: none past [`MAX_LANGUAGE`] bytes.
+    fn language(&mut self, tag: Option<&str>) -> Option<String> {
+        let tag = tag?;
+        if tag.len() > MAX_LANGUAGE {
+            self.leave_out(ReportKind::FeatureUnsupported, || {
+                format!("a language tag of more than {MAX_LANGUAGE} bytes is left out")
+            });
+            return None;
+        }
+        Some(tag.to_owned())
+    }
+
     /// A font name as the IR gets it: cut to [`MAX_FONT_NAME`] characters.
-    fn font_name(&mut self, name: &str) -> String {
+    pub(super) fn font_name(&mut self, name: &str) -> String {
         match name.char_indices().nth(MAX_FONT_NAME) {
             Some((end, _)) => {
                 self.leave_out(ReportKind::FeatureUnsupported, || {

@@ -164,6 +164,18 @@ impl<'a> Formats<'a> {
         Some(self.resolve_run(style, &properties.mark, label.as_deref()))
     }
 
+    /// The place among the styles of a paragraph's style: its own, else the default
+    /// paragraph style; none for a paragraph of another document. For the translation
+    /// into the layout IR, which keys contextual spacing by it.
+    // reason: only the translation into the layout IR asks for it.
+    #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
+    pub(crate) fn paragraph_style_index(&mut self, paragraph: Paragraph<'a>) -> Option<usize> {
+        if !std::ptr::eq(paragraph.document(), self.document) {
+            return None;
+        }
+        self.paragraph_style(Some(paragraph.node()))
+    }
+
     /// How many times a style's own properties were read, for tests of the work done.
     #[cfg(test)]
     pub(crate) fn style_reads(&self) -> usize {

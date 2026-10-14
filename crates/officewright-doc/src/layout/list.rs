@@ -40,9 +40,13 @@ impl Translator<'_> {
                 Some(
                     ir::LevelOverride::new(level)
                         .with_start(over.start().map(start))
-                        .with_replacement(
-                            over.definition().map(|replacement| self.level(replacement)),
-                        ),
+                        // Word ignores a replacing level's start and restart rule
+                        // (MS-OI29500 2.1.282 b, 2.1.292 b): the IR wants its defaults.
+                        .with_replacement(over.definition().map(|replacement| {
+                            self.level(replacement)
+                                .with_start(0)
+                                .with_restart(ir::Restart::Default)
+                        })),
                 )
             });
             let overrides: Vec<_> = overrides.collect();
