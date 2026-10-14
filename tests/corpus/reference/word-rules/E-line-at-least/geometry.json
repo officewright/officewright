@@ -1,7 +1,7 @@
 {
  "format": 1,
  "document": "word-rules/E-line-at-least.docx",
- "pdf_sha256": "fe259f68b16d57650f4e1fccba57eb0a99e770d7aa96f498fdddc848ad5c2a77",
+ "pdf_sha256": "f446f05e983a75a10d50c3f87169ad7be715516adf7195ceee5ae5d72204c32f",
  "made_with": "pdftotext 24.02.0 -bbox-layout",
  "units": "points, origin at the top left of the page, y downwards",
  "page_count": 1,

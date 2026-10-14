@@ -692,9 +692,33 @@ class Import(unittest.TestCase):
         self.change_resaved(record, {
             "word/settings.xml": [
                 (b'<w:listSeparator w:val=","/>', b'<w:listSeparator w:val=";"/>'),
+                (b'<w:decimalSymbol w:val="."/>', b'<w:decimalSymbol w:val=","/>'),
             ],
         })
         self.assertEqual(len(self.run_import(allow_locale=True)), 2)
+        # SOURCES.md names what was accepted, and only for that document.
+        rows = [
+            line for line in (self.corpus / "SOURCES.md").read_text(encoding="utf-8").splitlines()
+            if "accepted with --allow-locale" in line
+        ]
+        self.assertEqual(len(rows), 1)
+        self.assertIn(
+            f"| reference/word-rules/{rules.documents()[0].name}/ ", rows[0]
+        )
+        self.assertIn(
+            "accepted with --allow-locale: the re-saved copy has decimalSymbol ',', "
+            "the re-saved copy has listSeparator ';'",
+            rows[0],
+        )
+
+    def test_a_locale_trace_that_would_break_the_table_is_refused(self):
+        record = self.add_result(rules.documents()[0])
+        self.change_resaved(record, {
+            "word/settings.xml": [
+                (b'<w:listSeparator w:val=","/>', b'<w:listSeparator w:val="|"/>'),
+            ],
+        })
+        self.assertIn("which would break the SOURCES.md table", self.refused(allow_locale=True))
 
     def test_refuses_values_that_would_break_the_table(self):
         for key, value in (("word_build", "16.0 | x"), ("rendered", "today"),
@@ -1173,6 +1197,79 @@ class BodyParagraphs(unittest.TestCase):
             (second["style_id"], second["style_name"]), ("AlsoDefault", "Also Default")
         )
 
+    def test_an_empty_paragraph_with_a_hidden_mark_is_folded_into_the_next(self):
+        w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+
+        def paragraph(text, mark="", run="", style=None):
+            p_style = f'<w:pStyle w:val="{style}"/>' if style else ""
+            mark_xml = f"<w:rPr>{mark}</w:rPr>" if mark else ""
+            p_pr = f"<w:pPr>{p_style}{mark_xml}</w:pPr>" if style or mark else ""
+            r = f"<w:r><w:rPr>{run}</w:rPr><w:t>{text}</w:t></w:r>" if text or run else ""
+            return f"<w:p>{p_pr}{r}</w:p>"
+
+        hidden = "<w:vanish/>"
+        document = (
+            f"<w:document {w}><w:body>"
+            + paragraph("Before")
+            + paragraph("", hidden)  # folded into "Impact", as Word folds it
+            + paragraph("", '<w:vanish w:val="true"/>')  # folded too
+            + paragraph("Impact", style="Heading3")
+            + paragraph("Hidden mark", hidden)  # text: not folded
+            + paragraph("", '<w:vanish w:val="0"/>')
+            + paragraph("", '<w:vanish w:val="false"/>')
+            + paragraph("", '<w:vanish w:val="off"/>')
+            + paragraph("")
+            + paragraph("", "<w:b/>")
+            + paragraph("", run=hidden)  # a hidden run, not a hidden mark
+            + paragraph("After", style="Heading3")
+            + "</w:body></w:document>"
+        )
+        styles = (
+            f"<w:styles {w}>"
+            '<w:style w:type="paragraph" w:default="1" w:styleId="Normal">'
+            '<w:name w:val="Normal"/></w:style>'
+            '<w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="heading 3"/>'
+            "</w:style></w:styles>"
+        )
+        parts = {"word/document.xml": document.encode(), "word/styles.xml": styles.encode()}
+        normal = ("Normal", "Normal")
+        texts = ["Before", "Impact", "Hidden mark", "", "", "", "", "", "", "After"]
+        self.assertEqual(
+            importer.body_paragraph_styles(parts),
+            [
+                ("Before", *normal),
+                # Word gives the entry the formatting of the first paragraph folded into it,
+                # so the style of "Impact" is not the one Word applied.
+                ("Impact", None, None),
+                ("Hidden mark", *normal),
+                *[("", *normal)] * 6,
+                ("After", "Heading3", "heading 3"),
+            ],
+        )
+        # So the export of such a document lines up with the copy, and the folded entry
+        # gets no style id.
+        font = {"name": "Calibri", "size": 11, "bold": False, "italic": False,
+                "color": "auto", "theme": "minorHAnsi"}
+        export = {"format": 1, "complete": True, "runs": False, "runs_note": "", "stories": [
+            {"story": "main", "instance": 0, "paragraphs": [
+                {"index": i, "text": text, "style": None, "style_builtin": True,
+                 "left_indent": 0, "right_indent": 0, "first_line_indent": 0,
+                 "space_before": 0, "space_after": 0, "space_before_auto": False,
+                 "space_after_auto": False, "line_spacing": 12, "line_spacing_rule": "single",
+                 "alignment": "left", "list_string": "", "list_level": None, "font": font}
+                for i, text in enumerate(texts)
+            ]},
+        ]}
+        export = importer.read_formatting(json.dumps(export).encode())
+        result, note = importer.compact_formatting(export, parts, "x", "y")
+        self.assertTrue(result["styles_from_resaved_copy"])
+        self.assertNotIn("not matched", note)
+        paragraphs = result["stories"][0]["paragraphs"]
+        self.assertEqual(
+            [p.get("style_id") for p in paragraphs],
+            ["Normal", None] + ["Normal"] * 7 + ["Heading3"],
+        )
+
     def test_every_spelling_of_true_marks_the_default(self):
         w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
         document = (
@@ -1312,6 +1409,45 @@ class Summary(unittest.TestCase):
             lines[1],
             "  note: Helvetica is not embedded; rasterized with Arial Version 7.06, as Windows "
             "substitutes it for Helvetica",
+        )
+
+
+class FormattingNote(unittest.TestCase):
+    """SOURCES.md's note on a formatting export, made from the committed file."""
+
+    def result(self, **changes):
+        result = {"runs": True, "runs_note": "", "complete": True,
+                  "styles_from_resaved_copy": True,
+                  "stories": [{"paragraphs": [{}, {}]}, {"paragraphs": [{}]}]}
+        result.update(changes)
+        return result
+
+    def test_each_part_of_the_note(self):
+        note = importer.formatting_note
+        self.assertEqual(
+            note(self.result()), "formatting as Word computes it: 3 paragraphs, with runs"
+        )
+        self.assertEqual(
+            note(self.result(runs=False, runs_note=importer.SIZE_RUNS_NOTE)),
+            "formatting as Word computes it: 3 paragraphs, runs left out (size)",
+        )
+        self.assertEqual(
+            note(self.result(runs=False, complete=False, styles_from_resaved_copy=False)),
+            "formatting as Word computes it: 3 paragraphs, without runs, incomplete (time budget), "
+            "body styles not matched to the re-saved copy",
+        )
+
+    def test_a_file_over_the_limit_loses_its_runs_and_says_so(self):
+        font = {"name": "Calibri"}
+        paragraphs = [{"index": i, "text": "x", "font": 0, "runs": [[1, 1]] * 2000}
+                      for i in range(150)]
+        result = self.result(fonts=[font, dict(font, bold=True)], document="x.docx",
+                             stories=[{"story": "main", "instance": 0, "paragraphs": paragraphs}])
+        self.assertGreater(len(importer.formatting_bytes(result)), importer.MAX_FORMATTING_BYTES)
+        data, note = importer.within_size(result, importer.formatting_note(result))
+        self.assertLess(len(data), importer.MAX_FORMATTING_BYTES)
+        self.assertEqual(
+            note, "formatting as Word computes it: 150 paragraphs, runs left out (size)"
         )
 
 

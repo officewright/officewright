@@ -3268,6 +3268,9 @@ mod format;
 #[cfg(feature = "pdf")]
 mod layout;
 mod paragraph_format;
+#[cfg(feature = "pdf")]
+mod render;
+mod table_styles;
 
 /// The text of the paragraphs of some blocks, one line each.
 fn block_text<'a>(blocks: impl Iterator<Item = Block<'a>>) -> Vec<String> {
@@ -3588,4 +3591,45 @@ fn a_reference_to_a_part_of_the_other_kind_is_not_written() {
         );
     }
     assert!(sections[1].footer(HeaderFooterKind::First).is_none());
+}
+
+#[test]
+fn reads_the_conditional_formats_of_a_table_style() {
+    let styles = format!(
+        r#"<w:styles xmlns:w="{W}" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><w:style w:type="table" w:styleId="Grid"><w:name w:val="Grid"/><w:tblPr><w:tblStyleRowBandSize w:val="1"/></w:tblPr><w:tblStylePr w:type="firstRow"><w:rPr><w:b/></w:rPr><w:tcPr><w:shd w:val="clear" w:fill="FF0000"/></w:tcPr></w:tblStylePr><w:tblStylePr w:type="bogus"><w:rPr><w:i/></w:rPr></w:tblStylePr><mc:AlternateContent><mc:Choice Requires="w99"><w:tblStylePr w:type="lastRow"/></mc:Choice><mc:Fallback><w:tblStylePr w:type="band1Horz"><w:pPr><w:jc w:val="center"/></w:pPr><w:trPr><w:cantSplit/></w:trPr><w:tblPr><w:tblCellSpacing w:w="20" w:type="dxa"/></w:tblPr></w:tblStylePr></mc:Fallback></mc:AlternateContent></w:style></w:styles>"#
+    );
+    let document = with_part("styles", "styles.xml", &styles).unwrap();
+    let grid = document.styles().get("Grid").unwrap();
+    assert_eq!(grid.table_properties().row_band_size(), Some(1));
+    let formats: Vec<ConditionalFormat<'_>> = grid.conditional_formats().collect();
+    // A type that is not one is left out; the branch the reader takes is read.
+    let conditions: Vec<TableStyleCondition> =
+        formats.iter().map(|format| format.condition()).collect();
+    assert_eq!(
+        conditions,
+        [
+            TableStyleCondition::FirstRow,
+            TableStyleCondition::OddRowBand
+        ]
+    );
+    assert_eq!(formats[0].run_properties().bold(), Some(true));
+    assert_eq!(
+        formats[0]
+            .cell_properties()
+            .shading()
+            .and_then(|shading| shading.fill().value()),
+        Some(ColorValue::Rgb(0xFF, 0, 0))
+    );
+    assert_eq!(
+        formats[1].paragraph_properties().justification(),
+        Some(Justification::Center)
+    );
+    assert_eq!(formats[1].row_properties().cant_split(), Some(true));
+    assert_eq!(
+        formats[1].table_properties().cell_spacing(),
+        Some(TableWidth::Length(Pt(1.0)))
+    );
+    assert_eq!(formats[1].run_properties(), RunProperties::default());
+    // A style without them has none.
+    assert_eq!(document.styles().iter().count(), 1);
 }

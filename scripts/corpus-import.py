@@ -2,6 +2,7 @@
 """Imports reference renders made by scripts/windows/make-reference.ps1 into tests/corpus/.
 
     corpus-import.py RESULTS_DIR --group word-rules [--font-dir DIR]... [--dry-run]
+                     [--allow-locale]
 
 RESULTS_DIR is the -OutputDir of make-reference.ps1 (for example /mnt/c/officewright-ref/out
 under WSL). For every <name>.json there the script checks that
@@ -26,15 +27,22 @@ tests/corpus/reference/<group>/<name>/ go instead
   - geometry.json: page sizes and the position of every line and word (pdftotext
     -bbox-layout, in points from the top left of the page), the page count, Word's own page
     breaks (the w:lastRenderedPageBreak marks of the re-saved copy), and the fonts the PDF
-    references without embedding them.
+    references without embedding them;
+  - formatting.json, from make-reference.ps1 format 3 on: the formatting Word computes for
+    every paragraph of every story, with its runs of formatting when Word gave them, and the
+    body paragraphs' style ids and names taken from the re-saved copy.
 
 Word does not embed every font (Times New Roman and Arial, for example), and poppler would
 draw those with substitutes of its own. So before rasterizing, the script embeds the font
 Word used into a temporary copy of the PDF: the face in a --font-dir folder whose PostScript
 name is the PDF's font name (under WSL, /mnt/c/Windows/Fonts and the user font folder
-/mnt/c/Users/<name>/AppData/Local/Microsoft/Windows/Fonts). Only the glyph shapes come from
-that file; the positions stay those of the PDF. SOURCES.md and geometry.json name each such
-font with its version and SHA-256, never with its path.
+/mnt/c/Users/<name>/AppData/Local/Microsoft/Windows/Fonts). Helvetica and Helvetica,Bold,
+which no Windows font is named, are drawn with the faces Windows substitutes for them,
+ArialMT and Arial-BoldMT (SUBSTITUTES). Only the glyph shapes come from that file; the
+positions stay those of the PDF. SOURCES.md and geometry.json name each such font with its
+version and SHA-256, never with its path. The script cannot tell which build of a font Word
+had (#224): if a font was replaced after Word's render, pass a folder with the file Word
+used instead.
 
 The re-saved DOCX goes to tests/corpus/resaved/<group>/<name>.docx, and the document's row to
 the "Reference renders" table of tests/corpus/SOURCES.md. Nothing is written unless every
@@ -685,14 +693,22 @@ def alnum(text: str) -> str:
     return re.sub(r"\W+", "", text)
 
 
+def hidden_mark(paragraph: ElementTree.Element) -> bool:
+    """Whether the paragraph's own formatting hides its mark (w:vanish in w:pPr/w:rPr)."""
+    vanish = paragraph.find(f"{W}pPr/{W}rPr/{W}vanish")
+    return vanish is not None and vanish.get(f"{W}val", "true") not in ("0", "false", "off")
+
+
 def body_paragraph_styles(
     parts: dict[str, bytes],
 ) -> list[tuple[str, str | None, str | None]]:
     """(text, style id, style name) of the paragraphs of the body in order, the order of
     Word's main story: text boxes, alternative content and notes are stories of their own.
     Word's Paragraphs also count the end-of-row mark of every table row, which has no w:p;
-    it is ("", None, None) here, after the row's cells. The style is None where the copy does
-    not say which one Word applied."""
+    it is ("", None, None) here, after the row's cells. They fold an empty paragraph whose
+    mark is hidden into the paragraph after it, and so does this list; that paragraph gets
+    no style, since Word gives it the formatting of the first paragraph folded into it. The
+    style is None where the copy does not say which one Word applied."""
     root = ElementTree.fromstring(parts["word/document.xml"])
     styles = None
     if "word/styles.xml" in parts:
@@ -713,6 +729,7 @@ def body_paragraph_styles(
     MC = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
     other_stories = (f"{W}txbxContent", f"{MC}AlternateContent")
     out = []
+    folding = False
 
     def own_text(element: ElementTree.Element) -> str:
         """The text of a paragraph without the text of the text boxes it anchors."""
@@ -723,13 +740,24 @@ def body_paragraph_styles(
         return text
 
     def walk(element: ElementTree.Element) -> None:
+        nonlocal folding
         for child in element:
             if child.tag in other_stories:
                 continue
             if child.tag == f"{W}p":
+                text = own_text(child)
+                # In business/report-hhs-usability-test-plan, two empty list paragraphs with
+                # a hidden mark come before the Heading3 paragraph "Impact". Word's export has
+                # one entry for the three, with the text of "Impact" and the indents, spacing
+                # and list label of the first: Word drew "Impact" as Heading 3, unnumbered.
+                if not text and hidden_mark(child):
+                    folding = True
+                    continue
                 style = child.find(f"{W}pPr/{W}pStyle")
                 style_id = style.get(f"{W}val", default) if style is not None else default
-                out.append((own_text(child), style_id, names.get(style_id, style_id)))
+                if folding:
+                    style_id, folding = None, False
+                out.append((text, style_id, names.get(style_id, style_id)))
                 walk(child)  # a text box inside is skipped above
             elif child.tag == f"{W}tr":
                 walk(child)
@@ -807,14 +835,28 @@ def compact_formatting(
         "paragraph_formats": formats,
         "stories": stories,
     }
-    count = sum(len(s["paragraphs"]) for s in stories)
+    return result, formatting_note(result)
+
+
+SIZE_RUNS_NOTE = "left out to keep the file under 1 MB"
+
+
+def formatting_note(result: dict) -> str:
+    """SOURCES.md's note on a committed formatting.json, made from the file itself, so that
+    tests/corpus-tools can check the two agree."""
+    count = sum(len(story["paragraphs"]) for story in result["stories"])
     note = f"formatting as Word computes it: {count} paragraphs"
-    note += ", with runs" if export["runs"] else ", without runs"
-    if not export["complete"]:
+    if result["runs"]:
+        note += ", with runs"
+    elif result["runs_note"] == SIZE_RUNS_NOTE:
+        note += ", runs left out (size)"
+    else:
+        note += ", without runs"
+    if not result["complete"]:
         note += ", incomplete (time budget)"
-    if not styles_aligned:
+    if not result["styles_from_resaved_copy"]:
         note += ", body styles not matched to the re-saved copy"
-    return result, note
+    return note
 
 
 def formatting_bytes(result: dict) -> bytes:
@@ -835,8 +877,8 @@ def within_size(result: dict, note: str) -> tuple[bytes, str]:
         for paragraph in paragraphs:
             paragraph["font"] = renumbered[paragraph["font"]]
         result["runs"] = False
-        result["runs_note"] = "left out to keep the file under 1 MB"
-        note = note.replace(", with runs", ", runs left out (size)")
+        result["runs_note"] = SIZE_RUNS_NOTE
+        note = formatting_note(result)
         data = formatting_bytes(result)
     if len(data) > MAX_FORMATTING_BYTES:
         raise Refused(f"{result['document']}: formatting.json would be {len(data)} bytes")
@@ -887,7 +929,7 @@ PDFFONTS_TYPES = (
 # columns aside, and a name may hold spaces (a "#20" in the PDF), so the row is read by the
 # known types rather than by column positions.
 # The name is the shortest prefix before a known type. A name whose last word is "CID" and that
-# is too long for its column (36 characters) loses that word to the type "CID TrueType"; the
+# fills its column (36 characters or more) loses that word to the type "CID TrueType"; the
 # emb column is still read right, so such a font is never missed, only named short in a
 # refusal. pdffonts adds a bracketed suffix of two capitals to the type of an OpenType font.
 PDFFONTS_ROW = re.compile(
@@ -1224,6 +1266,11 @@ def with_fonts_embedded(pdf: Path, drawn: list[DrawnFont], directory: Path, tool
     return copy
 
 
+def locale_note(accepted: list[str]) -> str:
+    """How SOURCES.md names the language tags and number formats --allow-locale accepted."""
+    return "accepted with --allow-locale: " + ", ".join(accepted)
+
+
 def drawn_font_note(font: DrawnFont) -> str:
     """How SOURCES.md names a font the rasters draw with the maintainer's copy."""
     substitute = ""
@@ -1242,6 +1289,7 @@ def reference_row(
     poppler: str,
     dropped: list[str],
     formatting_note: str = "",
+    locale_accepted: list[str] | None = None,
 ) -> str:
     base = Path(record["file"]).stem
     windows = record["windows_version"]
@@ -1266,6 +1314,8 @@ def reference_row(
             or "none"
         ),
     ]
+    if locale_accepted:
+        notes.append(locale_note(locale_accepted))
     if formatting_note:
         notes.append(formatting_note)
     return (
@@ -1337,8 +1387,17 @@ def check_result(
         resaved_parts = read_parts(resaved)
         problems = docx_privacy_problems(resaved)
         problems += embedded_font_problems(resaved_parts)
+        # Accepted only by the maintainer's --allow-locale, and then named in SOURCES.md, so
+        # that tests/corpus-tools can tell an accepted trace from a later change.
+        accepted = locale_problems(original_parts, resaved_parts)
         if not allow_locale:
-            problems += locale_problems(original_parts, resaved_parts)
+            problems += accepted
+            accepted = []
+        problems += [
+            f"{trace}, which would break the SOURCES.md table"
+            for trace in accepted
+            if not FONT.match(trace)
+        ]
         mode = compatibility_mode(original_parts)
         resaved_mode = compatibility_mode(resaved_parts)
         # Word drops a legacy flag it does not apply in the document's mode, and adds
@@ -1394,7 +1453,7 @@ def check_result(
     formatting, formatting_note = None, ""
     if record["script_version"] >= 3:
         formatting, formatting_note = checked_formatting(record, results, resaved_parts, group)
-    row = reference_row(group, record, drawn, poppler, dropped, formatting_note)
+    row = reference_row(group, record, drawn, poppler, dropped, formatting_note, accepted)
     return Checked(record, pdf, resaved, row, geometry, drawn, formatting, formatting_note)
 
 

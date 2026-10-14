@@ -112,13 +112,14 @@ impl EmbeddedFontReference {
     /// The font program, TrueType or OpenType, as the part holds it once its first 32
     /// bytes are no longer obfuscated (ECMA-376 Part 1, §17.8.1). It is read when the
     /// document is opened. Only its first four bytes are checked; the program itself is
-    /// not read.
+    /// not parsed.
     ///
     /// None when the font table's relationships do not have the relationship, its target
     /// is no part of the package or one the package does not have, the part cannot be
     /// read, the key is not a GUID, or the bytes do not start as a font with or without
-    /// the key. The document's diagnostics report each: a relationship, target or key for
-    /// each font, a part once for each key it is read with, however many fonts name it.
+    /// the key. The document's diagnostics report each: a relationship, a target that is
+    /// no part, or a key for each font; a part the package does not have, cannot read or
+    /// that is no font once for each key it is read with, however many fonts name it.
     /// None, too, and not reported, for a font outside the package, which is never
     /// loaded.
     ///

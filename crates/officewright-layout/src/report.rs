@@ -57,6 +57,29 @@ impl LayoutReport {
     }
 }
 
+impl Extend<ReportEntry> for LayoutReport {
+    fn extend<T: IntoIterator<Item = ReportEntry>>(&mut self, entries: T) {
+        self.entries.extend(entries);
+    }
+}
+
+impl FromIterator<ReportEntry> for LayoutReport {
+    fn from_iter<T: IntoIterator<Item = ReportEntry>>(entries: T) -> Self {
+        Self {
+            entries: entries.into_iter().collect(),
+        }
+    }
+}
+
+impl IntoIterator for LayoutReport {
+    type Item = ReportEntry;
+    type IntoIter = std::vec::IntoIter<ReportEntry>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.into_iter()
+    }
+}
+
 impl<'a> IntoIterator for &'a LayoutReport {
     type Item = &'a ReportEntry;
     type IntoIter = std::slice::Iter<'a, ReportEntry>;
@@ -76,6 +99,26 @@ pub struct ReportEntry {
 }
 
 impl ReportEntry {
+    /// An entry of `kind` at `location`, saying `message`: for a producer of the layout IR
+    /// that reports what it leaves out, so that its entries and the layout's make one
+    /// report. Messages follow the crate's: lowercase, without a full stop at the end.
+    ///
+    /// ```
+    /// use officewright_layout::{LayoutReport, Location, ReportEntry, ReportKind};
+    ///
+    /// let place = Location::document().field("sections").index(0).field("blocks").index(3);
+    /// let entry = ReportEntry::new(ReportKind::FeatureUnsupported, place, "a chart is left out");
+    /// let report: LayoutReport = [entry].into_iter().collect();
+    /// assert_eq!(report.entries()[0].location().to_string(), "sections[0].blocks[3]");
+    /// ```
+    pub fn new(kind: ReportKind, location: Location, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            location,
+            message: message.into(),
+        }
+    }
+
     /// What kind of difference it is.
     pub fn kind(&self) -> ReportKind {
         self.kind
@@ -104,6 +147,11 @@ impl fmt::Display for ReportEntry {
 pub enum ReportKind {
     /// A font is not available and another one is used in its place.
     FontSubstituted,
+    /// A font is embedded with what its license or its format restricts: for viewing
+    /// and printing only, for editing but not installing, whole rather than as a subset,
+    /// or only the default instance of a variable font; or it cannot be embedded, and its
+    /// text is not drawn.
+    FontEmbedding,
     /// No available font has a glyph for a character; the font's missing-glyph shape
     /// is drawn.
     GlyphMissing,
@@ -114,7 +162,8 @@ pub enum ReportKind {
     FieldCached,
     /// A legacy compatibility option is set that the layout does not follow.
     CompatIgnored,
-    /// A value is beyond what Word accepts and was brought within its limits.
+    /// A value is beyond what Word accepts, or what a PDF holds, and was brought within
+    /// its limits.
     ValueClamped,
     /// Content does not fit its area, such as a word wider than its column.
     Overflow,
@@ -137,6 +186,24 @@ pub(crate) enum Step {
 }
 
 impl Location {
+    /// The document as a whole, which a producer extends with [`field`](Self::field) and
+    /// [`index`](Self::index) to name a place in it.
+    pub fn document() -> Self {
+        Self::default()
+    }
+
+    /// Field `name` of the value at this place.
+    pub fn field(mut self, name: &'static str) -> Self {
+        self.steps.push(Step::Field(name));
+        self
+    }
+
+    /// Position `index`, from 0, of the list at this place.
+    pub fn index(mut self, index: usize) -> Self {
+        self.steps.push(Step::Index(index));
+        self
+    }
+
     pub(crate) fn push(&mut self, step: Step) {
         self.steps.push(step);
     }

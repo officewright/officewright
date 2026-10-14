@@ -49,12 +49,16 @@ crates/
                         shapes with HarfRust, breaks lines first fit by UAX #14 (unicode-linebreak) with
                         Word's rules on top, and flows paragraphs onto the pages of each section with Word's
                         keep and widow rules, headers, footers and page numbers, behind private modules;
+                        feature `pdf` renders a document into PDF with officewright-pdf (`render_pdf`,
+                        hidden in the docs like the IR it takes, and `RenderOptions`);
                         feature `fuzzing` opens entry points for the fuzz targets, examples and the tests
                         with the test fonts and Word's renders, which are not API; `data/symbol.txt`
                         (Unicode's Adobe Symbol mapping) stays out of the published crate
-  officewright-doc      DOC/DOCX/RTF          (counterpart of Spire.Doc); feature `pdf` translates a document into
-                        the layout IR (`Document::to_layout_ir`), hidden in the docs and exempt from semver
-                        like the IR unless feature `unstable-ir`
+  officewright-doc      DOC/DOCX/RTF          (counterpart of Spire.Doc); feature `pdf` renders a document into PDF
+                        with the fonts it embeds first (`Document::save_pdf`, `save_pdf_path`, `save_pdf_bytes`,
+                        public, with the layout's report), through its translation into the layout IR
+                        (`Document::to_layout_ir`), hidden in the docs and exempt from semver like the IR unless
+                        feature `unstable-ir`
   officewright-pdf      PDF read/write        (counterpart of Spire.PDF); the drawing primitives the layout engine
                         paints with are public, but exempt from semver until 1.0 and hidden in the docs unless
                         feature `unstable-drawing`
@@ -71,8 +75,9 @@ tests/pdf-output/       checks text-to-pdf output, in Helvetica and with Liberat
                         (CFF) from tests/fonts embedded, the page of glyph runs and vector graphics that
                         officewright-pdf's example `primitives` draws in both fonts, and the JPEG and PNG files
                         images.py makes (also the fuzz seeds in fuzz/seeds/png and jpeg) drawn by the example
-                        `images`, with qpdf, pdftotext, pdffonts, pdfimages and pdftoppm (Linux, macOS; Windows
-                        has no official poppler build, and the golden snapshot proves the bytes are the same)
+                        `images`, with qpdf, pdftotext, pdffonts, pdfimages and pdftoppm, and what the example
+                        `embed_report` counts for fonts it cannot embed (Linux, macOS; Windows has no official
+                        poppler build, and the golden snapshot proves the bytes are the same)
 tests/corpus/           small curated real documents (committed) + SOURCES.md + baseline.json
 tests/corpus/word-rules/  documents written by scripts/make-rule-docs.py, one undocumented Word rule each
 tests/corpus/poi/        unmodified Apache POI test documents (Apache-2.0) with POI's LICENSE and NOTICE
@@ -106,6 +111,7 @@ scripts/check-capi.sh   checks such a prefix as a user would: files, exports, te
 scripts/package.sh      builds one release archive; release-in-container.sh wraps it for the Linux builds
 scripts/install-cargo-c.sh  the pinned prebuilt cargo-c, shared by ci.yml and release.yml
 scripts/nightly.sh      long-running checks (see below)
+scripts/check-test-fonts.sh  compares tests/fonts with the upstream sources THIRD-PARTY-NOTICES.md names
 scripts/make-rule-docs.py  writes tests/corpus/word-rules/ (stored ZIP, fixed dates: same bytes everywhere)
 scripts/import-public-docs.py  cleans the listed public documents into tests/corpus/business/
 scripts/make-business-docs.py  writes tests/corpus/generated/ the same way, with open-font twins
@@ -268,6 +274,7 @@ The maintainer does not review Rust code. Correctness rests on the automated gat
 ### 3. Fixes
 - Every blocker is fixed. Every should-fix is fixed or answered in the PR. The reviewer re-checks the blockers; repeat until the reviewer's last comment says "No blockers.".
 - GitHub Copilot's review comments: the author marks the PR ready for review, which is when Copilot reviews it, waits for that review and answers every finding in it before asking for the independent review, and any that come later as they arrive. When no Copilot review has come 30 minutes after the PR became ready for review (marked ready, or opened ready), the author says so in the PR and goes on. Every finding gets a reply: "fixed in <commit>", with the fix made as the Definition of done requires (a bug fix with a regression test that fails without it), or a short reason why not: wrong, already handled, or out of scope with a link to the issue that tracks it. Inline findings are answered in their thread; the low-confidence ones Copilot folds into the review body, which have no thread, in one PR comment quoting each. A fix, or a finding dismissed after the reviewer's last comment, goes to the reviewer like any other change; step 4 names the only changes that need not. Whether a Copilot finding is a blocker is for the independent reviewer to decide; Copilot's own wording never makes it one.
+- Temporary exception until 2026-11-01, because Copilot has no review quota until then: once the PR is ready for review, the author does not wait for a Copilot review, writes one line in the PR, "Copilot review unavailable until 2026-11-01 (quota)", and asks for the independent review at once (the upper PR of a stack still waits for the lower one's merge); that line is the reason step 4 asks for when there is no Copilot review. A Copilot review that arrives anyway is answered as above. A PR that carries the line keeps it after that date and needs no Copilot review. On 2026-11-01 the `maintenance` session deletes this item, and the Copilot steps apply again.
 
 ### 4. Merge
 The author squash-merges their own PR when all hold:
@@ -304,7 +311,7 @@ cargo package --list -p officewright-pdf, -font, -layout, -cli: no third-party d
 typos && taplo fmt --check && shellcheck scripts/*.sh .githooks/pre-commit && actionlint
 scripts/check-added-files.sh: no tracked Python bytecode, no file naming a home directory; its tests in tests/scripts
 tests/corpus-tools (Python unittest): committed rule documents equal make-rule-docs.py output; corpus-import.py refusals;
-  every file in tests/fonts is listed with its SHA-256 in THIRD-PARTY-NOTICES.md
+  every file in tests/fonts is listed with its SHA-256 in THIRD-PARTY-NOTICES.md, and check-test-fonts.sh's pins are its
 tests/corpus-tools/poppler (Linux, macOS): fonts corpus-import.py embeds are what poppler draws
 tests/corpus-tools/test_make_reference.ps1 (Windows): a Word step that hangs is stopped, checked and never waited on forever
 scripts/install-capi.sh target/capi --debug, copy the header, git diff --exit-code crates/officewright-ffi/include/officewright.h
@@ -326,7 +333,7 @@ PDF output of officewright text-to-pdf (tests/pdf-output): qpdf --check without 
 corpus-runner over tests/corpus (committed corpus), compared with tests/corpus/baseline.json
 ```
 
-`scripts/nightly.sh` (scheduled CI, hours): Miri on `officewright-ffi`, `fetch-corpus.sh --check all` (every pinned commit is still fetchable and every archive still has its pinned size; downloads nothing), fuzzing (30 min per target, each seeded with files of the format it reads, listed in `seeds()` in nightly.sh; crashing inputs uploaded as a CI artifact; from Milestone 3), corpus-runner over the Word documents of `corpus-ext/` (Apache POI and LibreOffice, fetched by the run; each child under the 1 GiB limit; compared with `tools/corpus-runner/baseline-ext.json`), report uploaded as a CI artifact. The full `fetch-corpus.sh all` from scratch, which downloads every source and verifies every SHA-256, runs weekly.
+`scripts/nightly.sh` (scheduled CI, hours): Miri on `officewright-ffi`, `fetch-corpus.sh --check all` (every pinned commit is still fetchable and every archive still has its pinned size; downloads nothing), the files of `tests/fonts` compared byte for byte with the upstream sources THIRD-PARTY-NOTICES.md names (`scripts/check-test-fonts.sh`), fuzzing (30 min per target, each seeded with files of the format it reads, listed in `seeds()` in nightly.sh; crashing inputs uploaded as a CI artifact; from Milestone 3), corpus-runner over the Word documents of `corpus-ext/` (Apache POI and LibreOffice, fetched by the run; each child under the 1 GiB limit; compared with `tools/corpus-runner/baseline-ext.json`), report uploaded as a CI artifact. The full `fetch-corpus.sh all` from scratch, which downloads every source and verifies every SHA-256, runs weekly.
 
 `.githooks/pre-commit` runs `scripts/check-added-files.sh --staged`, fmt, clippy and test. Enable once per clone: `git config core.hooksPath .githooks`. CI (`.github/workflows/ci.yml`) runs `check.sh` on Linux, Windows (Git Bash with the MSVC environment from `ilammy/msvc-dev-cmd`) and macOS plus an MSRV job on Rust 1.85 (`cargo test`, with poppler and qpdf for the corpus runner's tests); `nightly.yml` runs `nightly.sh` on Linux; `weekly.yml` runs the full corpus fetch on Linux. Actions are pinned by commit SHA and tools by version, except qpdf and poppler for the PDF output check and the MSRV job's corpus runner tests: they come from the runner's package manager (apt on `ubuntu-latest`, Homebrew on macOS), which keeps no installable old versions across runner image updates, so each CI step that installs them prints the versions it got.
 

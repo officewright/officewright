@@ -52,7 +52,7 @@ pub use settings::{
     ColorSchemeIndex, ColorSchemeMapping, CompatibilityMode, CompatibilityOption,
     CompatibilitySetting, Settings,
 };
-pub use styles::{Style, StyleKind, Styles};
+pub use styles::{ConditionalFormat, Style, StyleKind, Styles, TableStyleCondition};
 pub use table_properties::{
     CellBorders, CellMargins, CellMerge, HeightRule, HorizontalAlignment, PositionAnchor,
     RowHeight, TableBorders, TableCellProperties, TableJustification, TableLayout, TableLook,

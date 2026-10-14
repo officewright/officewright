@@ -298,7 +298,8 @@ class Doc:
     mode: int = 15
     compat_flags: tuple[str, ...] = ()
     numbering: str | None = None
-    # Style definitions added to styles.xml after the built-in ones, and before Normal.
+    # Style definitions added to styles.xml after the built-in ones (styles), or before
+    # Normal, ahead of the built-in ones (styles_before_normal).
     styles: str = ""
     styles_before_normal: str = ""
     # Whether Normal is marked w:default.
@@ -718,8 +719,10 @@ def tab_hanging(no_indent_tab: bool, mode: int = 15) -> Doc:
     variant = "with" if no_indent_tab else "without"
     name = "E-tab-hanging-noindenttab" if no_indent_tab else "E-tab-hanging"
     # Word 16 drops the flag from a document in mode 15 when it saves it and renders as if
-    # it were absent (the references of #13); in mode 14 Word may keep it, which the
-    # mode-14 pair is meant to show (#18).
+    # it were absent (the references of #13). In mode 14 it keeps the flag and applies it
+    # (#18, references of #50): the re-saved E-tab-hanging-noindenttab-14 still has it, and
+    # the text after the list label moves from 122.06 pt to 108.02 pt in case B and to
+    # 144.02 pt in case G (reference/word-rules/E-tab-hanging-noindenttab-14/geometry.json).
     where = ""
     if mode != 15:
         name += f"-{mode}"
@@ -1426,7 +1429,15 @@ def check(docs: list[Doc]) -> list[str]:
     present = {p.name for p in OUT_DIR.glob("*")} if OUT_DIR.is_dir() else set()
     for name in sorted(present - set(expected)):
         problems.append(f"tests/corpus/word-rules/{name} is not written by this script")
-    sources = SOURCES.read_text(encoding="utf-8")
+    lines = SOURCES.read_text(encoding="utf-8").splitlines()
+    rows = [number for number, line in enumerate(lines) if line.startswith("| word-rules/")]
+    # The rows are table rows: one block of table lines, right under the table's header.
+    if rows and not all(
+        line.startswith("|") for line in lines[rows[0] - 1 : rows[-1] + 1]
+    ):
+        problems.append(
+            "the word-rules rows of tests/corpus/SOURCES.md are not one block of its table"
+        )
     for name, doc in expected.items():
         path = OUT_DIR / name
         if name not in present:
@@ -1438,7 +1449,7 @@ def check(docs: list[Doc]) -> list[str]:
                 problems.append(f"{committed} differs from what this script writes")
             else:
                 problems.append(f"{committed} has the parts this script writes in other ZIP bytes")
-        if f"| word-rules/{name} |" not in sources:
+        if not any(lines[number].startswith(f"| word-rules/{name} |") for number in rows):
             problems.append(f"tests/corpus/SOURCES.md has no row for word-rules/{name}")
     return problems
 

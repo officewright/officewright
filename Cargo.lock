@@ -203,8 +203,10 @@ name = "officewright-doc"
 version = "0.1.0"
 dependencies = [
  "officewright-core",
+ "officewright-font",
  "officewright-layout",
  "officewright-opc",
+ "officewright-pdf",
 ]
 
 [[package]]
@@ -233,6 +235,7 @@ dependencies = [
  "insta",
  "officewright-core",
  "officewright-font",
+ "officewright-pdf",
  "unicode-linebreak",
  "unicode-script",
 ]

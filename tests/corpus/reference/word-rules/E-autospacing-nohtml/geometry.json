@@ -1,7 +1,7 @@
 {
  "format": 1,
  "document": "word-rules/E-autospacing-nohtml.docx",
- "pdf_sha256": "f807ab2984223375543c3d2fbfc57660163652da29b0a6fd649e9c36e717ff28",
+ "pdf_sha256": "34bacec6c417313904e1957eaf42f0fde783d1521750c880bd9026f88bffeaa8",
  "made_with": "pdftotext 24.02.0 -bbox-layout",
  "units": "points, origin at the top left of the page, y downwards",
  "page_count": 1,
