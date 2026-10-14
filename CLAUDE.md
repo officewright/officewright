@@ -54,9 +54,11 @@ crates/
                         feature `fuzzing` opens entry points for the fuzz targets, examples and the tests
                         with the test fonts and Word's renders, which are not API; `data/symbol.txt`
                         (Unicode's Adobe Symbol mapping) stays out of the published crate
-  officewright-doc      DOC/DOCX/RTF          (counterpart of Spire.Doc); feature `pdf` translates a document into
-                        the layout IR (`Document::to_layout_ir`), hidden in the docs and exempt from semver
-                        like the IR unless feature `unstable-ir`
+  officewright-doc      DOC/DOCX/RTF          (counterpart of Spire.Doc); feature `pdf` renders a document into PDF
+                        with the fonts it embeds first (`Document::save_pdf`, `save_pdf_path`, `save_pdf_bytes`,
+                        public, with the layout's report), through its translation into the layout IR
+                        (`Document::to_layout_ir`), hidden in the docs and exempt from semver like the IR unless
+                        feature `unstable-ir`
   officewright-pdf      PDF read/write        (counterpart of Spire.PDF); the drawing primitives the layout engine
                         paints with are public, but exempt from semver until 1.0 and hidden in the docs unless
                         feature `unstable-drawing`

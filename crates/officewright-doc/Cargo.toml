@@ -12,21 +12,35 @@ repository.workspace = true
 exclude = ["tests/layout_corpus.rs"]
 
 [features]
-# The document's translation into the layout engine's intermediate representation
-# (`Document::to_layout_ir`), on the way to PDF.
-pdf = ["dep:officewright-layout"]
+# The document rendered into PDF (`Document::save_pdf` and the like), through its
+# translation into the layout engine's intermediate representation
+# (`Document::to_layout_ir`).
+pdf = [
+  "dep:officewright-font",
+  "dep:officewright-layout",
+  "dep:officewright-pdf",
+  "officewright-layout/pdf",
+]
 # Shows `Document::to_layout_ir` and the layout IR in the documentation. Both are exempt
 # from semver until 1.0.
 unstable-ir = ["pdf", "officewright-layout/unstable-ir"]
 
 [dependencies]
 officewright-core.workspace = true
+# The fonts a document embeds go into the font book the layout renders with.
+officewright-font = { workspace = true, optional = true }
 officewright-layout = { workspace = true, optional = true }
 officewright-opc.workspace = true
+# The PDF the layout renders, written to a file, a writer or bytes.
+officewright-pdf = { workspace = true, optional = true }
 
 [lints]
 workspace = true
 
 [[example]]
 name = "ir_dump"
+required-features = ["pdf"]
+
+[[example]]
+name = "docx_to_pdf"
 required-features = ["pdf"]
