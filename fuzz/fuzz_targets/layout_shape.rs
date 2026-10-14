@@ -2,14 +2,17 @@
 //! tests/fonts, as the layout does: the first bytes describe up to four run styles
 //! (fonts, among them missing ones and the symbol fonts Symbol and Wingdings; bold,
 //! italic, capitals, small capitals, complex script, right to left, the East Asian hint,
-//! kerning; size), the rest are pieces of text, symbols, tabs and soft hyphens in those styles.
+//! kerning; size), the rest are pieces of text, symbols, tabs, soft hyphens, and page and
+//! column breaks in those styles.
 //! The paragraph must keep what the layout relies on (`check_paragraph`), and break into
 //! lines that hold its text in order, in a column, with a line spacing, an alignment, a
 //! hanging indent and tab stops the first bytes give too (`check_lines`). Up to four
 //! copies of it, kept with the next, kept together, with or without widow control and
 //! a page break before as the first bytes say, are then laid out on pages of a height
 //! they give, the last of them in a second section of a start the first bytes give when
-//! they say so, with every line on exactly one page inside its body (`check_pages`).
+//! they say so, with every line on exactly one page inside its body (`check_pages`);
+//! with the paragraph as their header and the page fields as their footer, in a number
+//! format, with a title page and even pages of their own, when the first bytes say so.
 #![no_main]
 
 use std::path::Path;
@@ -21,8 +24,9 @@ use officewright_core::Pt;
 use officewright_font::{FontBook, FontOrigin};
 use officewright_layout::fuzzing::{check_lines, check_pages, check_paragraph};
 use officewright_layout::ir::{
-    Alignment, Document, FontHint, Indent, Inline, LineSpacing, Margins, PageSetup, Paragraph,
-    ParagraphProps, RunFonts, RunStyle, Section, SectionStart, Spacing, TabKind, TabStop,
+    Alignment, Document, DocumentSettings, Field, FieldKind, FontHint, HeaderFooterSet, Indent,
+    Inline, LineSpacing, Margins, NumberFormat, PageSetup, Paragraph, ParagraphProps, RunFonts,
+    RunStyle, Section, SectionStart, Spacing, TabKind, TabStop,
 };
 
 const FAMILIES: [&str; 8] = [
@@ -89,7 +93,9 @@ fn style(bytes: &[u8]) -> RunStyle {
 fuzz_target!(|data: &[u8]| {
     // Longer paragraphs find nothing shorter ones do not, and slow the fuzzer down.
     let data = data.get(..2048).unwrap_or(data);
-    let mut document = Document::default();
+    // Even-page headers in use when bit 5 of byte 12 says so, as the footer below has them.
+    let even = data.get(12).is_some_and(|byte| byte & 32 != 0);
+    let mut document = Document::new(DocumentSettings::default().with_even_and_odd_headers(even));
     let mut styles = Vec::new();
     for chunk in data.chunks(4).take(4) {
         styles.push(document.add_run_style(style(chunk)));
@@ -112,13 +118,12 @@ fuzz_target!(|data: &[u8]| {
                 u16::from(body.first().copied().unwrap_or(0)) | 0xF000,
                 style,
             ),
-            _ => {
-                if head & 0x40 == 0 {
-                    Inline::tab(style)
-                } else {
-                    Inline::soft_hyphen(style)
-                }
-            }
+            _ => match head >> 6 {
+                0 => Inline::tab(style),
+                1 => Inline::soft_hyphen(style),
+                2 => Inline::page_break(style),
+                _ => Inline::column_break(style),
+            },
         });
     }
     if let Err(problem) = check_paragraph(book(), &document, &inlines) {
@@ -196,7 +201,41 @@ fuzz_target!(|data: &[u8]| {
     } else {
         Vec::new()
     };
-    document.add_section(Section::new(setup).with_blocks(blocks));
+    let mut section = Section::new(setup).with_blocks(blocks);
+    if flags & 64 != 0 {
+        // A footer of the page fields, in a number format byte 12 gives; a title page and
+        // even pages with their own frames when its bits say so.
+        let formats = [
+            NumberFormat::Decimal,
+            NumberFormat::UpperRoman,
+            NumberFormat::LowerLetter,
+            NumberFormat::Ordinal,
+            NumberFormat::Chicago,
+            NumberFormat::DecimalZero,
+            NumberFormat::None,
+            NumberFormat::Other("hebrew1".to_owned()),
+        ];
+        let format = formats[usize::from(byte(12)) % formats.len()].clone();
+        let field = |kind| Inline::Field(Field::new(kind, first).with_format(Some(format.clone())));
+        let numbers = Paragraph::new(first).with_inlines([
+            field(FieldKind::Page),
+            field(FieldKind::NumPages),
+            field(FieldKind::SectionPages),
+        ]);
+        let mut header = HeaderFooterSet::default().with_primary([paragraph.clone().into()]);
+        let mut footer = HeaderFooterSet::default().with_primary([numbers.clone().into()]);
+        if byte(12) & 16 != 0 {
+            header = header.with_first([numbers.clone().into()]);
+            footer = footer.with_first([paragraph.clone().into()]);
+            section = section.with_title_page(true);
+        }
+        if byte(12) & 32 != 0 {
+            header = header.with_even([numbers.into()]);
+            footer = footer.with_even([paragraph.clone().into()]);
+        }
+        section = section.with_headers(header).with_footers(footer);
+    }
+    document.add_section(section);
     if !second.is_empty() {
         let starts = [
             SectionStart::NextPage,

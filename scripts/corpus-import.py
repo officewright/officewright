@@ -691,12 +691,13 @@ def body_paragraph_styles(
     """(text, style id, style name) of the paragraphs of the body in order, the order of
     Word's main story: text boxes, alternative content and notes are stories of their own.
     Word's Paragraphs also count the end-of-row mark of every table row, which has no w:p;
-    it is ("", None, None) here, after the row's cells."""
+    it is ("", None, None) here, after the row's cells. The style is None where the copy does
+    not say which one Word applied."""
     root = ElementTree.fromstring(parts["word/document.xml"])
     styles = None
     if "word/styles.xml" in parts:
         styles = ElementTree.fromstring(parts["word/styles.xml"])
-    names, default = {}, ""
+    names, defaults = {}, []
     for style in styles.iter(f"{W}style") if styles is not None else ():
         if style.get(f"{W}type") != "paragraph":
             continue
@@ -704,7 +705,11 @@ def body_paragraph_styles(
         name = style.find(f"{W}name")
         names[style_id] = name.get(f"{W}val", style_id) if name is not None else style_id
         if style.get(f"{W}default") in ("1", "true", "on"):
-            default = style_id
+            defaults.append(style_id)
+    # A paragraph without w:pStyle has the default paragraph style. When the copy marks none,
+    # or more than one (word-rules/E-default-paragraph-style asks which Word takes), it does
+    # not say which style Word applied, and a guess would contradict Word's own (#149).
+    default = defaults[0] if len(defaults) == 1 else None
     MC = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
     other_stories = (f"{W}txbxContent", f"{MC}AlternateContent")
     out = []

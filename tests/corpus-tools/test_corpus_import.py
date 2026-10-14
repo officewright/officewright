@@ -1122,6 +1122,116 @@ class BodyParagraphs(unittest.TestCase):
             ("", None, None),
         ])
 
+    def test_a_paragraph_without_a_style_has_none_unless_one_style_is_the_default(self):
+        w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+        document = (
+            f"<w:document {w}><w:body>"
+            "<w:p><w:r><w:t>No style</w:t></w:r></w:p>"
+            '<w:p><w:pPr><w:pStyle w:val="AlsoDefault"/></w:pPr><w:r><w:t>Named</w:t></w:r></w:p>'
+            "</w:body></w:document>"
+        )
+
+        def parts(*defaults):
+            styles = ""
+            for style_id, name in (("Normal", "Normal"), ("AlsoDefault", "Also Default")):
+                default = ' w:default="1"' if style_id in defaults else ""
+                styles += (
+                    f'<w:style w:type="paragraph"{default} w:styleId="{style_id}">'
+                    f'<w:name w:val="{name}"/></w:style>'
+                )
+            return {"word/document.xml": document.encode(),
+                    "word/styles.xml": f"<w:styles {w}>{styles}</w:styles>".encode()}
+
+        def found(*defaults):
+            return importer.body_paragraph_styles(parts(*defaults))
+
+        named = ("Named", "AlsoDefault", "Also Default")
+        self.assertEqual(found("Normal"), [("No style", "Normal", "Normal"), named])
+        self.assertEqual(found("AlsoDefault"), [("No style", "AlsoDefault", "Also Default"), named])
+        # Two styles marked default, or none: which one Word applied is not known (#149).
+        self.assertEqual(found("Normal", "AlsoDefault"), [("No style", None, None), named])
+        self.assertEqual(found(), [("No style", None, None), named])
+        # formatting.json then leaves the style out for that paragraph only.
+        font = {"name": "Calibri", "size": 11, "bold": False, "italic": False,
+                "color": "auto", "theme": "minorHAnsi"}
+        export = {"format": 1, "complete": True, "runs": False, "runs_note": "", "stories": [
+            {"story": "main", "instance": 0, "paragraphs": [
+                {"index": i, "text": text, "style": None, "style_builtin": True,
+                 "left_indent": 0, "right_indent": 0, "first_line_indent": 0,
+                 "space_before": 0, "space_after": 0, "space_before_auto": False,
+                 "space_after_auto": False, "line_spacing": 12, "line_spacing_rule": "single",
+                 "alignment": "left", "list_string": "", "list_level": None, "font": font}
+                for i, text in enumerate(["No style", "Named"])
+            ]},
+        ]}
+        export = importer.read_formatting(json.dumps(export).encode())
+        result, _ = importer.compact_formatting(export, parts("Normal", "AlsoDefault"), "x", "y")
+        first, second = result["stories"][0]["paragraphs"]
+        self.assertNotIn("style_id", first)
+        self.assertNotIn("style_name", first)
+        self.assertEqual(
+            (second["style_id"], second["style_name"]), ("AlsoDefault", "Also Default")
+        )
+
+    def test_every_spelling_of_true_marks_the_default(self):
+        w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+        document = (
+            f"<w:document {w}><w:body><w:p><w:r><w:t>Plain</w:t></w:r></w:p></w:body></w:document>"
+        )
+        for value, expected in (("1", "Body"), ("true", "Body"), ("on", "Body"),
+                                ("0", None), ("false", None), ("off", None)):
+            styles = (
+                f"<w:styles {w}>"
+                f'<w:style w:type="paragraph" w:default="{value}" w:styleId="Body">'
+                '<w:name w:val="Body"/></w:style></w:styles>'
+            )
+            with self.subTest(value=value):
+                found = importer.body_paragraph_styles(
+                    {"word/document.xml": document.encode(), "word/styles.xml": styles.encode()}
+                )
+                self.assertEqual(found, [("Plain", expected, expected)])
+
+    def test_style_ids_land_on_their_paragraphs_around_a_table(self):
+        w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+
+        def paragraph(text, style=None):
+            p_pr = f'<w:pPr><w:pStyle w:val="{style}"/></w:pPr>' if style else ""
+            return f"<w:p>{p_pr}<w:r><w:t>{text}</w:t></w:r></w:p>"
+
+        def cell(text):
+            return f"<w:tc>{paragraph(text)}</w:tc>"
+
+        document = (
+            f"<w:document {w}><w:body>{paragraph('Before', 'Title')}<w:tbl>"
+            f"<w:tr>{cell('A')}{cell('B')}</w:tr><w:tr>{cell('C')}{cell('D')}</w:tr></w:tbl>"
+            f"{paragraph('After', 'Heading1')}</w:body></w:document>"
+        )
+        styles = f"<w:styles {w}>" + "".join(
+            f'<w:style w:type="paragraph"{default} w:styleId="{sid}"><w:name w:val="{sid}"/>'
+            "</w:style>"
+            for sid, default in (("Normal", ' w:default="1"'), ("Title", ""), ("Heading1", ""))
+        ) + "</w:styles>"
+        parts = {"word/document.xml": document.encode(), "word/styles.xml": styles.encode()}
+        font = {"name": "Calibri", "size": 11, "bold": False, "italic": False,
+                "color": "auto", "theme": "minorHAnsi"}
+        texts = ["Before", "A", "B", "", "C", "D", "", "After"]
+        export = {"format": 1, "complete": True, "runs": False, "runs_note": "", "stories": [
+            {"story": "main", "instance": 0, "paragraphs": [
+                {"index": i, "text": text, "style": None, "style_builtin": True,
+                 "left_indent": 0, "right_indent": 0, "first_line_indent": 0,
+                 "space_before": 0, "space_after": 0, "space_before_auto": False,
+                 "space_after_auto": False, "line_spacing": 12, "line_spacing_rule": "single",
+                 "alignment": "left", "list_string": "", "list_level": None, "font": font}
+                for i, text in enumerate(texts)
+            ]},
+        ]}
+        export = importer.read_formatting(json.dumps(export).encode())
+        result, _ = importer.compact_formatting(export, parts, "x", "y")
+        found = [p.get("style_id") for p in result["stories"][0]["paragraphs"]]
+        self.assertEqual(
+            found, ["Title", "Normal", "Normal", None, "Normal", "Normal", None, "Heading1"]
+        )
+
     def test_table_row_ends_line_up_with_words_paragraphs(self):
         w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
 
@@ -1156,7 +1266,9 @@ class BodyParagraphs(unittest.TestCase):
         self.assertTrue(result["styles_from_resaved_copy"])
         paragraphs = result["stories"][0]["paragraphs"]
         self.assertNotIn("style_id", paragraphs[3])
-        self.assertEqual(paragraphs[4]["style_id"], "")
+        # No styles part, so no default style: the copy does not say which style Word applied.
+        self.assertNotIn("style_id", paragraphs[4])
+        self.assertTrue(all("style_id" not in p for p in paragraphs))
         self.assertNotIn("not matched", note)
         result, note = importer.compact_formatting(
             export(["Before", "A", "B", "C", "D", "After"]), parts, "x", "y"

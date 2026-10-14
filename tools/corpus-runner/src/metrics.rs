@@ -370,8 +370,9 @@ pub fn check_pdf(pdf: &Path) -> Result<(bool, Vec<String>), String> {
         .arg(pdf)
         .output()
         .map_err(|error| format!("cannot run qpdf: {error}"))?;
-    let said = String::from_utf8_lossy(&output.stdout) + String::from_utf8_lossy(&output.stderr);
-    let valid = output.status.success() && !said.contains("WARNING");
+    // qpdf exits with 3 when it warned and 2 on errors. Its output echoes the file's path,
+    // so searching it for "WARNING" would also fail a clean file in such a folder.
+    let valid = output.status.success();
     let listing = tool(Command::new("pdffonts").arg(pdf))?;
     Ok((valid, not_embedded(&String::from_utf8_lossy(&listing))))
 }
@@ -665,6 +666,33 @@ mod tests {
             )
             .unwrap();
         }
+    }
+
+    /// qpdf's exit status decides, not its output, which names the file: a clean PDF in a
+    /// folder named WARNING is valid, a damaged one is not (#132).
+    #[cfg(unix)]
+    #[test]
+    fn qpdf_s_exit_status_decides_validity() {
+        let scratch = Scratch::new().unwrap();
+        let folder = scratch.path.join("WARNING");
+        std::fs::create_dir_all(&folder).unwrap();
+        let clean = folder.join("clean.pdf");
+        pdf(&clean, 0.0);
+        assert!(
+            check_pdf(&clean).unwrap().0,
+            "a clean PDF in a folder named WARNING"
+        );
+        // A wrong startxref offset: qpdf reconstructs the cross-reference table and warns.
+        let bytes = std::fs::read(&clean).unwrap();
+        let at = bytes
+            .windows(b"startxref".len())
+            .rposition(|window| window == b"startxref")
+            .unwrap();
+        let mut damaged = bytes[..at].to_vec();
+        damaged.extend_from_slice(b"startxref\n9\n%%EOF\n");
+        let damaged_path = folder.join("damaged.pdf");
+        std::fs::write(&damaged_path, damaged).unwrap();
+        assert!(!check_pdf(&damaged_path).unwrap().0, "qpdf warned");
     }
 
     /// Through pdftotext and pdftoppm, which check.sh requires on Linux and macOS.
