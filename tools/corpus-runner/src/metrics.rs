@@ -59,6 +59,25 @@ pub struct Scores {
     /// theme font make-reference.ps1 could not name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub word_fonts: Option<Vec<String>>,
+    /// Whether `word_fonts` holds every font Word used: the export read the runs of
+    /// formatting and was not cut short. Otherwise it lacks the runs, which leaves only the
+    /// font of each paragraph's first character, or the paragraphs after its time budget ran
+    /// out, so other fonts may be missing. A report written before this field existed counts
+    /// as not complete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub word_fonts_complete: Option<bool>,
+}
+
+impl Scores {
+    /// Sets the fonts Word used, and whether they are all of them, from the reference's
+    /// formatting export; leaves both unset for a reference without one.
+    pub fn read_word_fonts(&mut self, reference: &Path) -> Result<(), String> {
+        if let Some((fonts, complete)) = word_fonts(reference)? {
+            self.word_fonts = Some(fonts);
+            self.word_fonts_complete = Some(complete);
+        }
+        Ok(())
+    }
 }
 
 /// The pages of one rendering: its words with their boxes, and its 110 dpi grey rasters.
@@ -339,6 +358,7 @@ pub fn score(ours: &Rendering, reference: &Rendering) -> Scores {
         pdf_valid: None,
         fonts_not_embedded: None,
         word_fonts: None,
+        word_fonts_complete: None,
     }
 }
 
@@ -374,8 +394,9 @@ fn not_embedded(listing: &str) -> Vec<String> {
 }
 
 /// The fonts Word used for the document, from its reference's `formatting.json` (written
-/// by make-reference.ps1 format 3 on); `None` for an older reference.
-pub fn word_fonts(reference: &Path) -> Result<Option<Vec<String>>, String> {
+/// by make-reference.ps1 format 3 on), and whether they are all of them: true only when the
+/// export holds the runs of formatting and is complete; `None` for an older reference.
+pub fn word_fonts(reference: &Path) -> Result<Option<(Vec<String>, bool)>, String> {
     let path = reference.join("formatting.json");
     if !path.is_file() {
         return Ok(None);
@@ -399,7 +420,8 @@ pub fn word_fonts(reference: &Path) -> Result<Option<Vec<String>>, String> {
         .collect();
     names.sort();
     names.dedup();
-    Ok(Some(names))
+    let flag = |key: &str| value.get(key).and_then(serde_json::Value::as_bool) == Some(true);
+    Ok(Some((names, flag("runs") && flag("complete"))))
 }
 
 /// The mean, 1 for no values.
@@ -717,6 +739,12 @@ ABCDEF+AVeryLongFontNameThatPushesTheColumns-BoldItalic TrueType WinAnsi no  no 
     fn word_fonts_come_from_the_formatting_export() {
         let scratch = Scratch::new().unwrap();
         assert_eq!(word_fonts(&scratch.path).unwrap(), None);
+        let mut scores = score(&rendering(&[]), &rendering(&[]));
+        scores.read_word_fonts(&scratch.path).unwrap();
+        assert_eq!(
+            (&scores.word_fonts, scores.word_fonts_complete),
+            (&None, None)
+        );
         std::fs::write(
             scratch.path.join("formatting.json"),
             r#"{"fonts": [{"name": "Calibri"}, {"name": null, "theme": "unresolved"}, {"name": "Calibri", "bold": true}]}"#,
@@ -724,8 +752,33 @@ ABCDEF+AVeryLongFontNameThatPushesTheColumns-BoldItalic TrueType WinAnsi no  no 
         .unwrap();
         assert_eq!(
             word_fonts(&scratch.path).unwrap(),
-            Some(vec!["(unresolved)".to_owned(), "Calibri".to_owned()])
+            Some((vec!["(unresolved)".to_owned(), "Calibri".to_owned()], false)),
+            "without runs, the table has only the first characters' fonts"
         );
+        let export = |runs: bool, complete: bool| {
+            std::fs::write(
+                scratch.path.join("formatting.json"),
+                format!(r#"{{"complete": {complete}, "runs": {runs}, "fonts": [{{"name": "Carlito"}}]}}"#),
+            )
+            .unwrap();
+            word_fonts(&scratch.path).unwrap().map(|(_, all)| all)
+        };
+        assert_eq!(export(true, true), Some(true));
+        scores.read_word_fonts(&scratch.path).unwrap();
+        assert_eq!(
+            (&scores.word_fonts, scores.word_fonts_complete),
+            (&Some(vec!["Carlito".to_owned()]), Some(true))
+        );
+        // The report keeps an incomplete export as incomplete.
+        for (runs, complete) in [(false, true), (true, false)] {
+            assert_eq!(export(runs, complete), Some(false));
+            scores.read_word_fonts(&scratch.path).unwrap();
+            assert_eq!(
+                scores.word_fonts_complete,
+                Some(false),
+                "runs {runs}, complete {complete}"
+            );
+        }
         std::fs::write(scratch.path.join("formatting.json"), "{}").unwrap();
         assert!(word_fonts(&scratch.path).is_err());
     }
