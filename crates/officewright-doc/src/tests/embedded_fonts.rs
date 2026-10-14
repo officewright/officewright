@@ -14,7 +14,7 @@ const KEY_BYTES: [u8; 16] = [
 ];
 
 /// The start of a TrueType font (`00 01 00 00`), then `size - 4` bytes counting up.
-fn truetype(size: usize) -> Vec<u8> {
+pub(super) fn truetype(size: usize) -> Vec<u8> {
     let mut font = vec![0, 1, 0, 0];
     font.extend((0..size.saturating_sub(4)).map(|n| (n % 251) as u8));
     font
@@ -32,6 +32,16 @@ fn obfuscated(font: &[u8]) -> Vec<u8> {
 /// A package whose font table declares `fonts` (the XML of each `w:font`), with the
 /// font table's relationships and the files of the font parts.
 fn package_with_fonts(fonts: &str, relationships: &str, files: &[(&str, &[u8])]) -> Vec<u8> {
+    package_with_body_and_fonts("<w:p/>", fonts, relationships, files)
+}
+
+/// A package of `body`, whose font table declares `fonts`, as [`package_with_fonts`].
+pub(super) fn package_with_body_and_fonts(
+    body: &str,
+    fonts: &str,
+    relationships: &str,
+    files: &[(&str, &[u8])],
+) -> Vec<u8> {
     let table = format!(
         r#"<w:fonts xmlns:w="{W}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">{fonts}</w:fonts>"#
     );
@@ -44,19 +54,19 @@ fn package_with_fonts(fonts: &str, relationships: &str, files: &[(&str, &[u8])])
     ];
     all.extend_from_slice(files);
     files_package(
-        "<w:p/>",
+        body,
         &format!(r#"<Relationship Id="rIdFonts" Type="{FONT_TABLE}" Target="fontTable.xml"/>"#),
         &all,
         r#"<Default Extension="odttf" ContentType="application/vnd.openxmlformats-officedocument.obfuscatedFont"/>"#,
     )
 }
 
-fn relationship(id: &str, target: &str) -> String {
+pub(super) fn relationship(id: &str, target: &str) -> String {
     format!(r#"<Relationship Id="{id}" Type="{FONT}" Target="{target}"/>"#)
 }
 
 /// A `w:font` named `name` with these embedding elements.
-fn font(name: &str, embedded: &str) -> String {
+pub(super) fn font(name: &str, embedded: &str) -> String {
     format!(r#"<w:font w:name="{name}">{embedded}</w:font>"#)
 }
 

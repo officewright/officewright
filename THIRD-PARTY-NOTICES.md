@@ -96,13 +96,15 @@ read by `crates/officewright-font/tests/third_party_fonts.rs`,
 `crates/officewright-pdf/tests/embedded_fonts.rs`,
 `crates/officewright-layout/tests/shaping.rs` and
 `crates/officewright-cli/tests/fonts.rs`, which their crates exclude from their
-packages, by the C ABI tests in `tests/c` and `tests/ffi-python`, the PDF output
-checks in `tests/pdf-output` and `tests/corpus-tools/poppler/test_font_embedding.py`,
-and `tests/corpus-tools/test_test_fonts.py` checks this list of them; they seed the fuzz
-targets in `fuzz/`. The tests embed
-them, reduced to some of their glyphs, in PDF files they write to temporary directories;
-those files are not committed or published. Each font is unmodified and sits next to the
-license file it was distributed with, byte for byte.
+packages, by the C ABI tests in `tests/c` and `tests/ffi-python`, and by the PDF output
+checks in `tests/pdf-output` and `tests/corpus-tools/poppler/test_font_embedding.py`;
+they seed the fuzz targets in `fuzz/`. `tests/corpus-tools/test_test_fonts.py` checks
+that every file in `tests/fonts/` is listed below with its SHA-256, and that every file
+listed is there; `scripts/check-test-fonts.sh`, run at night, that each is byte for byte
+the file of the source given for it. The tests embed the fonts, reduced to some of their
+glyphs, in PDF files they write to temporary directories; those files are not committed
+or published. Each font is unmodified and sits next to the license file it was
+distributed with, byte for byte.
 
 ### Liberation Sans, Serif and Mono
 
