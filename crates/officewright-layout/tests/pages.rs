@@ -207,9 +207,11 @@ fn the_pages_of_space_before_top_keep_what_the_layout_relies_on() -> TestResult 
 
 /// A document built from `seed`: up to three sections of random starts, page heights and
 /// numbering, each of up to five random paragraphs (`random_paragraph`) kept with the
-/// next, kept together, with or without widow control, with page breaks before, some of
-/// them in tables; headers and footers of random paragraphs and page fields, a title
-/// page and even-page headers some of the time.
+/// next, kept together, with or without widow control, with page breaks before, a `PAGE`
+/// field, some of them in tables; headers and footers of random paragraphs and page
+/// fields, a title page and even-page headers some of the time. The `PAGE` fields send
+/// paragraphs that land on another page through their layout again, which `check_pages`
+/// checks as any other layout; what number they draw, the unit tests of `pages.rs` check.
 fn random_document(seed: u64) -> Document {
     use officewright_layout::ir::{
         DocumentSettings, Field, FieldKind, HeaderFooterSet, PageNumbering, SectionStart,

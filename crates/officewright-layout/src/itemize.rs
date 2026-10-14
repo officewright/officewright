@@ -45,6 +45,8 @@ pub(crate) struct Itemized {
     /// The text as the document has it, which the PDF gives for copying and searching.
     pub(crate) source: String,
     pub(crate) items: Vec<Item>,
+    /// The bytes of the drawn text that each `PAGE` field the layout computes shows.
+    pub(crate) page_fields: Vec<Range<usize>>,
 }
 
 /// A piece of a paragraph.
@@ -535,7 +537,11 @@ impl Builder<'_, '_, '_> {
                 "numbers in a format the layout does not write are written as decimal".to_owned(),
             );
         }
+        let start = self.out.text.len();
         self.text(&text, field.style());
+        if *field.kind() == FieldKind::Page {
+            self.out.page_fields.push(start..self.out.text.len());
+        }
     }
 
     fn push(&mut self, ch: char, source: Range<usize>, look: Look) {
