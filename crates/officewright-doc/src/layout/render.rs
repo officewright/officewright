@@ -28,8 +28,8 @@ impl Document {
     /// family, typographic family, full or PostScript name, or a named instance. A subset
     /// Word embeds under a name of its own (`___WRD_EMBED_SUB_` and a number) is found by
     /// none, so other fonts are used, and the report says so (#216). At most 256 faces
-    /// of embedded fonts are used, and no program with a name longer than any font's
-    /// (#226); the report says what is left out.
+    /// and named instances of embedded fonts are used, and no program with a name longer
+    /// than any font's (#226); the report says what is left out.
     ///
     /// # Errors
     ///
@@ -154,18 +154,22 @@ impl Document {
                         shorten(font.name())
                     )
                 };
-                // A collection of a thousand faces takes a few kilobytes: the faces, not
-                // the bytes, are what costs.
-                let count = FontFace::face_count(&program.0).map_or(1, |count| count as usize);
+                // A collection of a thousand faces takes a few kilobytes, and so does a
+                // variable font of a thousand named instances: the faces and instances the
+                // font book keeps, not the bytes, are what costs.
+                let scan = scan(&program.0);
+                let count = FontFace::face_count(&program.0)
+                    .map_or(1, |count| count as usize)
+                    .saturating_add(scan.instances);
                 if faces.saturating_add(count) > MAX_EMBEDDED_FACES {
                     past_limit += 1;
                     continue;
                 }
                 faces += count;
-                // The font book keeps each name a face has, however long; a document's
-                // program could hold names of megabytes. Until it bounds them (#226),
-                // such a program does not reach a font book.
-                if has_long_name(&program.0) {
+                // The font book keeps each name a face or instance has, however long; a
+                // document's program could hold names of megabytes. Until it bounds them
+                // (#226), such a program does not reach a font book.
+                if scan.long_name {
                     entries.push(ReportEntry::new(
                         ReportKind::FontEmbedding,
                         Location::document(),
@@ -220,7 +224,7 @@ impl Document {
                 Location::document(),
                 format!(
                     "{past_limit} embedded font {programs} left out, past {MAX_EMBEDDED_FACES} \
-                     faces in all, so other fonts are used"
+                     faces and named instances in all, so other fonts are used"
                 ),
             ));
         }
@@ -228,10 +232,12 @@ impl Document {
     }
 }
 
-/// The most faces the document's embedded fonts may add to the font book, a collection
-/// counting each of its faces. Word embeds at most four programs a font; the limit is
-/// our choice, far above what documents embed (24 programs in all in the corpora) and
-/// small enough that collections of a few kilobytes cannot fill the memory.
+/// The most faces and named instances of variable fonts the document's embedded fonts may
+/// add to the font book, a collection counting each of its faces and a variable font
+/// each of the instances the font book reads. Word embeds at most four programs a font;
+/// the limit is our choice, far above what documents embed (24 programs in all in the
+/// corpora), and with names of at most [`MAX_NAME_BYTES`] it bounds what they keep to
+/// a few tens of megabytes.
 const MAX_EMBEDDED_FACES: usize = 256;
 
 /// The longest name, in bytes, that an embedded program may have among those the font
@@ -239,14 +245,27 @@ const MAX_EMBEDDED_FACES: usize = 256;
 /// OpenType 63 in a PostScript name. Our choice, until the font book bounds them (#226).
 const MAX_NAME_BYTES: u16 = 512;
 
-/// Whether a face of `program` has a name the font book keeps longer than
-/// [`MAX_NAME_BYTES`]: its family, subfamily, full, PostScript and typographic names,
-/// those of IDs 21, 22 and 256 and up, and the name each named instance of a variable
-/// font gives as its subfamily, whatever its ID (OpenType's `fvar` table). Only the
-/// lengths of the name records are read (the `name` table), not the names; a face
-/// whose tables cannot be found has none, and the font book says why it cannot read
-/// it.
-fn has_long_name(program: &[u8]) -> bool {
+/// What the font book would keep of a program, read from its tables without reading its
+/// names: [`scan`].
+struct Scan {
+    /// The named instances of its variable faces the font book reads: the first 256 of
+    /// each face's `fvar` table.
+    instances: usize,
+    /// Whether a name the font book keeps is longer than [`MAX_NAME_BYTES`].
+    long_name: bool,
+}
+
+/// The named instances the font book reads of one face (`officewright-font`'s index).
+const MAX_INSTANCES: usize = 256;
+
+/// What the font book would keep of `program`, from the lengths of its name records
+/// (OpenType's `name` table) and its variable fonts' instances (`fvar`), not from the
+/// names. The names the font book keeps are a face's family, subfamily, full, PostScript
+/// and typographic names (IDs 1, 2, 4, 6, 16, 17), and for each of the first 256
+/// instances of a variable face the name of the ID it gives as its subfamily; IDs 21,
+/// 22 and 256 and up, which it does not read, are checked as a margin. A face whose
+/// tables cannot be found has none; the font book says why it cannot read it.
+fn scan(program: &[u8]) -> Scan {
     let u16_at = |at: Option<usize>| {
         let at = at?;
         let bytes = program.get(at..at.checked_add(2)?)?;
@@ -265,16 +284,20 @@ fn has_long_name(program: &[u8]) -> bool {
             .checked_add(base)?
             .checked_add(extra)
     };
-    // The offsets of the faces' table directories: one for a font, each of a collection's.
+    // The offsets of the faces' table directories: one for a font, each of a
+    // collection's, as many as can fit in the budget and one more.
     let faces: Vec<usize> = if program.starts_with(b"ttcf") {
         let count = u32_at(Some(8)).unwrap_or(0);
-        (0..count.min(MAX_EMBEDDED_FACES))
+        (0..count.min(MAX_EMBEDDED_FACES + 1))
             .filter_map(|face| u32_at(place(12, 4, face, 0)))
             .collect()
     } else {
         vec![0]
     };
-    let mut seen = HashSet::new();
+    let mut scan = Scan {
+        instances: 0,
+        long_name: false,
+    };
     for face in faces {
         let tables = usize::from(u16_at(face.checked_add(4)).unwrap_or(0));
         let table = |wanted: &[u8; 4]| {
@@ -288,34 +311,33 @@ fn has_long_name(program: &[u8]) -> bool {
                 }
             })
         };
-        let Some(name) = table(b"name") else {
-            continue;
-        };
-        // The IDs of the names the named instances of a variable font give as their
-        // subfamily, which the font book keeps too (the first 256 of them).
+        // The name IDs of the instances. The font book's reader places the instances
+        // after axis records of 20 bytes, the size OpenType sets, whatever axisSize says;
+        // both places are read, so that neither hides a name.
         let mut instance_ids = HashSet::new();
         if let Some(fvar) = table(b"fvar") {
             let field = |at: usize| u16_at(fvar.checked_add(at)).map(usize::from);
             if let (Some(axes), Some(axis_count), Some(axis_size), Some(count), Some(size)) =
                 (field(4), field(8), field(10), field(12), field(14))
             {
-                let first = axis_count
-                    .checked_mul(axis_size)
-                    .and_then(|axes_size| fvar.checked_add(axes)?.checked_add(axes_size));
-                for instance in 0..count.min(256) {
-                    match first.and_then(|first| u16_at(place(first, size, instance, 0))) {
-                        Some(id) => instance_ids.insert(id),
-                        None => break,
-                    };
+                let count = count.min(MAX_INSTANCES);
+                scan.instances = scan.instances.saturating_add(count);
+                for axis_size in [20, axis_size] {
+                    let first = axis_count
+                        .checked_mul(axis_size)
+                        .and_then(|axes_size| fvar.checked_add(axes)?.checked_add(axes_size));
+                    for instance in 0..count {
+                        match first.and_then(|first| u16_at(place(first, size, instance, 0))) {
+                            Some(id) => instance_ids.insert(id),
+                            None => break,
+                        };
+                    }
                 }
             }
         }
-        // The faces of a collection often share one name table and its instances.
-        let mut key: Vec<u16> = instance_ids.iter().copied().collect();
-        key.sort_unstable();
-        if !seen.insert((name, key)) {
+        let Some(name) = table(b"name") else {
             continue;
-        }
+        };
         let count = usize::from(u16_at(name.checked_add(2)).unwrap_or(0));
         for record in 0..count {
             let (Some(id), Some(length)) = (
@@ -328,11 +350,12 @@ fn has_long_name(program: &[u8]) -> bool {
                 || id >= 256
                 || instance_ids.contains(&id);
             if kept && length > MAX_NAME_BYTES {
-                return true;
+                scan.long_name = true;
+                return scan;
             }
         }
     }
-    false
+    scan
 }
 
 /// Whether the font book would find `program` by `name`: `Some(Ok(()))` when a font

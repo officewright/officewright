@@ -500,8 +500,8 @@ fn uses_at_most_two_hundred_and_fifty_six_embedded_faces() {
     assert_eq!(entry.kind(), ReportKind::FontEmbedding);
     assert_eq!(
         entry.to_string(),
-        "document: 1 embedded font program is left out, past 256 faces in all, so other \
-         fonts are used"
+        "document: 1 embedded font program is left out, past 256 faces and named instances \
+         in all, so other fonts are used"
     );
     // The faces of all the programs count together: of two collections of 200 faces,
     // the second is past the limit; a program after it that fits is still used.
@@ -517,8 +517,8 @@ fn uses_at_most_two_hundred_and_fifty_six_embedded_faces() {
     let listed = entries(&report);
     assert!(
         listed.iter().any(|entry| entry
-            == "document: 1 embedded font program is left out, past 256 faces in all, so \
-                other fonts are used"),
+            == "document: 1 embedded font program is left out, past 256 faces and named \
+                instances in all, so other fonts are used"),
         "{listed:?}"
     );
     // The same within one font: its bold program is past the limit, its italic one,
@@ -561,6 +561,27 @@ fn uses_at_most_two_hundred_and_fifty_six_embedded_faces() {
 /// `instances`, a named instance of a variable font whose subfamily name has that ID, in
 /// an `fvar` table that takes the place of `post`.
 fn with_names(records: &[(u16, u16, u16, u16)], instances: &[u16]) -> Vec<u8> {
+    with_names_and_axis_size(records, instances, 20)
+}
+
+/// As [`with_names`], with `axis_size` written as the size of the `fvar` table's axis
+/// records, which stay of 20 bytes, the instances after them.
+fn with_names_and_axis_size(
+    records: &[(u16, u16, u16, u16)],
+    instances: &[u16],
+    axis_size: u16,
+) -> Vec<u8> {
+    with_axis_records(records, instances, axis_size, 20)
+}
+
+/// As [`with_names`], with `axis_size` written as the size of the axis records and the
+/// axis record `written` bytes long, the instances after it.
+fn with_axis_records(
+    records: &[(u16, u16, u16, u16)],
+    instances: &[u16],
+    axis_size: u16,
+    written: usize,
+) -> Vec<u8> {
     let mut program = test_font();
     let tables = usize::from(u16::from_be_bytes([program[4], program[5]]));
     let directory = |program: &[u8], tag: &[u8; 4]| {
@@ -588,9 +609,10 @@ fn with_names(records: &[(u16, u16, u16, u16)], instances: &[u16]) -> Vec<u8> {
     place(&mut program, record, name);
     if !instances.is_empty() {
         // One axis, wght, of 20 bytes; instances of 8 bytes: name ID, flags, a coordinate.
-        let mut fvar = words(&[1, 0, 16, 2, 1, 20, instances.len() as u16, 8]);
+        let mut fvar = words(&[1, 0, 16, 2, 1, axis_size, instances.len() as u16, 8]);
         fvar.extend(b"wght");
         fvar.extend(words(&[100, 0, 400, 0, 900, 0, 0, 256]));
+        fvar.resize(fvar.len() + written - 20, 0);
         for &id in instances {
             fvar.extend(words(&[id, 0, 400, 0]));
         }
@@ -675,6 +697,34 @@ fn leaves_out_a_program_with_a_name_longer_than_any_font_s() {
         ))
         .is_none()
     );
+    // The second instance's name; and instances where the font book's reader finds them,
+    // after axis records of 20 bytes, though the table says 24.
+    assert!(
+        left_out(&with_names(
+            &[(3, 0x409, 1, 34), (3, 0x409, 100, 600)],
+            &[5, 100]
+        ))
+        .is_some()
+    );
+    assert!(
+        left_out(&with_names_and_axis_size(
+            &[(3, 0x409, 1, 34), (3, 0x409, 100, 600)],
+            &[100],
+            24
+        ))
+        .is_some()
+    );
+    // And where OpenType puts them for axis records that are 24 bytes, a margin should
+    // the reader follow axisSize.
+    assert!(
+        left_out(&with_axis_records(
+            &[(3, 0x409, 1, 34), (3, 0x409, 100, 600)],
+            &[100],
+            24,
+            24
+        ))
+        .is_some()
+    );
     // Each face of a collection: the long name is the second face's; the first, at the
     // end of the file, has a name table whose records run past it.
     let mut cut = test_font();
@@ -743,4 +793,34 @@ fn reports_an_embedded_font_without_a_family_name() {
                 used"),
         "{listed:?}"
     );
+}
+
+#[test]
+fn counts_the_named_instances_of_a_variable_font_in_the_limit() {
+    // The font book keeps an entry for each named instance it reads, the first 256 of a
+    // face: a face with 255 instances is within the limit of 256, one with 256 is past it.
+    let past = |instances: usize| {
+        let ids = vec![2u16; instances];
+        let program = with_names(&[(3, 0x409, 1, 34), (3, 0x409, 2, 14)], &ids);
+        let document = embedding(&[("Officewright Test", &program)]);
+        let (_, report) = document.save_pdf_bytes(&without_system_fonts()).unwrap();
+        report
+            .iter()
+            .any(|entry| entry.message().contains("faces and named instances in all"))
+    };
+    assert!(!past(255));
+    assert!(past(256));
+    // The instances of every face of a collection count: two of 200.
+    let variable = with_names(&[(3, 0x409, 1, 34), (3, 0x409, 2, 14)], &[2u16; 200]);
+    let document = embedding(&[(
+        "Officewright Test",
+        &collection_of(&[&variable, &variable], &[0, 1]),
+    )]);
+    let (_, report) = document.save_pdf_bytes(&without_system_fonts()).unwrap();
+    assert!(
+        report
+            .iter()
+            .any(|entry| entry.message().contains("faces and named instances in all"))
+    );
+    assert!(past(1000));
 }
