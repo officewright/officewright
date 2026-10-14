@@ -2082,6 +2082,19 @@ fn translates_ligatures_and_contextual_alternates() {
         assert!(!style.contextual_alternates());
     }
     assert_eq!(style_of(&inlines[0]), style_of(&inlines[1]));
+    // The setting on as any on/off value writes on.
+    for on in ["true", "on", " 1 "] {
+        let settings = format!(
+            r#"<w:compatSetting w:name="enableOpenTypeFeatures" w:uri="http://schemas.microsoft.com/office/word" w:val="{on}"/>"#
+        );
+        let translation = translate(&with_compat(body, &settings));
+        let inlines = paragraphs(&translation)[0].inlines();
+        let style = translation
+            .document()
+            .run_style(style_of(&inlines[0]))
+            .unwrap();
+        assert!(style.contextual_alternates(), "{on}");
+    }
     // The setting off, or turned off by a later one, is the same.
     for settings in [
         r#"<w:compatSetting w:name="enableOpenTypeFeatures" w:uri="http://schemas.microsoft.com/office/word" w:val="0"/>"#,
