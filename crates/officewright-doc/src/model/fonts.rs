@@ -2,6 +2,8 @@
 //! what the document says about each font it uses, so that a substitute can be chosen
 //! when a font is missing.
 
+use std::sync::Arc;
+
 use super::properties::xml_enum;
 
 xml_enum! {
@@ -62,8 +64,9 @@ impl FontSignature {
     }
 }
 
-/// A font embedded in the package for one style (`w:embedRegular` and the like), as
-/// written: the relationship to its part and the key it is obfuscated with.
+/// A font embedded in the package for one style (`w:embedRegular` and the like): the
+/// relationship to its part and the key it is obfuscated with, as written, and the font
+/// program read from the part.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct EmbeddedFontReference {
@@ -71,6 +74,18 @@ pub struct EmbeddedFontReference {
     pub(crate) relationship_id: Box<str>,
     pub(crate) key: Option<Box<str>>,
     pub(crate) subsetted: Option<bool>,
+    pub(crate) program: Option<Program>,
+}
+
+/// The bytes of an embedded font program, shared by the fonts that name one part with
+/// one key; debug output gives their number only.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct Program(pub(crate) Arc<[u8]>);
+
+impl std::fmt::Debug for Program {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Program({} bytes)", self.0.len())
+    }
 }
 
 impl EmbeddedFontReference {
@@ -92,6 +107,32 @@ impl EmbeddedFontReference {
     /// Only the characters the document uses are embedded (`w:subsetted`).
     pub fn subsetted(&self) -> Option<bool> {
         self.subsetted
+    }
+
+    /// The font program, TrueType or OpenType, as the part holds it once its first 32
+    /// bytes are no longer obfuscated (ECMA-376 Part 1, §17.8.1). It is read when the
+    /// document is opened. None, with a diagnostic, when the font table's relationships
+    /// or the package do not have the part, the part cannot be read, the key is not a
+    /// GUID, or the bytes are not a font with or without the key; none, too, for a font
+    /// outside the package.
+    ///
+    /// ```
+    /// # fn main() -> officewright_doc::Result<()> {
+    /// use officewright_doc::Document;
+    ///
+    /// let document = Document::open("tests/data/hello.docx")?;
+    /// for font in document.fonts() {
+    ///     for embedded in font.embedded() {
+    ///         if let Some(program) = embedded.program() {
+    ///             println!("{} {:?}: {} bytes", font.name(), embedded.style(), program.len());
+    ///         }
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn program(&self) -> Option<&[u8]> {
+        self.program.as_ref().map(|program| &*program.0)
     }
 }
 

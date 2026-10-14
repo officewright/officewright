@@ -4,15 +4,19 @@
 //! in `w:sectPr`. An `mc:AlternateContent` directly under `w:fonts` is kept whole, and
 //! the fonts in the branch it takes are read.
 
+use std::collections::HashMap;
+
 use officewright_opc::mce::Processor;
 use officewright_opc::xml::{Event, Input};
+use officewright_opc::{Part, PartName};
 
 use super::capture::{Budget, Capture, Notes};
 use super::properties::{Report, on_off, on_off_attribute, value};
 use super::{R, R_STRICT, W, W_STRICT, shorten};
 use crate::diagnostic::{DiagnosticKind, Diagnostics};
 use crate::model::fonts::{
-    EmbeddedFontReference, EmbeddedFontStyle, FontDeclaration, FontFamily, FontPitch, FontSignature,
+    EmbeddedFontReference, EmbeddedFontStyle, FontDeclaration, FontFamily, FontPitch,
+    FontSignature, Program,
 };
 use crate::model::xml::Element;
 use crate::model::{Document, Names};
@@ -197,6 +201,7 @@ fn font(
                     relationship_id: id.into(),
                     key: child.attribute(w, "fontKey").map(Into::into),
                     subsetted: on_off_attribute(child, names, "subsetted", report),
+                    program: None,
                 });
             }
             _ => {}
@@ -222,4 +227,147 @@ fn long_hex(value: &str) -> Option<u32> {
     (value.len() == 8 && value.bytes().all(|b| b.is_ascii_hexdigit()))
         .then(|| u32::from_str_radix(value, 16).ok())
         .flatten()
+}
+
+/// Reads the programs of the fonts the font table embeds, from the parts its
+/// relationships lead to: each part read once per key, however many fonts name it.
+///
+/// Word obfuscates an embedded font (ECMA-376 Part 1, §17.8.1): its first 32 bytes are
+/// XORed with the 16 bytes of the GUID of `w:fontKey`, taken in the reverse order of its
+/// hexadecimal digits as written, twice over. The fonts of Word's and LibreOffice's
+/// files in the corpora all turn into fonts so, and none in the order of the GUID's
+/// fields. A program that does not start as a font with the key, but does without it, is
+/// taken as it is; one that does neither is reported and left out. Only a limit of the
+/// package stops the reading.
+pub(super) fn read_programs(
+    document: &mut Document,
+    part: &Part<'_>,
+    diagnostics: &mut Diagnostics,
+) -> Result<()> {
+    let place = part.name().as_str();
+    let mut read: HashMap<(PartName, Option<[u8; 16]>), Option<Program>> = HashMap::new();
+    for font in &mut document.fonts {
+        for embedded in &mut font.embedded {
+            let what = || {
+                format!(
+                    "{place}: the w:{} of the font {}",
+                    embedded.style.to_xml(),
+                    shorten(&font.name)
+                )
+            };
+            let Some(relationship) = part.relationships().get(&embedded.relationship_id) else {
+                diagnostics.push(DiagnosticKind::UnexpectedContent, || {
+                    format!(
+                        "{} names the relationship {}, which the font table does not have",
+                        what(),
+                        shorten(&embedded.relationship_id)
+                    )
+                });
+                continue;
+            };
+            // None for a font outside the package, which is never loaded.
+            let Some(name) = relationship.target_part() else {
+                continue;
+            };
+            let key = match embedded.key.as_deref().map(font_key) {
+                None => None,
+                Some(Some(key)) => Some(key),
+                Some(None) => {
+                    diagnostics.push(DiagnosticKind::InvalidValue, || {
+                        format!("{} has a w:fontKey that is not a GUID", what())
+                    });
+                    continue;
+                }
+            };
+            let entry = (name, key);
+            if let Some(program) = read.get(&entry) {
+                embedded.program = program.clone();
+                continue;
+            }
+            let program = match part.package().part(&entry.0) {
+                None => {
+                    diagnostics.push(DiagnosticKind::UnexpectedContent, || {
+                        format!(
+                            "{} is in {}, which the package does not have",
+                            what(),
+                            shorten(entry.0.as_str())
+                        )
+                    });
+                    None
+                }
+                Some(font_part) => match font_part.read() {
+                    Ok(bytes) => {
+                        let program = deobfuscate(bytes, key);
+                        if program.is_none() {
+                            diagnostics.push(DiagnosticKind::UnexpectedContent, || {
+                                format!("{} is not a TrueType or OpenType font", what())
+                            });
+                        }
+                        program.map(|bytes| Program(bytes.into()))
+                    }
+                    Err(err @ officewright_opc::Error::LimitExceeded { .. }) => {
+                        return Err(err.into());
+                    }
+                    Err(err) => {
+                        diagnostics.push(DiagnosticKind::UnexpectedContent, || {
+                            format!("{} cannot be read: {err}", what())
+                        });
+                        None
+                    }
+                },
+            };
+            embedded.program = program.clone();
+            read.insert(entry, program);
+        }
+    }
+    Ok(())
+}
+
+/// The 16 bytes of a `w:fontKey` (ST_Guid, `{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}`), in
+/// the reverse order of its hexadecimal digits as written.
+fn font_key(value: &str) -> Option<[u8; 16]> {
+    let digits = value.trim().strip_prefix('{')?.strip_suffix('}')?;
+    let groups: Vec<&str> = digits.split('-').collect();
+    let lengths: Vec<usize> = groups.iter().map(|group| group.len()).collect();
+    if lengths != [8, 4, 4, 4, 12] {
+        return None;
+    }
+    let mut bytes = [0u8; 16];
+    let hex: String = groups.concat();
+    for (byte, pair) in bytes.iter_mut().rev().zip(hex.as_bytes().chunks(2)) {
+        let pair = std::str::from_utf8(pair).ok()?;
+        *byte = u8::from_str_radix(pair, 16).ok()?;
+    }
+    Some(bytes)
+}
+
+/// The font program of an embedded font part: with a key, its first 32 bytes XORed with
+/// the key twice over, unless only the bytes as they are start as a font.
+fn deobfuscate(mut bytes: Vec<u8>, key: Option<[u8; 16]>) -> Option<Vec<u8>> {
+    let Some(key) = key else {
+        return is_font(&bytes).then_some(bytes);
+    };
+    let plain = is_font(&bytes);
+    for (byte, k) in bytes.iter_mut().zip(key.iter().chain(key.iter())) {
+        *byte ^= k;
+    }
+    if is_font(&bytes) {
+        return Some(bytes);
+    }
+    if plain {
+        for (byte, k) in bytes.iter_mut().zip(key.iter().chain(key.iter())) {
+            *byte ^= k;
+        }
+        return Some(bytes);
+    }
+    None
+}
+
+/// Whether bytes start as a font file: TrueType, OpenType with CFF outlines, an old
+/// Apple TrueType, or a collection.
+fn is_font(bytes: &[u8]) -> bool {
+    matches!(
+        bytes.get(..4),
+        Some(b"\x00\x01\x00\x00" | b"OTTO" | b"true" | b"ttcf")
+    )
 }

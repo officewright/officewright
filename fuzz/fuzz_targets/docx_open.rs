@@ -29,6 +29,9 @@ fuzz_target!(|data: &[u8]| {
     }
     for font in document.fonts() {
         let _ = (font.panose(), font.signature(), font.embedded().len());
+        for embedded in font.embedded() {
+            let _ = embedded.program().map(<[u8]>::len);
+        }
     }
     let settings = document.settings();
     let _ = (

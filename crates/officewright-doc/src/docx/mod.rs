@@ -183,6 +183,7 @@ pub(crate) fn read(data: Vec<u8>, limits: &Limits) -> Result<Document> {
             &mut diagnostics,
             &mut budget,
         )?;
+        fonts::read_programs(&mut document, &part, &mut diagnostics)?;
     }
     if let Some(part) = related(&package, &main, &SETTINGS) {
         let name = part.name().as_str();
