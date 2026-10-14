@@ -370,12 +370,14 @@ fn u32_at(data: &[u8], at: usize) -> Option<u32> {
 }
 
 /// Reads the size and components of a JPEG file from its frame header (ITU T.81, B.2),
-/// and whether it has Adobe's `APP14` segment.
+/// and whether it has Adobe's `APP14` segment. The frame header and the first scan header
+/// are checked as libjpeg checks them when it reads them, so that a file a viewer cannot
+/// start to decode is refused; damage in the coded data is not looked for.
 fn read_jpeg(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> {
     let mut at = 2;
     let mut frame = None;
     let mut adobe = false;
-    loop {
+    let frame = loop {
         // A marker is 0xFF and a code; more 0xFF bytes may pad it (B.1.1.2). Other bytes
         // before a marker are skipped, as libjpeg skips them.
         while data.get(at).is_some_and(|&byte| byte != 0xFF) {
@@ -393,49 +395,32 @@ fn read_jpeg(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> 
             0x00 => continue,
             // Markers without a segment: TEM and the restart markers.
             0x01 | 0xD0..=0xD7 => continue,
-            // A scan comes after its frame header (B.2.1).
-            0xDA if frame.is_none() => return Err(malformed("the JPEG file has no frame header")),
             0xD8 | 0xD9 => return Err(malformed("the JPEG file has no scan")),
             _ => {}
         }
-        let length = usize::from(
-            u16_at(data, at).ok_or_else(|| malformed("the JPEG file ends in a segment"))?,
-        );
+        // A scan comes after its frame header (B.2.1).
+        let scan_frame = if code == 0xDA {
+            let frame = frame.take();
+            Some(frame.ok_or_else(|| malformed("the JPEG file has no frame header"))?)
+        } else {
+            None
+        };
+        let length = usize::from(u16_at(data, at).ok_or_else(|| {
+            malformed(format!(
+                "the JPEG file ends in the length of its FF{code:02X} segment at byte {at}"
+            ))
+        })?);
         let segment = data
             .get(at + 2..at + length.max(2))
             .ok_or_else(|| malformed(format!("the JPEG segment at byte {at} is truncated")))?;
+        // The scan header is the last before the coded data: every header has been read.
+        if let Some(frame) = scan_frame {
+            check_scan(segment, length, &frame)?;
+            break frame;
+        }
         match code {
             // Baseline, extended sequential and progressive Huffman coding.
-            0xC0..=0xC2 => {
-                let Some((&[precision, h1, h0, w1, w0, components], specifications)) =
-                    segment.split_first_chunk::<6>()
-                else {
-                    return Err(malformed("the JPEG frame header is truncated"));
-                };
-                check_components(specifications, components)?;
-                let height = u16::from_be_bytes([h1, h0]);
-                let width = u16::from_be_bytes([w1, w0]);
-                frame = Some((precision, height, width, components));
-            }
-            // The scan header (B.2.3), the last before the coded data: every header has
-            // been read. libjpeg refuses one of another length or with another number of
-            // components, and so does this check.
-            0xDA => {
-                let components = segment.first().copied().unwrap_or(0);
-                if !(1..=4).contains(&components) {
-                    return Err(malformed(format!(
-                        "the JPEG scan header gives {components} components, not 1 to 4"
-                    )));
-                }
-                let expected = 6 + 2 * usize::from(components);
-                if length != expected {
-                    return Err(malformed(format!(
-                        "the JPEG scan header is {length} bytes long, not {expected} for {}",
-                        counted(components, "component")
-                    )));
-                }
-                break;
-            }
+            0xC0..=0xC2 => frame = Some(read_frame(segment)?),
             // DHT, JPG and DAC are not frame headers.
             0xC4 | 0xC8 | 0xCC => {}
             // Lossless, differential and arithmetic-coded frames, and the DHP and EXP
@@ -449,58 +434,65 @@ fn read_jpeg(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> 
             _ => {}
         }
         at += length;
-    }
-    let Some((precision, height, width, components)) = frame else {
-        return Err(malformed("the JPEG file has no frame header"));
     };
-    if precision != 8 {
+    let components = frame.components.len();
+    if frame.precision != 8 {
         return Err(unsupported(format!(
-            "{precision}-bit JPEG cannot go into a PDF, only 8-bit"
+            "{}-bit JPEG cannot go into a PDF, only 8-bit",
+            frame.precision
         )));
     }
-    if height == 0 {
+    if frame.height == 0 {
         return Err(unsupported(
             "the JPEG file gives its height after its first scan (a DNL marker)",
         ));
     }
-    if width == 0 {
+    if frame.width == 0 {
         return Err(malformed("the JPEG frame header gives a width of 0"));
     }
-    if !matches!(components, 1 | 3 | 4) {
+    let Some(components @ (1 | 3 | 4)) = u8::try_from(components).ok() else {
         return Err(unsupported(format!(
             "a JPEG file with {components} components cannot go into a PDF"
         )));
-    }
+    };
     Ok((
-        u32::from(width),
-        u32::from(height),
+        u32::from(frame.width),
+        u32::from(frame.height),
         Encoding::Jpeg { components, adobe },
     ))
 }
 
-/// `count` and `noun`, in the plural unless `count` is 1: "1 component", "3 components".
-fn counted(count: u8, noun: &str) -> String {
-    if count == 1 {
-        format!("1 {noun}")
-    } else {
-        format!("{count} {noun}s")
-    }
+/// A JPEG frame header (ITU T.81, B.2.2).
+struct Frame {
+    precision: u8,
+    height: u16,
+    width: u16,
+    /// Each component's identifier and horizontal and vertical sampling factors.
+    components: Vec<(u8, u8, u8)>,
 }
 
-/// Checks the `specifications` of a JPEG frame header's `components` (ITU T.81, B.2.2):
-/// three bytes each, so that the header is `8 + 3 × components` bytes long, with
-/// sampling factors of 1 to 4 and a quantization table of 0 to 3. libjpeg refuses a
-/// frame header otherwise, so a PDF viewer could not show the image.
-fn check_components(specifications: &[u8], components: u8) -> std::result::Result<(), Problem> {
-    let expected = 3 * usize::from(components);
+/// Reads a JPEG frame header, `segment` after its length, and checks it as libjpeg does:
+/// 1 to 255 components of three bytes each, so that the header is `8 + 3 × components`
+/// bytes long, with sampling factors of 1 to 4 and a quantization table of 0 to 3.
+fn read_frame(segment: &[u8]) -> std::result::Result<Frame, Problem> {
+    let Some((&[precision, h1, h0, w1, w0, count], specifications)) =
+        segment.split_first_chunk::<6>()
+    else {
+        return Err(malformed("the JPEG frame header is truncated"));
+    };
+    if count == 0 {
+        return Err(malformed("the JPEG frame header gives 0 components"));
+    }
+    let expected = 3 * usize::from(count);
     if specifications.len() != expected {
         return Err(malformed(format!(
             "the JPEG frame header is {} bytes long, not {} for {}",
             8 + specifications.len(),
             8 + expected,
-            counted(components, "component")
+            counted(count, "component")
         )));
     }
+    let mut components = Vec::with_capacity(usize::from(count));
     for specification in specifications.chunks_exact(3) {
         let &[id, sampling, table] = specification else {
             continue;
@@ -518,8 +510,74 @@ fn check_components(specifications: &[u8], components: u8) -> std::result::Resul
                  not 0 to 3"
             )));
         }
+        components.push((id, horizontal, vertical));
+    }
+    Ok(Frame {
+        precision,
+        height: u16::from_be_bytes([h1, h0]),
+        width: u16::from_be_bytes([w1, w0]),
+        components,
+    })
+}
+
+/// Checks a JPEG scan header of `length` bytes, `segment` after the length, against its
+/// `frame` as libjpeg does (ITU T.81, B.2.3): 1 to 4 components, so that the header is
+/// `6 + 2 × components` bytes long, each a component of the frame named once, and in an
+/// interleaved scan at most 10 blocks in each minimum coded unit.
+fn check_scan(segment: &[u8], length: usize, frame: &Frame) -> std::result::Result<(), Problem> {
+    let count = segment.first().copied().unwrap_or(0);
+    if !(1..=4).contains(&count) {
+        return Err(malformed(format!(
+            "the JPEG scan header gives {count} components, not 1 to 4"
+        )));
+    }
+    let expected = 6 + 2 * usize::from(count);
+    if length != expected {
+        return Err(malformed(format!(
+            "the JPEG scan header is {length} bytes long, not {expected} for {}",
+            counted(count, "component")
+        )));
+    }
+    let mut named = Vec::with_capacity(usize::from(count));
+    let mut blocks = 0;
+    for specification in segment.get(1..).unwrap_or_default().chunks_exact(2) {
+        let Some(&id) = specification.first() else {
+            continue;
+        };
+        if named.len() == usize::from(count) {
+            break;
+        }
+        if named.contains(&id) {
+            return Err(malformed(format!(
+                "the JPEG scan header names component {id} twice"
+            )));
+        }
+        let Some(&(_, horizontal, vertical)) =
+            frame.components.iter().find(|component| component.0 == id)
+        else {
+            return Err(malformed(format!(
+                "the JPEG scan header names component {id}, which the frame header does not have"
+            )));
+        };
+        named.push(id);
+        blocks += u32::from(horizontal) * u32::from(vertical);
+    }
+    if count > 1 && blocks > 10 {
+        return Err(malformed(format!(
+            "the JPEG scan interleaves {blocks} blocks in each minimum coded unit, not at \
+             most 10"
+        )));
     }
     Ok(())
+}
+
+/// `count` and `noun`, in the plural unless `count` is 1: "1 component", "3 components".
+fn counted(count: u8, noun: &str) -> String {
+    if count == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
 }
 
 /// The header of a PNG file (PNG specification, 11.2.2).
@@ -1892,20 +1950,27 @@ pub(crate) mod tests {
 
     #[test]
     fn accepts_jpeg_headers_at_their_limits() {
-        // Four components, each with the largest sampling factors and table number, and
-        // a scan of all four.
+        // Four components, each with the largest sampling factors and table number,
+        // scanned one at a time.
         let mut data = jpeg(0xC0, 8, 4, 4, 4, false);
         let frame = data.windows(2).position(|w| w == [0xFF, 0xC0]).unwrap();
         for component in 0..4 {
             data[frame + 11 + 3 * component] = 0x44;
             data[frame + 12 + 3 * component] = 3;
         }
-        let data = with_scan(&data, &[4, 1, 0, 2, 0x11, 3, 0x11, 4, 0x11, 0, 0x3F, 0]);
-        let image = Image::from_bytes(data).unwrap();
+        let image = Image::from_bytes(with_scan(&data, &[1, 1, 0, 0, 0x3F, 0])).unwrap();
         assert!(matches!(
             image.inner.encoding,
             Encoding::Jpeg { components: 4, .. }
         ));
+        // All four in one scan, with the 10 blocks a minimum coded unit may have:
+        // 2 × 2, 2 × 1, 1 × 2 and 1 × 2.
+        let mut data = jpeg(0xC0, 8, 4, 4, 4, false);
+        for (component, sampling) in [0x22, 0x21, 0x12, 0x12].into_iter().enumerate() {
+            data[frame + 11 + 3 * component] = sampling;
+        }
+        let scan = [4, 1, 0, 2, 0x11, 3, 0x11, 4, 0x11, 0, 0x3F, 0];
+        Image::from_bytes(with_scan(&data, &scan)).unwrap();
         // The smallest frame header: one component.
         let image = Image::from_bytes(jpeg(0xC1, 8, 1, 1, 1, false)).unwrap();
         assert_eq!((image.width(), image.height()), (1, 1));
@@ -2060,7 +2125,10 @@ pub(crate) mod tests {
             ),
             (
                 good[..frame + 3].to_vec(),
-                "the JPEG file ends in a segment",
+                &format!(
+                    "the JPEG file ends in the length of its FFC0 segment at byte {}",
+                    frame + 2
+                ),
             ),
             (
                 good[..frame + 8].to_vec(),
@@ -2094,12 +2162,30 @@ pub(crate) mod tests {
                 "the JPEG frame header gives component 2 the sampling factors 1 and 5, not 1 to 4",
             ),
             (
+                patched(&good, frame + 14, 0x51),
+                "the JPEG frame header gives component 2 the sampling factors 5 and 1, not 1 to 4",
+            ),
+            (
+                patched(&good, frame + 14, 0x10),
+                "the JPEG frame header gives component 2 the sampling factors 1 and 0, not 1 to 4",
+            ),
+            (
                 patched(&good, frame + 15, 4),
                 "the JPEG frame header gives component 2 quantization table 4, not 0 to 3",
             ),
+            (
+                jpeg(0xC0, 8, 4, 4, 0, false),
+                "the JPEG frame header gives 0 components",
+            ),
             // A scan marker with no header after it, or a header cut short by the end of
             // the file.
-            (good[..sos + 2].to_vec(), "the JPEG file ends in a segment"),
+            (
+                good[..sos + 2].to_vec(),
+                &format!(
+                    "the JPEG file ends in the length of its FFDA segment at byte {}",
+                    sos + 2
+                ),
+            ),
             (
                 good[..sos + 7].to_vec(),
                 &format!("the JPEG segment at byte {} is truncated", sos + 2),
@@ -2120,6 +2206,38 @@ pub(crate) mod tests {
             (
                 with_scan(&good, &[]),
                 "the JPEG scan header gives 0 components, not 1 to 4",
+            ),
+            // A scan of components the frame does not have, or of one twice.
+            (
+                with_scan(&good, &[1, 9, 0, 0, 0x3F, 0]),
+                "the JPEG scan header names component 9, which the frame header does not have",
+            ),
+            (
+                with_scan(
+                    &jpeg(0xC0, 8, 4, 4, 1, false),
+                    &[2, 1, 0, 2, 0x11, 0, 0x3F, 0],
+                ),
+                "the JPEG scan header names component 2, which the frame header does not have",
+            ),
+            (
+                with_scan(&good, &[2, 1, 0, 1, 0x11, 0, 0x3F, 0]),
+                "the JPEG scan header names component 1 twice",
+            ),
+            // 2 × 2 + 2 × 2 + 2 × 1 + 1 × 1 = 11 blocks in one scan.
+            (
+                with_scan(
+                    &patched(
+                        &patched(
+                            &patched(&jpeg(0xC0, 8, 4, 4, 4, false), frame + 11, 0x22),
+                            frame + 14,
+                            0x22,
+                        ),
+                        frame + 17,
+                        0x21,
+                    ),
+                    &[4, 1, 0, 2, 0x11, 3, 0x11, 4, 0x11, 0, 0x3F, 0],
+                ),
+                "the JPEG scan interleaves 11 blocks in each minimum coded unit, not at most 10",
             ),
             // Two bytes too many after a one-component scan header.
             (
