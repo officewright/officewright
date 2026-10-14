@@ -388,3 +388,43 @@ fn score_takes_its_two_options_in_either_order() -> io::Result<()> {
     assert!(String::from_utf8_lossy(&output.stderr).contains("usage:"));
     Ok(())
 }
+
+/// A branch report made over fewer paths than main's cannot hide main's failing document
+/// (#130): the gate counts it in row 2, names it, and fails.
+#[test]
+fn the_gate_refuses_a_branch_report_that_lacks_files_of_main() -> io::Result<()> {
+    let corpus = Corpus::new("gate")?;
+    let (_, output) = corpus.run(&["--report", "main.json", "docs"], None)?;
+    assert!(output.contains("1 unexpected-error"), "{output}");
+    let (code, output) = corpus.run(&["--report", "branch.json", "docs/good.docx"], None)?;
+    assert_eq!(code, 0, "{output}");
+    let gate = |args: &[&str]| -> io::Result<(Option<i32>, String)> {
+        let output = Command::new(env!("CARGO_BIN_EXE_corpus-runner"))
+            .current_dir(&corpus.dir)
+            .arg("gate")
+            .args(args)
+            .output()?;
+        Ok((
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout).into_owned()
+                + &String::from_utf8_lossy(&output.stderr),
+        ))
+    };
+    let (code, text) = gate(&["branch.json"])?;
+    assert_eq!(code, Some(0), "alone, the narrower report passes: {text}");
+    let (code, text) = gate(&["--main", "main.json", "branch.json"])?;
+    assert_eq!(code, Some(1), "{text}");
+    assert!(
+        text.contains("Files of main the branch report lacks: docs/nested/BROKEN.DOCX"),
+        "{text}"
+    );
+    let refusals = text
+        .lines()
+        .find(|line| line.starts_with("| 2 |"))
+        .unwrap_or_default();
+    assert!(
+        refusals.contains("of main's, 1 files missing") && refusals.contains("(worse than main)"),
+        "{refusals}"
+    );
+    Ok(())
+}
