@@ -195,10 +195,22 @@ fn a_document_without_run_defaults_takes_words_own() {
             ("Calibri Light".to_owned(), Pt(11.0)),
         ]
     );
-    // With a theme, its minor fonts.
-    let document = build(&body, &styles, None, Some(&theme()));
-    assert_eq!(runs(&document)[0].fonts().ascii(), "Minor Latin");
-    assert_eq!(runs(&document)[0].fonts().east_asia(), "Minor EA");
+    // With a theme, its minor fonts, each of its slot (from the review of #151).
+    let theme = theme().replace(
+        r#"<a:minorFont><a:latin typeface="Minor Latin"/><a:ea typeface="Minor EA"/><a:cs typeface=""/>"#,
+        r#"<a:minorFont><a:latin typeface="Minor Latin"/><a:ea typeface="Minor EA"/><a:cs typeface="Minor CS"/>"#,
+    );
+    let document = build(&body, &styles, None, Some(&theme));
+    let fonts = runs(&document)[0].fonts().clone();
+    assert_eq!(
+        [
+            fonts.ascii(),
+            fonts.high_ansi(),
+            fonts.east_asia(),
+            fonts.complex_script()
+        ],
+        ["Minor Latin", "Minor Latin", "Minor EA", "Minor CS"]
+    );
 }
 
 #[test]
@@ -231,6 +243,99 @@ fn shares_font_names_and_languages_between_runs() {
             b.as_ref().unwrap()
         ));
     }
+}
+
+#[test]
+fn shares_what_styles_and_unresolved_theme_fonts_give_between_runs() {
+    // From the review of #151: names and languages that come through a style, and a name
+    // written next to a theme font the theme leaves empty, must be shared too.
+    let name = "S".repeat(100_000);
+    let written = "W".repeat(100_000);
+    let styles = [
+        defaults(&format!(
+            r#"<w:rFonts w:hAnsiTheme="minorHAnsi" w:hAnsi="{written}"/><w:lang w:val="en-GB" w:eastAsia="ja-JP" w:bidi="ar-SA"/>"#
+        )),
+        style(
+            "paragraph",
+            "Base",
+            None,
+            &format!(r#"<w:rFonts w:ascii="{name}"/><w:lang w:eastAsia="zh-CN"/>"#),
+        ),
+        style("paragraph", "Derived", Some("Base"), "<w:b/>"),
+    ]
+    .concat();
+    // The theme's minor latin font is empty, so the name written next to the theme font
+    // stands in.
+    let theme = theme().replace(
+        r#"<a:latin typeface="Minor Latin"/>"#,
+        r#"<a:latin typeface=""/>"#,
+    );
+    let body = [
+        paragraph("Base", &["", "<w:i/>"]),
+        paragraph("Derived", &["", "<w:i/>"]),
+    ]
+    .concat();
+    let document = build(&body, &styles, None, Some(&theme));
+    let formats = runs(&document);
+    let [first, rest @ ..] = &formats[..] else {
+        panic!("four runs");
+    };
+    assert_eq!(first.fonts().ascii(), name);
+    assert_eq!(first.fonts().high_ansi(), written);
+    assert_eq!(first.language_east_asia(), Some("zh-CN"));
+    use std::sync::Arc;
+    let same = |a: &Option<Arc<str>>, b: &Option<Arc<str>>| {
+        Arc::ptr_eq(a.as_ref().unwrap(), b.as_ref().unwrap())
+    };
+    for other in rest {
+        let (a, b) = (first.fonts(), other.fonts());
+        assert!(Arc::ptr_eq(&a.ascii, &b.ascii));
+        assert!(Arc::ptr_eq(&a.high_ansi, &b.high_ansi));
+        assert!(same(&first.language_latin, &other.language_latin));
+        assert!(same(&first.language_east_asia, &other.language_east_asia));
+        assert!(same(&first.language_bidi, &other.language_bidi));
+    }
+}
+
+#[test]
+fn takes_words_defaults_for_an_empty_run_defaults_element_and_ascii_theme_fonts() {
+    // From the review of #151: w:rPrDefault without w:rPr gives no run properties, so
+    // Word's own apply; and the ascii theme fonts take the default theme too.
+    let styles = [
+        "<w:docDefaults><w:rPrDefault/></w:docDefaults>".to_owned(),
+        style(
+            "paragraph",
+            "Minor",
+            None,
+            r#"<w:rFonts w:asciiTheme="minorAscii"/>"#,
+        ),
+        style(
+            "paragraph",
+            "Major",
+            None,
+            r#"<w:rFonts w:asciiTheme="majorAscii"/>"#,
+        ),
+    ]
+    .concat();
+    let body = [
+        paragraph("", &[""]),
+        paragraph("Minor", &[""]),
+        paragraph("Major", &[""]),
+    ]
+    .concat();
+    let document = build(&body, &styles, None, None);
+    let found: Vec<(String, Pt)> = runs(&document)
+        .iter()
+        .map(|format| (format.fonts().ascii().to_owned(), format.size()))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            ("Calibri".to_owned(), Pt(11.0)),
+            ("Calibri".to_owned(), Pt(11.0)),
+            ("Calibri Light".to_owned(), Pt(11.0)),
+        ]
+    );
 }
 
 #[test]
