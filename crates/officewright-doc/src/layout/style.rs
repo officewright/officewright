@@ -8,8 +8,8 @@ use officewright_layout::ir;
 
 use super::Translator;
 use crate::model::{
-    CharacterFormat, ColorValue, FontFamilies, FontHint, Highlight, Shading, ShadingPattern,
-    UnderlineStyle, VerticalPosition,
+    CharacterFormat, ColorValue, FontFamilies, FontHint, Highlight, Ligatures, Shading,
+    ShadingPattern, UnderlineStyle, VerticalPosition,
 };
 
 /// The longest font name passed on, in bytes, cut at the end of a character. Word lets
@@ -59,6 +59,8 @@ struct Values {
     kerning: Option<u64>,
     highlight: Option<Highlight>,
     shading: Option<Shading>,
+    ligatures: Ligatures,
+    contextual_alternates: bool,
     cuts: u8,
 }
 
@@ -98,6 +100,8 @@ impl<'f> StyleKey<'f> {
             language_latin,
             language_east_asia,
             language_bidi,
+            ligatures,
+            contextual_alternates,
         } = format;
         let FontFamilies {
             ascii,
@@ -171,6 +175,8 @@ impl<'f> StyleKey<'f> {
                 highlight: *highlight,
                 // A shading of pattern nil is no shading at all.
                 shading: shading.filter(|shading| shading.pattern() != Some(ShadingPattern::Nil)),
+                ligatures: *ligatures,
+                contextual_alternates: *contextual_alternates,
                 cuts,
             },
         }
@@ -320,6 +326,15 @@ impl Translator<'_> {
             .with_shading(format.shading().and_then(|shading| self.shading(shading)))
             .with_hidden(format.hidden())
             .with_language(language)
+            .with_ligatures({
+                let ligatures = format.ligatures();
+                ir::Ligatures::default()
+                    .with_standard(ligatures.standard())
+                    .with_contextual(ligatures.contextual())
+                    .with_historical(ligatures.historical())
+                    .with_discretional(ligatures.discretional())
+            })
+            .with_contextual_alternates(format.contextual_alternates())
     }
 
     /// A font name as the IR gets it, cut as [`cut_font_name`] does; a cut is listed.

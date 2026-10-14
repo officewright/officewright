@@ -200,6 +200,9 @@ fn gives_each_distinct_run_format_one_run_style() {
     assert_eq!(rich.letter_spacing(), Pt(1.0));
     assert_eq!(rich.kern_min(), Some(Pt(12.0)));
     assert!(rich.caps() && rich.hidden());
+    // Without ligatures in the defaults, none; contextual alternates off.
+    assert_eq!(rich.ligatures(), ir::Ligatures::default());
+    assert!(!rich.contextual_alternates());
     assert_eq!(
         rich.shading(),
         Some(
@@ -1346,7 +1349,13 @@ fn gives_runs_that_differ_in_one_property_different_run_styles() {
         ("", "<w:caps/>"),
         ("", "<w:smallCaps/>"),
         ("", "<w:vanish/>"),
+        ("", r#"<w14:ligatures w14:val="standard"/>"#),
+        ("", "<w14:cntxtAlts/>"),
         // Values against values, not against none.
+        (
+            r#"<w14:ligatures w14:val="standard"/>"#,
+            r#"<w14:ligatures w14:val="historical"/>"#,
+        ),
         (
             r#"<w:color w:val="FF0000"/>"#,
             r#"<w:color w:val="00FF00"/>"#,
@@ -2022,4 +2031,31 @@ fn gives_the_paragraph_added_to_a_cell_the_default_paragraph_style_s_mark() {
     };
     let ir = translation.document();
     assert_eq!(ir.run_style(added.mark()).unwrap().size(), Pt(20.0));
+}
+
+#[test]
+fn translates_ligatures_and_contextual_alternates() {
+    let document = open(
+        r#"<w:p><w:r><w:rPr><w14:ligatures w14:val="standardHistorical"/><w14:cntxtAlts/></w:rPr><w:t>x</w:t></w:r><w:r><w:t>y</w:t></w:r></w:p>"#,
+    );
+    let translation = translate(&document);
+    let ir = translation.document();
+    let inlines = paragraphs(&translation)[0].inlines();
+    let set = ir.run_style(style_of(&inlines[0])).unwrap();
+    assert_eq!(
+        set.ligatures(),
+        ir::Ligatures::default()
+            .with_standard(true)
+            .with_historical(true)
+    );
+    assert!(set.contextual_alternates());
+    // Without a styles part, Word's defaults: standard and contextual ligatures.
+    let defaults = ir.run_style(style_of(&inlines[1])).unwrap();
+    assert_eq!(
+        defaults.ligatures(),
+        ir::Ligatures::default()
+            .with_standard(true)
+            .with_contextual(true)
+    );
+    assert!(!defaults.contextual_alternates());
 }

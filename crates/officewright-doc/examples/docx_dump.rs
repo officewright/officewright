@@ -395,5 +395,21 @@ fn in_effect(format: &CharacterFormat) -> String {
     if let Some(underline) = format.underline() {
         out.push_str(&format!(" underline={underline:?}"));
     }
+    let ligatures = format.ligatures();
+    let kinds: Vec<&str> = [
+        ("standard", ligatures.standard()),
+        ("contextual", ligatures.contextual()),
+        ("historical", ligatures.historical()),
+        ("discretional", ligatures.discretional()),
+    ]
+    .into_iter()
+    .filter_map(|(name, on)| on.then_some(name))
+    .collect();
+    if !kinds.is_empty() {
+        out.push_str(&format!(" ligatures={}", kinds.join("+")));
+    }
+    if format.contextual_alternates() {
+        out.push_str(" contextual-alternates");
+    }
     out
 }
