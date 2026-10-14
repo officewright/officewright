@@ -1426,7 +1426,15 @@ def check(docs: list[Doc]) -> list[str]:
     present = {p.name for p in OUT_DIR.glob("*")} if OUT_DIR.is_dir() else set()
     for name in sorted(present - set(expected)):
         problems.append(f"tests/corpus/word-rules/{name} is not written by this script")
-    sources = SOURCES.read_text(encoding="utf-8")
+    lines = SOURCES.read_text(encoding="utf-8").splitlines()
+    rows = [number for number, line in enumerate(lines) if line.startswith("| word-rules/")]
+    # The rows are table rows: one block of table lines, right under the table's header.
+    if rows and not all(
+        line.startswith("|") for line in lines[rows[0] - 1 : rows[-1] + 1]
+    ):
+        problems.append(
+            "the word-rules rows of tests/corpus/SOURCES.md are not one block of its table"
+        )
     for name, doc in expected.items():
         path = OUT_DIR / name
         if name not in present:
@@ -1438,7 +1446,7 @@ def check(docs: list[Doc]) -> list[str]:
                 problems.append(f"{committed} differs from what this script writes")
             else:
                 problems.append(f"{committed} has the parts this script writes in other ZIP bytes")
-        if f"| word-rules/{name} |" not in sources:
+        if not any(lines[number].startswith(f"| word-rules/{name} |") for number in rows):
             problems.append(f"tests/corpus/SOURCES.md has no row for word-rules/{name}")
     return problems
 

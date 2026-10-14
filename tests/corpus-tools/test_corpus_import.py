@@ -695,6 +695,18 @@ class Import(unittest.TestCase):
             ],
         })
         self.assertEqual(len(self.run_import(allow_locale=True)), 2)
+        # SOURCES.md names what was accepted, and only for that document.
+        rows = [
+            line for line in (self.corpus / "SOURCES.md").read_text(encoding="utf-8").splitlines()
+            if "accepted with --allow-locale" in line
+        ]
+        self.assertEqual(len(rows), 1)
+        self.assertIn(
+            f"| reference/word-rules/{rules.documents()[0].name}/ ", rows[0]
+        )
+        self.assertIn(
+            "accepted with --allow-locale: the re-saved copy has listSeparator ';'", rows[0]
+        )
 
     def test_refuses_values_that_would_break_the_table(self):
         for key, value in (("word_build", "16.0 | x"), ("rendered", "today"),

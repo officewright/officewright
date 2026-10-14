@@ -1210,6 +1210,11 @@ def with_fonts_embedded(pdf: Path, drawn: list[DrawnFont], directory: Path, tool
     return copy
 
 
+def locale_note(accepted: list[str]) -> str:
+    """How SOURCES.md names the language tags and number formats --allow-locale accepted."""
+    return "accepted with --allow-locale: " + ", ".join(accepted)
+
+
 def drawn_font_note(font: DrawnFont) -> str:
     """How SOURCES.md names a font the rasters draw with the maintainer's copy."""
     substitute = ""
@@ -1228,6 +1233,7 @@ def reference_row(
     poppler: str,
     dropped: list[str],
     formatting_note: str = "",
+    locale_accepted: list[str] | None = None,
 ) -> str:
     base = Path(record["file"]).stem
     windows = record["windows_version"]
@@ -1252,6 +1258,8 @@ def reference_row(
             or "none"
         ),
     ]
+    if locale_accepted:
+        notes.append(locale_note(locale_accepted))
     if formatting_note:
         notes.append(formatting_note)
     return (
@@ -1323,8 +1331,12 @@ def check_result(
         resaved_parts = read_parts(resaved)
         problems = docx_privacy_problems(resaved)
         problems += embedded_font_problems(resaved_parts)
+        # Accepted only by the maintainer's --allow-locale, and then named in SOURCES.md, so
+        # that tests/corpus-tools can tell an accepted trace from a later change.
+        accepted = locale_problems(original_parts, resaved_parts)
         if not allow_locale:
-            problems += locale_problems(original_parts, resaved_parts)
+            problems += accepted
+            accepted = []
         mode = compatibility_mode(original_parts)
         resaved_mode = compatibility_mode(resaved_parts)
         # Word drops a legacy flag it does not apply in the document's mode, and adds
@@ -1380,7 +1392,7 @@ def check_result(
     formatting, formatting_note = None, ""
     if record["script_version"] >= 3:
         formatting, formatting_note = checked_formatting(record, results, resaved_parts, group)
-    row = reference_row(group, record, drawn, poppler, dropped, formatting_note)
+    row = reference_row(group, record, drawn, poppler, dropped, formatting_note, accepted)
     return Checked(record, pdf, resaved, row, geometry, drawn, formatting, formatting_note)
 
 
