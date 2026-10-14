@@ -2558,6 +2558,7 @@ pub(crate) mod tests {
                 "the progressive JPEG scan header gives Ss 0 and Se 5, not 0 and 0 for the DC \
                  coefficients or 1 <= Ss <= Se <= 63 for AC coefficients",
             ),
+            (scan(false, 0, 1, 0, 0), "gives Ss 0 and Se 1, not 0 and 0"),
             (scan(false, 2, 1, 0, 0), "gives Ss 2 and Se 1, not 0 and 0"),
             (
                 scan(false, 1, 64, 0, 0),
@@ -2571,6 +2572,11 @@ pub(crate) mod tests {
                 scan(true, 1, 63, 0, 0),
                 "the progressive JPEG scan header names 3 components in a scan of AC \
                  coefficients, not 1",
+            ),
+            // Two components, the first two of the frame.
+            (
+                vec![2, 1, 0, 2, 0x11, 1, 63, 0],
+                "names 2 components in a scan of AC coefficients, not 1",
             ),
             (
                 scan(false, 0, 0, 2, 0),
