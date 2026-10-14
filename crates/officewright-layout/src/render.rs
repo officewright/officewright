@@ -1103,16 +1103,79 @@ mod tests {
                 _ => None,
             })
             .collect();
-        let [(path, _), (_, thick)] = strokes.as_slice() else {
+        let [(path, _), (thick_path, thick_stroke)] = strokes.as_slice() else {
             panic!("two lines: {}", strokes.len());
         };
         assert_eq!(*path, &expected);
-        assert_eq!(thick.width(), Pt(MAX_LINE_WIDTH));
-        assert!(thick.dash().iter().all(|length| length.0 <= PDF_LIMIT));
+        // Thinned before it is cut: its margin is four of its thinned widths and a point,
+        // 16,384.5 pt, which keeps it within what a PDF holds; cut first, it would keep
+        // its start 40,000 pt left of the page.
+        let thinned = LineItem {
+            width: Pt(MAX_LINE_WIDTH),
+            ..thick
+        };
+        let page = Area {
+            width: 100.0,
+            height: 200.0,
+        };
+        let cut = on_page(&thinned, page).expect("on the page");
+        assert!((cut.from.x.0 + 16_384.5).abs() < 1e-6, "{:?}", cut.from);
+        let (cut_path, _) = line_path(&cut, |y| Pt(200.0 - y.0));
+        assert_eq!(*thick_path, &cut_path);
+        assert_eq!(thick_stroke.width(), Pt(MAX_LINE_WIDTH));
+        assert!(
+            thick_stroke
+                .dash()
+                .iter()
+                .all(|length| length.0 <= PDF_LIMIT)
+        );
         assert!(
             messages(&report).iter().any(|m| m.contains("thicker")),
             "{report:?}"
         );
+    }
+
+    #[test]
+    fn an_enlarged_page_keeps_its_content_at_its_top_left_corner() {
+        // A page 2 pt square, made 3 pt: a rectangle 1 pt square at its top left corner
+        // is drawn from 2 pt up, not 1.
+        let book = crate::testing::book(vec![crate::testing::minimal()]);
+        let mut fonts = Fonts::new(&book);
+        let document = Document::default();
+        let mut painter = Painter {
+            document: &document,
+            fonts: &mut fonts,
+            pdf_fonts: HashMap::new(),
+            images: HashMap::new(),
+            pdf: pdf::Document::new(),
+        };
+        painter.pdf.set_compression(pdf::Compression::None);
+        let page = Page {
+            section: 0,
+            width: Pt(2.0),
+            height: Pt(2.0),
+            number: 1,
+            body: pages::Body {
+                left: Pt(0.0),
+                top: Pt(0.0),
+                width: Pt(2.0),
+                bottom: Pt(2.0),
+            },
+            fragments: Vec::new(),
+            items: vec![DisplayItem::Rect {
+                at: Point {
+                    x: Pt(0.0),
+                    y: Pt(0.0),
+                },
+                width: Pt(1.0),
+                height: Pt(1.0),
+                color: Color::BLACK,
+            }],
+            blank: false,
+        };
+        painter.page(&page).expect("the page");
+        let pdf = String::from_utf8_lossy(&painter.pdf.to_bytes().expect("the PDF")).into_owned();
+        assert!(pdf.contains("0 2 1 1 re"), "{pdf}");
     }
 
     #[test]
