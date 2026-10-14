@@ -180,6 +180,23 @@ impl<'a> Formats<'a> {
     /// conditional format, then the table's own. Word does not allow some properties in a
     /// style (the width, layout, look, position, overlap and direction, MS-OI29500
     /// §17.7.6.4(a)); they come from the table only.
+    ///
+    /// ```
+    /// # fn main() -> officewright_doc::Result<()> {
+    /// use officewright_doc::{Block, Document};
+    ///
+    /// // A table in the style "Grid", which gives its borders.
+    /// let document = Document::open("tests/data/table-style.docx")?;
+    /// let mut formats = document.formats();
+    /// let Some(Block::Table(table)) = document.sections().flat_map(|s| s.blocks()).next() else {
+    ///     panic!("the document starts with a table");
+    /// };
+    /// assert!(formats.table_properties(table).borders().is_some());
+    /// // The table's w:tblLook turns on the style's format for the first row.
+    /// assert_eq!(formats.table_look(table).first_row(), Some(true));
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn table_properties(&mut self, table: Table<'a>) -> TableProperties {
         let (document, index) = table.place();
         if !std::ptr::eq(document, self.document) {
@@ -232,6 +249,30 @@ impl<'a> Formats<'a> {
     /// (MS-OI29500 §17.7.6.6(a)), then the cell's own. A conditional format's no
     /// wrapping, margins and vertical alignment apply to every cell of a row one of whose
     /// cells it applies to (MS-OI29500 §17.7.6.8(a)).
+    ///
+    /// ```
+    /// # fn main() -> officewright_doc::Result<()> {
+    /// use officewright_doc::{Block, ColorValue, Document, TableStyleCondition};
+    ///
+    /// // The style "Grid" shades the first row of the table.
+    /// let document = Document::open("tests/data/table-style.docx")?;
+    /// let mut formats = document.formats();
+    /// let Some(Block::Table(table)) = document.sections().flat_map(|s| s.blocks()).next() else {
+    ///     panic!("the document starts with a table");
+    /// };
+    /// let mut fills = Vec::new();
+    /// for row in table.rows() {
+    ///     let cell = row.cells().next().expect("a cell");
+    ///     let properties = formats.cell_properties(cell);
+    ///     fills.push(properties.shading().and_then(|shading| shading.fill().value()));
+    ///     println!("{:?}", formats.cell_conditions(cell));
+    /// }
+    /// assert_eq!(fills, [Some(ColorValue::Rgb(0x44, 0x72, 0xC4)), None]);
+    /// let first = table.rows().next().and_then(|row| row.cells().next()).expect("a cell");
+    /// assert_eq!(formats.cell_conditions(first), [TableStyleCondition::FirstRow]);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn cell_properties(&mut self, cell: TableCell<'a>) -> TableCellProperties {
         #[cfg(test)]
         {

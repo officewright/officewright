@@ -239,6 +239,20 @@ impl<'a> Style<'a> {
     /// what the style gives the parts of a table, such as its first row or every other
     /// band of rows, which the table's `w:tblLook` turns on. One of a type that is not
     /// one is left out.
+    ///
+    /// ```
+    /// # fn main() -> officewright_doc::Result<()> {
+    /// use officewright_doc::{Document, TableStyleCondition};
+    ///
+    /// let document = Document::open("tests/data/table-style.docx")?;
+    /// let style = document.styles().get("Grid").expect("the style Grid");
+    /// let formats: Vec<_> = style.conditional_formats().collect();
+    /// assert_eq!(formats.len(), 1);
+    /// assert_eq!(formats[0].condition(), TableStyleCondition::FirstRow);
+    /// assert!(formats[0].cell_properties().shading().is_some());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn conditional_formats(self) -> impl Iterator<Item = ConditionalFormat<'a>> + 'a {
         let document = self.document;
         document
