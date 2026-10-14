@@ -975,6 +975,7 @@ pub fn paint(
     let location = Location::default();
     let mut items = Vec::new();
     let mut top = 0.0;
+    let mut leaders = crate::display::LeaderBudget::default();
     for (index, paragraph) in paragraphs.iter().enumerate() {
         // The space above the first paragraph is its own; between two, the larger.
         let previous = index.checked_sub(1).and_then(|i| paragraphs.get(i));
@@ -1000,6 +1001,7 @@ pub fn paint(
             fonts: &mut fonts,
             location: &location,
             background: None,
+            leaders: &mut leaders,
         };
         let origin = Point {
             x: Pt(0.0),

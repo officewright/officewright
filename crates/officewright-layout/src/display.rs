@@ -36,9 +36,13 @@ const SUBSCRIPT_DROP: f64 = 1.0 / 3.0;
 const BAR_TAB_WIDTH: Pt = Pt(0.75);
 
 /// The most glyphs a tab leader is drawn with. A longer one, which only a tiny font in a
-/// wide tab makes, is drawn as a dotted or dashed line instead, and reported: it keeps
-/// the display list's size bounded by the page's, whatever the font.
+/// wide tab makes, is drawn as a dotted or dashed line instead, and reported.
 const MAX_LEADER_GLYPHS: usize = 4096;
+
+/// The most glyphs the leaders of one layout run are drawn with together, so that no
+/// number of tabs, lines or pages makes them unbounded: far more than the leaders of a
+/// long table of contents take. Past it, leaders are drawn as lines, and reported.
+const MAX_RUN_LEADER_GLYPHS: usize = 1 << 18;
 
 /// The most bar tabs a paragraph draws; more are reported.
 const MAX_BAR_TABS: usize = 256;
@@ -156,6 +160,75 @@ struct Look<'a> {
     color: Color,
 }
 
+/// The leader glyphs a layout run may still draw, [`MAX_RUN_LEADER_GLYPHS`] at first.
+#[derive(Debug)]
+pub(crate) struct LeaderBudget {
+    left: usize,
+}
+
+impl Default for LeaderBudget {
+    fn default() -> Self {
+        Self {
+            left: MAX_RUN_LEADER_GLYPHS,
+        }
+    }
+}
+
+/// The tables that find the source text of the drawn bytes of a run whose drawn and
+/// source characters correspond one to one: the number of characters before each byte of
+/// its drawn text, and where each character of its source starts. Made once for a run
+/// and kept for the pieces of it that follow, on the lines after.
+#[derive(Debug, Default)]
+struct SourceTables {
+    /// The item of the run they are for.
+    item: Option<usize>,
+    chars_before: Vec<usize>,
+    source_offsets: Vec<usize>,
+}
+
+impl SourceTables {
+    /// The tables of `run`, item `item` of `itemized`, made unless they are at hand.
+    fn of(&mut self, item: usize, itemized: &Itemized, run: &TextRun) -> &Self {
+        if self.item != Some(item) {
+            let drawn = itemized.text.get(run.range.clone()).unwrap_or("");
+            let source = itemized.source.get(run.source.clone()).unwrap_or("");
+            self.chars_before.clear();
+            self.chars_before.reserve(drawn.len() + 1);
+            let mut count = 0;
+            for (offset, _) in drawn.char_indices() {
+                self.chars_before.resize(offset + 1, count);
+                count += 1;
+            }
+            self.chars_before.resize(drawn.len() + 1, count);
+            self.source_offsets.clear();
+            self.source_offsets
+                .extend(source.char_indices().map(|(offset, _)| offset));
+            self.source_offsets.push(source.len());
+            self.item = Some(item);
+        }
+        self
+    }
+
+    /// The source text of the drawn bytes `drawn` of `run`.
+    fn source_of(&self, itemized: &Itemized, run: &TextRun, drawn: Range<usize>) -> String {
+        let char_at = |byte: usize| {
+            byte.checked_sub(run.range.start)
+                .and_then(|offset| self.chars_before.get(offset))
+                .copied()
+        };
+        let (Some(from), Some(to)) = (char_at(drawn.start), char_at(drawn.end)) else {
+            return String::new();
+        };
+        let (Some(&start), Some(&end)) =
+            (self.source_offsets.get(from), self.source_offsets.get(to))
+        else {
+            return String::new();
+        };
+        let source = itemized.source.get(run.source.clone()).unwrap_or("");
+        source.get(start..end).unwrap_or("").to_owned()
+    }
+}
+
 /// What the display list of a paragraph is made from.
 pub(crate) struct Painting<'a, 'f, 'b> {
     pub(crate) document: &'a Document,
@@ -166,6 +239,8 @@ pub(crate) struct Painting<'a, 'f, 'b> {
     /// What is behind the paragraph, such as a table cell's shading, which decides the
     /// automatic text colour; `None` for the page.
     pub(crate) background: Option<Color>,
+    /// The leader glyphs the layout run may still draw.
+    pub(crate) leaders: &'a mut LeaderBudget,
 }
 
 impl Painting<'_, '_, '_> {
@@ -179,11 +254,12 @@ impl Painting<'_, '_, '_> {
         let itemized = &self.layout.itemized;
         let lines = self.layout.lines.get(lines).unwrap_or(&[]);
         self.bars(lines, origin, &mut front);
+        let mut tables = SourceTables::default();
         // Word underlines the spaces at the end of a line only with this legacy option.
         let trailing = self
             .document
             .settings()
-            .has_compat_flag(&CompatFlag::Other("ulTrailSpace".to_owned()));
+            .has_compat_flag(&CompatFlag::UlTrailSpace);
         for line in lines {
             let baseline = top + line.baseline.0;
             let bounds = (top, top + line.height.0);
@@ -213,7 +289,10 @@ impl Painting<'_, '_, '_> {
                             bounds,
                         );
                         let color = text_color(style.color(), background);
-                        if let Some(glyphs) = self.glyphs(run, &style, piece, x, baseline, color) {
+                        let placed = (piece, x, baseline);
+                        if let Some(glyphs) =
+                            self.glyphs((*item, run), &style, placed, color, &mut tables)
+                        {
                             front.push(DisplayItem::Glyphs(glyphs));
                         }
                         // Spaces that hang past the end of the line are not underlined
@@ -391,12 +470,11 @@ impl Painting<'_, '_, '_> {
     /// The glyph run of a piece of text.
     fn glyphs(
         &mut self,
-        run: &TextRun,
+        (item, run): (usize, &TextRun),
         style: &RunStyle,
-        piece: &Piece,
-        x: f64,
-        baseline: f64,
+        (piece, x, baseline): (&Piece, f64, f64),
         color: Color,
+        tables: &mut SourceTables,
     ) -> Option<GlyphItem> {
         let face = run.face?;
         let placed = piece.glyphs(&self.layout.itemized);
@@ -408,7 +486,13 @@ impl Painting<'_, '_, '_> {
             x: Pt(x),
             y: Pt(baseline - rise),
         };
-        let clusters = clusters(&self.layout.itemized, run, &placed, piece);
+        let itemized = &self.layout.itemized;
+        let clusters = if run.sources.is_empty() {
+            let tables = tables.of(item, itemized, run);
+            clusters(itemized, run, &placed, piece, Some(tables))
+        } else {
+            clusters(itemized, run, &placed, piece, None)
+        };
         Some(GlyphItem {
             face,
             size: run.size,
@@ -495,50 +579,48 @@ fn decorations(
     color: Color,
     out: &mut Vec<DisplayItem>,
 ) {
-    {
-        let scale = size.0 / f64::from(face.units_per_em().max(1));
-        if let Some(underline) = style.underline() {
-            let line_color = match underline.color() {
-                ColorValue::Rgb(color) => color,
-                ColorValue::Auto => color,
-            };
-            let (position, thickness) = decoration(face, Decoration::Underline, scale);
-            for (start, end) in spans {
-                push_lines(
-                    out,
-                    underline_lines(underline.kind()),
-                    *start,
-                    *end,
-                    baseline - position,
-                    thickness,
-                    line_color,
-                );
-            }
-        }
-        let strikes = match (style.strike(), style.double_strike()) {
-            (_, true) => Some(2),
-            (true, false) => Some(1),
-            (false, false) => None,
+    let scale = size.0 / f64::from(face.units_per_em().max(1));
+    if let Some(underline) = style.underline() {
+        let line_color = match underline.color() {
+            ColorValue::Rgb(color) => color,
+            ColorValue::Auto => color,
         };
-        if let Some(count) = strikes {
-            let (position, thickness) = decoration(face, Decoration::Strikeout, scale);
-            // A double strike: two lines a thickness above and below the face's place.
-            // Hypothesis until a Word reference (`E-strike.docx`).
-            let kind = if count == 2 {
-                [(LineStyle::Solid, 1.0, -1.0), (LineStyle::Solid, 1.0, 1.0)].to_vec()
-            } else {
-                [(LineStyle::Solid, 1.0, 0.0)].to_vec()
-            };
+        let (position, thickness) = decoration(face, Decoration::Underline, scale);
+        for (start, end) in spans {
             push_lines(
                 out,
-                kind,
-                full.0,
-                full.1,
+                underline_lines(underline.kind()),
+                *start,
+                *end,
                 baseline - position,
                 thickness,
-                color,
+                line_color,
             );
         }
+    }
+    let strikes = match (style.strike(), style.double_strike()) {
+        (_, true) => Some(2),
+        (true, false) => Some(1),
+        (false, false) => None,
+    };
+    if let Some(count) = strikes {
+        let (position, thickness) = decoration(face, Decoration::Strikeout, scale);
+        // A double strike: two lines a thickness above and below the face's place.
+        // Hypothesis until a Word reference (`E-strike.docx`).
+        let kind = if count == 2 {
+            [(LineStyle::Solid, 1.0, -1.0), (LineStyle::Solid, 1.0, 1.0)].to_vec()
+        } else {
+            [(LineStyle::Solid, 1.0, 0.0)].to_vec()
+        };
+        push_lines(
+            out,
+            kind,
+            full.0,
+            full.1,
+            baseline - position,
+            thickness,
+            color,
+        );
     }
 }
 
@@ -708,13 +790,14 @@ impl Painting<'_, '_, '_> {
             return;
         }
         let fit = (width / advance).floor();
-        if fit > MAX_LEADER_GLYPHS as f64 {
+        if fit > MAX_LEADER_GLYPHS as f64 || fit > self.leaders.left as f64 {
             self.fonts.report_once(
                 ReportKind::FeatureUnsupported,
                 self.location,
                 format!(
-                    "a tab leader that would take more than {MAX_LEADER_GLYPHS} glyphs is drawn \
-                     as a line"
+                    "a tab leader that would take more than {MAX_LEADER_GLYPHS} glyphs, or more \
+                     than the {MAX_RUN_LEADER_GLYPHS} the leaders of a document take together, \
+                     is drawn as a line"
                 ),
             );
             let style = if leader == TabLeader::Hyphen {
@@ -727,6 +810,7 @@ impl Painting<'_, '_, '_> {
         }
         // As many as fit, the last ending where the tab ends.
         let count = fit as usize;
+        self.leaders.left -= count;
         let start = x + width - count as f64 * advance;
         let glyphs = (0..count)
             .map(|index| DrawnGlyph {
@@ -801,12 +885,14 @@ fn rise_at(style: &RunStyle, size: f64) -> f64 {
 /// source characters of its drawn characters, each source character with the cluster
 /// that draws the first character drawn for it (`ß` in capitals, `SS`, goes with the
 /// first `S`). A cluster's text runs to the next cluster's start in the text, whichever
-/// order the glyphs are in (right-to-left text has them backwards).
+/// order the glyphs are in (right-to-left text has them backwards). `tables` are the run's
+/// when its characters correspond one to one.
 fn clusters(
     itemized: &Itemized,
     run: &TextRun,
     placed: &[PlacedGlyph],
     piece: &Piece,
+    tables: Option<&SourceTables>,
 ) -> Vec<(String, Vec<PlacedGlyph>)> {
     let hyphen = matches!(piece.kind, PieceKind::Hyphen { .. });
     let piece_end = match &piece.kind {
@@ -823,35 +909,6 @@ fn clusters(
             .unwrap_or(piece_end)
             .max(cluster)
     };
-    // Drawn and source characters one to one: the source of drawn bytes is found by
-    // counting characters, with tables made once for the piece.
-    let drawn = itemized.text.get(run.range.clone()).unwrap_or("");
-    let source = itemized.source.get(run.source.clone()).unwrap_or("");
-    let mut chars_before = Vec::new();
-    let mut source_offsets = Vec::new();
-    if run.sources.is_empty() && !hyphen {
-        chars_before.reserve(drawn.len() + 1);
-        for (count, (offset, _)) in drawn.char_indices().enumerate() {
-            chars_before.resize(offset + 1, count);
-        }
-        chars_before.resize(drawn.len() + 1, drawn.chars().count());
-        source_offsets.extend(source.char_indices().map(|(offset, _)| offset));
-        source_offsets.push(source.len());
-    }
-    let source_of = |drawn: Range<usize>| -> String {
-        let char_at = |byte: usize| {
-            byte.checked_sub(run.range.start)
-                .and_then(|offset| chars_before.get(offset))
-                .copied()
-        };
-        let (Some(from), Some(to)) = (char_at(drawn.start), char_at(drawn.end)) else {
-            return String::new();
-        };
-        let (Some(&start), Some(&end)) = (source_offsets.get(from), source_offsets.get(to)) else {
-            return String::new();
-        };
-        source.get(start..end).unwrap_or("").to_owned()
-    };
     let mut out: Vec<(String, Vec<PlacedGlyph>)> = Vec::new();
     let mut index = 0;
     while let Some(first) = placed.get(index) {
@@ -866,8 +923,8 @@ fn clusters(
         let text = if hyphen {
             // The hyphen drawn at a soft hyphen stands for no text of its own.
             String::new()
-        } else if run.sources.is_empty() {
-            source_of(first.cluster..text_end(first.cluster))
+        } else if let Some(tables) = tables.filter(|_| run.sources.is_empty()) {
+            tables.source_of(itemized, run, first.cluster..text_end(first.cluster))
         } else {
             expanded_source(itemized, run, first.cluster..text_end(first.cluster))
         };
@@ -939,8 +996,8 @@ enum Decoration {
 
 /// Where a decoration's stroke is centred, up from the baseline, and its thickness, in
 /// points at `scale` points per unit: from the face, else from the usual proportions
-/// (an underline a tenth of an em below the baseline, a strikeout a quarter above, a
-/// twentieth of an em thick).
+/// (an underline a tenth of an em below the baseline, a strikeout three tenths above,
+/// a twentieth of an em thick).
 fn decoration(face: &FontFace, which: Decoration, scale: f64) -> (f64, f64) {
     let units_per_em = f64::from(face.units_per_em().max(1));
     let metrics = match which {
@@ -1155,6 +1212,7 @@ mod tests {
             &mut shaper,
             &location,
         );
+        let mut leaders = LeaderBudget::default();
         let mut painting = Painting {
             document: &document,
             paragraph: &paragraph,
@@ -1162,6 +1220,7 @@ mod tests {
             fonts: &mut fonts,
             location: &location,
             background: None,
+            leaders: &mut leaders,
         };
         let mut items = Vec::new();
         let origin = Point {
@@ -1462,6 +1521,47 @@ mod tests {
             [Color::rgb(255, 255, 0)]
         );
         assert_eq!(glyph_runs(&items)[2].color, Color::BLACK);
+    }
+
+    #[test]
+    fn the_box_of_lowered_text_is_cut_at_its_line_s_bottom() {
+        // A subscript drops a third of 10 pt: its box would end 2.5 pt below its baseline,
+        // past the line's bottom at 31.5 (ascent 9 and descent 2.5 from 20).
+        let lowered = RunStyle::default()
+            .with_vertical(VerticalPosition::Subscript)
+            .with_highlight(Some(Color::rgb(255, 255, 0)));
+        let (items, _) = painted(&[RunStyle::default(), lowered], |ids, _| {
+            let inlines = vec![Inline::text("A", ids[0]), Inline::text("A", ids[1])];
+            (ParagraphProps::default(), inlines)
+        });
+        let boxes = rects(&items);
+        let [(at, _, height, _)] = boxes.as_slice() else {
+            panic!("{items:?}");
+        };
+        assert!((at.y.0 + height.0 - 31.5).abs() < 1e-9, "{boxes:?}");
+    }
+
+    #[test]
+    fn at_most_256_bar_tabs_are_drawn_and_more_are_reported() {
+        let (items, report) = painted_with(vec![minimal()], &[RunStyle::default()], |ids, _| {
+            let bars = (0..300).map(|stop| {
+                TabStop::default()
+                    .with_position(Pt(f64::from(stop) / 4.0))
+                    .with_kind(TabKind::Bar)
+            });
+            (
+                ParagraphProps::default().with_tabs(bars),
+                vec![Inline::text("A", ids[0])],
+            )
+        });
+        assert_eq!(line_items(&items).len(), 256);
+        assert!(
+            report
+                .entries()
+                .iter()
+                .any(|entry| entry.message().contains("bar tabs")),
+            "{report:?}"
+        );
     }
 
     #[test]

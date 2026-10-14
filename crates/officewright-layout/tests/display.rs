@@ -571,7 +571,7 @@ fn hanging_spaces_have_no_highlight_and_the_underline_only_with_ul_trail_space()
         assert!(end <= 2000, "{line}\n{}", painted.text());
     }
     // With `ulTrailSpace`, the hanging spaces are underlined too.
-    let painted = paint_with(vec![CompatFlag::Other("ulTrailSpace".to_owned())]);
+    let painted = paint_with(vec![CompatFlag::from_name("ulTrailSpace")]);
     assert!(
         items(&painted, "line")
             .iter()
@@ -611,6 +611,155 @@ fn a_words_only_underline_covers_the_hyphen_at_a_soft_hyphen() -> TestResult {
             let ((from, _), (to, _)) = ends(line);
             from <= hyphen_x && to > hyphen_x
         }),
+        "{}",
+        painted.text()
+    );
+    Ok(())
+}
+
+#[test]
+fn the_leaders_of_a_document_take_a_bounded_number_of_glyphs() -> TestResult {
+    // 1 pt at 1 %, stops every 11 pt with dot leaders: each of 143 tabs a line holds
+    // stays under the bound of one leader, but together the leaders of three such lines
+    // would take 1.7 million glyphs.
+    let book = book()?;
+    let mut document = Document::default();
+    let tiny = styled(&mut document, |style| {
+        style.with_size(Pt(1.0)).with_scale(1)
+    });
+    let stops = (1..=143).map(|stop| {
+        TabStop::default()
+            .with_position(Pt(f64::from(stop) * 11.0))
+            .with_leader(TabLeader::Dot)
+    });
+    let props = ParagraphProps::default().with_tabs(stops);
+    let mut inlines = Vec::new();
+    for line in 0..3 {
+        if line > 0 {
+            inlines.push(Inline::line_break(
+                officewright_layout::ir::BreakClear::None,
+                tiny,
+            ));
+        }
+        inlines.push(Inline::text("A", tiny));
+        inlines.extend((0..143).map(|_| Inline::tab(tiny)));
+    }
+    let paragraph = Paragraph::new(tiny).with_props(props).with_inlines(inlines);
+    let painted = fuzzing::paint(&book, &document, &[paragraph], 1584.0);
+    let glyphs: usize = items(&painted, "glyphs")
+        .iter()
+        .filter(|run| run.contains("\"\\t\""))
+        .map(|run| glyph_xs(run).len())
+        .sum();
+    assert!(glyphs > 0 && glyphs <= 1 << 18, "{glyphs}");
+    assert!(
+        items(&painted, "line")
+            .iter()
+            .any(|line| line.contains(" dotted ")),
+        "no leader drawn as a line"
+    );
+    assert!(
+        painted
+            .report()
+            .entries()
+            .iter()
+            .any(|entry| entry.message().contains("tab leader")),
+        "{:?}",
+        painted.report()
+    );
+    Ok(())
+}
+
+#[test]
+fn line_leaders_are_dashed_for_hyphens_and_heavy_ones_twice_as_thick() -> TestResult {
+    let book = book()?;
+    let mut document = Document::default();
+    let style = document.add_run_style(base());
+    let tiny = styled(&mut document, |style| {
+        style.with_size(Pt(1.0)).with_scale(1)
+    });
+    let leader_line = |leader: TabLeader, style: RunStyleId| {
+        let props = ParagraphProps::default().with_tabs([TabStop::default()
+            .with_position(Pt(1500.0))
+            .with_leader(leader)]);
+        let paragraph = Paragraph::new(style)
+            .with_props(props)
+            .with_inlines([Inline::text("A", style), Inline::tab(style)]);
+        let painted = fuzzing::paint(&book, &document, &[paragraph], 1584.0);
+        items(&painted, "line")
+            .first()
+            .map(|line| (*line).to_owned())
+            .unwrap_or_default()
+    };
+    // Too long in a tiny font: a hyphen leader is a dashed line.
+    assert!(leader_line(TabLeader::Hyphen, tiny).contains(" dashed "));
+    // The heavy leader is twice as thick as the underscore leader.
+    let width = |line: String| -> i64 {
+        line.split(' ')
+            .nth(3)
+            .and_then(|width| width.parse().ok())
+            .unwrap_or(-1)
+    };
+    let (thin, heavy) = (
+        width(leader_line(TabLeader::Underscore, style)),
+        width(leader_line(TabLeader::Heavy, style)),
+    );
+    assert!(thin > 0 && (heavy - 2 * thin).abs() <= 1, "{thin} {heavy}");
+    Ok(())
+}
+
+#[test]
+fn a_tab_in_complex_script_text_has_the_complex_script_font() -> TestResult {
+    // A right-to-left style: its tab's leader is drawn in its complex-script font and
+    // size, as its line measured it.
+    let book = book()?;
+    let mut document = Document::default();
+    let style = styled(&mut document, |style| {
+        style
+            .with_rtl(true)
+            .with_fonts(RunFonts::new("Liberation Sans").with_complex_script("Liberation Serif"))
+            .with_size_complex_script(Pt(20.0))
+    });
+    let props = ParagraphProps::default().with_tabs([TabStop::default()
+        .with_position(Pt(200.0))
+        .with_leader(TabLeader::Dot)]);
+    let paragraph = Paragraph::new(style)
+        .with_props(props)
+        .with_inlines([Inline::text("A", style), Inline::tab(style)]);
+    let painted = paint(&book, &document, &[paragraph]);
+    let leader = items(&painted, "glyphs")
+        .into_iter()
+        .find(|run| run.contains("\"\\t\""))
+        .ok_or_else(|| painted.text().to_owned())?;
+    assert!(
+        leader.starts_with("glyphs Liberation Serif 400 "),
+        "{leader}"
+    );
+    Ok(())
+}
+
+#[test]
+fn text_whose_drawn_and_source_bytes_differ_keeps_its_text() -> TestResult {
+    // In capitals, `ı` (two bytes) is drawn `I` (one) and `ſ` (two) `S` (one): as many
+    // characters, fewer bytes.
+    let book = book()?;
+    let mut document = Document::default();
+    let caps = document.add_run_style(base().with_caps(true));
+    let plain = document.add_run_style(base());
+    // A run after it, of plain text, has its own text too.
+    let inlines = vec![
+        Inline::text("ıſxyz ıſ", caps),
+        Inline::text(" and plain words after", plain),
+    ];
+    let paragraph = one_paragraph(caps, inlines);
+    let painted = paint(&book, &document, &[paragraph]);
+    let texts: Vec<&str> = items(&painted, "glyphs")
+        .iter()
+        .map(|run| run.split('"').nth(1).unwrap_or_default())
+        .collect();
+    assert_eq!(
+        texts.concat(),
+        "ıſxyz ıſ and plain words after",
         "{}",
         painted.text()
     );
