@@ -3,7 +3,9 @@
 use miniz_oxide::deflate::compress_to_vec_zlib;
 
 /// How a [`Document`](crate::Document) stores the data of its streams: the content of
-/// its pages, and the programs and ToUnicode maps of its embedded fonts.
+/// its pages, the programs and ToUnicode maps of its embedded fonts, and the samples and
+/// soft masks of images decoded from PNG files. JPEG files, and the data of PNG files
+/// that go into the PDF as they are, keep their own compression either way.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Compression {

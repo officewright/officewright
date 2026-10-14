@@ -116,8 +116,10 @@ impl Document {
         self.pages.get_mut(index)
     }
 
-    /// Sets how the file stores page content and embedded fonts:
-    /// [`Compression::Flate`] unless set otherwise.
+    /// Sets how the file stores page content, embedded fonts, and the samples and soft
+    /// masks of images decoded from PNG files: [`Compression::Flate`] unless set
+    /// otherwise. JPEG files, and PNG files that go into the PDF as they are, keep their
+    /// own compression either way.
     ///
     /// ```
     /// use officewright_pdf::{Compression, Font, PageSize, Pt, StandardFont, text_to_pdf};
@@ -133,7 +135,8 @@ impl Document {
         self.compression = compression;
     }
 
-    /// How the file stores page content and embedded fonts.
+    /// How the file stores page content, embedded fonts, and the samples and soft masks of
+    /// images decoded from PNG files.
     pub fn compression(&self) -> Compression {
         self.compression
     }
@@ -142,9 +145,10 @@ impl Document {
     ///
     /// Embedded fonts are reduced to the glyphs the document shows now. Nothing is
     /// written to `out` unless the whole document can be. The file is PDF 1.4, or PDF 1.5
-    /// if some text needs replacement text for text extraction: where two characters share
+    /// if some text needs replacement text for text extraction (where two characters share
     /// a glyph of an embedded font, or a cluster of a glyph run cannot be given by the
-    /// ToUnicode map.
+    /// ToUnicode map), or if an image keeps 16-bit samples: a PNG file of 16 bits per
+    /// sample without interlacing or transparency, which goes into the PDF as it is.
     ///
     /// # Errors
     ///
