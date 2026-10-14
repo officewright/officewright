@@ -1,8 +1,8 @@
 //! The fonts of a layout run: which face each family and style resolves to, the faces
 //! loaded once each, and the faces that have a character the chosen one lacks.
 
-// reason: the layout itself uses this from PR 6 (paragraph layout) on; until then only
-// the tests and the `fuzzing` module do.
+// reason: the layout itself uses this once pagination (plan PR 8) lays out pages; until
+// then only the tests and the `fuzzing` module do.
 #![cfg_attr(not(any(test, feature = "fuzzing")), allow(dead_code))]
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
