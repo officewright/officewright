@@ -295,3 +295,28 @@ fn lays_the_rows_and_cells_own_properties_and_partial_looks_over_the_style() {
         translation.left_out()
     );
 }
+
+#[test]
+fn takes_the_first_whole_table_format_and_leaves_off_what_a_look_does_not_give() {
+    // Two whole-table formats, of which the first counts, and a span in the style's own
+    // cell properties, which Word does not allow (MS-OI29500 §17.7.6.8(b)).
+    let styles = format!(
+        r#"<w:style w:type="table" w:styleId="Twice"><w:name w:val="Twice"/><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:tblStylePr w:type="wholeTable">{}</w:tblStylePr><w:tblStylePr w:type="wholeTable">{}</w:tblStylePr><w:tblStylePr w:type="firstRow">{}</w:tblStylePr></w:style>"#,
+        shading("123456"),
+        shading("654321"),
+        shading("FF0000")
+    );
+    // A w:tblLook that gives only the last column: the first row it leaves out is off.
+    let body = table(
+        r#"<w:tblStyle w:val="Twice"/><w:tblLook w:lastColumn="1"/>"#,
+        2,
+        1,
+    );
+    let document = open_with(&styles, &body);
+    let mut formats = document.formats();
+    let styled = first_table(&document);
+    assert_eq!(formats.table_look(styled).first_row(), Some(false));
+    assert_eq!(fills(&document), [["123456"], ["123456"]]);
+    let cell = styled.rows().next().unwrap().cells().next().unwrap();
+    assert_eq!(formats.cell_properties(cell).grid_span(), None);
+}
