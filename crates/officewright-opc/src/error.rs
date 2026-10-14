@@ -101,7 +101,7 @@ impl Error {
                 context,
             } if matches!(
                 limit,
-                Limit::XmlDepth | Limit::XmlAttributes | Limit::MceNames
+                Limit::XmlDepth | Limit::XmlAttributes | Limit::XmlNamespaces | Limit::MceNames
             ) =>
             {
                 Self::LimitExceeded {

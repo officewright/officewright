@@ -554,14 +554,15 @@ fn bounds_the_namespaces_of_a_part() {
     let body = "<w:p xmlns:x='urn:x'><w:r xmlns:y='urn:y' xmlns:z='urn:x'/></w:p>";
     let options = LoadOptions::new().with_limits(Limits::new().with_max_xml_namespaces(6));
     let err = options.open_bytes(docx(body)).unwrap_err();
+    // The error names the part, as those of the other limits of an XML part do.
     assert!(
         matches!(
-            err,
+            &err,
             Error::LimitExceeded {
                 limit: Limit::XmlNamespaces,
                 maximum: 6,
-                ..
-            }
+                context,
+            } if context.starts_with("/word/document.xml, line 1, column ")
         ),
         "{err}"
     );
