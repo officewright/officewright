@@ -296,6 +296,142 @@ fn refuses_cff_reals_the_subsetter_cannot_write() -> TestResult {
     Ok(())
 }
 
+/// `font` with the directory record of `tag` renamed `new_tag` and pointed at `table`,
+/// appended to the end of the file.
+fn with_record(
+    mut font: Vec<u8>,
+    tag: &[u8; 4],
+    new_tag: &[u8; 4],
+    table: &[u8],
+) -> TestResult<Vec<u8>> {
+    let tables = usize::from(u16::from_be_bytes(
+        font.get(4..6).ok_or("short")?.try_into()?,
+    ));
+    let record = (0..tables)
+        .map(|i| 12 + 16 * i)
+        .find(|&at| font.get(at..at + 4) == Some(&tag[..]))
+        .ok_or("no such table")?;
+    font.resize(font.len().next_multiple_of(4), 0);
+    let offset = u32::try_from(font.len())?;
+    let length = u32::try_from(table.len())?;
+    font.extend_from_slice(table);
+    let checksum = font.get(record + 4..record + 8).ok_or("short directory")?;
+    let entry = [
+        &new_tag[..],
+        checksum,
+        &offset.to_be_bytes(),
+        &length.to_be_bytes(),
+    ]
+    .concat();
+    font.get_mut(record..record + 16)
+        .ok_or("short directory")?
+        .copy_from_slice(&entry);
+    Ok(font)
+}
+
+#[test]
+fn checks_the_cff_table_the_subsetter_takes() -> TestResult {
+    // Noto Sans with a second `CFF ` record: its `GDEF` record, renamed, after the
+    // first. The subsetter finds a table by bisection, which here takes the second;
+    // the font parser takes the first. One of the two tables has the real number
+    // 1E99999 the subsetter cannot write. In either order the subsetter never meets
+    // it: exactly one order is refused, before the subsetter runs, and the other
+    // subsets.
+    let noto = read("noto/NotoSans-Regular.otf")?;
+    let clean = table(&noto, b"CFF ")?.to_vec();
+    let at = clean
+        .windows(5)
+        .position(|window| window == [0x1e, 0x46, 0x87, 0x5c, 0x6f])
+        .ok_or("no real number")?;
+    let mut infinite = clean.clone();
+    infinite
+        .get_mut(at..at + 5)
+        .ok_or("short table")?
+        .copy_from_slice(&[0x1e, 0x1b, 0x99, 0x99, 0x9f]);
+    let mut refused = 0;
+    for (first, second) in [(&infinite, &clean), (&clean, &infinite)] {
+        let mut data = with_record(noto.clone(), b"GDEF", b"CFF ", second)?;
+        let cff = data
+            .windows(clean.len())
+            .position(|window| window == clean.as_slice())
+            .ok_or("no CFF table")?;
+        data.get_mut(cff..cff + first.len())
+            .ok_or("short font")?
+            .copy_from_slice(first);
+        match FontFace::from_bytes(data, 0)?.subset([]) {
+            Ok(_) => {}
+            Err(officewright_font::Error::MalformedTable { table: "CFF ", .. }) => refused += 1,
+            Err(err) => return Err(format!("{err}").into()),
+        }
+    }
+    assert_eq!(refused, 1);
+    Ok(())
+}
+
+#[test]
+fn checks_cff_reals_where_the_subsetter_takes_cff_for_truetype() -> TestResult {
+    // Noto Sans with the real number 1E99999 in its CFF table, and its GDEF and GPOS
+    // records renamed `glyf` and `loca`. The directory is no longer sorted: the font
+    // parser looks tables up one by one, finds both and takes the outlines for TrueType,
+    // while the subsetter's bisection misses `glyf` and takes the CFF table. The CFF
+    // check runs whatever the parser says, so the face is refused before the subsetter
+    // meets the number.
+    let mut data = read("noto/NotoSans-Regular.otf")?;
+    let at = data
+        .windows(5)
+        .position(|window| window == [0x1e, 0x46, 0x87, 0x5c, 0x6f])
+        .ok_or("no real number")?;
+    data.get_mut(at..at + 5)
+        .ok_or("short font")?
+        .copy_from_slice(&[0x1e, 0x1b, 0x99, 0x99, 0x9f]);
+    let tables = usize::from(u16::from_be_bytes(
+        data.get(4..6).ok_or("short")?.try_into()?,
+    ));
+    for (tag, new_tag) in [(b"GDEF", b"glyf"), (b"GPOS", b"loca")] {
+        let record = (0..tables)
+            .map(|i| 12 + 16 * i)
+            .find(|&at| data.get(at..at + 4) == Some(&tag[..]))
+            .ok_or("no such table")?;
+        data.get_mut(record..record + 4)
+            .ok_or("short directory")?
+            .copy_from_slice(new_tag);
+    }
+    let font = FontFace::from_bytes(data, 0)?;
+    assert_eq!(font.outline_format(), Some(OutlineFormat::TrueType));
+    let err = font.subset([]).err().ok_or("the subset succeeded")?;
+    assert!(
+        matches!(
+            err,
+            officewright_font::Error::MalformedTable { table: "CFF ", .. }
+        ),
+        "{err}"
+    );
+    Ok(())
+}
+
+#[test]
+fn refuses_name_tables_the_subsetter_cannot_write_in_cff_fonts_too() -> TestResult {
+    // Noto Sans with a `name` table whose one record ends 65538 bytes into the strings.
+    let mut name = Vec::new();
+    for value in [0u16, 1, 18, 3, 1, 0x0409, 1, 4, 0xFFFE] {
+        name.extend_from_slice(&value.to_be_bytes());
+    }
+    name.resize(18 + 0x1_0002, 0);
+    let data = with_record(read("noto/NotoSans-Regular.otf")?, b"name", b"name", &name)?;
+    let err = FontFace::from_bytes(data, 0)?
+        .subset([])
+        .err()
+        .ok_or("the subset succeeded")?;
+    assert!(
+        matches!(
+            err,
+            officewright_font::Error::MalformedTable { table: "name", .. }
+        ),
+        "{err}"
+    );
+    Ok(())
+}
+
 #[test]
 fn finds_the_faces_that_cover_a_character() -> TestResult {
     let mut book = FontBook::new();

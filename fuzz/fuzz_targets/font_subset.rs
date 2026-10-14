@@ -4,9 +4,6 @@
 use libfuzzer_sys::fuzz_target;
 use officewright_font::{FontFace, GlyphId};
 
-#[path = "shared/subsetter_issue_30.rs"]
-mod subsetter_issue_30;
-
 // libfuzzer-sys installs a panic hook that aborts, so a panic in the subsetter is a
 // crash here even though `FontFace::subset` catches it in other builds.
 fuzz_target!(|data: &[u8]| {
@@ -17,9 +14,6 @@ fuzz_target!(|data: &[u8]| {
         let Ok(font) = FontFace::from_bytes(data, index) else {
             continue;
         };
-        if subsetter_issue_30::hits(data, index) {
-            continue;
-        }
         // Glyphs by character, as text needs them, and the first glyphs by ID.
         let mut glyphs: Vec<GlyphId> = "Hello, Мир! 0123 ÁÉ fi"
             .chars()
