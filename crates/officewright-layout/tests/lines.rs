@@ -1345,15 +1345,10 @@ fn a_line_shaped_again_and_too_wide_ends_at_its_place_before() -> TestResult {
                 "{text:?} in {width} pt: {lines:?}"
             );
             lines_before = lines.len();
-            // A line without a drawn hyphen is as wide as its text shaped on its own.
-            for line in laid
-                .lines()
-                .iter()
-                .filter(|line| !line.text().ends_with('-') || text.contains("-Y"))
-            {
-                if line.text().ends_with('\u{00AD}') || line.text().ends_with("\u{00AD}-") {
-                    continue;
-                }
+            // A line without a drawn hyphen (which the dump writes after its soft hyphen)
+            // is as wide as its text shaped on its own.
+            let drawn_hyphen = |line: &&fuzzing::Line| line.text().ends_with("\u{00AD}-");
+            for line in laid.lines().iter().filter(|line| !drawn_hyphen(line)) {
                 let alone = width_of(&book, &document, style, line.text());
                 assert!(
                     (line.width() - alone).abs() < 1e-9,
@@ -1674,5 +1669,38 @@ fn spaces_before_an_object_of_no_width_hang_and_no_room_is_no_room() -> TestResu
     fuzzing::check_lines(&book, &document, &indented, 20.0)?;
     let laid = fuzzing::lay_out(&book, &document, &indented, 20.0);
     assert_eq!(laid.lines().first().map(|line| line.text()), Some("    "));
+    Ok(())
+}
+
+#[test]
+fn a_hyphen_that_does_not_fit_after_shaping_again_is_dropped_before_giving_up() -> TestResult {
+    // Kerned, "f" and the hyphen fit; shaped on its own, "f" is wider and the hyphen
+    // no longer fits. The line ends at the soft hyphen without one, and nothing is
+    // reported as overflowing: "f" alone is 7.78 pt.
+    let book = book()?;
+    let mut document = Document::default();
+    let style = document.add_run_style(
+        RunStyle::default()
+            .with_fonts(RunFonts::new("Liberation Sans"))
+            .with_size(Pt(28.0))
+            .with_kern_min(Some(Pt(1.0))),
+    );
+    let paragraph = Paragraph::new(style).with_inlines([Inline::text("f\u{00AD}fi", style)]);
+    let mut width = 16.5;
+    while width < 17.2 {
+        fuzzing::check_lines(&book, &document, &paragraph, width)
+            .map_err(|problem| format!("{width} pt: {problem}"))?;
+        let laid = fuzzing::lay_out(&book, &document, &paragraph, width);
+        let lines: Vec<&str> = laid.lines().iter().map(|line| line.text()).collect();
+        assert!(
+            laid.report().is_empty(),
+            "{width} pt: {lines:?} {:?}",
+            laid.report()
+        );
+        for line in laid.lines() {
+            assert!(line.width() <= width + 1e-9, "{width} pt: {lines:?}");
+        }
+        width += 0.05;
+    }
     Ok(())
 }

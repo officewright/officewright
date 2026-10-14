@@ -573,14 +573,22 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             }
             let again = self.fit(start, first);
             // First fit over the units as they are now shaped ends the line earlier, or
-            // at the same place without its hyphen. Should it change nothing, the line
-            // gives up its last unit that takes room, with what follows it; a single one
-            // stays, reported.
+            // at the same place without its hyphen. Should it not, the line drops its
+            // hyphen, else gives up its last unit that takes room with what follows it;
+            // a single one stays, reported.
             let last_wide = (start + 1..fit.end)
                 .rev()
                 .find(|&i| self.units.get(i).is_some_and(|unit| unit.width.0 > 0.0));
             fit = if again != fit && again.end <= fit.end {
                 again
+            } else if fit.hyphen {
+                // The same place without the hyphen that no longer fits: a later place,
+                // which first fit may find over wider units, is not taken, so that the
+                // loop ends.
+                Fit {
+                    hyphen: false,
+                    ..fit
+                }
             } else if let Some(end) = last_wide {
                 Fit {
                     end,
@@ -1765,6 +1773,58 @@ mod tests {
         // A word longer than the line breaks after the last character that fits.
         let (layout, _) = lay(text("AAAAAAAAAA"), ParagraphProps::default(), 20.0);
         assert_eq!(widths(&layout), [18.0, 18.0, 18.0, 6.0]);
+    }
+
+    #[test]
+    fn undoing_a_splice_maps_an_end_by_its_place_in_the_text() {
+        // "AAAA" in the test font: a unit per letter, at bytes 0, 1, 2 and 3.
+        let book = book(vec![minimal()]);
+        let mut document = Document::default();
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        let paragraph = Paragraph::new(style).with_inlines([Inline::text("AAAA", style)]);
+        let mut fonts = Fonts::new(&book);
+        let mut shaper = Shaper::new();
+        let location = Location::default();
+        let itemized =
+            crate::itemize::itemize(&document, paragraph.inlines(), &mut fonts, &location);
+        let shaped =
+            crate::itemize::shape_runs(&document, &itemized, &mut fonts, &mut shaper, &location);
+        let input = Input {
+            document: &document,
+            paragraph: &paragraph,
+            width: Pt(100.0),
+            location: &location,
+        };
+        let starts = |breaker: &Breaker<'_, '_, '_>| -> Vec<usize> {
+            breaker.units.iter().map(|unit| unit.range.start).collect()
+        };
+        let mut breaker = Breaker::new(input, &itemized, &shaped, &mut fonts, &mut shaper);
+        assert_eq!(starts(&breaker), [0, 1, 2, 3]);
+        // Shaped again, letters 1 to 3 became two units, as a ligature over 1 and 2
+        // would make them: units at 0, 1 and 3.
+        let splice_like = |breaker: &mut Breaker<'_, '_, '_>| {
+            let mut joined = breaker.units.get(1).cloned().expect("a unit");
+            joined.range = 1..3;
+            let last = breaker.units.get(3).cloned().expect("a unit");
+            let replaced: Vec<Unit> = breaker.units.splice(1..4, [joined, last]).collect();
+            Splice {
+                first: 1,
+                len: 2,
+                replaced,
+            }
+        };
+        // An end before the splice stays; one inside it goes to the unit that starts
+        // where it did (byte 3, now unit 3); one after it moves with the units.
+        for (end, mapped) in [(1, 1), (2, 3), (3, 4)] {
+            let splice = splice_like(&mut breaker);
+            assert_eq!(starts(&breaker), [0, 1, 3]);
+            assert_eq!(breaker.undo(splice, end), mapped, "end {end}");
+            assert_eq!(starts(&breaker), [0, 1, 2, 3]);
+        }
     }
 
     #[test]
