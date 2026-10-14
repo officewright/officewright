@@ -70,6 +70,12 @@ impl Document {
     /// other objects, equations, and indents and spacing given in character or line
     /// units, which keep their value in points.
     ///
+    /// Also listed is what the IR has no place for yet: a row's own alignment and cell
+    /// spacing where they differ from the table's, a row's hidden end mark, a cell's
+    /// text fitting and diagonal borders, and the content of a cell that continues a
+    /// horizontal merge. A cell that does not end with a paragraph, which Word refuses
+    /// to open, gets an empty one, and that is listed too.
+    ///
     /// ```
     /// # fn main() -> officewright_doc::Result<()> {
     /// use officewright_doc::Document;

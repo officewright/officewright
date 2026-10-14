@@ -1,6 +1,7 @@
 //! Tables as IR tables: the grid, rows and cells with the properties written on them.
-//! Table styles are not applied yet, and a row's table property exceptions are not
-//! translated; both are listed.
+//! Table styles are not applied yet, a row's table property exceptions are not
+//! translated, and neither are the properties the IR has no place for yet; each is
+//! listed.
 
 use officewright_core::Pt;
 use officewright_layout::ReportKind;
@@ -9,8 +10,9 @@ use officewright_layout::ir;
 use super::paragraph::border;
 use super::{Step, Translator};
 use crate::model::{
-    Border, BorderStyle, CellMerge, HeightRule, Table, TableBorders, TableJustification,
-    TableLayout, TableRow, TableWidth, TextDirection, VerticalJustification,
+    Block, Border, BorderStyle, CellMerge, HeightRule, PositionAnchor, Table, TableBorders,
+    TableCell, TableCellProperties, TableJustification, TableLayout, TablePosition, TableRow,
+    TableWidth, TextDirection, VerticalJustification,
 };
 
 impl<'a> Translator<'a> {
@@ -32,7 +34,11 @@ impl<'a> Translator<'a> {
                 "the table's style is not applied: table styles are not translated yet".into()
             });
         }
-        let margins = cell_margins(properties.cell_margins(), &ir::CellMargins::default());
+        let margins = cell_margins(
+            properties.cell_margins(),
+            &ir::CellMargins::default(),
+            false,
+        );
         let borders = properties.borders();
         let props = ir::TableProps::default()
             .with_width(preferred(properties.width()))
@@ -41,17 +47,9 @@ impl<'a> Translator<'a> {
                 _ => ir::TableLayout::Autofit,
             })
             .with_indent(length(properties.indentation()).unwrap_or_default())
-            .with_alignment(match properties.justification() {
-                Some(TableJustification::Center) => ir::TableAlignment::Center,
-                Some(TableJustification::End | TableJustification::Right) => {
-                    ir::TableAlignment::End
-                }
-                _ => ir::TableAlignment::Start,
-            })
+            .with_alignment(alignment(properties.justification()))
             .with_cell_margins(margins)
-            // Word gives a cell spacing in percent or auto no space (MS-OI29500
-            // §17.4.45(a)).
-            .with_cell_spacing(length(properties.cell_spacing()).unwrap_or_default())
+            .with_cell_spacing(spacing(properties.cell_spacing()))
             .with_borders(
                 ir::TableBorders::default()
                     .with_top(self.side(borders.and_then(TableBorders::top), false))
@@ -70,7 +68,7 @@ impl<'a> Translator<'a> {
                     .shading()
                     .and_then(|shading| self.shading(shading)),
             )
-            .with_floating(properties.position().is_some())
+            .with_floating(floats(properties.position()))
             .with_bidi_visual(properties.right_to_left().unwrap_or(false));
         // The reader reads w:gridCol as ST_TwipsMeasure, which has no negative widths.
         let grid: Vec<Pt> = table
@@ -82,12 +80,14 @@ impl<'a> Translator<'a> {
         for row in table.rows() {
             self.path
                 .extend([Step::Field("rows"), Step::Index(rows.len())]);
-            if let Some(row) = self.row(row, &margins) {
+            if let Some(row) = self.row(row, &props) {
                 rows.push(row);
             }
             self.path.truncate(self.path.len().saturating_sub(2));
         }
         self.table_depth -= 1;
+        // A vector keeps the room it grew to; a long table would keep it.
+        rows.shrink_to_fit();
         if rows.is_empty() {
             self.leave_out(ReportKind::FeatureUnsupported, || {
                 "a table without rows is left out".into()
@@ -103,11 +103,34 @@ impl<'a> Translator<'a> {
     }
 
     /// A row, or none when it has no cells; that is listed.
-    fn row(&mut self, row: TableRow<'a>, margins: &ir::CellMargins) -> Option<ir::Row> {
+    fn row(&mut self, row: TableRow<'a>, table: &ir::TableProps) -> Option<ir::Row> {
         let properties = row.properties();
         if row.table_property_exceptions() != Default::default() {
             self.leave_out(ReportKind::FeatureUnsupported, || {
                 "the row's table property exceptions are not applied".into()
+            });
+        }
+        // The IR's row has no alignment or cell spacing of its own: Word writes the
+        // table's into every row it saves, so only a row whose own differ is listed.
+        if properties
+            .justification()
+            .is_some_and(|justification| alignment(Some(justification)) != table.alignment())
+        {
+            self.leave_out(ReportKind::FeatureUnsupported, || {
+                "the row's own alignment is not applied; the table's is used".into()
+            });
+        }
+        if properties
+            .cell_spacing()
+            .is_some_and(|written| spacing(Some(written)) != table.cell_spacing())
+        {
+            self.leave_out(ReportKind::FeatureUnsupported, || {
+                "the row's own cell spacing is not applied; the table's is used".into()
+            });
+        }
+        if properties.hidden() == Some(true) {
+            self.leave_out(ReportKind::FeatureUnsupported, || {
+                "the row's hidden end mark (w:hidden) is not applied".into()
             });
         }
         let height = match properties.height() {
@@ -126,65 +149,42 @@ impl<'a> Translator<'a> {
                 .unwrap_or(0)
         };
         let mut cells: Vec<ir::Cell> = Vec::new();
+        // The last cell, kept out of `cells` while the cells after it may widen it.
+        let mut open: Option<ir::Cell> = None;
         for cell in row.cells() {
-            self.path
-                .extend([Step::Field("cells"), Step::Index(cells.len())]);
             let properties = cell.properties();
             let span = properties
                 .grid_span()
                 .and_then(|span| u16::try_from(span.max(1)).ok())
                 .unwrap_or(1);
-            // A cell that continues a horizontal merge widens the cell it continues, as
-            // a span does (ECMA-376 Part 1, §17.4.22).
+            // A cell that continues a horizontal merge (`w:hMerge`, ISO/IEC 29500-4
+            // §14.4.13) widens the cell before it, as a span does. The widened cell is
+            // moved, never copied: a copy per continuing cell costs the content times
+            // the cells.
             if properties.horizontal_merge() == Some(CellMerge::Continue) {
-                if let Some(last) = cells.last_mut() {
+                if let Some(last) = open.take() {
                     let widened = last.grid_span().saturating_add(span);
-                    *last = last.clone().with_grid_span(widened);
-                    self.path.truncate(self.path.len().saturating_sub(2));
+                    open = Some(last.with_grid_span(widened));
+                    if has_content(cell) {
+                        self.path
+                            .extend([Step::Field("cells"), Step::Index(cells.len())]);
+                        self.leave_out(ReportKind::FeatureUnsupported, || {
+                            "the content of a cell that continues a horizontal merge is left out"
+                                .into()
+                        });
+                        self.path.truncate(self.path.len().saturating_sub(2));
+                    }
                     continue;
                 }
             }
-            let written = properties.borders().map(|borders| borders.sides());
-            let borders = ir::CellBorders::default()
-                .with_top(self.side(written.and_then(TableBorders::top), true))
-                .with_start(self.side(written.and_then(TableBorders::start), true))
-                .with_bottom(self.side(written.and_then(TableBorders::bottom), true))
-                .with_end(self.side(written.and_then(TableBorders::end), true));
-            let blocks = self.cell_blocks(cell.blocks());
-            cells.push(
-                ir::Cell::default()
-                    .with_width(preferred(properties.width()))
-                    .with_grid_span(span)
-                    .with_vertical_merge(match properties.vertical_merge() {
-                        Some(CellMerge::Restart) => ir::VerticalMerge::Restart,
-                        Some(CellMerge::Continue) => ir::VerticalMerge::Continue,
-                        None => ir::VerticalMerge::None,
-                    })
-                    // The sides a cell leaves out come from the table.
-                    .with_margins(
-                        properties
-                            .margins()
-                            .map(|written| cell_margins(Some(written), margins)),
-                    )
-                    .with_borders(borders)
-                    .with_shading(
-                        properties
-                            .shading()
-                            .and_then(|shading| self.shading(shading)),
-                    )
-                    .with_vertical_align(match properties.vertical_justification() {
-                        Some(VerticalJustification::Center) => ir::CellVerticalAlign::Center,
-                        Some(VerticalJustification::Bottom) => ir::CellVerticalAlign::Bottom,
-                        // Word does not take both in a cell (MS-OI29500 §17.4.83(a)).
-                        _ => ir::CellVerticalAlign::Top,
-                    })
-                    .with_no_wrap(properties.no_wrap().unwrap_or(false))
-                    .with_hide_mark(properties.hide_mark().unwrap_or(false))
-                    .with_text_direction(text_direction(properties.text_direction()))
-                    .with_blocks(blocks),
-            );
+            cells.extend(open.take());
+            self.path
+                .extend([Step::Field("cells"), Step::Index(cells.len())]);
+            open = Some(self.cell(cell, &properties, span, &table.cell_margins()));
             self.path.truncate(self.path.len().saturating_sub(2));
         }
+        cells.extend(open);
+        cells.shrink_to_fit();
         if cells.is_empty() {
             self.leave_out(ReportKind::FeatureUnsupported, || {
                 "a row without cells is left out".into()
@@ -204,18 +204,89 @@ impl<'a> Translator<'a> {
         )
     }
 
-    /// The blocks of a cell, which end with a paragraph: Word adds an empty one after a
-    /// table or in an empty cell (MS-OI29500 2.1.168 b).
-    fn cell_blocks(
+    /// A cell, with the span it has so far.
+    fn cell(
         &mut self,
-        blocks: impl Iterator<Item = crate::model::Block<'a>> + 'a,
-    ) -> Vec<ir::Block> {
+        cell: TableCell<'a>,
+        properties: &TableCellProperties,
+        span: u16,
+        margins: &ir::CellMargins,
+    ) -> ir::Cell {
+        if properties.fit_text() == Some(true) {
+            self.leave_out(ReportKind::FeatureUnsupported, || {
+                "the cell's text fitting (w:tcFitText) is not applied".into()
+            });
+        }
+        let drawn = |border: Option<&Border>| {
+            border.is_some_and(|border| {
+                !matches!(
+                    border.style(),
+                    None | Some(BorderStyle::None | BorderStyle::Nil)
+                )
+            })
+        };
+        if properties.borders().is_some_and(|borders| {
+            drawn(borders.top_left_to_bottom_right()) || drawn(borders.top_right_to_bottom_left())
+        }) {
+            self.leave_out(ReportKind::FeatureUnsupported, || {
+                "the cell's diagonal borders are not drawn".into()
+            });
+        }
+        let written = properties.borders().map(|borders| borders.sides());
+        let borders = ir::CellBorders::default()
+            .with_top(self.side(written.and_then(TableBorders::top), true))
+            .with_start(self.side(written.and_then(TableBorders::start), true))
+            .with_bottom(self.side(written.and_then(TableBorders::bottom), true))
+            .with_end(self.side(written.and_then(TableBorders::end), true));
+        let blocks = self.cell_blocks(cell.blocks());
+        ir::Cell::default()
+            .with_width(preferred(properties.width()))
+            .with_grid_span(span)
+            .with_vertical_merge(match properties.vertical_merge() {
+                Some(CellMerge::Restart) => ir::VerticalMerge::Restart,
+                Some(CellMerge::Continue) => ir::VerticalMerge::Continue,
+                None => ir::VerticalMerge::None,
+            })
+            // The sides a cell leaves out come from the table.
+            .with_margins(
+                properties
+                    .margins()
+                    .map(|written| cell_margins(Some(written), margins, true)),
+            )
+            .with_borders(borders)
+            .with_shading(
+                properties
+                    .shading()
+                    .and_then(|shading| self.shading(shading)),
+            )
+            .with_vertical_align(match properties.vertical_justification() {
+                Some(VerticalJustification::Center) => ir::CellVerticalAlign::Center,
+                Some(VerticalJustification::Bottom) => ir::CellVerticalAlign::Bottom,
+                // Word does not take both in a cell (MS-OI29500 §17.4.83(a)).
+                _ => ir::CellVerticalAlign::Top,
+            })
+            .with_no_wrap(properties.no_wrap().unwrap_or(false))
+            .with_hide_mark(properties.hide_mark().unwrap_or(false))
+            .with_text_direction(text_direction(properties.text_direction()))
+            .with_blocks(blocks)
+    }
+
+    /// The blocks of a cell, which end with a paragraph, as the IR asks. Word refuses a
+    /// document with a cell that does not (MS-OI29500 2.1.168 b); the translation adds
+    /// an empty paragraph, with the mark of the default paragraph style, and lists it.
+    fn cell_blocks(&mut self, blocks: impl Iterator<Item = Block<'a>> + 'a) -> Vec<ir::Block> {
         let mut blocks = self.blocks(blocks);
         if !matches!(blocks.last(), Some(ir::Block::Paragraph(_))) {
+            self.leave_out(ReportKind::ValueClamped, || {
+                "a cell that does not end with a paragraph gets an empty one".into()
+            });
             let mark = self.formats.default_mark();
             let mark = self.run_style(&mark);
             blocks.push(ir::Paragraph::new(mark).into());
         }
+        // Most cells hold one paragraph; a vector keeps room for four after its first
+        // push.
+        blocks.shrink_to_fit();
         blocks
     }
 
@@ -254,19 +325,72 @@ fn length(width: Option<TableWidth>) -> Option<Pt> {
     }
 }
 
-/// Cell margins: those written, the others from `below`. A margin written as a
-/// percentage or automatic is 0: Word reads it so at the start and end (MS-OI29500
-/// 2.1.146 a, 2.1.125 a), as the IR's `CellMargins` describes, and it is taken so at the
-/// top and bottom too; `nil` is a width of 0.
+/// A table's alignment between the edges of its column.
+fn alignment(justification: Option<TableJustification>) -> ir::TableAlignment {
+    match justification {
+        Some(TableJustification::Center) => ir::TableAlignment::Center,
+        Some(TableJustification::End | TableJustification::Right) => ir::TableAlignment::End,
+        _ => ir::TableAlignment::Start,
+    }
+}
+
+/// A cell spacing: Word gives one in percent or auto no space (MS-OI29500 §17.4.45(a)),
+/// and expects every table measurement but the indent to be at least 0 (MS-OI29500
+/// §17.4.87(d)), so a negative one is 0.
+fn spacing(width: Option<TableWidth>) -> Pt {
+    length(width).map_or(Pt(0.0), |length| Pt(length.0.max(0.0)))
+}
+
+/// Whether a table floats. Word ignores a `w:tblpPr` with `tblpX` and `tblpY` 0 whose
+/// horizontal anchor is the text and vertical anchor is not; without anchors it takes
+/// the text horizontally and the margin vertically, so a `w:tblpPr` without attributes,
+/// which Word ignores too, is such a one (MS-OI29500 §17.4.57(b), (c)). Word also
+/// ignores one in a text box, a note or a comment, whose tables this translation does
+/// not reach yet.
+fn floats(position: Option<&TablePosition>) -> bool {
+    let Some(position) = position else {
+        return false;
+    };
+    // A distance as written, 0 when it is not: Word writes 1 twip for 0 to avoid this
+    // case (§17.4.57(e)).
+    let at_zero = |distance: Option<Pt>| distance.is_none_or(|distance| distance.0 == 0.0);
+    let ignored = at_zero(position.x())
+        && at_zero(position.y())
+        && position.horizontal_anchor().unwrap_or(PositionAnchor::Text) == PositionAnchor::Text
+        && position.vertical_anchor().unwrap_or(PositionAnchor::Margin) != PositionAnchor::Text;
+    !ignored
+}
+
+/// Whether a cell holds more than one empty paragraph.
+fn has_content(cell: TableCell<'_>) -> bool {
+    let mut blocks = cell.blocks();
+    match (blocks.next(), blocks.next()) {
+        (None, _) => false,
+        (Some(Block::Paragraph(paragraph)), None) => paragraph.inlines().next().is_some(),
+        _ => true,
+    }
+}
+
+/// Cell margins: those written, the others from `below`, the table's for a cell.
+///
+/// A margin of the table written as a percentage or automatic is 0: Word reads it so at
+/// the start and end (MS-OI29500 2.1.146 a, 2.1.125 a), as the IR's `CellMargins`
+/// describes, and it is taken so at the top and bottom too. A cell's own margin in
+/// percent or auto is taken as 0 as well, which no note confirms yet. Word ignores a
+/// side of a cell's `w:tcMar` of type `nil` (MS-OI29500 §17.4.2(a), §17.4.10(a),
+/// §17.4.77(a), and the same note for the start), so that side comes from the table; a
+/// table's `nil` is a width of 0, as the standard says.
 fn cell_margins(
     written: Option<&crate::model::CellMargins>,
     below: &ir::CellMargins,
+    in_cell: bool,
 ) -> ir::CellMargins {
     let Some(written) = written else {
         return *below;
     };
     let side = |width: Option<TableWidth>, default: Pt| match width {
         None => default,
+        Some(TableWidth::Nil) if in_cell => default,
         Some(TableWidth::Length(length)) => Pt(length.0.max(0.0)),
         Some(_) => Pt(0.0),
     };
