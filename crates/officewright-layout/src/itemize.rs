@@ -2,8 +2,8 @@
 //! formatting, one face and one script, so that each run can be shaped whole; and the
 //! inlines that are not text, in order.
 
-// reason: the layout itself uses this from PR 6 (paragraph layout) on; until then only
-// the tests and the `fuzzing` module do.
+// reason: the layout itself uses this once pagination (plan PR 8) lays out pages; until
+// then only the tests and the `fuzzing` module do.
 #![cfg_attr(not(any(test, feature = "fuzzing")), allow(dead_code))]
 
 use std::ops::Range;
@@ -14,7 +14,7 @@ use officewright_font::FaceId;
 use unicode_script::{Script, UnicodeScript};
 
 use crate::fonts::{Choice, Fonts};
-use crate::ir::{BreakKind, Document, Inline, RunFonts, RunStyle, RunStyleId};
+use crate::ir::{BreakKind, Document, Inline, RunFonts, RunStyle, RunStyleId, VerticalPosition};
 use crate::report::{Location, ReportKind};
 use crate::shape::{Features, ShapeRequest, ShapedRun, Shaper, combining_class};
 use crate::slot::{Slot, slot};
@@ -23,6 +23,10 @@ use crate::symbol::SymbolFont;
 /// The size of small capitals, as a fraction of the run's size. Hypothesis until a Word
 /// reference shows it (`E-smallcaps.docx`).
 pub(crate) const SMALL_CAPS_SCALE: f64 = 0.8;
+
+/// The size of superscripts and subscripts, as a fraction of the run's size. Hypothesis
+/// until a Word reference shows it (`E-superscript.docx`).
+pub(crate) const SUPERSCRIPT_SCALE: f64 = 0.65;
 
 /// The most bytes of text a run has: a longer one is cut where a cluster starts, after a
 /// space where there is one, so that shaping time and memory stay bounded per run.
@@ -174,6 +178,11 @@ impl Builder<'_, '_, '_> {
     }
 
     fn inline(&mut self, inline: &Inline) {
+        // Hidden text is not drawn (`w:vanish`), nor are the tabs, breaks and marks of
+        // a hidden run.
+        if inline_style(inline).is_some_and(|id| self.style(id).hidden()) {
+            return;
+        }
         let path = self.path.clone();
         match inline {
             Inline::Text { text, style, .. } => self.text(text, *style),
@@ -279,8 +288,8 @@ impl Builder<'_, '_, '_> {
         if let (true, Some(face)) = (choice.installed, choice.face) {
             for ch in codes {
                 if self.fonts.has_glyph(face, ch) {
-                    let look =
-                        self.look(id, &style, choice, style.size(), style.size(), Slot::Ascii);
+                    let size = drawn_size(&style, style.size(), false);
+                    let look = self.look(id, &style, choice, size, style.size(), Slot::Ascii);
                     self.push(ch, source, look);
                     return;
                 }
@@ -302,7 +311,8 @@ impl Builder<'_, '_, '_> {
                     ),
                 );
                 let face = self.face_for(ch, choice, &style, bold, italic, font);
-                let look = self.look(id, &style, face, style.size(), style.size(), Slot::Ascii);
+                let size = drawn_size(&style, style.size(), false);
+                let look = self.look(id, &style, face, size, style.size(), Slot::Ascii);
                 self.push(ch, source, look);
             }
             None => {
@@ -317,7 +327,8 @@ impl Builder<'_, '_, '_> {
                     format!("symbol {code:04X} of \"{font}\" cannot be drawn: {why}"),
                 );
                 let ch = char::from_u32(0xF000 | low).unwrap_or('\u{FFFD}');
-                let look = self.look(id, &style, choice, style.size(), style.size(), Slot::Ascii);
+                let size = drawn_size(&style, style.size(), false);
+                let look = self.look(id, &style, choice, size, style.size(), Slot::Ascii);
                 self.push(ch, source, look);
             }
         }
@@ -389,11 +400,7 @@ impl Builder<'_, '_, '_> {
         } else {
             style.size()
         };
-        let size = if small {
-            Pt(formatted_size.0 * SMALL_CAPS_SCALE)
-        } else {
-            formatted_size
-        };
+        let size = drawn_size(style, formatted_size, small);
         let family = slot.family(style.fonts()).to_owned();
         let choice = self.fonts.choose(&family, bold, italic);
         // A symbol font that is not installed: its codes stand for Unicode characters,
@@ -571,6 +578,38 @@ impl Builder<'_, '_, '_> {
         };
         let starts = self.shaper.cluster_starts(&face, text, &request)?;
         Some(starts.into_iter().map(|at| at + first.text.start).collect())
+    }
+}
+
+/// The size text of `style` is drawn at, from the size its formatting gives: smaller
+/// for the lowercase letters of small capitals (`small`), and for superscripts and
+/// subscripts.
+fn drawn_size(style: &RunStyle, formatted: Pt, small: bool) -> Pt {
+    let mut size = formatted.0;
+    if small {
+        size *= SMALL_CAPS_SCALE;
+    }
+    if style.vertical() != VerticalPosition::Baseline {
+        size *= SUPERSCRIPT_SCALE;
+    }
+    Pt(size)
+}
+
+/// The run style of an inline that has one.
+fn inline_style(inline: &Inline) -> Option<RunStyleId> {
+    match inline {
+        Inline::Text { style, .. }
+        | Inline::Symbol { style, .. }
+        | Inline::SoftHyphen { style, .. }
+        | Inline::NoBreakHyphen { style, .. }
+        | Inline::Tab { style, .. }
+        | Inline::Break { style, .. }
+        | Inline::NoteReference { style, .. }
+        | Inline::NoteNumber { style, .. }
+        | Inline::Separator { style, .. }
+        | Inline::ContinuationSeparator { style, .. } => Some(*style),
+        // A field's result has styles of its own; objects have none.
+        Inline::Field(_) | Inline::Object(_) | Inline::Anchored(_) => None,
     }
 }
 

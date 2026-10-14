@@ -22,8 +22,8 @@
 //! See THIRD-PARTY-NOTICES.md in the repository; `tests/symbol_table.rs` checks the table
 //! against the file, which is kept in `data/` and left out of the published crate.
 
-// reason: the layout itself uses this from PR 6 (paragraph layout) on; until then only
-// the tests and the `fuzzing` module do.
+// reason: the layout itself uses this once pagination (plan PR 8) lays out pages; until
+// then only the tests and the `fuzzing` module do.
 #![cfg_attr(not(any(test, feature = "fuzzing")), allow(dead_code))]
 
 /// The characters of the Symbol encoding (Adobe's table): where Adobe gives two, the
