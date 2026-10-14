@@ -18,6 +18,7 @@ from xml.etree import ElementTree
 
 SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+W14 = "{http://schemas.microsoft.com/office/word/2010/wordml}"
 CT = "{http://schemas.openxmlformats.org/package/2006/content-types}"
 PR = "{http://schemas.openxmlformats.org/package/2006/relationships}"
 
@@ -214,6 +215,18 @@ class Packages(unittest.TestCase):
                 "E-tab-hanging-noindenttab-14": {"doNotUseIndentAsNumberingTabStop"},
             }.get(doc.name, set())
             self.assertEqual(flags, expected, doc.name)
+            # The documents about OpenType features name the setting's value; every other
+            # document in mode 15 turns it on, as Word does in a new document.
+            open_type = [
+                s.get(f"{W}val")
+                for s in compat.iter(f"{W}compatSetting")
+                if s.get(f"{W}name") == "enableOpenTypeFeatures"
+            ]
+            expected = {
+                "E-opentype-on": ["1"], "E-opentype-off": ["0"], "E-opentype-none": [],
+                "E-opentype-12": [],
+            }.get(doc.name, ["1"] if modes == [15] else [])
+            self.assertEqual(open_type, expected, doc.name)
 
     def test_lists_only_use_defined_numbering(self):
         for doc in self.docs:
@@ -250,6 +263,17 @@ class Packages(unittest.TestCase):
                 for n in root.iter(f"{W}{tag}")
             }
             self.assertLessEqual(named, defined, doc.name)
+            # And of the right type: a paragraph or a list level names a paragraph style, a
+            # run or a paragraph mark a character style, and a style is based on its own type.
+            kind = {s.get(f"{W}styleId"): s.get(f"{W}type") for s in styles.iter(f"{W}style")}
+            for root in roots:
+                for tag, expected in (("pStyle", "paragraph"), ("rStyle", "character")):
+                    for n in root.iter(f"{W}{tag}"):
+                        self.assertEqual(kind[n.get(f"{W}val")], expected, doc.name)
+            for style in styles.iter(f"{W}style"):
+                base = style.find(f"{W}basedOn")
+                if base is not None:
+                    self.assertEqual(kind[base.get(f"{W}val")], style.get(f"{W}type"), doc.name)
 
     def test_refuses_a_colour_mapping_value_that_is_not_a_theme_colour(self):
         doc = next(doc for doc in self.docs if doc.color_mapping)
@@ -344,11 +368,25 @@ class Packages(unittest.TestCase):
             "specVanish",
             "oMath",
         ]
+        # Word 2010's run properties ([MS-DOCX] 2.6) follow every one of ECMA-376, in this
+        # order.
+        order += [
+            f"{W14}{tag}"
+            for tag in (
+                "glow", "shadow", "reflection", "textOutline", "textFill", "scene3d",
+                "props3d", "ligatures", "numForm", "numSpacing", "stylisticSets", "cntxtAlts",
+            )
+        ]
         for doc in self.docs:
             parts = rules.parts(doc)
-            for name in ("word/document.xml", "word/styles.xml"):
+            names = {name for name, _ in parts}
+            for name in ("word/document.xml", "word/styles.xml", "word/numbering.xml"):
+                if name not in names:
+                    continue
                 for properties in part(parts, name).iter(f"{W}rPr"):
                     tags = [child.tag.replace(W, "") for child in properties]
+                    for tag in tags:
+                        self.assertIn(tag, order, f"{doc.name}: {name} {tags}")
                     places = [order.index(tag) for tag in tags]
                     self.assertEqual(places, sorted(set(places)), f"{doc.name}: {tags}")
 
@@ -599,6 +637,219 @@ class Packages(unittest.TestCase):
             spacing = None if p_pr is None else p_pr.find(f"{W}spacing")
             space = None if spacing is None else spacing.get(f"{W}after")
             self.assertEqual(space, str(int(after) * 20) if after else None, style_id)
+
+    def test_list_label_cases_have_the_markup_their_labels_name(self):
+        def described(properties):
+            """The run properties as a label says them."""
+            words = []
+            for tag, on, off in (("b", "bold", "not bold"), ("i", "italic", "not italic")):
+                element = None if properties is None else properties.find(f"{W}{tag}")
+                if element is not None:
+                    words.append(off if element.get(f"{W}val") == "0" else on)
+            if properties is not None:
+                color = properties.find(f"{W}color")
+                if color is not None:
+                    self.assertEqual(color.get(f"{W}val"), "FF0000")
+                    words.append("red")
+                size = properties.find(f"{W}sz")
+                if size is not None:
+                    words.append(f"{int(size.get(f'{W}val')) / 2:g} pt")
+                if properties.find(f"{W}u") is not None:
+                    words.append("underlined")
+                highlight = properties.find(f"{W}highlight")
+                if highlight is not None:
+                    words.append(f"highlight {highlight.get(f'{W}val')}")
+                # Every property has its complex-script twin, and nothing else is there.
+                for tag in ("b", "i", "sz"):
+                    twin = properties.find(f"{W}{tag}Cs")
+                    element = properties.find(f"{W}{tag}")
+                    self.assertEqual(
+                        None if element is None else element.attrib,
+                        None if twin is None else twin.attrib,
+                    )
+                known = {"rStyle", "b", "bCs", "i", "iCs", "color", "sz", "szCs", "u",
+                         "highlight"}
+                self.assertLessEqual({c.tag.replace(W, "") for c in properties}, known)
+            return ", ".join(words)
+
+        def check_level(level, text):
+            """Level 0 of a decimal list whose label reads "1."."""
+            self.assertEqual(level.get(f"{W}ilvl"), "0", text)
+            self.assertEqual(level.find(f"{W}start").get(f"{W}val"), "1", text)
+            self.assertEqual(level.find(f"{W}numFmt").get(f"{W}val"), "decimal", text)
+            self.assertEqual(level.find(f"{W}lvlText").get(f"{W}val"), "%1.", text)
+
+        for name, count in (("E-list-label-format", 8), ("E-list-label-rstyle", 2)):
+            parts = rules.parts(next(doc for doc in self.docs if doc.name == name))
+            styles = {
+                s.get(f"{W}styleId"): s for s in part(parts, "word/styles.xml").iter(f"{W}style")
+            }
+            numbering = part(parts, "word/numbering.xml")
+            instances = {n.get(f"{W}numId"): n for n in numbering.iter(f"{W}num")}
+            definitions = {
+                d.get(f"{W}abstractNumId"): d for d in numbering.iter(f"{W}abstractNum")
+            }
+            body = part(parts, "word/document.xml").find(f"{W}body")
+            paragraphs = body.findall(f"{W}p")
+            self.assertEqual(len(paragraphs), count, name)
+            used = []
+            for n, paragraph in enumerate(paragraphs, 1):
+                text = "".join(t.text for t in paragraph.iter(f"{W}t"))
+                p_pr = paragraph.find(f"{W}pPr")
+                clauses = []
+                style = p_pr.find(f"{W}pStyle")
+                if style is not None:
+                    style_id = style.get(f"{W}val")
+                    clauses.append(
+                        f"style {style_id} ({described(styles[style_id].find(f'{W}rPr'))})"
+                    )
+                mark = p_pr.find(f"{W}rPr")
+                if mark is not None:
+                    char_style = mark.find(f"{W}rStyle")
+                    if char_style is not None:
+                        style_id = char_style.get(f"{W}val")
+                        props = styles[style_id].find(f"{W}rPr")
+                        clauses.append(f"mark style {style_id} ({described(props)})")
+                    else:
+                        clauses.append(f"mark {described(mark)}")
+                num_pr = p_pr.find(f"{W}numPr")
+                self.assertEqual(num_pr.find(f"{W}ilvl").get(f"{W}val"), "0", text)
+                instance = instances[num_pr.find(f"{W}numId").get(f"{W}val")]
+                definition_id = instance.find(f"{W}abstractNumId").get(f"{W}val")
+                used.append((instance.get(f"{W}numId"), definition_id))
+                (level,) = definitions[definition_id].findall(f"{W}lvl")
+                check_level(level, text)
+                override = instance.find(f"{W}lvlOverride/{W}lvl")
+                if override is not None:
+                    self.assertEqual(instance.find(f"{W}lvlOverride").get(f"{W}ilvl"), "0")
+                    check_level(override, text)
+                    self.assertIsNone(override.find(f"{W}pStyle"), text)
+                    clauses.append(f"definition's level {described(level.find(f'{W}rPr'))}")
+                    clauses.append(f"override level {described(override.find(f'{W}rPr'))}")
+                else:
+                    linked = level.find(f"{W}pStyle")
+                    if linked is not None:
+                        style_id = linked.get(f"{W}val")
+                        props = styles[style_id].find(f"{W}rPr")
+                        # Whether the style names this list back, as Word writes it.
+                        back = styles[style_id].find(f"{W}pPr/{W}numPr")
+                        if back is not None:
+                            self.assertIsNone(back.find(f"{W}ilvl"), text)
+                            self.assertEqual(back.find(f"{W}numId").get(f"{W}val"),
+                                             instance.get(f"{W}numId"), text)
+                        way = "both ways" if back is not None else "one way"
+                        clauses.append(
+                            f"level style {style_id} ({described(props)}), linked {way}"
+                        )
+                    label = level.find(f"{W}rPr")
+                    char_style = None if label is None else label.find(f"{W}rStyle")
+                    if char_style is not None:
+                        style_id = char_style.get(f"{W}val")
+                        props = styles[style_id].find(f"{W}rPr")
+                        clauses.append(f"level character style {style_id} ({described(props)})")
+                        self.assertEqual(len(label), 1, text)
+                    elif label is not None:
+                        clauses.append(f"level {described(label)}")
+                self.assertEqual(text, f"Case {n:02d}: " + "; ".join(clauses))
+            # A list and a definition of its own for every case, so each label reads "1.".
+            self.assertEqual(len({i for i, _ in used}), count, name)
+            self.assertEqual(len({d for _, d in used}), count, name)
+
+    def test_open_type_cases_have_the_markup_their_labels_name(self):
+        expected = {
+            "plain": set(),
+            "standard ligatures": {f"{W14}ligatures"},
+            "kerning from 1 pt": {f"{W}kern"},
+            "standard ligatures and kerning from 1 pt": {f"{W}kern", f"{W14}ligatures"},
+        }
+        names = {
+            "E-opentype-on": (15, 1), "E-opentype-off": (15, 0), "E-opentype-none": (15, None),
+            "E-opentype-12": (12, None),
+        }
+        for name, (mode, setting) in names.items():
+            doc = next(doc for doc in self.docs if doc.name == name)
+            values = dict(doc.compat_values)
+            self.assertEqual(doc.mode, mode, name)
+            self.assertEqual(values.get("enableOpenTypeFeatures", 1 if mode == 15 else None),
+                             setting, name)
+            said = {1: "on", 0: "off", None: "not written"}[setting]
+            self.assertIn(f"mode {mode} with the setting enableOpenTypeFeatures {said}",
+                          doc.purpose)
+            paragraphs = part(rules.parts(doc), "word/document.xml").find(f"{W}body")
+            paragraphs = paragraphs.findall(f"{W}p")
+            labels, samples = paragraphs[0::2], paragraphs[1::2]
+            self.assertEqual(len(labels), len(expected), name)
+            seen = []
+            for n, (label, sample) in enumerate(zip(labels, samples), 1):
+                text = "".join(t.text for t in label.iter(f"{W}t"))
+                self.assertTrue(text.startswith(f"Case {n:02d}: "), text)
+                case = text.removeprefix(f"Case {n:02d}: ")
+                seen.append(case)
+                (r,) = sample.findall(f"{W}r")
+                # Standard ligatures (fi, ff, ffl) and kerning pairs (AV, VA, Ty).
+                self.assertEqual(r.find(f"{W}t").text, "office affine fluffy AVATAR Type", name)
+                props = r.find(f"{W}rPr")
+                found = set() if props is None else {c.tag for c in props}
+                # No font or size of its own: the document defaults, Calibri 11 pt.
+                self.assertFalse(found & {f"{W}rFonts", f"{W}sz", f"{W}szCs"}, text)
+                self.assertEqual(found, expected[case], text)
+                if props is not None and props.find(f"{W}kern") is not None:
+                    self.assertEqual(props.find(f"{W}kern").get(f"{W}val"), "2", text)
+                if props is not None and props.find(f"{W14}ligatures") is not None:
+                    value = props.find(f"{W14}ligatures").get(f"{W14}val")
+                    self.assertEqual(value, "standard", text)
+            self.assertEqual(sorted(seen), sorted(expected), name)
+            styles = part(rules.parts(doc), "word/styles.xml")
+            defaults = styles.find(f"{W}docDefaults/{W}rPrDefault/{W}rPr")
+            self.assertEqual(defaults.find(f"{W}rFonts").get(f"{W}ascii"), "Calibri", name)
+            self.assertEqual(defaults.find(f"{W}sz").get(f"{W}val"), "22", name)
+            normal = next(s for s in styles.iter(f"{W}style") if s.get(f"{W}styleId") == "Normal")
+            self.assertIsNone(normal.find(f"{W}rPr"), name)
+            # The w14 namespace is declared, and ignorable, where it is used.
+            document = dict(rules.parts(doc))["word/document.xml"].decode()
+            self.assertIn('mc:Ignorable="w14"', document)
+
+    def test_only_documents_with_w14_markup_declare_its_namespace(self):
+        for doc in self.docs:
+            document = dict(rules.parts(doc))["word/document.xml"].decode()
+            self.assertEqual("xmlns:w14=" in document, "<w14:" in document, doc.name)
+
+    def test_default_after_normal_cases_name_their_styles(self):
+        doc = next(d for d in self.docs if d.name == "E-default-paragraph-style-after-normal")
+        parts = rules.parts(doc)
+        styles = part(parts, "word/styles.xml")
+        paragraph_styles = [
+            (s.get(f"{W}styleId"), s.get(f"{W}default"))
+            for s in styles.iter(f"{W}style")
+            if s.get(f"{W}type") == "paragraph"
+        ]
+        self.assertEqual(paragraph_styles, [("Normal", "1"), ("LaterDefault", "1")])
+        later = next(s for s in styles.iter(f"{W}style") if s.get(f"{W}styleId") == "LaterDefault")
+        self.assertEqual(later.find(f"{W}pPr/{W}jc").get(f"{W}val"), "center")
+        self.assertEqual(later.find(f"{W}pPr/{W}spacing").get(f"{W}after"), "480")
+        self.assertIn("Normal (left-aligned, no space after)", doc.purpose)
+        self.assertIn("LaterDefault (centred, 24 pt after), written after it", doc.purpose)
+        body = part(parts, "word/document.xml").find(f"{W}body")
+        for n, paragraph in enumerate(body.findall(f"{W}p"), 1):
+            text = "".join(t.text for t in paragraph.iter(f"{W}t"))
+            named = re.fullmatch(
+                rf"Case {n:02d}: a paragraph that names (no style|\w+)(, after the others)?", text
+            )
+            self.assertIsNotNone(named, text)
+            style = paragraph.find(f"{W}pPr/{W}pStyle")
+            self.assertEqual(
+                None if style is None else style.get(f"{W}val"),
+                None if named.group(1) == "no style" else named.group(1),
+                text,
+            )
+
+    def test_refuses_a_setting_word_does_not_write_in_the_mode(self):
+        doc = next(doc for doc in self.docs if doc.name == "E-opentype-on")
+        for mode, values in ((15, (("enableOpenTypeFeature", 0),)),
+                             (12, (("enableOpenTypeFeatures", 0),))):
+            mistyped = dataclasses.replace(doc, mode=mode, compat_values=values)
+            with self.assertRaisesRegex(ValueError, "not a setting Word writes in this mode"):
+                rules.settings_xml(mistyped)
 
     def test_refuses_a_colour_mapping_attribute_that_does_not_exist(self):
         doc = next(doc for doc in self.docs if doc.color_mapping)
