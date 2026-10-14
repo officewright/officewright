@@ -1936,7 +1936,8 @@ fn the_hyphen_at_a_soft_hyphen_is_measured_as_it_is_drawn() -> TestResult {
     use officewright_layout::ir::Alignment;
 
     // Condensed by 6 pt, the hyphen takes no room, as every other character: aligned at
-    // the end, the line with it ends at the edge, and no line is less than nothing wide.
+    // the end, no line reaches past the edge, the one with the hyphen included, and no
+    // line is less than nothing wide.
     let book = book()?;
     let (document, style) = spaced_out(-6.0);
     let right = ParagraphProps::default().with_alignment(Alignment::End);
@@ -1945,16 +1946,40 @@ fn the_hyphen_at_a_soft_hyphen_is_measured_as_it_is_drawn() -> TestResult {
         .with_inlines([Inline::text("WWWW\u{00AD}WWWW", style)]);
     fuzzing::check_lines(&book, &document, &paragraph, 8.0)?;
     let laid = fuzzing::lay_out(&book, &document, &paragraph, 8.0);
+    assert!(laid.lines().iter().any(|line| line.text().ends_with('-')));
+    for line in laid.lines() {
+        let end = line
+            .words()
+            .iter()
+            .map(|word| word.end())
+            .fold(0.0, f64::max);
+        assert!(end <= 8.0 + 1e-9, "{:?} ends at {end}", line.text());
+    }
+    let paragraph = Paragraph::new(style)
+        .with_props(right)
+        .with_inlines([Inline::soft_hyphen(style), Inline::text("WWWWWWWW", style)]);
+    fuzzing::check_lines(&book, &document, &paragraph, 10.0)?;
+    // Spaced out by 3 pt, the hyphen takes its spacing too: "ab-" is 23.45 pt wide,
+    // too wide for 22 pt, so the line ends at the soft hyphen without one.
+    let (document, style) = spaced_out(3.0);
+    let paragraph = Paragraph::new(style).with_inlines([Inline::text("ab\u{00AD}cd", style)]);
+    fuzzing::check_lines(&book, &document, &paragraph, 22.0)?;
+    let laid = fuzzing::lay_out(&book, &document, &paragraph, 22.0);
     let first = laid.lines().first().ok_or("no line")?;
+    assert_eq!(first.text(), "ab\u{00AD}");
+    // With room for it, the line ends with the hyphen, as wide as its last word reaches.
+    let laid = fuzzing::lay_out(&book, &document, &paragraph, 24.0);
+    let first = laid.lines().first().ok_or("no line")?;
+    assert_eq!(first.text(), "ab\u{00AD}-");
     let end = first
         .words()
         .iter()
         .map(|word| word.end())
         .fold(0.0, f64::max);
-    assert!(end <= 8.0 + 1e-9, "{:?} ends at {end}", first.text());
-    let paragraph = Paragraph::new(style)
-        .with_props(right)
-        .with_inlines([Inline::soft_hyphen(style), Inline::text("WWWWWWWW", style)]);
-    fuzzing::check_lines(&book, &document, &paragraph, 10.0)?;
+    assert!(
+        (end - first.width()).abs() < 1e-9,
+        "{end} against {}",
+        first.width()
+    );
     Ok(())
 }
