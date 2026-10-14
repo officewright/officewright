@@ -23,10 +23,10 @@ use paragraph::ParagraphLevel;
 /// them (MS-OI29500 §17.7.4.17(a)).
 const IGNORED_STYLES: [&str; 3] = ["NoList", "DefaultParagraphFont", "TableNormal"];
 
-/// Resolves the formatting in effect of paragraphs, runs and paragraph marks, keeping
-/// what it has worked out about styles for the next ones: use one for a whole
-/// document. It borrows the document; threads that format at the same time each use
-/// their own.
+/// Resolves the formatting in effect of paragraphs, runs, paragraph marks and list
+/// labels, keeping what it has worked out about styles for the next ones: use one for a
+/// whole document. It borrows the document; threads that format at the same time each
+/// use their own.
 #[derive(Debug)]
 pub struct Formats<'a> {
     document: &'a Document,
@@ -140,9 +140,17 @@ impl<'a> Formats<'a> {
     }
 
     /// The formatting of a list item's label, its number or bullet, in effect: the
-    /// paragraph mark's, with the run properties of the list level laid over it. Word
-    /// ignores the level's `w:rStyle`, `w:highlight` and `w:oMath` there (MS-OI29500
-    /// §17.9.24(a)). None when the paragraph is not a list item.
+    /// paragraph mark's, with the run properties of the list level laid over it, whose
+    /// on/off values set the value as direct formatting does. Word does not allow the
+    /// level's `w:rStyle`, `w:highlight`, `w:oMath` and `w:rPrChange` there (MS-OI29500
+    /// §17.9.24(a)); a file that has them is read, and they are dropped. None when the
+    /// paragraph is not a list item.
+    ///
+    /// Not confirmed against Word yet: [MS-DOC] ("Determining List Formatting of a
+    /// Paragraph", part 3) lays the level over the mark this way, and the reference
+    /// renders of the rule documents asked for in issue #162 are to confirm it. The
+    /// level's linked paragraph style, which [MS-DOC] applies too, does not reach the
+    /// label.
     ///
     /// What a level gives to labels is read once per level, however many paragraphs
     /// use it.

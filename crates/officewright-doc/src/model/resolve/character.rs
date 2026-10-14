@@ -110,7 +110,9 @@ impl Formats<'_> {
                     .or(levels.0)
                     .unwrap_or(false)
             };
-            // The list level's value, like direct formatting, sets it.
+            // The list level's value, like direct formatting, sets it, as [MS-DOC] applies
+            // the level's properties to the number text ("Determining List Formatting of
+            // a Paragraph", part 3, step 2); not confirmed against Word yet (#162).
             if let Some(value) = value(label, index) {
                 *slot = value;
             }
@@ -292,9 +294,10 @@ pub(super) struct CharacterLevel {
 }
 
 impl CharacterLevel {
-    /// What a list level's `w:rPr` gives to its label: Word ignores `w:rStyle`,
-    /// `w:highlight` and `w:oMath` there (MS-OI29500 §17.9.24(a)); `w:rPrChange` is not
-    /// read. None when it gives nothing.
+    /// What a list level's `w:rPr` gives to its label. Word does not allow `w:rStyle`,
+    /// `w:highlight`, `w:oMath` and `w:rPrChange` there (MS-OI29500 §17.9.24(a)); the
+    /// note does not say what Word does with a file that has them, and dropping them is
+    /// our choice (`w:rPrChange` is never read). None when it gives nothing.
     pub(super) fn of_label(properties: &RunProperties) -> Option<Arc<Self>> {
         let mut level = Self::of(properties);
         level.highlight = None;

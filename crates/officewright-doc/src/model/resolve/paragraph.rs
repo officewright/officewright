@@ -264,8 +264,8 @@ impl Formats<'_> {
 
     /// The start of each level of the definition `id` and the style it names, worked
     /// out once and shared by every instance that uses it. The levels are parsed and
-    /// dropped: what a level gives to paragraphs is kept only for the levels paragraphs
-    /// use ([`level_layer`](Self::level_layer)).
+    /// dropped: what a level gives to paragraphs and to their labels is kept only for
+    /// the levels paragraphs use ([`level_gives`](Self::level_gives)).
     fn definition_levels(&mut self, id: i64) -> Arc<DefinitionLevels> {
         if let Some(levels) = self.definitions.get(&id) {
             return Arc::clone(levels);
@@ -298,11 +298,10 @@ impl Formats<'_> {
 
     /// What level `number` of the instance `instance` gives to paragraphs and to their
     /// labels, with the instance's override applied, and the number it starts from, worked
-    /// out once per
-    /// instance and level that a paragraph uses. Only the instance's first override of
-    /// that level is read, and none when the instance's definition does not exist: such
-    /// an instance is a list without levels. Without a replacement level the entry
-    /// shares the definition's.
+    /// out once per instance and level that a paragraph uses. Only the instance's first
+    /// override of that level is read, and none when the instance's definition does not
+    /// exist: such an instance is a list without levels. Without a replacement level the
+    /// entry shares the definition's.
     fn instance_level(
         &mut self,
         instance: i64,

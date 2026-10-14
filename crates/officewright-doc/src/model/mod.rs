@@ -255,10 +255,11 @@ impl Document {
         Styles::new(self)
     }
 
-    /// Resolves the formatting in effect of paragraphs, runs and paragraph marks: the
-    /// document defaults, the styles, numbering and direct formatting combined as Word
-    /// combines them, with theme fonts and colours resolved. Keep it for the whole
-    /// document: it remembers what it has worked out about each style and list.
+    /// Resolves the formatting in effect of paragraphs, runs, paragraph marks and list
+    /// labels: the document defaults, the styles, numbering and direct formatting
+    /// combined as Word combines them, with theme fonts and colours resolved. Keep it for
+    /// the whole document: it remembers what it has worked out about each style and
+    /// list.
     ///
     /// ```
     /// # fn main() -> officewright_doc::Result<()> {
