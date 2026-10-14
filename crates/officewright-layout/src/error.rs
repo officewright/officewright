@@ -31,6 +31,14 @@ pub enum Error {
         /// The most pages allowed.
         limit: usize,
     },
+    /// The PDF could not be made, such as for a font whose license forbids embedding
+    /// it in a way the layout could not avoid.
+    #[cfg(feature = "pdf")]
+    #[non_exhaustive]
+    Pdf {
+        /// What went wrong.
+        source: officewright_pdf::Error,
+    },
 }
 
 impl fmt::Display for Error {
@@ -43,11 +51,21 @@ impl fmt::Display for Error {
             Self::TooManyPages { limit } => {
                 write!(f, "the document takes more than {limit} pages")
             }
+            #[cfg(feature = "pdf")]
+            Self::Pdf { source } => write!(f, "{source}"),
         }
     }
 }
 
-impl error::Error for Error {}
+impl error::Error for Error {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+        match self {
+            #[cfg(feature = "pdf")]
+            Self::Pdf { source } => Some(source),
+            _ => None,
+        }
+    }
+}
 
 impl From<Error> for officewright_core::Error {
     fn from(err: Error) -> Self {
@@ -56,6 +74,8 @@ impl From<Error> for officewright_core::Error {
             invalid @ Error::InvalidDocument { .. } => Self::InvalidArgument(invalid.to_string()),
             deep @ Error::NestingTooDeep { .. } => Self::LimitExceeded(deep.to_string()),
             long @ Error::TooManyPages { .. } => Self::LimitExceeded(long.to_string()),
+            #[cfg(feature = "pdf")]
+            Error::Pdf { source } => source.into(),
         }
     }
 }
