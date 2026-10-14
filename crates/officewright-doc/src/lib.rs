@@ -44,7 +44,7 @@ mod units;
 pub use diagnostic::{Diagnostic, DiagnosticKind};
 pub use error::{Error, Limit, Result};
 #[cfg(feature = "pdf")]
-pub use layout::{LeftOut, Translation};
+pub use layout::Translation;
 pub use model::{
     Anchor, AnchorHorizontalAlign, AnchorVerticalAlign, ArtBorder, Block, Border, BorderStyle,
     Break, BreakClear, BreakKind, CellBorders, CellMargins, CellMerge, ChapterSeparator,
@@ -69,6 +69,12 @@ pub use model::{
     TableWidth, TextDirection, Theme, ThemeColor, ThemeFont, Underline, UnderlineStyle,
     VerticalAlignment, VerticalJustification, VerticalPosition, VerticalReference, WrapKind,
 };
+/// What [`Document::save_pdf`] and the like report, and the options they take.
+#[cfg(feature = "pdf")]
+pub use officewright_layout::{LayoutReport, Location, RenderOptions, ReportEntry, ReportKind};
+/// How the streams of a PDF are compressed, for [`RenderOptions::with_compression`].
+#[cfg(feature = "pdf")]
+pub use officewright_pdf::Compression;
 pub use options::{Limits, LoadOptions};
 
 #[cfg(test)]

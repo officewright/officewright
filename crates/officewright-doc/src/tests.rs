@@ -3268,6 +3268,8 @@ mod format;
 #[cfg(feature = "pdf")]
 mod layout;
 mod paragraph_format;
+#[cfg(feature = "pdf")]
+mod render;
 
 /// The text of the paragraphs of some blocks, one line each.
 fn block_text<'a>(blocks: impl Iterator<Item = Block<'a>>) -> Vec<String> {

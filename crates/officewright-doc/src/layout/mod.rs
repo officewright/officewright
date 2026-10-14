@@ -12,15 +12,15 @@ mod inline;
 mod list;
 mod notes;
 mod paragraph;
+mod render;
 mod section;
 mod style;
 mod table;
 
 use std::collections::HashMap;
-use std::fmt;
 
-use officewright_layout::ReportKind;
 use officewright_layout::ir;
+use officewright_layout::{LayoutReport, Location, ReportEntry, ReportKind};
 
 use crate::model::{Block, Document, Formats};
 
@@ -125,7 +125,7 @@ impl Document {
 #[non_exhaustive]
 pub struct Translation {
     document: ir::Document,
-    left_out: Vec<LeftOut>,
+    left_out: Vec<ReportEntry>,
 }
 
 impl Translation {
@@ -141,42 +141,14 @@ impl Translation {
 
     /// What the IR does not hold, or holds otherwise than Word lays it out, in document
     /// order; at most 1,000 entries, the last of which then counts the others.
-    pub fn left_out(&self) -> &[LeftOut] {
+    pub fn left_out(&self) -> &[ReportEntry] {
         &self.left_out
     }
-}
 
-/// Something of the document the translation left out or changed.
-#[cfg_attr(not(feature = "unstable-ir"), doc(hidden))]
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct LeftOut {
-    kind: ReportKind,
-    location: String,
-    message: String,
-}
-
-impl LeftOut {
-    /// What kind of difference it is.
-    pub fn kind(&self) -> ReportKind {
-        self.kind
-    }
-
-    /// Where in the IR, as the layout's report writes places:
-    /// `sections[0].blocks[3]`, or `document` for the document as a whole.
-    pub fn location(&self) -> &str {
-        &self.location
-    }
-
-    /// What was left out, in words.
-    pub fn message(&self) -> &str {
-        &self.message
-    }
-}
-
-impl fmt::Display for LeftOut {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.location, self.message)
+    /// The document in the IR and what the translation left out, as a report the layout
+    /// adds its own entries to.
+    pub fn into_parts(self) -> (ir::Document, LayoutReport) {
+        (self.document, self.left_out.into_iter().collect())
     }
 }
 
@@ -198,7 +170,7 @@ struct Translator<'a> {
     lists: list::Lists,
     /// A key per paragraph style, by its place among the styles, for contextual spacing.
     style_keys: HashMap<usize, ir::StyleKey>,
-    left_out: Vec<LeftOut>,
+    left_out: Vec<ReportEntry>,
     /// Entries not listed once the list is full.
     omitted: usize,
     path: Vec<Step>,
@@ -259,11 +231,11 @@ impl<'a> Translator<'a> {
         self.note_separators();
         if self.omitted > 0 {
             let omitted = self.omitted;
-            self.left_out.push(LeftOut {
-                kind: ReportKind::FeatureUnsupported,
-                location: "document".to_owned(),
-                message: format!("{omitted} more entries are not listed"),
-            });
+            self.left_out.push(ReportEntry::new(
+                ReportKind::FeatureUnsupported,
+                Location::document(),
+                format!("{omitted} more entries are not listed"),
+            ));
         }
         Translation {
             document: self.ir,
@@ -350,30 +322,18 @@ impl<'a> Translator<'a> {
             self.omitted += 1;
             return;
         }
-        self.left_out.push(LeftOut {
-            kind,
-            location: self.location(),
-            message: message(),
-        });
+        self.left_out
+            .push(ReportEntry::new(kind, self.location(), message()));
     }
 
-    /// The current place, written as the layout's report writes places.
-    fn location(&self) -> String {
-        if self.path.is_empty() {
-            return "document".to_owned();
-        }
-        let mut out = String::new();
-        for (position, step) in self.path.iter().enumerate() {
-            match step {
-                Step::Field(name) if position == 0 => out.push_str(name),
-                Step::Field(name) => {
-                    out.push('.');
-                    out.push_str(name);
-                }
-                Step::Index(index) => out.push_str(&format!("[{index}]")),
-            }
-        }
-        out
+    /// The current place in the IR.
+    fn location(&self) -> Location {
+        self.path
+            .iter()
+            .fold(Location::document(), |location, step| match *step {
+                Step::Field(name) => location.field(name),
+                Step::Index(index) => location.index(index),
+            })
     }
 }
 

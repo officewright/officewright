@@ -1,7 +1,7 @@
 //! The translation into the layout IR: [`Document::to_layout_ir`].
 
-use officewright_layout::ReportKind;
 use officewright_layout::ir;
+use officewright_layout::{ReportEntry, ReportKind};
 
 use super::*;
 
@@ -209,7 +209,7 @@ fn cuts_font_names_no_font_has() {
     let messages: Vec<&str> = translation
         .left_out()
         .iter()
-        .map(LeftOut::message)
+        .map(ReportEntry::message)
         .collect();
     assert_eq!(messages, ["a font name of more than 256 bytes is cut"]);
     // The cut counts bytes and falls at the end of a character: 85 characters of three
@@ -396,7 +396,7 @@ fn lists_at_most_a_thousand_entries() {
     // 999 listed, and one counting the others.
     assert_eq!(left_out.len(), 1000);
     assert_eq!(left_out[999].message(), "201 more entries are not listed");
-    assert_eq!(left_out[999].location(), "document");
+    assert_eq!(left_out[999].location().to_string(), "document");
 }
 
 #[test]
@@ -854,7 +854,7 @@ fn assembles_fields_at_the_edges() {
     let left_out: Vec<&str> = translation
         .left_out()
         .iter()
-        .map(LeftOut::message)
+        .map(ReportEntry::message)
         .collect();
     assert_eq!(
         left_out,
@@ -900,7 +900,7 @@ fn bounds_what_long_names_and_tags_copy() {
     let left_out: Vec<&str> = translation
         .left_out()
         .iter()
-        .map(LeftOut::message)
+        .map(ReportEntry::message)
         .collect();
     assert!(left_out.contains(&"a language tag of more than 64 bytes is left out"));
     assert!(left_out.contains(&"a font name of more than 256 bytes is cut"));
@@ -1266,7 +1266,7 @@ fn lists_each_cut_name_and_tag() {
         let left_out: Vec<&str> = translation
             .left_out()
             .iter()
-            .map(LeftOut::message)
+            .map(ReportEntry::message)
             .collect();
         assert_eq!(left_out, [message], "{properties}");
     }
@@ -1276,7 +1276,7 @@ fn lists_each_cut_name_and_tag() {
     let left_out: Vec<&str> = translation
         .left_out()
         .iter()
-        .map(LeftOut::message)
+        .map(ReportEntry::message)
         .collect();
     assert_eq!(left_out, ["a font name of more than 256 bytes is cut"]);
     let ir::Inline::Symbol { font, .. } = &paragraphs(&translation)[0].inlines()[0] else {
@@ -1478,7 +1478,7 @@ fn cuts_names_and_tags_only_past_their_bounds() {
     let left_out: Vec<&str> = translation
         .left_out()
         .iter()
-        .map(LeftOut::message)
+        .map(ReportEntry::message)
         .collect();
     assert_eq!(left_out, ["a font name of more than 256 bytes is cut"]);
     assert!(report(&tag(64)).is_empty());
@@ -1584,7 +1584,7 @@ fn lists_a_cut_once_for_runs_that_share_a_style() {
     let left_out: Vec<&str> = translation
         .left_out()
         .iter()
-        .map(LeftOut::message)
+        .map(ReportEntry::message)
         .collect();
     assert_eq!(left_out, ["a font name of more than 256 bytes is cut"]);
 }
@@ -1753,7 +1753,7 @@ fn leaves_out_tables_without_rows_and_tables_nested_too_deep() {
     let messages: Vec<&str> = translation
         .left_out()
         .iter()
-        .map(LeftOut::message)
+        .map(ReportEntry::message)
         .collect();
     // Each kept table's cell ends with the table in it, so gets an empty paragraph.
     let added = "a cell that does not end with a paragraph gets an empty one";
@@ -2719,7 +2719,7 @@ fn translates_pictures_with_their_images() {
     let left_out: Vec<&str> = translation
         .left_out()
         .iter()
-        .map(LeftOut::message)
+        .map(ReportEntry::message)
         .collect();
     assert_eq!(
         left_out,
