@@ -6,8 +6,8 @@ const FONT_TABLE: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable";
 const FONT: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/font";
 
-/// The key of `{00112233-4455-6677-8899-AABBCCDDEEFF}`: its bytes in the reverse order of
-/// the hexadecimal digits as written (ECMA-376 Part 1, §17.8.1).
+/// The key of `{00112233-4455-6677-8899-AABBCCDDEEFF}`: the bytes its hexadecimal digits
+/// give, read in pairs as written, in reverse order (ECMA-376 Part 1, §17.8.1).
 const KEY: &str = "{00112233-4455-6677-8899-AABBCCDDEEFF}";
 const KEY_BYTES: [u8; 16] = [
     0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA, 0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00,
@@ -240,6 +240,24 @@ fn reports_embedded_fonts_it_cannot_read() {
             "{place}the w:embedRegular of the font Iota cannot be read: "
         )),
         "{messages:?}"
+    );
+    // A key that is not a GUID is a value of the wrong form; the rest is content the
+    // package lacks or that is not what it should be.
+    let kinds: Vec<crate::DiagnosticKind> = document
+        .diagnostics()
+        .iter()
+        .map(|diagnostic| diagnostic.kind())
+        .collect();
+    let (invalid, unexpected) = (
+        crate::DiagnosticKind::InvalidValue,
+        crate::DiagnosticKind::UnexpectedContent,
+    );
+    assert_eq!(
+        kinds,
+        [
+            unexpected, invalid, unexpected, unexpected, unexpected, unexpected, unexpected,
+            unexpected, invalid, invalid,
+        ]
     );
     assert_eq!(
         messages[6..],
