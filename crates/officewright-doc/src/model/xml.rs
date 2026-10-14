@@ -9,6 +9,10 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 
+/// The namespace of `xmlns` attributes (Namespaces in XML 1.0, section 3): a token keeps
+/// the namespace declarations written on its element as attributes in it.
+pub(crate) const XMLNS: &str = "http://www.w3.org/2000/xmlns/";
+
 /// A string of a document's [`Strings`]: a namespace URI or a qualified name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Sym(u32);
@@ -242,14 +246,15 @@ impl<'d> Element<'d> {
     }
 
     /// The element and everything in it as XML that stands on its own: each element
-    /// declares the prefixes it and its attributes use where they are not yet bound to
-    /// the same namespace.
+    /// keeps the namespace declarations written on it, and declares the prefixes it and
+    /// its attributes use where they are not yet bound to the same namespace.
     pub(crate) fn to_xml(self) -> String {
         let strings = self.strings;
+        let uri = |namespace: Option<Sym>| namespace.map(|uri| strings.get(uri));
         let mut out = String::new();
-        // The bindings of each prefix in scope, innermost last, and the prefixes each
+        // The URI each prefix is bound to in scope, innermost last, and the prefixes each
         // open element bound.
-        let mut bindings: HashMap<Option<&str>, Vec<Option<Sym>>> = HashMap::new();
+        let mut bindings: HashMap<Option<&str>, Vec<Option<&str>>> = HashMap::new();
         let mut open: Vec<(&str, Vec<Option<&str>>)> = Vec::new();
         for token in self.tokens {
             match token {
@@ -260,8 +265,22 @@ impl<'d> Element<'d> {
                     out.push('<');
                     out.push_str(qname);
                     let mut added = Vec::new();
-                    let names = std::iter::once((name, true))
-                        .chain(attributes.iter().map(|attribute| (&attribute.name, false)));
+                    // The declarations the element keeps bind first, so that none is
+                    // made twice.
+                    let is_declaration =
+                        |attribute: &XmlAttribute| uri(attribute.name.namespace) == Some(XMLNS);
+                    for attribute in attributes.iter().filter(|a| is_declaration(a)) {
+                        let prefix = strings.get(attribute.name.qname).strip_prefix("xmlns:");
+                        let bound = (!attribute.value.is_empty()).then_some(&*attribute.value);
+                        bindings.entry(prefix).or_default().push(bound);
+                        added.push(prefix);
+                    }
+                    let names = std::iter::once((name, true)).chain(
+                        attributes
+                            .iter()
+                            .filter(|a| !is_declaration(a))
+                            .map(|attribute| (&attribute.name, false)),
+                    );
                     for (name, is_element) in names {
                         let prefix = prefix(strings.get(name.qname));
                         // An unprefixed attribute is in no namespace and needs nothing;
@@ -274,7 +293,7 @@ impl<'d> Element<'d> {
                             .and_then(|stack| stack.last().copied());
                         // The default namespace starts out as no namespace.
                         let bound = bound.or(prefix.is_none().then_some(None));
-                        if bound == Some(name.namespace) {
+                        if bound == Some(uri(name.namespace)) {
                             continue;
                         }
                         match prefix {
@@ -289,7 +308,10 @@ impl<'d> Element<'d> {
                             true,
                         );
                         out.push('"');
-                        bindings.entry(prefix).or_default().push(name.namespace);
+                        bindings
+                            .entry(prefix)
+                            .or_default()
+                            .push(uri(name.namespace));
                         added.push(prefix);
                     }
                     for attribute in attributes.iter() {

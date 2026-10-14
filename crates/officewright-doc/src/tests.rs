@@ -383,6 +383,64 @@ fn follows_markup_compatibility() {
 }
 
 #[test]
+fn keeps_the_namespaces_that_values_in_kept_xml_name() {
+    // Prefixes named only in values, by mc:Ignorable, mc:ProcessContent, Requires and
+    // xsi:type, bound on the document's root outside the element kept, and one bound
+    // on the element that names it (#110).
+    let document = open(
+        r#"<w:p><w14:a xmlns:v="urn:v"><w14:d mc:Ignorable="wp" mc:ProcessContent="w:x"><mc:AlternateContent><mc:Choice Requires="r"><w14:b/></mc:Choice><mc:Fallback/></mc:AlternateContent></w14:d><w14:c xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="r:T"/><w14:e xmlns:t="urn:t" mc:Ignorable="t"/></w14:a></w:p>"#,
+    );
+    let Some(Block::Paragraph(paragraph)) = document.sections().next().unwrap().blocks().next()
+    else {
+        panic!("no paragraph");
+    };
+    let Some(Inline::Other(other)) = paragraph.inlines().next() else {
+        panic!("not kept");
+    };
+    let xml = other.to_xml();
+    // Read back, every prefix a value names is bound to the namespace it had.
+    let input = officewright_opc::xml::Input::decode(xml.as_bytes()).unwrap();
+    let mut reader = input.reader(&officewright_opc::Limits::new());
+    let mut checked = Vec::new();
+    while let Some(event) = reader.read_event().unwrap() {
+        let officewright_opc::xml::Event::Start(tag) = event else {
+            continue;
+        };
+        for attribute in tag.attributes() {
+            let value = attribute.value().to_owned();
+            for prefix in value.split_whitespace() {
+                let prefix = prefix.split_once(':').map_or(prefix, |(p, _)| p);
+                if matches!(
+                    attribute.name().local(),
+                    "Ignorable" | "ProcessContent" | "Requires" | "type"
+                ) {
+                    let bound = reader
+                        .resolve_prefix(prefix)
+                        .map(|ns| reader.namespace_uri(ns).to_owned());
+                    checked.push((prefix.to_owned(), bound));
+                }
+            }
+        }
+    }
+    let wp = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
+    let r = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    let expected = [
+        ("wp", Some(wp)),
+        ("w", Some(W)),
+        ("r", Some(r)),
+        ("r", Some(r)),
+        ("t", Some("urn:t")),
+    ]
+    .map(|(prefix, uri)| (prefix.to_owned(), uri.map(str::to_owned)));
+    assert_eq!(checked, expected, "{xml}");
+    // The declarations written on the elements kept are kept as written, and each is
+    // made once.
+    assert!(xml.starts_with(r#"<w14:a xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:v="urn:v">"#), "{xml}");
+    assert_eq!(xml.matches("xmlns:xsi=").count(), 1, "{xml}");
+    assert_eq!(xml.matches("xmlns:t=").count(), 1, "{xml}");
+}
+
+#[test]
 fn refuses_content_that_must_be_understood() {
     // On an element that is read; on one kept without being understood it is not
     // checked, as ECMA-376 Part 3 asks only of what a consumer processes.
