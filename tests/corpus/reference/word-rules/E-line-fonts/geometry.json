@@ -1,7 +1,7 @@
 {
  "format": 1,
  "document": "word-rules/E-line-fonts.docx",
- "pdf_sha256": "987f0cc7f7bcc64cbba8d16cc0969fa0d6beed3d9130d0b1724b00ff83179edf",
+ "pdf_sha256": "235a6ea8b565c81bd7a50a612f98f8d1867d1109818aea0e94fd3f8b5758b256",
  "made_with": "pdftotext 24.02.0 -bbox-layout",
  "units": "points, origin at the top left of the page, y downwards",
  "page_count": 12,

@@ -80,6 +80,12 @@ class References(unittest.TestCase):
                         for paragraph in story["paragraphs"]:
                             self.assertLess(paragraph["font"], fonts)
                             self.assertLess(paragraph["format"], formats)
+                            # make-reference.ps1 gives every paragraph its runs, or none.
+                            self.assertEqual("runs" in paragraph, formatting["runs"])
+                            for length, font in paragraph.get("runs", []):
+                                self.assertIs(type(length), int)
+                                self.assertGreaterEqual(length, 1)
+                                self.assertIn(font, range(fonts))
                     self.assertLess((folder / "formatting.json").stat().st_size, 1_000_000)
                 for page in geometry["pages"]:
                     png = (folder / f"page-{page['number']:03}.png").read_bytes()

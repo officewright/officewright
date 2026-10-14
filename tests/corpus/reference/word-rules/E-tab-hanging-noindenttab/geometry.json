@@ -1,7 +1,7 @@
 {
  "format": 1,
  "document": "word-rules/E-tab-hanging-noindenttab.docx",
- "pdf_sha256": "82f6a066c46c72271d9058177417fe1d5eb5a045eb4f44dc02ae90e4214f60d6",
+ "pdf_sha256": "2e4f1077ec89733ca5ea3d8cebc5ef89630b9d7ce517f936503f45d4c4a0b87f",
  "made_with": "pdftotext 24.02.0 -bbox-layout",
  "units": "points, origin at the top left of the page, y downwards",
  "page_count": 1,
