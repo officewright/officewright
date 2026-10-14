@@ -6,9 +6,6 @@ use libfuzzer_sys::fuzz_target;
 use officewright_font::FontFace;
 use officewright_pdf::{Document, Font, PageSize, Pt};
 
-#[path = "shared/subsetter_issue_30.rs"]
-mod subsetter_issue_30;
-
 /// Characters of the scripts an embedded font shows, and a ligature.
 const SAMPLE: &str = "Hello, Мир! Καλημέρα Բարեւ 0123 ÁÉ € fi 漢字かな";
 
@@ -19,9 +16,6 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     for index in 0..count.min(4) {
-        if subsetter_issue_30::hits(data, index) {
-            continue;
-        }
         let (Ok(face), Ok(font)) = (
             FontFace::from_bytes(data, index),
             Font::from_bytes(data, index),
