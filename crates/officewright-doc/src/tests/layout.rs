@@ -299,6 +299,11 @@ fn assembles_fields_with_their_results() {
             text_run("x")
         ),
         r#"<w:p><w:fldSimple w:instr=" PAGE \* ALPHABETIC "><w:r><w:t>B</w:t></w:r></w:fldSimple></w:p>"#.to_owned(),
+        // A complex field begun inside a simple field ends with it; what follows the
+        // simple field is not part of it (from Copilot's review of #158).
+        r#"<w:p><w:fldSimple w:instr="PAGE"><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>NUMPAGES</w:instrText><w:fldChar w:fldCharType="separate"/><w:t>9</w:t></w:r></w:fldSimple><w:r><w:t>after</w:t></w:r></w:p>"#.to_owned(),
+        // The legacy page number is a PAGE field.
+        r#"<w:p><w:r><w:pgNum/></w:r></w:p>"#.to_owned(),
         // Content before the separator is the instruction, which shows nothing.
         format!(
             "<w:p>{}</w:p>",
@@ -320,6 +325,8 @@ fn assembles_fields_with_their_results() {
             vec!["field SectionPages None [text 5]"],
             vec!["text x"],
             vec!["field Page Some(UpperLetter) [text B]"],
+            vec!["field Page None [text 9]", "text after"],
+            vec!["field Page None []"],
             vec!["field Page None [text 7]"],
         ]
     );
@@ -391,9 +398,10 @@ fn lists_at_most_a_thousand_entries() {
     let document = open(&format!("<w:p>{references}</w:p>"));
     let translation = translate(&document);
     let left_out = translation.left_out();
-    assert_eq!(left_out.len(), 1001);
-    assert_eq!(left_out[1000].message(), "200 more entries are not listed");
-    assert_eq!(left_out[1000].location(), "document");
+    // 999 listed, and one counting the others.
+    assert_eq!(left_out.len(), 1000);
+    assert_eq!(left_out[999].message(), "201 more entries are not listed");
+    assert_eq!(left_out[999].location(), "document");
 }
 
 #[test]
@@ -587,9 +595,9 @@ fn translates_lists_as_paragraphs_use_them() {
 #[test]
 fn translates_settings_and_sections() {
     let settings = format!(
-        r#"<w:settings xmlns:w="{W}"><w:evenAndOddHeaders/><w:defaultTabStop w:val="360"/><w:autoHyphenation/><w:consecutiveHyphenLimit w:val="2"/><w:hyphenationZone w:val="200"/><w:doNotHyphenateCaps/><w:footnotePr><w:pos w:val="sectEnd"/><w:numFmt w:val="upperLetter"/></w:footnotePr><w:compat><w:doNotExpandShiftReturn/><w:usePrinterMetrics/><w:noLeading w:val="0"/><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="14"/><w:compatSetting w:name="enableOpenTypeFeatures" w:uri="http://schemas.microsoft.com/office/word" w:val="1"/><w:compatSetting w:name="differentiateMultirowTableHeaders" w:uri="http://schemas.microsoft.com/office/word" w:val="0"/></w:compat><w:decimalSymbol w:val=","/></w:settings>"#
+        r#"<w:settings xmlns:w="{W}"><w:evenAndOddHeaders/><w:defaultTabStop w:val="360"/><w:autoHyphenation/><w:consecutiveHyphenLimit w:val="2"/><w:hyphenationZone w:val="200"/><w:doNotHyphenateCaps/><w:footnotePr><w:pos w:val="sectEnd"/><w:numFmt w:val="upperLetter"/></w:footnotePr><w:endnotePr><w:pos w:val="sectEnd"/></w:endnotePr><w:compat><w:doNotExpandShiftReturn/><w:usePrinterMetrics/><w:noLeading w:val="0"/><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="14"/><w:compatSetting w:name="enableOpenTypeFeatures" w:uri="http://schemas.microsoft.com/office/word" w:val="1"/><w:compatSetting w:name="differentiateMultirowTableHeaders" w:uri="http://schemas.microsoft.com/office/word" w:val="0"/></w:compat><w:decimalSymbol w:val=","/></w:settings>"#
     );
-    let body = r#"<w:p><w:pPr><w:sectPr><w:footnotePr><w:pos w:val="beneathText"/><w:numStart w:val="2"/><w:numRestart w:val="eachPage"/></w:footnotePr><w:type w:val="continuous"/><w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/><w:pgMar w:top="1000" w:right="1100" w:bottom="1200" w:left="1300" w:header="400" w:footer="500" w:gutter="100"/><w:pgNumType w:fmt="lowerRoman" w:start="3"/><w:cols w:num="2" w:space="720" w:sep="1"/><w:titlePg/><w:vAlign w:val="center"/></w:sectPr></w:pPr></w:p><w:p/><w:sectPr><w:cols w:num="2" w:equalWidth="0"><w:col w:w="3000" w:space="400"/><w:col w:w="5000"/></w:cols></w:sectPr>"#;
+    let body = r#"<w:p><w:pPr><w:sectPr><w:footnotePr><w:pos w:val="beneathText"/><w:numStart w:val="2"/><w:numRestart w:val="eachPage"/></w:footnotePr><w:endnotePr><w:pos w:val="docEnd"/><w:numFmt w:val="decimal"/></w:endnotePr><w:type w:val="continuous"/><w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/><w:pgMar w:top="1000" w:right="1100" w:bottom="1200" w:left="1300" w:header="400" w:footer="500" w:gutter="100"/><w:pgNumType w:fmt="lowerRoman" w:start="3"/><w:cols w:num="2" w:space="720" w:sep="1"/><w:titlePg/><w:vAlign w:val="center"/></w:sectPr></w:pPr></w:p><w:p/><w:sectPr><w:cols w:num="2" w:equalWidth="0"><w:col w:w="3000" w:space="400"/><w:col w:w="5000"/></w:cols></w:sectPr>"#;
     let document = with_parts(body, &[("settings", "settings.xml", settings)]);
     let translation = translate(&document);
     let ir = translation.document();
@@ -656,8 +664,8 @@ fn translates_settings_and_sections() {
             .with_start(Some(3))
     );
     assert_eq!(first.vertical_align(), ir::PageVerticalAlign::Center);
-    // Footnotes: the settings' number format, the section's position over the settings',
-    // its start and restart.
+    // Footnotes: the settings' number format, and the section's position, start and
+    // restart; Word ignores the settings' position (MS-OI29500 2.1.309 a).
     assert_eq!(
         first.footnotes(),
         &ir::NoteProps::footnotes()
@@ -666,7 +674,14 @@ fn translates_settings_and_sections() {
             .with_start(2)
             .with_restart(ir::NoteRestart::EachPage)
     );
-    assert_eq!(first.endnotes(), &ir::NoteProps::endnotes());
+    // Endnotes: the settings' position, not the section's (§17.11.22); the section's
+    // number format.
+    assert_eq!(
+        first.endnotes(),
+        &ir::NoteProps::endnotes()
+            .with_position(ir::NotePosition::SectionEnd)
+            .with_format(ir::NumberFormat::Decimal)
+    );
     assert_eq!(first.blocks().len(), 1);
 
     // No page size: Letter; columns of their own widths.
@@ -685,8 +700,10 @@ fn translates_settings_and_sections() {
     assert_eq!(last.start(), ir::SectionStart::NextPage);
     assert_eq!(
         last.footnotes(),
-        &ir::NoteProps::footnotes()
-            .with_format(ir::NumberFormat::UpperLetter)
-            .with_position(ir::NotePosition::SectionEnd)
+        &ir::NoteProps::footnotes().with_format(ir::NumberFormat::UpperLetter)
+    );
+    assert_eq!(
+        last.endnotes(),
+        &ir::NoteProps::endnotes().with_position(ir::NotePosition::SectionEnd)
     );
 }

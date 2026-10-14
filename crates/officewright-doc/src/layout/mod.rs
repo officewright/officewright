@@ -22,7 +22,8 @@ use officewright_layout::ir;
 
 use crate::model::{Block, Document, Formats};
 
-/// The most entries a translation lists; the others are counted in one last entry.
+/// The most entries a translation lists, the last of which counts the others when there
+/// are more.
 const MAX_LEFT_OUT: usize = 1000;
 
 impl Document {
@@ -214,7 +215,8 @@ impl<'a> Translator<'a> {
 
     /// Lists something left out at the current place.
     fn leave_out(&mut self, kind: ReportKind, message: impl FnOnce() -> String) {
-        if self.left_out.len() >= MAX_LEFT_OUT {
+        // One place is kept for the entry that counts those not listed.
+        if self.left_out.len() >= MAX_LEFT_OUT - 1 {
             self.omitted += 1;
             return;
         }

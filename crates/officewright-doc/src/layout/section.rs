@@ -141,13 +141,18 @@ pub(super) fn section<'a>(t: &mut Translator<'a>, section: Section<'a>) -> ir::S
         Some(VerticalJustification::Bottom) => ir::PageVerticalAlign::Bottom,
     };
     let settings = t.document.settings();
+    // Word places footnotes as the section says, not the document (MS-OI29500 2.1.309
+    // a), and endnotes as the document says, not the section (§17.11.22).
     let footnotes = notes(
         ir::NoteProps::footnotes(),
-        [settings.footnotes(), properties.footnotes()],
+        [
+            (settings.footnotes(), false),
+            (properties.footnotes(), true),
+        ],
     );
     let endnotes = notes(
         ir::NoteProps::endnotes(),
-        [settings.endnotes(), properties.endnotes()],
+        [(settings.endnotes(), true), (properties.endnotes(), false)],
     );
     if !properties.headers().is_empty() || !properties.footers().is_empty() {
         t.leave_out(ReportKind::FeatureUnsupported, || {
@@ -166,11 +171,15 @@ pub(super) fn section<'a>(t: &mut Translator<'a>, section: Section<'a>) -> ir::S
         .with_blocks(blocks)
 }
 
-/// Note properties: Word's defaults, then the document's settings, then the section's.
-fn notes(defaults: ir::NoteProps, levels: [Option<&NoteProperties>; 2]) -> ir::NoteProps {
+/// Note properties: Word's defaults, then the document's settings, then the section's;
+/// the position only from the levels marked to give it.
+fn notes(defaults: ir::NoteProps, levels: [(Option<&NoteProperties>, bool); 2]) -> ir::NoteProps {
     let mut props = defaults;
-    for level in levels.into_iter().flatten() {
-        if let Some(position) = level.position() {
+    for (level, places) in levels {
+        let Some(level) = level else {
+            continue;
+        };
+        if let Some(position) = level.position().filter(|_| places) {
             props = props.with_position(match position {
                 NotePosition::PageBottom => ir::NotePosition::PageBottom,
                 NotePosition::BeneathText => ir::NotePosition::BeneathText,

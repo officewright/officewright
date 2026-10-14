@@ -25,31 +25,36 @@ impl<'a> Translator<'a> {
         mark: ir::RunStyleId,
     ) -> Vec<ir::Inline> {
         let mut content = Content::default();
-        let mut stack: Vec<(Box<dyn Iterator<Item = Inline<'a>> + 'a>, bool)> =
-            vec![(Box::new(paragraph.inlines()), false)];
+        // Each open container, and for a simple field how many fields were open before
+        // it: when its content ends, it closes, with any field begun inside it that did
+        // not end there.
+        let mut stack: Vec<(Box<dyn Iterator<Item = Inline<'a>> + 'a>, Option<usize>)> =
+            vec![(Box::new(paragraph.inlines()), None)];
         while let Some((top, _)) = stack.last_mut() {
             let Some(inline) = top.next() else {
-                // A simple field ends with its content.
-                if let Some((_, true)) = stack.pop() {
-                    content.end();
+                if let Some((_, Some(open))) = stack.pop() {
+                    while content.fields.len() > open {
+                        content.end();
+                    }
                 }
                 continue;
             };
             match inline {
                 Inline::Run(run) => self.run(run, &mut content),
-                Inline::Hyperlink(link) => stack.push((Box::new(link.inlines()), false)),
-                Inline::ContentControl(control) => stack.push((Box::new(control.inlines()), false)),
+                Inline::Hyperlink(link) => stack.push((Box::new(link.inlines()), None)),
+                Inline::ContentControl(control) => stack.push((Box::new(control.inlines()), None)),
                 Inline::Revision(revision) => match revision.kind() {
                     RevisionKind::Insertion | RevisionKind::MoveTo => {
-                        stack.push((Box::new(revision.inlines()), false));
+                        stack.push((Box::new(revision.inlines()), None));
                     }
                     RevisionKind::Deletion | RevisionKind::MoveFrom => {}
                 },
                 Inline::SimpleField(field) => {
+                    let open = content.fields.len();
                     content.begin(mark);
                     content.instruction(field.instruction());
                     content.separate();
-                    stack.push((Box::new(field.inlines()), true));
+                    stack.push((Box::new(field.inlines()), Some(open)));
                 }
                 Inline::Other(other) => match other.local_name() {
                     "oMath" | "oMathPara" => {
@@ -111,6 +116,13 @@ impl<'a> Translator<'a> {
                     });
                 }
                 RunContent::CommentReference(_) | RunContent::LastRenderedPageBreak => {}
+                // The legacy page number: a PAGE field (ECMA-376 Part 1, §17.3.3.22).
+                RunContent::Other(other) if other.local_name() == "pgNum" => {
+                    content.push(ir::Inline::Field(ir::Field::new(
+                        ir::FieldKind::Page,
+                        style,
+                    )));
+                }
                 RunContent::Other(other) => {
                     let message = match other.local_name() {
                         "drawing" => "a drawing is left out",
