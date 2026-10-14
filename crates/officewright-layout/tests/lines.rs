@@ -544,6 +544,12 @@ fn width_of(book: &FontBook, document: &Document, style: RunStyleId, text: &str)
         .map_or(0.0, |line| line.width())
 }
 
+/// The advance of a space in `style` of `document`: a space on its own hangs and has no
+/// width on its line.
+fn space_width(book: &FontBook, document: &Document, style: RunStyleId) -> f64 {
+    width_of(book, document, style, "a b") - width_of(book, document, style, "ab")
+}
+
 const SENTENCE: &str = "The quick brown fox jumps over the lazy dog and keeps running \
                         through the long grass until the evening comes over the hills.";
 
@@ -583,7 +589,7 @@ fn lines_end_at_the_last_word_that_fits_and_spaces_hang() -> TestResult {
         assert!((line.width() - last.end()).abs() < 1e-9);
         // The next line's first word would not have fitted.
         let first = next.words().first().ok_or("no word")?;
-        let space = width_of(&book, &document, style, " ");
+        let space = space_width(&book, &document, style);
         assert!(line.width() + space + (first.end() - first.start()) > width);
     }
     assert_eq!(lines.last().map(|line| line.end()), Some("paragraph"));
@@ -1177,5 +1183,431 @@ fn spaces_before_a_word_too_wide_for_the_line_end_the_line() -> TestResult {
         messages,
         ["an inline object is wider than its line and reaches past its end"]
     );
+    Ok(())
+}
+
+/// Checks the space between paragraphs against Word's render of `name`
+/// (`E-autospacing` and `E-autospacing-nohtml`): paragraphs of one 20 pt exact line,
+/// most of them Calibri 11, with automatic and explicit spacing; Word's baselines must be
+/// as far apart as ours.
+fn check_autospacing(name: &str, no_html: bool) -> TestResult {
+    use officewright_layout::ir::{CompatFlag, DocumentSettings};
+
+    let book = book()?;
+    let word = word_lines(name)?;
+    let flags = if no_html {
+        vec![CompatFlag::DoNotUseHTMLParagraphAutoSpacing]
+    } else {
+        Vec::new()
+    };
+    let mut document = Document::new(DocumentSettings::default().with_compat_flags(flags));
+    let mut style = |size: f64| {
+        document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Calibri"))
+                .with_size(Pt(size)),
+        )
+    };
+    let (small, large) = (style(11.0), style(20.0));
+    // (size, before, after, automatic before, automatic after), as make-rule-docs.py
+    // writes the document.
+    let cases: [(f64, f64, f64, bool, bool); 14] = [
+        (11.0, 0.0, 0.0, false, false),
+        (11.0, 0.0, 0.0, true, true),
+        (11.0, 0.0, 0.0, false, false),
+        (11.0, 0.0, 0.0, true, false),
+        (11.0, 0.0, 0.0, false, false),
+        (11.0, 0.0, 0.0, false, true),
+        (11.0, 0.0, 0.0, false, false),
+        (11.0, 0.0, 0.0, true, true),
+        (11.0, 0.0, 0.0, true, true),
+        (11.0, 0.0, 0.0, false, false),
+        (11.0, 24.0, 24.0, true, true),
+        (11.0, 0.0, 0.0, false, false),
+        (20.0, 0.0, 0.0, true, true),
+        (11.0, 0.0, 0.0, false, false),
+    ];
+    let paragraphs: Vec<(f64, Paragraph)> = cases
+        .iter()
+        .map(|&(size, before, after, before_auto, after_auto)| {
+            let run = if size > 11.0 { large } else { small };
+            let spacing = Spacing::default()
+                .with_before(Pt(before))
+                .with_after(Pt(after))
+                .with_before_auto(before_auto)
+                .with_after_auto(after_auto)
+                .with_line(LineSpacing::Exact(Pt(20.0)));
+            let paragraph = Paragraph::new(run)
+                .with_props(ParagraphProps::default().with_spacing(spacing))
+                .with_inlines([Inline::text("Case", run)]);
+            (size, paragraph)
+        })
+        .collect();
+    let mut top = 0.0;
+    let mut ours = Vec::new();
+    for (index, (_, paragraph)) in paragraphs.iter().enumerate() {
+        if let Some((_, previous)) = index.checked_sub(1).and_then(|i| paragraphs.get(i)) {
+            top += fuzzing::space_between(&document, previous.props(), paragraph.props());
+        }
+        let laid = lay_out(&book, &document, paragraph);
+        ours.push(top + laid.lines().first().map_or(0.0, |line| line.baseline()));
+        top += laid.height();
+    }
+    // Word's baselines: the tops of the boxes `pdftotext` gives for Calibri are three
+    // quarters of the size above them.
+    let theirs: Vec<f64> = word
+        .iter()
+        .zip(&paragraphs)
+        .map(|(line, (size, _))| line.top + 0.75 * size)
+        .collect();
+    assert_eq!(theirs.len(), ours.len(), "{name}");
+    for (index, (pair, word_pair)) in ours.windows(2).zip(theirs.windows(2)).enumerate() {
+        let (Some(a), Some(b), Some(c), Some(d)) = (
+            pair.first(),
+            pair.get(1),
+            word_pair.first(),
+            word_pair.get(1),
+        ) else {
+            continue;
+        };
+        assert!(
+            ((b - a) - (d - c)).abs() <= GRID,
+            "{name}: paragraph {} is {:.2} pt below the one before, Word's {:.2}",
+            index + 1,
+            b - a,
+            d - c
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn automatic_spacing_is_words() -> TestResult {
+    check_autospacing("E-autospacing", false)
+}
+
+#[test]
+fn automatic_spacing_off_is_words() -> TestResult {
+    check_autospacing("E-autospacing-nohtml", true)
+}
+
+#[test]
+fn a_line_shaped_again_and_too_wide_ends_at_its_place_before() -> TestResult {
+    // Kerning joins T and o across the soft hyphen, and the A and the hyphen-minus: a
+    // line that ends there is wider shaped on its own. It must end at its place
+    // before, after "aaa ", never inside a word or before a hyphen (UAX #14, LB21).
+    let book = book()?;
+    let mut document = Document::default();
+    let kerned = |family: &str| {
+        RunStyle::default()
+            .with_fonts(RunFonts::new(family))
+            .with_size(Pt(20.0))
+            .with_kern_min(Some(Pt(1.0)))
+    };
+    let sans = document.add_run_style(kerned("Liberation Sans"));
+    let carlito = document.add_run_style(kerned("Calibri"));
+    for (style, text, from, to) in [
+        (sans, "aaa T\u{00AD}onne", 50.0, 62.0),
+        (carlito, "aaa AA-Yacht", 56.0, 68.0),
+        // T and the hyphen fit kerned, not shaped on their own: the line ends at the
+        // soft hyphen without one.
+        (sans, "T\u{00AD}onne", 15.0, 20.0),
+    ] {
+        let mut width = from;
+        while width < to {
+            let paragraph = Paragraph::new(style).with_inlines([Inline::text(text, style)]);
+            fuzzing::check_lines(&book, &document, &paragraph, width)
+                .map_err(|problem| format!("{text:?} in {width} pt: {problem}"))?;
+            let laid = fuzzing::lay_out(&book, &document, &paragraph, width);
+            let lines: Vec<&str> = laid.lines().iter().map(|line| line.text()).collect();
+            // Every character fits a line of its own: nothing overflows.
+            let overflows = laid
+                .report()
+                .iter()
+                .filter(|entry| entry.kind() == officewright_layout::ReportKind::Overflow)
+                .count();
+            assert_eq!(overflows, 0, "{text:?} in {width} pt: {lines:?}");
+            for line in lines.iter().skip(1) {
+                assert!(
+                    !line.starts_with(['-', '\u{00AD}']),
+                    "{text:?} in {width} pt: {lines:?}"
+                );
+            }
+            // Where the second word is cut, it is at its soft hyphen or hyphen.
+            let first = lines.first().filter(|line| line.len() > "aaa ".len());
+            if let Some(first) = first.filter(|_| text.starts_with("aaa")) {
+                assert!(
+                    first.ends_with('-') || first.ends_with("\u{00AD}-"),
+                    "{text:?} in {width} pt: {lines:?}"
+                );
+            }
+            width += 0.1;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn spaces_before_a_line_break_hang() -> TestResult {
+    // Word's form-gsa-pacs-series-form: a right-aligned "Identity Management Division "
+    // and a line break end at the margin, like the lines without a space.
+    use officewright_layout::ir::{Alignment, BreakClear};
+
+    let book = book()?;
+    let (document, style) = liberation(11.0);
+    let right = ParagraphProps::default().with_alignment(Alignment::End);
+    let ends: Vec<f64> = ["word ", "word"]
+        .iter()
+        .map(|text| {
+            let inlines = vec![
+                Inline::text(*text, style),
+                Inline::line_break(BreakClear::None, style),
+                Inline::text("next", style),
+            ];
+            let laid = fuzzing::lay_out(
+                &book,
+                &document,
+                &paragraph(style, right.clone(), inlines),
+                200.0,
+            );
+            laid.lines()
+                .first()
+                .and_then(|line| line.words().first())
+                .map_or(0.0, |word| word.end())
+        })
+        .collect();
+    assert_eq!(ends, [200.0, 200.0]);
+    Ok(())
+}
+
+#[test]
+fn justification_widens_only_the_spaces_after_the_last_tab() -> TestResult {
+    use officewright_layout::ir::Alignment;
+
+    let book = book()?;
+    let (document, style) = liberation(11.0);
+    let props = ParagraphProps::default()
+        .with_alignment(Alignment::Both)
+        .with_tabs([TabStop::default().with_position(Pt(60.0))]);
+    let inlines = vec![
+        Inline::text("a b", style),
+        Inline::tab(style),
+        Inline::text(SENTENCE, style),
+    ];
+    let laid = fuzzing::lay_out(&book, &document, &paragraph(style, props, inlines), 300.0);
+    let first = laid.lines().first().ok_or("no line")?;
+    let words = first.words();
+    let (Some(a), Some(b), Some(after)) = (words.first(), words.get(1), words.get(2)) else {
+        return Err("words".into());
+    };
+    // Before the tab the space keeps its width, and the text after the tab starts at
+    // its stop; after the tab the line is justified to its end.
+    let space = space_width(&book, &document, style);
+    assert!((b.start() - a.end() - space).abs() < 1e-9);
+    assert!((after.start() - 60.0).abs() < 1e-9, "{}", after.start());
+    assert!((first.width() - 300.0).abs() < 1e-6);
+    Ok(())
+}
+
+#[test]
+fn a_line_separator_in_text_ends_the_line() -> TestResult {
+    let book = book()?;
+    let (document, style) = liberation(11.0);
+    let laid = fuzzing::lay_out(
+        &book,
+        &document,
+        &paragraph(
+            style,
+            ParagraphProps::default(),
+            vec![Inline::text("one\u{2028}two", style)],
+        ),
+        300.0,
+    );
+    let ends: Vec<&str> = laid.lines().iter().map(|line| line.end()).collect();
+    assert_eq!(ends, ["break", "paragraph"]);
+    Ok(())
+}
+
+#[test]
+fn the_width_ends_where_the_text_after_an_end_tab_does() -> TestResult {
+    use officewright_layout::ir::TabKind;
+
+    let book = book()?;
+    let (document, style) = liberation(11.0);
+    let props = ParagraphProps::default().with_tabs([TabStop::default()
+        .with_position(Pt(200.0))
+        .with_kind(TabKind::End)]);
+    let inlines = vec![
+        Inline::text("Total", style),
+        Inline::tab(style),
+        Inline::text("9      ", style),
+    ];
+    let laid = fuzzing::lay_out(&book, &document, &paragraph(style, props, inlines), 400.0);
+    let line = laid.lines().first().ok_or("no line")?;
+    let nine = line.words().get(1).ok_or("no 9")?;
+    assert!(
+        (line.width() - nine.end()).abs() < 1e-9,
+        "{} against {}",
+        line.width(),
+        nine.end()
+    );
+    Ok(())
+}
+
+/// A paragraph built from `seed`, as the fuzz target `layout_shape` builds them, with
+/// line and page breaks, inline objects and kerning added; and its column's width.
+fn random_paragraph(seed: u64, document: &mut Document) -> (Paragraph, f64) {
+    use officewright_layout::ir::{
+        Alignment, BreakClear, ImageData, ImageFormat, InlineObject, ObjectContent, Picture, Size,
+        TabKind,
+    };
+
+    let mut state = seed
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
+    let mut next = move |below: u64| {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (state >> 33) % below.max(1)
+    };
+    const FAMILIES: [&str; 5] = [
+        "Calibri",
+        "Liberation Sans",
+        "Times New Roman",
+        "Noto Sans",
+        "Courier New",
+    ];
+    const WORDS: [&str; 14] = [
+        "AV",
+        "To",
+        "T\u{00AD}onne",
+        "AA-Yacht",
+        "Wordwordword",
+        "ab\u{00AD}cd",
+        " ",
+        "  ",
+        "a\u{00A0}b",
+        "Donau\u{00AD}dampf\u{00AD}schiff",
+        "12.50",
+        "x",
+        "\u{2028}",
+        "Ünïcödé",
+    ];
+    let mut make = || {
+        let family = FAMILIES.get(next(5) as usize).copied().unwrap_or("Calibri");
+        let mut style = RunStyle::default()
+            .with_fonts(RunFonts::new(family))
+            .with_size(Pt(4.0 + next(30) as f64));
+        if next(2) == 0 {
+            style = style.with_kern_min(Some(Pt(1.0)));
+        }
+        document.add_run_style(style)
+    };
+    let (a, b, c) = (make(), make(), make());
+    let style = |index: u64| match index % 3 {
+        0 => a,
+        1 => b,
+        _ => c,
+    };
+    let mut inlines = Vec::new();
+    for _ in 0..(1 + next(12)) {
+        let run = style(next(3));
+        inlines.push(match next(10) {
+            0 => Inline::tab(run),
+            1 => Inline::soft_hyphen(run),
+            2 => Inline::line_break(BreakClear::None, run),
+            3 if next(4) == 0 => Inline::page_break(run),
+            4 => {
+                let image = document.add_image(ImageData::new(ImageFormat::Png, Vec::new()));
+                let size = Size::new(Pt(next(120) as f64), Pt(next(40) as f64));
+                Inline::Object(InlineObject::new(
+                    ObjectContent::Picture(Picture::new(image)),
+                    size,
+                ))
+            }
+            _ => Inline::text(WORDS.get(next(14) as usize).copied().unwrap_or("x"), run),
+        });
+    }
+    let alignments = [
+        Alignment::Start,
+        Alignment::Center,
+        Alignment::End,
+        Alignment::Both,
+        Alignment::Distribute,
+    ];
+    let kinds = [
+        TabKind::Start,
+        TabKind::Center,
+        TabKind::End,
+        TabKind::Decimal,
+        TabKind::Bar,
+    ];
+    let line = match next(3) {
+        0 => LineSpacing::Multiple(next(64) as f64 / 16.0),
+        1 => LineSpacing::Exact(Pt(next(40) as f64)),
+        _ => LineSpacing::AtLeast(Pt(next(40) as f64)),
+    };
+    let tabs: Vec<TabStop> = (0..next(3))
+        .map(|_| {
+            TabStop::default()
+                .with_position(Pt(next(300) as f64))
+                .with_kind(
+                    kinds
+                        .get(next(5) as usize)
+                        .copied()
+                        .unwrap_or(TabKind::Start),
+                )
+        })
+        .collect();
+    let props = ParagraphProps::default()
+        .with_alignment(
+            alignments
+                .get(next(5) as usize)
+                .copied()
+                .unwrap_or(Alignment::Start),
+        )
+        .with_spacing(Spacing::default().with_line(line))
+        .with_indent(
+            Indent::default()
+                .with_start(Pt(next(40) as f64))
+                .with_first_line(Pt(next(40) as f64 - 20.0)),
+        )
+        .with_tabs(tabs)
+        .with_word_wrap(next(4) != 0);
+    let mark = style(0);
+    (
+        Paragraph::new(mark).with_props(props).with_inlines(inlines),
+        1.0 + next(400) as f64,
+    )
+}
+
+#[test]
+fn every_line_breaking_keeps_what_pagination_relies_on() -> TestResult {
+    let book = book()?;
+    // The input the reviewer of #152 found for the fuzz target: Calibri 11, "ab", a soft
+    // hyphen and "cd" in a column 1 pt wide.
+    let mut document = Document::default();
+    let style = document.add_run_style(
+        RunStyle::default()
+            .with_fonts(RunFonts::new("Calibri"))
+            .with_size(Pt(11.0)),
+    );
+    let paragraph = Paragraph::new(style).with_inlines([
+        Inline::text("ab", style),
+        Inline::soft_hyphen(style),
+        Inline::text("cd", style),
+    ]);
+    for width in [1.0, 4.0, 5.0, 9.0, 13.0, 20.0] {
+        fuzzing::check_lines(&book, &document, &paragraph, width)
+            .map_err(|problem| format!("{width} pt: {problem}"))?;
+    }
+    // Paragraphs of every ingredient, in columns of every width.
+    for seed in 0..1000 {
+        let mut document = Document::default();
+        let (paragraph, width) = random_paragraph(seed, &mut document);
+        fuzzing::check_lines(&book, &document, &paragraph, width)
+            .map_err(|problem| format!("seed {seed}, {width} pt: {problem}"))?;
+    }
     Ok(())
 }

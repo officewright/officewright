@@ -72,8 +72,9 @@ impl TabStops {
 
     /// The stop a tab at `x` takes the text to: the first stop after `x` (a stop at `x`
     /// itself is passed by), then the automatic stops after the last stop, at the
-    /// multiples of the interval from the start edge of the column (the edge itself
-    /// for text in the margin). `None` when there is no stop after `x`,
+    /// multiples of the interval from the start edge of the column, negative ones for
+    /// text in the margin; that they go on into the margin is a hypothesis until a
+    /// Word render (`E-tab-margin.docx`). `None` when there is no stop after `x`,
     /// which happens only when the interval is zero.
     pub(crate) fn next(&self, x: Pt) -> Option<Stop> {
         if let Some(stop) = self.stops.iter().find(|stop| stop.position.0 > x.0) {
@@ -215,7 +216,17 @@ mod tests {
         ]);
         let stops = TabStops::new(&props, &DocumentSettings::default(), false);
         assert_eq!(stops.stops.len(), 2);
-        // The start edge is an automatic stop for text in the margin.
+        // The start edge is an automatic stop for text in the margin, and so are the
+        // multiples of the interval before it.
+        let none = TabStops::new(
+            &ParagraphProps::default(),
+            &DocumentSettings::default(),
+            false,
+        );
+        assert_eq!(
+            positions(&none, &[-60.0, -36.0, -1.0]),
+            [Some(-36.0), Some(0.0), Some(0.0)]
+        );
         assert_eq!(
             positions(&stops, &[-40.0, -30.0, -10.0, 0.0]),
             [Some(-30.0), Some(-10.0), Some(0.0), Some(36.0)]

@@ -34,6 +34,23 @@ const EXACT_BASELINE: f64 = 0.8;
 /// advances.
 const EPSILON: f64 = 1e-9;
 
+/// How many clusters after a cut are shaped again at most when HarfRust marks none of
+/// them safe to break before, which bounds the work per line in a run kerned
+/// throughout; where the shaped pieces meet there, one kerning pair may be lost.
+const RESHAPE_WINDOW: usize = 64;
+
+/// Where first fit ends a line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Fit {
+    /// The unit after the line's last.
+    end: usize,
+    end_kind: LineEnd,
+    /// Whether the line ends at a soft hyphen whose hyphen fits, which it draws.
+    hyphen: bool,
+    /// Whether the line holds a piece too wide for any line.
+    overflow: bool,
+}
+
 /// A line of a paragraph.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Line {
@@ -56,6 +73,9 @@ pub(crate) struct Line {
     /// The baseline, from the top of the line.
     pub(crate) baseline: Pt,
     pub(crate) end: LineEnd,
+    /// Whether the line holds a piece too wide for any line, which reaches past its
+    /// end and is reported.
+    pub(crate) overflow: bool,
 }
 
 /// Why a line ends.
@@ -484,8 +504,9 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         let mut start = 0;
         loop {
             let first = lines.is_empty();
-            let (end, line_end) = self.fit(start, first);
-            let (end, mut line) = self.refit(start, end, first, line_end);
+            let fit = self.fit(start, first);
+            let (end, mut line) = self.refit(start, fit, first);
+            let line_end = line.end;
             let last =
                 end >= self.units.len() && !(line_end == LineEnd::Break && end == self.units.len());
             self.align(&mut line, last);
@@ -498,7 +519,13 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             if end >= self.units.len() {
                 // A line break at the very end: an empty line follows, with the
                 // paragraph mark.
-                let mut line = self.place(end, end, false, LineEnd::Paragraph);
+                let fit = Fit {
+                    end,
+                    end_kind: LineEnd::Paragraph,
+                    hyphen: false,
+                    overflow: false,
+                };
+                let mut line = self.place(end, fit, false);
                 self.set_height(&mut line, true);
                 lines.push(line);
                 break;
@@ -507,25 +534,50 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         lines
     }
 
-    /// The line from unit `start` to before unit `end`, which first fit chose, placed:
-    /// after shaping again the run a cut divides where its shaping depends on what
-    /// follows. Shaping again can make the line wider (a kerned pair cut apart); then
-    /// the cut moves back a cluster at a time until it fits again. Returns the unit
-    /// after the line's last, and the line.
-    fn refit(&mut self, start: usize, end: usize, first: bool, line_end: LineEnd) -> (usize, Line) {
+    /// The line from unit `start` that first fit chose, placed: after shaping again the
+    /// run a cut divides where its shaping depends on what follows. Shaping again can
+    /// make the line wider (a kerned pair cut apart, which a soft hyphen does not stop);
+    /// then first fit runs again over the units as they are now shaped, which ends the
+    /// line at the place before, or without its hyphen. Returns the unit after the
+    /// line's last, and the line.
+    fn refit(&mut self, start: usize, fit: Fit, first: bool) -> (usize, Line) {
         let (_, right) = self.edges(first);
-        let mut end = self.settle(start, end, line_end);
+        let mut fit = fit;
+        fit.end = self.settle(start, fit.end, fit.end_kind);
         loop {
             // Every line takes at least one unit, so that breaking ends.
-            if end <= start && start < self.units.len() {
-                end = start + 1;
+            if fit.end <= start && start < self.units.len() {
+                fit.end = start + 1;
             }
-            let line = self.place(start, end, first, line_end);
+            let mut line = self.place(start, fit, first);
             let fits = line.start.0 + line.width.0 <= right.0 + EPSILON;
-            if fits || line_end != LineEnd::Wrap || end <= start + 1 {
-                return (end, line);
+            if fits || fit.end_kind != LineEnd::Wrap || line.overflow {
+                return (fit.end, line);
             }
-            end = self.settle(start, end - 1, line_end);
+            let again = self.fit(start, first);
+            // First fit over the units as they are now shaped ends the line earlier, or
+            // at the same place without its hyphen. Should it change nothing, the line
+            // gives up its last unit that takes room, with what follows it; a single one
+            // stays, reported.
+            let last_wide = (start + 1..fit.end)
+                .rev()
+                .find(|&i| self.units.get(i).is_some_and(|unit| unit.width.0 > 0.0));
+            fit = if again != fit && again.end <= fit.end {
+                again
+            } else if let Some(end) = last_wide {
+                Fit {
+                    end,
+                    hyphen: false,
+                    ..fit
+                }
+            } else {
+                if let Some(kind) = self.units.get(start).map(|unit| unit.kind.clone()) {
+                    self.report_overflow(&kind);
+                }
+                line.overflow = true;
+                return (fit.end, line);
+            };
+            fit.end = self.settle(start, fit.end, fit.end_kind);
         }
     }
 
@@ -536,20 +588,39 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         (Pt(start), Pt(self.width.0 - indent.end().0))
     }
 
-    /// Where the line that starts at unit `start` ends, by first fit: the unit after
-    /// its last, and why it ends.
-    fn fit(&mut self, start: usize, first: bool) -> (usize, LineEnd) {
+    /// Where the line that starts at unit `start` ends, by first fit.
+    fn fit(&mut self, start: usize, first: bool) -> Fit {
         let (left, right) = self.edges(first);
         let mut cursor = Cursor::new(left);
-        // The unit after the last place the line may end, where it would fit.
-        let mut candidate: Option<usize> = None;
+        // The unit after the last place the line may end, where it would fit, and
+        // whether that place is a soft hyphen.
+        let mut candidate: Option<(usize, bool)> = None;
+        let mut overflow = false;
+        let wrap = |end: usize, hyphen: bool, overflow: bool| Fit {
+            end,
+            end_kind: LineEnd::Wrap,
+            hyphen,
+            overflow,
+        };
         let mut index = start;
         while let Some(unit) = self.units.get(index).cloned() {
             match &unit.kind {
                 UnitKind::Break { kind, .. } => {
-                    return (index + 1, line_end(*kind));
+                    return Fit {
+                        end: index + 1,
+                        end_kind: line_end(*kind),
+                        hyphen: false,
+                        overflow,
+                    };
                 }
                 UnitKind::Tab { .. } => {
+                    // A tab after spaces that already hang past the end of the line
+                    // starts the next line, if this one may end before it.
+                    if cursor.x.0 > right.0 + EPSILON {
+                        if let Some((end, hyphen)) = candidate {
+                            return wrap(end, hyphen, overflow);
+                        }
+                    }
                     cursor.tab(&self.tabs, right);
                 }
                 UnitKind::Glyphs { text, .. } if is_space(self.itemized, text) => {
@@ -565,13 +636,14 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                         // spaces at its start, too), else before the unit that does not
                         // fit, between two clusters; a unit alone on its line that does
                         // not fit stays there, reported.
-                        if let Some(end) = candidate {
-                            return (end, LineEnd::Wrap);
+                        if let Some((end, hyphen)) = candidate {
+                            return wrap(end, hyphen, overflow);
                         }
                         if cursor.has_content {
-                            return (index, LineEnd::Wrap);
+                            return wrap(index, false, overflow);
                         }
                         self.report_overflow(kind);
+                        overflow = true;
                     }
                     cursor.add(unit.width, what);
                 }
@@ -580,19 +652,28 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             let at = unit.range.end;
             match self.breaks.at(at) {
                 Some(Opportunity::Allowed) if index < self.units.len() => {
-                    if !self.ends_in_soft_hyphen(index - 1)
-                        || cursor.x.0 + self.hyphen_width(index - 1).0 <= right.0 + EPSILON
-                    {
-                        candidate = Some(index);
+                    let hyphen = self.ends_in_soft_hyphen(index - 1);
+                    if !hyphen || cursor.x.0 + self.hyphen_width(index - 1).0 <= right.0 + EPSILON {
+                        candidate = Some((index, hyphen));
                     }
                 }
                 Some(Opportunity::Mandatory) if index < self.units.len() => {
-                    return (index, LineEnd::Break);
+                    return Fit {
+                        end: index,
+                        end_kind: LineEnd::Break,
+                        hyphen: false,
+                        overflow,
+                    };
                 }
                 _ => {}
             }
         }
-        (self.units.len(), LineEnd::Paragraph)
+        Fit {
+            end: self.units.len(),
+            end_kind: LineEnd::Paragraph,
+            hyphen: false,
+            overflow,
+        }
     }
 
     /// What a unit holds, for a decimal tab before it.
@@ -713,23 +794,17 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             return end;
         }
         let item = *item;
-        // The units of the item: from the first on the line, or the item's first, to
-        // the item's last.
+        // Shape again only the piece around the cut that cannot be shaped on its own:
+        // from the last unit on the line where a piece may start, to the first after the
+        // cut where one may, at most a window of clusters on.
         let first = (start..end)
-            .find(|&i| {
-                self.units
-                    .get(i)
-                    .is_some_and(|unit| unit.kind.item() == item)
-            })
-            .unwrap_or(end - 1);
-        let last = (end..self.units.len())
-            .take_while(|&i| {
-                self.units
-                    .get(i)
-                    .is_some_and(|unit| unit.kind.item() == item)
-            })
-            .last()
-            .unwrap_or(end);
+            .rev()
+            .find(|&i| i == start || self.starts_piece(i))
+            .unwrap_or(start);
+        let mut last = end + 1;
+        while last < self.units.len() && last < end + RESHAPE_WINDOW && !self.starts_piece(last) {
+            last += 1;
+        }
         let text_of = |unit: Option<&Unit>| match unit.map(|unit| &unit.kind) {
             Some(UnitKind::Glyphs { text, .. }) => Some(text.clone()),
             _ => None,
@@ -737,7 +812,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         let (Some(head), Some(cut), Some(tail)) = (
             text_of(self.units.get(first)),
             text_of(self.units.get(end)),
-            text_of(self.units.get(last)),
+            text_of(self.units.get(last - 1)),
         ) else {
             return end;
         };
@@ -757,8 +832,41 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         let right_units = self.clusters(item, &right, cut.start..tail.end, offset(cut.start));
         let new_end = first + left_units.len();
         let replacement: Vec<Unit> = left_units.into_iter().chain(right_units).collect();
-        self.units.splice(first..=last, replacement);
+        self.units.splice(first..last, replacement);
         new_end
+    }
+
+    /// Whether unit `index` starts a piece that may be shaped on its own: it is not
+    /// glyphs of the same run as the unit before it, or HarfRust marks its first glyph
+    /// safe to break before.
+    fn starts_piece(&self, index: usize) -> bool {
+        let (Some(before), Some(unit)) = (
+            index.checked_sub(1).and_then(|i| self.units.get(i)),
+            self.units.get(index),
+        ) else {
+            return true;
+        };
+        match (&before.kind, &unit.kind) {
+            (
+                UnitKind::Glyphs {
+                    item: a, run: ra, ..
+                },
+                UnitKind::Glyphs {
+                    item: b,
+                    run: rb,
+                    glyphs,
+                    ..
+                },
+            ) => {
+                a != b
+                    || !Arc::ptr_eq(ra, rb)
+                    || !rb
+                        .glyphs()
+                        .get(glyphs.start)
+                        .is_some_and(|glyph| glyph.unsafe_to_break)
+            }
+            _ => true,
+        }
     }
 
     /// Bytes `text` of the drawn text of item `item`, shaped on their own.
@@ -776,24 +884,37 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         Some(self.shaper.shape(&face, string, &request(run, &style)))
     }
 
-    /// The line of units `start` to before `end`, each where it goes.
-    fn place(&mut self, start: usize, end: usize, first: bool, line_end: LineEnd) -> Line {
+    /// The line from unit `start` to before unit `fit.end`, each piece where it goes, with
+    /// a hyphen where the line ends at a soft hyphen that has room for one.
+    fn place(&mut self, start: usize, fit: Fit, first: bool) -> Line {
+        let end = fit.end;
         let (left, right) = self.edges(first);
         let mut cursor = Cursor::new(left);
         let mut pieces: Vec<Piece> = Vec::new();
         // Where the pieces after a pending tab start in `pieces`.
         let mut segment = 0;
         let mut content_end = left;
+        // Where the content after a pending tab ends, from the tab's end, until the tab
+        // is settled: spaces after it change the tab's width but are not content.
+        let mut segment_content: Option<f64> = None;
         let units: Vec<Unit> = self.units.get(start..end).unwrap_or(&[]).to_vec();
-        // The spaces after the last unit that is not one hang past the end of the line,
-        // in pieces of their own.
+        // The spaces after the last piece of content hang past the end of the line, in
+        // pieces of their own: those before the break that ends the line, and those
+        // before what takes no room, such as soft hyphens, too.
         let last_content = units
             .iter()
-            .rposition(|unit| !self.is_space_unit(unit))
+            .rposition(|unit| match unit.kind {
+                UnitKind::Tab { .. } | UnitKind::Object { .. } => true,
+                UnitKind::Glyphs { .. } => unit.width.0 > 0.0 && !self.is_space_unit(unit),
+                UnitKind::Break { .. } | UnitKind::Zero { .. } => false,
+            })
             .map_or(0, |index| index + 1);
         for (index, unit) in units.iter().enumerate() {
             if let UnitKind::Tab { item } = unit.kind {
+                // The tab after a pending one settles it; the line's content then ends
+                // at this tab's end.
                 cursor.settle_into(&mut pieces, segment);
+                segment_content = None;
                 let (x, width, leader) = cursor.tab(&self.tabs, right);
                 pieces.push(Piece {
                     x,
@@ -805,16 +926,21 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                 content_end = cursor.x;
                 continue;
             }
-            let space = self.is_space_unit(unit);
+            let content = index < last_content;
             // Before the pending tab is settled, a piece's place is its offset from
             // the tab's end.
             let x = cursor.pending.map_or(cursor.x, |pending| Pt(pending.text));
-            if space {
+            if self.is_space_unit(unit) {
                 cursor.space(unit.width);
             } else {
                 let what = self.decimal_char(&unit.kind);
                 cursor.add(unit.width, what);
-                content_end = cursor.x;
+            }
+            if content {
+                match cursor.pending {
+                    Some(pending) => segment_content = Some(pending.text),
+                    None => content_end = cursor.x,
+                }
             }
             let scale = self
                 .scales
@@ -822,18 +948,16 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                 .copied()
                 .flatten()
                 .unwrap_or_default();
-            push_piece(
-                &mut pieces,
-                x,
-                unit,
-                index >= last_content,
-                index != last_content,
-                scale,
-            );
+            push_piece(&mut pieces, x, unit, !content, index != last_content, scale);
         }
-        cursor.settle_into(&mut pieces, segment);
+        if let (Some(origin), Some(offset)) = (
+            cursor.settle_into(&mut pieces, segment),
+            segment_content.take(),
+        ) {
+            content_end = Pt(origin + offset);
+        }
         // The hyphen of a line that ends at a soft hyphen.
-        if line_end == LineEnd::Wrap && end > start && self.ends_in_soft_hyphen(end - 1) {
+        if fit.hyphen && end > start && self.ends_in_soft_hyphen(end - 1) {
             if let Some((item, run)) = self.hyphen(end - 1) {
                 let width = self.run_width(item, &run);
                 let scale = self.scales.get(item).copied().flatten().unwrap_or_default();
@@ -861,7 +985,8 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             descent: Pt(0.0),
             height: Pt(0.0),
             baseline: Pt(0.0),
-            end: line_end,
+            end: fit.end_kind,
+            overflow: fit.overflow,
         }
     }
 
@@ -1049,7 +1174,10 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             self.fonts.report_once(
                 ReportKind::ValueClamped,
                 self.location,
-                format!("line spacing {spacing:?} has no height; the lines are single"),
+                format!(
+                    "line spacing {} has no height; the lines are single",
+                    describe(spacing)
+                ),
             );
             return LineSpacing::Multiple(1.0);
         }
@@ -1108,6 +1236,15 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             Some(face) => line_metrics(face.face(), size, TypoRule::default()),
             None => no_font(size),
         }
+    }
+}
+
+/// Line spacing in words, for the report.
+fn describe(spacing: LineSpacing) -> String {
+    match spacing {
+        LineSpacing::Multiple(factor) => format!("of {factor} lines"),
+        LineSpacing::Exact(height) => format!("of exactly {} pt", height.0),
+        LineSpacing::AtLeast(height) => format!("of at least {} pt", height.0),
     }
 }
 
@@ -1269,11 +1406,10 @@ impl Cursor {
     }
 
     /// Settles the pending tab: its width, and the places of the pieces from
-    /// `segment` on, which until then are offsets from where the tab starts.
-    fn settle_into(&mut self, pieces: &mut [Piece], segment: usize) {
-        let Some(pending) = self.pending.take() else {
-            return;
-        };
+    /// `segment` on, which until then are offsets from where the tab starts. Returns
+    /// where the text after it starts, `None` without a pending tab.
+    fn settle_into(&mut self, pieces: &mut [Piece], segment: usize) -> Option<f64> {
+        let pending = self.pending.take()?;
         let width = pending.width();
         if let Some(tab) = segment
             .checked_sub(1)
@@ -1285,6 +1421,7 @@ impl Cursor {
         for piece in pieces.get_mut(segment..).unwrap_or(&mut []) {
             piece.x = Pt(origin + piece.x.0);
         }
+        Some(origin)
     }
 
     /// Adds a tab: the stop it goes to after the current place, given the end of the

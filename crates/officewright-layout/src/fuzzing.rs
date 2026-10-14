@@ -843,17 +843,16 @@ fn piece_text_end(kind: &crate::lines::PieceKind) -> usize {
 
 /// Lays out `paragraph` of `document` in a column `width` points wide with the fonts of
 /// `book`, and checks what pagination relies on: the lines hold the paragraph's text in
-/// order, all of it, each byte once; a line wider than its room holds a single piece
-/// too wide for any line, and that is reported; heights and baselines are numbers, the
-/// heights not negative.
+/// order, all of it, each byte once; a line wider than its room is one the breaker
+/// marks as holding a piece too wide for any line, and the report says so; a line
+/// starts with a soft hyphen only where a line may end before it; heights and baselines
+/// are numbers, the heights not negative.
 pub fn check_lines(
     book: &FontBook,
     document: &Document,
     paragraph: &crate::ir::Paragraph,
     width: f64,
 ) -> Result<(), String> {
-    use crate::lines::PieceKind;
-
     let mut fonts = Fonts::new(book);
     let mut shaper = Shaper::new();
     let location = Location::default();
@@ -866,11 +865,12 @@ pub fn check_lines(
         &location,
     );
     let report = fonts.into_report();
-    let overflow = report
+    let reported = report
         .iter()
         .any(|entry| entry.kind() == crate::ReportKind::Overflow);
     let indent = paragraph.props().indent();
     let (text, _) = crate::lines::break_text(&layout.itemized);
+    let breaks = crate::breaks::BreakMap::new(&text, paragraph.props().word_wrap());
     let mut end = 0;
     for (index, line) in layout.lines.iter().enumerate() {
         if line.range.start != end {
@@ -888,35 +888,23 @@ pub fn check_lines(
             } else {
                 0.0
             };
-        if line.width.0 > room.max(0.0) + 1e-6 && line.width.0 > 0.0 {
-            // Only a single piece too wide for any line may reach past it: one cluster
-            // or one object, with nothing else but spaces and pieces of no width.
-            let wide: Vec<&crate::lines::Piece> = line
-                .pieces
-                .iter()
-                .filter(|piece| !piece.hanging && piece.width.0 > 0.0)
-                .collect();
-            let single = match wide.as_slice() {
-                [piece] => match &piece.kind {
-                    PieceKind::Text { run, glyphs, .. } => {
-                        let glyphs = run.glyphs().get(glyphs.clone()).unwrap_or(&[]);
-                        glyphs.windows(2).all(|pair| {
-                            pair.first().map(|glyph| glyph.cluster)
-                                == pair.get(1).map(|glyph| glyph.cluster)
-                        })
-                    }
-                    PieceKind::Object { .. } => true,
-                    _ => false,
-                },
-                _ => false,
-            };
-            if !(single && overflow) {
-                return Err(format!(
-                    "line {index} is {} wide in {room}: {:?}",
-                    line.width.0,
-                    text.get(line.range.clone())
-                ));
-            }
+        let wide = line.width.0 > room.max(0.0) + 1e-6 && line.width.0 > 0.0;
+        if wide && !(line.overflow && reported) {
+            return Err(format!(
+                "line {index} is {} wide in {room}: {:?}",
+                line.width.0,
+                text.get(line.range.clone())
+            ));
+        }
+        // A soft hyphen starts a line only where a line may end before it, never where
+        // a cut moved back before it.
+        let starts_with_soft_hyphen = text
+            .get(line.range.clone())
+            .is_some_and(|line| line.starts_with('\u{00AD}'));
+        if index > 0 && starts_with_soft_hyphen && breaks.at(line.range.start).is_none() {
+            return Err(format!(
+                "line {index} starts with a soft hyphen it may not start with"
+            ));
         }
         let numbers = [
             line.height.0,
