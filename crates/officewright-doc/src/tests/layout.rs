@@ -2305,3 +2305,27 @@ fn translates_notes_where_the_text_refers_to_them() {
         ]
     );
 }
+
+#[test]
+fn keeps_tables_in_notes_from_floating() {
+    // Word ignores a w:tblpPr in a note (MS-OI29500 §17.4.57(b)).
+    let table = r#"<w:tbl><w:tblPr><w:tblpPr w:horzAnchor="margin" w:tblpY="100"/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>"#;
+    let footnotes = format!(
+        r#"<w:footnotes xmlns:w="{W}"><w:footnote w:id="1">{table}<w:p/></w:footnote></w:footnotes>"#
+    );
+    let body = format!(r#"{table}<w:p><w:r><w:footnoteReference w:id="1"/></w:r></w:p>"#);
+    let document = with_parts(&body, &[("footnotes", "footnotes.xml", footnotes)]);
+    let translation = translate(&document);
+    assert!(tables(&translation)[0].props().floating());
+    let ir = translation.document();
+    let ir::Block::Paragraph(paragraph) = &ir.sections()[0].blocks()[1] else {
+        panic!("a paragraph");
+    };
+    let ir::Inline::NoteReference { note, .. } = &paragraph.inlines()[0] else {
+        panic!("a note reference");
+    };
+    let ir::Block::Table(in_note) = &ir.note(*note).unwrap().blocks()[0] else {
+        panic!("a table");
+    };
+    assert!(!in_note.props().floating());
+}
