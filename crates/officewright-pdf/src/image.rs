@@ -2,6 +2,8 @@
 //! through with the PNG predictors of the FlateDecode filter where PDF can show them as
 //! they are, decoded otherwise (ISO 32000-1, 8.9 and 7.4.4.4).
 
+use std::borrow::Cow;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{fmt, fs};
@@ -80,6 +82,45 @@ struct Inner {
     encoding: Encoding,
 }
 
+impl Inner {
+    /// The compressed data of a PNG file, joined; borrowed from the file when it is one
+    /// chunk, as it usually is, or from the copy.
+    fn png_data<'a>(&'a self, data: &'a PngData) -> Cow<'a, [u8]> {
+        match data {
+            PngData::Copied(data) => Cow::Borrowed(data),
+            PngData::InFile(chunks) => match chunks.as_slice() {
+                [chunk] => Cow::Borrowed(self.source.get(chunk.clone()).unwrap_or_default()),
+                chunks => Cow::Owned(
+                    chunks
+                        .iter()
+                        .filter_map(|chunk| self.source.get(chunk.clone()))
+                        .flatten()
+                        .copied()
+                        .collect(),
+                ),
+            },
+        }
+    }
+}
+
+/// The zlib stream of a PNG file's `IDAT` chunks: where the data of each non-empty chunk
+/// is in the file, which is kept anyway, or, for chunks so small that their places would
+/// take more than a quarter of their data, a copy.
+enum PngData {
+    InFile(Vec<Range<usize>>),
+    Copied(Vec<u8>),
+}
+
+impl PngData {
+    /// The bytes of the zlib stream.
+    fn len(&self) -> usize {
+        match self {
+            Self::InFile(chunks) => chunks.iter().map(ExactSizeIterator::len).sum(),
+            Self::Copied(data) => data.len(),
+        }
+    }
+}
+
 impl fmt::Debug for Inner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Image")
@@ -101,7 +142,7 @@ enum Encoding {
     },
     /// The zlib stream of a PNG file's `IDAT` chunks, whose rows the PNG predictors undo.
     Png {
-        data: Vec<u8>,
+        data: PngData,
         space: ColorSpace,
         bits: u8,
         /// The range of palette indices that are fully transparent.
@@ -298,6 +339,7 @@ impl Image {
                 bits,
                 mask,
             } => {
+                let data = inner.png_data(data);
                 let mask =
                     mask.map_or_else(String::new, |(min, max)| format!(" /Mask [{min} {max}]"));
                 let entries = format!(
@@ -308,7 +350,7 @@ impl Image {
                     inner.width,
                     space.entry()
                 );
-                vec![stream_object(&entries, data, Compression::None)]
+                vec![stream_object(&entries, &data, Compression::None)]
             }
             Encoding::Decoded {
                 samples,
@@ -707,6 +749,9 @@ fn read_png(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> {
     let mut palette = None;
     let mut transparency = None;
     let mut compressed = Vec::new();
+    // Where the data of each chunk is, until those places would take more than a quarter
+    // of the data: the copy, which decompressing needs anyway, is kept then.
+    let mut chunks = Some(Vec::new());
     loop {
         let length = u32_at(data, at).ok_or_else(|| malformed("the PNG file has no IEND chunk"))?;
         // A chunk's length is at most 2^31 - 1 (5.3).
@@ -743,7 +788,17 @@ fn read_png(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> {
             b"IHDR" => header = Some(png_header(body)?),
             b"PLTE" => palette = Some(body.to_vec()),
             b"tRNS" => transparency = Some(body.to_vec()),
-            b"IDAT" => compressed.extend_from_slice(body),
+            b"IDAT" => {
+                compressed.extend_from_slice(body);
+                if let Some(places) = &mut chunks {
+                    if !body.is_empty() {
+                        places.push(end - body.len()..end);
+                    }
+                    if 4 * size_of::<Range<usize>>() * places.len() > compressed.len() {
+                        chunks = None;
+                    }
+                }
+            }
             b"IEND" => break,
             // A critical chunk this reader does not know (bit 5 of the first byte clear).
             [first, ..] if first.is_ascii_uppercase() => {
@@ -833,7 +888,13 @@ fn read_png(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> {
             header.width,
             header.height,
             Encoding::Png {
-                data: compressed,
+                data: match chunks {
+                    Some(mut places) => {
+                        places.shrink_to_fit();
+                        PngData::InFile(places)
+                    }
+                    None => PngData::Copied(compressed),
+                },
                 space,
                 bits: header.bits,
                 mask,
@@ -1445,7 +1506,10 @@ pub(crate) mod tests {
                     else {
                         panic!("type {color_type} at {bits} bits was not passed through");
                     };
-                    assert_eq!(*data, compress_to_vec_zlib(&png.rows(), 6));
+                    assert_eq!(
+                        *image.inner.png_data(data),
+                        compress_to_vec_zlib(&png.rows(), 6)
+                    );
                     assert_eq!((*written, *mask), (bits, None));
                     assert_eq!(image.needs_pdf_15(), bits == 16);
                     match space {
@@ -2441,6 +2505,114 @@ pub(crate) mod tests {
             object.contains("/BitsPerComponent 2 /Mask [1 2] >>"),
             "{object}"
         );
+    }
+
+    #[test]
+    fn writes_the_data_of_one_png_idat_chunk_or_several_as_it_is() {
+        // Chunks large enough to be read from the file, not copied.
+        let png = Png::new(40, 30, 2, 8);
+        let data = compress_to_vec_zlib(&png.rows(), 6);
+        let (first, second) = data.split_at(1000);
+        // One chunk; empty chunks around and between two; three.
+        let layouts: [&[&[u8]]; 3] = [
+            &[&data],
+            &[b"", first, b"", second, b""],
+            &[first, &second[..1], &second[1..]],
+        ];
+        for chunks in layouts {
+            let mut file = PNG_SIGNATURE.to_vec();
+            Png::chunk(&mut file, b"IHDR", &png.header());
+            for chunk in chunks {
+                Png::chunk(&mut file, b"IDAT", chunk);
+            }
+            Png::chunk(&mut file, b"IEND", b"");
+            let image = Image::from_bytes(file).unwrap();
+            assert!(
+                matches!(
+                    &image.inner.encoding,
+                    Encoding::Png {
+                        data: PngData::InFile(_),
+                        ..
+                    }
+                ),
+                "{chunks:?}"
+            );
+            let object = image.objects(1, Compression::Flate).concat();
+            // The stream's data is the zlib stream, however the file cut it.
+            let head = format!(
+                "<< /Length {} /Filter /FlateDecode /DecodeParms",
+                data.len()
+            );
+            assert!(object.starts_with(head.as_bytes()), "{chunks:?}");
+            assert!(
+                object.ends_with(&[&data[..], b"\nendstream"].concat()),
+                "{chunks:?}"
+            );
+        }
+    }
+
+    /// A PNG file of `png`'s header, with `data` cut into `IDAT` chunks of `size` bytes, the
+    /// last one taking what is left over too.
+    fn png_in_chunks(png: &Png, data: &[u8], size: usize) -> Vec<u8> {
+        let mut file = PNG_SIGNATURE.to_vec();
+        Png::chunk(&mut file, b"IHDR", &png.header());
+        let whole = (data.len() / size).max(1);
+        for i in 0..whole {
+            let end = if i + 1 == whole {
+                data.len()
+            } else {
+                (i + 1) * size
+            };
+            Png::chunk(&mut file, b"IDAT", &data[i * size..end]);
+        }
+        Png::chunk(&mut file, b"IEND", b"");
+        file
+    }
+
+    #[test]
+    fn keeps_a_copy_of_png_data_in_chunks_too_small_to_point_at() {
+        // Chunks of 1 byte would take 16 bytes each to point at: the data is copied once.
+        // Chunks of 100 bytes are pointed at in the file.
+        let png = Png::new(40, 30, 2, 8);
+        let data = compress_to_vec_zlib(&png.rows(), 6);
+        // At the limit, chunks of 64 bytes, whose places take a quarter of their data, are
+        // pointed at, and chunks of 63 bytes are copied (with what is left over added to
+        // the last chunk, so that every chunk but the last has that size).
+        for (size, copied) in [(1, true), (100, false), (64, false), (63, true)] {
+            let image = Image::from_bytes(png_in_chunks(&png, &data, size)).unwrap();
+            let Encoding::Png { data: kept, .. } = &image.inner.encoding else {
+                panic!("not passed through");
+            };
+            assert_eq!(matches!(kept, PngData::Copied(_)), copied, "{size}");
+            assert_eq!(*image.inner.png_data(kept), data, "{size}");
+            let object = image.objects(1, Compression::Flate).concat();
+            assert!(
+                object.ends_with(&[&data[..], b"\nendstream"].concat()),
+                "{size}"
+            );
+        }
+    }
+
+    #[test]
+    fn writes_png_data_as_it_is_whatever_the_compression() {
+        // Stored deflate blocks, which Flate would shrink a lot: the PNG's own zlib stream
+        // goes into the PDF unchanged, with one filter, whatever the document's setting.
+        let mut png = Png::new(64, 64, 0, 8);
+        for pixel in &mut png.pixels {
+            *pixel = vec![7];
+        }
+        let data = compress_to_vec_zlib(&png.rows(), 0);
+        assert!(compress_to_vec_zlib(&data, 6).len() < data.len() / 2);
+        let image = Image::from_bytes(png_in_chunks(&png, &data, data.len())).unwrap();
+        for compression in [Compression::Flate, Compression::None] {
+            let object = image.objects(1, compression).concat();
+            let text = String::from_utf8_lossy(&object);
+            assert_eq!(text.matches("/Filter").count(), 1, "{compression:?}");
+            assert!(
+                object.ends_with(&[&data[..], b"\nendstream"].concat()),
+                "{compression:?}"
+            );
+        }
     }
 
     #[test]
