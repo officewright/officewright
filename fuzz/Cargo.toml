@@ -11,7 +11,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4.13"
 officewright-core = { path = "../crates/officewright-core" }
-officewright-doc = { path = "../crates/officewright-doc" }
+officewright-doc = { path = "../crates/officewright-doc", features = ["pdf"] }
 officewright-font = { path = "../crates/officewright-font" }
 officewright-layout = { path = "../crates/officewright-layout", features = [
   "fuzzing",

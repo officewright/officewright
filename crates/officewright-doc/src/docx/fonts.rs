@@ -82,7 +82,18 @@ pub(super) fn read(
             _ => {}
         }
     }
+    // An index of the names in lower case, built once: the first declaration of a name
+    // counts.
+    let mut index = std::collections::HashMap::new();
+    for (n, font) in fonts.iter().enumerate() {
+        if let Ok(n) = u32::try_from(n) {
+            index
+                .entry(crate::model::fold_case(font.name()))
+                .or_insert(n);
+        }
+    }
     c.document.fonts = fonts;
+    c.document.font_index = index;
     Ok(())
 }
 

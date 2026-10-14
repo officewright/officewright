@@ -34,12 +34,16 @@
 mod diagnostic;
 mod docx;
 mod error;
+#[cfg(feature = "pdf")]
+mod layout;
 mod model;
 mod options;
 mod units;
 
 pub use diagnostic::{Diagnostic, DiagnosticKind};
 pub use error::{Error, Limit, Result};
+#[cfg(feature = "pdf")]
+pub use layout::{LeftOut, Translation};
 pub use model::{
     ArtBorder, Block, Border, BorderStyle, Break, BreakClear, BreakKind, CellBorders, CellMargins,
     CellMerge, ChapterSeparator, CharacterFormat, Color, ColorScheme, ColorSchemeIndex,

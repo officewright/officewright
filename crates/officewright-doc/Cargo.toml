@@ -7,10 +7,26 @@ rust-version.workspace = true
 license.workspace = true
 license-file.workspace = true
 repository.workspace = true
+# Reads the committed corpus at the root of the repository, which is not part of the
+# crate.
+exclude = ["tests/layout_corpus.rs"]
+
+[features]
+# The document's translation into the layout engine's intermediate representation
+# (`Document::to_layout_ir`), on the way to PDF.
+pdf = ["dep:officewright-layout"]
+# Shows `Document::to_layout_ir` and the layout IR in the documentation. Both are exempt
+# from semver until 1.0.
+unstable-ir = ["pdf", "officewright-layout/unstable-ir"]
 
 [dependencies]
 officewright-core.workspace = true
+officewright-layout = { workspace = true, optional = true }
 officewright-opc.workspace = true
 
 [lints]
 workspace = true
+
+[[example]]
+name = "ir_dump"
+required-features = ["pdf"]
