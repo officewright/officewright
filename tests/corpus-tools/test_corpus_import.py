@@ -692,9 +692,33 @@ class Import(unittest.TestCase):
         self.change_resaved(record, {
             "word/settings.xml": [
                 (b'<w:listSeparator w:val=","/>', b'<w:listSeparator w:val=";"/>'),
+                (b'<w:decimalSymbol w:val="."/>', b'<w:decimalSymbol w:val=","/>'),
             ],
         })
         self.assertEqual(len(self.run_import(allow_locale=True)), 2)
+        # SOURCES.md names what was accepted, and only for that document.
+        rows = [
+            line for line in (self.corpus / "SOURCES.md").read_text(encoding="utf-8").splitlines()
+            if "accepted with --allow-locale" in line
+        ]
+        self.assertEqual(len(rows), 1)
+        self.assertIn(
+            f"| reference/word-rules/{rules.documents()[0].name}/ ", rows[0]
+        )
+        self.assertIn(
+            "accepted with --allow-locale: the re-saved copy has decimalSymbol ',', "
+            "the re-saved copy has listSeparator ';'",
+            rows[0],
+        )
+
+    def test_a_locale_trace_that_would_break_the_table_is_refused(self):
+        record = self.add_result(rules.documents()[0])
+        self.change_resaved(record, {
+            "word/settings.xml": [
+                (b'<w:listSeparator w:val=","/>', b'<w:listSeparator w:val="|"/>'),
+            ],
+        })
+        self.assertIn("which would break the SOURCES.md table", self.refused(allow_locale=True))
 
     def test_refuses_values_that_would_break_the_table(self):
         for key, value in (("word_build", "16.0 | x"), ("rendered", "today"),
@@ -835,6 +859,19 @@ class Pdffonts(unittest.TestCase):
         row = "Helvetica" + " " * 28 + "Type 1            WinAnsi          no  no  no       3  0"
         self.assertEqual(importer.not_embedded(PDFFONTS + row + "\n"), ["Garamond", "Helvetica"])
 
+    def test_an_opentype_suffix_is_read(self):
+        # The suffix is built from parts: spelled out, the spelling check reads it as a word.
+        suffix = "(" + "O" + "T)"
+        row = f"{'Minion':<37}{'Type 1C ' + suffix:<18}Custom           no  no  no      17  0"
+        self.assertEqual(importer.not_embedded(PDFFONTS + row + "\n"), ["Garamond", "Minion"])
+
+    def test_an_embedded_opentype_font_is_read_as_embedded(self):
+        # As pdffonts lists a CFF face embedded as /FontFile3 /OpenType: emb yes.
+        suffix = "(" + "O" + "T)"
+        name = "ABCDEF+Minion"
+        row = f"{name:<37}{'Type 1C ' + suffix:<18}Custom           yes yes no      17  0"
+        self.assertEqual(importer.not_embedded(PDFFONTS + row + "\n"), ["Garamond"])
+
 
 def word_export(parts, runs=True, texts=None):
     """make-reference.ps1's formatting export for a package, as Word would write it: the
@@ -920,6 +957,20 @@ class Formatting(Import):
         sources = (self.corpus / "SOURCES.md").read_text(encoding="utf-8")
         count = len(body) + 1
         self.assertIn(f"formatting as Word computes it: {count} paragraphs, with runs", sources)
+
+    def test_whether_a_style_is_built_in_is_committed(self):
+        # Outside the body there is no style id from the re-saved copy, so the flag is what
+        # tells a built-in style from a missing one (#126).
+        doc = rules.documents()[0]
+        record = self.add_result(doc)
+        export = word_export(importer.read_parts(self.results / record["resaved_file"]))
+        export["stories"][0]["paragraphs"][1]["style_builtin"] = None  # Word could not say
+        self.add_v3(export)
+        self.run_import()
+        main, header = self.committed(doc)["stories"]
+        self.assertIs(main["paragraphs"][0]["style_builtin"], True)
+        self.assertNotIn("style_builtin", main["paragraphs"][1])
+        self.assertIs(header["paragraphs"][0]["style_builtin"], False)
 
     def test_a_theme_colour_is_committed_with_its_tint_or_shade(self):
         doc = rules.documents()[0]
@@ -1288,6 +1339,45 @@ class Summary(unittest.TestCase):
         )
 
 
+class FormattingNote(unittest.TestCase):
+    """SOURCES.md's note on a formatting export, made from the committed file."""
+
+    def result(self, **changes):
+        result = {"runs": True, "runs_note": "", "complete": True,
+                  "styles_from_resaved_copy": True,
+                  "stories": [{"paragraphs": [{}, {}]}, {"paragraphs": [{}]}]}
+        result.update(changes)
+        return result
+
+    def test_each_part_of_the_note(self):
+        note = importer.formatting_note
+        self.assertEqual(
+            note(self.result()), "formatting as Word computes it: 3 paragraphs, with runs"
+        )
+        self.assertEqual(
+            note(self.result(runs=False, runs_note=importer.SIZE_RUNS_NOTE)),
+            "formatting as Word computes it: 3 paragraphs, runs left out (size)",
+        )
+        self.assertEqual(
+            note(self.result(runs=False, complete=False, styles_from_resaved_copy=False)),
+            "formatting as Word computes it: 3 paragraphs, without runs, incomplete (time budget), "
+            "body styles not matched to the re-saved copy",
+        )
+
+    def test_a_file_over_the_limit_loses_its_runs_and_says_so(self):
+        font = {"name": "Calibri"}
+        paragraphs = [{"index": i, "text": "x", "font": 0, "runs": [[1, 1]] * 2000}
+                      for i in range(150)]
+        result = self.result(fonts=[font, dict(font, bold=True)], document="x.docx",
+                             stories=[{"story": "main", "instance": 0, "paragraphs": paragraphs}])
+        self.assertGreater(len(importer.formatting_bytes(result)), importer.MAX_FORMATTING_BYTES)
+        data, note = importer.within_size(result, importer.formatting_note(result))
+        self.assertLess(len(data), importer.MAX_FORMATTING_BYTES)
+        self.assertEqual(
+            note, "formatting as Word computes it: 150 paragraphs, runs left out (size)"
+        )
+
+
 class FontFiles(unittest.TestCase):
     def setUp(self):
         self.temp = Path(tempfile.mkdtemp())
@@ -1322,6 +1412,14 @@ class FontFiles(unittest.TestCase):
             with self.assertRaises(importer.Refused) as caught:
                 importer.drawn_font(name, index)
             self.assertIn(f"{name}: Word names a style it synthesizes", str(caught.exception))
+
+    def test_a_pdf_font_name_that_would_break_the_row_is_refused(self):
+        (self.temp / "font.ttf").write_bytes(sfnt("Gara|mond", "Garamond", "Version 1.0"))
+        index = importer.font_index([self.temp])
+        for name in ("Gara|mond", "Gara\x07mond"):
+            with self.assertRaises(importer.Refused) as caught:
+                importer.drawn_font(name, index)
+            self.assertIn("unexpected font name in the PDF", str(caught.exception))
 
     def test_a_folder_that_cannot_be_listed_is_refused(self):
         with mock.patch.object(Path, "iterdir", side_effect=PermissionError("denied")):

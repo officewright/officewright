@@ -260,6 +260,11 @@ pub struct Table<'a> {
 }
 
 impl<'a> Table<'a> {
+    /// The document the view is of, and the node's place among its nodes.
+    pub(crate) fn place(self) -> (&'a Document, u32) {
+        (self.document, self.index)
+    }
+
     pub(super) fn at(document: &'a Document, index: u32) -> Option<Self> {
         let node = document.node(index)?;
         matches!(node.kind, Kind::Table { .. }).then_some(Self {
@@ -304,7 +309,11 @@ impl<'a> Table<'a> {
         let document = self.document;
         through_containers(document, &self.node.children).filter_map(move |index| {
             let node = document.node(index)?;
-            matches!(node.kind, Kind::Row).then_some(TableRow { document, node })
+            matches!(node.kind, Kind::Row).then_some(TableRow {
+                document,
+                index,
+                node,
+            })
         })
     }
 }
@@ -313,10 +322,16 @@ impl<'a> Table<'a> {
 #[derive(Clone, Copy, Debug)]
 pub struct TableRow<'a> {
     document: &'a Document,
+    index: u32,
     node: &'a Node,
 }
 
 impl<'a> TableRow<'a> {
+    /// The document the view is of, and the node's place among its nodes.
+    pub(crate) fn place(self) -> (&'a Document, u32) {
+        (self.document, self.index)
+    }
+
     /// The row properties written on the row (its `w:trPr`).
     pub fn properties(self) -> TableRowProperties {
         property_element(self.document, self.node, "trPr").map_or_else(
@@ -353,7 +368,11 @@ impl<'a> TableRow<'a> {
         let document = self.document;
         through_containers(document, &self.node.children).filter_map(move |index| {
             let node = document.node(index)?;
-            matches!(node.kind, Kind::Cell).then_some(TableCell { document, node })
+            matches!(node.kind, Kind::Cell).then_some(TableCell {
+                document,
+                index,
+                node,
+            })
         })
     }
 }
@@ -362,10 +381,16 @@ impl<'a> TableRow<'a> {
 #[derive(Clone, Copy, Debug)]
 pub struct TableCell<'a> {
     document: &'a Document,
+    index: u32,
     node: &'a Node,
 }
 
 impl<'a> TableCell<'a> {
+    /// The document the view is of, and the node's place among its nodes.
+    pub(crate) fn place(self) -> (&'a Document, u32) {
+        (self.document, self.index)
+    }
+
     /// The cell properties written on the cell (its `w:tcPr`).
     pub fn properties(self) -> TableCellProperties {
         property_element(self.document, self.node, "tcPr").map_or_else(

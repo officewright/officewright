@@ -41,6 +41,8 @@ mod metrics;
 mod numbers;
 mod pages;
 mod paragraph;
+#[cfg(feature = "pdf")]
+mod render;
 mod report;
 mod shape;
 mod slot;
@@ -50,4 +52,9 @@ mod tabs;
 mod testing;
 
 pub use error::{Error, Result};
+#[cfg(feature = "pdf")]
+#[cfg_attr(not(feature = "unstable-ir"), doc(hidden))]
+pub use render::render_pdf;
+#[cfg(feature = "pdf")]
+pub use render::{DEFAULT_MAX_PAGES, RenderOptions, Rendered};
 pub use report::{LayoutReport, Location, ReportEntry, ReportKind};
