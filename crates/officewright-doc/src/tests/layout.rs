@@ -1489,3 +1489,104 @@ fn cuts_names_and_tags_only_past_their_bounds() {
         ["a language tag of more than 64 bytes is left out"]
     );
 }
+
+#[test]
+fn keeps_names_and_tags_apart_in_any_combination() {
+    // Names and tags come back in new combinations: each run style has its own, however
+    // the table of strings numbers them.
+    let runs = [
+        ("A", "de-DE"),
+        ("B", "fr-FR"),
+        ("A", "fr-FR"),
+        ("B", "de-DE"),
+        ("A", "de-DE"),
+        ("C", "it-IT"),
+        ("B", "fr-FR"),
+    ];
+    let body: String = runs
+        .iter()
+        .map(|(name, tag)| {
+            format!(
+                r#"<w:r><w:rPr><w:rFonts w:ascii="{name}"/><w:lang w:val="{tag}"/></w:rPr><w:t>x</w:t></w:r>"#
+            )
+        })
+        .collect();
+    let translation = translate(&open(&format!("<w:p>{body}</w:p>")));
+    let ir = translation.document();
+    let found: Vec<(String, Option<String>)> = paragraphs(&translation)[0]
+        .inlines()
+        .iter()
+        .map(|inline| {
+            let style = ir.run_style(style_of(inline)).unwrap();
+            (
+                style.fonts().ascii().to_owned(),
+                style.language().latin().map(str::to_owned),
+            )
+        })
+        .collect();
+    let expected: Vec<(String, Option<String>)> = runs
+        .iter()
+        .map(|(name, tag)| ((*name).to_owned(), Some((*tag).to_owned())))
+        .collect();
+    assert_eq!(found, expected);
+    // Two names first met in one run, then swapped in the next.
+    let body = r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="P" w:hAnsi="Q"/></w:rPr><w:t>x</w:t></w:r><w:r><w:rPr><w:rFonts w:ascii="Q" w:hAnsi="P"/></w:rPr><w:t>y</w:t></w:r></w:p>"#;
+    let translation = translate(&open(body));
+    let ir = translation.document();
+    let fonts: Vec<(String, String)> = paragraphs(&translation)[0]
+        .inlines()
+        .iter()
+        .map(|inline| {
+            let fonts = ir.run_style(style_of(inline)).unwrap().fonts().clone();
+            (fonts.ascii().to_owned(), fonts.high_ansi().to_owned())
+        })
+        .collect();
+    assert_eq!(
+        fonts,
+        [
+            ("P".to_owned(), "Q".to_owned()),
+            ("Q".to_owned(), "P".to_owned())
+        ]
+    );
+}
+
+#[test]
+fn tells_apart_long_names_and_on_off_properties_that_look_alike() {
+    // Names that differ only past their first 32 bytes, and two on/off properties.
+    let shared = "X".repeat(40);
+    let pairs = [
+        (
+            format!(r#"<w:rFonts w:ascii="{shared}a"/>"#),
+            format!(r#"<w:rFonts w:ascii="{shared}b"/>"#),
+        ),
+        ("<w:b/>".to_owned(), "<w:caps/>".to_owned()),
+        ("<w:i/>".to_owned(), "<w:smallCaps/>".to_owned()),
+        ("<w:strike/>".to_owned(), "<w:vanish/>".to_owned()),
+    ];
+    for (a, b) in pairs {
+        let body = format!(
+            r#"<w:p><w:r><w:rPr>{a}</w:rPr><w:t>a</w:t></w:r><w:r><w:rPr>{b}</w:rPr><w:t>b</w:t></w:r></w:p>"#
+        );
+        let translation = translate(&open(&body));
+        let inlines = paragraphs(&translation)[0].inlines();
+        let ir = translation.document();
+        assert_ne!(
+            ir.run_style(style_of(&inlines[0])),
+            ir.run_style(style_of(&inlines[1])),
+            "{a} {b}"
+        );
+    }
+}
+
+#[test]
+fn lists_a_cut_once_for_runs_that_share_a_style() {
+    let name = "N".repeat(300);
+    let run = format!(r#"<w:r><w:rPr><w:rFonts w:ascii="{name}"/></w:rPr><w:t>x</w:t></w:r>"#);
+    let translation = translate(&open(&format!("<w:p>{}</w:p>", run.repeat(3))));
+    let left_out: Vec<&str> = translation
+        .left_out()
+        .iter()
+        .map(LeftOut::message)
+        .collect();
+    assert_eq!(left_out, ["a font name of more than 256 bytes is cut"]);
+}
