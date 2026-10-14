@@ -30,9 +30,7 @@ pub fn main(options: &Options) -> ExitCode {
 
 /// Runs over the files; `Ok(false)` when the run fails.
 fn run(options: &Options) -> Result<bool, String> {
-    // Absolute but not canonical: a corpus directory may be a symbolic link to elsewhere.
-    let root = std::path::absolute(&options.root)
-        .map_err(|error| format!("root {}: {error}", options.root.display()))?;
+    let root = lexical_absolute(&options.root).map_err(|error| format!("root {error}"))?;
     let expected = match &options.expected {
         Some(path) => report::parse_expected(&read(path)?)
             .map_err(|error| format!("{}: {error}", path.display()))?,
@@ -40,7 +38,9 @@ fn run(options: &Options) -> Result<bool, String> {
     };
     let mut found = Vec::new();
     for path in &options.paths {
-        collect(path, &mut found)?;
+        // Resolved before the child opens it, so that it opens the file the report names:
+        // the system would follow a symbolic link before "..", the name would not.
+        collect(&lexical_absolute(path)?, &mut found)?;
     }
     let mut files = found
         .into_iter()
@@ -55,9 +55,7 @@ fn run(options: &Options) -> Result<bool, String> {
     let index = reference_index(options)?;
     let mut scoring = BTreeMap::new();
     for (name, file) in &files {
-        let absolute =
-            std::path::absolute(file).map_err(|error| format!("{}: {error}", file.display()))?;
-        if let Some(pair) = index.get(&absolute) {
+        if let Some(pair) = index.get(&lexical_absolute(file)?) {
             scoring.insert(name.clone(), pair.clone());
         }
     }
@@ -111,16 +109,13 @@ fn run(options: &Options) -> Result<bool, String> {
                 println!("better than the baseline: {line}");
             }
             if !changes.worse.is_empty() {
-                println!(
-                    "FAILED: {} files are worse than the baseline",
-                    changes.worse.len()
-                );
+                println!("FAILED: {} worse than the baseline", changes.worse_count());
                 passed = false;
             } else if !changes.better.is_empty() && !options.allow_better {
                 println!(
-                    "FAILED: {} files are better than the baseline; accept them by running with \
+                    "FAILED: {} better than the baseline; accept them by running with \
                      --update-baseline and committing {}",
-                    changes.better.len(),
+                    changes.better_count(),
                     path.display()
                 );
                 passed = false;
@@ -180,24 +175,35 @@ fn is_word_document(path: &Path) -> bool {
         })
 }
 
+/// The path made absolute, with "." and ".." resolved by name: not canonical, since a corpus
+/// folder may be a symbolic link to elsewhere. std::path::absolute keeps ".." on Unix and
+/// resolves it on Windows; this gives the same path on every system, for the root, the
+/// files and the reference folders alike.
+fn lexical_absolute(path: &Path) -> Result<PathBuf, String> {
+    let full = std::path::absolute(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let mut out = PathBuf::new();
+    for part in full.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    Ok(out)
+}
+
 /// The file's path under the root, with forward slashes, the same on every system.
 fn relative(root: &Path, file: &Path) -> Result<String, String> {
-    let full = std::path::absolute(file).map_err(|error| format!("{}: {error}", file.display()))?;
-    let outside = || {
+    let full = lexical_absolute(file)?;
+    let rest = full.strip_prefix(root).map_err(|_| {
         format!(
             "{} is not under the root {}; pass --root",
             file.display(),
             root.display()
         )
-    };
-    let rest = full.strip_prefix(root).map_err(|_| outside())?;
-    // std::path::absolute keeps "..": a path through it may lead out of the root.
-    if rest
-        .components()
-        .any(|part| !matches!(part, std::path::Component::Normal(_)))
-    {
-        return Err(outside());
-    }
+    })?;
     let parts: Vec<String> = rest
         .components()
         .map(|part| part.as_os_str().to_string_lossy().into_owned())
@@ -325,8 +331,7 @@ fn reference_index(options: &Options) -> Result<BTreeMap<PathBuf, (PathBuf, Path
     let (Some(references), Some(ours)) = (&options.references, &options.ours) else {
         return Ok(BTreeMap::new());
     };
-    let references = std::path::absolute(references)
-        .map_err(|error| format!("{}: {error}", references.display()))?;
+    let references = lexical_absolute(references)?;
     let corpus = references
         .parent()
         .ok_or_else(|| format!("{} has no parent folder", references.display()))?;
@@ -399,16 +404,15 @@ fn run_child(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn();
-    let mut child = match child {
-        Ok(child) => child,
-        Err(error) => {
-            let exit = ChildExit {
-                stderr: format!("cannot start the child: {error}"),
-                ..ChildExit::default()
-            };
-            return Ok((exit, started.elapsed()));
-        }
-    };
+    // A child that cannot be started says nothing about the file: like a thread that cannot
+    // be started below, it stops the run.
+    let mut child = child.map_err(|error| {
+        format!(
+            "cannot start {} to open {}: {error}",
+            launcher.program.display(),
+            file.display()
+        )
+    })?;
     // The pipes are drained while the child runs, so a full pipe cannot block it.
     let (stdout, stderr) = match (
         child.stdout.take().map(drain),
@@ -494,7 +498,8 @@ fn print_summary(report: &Report, elapsed: Duration) {
         .max_by_key(|file| file.peak_rss_kb)
     {
         let kb = largest.peak_rss_kb.unwrap_or_default();
-        println!("peak memory: {} MiB, {}", kb / 1024, largest.path);
+        // Rounded up, as in a memory failure's message.
+        println!("peak memory: {} MiB, {}", kb.div_ceil(1024), largest.path);
     }
     let scored: Vec<&metrics::Scores> = report
         .files
@@ -542,4 +547,71 @@ fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), String>
         .map_err(|error| format!("{}: {error}", path.display()))?;
     json.push('\n');
     std::fs::write(path, json).map_err(|error| format!("{}: {error}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A child that cannot be started is a failure of the runner, not a result of the file
+    /// (#68).
+    #[test]
+    fn a_child_that_cannot_start_stops_the_run() {
+        let launcher = Launcher {
+            program: PathBuf::from("/nonexistent/corpus-runner-child"),
+            leading: Vec::new(),
+        };
+        let error = run_child(&launcher, Path::new("docs/a.docx"), Duration::from_secs(5))
+            .err()
+            .unwrap();
+        assert!(
+            error.starts_with("cannot start /nonexistent/corpus-runner-child to open docs/a.docx"),
+            "{error}"
+        );
+    }
+
+    /// The whole run stops: no file is skipped and the rest reported as if nothing happened.
+    #[test]
+    fn the_run_stops_when_a_child_cannot_start() {
+        let launcher = Launcher {
+            program: PathBuf::from("/nonexistent/corpus-runner-child"),
+            leading: Vec::new(),
+        };
+        let files: Vec<(String, PathBuf)> = ["a", "b", "c"]
+            .iter()
+            .map(|name| {
+                (
+                    format!("{name}.docx"),
+                    PathBuf::from(format!("docs/{name}.docx")),
+                )
+            })
+            .collect();
+        let options = Options {
+            paths: Vec::new(),
+            root: PathBuf::from("."),
+            report: None,
+            baseline: None,
+            update_baseline: false,
+            allow_better: false,
+            expected: None,
+            timeout: Duration::from_secs(5),
+            memory_limit_mb: 1024,
+            enforce_memory_limit: false,
+            jobs: 2,
+            references: None,
+            ours: None,
+        };
+        let outcome = run_all(
+            &launcher,
+            &files,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &options,
+        );
+        let error = outcome.err().unwrap();
+        assert!(
+            error.starts_with("cannot start /nonexistent/corpus-runner-child"),
+            "{error}"
+        );
+    }
 }

@@ -835,6 +835,19 @@ class Pdffonts(unittest.TestCase):
         row = "Helvetica" + " " * 28 + "Type 1            WinAnsi          no  no  no       3  0"
         self.assertEqual(importer.not_embedded(PDFFONTS + row + "\n"), ["Garamond", "Helvetica"])
 
+    def test_an_opentype_suffix_is_read(self):
+        # The suffix is built from parts: spelled out, the spelling check reads it as a word.
+        suffix = "(" + "O" + "T)"
+        row = f"{'Minion':<37}{'Type 1C ' + suffix:<18}Custom           no  no  no      17  0"
+        self.assertEqual(importer.not_embedded(PDFFONTS + row + "\n"), ["Garamond", "Minion"])
+
+    def test_an_embedded_opentype_font_is_read_as_embedded(self):
+        # As pdffonts lists a CFF face embedded as /FontFile3 /OpenType: emb yes.
+        suffix = "(" + "O" + "T)"
+        name = "ABCDEF+Minion"
+        row = f"{name:<37}{'Type 1C ' + suffix:<18}Custom           yes yes no      17  0"
+        self.assertEqual(importer.not_embedded(PDFFONTS + row + "\n"), ["Garamond"])
+
 
 def word_export(parts, runs=True, texts=None):
     """make-reference.ps1's formatting export for a package, as Word would write it: the
@@ -920,6 +933,20 @@ class Formatting(Import):
         sources = (self.corpus / "SOURCES.md").read_text(encoding="utf-8")
         count = len(body) + 1
         self.assertIn(f"formatting as Word computes it: {count} paragraphs, with runs", sources)
+
+    def test_whether_a_style_is_built_in_is_committed(self):
+        # Outside the body there is no style id from the re-saved copy, so the flag is what
+        # tells a built-in style from a missing one (#126).
+        doc = rules.documents()[0]
+        record = self.add_result(doc)
+        export = word_export(importer.read_parts(self.results / record["resaved_file"]))
+        export["stories"][0]["paragraphs"][1]["style_builtin"] = None  # Word could not say
+        self.add_v3(export)
+        self.run_import()
+        main, header = self.committed(doc)["stories"]
+        self.assertIs(main["paragraphs"][0]["style_builtin"], True)
+        self.assertNotIn("style_builtin", main["paragraphs"][1])
+        self.assertIs(header["paragraphs"][0]["style_builtin"], False)
 
     def test_a_theme_colour_is_committed_with_its_tint_or_shade(self):
         doc = rules.documents()[0]
@@ -1322,6 +1349,14 @@ class FontFiles(unittest.TestCase):
             with self.assertRaises(importer.Refused) as caught:
                 importer.drawn_font(name, index)
             self.assertIn(f"{name}: Word names a style it synthesizes", str(caught.exception))
+
+    def test_a_pdf_font_name_that_would_break_the_row_is_refused(self):
+        (self.temp / "font.ttf").write_bytes(sfnt("Gara|mond", "Garamond", "Version 1.0"))
+        index = importer.font_index([self.temp])
+        for name in ("Gara|mond", "Gara\x07mond"):
+            with self.assertRaises(importer.Refused) as caught:
+                importer.drawn_font(name, index)
+            self.assertIn("unexpected font name in the PDF", str(caught.exception))
 
     def test_a_folder_that_cannot_be_listed_is_refused(self):
         with mock.patch.object(Path, "iterdir", side_effect=PermissionError("denied")):
