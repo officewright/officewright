@@ -414,8 +414,9 @@ enum OwStatus ow_pdf_document_set_compression(struct OwPdfDocument *doc, int32_t
  * an I/O error while writing can leave a partial file. Fails with
  * `OW_STATUS_INVALID_ARGUMENT` if the document has no pages, `OW_STATUS_MALFORMED` if an
  * embedded font turns out to be damaged when it is reduced to the glyphs the document
- * uses, `OW_STATUS_UNSUPPORTED` if it uses a feature that cannot be subset yet, and
- * `OW_STATUS_IO` if the file cannot be written.
+ * uses, `OW_STATUS_LIMIT_EXCEEDED` if one is past a limit of the library (`name`
+ * records that point at more than 1 MiB of strings), `OW_STATUS_UNSUPPORTED` if it uses
+ * a feature that cannot be subset yet, and `OW_STATUS_IO` if the file cannot be written.
  *
  * # Safety
  *
@@ -430,8 +431,9 @@ enum OwStatus ow_pdf_document_save_path(const struct OwPdfDocument *doc, const c
  *
  * Fails with `OW_STATUS_INVALID_ARGUMENT` if the document has no pages,
  * `OW_STATUS_MALFORMED` if an embedded font turns out to be damaged when it is reduced
- * to the glyphs the document uses, and `OW_STATUS_UNSUPPORTED` if it uses a feature
- * that cannot be subset yet.
+ * to the glyphs the document uses, `OW_STATUS_LIMIT_EXCEEDED` if one is past a limit of
+ * the library, and `OW_STATUS_UNSUPPORTED` if it uses a feature that cannot be subset
+ * yet.
  *
  * # Safety
  *
@@ -478,9 +480,10 @@ enum OwStatus ow_pdf_font_new_standard(int32_t standard_font, struct OwPdfFont *
  * `ow_pdf_font_note_count` and `ow_pdf_font_note`.
  *
  * Fails with `OW_STATUS_IO` if the file cannot be read, `OW_STATUS_MALFORMED` if it is
- * not a font or is damaged, `OW_STATUS_INVALID_ARGUMENT` if it has no such face, and
- * `OW_STATUS_UNSUPPORTED` if its license forbids embedding or its outlines cannot be
- * embedded (CFF2). On success
+ * not a font or is damaged, `OW_STATUS_LIMIT_EXCEEDED` if it is past a limit of the
+ * library (`name` records that point at more than 1 MiB of strings),
+ * `OW_STATUS_INVALID_ARGUMENT` if it has no such face, and `OW_STATUS_UNSUPPORTED` if its
+ * license forbids embedding or its outlines cannot be embedded (CFF2). On success
  * `*out_font` is a new handle for `ow_pdf_font_free`.
  *
  * # Safety
@@ -718,8 +721,9 @@ enum OwStatus ow_font_resolver_new(const struct OwFontBook *book,
  *
  * Fails with `OW_STATUS_UNSUPPORTED` if no font could be found or the chosen font's
  * license forbids embedding, `OW_STATUS_INVALID_ARGUMENT` if `bold` or `italic` is not
- * 0 or 1, `OW_STATUS_MALFORMED` if the chosen font is damaged, and `OW_STATUS_IO` if
- * its file cannot be read any more.
+ * 0 or 1, `OW_STATUS_MALFORMED` if the chosen font is damaged,
+ * `OW_STATUS_LIMIT_EXCEEDED` if it is past a limit of the library, and `OW_STATUS_IO`
+ * if its file cannot be read any more.
  *
  * # Safety
  *
@@ -814,8 +818,8 @@ enum OwStatus ow_doc_document_open_bytes(const uint8_t *data,
  * Fails with `OW_STATUS_IO` if the file cannot be written or a font folder of the
  * options cannot be read, `OW_STATUS_MALFORMED` if a font the PDF embeds is damaged
  * where only embedding looks (a glyph's outline, say), and `OW_STATUS_LIMIT_EXCEEDED`
- * if the document takes more pages than the options allow or nests tables deeper than
- * the layout follows. `OW_STATUS_INVALID_ARGUMENT` here would mean that officewright
+ * if the document takes more pages than the options allow, nests tables deeper than
+ * the layout follows, or embeds a font past a limit of the font reader. `OW_STATUS_INVALID_ARGUMENT` here would mean that officewright
  * translated the document wrongly, a defect worth reporting with the document.
  *
  * # Safety
