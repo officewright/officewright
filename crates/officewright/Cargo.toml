@@ -14,7 +14,7 @@ workspace = true
 [features]
 default = ["doc", "pdf", "slides", "xls"]
 doc = ["dep:officewright-doc"]
-pdf = ["dep:officewright-font", "dep:officewright-pdf"]
+pdf = ["dep:officewright-font", "dep:officewright-pdf", "officewright-doc?/pdf"]
 slides = ["dep:officewright-slides"]
 xls = ["dep:officewright-xls"]
 
