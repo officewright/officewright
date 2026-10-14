@@ -295,9 +295,25 @@ fn variation_store(deltas: &[u8]) -> TestResult<Vec<u8>> {
         .0)
 }
 
+/// The `fvar` table of one axis, weight from 100 to 900, its default 400, and no named
+/// instances. The axis is named by name ID 2, which the font has; the specification asks
+/// for an ID of 256 or more, which no reader this test runs looks at.
+fn weight_axis() -> Vec<u8> {
+    Bytes::default()
+        // Axes at 16, two reserved bytes, one axis of 20 bytes, no named instances.
+        .u16s(&[1, 0, 16, 2, 1, 20, 0, 8])
+        .u8s(b"wght")
+        .u32s(&[100 << 16, 400 << 16, 900 << 16])
+        // No flags; named by name ID 2.
+        .u16s(&[0, 2])
+        .0
+}
+
 /// minimal.ttf made a variable font with one axis, weight from 100 to 900, its default
 /// 400 (`fvar`). At the top of the axis A's outline is 10 units further right (`gvar`),
-/// A and Á are 20 units wider (`HVAR`) and the x-height is 10 units higher (`MVAR`);
+/// A and Á are 20 units wider by `HVAR` (`gvar` leaves A's advance point where it is, so
+/// a reader that takes advances from `gvar` alone keeps them) and the x-height is 10
+/// units higher (`MVAR`);
 /// `avar` maps halfway up the axis to a quarter of the way. A PDF shows the default
 /// instance, which is minimal.ttf itself.
 fn variable_minimal() -> TestResult<Vec<u8>> {
@@ -316,14 +332,7 @@ fn variable_minimal() -> TestResult<Vec<u8>> {
         (Some(1), Some(2))
     );
 
-    let fvar = Bytes::default()
-        // Axes at 16, two reserved bytes, one axis of 20 bytes, no named instances.
-        .u16s(&[1, 0, 16, 2, 1, 20, 0, 8])
-        .u8s(b"wght")
-        .u32s(&[100 << 16, 400 << 16, 900 << 16])
-        // No flags; named by name ID 2.
-        .u16s(&[0, 2])
-        .0;
+    let fvar = weight_axis();
     let avar = Bytes::default()
         .u16s(&[1, 0, 0, 1, 4])
         .u16s(&[BOTTOM, BOTTOM, 0, 0, HALF, QUARTER, TOP, TOP])
@@ -859,6 +868,37 @@ fn embeds_the_default_instance_of_a_variable_font() -> TestResult {
     assert_eq!(
         EmbeddingNote::DefaultInstance.to_string(),
         "it is a variable font; only its default instance is embedded"
+    );
+    Ok(())
+}
+
+#[test]
+fn refuses_a_variable_font_with_cff2_outlines() -> TestResult {
+    // Noto Sans with its outlines under the tag `CFF2` and a weight axis: a variable font
+    // with CFF2 outlines, whose instances cannot be embedded yet. The library refuses it
+    // itself, not only because the subsetter cannot read CFF2.
+    let mut tables = tables_of(&noto_sans()?)?;
+    let outlines = tables.remove(b"CFF ").ok_or("no CFF table")?;
+    tables.insert(*b"CFF2", outlines);
+    tables.insert(*b"fvar", weight_axis());
+    let err = Font::from_bytes(font_of(&tables)?, 0).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            Error::Font {
+                source: officewright_font::Error::UnsupportedOutlines {
+                    format: Some(officewright_font::OutlineFormat::Cff2),
+                    ..
+                },
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    let source = std::error::Error::source(&err).ok_or("no source")?;
+    assert_eq!(
+        source.to_string(),
+        "font face 0: CFF2 outlines cannot be subset yet"
     );
     Ok(())
 }
