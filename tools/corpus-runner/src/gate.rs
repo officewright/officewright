@@ -18,7 +18,8 @@ const SAME_FONTS: [&str; 5] = [
 const TWINNED: [&str; 4] = ["Arial", "Calibri", "Courier New", "Times New Roman"];
 
 /// How a document's fonts compare with Word's: the same (S), confirmed metric twins (T),
-/// neither (N), or not known because its reference has no formatting export.
+/// neither (N), or not known: its reference has no formatting export, or one without the
+/// fonts of the runs in which every font named is S or T.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Class {
     Same,
@@ -36,15 +37,19 @@ pub fn class(scores: &Scores, same_fonts: bool) -> Class {
         return Class::Unknown;
     };
     let same = |font: &String| SAME_FONTS.contains(&font.as_str());
-    if fonts.iter().all(same) {
-        Class::Same
-    } else if fonts
+    if !fonts
         .iter()
         .all(|font| same(font) || TWINNED.contains(&font.as_str()))
     {
-        Class::Twin
-    } else {
+        // Fonts the export left out cannot take this back.
         Class::Other
+    } else if scores.word_fonts_complete != Some(true) {
+        // The runs may hold a font of class N.
+        Class::Unknown
+    } else if fonts.iter().all(same) {
+        Class::Same
+    } else {
+        Class::Twin
     }
 }
 
@@ -516,11 +521,16 @@ pub fn measure(report: &Report, same_fonts: bool) -> Vec<Measure> {
 pub fn census(report: &Report, same_fonts: bool) -> String {
     let mut counts = [0usize; 4];
     let mut left_out = Vec::new();
+    let mut partial = 0;
     for file in &report.files {
         let Some(scores) = file.scores.as_ref() else {
             continue;
         };
-        let index = match class(scores, same_fonts) {
+        let class = class(scores, same_fonts);
+        if class == Class::Unknown && scores.word_fonts.is_some() {
+            partial += 1;
+        }
+        let index = match class {
             Class::Same => 0,
             Class::Twin => 1,
             Class::Other => 2,
@@ -539,9 +549,14 @@ pub fn census(report: &Report, same_fonts: bool) -> String {
         .iter()
         .filter(|file| file.score_error.is_some())
         .count();
+    let without_runs = if partial > 0 {
+        format!(" ({partial} without the fonts of runs)")
+    } else {
+        String::new()
+    };
     let mut line = format!(
         "{} files, {} scored against Word's references: S {same}, T {twin}, N {other}, \
-         no class {unknown}; {unscored} reference documents not scored",
+         no class {unknown}{without_runs}; {unscored} reference documents not scored",
         report.files.len(),
         same + twin + other + unknown
     );
@@ -640,6 +655,7 @@ mod tests {
             pdf_valid: Some(true),
             fonts_not_embedded: Some(Vec::new()),
             word_fonts: Some(fonts.iter().map(|font| (*font).to_owned()).collect()),
+            word_fonts_complete: Some(true),
         }
     }
 
@@ -712,6 +728,48 @@ mod tests {
             class(&s(&["Aptos"]), true),
             Class::Same,
             "the release run has Word's fonts"
+        );
+        // Without the fonts of the runs, S and T are not known; N is.
+        let partial = |fonts: &[&str], complete: Option<bool>| Scores {
+            word_fonts_complete: complete,
+            ..s(fonts)
+        };
+        for complete in [Some(false), None] {
+            assert_eq!(
+                class(&partial(&["Carlito"], complete), false),
+                Class::Unknown
+            );
+            assert_eq!(
+                class(&partial(&["Calibri"], complete), false),
+                Class::Unknown
+            );
+            assert_eq!(
+                class(&partial(&["Calibri", "Aptos"], complete), false),
+                Class::Other
+            );
+        }
+        assert_eq!(
+            class(&partial(&["Calibri"], Some(false)), true),
+            Class::Same
+        );
+    }
+
+    /// The census says how many documents have no class only because their export lacks
+    /// the fonts of the runs (#133).
+    #[test]
+    fn the_census_counts_documents_without_the_fonts_of_runs() {
+        let mut report = good();
+        scores_of(&mut report, "c/letter.docx").word_fonts_complete = Some(false);
+        let measures = measure(&report, false);
+        assert_eq!(
+            census(&report, false),
+            "5 files, 4 scored against Word's references: S 1, T 0, N 1, no class 2 (1 without \
+             the fonts of runs); 0 reference documents not scored. Not gated by rows 4 and 6 to \
+             9 (N or no class): letter.docx, old.docx, poster.docx"
+        );
+        assert_eq!(
+            measures[3].text,
+            "100.0 % same (1/1), 0 off by more than one, `E-*` 1/1"
         );
     }
 
