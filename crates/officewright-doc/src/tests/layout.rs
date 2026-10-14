@@ -2529,8 +2529,8 @@ fn bounds_a_note_s_tables_by_the_tables_around_its_reference() {
             "{place}: a table nested more than 100 deep is left out"
         )]
     );
-    // The deepest the default limits allow on both sides translates within a test
-    // thread's stack.
+    // 83 around a note of 83 reaches the cap of 100, as every deeper case the default
+    // limits allow does, and translates within a test thread's stack.
     let (depth, _) = note_depth(83, 83);
     assert_eq!(depth, 17);
 }

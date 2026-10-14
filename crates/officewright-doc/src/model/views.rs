@@ -38,8 +38,9 @@ impl<'a> Section<'a> {
 
     /// The header of this kind in effect for the section: its own, or the one the
     /// closest earlier section names, as each kind is inherited on its own (ECMA-376
-    /// Part 1, §17.10.5, as Word reads it: MS-OI29500 §17.10.5(b)). Which kind a page shows depends on the title page and on the
-    /// document's different odd and even headers.
+    /// Part 1, §17.10.5, as Word reads it: MS-OI29500 §17.10.5(b)). Which kind a page
+    /// shows depends on the title page and on the document's different odd and even
+    /// headers.
     pub fn header(self, kind: HeaderFooterKind) -> Option<HeaderFooter<'a>> {
         HeaderFooter::at(self.document, *self.data.headers.get(kind_index(kind))?)
     }
