@@ -5,19 +5,24 @@
 //! kerning; size), the rest are pieces of text, symbols, tabs and soft hyphens in those styles.
 //! The paragraph must keep what the layout relies on (`check_paragraph`), and break into
 //! lines that hold its text in order, in a column, with a line spacing, an alignment, a
-//! hanging indent and tab stops the first bytes give too (`check_lines`).
+//! hanging indent and tab stops the first bytes give too (`check_lines`). Up to four
+//! copies of it, kept with the next, kept together, with or without widow control and
+//! a page break before as the first bytes say, are then laid out on pages of a height
+//! they give, the last of them in a second section of a start the first bytes give when
+//! they say so, with every line on exactly one page inside its body (`check_pages`).
 #![no_main]
 
 use std::path::Path;
 use std::sync::OnceLock;
 
 use libfuzzer_sys::fuzz_target;
+use officewright_core::PageSize;
 use officewright_core::Pt;
 use officewright_font::{FontBook, FontOrigin};
-use officewright_layout::fuzzing::{check_lines, check_paragraph};
+use officewright_layout::fuzzing::{check_lines, check_pages, check_paragraph};
 use officewright_layout::ir::{
-    Alignment, Document, FontHint, Indent, Inline, LineSpacing, Paragraph, ParagraphProps,
-    RunFonts, RunStyle, Spacing, TabKind, TabStop,
+    Alignment, Document, FontHint, Indent, Inline, LineSpacing, Margins, PageSetup, Paragraph,
+    ParagraphProps, RunFonts, RunStyle, Section, SectionStart, Spacing, TabKind, TabStop,
 };
 
 const FAMILIES: [&str; 8] = [
@@ -159,6 +164,51 @@ fuzz_target!(|data: &[u8]| {
         .with_inlines(inlines);
     let width = 1.0 + f64::from(byte(13)) * 3.0;
     if let Err(problem) = check_lines(book(), &document, &paragraph, width) {
+        panic!("{problem}");
+    }
+    // The same paragraph on pages: a body `width` wide and up to 530 pt high.
+    let flags = byte(14);
+    let props = paragraph
+        .props()
+        .clone()
+        .with_keep_next(flags & 1 != 0)
+        .with_keep_lines(flags & 2 != 0)
+        .with_widow_control(flags & 4 == 0)
+        .with_page_break_before(flags & 8 != 0);
+    let paragraph = paragraph.with_props(props);
+    let height = 20.0 + f64::from(byte(15)) * 2.0;
+    let setup = PageSetup::new(PageSize::new(Pt(width + 20.0), Pt(height + 20.0))).with_margins(
+        Margins::default()
+            .with_top(Pt(10.0))
+            .with_bottom(Pt(10.0))
+            .with_left(Pt(10.0))
+            .with_right(Pt(10.0)),
+    );
+    let copies = 1 + usize::from(flags >> 4 & 3);
+    let mut blocks = (0..copies)
+        .map(|_| paragraph.clone().into())
+        .collect::<Vec<_>>();
+    // The last copies (two of three or four, so that a chain can reach past the start)
+    // in a section of their own, which starts on a new page, on the same one, on an odd
+    // or even page, or in the next column.
+    let second = if flags & 128 != 0 {
+        blocks.split_off(blocks.len().saturating_sub(if copies > 2 { 2 } else { 1 }))
+    } else {
+        Vec::new()
+    };
+    document.add_section(Section::new(setup).with_blocks(blocks));
+    if !second.is_empty() {
+        let starts = [
+            SectionStart::NextPage,
+            SectionStart::Continuous,
+            SectionStart::EvenPage,
+            SectionStart::OddPage,
+            SectionStart::NextColumn,
+        ];
+        let start = starts[usize::from(byte(3)) % starts.len()];
+        document.add_section(Section::new(setup).with_start(start).with_blocks(second));
+    }
+    if let Err(problem) = check_pages(book(), &document, 512) {
         panic!("{problem}");
     }
 });
