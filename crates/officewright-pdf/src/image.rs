@@ -2023,6 +2023,13 @@ pub(crate) mod tests {
         ] {
             Image::from_bytes(with_scan(&good, &scan)).unwrap();
         }
+        // Blocks of the components the scan takes, not of those at its positions: 2, 3
+        // of a frame 1 (4 × 4), 2, 3 interleaves 2 blocks.
+        Image::from_bytes(with_scan(
+            &patched(&good, frame + 11, 0x44),
+            &[2, 2, 0, 3, 0x11, 0, 0x3F, 0],
+        ))
+        .unwrap();
         let zeros = patched(
             &patched(&patched(&good, frame + 10, 0), frame + 13, 0),
             frame + 16,
@@ -2314,6 +2321,15 @@ pub(crate) mod tests {
                     &[2, 1, 0, 1, 0x11, 0, 0x3F, 0],
                 ),
                 "the JPEG scan interleaves 17 blocks in each minimum coded unit, not at most 10",
+            ),
+            // A component taken before, not only the last one: 3, 2, 3 of a frame 1, 2, 3, 3
+            // takes the first 3 twice (libjpeg: "Invalid component ID 3 in SOS").
+            (
+                with_scan(
+                    &patched(&jpeg(0xC0, 8, 4, 4, 4, false), frame + 19, 3),
+                    &[3, 3, 0, 2, 0x11, 3, 0x11, 0, 0x3F, 0],
+                ),
+                "the JPEG scan header names component 3 out of the frame header's order",
             ),
             // A frame whose three components are all 1, scanned as 1, 2, 3.
             (
