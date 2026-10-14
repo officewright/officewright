@@ -161,7 +161,7 @@ struct Look<'a> {
 }
 
 /// The leader glyphs a layout run may still draw, [`MAX_RUN_LEADER_GLYPHS`] at first.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct LeaderBudget {
     left: usize,
 }

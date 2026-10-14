@@ -56,8 +56,9 @@ fn in_table(block: Block) -> Block {
 }
 
 /// `E-space-before-top.docx` (scripts/make-rule-docs.py) in the IR, and the first words
-/// of its paragraphs in reading order.
-fn space_before_top() -> (Document, Vec<&'static str>) {
+/// of its paragraphs in reading order; `None` for the paragraphs that hold only a page
+/// break, which never start a page.
+fn space_before_top() -> (Document, Vec<Option<&'static str>>) {
     let mut document = Document::default();
     let style = document.add_run_style(
         RunStyle::default()
@@ -127,21 +128,21 @@ fn space_before_top() -> (Document, Vec<&'static str>) {
     document.add_section(Section::new(a4()).with_blocks(first));
     document.add_section(Section::new(a4()).with_blocks(second));
     let words = vec![
-        "Case 1:",
-        "",
-        "Case 2:",
-        "Case 3:",
-        "Control:",
-        "Filler",
-        "Case 4:",
-        "Case 5:",
-        "A",
-        "Case 6:",
-        "",
-        "Case 7:",
-        "Reference",
-        "Case 8:",
-        "End",
+        Some("Case 1:"),
+        None,
+        Some("Case 2:"),
+        Some("Case 3:"),
+        Some("Control:"),
+        Some("Filler"),
+        Some("Case 4:"),
+        Some("Case 5:"),
+        Some("A"),
+        Some("Case 6:"),
+        None,
+        Some("Case 7:"),
+        Some("Reference"),
+        Some("Case 8:"),
+        Some("End"),
     ];
     (document, words)
 }
@@ -168,7 +169,10 @@ fn space_above_at_the_top_of_a_page_is_where_word_keeps_it() -> TestResult {
             .find(|line| line.page == number + 1)
             .ok_or("an empty page")?;
         let fragment = page.fragments().first().ok_or("an empty page of ours")?;
-        let label = words.get(fragment.paragraph()).ok_or("no such paragraph")?;
+        let label = words
+            .get(fragment.paragraph())
+            .ok_or("no such paragraph")?
+            .ok_or_else(|| format!("page {} starts with a page break's paragraph", number + 1))?;
         assert!(
             first.text.starts_with(label),
             "page {}: Word starts it with {:?}, we with {label:?}",
@@ -281,5 +285,73 @@ fn every_document_on_pages_keeps_what_the_painter_relies_on() -> TestResult {
         fuzzing::check_pages(&book, &document, 512)
             .map_err(|problem| format!("seed {seed}: {problem}"))?;
     }
+    Ok(())
+}
+
+#[test]
+fn a_chain_that_moves_draws_its_leaders_once() -> TestResult {
+    use officewright_layout::ir::{TabLeader, TabStop};
+
+    // A line of 50 dot-leader tabs at 1 pt and 1 % (about 198,000 glyphs, under the
+    // document's bound of 262,144), kept with a paragraph that does not fit: both move to
+    // the next page, and the leaders drawn on the first try are not counted against the
+    // bound again.
+    let book = book()?;
+    let mut document = Document::default();
+    let style = document.add_run_style(
+        RunStyle::default()
+            .with_fonts(RunFonts::new("Liberation Sans"))
+            .with_size(Pt(1.0))
+            .with_scale(1),
+    );
+    let stops = (1..=50).map(|stop| {
+        TabStop::default()
+            .with_position(Pt(f64::from(stop) * 11.0))
+            .with_leader(TabLeader::Dot)
+    });
+    let mut leaders = vec![Inline::text("A", style)];
+    leaders.extend((0..50).map(|_| Inline::tab(style)));
+    let mut blocks: Vec<Block> = (0..6)
+        .map(|_| paragraph(style, exact(0.0), vec![Inline::text("A", style)]))
+        .collect();
+    blocks.push(paragraph(
+        style,
+        exact(0.0).with_keep_next(true).with_tabs(stops),
+        leaders,
+    ));
+    let three = vec![
+        Inline::text("A", style),
+        Inline::line_break(BreakClear::None, style),
+        Inline::text("A", style),
+        Inline::line_break(BreakClear::None, style),
+        Inline::text("A", style),
+    ];
+    blocks.push(paragraph(style, exact(0.0).with_keep_lines(true), three));
+    // A body 160 pt high and 600 pt wide: eight lines of 20 pt.
+    let setup = PageSetup::new(PageSize::new(Pt(744.0), Pt(304.0)));
+    document.add_section(Section::new(setup).with_blocks(blocks));
+    let laid = fuzzing::paginate(&book, &document, 100)?;
+    let second = laid.pages().get(1).ok_or("no second page")?;
+    assert_eq!(second.fragments().first().map(|f| f.paragraph()), Some(6));
+    let glyphs: usize = second
+        .text()
+        .lines()
+        .filter(|line| line.starts_with("glyphs") && line.contains("\"\\t\""))
+        .map(|line| {
+            line.split(' ')
+                .filter(|word| word.contains('@') && !word.starts_with('@'))
+                .count()
+        })
+        .sum();
+    assert!(glyphs > 150_000, "{glyphs}");
+    assert!(
+        !laid
+            .report()
+            .entries()
+            .iter()
+            .any(|entry| entry.message().contains("tab leader")),
+        "{:?}",
+        laid.report()
+    );
     Ok(())
 }

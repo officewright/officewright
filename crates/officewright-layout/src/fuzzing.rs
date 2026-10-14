@@ -1289,23 +1289,76 @@ pub fn paginate(
 }
 
 /// Lays out `document` on pages, at most `max_pages`, and checks what the rest of the
-/// layout relies on: there is a page; every line of every paragraph is on exactly one
-/// page, in reading order; lines are inside the body of their page, but for a single
-/// line that nothing could move further; lines on a page do not overlap; page numbers
-/// grow by one within a section; and what pages draw is at finite places. A document
-/// that takes more than `max_pages` pages is not an error here.
+/// layout relies on:
+/// - there is a page, and no more than one a line, besides a blank page and a page
+///   without lines for each section and the page of an empty document; a document past
+///   `max_pages` is an error only when its lines, counted paragraph by paragraph, could
+///   not take that many;
+/// - every paragraph has a line, and every line is on exactly one page, in reading order;
+/// - lines are inside the body of their page, but for a single line that nothing could
+///   move further, and lines on a page do not overlap;
+/// - each paragraph is on a page with its section's setup, and the first paragraph of a
+///   section that starts on a new page starts its page;
+/// - page numbers grow by one within a section, and what pages draw is at finite places.
 pub fn check_pages(book: &FontBook, document: &Document, max_pages: usize) -> Result<(), String> {
     use crate::display::DisplayItem;
+    use crate::ir::SectionStart;
 
     let mut fonts = Fonts::new(book);
     let mut shaper = Shaper::new();
+    let sections = document.sections();
+    let flow = crate::pages::flow(document, &mut fonts).map_err(|err| err.to_string())?;
+    let setup_of = |section: usize| sections.get(section).map(|section| *section.page());
+    let bound = |lines: usize| lines + 2 * sections.len() + 1;
     let laid = match crate::pages::paginate(document, &mut fonts, &mut shaper, max_pages) {
         Ok(laid) => laid,
-        Err(crate::Error::TooManyPages { .. }) => return Ok(()),
+        Err(crate::Error::TooManyPages { .. }) => {
+            // Counted on its own, each paragraph's lines; twice that leaves room for the
+            // values fields show on pages.
+            let mut lines = 0;
+            for flowed in &flow {
+                let setup = setup_of(flowed.section).unwrap_or_default();
+                let width = crate::pages::body(&setup).width;
+                let layout = crate::paragraph::lay_out(
+                    document,
+                    flowed.paragraph,
+                    width,
+                    &mut fonts,
+                    &mut shaper,
+                    &flowed.location,
+                );
+                lines += layout.lines.len();
+            }
+            if bound(2 * lines) > max_pages {
+                return Ok(());
+            }
+            return Err(format!(
+                "more than {max_pages} pages for {lines} lines in {} sections",
+                sections.len()
+            ));
+        }
         Err(err) => return Err(err.to_string()),
     };
     if laid.pages.is_empty() {
         return Err("no page".to_owned());
+    }
+    if laid.lines.len() != flow.len() {
+        return Err(format!(
+            "{} paragraphs laid out of {}",
+            laid.lines.len(),
+            flow.len()
+        ));
+    }
+    if let Some(index) = laid.lines.iter().position(|&count| count == 0) {
+        return Err(format!("paragraph {index} has no line"));
+    }
+    let total: usize = laid.lines.iter().sum();
+    if laid.pages.len() > bound(total) {
+        return Err(format!(
+            "{} pages for {total} lines in {} sections",
+            laid.pages.len(),
+            sections.len()
+        ));
     }
     // Every line once, in order.
     let mut next = (0usize, 0usize);
@@ -1339,6 +1392,33 @@ pub fn check_pages(book: &FontBook, document: &Document, max_pages: usize) -> Re
                 ));
             }
             bottom = end;
+            let flowed = flow
+                .get(fragment.paragraph)
+                .ok_or_else(|| format!("page {number}: no paragraph {}", fragment.paragraph))?;
+            if setup_of(flowed.section) != setup_of(page.section) {
+                return Err(format!(
+                    "page {number} of section {} holds paragraph {} of section {}, of another \
+                     setup",
+                    page.section, fragment.paragraph, flowed.section
+                ));
+            }
+            let starts_section = fragment.lines.start == 0
+                && flowed.section > 0
+                && fragment
+                    .paragraph
+                    .checked_sub(1)
+                    .and_then(|before| flow.get(before))
+                    .is_none_or(|before| before.section != flowed.section);
+            let continuous = sections
+                .get(flowed.section)
+                .is_some_and(|section| section.start() == SectionStart::Continuous);
+            if starts_section && !continuous && position != 0 {
+                return Err(format!(
+                    "page {number}: section {} starts below paragraph {} of its page",
+                    flowed.section,
+                    fragment.paragraph - 1
+                ));
+            }
             let forced = position == 0 && fragment.lines.len() == 1;
             if top < page.body.top.0 - 1e-6 || (end > page.body.bottom.0 + 1e-6 && !forced) {
                 return Err(format!(

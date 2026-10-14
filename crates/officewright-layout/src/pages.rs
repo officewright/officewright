@@ -71,8 +71,9 @@ pub(crate) struct Flowed<'a> {
     pub(crate) section: usize,
     pub(crate) paragraph: &'a Paragraph,
     pub(crate) location: Location,
-    /// Whether it is in a table cell, where keep rules and widow control do not apply
-    /// (MS-OI29500 2.1.46 a, 2.1.66 a).
+    /// Whether it is in a table cell, where keeping lines together and widow control do
+    /// not apply (MS-OI29500 2.1.46 a, 2.1.66 a). Keeping with the next, which Word applies
+    /// to a cell's row, waits for tables to be laid out (plan PR 12).
     pub(crate) in_cell: bool,
     /// Whether it is the first paragraph of a table cell, which keeps the space above it
     /// at the top of a page.
@@ -136,7 +137,7 @@ impl<'a> Walk<'a, '_> {
                     first_in_cell: in_cell && index == 0,
                 }),
                 Block::Table(table) => {
-                    if depth + 1 >= MAX_TABLE_DEPTH {
+                    if depth >= MAX_TABLE_DEPTH {
                         return Err(Error::NestingTooDeep {
                             location: self.location.clone(),
                             limit: MAX_TABLE_DEPTH,
@@ -215,6 +216,8 @@ struct Checkpoint {
     cursor: f64,
     above: Option<usize>,
     next_number: u32,
+    /// The leader glyphs the run could still draw.
+    leaders: LeaderBudget,
     /// Whether nothing was on the page yet.
     at_top: bool,
 }
@@ -271,7 +274,9 @@ impl Pager<'_, '_, '_> {
             // The sections from the last one started up to this paragraph's, those
             // without paragraphs included.
             let mut kept_top = false;
+            let mut section_here = false;
             while section_started.is_none_or(|started| started < flowed.section) {
+                section_here = true;
                 let next = section_started.map_or(0, |started| started + 1);
                 let Some(section) = sections.get(next) else {
                     break;
@@ -292,6 +297,8 @@ impl Pager<'_, '_, '_> {
                 pending_break = false;
             }
             let props = flowed.paragraph.props();
+            // A page break before a paragraph that already starts a page makes no page.
+            // Hypothesis until a Word render (`E-page-break-before-top.docx`).
             if props.page_break_before() && !self.page_is_empty() {
                 self.new_page(flowed.section, section.page())?;
                 broke_page = true;
@@ -318,16 +325,21 @@ impl Pager<'_, '_, '_> {
             if let Some(slot) = placed.get_mut(index) {
                 *slot = Some(here);
             }
-            // A chain kept with this paragraph must end on the page where it starts.
-            if let Some(start) = chain {
+            // A chain kept with this paragraph must end on the page where it starts. A
+            // section start or a page break before this paragraph ends the chain: keeping
+            // with the next does not reach past them, so moving a chain never undoes one.
+            // Hypothesis until a Word render (`E-keepnext-chain.docx`).
+            let boundary = broke_page || section_here;
+            if let Some(start) = chain.filter(|_| !boundary) {
                 let previous = index
                     .checked_sub(1)
                     .and_then(|i| placed.get(i).copied().flatten());
                 let apart = previous.is_some_and(|previous| previous.last_page != here.first_page);
-                if apart && !broke_page {
+                if apart {
                     if !start.at_top && moved.insert(start.index) {
                         // The whole chain to the next page, once.
                         self.restore(start);
+                        chain = None;
                         let section = flow.get(start.index).map_or(0, |f| f.section);
                         let setup = sections
                             .get(section)
@@ -346,10 +358,10 @@ impl Pager<'_, '_, '_> {
                     );
                 }
             }
-            chain = if props.keep_next() && !flowed.in_cell {
-                Some(chain.unwrap_or(checkpoint))
-            } else {
-                None
+            chain = match chain {
+                _ if !props.keep_next() || flowed.in_cell => None,
+                Some(start) if !boundary => Some(start),
+                _ => Some(checkpoint),
             };
             broke_page = ends_with_break;
             pending_break = ends_with_break;
@@ -402,6 +414,9 @@ impl Pager<'_, '_, '_> {
         if let Some(start) = section.page_numbering().start() {
             self.next_number = start;
         }
+        // The first section starts the first page, numbered 1 or as it says, whatever its
+        // start: no blank page comes before it for an odd or even start. Hypothesis until a
+        // Word render (`E-section-odd.docx`).
         let Some(current) = self.pages.last() else {
             self.new_page(index, section.page())?;
             return Ok(true);
@@ -413,10 +428,8 @@ impl Pager<'_, '_, '_> {
             .is_some_and(|previous| previous.page() == section.page());
         match section.start() {
             // After a page break, the break makes the new page, when a paragraph follows.
-            SectionStart::Continuous | SectionStart::NextColumn if after_break || same_setup => {
-                Ok(false)
-            }
-            SectionStart::Continuous | SectionStart::NextColumn => {
+            SectionStart::Continuous if after_break || same_setup => Ok(false),
+            SectionStart::Continuous => {
                 self.fonts.report_once(
                     ReportKind::FeatureUnsupported,
                     &location,
@@ -437,6 +450,9 @@ impl Pager<'_, '_, '_> {
                 self.new_page(index, section.page())?;
                 Ok(true)
             }
+            // A next-column start in a section of one column, as every section is laid out,
+            // is a next-page one. Hypothesis until a Word render
+            // (`E-section-next-column.docx`).
             _ => {
                 self.new_page(index, section.page())?;
                 Ok(true)
@@ -491,6 +507,14 @@ impl Pager<'_, '_, '_> {
             if rest == 0 {
                 return Ok((first_page.unwrap_or(here), false));
             }
+            // On an empty page, the space above never pushes the first line off the body:
+            // it shrinks to the room the line leaves. Ours, not Word's.
+            let gap = match lines.get(first) {
+                Some(line) if empty => {
+                    gap.min((body.bottom.0 - self.cursor - line.height.0).max(0.0))
+                }
+                _ => gap,
+            };
             let top = self.cursor + gap;
             let (fit, breaks) = fitting(lines, first, top, body.bottom.0);
             if fit == rest || (breaks && fit > 0) {
@@ -691,6 +715,7 @@ impl Pager<'_, '_, '_> {
             cursor: self.cursor,
             above: self.above,
             next_number: self.next_number,
+            leaders: self.leaders,
             at_top: self.page_is_empty(),
         }
     }
@@ -705,12 +730,13 @@ impl Pager<'_, '_, '_> {
         self.cursor = checkpoint.cursor;
         self.above = checkpoint.above;
         self.next_number = checkpoint.next_number;
+        self.leaders = checkpoint.leaders;
     }
 }
 
 /// The body of a page of `setup`: inside the margins, the gutter on the left; a
 /// negative top or bottom margin is a fixed one of its size (ECMA-376 Part 1, §17.6.11).
-fn body(setup: &PageSetup) -> Body {
+pub(crate) fn body(setup: &PageSetup) -> Body {
     let size = setup.size();
     let margins = setup.margins();
     let left = margins.left().0 + margins.gutter().0;
@@ -1033,6 +1059,237 @@ mod tests {
                 .iter()
                 .any(|entry| entry.kind() == ReportKind::Overflow),
             "{report:?}"
+        );
+    }
+
+    #[test]
+    fn a_chain_kept_with_the_next_that_moves_reports_nothing() {
+        let document = document(|style| {
+            let mut blocks: Vec<Block> =
+                (0..6).map(|_| lines(style, 1, spacing(0.0, 0.0))).collect();
+            blocks.push(lines(style, 1, spacing(0.0, 0.0).with_keep_next(true)));
+            blocks.push(lines(style, 3, spacing(0.0, 0.0).with_keep_lines(true)));
+            one_section(blocks)
+        });
+        let (laid, report) = laid(&document, 100);
+        let laid = laid.expect("pages");
+        assert_eq!(laid.pages[1].fragments.len(), 2);
+        assert!(report.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn a_chain_kept_with_the_next_ends_at_a_section_start_or_a_page_break() {
+        // Moving a chain never undoes the page a section starts on, its blank page, its
+        // numbering or a page break: keeping with the next does not reach past them.
+        let chain = |style, start: SectionStart, break_before: bool| {
+            let mut first: Vec<Block> =
+                (0..6).map(|_| lines(style, 1, spacing(0.0, 0.0))).collect();
+            first.push(lines(style, 1, spacing(0.0, 0.0).with_keep_next(true)));
+            let mut second = vec![lines(
+                style,
+                6,
+                spacing(0.0, 0.0)
+                    .with_keep_next(true)
+                    .with_page_break_before(break_before),
+            )];
+            second.push(lines(style, 3, spacing(0.0, 0.0).with_keep_lines(true)));
+            let numbering = crate::ir::PageNumbering::default().with_start(Some(10));
+            if break_before {
+                first.extend(second);
+                return vec![Section::new(setup()).with_blocks(first)];
+            }
+            vec![
+                Section::new(setup()).with_blocks(first),
+                Section::new(setup())
+                    .with_start(start)
+                    .with_page_numbering(numbering)
+                    .with_blocks(second),
+            ]
+        };
+        let summary = |start: SectionStart, break_before: bool| {
+            let (laid, _) = laid(&document(|style| chain(style, start, break_before)), 100);
+            laid.expect("pages")
+                .pages
+                .iter()
+                .map(|page| {
+                    let paragraphs = page.fragments.iter().map(|f| f.paragraph).collect();
+                    (page.section, page.number, paragraphs)
+                })
+                .collect::<Vec<(usize, u32, Vec<usize>)>>()
+        };
+        // A section on the next page: it starts page 2, numbered 10; its chain moves its
+        // last paragraph's companion with it to page 3.
+        assert_eq!(
+            summary(SectionStart::NextPage, false),
+            [
+                (0, 1, vec![0, 1, 2, 3, 4, 5, 6]),
+                (1, 10, vec![7]),
+                (1, 11, vec![8])
+            ]
+        );
+        // On an odd page: page 2 would be even, so it is blank.
+        let odd = summary(SectionStart::OddPage, false);
+        assert_eq!(odd.len(), 4, "{odd:?}");
+        assert_eq!((odd[1].2.len(), odd[2].2.clone()), (0, vec![7]));
+        // A continuous section that numbers its pages from 10: its next page is 10.
+        let continuous = summary(SectionStart::Continuous, false);
+        assert!(continuous.iter().any(|page| page.1 == 10), "{continuous:?}");
+        // A page break before: three pages, not four, and the break stays where it is.
+        let broken = summary(SectionStart::NextPage, true);
+        assert_eq!(broken.len(), 3, "{broken:?}");
+        assert_eq!(broken[1].2, [7]);
+    }
+
+    #[test]
+    fn keep_rules_and_widow_control_wait_in_table_cells() {
+        // In a cell, a paragraph kept together that does not fit is split, and widow
+        // control leaves one line at the top of the next page (MS-OI29500 2.1.46 a,
+        // 2.1.66 a); keeping with the next waits for tables.
+        let cell_paragraph = |style, count, props: ParagraphProps| -> Block {
+            let cell = Cell::default().with_blocks([lines(style, count, props)]);
+            Table::default()
+                .with_rows(vec![Row::default().with_cells(vec![cell])])
+                .into()
+        };
+        let kept = document(|style| {
+            let mut blocks: Vec<Block> =
+                (0..6).map(|_| lines(style, 1, spacing(0.0, 0.0))).collect();
+            blocks.push(cell_paragraph(
+                style,
+                3,
+                spacing(0.0, 0.0).with_keep_lines(true),
+            ));
+            one_section(blocks)
+        });
+        assert_eq!(pages(&kept)[0].last(), Some(&(6, 0..2, 140.0)));
+        let widowed = document(|style| {
+            let mut blocks: Vec<Block> =
+                (0..5).map(|_| lines(style, 1, spacing(0.0, 0.0))).collect();
+            blocks.push(cell_paragraph(style, 4, spacing(0.0, 0.0)));
+            one_section(blocks)
+        });
+        assert_eq!(pages(&widowed)[1], [(5, 3..4, 20.0)]);
+    }
+
+    #[test]
+    fn a_page_break_before_the_first_paragraph_of_a_page_makes_no_page() {
+        let document = document(|style| {
+            one_section(vec![lines(
+                style,
+                1,
+                spacing(0.0, 0.0).with_page_break_before(true),
+            )])
+        });
+        assert_eq!(pages(&document), [vec![(0, 0..1, 20.0)]]);
+    }
+
+    #[test]
+    fn a_next_column_section_starts_a_new_page_in_one_column() {
+        let document = document(|style| {
+            vec![
+                Section::new(setup()).with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+                Section::new(setup())
+                    .with_start(SectionStart::NextColumn)
+                    .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+            ]
+        });
+        assert_eq!(pages(&document).len(), 2);
+    }
+
+    #[test]
+    fn space_above_never_pushes_a_first_line_off_its_page() {
+        // 500 pt above the first paragraph of the document, on a body 160 pt high.
+        let document = document(|style| one_section(vec![lines(style, 1, spacing(500.0, 0.0))]));
+        let (laid, report) = laid(&document, 100);
+        assert_eq!(laid.expect("pages").pages[0].fragments[0].top, Pt(160.0));
+        assert!(report.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn columns_vertical_alignment_and_a_page_break_s_mark_are_reported() {
+        use crate::ir::{Columns, CompatFlag, DocumentSettings, PageVerticalAlign};
+        let kinds = |settings: DocumentSettings| {
+            let mut document = Document::new(settings);
+            let style = document.add_run_style(
+                RunStyle::default()
+                    .with_fonts(RunFonts::new("Officewright Test"))
+                    .with_size(Pt(10.0)),
+            );
+            let ending_in_break = Paragraph::new(style)
+                .with_inlines([Inline::text("A", style), Inline::page_break(style)]);
+            document.add_section(
+                Section::new(setup())
+                    .with_columns(Columns::default().with_count(2))
+                    .with_vertical_align(PageVerticalAlign::Center)
+                    .with_blocks(vec![
+                        ending_in_break.into(),
+                        lines(style, 1, spacing(0.0, 0.0)),
+                    ]),
+            );
+            let (_, report) = laid(&document, 100);
+            report
+                .entries()
+                .iter()
+                .map(|entry| entry.message().to_owned())
+                .collect::<Vec<_>>()
+        };
+        let older = kinds(DocumentSettings::default());
+        for expected in ["columns", "vertical alignment", "paragraph mark"] {
+            assert!(
+                older.iter().any(|message| message.contains(expected)),
+                "{older:?}"
+            );
+        }
+        // Word 2013 and later, and documents with `splitPgBreakAndParaMark`, keep the mark
+        // with the break themselves.
+        let newer = kinds(DocumentSettings::default().with_compat_mode(CompatMode::Word2013));
+        assert!(
+            !newer
+                .iter()
+                .any(|message| message.contains("paragraph mark"))
+        );
+        let flagged = kinds(
+            DocumentSettings::default().with_compat_flags([CompatFlag::SplitPgBreakAndParaMark]),
+        );
+        assert!(
+            !flagged
+                .iter()
+                .any(|message| message.contains("paragraph mark"))
+        );
+    }
+
+    #[test]
+    fn tables_nest_as_deep_as_the_ir_allows() {
+        let nested = |depth: usize| {
+            document(move |style| {
+                // A cell ends with a paragraph, and a table has a grid, as the IR wants.
+                let mut block = lines(style, 1, spacing(0.0, 0.0));
+                for _ in 0..depth {
+                    let blocks = vec![block, lines(style, 1, spacing(0.0, 0.0))];
+                    let cell = Cell::default().with_blocks(blocks);
+                    block = Table::default()
+                        .with_grid([Pt(10.0)])
+                        .with_rows(vec![Row::default().with_cells(vec![cell])])
+                        .into();
+                }
+                one_section(vec![block])
+            })
+        };
+        let deepest = nested(MAX_TABLE_DEPTH);
+        assert!(deepest.validate().is_ok());
+        assert!(laid(&deepest, 100).0.is_ok());
+        assert!(matches!(
+            laid(&nested(MAX_TABLE_DEPTH + 1), 100).0,
+            Err(Error::NestingTooDeep { .. })
+        ));
+    }
+
+    #[test]
+    fn too_many_pages_is_a_limit_exceeded() {
+        let core = officewright_core::Error::from(Error::TooManyPages { limit: 7 });
+        assert!(
+            matches!(&core, officewright_core::Error::LimitExceeded(message) if message.contains('7')),
+            "{core:?}"
         );
     }
 

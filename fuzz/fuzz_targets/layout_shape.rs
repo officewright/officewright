@@ -8,7 +8,8 @@
 //! hanging indent and tab stops the first bytes give too (`check_lines`). Up to four
 //! copies of it, kept with the next, kept together, with or without widow control and
 //! a page break before as the first bytes say, are then laid out on pages of a height
-//! they give, with every line on exactly one page inside its body (`check_pages`).
+//! they give, the last of them in a second section of a start the first bytes give when
+//! they say so, with every line on exactly one page inside its body (`check_pages`).
 #![no_main]
 
 use std::path::Path;
@@ -21,7 +22,7 @@ use officewright_font::{FontBook, FontOrigin};
 use officewright_layout::fuzzing::{check_lines, check_pages, check_paragraph};
 use officewright_layout::ir::{
     Alignment, Document, FontHint, Indent, Inline, LineSpacing, Margins, PageSetup, Paragraph,
-    ParagraphProps, RunFonts, RunStyle, Section, Spacing, TabKind, TabStop,
+    ParagraphProps, RunFonts, RunStyle, Section, SectionStart, Spacing, TabKind, TabStop,
 };
 
 const FAMILIES: [&str; 8] = [
@@ -184,10 +185,24 @@ fuzz_target!(|data: &[u8]| {
             .with_right(Pt(10.0)),
     );
     let copies = 1 + usize::from(flags >> 4 & 3);
-    let blocks = (0..copies)
+    let mut blocks = (0..copies)
         .map(|_| paragraph.clone().into())
         .collect::<Vec<_>>();
+    // The last copy in a section of its own, which starts on a new page, on the same one,
+    // on an odd or even page, or in the next column.
+    let second = if flags & 128 != 0 { blocks.pop() } else { None };
     document.add_section(Section::new(setup).with_blocks(blocks));
+    if let Some(last) = second {
+        let starts = [
+            SectionStart::NextPage,
+            SectionStart::Continuous,
+            SectionStart::EvenPage,
+            SectionStart::OddPage,
+            SectionStart::NextColumn,
+        ];
+        let start = starts[usize::from(byte(3)) % starts.len()];
+        document.add_section(Section::new(setup).with_start(start).with_blocks([last]));
+    }
     if let Err(problem) = check_pages(book(), &document, 512) {
         panic!("{problem}");
     }
