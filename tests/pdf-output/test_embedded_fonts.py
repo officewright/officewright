@@ -11,6 +11,9 @@ from tests/fonts, and what the example embed_report counts:
   (text extraction cannot see that: it reads the ToUnicode map, not the glyphs);
 - where two characters share a glyph, pdftotext must read each through the replacement
   text (ActualText) of the second, in a file that declares PDF 1.5;
+- a variable font is embedded with a warning, and the tools accept the PDF (that its
+  program keeps only the default instance, none of these tools can see: the Rust test
+  embedded_fonts.rs checks its tables);
 - the example embed_report, which embeds every font of a directory, must count a font
   the subsetter does not support, or one without outlines it can take, apart from a
   damaged one.
@@ -61,6 +64,40 @@ def with_shared_glyph(font):
 
     assert font.count(deltas(4)) == 1
     return font.replace(deltas(4), deltas(2))
+
+
+def with_table(font, tag, data):
+    """The font with table `tag` added: its table directory, sorted by tag as it must be,
+    gets a record more, and every table keeps its data."""
+    count = int.from_bytes(font[4:6], "big")
+    tables = {}
+    for record in range(12, 12 + 16 * count, 16):
+        offset = int.from_bytes(font[record + 8 : record + 12], "big")
+        length = int.from_bytes(font[record + 12 : record + 16], "big")
+        tables[font[record : record + 4]] = font[offset : offset + length]
+    tables[tag] = data
+    selector = len(tables).bit_length() - 1
+    search = 16 << selector
+    fields = (len(tables), search, selector, 16 * len(tables) - search)
+    directory = bytearray(font[:4] + b"".join(field.to_bytes(2, "big") for field in fields))
+    body = bytearray()
+    for tag in sorted(tables):
+        table = tables[tag] + bytes(-len(tables[tag]) % 4)
+        checksum = sum(int.from_bytes(table[at : at + 4], "big") for at in range(0, len(table), 4))
+        offset = 12 + 16 * len(tables) + len(body)
+        directory += tag + b"".join(v.to_bytes(4, "big") for v in (checksum & 0xFFFFFFFF, offset, len(tables[tag])))
+        body += table
+    return bytes(directory + body)
+
+
+# The fvar table of a variable font with one axis, weight from 100 to 900, its default
+# 400, named by name ID 2; it has no named instances.
+WEIGHT_AXIS = (
+    b"".join(field.to_bytes(2, "big") for field in (1, 0, 16, 2, 1, 20, 0, 8))
+    + b"wght"
+    + b"".join((value << 16).to_bytes(4, "big") for value in (100, 400, 900))
+    + b"\0\0\0\2"
+)
 
 
 def with_unsupported_notdef(font):
@@ -221,6 +258,24 @@ class EmbeddedFontTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             text = run(["pdftotext", "-enc", "UTF-8", str(pdf), "-"]).stdout.decode("utf-8")
             self.assertEqual(text.split(), ["AÁA", "ÁA"])
+
+    def test_a_variable_font_is_embedded_with_a_warning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            font = Path(directory) / "variable.ttf"
+            font.write_bytes(with_table(MINIMAL.read_bytes(), b"fvar", WEIGHT_AXIS))
+            source = Path(directory) / "variable.txt"
+            source.write_text("AÁ A", encoding="utf-8")
+            pdf, stderr = self.convert(directory, font, source=source)
+            warning = "it is a variable font; only its default instance is embedded"
+            self.assertEqual(stderr, f"warning: font OfficewrightTest-Regular: {warning}\n")
+            result = subprocess.run(["qpdf", "--check", str(pdf)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(self.fonts(pdf), [("CID TrueType", "yes", "yes", "yes")])
+            text = run(["pdftotext", "-enc", "UTF-8", str(pdf), "-"]).stdout.decode("utf-8")
+            self.assertEqual(text.split(), ["AÁ", "A"])
+            pages, poppler = self.render(pdf, directory)
+            self.assertEqual(poppler, "")
+            self.assertLess(min(pages[0].split(b"\n", 3)[3]), 128, "the page is blank")
 
     def test_embed_report_counts_each_kind_of_failure(self):
         with tempfile.TemporaryDirectory() as directory:

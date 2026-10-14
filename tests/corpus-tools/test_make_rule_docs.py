@@ -103,6 +103,29 @@ class Check(unittest.TestCase):
             ],
         )
 
+    def test_a_sources_row_outside_the_table_is_reported(self):
+        text = self.sources.read_text(encoding="utf-8")
+        row = "| word-rules/E-line-exact.docx |"
+        # A blank line before the row ends the table there.
+        self.sources.write_text(text.replace(row, "\n" + row), "utf-8")
+        self.assertEqual(
+            rules.check(self.docs),
+            ["the word-rules rows of tests/corpus/SOURCES.md are not one block of its table"],
+        )
+        # Nor may the block begin anywhere but right under the table's header.
+        first = next(line for line in text.splitlines() if line.startswith("| word-rules/"))
+        self.sources.write_text(text.replace(first, "Some text\n" + first), "utf-8")
+        self.assertEqual(
+            rules.check(self.docs),
+            ["the word-rules rows of tests/corpus/SOURCES.md are not one block of its table"],
+        )
+        # A row text further in a line is no row.
+        self.sources.write_text(text.replace(row, "| note " + row), "utf-8")
+        self.assertEqual(
+            rules.check(self.docs),
+            ["tests/corpus/SOURCES.md has no row for word-rules/E-line-exact.docx"],
+        )
+
     def test_missing_sources_row_is_reported(self):
         text = self.sources.read_text(encoding="utf-8")
         self.sources.write_text(text.replace("| word-rules/E-line-exact.docx |", "|"), "utf-8")

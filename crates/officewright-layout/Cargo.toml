@@ -15,6 +15,7 @@ exclude = [
   "tests/fonts.rs",
   "tests/lines.rs",
   "tests/pages.rs",
+  "tests/render.rs",
   "tests/common",
   "tests/display.rs",
   "tests/snapshots",
@@ -29,6 +30,8 @@ unstable-ir = []
 # Entry points for the fuzz targets, the examples and the tests that use the repository's
 # test fonts. Not part of the API.
 fuzzing = []
+# Rendering into PDF (`render_pdf`), painting with officewright-pdf.
+pdf = ["dep:officewright-pdf"]
 
 [dependencies]
 # Pinned exactly: HarfRust is 0.x, and the layout follows its API behind one private
@@ -36,6 +39,8 @@ fuzzing = []
 harfrust = { version = "=0.14.0", default-features = false, features = ["std"] }
 officewright-core.workspace = true
 officewright-font.workspace = true
+# Our own PDF writer, for rendering; it depends on neither this crate nor officewright-doc.
+officewright-pdf = { workspace = true, optional = true }
 # The Unicode line breaking algorithm (UAX #14), where lines may end (approved with
 # HarfRust); no dependencies of its own.
 unicode-linebreak = { version = "0.1.5", default-features = false }

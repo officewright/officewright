@@ -807,14 +807,28 @@ def compact_formatting(
         "paragraph_formats": formats,
         "stories": stories,
     }
-    count = sum(len(s["paragraphs"]) for s in stories)
+    return result, formatting_note(result)
+
+
+SIZE_RUNS_NOTE = "left out to keep the file under 1 MB"
+
+
+def formatting_note(result: dict) -> str:
+    """SOURCES.md's note on a committed formatting.json, made from the file itself, so that
+    tests/corpus-tools can check the two agree."""
+    count = sum(len(story["paragraphs"]) for story in result["stories"])
     note = f"formatting as Word computes it: {count} paragraphs"
-    note += ", with runs" if export["runs"] else ", without runs"
-    if not export["complete"]:
+    if result["runs"]:
+        note += ", with runs"
+    elif result["runs_note"] == SIZE_RUNS_NOTE:
+        note += ", runs left out (size)"
+    else:
+        note += ", without runs"
+    if not result["complete"]:
         note += ", incomplete (time budget)"
-    if not styles_aligned:
+    if not result["styles_from_resaved_copy"]:
         note += ", body styles not matched to the re-saved copy"
-    return result, note
+    return note
 
 
 def formatting_bytes(result: dict) -> bytes:
@@ -835,8 +849,8 @@ def within_size(result: dict, note: str) -> tuple[bytes, str]:
         for paragraph in paragraphs:
             paragraph["font"] = renumbered[paragraph["font"]]
         result["runs"] = False
-        result["runs_note"] = "left out to keep the file under 1 MB"
-        note = note.replace(", with runs", ", runs left out (size)")
+        result["runs_note"] = SIZE_RUNS_NOTE
+        note = formatting_note(result)
         data = formatting_bytes(result)
     if len(data) > MAX_FORMATTING_BYTES:
         raise Refused(f"{result['document']}: formatting.json would be {len(data)} bytes")
@@ -887,7 +901,7 @@ PDFFONTS_TYPES = (
 # columns aside, and a name may hold spaces (a "#20" in the PDF), so the row is read by the
 # known types rather than by column positions.
 # The name is the shortest prefix before a known type. A name whose last word is "CID" and that
-# is too long for its column (36 characters) loses that word to the type "CID TrueType"; the
+# fills its column (36 characters or more) loses that word to the type "CID TrueType"; the
 # emb column is still read right, so such a font is never missed, only named short in a
 # refusal. pdffonts adds a bracketed suffix of two capitals to the type of an OpenType font.
 PDFFONTS_ROW = re.compile(
@@ -1224,6 +1238,11 @@ def with_fonts_embedded(pdf: Path, drawn: list[DrawnFont], directory: Path, tool
     return copy
 
 
+def locale_note(accepted: list[str]) -> str:
+    """How SOURCES.md names the language tags and number formats --allow-locale accepted."""
+    return "accepted with --allow-locale: " + ", ".join(accepted)
+
+
 def drawn_font_note(font: DrawnFont) -> str:
     """How SOURCES.md names a font the rasters draw with the maintainer's copy."""
     substitute = ""
@@ -1242,6 +1261,7 @@ def reference_row(
     poppler: str,
     dropped: list[str],
     formatting_note: str = "",
+    locale_accepted: list[str] | None = None,
 ) -> str:
     base = Path(record["file"]).stem
     windows = record["windows_version"]
@@ -1266,6 +1286,8 @@ def reference_row(
             or "none"
         ),
     ]
+    if locale_accepted:
+        notes.append(locale_note(locale_accepted))
     if formatting_note:
         notes.append(formatting_note)
     return (
@@ -1337,8 +1359,17 @@ def check_result(
         resaved_parts = read_parts(resaved)
         problems = docx_privacy_problems(resaved)
         problems += embedded_font_problems(resaved_parts)
+        # Accepted only by the maintainer's --allow-locale, and then named in SOURCES.md, so
+        # that tests/corpus-tools can tell an accepted trace from a later change.
+        accepted = locale_problems(original_parts, resaved_parts)
         if not allow_locale:
-            problems += locale_problems(original_parts, resaved_parts)
+            problems += accepted
+            accepted = []
+        problems += [
+            f"{trace}, which would break the SOURCES.md table"
+            for trace in accepted
+            if not FONT.match(trace)
+        ]
         mode = compatibility_mode(original_parts)
         resaved_mode = compatibility_mode(resaved_parts)
         # Word drops a legacy flag it does not apply in the document's mode, and adds
@@ -1394,7 +1425,7 @@ def check_result(
     formatting, formatting_note = None, ""
     if record["script_version"] >= 3:
         formatting, formatting_note = checked_formatting(record, results, resaved_parts, group)
-    row = reference_row(group, record, drawn, poppler, dropped, formatting_note)
+    row = reference_row(group, record, drawn, poppler, dropped, formatting_note, accepted)
     return Checked(record, pdf, resaved, row, geometry, drawn, formatting, formatting_note)
 
 
