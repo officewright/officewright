@@ -739,8 +739,10 @@ def tab_hanging(no_indent_tab: bool, mode: int = 15) -> Doc:
     # Word 16 drops the flag from a document in mode 15 when it saves it and renders as if
     # it were absent (the references of #13). In mode 14 it keeps the flag and applies it
     # (#18, references of #50): the re-saved E-tab-hanging-noindenttab-14 still has it, and
-    # the text after the list label moves from 122.06 pt to 108.02 pt in case B and to
-    # 144.02 pt in case G (reference/word-rules/E-tab-hanging-noindenttab-14/geometry.json).
+    # the text after the list label starts at 108.02 pt in case B and at 144.02 pt in case G
+    # (36 pt and 72 pt past the margin), where E-tab-hanging-14 has it at 122.06 pt in both.
+    # Each x is from the left page edge, the margin at 72.02 pt, in
+    # tests/corpus/reference/word-rules/E-tab-hanging-noindenttab-14/geometry.json.
     where = ""
     if mode != 15:
         name += f"-{mode}"
