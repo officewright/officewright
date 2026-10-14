@@ -1,8 +1,10 @@
 //! `corpus-runner gate`: the release criteria of Milestone 4 over a run's report, printed as
 //! a markdown table with the target, the value on main and the value on the branch.
 
+use std::collections::HashMap;
+
 use crate::metrics::Scores;
-use crate::report::{Report, Status};
+use crate::report::{FileResult, Report, Status};
 
 /// The fonts of `tests/fonts`, which Word had too when it rendered the references: a
 /// document in these only is laid out with Word's fonts (class S).
@@ -230,7 +232,7 @@ impl Missing {
 }
 
 /// A file the runner tried to score: one with a Word reference.
-fn is_reference(file: &crate::report::FileResult) -> bool {
+fn is_reference(file: &FileResult) -> bool {
     file.scores.is_some() || file.score_error.is_some()
 }
 
@@ -238,9 +240,14 @@ fn is_reference(file: &crate::report::FileResult) -> bool {
 /// references, would otherwise leave main's failing documents out of every row. Files that
 /// only the report has are new documents and count for nothing here.
 pub fn missing(report: &Report, main: &Report) -> Missing {
+    let files: HashMap<&str, &FileResult> = report
+        .files
+        .iter()
+        .map(|file| (file.path.as_str(), file))
+        .collect();
     let mut out = Missing::default();
     for before in &main.files {
-        match report.files.iter().find(|file| file.path == before.path) {
+        match files.get(before.path.as_str()) {
             None => out.files.push(before.path.clone()),
             Some(file) if is_reference(before) && !is_reference(file) => {
                 out.references.push(before.path.clone());
@@ -673,7 +680,6 @@ pub fn passes(measures: &[Measure]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::report::FileResult;
 
     fn scores(pages: usize, text: f64, lines: usize, agreeing: usize, fonts: &[&str]) -> Scores {
         Scores {
