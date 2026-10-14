@@ -1,8 +1,8 @@
 //! Which of a run's four fonts a character takes: Word's rule, MS-OI29500 2.1.88 b (the
 //! same note is MS-OE376 for Part 4 §2.3.2.24, rFonts).
 
-// reason: the layout itself uses this from PR 6 (paragraph layout) on; until then only
-// the tests and the `fuzzing` module do.
+// reason: the layout itself uses this once pagination (plan PR 8) lays out pages; until
+// then only the tests and the `fuzzing` module do.
 #![cfg_attr(not(any(test, feature = "fuzzing")), allow(dead_code))]
 
 use crate::ir::{EastAsiaCharset, FontHint, RunFonts, RunStyle};

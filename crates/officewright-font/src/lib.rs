@@ -23,6 +23,7 @@ mod error;
 mod face;
 mod font;
 mod index;
+mod name_offsets;
 mod resolve;
 mod subset;
 mod system;
