@@ -691,12 +691,13 @@ def body_paragraph_styles(
     """(text, style id, style name) of the paragraphs of the body in order, the order of
     Word's main story: text boxes, alternative content and notes are stories of their own.
     Word's Paragraphs also count the end-of-row mark of every table row, which has no w:p;
-    it is ("", None, None) here, after the row's cells."""
+    it is ("", None, None) here, after the row's cells. The style is None where the copy does
+    not say which one Word applied."""
     root = ElementTree.fromstring(parts["word/document.xml"])
     styles = None
     if "word/styles.xml" in parts:
         styles = ElementTree.fromstring(parts["word/styles.xml"])
-    names, default = {}, ""
+    names, defaults = {}, []
     for style in styles.iter(f"{W}style") if styles is not None else ():
         if style.get(f"{W}type") != "paragraph":
             continue
@@ -704,7 +705,11 @@ def body_paragraph_styles(
         name = style.find(f"{W}name")
         names[style_id] = name.get(f"{W}val", style_id) if name is not None else style_id
         if style.get(f"{W}default") in ("1", "true", "on"):
-            default = style_id
+            defaults.append(style_id)
+    # A paragraph without w:pStyle has the default paragraph style. When the copy marks none,
+    # or more than one (word-rules/E-default-paragraph-style asks which Word takes), it does
+    # not say which style Word applied, and a guess would contradict Word's own (#149).
+    default = defaults[0] if len(defaults) == 1 else None
     MC = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
     other_stories = (f"{W}txbxContent", f"{MC}AlternateContent")
     out = []
@@ -770,6 +775,9 @@ def compact_formatting(
             out = {"index": paragraph["index"], "text": paragraph["text"]}
             if paragraph["style"] is not None:
                 out["style"] = paragraph["style"]
+            # Left out when Word could not say, so that it differs from a built-in style.
+            if paragraph["style_builtin"] is not None:
+                out["style_builtin"] = paragraph["style_builtin"]
             if story["story"] == "main" and styles_aligned and xml[number][1] is not None:
                 out["style_id"], out["style_name"] = xml[number][1], xml[number][2]
             out["format"] = index_of(formats, format_index, paragraph["format"])
@@ -878,6 +886,10 @@ PDFFONTS_TYPES = (
 # or "[none]" for a font dictionary that is not an object of its own. A long name pushes the
 # columns aside, and a name may hold spaces (a "#20" in the PDF), so the row is read by the
 # known types rather than by column positions.
+# The name is the shortest prefix before a known type. A name whose last word is "CID" and that
+# is too long for its column (36 characters) loses that word to the type "CID TrueType"; the
+# emb column is still read right, so such a font is never missed, only named short in a
+# refusal. pdffonts adds a bracketed suffix of two capitals to the type of an OpenType font.
 PDFFONTS_ROW = re.compile(
     r"^(?P<name>.+?)\s+(?:" + "|".join(map(re.escape, PDFFONTS_TYPES)) + r")(?: \([A-Z]{2}\))?"
     r"\s+\S+\s+(?P<emb>yes|no)\s+(?:yes|no)\s+(?:yes|no)\s+(?:\[none\]|\d+\s+\d+)\s*$"
@@ -1112,6 +1124,8 @@ class DrawnFont:
 
 def drawn_font(name: str, index: dict[str, list[FontFace]]) -> DrawnFont:
     """The face for a font the PDF names without embedding it; refused unless exactly one."""
+    if not FONT.match(name):
+        raise Refused(f"{name!r}: unexpected font name in the PDF")
     substitute = SUBSTITUTES.get(name, "")
     postscript = substitute or name
     if "," in postscript:
