@@ -692,6 +692,7 @@ class Import(unittest.TestCase):
         self.change_resaved(record, {
             "word/settings.xml": [
                 (b'<w:listSeparator w:val=","/>', b'<w:listSeparator w:val=";"/>'),
+                (b'<w:decimalSymbol w:val="."/>', b'<w:decimalSymbol w:val=","/>'),
             ],
         })
         self.assertEqual(len(self.run_import(allow_locale=True)), 2)
@@ -705,8 +706,19 @@ class Import(unittest.TestCase):
             f"| reference/word-rules/{rules.documents()[0].name}/ ", rows[0]
         )
         self.assertIn(
-            "accepted with --allow-locale: the re-saved copy has listSeparator ';'", rows[0]
+            "accepted with --allow-locale: the re-saved copy has decimalSymbol ',', "
+            "the re-saved copy has listSeparator ';'",
+            rows[0],
         )
+
+    def test_a_locale_trace_that_would_break_the_table_is_refused(self):
+        record = self.add_result(rules.documents()[0])
+        self.change_resaved(record, {
+            "word/settings.xml": [
+                (b'<w:listSeparator w:val=","/>', b'<w:listSeparator w:val="|"/>'),
+            ],
+        })
+        self.assertIn("which would break the SOURCES.md table", self.refused(allow_locale=True))
 
     def test_refuses_values_that_would_break_the_table(self):
         for key, value in (("word_build", "16.0 | x"), ("rendered", "today"),

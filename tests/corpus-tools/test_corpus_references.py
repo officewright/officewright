@@ -132,20 +132,41 @@ class References(unittest.TestCase):
                 problems += importer.embedded_font_problems(importer.read_parts(resaved))
                 self.assertEqual(problems, [])
 
+    def row(self, folder):
+        key = f"| reference/{folder.parent.name}/{folder.name}/ |"
+        (row,) = [r for r in self.sources.splitlines() if r.startswith(key)]
+        return row
+
+    def notes(self, folder):
+        """The Notes cell of the folder's SOURCES.md row, as its separate notes."""
+        return self.row(folder).rstrip(" |").rsplit(" | ", 1)[-1].split("; ")
+
     def test_locale_traces_are_only_those_sources_md_names_as_accepted(self):
         for folder in folders():
             resaved, original = self.resaved(folder)
-            group, name = folder.parent.name, folder.name
-            with self.subTest(document=f"{group}/{name}"):
+            with self.subTest(document=f"{folder.parent.name}/{folder.name}"):
                 added = importer.locale_problems(
                     importer.read_parts(original), importer.read_parts(resaved)
                 )
-                key = f"| reference/{group}/{name}/ |"
-                (row,) = [r for r in self.sources.splitlines() if r.startswith(key)]
-                if added:
-                    self.assertIn(importer.locale_note(added), row)
+                accepted = [
+                    note for note in self.notes(folder)
+                    if note.startswith("accepted with --allow-locale")
+                ]
+                self.assertEqual(accepted, [importer.locale_note(added)] if added else [])
+
+    def test_sources_md_describes_each_formatting_export(self):
+        for folder in folders():
+            with self.subTest(document=f"{folder.parent.name}/{folder.name}"):
+                said = [
+                    note for note in self.notes(folder)
+                    if note.startswith("formatting as Word computes it")
+                ]
+                path = folder / "formatting.json"
+                if path.exists():
+                    formatting = json.loads(path.read_text(encoding="utf-8"))
+                    self.assertEqual(said, [importer.formatting_note(formatting)])
                 else:
-                    self.assertNotIn("accepted with --allow-locale", row)
+                    self.assertEqual(said, [], "the row describes a formatting.json")
 
     def test_word_s_page_breaks_are_those_of_the_re_saved_copy(self):
         for folder in folders():
@@ -154,6 +175,12 @@ class References(unittest.TestCase):
                 geometry = json.loads((folder / "geometry.json").read_text(encoding="utf-8"))
                 expected = importer.rendered_page_breaks(importer.read_parts(resaved))
                 self.assertEqual(geometry["page_breaks"], expected)
+
+    def test_every_re_saved_copy_belongs_to_a_reference(self):
+        for path in sorted((CORPUS / "resaved").glob("*/*")):
+            with self.subTest(file=str(path.relative_to(CORPUS))):
+                self.assertEqual(path.suffix, ".docx")
+                self.assertTrue((REFERENCE / path.parent.name / path.stem).is_dir())
 
     def test_reference_files_name_no_profile_path(self):
         for folder in folders():

@@ -807,14 +807,28 @@ def compact_formatting(
         "paragraph_formats": formats,
         "stories": stories,
     }
-    count = sum(len(s["paragraphs"]) for s in stories)
+    return result, formatting_note(result)
+
+
+SIZE_RUNS_NOTE = "left out to keep the file under 1 MB"
+
+
+def formatting_note(result: dict) -> str:
+    """SOURCES.md's note on a committed formatting.json, made from the file itself, so that
+    tests/corpus-tools can check the two agree."""
+    count = sum(len(story["paragraphs"]) for story in result["stories"])
     note = f"formatting as Word computes it: {count} paragraphs"
-    note += ", with runs" if export["runs"] else ", without runs"
-    if not export["complete"]:
+    if result["runs"]:
+        note += ", with runs"
+    elif result["runs_note"] == SIZE_RUNS_NOTE:
+        note += ", runs left out (size)"
+    else:
+        note += ", without runs"
+    if not result["complete"]:
         note += ", incomplete (time budget)"
-    if not styles_aligned:
+    if not result["styles_from_resaved_copy"]:
         note += ", body styles not matched to the re-saved copy"
-    return result, note
+    return note
 
 
 def formatting_bytes(result: dict) -> bytes:
@@ -835,8 +849,8 @@ def within_size(result: dict, note: str) -> tuple[bytes, str]:
         for paragraph in paragraphs:
             paragraph["font"] = renumbered[paragraph["font"]]
         result["runs"] = False
-        result["runs_note"] = "left out to keep the file under 1 MB"
-        note = note.replace(", with runs", ", runs left out (size)")
+        result["runs_note"] = SIZE_RUNS_NOTE
+        note = formatting_note(result)
         data = formatting_bytes(result)
     if len(data) > MAX_FORMATTING_BYTES:
         raise Refused(f"{result['document']}: formatting.json would be {len(data)} bytes")
@@ -1351,6 +1365,11 @@ def check_result(
         if not allow_locale:
             problems += accepted
             accepted = []
+        problems += [
+            f"{trace}, which would break the SOURCES.md table"
+            for trace in accepted
+            if not FONT.match(trace)
+        ]
         mode = compatibility_mode(original_parts)
         resaved_mode = compatibility_mode(resaved_parts)
         # Word drops a legacy flag it does not apply in the document's mode, and adds

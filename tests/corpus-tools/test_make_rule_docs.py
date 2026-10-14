@@ -112,6 +112,13 @@ class Check(unittest.TestCase):
             rules.check(self.docs),
             ["the word-rules rows of tests/corpus/SOURCES.md are not one block of its table"],
         )
+        # Nor may the block begin anywhere but right under the table's header.
+        first = next(line for line in text.splitlines() if line.startswith("| word-rules/"))
+        self.sources.write_text(text.replace(first, "Some text\n" + first), "utf-8")
+        self.assertEqual(
+            rules.check(self.docs),
+            ["the word-rules rows of tests/corpus/SOURCES.md are not one block of its table"],
+        )
         # A row text further in a line is no row.
         self.sources.write_text(text.replace(row, "| note " + row), "utf-8")
         self.assertEqual(
