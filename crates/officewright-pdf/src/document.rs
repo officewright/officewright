@@ -116,9 +116,10 @@ impl Document {
         self.pages.get_mut(index)
     }
 
-    /// Sets how the file stores page content, embedded fonts and decoded images:
-    /// [`Compression::Flate`] unless set otherwise. JPEG files, and PNG files that go into
-    /// the PDF as they are, keep their own compression either way.
+    /// Sets how the file stores page content, embedded fonts, and the samples and soft
+    /// masks of images decoded from PNG files: [`Compression::Flate`] unless set
+    /// otherwise. JPEG files, and PNG files that go into the PDF as they are, keep their
+    /// own compression either way.
     ///
     /// ```
     /// use officewright_pdf::{Compression, Font, PageSize, Pt, StandardFont, text_to_pdf};
@@ -134,7 +135,8 @@ impl Document {
         self.compression = compression;
     }
 
-    /// How the file stores page content, embedded fonts and decoded images.
+    /// How the file stores page content, embedded fonts, and the samples and soft masks of
+    /// images decoded from PNG files.
     pub fn compression(&self) -> Compression {
         self.compression
     }
