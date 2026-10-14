@@ -233,6 +233,10 @@ impl<'a> Formats<'a> {
     /// wrapping, margins and vertical alignment apply to every cell of a row one of whose
     /// cells it applies to (MS-OI29500 §17.7.6.8(a)).
     pub fn cell_properties(&mut self, cell: TableCell<'a>) -> TableCellProperties {
+        #[cfg(test)]
+        {
+            self.work.cells += 1;
+        }
         let (document, index) = cell.place();
         if !std::ptr::eq(document, self.document) {
             return Formats::new(document).cell_properties(cell);

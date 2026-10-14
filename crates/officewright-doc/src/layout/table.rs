@@ -12,8 +12,8 @@ use super::paragraph::border;
 use super::{Step, Translator};
 use crate::model::{
     Block, Border, BorderStyle, CellMerge, HeightRule, PositionAnchor, Table, TableBorders,
-    TableCell, TableJustification, TableLayout, TablePosition, TableRow, TableWidth, TextDirection,
-    VerticalJustification,
+    TableCell, TableCellProperties, TableJustification, TableLayout, TablePosition, TableRow,
+    TableWidth, TextDirection, VerticalJustification,
 };
 
 impl<'a> Translator<'a> {
@@ -121,7 +121,7 @@ impl<'a> Translator<'a> {
         #[cfg(test)]
         let mut built_at = 0;
         for cell in row.cells() {
-            let (span, continues) = self.merge(cell);
+            let (span, continues, properties) = self.merge(cell);
             // A cell that continues a horizontal merge (`w:hMerge`, ISO/IEC 29500-4
             // §14.4.13) widens the cell before it, as a span does. The widened cell is
             // moved, never copied: a copy per continuing cell costs the content times
@@ -152,7 +152,7 @@ impl<'a> Translator<'a> {
             cells.extend(open.take());
             self.path
                 .extend([Step::Field("cells"), Step::Index(cells.len())]);
-            let built = self.cell(cell, span, &table.cell_margins());
+            let built = self.cell(cell, &properties, span, &table.cell_margins());
             #[cfg(test)]
             {
                 built_at = built.blocks().as_ptr().addr();
@@ -229,9 +229,15 @@ impl<'a> Translator<'a> {
             .with_width_after(preferred(properties.width_after()))
     }
 
-    /// A cell, with the span it has so far.
-    fn cell(&mut self, cell: TableCell<'a>, span: u16, margins: &ir::CellMargins) -> ir::Cell {
-        let head = self.cell_head(cell, span, margins);
+    /// A cell, with its properties in effect and the span it has so far.
+    fn cell(
+        &mut self,
+        cell: TableCell<'a>,
+        properties: &TableCellProperties,
+        span: u16,
+        margins: &ir::CellMargins,
+    ) -> ir::Cell {
+        let head = self.cell_head(properties, span, margins);
         let blocks = self.cell_blocks(cell.blocks());
         head.with_blocks(blocks)
     }
@@ -239,8 +245,12 @@ impl<'a> Translator<'a> {
     /// A cell's properties as an IR cell without its blocks; what the IR has no place
     /// for is listed.
     #[inline(never)]
-    fn cell_head(&mut self, cell: TableCell<'a>, span: u16, margins: &ir::CellMargins) -> ir::Cell {
-        let properties = self.formats.cell_properties(cell);
+    fn cell_head(
+        &mut self,
+        properties: &TableCellProperties,
+        span: u16,
+        margins: &ir::CellMargins,
+    ) -> ir::Cell {
         if properties.fit_text() == Some(true) {
             self.leave_out(ReportKind::FeatureUnsupported, || {
                 "the cell's text fitting (w:tcFitText) is not applied".into()
@@ -312,19 +322,19 @@ impl<'a> Translator<'a> {
         blocks
     }
 
-    /// A cell's span in effect, 1 for none or one out of range, and whether it continues
-    /// a horizontal merge.
+    /// A cell's span in effect, 1 for none or one out of range, whether it continues a
+    /// horizontal merge, and its properties in effect, read once for the cell. They are
+    /// boxed, so that they take no room in the frames of the cells' translation, which
+    /// recurses.
     #[inline(never)]
-    fn merge(&mut self, cell: TableCell<'a>) -> (u16, bool) {
-        let properties = self.formats.cell_properties(cell);
+    fn merge(&mut self, cell: TableCell<'a>) -> (u16, bool, Box<TableCellProperties>) {
+        let properties = Box::new(self.formats.cell_properties(cell));
         let span = properties
             .grid_span()
             .and_then(|span| u16::try_from(span.max(1)).ok())
             .unwrap_or(1);
-        (
-            span,
-            properties.horizontal_merge() == Some(CellMerge::Continue),
-        )
+        let continues = properties.horizontal_merge() == Some(CellMerge::Continue);
+        (span, continues, properties)
     }
 
     /// The empty paragraph added to a cell that does not end with one, listed; built

@@ -94,6 +94,8 @@ pub(crate) struct Work {
     pub(crate) combinations: usize,
     /// Tables whose rows and cells were worked out.
     pub(crate) tables: usize,
+    /// Cells whose properties in effect were worked out.
+    pub(crate) cells: usize,
 }
 
 impl<'a> Formats<'a> {

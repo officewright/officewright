@@ -2823,3 +2823,21 @@ fn translates_tables_with_their_style() {
         ]
     );
 }
+
+#[test]
+fn reads_each_cell_s_properties_once() {
+    // Four cells, one of which continues a horizontal merge, in a table with a style: the
+    // properties in effect of each are worked out once, for its span and merge and for
+    // the cell itself.
+    let styles = format!(
+        r#"<w:styles xmlns:w="{W}"><w:style w:type="table" w:styleId="Grid"><w:tcPr><w:shd w:val="clear" w:fill="FF0000"/></w:tcPr></w:style></w:styles>"#
+    );
+    let table = r#"<w:tbl><w:tblPr><w:tblStyle w:val="Grid"/></w:tblPr><w:tblGrid><w:gridCol w:w="1000"/><w:gridCol w:w="1000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:hMerge w:val="restart"/></w:tcPr><w:p/></w:tc><w:tc><w:tcPr><w:hMerge/></w:tcPr><w:p/></w:tc></w:tr><w:tr><w:tc><w:p/></w:tc><w:tc><w:tcPr><w:gridSpan w:val="1"/></w:tcPr><w:p/></w:tc></w:tr></w:tbl><w:p/>"#;
+    let document = with_parts(table, &[("styles", "styles.xml", styles)]);
+    let (translation, reads) = work_of(|work| work.cell_reads, || translate(&document));
+    assert_eq!(reads, 4);
+    let rows = tables(&translation)[0].rows();
+    assert_eq!(rows[0].cells().len(), 1);
+    assert_eq!(rows[0].cells()[0].grid_span(), 2);
+    assert!(rows[1].cells()[1].shading().is_some());
+}
