@@ -5,8 +5,9 @@
 // the `fuzzing` module do.
 #![cfg_attr(not(any(test, feature = "fuzzing")), allow(dead_code))]
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
+use std::rc::Rc;
 
 use officewright_core::Pt;
 
@@ -209,6 +210,7 @@ pub(crate) fn paginate(
             next_number: 1,
             leaders: LeaderBudget::default(),
             totals: totals.clone(),
+            frames: HashMap::new(),
         };
         let lines = pager.run(&flow)?;
         if pager.pages.is_empty() {
@@ -250,7 +252,10 @@ struct Totals {
 
 impl Totals {
     /// The counts of `pages` of `document`: all of them, but one less when the first
-    /// section has a title page and numbers its pages from 0 (MS-OI29500 2.1.489 a).
+    /// section has a title page and numbers its pages from 0 (MS-OI29500 2.1.489 a). A
+    /// section counts the blank page of its odd or even start, and not the page it starts
+    /// on when it is continuous: hypotheses until Word renders (`E-section-odd.docx`,
+    /// `E-section-continuous-headers.docx`).
     fn of(pages: &[Page], document: &Document) -> Self {
         let count = |section: usize| {
             u32::try_from(pages.iter().filter(|page| page.section == section).count())
@@ -302,8 +307,38 @@ fn counts_pages(document: &Document) -> bool {
     })
 }
 
+/// Whether `flowed` has a `PAGE` field, whose value depends on the page it lands on.
+fn has_page_field(flowed: &Flowed<'_>) -> bool {
+    flowed
+        .paragraph
+        .inlines()
+        .iter()
+        .any(|inline| matches!(inline, Inline::Field(field) if *field.kind() == FieldKind::Page))
+}
+
+/// Whether `blocks` have a field whose value the layout computes, at any depth of
+/// tables.
+fn has_page_fields(blocks: &[Block], depth: usize) -> bool {
+    blocks.iter().any(|block| match block {
+        Block::Paragraph(paragraph) => paragraph.inlines().iter().any(|inline| {
+            matches!(inline, Inline::Field(field) if matches!(
+                field.kind(),
+                FieldKind::Page | FieldKind::NumPages | FieldKind::SectionPages
+            ))
+        }),
+        Block::Table(table) => {
+            depth < MAX_TABLE_DEPTH
+                && table.rows().iter().any(|row| {
+                    row.cells()
+                        .iter()
+                        .any(|cell| has_page_fields(cell.blocks(), depth + 1))
+                })
+        }
+    })
+}
+
 /// Which of its section's headers and footers a page has.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Kind {
     /// That of the section's first page.
     First,
@@ -362,7 +397,14 @@ struct Pager<'d, 'f, 'b> {
     leaders: LeaderBudget,
     /// The page counts of the pass before, for `NUMPAGES` and `SECTIONPAGES`.
     totals: Totals,
+    /// The headers and footers laid out so far, by section, side, kind and the values of
+    /// their fields when they have any: each is laid out once, not once a page.
+    frames: HashMap<FrameKey, Rc<Frame<'d>>>,
 }
+
+/// What a header or footer is laid out for: its section, whether it is the header, its
+/// kind, and the values of its fields when it has fields the layout computes.
+type FrameKey = (usize, bool, Kind, Option<FieldValues>);
 
 impl<'d> Pager<'d, '_, '_> {
     /// Places every paragraph of `flow`, section by section. Returns the number of lines
@@ -437,6 +479,37 @@ impl<'d> Pager<'d, '_, '_> {
                 None => break,
             };
             let keeps_space = kept_top || index == 0 || flowed.first_in_cell;
+            let (mut first_page, mut ends_with_break) =
+                self.place(flow, index, layout, keeps_space)?;
+            // A `PAGE` field shows the number of the page its paragraph starts on: laid out
+            // for the page it began on, a paragraph that keep or widow rules moved is laid
+            // out again for the page it landed on, and placed again.
+            let landed = self.pages.get(first_page).map(|page| page.number);
+            if let Some(landed) = landed.filter(|&n| n != values.page && has_page_field(flowed)) {
+                self.restore(checkpoint);
+                let values = FieldValues {
+                    page: landed,
+                    ..values.clone()
+                };
+                *layout = paragraph::lay_out_with(
+                    self.document,
+                    flowed.paragraph,
+                    self.body()?.width,
+                    (&mut *self.fonts, &mut *self.shaper),
+                    &flowed.location,
+                    Some(&values),
+                );
+                (first_page, ends_with_break) = self.place(flow, index, layout, keeps_space)?;
+                if self.pages.get(first_page).map(|page| page.number) != Some(landed) {
+                    self.fonts.report_once(
+                        ReportKind::FieldCached,
+                        &flowed.location,
+                        "a PAGE field in the body text shows the number of a page next to the \
+                         one its paragraph starts on"
+                            .to_owned(),
+                    );
+                }
+            }
             // A page or column break before its last line: its last lines start a page
             // whatever comes before them.
             let inner_break = layout
@@ -445,7 +518,6 @@ impl<'d> Pager<'d, '_, '_> {
                 .rev()
                 .skip(1)
                 .any(|line| matches!(line.end, LineEnd::PageBreak | LineEnd::ColumnBreak));
-            let (first_page, ends_with_break) = self.place(flow, index, layout, keeps_space)?;
             let here = Placed {
                 first_page,
                 last_page: self.pages.len().saturating_sub(1),
@@ -548,6 +620,13 @@ impl<'d> Pager<'d, '_, '_> {
         }
         if let Some(start) = section.page_numbering().start() {
             self.next_number = start;
+        }
+        if section.page_numbering().chapter_style().is_some() {
+            self.fonts.report_once(
+                ReportKind::FeatureUnsupported,
+                &location,
+                "chapter numbers before page numbers are not written".to_owned(),
+            );
         }
         // The first section starts the first page, numbered 1 or as it says, whatever its
         // start: no blank page comes before it for an odd or even start. Hypothesis until a
@@ -752,24 +831,7 @@ impl<'d> Pager<'d, '_, '_> {
             .map(|line| line.height.0)
             .sum();
         let mut items = Vec::new();
-        let borders = flowed.paragraph.props().borders();
-        let bordered = [
-            borders.top(),
-            borders.bottom(),
-            borders.start(),
-            borders.end(),
-            borders.between(),
-            borders.bar(),
-        ]
-        .iter()
-        .any(Option::is_some);
-        if bordered {
-            self.fonts.report_once(
-                ReportKind::FeatureUnsupported,
-                &flowed.location,
-                "paragraph borders are not drawn yet".to_owned(),
-            );
-        }
+        self.report_borders(flowed);
         let origin = Point {
             x: left,
             y: Pt(top),
@@ -820,6 +882,9 @@ impl<'d> Pager<'d, '_, '_> {
         let mut body = body(setup);
         let mut items = Vec::new();
         if let Some(ir) = self.document.sections().get(section).filter(|_| !blank) {
+            // The section's first page is the first of its own: a continuous section starts
+            // on a page that keeps the section before, so its title-page header is on its
+            // second. Hypothesis until a Word render (`E-section-continuous-headers.docx`).
             let first = self
                 .pages
                 .iter()
@@ -838,8 +903,9 @@ impl<'d> Pager<'d, '_, '_> {
                 ..self.field_values(section)
             };
             let margins = setup.margins();
-            let header = self.frame(ir, section, true, kind, &values, body.width)?;
-            let footer = self.frame(ir, section, false, kind, &values, body.width)?;
+            let room = (body.width, setup.size().height());
+            let header = self.cached_frame(ir, section, true, kind, &values, room)?;
+            let footer = self.cached_frame(ir, section, false, kind, &values, room)?;
             let header_top = margins.header().0;
             let footer_bottom = setup.size().height().0 - margins.footer().0;
             // An empty header or footer takes no room (design 6.4).
@@ -849,8 +915,17 @@ impl<'d> Pager<'d, '_, '_> {
             if margins.bottom().0 >= 0.0 && !footer.parts.is_empty() {
                 body.bottom = Pt(body.bottom.0.min(footer_bottom - footer.height));
             }
+            if body.bottom.0 <= body.top.0 {
+                self.fonts.report_once(
+                    ReportKind::Overflow,
+                    &Location::default(),
+                    "the header and footer of a page leave no room for its body text, which \
+                     is drawn below them"
+                        .to_owned(),
+                );
+            }
             self.paint_frame(
-                header,
+                &header,
                 Point {
                     x: body.left,
                     y: Pt(header_top),
@@ -859,7 +934,7 @@ impl<'d> Pager<'d, '_, '_> {
             );
             let footer_top = footer_bottom - footer.height;
             self.paint_frame(
-                footer,
+                &footer,
                 Point {
                     x: body.left,
                     y: Pt(footer_top),
@@ -883,6 +958,28 @@ impl<'d> Pager<'d, '_, '_> {
         Ok(())
     }
 
+    /// Reports, once, that the borders of `flowed` are not drawn.
+    fn report_borders(&mut self, flowed: &Flowed<'_>) {
+        let borders = flowed.paragraph.props().borders();
+        let bordered = [
+            borders.top(),
+            borders.bottom(),
+            borders.start(),
+            borders.end(),
+            borders.between(),
+            borders.bar(),
+        ]
+        .iter()
+        .any(Option::is_some);
+        if bordered {
+            self.fonts.report_once(
+                ReportKind::FeatureUnsupported,
+                &flowed.location,
+                "paragraph borders are not drawn yet".to_owned(),
+            );
+        }
+    }
+
     /// The values of the fields of section `section` on the current page.
     fn field_values(&self, section: usize) -> FieldValues {
         let format = self
@@ -902,9 +999,42 @@ impl<'d> Pager<'d, '_, '_> {
         }
     }
 
-    /// The header (`header`) or footer of `kind` of section `section`, laid out `width`
+    /// [`frame`](Self::frame), laid out once for each section, side, kind and, for a frame
+    /// with fields the layout computes, field values.
+    fn cached_frame(
+        &mut self,
+        ir: &'d Section,
+        section: usize,
+        header: bool,
+        kind: Kind,
+        values: &FieldValues,
+        room: (Pt, Pt),
+    ) -> Result<Rc<Frame<'d>>> {
+        let set = if header { ir.headers() } else { ir.footers() };
+        let blocks = match kind {
+            Kind::First => set.first(),
+            Kind::Even => set.even(),
+            Kind::Primary => set.primary(),
+        };
+        let key = (
+            section,
+            header,
+            kind,
+            has_page_fields(blocks, 0).then(|| values.clone()),
+        );
+        if let Some(frame) = self.frames.get(&key) {
+            return Ok(Rc::clone(frame));
+        }
+        let frame = Rc::new(self.frame(ir, section, header, kind, values, room)?);
+        self.frames.insert(key, Rc::clone(&frame));
+        Ok(frame)
+    }
+
+    /// The header (`header`) or footer of `kind` of section `section`, laid out `room.0`
     /// wide with the field values `values`: its paragraphs one under the other with the
-    /// space between them, the space before the first and after the last included.
+    /// space between them, the space before the first and after the last included. Its
+    /// paragraphs past the page's height `room.1` are left out, and that is reported:
+    /// nothing of them could be seen.
     fn frame(
         &mut self,
         ir: &'d Section,
@@ -912,7 +1042,7 @@ impl<'d> Pager<'d, '_, '_> {
         header: bool,
         kind: Kind,
         values: &FieldValues,
-        width: Pt,
+        (width, page_height): (Pt, Pt),
     ) -> Result<Frame<'d>> {
         let set = if header { ir.headers() } else { ir.footers() };
         let (blocks, name) = match kind {
@@ -947,6 +1077,15 @@ impl<'d> Pager<'d, '_, '_> {
         let mut height = 0.0;
         let mut above: Option<&'d Paragraph> = None;
         for part in flowed {
+            if height >= page_height.0 {
+                self.fonts.report_once(
+                    ReportKind::Overflow,
+                    &part.location,
+                    "a header or footer taller than its page is cut at the page's height"
+                        .to_owned(),
+                );
+                break;
+            }
             let props = part.paragraph.props();
             height += match above {
                 Some(above) => paragraph::space_between(self.document, above.props(), props).0,
@@ -972,8 +1111,9 @@ impl<'d> Pager<'d, '_, '_> {
     }
 
     /// Adds to `items` what `frame` draws, its top left corner at `origin`.
-    fn paint_frame(&mut self, frame: Frame<'d>, origin: Point, items: &mut Vec<DisplayItem>) {
+    fn paint_frame(&mut self, frame: &Frame<'d>, origin: Point, items: &mut Vec<DisplayItem>) {
         for (part, layout, top) in &frame.parts {
+            self.report_borders(part);
             let at = Point {
                 x: origin.x,
                 y: Pt(origin.y.0 + top),
@@ -2174,6 +2314,266 @@ mod tests {
         // Section 1 numbers its pages in capital Roman numerals; section 2 continues the
         // numbers, and its field writes them as letters.
         assert_eq!(footers, ["I 5 2", "II 5 2", "c 5 3", "d 5 3", "e 5 3"]);
+    }
+
+    /// A paragraph of the fields `kinds`, in the test font.
+    fn fields(style: RunStyleId, kinds: Vec<crate::ir::FieldKind>) -> Block {
+        Paragraph::new(style)
+            .with_props(spacing(0.0, 0.0))
+            .with_inlines(
+                kinds
+                    .into_iter()
+                    .map(|kind| Inline::Field(crate::ir::Field::new(kind, style))),
+            )
+            .into()
+    }
+
+    /// The messages of `report`.
+    fn messages(report: &LayoutReport) -> Vec<String> {
+        report
+            .entries()
+            .iter()
+            .map(|entry| entry.message().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn headers_and_footers_are_drawn_where_their_distances_put_them() {
+        // One exact 20 pt line each: the header's from 10 pt down, its baseline at 26;
+        // the footer's ending 10 pt above the bottom of the 200 pt page, its baseline at
+        // 186.
+        let document = document(|style| {
+            vec![
+                Section::new(close_frames())
+                    .with_headers(HeaderFooterSet::default().with_primary(frame_of(style, 1)))
+                    .with_footers(HeaderFooterSet::default().with_primary(frame_of(style, 1)))
+                    .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+            ]
+        });
+        let (laid, _) = laid(&document, 100);
+        let page = &laid.expect("pages").pages[0];
+        let baselines: Vec<f64> = page
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                DisplayItem::Glyphs(run) => Some(run.origin.y.0),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            baselines.get(..2),
+            Some(&[26.0, 186.0][..]),
+            "{baselines:?}"
+        );
+    }
+
+    #[test]
+    fn a_negative_bottom_margin_is_fixed_whatever_the_footer() {
+        let document = document(|style| {
+            let margins = close_frames().margins().with_bottom(Pt(-20.0));
+            vec![
+                Section::new(close_frames().with_margins(margins))
+                    .with_footers(HeaderFooterSet::default().with_primary(frame_of(style, 3)))
+                    .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+            ]
+        });
+        let (laid, _) = laid(&document, 100);
+        assert_eq!(laid.expect("pages").pages[0].body.bottom, Pt(180.0));
+    }
+
+    #[test]
+    fn a_frame_s_paragraphs_have_the_space_between_them() {
+        // 5 pt below the first and 8 above the second make 8: 20 + 8 + 20 from 10 pt.
+        let document = document(|style| {
+            let header = vec![
+                lines(style, 1, spacing(0.0, 5.0)),
+                lines(style, 1, spacing(8.0, 0.0)),
+            ];
+            vec![
+                Section::new(close_frames())
+                    .with_headers(HeaderFooterSet::default().with_primary(header))
+                    .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+            ]
+        });
+        let (laid, _) = laid(&document, 100);
+        assert_eq!(laid.expect("pages").pages[0].body.top, Pt(58.0));
+    }
+
+    #[test]
+    fn a_page_field_in_the_body_shows_the_page_its_paragraph_lands_on() {
+        use crate::ir::FieldKind;
+        // Eight lines fill page 1: the paragraph of the field lands on page 2, laid out
+        // for page 1 first.
+        let document = document(|style| {
+            let mut blocks: Vec<Block> =
+                (0..8).map(|_| lines(style, 1, spacing(0.0, 0.0))).collect();
+            blocks.push(fields(style, vec![FieldKind::Page]));
+            one_section(blocks)
+        });
+        let (laid, report) = laid(&document, 100);
+        let laid = laid.expect("pages");
+        assert_eq!(texts(&laid.pages[1]), ["2"]);
+        assert!(
+            !messages(&report).iter().any(|m| m.contains("PAGE")),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn page_counts_are_found_wherever_their_fields_are() {
+        use crate::ir::FieldKind;
+        // NUMPAGES only in a first-page header, only in the body, and only in a table:
+        // each shows the pages: three, and four where the field's paragraph is on a page
+        // before the three.
+        let three = |style| -> Vec<Block> {
+            (0..3)
+                .map(|_| lines(style, 1, spacing(0.0, 0.0).with_page_break_before(true)))
+                .collect()
+        };
+        let in_header = document(|style| {
+            vec![
+                Section::new(close_frames())
+                    .with_title_page(true)
+                    .with_headers(
+                        HeaderFooterSet::default()
+                            .with_first(vec![fields(style, vec![FieldKind::NumPages])]),
+                    )
+                    .with_blocks(three(style)),
+            ]
+        });
+        let (header_laid, _) = laid(&in_header, 100);
+        assert_eq!(
+            texts(&header_laid.expect("pages").pages[0])
+                .first()
+                .map(String::as_str),
+            Some("3")
+        );
+        let in_body = document(|style| {
+            let mut blocks = vec![fields(style, vec![FieldKind::NumPages])];
+            blocks.extend(three(style));
+            one_section(blocks)
+        });
+        let (body_laid, _) = laid(&in_body, 100);
+        assert_eq!(
+            texts(&body_laid.expect("pages").pages[0])
+                .first()
+                .map(String::as_str),
+            Some("4")
+        );
+        let in_table = document(|style| {
+            let cell = Cell::default().with_blocks([fields(style, vec![FieldKind::NumPages])]);
+            let mut blocks: Vec<Block> = vec![
+                Table::default()
+                    .with_rows(vec![Row::default().with_cells(vec![cell])])
+                    .into(),
+            ];
+            blocks.extend(three(style));
+            one_section(blocks)
+        });
+        let (table_laid, _) = laid(&in_table, 100);
+        assert_eq!(
+            texts(&table_laid.expect("pages").pages[0])
+                .first()
+                .map(String::as_str),
+            Some("4")
+        );
+    }
+
+    #[test]
+    fn page_counts_that_keep_changing_are_reported() {
+        use crate::ir::{FieldKind, NumberFormat};
+        // A body 12 pt wide and 20 pt high: one line a page. "III" wraps, "IV" does not, so
+        // the count goes 1, 3, 4, 3 and never settles.
+        let document = document(|style| {
+            let narrow = PageSetup::new(PageSize::new(Pt(52.0), Pt(60.0))).with_margins(
+                Margins::default()
+                    .with_top(Pt(20.0))
+                    .with_bottom(Pt(20.0))
+                    .with_left(Pt(20.0))
+                    .with_right(Pt(20.0)),
+            );
+            let roman = Paragraph::new(style).with_inlines([Inline::Field(
+                crate::ir::Field::new(FieldKind::NumPages, style)
+                    .with_format(Some(NumberFormat::UpperRoman)),
+            )]);
+            vec![Section::new(narrow).with_blocks(vec![
+                Paragraph::new(style).with_inlines([Inline::text("A", style)]).into(),
+                Paragraph::new(style).with_inlines([Inline::text("A", style)]).into(),
+                roman.into(),
+            ])]
+        });
+        let (laid, report) = laid(&document, 100);
+        assert!(laid.is_ok());
+        assert!(
+            report
+                .entries()
+                .iter()
+                .any(|entry| entry.kind() == ReportKind::FieldCached
+                    && entry.message().contains("changed")),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn what_frames_and_page_numbers_leave_out_is_reported() {
+        use crate::ir::{Border, FieldKind, NumberFormat, PageNumbering, ParagraphBorders};
+        let document = document(|style| {
+            let bordered = lines(
+                style,
+                1,
+                spacing(0.0, 0.0)
+                    .with_borders(ParagraphBorders::default().with_bottom(Some(Border::default()))),
+            );
+            let cell = Cell::default().with_blocks([lines(style, 1, spacing(0.0, 0.0))]);
+            let table: Block = Table::default()
+                .with_rows(vec![Row::default().with_cells(vec![cell])])
+                .into();
+            let hebrew = Paragraph::new(style).with_inlines([Inline::Field(
+                crate::ir::Field::new(FieldKind::Page, style)
+                    .with_format(Some(NumberFormat::Other("hebrew1".into()))),
+            )]);
+            vec![
+                Section::new(close_frames())
+                    .with_page_numbering(PageNumbering::default().with_chapter_style(Some(1)))
+                    .with_headers(HeaderFooterSet::default().with_primary(vec![bordered, table]))
+                    .with_footers(HeaderFooterSet::default().with_primary(vec![hebrew.into()]))
+                    .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+            ]
+        });
+        let (_, report) = laid(&document, 100);
+        let all = messages(&report);
+        for expected in ["borders", "tables", "decimal", "chapter"] {
+            assert!(
+                all.iter().any(|m| m.contains(expected)),
+                "{expected}: {all:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_header_taller_than_its_page_is_cut_and_reported() {
+        // Thirty lines of 20 pt on a page 200 pt high: what fits is laid out, and the
+        // body has no room.
+        let document = document(|style| {
+            vec![
+                Section::new(close_frames())
+                    .with_headers(
+                        HeaderFooterSet::default().with_primary(
+                            (0..30)
+                                .map(|_| lines(style, 1, spacing(0.0, 0.0)))
+                                .collect::<Vec<Block>>(),
+                        ),
+                    )
+                    .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+            ]
+        });
+        let (laid, report) = laid(&document, 100);
+        let page = &laid.expect("pages").pages[0];
+        let header_lines = texts(page).len() - 1;
+        assert!(header_lines <= 10, "{header_lines}");
+        let all = messages(&report);
+        assert!(all.iter().any(|m| m.contains("cut")), "{all:?}");
+        assert!(all.iter().any(|m| m.contains("no room")), "{all:?}");
     }
 
     #[test]

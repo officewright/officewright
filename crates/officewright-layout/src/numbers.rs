@@ -10,10 +10,16 @@ use crate::ir::NumberFormat;
 /// doubled, then tripled.
 const CHICAGO: [char; 4] = ['*', '\u{2020}', '\u{2021}', '\u{00A7}'];
 
-/// The longest a letter or Chicago number is written: Word repeats one mark for each 26 (or
-/// 4) past the first round, so a large number would make a long text. Hypothesis until a
-/// Word reference (`E-number-formats.docx`) shows what Word writes there.
+/// The longest a letter number is written: Word repeats one letter for each 26 past the
+/// first round, so a large number would make a long text. Hypothesis until a Word
+/// reference (`E-number-formats.docx`) shows what Word writes there, as are 0 written in
+/// decimal in every format and Roman thousands as repeated `M`.
 const MAX_REPEATS: u32 = 64;
+
+/// The largest number Word writes in Chicago marks (MS-OI29500 2.1.548 k: "Word does not
+/// write out sequence numbers for chicago after 116"); past it, nothing is written. The
+/// note's item i confirms the doubling.
+const MAX_CHICAGO: u32 = 116;
 
 /// `number` written in `format`, and whether the format is one the layout writes as
 /// decimal instead, which the caller reports.
@@ -66,7 +72,8 @@ fn roman(number: u32) -> String {
         (4, "IV"),
         (1, "I"),
     ];
-    // Thousands past the bound of repeats are not written: Word's fields stop far below.
+    // Thousands past the bound of repeats are not written, so that no number makes a long
+    // text.
     let mut rest = number.min(MAX_REPEATS * 1000 + 999);
     let mut text = String::new();
     for (value, part) in PARTS {
@@ -79,6 +86,8 @@ fn roman(number: u32) -> String {
 }
 
 /// `number` with its English ordinal suffix: 1st, 2nd, 3rd, 4th, 11th, 12th, 13th, 21st.
+/// Word writes the suffix in the language of the text; English everywhere is a
+/// hypothesis until a Word reference (`E-number-formats.docx`).
 fn ordinal(number: u32) -> String {
     // Each suffix after a digit that takes it, as it is read: the digit is left out.
     let example = match (number % 10, number % 100) {
@@ -91,13 +100,17 @@ fn ordinal(number: u32) -> String {
     format!("{number}{}", example.get(1..).unwrap_or_default())
 }
 
-/// `number` in Chicago marks: *, †, ‡, §, then the same doubled, tripled; 0 as decimal.
+/// `number` in Chicago marks: *, †, ‡, §, then the same doubled, tripled; 0 as decimal,
+/// and nothing past 116.
 fn chicago(number: u32) -> String {
     if number == 0 {
         return number.to_string();
     }
+    if number > MAX_CHICAGO {
+        return String::new();
+    }
     let index = ((number - 1) % 4) as usize;
-    let repeats = ((number - 1) / 4 + 1).min(MAX_REPEATS);
+    let repeats = (number - 1) / 4 + 1;
     let mark = CHICAGO.get(index).copied().unwrap_or('*');
     std::iter::repeat_n(mark, repeats as usize).collect()
 }
@@ -181,12 +194,11 @@ mod tests {
 
     #[test]
     fn large_numbers_stay_short() {
-        let long = text(u32::MAX, NumberFormat::UpperLetter);
-        assert_eq!(long.len(), MAX_REPEATS as usize);
+        // 64 letters at most, and Chicago marks only up to 116 (MS-OI29500 2.1.548 k).
+        assert_eq!(text(u32::MAX, NumberFormat::UpperLetter).len(), 64);
         assert!(text(u32::MAX, NumberFormat::UpperRoman).len() < 100);
-        assert_eq!(
-            text(u32::MAX, NumberFormat::Chicago).chars().count(),
-            MAX_REPEATS as usize
-        );
+        assert_eq!(text(116, NumberFormat::Chicago), "\u{a7}".repeat(29));
+        assert_eq!(text(117, NumberFormat::Chicago), "");
+        assert_eq!(text(u32::MAX, NumberFormat::Chicago), "");
     }
 }
