@@ -4,6 +4,7 @@
 
 mod character;
 mod paragraph;
+mod table;
 
 pub(crate) use paragraph::list_level;
 
@@ -59,6 +60,14 @@ pub struct Formats<'a> {
     /// Each list instance's levels that paragraphs use, with the instance's overrides,
     /// and the numbers they start from.
     instance_levels: HashMap<(i64, usize), paragraph::InstanceLevel>,
+    /// What each table style gives with the styles it is based on.
+    table_styles: StyleLevels<table::TableStyleLevel>,
+    /// What is worked out once per table, by the table's node.
+    tables: HashMap<u32, Arc<table::TableContext>>,
+    /// The table each row and cell of a table worked out so far belongs to.
+    table_of: HashMap<u32, u32>,
+    /// The index of the default table style, once looked up.
+    default_table_style: Option<Option<usize>>,
     /// The defaults and a paragraph style with a list level laid over them, by the
     /// style and where the level comes from; at most [`MAX_COMBINATIONS`] at a time.
     combinations: HashMap<(Option<usize>, paragraph::LayerSource), Arc<ParagraphLevel>>,
@@ -83,6 +92,8 @@ pub(crate) struct Work {
     pub(crate) replacements: usize,
     /// A style's level and a list level laid over each other.
     pub(crate) combinations: usize,
+    /// Tables whose rows and cells were worked out.
+    pub(crate) tables: usize,
 }
 
 impl<'a> Formats<'a> {
@@ -103,6 +114,10 @@ impl<'a> Formats<'a> {
             level_layers: HashMap::new(),
             instance_levels: HashMap::new(),
             combinations: HashMap::new(),
+            table_styles: StyleLevels::default(),
+            tables: HashMap::new(),
+            table_of: HashMap::new(),
+            default_table_style: None,
             #[cfg(test)]
             work: Work::default(),
         }

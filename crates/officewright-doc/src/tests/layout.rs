@@ -1729,7 +1729,6 @@ fn translates_tables_with_their_rows_and_cells() {
     assert_eq!(
         left_out,
         [
-            "sections[0].blocks[0]: the table's style is not applied: table styles are not translated yet",
             "sections[0].blocks[0].rows[1]: the row's table property exceptions are not applied",
             "sections[0].blocks[0].rows[2].cells[0]: a cell that does not end with a paragraph gets an empty one",
             "sections[0].blocks[0].rows[2].cells[1]: a cell that does not end with a paragraph gets an empty one",
@@ -2784,6 +2783,43 @@ fn lists_a_cell_s_own_entries_before_those_of_its_content() {
                 format!("{cell}: a cell that does not end with a paragraph gets an empty one"),
                 ReportKind::ValueClamped
             ),
+        ]
+    );
+}
+
+#[test]
+fn translates_tables_with_their_style() {
+    let styles = format!(
+        r#"<w:styles xmlns:w="{W}"><w:style w:type="table" w:styleId="Grid"><w:name w:val="Grid"/><w:rPr><w:b/></w:rPr><w:tblPr><w:jc w:val="center"/><w:tblBorders><w:insideH w:val="single" w:sz="8"/></w:tblBorders></w:tblPr><w:tblStylePr w:type="firstRow"><w:tblPr><w:tblCellSpacing w:w="20" w:type="dxa"/></w:tblPr><w:trPr><w:tblHeader/></w:trPr><w:tcPr><w:shd w:val="clear" w:fill="FF0000"/></w:tcPr></w:tblStylePr></w:style></w:styles>"#
+    );
+    let table = r#"<w:tbl><w:tblPr><w:tblStyle w:val="Grid"/></w:tblPr><w:tblGrid><w:gridCol w:w="1000"/></w:tblGrid><w:tr><w:tc><w:p/></w:tc></w:tr><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl><w:p/>"#;
+    let document = with_parts(table, &[("styles", "styles.xml", styles)]);
+    let translation = translate(&document);
+    let table = tables(&translation)[0];
+    assert_eq!(table.props().alignment(), ir::TableAlignment::Center);
+    assert!(matches!(
+        table.props().borders().inside_horizontal(),
+        ir::BorderSide::Line(_)
+    ));
+    // The first row's format: the header row and the cell's shading.
+    let rows = table.rows();
+    assert!(rows[0].header() && !rows[1].header());
+    let red = ir::ColorValue::Rgb(officewright_core::Color::rgb(255, 0, 0));
+    assert_eq!(
+        rows[0].cells()[0].shading(),
+        Some(ir::Shading::default().with_fill(red))
+    );
+    assert_eq!(rows[1].cells()[0].shading(), None);
+    let left_out: Vec<&str> = translation
+        .left_out()
+        .iter()
+        .map(LeftOut::message)
+        .collect();
+    assert_eq!(
+        left_out,
+        [
+            "what the table's style gives paragraphs and runs is not applied yet",
+            "the table properties of the table style's conditional formats are not applied",
         ]
     );
 }

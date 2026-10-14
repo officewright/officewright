@@ -670,3 +670,140 @@ impl TableCellProperties {
         self.hide_mark
     }
 }
+
+/// Lays `above` over `below`: what `above` gives replaces what `below` gives, side by
+/// side for borders and margins. For the levels of table styles and the table's own
+/// properties.
+fn overwrite<T: Clone>(below: &mut Option<T>, above: &Option<T>) {
+    if above.is_some() {
+        below.clone_from(above);
+    }
+}
+
+impl TableBorders {
+    pub(crate) fn overlay(&mut self, above: &Self) {
+        overwrite(&mut self.top, &above.top);
+        overwrite(&mut self.bottom, &above.bottom);
+        overwrite(&mut self.start, &above.start);
+        overwrite(&mut self.end, &above.end);
+        overwrite(&mut self.inside_horizontal, &above.inside_horizontal);
+        overwrite(&mut self.inside_vertical, &above.inside_vertical);
+    }
+}
+
+impl CellBorders {
+    pub(crate) fn overlay(&mut self, above: &Self) {
+        self.sides.overlay(&above.sides);
+        overwrite(
+            &mut self.top_left_to_bottom_right,
+            &above.top_left_to_bottom_right,
+        );
+        overwrite(
+            &mut self.top_right_to_bottom_left,
+            &above.top_right_to_bottom_left,
+        );
+    }
+}
+
+impl CellMargins {
+    pub(crate) fn overlay(&mut self, above: &Self) {
+        overwrite(&mut self.top, &above.top);
+        overwrite(&mut self.bottom, &above.bottom);
+        overwrite(&mut self.start, &above.start);
+        overwrite(&mut self.end, &above.end);
+    }
+}
+
+/// Lays an optional set of sides over another, side by side.
+fn overlay_sides<T: Clone + Default>(
+    below: &mut Option<T>,
+    above: &Option<T>,
+    overlay: impl FnOnce(&mut T, &T),
+) {
+    if let Some(above) = above {
+        overlay(below.get_or_insert_with(T::default), above);
+    }
+}
+
+impl TableProperties {
+    /// Lays `above` over these properties.
+    pub(crate) fn overlay(&mut self, above: &Self) {
+        overwrite(&mut self.style, &above.style);
+        overwrite(&mut self.position, &above.position);
+        overwrite(&mut self.overlap, &above.overlap);
+        overwrite(&mut self.right_to_left, &above.right_to_left);
+        overwrite(&mut self.row_band_size, &above.row_band_size);
+        overwrite(&mut self.column_band_size, &above.column_band_size);
+        overwrite(&mut self.width, &above.width);
+        overwrite(&mut self.justification, &above.justification);
+        overwrite(&mut self.cell_spacing, &above.cell_spacing);
+        overwrite(&mut self.indentation, &above.indentation);
+        overlay_sides(&mut self.borders, &above.borders, TableBorders::overlay);
+        overwrite(&mut self.shading, &above.shading);
+        overwrite(&mut self.layout, &above.layout);
+        overlay_sides(
+            &mut self.cell_margins,
+            &above.cell_margins,
+            CellMargins::overlay,
+        );
+        overwrite(&mut self.look, &above.look);
+        overwrite(&mut self.caption, &above.caption);
+        overwrite(&mut self.description, &above.description);
+    }
+
+    /// Drops what Word does not allow in the `w:tblPr` of a table style (MS-OI29500
+    /// §17.7.6.4(a)) and, for a conditional format, also the band sizes (§17.7.6.3(a)).
+    /// The notes say only that Word does not allow them; leaving them out is our choice,
+    /// not yet confirmed against Word (#172).
+    pub(crate) fn of_table_style(mut self, conditional: bool) -> Self {
+        self.right_to_left = None;
+        self.layout = None;
+        self.look = None;
+        self.overlap = None;
+        self.position = None;
+        self.style = None;
+        self.width = None;
+        if conditional {
+            self.row_band_size = None;
+            self.column_band_size = None;
+        }
+        self
+    }
+}
+
+impl TableRowProperties {
+    /// Lays `above` over these properties.
+    pub(crate) fn overlay(&mut self, above: &Self) {
+        overwrite(&mut self.grid_before, &above.grid_before);
+        overwrite(&mut self.grid_after, &above.grid_after);
+        overwrite(&mut self.width_before, &above.width_before);
+        overwrite(&mut self.width_after, &above.width_after);
+        overwrite(&mut self.cant_split, &above.cant_split);
+        overwrite(&mut self.height, &above.height);
+        overwrite(&mut self.header, &above.header);
+        overwrite(&mut self.cell_spacing, &above.cell_spacing);
+        overwrite(&mut self.justification, &above.justification);
+        overwrite(&mut self.hidden, &above.hidden);
+    }
+}
+
+impl TableCellProperties {
+    /// Lays `above` over these properties.
+    pub(crate) fn overlay(&mut self, above: &Self) {
+        overwrite(&mut self.width, &above.width);
+        overwrite(&mut self.grid_span, &above.grid_span);
+        overwrite(&mut self.horizontal_merge, &above.horizontal_merge);
+        overwrite(&mut self.vertical_merge, &above.vertical_merge);
+        overlay_sides(&mut self.borders, &above.borders, CellBorders::overlay);
+        overwrite(&mut self.shading, &above.shading);
+        overwrite(&mut self.no_wrap, &above.no_wrap);
+        overlay_sides(&mut self.margins, &above.margins, CellMargins::overlay);
+        overwrite(&mut self.text_direction, &above.text_direction);
+        overwrite(&mut self.fit_text, &above.fit_text);
+        overwrite(
+            &mut self.vertical_justification,
+            &above.vertical_justification,
+        );
+        overwrite(&mut self.hide_mark, &above.hide_mark);
+    }
+}
