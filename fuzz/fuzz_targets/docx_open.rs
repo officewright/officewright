@@ -1,10 +1,10 @@
 //! Opens the input as a Word document and walks everything the model read from it:
 //! sections, headers, footers and notes, blocks, tables, inline content and runs, the
-//! text, the programs of embedded fonts, and the XML of every drawing and of every element
-//! kept without being understood, which must read back as XML. The formatting in
-//! effect of every paragraph, run and paragraph mark is resolved, and must not depend on
-//! what the resolver remembered from earlier ones. The document's translation into the
-//! layout IR must be valid IR.
+//! text, the programs of embedded fonts, and the XML of every drawing and of every
+//! element kept without being understood, which must read back as XML. The formatting in
+//! effect of every paragraph, run, paragraph mark, table, row and cell is resolved, and
+//! must not depend on what the resolver remembered from earlier ones. The document's
+//! translation into the layout IR must be valid IR.
 #![no_main]
 
 use std::collections::HashSet;
@@ -67,7 +67,7 @@ fuzz_target!(|data: &[u8]| {
     // A fresh resolver walks every style chain again, so only the first paragraphs and
     // runs are compared, each with a budget of its own: the checks stay, the cost does
     // not grow with their number × chain length.
-    let (mut paragraphs_compared, mut runs_compared) = (0, 0);
+    let (mut paragraphs_compared, mut runs_compared, mut cells_compared) = (0, 0, 0);
     let mut blocks: Vec<Block<'_>> = document.sections().flat_map(|s| s.blocks()).collect();
     // The headers, footers and notes, each walked like the body. Each header and footer
     // is walked once, however many sections have it: thousands of sections may name or
@@ -162,10 +162,24 @@ fuzz_target!(|data: &[u8]| {
                 assert!(document.table(table.id()).is_some());
                 let _ = table.grid_columns().count();
                 let _ = table.properties();
+                let properties = formats.table_properties(table);
+                let _ = formats.table_look(table);
                 for row in table.rows() {
                     let _ = (row.properties(), row.table_property_exceptions());
+                    let row_format = formats.row_properties(row);
                     for cell in row.cells() {
                         let _ = cell.properties();
+                        let cell_format = formats.cell_properties(cell);
+                        let _ = formats.cell_conditions(cell);
+                        // A fresh resolver works the table out again: the first cells
+                        // only, as for paragraphs and runs.
+                        if cells_compared < 64 {
+                            cells_compared += 1;
+                            let mut fresh = document.formats();
+                            assert_eq!(cell_format, fresh.cell_properties(cell));
+                            assert_eq!(row_format, fresh.row_properties(row));
+                            assert_eq!(properties, fresh.table_properties(table));
+                        }
                         blocks.extend(cell.blocks());
                     }
                 }

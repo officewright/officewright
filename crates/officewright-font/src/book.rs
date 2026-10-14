@@ -306,6 +306,9 @@ pub struct FontBook {
     /// canonical paths of files that could not be indexed, and the canonical directory
     /// and name of font files and directories that could not be resolved or read.
     failed: HashMap<PathBuf, Failure>,
+    /// The canonical directory behind each location in `failed` of a directory that could
+    /// not be read, so that reading that directory by any path drops them all.
+    unreadable_dirs: HashMap<PathBuf, PathBuf>,
 }
 
 /// How a path that a directory scan could not add looked, so the next scan tries it
@@ -556,6 +559,8 @@ impl FontBook {
     /// was first reached by, so reaching it through another alias of its directory does
     /// not change the entry; anything else listed for it before is replaced.
     fn list_failure(&mut self, key: PathBuf, failure: Failure, path: PathBuf, mut error: Error) {
+        // A directory behind the path is remembered again by the caller if it is one.
+        self.unreadable_dirs.remove(&key);
         if failure == Failure::Unreachable && self.failed.get(&key) == Some(&failure) {
             let listed = self
                 .skipped
@@ -581,6 +586,7 @@ impl FontBook {
 
     /// Drops what was listed for a path that has now been read.
     fn forget_failure(&mut self, key: &Path) {
+        self.unreadable_dirs.remove(key);
         if self.failed.remove(key).is_some() {
             self.skipped
                 .retain(|skipped| skipped.key.as_deref() != Some(key));
@@ -656,27 +662,56 @@ impl FontBook {
     /// Adds the fonts under `root`; unreadable files and directories are skipped.
     fn scan_dir(&mut self, root: &Path, origin: FontOrigin) -> usize {
         let mut added = 0;
-        let mut visited = HashSet::new();
-        let mut stack = vec![(root.to_owned(), 0)];
-        while let Some((dir, depth)) = stack.pop() {
+        // Whether each directory reached in this scan could be read.
+        let mut visited: HashMap<PathBuf, bool> = HashMap::new();
+        // Each directory with its location, under which it is listed if it cannot be
+        // read, as a font file that cannot be resolved is: the entry, not what it leads
+        // to, so that replacing it with a link to another directory drops the entry. A
+        // root without a name of its own, such as `.`, is listed under its canonical path.
+        let mut stack = vec![(root.to_owned(), location(root), 0)];
+        while let Some((dir, dir_location, depth)) = stack.pop() {
             // Following links can lead back to a directory already searched.
             let Ok(canonical_dir) = fs::canonicalize(&dir) else {
                 continue;
             };
-            if !visited.insert(canonical_dir.clone()) {
+            let dir_location = dir_location.unwrap_or_else(|| canonical_dir.clone());
+            // A directory reached again is not read again, but what is listed for this
+            // entry follows where it leads now: nothing once that directory was read, and
+            // that directory if it could not be read.
+            if let Some(&read) = visited.get(&canonical_dir) {
+                if read {
+                    self.forget_failure(&dir_location);
+                } else if self.unreadable_dirs.contains_key(&dir_location) {
+                    self.unreadable_dirs.insert(dir_location, canonical_dir);
+                }
                 continue;
             }
             let entries = match fs::read_dir(&dir) {
+                // Read now, under this path or another: what was listed for the entry,
+                // and for every entry that leads to this directory (the directory itself
+                // among them, reached by its own path), is out of date.
                 Ok(entries) => {
-                    self.forget_failure(&canonical_dir);
+                    visited.insert(canonical_dir.clone(), true);
+                    self.forget_failure(&dir_location);
+                    let behind: Vec<PathBuf> = self
+                        .unreadable_dirs
+                        .iter()
+                        .filter(|(_, target)| **target == canonical_dir)
+                        .map(|(listed, _)| listed.clone())
+                        .collect();
+                    for listed in behind {
+                        self.forget_failure(&listed);
+                    }
                     entries
                 }
                 Err(source) => {
+                    visited.insert(canonical_dir.clone(), false);
                     let error = Error::Read {
                         path: dir.clone(),
                         source,
                     };
-                    self.list_failure(canonical_dir, Failure::Unreachable, dir, error);
+                    self.list_failure(dir_location.clone(), Failure::Unreachable, dir, error);
+                    self.unreadable_dirs.insert(dir_location, canonical_dir);
                     continue;
                 }
             };
@@ -687,21 +722,21 @@ impl FontBook {
             paths.sort();
             let mut subdirs = Vec::new();
             for path in paths {
+                // Where the entry is, however its directory was reached.
+                let location = path
+                    .file_name()
+                    .map_or_else(|| path.clone(), |name| canonical_dir.join(name));
                 // `metadata` follows links, so linked fonts and directories count.
                 let metadata = fs::metadata(&path);
                 if metadata.as_ref().is_ok_and(fs::Metadata::is_dir) {
                     if depth < MAX_DEPTH {
-                        subdirs.push((path, depth + 1));
+                        subdirs.push((path, Some(location), depth + 1));
                     }
                     continue;
                 }
                 if !is_font_file(&path) {
                     continue;
                 }
-                // Where the entry is, however its directory was reached.
-                let location = path
-                    .file_name()
-                    .map_or_else(|| path.clone(), |name| canonical_dir.join(name));
                 let resolved =
                     metadata.and_then(|metadata| Ok((fs::canonicalize(&path)?, metadata)));
                 let (canonical, metadata) = match resolved {
@@ -747,7 +782,8 @@ impl FontBook {
 }
 
 /// Where a directory entry is: its canonical directory and its name, however the
-/// directory was reached. A scan lists a font file that cannot be resolved under it.
+/// directory was reached. A scan lists a font file that cannot be resolved, and a
+/// directory that cannot be read, under it.
 fn location(path: &Path) -> Option<PathBuf> {
     let dir = match path.parent() {
         Some(dir) if !dir.as_os_str().is_empty() => dir,
@@ -1185,6 +1221,327 @@ mod tests {
 
         assert_eq!(book.add_dir(&dir.0).unwrap(), 1);
         assert!(book.skipped().is_empty(), "{:?}", book.skipped());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_unreadable_directory_leaves_the_list_once_read_through_a_link() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let set_mode =
+            |path: &Path, mode| fs::set_permissions(path, fs::Permissions::from_mode(mode));
+        let dir = TempDir::new("relinked-dir");
+        let (fonts, locked, other) = (
+            dir.0.join("fonts"),
+            dir.0.join("locked"),
+            dir.0.join("other"),
+        );
+        for path in [&fonts, &locked, &other] {
+            fs::create_dir(path).unwrap();
+        }
+        fs::write(other.join("sans.ttf"), TestFont::new("Test Sans").build()).unwrap();
+        // Root reads every directory, so this has to run as an ordinary user.
+        set_mode(&locked, 0o000).unwrap();
+        let readable = fs::read_dir(&locked).is_ok();
+        set_mode(&locked, 0o755).unwrap();
+        assert!(
+            !readable,
+            "run the tests as a user who cannot read mode 000"
+        );
+        // `fonts` reached through a link to it, to name a root another way.
+        let fonts_link = dir.0.join("fonts-link");
+        symlink(&fonts, &fonts_link).unwrap();
+        let (sub, alias) = (fonts.join("sub"), fonts.join("alias"));
+        let scan_fonts = |book: &mut FontBook| book.add_dir(&fonts).unwrap();
+        // As the root of a scan, as the system font directories are.
+        let scan_sub = |book: &mut FontBook| book.scan_dir(&sub, FontOrigin::User);
+        let scan_sub_linked =
+            |book: &mut FontBook| book.scan_dir(&fonts_link.join("sub"), FontOrigin::User);
+        let scan_alias = |book: &mut FontBook| book.scan_dir(&alias, FontOrigin::User);
+        let scan_locked = |book: &mut FontBook| book.scan_dir(&locked, FontOrigin::User);
+        let unreadable = || {
+            fs::create_dir(&sub).unwrap();
+            set_mode(&sub, 0o000).unwrap();
+        };
+        let link_to_locked = || {
+            set_mode(&locked, 0o000).unwrap();
+            symlink(&locked, &sub).unwrap();
+        };
+        let relink = || {
+            if fs::symlink_metadata(&sub).unwrap().is_dir() {
+                fs::remove_dir(&sub).unwrap();
+            } else {
+                fs::remove_file(&sub).unwrap();
+            }
+            symlink(&other, &sub).unwrap();
+        };
+        let unlock_and_alias = || {
+            set_mode(&sub, 0o755).unwrap();
+            symlink(&sub, &alias).unwrap();
+        };
+        let unlock_locked = || set_mode(&locked, 0o755).unwrap();
+        // A link `fonts/alias` to `other`, which a scan of `fonts` reads before `sub`.
+        let unreadable_beside_alias = || {
+            symlink(&other, &alias).unwrap();
+            unreadable();
+        };
+        let alias_and_relink = || {
+            symlink(&other, &alias).unwrap();
+            relink();
+        };
+        let relink_to_root = || {
+            fs::remove_dir(&sub).unwrap();
+            symlink(&fonts, &sub).unwrap();
+        };
+        // `alias` comes before `sub`, so a scan of `fonts` reads `locked` through it and
+        // skips `sub` as a directory it has read.
+        let unlock_locked_and_alias = || {
+            set_mode(&locked, 0o755).unwrap();
+            symlink(&locked, &alias).unwrap();
+        };
+        type Scan<'a> = &'a dyn Fn(&mut FontBook) -> usize;
+        // A case: its name, how the directory is made, the first scan, the change, the
+        // scan after it, and the faces that scan adds (Test Sans, through a link to
+        // `other`, or none).
+        type Case<'a> = (
+            &'a str,
+            &'a dyn Fn(),
+            Scan<'a>,
+            &'a dyn Fn(),
+            Scan<'a>,
+            usize,
+        );
+        let cases: [Case<'_>; 10] = [
+            // A directory without permission, replaced by a link to a readable one,
+            // reached as a subdirectory, as a root, and as a root named another way.
+            (
+                "subdirectory",
+                &unreadable,
+                &scan_fonts,
+                &relink,
+                &scan_fonts,
+                1,
+            ),
+            ("root", &unreadable, &scan_sub, &relink, &scan_sub, 1),
+            (
+                "root by another path",
+                &unreadable,
+                &scan_sub,
+                &relink,
+                &scan_sub_linked,
+                1,
+            ),
+            // A link to a directory without permission, pointed at a readable one.
+            (
+                "link",
+                &link_to_locked,
+                &scan_fonts,
+                &relink,
+                &scan_fonts,
+                1,
+            ),
+            // A directory without permission that becomes readable, read through
+            // another link to it: a link to `fonts/sub`, or one to the directory behind
+            // the link `fonts/sub`, or that directory as a root.
+            (
+                "alias",
+                &unreadable,
+                &scan_fonts,
+                &unlock_and_alias,
+                &scan_alias,
+                0,
+            ),
+            (
+                "other link",
+                &link_to_locked,
+                &scan_fonts,
+                &unlock_locked_and_alias,
+                &scan_fonts,
+                0,
+            ),
+            // Replaced by a link to a directory the scan has read before it, through
+            // another link, or the root itself; or repointed to one.
+            (
+                "relinked to a directory read first",
+                &unreadable_beside_alias,
+                &scan_fonts,
+                &relink,
+                &scan_fonts,
+                0,
+            ),
+            (
+                "repointed to a directory read first",
+                &link_to_locked,
+                &scan_fonts,
+                &alias_and_relink,
+                &scan_fonts,
+                1,
+            ),
+            (
+                "relinked to the root",
+                &unreadable,
+                &scan_fonts,
+                &relink_to_root,
+                &scan_fonts,
+                0,
+            ),
+            (
+                "target",
+                &link_to_locked,
+                &scan_fonts,
+                &unlock_locked,
+                &scan_locked,
+                0,
+            ),
+        ];
+        // For each case: what its book listed after the first scan, and what it listed
+        // and how many faces it added after the second.
+        let mut results = Vec::new();
+        for (name, before, first, change, second, faces) in cases {
+            before();
+            let mut book = FontBook::new();
+            first(&mut book);
+            let listed: Vec<_> = book
+                .skipped()
+                .iter()
+                .map(|s| s.path().map(Path::to_owned))
+                .collect();
+            change();
+            let added = second(&mut book);
+            results.push((name, listed, added, faces, book.skipped().to_vec()));
+            // The next case starts from an empty directory of fonts.
+            for path in [&alias, &sub] {
+                match fs::symlink_metadata(path) {
+                    Ok(metadata) if metadata.is_dir() => {
+                        set_mode(path, 0o755).unwrap();
+                        fs::remove_dir(path).unwrap();
+                    }
+                    Ok(_) => fs::remove_file(path).unwrap(),
+                    Err(_) => {}
+                }
+            }
+        }
+        set_mode(&locked, 0o755).unwrap();
+
+        for (name, listed, added, faces, skipped) in results {
+            assert_eq!(listed, [Some(sub.clone())], "{name}");
+            assert_eq!(added, faces, "{name}");
+            assert!(skipped.is_empty(), "{name}: {skipped:?}");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn keeps_an_unreadable_directory_listed_while_others_are_read() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new("still-locked");
+        let (one, two) = (dir.0.join("one"), dir.0.join("two"));
+        let locked = one.join("sub");
+        fs::create_dir_all(&locked).unwrap();
+        fs::create_dir(&two).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let mut book = FontBook::new();
+        book.add_dir(&one).unwrap();
+        book.add_dir(&two).unwrap();
+        let skipped = book.skipped().len();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        // Reading `two` says nothing about `one/sub`, which still cannot be read.
+        assert_eq!(skipped, 1);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn lists_an_unreadable_directory_once_per_scan_under_each_link() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let dir = TempDir::new("two-links");
+        let (fonts, locked) = (dir.0.join("fonts"), dir.0.join("locked"));
+        fs::create_dir(&fonts).unwrap();
+        fs::create_dir(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        symlink(&locked, fonts.join("b")).unwrap();
+        let mut book = FontBook::new();
+        book.add_dir(&fonts).unwrap();
+        // A second link to the same directory, which the scans reach first.
+        symlink(&locked, fonts.join("a")).unwrap();
+        book.add_dir(&fonts).unwrap();
+        let mut fresh = FontBook::new();
+        fresh.add_dir(&fonts).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        let paths = |book: &FontBook| -> Vec<PathBuf> {
+            book.skipped()
+                .iter()
+                .filter_map(|skipped| skipped.path().map(Path::to_owned))
+                .collect()
+        };
+        // Across scans, under each link reached; in one scan, once, under the first.
+        assert_eq!(paths(&book), [fonts.join("b"), fonts.join("a")]);
+        assert_eq!(paths(&fresh), [fonts.join("a")]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_link_repointed_follows_its_new_target() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let set_mode =
+            |path: &Path, mode| fs::set_permissions(path, fs::Permissions::from_mode(mode));
+        let dir = TempDir::new("repointed");
+        let (fonts, first, second) = (dir.0.join("fonts"), dir.0.join("t1"), dir.0.join("t2"));
+        for path in [&fonts, &first, &second] {
+            fs::create_dir(path).unwrap();
+        }
+        fs::write(second.join("sans.ttf"), TestFont::new("Test Sans").build()).unwrap();
+        set_mode(&first, 0o000).unwrap();
+        set_mode(&second, 0o000).unwrap();
+        // `a` leads to `t2` and `b` to `t1`, neither readable.
+        symlink(&second, fonts.join("a")).unwrap();
+        symlink(&first, fonts.join("b")).unwrap();
+        let mut book = FontBook::new();
+        book.add_dir(&fonts).unwrap();
+        let listed = book.skipped().len();
+        // `b` now leads to `t2`, which the next scan reaches first through `a`, so it
+        // skips `b` but remembers where it leads. Then `t2` becomes readable, and reading
+        // it as a root, which reaches neither link, drops both entries.
+        fs::remove_file(fonts.join("b")).unwrap();
+        symlink(&second, fonts.join("b")).unwrap();
+        book.add_dir(&fonts).unwrap();
+        set_mode(&second, 0o755).unwrap();
+        let added = book.add_dir(&second).unwrap();
+        let skipped = book.skipped().to_vec();
+        set_mode(&first, 0o755).unwrap();
+        assert_eq!(listed, 2);
+        assert_eq!(added, 1);
+        assert!(skipped.is_empty(), "{skipped:?}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_directory_link_that_becomes_a_dangling_font_link_stays_listed() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let set_mode =
+            |path: &Path, mode| fs::set_permissions(path, fs::Permissions::from_mode(mode));
+        let dir = TempDir::new("dir-to-font-link");
+        let (fonts, locked) = (dir.0.join("fonts"), dir.0.join("locked"));
+        fs::create_dir(&fonts).unwrap();
+        fs::create_dir(&locked).unwrap();
+        set_mode(&locked, 0o000).unwrap();
+        // A link named like a font file, leading to a directory that cannot be read.
+        let link = fonts.join("x.ttf");
+        symlink(&locked, &link).unwrap();
+        let mut book = FontBook::new();
+        book.add_dir(&fonts).unwrap();
+        // It becomes a link to a removed font file, and stays listed as one; reading
+        // the directory it led to does not drop it.
+        fs::remove_file(&link).unwrap();
+        symlink(dir.0.join("gone.ttf"), &link).unwrap();
+        book.add_dir(&fonts).unwrap();
+        set_mode(&locked, 0o755).unwrap();
+        book.add_dir(&locked).unwrap();
+        assert_eq!(book.skipped().len(), 1, "{:?}", book.skipped());
+        assert_eq!(book.skipped()[0].path(), Some(link.as_path()));
     }
 
     #[test]

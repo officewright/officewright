@@ -3,11 +3,13 @@
 //! left corner: glyph runs with each glyph's place, rectangles, lines and pictures.
 //! With `--page`, lays them out on pages instead, with margins of 1 inch, and prints
 //! each page and what it draws, positions from the page's top left corner; `--footer`
-//! adds a footer to every page, "Page N of M", centred.
+//! adds a footer to every page, "Page N of M", centred. With the feature `pdf` too,
+//! `--pdf FILE` writes the pages as a PDF instead.
 //!
 //! ```text
 //! cargo run -p officewright-layout --features fuzzing --example layout_dump -- \
-//!     FONT_DIR FAMILY WIDTH_PT FILE [--size PT] [--justify] [--page HEIGHT_PT [--footer]]
+//!     FONT_DIR FAMILY WIDTH_PT FILE [--size PT] [--justify]
+//!     [--page HEIGHT_PT [--footer] [--pdf FILE]]
 //! ```
 //!
 //! Each line of FILE is a paragraph; in it, `\t` is a tab, `\n` a line break, `\p` a
@@ -27,7 +29,7 @@ use officewright_layout::ir::{
 
 fn main() -> Result<(), Box<dyn Error>> {
     let usage = "usage: layout_dump FONT_DIR FAMILY WIDTH_PT FILE [--size PT] [--justify] \
-                 [--page HEIGHT_PT [--footer]]";
+                 [--page HEIGHT_PT [--footer] [--pdf FILE]]";
     let mut args = std::env::args().skip(1);
     let (Some(dir), Some(family), Some(width), Some(file)) =
         (args.next(), args.next(), args.next(), args.next())
@@ -39,14 +41,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut alignment = Alignment::Start;
     let mut page: Option<f64> = None;
     let mut footer = false;
+    let mut pdf: Option<String> = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--size" => size = args.next().ok_or(usage)?.parse()?,
             "--justify" => alignment = Alignment::Both,
             "--page" => page = Some(args.next().ok_or(usage)?.parse()?),
             "--footer" => footer = true,
+            "--pdf" => pdf = Some(args.next().ok_or(usage)?),
             _ => return Err(usage.into()),
         }
+    }
+    // Only pages are written as a PDF.
+    if pdf.is_some() && page.is_none() {
+        return Err(usage.into());
     }
     let mut book = FontBook::new();
     book.add_dir(&dir)?;
@@ -94,6 +102,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 section.with_footers(HeaderFooterSet::default().with_primary([numbers.into()]));
         }
         document.add_section(section);
+        if let Some(file) = pdf {
+            return write_pdf(&document, &book, &file);
+        }
         let laid = fuzzing::paginate(&book, &document, 10_000)?;
         for page in laid.pages() {
             let (width, height) = page.size();
@@ -111,6 +122,27 @@ fn main() -> Result<(), Box<dyn Error>> {
         eprintln!("{:?}: {}", entry.kind(), entry.message());
     }
     Ok(())
+}
+
+/// Renders `document` with the fonts of `book` into the PDF `file`, and prints what the
+/// layout reported.
+#[cfg(feature = "pdf")]
+fn write_pdf(document: &Document, book: &FontBook, file: &str) -> Result<(), Box<dyn Error>> {
+    // The fonts are those of `book`, from FONT_DIR: the options' font settings only make
+    // a book.
+    let options = officewright_layout::RenderOptions::new();
+    let rendered = officewright_layout::render_pdf(document, book, &options)?;
+    rendered.pdf().save(file)?;
+    for entry in rendered.report() {
+        eprintln!("{:?}: {}", entry.kind(), entry.message());
+    }
+    Ok(())
+}
+
+/// Without the feature `pdf`, there is no PDF to write.
+#[cfg(not(feature = "pdf"))]
+fn write_pdf(_: &Document, _: &FontBook, _: &str) -> Result<(), Box<dyn Error>> {
+    Err("--pdf needs the feature pdf".into())
 }
 
 /// The run styles of the file's markup.

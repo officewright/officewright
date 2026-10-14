@@ -49,6 +49,8 @@ crates/
                         shapes with HarfRust, breaks lines first fit by UAX #14 (unicode-linebreak) with
                         Word's rules on top, and flows paragraphs onto the pages of each section with Word's
                         keep and widow rules, headers, footers and page numbers, behind private modules;
+                        feature `pdf` renders a document into PDF with officewright-pdf (`render_pdf`,
+                        hidden in the docs like the IR it takes, and `RenderOptions`);
                         feature `fuzzing` opens entry points for the fuzz targets, examples and the tests
                         with the test fonts and Word's renders, which are not API; `data/symbol.txt`
                         (Unicode's Adobe Symbol mapping) stays out of the published crate
