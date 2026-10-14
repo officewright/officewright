@@ -2509,9 +2509,10 @@ pub(crate) mod tests {
 
     #[test]
     fn writes_the_data_of_one_png_idat_chunk_or_several_as_it_is() {
-        let png = Png::new(5, 3, 2, 8);
+        // Chunks large enough to be read from the file, not copied.
+        let png = Png::new(40, 30, 2, 8);
         let data = compress_to_vec_zlib(&png.rows(), 6);
-        let (first, second) = data.split_at(7);
+        let (first, second) = data.split_at(1000);
         // One chunk; empty chunks around and between two; three.
         let layouts: [&[&[u8]]; 3] = [
             &[&data],
@@ -2526,6 +2527,16 @@ pub(crate) mod tests {
             }
             Png::chunk(&mut file, b"IEND", b"");
             let image = Image::from_bytes(file).unwrap();
+            assert!(
+                matches!(
+                    &image.inner.encoding,
+                    Encoding::Png {
+                        data: PngData::InFile(_),
+                        ..
+                    }
+                ),
+                "{chunks:?}"
+            );
             let object = image.objects(1, Compression::Flate).concat();
             // The stream's data is the zlib stream, however the file cut it.
             let head = format!(
@@ -2540,12 +2551,19 @@ pub(crate) mod tests {
         }
     }
 
-    /// A PNG file of `png`'s header, with `data` cut into `IDAT` chunks of `size` bytes.
+    /// A PNG file of `png`'s header, with `data` cut into `IDAT` chunks of `size` bytes, the
+    /// last one taking what is left over too.
     fn png_in_chunks(png: &Png, data: &[u8], size: usize) -> Vec<u8> {
         let mut file = PNG_SIGNATURE.to_vec();
         Png::chunk(&mut file, b"IHDR", &png.header());
-        for chunk in data.chunks(size) {
-            Png::chunk(&mut file, b"IDAT", chunk);
+        let whole = (data.len() / size).max(1);
+        for i in 0..whole {
+            let end = if i + 1 == whole {
+                data.len()
+            } else {
+                (i + 1) * size
+            };
+            Png::chunk(&mut file, b"IDAT", &data[i * size..end]);
         }
         Png::chunk(&mut file, b"IEND", b"");
         file
@@ -2557,7 +2575,10 @@ pub(crate) mod tests {
         // Chunks of 100 bytes are pointed at in the file.
         let png = Png::new(40, 30, 2, 8);
         let data = compress_to_vec_zlib(&png.rows(), 6);
-        for (size, copied) in [(1, true), (100, false)] {
+        // At the limit, chunks of 64 bytes, whose places take a quarter of their data, are
+        // pointed at, and chunks of 63 bytes are copied (with what is left over added to
+        // the last chunk, so that every chunk but the last has that size).
+        for (size, copied) in [(1, true), (100, false), (64, false), (63, true)] {
             let image = Image::from_bytes(png_in_chunks(&png, &data, size)).unwrap();
             let Encoding::Png { data: kept, .. } = &image.inner.encoding else {
                 panic!("not passed through");
