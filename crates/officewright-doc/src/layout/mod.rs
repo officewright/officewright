@@ -9,6 +9,7 @@
 
 mod inline;
 mod list;
+mod notes;
 mod paragraph;
 mod section;
 mod style;
@@ -85,9 +86,8 @@ impl Document {
     /// from semver until 1.0.
     ///
     /// Not translated yet, and listed: table styles and a row's table property
-    /// exceptions, headers and footers, footnotes and endnotes, drawings, pictures and
-    /// other objects, equations, and indents and spacing given in character or line
-    /// units, which keep their value in points.
+    /// exceptions, drawings, pictures and other objects, equations, and indents and
+    /// spacing given in character or line units, which keep their value in points.
     ///
     /// Also listed is what the IR has no place for yet: a row's own alignment and cell
     /// spacing where they differ from the table's, a row's hidden end mark, a cell's
@@ -201,6 +201,15 @@ struct Translator<'a> {
     path: Vec<Step>,
     /// How many tables the current block is in.
     table_depth: usize,
+    /// The translated blocks of each header and footer used so far, by story, and their
+    /// weight (blocks and inlines).
+    header_footers: HashMap<u32, (Vec<ir::Block>, usize)>,
+    /// The weight of the headers and footers copied into sections so far.
+    copied: usize,
+    /// The IR note of each note referred to so far: whether it is an endnote, and its id.
+    notes: HashMap<(bool, i64), Option<ir::NoteId>>,
+    /// Whether the blocks being translated are a note's, which holds no note references.
+    in_note: bool,
 }
 
 impl<'a> Translator<'a> {
@@ -217,6 +226,10 @@ impl<'a> Translator<'a> {
             path: Vec::new(),
             table_depth: 0,
             open_type_features: open_type_features(document),
+            header_footers: HashMap::new(),
+            copied: 0,
+            notes: HashMap::new(),
+            in_note: false,
         }
     }
 
@@ -230,6 +243,7 @@ impl<'a> Translator<'a> {
             self.ir.add_section(section);
             self.path.truncate(self.path.len().saturating_sub(2));
         }
+        self.note_separators();
         if self.omitted > 0 {
             let omitted = self.omitted;
             self.left_out.push(LeftOut {

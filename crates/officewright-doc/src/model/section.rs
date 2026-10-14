@@ -202,8 +202,9 @@ xml_enum! {
 }
 
 xml_enum! {
-    /// What a footnote or an endnote of the notes part is (ST_FtnEdn): a note the text
-    /// refers to, or one of the special notes Word draws between the text and the notes.
+    /// What a footnote or an endnote of the notes part is (the `w:type` of `w:footnote` and
+    /// `w:endnote`, ECMA-376 Part 1, §17.11): a note the text refers to, or one of the
+    /// special notes Word draws between the text and the notes.
     NoteType {
         /// A note that the text refers to.
         Normal = "normal",

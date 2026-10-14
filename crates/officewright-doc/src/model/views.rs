@@ -63,13 +63,26 @@ pub(crate) fn kind_index(kind: HeaderFooterKind) -> usize {
 pub struct HeaderFooter<'a> {
     document: &'a Document,
     data: &'a StoryData,
+    index: u32,
 }
 
 impl<'a> HeaderFooter<'a> {
     fn at(document: &'a Document, index: Option<u32>) -> Option<Self> {
-        let data = document.stories.get(usize::try_from(index?).ok()?)?;
-        matches!(data.kind, StoryKind::Header | StoryKind::Footer)
-            .then_some(Self { document, data })
+        let index = index?;
+        let data = document.stories.get(usize::try_from(index).ok()?)?;
+        matches!(data.kind, StoryKind::Header | StoryKind::Footer).then_some(Self {
+            document,
+            data,
+            index,
+        })
+    }
+
+    /// Where it is among the document's stories: the same for every section that has
+    /// it.
+    // reason: only the translation into the layout IR asks for it.
+    #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
+    pub(crate) fn index(self) -> u32 {
+        self.index
     }
 
     /// Whether it is a header, not a footer.

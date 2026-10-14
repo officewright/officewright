@@ -1,0 +1,106 @@
+//! Footnotes and endnotes as IR notes, each added when the text first refers to it, and
+//! the special notes Word draws between the text and the notes.
+
+use officewright_layout::ReportKind;
+use officewright_layout::ir;
+
+use super::{Step, Translator};
+use crate::model::NoteType;
+
+impl Translator<'_> {
+    /// The IR note a reference to the note `id` names, added the first time; none,
+    /// listed, for a reference inside a note, which the IR does not hold, and for a note
+    /// that does not exist or is not a normal note.
+    pub(super) fn note_reference(&mut self, endnote: bool, id: i64) -> Option<ir::NoteId> {
+        let name = if endnote { "endnote" } else { "footnote" };
+        if self.in_note {
+            self.leave_out(ReportKind::FeatureUnsupported, || {
+                format!("a reference to a {name} inside a note is left out")
+            });
+            return None;
+        }
+        if let Some(found) = self.notes.get(&(endnote, id)) {
+            return *found;
+        }
+        let document = self.document;
+        let note = if endnote {
+            document.endnote(id)
+        } else {
+            document.footnote(id)
+        }
+        .filter(|note| note.note_type() == NoteType::Normal);
+        let found = match note {
+            Some(note) => {
+                // Places in a note are written from the document's list of notes.
+                let path = std::mem::replace(
+                    &mut self.path,
+                    vec![Step::Field("notes"), Step::Index(self.notes.len())],
+                );
+                self.in_note = true;
+                let blocks = self.blocks(note.blocks());
+                self.in_note = false;
+                self.path = path;
+                let kind = if endnote {
+                    ir::NoteKind::Endnote
+                } else {
+                    ir::NoteKind::Footnote
+                };
+                Some(self.ir.add_note(ir::Note::new(kind, blocks)))
+            }
+            None => {
+                self.leave_out(ReportKind::FeatureUnsupported, || {
+                    format!(
+                        "a reference to {name} {id}, which the document does not have, is left out"
+                    )
+                });
+                None
+            }
+        };
+        self.notes.insert((endnote, id), found);
+        found
+    }
+
+    /// The separators of footnotes and of endnotes: the first note of each special type.
+    /// Without them, the IR's defaults draw what Word draws.
+    pub(super) fn note_separators(&mut self) {
+        for (endnote, kind) in [
+            (false, ir::NoteKind::Footnote),
+            (true, ir::NoteKind::Endnote),
+        ] {
+            let mut parts: [Option<Vec<ir::Block>>; 3] = [None, None, None];
+            let document = self.document;
+            for note in document.notes().filter(|note| note.is_endnote() == endnote) {
+                let slot = match note.note_type() {
+                    NoteType::Separator => 0,
+                    NoteType::ContinuationSeparator => 1,
+                    NoteType::ContinuationNotice => 2,
+                    NoteType::Normal => continue,
+                };
+                if parts.get(slot).is_some_and(Option::is_some) {
+                    continue;
+                }
+                self.in_note = true;
+                let blocks = self.blocks(note.blocks());
+                self.in_note = false;
+                if let Some(part) = parts.get_mut(slot) {
+                    *part = Some(blocks);
+                }
+            }
+            if parts.iter().all(Option::is_none) {
+                continue;
+            }
+            let [separator, continuation, notice] = parts;
+            let mut separators = self.ir.note_separators(kind).clone();
+            if let Some(blocks) = separator {
+                separators = separators.with_separator(blocks);
+            }
+            if let Some(blocks) = continuation {
+                separators = separators.with_continuation_separator(blocks);
+            }
+            if let Some(blocks) = notice {
+                separators = separators.with_continuation_notice(blocks);
+            }
+            self.ir.set_note_separators(kind, separators);
+        }
+    }
+}

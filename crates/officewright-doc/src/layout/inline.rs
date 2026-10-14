@@ -109,15 +109,15 @@ impl<'a> Translator<'a> {
                 RunContent::FieldChar(FieldCharKind::End) => content.end(),
                 RunContent::NoBreakHyphen => content.push(ir::Inline::no_break_hyphen(style)),
                 RunContent::SoftHyphen => content.push(ir::Inline::soft_hyphen(style)),
-                RunContent::FootnoteReference(_) => {
-                    self.leave_out(ReportKind::FeatureUnsupported, || {
-                        "a footnote reference is left out: notes are not translated yet".into()
-                    });
+                RunContent::FootnoteReference(id) => {
+                    if let Some(note) = self.note_reference(false, id) {
+                        content.push(ir::Inline::note_reference(note, false, style));
+                    }
                 }
-                RunContent::EndnoteReference(_) => {
-                    self.leave_out(ReportKind::FeatureUnsupported, || {
-                        "an endnote reference is left out: notes are not translated yet".into()
-                    });
+                RunContent::EndnoteReference(id) => {
+                    if let Some(note) = self.note_reference(true, id) {
+                        content.push(ir::Inline::note_reference(note, false, style));
+                    }
                 }
                 RunContent::NoteNumber => content.push(ir::Inline::note_number(style)),
                 RunContent::Separator => content.push(ir::Inline::separator(style)),

@@ -3386,3 +3386,25 @@ fn refuses_a_header_part_whose_root_is_not_a_header() {
         "{err}"
     );
 }
+
+#[test]
+fn splits_no_content_control_at_a_section_break_in_a_header() {
+    // A w:sectPr in a header ends no section, so the content control around it stays
+    // whole; in the body it would be split between two sections.
+    let header = format!(
+        r#"<w:hdr xmlns:w="{W}"><w:sdt><w:sdtContent><w:p><w:pPr><w:sectPr/></w:pPr><w:r><w:t>a</w:t></w:r></w:p><w:p><w:r><w:t>b</w:t></w:r></w:p></w:sdtContent></w:sdt></w:hdr>"#
+    );
+    let body = r#"<w:p/><w:sectPr><w:headerReference w:type="default" r:id="rId0"/></w:sectPr>"#;
+    let document = with_parts(body, &[("header", "header1.xml", header)]);
+    let section = document.sections().next().unwrap();
+    let blocks: Vec<Block<'_>> = section
+        .header(HeaderFooterKind::Default)
+        .unwrap()
+        .blocks()
+        .collect();
+    assert_eq!(blocks.len(), 1);
+    let Block::ContentControl(control) = blocks[0] else {
+        panic!("a content control");
+    };
+    assert_eq!(block_text(control.blocks()), ["a", "b"]);
+}

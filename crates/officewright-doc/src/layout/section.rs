@@ -6,10 +6,10 @@ use officewright_core::{PageSize, Pt};
 use officewright_layout::ReportKind;
 use officewright_layout::ir;
 
-use super::Translator;
+use super::{Step, Translator};
 use crate::model::{
-    NotePosition, NoteProperties, NoteRestart, NumberFormat, Orientation, Section, SectionStart,
-    VerticalJustification,
+    HeaderFooterKind, NotePosition, NoteProperties, NoteRestart, NumberFormat, Orientation,
+    Section, SectionStart, VerticalJustification,
 };
 
 /// The settings that apply to the whole document.
@@ -176,11 +176,8 @@ pub(super) fn section<'a>(t: &mut Translator<'a>, section: Section<'a>) -> ir::S
         ir::NoteProps::endnotes(),
         [(settings.endnotes(), true), (properties.endnotes(), false)],
     );
-    if !properties.headers().is_empty() || !properties.footers().is_empty() {
-        t.leave_out(ReportKind::FeatureUnsupported, || {
-            "the section's headers and footers are left out: they are not translated yet".into()
-        });
-    }
+    let headers = t.header_footer_set(section, true);
+    let footers = t.header_footer_set(section, false);
     let blocks = t.blocks(section.blocks());
     ir::Section::new(page)
         .with_columns(columns)
@@ -190,7 +187,92 @@ pub(super) fn section<'a>(t: &mut Translator<'a>, section: Section<'a>) -> ir::S
         .with_vertical_align(vertical_align)
         .with_footnotes(footnotes)
         .with_endnotes(endnotes)
+        .with_headers(headers)
+        .with_footers(footers)
         .with_blocks(blocks)
+}
+
+impl<'a> Translator<'a> {
+    /// The headers or footers in effect for a section, each translated once and copied
+    /// into every section that has it. The copies are bounded: past [`MAX_COPIED`]
+    /// blocks and inlines, or the size of the document if that is more, a section gets
+    /// no more of them, and that is listed.
+    fn header_footer_set(&mut self, section: Section<'a>, header: bool) -> ir::HeaderFooterSet {
+        let mut set = ir::HeaderFooterSet::default();
+        let place = if header { "headers" } else { "footers" };
+        for (kind, field) in [
+            (HeaderFooterKind::Default, "primary"),
+            (HeaderFooterKind::First, "first"),
+            (HeaderFooterKind::Even, "even"),
+        ] {
+            let story = if header {
+                section.header(kind)
+            } else {
+                section.footer(kind)
+            };
+            let Some(story) = story else {
+                continue;
+            };
+            self.path.extend([Step::Field(place), Step::Field(field)]);
+            if !self.header_footers.contains_key(&story.index()) {
+                let blocks = self.blocks(story.blocks());
+                let weight = weight(&blocks);
+                self.header_footers.insert(story.index(), (blocks, weight));
+            }
+            let limit = MAX_COPIED.max(self.document.nodes.len());
+            let copy = match self.header_footers.get(&story.index()) {
+                Some((blocks, weight)) if self.copied.saturating_add(*weight) <= limit => {
+                    self.copied += weight;
+                    Some(blocks.clone())
+                }
+                _ => None,
+            };
+            match copy {
+                Some(blocks) => {
+                    set = match kind {
+                        HeaderFooterKind::Default => set.with_primary(blocks),
+                        HeaderFooterKind::First => set.with_first(blocks),
+                        HeaderFooterKind::Even => set.with_even(blocks),
+                    };
+                }
+                None => self.leave_out(ReportKind::FeatureUnsupported, || {
+                    format!(
+                        "a {} is left out: the copies of headers and footers in sections \
+                         have reached the size of the document",
+                        if header { "header" } else { "footer" }
+                    )
+                }),
+            }
+            self.path.truncate(self.path.len().saturating_sub(2));
+        }
+        set
+    }
+}
+
+/// How many blocks and inlines of headers and footers a translation copies into its
+/// sections at least, however small the document: a header of a few lines in every
+/// section of a document of thousands of sections is not damage. Smaller in tests, which
+/// reach it.
+const MAX_COPIED: usize = if cfg!(test) { 1_000 } else { 1_000_000 };
+
+/// The blocks and inlines of some blocks, those in tables included. Tables nest no
+/// deeper than the IR allows.
+fn weight(blocks: &[ir::Block]) -> usize {
+    blocks
+        .iter()
+        .map(|block| match block {
+            ir::Block::Paragraph(paragraph) => 1 + paragraph.inlines().len(),
+            ir::Block::Table(table) => {
+                1 + table
+                    .rows()
+                    .iter()
+                    .flat_map(|row| row.cells())
+                    .map(|cell| weight(cell.blocks()))
+                    .sum::<usize>()
+            }
+            _ => 1,
+        })
+        .sum()
 }
 
 /// Note properties: Word's defaults, then the document's settings, then the section's;
