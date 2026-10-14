@@ -51,8 +51,12 @@ scripts/check-test-fonts.sh || fonts_failed=1
 printf '==> %s\n' "fuzzing (30 min per target)"
 # Each target is seeded with files of the format it reads; libFuzzer keeps the inputs it
 # finds in fuzz/corpus/<target> and writes crashing inputs to fuzz/artifacts/<target>,
-# which nightly.yml uploads. The limits are the corpus rules of CLAUDE.md: 30 s per
-# input, 1 GiB of memory. A crash in one target does not stop the others. The targets
+# which nightly.yml uploads. The limits follow the corpus rules of CLAUDE.md: 30 s per
+# input, and 1 GiB for what an input asks for at once (-malloc_limit_mb). The process may
+# grow to 2.5 GiB, the limit OSS-Fuzz runs with (-rss_limit_mb), because besides the input
+# it holds libFuzzer's corpus and AddressSanitizer's quarantine of freed memory: with the
+# fonts as seeds those two passed 1 GiB within a quarter of an hour while no input took
+# more than 50 MB. A crash in one target does not stop the others. The targets
 # and their seeds are looked up in statements of their own, so that `set -e` stops the
 # script if either fails.
 seeds() {
@@ -82,7 +86,7 @@ for target in $targets; do
 	target_seeds=$(seeds "$target")
 	read -r -a dirs <<<"$target_seeds"
 	cargo +nightly fuzz run "$target" "fuzz/corpus/$target" "${dirs[@]}" -- \
-		-max_total_time=1800 -timeout=30 -rss_limit_mb=1024 ||
+		-max_total_time=1800 -timeout=30 -malloc_limit_mb=1024 -rss_limit_mb=2560 ||
 		crashed="$crashed $target"
 done
 failed=
