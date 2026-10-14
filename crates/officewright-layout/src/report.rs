@@ -169,6 +169,23 @@ pub enum ReportKind {
     Overflow,
 }
 
+impl ReportKind {
+    /// The kind's name, such as `font-substituted`, as `officewright docx-to-pdf
+    /// --report` and the corpus runner write it. A name does not change once released.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::FontSubstituted => "font-substituted",
+            Self::FontEmbedding => "font-embedding",
+            Self::GlyphMissing => "glyph-missing",
+            Self::FeatureUnsupported => "feature-unsupported",
+            Self::FieldCached => "field-cached",
+            Self::CompatIgnored => "compat-ignored",
+            Self::ValueClamped => "value-clamped",
+            Self::Overflow => "overflow",
+        }
+    }
+}
+
 /// A place in the layout IR, written as the path of fields and list positions from the
 /// document to the value, such as `sections[0].blocks[3].props.tabs[1].position`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
@@ -226,5 +243,41 @@ impl fmt::Display for Location {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ReportKind;
+
+    #[test]
+    fn every_kind_has_its_name() {
+        let names: Vec<&str> = [
+            ReportKind::FontSubstituted,
+            ReportKind::FontEmbedding,
+            ReportKind::GlyphMissing,
+            ReportKind::FeatureUnsupported,
+            ReportKind::FieldCached,
+            ReportKind::CompatIgnored,
+            ReportKind::ValueClamped,
+            ReportKind::Overflow,
+        ]
+        .into_iter()
+        .map(ReportKind::name)
+        .collect();
+        // Users read these names from the CLI's JSON report: they never change.
+        assert_eq!(
+            names,
+            [
+                "font-substituted",
+                "font-embedding",
+                "glyph-missing",
+                "feature-unsupported",
+                "field-cached",
+                "compat-ignored",
+                "value-clamped",
+                "overflow"
+            ]
+        );
     }
 }

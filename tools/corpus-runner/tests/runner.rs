@@ -720,9 +720,10 @@ fn documents_are_rendered_where_the_scoring_finds_them() -> io::Result<()> {
     );
     assert!(report["files"][1].get("layout_report").is_none());
 
-    // With references in docs/references, whose documents are named from docs: rendered
-    // where the scoring looks, pdfs/good.pdf, and scored from there.
-    let reference = corpus.dir.join("docs/references/good");
+    // With references in docs/references (a group, then a folder per document), whose
+    // documents are named from docs: rendered where the scoring looks, pdfs/good.pdf, and
+    // scored from there.
+    let reference = corpus.dir.join("docs/references/group/good");
     std::fs::create_dir_all(&reference)?;
     std::fs::write(
         reference.join("geometry.json"),
@@ -744,8 +745,8 @@ fn documents_are_rendered_where_the_scoring_finds_them() -> io::Result<()> {
     )?;
     assert!(corpus.dir.join("pdfs/good.pdf").is_file(), "{output}");
     let scored: serde_json::Value = serde_json::from_str(&corpus.read("scored.json")?).unwrap();
-    let why = scored["files"][0]["score_error"].as_str().unwrap_or("");
-    assert!(!why.starts_with("no PDF of ours"), "{why}");
+    let good = &scored["files"][0];
+    assert!(good["scores"].is_object(), "{good}\n{output}");
     Ok(())
 }
 
@@ -816,5 +817,126 @@ fn a_run_of_statuses_only_keeps_the_baseline_s_scores() -> io::Result<()> {
     let (code, output) = corpus.run(&["--statuses-only", "docs"], None)?;
     assert_eq!(code, 2, "{output}");
     assert!(output.contains("need --baseline"), "{output}");
+    Ok(())
+}
+
+#[test]
+fn a_run_of_statuses_only_still_fails_on_statuses() -> io::Result<()> {
+    let corpus = Corpus::new("statuses-fail")?;
+    let cases = [
+        // A status changed for the worse.
+        (
+            r#"{"format": 1, "files": {"docs/good.docx": "opened", "docs/nested/BROKEN.DOCX": "opened"}}"#,
+            "docs/nested/BROKEN.DOCX: opened in the baseline, now unexpected-error",
+        ),
+        // A file of the baseline is gone.
+        (
+            r#"{"format": 1, "files": {"docs/good.docx": "opened", "docs/nested/BROKEN.DOCX": "unexpected-error", "docs/gone.docx": "opened"}}"#,
+            "docs/gone.docx: in the baseline but not in this run",
+        ),
+        // A file the baseline does not know.
+        (
+            r#"{"format": 1, "files": {"docs/good.docx": "opened"}}"#,
+            "docs/nested/BROKEN.DOCX: not in the baseline",
+        ),
+    ];
+    for (baseline, why) in cases {
+        corpus.write("baseline.json", baseline)?;
+        let (code, output) = corpus.run(
+            &["--baseline", "baseline.json", "--statuses-only", "docs"],
+            None,
+        )?;
+        assert_eq!(code, 1, "{output}");
+        assert!(output.contains(why), "{why}\n{output}");
+    }
+    Ok(())
+}
+
+#[test]
+fn two_documents_are_never_rendered_to_one_pdf() -> io::Result<()> {
+    let corpus = Corpus::new("clash")?;
+    std::fs::copy(
+        corpus.dir.join("docs/good.docx"),
+        corpus.dir.join("docs/good.dotx"),
+    )?;
+    let (code, output) = corpus.run(&["--render", "pdfs", "docs"], None)?;
+    assert_eq!(code, 2, "{output}");
+    assert!(
+        output.contains("docs/good.docx and docs/good.dotx would both be rendered to"),
+        "{output}"
+    );
+    assert!(!corpus.dir.join("pdfs").exists());
+    Ok(())
+}
+
+#[test]
+fn a_pdf_of_an_earlier_run_is_never_scored() -> io::Result<()> {
+    let corpus = Corpus::new("stale")?;
+    let reference = corpus.dir.join("docs/references/group/good");
+    std::fs::create_dir_all(&reference)?;
+    std::fs::write(
+        reference.join("geometry.json"),
+        r#"{"format": 1, "document": "good.docx", "pages": []}"#,
+    )?;
+    let args = [
+        "--render",
+        "pdfs",
+        "--references",
+        "docs/references",
+        "--report",
+        "report.json",
+        "docs",
+    ];
+    let (_, output) = corpus.run(&args, None)?;
+    assert!(corpus.dir.join("pdfs/good.pdf").is_file(), "{output}");
+    let report: serde_json::Value = serde_json::from_str(&corpus.read("report.json")?).unwrap();
+    assert!(report["files"][0]["scores"].is_object(), "{output}");
+    // The child dies before it renders: the earlier PDF is gone, and nothing is scored.
+    let (code, output) = corpus.run(&args, Some("panic"))?;
+    assert_eq!(code, 1, "{output}");
+    assert!(!corpus.dir.join("pdfs/good.pdf").exists(), "{output}");
+    let report: serde_json::Value = serde_json::from_str(&corpus.read("report.json")?).unwrap();
+    let good = report["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|file| file["path"] == "docs/good.docx")
+        .unwrap();
+    assert!(
+        good.get("scores").is_none_or(serde_json::Value::is_null),
+        "{good}"
+    );
+    assert_eq!(good["score_error"], "our PDF was not rendered");
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn memory_is_measured_after_the_rendering() -> io::Result<()> {
+    let corpus = Corpus::new("render-memory")?;
+    let fonts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fonts");
+    let peak = |report: &str| -> io::Result<u64> {
+        let report: serde_json::Value = serde_json::from_str(&corpus.read(report)?).unwrap();
+        Ok(report["files"][0]["peak_rss_kb"].as_u64().unwrap())
+    };
+    corpus.run(&["--report", "opened.json", "docs"], None)?;
+    let (_, output) = corpus.run(
+        &[
+            "--render",
+            "pdfs",
+            "--font-dir",
+            fonts.to_str().unwrap(),
+            "--report",
+            "rendered.json",
+            "docs",
+        ],
+        None,
+    )?;
+    // Rendering reads the fonts of tests/fonts, megabytes the opening alone never holds.
+    let (opened, rendered) = (peak("opened.json")?, peak("rendered.json")?);
+    assert!(
+        rendered > opened + 1024,
+        "{opened} KiB, then {rendered} KiB\n{output}"
+    );
     Ok(())
 }

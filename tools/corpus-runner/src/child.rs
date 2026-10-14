@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use officewright_doc::{Document, Error, LayoutReport, RenderOptions, ReportKind};
+use officewright_doc::{Document, Error, LayoutReport, RenderOptions};
 use serde::{Deserialize, Serialize};
 
 /// What the child prints.
@@ -136,13 +136,19 @@ fn render_pdf(document: &Document, render: &Render) -> Result<LayoutReport, Stri
         std::fs::create_dir_all(folder)
             .map_err(|error| format!("cannot make {}: {error}", folder.display()))?;
     }
+    document
+        .save_pdf_path(&render.pdf, &render_options(render))
+        .map_err(|error| with_causes(&error))
+}
+
+/// The options of a rendering: the fonts of `render.font_dirs` besides those the document
+/// embeds, and none of the system's, so that a run gives the same pages on every machine.
+fn render_options(render: &Render) -> RenderOptions {
     let mut options = RenderOptions::new().with_system_fonts(false);
     for dir in &render.font_dirs {
         options = options.with_font_dir(dir);
     }
-    document
-        .save_pdf_path(&render.pdf, &options)
-        .map_err(|error| with_causes(&error))
+    options
 }
 
 /// `error` with each of its causes.
@@ -162,27 +168,11 @@ fn entries(report: &LayoutReport) -> Vec<LayoutEntry> {
         .entries()
         .iter()
         .map(|entry| LayoutEntry {
-            kind: kind_name(entry.kind()).to_owned(),
+            kind: entry.kind().name().to_owned(),
             location: entry.location().to_string(),
             message: entry.message().to_owned(),
         })
         .collect()
-}
-
-/// The name of a report kind, as `officewright docx-to-pdf --report` writes it; `other`
-/// for a kind this version does not know.
-pub fn kind_name(kind: ReportKind) -> &'static str {
-    match kind {
-        ReportKind::FontSubstituted => "font-substituted",
-        ReportKind::GlyphMissing => "glyph-missing",
-        ReportKind::FeatureUnsupported => "feature-unsupported",
-        ReportKind::FieldCached => "field-cached",
-        ReportKind::CompatIgnored => "compat-ignored",
-        ReportKind::ValueClamped => "value-clamped",
-        ReportKind::Overflow => "overflow",
-        ReportKind::FontEmbedding => "font-embedding",
-        _ => "other",
-    }
 }
 
 fn kind(error: &Error) -> &'static str {
@@ -214,5 +204,19 @@ fn misbehave() {
             std::process::abort()
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Render, render_options};
+
+    #[test]
+    fn a_rendering_uses_none_of_the_system_s_fonts() {
+        let render = Render {
+            pdf: "out.pdf".into(),
+            font_dirs: vec!["fonts".into()],
+        };
+        assert!(!render_options(&render).system_fonts());
     }
 }

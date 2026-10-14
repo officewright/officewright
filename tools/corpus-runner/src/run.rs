@@ -290,6 +290,8 @@ impl Launcher {
 /// Where each file is rendered with `--render DIR`, by its name: `DIR/<path>.pdf`, the path
 /// relative to the folder above `--references` when the file lies under it (where the
 /// scoring looks for it), else its name, relative to the root. Empty without `--render`.
+/// Refuses two files that would be rendered to one PDF: names that differ only in their
+/// extension, or in case, which the file systems of macOS and Windows ignore.
 fn render_targets(
     options: &Options,
     files: &[(String, PathBuf)],
@@ -311,6 +313,15 @@ fn render_targets(
             .and_then(|corpus| full.strip_prefix(corpus).ok())
             .map_or_else(|| PathBuf::from(name), Path::to_path_buf);
         targets.insert(name.clone(), dir.join(relative).with_extension("pdf"));
+    }
+    let mut seen: BTreeMap<String, &str> = BTreeMap::new();
+    for (name, pdf) in &targets {
+        if let Some(other) = seen.insert(pdf.to_string_lossy().to_lowercase(), name) {
+            return Err(format!(
+                "{other} and {name} would both be rendered to {}",
+                pdf.display()
+            ));
+        }
     }
     Ok(targets)
 }
@@ -341,6 +352,18 @@ fn run_all(
             let render = renders
                 .get(name)
                 .map(|pdf| (pdf.as_path(), options.font_dirs.as_slice()));
+            if let Some((pdf, _)) = render {
+                // A PDF left by an earlier run would be scored if this one is not written.
+                if let Err(error) = std::fs::remove_file(pdf) {
+                    if std::fs::symlink_metadata(pdf).is_ok() {
+                        *fatal.lock().unwrap_or_else(PoisonError::into_inner) = Some(format!(
+                            "cannot remove {} of an earlier run: {error}",
+                            pdf.display()
+                        ));
+                        break;
+                    }
+                }
+            }
             let (exit, elapsed) = match run_child(launcher, file, render, options.timeout) {
                 Ok(done) => done,
                 Err(error) => {
@@ -357,9 +380,15 @@ fn run_all(
             );
             report::check_memory(&mut result, options.memory_limit_mb);
             if let Some((folder, pdf)) = scoring.get(name) {
-                match score_file(folder, pdf) {
-                    Ok(scores) => result.scores = Some(scores),
-                    Err(error) => result.score_error = Some(error),
+                let unrendered = render.is_some()
+                    && (result.status != Status::Opened || result.render_error.is_some());
+                if unrendered {
+                    result.score_error = Some("our PDF was not rendered".to_owned());
+                } else {
+                    match score_file(folder, pdf) {
+                        Ok(scores) => result.scores = Some(scores),
+                        Err(error) => result.score_error = Some(error),
+                    }
                 }
             }
             results
@@ -695,5 +724,50 @@ mod tests {
             error.starts_with("cannot start /nonexistent/corpus-runner-child"),
             "{error}"
         );
+    }
+
+    /// Names that differ only in case would share one PDF where the file system ignores
+    /// case, as those of macOS and Windows do.
+    #[test]
+    fn names_that_differ_only_in_case_are_refused() {
+        let files = [
+            (
+                "docs/Letter.docx".to_owned(),
+                PathBuf::from("docs/Letter.docx"),
+            ),
+            (
+                "docs/letter.docx".to_owned(),
+                PathBuf::from("docs/letter.docx"),
+            ),
+        ];
+        let options = Options {
+            paths: Vec::new(),
+            root: PathBuf::from("."),
+            report: None,
+            baseline: None,
+            update_baseline: false,
+            allow_better: false,
+            expected: None,
+            timeout: Duration::from_secs(5),
+            memory_limit_mb: 1024,
+            enforce_memory_limit: false,
+            jobs: 2,
+            references: None,
+            ours: None,
+            render: Some(PathBuf::from("pdfs")),
+            font_dirs: Vec::new(),
+            statuses_only: false,
+        };
+        let error = render_targets(&options, &files).unwrap_err();
+        assert!(
+            error.starts_with("docs/Letter.docx and docs/letter.docx would both be rendered to"),
+            "{error}"
+        );
+        // Without --render nothing is rendered, so nothing clashes.
+        let options = Options {
+            render: None,
+            ..options
+        };
+        assert!(render_targets(&options, &files).unwrap().is_empty());
     }
 }
