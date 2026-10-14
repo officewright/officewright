@@ -83,6 +83,14 @@ impl Formats<'_> {
         Some(level.label)
     }
 
+    /// The definition the list instance `instance` uses, after a numbering style's
+    /// link, as paragraphs resolve it; none when there is no such instance or definition.
+    // reason: only the translation into the layout IR asks for it.
+    #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
+    pub(crate) fn list_definition(&mut self, instance: i64) -> Option<i64> {
+        self.instance(instance)?.definition
+    }
+
     /// What the document defaults give to paragraphs.
     fn paragraph_defaults(&mut self) -> Arc<ParagraphLevel> {
         let document = self.document;
@@ -256,8 +264,8 @@ impl Formats<'_> {
 
     /// The start of each level of the definition `id` and the style it names, worked
     /// out once and shared by every instance that uses it. The levels are parsed and
-    /// dropped: what a level gives to paragraphs is kept only for the levels paragraphs
-    /// use ([`level_layer`](Self::level_layer)).
+    /// dropped: what a level gives to paragraphs and to their labels is kept only for
+    /// the levels paragraphs use ([`level_gives`](Self::level_gives)).
     fn definition_levels(&mut self, id: i64) -> Arc<DefinitionLevels> {
         if let Some(levels) = self.definitions.get(&id) {
             return Arc::clone(levels);
@@ -290,11 +298,10 @@ impl Formats<'_> {
 
     /// What level `number` of the instance `instance` gives to paragraphs and to their
     /// labels, with the instance's override applied, and the number it starts from, worked
-    /// out once per
-    /// instance and level that a paragraph uses. Only the instance's first override of
-    /// that level is read, and none when the instance's definition does not exist: such
-    /// an instance is a list without levels. Without a replacement level the entry
-    /// shares the definition's.
+    /// out once per instance and level that a paragraph uses. Only the instance's first
+    /// override of that level is read, and none when the instance's definition does not
+    /// exist: such an instance is a list without levels. Without a replacement level the
+    /// entry shares the definition's.
     fn instance_level(
         &mut self,
         instance: i64,

@@ -38,6 +38,15 @@ macro_rules! xml_enum {
                     _ => None,
                 }
             }
+
+            /// The value as WordprocessingML writes it.
+            // reason: only some value sets are passed on by name so far.
+            #[allow(dead_code)]
+            pub(crate) fn to_xml(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $value,)*
+                }
+            }
         }
     };
 }
@@ -200,7 +209,7 @@ xml_enum! {
 
 /// A colour as written: a value, a theme colour, or both, the theme colour then taking
 /// precedence (ECMA-376 Part 1, §17.3.2.6).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct Color {
     pub(crate) value: Option<ColorValue>,
@@ -237,7 +246,7 @@ impl Color {
 }
 
 /// A colour value (ST_HexColor).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ColorValue {
     /// Chosen by the application: for text, black, or white on a dark background.
@@ -269,7 +278,7 @@ impl Underline {
 }
 
 /// A shading: a pattern in a colour over a fill.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct Shading {
     pub(crate) pattern: Option<ShadingPattern>,

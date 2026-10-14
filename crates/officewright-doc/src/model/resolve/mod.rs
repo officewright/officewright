@@ -23,10 +23,10 @@ use paragraph::ParagraphLevel;
 /// them (MS-OI29500 §17.7.4.17(a)).
 const IGNORED_STYLES: [&str; 3] = ["NoList", "DefaultParagraphFont", "TableNormal"];
 
-/// Resolves the formatting in effect of paragraphs, runs and paragraph marks, keeping
-/// what it has worked out about styles for the next ones: use one for a whole
-/// document. It borrows the document; threads that format at the same time each use
-/// their own.
+/// Resolves the formatting in effect of paragraphs, runs, paragraph marks and list
+/// labels, keeping what it has worked out about styles for the next ones: use one for a
+/// whole document. It borrows the document; threads that format at the same time each
+/// use their own.
 #[derive(Debug)]
 pub struct Formats<'a> {
     document: &'a Document,
@@ -140,9 +140,17 @@ impl<'a> Formats<'a> {
     }
 
     /// The formatting of a list item's label, its number or bullet, in effect: the
-    /// paragraph mark's, with the run properties of the list level laid over it. Word
-    /// ignores the level's `w:rStyle`, `w:highlight` and `w:oMath` there (MS-OI29500
-    /// §17.9.24(a)). None when the paragraph is not a list item.
+    /// paragraph mark's, with the run properties of the list level laid over it, whose
+    /// on/off values set the value as direct formatting does. Word does not allow the
+    /// level's `w:rStyle`, `w:highlight`, `w:oMath` and `w:rPrChange` there (MS-OI29500
+    /// §17.9.24(a)); a file that has them is read, and they are dropped. None when the
+    /// paragraph is not a list item.
+    ///
+    /// Not confirmed against Word yet: [MS-DOC] ("Determining List Formatting of a
+    /// Paragraph", part 3) lays the level over the mark this way, and the reference
+    /// renders of the rule documents asked for in issue #162 are to confirm it. The
+    /// level's linked paragraph style, which [MS-DOC] applies too, does not reach the
+    /// label.
     ///
     /// What a level gives to labels is read once per level, however many paragraphs
     /// use it.
@@ -154,6 +162,18 @@ impl<'a> Formats<'a> {
         let style = self.paragraph_style(Some(paragraph.node()));
         let label = self.label_level(style, &properties)?;
         Some(self.resolve_run(style, &properties.mark, label.as_deref()))
+    }
+
+    /// The place among the styles of a paragraph's style: its own, else the default
+    /// paragraph style; none for a paragraph of another document. For the translation
+    /// into the layout IR, which keys contextual spacing by it.
+    // reason: only the translation into the layout IR asks for it.
+    #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
+    pub(crate) fn paragraph_style_index(&mut self, paragraph: Paragraph<'a>) -> Option<usize> {
+        if !std::ptr::eq(paragraph.document(), self.document) {
+            return None;
+        }
+        self.paragraph_style(Some(paragraph.node()))
     }
 
     /// How many times a style's own properties were read, for tests of the work done.
@@ -395,6 +415,16 @@ fn paragraph_of<'a>(document: &'a Document, node: &'a Node) -> Option<&'a Node> 
         current = document.node(current.parent)?;
     }
     None
+}
+
+impl Document {
+    /// A colour as written, in effect: a theme colour through the colour mapping and
+    /// the theme, with its tint or shade; else the value written, or automatic.
+    // reason: only the translation into the layout IR asks for it outside the resolver.
+    #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
+    pub(crate) fn resolve_color(&self, color: &super::properties::Color) -> super::ColorValue {
+        character::resolve_color(self, color)
+    }
 }
 
 /// Sets `slot` to `value` when there is one.

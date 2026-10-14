@@ -2,7 +2,8 @@
 //! sections, blocks, tables, inline content and runs, the text, and the XML of every
 //! element kept without being understood, which must read back as XML. The formatting in
 //! effect of every paragraph, run and paragraph mark is resolved, and must not depend on
-//! what the resolver remembered from earlier ones.
+//! what the resolver remembered from earlier ones. The document's translation into the
+//! layout IR must be valid IR.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
@@ -69,6 +70,7 @@ fuzz_target!(|data: &[u8]| {
                 let _ = paragraph.properties();
                 let _ = paragraph.text();
                 let _ = formats.paragraph_mark(paragraph);
+                let _ = formats.list_label(paragraph);
                 let format = formats.paragraph(paragraph);
                 if paragraphs_compared < 256 {
                     paragraphs_compared += 1;
@@ -126,6 +128,11 @@ fuzz_target!(|data: &[u8]| {
             Block::Other(opaque) => check(opaque),
             _ => {}
         }
+    }
+    // The translation into the layout IR gives IR the layout accepts.
+    let translation = document.to_layout_ir();
+    if let Err(err) = translation.document().validate() {
+        panic!("{err}");
     }
 });
 
