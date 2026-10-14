@@ -1,4 +1,5 @@
-"""Every test font in tests/fonts/ is credited in THIRD-PARTY-NOTICES.md with its SHA-256."""
+"""Every test font in tests/fonts/ is credited in THIRD-PARTY-NOTICES.md with its SHA-256, and
+the upstream sources scripts/check-test-fonts.sh checks them against are the ones credited."""
 
 import hashlib
 import re
@@ -21,6 +22,16 @@ class TestFonts(unittest.TestCase):
             digest = hashlib.sha256(path.read_bytes()).hexdigest()
             with self.subTest(name):
                 self.assertEqual(listed.get(name), digest, "listed SHA-256 of the file")
+
+    def test_the_upstream_pins_are_the_noticed_ones(self):
+        # scripts/check-test-fonts.sh compares the files with these sources at night.
+        script = (ROOT / "scripts" / "check-test-fonts.sh").read_text(encoding="utf-8")
+        pins = re.findall(r"^\w+_(?:url|sha256|commit)=(\S+)$", script, re.M)
+        self.assertEqual(len(pins), 6)
+        notices = NOTICES.read_text(encoding="utf-8")
+        for pin in pins:
+            with self.subTest(pin):
+                self.assertIn(pin, notices)
 
     def test_every_listed_file_is_there(self):
         notices = NOTICES.read_text(encoding="utf-8")

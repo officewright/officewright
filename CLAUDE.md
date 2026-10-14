@@ -308,7 +308,7 @@ cargo package --list -p officewright-pdf, -font, -layout, -cli: no third-party d
 typos && taplo fmt --check && shellcheck scripts/*.sh .githooks/pre-commit && actionlint
 scripts/check-added-files.sh: no tracked Python bytecode, no file naming a home directory; its tests in tests/scripts
 tests/corpus-tools (Python unittest): committed rule documents equal make-rule-docs.py output; corpus-import.py refusals;
-  every file in tests/fonts is listed with its SHA-256 in THIRD-PARTY-NOTICES.md
+  every file in tests/fonts is listed with its SHA-256 in THIRD-PARTY-NOTICES.md, and check-test-fonts.sh's pins are its
 tests/corpus-tools/poppler (Linux, macOS): fonts corpus-import.py embeds are what poppler draws
 tests/corpus-tools/test_make_reference.ps1 (Windows): a Word step that hangs is stopped, checked and never waited on forever
 scripts/install-capi.sh target/capi --debug, copy the header, git diff --exit-code crates/officewright-ffi/include/officewright.h

@@ -95,7 +95,7 @@ if [ -n "$corpus_failed" ]; then
 	failed=1
 fi
 if [ -n "$fonts_failed" ]; then
-	echo "nightly.sh: the test fonts are not their upstream files (messages above)" >&2
+	echo "nightly.sh: the test fonts differ from their upstream files, or could not be checked (messages above)" >&2
 	failed=1
 fi
 if [ -n "$failed" ]; then

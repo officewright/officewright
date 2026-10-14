@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Checks that every file in tests/fonts/ is byte for byte the file of the upstream source
 # THIRD-PARTY-NOTICES.md names for it. tests/corpus-tools/test_test_fonts.py compares the
-# files with the SHA-256 the notices list; this compares them with upstream. Liberation
-# comes from its release archive, whose SHA-256 is checked first; Carlito and Noto Sans
-# from shallow, partial, sparse clones of the pinned commits, which git verifies.
-# Needs network, curl, tar and git. Run by scripts/nightly.sh.
+# files with the SHA-256 the notices list, and that the pins below are the notices'; this
+# compares them with upstream. Liberation comes from its release archive, whose SHA-256 is
+# checked first; Carlito and Noto Sans from shallow, partial, sparse clones of the pinned
+# commits, which git verifies. Every entry of tests/fonts must be a regular file. Needs
+# network, curl, tar and git. Run by scripts/nightly.sh.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -20,6 +21,11 @@ fail() {
 	echo "check-test-fonts.sh: $*" >&2
 	failed=1
 }
+# A download or clone that does not succeed: nothing can be compared.
+cannot() {
+	echo "check-test-fonts.sh: cannot $*; the test fonts were not checked" >&2
+	exit 1
+}
 
 # The pins are the ones the notices give.
 for pin in "$liberation_url" "$liberation_sha256" "$carlito_url" "$carlito_commit" \
@@ -34,7 +40,13 @@ sha256() {
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-curl -fsSL --retry 3 -o "$work/liberation.tar.gz" "$liberation_url"
+# Every entry but directories, links among them, so that none is left out unseen; a
+# failing find stops the script here.
+find tests/fonts ! -type d -print0 | sort -z >"$work/files"
+
+# Time limits, so that a server that does not answer cannot hold up the night.
+curl -fsSL --retry 3 --connect-timeout 30 --max-time 600 -o "$work/liberation.tar.gz" \
+	"$liberation_url" || cannot "download $liberation_url"
 got=$(sha256 "$work/liberation.tar.gz")
 if [ "$got" != "$liberation_sha256" ]; then
 	echo "check-test-fonts.sh: the Liberation archive has SHA-256 $got, not $liberation_sha256" >&2
@@ -48,18 +60,24 @@ clone() { # directory url commit paths...
 	git init -q "$dir"
 	git -C "$dir" remote add origin "$url"
 	git -C "$dir" sparse-checkout set --no-cone "$@"
-	git -C "$dir" fetch -q --depth 1 --filter=blob:none origin "$commit"
-	git -C "$dir" checkout -q --detach FETCH_HEAD
-	[ "$(git -C "$dir" rev-parse HEAD)" = "$commit" ] || {
-		echo "check-test-fonts.sh: $url did not give commit $commit" >&2
-		exit 1
-	}
+	# A transfer slower than 1 KB/s for a minute is given up.
+	git -C "$dir" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 \
+		fetch -q --depth 1 --filter=blob:none origin "$commit" ||
+		cannot "fetch $url at $commit"
+	git -C "$dir" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 \
+		checkout -q --detach FETCH_HEAD || cannot "check out $url at $commit"
+	[ "$(git -C "$dir" rev-parse HEAD)" = "$commit" ] || cannot "get commit $commit from $url"
 }
 clone "$work/carlito" "$carlito_url" "$carlito_commit" /fonts/ttf/ /OFL.txt
 clone "$work/noto" "$noto_url" "$noto_commit" /fonts/NotoSans/unhinted/otf/NotoSans-Regular.otf /fonts/LICENSE
 
 checked=0
 while IFS= read -r -d '' file; do
+	checked=$((checked + 1))
+	if [ -L "$file" ] || [ ! -f "$file" ]; then
+		fail "$file is not a regular file; the test fonts are committed as they are"
+		continue
+	fi
 	name=${file##*/}
 	case $file in
 	tests/fonts/liberation/*) upstream=$work/liberation-fonts-ttf-2.1.5/$name ;;
@@ -73,12 +91,11 @@ while IFS= read -r -d '' file; do
 		;;
 	esac
 	if [ ! -f "$upstream" ]; then
-		fail "$file: upstream has no ${upstream#"$work"/}"
+		fail "$file: ${upstream#"$work"/} was not fetched: upstream has no such file, or this script does not fetch it"
 	elif ! cmp -s "$file" "$upstream"; then
 		fail "$file differs from upstream ${upstream#"$work"/}"
 	fi
-	checked=$((checked + 1))
-done < <(find tests/fonts -type f -print0 | sort -z)
+done <"$work/files"
 
 [ "$checked" -gt 0 ] || fail "no files in tests/fonts"
 [ -z "$failed" ] || exit 1
