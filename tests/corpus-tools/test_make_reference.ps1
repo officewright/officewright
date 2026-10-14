@@ -401,7 +401,24 @@ Exit-Stuck 'test' ''
     }
     $late = (Export-Formatting $sluggish 0 $theme $progress).Export
     $lateStories = @($late.stories)
-    Check 'a document over its time budget is marked incomplete, without runs' ($late.complete -eq $false -and $lateStories.Count -eq 1 -and @($lateStories[0].paragraphs).Count -lt 2 -and $late.runs -eq $false -and $late.runs_note -eq 'not collected: the paragraphs did not fit in the time budget') "complete $($late.complete), $($lateStories.Count) stories, $(@($lateStories[0].paragraphs).Count) paragraphs, $($late.runs_note)"
+    $lateCounts = @($lateStories | ForEach-Object { @($_.paragraphs).Count }) -join '/'
+    Check 'a document over its time budget is marked incomplete, without runs' ($late.complete -eq $false -and $lateStories.Count -eq 1 -and @($lateStories[0].paragraphs).Count -lt 2 -and $late.runs -eq $false -and $late.runs_note -eq 'not collected: the paragraphs did not fit in the time budget') "complete $($late.complete), runs $($late.runs), paragraphs per story $lateCounts, $($late.runs_note)"
+    # The budget holds for the whole document, not for each story: each story here fits in
+    # 1 s, both do not, and the last paragraph is reached 1.2 s or more after the start.
+    $twoStories = New-Object PSObject -Property @{ StoryRanges = @(
+            (New-Story 7 @(
+                    (New-Paragraph ('First' + [char]13) $runs $true '' -ReadDelay 400),
+                    (New-Paragraph ('Second' + [char]13) $runs $true '' -ReadDelay 400)
+                )),
+            (New-Story 1 @(
+                    (New-Paragraph ('Third' + [char]13) $runs $true '' -ReadDelay 400),
+                    (New-Paragraph ('Fourth' + [char]13) $runs $true '' -ReadDelay 400)
+                ))
+        )
+    }
+    $overall = (Export-Formatting $twoStories 1 $theme $progress).Export
+    $overallCounts = @(@($overall.stories) | ForEach-Object { @($_.paragraphs).Count }) -join '/'
+    Check 'the time budget holds for the whole document, not for each story' ($overall.complete -eq $false) "complete $($overall.complete), paragraphs per story $overallCounts"
     $unchecked = (Export-Formatting $document 600 $theme $progress $false).Export
     Check 'runs are left out with a fixed note when the run reader failed its check' ($unchecked.complete -eq $true -and $unchecked.runs -eq $false -and $unchecked.runs_note -eq 'left out: Word failed the check of the run reader' -and -not $unchecked.stories[0].paragraphs[0].Contains('runs')) "$($unchecked.runs_note)"
     $failing = New-Object PSObject -Property @{ StoryRanges = @((New-Story 1 @((New-Paragraph ('Body' + [char]13) $runs $true '' 0 '' 99)))) }
