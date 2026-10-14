@@ -232,7 +232,10 @@ impl CharacterFormat {
         self.language_bidi.as_deref()
     }
 
-    /// The kinds of ligatures the text uses; none when nothing in the hierarchy says.
+    /// The kinds of ligatures the text uses; none when nothing in the hierarchy says. When
+    /// the document defaults give no run properties at all, Word's own defaults apply,
+    /// which give standard and contextual ligatures; document defaults that give run
+    /// properties but no ligatures give none.
     pub fn ligatures(&self) -> Ligatures {
         self.ligatures
     }
