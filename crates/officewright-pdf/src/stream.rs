@@ -101,9 +101,9 @@ mod tests {
     #[test]
     fn compresses_exactly_when_the_whole_object_gets_smaller() {
         // Data that hardly compresses: noise, then a run of zeros that grows by a byte at
-        // a time, so that the zlib stream gets shorter than the data by a few bytes more
-        // each time. The noise is 40, 940 and 2000 bytes long, so the data also passes
-        // 100 and 1000 bytes, where `/Length` gains a digit.
+        // a time, so that the zlib stream gets shorter than the data by about a byte more
+        // each time. The noise is 40, 920 and 2000 bytes long: with 40 and 920 the choice
+        // turns where the data passes 100 and 1000 bytes and `/Length` gains a digit.
         let mut state: u32 = 1;
         let noise: Vec<u8> = (0..2000)
             .map(|_| {
@@ -113,7 +113,7 @@ mod tests {
             .collect();
         let mut stored_though_shorter = 0;
         let mut compressed = 0;
-        for noise_len in [40, 940, 2000] {
+        for noise_len in [40, 920, 2000] {
             for zeros in 0..150 {
                 let data = [&noise[..noise_len], &vec![0; zeros]].concat();
                 let zlib = compress_to_vec_zlib(&data, LEVEL);
@@ -162,7 +162,10 @@ mod tests {
 
     #[test]
     fn counts_the_digits_of_lengths() {
-        assert_eq!([0, 9, 10, 99, 100, 12_345].map(digits), [1, 1, 2, 2, 3, 5]);
+        assert_eq!(
+            [0, 9, 10, 99, 100, 999, 1000, 12_345].map(digits),
+            [1, 1, 2, 2, 3, 3, 4, 5]
+        );
     }
 
     #[test]
