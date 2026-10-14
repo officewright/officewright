@@ -182,7 +182,7 @@ fn table_range(font: &FontRef<'_>, tag: &[u8; 4], len: usize) -> Option<Range<us
 /// faces before the subsetter runs, since the panic hook would still print them. They
 /// are an overflow in its `name` table code
 /// (<https://github.com/typst/subsetter/issues/30>) and `unreachable!()` for a CFF real
-/// number too large for an `f32`. Catching relies on unwinding, like the C ABI: built with `-C panic=abort` the
+/// number too large for an `f32` (<https://github.com/typst/subsetter/issues/32>). Catching relies on unwinding, like the C ABI: built with `-C panic=abort` the
 /// process aborts instead. The default panic hook still prints the message to stderr,
 /// since a library must not replace the process-wide hook.
 fn catch_subsetter_panic<T>(face: u32, run: impl FnOnce() -> T + UnwindSafe) -> Result<T> {
