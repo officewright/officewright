@@ -51,7 +51,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     "embedded".to_owned()
                 }
                 Err(err) => {
-                    println!("{}, face {index}: {err}", file.display());
+                    let cause = std::error::Error::source(&err)
+                        .map_or_else(String::new, |cause| format!(": {cause}"));
+                    println!("{}, face {index}: {err}{cause}", file.display());
                     kind(&err)
                 }
             };
@@ -85,14 +87,14 @@ fn kind(err: &officewright_pdf::Error) -> String {
     match err {
         officewright_pdf::Error::EmbeddingNotAllowed { .. } => "license forbids embedding".into(),
         officewright_pdf::Error::Font { source, .. }
-        | officewright_pdf::Error::Embed { source, .. } => {
-            let message = source.to_string();
-            if message.contains("outlines") {
-                "outlines cannot be embedded".into()
-            } else {
-                "damaged".into()
+        | officewright_pdf::Error::Embed { source, .. } => match source {
+            officewright_font::Error::UnsupportedOutlines { .. }
+            | officewright_font::Error::SubsetUnsupported { .. } => {
+                "not supported by the subsetter yet".into()
             }
-        }
+            officewright_font::Error::SubsetterPanicked { .. } => "the subsetter panicked".into(),
+            _ => "damaged".into(),
+        },
         officewright_pdf::Error::MissingGlyph { .. } => "no glyph for a space".into(),
         other => format!("other: {other}"),
     }
