@@ -161,7 +161,7 @@ struct Look<'a> {
 }
 
 /// The leader glyphs a layout run may still draw, [`MAX_RUN_LEADER_GLYPHS`] at first.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct LeaderBudget {
     left: usize,
 }
@@ -326,6 +326,51 @@ impl Painting<'_, '_, '_> {
         }
         out.extend(behind);
         out.extend(front);
+    }
+
+    /// The paragraph's shading behind `lines` of it, the first with its top at
+    /// `origin.y`, in a column whose start edge is at `origin.x`: from its start indent,
+    /// or its first line's where that hangs further out, to its end indent, over the
+    /// lines only. Hypothesis until a Word reference (`E-para-shading.docx`): Word may
+    /// shade the spacing around the paragraph, or join the shading of neighbours.
+    pub(crate) fn paint_shading(
+        &mut self,
+        lines: Range<usize>,
+        origin: Point,
+        out: &mut Vec<DisplayItem>,
+    ) {
+        let props = self.paragraph.props();
+        let Some(shading) = props.shading() else {
+            return;
+        };
+        let Some(color) = self.shading_color(&shading) else {
+            return;
+        };
+        let indent = props.indent();
+        let start = indent
+            .start()
+            .0
+            .min(indent.start().0 + indent.first_line().0);
+        let end = self.layout.width.0 - indent.end().0;
+        let height: f64 = self
+            .layout
+            .lines
+            .get(lines)
+            .unwrap_or(&[])
+            .iter()
+            .map(|line| line.height.0)
+            .sum();
+        if end > start && height > 0.0 {
+            out.push(DisplayItem::Rect {
+                at: Point {
+                    x: Pt(origin.x.0 + start),
+                    y: origin.y,
+                },
+                width: Pt(end - start),
+                height: Pt(height),
+                color,
+            });
+        }
     }
 
     /// The background of a piece of text or a tab in `style`, `span` its start and width,

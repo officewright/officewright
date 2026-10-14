@@ -38,6 +38,7 @@ pub mod ir;
 mod itemize;
 mod lines;
 mod metrics;
+mod pages;
 mod paragraph;
 mod report;
 mod shape;
