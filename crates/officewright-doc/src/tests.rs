@@ -1665,6 +1665,37 @@ fn messages(document: &Document) -> Vec<&str> {
 }
 
 #[test]
+fn refuses_integers_with_whitespace_around_them_as_word_does() {
+    // ST_DecimalNumber is an xsd:integer, whose whitespace the schema collapses, but Office
+    // accepts only values already normalized (MS-OI29500 2.1.1(a)): each is reported and
+    // left out (#114).
+    let document = open(
+        "<w:p><w:pPr><w:numPr><w:ilvl w:val=\" 1 \"/><w:numId w:val=\"3 \"/></w:numPr><w:outlineLvl w:val=\"\r\n2 \"/></w:pPr></w:p>\
+         <w:tbl><w:tr><w:trPr><w:gridBefore w:val=\" 1\"/></w:trPr><w:tc><w:tcPr><w:gridSpan w:val=\"&#9;2&#13;&#10;\"/></w:tcPr><w:p/></w:tc></w:tr></w:tbl>",
+    );
+    let properties = first_paragraph(&document).properties();
+    let numbering = properties.numbering().unwrap();
+    assert_eq!((numbering.instance(), numbering.level()), (None, None));
+    assert_eq!(properties.outline_level(), None);
+    let row = first_table(&document).rows().next().unwrap();
+    assert_eq!(row.properties().grid_before(), None);
+    assert_eq!(row.cells().next().unwrap().properties().grid_span(), None);
+    let listed = messages(&document);
+    assert_eq!(listed.len(), 5, "{listed:?}");
+    // The same values written as Word writes them are read.
+    let document = open(
+        "<w:tbl><w:tr><w:trPr><w:gridBefore w:val=\"1\"/></w:trPr><w:tc><w:tcPr><w:gridSpan w:val=\"2\"/></w:tcPr><w:p/></w:tc></w:tr></w:tbl>",
+    );
+    let row = first_table(&document).rows().next().unwrap();
+    assert_eq!(row.properties().grid_before(), Some(1));
+    assert_eq!(
+        row.cells().next().unwrap().properties().grid_span(),
+        Some(2)
+    );
+    assert_eq!(messages(&document), Vec::<&str>::new());
+}
+
+#[test]
 fn reads_the_properties_written_on_a_table() {
     let document = open(
         r#"<w:tbl><w:tblPr><w:tblStyle w:val="TableGrid"/><w:tblpPr w:leftFromText="180" w:rightFromText="180" w:topFromText="0" w:bottomFromText="144" w:vertAnchor="page" w:horzAnchor="margin" w:tblpXSpec="center" w:tblpY="-720"/><w:tblOverlap w:val="never"/><w:bidiVisual/><w:tblStyleRowBandSize w:val="2"/><w:tblStyleColBandSize w:val="1"/><w:tblW w:w="5000" w:type="pct"/><w:jc w:val="center"/><w:tblCellSpacing w:w="20" w:type="dxa"/><w:tblInd w:w="-108" w:type="dxa"/><w:tblBorders><w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:left w:val="double" w:sz="8" w:space="0" w:color="00FF00"/><w:insideH w:val="dashed" w:sz="2" w:space="0" w:color="auto"/><w:insideV w:val="nil"/></w:tblBorders><w:shd w:val="clear" w:color="auto" w:fill="EEEEEE"/><w:tblLayout w:type="fixed"/><w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:left w:w="108" w:type="dxa"/><w:right w:w="108" w:type="dxa"/></w:tblCellMar><w:tblLook w:val="04A0" w:firstRow="1" w:lastRow="0" w:firstColumn="1" w:lastColumn="0" w:noHBand="0" w:noVBand="1"/><w:tblCaption w:val="Prices"/><w:tblDescription w:val="Prices by year"/></w:tblPr><w:tblGrid><w:gridCol w:w="4680"/></w:tblGrid><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>"#,
