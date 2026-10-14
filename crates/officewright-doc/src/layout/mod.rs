@@ -12,6 +12,7 @@ mod list;
 mod paragraph;
 mod section;
 mod style;
+mod table;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -33,6 +34,7 @@ thread_local! {
         built: 0,
         cut_steps: 0,
         flags: 0,
+        cell_copies: 0,
     }) };
 }
 
@@ -45,6 +47,9 @@ pub(crate) struct Work {
     pub(crate) built: usize,
     pub(crate) cut_steps: usize,
     pub(crate) flags: usize,
+    /// Table cells widened by a horizontal merge whose blocks were not where the cell
+    /// was built: copies, where the cell should have been moved.
+    pub(crate) cell_copies: usize,
 }
 
 /// Counts work for [`WORK`].
@@ -64,9 +69,16 @@ impl Document {
     /// hold listed in [`Translation::left_out`]. The IR, and so this function, is exempt
     /// from semver until 1.0.
     ///
-    /// Not translated yet, and listed: tables, headers and footers, footnotes and
-    /// endnotes, drawings, pictures and other objects, equations, and indents and spacing
-    /// given in character or line units, which keep their value in points.
+    /// Not translated yet, and listed: table styles and a row's table property
+    /// exceptions, headers and footers, footnotes and endnotes, drawings, pictures and
+    /// other objects, equations, and indents and spacing given in character or line
+    /// units, which keep their value in points.
+    ///
+    /// Also listed is what the IR has no place for yet: a row's own alignment and cell
+    /// spacing where they differ from the table's, a row's hidden end mark, a cell's
+    /// text fitting and diagonal borders, and the content of a cell that continues a
+    /// horizontal merge. A cell that does not end with a paragraph, which Word refuses
+    /// to open, gets an empty one, and that is listed too.
     ///
     /// ```
     /// # fn main() -> officewright_doc::Result<()> {
@@ -170,6 +182,8 @@ struct Translator<'a> {
     /// Entries not listed once the list is full.
     omitted: usize,
     path: Vec<Step>,
+    /// How many tables the current block is in.
+    table_depth: usize,
 }
 
 impl<'a> Translator<'a> {
@@ -184,6 +198,7 @@ impl<'a> Translator<'a> {
             left_out: Vec::new(),
             omitted: 0,
             path: Vec::new(),
+            table_depth: 0,
         }
     }
 
@@ -228,10 +243,10 @@ impl<'a> Translator<'a> {
                     out.push(paragraph::paragraph(self, paragraph).into());
                 }
                 Block::ContentControl(control) => pending.push(Box::new(control.blocks())),
-                Block::Table(_) => {
-                    self.leave_out(ReportKind::FeatureUnsupported, || {
-                        "a table is left out: tables are not translated yet".into()
-                    });
+                Block::Table(table) => {
+                    if let Some(table) = self.table(table) {
+                        out.push(table.into());
+                    }
                 }
                 Block::Other(other) => {
                     if !is_marker(other.local_name()) {
