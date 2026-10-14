@@ -317,6 +317,14 @@ impl Pager<'_, '_, '_> {
                 None => break,
             };
             let keeps_space = kept_top || index == 0 || flowed.first_in_cell;
+            // A page or column break before its last line: its last lines start a page
+            // whatever comes before them.
+            let inner_break = layout
+                .lines
+                .iter()
+                .rev()
+                .skip(1)
+                .any(|line| matches!(line.end, LineEnd::PageBreak | LineEnd::ColumnBreak));
             let (first_page, ends_with_break) = self.place(flow, index, layout, keeps_space)?;
             let here = Placed {
                 first_page,
@@ -360,6 +368,13 @@ impl Pager<'_, '_, '_> {
             }
             chain = match chain {
                 _ if !props.keep_next() || flowed.in_cell => None,
+                // Its last lines, kept with the next paragraph, start a page after the
+                // break inside it: the chain starts there, at the top of a page, and
+                // moving it would only take the lines before the break along.
+                _ if inner_break => Some(Checkpoint {
+                    at_top: true,
+                    ..checkpoint
+                }),
                 Some(start) if !boundary => Some(start),
                 _ => Some(checkpoint),
             };
@@ -1138,6 +1153,112 @@ mod tests {
         let broken = summary(SectionStart::NextPage, true);
         assert_eq!(broken.len(), 3, "{broken:?}");
         assert_eq!(broken[1].2, [7]);
+    }
+
+    #[test]
+    fn a_page_break_inside_a_chain_s_paragraph_makes_no_extra_page() {
+        // P5, kept with the next, holds "A", a page break and six lines: its last lines
+        // start page 2 whatever happens, so moving it would only push "A" onto a page of
+        // its own. The three lines kept together that follow do not fit there and go to
+        // page 3, and the chain is reported split.
+        let with_break = |style, before: usize, after: usize| -> Block {
+            let mut inlines = Vec::new();
+            for _ in 0..before {
+                inlines.push(Inline::text("A", style));
+            }
+            inlines.push(Inline::page_break(style));
+            for line in 0..after {
+                if line > 0 {
+                    inlines.push(Inline::line_break(BreakClear::None, style));
+                }
+                inlines.push(Inline::text("A", style));
+            }
+            Paragraph::new(style)
+                .with_props(spacing(0.0, 0.0).with_keep_next(true))
+                .with_inlines(inlines)
+                .into()
+        };
+        let inner = document(|style| {
+            let mut blocks: Vec<Block> =
+                (0..5).map(|_| lines(style, 1, spacing(0.0, 0.0))).collect();
+            blocks.push(with_break(style, 1, 6));
+            blocks.push(lines(style, 3, spacing(0.0, 0.0).with_keep_lines(true)));
+            one_section(blocks)
+        });
+        let (laid, report) = laid(&inner, 100);
+        let laid = laid.expect("pages");
+        assert_eq!(laid.pages.len(), 3);
+        assert_eq!(laid.pages[0].fragments.last().map(|f| f.paragraph), Some(5));
+        assert!(
+            report
+                .entries()
+                .iter()
+                .any(|entry| entry.kind() == ReportKind::Overflow),
+            "{report:?}"
+        );
+        // A heading that starts with a page break, kept with ten lines kept together:
+        // four pages, as without keeping with the next.
+        let leading = document(|style| {
+            let mut blocks: Vec<Block> =
+                (0..3).map(|_| lines(style, 1, spacing(0.0, 0.0))).collect();
+            blocks.push(with_break(style, 0, 1));
+            blocks.push(lines(style, 10, spacing(0.0, 0.0).with_keep_lines(true)));
+            one_section(blocks)
+        });
+        assert_eq!(pages(&leading).len(), 4);
+    }
+
+    #[test]
+    fn keeping_with_the_next_waits_in_table_cells() {
+        // A cell's paragraph kept with the next stays on page 1 when the paragraph after
+        // the table goes to page 2.
+        let document = document(|style| {
+            let mut blocks: Vec<Block> =
+                (0..6).map(|_| lines(style, 1, spacing(0.0, 0.0))).collect();
+            let cell = Cell::default().with_blocks([lines(
+                style,
+                1,
+                spacing(0.0, 0.0).with_keep_next(true),
+            )]);
+            blocks.push(
+                Table::default()
+                    .with_rows(vec![Row::default().with_cells(vec![cell])])
+                    .into(),
+            );
+            blocks.push(lines(style, 3, spacing(0.0, 0.0).with_keep_lines(true)));
+            one_section(blocks)
+        });
+        let laid = pages(&document);
+        assert_eq!(laid[0].last(), Some(&(6, 0..1, 140.0)));
+        assert_eq!(laid[1], [(7, 0..3, 20.0)]);
+    }
+
+    #[test]
+    fn the_first_section_starts_on_page_1_whatever_its_start() {
+        let document = document(|style| {
+            vec![
+                Section::new(setup())
+                    .with_start(SectionStart::EvenPage)
+                    .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+            ]
+        });
+        let (laid, _) = laid(&document, 100);
+        let laid = laid.expect("pages");
+        assert_eq!(laid.pages.len(), 1);
+        assert_eq!(laid.pages[0].number, 1);
+    }
+
+    #[test]
+    fn space_above_that_does_not_fit_below_text_moves_its_paragraph() {
+        // Under three lines, 200 pt above a paragraph do not fit: it moves to page 2,
+        // where the space is dropped at the top, rather than being squeezed in.
+        let document = document(|style| {
+            let mut blocks: Vec<Block> =
+                (0..3).map(|_| lines(style, 1, spacing(0.0, 0.0))).collect();
+            blocks.push(lines(style, 1, spacing(200.0, 0.0)));
+            one_section(blocks)
+        });
+        assert_eq!(pages(&document)[1], [(3, 0..1, 20.0)]);
     }
 
     #[test]

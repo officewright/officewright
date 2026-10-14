@@ -188,11 +188,16 @@ fuzz_target!(|data: &[u8]| {
     let mut blocks = (0..copies)
         .map(|_| paragraph.clone().into())
         .collect::<Vec<_>>();
-    // The last copy in a section of its own, which starts on a new page, on the same one,
-    // on an odd or even page, or in the next column.
-    let second = if flags & 128 != 0 { blocks.pop() } else { None };
+    // The last copies (two of three or four, so that a chain can reach past the start)
+    // in a section of their own, which starts on a new page, on the same one, on an odd
+    // or even page, or in the next column.
+    let second = if flags & 128 != 0 {
+        blocks.split_off(blocks.len().saturating_sub(if copies > 2 { 2 } else { 1 }))
+    } else {
+        Vec::new()
+    };
     document.add_section(Section::new(setup).with_blocks(blocks));
-    if let Some(last) = second {
+    if !second.is_empty() {
         let starts = [
             SectionStart::NextPage,
             SectionStart::Continuous,
@@ -201,7 +206,7 @@ fuzz_target!(|data: &[u8]| {
             SectionStart::NextColumn,
         ];
         let start = starts[usize::from(byte(3)) % starts.len()];
-        document.add_section(Section::new(setup).with_start(start).with_blocks([last]));
+        document.add_section(Section::new(setup).with_start(start).with_blocks(second));
     }
     if let Err(problem) = check_pages(book(), &document, 512) {
         panic!("{problem}");

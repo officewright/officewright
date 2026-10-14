@@ -1419,6 +1419,12 @@ pub fn check_pages(book: &FontBook, document: &Document, max_pages: usize) -> Re
                     fragment.paragraph - 1
                 ));
             }
+            if starts_section && !continuous && page.section != flowed.section {
+                return Err(format!(
+                    "page {number} of section {} holds the start of section {}",
+                    page.section, flowed.section
+                ));
+            }
             let forced = position == 0 && fragment.lines.len() == 1;
             if top < page.body.top.0 - 1e-6 || (end > page.body.bottom.0 + 1e-6 && !forced) {
                 return Err(format!(
