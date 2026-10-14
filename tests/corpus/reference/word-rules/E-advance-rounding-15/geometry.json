@@ -1,7 +1,7 @@
 {
  "format": 1,
  "document": "word-rules/E-advance-rounding-15.docx",
- "pdf_sha256": "26240ebc08347893c30bbc0e6ffa23d8889b704d406a80f6da5f2b0d6dbdd6e5",
+ "pdf_sha256": "f186d15a45a1bae98bd5f10ccf15d4426822e78b3b5e443ee19e83227062ae5b",
  "made_with": "pdftotext 24.02.0 -bbox-layout",
  "units": "points, origin at the top left of the page, y downwards",
  "page_count": 1,
