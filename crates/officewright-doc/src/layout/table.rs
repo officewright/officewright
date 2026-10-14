@@ -11,8 +11,8 @@ use super::paragraph::border;
 use super::{Step, Translator};
 use crate::model::{
     Block, Border, BorderStyle, CellMerge, HeightRule, PositionAnchor, Table, TableBorders,
-    TableCell, TableCellProperties, TableJustification, TableLayout, TablePosition, TableRow,
-    TableWidth, TextDirection, VerticalJustification,
+    TableCell, TableJustification, TableLayout, TablePosition, TableRow, TableWidth, TextDirection,
+    VerticalJustification,
 };
 
 impl<'a> Translator<'a> {
@@ -28,6 +28,40 @@ impl<'a> Translator<'a> {
             });
             return None;
         }
+        // What is built before and after the rows is built in functions of their own, so
+        // that its temporaries take no room in this frame, which every nested table
+        // repeats (#187).
+        let props = self.table_props(table);
+        // The reader reads w:gridCol as ST_TwipsMeasure, which has no negative widths.
+        let grid: Vec<Pt> = table
+            .grid_columns()
+            .map(Option::unwrap_or_default)
+            .collect();
+        self.table_depth += 1;
+        let mut rows = Vec::new();
+        for row in table.rows() {
+            self.path
+                .extend([Step::Field("rows"), Step::Index(rows.len())]);
+            if let Some(row) = self.row(row, &props) {
+                rows.push(row);
+            }
+            self.path.truncate(self.path.len().saturating_sub(2));
+        }
+        self.table_depth -= 1;
+        // A vector keeps the room it grew to; a long table would keep it.
+        rows.shrink_to_fit();
+        if rows.is_empty() {
+            self.leave_out(ReportKind::FeatureUnsupported, || {
+                "a table without rows is left out".into()
+            });
+            return None;
+        }
+        Some(new_table(props, grid, rows))
+    }
+
+    /// The properties of a table, its style listed when it has one.
+    #[inline(never)]
+    fn table_props(&mut self, table: Table<'a>) -> ir::TableProps {
         let properties = table.properties();
         if properties.style().is_some() {
             self.leave_out(ReportKind::FeatureUnsupported, || {
@@ -36,7 +70,7 @@ impl<'a> Translator<'a> {
         }
         let margins = cell_margins(properties.cell_margins(), &ir::CellMargins::default());
         let borders = properties.borders();
-        let props = ir::TableProps::default()
+        ir::TableProps::default()
             .with_width(preferred(properties.width()))
             .with_layout(match properties.layout() {
                 Some(TableLayout::Fixed) => ir::TableLayout::Fixed,
@@ -66,41 +100,73 @@ impl<'a> Translator<'a> {
             )
             // Word ignores a w:tblpPr in a note (MS-OI29500 §17.4.57(b)).
             .with_floating(!self.in_note && floats(properties.position()))
-            .with_bidi_visual(properties.right_to_left().unwrap_or(false));
-        // The reader reads w:gridCol as ST_TwipsMeasure, which has no negative widths.
-        let grid: Vec<Pt> = table
-            .grid_columns()
-            .map(Option::unwrap_or_default)
-            .collect();
-        self.table_depth += 1;
-        let mut rows = Vec::new();
-        for row in table.rows() {
-            self.path
-                .extend([Step::Field("rows"), Step::Index(rows.len())]);
-            if let Some(row) = self.row(row, &props) {
-                rows.push(row);
-            }
-            self.path.truncate(self.path.len().saturating_sub(2));
-        }
-        self.table_depth -= 1;
-        // A vector keeps the room it grew to; a long table would keep it.
-        rows.shrink_to_fit();
-        if rows.is_empty() {
-            self.leave_out(ReportKind::FeatureUnsupported, || {
-                "a table without rows is left out".into()
-            });
-            return None;
-        }
-        Some(
-            ir::Table::default()
-                .with_props(props)
-                .with_grid(grid)
-                .with_rows(rows),
-        )
+            .with_bidi_visual(properties.right_to_left().unwrap_or(false))
     }
 
     /// A row, or none when it has no cells; that is listed.
     fn row(&mut self, row: TableRow<'a>, table: &ir::TableProps) -> Option<ir::Row> {
+        let head = self.row_head(row, table);
+        let mut cells: Vec<ir::Cell> = Vec::new();
+        // The last cell, kept out of `cells` while the cells after it may widen it.
+        let mut open: Option<ir::Cell> = None;
+        // In tests, where the last cell's blocks were built.
+        #[cfg(test)]
+        let mut built_at = 0;
+        for cell in row.cells() {
+            let (span, continues) = merge(cell);
+            // A cell that continues a horizontal merge (`w:hMerge`, ISO/IEC 29500-4
+            // §14.4.13) widens the cell before it, as a span does. The widened cell is
+            // moved, never copied: a copy per continuing cell costs the content times
+            // the cells.
+            if continues {
+                if let Some(last) = open.take() {
+                    let widened = last.grid_span().saturating_add(span);
+                    open = Some(last.with_grid_span(widened));
+                    #[cfg(test)]
+                    if open
+                        .as_ref()
+                        .is_some_and(|cell| cell.blocks().as_ptr().addr() != built_at)
+                    {
+                        super::work(|work| work.cell_copies += 1);
+                    }
+                    if has_content(cell) {
+                        self.path
+                            .extend([Step::Field("cells"), Step::Index(cells.len())]);
+                        self.leave_out(ReportKind::FeatureUnsupported, || {
+                            "the content of a cell that continues a horizontal merge is left out"
+                                .into()
+                        });
+                        self.path.truncate(self.path.len().saturating_sub(2));
+                    }
+                    continue;
+                }
+            }
+            cells.extend(open.take());
+            self.path
+                .extend([Step::Field("cells"), Step::Index(cells.len())]);
+            let built = self.cell(cell, span, &table.cell_margins());
+            #[cfg(test)]
+            {
+                built_at = built.blocks().as_ptr().addr();
+            }
+            open = Some(built);
+            self.path.truncate(self.path.len().saturating_sub(2));
+        }
+        cells.extend(open);
+        cells.shrink_to_fit();
+        if cells.is_empty() {
+            self.leave_out(ReportKind::FeatureUnsupported, || {
+                "a row without cells is left out".into()
+            });
+            return None;
+        }
+        Some(head.with_cells(cells))
+    }
+
+    /// A row's properties as an IR row without its cells; what the IR has no place for
+    /// is listed.
+    #[inline(never)]
+    fn row_head(&mut self, row: TableRow<'a>, table: &ir::TableProps) -> ir::Row {
         let properties = row.properties();
         if row.table_property_exceptions() != Default::default() {
             self.leave_out(ReportKind::FeatureUnsupported, || {
@@ -145,85 +211,28 @@ impl<'a> Translator<'a> {
                 .and_then(|value| u16::try_from(value).ok())
                 .unwrap_or(0)
         };
-        let mut cells: Vec<ir::Cell> = Vec::new();
-        // The last cell, kept out of `cells` while the cells after it may widen it.
-        let mut open: Option<ir::Cell> = None;
-        // In tests, where the last cell's blocks were built.
-        #[cfg(test)]
-        let mut built_at = 0;
-        for cell in row.cells() {
-            let properties = cell.properties();
-            let span = properties
-                .grid_span()
-                .and_then(|span| u16::try_from(span.max(1)).ok())
-                .unwrap_or(1);
-            // A cell that continues a horizontal merge (`w:hMerge`, ISO/IEC 29500-4
-            // §14.4.13) widens the cell before it, as a span does. The widened cell is
-            // moved, never copied: a copy per continuing cell costs the content times
-            // the cells.
-            if properties.horizontal_merge() == Some(CellMerge::Continue) {
-                if let Some(last) = open.take() {
-                    let widened = last.grid_span().saturating_add(span);
-                    open = Some(last.with_grid_span(widened));
-                    #[cfg(test)]
-                    if open
-                        .as_ref()
-                        .is_some_and(|cell| cell.blocks().as_ptr().addr() != built_at)
-                    {
-                        super::work(|work| work.cell_copies += 1);
-                    }
-                    if has_content(cell) {
-                        self.path
-                            .extend([Step::Field("cells"), Step::Index(cells.len())]);
-                        self.leave_out(ReportKind::FeatureUnsupported, || {
-                            "the content of a cell that continues a horizontal merge is left out"
-                                .into()
-                        });
-                        self.path.truncate(self.path.len().saturating_sub(2));
-                    }
-                    continue;
-                }
-            }
-            cells.extend(open.take());
-            self.path
-                .extend([Step::Field("cells"), Step::Index(cells.len())]);
-            let built = self.cell(cell, &properties, span, &table.cell_margins());
-            #[cfg(test)]
-            {
-                built_at = built.blocks().as_ptr().addr();
-            }
-            open = Some(built);
-            self.path.truncate(self.path.len().saturating_sub(2));
-        }
-        cells.extend(open);
-        cells.shrink_to_fit();
-        if cells.is_empty() {
-            self.leave_out(ReportKind::FeatureUnsupported, || {
-                "a row without cells is left out".into()
-            });
-            return None;
-        }
-        Some(
-            ir::Row::default()
-                .with_height(height)
-                .with_cant_split(properties.cant_split().unwrap_or(false))
-                .with_header(properties.header().unwrap_or(false))
-                .with_grid_before(count(properties.grid_before()))
-                .with_width_before(preferred(properties.width_before()))
-                .with_grid_after(count(properties.grid_after()))
-                .with_width_after(preferred(properties.width_after()))
-                .with_cells(cells),
-        )
+        ir::Row::default()
+            .with_height(height)
+            .with_cant_split(properties.cant_split().unwrap_or(false))
+            .with_header(properties.header().unwrap_or(false))
+            .with_grid_before(count(properties.grid_before()))
+            .with_width_before(preferred(properties.width_before()))
+            .with_grid_after(count(properties.grid_after()))
+            .with_width_after(preferred(properties.width_after()))
     }
 
     /// A cell, with the span it has so far.
-    fn cell(
-        &mut self,
-        cell: TableCell<'a>,
-        properties: &TableCellProperties,
-        span: u16,
-        margins: &ir::CellMargins,
-    ) -> ir::Cell {
+    fn cell(&mut self, cell: TableCell<'a>, span: u16, margins: &ir::CellMargins) -> ir::Cell {
+        let head = self.cell_head(cell, span, margins);
+        let blocks = self.cell_blocks(cell.blocks());
+        head.with_blocks(blocks)
+    }
+
+    /// A cell's properties as an IR cell without its blocks; what the IR has no place
+    /// for is listed.
+    #[inline(never)]
+    fn cell_head(&mut self, cell: TableCell<'a>, span: u16, margins: &ir::CellMargins) -> ir::Cell {
+        let properties = cell.properties();
         if properties.fit_text() == Some(true) {
             self.leave_out(ReportKind::FeatureUnsupported, || {
                 "the cell's text fitting (w:tcFitText) is not applied".into()
@@ -250,7 +259,6 @@ impl<'a> Translator<'a> {
             .with_start(self.side(written.and_then(TableBorders::start), true))
             .with_bottom(self.side(written.and_then(TableBorders::bottom), true))
             .with_end(self.side(written.and_then(TableBorders::end), true));
-        let blocks = self.cell_blocks(cell.blocks());
         ir::Cell::default()
             .with_width(preferred(properties.width()))
             .with_grid_span(span)
@@ -280,7 +288,6 @@ impl<'a> Translator<'a> {
             .with_no_wrap(properties.no_wrap().unwrap_or(false))
             .with_hide_mark(properties.hide_mark().unwrap_or(false))
             .with_text_direction(text_direction(properties.text_direction()))
-            .with_blocks(blocks)
     }
 
     /// The blocks of a cell, which end with a paragraph, as the IR asks. Word refuses a
@@ -289,17 +296,25 @@ impl<'a> Translator<'a> {
     fn cell_blocks(&mut self, blocks: impl Iterator<Item = Block<'a>> + 'a) -> Vec<ir::Block> {
         let mut blocks = self.blocks(blocks);
         if !matches!(blocks.last(), Some(ir::Block::Paragraph(_))) {
-            self.leave_out(ReportKind::ValueClamped, || {
-                "a cell that does not end with a paragraph gets an empty one".into()
-            });
-            let mark = self.formats.default_mark();
-            let mark = self.run_style(&mark);
-            blocks.push(ir::Paragraph::new(mark).into());
+            blocks.push(self.added_paragraph());
         }
         // Most cells hold one paragraph; a vector keeps room for four after its first
         // push.
         blocks.shrink_to_fit();
         blocks
+    }
+
+    /// The empty paragraph added to a cell that does not end with one, listed; built
+    /// here, so that the format of its mark takes no room in the frames of the cells'
+    /// translation, which recurses.
+    #[inline(never)]
+    fn added_paragraph(&mut self) -> ir::Block {
+        self.leave_out(ReportKind::ValueClamped, || {
+            "a cell that does not end with a paragraph gets an empty one".into()
+        });
+        let mark = self.formats.default_mark();
+        let mark = self.run_style(&mark);
+        ir::Paragraph::new(mark).into()
     }
 
     /// A border of a table or a cell: none written is `Inherit`. Word looks a cell's
@@ -318,6 +333,31 @@ impl<'a> Translator<'a> {
             Some(_) => border(self, written).map_or(ir::BorderSide::None, ir::BorderSide::Line),
         }
     }
+}
+
+/// A table of these parts; built here, so that its temporaries take no room in the
+/// frame of [`Translator::table`], which recurses.
+#[inline(never)]
+fn new_table(props: ir::TableProps, grid: Vec<Pt>, rows: Vec<ir::Row>) -> ir::Table {
+    ir::Table::default()
+        .with_props(props)
+        .with_grid(grid)
+        .with_rows(rows)
+}
+
+/// A cell's span, 1 for none or one out of range, and whether it continues a horizontal
+/// merge.
+#[inline(never)]
+fn merge(cell: TableCell<'_>) -> (u16, bool) {
+    let properties = cell.properties();
+    let span = properties
+        .grid_span()
+        .and_then(|span| u16::try_from(span.max(1)).ok())
+        .unwrap_or(1);
+    (
+        span,
+        properties.horizontal_merge() == Some(CellMerge::Continue),
+    )
 }
 
 /// A preferred width of a table, a cell or the space before or after a row: automatic

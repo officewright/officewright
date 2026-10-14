@@ -1774,6 +1774,41 @@ fn leaves_out_tables_without_rows_and_tables_nested_too_deep() {
 }
 
 #[test]
+fn translates_tables_nested_to_the_limit_on_a_small_stack() {
+    // The translation recurses once per nested table. 100 levels, the IR's limit, take
+    // about 0.9 MiB with full debug info, as CI builds tests, and less in release; they
+    // took about 2 MiB before the frames on that path were made small (#187). The
+    // thread's stack of 1.5 MiB fails this test if a level grows by half again.
+    let depth = ir::MAX_TABLE_DEPTH;
+    let body = format!(
+        "{}<w:p/>{}",
+        "<w:tbl><w:tr><w:tc>".repeat(depth),
+        "</w:tc></w:tr></w:tbl><w:p/>".repeat(depth)
+    );
+    let options = LoadOptions::new().with_limits(Limits::new().with_max_xml_depth(1 << 12));
+    let document = options.open_bytes(docx(&body)).unwrap();
+    let kept = std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("100 nested tables on 1.5 MiB of stack".into())
+            .stack_size(1_536 * 1024)
+            .spawn_scoped(scope, || {
+                let translation = document.to_layout_ir();
+                let mut kept = 0;
+                let mut blocks = translation.document().sections()[0].blocks();
+                while let Some(ir::Block::Table(table)) = blocks.first() {
+                    kept += 1;
+                    blocks = table.rows()[0].cells()[0].blocks();
+                }
+                kept
+            })
+            .unwrap()
+            .join()
+            .unwrap()
+    });
+    assert_eq!(kept, depth);
+}
+
+#[test]
 fn translates_the_rest_of_table_properties() {
     let table = r#"<w:tbl><w:tblPr><w:tblW w:w="0" w:type="pct"/><w:jc w:val="right"/><w:tblBorders><w:end w:val="single" w:sz="4"/><w:insideV w:val="dotted" w:sz="4"/></w:tblBorders><w:tblCellMar><w:top w:w="-100" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tblGrid><w:gridCol w:w="-100"/><w:gridCol w:w="1000"/></w:tblGrid>
         <w:tr><w:trPr><w:gridBefore w:val="-1"/><w:trHeight w:val="400" w:hRule="auto"/></w:trPr>

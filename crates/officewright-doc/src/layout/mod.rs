@@ -267,6 +267,13 @@ impl<'a> Translator<'a> {
         self.blocks_in(Some("blocks"), blocks)
     }
 
+    /// A paragraph as a block; translated here, so that its temporaries take no room in
+    /// the frame of [`Translator::blocks_in`], which nested tables repeat (#187).
+    #[inline(never)]
+    fn paragraph_block(&mut self, paragraph: crate::model::Paragraph<'a>) -> ir::Block {
+        paragraph::paragraph(self, paragraph).into()
+    }
+
     /// Blocks held in the field `field` of what is being translated, or, with none, in
     /// the list of blocks the current place names (a header, a note separator): the
     /// place of each is written as the layout's report writes it.
@@ -289,9 +296,7 @@ impl<'a> Translator<'a> {
             }
             self.path.push(Step::Index(out.len()));
             match block {
-                Block::Paragraph(paragraph) => {
-                    out.push(paragraph::paragraph(self, paragraph).into());
-                }
+                Block::Paragraph(paragraph) => out.push(self.paragraph_block(paragraph)),
                 Block::ContentControl(control) => pending.push(Box::new(control.blocks())),
                 Block::Table(table) => {
                     if let Some(table) = self.table(table) {
