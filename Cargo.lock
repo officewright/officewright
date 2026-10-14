@@ -230,6 +230,7 @@ name = "officewright-layout"
 version = "0.1.0"
 dependencies = [
  "harfrust",
+ "insta",
  "officewright-core",
  "officewright-font",
  "unicode-linebreak",

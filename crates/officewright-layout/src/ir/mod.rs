@@ -391,3 +391,12 @@ document_ids! {
     /// A footnote or an endnote of a [`Document`], from [`Document::add_note`].
     NoteId in notes, "note";
 }
+
+impl ImageId {
+    /// Its place in the document's table of images, from 0. Only the display list's text
+    /// dump uses it until the PDF painter (plan PR 8) does.
+    #[cfg(feature = "fuzzing")]
+    pub(crate) fn index(self) -> usize {
+        self.index
+    }
+}

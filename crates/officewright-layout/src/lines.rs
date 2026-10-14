@@ -114,8 +114,9 @@ pub(crate) struct Piece {
     pub(crate) x: Pt,
     pub(crate) width: Pt,
     pub(crate) kind: PieceKind,
-    /// Whether it is of the spaces at the end of the line, which hang past its edge:
-    /// they count for no width, and justification leaves them alone.
+    /// Whether it comes after the last content of the line and hangs past its edge, as
+    /// the spaces at its end and a tab that starts past it do: such pieces count for no
+    /// width, justification leaves them alone, and they are not underlined.
     pub(crate) hanging: bool,
 }
 

@@ -77,6 +77,8 @@ pub enum CompatFlag {
     /// `splitPgBreakAndParaMark`: a page break at the end of a paragraph does not move the
     /// paragraph mark to the next page.
     SplitPgBreakAndParaMark,
+    /// `ulTrailSpace`: the spaces at the end of a line are underlined.
+    UlTrailSpace,
     /// `growAutofit`: autofit tables may grow into the margins.
     GrowAutofit,
     /// `doNotAutofitConstrainedTables`: autofit does not apply to tables whose preferred
@@ -99,12 +101,13 @@ pub enum CompatFlag {
 
 impl CompatFlag {
     /// Every variant but [`Other`](Self::Other), for [`from_name`](Self::from_name).
-    pub(super) const NAMED: [CompatFlag; 12] = [
+    pub(super) const NAMED: [CompatFlag; 13] = [
         Self::DoNotExpandShiftReturn,
         Self::DoNotUseIndentAsNumberingTabStop,
         Self::DoNotUseHTMLParagraphAutoSpacing,
         Self::NoLeading,
         Self::SplitPgBreakAndParaMark,
+        Self::UlTrailSpace,
         Self::GrowAutofit,
         Self::DoNotAutofitConstrainedTables,
         Self::LayoutRawTableWidth,
@@ -142,6 +145,7 @@ impl CompatFlag {
             Self::DoNotUseHTMLParagraphAutoSpacing => "doNotUseHTMLParagraphAutoSpacing",
             Self::NoLeading => "noLeading",
             Self::SplitPgBreakAndParaMark => "splitPgBreakAndParaMark",
+            Self::UlTrailSpace => "ulTrailSpace",
             Self::GrowAutofit => "growAutofit",
             Self::DoNotAutofitConstrainedTables => "doNotAutofitConstrainedTables",
             Self::LayoutRawTableWidth => "layoutRawTableWidth",

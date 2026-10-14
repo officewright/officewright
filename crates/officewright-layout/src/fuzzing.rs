@@ -928,3 +928,214 @@ pub fn check_lines(
     }
     Ok(())
 }
+
+/// Paragraphs laid out and drawn by [`paint`]: what the display list holds, one line
+/// per item, and what the layout reported.
+#[derive(Clone, Debug)]
+pub struct Painted {
+    text: String,
+    report: LayoutReport,
+}
+
+impl Painted {
+    /// The display list as text, positions and sizes in twips from the column's top
+    /// left corner:
+    ///
+    /// - `glyphs FACE SIZE #RRGGBB @X,Y [bold] [italic] [scale S] "TEXT" ID@X[,Y] ...`
+    ///   where `FACE` is the family, then the face's style unless it is Regular
+    ///   (`Carlito Bold`), `bold` and `italic` are synthetic, and glyph places are from
+    ///   the run's origin on its baseline;
+    /// - `rect @X,Y WxH #RRGGBB`;
+    /// - `line X,Y X,Y WIDTH STYLE #RRGGBB`;
+    /// - `image N @X,Y WxH [rotated DEGREES] [flipped-horizontally] [flipped-vertically]`.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// What the layout did that differs from Word.
+    pub fn report(&self) -> &LayoutReport {
+        &self.report
+    }
+}
+
+/// Lays out `paragraphs` of `document` one under the other, with the space between
+/// them, in a column `width` points wide with the fonts of `book`, and draws them.
+pub fn paint(
+    book: &FontBook,
+    document: &Document,
+    paragraphs: &[crate::ir::Paragraph],
+    width: f64,
+) -> Painted {
+    use std::fmt::Write as _;
+
+    use crate::display::{DisplayItem, LineStyle, Painting, Point};
+
+    let mut fonts = Fonts::new(book);
+    let mut shaper = Shaper::new();
+    let location = Location::default();
+    let mut items = Vec::new();
+    let mut top = 0.0;
+    let mut leaders = crate::display::LeaderBudget::default();
+    for (index, paragraph) in paragraphs.iter().enumerate() {
+        // The space above the first paragraph is its own; between two, the larger.
+        let previous = index.checked_sub(1).and_then(|i| paragraphs.get(i));
+        top += match previous {
+            Some(previous) => {
+                crate::paragraph::space_between(document, previous.props(), paragraph.props())
+            }
+            None => crate::paragraph::space_before(document, paragraph.props()),
+        }
+        .0;
+        let layout = crate::paragraph::lay_out(
+            document,
+            paragraph,
+            Pt(width),
+            &mut fonts,
+            &mut shaper,
+            &location,
+        );
+        let mut painting = Painting {
+            document,
+            paragraph,
+            layout: &layout,
+            fonts: &mut fonts,
+            location: &location,
+            background: None,
+            leaders: &mut leaders,
+        };
+        let origin = Point {
+            x: Pt(0.0),
+            y: Pt(top),
+        };
+        painting.paint(0..layout.lines.len(), origin, &mut items);
+        top += layout.height().0;
+    }
+    let twips = |pt: Pt| (pt.0 * 20.0).round() as i64;
+    let hex = |color: officewright_core::Color| {
+        format!(
+            "#{:02X}{:02X}{:02X}",
+            color.red(),
+            color.green(),
+            color.blue()
+        )
+    };
+    let mut text = String::new();
+    for item in &items {
+        let _ = match item {
+            DisplayItem::Glyphs(run) => {
+                let family = fonts
+                    .face(run.face)
+                    .map(|face| {
+                        let names = face.face().names();
+                        let family = names.family().unwrap_or_default();
+                        match names.subfamily() {
+                            Some(style) if style != "Regular" => format!("{family} {style}"),
+                            _ => family.to_owned(),
+                        }
+                    })
+                    .unwrap_or_default();
+                let mut flags = String::new();
+                if run.synthetic_bold {
+                    flags.push_str(" bold");
+                }
+                if run.synthetic_italic {
+                    flags.push_str(" italic");
+                }
+                if (run.h_scale - 1.0).abs() > 1e-9 {
+                    let _ = write!(flags, " scale {}", run.h_scale);
+                }
+                let words: String = run
+                    .clusters
+                    .iter()
+                    .map(|cluster| cluster.text.as_str())
+                    .collect();
+                let glyphs: Vec<String> = run
+                    .clusters
+                    .iter()
+                    .flat_map(|cluster| &cluster.glyphs)
+                    .map(|glyph| {
+                        if twips(glyph.y) == 0 {
+                            format!("{}@{}", glyph.glyph.to_u16(), twips(glyph.x))
+                        } else {
+                            format!(
+                                "{}@{},{}",
+                                glyph.glyph.to_u16(),
+                                twips(glyph.x),
+                                twips(glyph.y)
+                            )
+                        }
+                    })
+                    .collect();
+                writeln!(
+                    text,
+                    "glyphs {family} {} {} @{},{}{flags} {words:?} {}",
+                    twips(run.size),
+                    hex(run.color),
+                    twips(run.origin.x),
+                    twips(run.origin.y),
+                    glyphs.join(" ")
+                )
+            }
+            DisplayItem::Rect {
+                at,
+                width,
+                height,
+                color,
+            } => writeln!(
+                text,
+                "rect @{},{} {}x{} {}",
+                twips(at.x),
+                twips(at.y),
+                twips(*width),
+                twips(*height),
+                hex(*color)
+            ),
+            DisplayItem::Line(line) => {
+                let style = match line.style {
+                    LineStyle::Solid => "solid",
+                    LineStyle::Dotted => "dotted",
+                    LineStyle::Dashed => "dashed",
+                    LineStyle::LongDashed => "long-dashed",
+                    LineStyle::DotDash => "dot-dash",
+                    LineStyle::DotDotDash => "dot-dot-dash",
+                    LineStyle::Wave => "wave",
+                };
+                writeln!(
+                    text,
+                    "line {},{} {},{} {} {style} {}",
+                    twips(line.from.x),
+                    twips(line.from.y),
+                    twips(line.to.x),
+                    twips(line.to.y),
+                    twips(line.width),
+                    hex(line.color)
+                )
+            }
+            DisplayItem::Image(image) => {
+                let mut flags = String::new();
+                if image.rotation != 0.0 {
+                    let _ = write!(flags, " rotated {}", image.rotation);
+                }
+                if image.flip_horizontal {
+                    flags.push_str(" flipped-horizontally");
+                }
+                if image.flip_vertical {
+                    flags.push_str(" flipped-vertically");
+                }
+                writeln!(
+                    text,
+                    "image {} @{},{} {}x{}{flags}",
+                    image.image.index(),
+                    twips(image.at.x),
+                    twips(image.at.y),
+                    twips(image.width),
+                    twips(image.height)
+                )
+            }
+        };
+    }
+    Painted {
+        text,
+        report: fonts.into_report(),
+    }
+}
