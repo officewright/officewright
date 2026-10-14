@@ -16,14 +16,18 @@
 //! which could reject tables it accepts: a version, a record count, the offset of the
 //! string storage, every record, then the records it keeps in order, each string looked
 //! up in the storage. Tables it cannot read, or that end its work with an error before
-//! an overflow, are left to it. Every `name` record of the table directory is checked:
-//! the subsetter finds a table by bisection even in an unsorted directory, and so may
-//! take any of them.
+//! an overflow, are left to it. The table is found as the subsetter finds it, by
+//! `binary_search_by` over the records of the table directory in their order, sorted or
+//! not: built with the same standard library, the same search over the same tags takes
+//! the same record, also among several `name` records. Checking each of those instead
+//! would let a small file make this check read one table thousands of times. A
+//! subsetter release that looks tables up otherwise (its main branch sorts the records
+//! first) needs this lookup changed with it; the test of several `name` records fails
+//! until it is.
 
 use std::collections::HashSet;
 
 use skrifa::raw::FontRef;
-use skrifa::raw::types::Tag;
 
 use crate::error::{Cause, Error, Result};
 
@@ -36,27 +40,28 @@ const RECORD_SIZE: usize = 12;
 /// The bytes before the records: version, count and storage offset.
 const HEADER_SIZE: usize = 6;
 
-/// Fails if a `name` table of face `face`, in its font file `data`, would overflow the
-/// subsetter's offsets.
+/// Fails if the `name` table the subsetter would take for face `face`, in its font file
+/// `data`, would overflow its offsets.
 pub(crate) fn check(font: &FontRef<'_>, data: &[u8], face: u32) -> Result<()> {
-    let name = Tag::new(b"name");
-    for record in font.table_directory().table_records() {
-        if record.tag() != name {
-            continue;
-        }
-        let table = usize::try_from(record.offset()).ok().and_then(|start| {
-            let end = start.checked_add(usize::try_from(record.length()).ok()?)?;
-            data.get(start..end)
-        });
-        if let Some(reason) = table.and_then(overflow) {
-            return Err(Error::MalformedTable {
-                face,
-                table: "name",
-                source: Cause::new(reason),
-            });
-        }
+    let records = font.table_directory().table_records();
+    // The subsetter compares tags as their four bytes.
+    let Ok(found) = records.binary_search_by(|record| record.tag().to_be_bytes().cmp(b"name"))
+    else {
+        return Ok(());
+    };
+    let table = records.get(found).and_then(|record| {
+        let start = usize::try_from(record.offset()).ok()?;
+        let end = start.checked_add(usize::try_from(record.length()).ok()?)?;
+        data.get(start..end)
+    });
+    match table.and_then(overflow) {
+        Some(reason) => Err(Error::MalformedTable {
+            face,
+            table: "name",
+            source: Cause::new(reason),
+        }),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Why subsetter 0.2.6 would overflow on the `name` table `table`, if it would.
@@ -257,24 +262,60 @@ mod tests {
     }
 
     #[test]
-    fn checks_every_name_table_of_the_directory() {
-        // Two `name` records, the second with the overflow: the subsetter's bisection may
-        // pick either. The second is built as `namf`, which sorts after `name`, and
-        // renamed in the table directory.
+    fn checks_the_name_table_the_subsetter_takes() {
+        // Two to four `name` records, one of them with the overflow, in each position:
+        // the bisection takes the same position every time, so exactly one position is
+        // refused, and the subsetter never meets the overflow (in a test build it would
+        // panic). The tables after the first are built as `namf`, `namg` and `namh`,
+        // which sort after `name`, and renamed in the table directory.
+        let good = name_table(&[(3, 1, 0x0409, 1, "Test Sans")]);
         let bad = raw_name_table(&[(3, 1, 1, 4, 0xFFFE)], &vec![0; 0x1_0002]);
-        let mut data = TestFont::new("Test Sans").with_table(b"namf", bad).build();
-        let tables = usize::from(u16::from_be_bytes([data[4], data[5]]));
-        let record = (0..tables)
-            .map(|i| 12 + 16 * i)
-            .find(|&at| &data[at..at + 4] == b"namf")
-            .unwrap();
-        data[record..record + 4].copy_from_slice(b"name");
-        let font = FontFace::from_bytes(data, 0).unwrap();
-        assert_eq!(font.names().family(), Some("Test Sans"));
-        let err = font.subset([]).unwrap_err();
-        assert!(
-            matches!(err, Error::MalformedTable { table: "name", .. }),
-            "{err}"
-        );
+        let tags = [b"name", b"namf", b"namg", b"namh"];
+        for count in 2..=4 {
+            let mut refused = 0;
+            for bad_at in 0..count {
+                let mut font = TestFont::new("Test Sans");
+                for (i, tag) in tags.iter().take(count).enumerate() {
+                    let table = if i == bad_at { &bad } else { &good };
+                    font = font.with_table(tag, table.clone());
+                }
+                let mut data = font.build();
+                let tables = usize::from(u16::from_be_bytes([data[4], data[5]]));
+                for at in (0..tables).map(|i| 12 + 16 * i) {
+                    if tags[1..].iter().any(|tag| data[at..at + 4] == **tag) {
+                        data[at..at + 4].copy_from_slice(b"name");
+                    }
+                }
+                let font = FontFace::from_bytes(data, 0).unwrap();
+                match font.subset([]) {
+                    Ok(_) => {}
+                    Err(Error::MalformedTable { table: "name", .. }) => refused += 1,
+                    Err(err) => panic!("{count} records, bad at {bad_at}: {err}"),
+                }
+            }
+            assert_eq!(refused, 1, "{count} records");
+        }
+        // An unsorted directory: a second `name` record after `post`, at the end, built
+        // as `zzzz`. The bisection need not take the last of them.
+        let mut refused = 0;
+        for (first, last) in [(&good, &bad), (&bad, &good)] {
+            let mut data = TestFont::new("Test Sans")
+                .with_table(b"name", first.clone())
+                .with_table(b"zzzz", last.clone())
+                .build();
+            let tables = usize::from(u16::from_be_bytes([data[4], data[5]]));
+            let record = (0..tables)
+                .map(|i| 12 + 16 * i)
+                .find(|&at| &data[at..at + 4] == b"zzzz")
+                .unwrap();
+            data[record..record + 4].copy_from_slice(b"name");
+            let font = FontFace::from_bytes(data, 0).unwrap();
+            match font.subset([]) {
+                Ok(_) => {}
+                Err(Error::MalformedTable { table: "name", .. }) => refused += 1,
+                Err(err) => panic!("unsorted: {err}"),
+            }
+        }
+        assert_eq!(refused, 1, "unsorted");
     }
 }
