@@ -1144,6 +1144,34 @@ mod tests {
     }
 
     #[test]
+    fn reports_a_bold_italic_face_for_italic_text() {
+        // The case of issue #82's title: a family of Bold and Bold Italic only. Italic
+        // text takes Bold Italic, whose slant is real, and the report says it is bold.
+        let bold_italic = book(&[
+            system(TestFont::new("Test Sans").style("Bold", 700, false)),
+            system(TestFont::new("Test Sans").style("Bold Italic", 700, true)),
+        ]);
+        let (face, resolution) =
+            resolved(&bold_italic, &FontRequest::new("Test Sans").italic(true));
+        assert_eq!((face.weight(), face.is_italic()), (700, true));
+        assert!(resolution.unrequested_bold());
+        assert_eq!(
+            resolution.to_string(),
+            "\"Test Sans\" italic → \"Test Sans\", in bold: the family has no regular face \
+             installed"
+        );
+        // Subfamily names that say bold in other words.
+        for subfamily in ["SemiBold", "Demibold", "ExtraBold Italic"] {
+            let italic = subfamily.ends_with("Italic");
+            let named = book(&[system(
+                TestFont::new("Test Sans").style(subfamily, 600, italic),
+            )]);
+            let request = FontRequest::new("Test Sans").italic(italic);
+            assert!(named.resolve(&request).unrequested_bold(), "{subfamily}");
+        }
+    }
+
+    #[test]
     fn a_face_named_by_its_full_name_is_not_reported_as_bolder() {
         let named = book(&[system(
             TestFont::new("Test Serif").style("Bold", 700, false),
