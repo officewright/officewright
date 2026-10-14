@@ -978,6 +978,56 @@ mod tests {
         assert!(!measures[1].worse_than(&main[1]));
     }
 
+    /// A reference document of main's that the branch did not try to score is lacking even
+    /// when the branch has the file: a branch report made without the references (#130).
+    #[test]
+    fn a_reference_main_tried_and_the_branch_did_not_is_refused() {
+        let mut main_report = good();
+        let mut tried = file("c/tried.docx", Status::Opened, None);
+        tried.score_error = Some("no PDF of ours".to_owned());
+        main_report.files.push(tried);
+        let mut report = good();
+        report
+            .files
+            .push(file("c/tried.docx", Status::Opened, None));
+        named(&mut report, "c/letter.docx").scores = None;
+        let lacking = missing(&report, &main_report);
+        assert_eq!(
+            lacking,
+            Missing {
+                files: Vec::new(),
+                references: vec!["c/letter.docx".to_owned(), "c/tried.docx".to_owned()],
+            }
+        );
+        assert!(!lacking.is_empty());
+        let branch = measure_against(&report, Some(&main_report), false);
+        assert_eq!(branch[1].pass, Some(false));
+        assert!(
+            branch[1]
+                .text
+                .ends_with("of main's, 0 files missing and 2 reference documents not scored"),
+            "{}",
+            branch[1].text
+        );
+    }
+
+    /// Rows 7 and 9 take their largest and lowest values from S and T documents only, like
+    /// their counts.
+    #[test]
+    fn rows_7_and_9_compare_only_gated_documents() {
+        let main = measure(&good(), false);
+        let mut report = good();
+        let poster = scores_of(&mut report, "c/poster.docx"); // class N
+        (poster.dx_p95, poster.dy_p95, poster.ssim_min) = (Some(5.0), Some(5.0), 0.5);
+        let old = scores_of(&mut report, "c/old.docx"); // no class
+        (old.dx_p95, old.dy_p95, old.ssim_min) = (Some(5.0), Some(5.0), 0.5);
+        let branch = measure(&report, false);
+        for index in [6, 8] {
+            assert_eq!(branch[index].text, main[index].text, "row {}", index + 1);
+            assert!(!branch[index].worse_than(&main[index]), "row {}", index + 1);
+        }
+    }
+
     /// Rows 5, 7 and 9 print the lowest or largest value, so a worse one is marked even when
     /// no document crosses a threshold (#131).
     #[test]

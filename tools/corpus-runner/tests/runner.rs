@@ -428,3 +428,47 @@ fn the_gate_refuses_a_branch_report_that_lacks_files_of_main() -> io::Result<()>
     );
     Ok(())
 }
+
+/// A branch report made without the references cannot hide main's reference documents
+/// (#130): the gate counts them in row 2, names them, and fails.
+#[test]
+fn the_gate_refuses_a_branch_report_made_without_the_references() -> io::Result<()> {
+    let corpus = Corpus::new("gate-references")?;
+    let reference = corpus.dir.join("references/docs/good");
+    std::fs::create_dir_all(&reference)?;
+    std::fs::write(
+        reference.join("geometry.json"),
+        r#"{"format": 1, "document": "docs/good.docx", "pages": []}"#,
+    )?;
+    let main = [
+        "--references",
+        "references",
+        "--ours",
+        "ours",
+        "--report",
+        "main.json",
+        "docs/good.docx",
+    ];
+    let (code, output) = corpus.run(&main, None)?;
+    assert_eq!(code, 0, "{output}");
+    let (code, output) = corpus.run(&["--report", "branch.json", "docs/good.docx"], None)?;
+    assert_eq!(code, 0, "{output}");
+    let output = Command::new(env!("CARGO_BIN_EXE_corpus-runner"))
+        .current_dir(&corpus.dir)
+        .args(["gate", "--main", "main.json", "branch.json"])
+        .output()?;
+    let text = String::from_utf8_lossy(&output.stdout).into_owned()
+        + &String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{text}");
+    assert!(
+        text.contains(
+            "Reference documents of main the branch report did not score: docs/good.docx"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("of main's, 0 files missing and 1 reference documents not scored"),
+        "{text}"
+    );
+    Ok(())
+}
