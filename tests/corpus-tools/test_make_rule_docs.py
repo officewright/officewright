@@ -213,6 +213,7 @@ class Packages(unittest.TestCase):
                 "E-autospacing-nohtml": {"doNotUseHTMLParagraphAutoSpacing"},
                 "E-tab-hanging-noindenttab": {"doNotUseIndentAsNumberingTabStop"},
                 "E-tab-hanging-noindenttab-14": {"doNotUseIndentAsNumberingTabStop"},
+                "E-underline-trailspace": {"ulTrailSpace"},
             }.get(doc.name, set())
             self.assertEqual(flags, expected, doc.name)
             # The documents about a setting name its value; every other document in mode 15
@@ -1199,6 +1200,223 @@ class Packages(unittest.TestCase):
             over = [size for size in bands if not 0 <= size <= 3]
             self.assertEqual(bool(over), doc.name == "E-table-style-bands-5", doc.name)
             self.assertEqual(bool(held), doc.name == "E-table-style-not-allowed", doc.name)
+
+    def test_line_and_drawing_cases_have_the_markup_their_labels_name(self):
+        def cases(name):
+            """Per paragraph with a case label: the label without its number, the sample
+            runs (text, run properties by tag, tab or not) and the paragraph's w:pPr."""
+            doc = next(doc for doc in self.docs if doc.name == name)
+            body = part(rules.parts(doc), "word/document.xml").find(f"{W}body")
+            found, n = [], 0
+            for paragraph in body.findall(f"{W}p"):
+                runs = paragraph.findall(f"{W}r")
+                first = "".join(t.text for t in runs[0].iter(f"{W}t")) if runs else ""
+                if not first.startswith("Case "):
+                    found[-1][1].extend(sample(r) for r in runs)  # a sample paragraph
+                    continue
+                n += 1
+                self.assertTrue(first.startswith(f"Case {n:02d}: "), first)
+                label = first.removeprefix(f"Case {n:02d}: ").rstrip(": ")
+                found.append((label, [sample(r) for r in runs[1:]], paragraph.find(f"{W}pPr")))
+            return found
+
+        def sample(r):
+            props = r.find(f"{W}rPr")
+            tags = {} if props is None else {
+                c.tag.replace(W, ""): {k.replace(W, ""): v for k, v in c.attrib.items()}
+                for c in props
+            }
+            # The text in order, a soft hyphen (w:softHyphen) as U+00AD.
+            value = "".join(
+                (c.text or "") if c.tag == f"{W}t" else "\u00ad"
+                for c in r
+                if c.tag in (f"{W}t", f"{W}softHyphen")
+            )
+            return value, tags, r.find(f"{W}tab") is not None
+
+        def tabs(p_pr):
+            stops = [] if p_pr is None else p_pr.findall(f"{W}tabs/{W}tab")
+            return [{k.replace(W, ""): v for k, v in t.attrib.items()} for t in stops]
+
+        # E-spacing-condensed: every sample run is condensed by the label's amount.
+        found = cases("E-spacing-condensed")
+        self.assertEqual(len(found), 10)
+        for label, samples, p_pr in found:
+            points = int(re.match(r"condensed by (\d) pt", label).group(1))
+            text_runs = [s for s in samples if not s[2]]
+            self.assertTrue(text_runs, label)
+            for _, tags, _ in text_runs:
+                self.assertEqual(tags, {"spacing": {"val": str(-points * 20)}}, label)
+            if "soft hyphens" in label:
+                self.assertIn("\u00ad", text_runs[0][0])
+                ind = p_pr.find(f"{W}ind")
+                self.assertEqual(int(ind.get(f"{W}right")), rules.TEXT_W - 3000)
+            if "zero-width" in label:
+                self.assertEqual(text_runs[0][0].count("\u200b"), 2)
+            if "right tab" in label:
+                self.assertEqual(tabs(p_pr), [{"val": "right", "pos": str(rules.TEXT_W)}])
+                self.assertTrue(samples[0][2], label)
+
+        # E-tab-margin: the stops the labels name.
+        found = cases("E-tab-margin")
+        edge = rules.TEXT_W + 360, rules.PAGE_W - rules.MARGIN + 360
+        expected = [
+            ("a left stop 18 pt into the right margin", [{"val": "left", "pos": str(edge[0])}]),
+            ("a left stop 18 pt past the right edge of the page",
+             [{"val": "left", "pos": str(edge[1])}]),
+            ("a right stop 18 pt into the right margin", [{"val": "right", "pos": str(edge[0])}]),
+        ]
+        self.assertEqual([(label, tabs(p_pr)) for label, _, p_pr in found[:3]], expected)
+        for label, samples, _ in found[3:]:
+            count = int(re.match(r"(\d+) x, then an opening bracket and two tabs", label).group(1))
+            self.assertEqual(
+                [(value, is_tab) for value, _, is_tab in samples],
+                [("x" * count + "(", False), ("", True), ("", True), ("end", False)], label)
+        self.assertEqual(len(found), 8)
+
+        # E-highlight: each sample the label calls highlighted is.
+        found = cases("E-highlight")
+        self.assertEqual(len(found), 8)
+        for label, samples, p_pr in found:
+            marked = [tags for _, tags, _ in samples if "highlight" in tags]
+            self.assertTrue(marked, label)
+            for tags in marked:
+                self.assertEqual(tags["highlight"], {"val": "darkYellow"}, label)
+            raised = {"superscript": "superscript", "subscript": "subscript"}
+            for word, value in raised.items():
+                if f"highlighted {word}" in label:
+                    self.assertEqual(marked[0]["vertAlign"], {"val": value}, label)
+            if "raised 6 pt" in label:
+                self.assertEqual(marked[0]["position"], {"val": "12"}, label)
+            if "exact 9 pt" in label:
+                spacing = p_pr.find(f"{W}spacing")
+                self.assertEqual((spacing.get(f"{W}line"), spacing.get(f"{W}lineRule")),
+                                 ("180", "exact"))
+            if "justified" in label:
+                self.assertEqual(p_pr.find(f"{W}jc").get(f"{W}val"), "both")
+            if "run shading" in label:
+                self.assertIn("shd", marked[0], label)
+            if "tab" in label:
+                self.assertTrue(any(is_tab and "highlight" in tags
+                                    for _, tags, is_tab in samples), label)
+
+        # E-underline: every kind of ST_Underline once, in its own case.
+        found = cases("E-underline")
+        kinds = [
+            "single", "words", "double", "thick", "dotted", "dottedHeavy", "dash", "dashedHeavy",
+            "dashLong", "dashLongHeavy", "dotDash", "dashDotHeavy", "dotDotDash",
+            "dashDotDotHeavy", "wave", "wavyHeavy", "wavyDouble",
+        ]
+        for (label, samples, _), kind in zip(found, kinds):
+            self.assertEqual(label, f"underline {kind}")
+            ((_, tags, _),) = samples
+            self.assertEqual(tags, {"u": {"val": kind}}, label)
+        rest = found[len(kinds):]
+        self.assertEqual(len(rest), 6)
+        for label, samples, p_pr in rest:
+            for _, tags, _ in samples:
+                expected_kind = "words" if label.startswith("words only") else "single"
+                self.assertEqual(tags["u"], {"val": expected_kind}, label)
+            if "small capitals" in label:
+                self.assertIn("smallCaps", samples[0][1])
+            if "superscript" in label:
+                self.assertEqual([t.get("vertAlign") for _, t, _ in samples],
+                                 [None, {"val": "superscript"}, None])
+            if "under a tab" in label:
+                self.assertTrue(samples[1][2], label)
+        trailing = [(label, p_pr) for label, _, p_pr in rest[-2:]]
+        self.assertEqual(
+            [(label, p_pr is not None and p_pr.find(f"{W}jc") is not None)
+             for label, p_pr in trailing],
+            [("underlined words ending a line in three spaces, left aligned", False),
+             ("underlined words ending a line in three spaces, justified", True)])
+        # E-underline-trailspace has the same two cases, with the setting on.
+        again = cases("E-underline-trailspace")
+        self.assertEqual([(l, s) for l, s, _ in again], [(l, s) for l, s, _ in rest[-2:]])
+
+        # E-strike.
+        found = cases("E-strike")
+        self.assertEqual(
+            sorted(label for label, _, _ in found),
+            sorted(f"{k} strikethrough, {n} pt" for k in ("single", "double") for n in (11, 24)))
+        for label, ((_, tags, _),), _ in found:
+            kind = "strike" if label.startswith("single") else "dstrike"
+            size = str(int(re.search(r"(\d+) pt", label).group(1)) * 2)
+            self.assertEqual(tags, {kind: {}, "sz": {"val": size}, "szCs": {"val": size}}, label)
+
+        # E-tab-leader: every leader to every kind of stop, then the three variants.
+        found = cases("E-tab-leader")
+        leaders = ["dot", "hyphen", "middleDot", "underscore", "heavy"]
+        stops = ["left", "right", "center", "decimal"]
+        self.assertEqual(
+            [label for label, _, _ in found[:20]],
+            [f"{leader} leader to a {kind} stop at 216 pt" for leader in leaders for kind in stops])
+        for label, samples, p_pr in found[:20]:
+            leader, kind = re.match(r"(\w+) leader to a (\w+) stop", label).groups()
+            self.assertEqual(tabs(p_pr), [{"val": kind, "leader": leader, "pos": "4320"}])
+            self.assertTrue(samples[0][2], label)
+        variants = {
+            "dot leader at 1 pt": {"sz": {"val": "2"}, "szCs": {"val": "2"}},
+            "dot leader at a character scale of 50 %": {"w": {"val": "50"}},
+            "dot leader under an underlined tab": {"u": {"val": "single"}},
+        }
+        self.assertEqual([label for label, _, _ in found[20:]], list(variants))
+        for label, samples, p_pr in found[20:]:
+            self.assertEqual(tabs(p_pr), [{"val": "left", "leader": "dot", "pos": "4320"}])
+            self.assertEqual((samples[0][1], samples[0][2]), (variants[label], True), label)
+
+        # E-bar-tab: a bar stop at 144 pt in every case, and the spacing the label names.
+        found = cases("E-bar-tab")
+        self.assertEqual(len(found), 7)
+        for label, _, p_pr in found:
+            self.assertEqual(tabs(p_pr), [{"val": "bar", "pos": "2880"}], label)
+            spacing = p_pr.find(f"{W}spacing")
+            values = {} if spacing is None else {
+                k.replace(W, ""): v for k, v in spacing.attrib.items()
+            }
+            expected = {
+                "1.5 lines spacing": {"line": "360", "lineRule": "auto"},
+                "exact 18 pt spacing": {"line": "360", "lineRule": "exact"},
+                "12 pt before and after": {"before": "240", "after": "240"},
+            }.get(label, {})
+            self.assertEqual(values, expected, label)
+            shading = p_pr.find(f"{W}shd")
+            self.assertEqual(shading is not None, label == "dark paragraph shading", label)
+
+        # E-auto-color: every grey from 10 % to 90 % and the colours, as run shading and as
+        # paragraph shading, with no colour of the text's own.
+        found = cases("E-auto-color")
+        self.assertEqual(len(found), 28)
+        greys = {f"{k * 10} % grey" for k in range(1, 10)}
+        named = set()
+        for label, samples, p_pr in found:
+            kind, name, fill = re.fullmatch(r"(run|paragraph) shading (.+) \((\w{6})\)",
+                                            label).groups()
+            named.add((kind, name))
+            if name in greys:
+                level = round(255 * (1 - int(name.split()[0]) / 100))
+                self.assertEqual(fill, f"{level:02X}" * 3, label)
+            ((_, tags, _),) = samples
+            self.assertNotIn("color", tags, label)
+            if kind == "run":
+                self.assertEqual(tags["shd"]["fill"], fill, label)
+                self.assertIsNone(p_pr, label)
+            else:
+                self.assertEqual(tags, {}, label)
+                self.assertEqual(p_pr.find(f"{W}shd").get(f"{W}fill"), fill, label)
+        names = greys | {"red", "green", "blue", "yellow", "dark blue"}
+        self.assertEqual(named, {(k, n) for k in ("run", "paragraph") for n in names})
+
+        # E-superscript.
+        found = cases("E-superscript")
+        self.assertEqual(
+            sorted(label for label, _, _ in found),
+            sorted(f"{k} at {n} pt" for k in ("superscript", "subscript") for n in (11, 24)))
+        for label, (base, raised), _ in found:
+            kind, size = re.fullmatch(r"(\w+) at (\d+) pt", label).groups()
+            half = {"val": str(int(size) * 2)}
+            self.assertEqual(base[1], {"sz": half, "szCs": half}, label)
+            self.assertEqual(raised[1], {"sz": half, "szCs": half, "vertAlign": {"val": kind}})
 
     def test_refuses_a_setting_word_does_not_write_in_the_mode(self):
         doc = next(doc for doc in self.docs if doc.name == "E-opentype-on")
