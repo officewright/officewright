@@ -1,6 +1,6 @@
 use std::{error, fmt, io};
 
-/// An error from opening a document.
+/// An error from opening a document, or from rendering it into PDF.
 ///
 /// Damage that Word repairs by itself is not an error: the document opens and
 /// [`Document::diagnostics`](crate::Document::diagnostics) says what was repaired.
@@ -35,6 +35,33 @@ pub enum Error {
     /// The input is valid but uses something officewright cannot read yet, such as an
     /// encrypted document or a binary Word document.
     Unsupported(String),
+    /// Laying the document out or making its PDF failed, such as when it takes more
+    /// pages than the [`RenderOptions`](crate::RenderOptions) allow. The layout engine's
+    /// error is passed through: its message and its cause are this error's.
+    #[cfg(feature = "pdf")]
+    #[non_exhaustive]
+    Layout {
+        /// The layout engine's error.
+        source: officewright_layout::Error,
+    },
+    /// A font the [`RenderOptions`](crate::RenderOptions) give cannot be read, or a
+    /// directory of fonts cannot be listed. The font library's error is passed through,
+    /// as for `Layout`.
+    #[cfg(feature = "pdf")]
+    #[non_exhaustive]
+    Font {
+        /// The font library's error.
+        source: officewright_font::Error,
+    },
+    /// The PDF cannot be made, such as when a font cannot be subset for it, or cannot be
+    /// written, to the file or the writer. The PDF writer's error is passed through, as
+    /// for `Layout`.
+    #[cfg(feature = "pdf")]
+    #[non_exhaustive]
+    Pdf {
+        /// The PDF writer's error.
+        source: officewright_pdf::Error,
+    },
 }
 
 /// One of the bounds set by [`Limits`](crate::Limits).
@@ -76,6 +103,12 @@ impl fmt::Display for Error {
                 maximum,
                 context,
             } => write!(f, "{context}: {limit} exceeds the limit of {maximum}"),
+            #[cfg(feature = "pdf")]
+            Self::Layout { source } => write!(f, "{source}"),
+            #[cfg(feature = "pdf")]
+            Self::Font { source } => write!(f, "{source}"),
+            #[cfg(feature = "pdf")]
+            Self::Pdf { source } => write!(f, "{source}"),
         }
     }
 }
@@ -84,6 +117,14 @@ impl error::Error for Error {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
             Self::Io { source, .. } => Some(source),
+            // The errors of rendering are passed through: their message is this error's,
+            // and their cause its cause, so that no message is said twice.
+            #[cfg(feature = "pdf")]
+            Self::Layout { source } => source.source(),
+            #[cfg(feature = "pdf")]
+            Self::Font { source } => source.source(),
+            #[cfg(feature = "pdf")]
+            Self::Pdf { source } => source.source(),
             _ => None,
         }
     }
@@ -156,7 +197,34 @@ impl From<Error> for officewright_core::Error {
             Error::Unsupported(message) => Self::Unsupported(message),
             Error::Malformed { message } => Self::Malformed(message),
             limit @ Error::LimitExceeded { .. } => Self::LimitExceeded(limit.to_string()),
+            #[cfg(feature = "pdf")]
+            Error::Layout { source } => source.into(),
+            #[cfg(feature = "pdf")]
+            Error::Font { source } => source.into(),
+            #[cfg(feature = "pdf")]
+            Error::Pdf { source } => source.into(),
         }
+    }
+}
+
+#[cfg(feature = "pdf")]
+impl From<officewright_layout::Error> for Error {
+    fn from(source: officewright_layout::Error) -> Self {
+        Self::Layout { source }
+    }
+}
+
+#[cfg(feature = "pdf")]
+impl From<officewright_font::Error> for Error {
+    fn from(source: officewright_font::Error) -> Self {
+        Self::Font { source }
+    }
+}
+
+#[cfg(feature = "pdf")]
+impl From<officewright_pdf::Error> for Error {
+    fn from(source: officewright_pdf::Error) -> Self {
+        Self::Pdf { source }
     }
 }
 
