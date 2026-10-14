@@ -122,12 +122,12 @@ impl FontFace {
             }
             ids.push(glyph.to_u16());
         }
-        // What subsetter 0.2.6 would panic on is refused first.
+        // What subsetter 0.2.6 would panic on is refused first, in the tables it takes.
+        // The CFF check runs for TrueType outlines too: where the parser's lookup and the
+        // subsetter's differ, the subsetter may miss the `glyf` table and take `CFF `.
         let font = crate::font::font_ref(self.data(), face)?;
         crate::name_offsets::check(&font, self.data(), face)?;
-        if outline_format == OutlineFormat::Cff {
-            crate::cff::check_reals(&font, face)?;
-        }
+        crate::cff::check_reals(&font, self.data(), face)?;
         let remapper = GlyphRemapper::new_from_glyphs_sorted(&ids);
         let data = self.data();
         let data = catch_subsetter_panic(face, || subsetter::subset(data, face, &remapper))?
@@ -170,6 +170,28 @@ fn table_range(font: &FontRef<'_>, tag: &[u8; 4], len: usize) -> Option<Range<us
     let start = usize::try_from(record.offset()).ok()?;
     let end = start.checked_add(usize::try_from(record.length()).ok()?)?;
     (end <= len).then_some(start..end)
+}
+
+/// The table `tag` of `font`, in its file `data`, that subsetter 0.2.6 takes: the record
+/// `binary_search_by` finds among the records of the table directory in their order,
+/// sorted or not, comparing tags as their four bytes. Built with the same standard
+/// library, the same search over the same tags takes the same record, also where a tag
+/// is repeated; the parser's own lookup may take another. A subsetter release that looks
+/// tables up otherwise (its main branch sorts the records first) needs this changed with
+/// it; the tests of repeated `name` and `CFF ` records fail until it is.
+pub(crate) fn subsetter_table<'a>(
+    font: &FontRef<'_>,
+    data: &'a [u8],
+    tag: &[u8; 4],
+) -> Option<&'a [u8]> {
+    let records = font.table_directory().table_records();
+    let found = records
+        .binary_search_by(|record| record.tag().to_be_bytes().cmp(tag))
+        .ok()?;
+    let record = records.get(found)?;
+    let start = usize::try_from(record.offset()).ok()?;
+    let end = start.checked_add(usize::try_from(record.length()).ok()?)?;
+    data.get(start..end)
 }
 
 /// Runs the subsetter and turns a panic into [`Error::SubsetterPanicked`].

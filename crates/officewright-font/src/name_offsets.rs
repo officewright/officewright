@@ -30,6 +30,7 @@ use std::collections::HashSet;
 use skrifa::raw::FontRef;
 
 use crate::error::{Cause, Error, Result};
+use crate::subset::subsetter_table;
 
 /// The largest offset the subsetter can compute.
 const MAX_OFFSET: usize = 0xFFFF;
@@ -43,18 +44,7 @@ const HEADER_SIZE: usize = 6;
 /// Fails if the `name` table the subsetter would take for face `face`, in its font file
 /// `data`, would overflow its offsets.
 pub(crate) fn check(font: &FontRef<'_>, data: &[u8], face: u32) -> Result<()> {
-    let records = font.table_directory().table_records();
-    // The subsetter compares tags as their four bytes.
-    let Ok(found) = records.binary_search_by(|record| record.tag().to_be_bytes().cmp(b"name"))
-    else {
-        return Ok(());
-    };
-    let table = records.get(found).and_then(|record| {
-        let start = usize::try_from(record.offset()).ok()?;
-        let end = start.checked_add(usize::try_from(record.length()).ok()?)?;
-        data.get(start..end)
-    });
-    match table.and_then(overflow) {
+    match subsetter_table(font, data, b"name").and_then(overflow) {
         Some(reason) => Err(Error::MalformedTable {
             face,
             table: "name",
@@ -180,10 +170,14 @@ mod tests {
                  the 65535 that the subsetter can handle"
             )
         );
-        // Up to byte 65535 is fine.
+        // Up to byte 65535 is fine; one byte further is not.
         assert_eq!(
             subset_error(raw_name_table(&[(3, 1, 1, 4, 0xFFFB)], &storage)),
             None
+        );
+        assert!(
+            subset_error(raw_name_table(&[(3, 1, 1, 2, 0xFFFE)], &storage))
+                .is_some_and(|err| err.contains("ends 65536 bytes"))
         );
         // Records the subsetter drops are not looked at: Macintosh, Windows symbol
         // encoding, name IDs 10 and 15 and up.
@@ -218,6 +212,14 @@ mod tests {
         // The same string twice is stored once.
         let same = [(3, 1, 1, 40_000, 0), (3, 1, 4, 40_000, 0)];
         assert_eq!(subset_error(raw_name_table(&same, &storage)), None);
+        // A string stored once counts once, also before a new one: 40000 bytes twice,
+        // then 20000 more, take 60000.
+        let then_new = [
+            (3, 1, 1, 40_000, 0),
+            (3, 1, 4, 40_000, 0),
+            (3, 1, 5, 20_000, 1),
+        ];
+        assert_eq!(subset_error(raw_name_table(&then_new, &storage)), None);
         // So is an equal string elsewhere in the storage.
         let zeros = vec![0; 50_000];
         assert_eq!(subset_error(raw_name_table(&two, &zeros)), None);
@@ -238,6 +240,20 @@ mod tests {
         assert_eq!(subset_error(raw_name_table(&mixed, &[])), None);
     }
 
+    /// Subsets the test font with `name` as its `name` table, which this check leaves to
+    /// the subsetter: it subsets, or the subsetter reports an error, but never panics. A
+    /// face the font parser refuses never reaches the subsetter.
+    fn left_to_the_subsetter(name: Vec<u8>) {
+        let data = TestFont::new("Test Sans").with_table(b"name", name).build();
+        let Ok(font) = FontFace::from_bytes(data, 0) else {
+            return;
+        };
+        match font.subset([]) {
+            Ok(_) | Err(Error::Subset { .. }) => {}
+            Err(err) => panic!("{err}"),
+        }
+    }
+
     #[test]
     fn leaves_tables_the_subsetter_stops_at_to_it() {
         // A string outside the storage ends the subsetter's work with an error before it
@@ -245,11 +261,11 @@ mod tests {
         let storage = vec![0; 0x1_0002];
         let mut table = raw_name_table(&[(3, 1, 1, 4, 0), (3, 1, 2, 4, 0xFFFE)], &storage);
         table.truncate(table.len() - storage.len() + 2);
-        assert!(overflow(&table).is_none());
+        left_to_the_subsetter(table);
         // A version 1 table is kept as it is.
         let mut table = raw_name_table(&[(3, 1, 1, 4, 0xFFFE)], &storage);
         table[1] = 1;
-        assert!(overflow(&table).is_none());
+        left_to_the_subsetter(table);
         // A record past the end of the table, after one that would overflow: the
         // subsetter cannot read the table. (The storage starts at byte 6, so that only
         // the record is missing.)
@@ -257,8 +273,26 @@ mod tests {
         table[4..6].copy_from_slice(&6u16.to_be_bytes());
         assert!(overflow(&table).is_some());
         assert!(overflow(&table[..table.len() - 1]).is_none());
+        left_to_the_subsetter(table[..table.len() - 1].to_vec());
         // An ordinary table.
-        assert!(overflow(&name_table(&[(3, 1, 0x0409, 1, "Test Sans")])).is_none());
+        left_to_the_subsetter(name_table(&[(3, 1, 0x0409, 1, "Test Sans")]));
+    }
+
+    #[test]
+    fn reads_the_strings_where_the_storage_offset_puts_them() {
+        // The storage starts at byte 6, among the records, as the table says, so the
+        // first record's string, 20 bytes into it, is there, and the overflowing record
+        // after it is reached. Read from the end of the records, the first string would
+        // be missing and the subsetter would stop before the overflow.
+        let mut table = raw_name_table(&[(3, 1, 1, 4, 20), (3, 1, 2, 4, 0xFFFE)], &[0; 10]);
+        table[4..6].copy_from_slice(&6u16.to_be_bytes());
+        assert_eq!(
+            subset_error(table).as_deref(),
+            Some(
+                "the string of name record 1 ends 65538 bytes into the string storage, past \
+                 the 65535 that the subsetter can handle"
+            )
+        );
     }
 
     #[test]

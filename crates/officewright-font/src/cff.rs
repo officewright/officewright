@@ -22,9 +22,9 @@
 use std::ops::Range;
 
 use skrifa::raw::FontRef;
-use skrifa::raw::types::Tag;
 
 use crate::error::{Cause, Error, Result};
+use crate::subset::subsetter_table;
 
 /// The most characters a real number may have; the subsetter rejects longer ones.
 const MAX_REAL_LEN: usize = 64;
@@ -38,14 +38,15 @@ const PRIVATE: u16 = 18;
 /// The FDArray operator (12 36): the offset of the Font DICT INDEX.
 const FD_ARRAY: u16 = 12 << 8 | 36;
 
-/// Fails if a DICT the subsetter rewrites has a real number that is finite in the font
-/// but too large for an `f32`. Structures that cannot be read are left to the subsetter,
-/// which reports them as errors.
-pub(crate) fn check_reals(font: &FontRef<'_>, face: u32) -> Result<()> {
-    let Some(data) = font.table_data(Tag::new(b"CFF ")) else {
+/// Fails if a DICT the subsetter rewrites, in the `CFF ` table it takes from `font` (its
+/// file `data`), has a real number that is finite in the font but too large for an
+/// `f32`. Structures that cannot be read are left to the subsetter, which reports them as
+/// errors.
+pub(crate) fn check_reals(font: &FontRef<'_>, data: &[u8], face: u32) -> Result<()> {
+    let Some(cff) = subsetter_table(font, data, b"CFF ") else {
         return Ok(());
     };
-    for dict in dicts(data.as_bytes()) {
+    for dict in dicts(cff) {
         if let Some(real) = overflowing_real(dict) {
             return Err(Error::MalformedTable {
                 face,
