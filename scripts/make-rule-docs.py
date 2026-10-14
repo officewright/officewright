@@ -145,6 +145,8 @@ def spacing(
 def ppr(
     *,
     p_style: str | None = None,
+    keep_next: bool = False,
+    keep_lines: bool = False,
     page_break_before: bool = False,
     widow_control: bool | None = None,
     list_item: tuple[int, int] | None = None,
@@ -161,6 +163,10 @@ def ppr(
     parts = []
     if p_style:
         parts.append(f'<w:pStyle w:val="{p_style}"/>')
+    if keep_next:
+        parts.append("<w:keepNext/>")
+    if keep_lines:
+        parts.append("<w:keepLines/>")
     if page_break_before:
         parts.append("<w:pageBreakBefore/>")
     if widow_control is not None:
@@ -209,6 +215,50 @@ def sect_pr() -> str:
         '<w:docGrid w:linePitch="360"/>'
         "</w:sectPr>"
     )
+
+
+def section(
+    *,
+    kind: str | None = None,
+    refs: tuple[tuple[str, str, str], ...] = (),
+    page_start: int | None = None,
+    margins: tuple[int, int] = (MARGIN, MARGIN),
+) -> str:
+    """A section's properties: A4 portrait as sect_pr(), with a start type (w:type), header
+    and footer references as (headerReference or footerReference, w:type, part name), a
+    first page number and the top and bottom margins (negative for a fixed body edge)."""
+    references = "".join(
+        f'<w:{element} w:type="{ref_type}" r:id="{part_id(name)}"/>'
+        for element, ref_type, name in refs
+    )
+    start = f'<w:type w:val="{kind}"/>' if kind else ""
+    numbers = f'<w:pgNumType w:start="{page_start}"/>' if page_start is not None else ""
+    top, bottom = margins
+    return (
+        f"<w:sectPr>{references}{start}"
+        f'<w:pgSz w:w="{PAGE_W}" w:h="{PAGE_H}"/>'
+        f'<w:pgMar w:top="{top}" w:right="{MARGIN}" w:bottom="{bottom}" w:left="{MARGIN}"'
+        ' w:header="708" w:footer="708" w:gutter="0"/>'
+        f'{numbers}<w:cols w:space="708"/>'
+        '<w:docGrid w:linePitch="360"/>'
+        "</w:sectPr>"
+    )
+
+
+def part_id(name: str) -> str:
+    """The relationship id of a header or footer part: rIdheader1 for header1.xml."""
+    return "rId" + name.rsplit(".", 1)[0]
+
+
+def header_part(name: str, paragraphs: str) -> tuple[str, str]:
+    """A header (header*.xml) or footer (footer*.xml) part holding these paragraphs."""
+    root = "hdr" if name.startswith("header") else "ftr"
+    return name, f'<w:{root} xmlns:w="{W_NS}" xmlns:r="{R_NS}">{paragraphs}</w:{root}>'
+
+
+def page_field() -> str:
+    """The current page number, as a simple field."""
+    return '<w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple>'
 
 
 def border(side: str) -> str:
@@ -341,6 +391,11 @@ class Doc:
     # Values other than 1 of the compatibility settings Word writes in mode 15
     # (MODE_15_SETTINGS), such as (("enableOpenTypeFeatures", 0),); None leaves one out.
     compat_values: tuple[tuple[str, int | None], ...] = ()
+    # Header and footer parts, as (part name under word/, root element), such as
+    # header_part("header1.xml", ...); sections name them through section().
+    headers: tuple[tuple[str, str], ...] = ()
+    # The last section's w:sectPr, when it is not sect_pr()'s.
+    last_section: str = ""
 
 
 def line_fonts_body(fonts: list[str]) -> str:
@@ -2001,6 +2056,242 @@ def superscript() -> Doc:
     )
 
 
+# Pages (#186, layout-engine.md E10, E11, E13, E21, E26, E34). Every paragraph has exact
+# 12 pt line spacing, so that a page holds 58 lines (697.9 pt of text height) and a case
+# can put a paragraph at a known line of the page.
+EXACT_12 = spacing(line=("exact", 12))
+LINES_PER_PAGE = 58
+
+
+def page_para(content: str = "", **props) -> str:
+    return para(content, space=props.pop("space", EXACT_12), **props)
+
+
+def filler(count: int, label: str, **props) -> str:
+    """One paragraph of count lines: the label, then lines numbered from 2."""
+    values = [label] + [f"filler line {n}" for n in range(2, count + 1)]
+    return page_para(lines(values), **props)
+
+
+def one_liners(prefix: str, count: int, **props) -> str:
+    """count paragraphs of one line each, numbered."""
+    return "".join(page_para(run(f"{prefix} {n}"), **props) for n in range(1, count + 1))
+
+
+def page_footer(name: str = "footer1.xml") -> tuple[str, str]:
+    return header_part(name, para(run("page ") + page_field()))
+
+
+def section_odd() -> Doc:
+    refs = (("headerReference", "default", "header1.xml"),
+            ("footerReference", "default", "footer1.xml"))
+    sections = [
+        # (label, start type, first page number, page count)
+        ("Section 1: one page", None, None, 1),
+        ("Section 2: odd page start after one page; two pages", "oddPage", None, 2),
+        ("Section 3: odd page start after a section of two pages", "oddPage", None, 1),
+        ("Section 4: even page start after a section of one page", "evenPage", None, 1),
+        ("Section 5: even page start after a section of one page", "evenPage", None, 1),
+        ("Section 6: odd page start, page numbers restarted at 1", "oddPage", 1, 1),
+        ("Section 7: even page start, page numbers restarted at 1", "evenPage", 1, 1),
+    ]
+    # Each section's properties are in the w:sectPr of its last paragraph, the last
+    # section's at the end of the body; the start type of a section is in its own.
+    body, properties = "", [
+        section(kind=kind, page_start=start, refs=refs if n == 0 else ())
+        for n, (_, kind, start, _) in enumerate(sections)
+    ]
+    for n, (label, _, _, pages) in enumerate(sections):
+        texts = [label] + [f"{label.split(':')[0]}, page {page}" for page in range(2, pages + 1)]
+        for i, value in enumerate(texts):
+            last = i == len(texts) - 1 and n < len(sections) - 1
+            body += page_para(run(value), page_break_before=i > 0,
+                              sect=properties[n] if last else None)
+    return Doc(
+        "E-section-odd",
+        "Sections that start on an odd or an even page, after an odd and after an even "
+        "page count, with page numbers restarted and not: the blank pages Word adds, whether "
+        "they count and whether they have the header (header) and footer (page number)",
+        body,
+        headers=(header_part("header1.xml", para(run("header"))), page_footer()),
+        last_section=properties[-1],
+    )
+
+
+def section_odd_first() -> Doc:
+    refs = (("headerReference", "default", "header1.xml"),
+            ("footerReference", "default", "footer1.xml"))
+    body = page_para(run("Section 1: the first section of the document, even page start"),
+                     sect=section(kind="evenPage", refs=refs))
+    body += page_para(run("Section 2: next page start"))
+    return Doc(
+        "E-section-odd-first",
+        "A first section that starts on an even page: whether Word adds a blank page before "
+        "the document",
+        body,
+        headers=(header_part("header1.xml", para(run("header"))), page_footer()),
+        last_section=section(),
+    )
+
+
+def section_continuous_headers() -> Doc:
+    first = (("headerReference", "default", "header1.xml"),)
+    second = (("headerReference", "default", "header2.xml"),)
+    body = filler(29, "Section 1: 29 lines, with the header Header A", sect=section(refs=first))
+    body += filler(60, "Section 2: a continuous section of 60 lines with the header Header B")
+    return Doc(
+        "E-section-continuous-headers",
+        "A continuous section with a header of its own that starts in the middle of page 1 "
+        "and runs onto page 2: from which page its header applies",
+        body,
+        headers=(header_part("header1.xml", para(run("Header A"))),
+                 header_part("header2.xml", para(run("Header B")))),
+        last_section=section(kind="continuous", refs=second),
+    )
+
+
+def section_next_column() -> Doc:
+    body = page_para(run("Section 1: one column"), sect=section())
+    body += page_para(run("Section 2: a next column start in a section of one column"))
+    return Doc(
+        "E-section-next-column",
+        "A section that starts in the next column (w:type nextColumn) after a section of one "
+        "column: whether it starts a new page",
+        body,
+        last_section=section(kind="nextColumn"),
+    )
+
+
+def keeplines_long() -> Doc:
+    body = filler(29, "29 lines before the paragraph")
+    body += filler(80, "a keep-lines paragraph of 80 lines, longer than a page", keep_lines=True)
+    return Doc(
+        "E-keeplines-long",
+        "A paragraph with keep lines together (w:keepLines) longer than a page, starting in "
+        "the middle of a page: whether it moves to the next page before it is split",
+        body,
+    )
+
+
+def keepnext_chain() -> Doc:
+    body = filler(55, "Case 01: 55 lines, then a keep-with-next chain of 4 that fits a page")
+    body += one_liners("Case 01 chain", 3, keep_next=True) + page_para(run("Case 01 chain 4"))
+    body += filler(30, "Case 02: 30 lines, then a keep-with-next chain of 70 lines",
+                   page_break_before=True)
+    body += one_liners("Case 02 chain", 69, keep_next=True) + page_para(run("Case 02 chain 70"))
+    body += filler(54, "Case 03: 54 lines, then a chain of 3 that ends at a next page section "
+                   "break", page_break_before=True)
+    body += one_liners("Case 03 chain", 2, keep_next=True)
+    body += page_para(run("Case 03 chain 3"), keep_next=True, sect=section())
+    body += page_para(run("Case 03: the first paragraph of the next section"))
+    body += filler(55, "Case 04: 55 lines, then a chain of 2 that ends at a continuous section "
+                   "break, then two lines", page_break_before=True)
+    body += page_para(run("Case 04 chain 1"), keep_next=True)
+    body += page_para(run("Case 04 chain 2"), keep_next=True, sect=section(kind="continuous"))
+    body += page_para(lines(["Case 04: two lines after the", "continuous section break"]))
+    body += filler(54, "Case 05: 54 lines, then a chain of 3 before a paragraph with page break "
+                   "before", page_break_before=True)
+    body += one_liners("Case 05 chain", 3, keep_next=True)
+    body += page_para(run("Case 05: page break before"), page_break_before=True)
+    return Doc(
+        "E-keepnext-chain",
+        "Keep-with-next chains near the end of a page: one that fits a page, one longer than "
+        "a page, one that ends at a next page and one at a continuous section break, one "
+        "before a paragraph with page break before",
+        body,
+        last_section=section(kind="nextPage"),
+    )
+
+
+def page_break_before_top() -> Doc:
+    body = page_para(run("Case 01: page break before, on the first paragraph of the document"),
+                     page_break_before=True)
+    body += filler(LINES_PER_PAGE - 1, "57 lines, which fill the rest of the page")
+    body += page_para(run("Case 02: page break before, on a paragraph that starts a page by "
+                          "flowing"), page_break_before=True)
+    return Doc(
+        "E-page-break-before-top",
+        "Page break before (w:pageBreakBefore) on the first paragraph of the document, and on "
+        "a paragraph that starts a page anyway: whether Word adds an empty page",
+        body,
+    )
+
+
+SHADE = "D9D9D9"
+
+
+def para_shading() -> Doc:
+    text_3 = "three lines of shaded text in one paragraph, " * 9
+    cases = [
+        ("a hanging first line (left 72 pt, hanging 36 pt)",
+         {"ind": {"left": 1440, "hanging": 720}}),
+        ("negative indents (left and right -18 pt)", {"ind": {"left": -360, "right": -360}}),
+        ("12 pt before and after", {"space": spacing(before=12, after=12, line=("exact", 12))}),
+        ("the first of two shaded paragraphs in a row", {}),
+        ("the second of two shaded paragraphs in a row", {}),
+    ]
+    body = "".join(
+        page_para(run(f"Case {n:02d}: {label}: ") + run(text_3), shading=SHADE, **props)
+        for n, (label, props) in enumerate(cases, 1)
+    )
+    # Ten lines that start on line 54 of a page: the paragraph splits over two pages.
+    body += filler(LINES_PER_PAGE - 4, "lines before the next case", page_break_before=True)
+    body += filler(10, "Case 06: a shaded paragraph of 10 lines that starts on line 54",
+                   shading=SHADE)
+    return Doc(
+        "E-para-shading",
+        "The extent of paragraph shading: with a hanging first line, with negative indents, "
+        "with space before and after, in two shaded paragraphs in a row, and in a paragraph "
+        "split over two pages",
+        body,
+    )
+
+
+def tall(kind: str, count: int) -> str:
+    return para(lines([f"{kind} line {n}" for n in range(1, count + 1)]))
+
+
+HEADER_REFS = (("headerReference", "default", "header1.xml"),
+               ("footerReference", "default", "footer1.xml"))
+
+
+def header_tall() -> Doc:
+    return Doc(
+        "E-header-tall",
+        "A header of 8 lines, taller than the top margin, and a footer of 8 lines, taller "
+        "than the bottom margin: where the body starts and ends",
+        filler(70, "the body: 70 lines"),
+        headers=(header_part("header1.xml", tall("header", 8)),
+                 header_part("footer1.xml", tall("footer", 8))),
+        last_section=section(refs=HEADER_REFS),
+    )
+
+
+def header_space_after() -> Doc:
+    header = para(run("header line 1")) + para(run("header line 2, with 24 pt after"),
+                                               space=spacing(after=24))
+    return Doc(
+        "E-header-space-after",
+        "A header of two lines whose last paragraph has 24 pt after, taller with it than the "
+        "top margin: whether the space after counts toward the header's height",
+        filler(70, "the body: 70 lines"),
+        headers=(header_part("header1.xml", header),),
+        last_section=section(refs=(HEADER_REFS[0],)),
+    )
+
+
+def header_negative_margin() -> Doc:
+    return Doc(
+        "E-header-negative-margin",
+        "Negative top and bottom margins (-72 pt: the body edge stays at 72 pt whatever the "
+        "header), with a header and a footer of 8 lines each",
+        filler(70, "the body: 70 lines"),
+        headers=(header_part("header1.xml", tall("header", 8)),
+                 header_part("footer1.xml", tall("footer", 8))),
+        last_section=section(refs=HEADER_REFS, margins=(-MARGIN, -MARGIN)),
+    )
+
+
 def documents() -> list[Doc]:
     return [
         line_fonts(),
@@ -2063,6 +2354,17 @@ def documents() -> list[Doc]:
         bar_tab(),
         auto_color(),
         superscript(),
+        section_odd(),
+        section_odd_first(),
+        section_continuous_headers(),
+        section_next_column(),
+        keeplines_long(),
+        keepnext_chain(),
+        page_break_before_top(),
+        para_shading(),
+        header_tall(),
+        header_space_after(),
+        header_negative_margin(),
     ]
 
 
@@ -2242,10 +2544,12 @@ def core_xml(doc: Doc) -> str:
     )
 
 
-def relationships(rels: list[tuple[str, str]]) -> str:
+def relationships(rels: list[tuple[str, ...]]) -> str:
+    """(type, target) numbered rId1, rId2 ..., or (type, target, id)."""
     entries = "".join(
-        f'<Relationship Id="rId{i}" Type="{REL}/{kind}" Target="{target}"/>'
-        for i, (kind, target) in enumerate(rels, 1)
+        f'<Relationship Id="{rel[2] if len(rel) > 2 else f"rId{i}"}" Type="{REL}/{rel[0]}"'
+        f' Target="{rel[1]}"/>'
+        for i, rel in enumerate(rels, 1)
     )
     ns = "http://schemas.openxmlformats.org/package/2006/relationships"
     return f'<Relationships xmlns="{ns}">{entries}</Relationships>'
@@ -2260,13 +2564,13 @@ def parts(doc: Doc) -> list[tuple[str, bytes]]:
         namespaces += f' xmlns:w14="{W14_NS}" xmlns:mc="{MC_NS}" mc:Ignorable="w14"'
     document = (
         f"<w:document {namespaces}>"
-        f"<w:body>{doc.body}{sect_pr()}</w:body></w:document>"
+        f"<w:body>{doc.body}{doc.last_section or sect_pr()}</w:body></w:document>"
     )
     numbering = None
     if doc.numbering:
         numbering = f'<w:numbering xmlns:w="{W_NS}">{doc.numbering}</w:numbering>'
 
-    used = document + styles_xml(doc) + (numbering or "")
+    used = document + styles_xml(doc) + (numbering or "") + "".join(x for _, x in doc.headers)
     # The fonts every w:rFonts names, directly or through a theme attribute.
     fonts = set()
     for attributes in re.findall(r"<w:rFonts ([^>]*)/>", used):
@@ -2290,6 +2594,10 @@ def parts(doc: Doc) -> list[tuple[str, bytes]]:
     if numbering:
         word_rels.append(("numbering", "numbering.xml"))
         overrides.append(("/word/numbering.xml", f"{CT_W}.numbering+xml"))
+    for name, _ in doc.headers:
+        kind = "header" if name.startswith("header") else "footer"
+        word_rels.append((kind, name, part_id(name)))
+        overrides.append((f"/word/{name}", f"{CT_W}.{kind}+xml"))
     if doc.theme:
         word_rels.append(("theme", "theme/theme1.xml"))
         overrides.append(
@@ -2323,6 +2631,8 @@ def parts(doc: Doc) -> list[tuple[str, bytes]]:
         result.append(("word/numbering.xml", xml_part(numbering)))
     if doc.theme:
         result.append(("word/theme/theme1.xml", xml_part(theme_xml())))
+    for name, root in doc.headers:
+        result.append((f"word/{name}", xml_part(root)))
     result.append(("word/_rels/document.xml.rels", xml_part(relationships(word_rels))))
     for name, data in result:
         try:

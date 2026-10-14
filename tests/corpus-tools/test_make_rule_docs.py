@@ -344,25 +344,35 @@ class Packages(unittest.TestCase):
             # CT_Tbl 17.4.38 and CT_Row 17.4.79.
             "tbl": ["bookmarkStart", "bookmarkEnd", "tblPr", "tblGrid", "tr"],
             "tr": ["tblPrEx", "trPr", "tc"],
+            # CT_SectPr 17.6.17; the header and footer references come first, in any order.
+            "sectPr": [
+                "headerReference", "footnotePr", "endnotePr", "type", "pgSz", "pgMar",
+                "paperSrc", "pgBorders", "lnNumType", "pgNumType", "cols", "formProt",
+                "vAlign", "noEndnote", "titlePg", "textDirection", "bidi", "rtlGutter",
+                "docGrid", "printerSettings", "sectPrChange",
+            ],
         }
         for doc in self.docs:
             parts = rules.parts(doc)
             for name, _ in parts:
-                if name not in ("word/document.xml", "word/styles.xml", "word/numbering.xml"):
+                stories = ("word/document.xml", "word/styles.xml", "word/numbering.xml")
+                if name not in stories and not name.startswith(("word/header", "word/footer")):
                     continue
                 root = part(parts, name)
                 for kind, order in orders.items():
                     for element in root.iter(f"{W}{kind}"):
                         tags = [child.tag.replace(W, "") for child in element]
+                        tags = ["headerReference" if t == "footerReference" else t for t in tags]
                         for tag in tags:
                             self.assertIn(tag, order, f"{doc.name}: {kind} {tags}")
                         places = [order.index(tag) for tag in tags]
                         self.assertEqual(places, sorted(places), f"{doc.name}: {tags}")
-                        # Only a style's conditional formats, a table's rows and a row's
-                        # cells may come more than once.
+                        # Only a style's conditional formats, a section's header and footer
+                        # references, a table's rows and a row's cells may come more than once.
                         repeated = {tag for tag in tags if tags.count(tag) > 1}
                         self.assertLessEqual(
-                            repeated, {"tblStylePr", "tr", "tc"}, f"{doc.name}: {tags}"
+                            repeated, {"tblStylePr", "headerReference", "tr", "tc"},
+                            f"{doc.name}: {tags}"
                         )
 
     def test_properties_come_first_in_their_element(self):
@@ -436,7 +446,8 @@ class Packages(unittest.TestCase):
         for doc in self.docs:
             parts = rules.parts(doc)
             names = {name for name, _ in parts}
-            for name in ("word/document.xml", "word/styles.xml", "word/numbering.xml"):
+            stories = [n for n in sorted(names) if n.startswith(("word/header", "word/footer"))]
+            for name in ["word/document.xml", "word/styles.xml", "word/numbering.xml"] + stories:
                 if name not in names:
                     continue
                 for properties in part(parts, name).iter(f"{W}rPr"):
@@ -1450,6 +1461,224 @@ class Packages(unittest.TestCase):
             half = {"val": str(int(size) * 2)}
             self.assertEqual(base[1], {"sz": half, "szCs": half}, label)
             self.assertEqual(raised[1], {"sz": half, "szCs": half, "vertAlign": {"val": kind}})
+
+    def test_page_cases_have_the_markup_their_labels_name(self):
+        R = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+
+        def load(name):
+            doc = next(doc for doc in self.docs if doc.name == name)
+            parts = dict(rules.parts(doc))
+            body = ElementTree.fromstring(parts["word/document.xml"]).find(f"{W}body")
+            rels = ElementTree.fromstring(parts["word/_rels/document.xml.rels"])
+            targets = {r.get("Id"): r.get("Target") for r in rels}
+            return doc, parts, body, targets
+
+        def lines_of(paragraph):
+            """The lines of a paragraph: its text split at line breaks."""
+            out = [""]
+            for element in paragraph.iter():
+                if element.tag == f"{W}t":
+                    out[-1] += element.text or ""
+                elif element.tag == f"{W}br":
+                    out.append("")
+            return out
+
+        def flag(paragraph, tag):
+            return paragraph.find(f"{W}pPr/{W}{tag}") is not None
+
+        def sections(body, doc):
+            """Per section: its paragraphs and its w:sectPr."""
+            found, current = [], []
+            for paragraph in body.findall(f"{W}p"):
+                current.append(paragraph)
+                sect = paragraph.find(f"{W}pPr/{W}sectPr")
+                if sect is not None:
+                    found.append((current, sect))
+                    current = []
+            found.append((current, body.find(f"{W}sectPr")))
+            return found
+
+        def kind(sect):
+            element = sect.find(f"{W}type")
+            return None if element is None else element.get(f"{W}val")
+
+        def header_text(parts, targets, sect, element="headerReference"):
+            refs = sect.findall(f"{W}{element}")
+            return ["".join(t.text for t in ElementTree.fromstring(
+                parts["word/" + targets[r.get(f"{R}id")]]).iter(f"{W}t")) for r in refs]
+
+        # Every paragraph of the page documents has exact 12 pt lines, so that line counts
+        # are what the labels say.
+        names = ["E-section-odd", "E-section-odd-first", "E-section-continuous-headers",
+                 "E-section-next-column", "E-keeplines-long", "E-keepnext-chain",
+                 "E-page-break-before-top", "E-para-shading", "E-header-tall",
+                 "E-header-space-after", "E-header-negative-margin"]
+        for name in names:
+            _, _, body, _ = load(name)
+            for paragraph in body.findall(f"{W}p"):
+                spacing = paragraph.find(f"{W}pPr/{W}spacing")
+                self.assertEqual((spacing.get(f"{W}line"), spacing.get(f"{W}lineRule")),
+                                 ("240", "exact"), name)
+        self.assertEqual(rules.LINES_PER_PAGE, int((rules.PAGE_H - 2 * rules.MARGIN) / 240))
+
+        # E-section-odd: each section's label says its start type and numbering.
+        doc, parts, body, targets = load("E-section-odd")
+        found = sections(body, doc)
+        self.assertEqual(len(found), 7)
+        pages_before = None
+        for n, (paragraphs, sect) in enumerate(found, 1):
+            label = lines_of(paragraphs[0])[0]
+            said = re.fullmatch(
+                rf"Section {n}: (?:one page|(odd|even) page start(?: after (?:one page|a section "
+                r"of (one|two) pages?))?(, page numbers restarted at 1)?(; two pages)?)", label)
+            self.assertIsNotNone(said, label)
+            start, before, restart, two = said.groups()
+            self.assertEqual(kind(sect), None if start is None else f"{start}Page", label)
+            numbers = sect.find(f"{W}pgNumType")
+            self.assertEqual(numbers is not None and numbers.get(f"{W}start") == "1",
+                             bool(restart), label)
+            if before is not None or "after one page" in label:
+                expected = 2 if before == "two" else 1
+                self.assertEqual(pages_before, expected, label)
+            pages = len(paragraphs)
+            self.assertEqual(pages, 2 if two else 1, label)
+            for paragraph in paragraphs[1:]:
+                self.assertTrue(flag(paragraph, "pageBreakBefore"), label)
+            pages_before = pages
+            # The header and footer are named once, by the first section.
+            refs = sect.findall(f"{W}headerReference") + sect.findall(f"{W}footerReference")
+            self.assertEqual(len(refs), 2 if n == 1 else 0, label)
+        self.assertEqual(header_text(parts, targets, found[0][1]), ["header"])
+        footer = parts["word/" + targets[found[0][1].find(f"{W}footerReference").get(f"{R}id")]]
+        self.assertIn(b'w:instr=" PAGE "', footer)
+
+        # E-section-odd-first.
+        doc, parts, body, targets = load("E-section-odd-first")
+        (first, sect), (second, last) = sections(body, doc)
+        self.assertIn("even page start", lines_of(first[0])[0])
+        self.assertEqual((kind(sect), kind(last)), ("evenPage", None))
+
+        # E-section-continuous-headers.
+        doc, parts, body, targets = load("E-section-continuous-headers")
+        (first, sect), (second, last) = sections(body, doc)
+        self.assertEqual(len(lines_of(first[0])), 29)
+        self.assertEqual(len(lines_of(second[0])), 60)
+        self.assertEqual((kind(sect), kind(last)), (None, "continuous"))
+        self.assertEqual(header_text(parts, targets, sect), ["Header A"])
+        self.assertEqual(header_text(parts, targets, last), ["Header B"])
+        self.assertIn("Header A", lines_of(first[0])[0])
+        self.assertIn("Header B", lines_of(second[0])[0])
+
+        # E-section-next-column.
+        doc, parts, body, targets = load("E-section-next-column")
+        (_, sect), (_, last) = sections(body, doc)
+        self.assertEqual((kind(sect), kind(last)), (None, "nextColumn"))
+
+        # E-keeplines-long.
+        _, _, body, _ = load("E-keeplines-long")
+        before, long = body.findall(f"{W}p")
+        self.assertEqual(len(lines_of(before)), 29)
+        self.assertEqual(len(lines_of(long)), 80)
+        self.assertTrue(len(lines_of(long)) > rules.LINES_PER_PAGE)
+        self.assertEqual((flag(before, "keepLines"), flag(long, "keepLines")), (False, True))
+
+        # E-keepnext-chain: each case's filler has the lines its label says, and the chain
+        # is that many one-line paragraphs, all but the last with keep with next.
+        doc, _, body, _ = load("E-keepnext-chain")
+        paragraphs = body.findall(f"{W}p")
+        starts = [i for i, p in enumerate(paragraphs)
+                  if re.match(r"Case \d\d: \d+ lines", lines_of(p)[0])]
+        self.assertEqual(len(starts), 5)
+        for number, start in enumerate(starts, 1):
+            label = lines_of(paragraphs[start])[0]
+            self.assertTrue(label.startswith(f"Case {number:02d}: "), label)
+            count = int(re.search(r": (\d+) lines", label).group(1))
+            self.assertEqual(len(lines_of(paragraphs[start])), count, label)
+            self.assertEqual(flag(paragraphs[start], "pageBreakBefore"), number > 1, label)
+            size = int(re.search(r"chain of (\d+)", label).group(1))
+            chain = paragraphs[start + 1 : start + 1 + size]
+            self.assertEqual([lines_of(p)[0] for p in chain],
+                             [f"Case {number:02d} chain {k}" for k in range(1, size + 1)], label)
+            keeps = [flag(p, "keepNext") for p in chain]
+            if "section break" in label:
+                # The chain's last paragraph keeps with the next, which is past the break.
+                self.assertEqual(keeps, [True] * size, label)
+                sect = chain[-1].find(f"{W}pPr/{W}sectPr")
+                self.assertIsNotNone(sect, label)
+                expected = "continuous" if "continuous" in label else None
+                self.assertEqual(kind(sect), expected, label)
+            else:
+                self.assertEqual(keeps, [True] * (size - 1) + ["before a paragraph with page "
+                                 "break before" in label], label)
+            after = paragraphs[start + 1 + size] if start + 1 + size < len(paragraphs) else None
+            if "page break before" in label:
+                self.assertTrue(flag(after, "pageBreakBefore"), label)
+            if "fits a page" in label:
+                self.assertTrue(size <= rules.LINES_PER_PAGE < count + size, label)
+            if "70 lines" in label:
+                self.assertTrue(size > rules.LINES_PER_PAGE, label)
+            if number in (3, 5):
+                self.assertTrue(count + size <= rules.LINES_PER_PAGE, label)
+            if number == 4:
+                self.assertEqual(len(lines_of(after)), 2, label)
+                self.assertTrue(count + size <= rules.LINES_PER_PAGE < count + size + 2, label)
+
+        # E-page-break-before-top.
+        _, _, body, _ = load("E-page-break-before-top")
+        first, fill, second = body.findall(f"{W}p")
+        self.assertTrue(flag(first, "pageBreakBefore") and flag(second, "pageBreakBefore"))
+        self.assertEqual(1 + len(lines_of(fill)), rules.LINES_PER_PAGE)
+        self.assertFalse(flag(fill, "pageBreakBefore"))
+
+        # E-para-shading.
+        _, _, body, _ = load("E-para-shading")
+        paragraphs = body.findall(f"{W}p")
+        shaded = [p for p in paragraphs if p.find(f"{W}pPr/{W}shd") is not None]
+        self.assertEqual(len(shaded), 6)
+        for paragraph in shaded:
+            label = lines_of(paragraph)[0]
+            ind = paragraph.find(f"{W}pPr/{W}ind")
+            values = {} if ind is None else {k.replace(W, ""): v for k, v in ind.attrib.items()}
+            expected = {}
+            if "hanging first line" in label:
+                expected = {"left": "1440", "hanging": "720"}
+            if "negative indents" in label:
+                expected = {"left": "-360", "right": "-360"}
+            self.assertEqual(values, expected, label)
+            spacing = paragraph.find(f"{W}pPr/{W}spacing")
+            self.assertEqual(spacing.get(f"{W}before") is not None, "before and after" in label)
+        split = shaded[-1]
+        self.assertEqual(len(lines_of(split)), 10)
+        self.assertEqual(len(lines_of(paragraphs[-2])), rules.LINES_PER_PAGE - 4)
+        self.assertIn("starts on line 54", lines_of(split)[0])
+        self.assertEqual(rules.LINES_PER_PAGE - 4, 54)
+
+        # The header documents.
+        for name, top, header_lines, footer_lines in (
+            ("E-header-tall", "1440", 8, 8),
+            ("E-header-space-after", "1440", 2, None),
+            ("E-header-negative-margin", "-1440", 8, 8),
+        ):
+            doc, parts, body, targets = load(name)
+            sect = body.find(f"{W}sectPr")
+            margins = sect.find(f"{W}pgMar")
+            self.assertEqual((margins.get(f"{W}top"), margins.get(f"{W}bottom")), (top, top))
+            header = ElementTree.fromstring(
+                parts["word/" + targets[sect.find(f"{W}headerReference").get(f"{R}id")]])
+            got = sum(len(lines_of(p)) for p in header.findall(f"{W}p"))
+            self.assertEqual(got, header_lines, name)
+            footer = sect.find(f"{W}footerReference")
+            if footer_lines is None:
+                self.assertIsNone(footer, name)
+            else:
+                root = ElementTree.fromstring(parts["word/" + targets[footer.get(f"{R}id")]])
+                self.assertEqual(sum(len(lines_of(p)) for p in root.findall(f"{W}p")),
+                                 footer_lines, name)
+            (paragraph,) = body.findall(f"{W}p")
+            self.assertEqual(len(lines_of(paragraph)), 70, name)
+            if name == "E-header-space-after":
+                last = header.findall(f"{W}p")[-1]
+                self.assertEqual(last.find(f"{W}pPr/{W}spacing").get(f"{W}after"), "480")
 
     def test_refuses_a_setting_word_does_not_write_in_the_mode(self):
         doc = next(doc for doc in self.docs if doc.name == "E-opentype-on")
