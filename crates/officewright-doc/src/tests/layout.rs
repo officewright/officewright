@@ -1796,7 +1796,7 @@ fn translates_the_rest_of_table_properties() {
     let translation = translate(&open(&format!("{table}<w:p/>")));
     let table = tables(&translation)[0];
     let props = table.props();
-    // A width of 0 percent is automatic (MS-OI29500 §17.4.71(a)).
+    // A width of 0 percent is automatic (MS-OI29500 §17.4.63(a)).
     assert_eq!(props.width(), ir::PreferredWidth::Auto);
     assert_eq!(props.alignment(), ir::TableAlignment::End);
     let line =

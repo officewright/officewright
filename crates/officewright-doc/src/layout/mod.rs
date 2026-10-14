@@ -26,8 +26,8 @@ use crate::model::{Block, Document, Formats};
 thread_local! {
     /// Work the translation did on this thread, for tests of its cost: inlines added to
     /// paragraphs and field results, bytes of names and tags looked up to share run
-    /// styles, run styles built, places tried to cut names, and comparisons of
-    /// compatibility flags.
+    /// styles, run styles built, places tried to cut names, comparisons of compatibility
+    /// flags, and table cells copied where a horizontal merge should move them.
     pub(crate) static WORK: std::cell::Cell<Work> = const { std::cell::Cell::new(Work {
         inlines: 0,
         compared: 0,
