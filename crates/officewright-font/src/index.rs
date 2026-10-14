@@ -19,7 +19,7 @@ use skrifa::raw::tables::maxp::Maxp;
 
 use crate::coverage::{Allowance, Coverage};
 use crate::error::{Cause, Error};
-use crate::face::{FaceProperties, english_rank};
+use crate::face::{FaceProperties, english_rank, name_text};
 use crate::font::{all_records, optional, required};
 
 /// How much of a table the index reads.
@@ -390,7 +390,8 @@ fn index_face(tables: &[(Tag, Vec<u8>)], present: &[Tag], face: u32) -> Result<I
 }
 
 /// The named instances of a variable font. Instances whose record or name cannot be
-/// read are left out.
+/// read are left out, and so are those whose name is too long to be kept
+/// ([`name_text`]).
 fn named_instances(fvar: &Fvar<'_>, name: &Name<'_>) -> Vec<NamedInstance> {
     let (Ok(axes), Ok(records)) = (fvar.axes(), fvar.instances()) else {
         return Vec::new();
@@ -419,13 +420,8 @@ fn named_instances(fvar: &Fvar<'_>, name: &Name<'_>) -> Vec<NamedInstance> {
         if rank >= best.0 {
             continue;
         }
-        let Ok(string) = record.string(data) else {
-            continue;
-        };
-        let text: String = string.chars().collect();
-        let text = text.trim_matches(|c: char| c.is_whitespace() || c == '\0');
-        if !text.is_empty() {
-            *best = (rank, text.to_owned());
+        if let Some(text) = name_text(record, data) {
+            *best = (rank, text);
         }
     }
     let coordinate =
@@ -1108,6 +1104,29 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn leaves_out_instances_whose_names_are_too_long_to_keep() {
+        let axes = [(b"wght", 100.0, 400.0, 900.0)];
+        let instances: [(u16, &[f64]); 3] = [(256, &[600.0]), (257, &[700.0]), (258, &[800.0])];
+        let at_limit = "一".repeat(170);
+        let font = TestFont::new("Test Var")
+            .name_record(256, &at_limit)
+            .name_record(257, &"二".repeat(171))
+            .name_record(258, &"B".repeat(513))
+            .with_table(b"fvar", testing::fvar(&axes, &instances))
+            .build();
+        let faces = index(&font).unwrap();
+        let names: Vec<_> = faces[0]
+            .1
+            .as_ref()
+            .unwrap()
+            .instances
+            .iter()
+            .map(|i| &i.name)
+            .collect();
+        assert_eq!(names, [&at_limit]);
     }
 
     #[test]
