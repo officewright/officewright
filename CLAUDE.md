@@ -48,10 +48,10 @@ crates/
                         chooses each character's font by Word's rule (MS-OI29500 2.1.88 b) with fallback,
                         shapes with HarfRust, breaks lines first fit by UAX #14 (unicode-linebreak) with
                         Word's rules on top, and flows paragraphs onto the pages of each section with Word's
-                        keep and widow rules, behind private modules; feature `fuzzing` opens entry points
-                        for the fuzz targets, examples and the tests with the test fonts and Word's renders,
-                        which are not API; `data/symbol.txt` (Unicode's Adobe Symbol mapping) stays out of
-                        the published crate
+                        keep and widow rules, headers, footers and page numbers, behind private modules;
+                        feature `fuzzing` opens entry points for the fuzz targets, examples and the tests
+                        with the test fonts and Word's renders, which are not API; `data/symbol.txt`
+                        (Unicode's Adobe Symbol mapping) stays out of the published crate
   officewright-doc      DOC/DOCX/RTF          (counterpart of Spire.Doc); feature `pdf` translates a document into
                         the layout IR (`Document::to_layout_ir`), hidden in the docs and exempt from semver
                         like the IR unless feature `unstable-ir`
@@ -321,7 +321,8 @@ PDF output of officewright text-to-pdf (tests/pdf-output): qpdf --check without 
   pdftoppm renders the subset exactly as the whole font and the shapes, colours and clips where the page puts them;
   the example images' page: pdfimages lists every JPEG and PNG as passed through or decoded with a soft mask, pdftoppm
   shows their colours and transparency, a PNG with every filter type renders the same decoded by officewright as
-  unfiltered by poppler, the committed fuzz seeds equal images.py's output (Linux, macOS)
+  unfiltered by poppler, the committed fuzz seeds equal images.py's output; the example embed_report counts a font the
+  subsetter does not support apart from a damaged one (Linux, macOS)
 corpus-runner over tests/corpus (committed corpus), compared with tests/corpus/baseline.json
 ```
 

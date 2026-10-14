@@ -143,8 +143,10 @@ impl Document {
 
     /// Writes the document as a PDF file to `out`.
     ///
-    /// Embedded fonts are reduced to the glyphs the document shows now. Nothing is
-    /// written to `out` unless the whole document can be. The file is PDF 1.4, or PDF 1.5
+    /// Embedded fonts are reduced to the glyphs the document shows now, unless a font's
+    /// license forbids subsetting
+    /// ([`EmbeddingNote::WholeFont`](crate::EmbeddingNote::WholeFont)). Nothing is written
+    /// to `out` unless the whole document can be. The file is PDF 1.4, or PDF 1.5
     /// if some text needs replacement text for text extraction (where two characters share
     /// a glyph of an embedded font, or a cluster of a glyph run cannot be given by the
     /// ToUnicode map), or if an image keeps 16-bit samples: a PNG file of 16 bits per
