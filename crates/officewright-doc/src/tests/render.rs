@@ -304,7 +304,8 @@ fn reports_an_embedded_font_whose_names_the_text_cannot_reach() {
     assert_eq!(
         entry.to_string(),
         "document: the w:embedRegular of the font Officewright Test holds a font named \
-         ___WRD_EMBED_S_17, which is not that font's name, so other fonts are used"
+         ___WRD_EMBED_S_17, which the text cannot reach by the font's name, so other fonts \
+         are used"
     );
     assert!(
         listed.iter().any(|entry| entry == NO_TEST_FONT),
@@ -327,6 +328,8 @@ fn reports_an_embedded_font_whose_names_the_text_cannot_reach() {
             .any(|entry| entry.message().contains("holds a font named"))
     };
     assert!(reached(&test_font(), "OFFICEWRIGHT TEST"));
+    // The PostScript name too, which the font book finds the font by.
+    assert!(reached(&test_font(), "OfficewrightTest"));
     // The family renamed, the full name (name ID 4, after it) kept.
     assert!(reached(
         &renamed_where(&test_font(), "___WRD_EMBED_S_17", 1),
@@ -402,9 +405,132 @@ fn says_each_message_of_an_error_once() {
     let mut unique = messages.clone();
     unique.dedup();
     assert_eq!(unique, messages);
+    // A document past the page limit: the layout's error, which has no cause.
+    let two_pages =
+        open(r#"<w:p><w:r><w:t>one</w:t><w:br w:type="page"/><w:t>two</w:t></w:r></w:p>"#);
+    let err = two_pages
+        .save_pdf_bytes(&without_system_fonts().with_max_pages(1))
+        .unwrap_err();
+    assert_eq!(chain(&err).len(), 1, "{:?}", chain(&err));
     // The font library's own message.
     let refused = officewright_font::FontBook::new()
         .add_bytes(b"not a font".to_vec(), officewright_font::FontOrigin::User)
         .unwrap_err();
     assert_eq!(messages[0], refused.to_string());
+}
+
+/// The test font as a collection (`ttcf`) of `faces` faces, each the same font: its
+/// tables placed after the collection's header, their offsets moved to match.
+fn collection(program: &[u8], faces: u32) -> Vec<u8> {
+    let header = 12 + 4 * faces as usize;
+    let mut font = program.to_vec();
+    let tables = usize::from(u16::from_be_bytes([font[4], font[5]]));
+    for table in 0..tables {
+        let at = 12 + 16 * table + 8;
+        let offset = u32::from_be_bytes(font[at..at + 4].try_into().unwrap());
+        font[at..at + 4].copy_from_slice(&(offset + header as u32).to_be_bytes());
+    }
+    let mut bytes = b"ttcf".to_vec();
+    bytes.extend(0x0001_0000u32.to_be_bytes());
+    bytes.extend(faces.to_be_bytes());
+    for _ in 0..faces {
+        bytes.extend((header as u32).to_be_bytes());
+    }
+    bytes.extend(font);
+    bytes
+}
+
+#[test]
+fn uses_at_most_a_thousand_and_twenty_four_embedded_faces() {
+    // A collection takes a few kilobytes for a thousand faces; the faces are what costs,
+    // so the document's embedded fonts add at most 1,024.
+    let report = |faces: u32| {
+        let program = collection(&test_font(), faces);
+        let document = Document::from_bytes(package_with_body_and_fonts(
+            &text_in_test_font("A"),
+            &font("Officewright Test", r#"<w:embedRegular r:id="rId1"/>"#),
+            &relationship("rId1", "fonts/font1.odttf"),
+            &[("word/fonts/font1.odttf", &program)],
+        ))
+        .unwrap();
+        let (pdf, report) = document.save_pdf_bytes(&without_system_fonts()).unwrap();
+        (names(&pdf, b"+OfficewrightTest"), entries(&report))
+    };
+    let (used, listed) = report(1024);
+    assert!(used, "{listed:?}");
+    assert!(
+        !listed.iter().any(|entry| entry.contains("left out")),
+        "{listed:?}"
+    );
+    let (used, listed) = report(1025);
+    assert!(!used, "{listed:?}");
+    // The faces of all the programs count together: two collections of 600 faces each,
+    // the second past the limit.
+    let program = collection(&test_font(), 600);
+    let document = Document::from_bytes(package_with_body_and_fonts(
+        &text_in_test_font("A"),
+        &font(
+            "Officewright Test",
+            r#"<w:embedRegular r:id="rId1"/><w:embedBold r:id="rId2"/>"#,
+        ),
+        &[
+            relationship("rId1", "fonts/font1.odttf"),
+            relationship("rId2", "fonts/font2.odttf"),
+        ]
+        .concat(),
+        &[
+            ("word/fonts/font1.odttf", &program),
+            ("word/fonts/font2.odttf", &program),
+        ],
+    ))
+    .unwrap();
+    let (_, report) = document.save_pdf_bytes(&without_system_fonts()).unwrap();
+    let two = entries(&report);
+    assert!(
+        two.iter()
+            .any(|entry| entry.starts_with("document: 1 embedded font programs are left out")),
+        "{two:?}"
+    );
+    assert!(
+        listed.iter().any(|entry| entry
+            == "document: 1 embedded font programs are left out, past 1024 faces in all, so \
+                other fonts are used"),
+        "{listed:?}"
+    );
+}
+
+#[test]
+fn reports_an_embedded_font_without_a_family_name() {
+    // The test font with its family and full names (name IDs 1 and 4) made other names:
+    // nothing finds it by "Officewright Test".
+    let mut program = test_font();
+    let tables = usize::from(u16::from_be_bytes([program[4], program[5]]));
+    let name = (0..tables)
+        .map(|table| 12 + 16 * table)
+        .find(|&at| &program[at..at + 4] == b"name")
+        .map(|at| u32::from_be_bytes(program[at + 8..at + 12].try_into().unwrap()) as usize)
+        .unwrap();
+    let records = usize::from(u16::from_be_bytes([program[name + 2], program[name + 3]]));
+    for record in 0..records {
+        let id = name + 6 + 12 * record + 6;
+        if matches!(u16::from_be_bytes([program[id], program[id + 1]]), 1 | 4) {
+            program[id..id + 2].copy_from_slice(&7u16.to_be_bytes());
+        }
+    }
+    let document = Document::from_bytes(package_with_body_and_fonts(
+        &text_in_test_font("A"),
+        &font("Officewright Test", r#"<w:embedRegular r:id="rId1"/>"#),
+        &relationship("rId1", "fonts/font1.odttf"),
+        &[("word/fonts/font1.odttf", &program)],
+    ))
+    .unwrap();
+    let (_, report) = document.save_pdf_bytes(&without_system_fonts()).unwrap();
+    let listed = entries(&report);
+    assert!(
+        listed.iter().any(|entry| entry
+            == "document: the w:embedRegular of the font Officewright Test holds a font without \
+                a family name, which the text cannot reach by the font's name, so other fonts are \
+                used"),
+        "{listed:?}"
+    );
 }

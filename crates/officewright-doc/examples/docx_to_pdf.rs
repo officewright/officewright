@@ -6,8 +6,8 @@
 //!     IN.docx OUT.pdf [--font-dir DIR]... [--no-system-fonts] [--max-pages N]
 //! ```
 //!
-//! It prints the number of pages, then each entry of the report: where in the document,
-//! what kind, and what happened.
+//! It prints the size of the PDF in bytes, then each entry of the report: what kind,
+//! where in the document, and what happened.
 
 use std::process::ExitCode;
 

@@ -53,8 +53,9 @@ pub enum Error {
         /// The font library's error.
         source: officewright_font::Error,
     },
-    /// The PDF cannot be written, to the file or the writer. The PDF writer's error is
-    /// passed through, as for `Layout`.
+    /// The PDF cannot be made, such as when a font cannot be subset for it, or cannot be
+    /// written, to the file or the writer. The PDF writer's error is passed through, as
+    /// for `Layout`.
     #[cfg(feature = "pdf")]
     #[non_exhaustive]
     Pdf {

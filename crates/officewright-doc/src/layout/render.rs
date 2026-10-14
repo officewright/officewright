@@ -6,7 +6,7 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
-use officewright_font::{FaceInfo, FontBook, FontOrigin};
+use officewright_font::{FontBook, FontFace, FontOrigin, FontRequest, ResolutionKind};
 use officewright_layout::{LayoutReport, Location, RenderOptions, ReportEntry, ReportKind};
 
 use crate::docx::shorten;
@@ -17,16 +17,18 @@ impl Document {
     /// Renders the document into PDF and writes it to `out`. Returns the report of what
     /// the PDF shows otherwise than Word would, so that users know why it differs.
     ///
-    /// The document is translated into the layout engine's input
-    /// ([`to_layout_ir`](Self::to_layout_ir)), laid out on pages and painted. Its text is
+    /// The document is translated into the layout engine's input, laid out on pages and
+    /// painted. Its text is
     /// laid out with the fonts the document embeds first, then those of `options`, then
     /// the system's when `options` use them. The report lists, in this order, what the
     /// translation leaves out, the embedded fonts that cannot be read or used, and what
     /// the layout does differently from Word, such as a font it uses in place of another.
     ///
-    /// An embedded font is used for the text whose font has a name the program itself
-    /// has. A subset Word embeds under a name of its own (`___WRD_EMBED_SUB_` and a
-    /// number) answers to none, so other fonts are used, and the report says so (#216).
+    /// An embedded font is used for the text whose font the font book finds it by: its
+    /// family, typographic family, full or PostScript name, or a named instance. A subset
+    /// Word embeds under a name of its own (`___WRD_EMBED_SUB_` and a number) is found by
+    /// none, so other fonts are used, and the report says so (#216). At most 1,024 faces
+    /// of embedded fonts are used; the report counts those left out.
     ///
     /// # Errors
     ///
@@ -34,10 +36,9 @@ impl Document {
     ///   `options` allow ([`RenderOptions::with_max_pages`]);
     /// - [`Error::Font`](crate::Error::Font) when a font `options` give cannot be read, or
     ///   a directory of fonts cannot be listed;
-    /// - [`Error::Pdf`](crate::Error::Pdf) when the PDF cannot be written to `out`;
-    /// - [`Error::Layout`](crate::Error::Layout) too when the PDF cannot be made, such as
-    ///   when a font the document embeds is damaged past what the font book checks and
-    ///   cannot be subset for the PDF (#217).
+    /// - [`Error::Pdf`](crate::Error::Pdf) when the PDF cannot be written to `out`, or
+    ///   cannot be made, such as when a font the document embeds is damaged past what the
+    ///   font book checks and cannot be subset for the PDF (#217).
     ///
     /// ```
     /// # fn main() -> officewright_doc::Result<()> {
@@ -129,13 +130,14 @@ impl Document {
     }
 
     /// Adds the programs of the fonts the document embeds to `fonts`, ahead of the
-    /// caller's and the system's, each program once however many styles share it.
-    /// Returns an entry for each program the font book cannot read, which is left out,
-    /// and for each whose faces answer to none of the font's names, which the text
-    /// cannot reach.
+    /// caller's and the system's, each program once however many styles share it, and
+    /// at most [`MAX_EMBEDDED_FACES`] faces in all. Returns an entry for each program the
+    /// font book cannot read, which is left out; for each the text cannot reach by the
+    /// font's name; and one for those past the limit, which are left out.
     fn add_embedded_fonts(&self, fonts: &mut FontBook) -> Vec<ReportEntry> {
         let mut added = HashSet::new();
         let mut entries = Vec::new();
+        let (mut faces, mut past_limit) = (0usize, 0usize);
         for font in self.fonts() {
             for embedded in font.embedded() {
                 let Some(program) = &embedded.program else {
@@ -151,30 +153,23 @@ impl Document {
                         shorten(font.name())
                     )
                 };
-                let before = fonts.len();
+                // A collection of a thousand faces takes a few kilobytes: the faces, not
+                // the bytes, are what costs.
+                let count = FontFace::face_count(&program.0).map_or(1, |count| count as usize);
+                if faces.saturating_add(count) > MAX_EMBEDDED_FACES {
+                    past_limit += 1;
+                    continue;
+                }
+                faces += count;
                 match fonts.add_bytes(Arc::clone(&program.0), FontOrigin::Document) {
                     Ok(_) => {
-                        let names = |face: &FaceInfo| {
-                            let names = face.names();
-                            names
-                                .families()
-                                .chain(names.typographic_families())
-                                .chain(names.full_names())
-                                .any(|name| same_name(name, font.name()))
-                        };
-                        if !fonts.faces().skip(before).any(|(_, face)| names(face)) {
-                            let family = fonts
-                                .faces()
-                                .nth(before)
-                                .and_then(|(_, face)| face.names().family())
-                                .map(shorten)
-                                .unwrap_or_default();
+                        if let Some(family) = unreachable_family(&program.0, font.name()) {
                             entries.push(ReportEntry::new(
                                 ReportKind::FontSubstituted,
                                 Location::document(),
                                 format!(
-                                    "{} holds a font named {family}, which is not that font's \
-                                     name, so other fonts are used",
+                                    "{} holds {family}, which the text cannot reach by the \
+                                     font's name, so other fonts are used",
                                     what()
                                 ),
                             ));
@@ -195,12 +190,54 @@ impl Document {
                 }
             }
         }
+        if past_limit > 0 {
+            entries.push(ReportEntry::new(
+                ReportKind::FontEmbedding,
+                Location::document(),
+                format!(
+                    "{past_limit} embedded font programs are left out, past {MAX_EMBEDDED_FACES} \
+                     faces in all, so other fonts are used"
+                ),
+            ));
+        }
         entries
     }
 }
 
-/// Whether two font names are the same as the font book compares them: without the
-/// spaces around them and whatever their case.
-fn same_name(a: &str, b: &str) -> bool {
-    a.trim().to_lowercase() == b.trim().to_lowercase()
+/// The most faces the document's embedded fonts may add to the font book, a collection
+/// counting each of its faces. Word embeds at most four programs a font; the limit is
+/// our choice, far above what documents embed and small enough that a few kilobytes of
+/// collections cannot fill the memory.
+const MAX_EMBEDDED_FACES: usize = 1024;
+
+/// The family `program` holds, described for the report, when the font book would not
+/// find it by `name`: a font book with only the program finds no face of that name, by
+/// any of the ways the font book finds names (the family, an alias, another of the
+/// font's names, a named instance). A subset Word embeds under a name of its own
+/// (`___WRD_EMBED_SUB_` and a number) is such a program.
+fn unreachable_family(program: &Arc<[u8]>, name: &str) -> Option<String> {
+    let mut alone = FontBook::new();
+    alone
+        .add_bytes(Arc::clone(program), FontOrigin::Document)
+        .ok()?;
+    let resolution = alone.resolve(&FontRequest::new(name));
+    let found = matches!(
+        resolution.kind(),
+        ResolutionKind::Exact
+            | ResolutionKind::Alias
+            | ResolutionKind::OtherName
+            | ResolutionKind::VariableInstance
+    );
+    if found {
+        return None;
+    }
+    let family = alone
+        .faces()
+        .next()
+        .and_then(|(_, face)| face.names().family())
+        .map_or_else(
+            || "a font without a family name".to_owned(),
+            |family| format!("a font named {}", shorten(family)),
+        );
+    Some(family)
 }
