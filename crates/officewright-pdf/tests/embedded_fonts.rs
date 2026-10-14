@@ -222,8 +222,16 @@ fn font_of(tables: &BTreeMap<[u8; 4], Vec<u8>>) -> TestResult<Vec<u8>> {
     let count = u16::try_from(tables.len())?;
     let selector = u16::try_from(count.ilog2())?;
     let search = 16 << selector;
+    // `OTTO` for CFF or CFF2 outlines, as such fonts start; 1.0 for TrueType outlines.
+    let cff = !tables.contains_key(b"glyf")
+        && (tables.contains_key(b"CFF ") || tables.contains_key(b"CFF2"));
+    let version = if cff {
+        u32::from_be_bytes(*b"OTTO")
+    } else {
+        0x0001_0000
+    };
     let mut font = Bytes::default()
-        .u32s(&[0x0001_0000])
+        .u32s(&[version])
         .u16s(&[count, search, selector, 16 * count - search])
         .0;
     let mut data = Vec::new();
