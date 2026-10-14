@@ -162,7 +162,8 @@ pub enum ReportKind {
     FieldCached,
     /// A legacy compatibility option is set that the layout does not follow.
     CompatIgnored,
-    /// A value is beyond what Word accepts and was brought within its limits.
+    /// A value is beyond what Word accepts, or what a PDF holds, and was brought within
+    /// its limits.
     ValueClamped,
     /// Content does not fit its area, such as a word wider than its column.
     Overflow,
