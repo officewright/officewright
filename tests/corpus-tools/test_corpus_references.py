@@ -177,10 +177,14 @@ class References(unittest.TestCase):
                 self.assertEqual(geometry["page_breaks"], expected)
 
     def test_every_re_saved_copy_belongs_to_a_reference(self):
-        for path in sorted((CORPUS / "resaved").glob("*/*")):
+        # Every file at any depth: resaved/<group>/<name>.docx with its reference folder.
+        resaved = CORPUS / "resaved"
+        for path in sorted(p for p in resaved.rglob("*") if p.is_file()):
+            relative = path.relative_to(resaved)
             with self.subTest(file=str(path.relative_to(CORPUS))):
+                self.assertEqual(len(relative.parts), 2, "not resaved/<group>/<name>.docx")
                 self.assertEqual(path.suffix, ".docx")
-                self.assertTrue((REFERENCE / path.parent.name / path.stem).is_dir())
+                self.assertTrue((REFERENCE / relative.parts[0] / path.stem).is_dir())
 
     def test_reference_files_name_no_profile_path(self):
         for folder in folders():

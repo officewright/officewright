@@ -1339,6 +1339,45 @@ class Summary(unittest.TestCase):
         )
 
 
+class FormattingNote(unittest.TestCase):
+    """SOURCES.md's note on a formatting export, made from the committed file."""
+
+    def result(self, **changes):
+        result = {"runs": True, "runs_note": "", "complete": True,
+                  "styles_from_resaved_copy": True,
+                  "stories": [{"paragraphs": [{}, {}]}, {"paragraphs": [{}]}]}
+        result.update(changes)
+        return result
+
+    def test_each_part_of_the_note(self):
+        note = importer.formatting_note
+        self.assertEqual(
+            note(self.result()), "formatting as Word computes it: 3 paragraphs, with runs"
+        )
+        self.assertEqual(
+            note(self.result(runs=False, runs_note=importer.SIZE_RUNS_NOTE)),
+            "formatting as Word computes it: 3 paragraphs, runs left out (size)",
+        )
+        self.assertEqual(
+            note(self.result(runs=False, complete=False, styles_from_resaved_copy=False)),
+            "formatting as Word computes it: 3 paragraphs, without runs, incomplete (time budget), "
+            "body styles not matched to the re-saved copy",
+        )
+
+    def test_a_file_over_the_limit_loses_its_runs_and_says_so(self):
+        font = {"name": "Calibri"}
+        paragraphs = [{"index": i, "text": "x", "font": 0, "runs": [[1, 1]] * 2000}
+                      for i in range(150)]
+        result = self.result(fonts=[font, dict(font, bold=True)], document="x.docx",
+                             stories=[{"story": "main", "instance": 0, "paragraphs": paragraphs}])
+        self.assertGreater(len(importer.formatting_bytes(result)), importer.MAX_FORMATTING_BYTES)
+        data, note = importer.within_size(result, importer.formatting_note(result))
+        self.assertLess(len(data), importer.MAX_FORMATTING_BYTES)
+        self.assertEqual(
+            note, "formatting as Word computes it: 150 paragraphs, runs left out (size)"
+        )
+
+
 class FontFiles(unittest.TestCase):
     def setUp(self):
         self.temp = Path(tempfile.mkdtemp())
