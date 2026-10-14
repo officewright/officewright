@@ -5,7 +5,7 @@
 
 use std::collections::hash_map::Entry;
 
-use officewright_opc::mce::{Disposition, Processor};
+use officewright_opc::mce::Processor;
 use officewright_opc::xml::{Event, Input};
 
 use super::capture::{Budget, Capture};
@@ -47,7 +47,7 @@ pub(super) fn read(
         match event {
             Event::Start(tag) => {
                 c.at = tag.offset();
-                let disposition = mce.start(&reader, &tag).map_err(opc)?;
+                mce.start(&reader, &tag).map_err(opc)?;
                 if !in_root {
                     if !w
                         .iter()
@@ -63,17 +63,16 @@ pub(super) fn read(
                     continue;
                 }
                 let offset = tag.offset();
-                let understood = disposition == Disposition::Understood
-                    && tag.name().namespace().is_some_and(|ns| w.contains(&ns));
-                let local = tag.name().local();
                 // Every element is kept with the document's tokens for writing; picture
-                // bullets are not read yet. An mc:AlternateContent here is kept whole
-                // too, so a definition in it is not read.
+                // bullets are not read yet. An mc:AlternateContent is kept whole, and
+                // the children of the branch it takes are read in its place.
                 let span = c.capture(&mut reader, &mut mce, tag)?;
-                match local {
-                    "abstractNum" if understood => definition(&mut c, &names, span, offset),
-                    "num" if understood => instance(&mut c, &names, span, offset),
-                    _ => {}
+                for span in c.through_alternates(span) {
+                    match c.document.element(span).local_in(&names.w) {
+                        Some("abstractNum") => definition(&mut c, &names, span, offset),
+                        Some("num") => instance(&mut c, &names, span, offset),
+                        _ => {}
+                    }
                 }
             }
             Event::End(_) => mce.end(),
@@ -94,7 +93,7 @@ fn definition(c: &mut Capture<'_, '_, '_>, names: &Names, span: Span, offset: us
     // Levels written twice: the first counts, as ListDefinition::levels reads them.
     let mut seen = [false; 9];
     let mut repeated: Vec<usize> = Vec::new();
-    for child in element.children_through_fallback(names.mc) {
+    for child in element.children_through_alternates(names.mc) {
         if !child.is(&names.w, "lvl") {
             continue;
         }
@@ -116,7 +115,7 @@ fn definition(c: &mut Capture<'_, '_, '_>, names: &Names, span: Span, offset: us
     c.check(span, offset, |element, report| {
         // Read only for their diagnostics.
         let _ = value(element, names, "abstractNumId", valid_id, report);
-        for child in element.children_through_fallback(names.mc) {
+        for child in element.children_through_alternates(names.mc) {
             match child.local_in(&names.w) {
                 Some("nsid" | "tmpl") => {
                     let _ = value(child, names, "val", long_hex, report);
@@ -156,9 +155,8 @@ fn instance(c: &mut Capture<'_, '_, '_>, names: &Names, span: Span, offset: usiz
     let element = c.document.element(span);
     let w = &names.w;
     let id = element.attribute(w, "numId").and_then(integer);
-    let children = element.children_through_fallback(names.mc);
-    let reference = children
-        .iter()
+    let reference = element
+        .children_through_alternates(names.mc)
         .find(|child| child.is(w, "abstractNumId"))
         .and_then(|reference| reference.attribute(w, "val"));
     let definition = reference.and_then(integer);
@@ -176,7 +174,10 @@ fn instance(c: &mut Capture<'_, '_, '_>, names: &Names, span: Span, offset: usiz
             omitted += 1;
         }
     };
-    for child in children.iter().filter(|child| child.is(w, "lvlOverride")) {
+    let overrides = element
+        .children_through_alternates(names.mc)
+        .filter(|child| child.is(w, "lvlOverride"));
+    for child in overrides {
         let Some(level) = child
             .attribute(w, "ilvl")
             .and_then(|v| v.parse::<usize>().ok())
@@ -190,9 +191,13 @@ fn instance(c: &mut Capture<'_, '_, '_>, names: &Names, span: Span, offset: usiz
             }
             *seen = true;
         }
-        let inner = child.children_through_fallback(names.mc);
         for local in ["startOverride", "lvl"] {
-            if inner.iter().filter(|element| element.is(w, local)).count() > 1 {
+            let inner = child.children_through_alternates(names.mc);
+            if inner
+                .filter(|element| element.is(w, local))
+                .nth(1)
+                .is_some()
+            {
                 note(&|| {
                     format!("a second w:{local} in the w:lvlOverride of level {level} is ignored")
                 });
@@ -209,7 +214,7 @@ fn instance(c: &mut Capture<'_, '_, '_>, names: &Names, span: Span, offset: usiz
     c.check(span, offset, |element, report| {
         // Read only for their diagnostics.
         let _ = value(element, names, "numId", integer, report);
-        for child in element.children_through_fallback(names.mc) {
+        for child in element.children_through_alternates(names.mc) {
             match child.local_in(&names.w) {
                 Some("abstractNumId") => {
                     let _ = value(child, names, "val", integer, report);
@@ -260,7 +265,7 @@ pub(crate) fn level(lvl: Element<'_>, names: &Names, report: Report<'_>) -> Opti
         template_code: value(lvl, names, "tplc", long_hex, report),
         ..ListLevel::default()
     };
-    for child in lvl.children_through_fallback(names.mc) {
+    for child in lvl.children_through_alternates(names.mc) {
         let Some(local) = child.local_in(w) else {
             continue;
         };
@@ -342,7 +347,7 @@ pub(crate) fn level_override(
     // The first of each child counts; CT_NumLvl allows one.
     let mut start_read = false;
     let mut level_read = false;
-    for child in element.children_through_fallback(names.mc) {
+    for child in element.children_through_alternates(names.mc) {
         match child.local_in(&names.w) {
             Some("startOverride") if !start_read => {
                 start_read = true;

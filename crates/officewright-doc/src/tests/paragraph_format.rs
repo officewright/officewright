@@ -1499,8 +1499,8 @@ fn a_hanging_indent_of_the_lowest_number_saturates() {
 
 #[test]
 fn reads_the_paragraph_style_as_the_paragraph_properties_do() {
-    // A w:pStyle in mc:AlternateContent counts, through its fallback, and of two the
-    // last wins, as Paragraph::properties reads them.
+    // A w:pStyle in mc:AlternateContent counts, through the branch taken (#116), and of
+    // two the last wins, as Paragraph::properties reads them.
     let styles = [
         defaults(""),
         style("paragraph", "Centred", None, r#"<w:jc w:val="center"/>"#),
@@ -1509,6 +1509,8 @@ fn reads_the_paragraph_style_as_the_paragraph_properties_do() {
     .concat();
     let body = [
         r#"<w:p><w:pPr><mc:AlternateContent><mc:Choice Requires="w99"><w:pStyle w:val="Right"/></mc:Choice><mc:Fallback><w:pStyle w:val="Centred"/></mc:Fallback></mc:AlternateContent></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
+        // A choice that requires only w is taken.
+        r#"<w:p><w:pPr><mc:AlternateContent><mc:Choice Requires="w"><w:pStyle w:val="Right"/></mc:Choice><mc:Fallback><w:pStyle w:val="Centred"/></mc:Fallback></mc:AlternateContent></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
         r#"<w:p><w:pPr><w:pStyle w:val="Centred"/><w:pStyle w:val="Right"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
         // The last w:pStyle names no style: the paragraph has the default style.
         r#"<w:p><w:pPr><w:pStyle w:val="Centred"/><w:pStyle/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
@@ -1533,6 +1535,7 @@ fn reads_the_paragraph_style_as_the_paragraph_properties_do() {
         found,
         [
             (Some("Centred".to_owned()), Justification::Center),
+            (Some("Right".to_owned()), Justification::Right),
             (Some("Right".to_owned()), Justification::Right),
             (None, Justification::Start),
             (Some("Right".to_owned()), Justification::Right),

@@ -23,7 +23,7 @@ pub(crate) fn run_properties(
 ) -> RunProperties {
     let mut properties = RunProperties::default();
     let w = &names.w;
-    for child in r_pr.children_through_fallback(names.mc) {
+    for child in r_pr.children_through_alternates(names.mc) {
         let Some(local) = child.local_in(w) else {
             continue;
         };
@@ -223,7 +223,7 @@ pub(crate) fn paragraph_properties(
 ) -> ParagraphProperties {
     let mut properties = ParagraphProperties::default();
     let w = &names.w;
-    for child in p_pr.children_through_fallback(names.mc) {
+    for child in p_pr.children_through_alternates(names.mc) {
         let Some(local) = child.local_in(w) else {
             continue;
         };
@@ -270,16 +270,15 @@ pub(crate) fn paragraph_properties(
 /// The list reference of a `w:pPr` (its last `w:numPr`, as
 /// [`paragraph_properties`] reads it), without reading its other properties.
 pub(crate) fn numbering_of(p_pr: Element<'_>, names: &Names) -> Option<NumberingReference> {
-    p_pr.children_through_fallback(names.mc)
-        .into_iter()
-        .rev()
-        .find(|child| child.is(&names.w, "numPr"))
+    p_pr.children_through_alternates(names.mc)
+        .filter(|child| child.is(&names.w, "numPr"))
+        .last()
         .map(|num_pr| numbering(num_pr, names, &mut |_, _, _| {}))
 }
 
 fn numbering(element: Element<'_>, names: &Names, report: Report<'_>) -> NumberingReference {
     let mut reference = NumberingReference::default();
-    for child in element.children_through_fallback(names.mc) {
+    for child in element.children_through_alternates(names.mc) {
         match child.local_in(&names.w) {
             Some("numId") => reference.instance = value(child, names, "val", integer, report),
             Some("ilvl") => reference.level = value(child, names, "val", integer, report),
@@ -291,7 +290,7 @@ fn numbering(element: Element<'_>, names: &Names, report: Report<'_>) -> Numberi
 
 fn borders(element: Element<'_>, names: &Names, report: Report<'_>) -> ParagraphBorders {
     let mut borders = ParagraphBorders::default();
-    for child in element.children_through_fallback(names.mc) {
+    for child in element.children_through_alternates(names.mc) {
         let slot = match child.local_in(&names.w) {
             Some("top") => &mut borders.top,
             Some("bottom") => &mut borders.bottom,
@@ -342,7 +341,7 @@ pub(super) fn border(element: Element<'_>, names: &Names, report: Report<'_>) ->
 
 fn tabs(element: Element<'_>, names: &Names, report: Report<'_>) -> Vec<TabStop> {
     let mut tabs = Vec::new();
-    for child in element.children_through_fallback(names.mc) {
+    for child in element.children_through_alternates(names.mc) {
         if child.local_in(&names.w) != Some("tab") {
             continue;
         }

@@ -1,7 +1,7 @@
 //! The settings part (`w:settings`, ECMA-376 Part 1, §17.15): each setting is kept
 //! whole, and those that bear on layout are typed.
 
-use officewright_opc::mce::{Disposition, Processor};
+use officewright_opc::mce::Processor;
 use officewright_opc::xml::{Event, Input};
 
 use super::capture::{Budget, Capture};
@@ -45,7 +45,7 @@ pub(super) fn read(
         match event {
             Event::Start(tag) => {
                 c.at = tag.offset();
-                let disposition = mce.start(&reader, &tag).map_err(opc)?;
+                mce.start(&reader, &tag).map_err(opc)?;
                 if !in_root {
                     if !w
                         .iter()
@@ -61,16 +61,15 @@ pub(super) fn read(
                     continue;
                 }
                 let offset = tag.offset();
-                let understood = disposition == Disposition::Understood
-                    && tag.name().namespace().is_some_and(|ns| w.contains(&ns));
-                let local = tag.name().local();
                 // Every setting is kept with the document's tokens for writing. An
-                // mc:AlternateContent here is kept whole too, so a setting in it is not
-                // read; no document of the corpus has one.
+                // mc:AlternateContent is kept whole, and the children of the branch it
+                // takes are read in its place.
                 let span = c.capture(&mut reader, &mut mce, tag)?;
-                if understood {
+                for span in c.through_alternates(span) {
                     c.check(span, offset, |element, report| {
-                        setting(&mut settings, element, local, &names, report);
+                        if let Some(local) = element.local_in(&names.w) {
+                            setting(&mut settings, element, local, &names, report);
+                        }
                     });
                 }
             }
@@ -168,7 +167,7 @@ fn setting(
 /// `w:compat`: the legacy options and the compatibility settings.
 fn compat(settings: &mut Settings, element: Element<'_>, names: &Names, report: Report<'_>) {
     let w = &names.w;
-    for child in element.children_through_fallback(names.mc) {
+    for child in element.children_through_alternates(names.mc) {
         let Some(local) = child.local_in(w) else {
             continue;
         };
@@ -206,8 +205,7 @@ fn compat(settings: &mut Settings, element: Element<'_>, names: &Names, report: 
 /// The ids of the separator notes in a `w:footnotePr` or `w:endnotePr` of the settings.
 fn separators(element: Element<'_>, names: &Names, local: &str, report: Report<'_>) -> Vec<i64> {
     element
-        .children_through_fallback(names.mc)
-        .into_iter()
+        .children_through_alternates(names.mc)
         .filter(|child| child.is(&names.w, local))
         .filter_map(|child| value(child, names, "id", integer, report))
         .collect()

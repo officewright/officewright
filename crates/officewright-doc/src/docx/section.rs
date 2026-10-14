@@ -29,7 +29,7 @@ pub(super) fn read(
     let mut seen: Vec<&str> = Vec::new();
     // Headers and footers, by kind: default, even, first.
     let mut seen_references = [[false; 3]; 2];
-    for child in sect_pr.children_through_fallback(names.mc) {
+    for child in sect_pr.children_through_alternates(names.mc) {
         let Some(local) = child.local_in(w) else {
             continue;
         };
@@ -245,7 +245,7 @@ pub(super) fn notes(
     report: Report<'_>,
 ) -> NoteProperties {
     let mut properties = NoteProperties::default();
-    for child in element.children_through_fallback(names.mc) {
+    for child in element.children_through_alternates(names.mc) {
         match child.local_in(&names.w) {
             Some("pos") => {
                 properties.position = value(
@@ -297,7 +297,7 @@ fn page_borders(element: Element<'_>, names: &Names, report: Report<'_>) -> Page
         ),
         ..PageBorders::default()
     };
-    for child in element.children_through_fallback(names.mc) {
+    for child in element.children_through_alternates(names.mc) {
         let slot = match child.local_in(&names.w) {
             Some("top") => &mut borders.top,
             Some("left") => &mut borders.left,
@@ -327,7 +327,7 @@ fn columns(element: Element<'_>, names: &Names, report: Report<'_>) -> Columns {
         separator: super::properties::on_off_attribute(element, names, "sep", report),
         columns: Vec::new(),
     };
-    for child in element.children_through_fallback(names.mc) {
+    for child in element.children_through_alternates(names.mc) {
         if child.local_in(&names.w) == Some("col") {
             columns.columns.push(Column {
                 width: length(child, "w", report),
