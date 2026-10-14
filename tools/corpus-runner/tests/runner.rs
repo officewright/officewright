@@ -750,18 +750,21 @@ fn documents_are_rendered_where_the_scoring_finds_them() -> io::Result<()> {
 }
 
 /// That `file` of a report was scored from the PDF this run rendered. Scoring needs
-/// poppler, which check.sh requires on Linux and macOS; on Windows, which has none, the
-/// scoring must at least have found the PDF.
+/// poppler, which check.sh requires on Linux and macOS. Windows has no official build: there
+/// a scoring that fails where poppler is missing still shows that it looked at this run's
+/// PDF, and a poppler someone installed scores it.
 fn assert_scored(file: &serde_json::Value, output: &str) {
-    if cfg!(unix) {
-        assert!(file["scores"].is_object(), "{file}\n{output}");
-    } else {
-        let why = file["score_error"].as_str().unwrap_or_default();
-        assert!(
-            !why.is_empty() && !why.starts_with("no PDF of ours"),
-            "{file}\n{output}"
-        );
+    if file["scores"].is_object() {
+        return;
     }
+    let why = file["score_error"].as_str().unwrap_or_default();
+    assert!(
+        !cfg!(unix)
+            && !why.is_empty()
+            && !why.starts_with("no PDF of ours")
+            && why != "our PDF was not rendered",
+        "{file}\n{output}"
+    );
 }
 
 #[test]
@@ -920,7 +923,18 @@ fn a_pdf_of_an_earlier_run_is_never_scored() -> io::Result<()> {
     };
     let (_, output) = corpus.run(&args, None)?;
     assert!(corpus.dir.join("pdfs/good.pdf").is_file(), "{output}");
-    assert_scored(&good(&corpus)?, &output);
+    let first = good(&corpus)?;
+    assert_scored(&first, &output);
+    // Rendered without font folders and without the system's fonts: Calibri has no font,
+    // on every machine.
+    assert!(
+        first["layout_report"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["message"] == "\"Calibri\" → no font available"),
+        "{first}"
+    );
     // The child dies before it renders: the earlier PDF is gone, and nothing is scored.
     let (code, output) = corpus.run(&args, Some("panic"))?;
     assert_eq!(code, 1, "{output}");
