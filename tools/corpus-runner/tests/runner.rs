@@ -679,3 +679,142 @@ fn the_report_says_whether_word_s_fonts_are_all_known() -> io::Result<()> {
     assert!(census.contains("S 1, T 0, N 0, no class 0;"), "{census}");
     Ok(())
 }
+
+#[test]
+fn documents_are_rendered_where_the_scoring_finds_them() -> io::Result<()> {
+    let corpus = Corpus::new("render")?;
+    let fonts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fonts");
+    let fonts = fonts.to_str().unwrap();
+
+    // Without references: each document that opens is rendered under its name.
+    let (code, output) = corpus.run(
+        &[
+            "--render",
+            "pdfs",
+            "--font-dir",
+            fonts,
+            "--report",
+            "report.json",
+            "docs",
+        ],
+        None,
+    )?;
+    assert_eq!(code, 0, "{output}");
+    assert!(std::fs::read(corpus.dir.join("pdfs/docs/good.pdf"))?.starts_with(b"%PDF-"));
+    assert!(!corpus.dir.join("pdfs/docs/nested/BROKEN.pdf").exists());
+    let report: serde_json::Value = serde_json::from_str(&corpus.read("report.json")?).unwrap();
+    let entries = report["files"][0]["layout_report"].as_array().unwrap();
+    assert!(
+        entries.iter().all(|entry| entry["kind"].is_string()
+            && entry["location"].is_string()
+            && entry["message"].is_string()),
+        "{entries:?}"
+    );
+    // Laid out with the fonts given: Calibri becomes Carlito from tests/fonts.
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["kind"] == "font-substituted"
+                && entry["message"].as_str().unwrap().contains("Carlito")),
+        "{entries:?}"
+    );
+    assert!(report["files"][1].get("layout_report").is_none());
+
+    // With references in docs/references, whose documents are named from docs: rendered
+    // where the scoring looks, pdfs/good.pdf, and scored from there.
+    let reference = corpus.dir.join("docs/references/good");
+    std::fs::create_dir_all(&reference)?;
+    std::fs::write(
+        reference.join("geometry.json"),
+        r#"{"format": 1, "document": "good.docx", "pages": []}"#,
+    )?;
+    let (_, output) = corpus.run(
+        &[
+            "--render",
+            "pdfs",
+            "--font-dir",
+            fonts,
+            "--references",
+            "docs/references",
+            "--report",
+            "scored.json",
+            "docs",
+        ],
+        None,
+    )?;
+    assert!(corpus.dir.join("pdfs/good.pdf").is_file(), "{output}");
+    let scored: serde_json::Value = serde_json::from_str(&corpus.read("scored.json")?).unwrap();
+    let why = scored["files"][0]["score_error"].as_str().unwrap_or("");
+    assert!(!why.starts_with("no PDF of ours"), "{why}");
+    Ok(())
+}
+
+#[test]
+fn a_document_that_opens_but_cannot_be_rendered_fails_the_run() -> io::Result<()> {
+    let corpus = Corpus::new("unrendered")?;
+    // A file where the folder of the PDFs would go.
+    corpus.write("blocked", "not a folder")?;
+    let (code, output) = corpus.run(&["--render", "blocked", "docs"], None)?;
+    assert_eq!(code, 1, "{output}");
+    assert!(
+        output.contains("not rendered: docs/good.docx: cannot make"),
+        "{output}"
+    );
+    assert!(
+        output.contains("FAILED: 1 files opened but could not be rendered"),
+        "{output}"
+    );
+    // Fonts to render with need something to render.
+    let (code, output) = corpus.run(&["--font-dir", "fonts", "docs"], None)?;
+    assert_eq!(code, 2, "{output}");
+    assert!(output.contains("--font-dir needs --render"), "{output}");
+    Ok(())
+}
+
+#[test]
+fn a_run_of_statuses_only_keeps_the_baseline_s_scores() -> io::Result<()> {
+    let corpus = Corpus::new("statuses")?;
+    let baseline = r#"{"format": 1, "files": {"docs/good.docx": "opened", "docs/nested/BROKEN.DOCX": "unexpected-error"},
+        "scores": {"docs/good.docx": {"text_score": 1.0}}}"#;
+    corpus.write("baseline.json", baseline)?;
+    // Not scored, but compared by status only: it passes.
+    let (code, output) = corpus.run(
+        &["--baseline", "baseline.json", "--statuses-only", "docs"],
+        None,
+    )?;
+    assert_eq!(code, 0, "{output}");
+    // Updating it keeps the scores it cannot measure.
+    let (code, output) = corpus.run(
+        &[
+            "--baseline",
+            "baseline.json",
+            "--statuses-only",
+            "--update-baseline",
+            "docs",
+        ],
+        None,
+    )?;
+    assert_eq!(code, 0, "{output}");
+    let written: serde_json::Value = serde_json::from_str(&corpus.read("baseline.json")?).unwrap();
+    assert_eq!(written["scores"]["docs/good.docx"]["text_score"], 1.0);
+    // It takes no references, and needs a baseline.
+    let (code, output) = corpus.run(
+        &[
+            "--baseline",
+            "baseline.json",
+            "--statuses-only",
+            "--references",
+            "r",
+            "--ours",
+            "o",
+            "docs",
+        ],
+        None,
+    )?;
+    assert_eq!(code, 2, "{output}");
+    assert!(output.contains("takes no --references"), "{output}");
+    let (code, output) = corpus.run(&["--statuses-only", "docs"], None)?;
+    assert_eq!(code, 2, "{output}");
+    assert!(output.contains("need --baseline"), "{output}");
+    Ok(())
+}

@@ -538,7 +538,12 @@ pub fn measure_against(report: &Report, main: Option<&Report>, same_fonts: bool)
         out.push(measure);
     }
 
-    // 10. Speed and memory: opening only, until the runner renders.
+    // 10. Speed and memory: of opening and rendering when the run rendered, else of
+    // opening only.
+    let rendered = report
+        .files
+        .iter()
+        .any(|file| file.layout_report.is_some() || file.render_error.is_some());
     let slowest = report
         .files
         .iter()
@@ -564,12 +569,13 @@ pub fn measure_against(report: &Report, main: Option<&Report>, same_fonts: bool)
     }
     out.push(Measure {
         text: format!(
-            "slowest {:.2} s, peak {} (opening only)",
+            "slowest {:.2} s, peak {}{}",
             slowest as f64 / 1000.0,
             peak.map_or("not measured".to_owned(), |bytes| format!(
                 "{:.0} MB",
                 bytes as f64 / 1e6
-            ))
+            )),
+            if rendered { "" } else { " (opening only)" }
         ),
         pass: Some(slowest < TIME_LIMIT_MS && peak.is_none_or(|bytes| bytes < MEMORY_LIMIT)),
         keys,
@@ -577,10 +583,10 @@ pub fn measure_against(report: &Report, main: Option<&Report>, same_fonts: bool)
 
     // 11 and 12 need the layout report.
     out.push(Measure::unmeasured(
-        "not measured before the layout report (layout PR 10)",
+        "not measured yet: the layout report is in the run's report, the criterion to come (#239)",
     ));
     out.push(Measure::unmeasured(
-        "not measured before the layout report (layout PR 10)",
+        "not measured yet: the layout report is in the run's report, the criterion to come (#239)",
     ));
     out
 }
@@ -739,6 +745,8 @@ mod tests {
             diagnostics: None,
             scores,
             score_error: None,
+            render_error: None,
+            layout_report: None,
         }
     }
 
@@ -1295,6 +1303,12 @@ mod tests {
         assert_eq!(row(5_000, 195_312).pass, Some(false));
         assert_eq!(row(4_999, 195_313).pass, Some(false));
         assert!(row(100, 50_000).text.ends_with("peak 51 MB (opening only)"));
+        // Once the run renders, opening and rendering together.
+        let mut rendered = file("c/a.docx", Status::Opened, None);
+        (rendered.duration_ms, rendered.peak_rss_kb) = (100, Some(50_000));
+        rendered.layout_report = Some(Vec::new());
+        let row10 = measure(&Report::new(vec![rendered]), false).swap_remove(9);
+        assert!(row10.text.ends_with("peak 51 MB"), "{}", row10.text);
         // Memory: 16 MiB more than main is noise, more than that is worse.
         let main = row(100, 50_000);
         assert!(!row(100, 50_000 + 16 * 1024).worse_than(&main));
