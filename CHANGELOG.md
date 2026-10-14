@@ -28,8 +28,8 @@ published on crates.io.
   Han, Hiragana, Katakana and Hangul syllables, one glyph per character. Text a font
   cannot show, or that needs shaping or right-to-left layout, is refused with the
   character and its position, never altered.
-- The font's license (`fsType`) is honoured: a font that forbids embedding is refused,
-  other restrictions are reported (#12).
+- The font's license (`fsType`) is honoured: a font that forbids embedding, or allows only
+  its bitmaps to be embedded, is refused; other restrictions are reported (#12).
 - Fonts can be chosen by family name, the way Word names them (#17).
 - Page content and embedded fonts are compressed with the Flate filter; compression can be
   turned off (#29).
