@@ -179,6 +179,20 @@ fn is_word_document(path: &Path) -> bool {
 
 /// The file's path under the root, with forward slashes, the same on every system.
 fn relative(root: &Path, file: &Path) -> Result<String, String> {
+    let through_parent = || {
+        format!(
+            "{}: a path through '..' is not accepted; name the file from the root without it",
+            file.display()
+        )
+    };
+    // Checked as given: std::path::absolute keeps ".." on Unix but resolves it on Windows,
+    // and such a path is refused on both, whether or not it stays inside the root.
+    if file
+        .components()
+        .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err(through_parent());
+    }
     let full = std::path::absolute(file).map_err(|error| format!("{}: {error}", file.display()))?;
     let outside = || {
         format!(
@@ -188,16 +202,11 @@ fn relative(root: &Path, file: &Path) -> Result<String, String> {
         )
     };
     let rest = full.strip_prefix(root).map_err(|_| outside())?;
-    // std::path::absolute keeps "..": a path through it may lead out of the root, so it is
-    // not resolved but refused, whether or not it stays inside.
     if rest
         .components()
         .any(|part| !matches!(part, std::path::Component::Normal(_)))
     {
-        return Err(format!(
-            "{}: a path through '..' is not accepted; name the file from the root without it",
-            file.display()
-        ));
+        return Err(through_parent());
     }
     let parts: Vec<String> = rest
         .components()
