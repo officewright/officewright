@@ -1,5 +1,6 @@
-"""Checks PDFs made by `officewright text-to-pdf --font` with tools that share no code with
-it, for a TrueType font (Liberation Sans) and a CFF font (Noto Sans) from tests/fonts:
+"""Checks font embedding: PDFs made by `officewright text-to-pdf --font` with tools that
+share no code with it, for a TrueType font (Liberation Sans) and a CFF font (Noto Sans)
+from tests/fonts, and what the example embed_report counts:
 
 - qpdf validates the file structure;
 - poppler's pdffonts must see each font embedded, subset and with a ToUnicode map;
@@ -11,7 +12,8 @@ it, for a TrueType font (Liberation Sans) and a CFF font (Noto Sans) from tests/
 - where two characters share a glyph, pdftotext must read each through the replacement
   text (ActualText) of the second, in a file that declares PDF 1.5;
 - the example embed_report, which embeds every font of a directory, must count a font
-  the subsetter does not support apart from a damaged one.
+  the subsetter does not support, or one without outlines it can take, apart from a
+  damaged one.
 
 OW_CLI must point at the officewright binary, and OW_EMBED_REPORT at the example's
 (scripts/check.sh sets both).
@@ -72,7 +74,8 @@ def with_unsupported_notdef(font):
     cff = int.from_bytes(font[record + 8 : record + 12], "big")
 
     def index(at):
-        """The offset size and offsets of the INDEX at `at`, and where it ends."""
+        """The offsets of the INDEX at `at`, which count from 1, the byte before its data,
+        where they start, and where the INDEX ends."""
         count = int.from_bytes(font[at : at + 2], "big")
         size = font[at + 2]
         offsets = [int.from_bytes(font[at + 3 + i * size : at + 3 + (i + 1) * size], "big") for i in range(count + 1)]
@@ -243,5 +246,29 @@ class EmbeddedFontTest(unittest.TestCase):
             self.assertIn(
                 f"{fonts / 'truncated.ttf'}, face 0: cannot use the font data: font face 0: "
                 "required table 'hmtx' is missing",
+                lines,
+            )
+
+    def test_embed_report_counts_a_face_without_outlines_as_unsupported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fonts = Path(directory) / "fonts"
+            fonts.mkdir()
+            # Liberation Sans with its glyf and loca tables renamed (still in the order of
+            # the table directory), so it has no outlines the subsetter can take.
+            font = bytearray(CASES[0][0].read_bytes())
+            tables = int.from_bytes(font[4:6], "big")
+            for record in range(12, 12 + 16 * tables, 16):
+                if font[record : record + 4] in (b"glyf", b"loca"):
+                    font[record + 3] = ord("x")
+            (fonts / "no-outlines.ttf").write_bytes(bytes(font))
+            result = run([os.environ["OW_EMBED_REPORT"], str(Path(directory) / "out"), str(fonts)])
+            lines = result.stdout.decode("utf-8").splitlines()
+            self.assertEqual(
+                [line.strip() for line in lines[-2:]],
+                ["1 files", "1 not supported by the subsetter yet"],
+            )
+            self.assertIn(
+                f"{fonts / 'no-outlines.ttf'}, face 0: cannot use the font data: font face 0 has no glyph "
+                "outlines to subset",
                 lines,
             )
