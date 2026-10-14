@@ -15,8 +15,9 @@ use crate::{Error, Result, embed, encoding, helvetica, script};
 ///   nothing is embedded. It is used with WinAnsiEncoding, which covers Latin text only.
 /// - [`Font::from_file`], [`Font::from_bytes`] and [`Font::from_face`] give a TrueType or
 ///   OpenType font that is embedded in the documents it is drawn in and, unless its
-///   license forbids subsetting, reduced to the glyphs they use. It shows every character it has a glyph for in the scripts that
-///   need no shaping; [`Page::add_text`](crate::Page::add_text) lists them.
+///   license forbids subsetting, reduced to the glyphs they use. It shows every
+///   character it has a glyph for in the scripts that need no shaping;
+///   [`Page::add_text`](crate::Page::add_text) lists them.
 ///
 /// Cloning is cheap: the font data is shared. Two fonts are equal if they are the same
 /// standard font or the same face of the same font data, and a document embeds each
@@ -274,7 +275,8 @@ impl Font {
     /// A PostScript name too long for the PDF is cut between characters: with the
     /// six-letter tag a subset's name starts with, and the "-Identity-H" a CFF font's
     /// Type 0 font adds, every name of the font in the file takes at most the 127 bytes
-    /// readers have to accept (ISO 32000-1, Annex C).
+    /// readers have to accept (ISO 32000-1, Annex C). Null characters, which no PDF name
+    /// can hold (7.3.5), are left out first.
     pub fn name(&self) -> &str {
         match &self.kind {
             Kind::Standard(StandardFont::Helvetica) => "Helvetica",

@@ -9,9 +9,12 @@ it, for a TrueType font (Liberation Sans) and a CFF font (Noto Sans) from tests/
   the whole font does, which proves the subset kept the right glyph for every character
   (text extraction cannot see that: it reads the ToUnicode map, not the glyphs);
 - where two characters share a glyph, pdftotext must read each through the replacement
-  text (ActualText) of the second, in a file that declares PDF 1.5.
+  text (ActualText) of the second, in a file that declares PDF 1.5;
+- the example embed_report, which embeds every font of a directory, must count a font
+  the subsetter does not support apart from a damaged one.
 
-OW_CLI must point at the officewright binary (scripts/check.sh sets it).
+OW_CLI must point at the officewright binary, and OW_EMBED_REPORT at the example's
+(scripts/check.sh sets both).
 """
 
 import os
@@ -56,6 +59,54 @@ def with_shared_glyph(font):
 
     assert font.count(deltas(4)) == 1
     return font.replace(deltas(4), deltas(2))
+
+
+def with_unsupported_notdef(font):
+    """The CFF font with its .notdef glyph starting with "0 0 0 0 endchar": endchar with
+    the four operands of an accented character (seac), which the subsetter does not
+    implement. The glyph is the first of the CharStrings INDEX, which the Top DICT finds
+    with operator 17."""
+    font = bytearray(font)
+    tables = int.from_bytes(font[4:6], "big")
+    record = next(r for r in range(12, 12 + 16 * tables, 16) if font[r : r + 4] == b"CFF ")
+    cff = int.from_bytes(font[record + 8 : record + 12], "big")
+
+    def index(at):
+        """The offset size and offsets of the INDEX at `at`, and where it ends."""
+        count = int.from_bytes(font[at : at + 2], "big")
+        size = font[at + 2]
+        offsets = [int.from_bytes(font[at + 3 + i * size : at + 3 + (i + 1) * size], "big") for i in range(count + 1)]
+        return offsets, at + 3 + (count + 1) * size - 1, offsets[-1] + at + 3 + (count + 1) * size - 1
+
+    _, _, name_end = index(cff + font[cff + 2])
+    offsets, data, _ = index(name_end)
+    at, end, operands = data + offsets[0], data + offsets[1], []
+    while at < end:
+        b0 = font[at]
+        if b0 in (28, 29):
+            size = 2 if b0 == 28 else 4
+            operands.append(int.from_bytes(font[at + 1 : at + 1 + size], "big", signed=True))
+            at += 1 + size
+        elif 32 <= b0 <= 246:
+            operands.append(b0 - 139)
+            at += 1
+        elif 247 <= b0 <= 254:
+            sign = 1 if b0 <= 250 else -1
+            operands.append(sign * (((b0 - 247 if b0 <= 250 else b0 - 251) << 8) + font[at + 1] + 108))
+            at += 2
+        elif b0 == 30:
+            while font[at] & 0x0F != 0x0F and font[at] >> 4 != 0x0F:
+                at += 1
+            at += 1
+            operands.append(0)
+        else:
+            if b0 == 17:
+                charstrings = cff + operands[-1]
+            at += 2 if b0 == 12 else 1
+            operands = []
+    offsets, data, _ = index(charstrings)
+    font[data + offsets[0] : data + offsets[0] + 5] = bytes([139, 139, 139, 139, 14])
+    return bytes(font)
 
 
 def characters(text):
@@ -167,3 +218,30 @@ class EmbeddedFontTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             text = run(["pdftotext", "-enc", "UTF-8", str(pdf), "-"]).stdout.decode("utf-8")
             self.assertEqual(text.split(), ["AÁA", "ÁA"])
+
+    def test_embed_report_counts_each_kind_of_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fonts = Path(directory) / "fonts"
+            fonts.mkdir()
+            liberation, noto = (font for font, _ in CASES)
+            (fonts / "regular.ttf").write_bytes(liberation.read_bytes())
+            bold = FONTS / "liberation" / "LiberationSans-Bold.ttf"
+            (fonts / "truncated.ttf").write_bytes(bold.read_bytes()[:5000])
+            (fonts / "unsupported.otf").write_bytes(with_unsupported_notdef(noto.read_bytes()))
+            result = run([os.environ["OW_EMBED_REPORT"], str(Path(directory) / "out"), str(fonts)])
+            lines = result.stdout.decode("utf-8").splitlines()
+            self.assertEqual(
+                [line.strip() for line in lines[-4:]],
+                ["3 files", "1 damaged", "1 embedded", "1 not supported by the subsetter yet"],
+            )
+            # Each failure is printed with its cause.
+            self.assertIn(
+                f"{fonts / 'unsupported.otf'}, face 0: cannot use the font data: cannot subset font face 0: "
+                "it uses a feature the subsetter does not support yet",
+                lines,
+            )
+            self.assertIn(
+                f"{fonts / 'truncated.ttf'}, face 0: cannot use the font data: font face 0: "
+                "required table 'hmtx' is missing",
+                lines,
+            )

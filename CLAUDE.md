@@ -321,7 +321,8 @@ PDF output of officewright text-to-pdf (tests/pdf-output): qpdf --check without 
   pdftoppm renders the subset exactly as the whole font and the shapes, colours and clips where the page puts them;
   the example images' page: pdfimages lists every JPEG and PNG as passed through or decoded with a soft mask, pdftoppm
   shows their colours and transparency, a PNG with every filter type renders the same decoded by officewright as
-  unfiltered by poppler, the committed fuzz seeds equal images.py's output (Linux, macOS)
+  unfiltered by poppler, the committed fuzz seeds equal images.py's output; the example embed_report counts a font the
+  subsetter does not support apart from a damaged one (Linux, macOS)
 corpus-runner over tests/corpus (committed corpus), compared with tests/corpus/baseline.json
 ```
 

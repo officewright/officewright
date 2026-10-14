@@ -388,8 +388,8 @@ enum OwStatus ow_pdf_font_new_standard(int32_t standard_font, struct OwPdfFont *
  * Greek, Cyrillic, Armenian, Georgian, Han, Hiragana and Katakana scripts, precomposed
  * Hangul syllables, and the punctuation, digits and symbols every script shares, one
  * glyph per character; text in scripts that need shaping or right-to-left layout is
- * refused. Restrictions in the font's license that do not stop
- * embedding are listed by `ow_pdf_font_note_count` and `ow_pdf_font_note`.
+ * refused. Restrictions in the font's license that do not stop embedding are listed by
+ * `ow_pdf_font_note_count` and `ow_pdf_font_note`.
  *
  * Fails with `OW_STATUS_IO` if the file cannot be read, `OW_STATUS_MALFORMED` if it is
  * not a font or is damaged, `OW_STATUS_INVALID_ARGUMENT` if it has no such face, and

@@ -8,8 +8,8 @@
 //!   that encoding covers.
 //! - A TrueType or OpenType font ([`Font::from_file`]) is embedded and, unless its
 //!   license forbids subsetting, reduced to the glyphs the document uses, with a
-//!   ToUnicode map so that its text can be copied and searched. It shows Latin, Greek, Cyrillic and the other scripts that need no
-//!   shaping, one glyph per character.
+//!   ToUnicode map so that its text can be copied and searched. It shows Latin, Greek,
+//!   Cyrillic and the other scripts that need no shaping, one glyph per character.
 //!
 //! Text a font cannot show is rejected with an error that names the character and its
 //! offset, rather than altered. Page content and embedded fonts are compressed
