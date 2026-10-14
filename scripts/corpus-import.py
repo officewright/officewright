@@ -705,9 +705,10 @@ def body_paragraph_styles(
     """(text, style id, style name) of the paragraphs of the body in order, the order of
     Word's main story: text boxes, alternative content and notes are stories of their own.
     Word's Paragraphs also count the end-of-row mark of every table row, which has no w:p;
-    it is ("", None, None) here, after the row's cells. They leave out an empty paragraph
-    whose mark is hidden, and so does this list. The style is None where the copy does not
-    say which one Word applied."""
+    it is ("", None, None) here, after the row's cells. They fold an empty paragraph whose
+    mark is hidden into the paragraph after it, and so does this list; that paragraph gets
+    no style, since Word gives it the formatting of the first paragraph folded into it. The
+    style is None where the copy does not say which one Word applied."""
     root = ElementTree.fromstring(parts["word/document.xml"])
     styles = None
     if "word/styles.xml" in parts:
@@ -728,6 +729,7 @@ def body_paragraph_styles(
     MC = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
     other_stories = (f"{W}txbxContent", f"{MC}AlternateContent")
     out = []
+    folding = False
 
     def own_text(element: ElementTree.Element) -> str:
         """The text of a paragraph without the text of the text boxes it anchors."""
@@ -738,17 +740,23 @@ def body_paragraph_styles(
         return text
 
     def walk(element: ElementTree.Element) -> None:
+        nonlocal folding
         for child in element:
             if child.tag in other_stories:
                 continue
             if child.tag == f"{W}p":
                 text = own_text(child)
-                # Word's export of business/report-hhs-usability-test-plan has 222 paragraphs
-                # and its re-saved copy 224: the two left out are empty with a hidden mark.
+                # In business/report-hhs-usability-test-plan, two empty list paragraphs with
+                # a hidden mark come before the Heading3 paragraph "Impact". Word's export has
+                # one entry for the three, with the text of "Impact" and the indents, spacing
+                # and list label of the first: Word drew "Impact" as Heading 3, unnumbered.
                 if not text and hidden_mark(child):
+                    folding = True
                     continue
                 style = child.find(f"{W}pPr/{W}pStyle")
                 style_id = style.get(f"{W}val", default) if style is not None else default
+                if folding:
+                    style_id, folding = None, False
                 out.append((text, style_id, names.get(style_id, style_id)))
                 walk(child)  # a text box inside is skipped above
             elif child.tag == f"{W}tr":

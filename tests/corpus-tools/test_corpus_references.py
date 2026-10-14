@@ -233,6 +233,10 @@ class References(unittest.TestCase):
         for name in listed:
             with self.subTest(listed=name):
                 self.assertTrue((CORPUS / f"{name}.docx").is_file())
+                # The SHA-256 of the input Word rendered is the committed file's.
+                (row,) = [r for r in section.splitlines() if r.startswith(f"| `{name}.docx` |")]
+                input_sha = row.strip("| ").split(" | ")[5]
+                self.assertEqual(input_sha, importer.sha256(CORPUS / f"{name}.docx"))
         for group in ("business", "generated"):
             for document in sorted((CORPUS / group).glob("*.docx")):
                 name = f"{group}/{document.stem}"

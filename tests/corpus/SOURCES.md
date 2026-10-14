@@ -318,7 +318,7 @@ would add about 53 MB to a corpus whose limit is 50 MB, and six `geometry.json` 
 | `business/report-dol-field-handbook-11.docx` | size | 54 | 14 | 1.4 | 93f9990d3583698065ef8710b69759c041c7a2b3b17b68288217f3d691062e3d | 2000dacededa10478c129cb88107db39f48624953658e3ec4fc145508d11c693 |
 | `business/report-dol-field-handbook-15.docx` | size | 68 | 14 | 1.9 | 6f2f647df93f730801c2737bb56f9619925419d5409755e6d8352be92f46bb75 | 65212e59d6b351e6953c3e781f934c892a454e1a81962f90190002f499529dc3 |
 | `business/report-gsa-certificate-policy.docx` | size | 138 | 15 | 6.7 | 107e9b78619efa1f02057e06f18c5d57a706862113c29408aa962ed2016c45bc | 8079a00c216dc6b852575b6c08152dd4dc7346184ff5765c2d27e7fce3a5d152 |
-| `business/report-gsa-csp-capabilities.docx` | Word's page count and the page breaks of its re-saved copy give 30 pages, its PDF 35 | 30 (PDF 35) | 15 | 2.3 | 27a6762eefa7672782699cc560bca2bb583a252ce4efa359e613c0b9cb208d33 | 1fdca4937cfbafb2fa3bfa4965c3495d4b517ccd31030fe9f116ee2a538248a0 |
+| `business/report-gsa-csp-capabilities.docx` | Word counts 30 pages and its PDF has 35; the 34 page-break marks of its re-saved copy do not fall where the PDF's pages begin (its page 2 begins at "Revision History", which has no mark) | 30 (PDF 35) | 15 | 2.3 | 27a6762eefa7672782699cc560bca2bb583a252ce4efa359e613c0b9cb208d33 | 1fdca4937cfbafb2fa3bfa4965c3495d4b517ccd31030fe9f116ee2a538248a0 |
 
 ## External corpora
 
