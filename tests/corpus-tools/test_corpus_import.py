@@ -4,6 +4,7 @@ The poppler tools are replaced by fixed output, so the checks run where poppler 
 installed (Windows) and do not depend on its version.
 """
 
+import dataclasses
 import hashlib
 import importlib.util
 import json
@@ -719,6 +720,69 @@ class Import(unittest.TestCase):
         self.info = "Author:          \nPages:           4\n"
         self.assertIn("Word counted 3 pages, the PDF has 4", self.refused())
 
+    def use_helvetica(self, arial=True):
+        """A PDF that names Helvetica and Helvetica,Bold without embedding them."""
+        columns = "TrueType          WinAnsi          no  no  no "
+        listing = PDFFONTS.replace(
+            f"{'Garamond':<37}{columns}     12  0\n",
+            f"{'Helvetica':<37}{columns}     12  0\n{'Helvetica,Bold':<37}{columns}     14  0\n",
+        )
+        self.assertNotEqual(listing, PDFFONTS)
+        self.pdffonts = listing
+        self.copy_fonts = listing.replace("no  no  no ", "yes no  no ")
+        objects = {"qpdf": [
+            {"jsonversion": 2, "maxobjectid": 14},
+            {
+                "obj:12 0 R": {"value": {"/Type": "/FontDescriptor", "/FontName": "/Helvetica"}},
+                "obj:14 0 R": {"value": {"/Type": "/FontDescriptor",
+                                         "/FontName": "/Helvetica,Bold"}},
+            },
+        ]}
+        self.tools = dataclasses.replace(self.tools, objects=lambda path: json.dumps(objects))
+        self.arial = sfnt("ArialMT", "Arial", "Version 7.06")
+        self.arial_bold = sfnt("Arial-BoldMT", "Arial Bold", "Version 7.06")
+        if arial:
+            (self.font_dir / "arial.ttf").write_bytes(self.arial)
+            (self.font_dir / "arialbd.ttf").write_bytes(self.arial_bold)
+
+    def test_helvetica_is_drawn_with_arial_as_windows_substitutes_it(self):
+        self.use_helvetica()
+        self.run_import()
+        embedded = {}
+        for _, update, data in self.updates:
+            for key, value in update["qpdf"][1].items():
+                if "value" in value:
+                    name = value["value"]["/FontName"]
+                    stream = value["value"]["/FontFile2"].replace(" 0 R", "")
+                    embedded[name] = data[f"obj:{stream} 0 R"]
+        self.assertEqual(embedded["/Helvetica"], self.arial)
+        self.assertEqual(embedded["/Helvetica,Bold"], self.arial_bold)
+        doc = rules.documents()[0]
+        geometry = json.loads(
+            (self.corpus / "reference" / "word-rules" / doc.name / "geometry.json")
+            .read_text(encoding="utf-8")
+        )
+        drawn = {font["font"]: font for font in geometry["fonts_rasterized_with"]}
+        self.assertEqual(
+            (drawn["Helvetica"]["windows_substitute"], drawn["Helvetica"]["full_name"]),
+            ("ArialMT", "Arial"),
+        )
+        self.assertEqual(drawn["Helvetica,Bold"]["windows_substitute"], "Arial-BoldMT")
+        sources = (self.corpus / "SOURCES.md").read_text(encoding="utf-8")
+        self.assertIn(
+            "Helvetica,Bold (drawn with Arial-BoldMT as Windows substitutes it, Arial Bold, "
+            f"Version 7.06, SHA-256 {sha256(self.arial_bold)})",
+            sources,
+        )
+
+    def test_helvetica_without_arial_is_refused(self):
+        self.use_helvetica(arial=False)
+        self.assertIn(
+            "Helvetica is not embedded in the PDF, and no --font-dir folder has a font with the "
+            "PostScript name ArialMT, which Windows draws it with",
+            self.refused(),
+        )
+
     def test_refuses_another_format_version(self):
         self.add_result(rules.documents()[0], script_version=1)
         self.assertIn("format 1", self.refused())
@@ -1074,6 +1138,44 @@ class BodyParagraphs(unittest.TestCase):
         self.assertIn("body styles not matched to the re-saved copy", note)
 
 
+class Summary(unittest.TestCase):
+    """What the import prints about each document."""
+
+    def item(self, word_pages, pages, drawn=()):
+        return importer.Checked(
+            record={"file": "report.docx", "pages": word_pages},
+            pdf=Path("report.pdf"),
+            resaved=Path("report.resaved.docx"),
+            row="",
+            geometry={"page_count": pages, "compat_flags_dropped": []},
+            drawn=list(drawn),
+        )
+
+    def test_each_document_and_the_count(self):
+        lines = importer.summary([self.item(35, 35), self.item(1, 1)], "would import")
+        self.assertEqual(
+            lines,
+            [
+                "would import report.docx: 35 pages",
+                "would import report.docx: 1 page",
+                "corpus-import.py: would import 2 reference renders",
+            ],
+        )
+
+    def test_a_substituted_font_is_named_with_its_substitute(self):
+        face = importer.FontFace(
+            path=Path("arial.ttf"), index=0, collection=False, postscript="ArialMT",
+            full_name="Arial", version="Version 7.06", cff=False,
+        )
+        drawn = importer.DrawnFont("Helvetica", face, b"", "ArialMT")
+        lines = importer.summary([self.item(1, 1, [drawn])], "imported")
+        self.assertEqual(
+            lines[1],
+            "  note: Helvetica is not embedded; rasterized with Arial Version 7.06, as Windows "
+            "substitutes it for Helvetica",
+        )
+
+
 class FontFiles(unittest.TestCase):
     def setUp(self):
         self.temp = Path(tempfile.mkdtemp())
@@ -1093,6 +1195,21 @@ class FontFiles(unittest.TestCase):
         with self.assertRaises(importer.Refused) as caught:
             importer.drawn_font("Garamond", index)
         self.assertIn("Garamond: the font file cannot be read: broken.ttc", str(caught.exception))
+
+    def test_only_the_substituted_styles_of_helvetica_may_have_a_comma(self):
+        (self.temp / "arial.ttf").write_bytes(sfnt("ArialMT", "Arial", "Version 7.06"))
+        (self.temp / "arialbd.ttf").write_bytes(sfnt("Arial-BoldMT", "Arial Bold", "7.06"))
+        (self.temp / "ariali.ttf").write_bytes(sfnt("Arial-ItalicMT", "Arial Italic", "7.06"))
+        index = importer.font_index([self.temp])
+        self.assertEqual(importer.drawn_font("Helvetica", index).substitute, "ArialMT")
+        self.assertEqual(importer.drawn_font("Helvetica,Bold", index).face.full_name, "Arial Bold")
+        self.assertEqual(importer.drawn_font("ArialMT", index).substitute, "")
+        # Styles Word's PDFs have not shown are not guessed.
+        refused = ("Helvetica,Italic", "Helvetica,BoldItalic", "Helvetica,Oblique", "ArialMT,Bold")
+        for name in refused:
+            with self.assertRaises(importer.Refused) as caught:
+                importer.drawn_font(name, index)
+            self.assertIn(f"{name}: Word names a style it synthesizes", str(caught.exception))
 
     def test_a_folder_that_cannot_be_listed_is_refused(self):
         with mock.patch.object(Path, "iterdir", side_effect=PermissionError("denied")):
