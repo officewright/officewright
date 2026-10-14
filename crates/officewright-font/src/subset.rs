@@ -129,6 +129,7 @@ impl FontFace {
         crate::name_offsets::check(&font, self.data(), face)?;
         if subsetter_table(&font, self.data(), b"glyf").is_none() {
             crate::cff::check_reals(&font, self.data(), face)?;
+            crate::cff::check_hints(&font, self.data(), face, &ids)?;
         }
         let remapper = GlyphRemapper::new_from_glyphs_sorted(&ids);
         let data = self.data();

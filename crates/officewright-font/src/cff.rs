@@ -1,4 +1,4 @@
-//! A check of CFF data that the subsetter cannot handle yet.
+//! Checks of CFF data that the subsetter cannot handle yet.
 //!
 //! subsetter 0.2.6 keeps the real-number operands of the DICTs it rewrites as `f32` and
 //! writes them back from their decimal form. A real too large for an `f32` becomes
@@ -18,6 +18,14 @@
 //! it rewrites only FontMatrix and FontBBox of the Top DICT, the top-level Private DICT
 //! only of a SID-keyed font and the FDArray only of a CID-keyed one. A real number past
 //! `f32::MAX` has no place in any of these, so finding one anywhere refuses the face.
+//!
+//! subsetter 0.2.6 also counts the stem hints of each glyph it keeps in a `u16`
+//! (`count_hints` in `src/cff/charstring.rs`), as it decompiles the glyph's charstring
+//! and the subroutines it calls. A glyph that declares more than 65,535 hints overflows
+//! it: with overflow checks it panics, and without them the count wraps and the hint
+//! masks after it are misread (<https://github.com/typst/subsetter/issues/33>). The Type 2
+//! format allows 96 hints in a glyph, so such a glyph is damage, and [`check_hints`]
+//! refuses it, walking the kept glyphs as the subsetter does.
 
 use std::ops::Range;
 
@@ -43,6 +51,22 @@ const ROS: u16 = 12 << 8 | 30;
 
 /// The FontMatrix operator (12 7).
 const FONT_MATRIX: u16 = 12 << 8 | 7;
+
+/// The CharStrings operator: the offset of the CharStrings INDEX.
+const CHAR_STRINGS: u16 = 17;
+
+/// The FDSelect operator (12 37).
+const FD_SELECT: u16 = 12 << 8 | 37;
+
+/// The Subrs operator of a Private DICT: the offset of its local subroutines from the
+/// start of the DICT.
+const SUBRS: u16 = 19;
+
+/// The most stem hints the subsetter can count in one glyph.
+const MAX_HINTS: u32 = 0xFFFF;
+
+/// How deep the subsetter follows subroutine calls.
+const MAX_CALL_DEPTH: u8 = 64;
 
 /// Fails if a DICT the subsetter rewrites, in the `CFF ` table it takes from `font` (its
 /// file `data`), has a real number that is finite in the font but too large for an
@@ -78,9 +102,9 @@ pub(crate) fn check_reals(font: &FontRef<'_>, data: &[u8], face: u32) -> Result<
 /// The first entry of a Font DICT's FontMatrix that the subsetter scales past the `f32`
 /// range, in its decimal form, looking at every Font DICT and every FontMatrix in one,
 /// although the subsetter scales only the Font DICTs of the glyphs it keeps and the last
-/// FontMatrix of each: an entry past `f32::MAX` / 1000 is damage wherever it is. When
-/// the Top DICT of a CID-keyed font has no FontMatrix,
-/// subsetter 0.2.6 writes one of 0.001 there and multiplies each Font DICT's by 1000
+/// FontMatrix of each: an entry past `f32::MAX` / 1000 is damage wherever it is. When the
+/// Top DICT of a CID-keyed font has no FontMatrix, subsetter 0.2.6 writes one of 0.001
+/// there and multiplies each Font DICT's by 1000
 /// (`rewrite_font_dict_index` in `src/cff/dict/font_dict.rs`), in `f64` and then back to
 /// `f32`; an entry past `f32::MAX` / 1000 becomes infinite and reaches the same
 /// `unreachable!()` as a real that is infinite already
@@ -391,6 +415,357 @@ fn real(data: &[u8]) -> Option<(Option<String>, usize)> {
     None
 }
 
+/// Fails if a glyph the subsetter decompiles when it keeps `glyphs` of the `CFF ` table it
+/// takes from `font` (its file `data`) declares more stem hints than it can count. The
+/// subsetter decompiles `.notdef` and then the kept glyphs in order, and stops at the
+/// first it cannot read; so does this check, leaving that error to the subsetter.
+pub(crate) fn check_hints(
+    font: &FontRef<'_>,
+    data: &[u8],
+    face: u32,
+    glyphs: &[u16],
+) -> Result<()> {
+    let Some(cff) = subsetter_table(font, data, b"CFF ") else {
+        return Ok(());
+    };
+    let Some(programs) = Programs::read(cff) else {
+        return Ok(());
+    };
+    let mut kept = glyphs.to_vec();
+    kept.sort_unstable();
+    kept.dedup();
+    for glyph in std::iter::once(0).chain(kept.into_iter().filter(|&glyph| glyph != 0)) {
+        match programs.walk(glyph) {
+            Ok(()) => {}
+            Err(Stop::Overflow) => {
+                return Err(Error::MalformedTable {
+                    face,
+                    table: "CFF ",
+                    source: Cause::new(format!(
+                        "glyph {glyph} declares more than 65535 stem hints, more than the \
+                         subsetter can count"
+                    )),
+                });
+            }
+            Err(Stop::Unreadable) => return Ok(()),
+        }
+    }
+    Ok(())
+}
+
+/// What the subsetter decompiles glyphs with, read as `Table::parse` in its
+/// `src/cff/mod.rs` reads it.
+struct Programs<'a> {
+    charstrings: Index<'a>,
+    global: Vec<&'a [u8]>,
+    /// The local subroutines of a SID-keyed font, or of each Font DICT of a CID-keyed one.
+    local: Vec<Vec<&'a [u8]>>,
+    /// A CID-keyed font's FDSelect, from its format byte on.
+    fd_select: Option<&'a [u8]>,
+}
+
+impl<'a> Programs<'a> {
+    /// Reads them from `cff`, or `None` where the subsetter fails before it decompiles
+    /// a glyph.
+    fn read(cff: &'a [u8]) -> Option<Self> {
+        if cff.first() != Some(&1) {
+            return None;
+        }
+        let names = usize::from(*cff.get(2)?);
+        let (top_dicts, after_top_dicts) = parsed_index(cff, skip_index(cff, names)?)?;
+        let top = operators(top_dicts.get(0)?);
+        // Of an operator given twice, the subsetter keeps the last.
+        let last = |operator: u16| {
+            top.iter()
+                .rev()
+                .find(|(found, _)| *found == operator)
+                .map(|(_, operands)| operands.as_slice())
+        };
+        let (_, after_strings) = parsed_index(cff, after_top_dicts)?;
+        let (global, _) = parsed_index(cff, after_strings)?;
+        let (charstrings, _) = parsed_index(cff, offset(last(CHAR_STRINGS)?)?)?;
+        let glyph_count = charstrings.len();
+        if glyph_count == 0 || glyph_count > usize::from(u16::MAX) {
+            return None;
+        }
+        let (local, fd_select) = if top.iter().any(|(operator, _)| *operator == ROS) {
+            let (font_dicts, _) = parsed_index(cff, offset(last(FD_ARRAY)?)?)?;
+            let fd_select = cff.get(offset(last(FD_SELECT)?)?..)?;
+            match fd_select.first()? {
+                // A font DICT number for each glyph.
+                0 => {
+                    fd_select.get(1..glyph_count.checked_add(1)?)?;
+                }
+                3 => {}
+                _ => return None,
+            }
+            let mut local = Vec::new();
+            for font_dict in objects(&font_dicts) {
+                // The last Private operator of the Font DICT gives its subroutines.
+                let mut subrs = Vec::new();
+                for (operator, operands) in operators(font_dict) {
+                    if operator == PRIVATE {
+                        subrs = local_subrs(cff, range(&operands)?)?;
+                    }
+                }
+                local.push(subrs);
+            }
+            (local, Some(fd_select))
+        } else {
+            // A SID-keyed font whose local subroutines cannot be read has none.
+            let subrs = last(PRIVATE)
+                .and_then(range)
+                .and_then(|private| local_subrs(cff, private))
+                .unwrap_or_default();
+            (vec![subrs], None)
+        };
+        Some(Self {
+            charstrings,
+            global: objects(&global),
+            local,
+            fd_select,
+        })
+    }
+
+    /// Walks the charstring of `glyph` as the subsetter decompiles it.
+    fn walk(&self, glyph: u16) -> std::result::Result<(), Stop> {
+        let font_dict = match self.fd_select {
+            Some(fd_select) => font_dict(fd_select, glyph).ok_or(Stop::Unreadable)?,
+            None => 0,
+        };
+        let local = self
+            .local
+            .get(usize::from(font_dict))
+            .ok_or(Stop::Unreadable)?;
+        let charstring = self
+            .charstrings
+            .get(usize::from(glyph))
+            .ok_or(Stop::Unreadable)?;
+        let mut walk = Walk {
+            global: &self.global,
+            local,
+            stack: Vec::new(),
+            hints: 0,
+            mask_bytes: 0,
+        };
+        walk.run(charstring, 1).map(|_| ())
+    }
+}
+
+/// The subroutines of the Private DICT at `private`, which the subsetter finds by the
+/// first Subrs operator of the DICT; `None` where it fails.
+fn local_subrs(cff: &[u8], private: Range<usize>) -> Option<Vec<&[u8]>> {
+    let start = private.start;
+    let operators = operators(cff.get(private)?);
+    let Some((_, operands)) = operators.iter().find(|(operator, _)| *operator == SUBRS) else {
+        return Some(Vec::new());
+    };
+    let (subrs, _) = parsed_index(cff, start.checked_add(offset(operands)?)?)?;
+    Some(objects(&subrs))
+}
+
+/// The Font DICT of `glyph` in an FDSelect, as the subsetter's `font_dict_index` finds it.
+fn font_dict(fd_select: &[u8], glyph: u16) -> Option<u8> {
+    let (&format, rest) = fd_select.split_first()?;
+    if format == 0 {
+        return rest.get(usize::from(glyph)).copied();
+    }
+    // Format 3: ranges of a first glyph and a Font DICT, then a sentinel glyph.
+    let ranges = u16_at(rest, 0)?;
+    if ranges == 0 {
+        return None;
+    }
+    let mut first = u16_at(rest, 2)?;
+    let mut dict = *rest.get(4)?;
+    let mut at = 5;
+    for _ in 0..ranges {
+        let next = u16_at(rest, at)?;
+        if (first..next).contains(&glyph) {
+            return Some(dict);
+        }
+        dict = *rest.get(at + 2)?;
+        first = next;
+        at += 3;
+    }
+    None
+}
+
+fn u16_at(data: &[u8], at: usize) -> Option<u16> {
+    Some(u16::from_be_bytes([*data.get(at)?, *data.get(at + 1)?]))
+}
+
+/// The INDEX at `at` and where it ends, as the subsetter's `parse_index` reads one: one
+/// whose last offset is 0 is empty, and its data must fit in the table.
+fn parsed_index(cff: &[u8], at: usize) -> Option<(Index<'_>, usize)> {
+    let (mut index, end) = Index::head(cff, at)?;
+    let Some(len) = index.len().checked_add(1).and_then(|n| index.offset(n - 1)) else {
+        let empty = Index {
+            offsets: &[],
+            offset_size: 1,
+            data: &[],
+        };
+        return Some((empty, end));
+    };
+    let data_end = end.checked_add(len)?;
+    index.data = cff.get(end..data_end)?;
+    Some((index, data_end))
+}
+
+/// The objects of an INDEX up to the first that cannot be read, as the subsetter collects
+/// subroutines.
+fn objects<'a>(index: &Index<'a>) -> Vec<&'a [u8]> {
+    (0..index.len()).map_while(|i| index.get(i)).collect()
+}
+
+/// The subroutine a call operand `index` names among `subrs`, after the bias for their
+/// number (Type 2 Charstring Format, 4.7).
+fn subroutine<'a>(subrs: &[&'a [u8]], index: i32) -> Option<&'a [u8]> {
+    let bias = match subrs.len() {
+        0..1240 => 107,
+        1240..33900 => 1131,
+        _ => 32768,
+    };
+    let index = usize::try_from(index.checked_add(bias)?).ok()?;
+    subrs.get(index).copied()
+}
+
+/// Why a walk stopped before the end of a glyph.
+enum Stop {
+    /// The glyph declares more stem hints than the subsetter can count.
+    Overflow,
+    /// The subsetter fails on the glyph with an error of its own.
+    Unreadable,
+}
+
+/// How a charstring or subroutine ended.
+enum End {
+    Return,
+    EndChar,
+}
+
+/// A glyph's charstring and the subroutines it calls, walked as subsetter 0.2.6's
+/// `Decompiler` (`src/cff/charstring.rs`) decompiles them, keeping only what it needs
+/// to count stem hints: the operands, and the hints so far.
+struct Walk<'a> {
+    global: &'a [&'a [u8]],
+    local: &'a [&'a [u8]],
+    /// Each operand as an `i32`, `None` for one with a fraction.
+    stack: Vec<Option<i32>>,
+    hints: u32,
+    /// The length of a hint mask, set at the first.
+    mask_bytes: usize,
+}
+
+impl Walk<'_> {
+    fn run(&mut self, charstring: &[u8], depth: u8) -> std::result::Result<End, Stop> {
+        if depth > MAX_CALL_DEPTH {
+            return Err(Stop::Unreadable);
+        }
+        let mut at = 0;
+        while let Some(&b0) = charstring.get(at) {
+            if matches!(b0, 28 | 32..=255) {
+                let (operand, len) = charstring_number(charstring.get(at..).unwrap_or_default())
+                    .ok_or(Stop::Unreadable)?;
+                if self.stack.len() == MAX_OPERANDS {
+                    return Err(Stop::Unreadable);
+                }
+                self.stack.push(operand);
+                at += len;
+                continue;
+            }
+            at += 1;
+            let operator = if b0 == 12 {
+                let b1 = *charstring.get(at).ok_or(Stop::Unreadable)?;
+                at += 1;
+                12 << 8 | u16::from(b1)
+            } else {
+                u16::from(b0)
+            };
+            match operator {
+                // hstem, vstem, hstemhm and vstemhm.
+                1 | 3 | 18 | 23 => self.count_hints()?,
+                // Path operators, and hflex, flex, hflex1 and flex1.
+                4..=8 | 21 | 22 | 24..=27 | 30 | 31 | 0x0C22..=0x0C25 => self.stack.clear(),
+                // return
+                11 => return Ok(End::Return),
+                // callsubr and callgsubr
+                10 | 29 => {
+                    let index = self.stack.pop().flatten().ok_or(Stop::Unreadable)?;
+                    let subrs = if operator == 29 {
+                        self.global
+                    } else {
+                        self.local
+                    };
+                    let subr = subroutine(subrs, index).ok_or(Stop::Unreadable)?;
+                    if let End::EndChar = self.run(subr, depth + 1)? {
+                        return Ok(End::EndChar);
+                    }
+                }
+                // hintmask and cntrmask: the first may declare vstem hints of its own.
+                19 | 20 => {
+                    if self.mask_bytes == 0 {
+                        self.count_hints()?;
+                        self.mask_bytes = usize::try_from(self.hints.div_ceil(8))
+                            .map_err(|_| Stop::Unreadable)?;
+                    }
+                    at = at
+                        .checked_add(self.mask_bytes)
+                        .filter(|&end| end <= charstring.len())
+                        .ok_or(Stop::Unreadable)?;
+                }
+                // endchar; with four operands it would be an accented character, which
+                // the subsetter does not implement.
+                14 if self.stack.len() >= 4 => return Err(Stop::Unreadable),
+                14 => return Ok(End::EndChar),
+                _ => return Err(Stop::Unreadable),
+            }
+        }
+        Ok(End::Return)
+    }
+
+    /// Counts the operands of a stem operator, two for each hint, and takes them off.
+    fn count_hints(&mut self) -> std::result::Result<(), Stop> {
+        let operands = u32::try_from(self.stack.len()).map_err(|_| Stop::Unreadable)?;
+        self.stack.clear();
+        self.hints += operands / 2;
+        if self.hints > MAX_HINTS {
+            return Err(Stop::Overflow);
+        }
+        Ok(())
+    }
+}
+
+/// A charstring number at the start of `data` as the subsetter reads it, as an `i32`
+/// (`None` for a 16.16 fixed number with a fraction), and its length.
+fn charstring_number(data: &[u8]) -> Option<(Option<i32>, usize)> {
+    match *data.first()? {
+        28 => Some((
+            Some(i32::from(i16::from_be_bytes([
+                *data.get(1)?,
+                *data.get(2)?,
+            ]))),
+            3,
+        )),
+        b0 @ 32..=246 => Some((Some(i32::from(b0) - 139), 1)),
+        b0 @ 247..=250 => Some((
+            Some((i32::from(b0) - 247) * 256 + i32::from(*data.get(1)?) + 108),
+            2,
+        )),
+        b0 @ 251..=254 => Some((
+            Some(-(i32::from(b0) - 251) * 256 - i32::from(*data.get(1)?) - 108),
+            2,
+        )),
+        255 => {
+            let bytes: [u8; 4] = data.get(1..5)?.try_into().ok()?;
+            // As the subsetter's `as_i32` converts it: in `f32`, a whole number only.
+            let value = i32::from_be_bytes(bytes) as f32 / 65536.0;
+            let whole = (value.fract() == 0.0).then_some(value as i32);
+            Some((whole, 5))
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,9 +852,10 @@ mod tests {
     }
 
     /// A CFF table of one glyph (`.notdef`, endchar) whose Top DICT has `top` before its
-    /// offsets and `top_after` after them, with a Private DICT holding `private`, and, when `font_dict` is given, an
-    /// FDArray of one Font DICT holding it and pointing at that Private DICT. Offsets are
-    /// five-byte integers, so the layout does not depend on them.
+    /// offsets and `top_after` after them, with a Private DICT holding `private`, and,
+    /// when `font_dict` is given, an FDArray of one Font DICT holding it and pointing at
+    /// that Private DICT. Offsets are five-byte integers, so the layout does not depend on
+    /// them.
     fn cff_table(
         top: &[u8],
         top_after: &[u8],
@@ -732,5 +1108,399 @@ mod tests {
         cff.resize(30, 0);
         cff.push(139);
         assert_eq!(dicts(&cff), [&top[..], &font_dict[..], &[139][..]]);
+    }
+
+    /// An INDEX of `items`, with the smallest offset size that holds them.
+    fn index_of(items: &[Vec<u8>]) -> Vec<u8> {
+        if items.is_empty() {
+            return vec![0, 0];
+        }
+        let mut offsets = vec![1];
+        for item in items {
+            offsets.push(offsets.last().unwrap() + item.len());
+        }
+        let size = (1..=4)
+            .find(|&size| *offsets.last().unwrap() < 1 << (8 * size))
+            .unwrap();
+        let mut out = u16::try_from(items.len()).unwrap().to_be_bytes().to_vec();
+        out.push(size as u8);
+        for offset in offsets {
+            out.extend_from_slice(&offset.to_be_bytes()[8 - size..]);
+        }
+        for item in items {
+            out.extend_from_slice(item);
+        }
+        out
+    }
+
+    /// A CFF table with the charstrings `glyphs` and the global subroutines `global`. With
+    /// one entry in `local`, it is SID-keyed and that entry holds its local subroutines;
+    /// with an `fd_select`, it is CID-keyed and `local` holds those of each Font DICT.
+    /// Each Private DICT is "6 Subrs", its subroutines right after it. Offsets are
+    /// five-byte integers, so the layout does not depend on them.
+    fn programs(
+        glyphs: &[Vec<u8>],
+        global: &[Vec<u8>],
+        local: &[Vec<Vec<u8>>],
+        fd_select: Option<&[u8]>,
+    ) -> Vec<u8> {
+        let int5 = |value: usize| [&[29][..], &(value as i32).to_be_bytes()].concat();
+        let privates: Vec<Vec<u8>> = local
+            .iter()
+            .map(|subrs| [int5(6), vec![19], index_of(subrs)].concat())
+            .collect();
+        // Private DICT `i` is 6 bytes, then its subroutines.
+        let private_len = 6;
+        let top_dict =
+            |charstrings: usize, fd_array: usize, fd_select_at: usize, private_at: usize| {
+                let mut dict = Vec::new();
+                if fd_select.is_some() {
+                    dict.extend(ROS_ADOBE_IDENTITY);
+                }
+                dict.extend(int5(charstrings));
+                dict.push(17);
+                if fd_select.is_some() {
+                    dict.extend(int5(fd_array));
+                    dict.extend([12, 36]);
+                    dict.extend(int5(fd_select_at));
+                    dict.extend([12, 37]);
+                } else {
+                    dict.extend(int5(private_len));
+                    dict.extend(int5(private_at));
+                    dict.push(18);
+                }
+                dict
+            };
+        let font_dict =
+            |private_at: usize| [int5(private_len), int5(private_at), vec![18]].concat();
+        let head = vec![1, 0, 4, 1];
+        let names = index_of(&[b"A".to_vec()]);
+        let top_len = index_of(&[top_dict(0, 0, 0, 0)]).len();
+        let strings = index_of(&[b"Adobe".to_vec(), b"Identity".to_vec()]);
+        let global = index_of(global);
+        let charstrings = index_of(glyphs);
+        let charstrings_at = head.len() + names.len() + top_len + strings.len() + global.len();
+        let fd_select_at = charstrings_at + charstrings.len();
+        let fd_select = fd_select.unwrap_or_default();
+        let fd_array_at = fd_select_at + fd_select.len();
+        let fd_array_len = if fd_select.is_empty() {
+            0
+        } else {
+            index_of(&vec![font_dict(0); local.len()]).len()
+        };
+        let mut private_at = Vec::new();
+        let mut at = fd_array_at + fd_array_len;
+        for private in &privates {
+            private_at.push(at);
+            at += private.len();
+        }
+        let mut cff = head;
+        cff.extend(names);
+        cff.extend(index_of(&[top_dict(
+            charstrings_at,
+            fd_array_at,
+            fd_select_at,
+            private_at[0],
+        )]));
+        cff.extend(strings);
+        cff.extend(global);
+        cff.extend(charstrings);
+        if !fd_select.is_empty() {
+            cff.extend_from_slice(fd_select);
+            let dicts: Vec<Vec<u8>> = private_at.iter().map(|&at| font_dict(at)).collect();
+            cff.extend(index_of(&dicts));
+        }
+        for private in privates {
+            cff.extend(private);
+        }
+        cff
+    }
+
+    /// Subroutines that declare stem hints: 0 is 24 hints; 1 calls 0 60 times (1,440);
+    /// 2 calls 1 45 times (64,800). With fewer than 1,240 subroutines the bias is 107, so
+    /// subroutine `i` is called with the operand `i` - 107, the byte `i` + 32.
+    fn hint_subrs(call: u8) -> Vec<Vec<u8>> {
+        let mut first = vec![139; 48];
+        first.extend([1, 11]);
+        let calls = |subr: u8, times: usize| {
+            let mut subr = [subr + 32, call].repeat(times);
+            subr.push(11);
+            subr
+        };
+        vec![first, calls(0, 60), calls(1, 45)]
+    }
+
+    /// A charstring that declares `hints` stem hints, at least 65,520: subroutine 2, then 0
+    /// 30 times (65,520 so far), then the rest with one hstem, or with the first hintmask
+    /// and its mask when `mask` is set; then endchar. `call` is callsubr (10) or
+    /// callgsubr (29).
+    fn hinted_glyph(hints: u32, call: u8, mask: bool) -> Vec<u8> {
+        let rest = usize::try_from(hints - 65_520).unwrap();
+        let mut glyph = vec![34, call];
+        glyph.extend([32, call].repeat(30));
+        glyph.extend(vec![139; 2 * rest]);
+        if mask {
+            glyph.push(19);
+            glyph.extend(vec![0xFF; usize::try_from(hints.div_ceil(8)).unwrap()]);
+        } else {
+            glyph.push(1);
+        }
+        glyph.push(14);
+        glyph
+    }
+
+    /// Two operands for each path operator, the four flex operators (12 34 to 12 37)
+    /// among them, which the subsetter takes off the stack without counting hints.
+    fn drawn() -> Vec<u8> {
+        let mut path = Vec::new();
+        for operator in [21, 22, 4, 5, 6, 7, 8, 24, 25, 26, 27, 30, 31] {
+            path.extend([139, 139, operator]);
+        }
+        for flex in 34..=37 {
+            path.extend([139, 139, 12, flex]);
+        }
+        path
+    }
+
+    /// The five glyphs of the test font: `glyph` as glyph `at`, the others endchar.
+    fn glyphs_with(at: usize, glyph: Vec<u8>) -> Vec<Vec<u8>> {
+        let mut glyphs = vec![vec![14]; crate::testing::ADVANCES.len()];
+        glyphs[at] = glyph;
+        glyphs
+    }
+
+    /// The test font with `cff` as its outlines, subset to `glyphs`.
+    fn subset_glyphs(cff: Vec<u8>, glyphs: &[u16]) -> Result<crate::subset::Subset> {
+        let font = crate::testing::TestFont::new("Test Sans")
+            .with_table(b"CFF ", cff)
+            .without_table(b"glyf")
+            .without_table(b"loca")
+            .build();
+        crate::font::FontFace::from_bytes(font, 0)
+            .unwrap()
+            .subset(glyphs.iter().map(|&glyph| crate::font::GlyphId::new(glyph)))
+    }
+
+    /// The message of a refusal by [`check_hints`].
+    fn refusal(result: Result<crate::subset::Subset>) -> String {
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, Error::MalformedTable { table: "CFF ", .. }),
+            "{err}"
+        );
+        std::error::Error::source(&err).unwrap().to_string()
+    }
+
+    #[test]
+    fn refuses_a_glyph_with_more_stem_hints_than_the_subsetter_counts() {
+        for mask in [false, true] {
+            let font = |hints| {
+                programs(
+                    &glyphs_with(1, hinted_glyph(hints, 29, mask)),
+                    &hint_subrs(29),
+                    &[vec![]],
+                    None,
+                )
+            };
+            // 65,535 hints fit in the subsetter's count; one more does not.
+            subset_glyphs(font(65_535), &[1]).unwrap();
+            assert_eq!(
+                refusal(subset_glyphs(font(65_536), &[1])),
+                "glyph 1 declares more than 65535 stem hints, more than the subsetter can count",
+                "mask {mask}"
+            );
+            // Only the glyphs the subset keeps are walked, and .notdef always is.
+            subset_glyphs(font(65_536), &[2, 3]).unwrap();
+            let notdef = programs(
+                &glyphs_with(0, hinted_glyph(65_536, 29, mask)),
+                &hint_subrs(29),
+                &[vec![]],
+                None,
+            );
+            assert!(refusal(subset_glyphs(notdef, &[2])).starts_with("glyph 0 declares"));
+            // After drawing with every path operator.
+            let drawn = |hints| {
+                let glyph = [drawn(), hinted_glyph(hints, 29, mask)].concat();
+                programs(&glyphs_with(1, glyph), &hint_subrs(29), &[vec![]], None)
+            };
+            subset_glyphs(drawn(65_535), &[1]).unwrap();
+            assert!(refusal(subset_glyphs(drawn(65_536), &[1])).starts_with("glyph 1 declares"));
+        }
+    }
+
+    #[test]
+    fn ends_a_glyph_at_endchar_in_a_subroutine() {
+        // Global subroutine 3 is endchar, which ends the glyph that calls it: the hints
+        // after the call are never decompiled.
+        let mut subrs = hint_subrs(29);
+        subrs.push(vec![14]);
+        let glyph = [vec![35, 29], hinted_glyph(65_536, 29, false)].concat();
+        let font = programs(&glyphs_with(1, glyph), &subrs, &[vec![]], None);
+        subset_glyphs(font, &[1]).unwrap();
+    }
+
+    #[test]
+    fn counts_the_stem_hints_of_local_subroutines() {
+        // A SID-keyed font, its Private DICT's subroutines.
+        let font = |hints| {
+            programs(
+                &glyphs_with(3, hinted_glyph(hints, 10, false)),
+                &[],
+                &[hint_subrs(10)],
+                None,
+            )
+        };
+        subset_glyphs(font(65_535), &[3]).unwrap();
+        assert!(refusal(subset_glyphs(font(65_536), &[3])).starts_with("glyph 3 declares"));
+        // A CID-keyed font: glyphs 0 to 2 use Font DICT 0, which has no subroutines, and
+        // 3 and 4 use Font DICT 1, whose subroutines declare the hints; FDSelect format 3
+        // (two ranges and the sentinel), and format 0 (a Font DICT for each glyph).
+        let format3 = [3, 0, 2, 0, 0, 0, 0, 3, 1, 0, 5];
+        let format0 = [0, 0, 0, 0, 1, 1];
+        for fd_select in [&format3[..], &format0[..]] {
+            let font = |hints| {
+                programs(
+                    &glyphs_with(4, hinted_glyph(hints, 10, false)),
+                    &[],
+                    &[vec![], hint_subrs(10)],
+                    Some(fd_select),
+                )
+            };
+            subset_glyphs(font(65_535), &[4]).unwrap();
+            assert!(refusal(subset_glyphs(font(65_536), &[4])).starts_with("glyph 4 declares"));
+            subset_glyphs(font(65_536), &[1, 2, 3]).unwrap();
+        }
+    }
+
+    #[test]
+    fn leaves_glyphs_the_subsetter_cannot_read_to_the_subsetter() {
+        // An operator the subsetter does not know (12 0) before the hints, and endchar with
+        // the four operands of an accented character: it fails on the glyph before it
+        // counts the hints, with an error of its own.
+        for before in [vec![12, 0], vec![139, 139, 139, 139, 14]] {
+            let glyph = [before, hinted_glyph(65_536, 29, false)].concat();
+            let font = programs(&glyphs_with(1, glyph), &hint_subrs(29), &[vec![]], None);
+            let err = subset_glyphs(font, &[1]).unwrap_err();
+            assert!(!matches!(err, Error::MalformedTable { .. }), "{err}");
+        }
+        // A glyph before it that the subsetter cannot read, the last one a hintmask without
+        // its mask: it stops there.
+        for before in [
+            vec![12, 0],
+            vec![139, 139, 139, 139, 14],
+            vec![139, 139, 19],
+        ] {
+            let mut glyphs = glyphs_with(2, hinted_glyph(65_536, 29, false));
+            glyphs[1] = before;
+            let font = programs(&glyphs, &hint_subrs(29), &[vec![]], None);
+            let err = subset_glyphs(font, &[1, 2]).unwrap_err();
+            assert!(!matches!(err, Error::MalformedTable { .. }), "{err}");
+        }
+    }
+
+    #[test]
+    fn agrees_with_the_subsetter_on_when_its_hint_count_overflows() {
+        // The subsetter itself panics exactly where the check refuses, on fonts around the
+        // limit built every way above. It panics only with overflow checks, which come
+        // with debug assertions, as in `cargo test`; without them its count wraps.
+        let subsetter_panics = |cff: Vec<u8>, glyphs: &[u16]| {
+            let font = crate::testing::TestFont::new("Test Sans")
+                .with_table(b"CFF ", cff)
+                .without_table(b"glyf")
+                .without_table(b"loca")
+                .build();
+            let remapper = subsetter::GlyphRemapper::new_from_glyphs_sorted(glyphs);
+            std::panic::catch_unwind(|| subsetter::subset(&font, 0, &remapper)).is_err()
+        };
+        let mut cases = 0;
+        for hints in [65_534, 65_535, 65_536, 65_537, 65_543] {
+            for mask in [false, true] {
+                for (cff, glyph) in [
+                    (
+                        programs(
+                            &glyphs_with(1, hinted_glyph(hints, 29, mask)),
+                            &hint_subrs(29),
+                            &[vec![]],
+                            None,
+                        ),
+                        1,
+                    ),
+                    (
+                        programs(
+                            &glyphs_with(3, hinted_glyph(hints, 10, mask)),
+                            &[],
+                            &[hint_subrs(10)],
+                            None,
+                        ),
+                        3,
+                    ),
+                    (
+                        programs(
+                            &glyphs_with(0, hinted_glyph(hints, 29, mask)),
+                            &hint_subrs(29),
+                            &[vec![]],
+                            None,
+                        ),
+                        0,
+                    ),
+                    (
+                        programs(
+                            &glyphs_with(2, [drawn(), hinted_glyph(hints, 29, mask)].concat()),
+                            &hint_subrs(29),
+                            &[vec![]],
+                            None,
+                        ),
+                        2,
+                    ),
+                ] {
+                    let refused = matches!(
+                        subset_glyphs(cff.clone(), &[glyph]),
+                        Err(Error::MalformedTable { .. })
+                    );
+                    assert_eq!(
+                        refused,
+                        hints > 65_535,
+                        "{hints} hints, mask {mask}, glyph {glyph}"
+                    );
+                    if cfg!(debug_assertions) {
+                        assert_eq!(
+                            refused,
+                            subsetter_panics(cff, &[glyph]),
+                            "{hints} hints, mask {mask}, glyph {glyph}"
+                        );
+                    }
+                    cases += 1;
+                }
+            }
+        }
+        assert_eq!(cases, 40);
+    }
+
+    #[test]
+    fn reads_charstring_numbers_and_subroutine_biases_as_the_subsetter_does() {
+        assert_eq!(charstring_number(&[28, 0xFF, 0x9C]), Some((Some(-100), 3)));
+        assert_eq!(charstring_number(&[139]), Some((Some(0), 1)));
+        assert_eq!(charstring_number(&[247, 0]), Some((Some(108), 2)));
+        assert_eq!(charstring_number(&[254, 0xFF]), Some((Some(-1131), 2)));
+        // 16.16 fixed: 2.0 is whole, 1.5 is not.
+        assert_eq!(charstring_number(&[255, 0, 2, 0, 0]), Some((Some(2), 5)));
+        assert_eq!(charstring_number(&[255, 0, 1, 0x80, 0]), Some((None, 5)));
+        assert_eq!(charstring_number(&[28, 1]), None);
+        // The bias grows at 1,240 and 33,900 subroutines.
+        let subrs = |len: usize| vec![&[11u8][..]; len];
+        assert!(subroutine(&subrs(1239), -107).is_some());
+        assert!(subroutine(&subrs(1239), -108).is_none());
+        assert!(subroutine(&subrs(1240), -1131).is_some());
+        assert!(subroutine(&subrs(1240), 109).is_none());
+        assert!(subroutine(&subrs(33_900), -32768).is_some());
+        assert!(subroutine(&subrs(33_900), i32::MAX).is_none());
+        // FDSelect format 3: glyphs 0 to 2 in Font DICT 0, 3 and 4 in 1, 5 beyond the
+        // sentinel; no ranges finds nothing.
+        let format3 = [3, 0, 2, 0, 0, 0, 0, 3, 1, 0, 5];
+        let found: Vec<_> = (0..6).map(|glyph| font_dict(&format3, glyph)).collect();
+        assert_eq!(found, [Some(0), Some(0), Some(0), Some(1), Some(1), None]);
+        assert_eq!(font_dict(&[3, 0, 0, 0, 0, 0], 0), None);
+        assert_eq!(font_dict(&[0, 7, 8], 1), Some(8));
+        assert_eq!(font_dict(&[0, 7, 8], 2), None);
     }
 }
