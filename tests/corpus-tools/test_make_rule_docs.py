@@ -485,6 +485,17 @@ class Packages(unittest.TestCase):
                         if val(level, "pStyle") == style
                     ]
                     self.assertEqual(naming, [linked.group(1)], label)
+                    # Nor does a level of any other definition.
+                    elsewhere = [
+                        number.get(f"{W}abstractNumId")
+                        for number in numbering.findall(f"{W}abstractNum")
+                        if number is not definition
+                        and any(
+                            val(level, "pStyle") == style
+                            for level in number.findall(f"{W}lvl")
+                        )
+                    ]
+                    self.assertEqual(elsewhere, [], label)
                 else:
                     direct += clause
             said = dict(re.findall(r"direct (numId|ilvl) (\d+)", direct))
