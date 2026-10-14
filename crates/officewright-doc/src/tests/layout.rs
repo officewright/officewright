@@ -1775,10 +1775,12 @@ fn leaves_out_tables_without_rows_and_tables_nested_too_deep() {
 
 #[test]
 fn translates_tables_nested_to_the_limit_on_a_small_stack() {
-    // The translation recurses once per nested table. 100 levels, the IR's limit, take
-    // about 0.9 MiB with full debug info, as CI builds tests, and less in release; they
-    // took about 2 MiB before the frames on that path were made small (#187). The
-    // thread's stack of 1.5 MiB fails this test if a level grows by half again.
+    // The translation recurses once per nested table. With full debug info, as CI builds
+    // tests, this takes about 0.85 MiB: some 66 KiB, and 8 KiB a level for the IR's limit
+    // of 100 levels; less in release. Before the frames on that path were made small
+    // (#187), it took about 2 MiB. The thread's stack of 1.5 MiB leaves room for other
+    // platforms and compilers; this test fails if a level nearly doubles, to about
+    // 15 KiB.
     let depth = ir::MAX_TABLE_DEPTH;
     let body = format!(
         "{}<w:p/>{}",
@@ -2753,4 +2755,35 @@ fn translates_pictures_whose_lengths_are_out_of_range_into_valid_ir() {
         super::drawing::graphic("rIdPng", "", "")
     );
     translate(&with_images(&inline));
+}
+
+#[test]
+fn lists_a_cell_s_own_entries_before_those_of_its_content() {
+    // A cell's properties are listed before its content, and the paragraph added to a
+    // cell that ends with a table last, as a value the translation changed.
+    let body = r#"<w:tbl><w:tr><w:tc><w:tcPr><w:tcFitText/></w:tcPr><w:p><w:r><w:ptab w:relativeTo="margin" w:alignment="left" w:leader="none"/></w:r></w:p><w:tbl><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl></w:tc></w:tr></w:tbl><w:p/>"#;
+    let translation = translate(&open(body));
+    let entries: Vec<(String, ReportKind)> = translation
+        .left_out()
+        .iter()
+        .map(|entry| (entry.to_string(), entry.kind()))
+        .collect();
+    let cell = "sections[0].blocks[0].rows[0].cells[0]";
+    assert_eq!(
+        entries,
+        [
+            (
+                format!("{cell}: the cell's text fitting (w:tcFitText) is not applied"),
+                ReportKind::FeatureUnsupported
+            ),
+            (
+                format!("{cell}.blocks[0].inlines: an absolute position tab is left out (w:ptab)"),
+                ReportKind::FeatureUnsupported
+            ),
+            (
+                format!("{cell}: a cell that does not end with a paragraph gets an empty one"),
+                ReportKind::ValueClamped
+            ),
+        ]
+    );
 }
