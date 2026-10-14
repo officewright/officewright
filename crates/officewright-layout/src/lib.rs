@@ -28,6 +28,7 @@
 #![forbid(unsafe_code)]
 
 mod breaks;
+mod display;
 mod error;
 mod fonts;
 #[cfg(feature = "fuzzing")]
