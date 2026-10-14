@@ -671,6 +671,14 @@ fn cuts_font_names_to_what_readers_accept() -> TestResult {
     // A name at the limit is kept whole.
     let font = Font::from_bytes(with_postscript_name(minimal()?, &long[..120])?, 0)?;
     assert_eq!(font.name(), &long[..120]);
+    // A null character, which no PDF name may hold (ISO 32000-1, 7.3.5), is left out.
+    let font = Font::from_bytes(with_postscript_name(minimal()?, "Foo\0Bar")?, 0)?;
+    assert_eq!(font.name(), "FooBar");
+    let pdf = pdf_text(&one_line(&font, "A")?)?;
+    for name in font_names(&pdf) {
+        assert!(name.ends_with("+FooBar"), "{name}");
+    }
+    assert!(!pdf.contains("#00"));
     Ok(())
 }
 
