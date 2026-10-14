@@ -76,7 +76,9 @@ struct StyleKey<'f> {
 }
 
 impl<'f> StyleKey<'f> {
-    fn of(format: &'f CharacterFormat) -> Self {
+    /// The key of a format; its ligatures and contextual alternates count only with
+    /// `open_type_features`, as the IR style takes them.
+    fn of(format: &'f CharacterFormat, open_type_features: bool) -> Self {
         // Every field, so that one added to the format cannot be left out of the key.
         let CharacterFormat {
             // The IR keeps no style id; what the style gives is in the other fields.
@@ -175,8 +177,12 @@ impl<'f> StyleKey<'f> {
                 highlight: *highlight,
                 // A shading of pattern nil is no shading at all.
                 shading: shading.filter(|shading| shading.pattern() != Some(ShadingPattern::Nil)),
-                ligatures: *ligatures,
-                contextual_alternates: *contextual_alternates,
+                ligatures: if open_type_features {
+                    *ligatures
+                } else {
+                    Ligatures::default()
+                },
+                contextual_alternates: open_type_features && *contextual_alternates,
                 cuts,
             },
         }
@@ -188,7 +194,7 @@ impl Translator<'_> {
     /// [`StyleKey`] is met. Formats whose keys are equal share it; the key holds only what
     /// the IR keeps.
     pub(super) fn run_style(&mut self, format: &CharacterFormat) -> ir::RunStyleId {
-        let key = StyleKey::of(format);
+        let key = StyleKey::of(format, self.open_type_features);
         // The ids of its strings: one not met yet means a key not met yet.
         let strings = &self.run_styles.strings;
         let mut ids = [NO_TAG; 7];
@@ -326,15 +332,20 @@ impl Translator<'_> {
             .with_shading(format.shading().and_then(|shading| self.shading(shading)))
             .with_hidden(format.hidden())
             .with_language(language)
+            // Word uses them only when the document turns OpenType features on.
             .with_ligatures({
-                let ligatures = format.ligatures();
+                let ligatures = if self.open_type_features {
+                    format.ligatures()
+                } else {
+                    Ligatures::default()
+                };
                 ir::Ligatures::default()
                     .with_standard(ligatures.standard())
                     .with_contextual(ligatures.contextual())
                     .with_historical(ligatures.historical())
                     .with_discretional(ligatures.discretional())
             })
-            .with_contextual_alternates(format.contextual_alternates())
+            .with_contextual_alternates(self.open_type_features && format.contextual_alternates())
     }
 
     /// A font name as the IR gets it, cut as [`cut_font_name`] does; a cut is listed.

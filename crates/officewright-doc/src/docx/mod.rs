@@ -22,7 +22,7 @@ use capture::Budget;
 
 /// The main namespace of WordprocessingML, Transitional.
 const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
-/// The namespace of Word 2010's extensions ([MS-DOCX] 2.1).
+/// The namespace of Word 2010's extensions ([MS-DOCX] 2.6).
 const W14: &str = "http://schemas.microsoft.com/office/word/2010/wordml";
 /// The main namespace of WordprocessingML, Strict.
 const W_STRICT: &str = "http://purl.oclc.org/ooxml/wordprocessingml/main";

@@ -1096,7 +1096,7 @@ fn reads_every_set_of_ligatures_and_nothing_else() {
         }
         valid.push((name, flags));
     }
-    // The 16 values of ST_Ligatures ([MS-DOCX] 2.6.18).
+    // The 16 values of ST_Ligatures ([MS-DOCX] 2.6.4.3).
     assert_eq!(valid.len(), 16);
     for (value, [standard, contextual, historical, discretional]) in &valid {
         let ligatures = Ligatures::from_xml(value).unwrap_or_else(|| panic!("{value}"));
@@ -1146,14 +1146,18 @@ fn resolves_ligatures_and_contextual_alternates() {
         &format!(
             r#"<w14:ligatures {W14} w14:val="Standard"/><w14:cntxtAlts {W14} w14:val="maybe"/>"#
         ),
+        // w14's ST_OnOff: true and 1 are on; on is no value of it ([MS-DOCX] 2.6.4.9).
+        &format!(r#"<w14:cntxtAlts {W14} w14:val="true"/>"#),
+        &format!(r#"<w14:cntxtAlts {W14} w14:val="1"/>"#),
         &format!(r#"<w14:cntxtAlts {W14} w14:val="on"/>"#),
     ];
-    // Under a style with contextual alternates on: a value that is not one inherits
-    // them; "off" sets them off.
+    // Under a style with contextual alternates on: a value that is not one, off among
+    // them, inherits them; false sets them off.
     let plain = [
         "",
         &format!(r#"<w14:cntxtAlts {W14} w14:val="maybe"/>"#),
         &format!(r#"<w14:cntxtAlts {W14} w14:val="off"/>"#),
+        &format!(r#"<w14:cntxtAlts {W14} w14:val="false"/>"#),
     ];
     let body = [paragraph("", &written), paragraph("Plain", &plain)].concat();
     let document = build(&body, &styles, None, None);
@@ -1172,7 +1176,10 @@ fn resolves_ligatures_and_contextual_alternates() {
             ),
             (all, false),
             (all, true),
+            (all, true),
+            (all, false),
             // The paragraph style's none and contextual alternates.
+            (Ligatures::default(), true),
             (Ligatures::default(), true),
             (Ligatures::default(), true),
             (Ligatures::default(), false),

@@ -421,7 +421,8 @@ pub struct RunProperties {
     pub(crate) contextual_alternates: Option<bool>,
 }
 
-/// The kinds of ligatures text uses (`w14:ligatures`, [MS-DOCX] 2.6.18 ST_Ligatures):
+/// The kinds of ligatures text uses (`w14:ligatures`, [MS-DOCX] 2.6.1.17, of type
+/// ST_Ligatures, 2.6.4.3):
 /// each of the 16 values names a set of the four kinds, `none` and `all` among them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -679,13 +680,13 @@ impl RunProperties {
         &self.language
     }
 
-    /// The kinds of ligatures (`w14:ligatures`, [MS-DOCX] 2.6.18).
+    /// The kinds of ligatures (`w14:ligatures`, [MS-DOCX] 2.6.1.17).
     pub fn ligatures(&self) -> Option<Ligatures> {
         self.ligatures
     }
 
     /// Whether the text uses the font's contextual alternates (`w14:cntxtAlts`,
-    /// [MS-DOCX] 2.6.3).
+    /// [MS-DOCX] 2.6.1.2).
     pub fn contextual_alternates(&self) -> Option<bool> {
         self.contextual_alternates
     }

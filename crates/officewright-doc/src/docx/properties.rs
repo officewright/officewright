@@ -24,17 +24,19 @@ pub(crate) fn run_properties(
     let mut properties = RunProperties::default();
     let w = &names.w;
     for child in r_pr.children_through_alternates(names.mc) {
-        // Word 2010's extensions. Their values are not reported when they are not valid:
-        // Word ignores what it does not understand in an ignorable namespace.
+        // Word 2010's extensions ([MS-DOCX] 2.6.1.17 ligatures, 2.6.1.2 cntxtAlts). A
+        // value that is not valid is not read; not reporting it is our choice, since the
+        // diagnostics name attributes of w:.
         if let Some(local) = child.local_in(&[names.w14]) {
             let value = child.attribute(&[names.w14], "val");
             match local {
                 "ligatures" => properties.ligatures = value.and_then(Ligatures::from_xml),
                 "cntxtAlts" => {
+                    // w14's ST_OnOff has no on and off ([MS-DOCX] 2.6.4.9).
                     properties.contextual_alternates = match value {
                         None => Some(true),
-                        Some("true" | "on" | "1") => Some(true),
-                        Some("false" | "off" | "0") => Some(false),
+                        Some("true" | "1") => Some(true),
+                        Some("false" | "0") => Some(false),
                         Some(_) => None,
                     };
                 }

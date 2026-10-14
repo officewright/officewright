@@ -321,8 +321,8 @@ impl<'a> Translator<'a> {
 
 /// A preferred width of a table, a cell or the space before or after a row: automatic
 /// when it is written so, as `nil` or as 0 (MS-OI29500 §17.4.63(a), (b) for a table's,
-/// §17.4.71(a) for a cell's), or not written; a negative one, which Word does not expect (MS-OI29500 §17.4.87(d)), is
-/// automatic too.
+/// §17.4.71(a), (b) for a cell's), or not written; a negative one, which Word does not
+/// expect (MS-OI29500 §17.4.87(d)), is automatic too.
 fn preferred(width: Option<TableWidth>) -> ir::PreferredWidth {
     match width {
         Some(TableWidth::Length(length)) if length.0 > 0.0 => ir::PreferredWidth::Points(length),
