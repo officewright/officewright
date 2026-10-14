@@ -99,7 +99,8 @@ impl FontFace {
     /// [`Error::GlyphOutOfRange`] if a glyph is not in the face,
     /// [`Error::UnsupportedOutlines`] for a face without outlines or with CFF2
     /// outlines, [`Error::MalformedTable`] for a `CFF ` table with a real number the
-    /// subsetter cannot write back or a `name` table whose offsets it cannot compute,
+    /// subsetter cannot write back or a glyph with more stem hints than it can count, or
+    /// a `name` table whose offsets it cannot compute,
     /// [`Error::SubsetUnsupported`] if the face uses
     /// something the subsetter does not implement yet, and [`Error::Subset`] or
     /// [`Error::SubsetterPanicked`] if the face is damaged in a way that only subsetting
@@ -202,14 +203,14 @@ pub(crate) fn subsetter_table<'a>(
 /// subsetter 0.2.6 still has `unwrap()`, `unreachable!()` and unchecked arithmetic on
 /// paths that malformed fonts can reach. A damaged font must give `Err`, never a panic,
 /// also inside a dependency, so the panic is caught here until upstream returns errors
-/// on those paths; panics that fuzzing finds are reported there. The two found so far
-/// are not left to this guard: the checks in `name_offsets.rs` and `cff.rs` refuse the
-/// faces before the subsetter runs, since the panic hook would still print them. They
-/// are an overflow in its `name` table code
-/// (<https://github.com/typst/subsetter/issues/30>) and `unreachable!()` for a CFF real
-/// number too large for an `f32` (<https://github.com/typst/subsetter/issues/31>). A
-/// third, an overflow of a glyph's stem-hint count, is still left to it (officewright
-/// issue #180).
+/// on those paths; panics that fuzzing finds are reported there. The three found so
+/// far are not left to this guard: the checks in `name_offsets.rs` and `cff.rs` refuse
+/// the faces before the subsetter runs, since the panic hook would still print them.
+/// They are an overflow in its `name` table code
+/// (<https://github.com/typst/subsetter/issues/30>), `unreachable!()` for a CFF real
+/// number too large for an `f32` (<https://github.com/typst/subsetter/issues/31>), and
+/// an overflow of a glyph's stem-hint count
+/// (<https://github.com/typst/subsetter/issues/33>).
 /// Catching relies on unwinding, like the C ABI: built with `-C panic=abort` the process
 /// aborts instead. The default panic hook still prints the message to stderr, since a
 /// library must not replace the process-wide hook.

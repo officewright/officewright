@@ -466,7 +466,10 @@ struct Programs<'a> {
 
 impl<'a> Programs<'a> {
     /// Reads them from `cff`, or `None` where the subsetter fails before it decompiles
-    /// a glyph.
+    /// a glyph. Only what decides which programs are walked is read as the subsetter reads
+    /// it; where a damaged table makes the subsetter fail on something else (another
+    /// operator of a DICT, an FDSelect range past the glyph), this check may refuse the
+    /// face first, with an error of its own: both are errors.
     fn read(cff: &'a [u8]) -> Option<Self> {
         if cff.first() != Some(&1) {
             return None;
@@ -553,14 +556,20 @@ impl<'a> Programs<'a> {
 }
 
 /// The subroutines of the Private DICT at `private`, which the subsetter finds by the
-/// first Subrs operator of the DICT; `None` where it fails.
+/// first Subrs operator of the DICT: none without one, or when its operand is no offset
+/// it can read (`parse_subr_offset` in its `src/cff/dict/private_dict.rs`); `None` where
+/// it fails.
 fn local_subrs(cff: &[u8], private: Range<usize>) -> Option<Vec<&[u8]>> {
     let start = private.start;
     let operators = operators(cff.get(private)?);
-    let Some((_, operands)) = operators.iter().find(|(operator, _)| *operator == SUBRS) else {
+    let Some(offset) = operators
+        .iter()
+        .find(|(operator, _)| *operator == SUBRS)
+        .and_then(|(_, operands)| offset(operands))
+    else {
         return Some(Vec::new());
     };
-    let (subrs, _) = parsed_index(cff, start.checked_add(offset(operands)?)?)?;
+    let (subrs, _) = parsed_index(cff, start.checked_add(offset)?)?;
     Some(objects(&subrs))
 }
 
@@ -1133,95 +1142,175 @@ mod tests {
         out
     }
 
+    /// A five-byte integer operand of a DICT.
+    fn int5(value: usize) -> Vec<u8> {
+        [&[29][..], &(value as i32).to_be_bytes()].concat()
+    }
+
+    /// How each Private DICT of a table gives its local subroutines.
+    #[derive(Clone, Copy, Default)]
+    enum Subrs {
+        /// "6 Subrs": the subroutines right after the DICT.
+        #[default]
+        One,
+        /// "12 Subrs 1000000 Subrs": the subsetter takes the first.
+        Twice,
+        /// "0 0 Subrs": two operands, no offset the subsetter can read, so it takes the
+        /// DICT to have no subroutines.
+        Unreadable,
+    }
+
+    /// A CFF table to build. With one entry in `local`, it is SID-keyed and that entry
+    /// holds its local subroutines; with an `fd_select`, it is CID-keyed and `local` holds
+    /// those of each Font DICT. Offsets are five-byte integers, so the layout does not
+    /// depend on them.
+    #[derive(Clone, Default)]
+    struct Spec {
+        glyphs: Vec<Vec<u8>>,
+        /// The Global Subrs INDEX as written; empty for none.
+        global: Vec<u8>,
+        local: Vec<Vec<Vec<u8>>>,
+        fd_select: Option<Vec<u8>>,
+        subrs: Subrs,
+        /// Written first in the Top DICT, before the operators the table needs, which
+        /// come later and so are the ones the subsetter keeps.
+        top_prefix: Vec<u8>,
+        /// Each Font DICT gives a Private operator pointing at Font DICT 0's Private DICT
+        /// before the one pointing at its own.
+        two_private: bool,
+        /// An empty String INDEX.
+        no_strings: bool,
+    }
+
+    impl Spec {
+        fn build(&self) -> Vec<u8> {
+            let cid = self.fd_select.is_some();
+            let private_dict: Vec<u8> = match self.subrs {
+                Subrs::One => [int5(6), vec![19]].concat(),
+                Subrs::Twice => [int5(12), vec![19], int5(1_000_000), vec![19]].concat(),
+                Subrs::Unreadable => vec![139, 139, 19],
+            };
+            let private_len = private_dict.len();
+            let privates: Vec<Vec<u8>> = self
+                .local
+                .iter()
+                .map(|subrs| [private_dict.clone(), index_of(subrs)].concat())
+                .collect();
+            let top_dict =
+                |charstrings: usize, fd_array: usize, fd_select_at: usize, private_at: usize| {
+                    let mut dict = self.top_prefix.clone();
+                    if cid {
+                        dict.extend(ROS_ADOBE_IDENTITY);
+                    }
+                    dict.extend(int5(charstrings));
+                    dict.push(17);
+                    if cid {
+                        dict.extend(int5(fd_array));
+                        dict.extend([12, 36]);
+                        dict.extend(int5(fd_select_at));
+                        dict.extend([12, 37]);
+                    } else {
+                        dict.extend(int5(private_len));
+                        dict.extend(int5(private_at));
+                        dict.push(18);
+                    }
+                    dict
+                };
+            let font_dict = |first_at: usize, private_at: usize| {
+                let mut dict = Vec::new();
+                if self.two_private {
+                    dict.extend([int5(private_len), int5(first_at), vec![18]].concat());
+                }
+                dict.extend([int5(private_len), int5(private_at), vec![18]].concat());
+                dict
+            };
+            let head = vec![1, 0, 4, 1];
+            let names = index_of(&[b"A".to_vec()]);
+            let top_len = index_of(&[top_dict(0, 0, 0, 0)]).len();
+            let strings = if self.no_strings {
+                index_of(&[])
+            } else {
+                index_of(&[b"Adobe".to_vec(), b"Identity".to_vec()])
+            };
+            let global = if self.global.is_empty() {
+                index_of(&[])
+            } else {
+                self.global.clone()
+            };
+            let charstrings = index_of(&self.glyphs);
+            let charstrings_at = head.len() + names.len() + top_len + strings.len() + global.len();
+            let fd_select_at = charstrings_at + charstrings.len();
+            let fd_select = self.fd_select.clone().unwrap_or_default();
+            let fd_array_at = fd_select_at + fd_select.len();
+            let fd_array_len = if cid {
+                index_of(&vec![font_dict(0, 0); self.local.len()]).len()
+            } else {
+                0
+            };
+            let mut private_at = Vec::new();
+            let mut at = fd_array_at + fd_array_len;
+            for private in &privates {
+                private_at.push(at);
+                at += private.len();
+            }
+            let mut cff = head;
+            cff.extend(names);
+            cff.extend(index_of(&[top_dict(
+                charstrings_at,
+                fd_array_at,
+                fd_select_at,
+                private_at[0],
+            )]));
+            cff.extend(strings);
+            cff.extend(global);
+            cff.extend(charstrings);
+            if cid {
+                cff.extend_from_slice(&fd_select);
+                let dicts: Vec<Vec<u8>> = private_at
+                    .iter()
+                    .map(|&at| font_dict(private_at[0], at))
+                    .collect();
+                cff.extend(index_of(&dicts));
+            }
+            for private in privates {
+                cff.extend(private);
+            }
+            cff
+        }
+    }
+
     /// A CFF table with the charstrings `glyphs` and the global subroutines `global`. With
     /// one entry in `local`, it is SID-keyed and that entry holds its local subroutines;
     /// with an `fd_select`, it is CID-keyed and `local` holds those of each Font DICT.
-    /// Each Private DICT is "6 Subrs", its subroutines right after it. Offsets are
-    /// five-byte integers, so the layout does not depend on them.
+    /// Each Private DICT is "6 Subrs", its subroutines right after it.
     fn programs(
         glyphs: &[Vec<u8>],
         global: &[Vec<u8>],
         local: &[Vec<Vec<u8>>],
         fd_select: Option<&[u8]>,
     ) -> Vec<u8> {
-        let int5 = |value: usize| [&[29][..], &(value as i32).to_be_bytes()].concat();
-        let privates: Vec<Vec<u8>> = local
-            .iter()
-            .map(|subrs| [int5(6), vec![19], index_of(subrs)].concat())
-            .collect();
-        // Private DICT `i` is 6 bytes, then its subroutines.
-        let private_len = 6;
-        let top_dict =
-            |charstrings: usize, fd_array: usize, fd_select_at: usize, private_at: usize| {
-                let mut dict = Vec::new();
-                if fd_select.is_some() {
-                    dict.extend(ROS_ADOBE_IDENTITY);
-                }
-                dict.extend(int5(charstrings));
-                dict.push(17);
-                if fd_select.is_some() {
-                    dict.extend(int5(fd_array));
-                    dict.extend([12, 36]);
-                    dict.extend(int5(fd_select_at));
-                    dict.extend([12, 37]);
-                } else {
-                    dict.extend(int5(private_len));
-                    dict.extend(int5(private_at));
-                    dict.push(18);
-                }
-                dict
-            };
-        let font_dict =
-            |private_at: usize| [int5(private_len), int5(private_at), vec![18]].concat();
-        let head = vec![1, 0, 4, 1];
-        let names = index_of(&[b"A".to_vec()]);
-        let top_len = index_of(&[top_dict(0, 0, 0, 0)]).len();
-        let strings = index_of(&[b"Adobe".to_vec(), b"Identity".to_vec()]);
-        let global = index_of(global);
-        let charstrings = index_of(glyphs);
-        let charstrings_at = head.len() + names.len() + top_len + strings.len() + global.len();
-        let fd_select_at = charstrings_at + charstrings.len();
-        let fd_select = fd_select.unwrap_or_default();
-        let fd_array_at = fd_select_at + fd_select.len();
-        let fd_array_len = if fd_select.is_empty() {
-            0
-        } else {
-            index_of(&vec![font_dict(0); local.len()]).len()
-        };
-        let mut private_at = Vec::new();
-        let mut at = fd_array_at + fd_array_len;
-        for private in &privates {
-            private_at.push(at);
-            at += private.len();
+        Spec {
+            glyphs: glyphs.to_vec(),
+            global: index_of(global),
+            local: local.to_vec(),
+            fd_select: fd_select.map(<[u8]>::to_vec),
+            ..Spec::default()
         }
-        let mut cff = head;
-        cff.extend(names);
-        cff.extend(index_of(&[top_dict(
-            charstrings_at,
-            fd_array_at,
-            fd_select_at,
-            private_at[0],
-        )]));
-        cff.extend(strings);
-        cff.extend(global);
-        cff.extend(charstrings);
-        if !fd_select.is_empty() {
-            cff.extend_from_slice(fd_select);
-            let dicts: Vec<Vec<u8>> = private_at.iter().map(|&at| font_dict(at)).collect();
-            cff.extend(index_of(&dicts));
-        }
-        for private in privates {
-            cff.extend(private);
-        }
-        cff
+        .build()
     }
 
     /// Subroutines that declare stem hints: 0 is 24 hints; 1 calls 0 60 times (1,440);
     /// 2 calls 1 45 times (64,800). With fewer than 1,240 subroutines the bias is 107, so
     /// subroutine `i` is called with the operand `i` - 107, the byte `i` + 32.
     fn hint_subrs(call: u8) -> Vec<Vec<u8>> {
+        stem_subrs(call, 1)
+    }
+
+    /// The same, declaring the hints with the stem operator `stem`: hstem (1), vstem (3),
+    /// hstemhm (18) or vstemhm (23).
+    fn stem_subrs(call: u8, stem: u8) -> Vec<Vec<u8>> {
         let mut first = vec![139; 48];
-        first.extend([1, 11]);
+        first.extend([stem, 11]);
         let calls = |subr: u8, times: usize| {
             let mut subr = [subr + 32, call].repeat(times);
             subr.push(11);
@@ -1235,18 +1324,38 @@ mod tests {
     /// and its mask when `mask` is set; then endchar. `call` is callsubr (10) or
     /// callgsubr (29).
     fn hinted_glyph(hints: u32, call: u8, mask: bool) -> Vec<u8> {
+        [hinted(hints, call, if mask { 19 } else { 1 }), vec![14]].concat()
+    }
+
+    /// The program of [`hinted_glyph`] without its endchar, the last hints declared by
+    /// `last`: hstem (1), or the first hintmask (19) or cntrmask (20) with its mask.
+    fn hinted(hints: u32, call: u8, last: u8) -> Vec<u8> {
         let rest = usize::try_from(hints - 65_520).unwrap();
-        let mut glyph = vec![34, call];
-        glyph.extend([32, call].repeat(30));
-        glyph.extend(vec![139; 2 * rest]);
-        if mask {
-            glyph.push(19);
-            glyph.extend(vec![0xFF; usize::try_from(hints.div_ceil(8)).unwrap()]);
-        } else {
-            glyph.push(1);
+        let mut program = vec![34, call];
+        program.extend([32, call].repeat(30));
+        program.extend(vec![139; 2 * rest]);
+        program.push(last);
+        if last != 1 {
+            program.extend(vec![0xFF; usize::try_from(hints.div_ceil(8)).unwrap()]);
         }
-        glyph.push(14);
-        glyph
+        program
+    }
+
+    /// 1,241 global subroutines, the hint subroutines first, of which the subsetter can
+    /// read only the first 1,239: the end of object 1,239 comes before its start. With
+    /// 1,239 the bias is 107; with 1,240 or more it would be 1,131.
+    fn broken_global() -> Vec<u8> {
+        let mut subrs = hint_subrs(29);
+        subrs.resize(1241, vec![11]);
+        let mut index = index_of(&subrs);
+        let size = usize::from(index[2]);
+        let at = |i: usize| 3 + i * size;
+        let start = index[at(1239)..at(1240)]
+            .iter()
+            .fold(0usize, |value, &byte| value << 8 | usize::from(byte));
+        let end = (start - 1).to_be_bytes();
+        index[at(1240)..at(1241)].copy_from_slice(&end[end.len() - size..]);
+        index
     }
 
     /// Two operands for each path operator, the four flex operators (12 34 to 12 37)
@@ -1412,7 +1521,7 @@ mod tests {
             let remapper = subsetter::GlyphRemapper::new_from_glyphs_sorted(glyphs);
             std::panic::catch_unwind(|| subsetter::subset(&font, 0, &remapper)).is_err()
         };
-        let mut cases = 0;
+        let mut cases: Vec<(String, Vec<u8>, u16, bool)> = Vec::new();
         for hints in [65_534, 65_535, 65_536, 65_537, 65_543] {
             for mask in [false, true] {
                 for (cff, glyph) in [
@@ -1453,27 +1562,166 @@ mod tests {
                         2,
                     ),
                 ] {
-                    let refused = matches!(
-                        subset_glyphs(cff.clone(), &[glyph]),
-                        Err(Error::MalformedTable { .. })
-                    );
-                    assert_eq!(
-                        refused,
+                    cases.push((
+                        format!("{hints} hints, mask {mask}"),
+                        cff,
+                        glyph,
                         hints > 65_535,
-                        "{hints} hints, mask {mask}, glyph {glyph}"
-                    );
-                    if cfg!(debug_assertions) {
-                        assert_eq!(
-                            refused,
-                            subsetter_panics(cff, &[glyph]),
-                            "{hints} hints, mask {mask}, glyph {glyph}"
-                        );
-                    }
-                    cases += 1;
+                    ));
                 }
             }
         }
-        assert_eq!(cases, 40);
+        let format3 = vec![3, 0, 2, 0, 0, 0, 0, 3, 1, 0, 5];
+        for hints in [65_535, 65_536] {
+            let over = hints > 65_535;
+            // The other stem operators, and cntrmask.
+            for (stem, last) in [(3, 1), (18, 1), (23, 1), (1, 20)] {
+                let glyph = [hinted(hints, 29, last), vec![14]].concat();
+                cases.push((
+                    format!("{hints} hints, stem {stem}, last {last}"),
+                    programs(
+                        &glyphs_with(1, glyph),
+                        &stem_subrs(29, stem),
+                        &[vec![]],
+                        None,
+                    ),
+                    1,
+                    over,
+                ));
+            }
+            // A second hintmask after more stems: only the first counts its operands.
+            let mut glyph = vec![139, 139, 1, 19, 0xFF];
+            glyph.extend(hinted(hints - 1, 29, 1));
+            glyph.extend([139, 139, 19, 0xFF, 14]);
+            cases.push((
+                format!("{hints} hints, second mask"),
+                programs(&glyphs_with(1, glyph), &hint_subrs(29), &[vec![]], None),
+                1,
+                over,
+            ));
+            // CID-keyed: Font DICT 1's own subroutines; or none, its Subrs operand being
+            // no offset, with the hints in the global ones; or its last Private operator.
+            cases.push((
+                format!("{hints} hints, CID"),
+                programs(
+                    &glyphs_with(4, hinted_glyph(hints, 10, false)),
+                    &[],
+                    &[vec![], hint_subrs(10)],
+                    Some(&format3),
+                ),
+                4,
+                over,
+            ));
+            cases.push((
+                format!("{hints} hints, CID, unreadable Subrs"),
+                Spec {
+                    glyphs: glyphs_with(4, hinted_glyph(hints, 29, false)),
+                    global: index_of(&hint_subrs(29)),
+                    local: vec![vec![], vec![]],
+                    fd_select: Some(format3.clone()),
+                    subrs: Subrs::Unreadable,
+                    ..Spec::default()
+                }
+                .build(),
+                4,
+                over,
+            ));
+            cases.push((
+                format!("{hints} hints, CID, two Private"),
+                Spec {
+                    glyphs: glyphs_with(4, hinted_glyph(hints, 10, false)),
+                    local: vec![vec![vec![11]; 3], hint_subrs(10)],
+                    fd_select: Some(format3.clone()),
+                    two_private: true,
+                    ..Spec::default()
+                }
+                .build(),
+                4,
+                over,
+            ));
+            // The first of two Subrs operators; the last of two CharStrings operators,
+            // the first pointing at the header; an empty String INDEX before the global
+            // subroutines; a global subroutine the subsetter cannot read.
+            cases.push((
+                format!("{hints} hints, two Subrs"),
+                Spec {
+                    glyphs: glyphs_with(3, hinted_glyph(hints, 10, false)),
+                    local: vec![hint_subrs(10)],
+                    subrs: Subrs::Twice,
+                    ..Spec::default()
+                }
+                .build(),
+                3,
+                over,
+            ));
+            let global = Spec {
+                glyphs: glyphs_with(1, hinted_glyph(hints, 29, false)),
+                global: index_of(&hint_subrs(29)),
+                local: vec![vec![]],
+                ..Spec::default()
+            };
+            cases.push((
+                format!("{hints} hints, two CharStrings"),
+                Spec {
+                    top_prefix: [int5(0), vec![17]].concat(),
+                    ..global.clone()
+                }
+                .build(),
+                1,
+                over,
+            ));
+            cases.push((
+                format!("{hints} hints, no strings"),
+                Spec {
+                    no_strings: true,
+                    ..global.clone()
+                }
+                .build(),
+                1,
+                over,
+            ));
+            cases.push((
+                format!("{hints} hints, broken global subroutine"),
+                Spec {
+                    global: broken_global(),
+                    ..global
+                }
+                .build(),
+                1,
+                over,
+            ));
+        }
+        // Hints declared in a subroutine 60 or 61 calls deep: the deepest call is at depth
+        // 64, which the subsetter follows, or 65, where it stops with an error of its own.
+        for (chain, refused) in [(60, true), (61, false)] {
+            let mut global = hint_subrs(29);
+            for link in 0..chain - 1 {
+                global.push(vec![32 + 3 + link + 1, 29, 11]);
+            }
+            global.push([hinted(65_536, 29, 1), vec![11]].concat());
+            cases.push((
+                format!("{chain} calls deep"),
+                programs(
+                    &glyphs_with(1, vec![32 + 3, 29, 14]),
+                    &global,
+                    &[vec![]],
+                    None,
+                ),
+                1,
+                refused,
+            ));
+        }
+        assert_eq!(cases.len(), 40 + 2 * 12 + 2);
+        for (name, cff, glyph, expected) in cases {
+            let refused = matches!(
+                subset_glyphs(cff.clone(), &[glyph]),
+                Err(Error::MalformedTable { .. })
+            );
+            assert_eq!(refused, expected, "{name}");
+            if cfg!(debug_assertions) {
+                assert_eq!(refused, subsetter_panics(cff, &[glyph]), "{name}");
+            }
+        }
     }
 
     #[test]
