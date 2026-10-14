@@ -298,7 +298,8 @@ class Doc:
     mode: int = 15
     compat_flags: tuple[str, ...] = ()
     numbering: str | None = None
-    # Style definitions added to styles.xml after the built-in ones, and before Normal.
+    # Style definitions added to styles.xml after the built-in ones (styles), or before
+    # Normal, ahead of the built-in ones (styles_before_normal).
     styles: str = ""
     styles_before_normal: str = ""
     # Whether Normal is marked w:default.
@@ -718,8 +719,10 @@ def tab_hanging(no_indent_tab: bool, mode: int = 15) -> Doc:
     variant = "with" if no_indent_tab else "without"
     name = "E-tab-hanging-noindenttab" if no_indent_tab else "E-tab-hanging"
     # Word 16 drops the flag from a document in mode 15 when it saves it and renders as if
-    # it were absent (the references of #13); in mode 14 Word may keep it, which the
-    # mode-14 pair is meant to show (#18).
+    # it were absent (the references of #13). In mode 14 it keeps the flag and applies it
+    # (#18, references of #50): the re-saved E-tab-hanging-noindenttab-14 still has it, and
+    # the text after the list label moves from 122.06 pt to 108.02 pt in case B and to
+    # 144.02 pt in case G (reference/word-rules/E-tab-hanging-noindenttab-14/geometry.json).
     where = ""
     if mode != 15:
         name += f"-{mode}"
