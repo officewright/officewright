@@ -76,7 +76,10 @@ pub(crate) fn check_reals(font: &FontRef<'_>, data: &[u8], face: u32) -> Result<
 }
 
 /// The first entry of a Font DICT's FontMatrix that the subsetter scales past the `f32`
-/// range, in its decimal form. When the Top DICT of a CID-keyed font has no FontMatrix,
+/// range, in its decimal form, looking at every Font DICT and every FontMatrix in one,
+/// although the subsetter scales only the Font DICTs of the glyphs it keeps and the last
+/// FontMatrix of each: an entry past `f32::MAX` / 1000 is damage wherever it is. When
+/// the Top DICT of a CID-keyed font has no FontMatrix,
 /// subsetter 0.2.6 writes one of 0.001 there and multiplies each Font DICT's by 1000
 /// (`rewrite_font_dict_index` in `src/cff/dict/font_dict.rs`), in `f64` and then back to
 /// `f32`; an entry past `f32::MAX` / 1000 becomes infinite and reaches the same
@@ -359,15 +362,17 @@ fn overflowing_real(dict: &[u8]) -> Option<String> {
 
 /// Reads the nibbles of a real number (CFF specification, Table 5) after its prefix
 /// byte, as the subsetter's `RealNumber::parse` does. Returns its decimal form, `None`
-/// if the subsetter would reject it, and the number of bytes it takes; `None` overall if
-/// the data ends before the number does.
+/// if the subsetter would reject it (its nibbles, or a text such as "", "." or "1E" that
+/// does not parse as an `f32`, which makes the subsetter stop reading the DICT), and the
+/// number of bytes it takes; `None` overall if the data ends before the number does.
 fn real(data: &[u8]) -> Option<(Option<String>, usize)> {
     let mut text = String::new();
     let mut valid = true;
     for (i, &byte) in data.iter().enumerate() {
         for nibble in [byte >> 4, byte & 0xF] {
             if nibble == 0xF {
-                return Some((valid.then_some(text), i + 1));
+                let readable = valid && text.parse::<f32>().is_ok();
+                return Some((readable.then_some(text), i + 1));
             }
             // As `parse_float_nibble`: no character past the 64th, and E- needs two.
             let room = MAX_REAL_LEN.saturating_sub(text.len());
@@ -472,10 +477,15 @@ mod tests {
     }
 
     /// A CFF table of one glyph (`.notdef`, endchar) whose Top DICT has `top` before its
-    /// offsets, with a Private DICT holding `private`, and, when `font_dict` is given, an
+    /// offsets and `top_after` after them, with a Private DICT holding `private`, and, when `font_dict` is given, an
     /// FDArray of one Font DICT holding it and pointing at that Private DICT. Offsets are
     /// five-byte integers, so the layout does not depend on them.
-    fn cff_table(top: &[u8], private: &[u8], font_dict: Option<&[u8]>) -> Vec<u8> {
+    fn cff_table(
+        top: &[u8],
+        top_after: &[u8],
+        private: &[u8],
+        font_dict: Option<&[u8]>,
+    ) -> Vec<u8> {
         fn index(items: &[&[u8]]) -> Vec<u8> {
             if items.is_empty() {
                 return vec![0, 0];
@@ -506,6 +516,7 @@ mod tests {
                 dict.extend(int5(at));
                 dict.push(18);
             }
+            dict.extend_from_slice(top_after);
             dict
         };
         let font_dict_of = |at: usize| {
@@ -576,7 +587,7 @@ mod tests {
     fn refuses_font_matrices_the_subsetter_scales_past_f32() {
         // A CID-keyed font without a FontMatrix in its Top DICT: the subsetter multiplies
         // the Font DICT's by 1000, and 1E36 becomes infinite.
-        let cid = |matrix: &[u8]| cff_table(&ROS_ADOBE_IDENTITY, &PRIVATE_ZERO, Some(matrix));
+        let cid = |matrix: &[u8]| cff_table(&ROS_ADOBE_IDENTITY, &[], &PRIVATE_ZERO, Some(matrix));
         let err = subset_with(cid(&font_matrix(&E36)), false).unwrap_err();
         assert!(
             matches!(err, Error::MalformedTable { table: "CFF ", .. }),
@@ -586,13 +597,51 @@ mod tests {
             std::error::Error::source(&err).unwrap().to_string(),
             "the FontMatrix entry 1E36 of a Font DICT is too large to subset"
         );
+        // Entries 1 to 3 are scaled too.
+        for at in 1..4 {
+            let mut entries = vec![vec![139]; 6];
+            entries[3] = THOUSANDTH.to_vec();
+            entries[at] = E36.to_vec();
+            let matrix = [entries.concat(), vec![12, 7]].concat();
+            let err = subset_with(cid(&matrix), false).unwrap_err();
+            assert!(
+                matches!(err, Error::MalformedTable { table: "CFF ", .. }),
+                "{at}: {err}"
+            );
+        }
+        // At the limit: 3.40282357E35 times 1000 still rounds to f32::MAX, 3.402824E35
+        // does not.
+        let below = [30, 0x3A, 0x40, 0x28, 0x23, 0x57, 0xB3, 0x5F];
+        let above = [30, 0x3A, 0x40, 0x28, 0x24, 0xB3, 0x5F];
+        subset_with(cid(&font_matrix(&below)), false).unwrap();
+        let err = subset_with(cid(&font_matrix(&above)), false).unwrap_err();
+        assert_eq!(
+            std::error::Error::source(&err).unwrap().to_string(),
+            "the FontMatrix entry 3.402824E35 of a Font DICT is too large to subset"
+        );
+        // A real the subsetter cannot read, "", "." or "1E", ends its reading of the Top
+        // DICT, so a FontMatrix after it does not count, and the Font DICT's is scaled.
+        for unreadable in [&[30, 0xFF][..], &[30, 0xAF], &[30, 0x1B, 0xFF]] {
+            let after = [unreadable, &font_matrix(&THOUSANDTH)].concat();
+            let table = cff_table(
+                &ROS_ADOBE_IDENTITY,
+                &after,
+                &PRIVATE_ZERO,
+                Some(&font_matrix(&E36)),
+            );
+            let err = subset_with(table, false).unwrap_err();
+            assert!(
+                matches!(err, Error::MalformedTable { table: "CFF ", .. }),
+                "{err}"
+            );
+        }
         // 1E30 times 1000 fits; so do the usual 0.001.
         subset_with(cid(&font_matrix(&E30)), false).unwrap();
         subset_with(cid(&font_matrix(&THOUSANDTH)), false).unwrap();
         // With a FontMatrix of its own in the Top DICT, the Font DICT's is written as it
         // is, and 1E36 fits in an f32.
         let top = [&ROS_ADOBE_IDENTITY[..], &font_matrix(&THOUSANDTH)].concat();
-        let own = cff_table(&top, &PRIVATE_ZERO, Some(&font_matrix(&E36)));
+        let own = cff_table(&top, &[], &PRIVATE_ZERO, Some(&font_matrix(&E36)));
         subset_with(own, false).unwrap();
         // The translation is not scaled: 1E36 as its first entry fits.
         let thousandth = [30, 0x0A, 0x00, 0x1F];
@@ -606,14 +655,14 @@ mod tests {
         .concat();
         subset_with(cid(&translated), false).unwrap();
         // A font that is not CID-keyed: the subsetter does not read the FDArray.
-        let sid = cff_table(&[], &PRIVATE_ZERO, Some(&font_matrix(&E36)));
+        let sid = cff_table(&[], &[], &PRIVATE_ZERO, Some(&font_matrix(&E36)));
         subset_with(sid, false).unwrap();
     }
 
     #[test]
     fn checks_the_cff_table_only_where_the_subsetter_reads_it() {
         // A CFF table whose Private DICT has 1E99999 is refused as the outlines.
-        let infinite = cff_table(&[], &PRIVATE_INFINITE, None);
+        let infinite = cff_table(&[], &[], &PRIVATE_INFINITE, None);
         let err = subset_with(infinite.clone(), false).unwrap_err();
         assert!(
             matches!(err, Error::MalformedTable { table: "CFF ", .. }),
@@ -621,8 +670,21 @@ mod tests {
         );
         // Next to a `glyf` table, the subsetter takes TrueType outlines and never reads
         // it, so the face subsets.
-        let subset = subset_with(infinite, true).unwrap();
+        let subset = subset_with(infinite.clone(), true).unwrap();
         assert_eq!(subset.outline_format(), OutlineFormat::TrueType);
+        // `loca` alone does not make the subsetter take TrueType outlines.
+        let font = crate::testing::TestFont::new("Test Sans")
+            .without_table(b"glyf")
+            .with_table(b"CFF ", infinite)
+            .build();
+        let err = crate::font::FontFace::from_bytes(font, 0)
+            .unwrap()
+            .subset([])
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::MalformedTable { table: "CFF ", .. }),
+            "{err}"
+        );
     }
 
     /// Subsets the test font with `cff` as its outlines, and `glyf` and `loca` kept or
