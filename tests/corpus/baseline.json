@@ -223,6 +223,7 @@
     "tests/corpus/word-rules/E-tab-hanging.docx": "opened",
     "tests/corpus/word-rules/E-table-indent-14.docx": "opened",
     "tests/corpus/word-rules/E-table-indent-15.docx": "opened",
+    "tests/corpus/word-rules/E-table-style-bands-5.docx": "opened",
     "tests/corpus/word-rules/E-table-style-bands.docx": "opened",
     "tests/corpus/word-rules/E-table-style-header-rows-off.docx": "opened",
     "tests/corpus/word-rules/E-table-style-header-rows-on.docx": "opened",
