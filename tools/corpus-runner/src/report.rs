@@ -537,6 +537,7 @@ mod tests {
             pdf_valid: None,
             fonts_not_embedded: None,
             word_fonts: None,
+            word_fonts_complete: None,
         });
         result
     }
