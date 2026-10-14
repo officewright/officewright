@@ -49,6 +49,18 @@ pub enum Error {
         /// What the font parser found.
         source: Cause,
     },
+    /// A table is within the format but past a limit the library sets on the work of
+    /// reading it, which no real font comes near: `name` records that point at more than
+    /// 1 MiB of strings to keep when subsetting.
+    #[non_exhaustive]
+    TableOverLimit {
+        /// The face.
+        face: u32,
+        /// The table tag, such as `"name"`.
+        table: &'static str,
+        /// What is past the limit.
+        source: Cause,
+    },
     /// `unitsPerEm` in the `head` table is outside the 16 to 16384 range that the
     /// OpenType specification allows.
     #[non_exhaustive]
@@ -134,6 +146,12 @@ impl fmt::Display for Error {
             Self::MalformedTable { face, table, .. } => {
                 write!(f, "font face {face}: table '{table}' is damaged")
             }
+            Self::TableOverLimit { face, table, .. } => {
+                write!(
+                    f,
+                    "font face {face}: table '{table}' is past a limit of the library"
+                )
+            }
             Self::InvalidUnitsPerEm { face, units_per_em } => write!(
                 f,
                 "font face {face}: unitsPerEm {units_per_em} is outside the 16 to 16384 \
@@ -177,6 +195,7 @@ impl error::Error for Error {
             Self::NotAFont { source }
             | Self::MalformedFace { source, .. }
             | Self::MalformedTable { source, .. }
+            | Self::TableOverLimit { source, .. }
             | Self::Subset { source, .. }
             | Self::SubsetUnsupported { source, .. } => Some(source),
             Self::Read { source, .. } => Some(source),
@@ -194,8 +213,8 @@ impl From<Error> for officewright_core::Error {
     /// A file that cannot be read is an I/O error. Data that is not a font, or a font
     /// that cannot be read or subset, is malformed; a face index or glyph the font does
     /// not have is an invalid argument; outlines or features that cannot be subset yet
-    /// are unsupported. The message keeps the reason the font parser or the subsetter
-    /// gave.
+    /// are unsupported; a table past a limit of the library is a limit exceeded. The
+    /// message keeps the reason the font parser or the subsetter gave.
     fn from(err: Error) -> Self {
         let mut message = err.to_string();
         if let Some(cause) = error::Error::source(&err) {
@@ -219,6 +238,7 @@ impl From<Error> for officewright_core::Error {
             Error::FaceIndexOutOfRange { .. } | Error::GlyphOutOfRange { .. } => {
                 Self::InvalidArgument(message)
             }
+            Error::TableOverLimit { .. } => Self::LimitExceeded(message),
         }
     }
 }
@@ -281,6 +301,17 @@ mod tests {
             ),
             other => panic!("{other:?}"),
         }
+        // A table past a limit of the library is a limit, not damage.
+        let over = Error::TableOverLimit {
+            face: 0,
+            table: "name",
+            source: Cause::new("too many strings"),
+        };
+        assert!(matches!(
+            officewright_core::Error::from(over),
+            officewright_core::Error::LimitExceeded(message)
+                if message == "font face 0: table 'name' is past a limit of the library: too many strings"
+        ));
         // A face the file does not have is the caller's mistake.
         assert!(matches!(
             officewright_core::Error::from(Error::FaceIndexOutOfRange { index: 3, count: 1 }),

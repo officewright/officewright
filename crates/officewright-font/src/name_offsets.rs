@@ -61,7 +61,13 @@ const MAX_KEPT_STRING_BYTES: usize = 1 << 20;
 /// [`MAX_KEPT_STRING_BYTES`] of strings.
 pub(crate) fn check(font: &FontRef<'_>, data: &[u8], face: u32) -> Result<()> {
     match subsetter_table(font, data, b"name").and_then(refusal) {
-        Some(reason) => Err(Error::MalformedTable {
+        Some(Refusal::Overflow(reason)) => Err(Error::MalformedTable {
+            face,
+            table: "name",
+            source: Cause::new(reason),
+        }),
+        // A table within the format, past our bound on the work.
+        Some(Refusal::OverLimit(reason)) => Err(Error::TableOverLimit {
             face,
             table: "name",
             source: Cause::new(reason),
@@ -70,9 +76,17 @@ pub(crate) fn check(font: &FontRef<'_>, data: &[u8], face: u32) -> Result<()> {
     }
 }
 
+/// Why a `name` table is refused.
+enum Refusal {
+    /// The subsetter would overflow its offsets.
+    Overflow(String),
+    /// The strings of the records to keep take more than [`MAX_KEPT_STRING_BYTES`].
+    OverLimit(String),
+}
+
 /// Why the `name` table `table` is refused: subsetter 0.2.6 would overflow on it, or it
 /// points at more than [`MAX_KEPT_STRING_BYTES`] of strings to keep.
-fn refusal(table: &[u8]) -> Option<String> {
+fn refusal(table: &[u8]) -> Option<Refusal> {
     let read = |at: usize| -> Option<u16> {
         Some(u16::from_be_bytes(
             table.get(at..at.checked_add(2)?)?.try_into().ok()?,
@@ -108,10 +122,10 @@ fn refusal(table: &[u8]) -> Option<String> {
         .map(|&(.., length, _)| usize::from(length))
         .sum();
     if referenced > MAX_KEPT_STRING_BYTES {
-        return Some(format!(
+        return Some(Refusal::OverLimit(format!(
             "the name records to keep point at {referenced} bytes of strings, more than the \
              {MAX_KEPT_STRING_BYTES} read before subsetting"
-        ));
+        )));
     }
     let mut kept = 0;
     let mut strings = HashSet::new();
@@ -124,29 +138,29 @@ fn refusal(table: &[u8]) -> Option<String> {
         let (offset, length) = (usize::from(offset), usize::from(length));
         let end = offset + length;
         if end > MAX_OFFSET {
-            return Some(format!(
+            return Some(Refusal::Overflow(format!(
                 "the string of name record {i} ends {end} bytes into the string storage, \
                  past the {MAX_OFFSET} that the subsetter can handle"
-            ));
+            )));
         }
         // The subsetter ends with an error here.
         let string = storage.get(offset..end)?;
         if strings.insert(string) {
             stored += length;
             if stored > MAX_OFFSET {
-                return Some(format!(
+                return Some(Refusal::Overflow(format!(
                     "the strings of the name records to keep take more than the \
                      {MAX_OFFSET} bytes that the subsetter can handle"
-                ));
+                )));
             }
         }
     }
     // The storage follows the records.
     if HEADER_SIZE + RECORD_SIZE * kept > MAX_OFFSET {
-        return Some(format!(
+        return Some(Refusal::Overflow(format!(
             "{kept} name records to keep, more than the {} that the subsetter can handle",
             (MAX_OFFSET - HEADER_SIZE) / RECORD_SIZE
-        ));
+        )));
     }
     None
 }
@@ -181,9 +195,10 @@ mod tests {
         let font = FontFace::from_bytes(data, 0).unwrap();
         match font.subset([]) {
             Ok(_) => None,
-            Err(err @ Error::MalformedTable { table: "name", .. }) => {
-                Some(std::error::Error::source(&err).unwrap().to_string())
-            }
+            Err(
+                err @ (Error::MalformedTable { table: "name", .. }
+                | Error::TableOverLimit { table: "name", .. }),
+            ) => Some(std::error::Error::source(&err).unwrap().to_string()),
             Err(err) => panic!("{err}"),
         }
     }
@@ -259,14 +274,37 @@ mod tests {
     #[test]
     fn refuses_strings_to_keep_of_more_than_1_mib_counted_with_repeats() {
         // 32 records of one string of 32768 bytes, which the subsetter would store once,
-        // come to 1 MiB; a record of one byte more is too much.
+        // come to 1 MiB; a record of one byte more is too much. Every Unicode encoding
+        // the subsetter keeps counts.
         let storage = vec![0; 32_768];
         let records = |extra: Option<u16>| {
-            let mut records = vec![(3, 1, 1, 32_768, 0); 32];
+            let mut records = vec![(3, 1, 1, 32_768, 0); 28];
+            records.extend([
+                (0, 3, 2, 32_768, 0),
+                (3, 0, 4, 32_768, 0),
+                (3, 10, 6, 32_768, 0),
+                (0, 4, 13, 32_768, 0),
+            ]);
             records.extend(extra.map(|length| (3, 1, 4, length, 0)));
             records
         };
         assert_eq!(subset_error(raw_name_table(&records(None), &storage)), None);
+        // A limit of ours, not damage: the C ABI's LIMIT_EXCEEDED.
+        let data = TestFont::new("Test Sans")
+            .with_table(b"name", raw_name_table(&records(Some(1)), &storage))
+            .build();
+        let err = FontFace::from_bytes(data, 0)
+            .unwrap()
+            .subset([])
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::TableOverLimit { table: "name", .. }),
+            "{err}"
+        );
+        assert!(matches!(
+            officewright_core::Error::from(err),
+            officewright_core::Error::LimitExceeded(_)
+        ));
         assert_eq!(
             subset_error(raw_name_table(&records(Some(1)), &storage)).as_deref(),
             Some(
@@ -341,7 +379,7 @@ mod tests {
         // the record is missing.)
         let mut table = raw_name_table(&[(3, 1, 1, 4, 0xFFFE), (3, 1, 2, 0, 0)], &[]);
         table[4..6].copy_from_slice(&6u16.to_be_bytes());
-        assert!(refusal(&table).is_some());
+        assert!(matches!(refusal(&table), Some(Refusal::Overflow(_))));
         assert!(refusal(&table[..table.len() - 1]).is_none());
         left_to_the_subsetter(table[..table.len() - 1].to_vec());
         // An ordinary table.
