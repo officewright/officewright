@@ -1,7 +1,7 @@
 {
  "format": 1,
  "document": "word-rules/E-space-before-top.docx",
- "pdf_sha256": "acf9be37626184e744a3c483ca8c2255ae44b4b33734a2caf864bb1df0d584a0",
+ "pdf_sha256": "7e0f8786dc6b165e7375e95230ef7e4e8cc3b6795c61ae28dbecff6feb8cfc97",
  "made_with": "pdftotext 24.02.0 -bbox-layout",
  "units": "points, origin at the top left of the page, y downwards",
  "page_count": 8,

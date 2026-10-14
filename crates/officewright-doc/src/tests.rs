@@ -2953,7 +2953,15 @@ fn reads_the_font_table() {
         r#"<w:fonts xmlns:w="{W}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:font w:name="Calibri"><w:panose1 w:val="020F0502020204030204"/><w:charset w:val="00"/><w:family w:val="swiss"/><w:pitch w:val="variable"/><w:sig w:usb0="E4002EFF" w:usb1="C000247B" w:usb2="00000009" w:usb3="00000000" w:csb0="000001FF" w:csb1="00000000"/></w:font><w:font w:name="MS Mincho"><w:altName w:val="ＭＳ 明朝"/><w:charset w:val="80"/><w:family w:val="modern"/><w:pitch w:val="fixed"/></w:font><w:font w:name="Symbol"><w:charset w:val="02" w:characterSet="Symbol"/><w:family w:val="roman"/><w:notTrueType/><w:embedRegular r:id="rId1" w:fontKey="{{4F9F5AB2-1C3D-4E5F-9A0B-1C2D3E4F5A6B}}" w:subsetted="1"/><w:embedBold r:id="rId2"/></w:font></w:fonts>"#
     );
     let document = with_part("fontTable", "fontTable.xml", &fonts).unwrap();
-    assert!(messages(&document).is_empty(), "{:?}", messages(&document));
+    // The font table has no relationships: the embedded fonts' parts are not found, which
+    // is reported (their programs are tested in tests::embedded_fonts).
+    assert_eq!(
+        messages(&document),
+        [
+            "/word/fontTable.xml: the w:embedRegular of the font Symbol names the relationship rId1, which the font table does not have",
+            "/word/fontTable.xml: the w:embedBold of the font Symbol names the relationship rId2, which the font table does not have",
+        ]
+    );
     assert_eq!(document.fonts().len(), 3);
     let calibri = document.font("Calibri").unwrap();
     assert_eq!(
@@ -3135,7 +3143,8 @@ fn repairs_damaged_font_declarations() {
     // A sign is not a hexadecimal digit; w:family is read through the fallback.
     assert_eq!((b.charset(), b.family()), (None, Some(FontFamily::Modern)));
     let messages = messages(&document);
-    assert_eq!(messages.len(), 7, "{messages:?}");
+    // The seven of the declarations, then the embedded font's relationship.
+    assert_eq!(messages.len(), 8, "{messages:?}");
     assert!(messages[0].ends_with(": a second w:charset in a w:font is ignored"));
     assert!(messages[1].ends_with(": a second w:family in a w:font is ignored"));
     assert!(messages[2].ends_with(": a second w:altName in a w:font is ignored"));
@@ -3143,6 +3152,9 @@ fn repairs_damaged_font_declarations() {
     assert!(messages[4].ends_with(": a w:embedRegular without r:id is ignored"));
     assert!(messages[5].ends_with(": a second w:embedBold in a w:font is ignored"));
     assert!(messages[6].ends_with(r#": w:charset w:val="+F" is not valid; it is ignored"#));
+    assert!(
+        messages[7].ends_with("names the relationship rId1, which the font table does not have")
+    );
 }
 
 #[test]
@@ -3251,10 +3263,12 @@ fn repairs_a_damaged_theme() {
 }
 
 mod drawing;
+mod embedded_fonts;
 mod format;
 #[cfg(feature = "pdf")]
 mod layout;
 mod paragraph_format;
+mod table_styles;
 
 /// The text of the paragraphs of some blocks, one line each.
 fn block_text<'a>(blocks: impl Iterator<Item = Block<'a>>) -> Vec<String> {
@@ -3575,4 +3589,45 @@ fn a_reference_to_a_part_of_the_other_kind_is_not_written() {
         );
     }
     assert!(sections[1].footer(HeaderFooterKind::First).is_none());
+}
+
+#[test]
+fn reads_the_conditional_formats_of_a_table_style() {
+    let styles = format!(
+        r#"<w:styles xmlns:w="{W}" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><w:style w:type="table" w:styleId="Grid"><w:name w:val="Grid"/><w:tblPr><w:tblStyleRowBandSize w:val="1"/></w:tblPr><w:tblStylePr w:type="firstRow"><w:rPr><w:b/></w:rPr><w:tcPr><w:shd w:val="clear" w:fill="FF0000"/></w:tcPr></w:tblStylePr><w:tblStylePr w:type="bogus"><w:rPr><w:i/></w:rPr></w:tblStylePr><mc:AlternateContent><mc:Choice Requires="w99"><w:tblStylePr w:type="lastRow"/></mc:Choice><mc:Fallback><w:tblStylePr w:type="band1Horz"><w:pPr><w:jc w:val="center"/></w:pPr><w:trPr><w:cantSplit/></w:trPr><w:tblPr><w:tblCellSpacing w:w="20" w:type="dxa"/></w:tblPr></w:tblStylePr></mc:Fallback></mc:AlternateContent></w:style></w:styles>"#
+    );
+    let document = with_part("styles", "styles.xml", &styles).unwrap();
+    let grid = document.styles().get("Grid").unwrap();
+    assert_eq!(grid.table_properties().row_band_size(), Some(1));
+    let formats: Vec<ConditionalFormat<'_>> = grid.conditional_formats().collect();
+    // A type that is not one is left out; the branch the reader takes is read.
+    let conditions: Vec<TableStyleCondition> =
+        formats.iter().map(|format| format.condition()).collect();
+    assert_eq!(
+        conditions,
+        [
+            TableStyleCondition::FirstRow,
+            TableStyleCondition::OddRowBand
+        ]
+    );
+    assert_eq!(formats[0].run_properties().bold(), Some(true));
+    assert_eq!(
+        formats[0]
+            .cell_properties()
+            .shading()
+            .and_then(|shading| shading.fill().value()),
+        Some(ColorValue::Rgb(0xFF, 0, 0))
+    );
+    assert_eq!(
+        formats[1].paragraph_properties().justification(),
+        Some(Justification::Center)
+    );
+    assert_eq!(formats[1].row_properties().cant_split(), Some(true));
+    assert_eq!(
+        formats[1].table_properties().cell_spacing(),
+        Some(TableWidth::Length(Pt(1.0)))
+    );
+    assert_eq!(formats[1].run_properties(), RunProperties::default());
+    // A style without them has none.
+    assert_eq!(document.styles().iter().count(), 1);
 }
