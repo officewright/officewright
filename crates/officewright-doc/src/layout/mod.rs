@@ -9,6 +9,7 @@
 
 mod inline;
 mod list;
+mod notes;
 mod paragraph;
 mod section;
 mod style;
@@ -67,7 +68,8 @@ const MAX_LEFT_OUT: usize = 1000;
 /// Whether Word uses OpenType features in a document: ligatures and contextual
 /// alternates, which it uses only when the compatibility setting
 /// `enableOpenTypeFeatures` is on, off by default ([MS-DOCX] 2.3.3). Of the setting
-/// written twice, the last counts, as for the other compatibility settings.
+/// written twice, the last counts, as for the other compatibility settings. The note
+/// names kerning too, which the translation does not gate yet (see `translate_run_style`).
 fn open_type_features(document: &Document) -> bool {
     document
         .settings()
@@ -85,9 +87,8 @@ impl Document {
     /// from semver until 1.0.
     ///
     /// Not translated yet, and listed: table styles and a row's table property
-    /// exceptions, headers and footers, footnotes and endnotes, drawings, pictures and
-    /// other objects, equations, and indents and spacing given in character or line
-    /// units, which keep their value in points.
+    /// exceptions, drawings, pictures and other objects, equations, and indents and
+    /// spacing given in character or line units, which keep their value in points.
     ///
     /// Also listed is what the IR has no place for yet: a row's own alignment and cell
     /// spacing where they differ from the table's, a row's hidden end mark, a cell's
@@ -201,6 +202,17 @@ struct Translator<'a> {
     path: Vec<Step>,
     /// How many tables the current block is in.
     table_depth: usize,
+    /// The translated blocks of each header and footer used so far, by story, and their
+    /// weight, the bytes a copy of them takes.
+    header_footers: HashMap<u32, (Vec<ir::Block>, usize)>,
+    /// The weight of the headers and footers copied into sections so far.
+    copied: usize,
+    /// The IR note of each note referred to so far: whether it is an endnote, and its id.
+    notes: HashMap<(bool, i64), ir::NoteId>,
+    /// Whether the blocks being translated are a note's, which holds no note references.
+    in_note: bool,
+    /// How many notes the IR has.
+    notes_added: usize,
 }
 
 impl<'a> Translator<'a> {
@@ -217,6 +229,11 @@ impl<'a> Translator<'a> {
             path: Vec::new(),
             table_depth: 0,
             open_type_features: open_type_features(document),
+            header_footers: HashMap::new(),
+            copied: 0,
+            notes: HashMap::new(),
+            in_note: false,
+            notes_added: 0,
         }
     }
 
@@ -230,6 +247,7 @@ impl<'a> Translator<'a> {
             self.ir.add_section(section);
             self.path.truncate(self.path.len().saturating_sub(2));
         }
+        self.note_separators();
         if self.omitted > 0 {
             let omitted = self.omitted;
             self.left_out.push(LeftOut {
@@ -246,7 +264,19 @@ impl<'a> Translator<'a> {
 
     /// The blocks of a story, through content controls, which the IR does not have.
     fn blocks(&mut self, blocks: impl Iterator<Item = Block<'a>> + 'a) -> Vec<ir::Block> {
+        self.blocks_in(Some("blocks"), blocks)
+    }
+
+    /// Blocks held in the field `field` of what is being translated, or, with none, in
+    /// the list of blocks the current place names (a header, a note separator): the
+    /// place of each is written as the layout's report writes it.
+    fn blocks_in(
+        &mut self,
+        field: Option<&'static str>,
+        blocks: impl Iterator<Item = Block<'a>> + 'a,
+    ) -> Vec<ir::Block> {
         let mut out = Vec::new();
+        let steps = if field.is_some() { 2 } else { 1 };
         // Content controls nest: walked with a stack of their blocks, never recursively.
         let mut pending: Vec<Box<dyn Iterator<Item = Block<'a>> + 'a>> = vec![Box::new(blocks)];
         while let Some(top) = pending.last_mut() {
@@ -254,8 +284,10 @@ impl<'a> Translator<'a> {
                 pending.pop();
                 continue;
             };
-            self.path
-                .extend([Step::Field("blocks"), Step::Index(out.len())]);
+            if let Some(field) = field {
+                self.path.push(Step::Field(field));
+            }
+            self.path.push(Step::Index(out.len()));
             match block {
                 Block::Paragraph(paragraph) => {
                     out.push(paragraph::paragraph(self, paragraph).into());
@@ -275,7 +307,7 @@ impl<'a> Translator<'a> {
                     }
                 }
             }
-            self.path.truncate(self.path.len().saturating_sub(2));
+            self.path.truncate(self.path.len().saturating_sub(steps));
         }
         out
     }

@@ -64,7 +64,8 @@ impl<'a> Translator<'a> {
                     .shading()
                     .and_then(|shading| self.shading(shading)),
             )
-            .with_floating(floats(properties.position()))
+            // Word ignores a w:tblpPr in a note (MS-OI29500 §17.4.57(b)).
+            .with_floating(!self.in_note && floats(properties.position()))
             .with_bidi_visual(properties.right_to_left().unwrap_or(false));
         // The reader reads w:gridCol as ST_TwipsMeasure, which has no negative widths.
         let grid: Vec<Pt> = table
@@ -359,8 +360,8 @@ fn spacing(width: Option<TableWidth>) -> Pt {
 /// horizontal anchor is the text and vertical anchor is not; without anchors it takes
 /// the text horizontally and the margin vertically, so a `w:tblpPr` without attributes,
 /// which Word ignores too, is such a one (MS-OI29500 §17.4.57(b), (c)). Word also
-/// ignores one in a text box, a note or a comment, whose tables this translation does
-/// not reach yet.
+/// ignores one in a note, which the caller sees to, and in a text box or a comment,
+/// whose tables this translation does not reach yet.
 fn floats(position: Option<&TablePosition>) -> bool {
     let Some(position) = position else {
         return false;

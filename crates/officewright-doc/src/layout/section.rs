@@ -6,10 +6,10 @@ use officewright_core::{PageSize, Pt};
 use officewright_layout::ReportKind;
 use officewright_layout::ir;
 
-use super::Translator;
+use super::{Step, Translator};
 use crate::model::{
-    NotePosition, NoteProperties, NoteRestart, NumberFormat, Orientation, Section, SectionStart,
-    VerticalJustification,
+    HeaderFooterKind, NotePosition, NoteProperties, NoteRestart, NumberFormat, Orientation,
+    Section, SectionStart, VerticalJustification,
 };
 
 /// The settings that apply to the whole document.
@@ -176,11 +176,8 @@ pub(super) fn section<'a>(t: &mut Translator<'a>, section: Section<'a>) -> ir::S
         ir::NoteProps::endnotes(),
         [(settings.endnotes(), true), (properties.endnotes(), false)],
     );
-    if !properties.headers().is_empty() || !properties.footers().is_empty() {
-        t.leave_out(ReportKind::FeatureUnsupported, || {
-            "the section's headers and footers are left out: they are not translated yet".into()
-        });
-    }
+    let headers = t.header_footer_set(section, true);
+    let footers = t.header_footer_set(section, false);
     let blocks = t.blocks(section.blocks());
     ir::Section::new(page)
         .with_columns(columns)
@@ -190,7 +187,138 @@ pub(super) fn section<'a>(t: &mut Translator<'a>, section: Section<'a>) -> ir::S
         .with_vertical_align(vertical_align)
         .with_footnotes(footnotes)
         .with_endnotes(endnotes)
+        .with_headers(headers)
+        .with_footers(footers)
         .with_blocks(blocks)
+}
+
+impl<'a> Translator<'a> {
+    /// The headers or footers in effect for a section, each translated once and copied
+    /// into every section that has it. The copies are bounded: past [`MAX_COPIED`] bytes
+    /// as [`weight`] counts them, or the size of the document's XML if that is more, a
+    /// section gets no more of them, and that is listed.
+    fn header_footer_set(&mut self, section: Section<'a>, header: bool) -> ir::HeaderFooterSet {
+        let mut set = ir::HeaderFooterSet::default();
+        let place = if header { "headers" } else { "footers" };
+        for (kind, field) in [
+            (HeaderFooterKind::Default, "primary"),
+            (HeaderFooterKind::First, "first"),
+            (HeaderFooterKind::Even, "even"),
+        ] {
+            let story = if header {
+                section.header(kind)
+            } else {
+                section.footer(kind)
+            };
+            let Some(story) = story else {
+                continue;
+            };
+            self.path.extend([Step::Field(place), Step::Field(field)]);
+            if !self.header_footers.contains_key(&story.index()) {
+                let blocks = self.blocks_in(None, story.blocks());
+                let weight = weight(&blocks);
+                self.header_footers.insert(story.index(), (blocks, weight));
+            }
+            let limit = MAX_COPIED.max(self.document.xml_size);
+            let copy = match self.header_footers.get(&story.index()) {
+                Some((blocks, weight)) if self.copied.saturating_add(*weight) <= limit => {
+                    self.copied += weight;
+                    Some(blocks.clone())
+                }
+                _ => None,
+            };
+            match copy {
+                Some(blocks) => {
+                    set = match kind {
+                        HeaderFooterKind::Default => set.with_primary(blocks),
+                        HeaderFooterKind::First => set.with_first(blocks),
+                        HeaderFooterKind::Even => set.with_even(blocks),
+                    };
+                }
+                None => self.leave_out(ReportKind::FeatureUnsupported, || {
+                    format!(
+                        "a {} is left out: the copies of headers and footers in sections \
+                         have reached their limit",
+                        if header { "header" } else { "footer" }
+                    )
+                }),
+            }
+            self.path.truncate(self.path.len().saturating_sub(2));
+        }
+        set
+    }
+}
+
+/// How much memory the copies of headers and footers in sections take at most, in
+/// bytes as [`weight`] counts them, however small the document: a header of a few lines
+/// in every section of a document of thousands of sections is not damage. A document
+/// whose XML is larger may copy as much as its XML. Smaller in tests, which reach it.
+const MAX_COPIED: usize = if cfg!(test) { 1 << 20 } else { 64 << 20 };
+
+/// How many bytes of memory a copy of some blocks takes: every allocation a clone makes.
+/// That is each block, row, cell, inline and tab stop, and what they own: a table's grid,
+/// a paragraph's tab stops, the text of inlines, a symbol's font name, a field's name, its
+/// number format's name and its result, an anchored object. A part that is small in the
+/// document can take much more in the IR: a table of thousands of grid columns, or empty
+/// paragraphs whose style gives 64 tab stops. Tables nest no deeper than the IR allows,
+/// and the results of fields hold no fields.
+fn weight(blocks: &[ir::Block]) -> usize {
+    blocks
+        .iter()
+        .map(|block| {
+            size_of::<ir::Block>()
+                + match block {
+                    ir::Block::Paragraph(paragraph) => {
+                        size_of_val(paragraph.props().tabs()) + inlines_weight(paragraph.inlines())
+                    }
+                    ir::Block::Table(table) => {
+                        size_of_val(table.grid())
+                            + table
+                                .rows()
+                                .iter()
+                                .map(|row| {
+                                    size_of::<ir::Row>()
+                                        + row
+                                            .cells()
+                                            .iter()
+                                            .map(|cell| {
+                                                size_of::<ir::Cell>() + weight(cell.blocks())
+                                            })
+                                            .sum::<usize>()
+                                })
+                                .sum::<usize>()
+                    }
+                    _ => 0,
+                }
+        })
+        .sum()
+}
+
+/// How many bytes of memory a copy of some inlines takes, as [`weight`] counts them.
+fn inlines_weight(inlines: &[ir::Inline]) -> usize {
+    inlines
+        .iter()
+        .map(|inline| {
+            size_of::<ir::Inline>()
+                + match inline {
+                    ir::Inline::Text { text, .. } => text.len(),
+                    ir::Inline::Symbol { font, .. } => font.len(),
+                    ir::Inline::Field(field) => {
+                        let name = match field.kind() {
+                            ir::FieldKind::Other(name) => name.len(),
+                            _ => 0,
+                        };
+                        let format = match field.format() {
+                            Some(ir::NumberFormat::Other(name)) => name.len(),
+                            _ => 0,
+                        };
+                        name + format + inlines_weight(field.result())
+                    }
+                    ir::Inline::Anchored(_) => size_of::<ir::AnchoredObject>(),
+                    _ => 0,
+                }
+        })
+        .sum()
 }
 
 /// Note properties: Word's defaults, then the document's settings, then the section's;
@@ -263,3 +391,42 @@ impl PartialEq for Flag {
 }
 
 impl Eq for Flag {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Rows and anchored objects never dominate a header's memory as documents write
+    // them, so their terms in `weight` are tested here: each row is a cell and a
+    // paragraph too, and the translation makes no anchored object yet.
+    #[test]
+    fn weighs_rows_and_anchored_objects_at_least_at_their_size() {
+        let mut document = ir::Document::default();
+        let mark = document.add_run_style(ir::RunStyle::default());
+        let image = document.add_image(ir::ImageData::new(ir::ImageFormat::Png, vec![0u8; 4]));
+        let paragraph = |inlines: Vec<ir::Inline>| -> ir::Block {
+            ir::Paragraph::new(mark).with_inlines(inlines).into()
+        };
+        let row = ir::Row::default().with_cells(vec![
+            ir::Cell::default().with_blocks(vec![paragraph(Vec::new())]),
+        ]);
+        let table = |rows: usize| -> ir::Block {
+            ir::Table::default()
+                .with_rows(vec![row.clone(); rows])
+                .into()
+        };
+        // Each more row weighs at least a row, its cell and its paragraph.
+        let one_more = weight(&[table(2)]) - weight(&[table(1)]);
+        assert!(one_more >= size_of::<ir::Row>() + size_of::<ir::Cell>() + size_of::<ir::Block>());
+        // An anchored object weighs at least its inline and its box.
+        let anchored = ir::Inline::Anchored(Box::new(ir::AnchoredObject::new(
+            ir::ObjectContent::Picture(ir::Picture::new(image)),
+            ir::Size::new(Pt(1.0), Pt(1.0)),
+            ir::HorizontalAnchor::default(),
+            ir::VerticalAnchor::default(),
+        )));
+        let with = weight(&[paragraph(vec![anchored])]);
+        let without = weight(&[paragraph(Vec::new())]);
+        assert!(with - without >= size_of::<ir::Inline>() + size_of::<ir::AnchoredObject>());
+    }
+}

@@ -232,16 +232,18 @@ impl CharacterFormat {
         self.language_bidi.as_deref()
     }
 
-    /// The kinds of ligatures the text uses; none when nothing in the hierarchy says. When
-    /// the document defaults give no run properties at all, Word's own defaults apply,
-    /// which give standard and contextual ligatures; document defaults that give run
-    /// properties but no ligatures give none.
+    /// The kinds of ligatures the text asks for; none when nothing in the hierarchy says.
+    /// When the document defaults give no run properties at all, Word's own defaults
+    /// apply, which give standard and contextual ligatures; document defaults that give
+    /// run properties but no ligatures give none. Word draws them only when the
+    /// document's compatibility setting `enableOpenTypeFeatures` is on ([MS-DOCX] 2.3.3).
     pub fn ligatures(&self) -> Ligatures {
         self.ligatures
     }
 
-    /// Whether the text uses the font's contextual alternates; off when nothing in the
-    /// hierarchy says.
+    /// Whether the text asks for the font's contextual alternates; off when nothing in the
+    /// hierarchy says. Word uses them only when the document's compatibility setting
+    /// `enableOpenTypeFeatures` is on ([MS-DOCX] 2.3.3).
     pub fn contextual_alternates(&self) -> bool {
         self.contextual_alternates
     }
