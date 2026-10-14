@@ -1226,8 +1226,9 @@ impl<'d> Pager<'d, '_, '_> {
     /// `values.1` are those it shows): its paragraphs one under the other with the space
     /// between them, the space before the first and after the last included. The layouts
     /// of its paragraphs without fields are taken from `last` when it has them. Paragraphs
-    /// past the page's height `room.1`, spacing included, are left out, and reported: the
-    /// last ones of a header, the first ones of a footer, which grows up from its distance.
+    /// that would start past the page's height `room.1`, spacing included, are left out,
+    /// and reported: the last ones of a header, the first ones of a footer, which grows up
+    /// from its distance.
     fn frame(
         &mut self,
         candidates: Rc<Candidates<'d>>,
@@ -1258,13 +1259,27 @@ impl<'d> Pager<'d, '_, '_> {
         // it in a footer.
         let mut before: Option<&'d Paragraph> = None;
         for index in order {
-            if taken >= page_height.0 {
-                self.report_cut(&candidates.location);
-                break;
-            }
             let Some((part, _)) = candidates.parts.get(index) else {
                 continue;
             };
+            // The space between it and the paragraph before, or before a header's first
+            // and after a footer's last: a paragraph that would start past the page's
+            // height is not laid out, nor any after it.
+            let props = part.paragraph.props();
+            let gap = match (before, candidates.header) {
+                (None, true) => paragraph::space_before(self.document, props).0,
+                (None, false) => paragraph::space_after(self.document, props).0,
+                (Some(above), true) => {
+                    paragraph::space_between(self.document, above.props(), props).0
+                }
+                (Some(below), false) => {
+                    paragraph::space_between(self.document, props, below.props()).0
+                }
+            };
+            if taken + gap >= page_height.0 {
+                self.report_cut(&candidates.location);
+                break;
+            }
             let layout = match reusable.get(&index) {
                 Some(layout) => Rc::clone(layout),
                 None => Rc::new(paragraph::lay_out_with(
@@ -1276,18 +1291,7 @@ impl<'d> Pager<'d, '_, '_> {
                     Some(values),
                 )),
             };
-            let props = part.paragraph.props();
-            taken += match (before, candidates.header) {
-                (None, true) => paragraph::space_before(self.document, props).0,
-                (None, false) => paragraph::space_after(self.document, props).0,
-                (Some(above), true) => {
-                    paragraph::space_between(self.document, above.props(), props).0
-                }
-                (Some(below), false) => {
-                    paragraph::space_between(self.document, props, below.props()).0
-                }
-            };
-            taken += layout.height().0;
+            taken += gap + layout.height().0;
             before = Some(part.paragraph);
             kept.push((index, layout));
         }
@@ -3170,8 +3174,8 @@ mod tests {
     #[test]
     fn the_cut_at_the_page_s_height_counts_the_space_between_paragraphs() {
         // Twenty one-line paragraphs of 20 pt with 100 pt before each, on a page 200 pt
-        // high: the second ends 240 pt down, and no third is laid out. A header keeps its
-        // first ones.
+        // high: the second would start 220 pt down, and is not laid out. A header keeps
+        // its first ones.
         let document = document(|style| {
             let header = (0..20)
                 .map(|n| text_paragraph(style, &format!("H{n}"), spacing(100.0, 0.0)))
@@ -3184,7 +3188,7 @@ mod tests {
         });
         let (laid, report) = laid(&document, 100);
         let drawn = texts(&laid.expect("pages").pages[0]);
-        assert_eq!(drawn, ["H0", "H1", "B"]);
+        assert_eq!(drawn, ["H0", "B"]);
         assert!(
             messages(&report).iter().any(|m| m.contains("cut")),
             "{report:?}"
@@ -3279,6 +3283,54 @@ mod tests {
             .count();
         assert_eq!(shading, 1);
         assert!(texts(page).iter().any(|text| text == "F29"));
+    }
+
+    #[test]
+    fn the_cut_counts_the_spacing_on_each_side_of_a_paragraph() {
+        // One-line paragraphs of 20 pt on a page 200 pt high, with 80 pt after every
+        // other one; what a frame keeps depends on which space lies between which.
+        let frame = |style, last_after: f64| {
+            (0..10)
+                .map(|n| {
+                    let after = if n == 9 {
+                        last_after
+                    } else if n % 2 == 0 {
+                        80.0
+                    } else {
+                        0.0
+                    };
+                    text_paragraph(style, &format!("P{n}"), spacing(0.0, after))
+                })
+                .collect::<Vec<Block>>()
+        };
+        // A header: P0 to 20 pt, P1 after P0's 80 to 120, P2 to 140; P3 would start at
+        // 220.
+        let header = document(|style| {
+            vec![
+                Section::new(close_frames())
+                    .with_headers(HeaderFooterSet::default().with_primary(frame(style, 0.0)))
+                    .with_blocks(vec![text_paragraph(style, "B", spacing(0.0, 0.0))]),
+            ]
+        });
+        let (header_laid, _) = laid(&header, 100);
+        assert_eq!(
+            texts(&header_laid.expect("pages").pages[0]),
+            ["P0", "P1", "P2", "B"]
+        );
+        // A footer, from its distance up: P9's 90 after it and P9 to 110, P8's 80 after
+        // it and P8 to 210; P7 would start at 210.
+        let footer = document(|style| {
+            vec![
+                Section::new(close_frames())
+                    .with_footers(HeaderFooterSet::default().with_primary(frame(style, 90.0)))
+                    .with_blocks(vec![text_paragraph(style, "B", spacing(0.0, 0.0))]),
+            ]
+        });
+        let (footer_laid, _) = laid(&footer, 100);
+        assert_eq!(
+            texts(&footer_laid.expect("pages").pages[0]),
+            ["P8", "P9", "B"]
+        );
     }
 
     #[test]
