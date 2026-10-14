@@ -770,6 +770,9 @@ def compact_formatting(
             out = {"index": paragraph["index"], "text": paragraph["text"]}
             if paragraph["style"] is not None:
                 out["style"] = paragraph["style"]
+            # Left out when Word could not say, so that it differs from a built-in style.
+            if paragraph["style_builtin"] is not None:
+                out["style_builtin"] = paragraph["style_builtin"]
             if story["story"] == "main" and styles_aligned and xml[number][1] is not None:
                 out["style_id"], out["style_name"] = xml[number][1], xml[number][2]
             out["format"] = index_of(formats, format_index, paragraph["format"])
@@ -878,6 +881,10 @@ PDFFONTS_TYPES = (
 # or "[none]" for a font dictionary that is not an object of its own. A long name pushes the
 # columns aside, and a name may hold spaces (a "#20" in the PDF), so the row is read by the
 # known types rather than by column positions.
+# The name is the shortest prefix before a known type. A name whose last word is "CID" and that
+# is too long for its column (36 characters) loses that word to the type "CID TrueType"; the
+# emb column is still read right, so such a font is never missed, only named short in a
+# refusal. pdffonts adds a bracketed suffix of two capitals to the type of an OpenType font.
 PDFFONTS_ROW = re.compile(
     r"^(?P<name>.+?)\s+(?:" + "|".join(map(re.escape, PDFFONTS_TYPES)) + r")(?: \([A-Z]{2}\))?"
     r"\s+\S+\s+(?P<emb>yes|no)\s+(?:yes|no)\s+(?:yes|no)\s+(?:\[none\]|\d+\s+\d+)\s*$"
@@ -1112,6 +1119,8 @@ class DrawnFont:
 
 def drawn_font(name: str, index: dict[str, list[FontFace]]) -> DrawnFont:
     """The face for a font the PDF names without embedding it; refused unless exactly one."""
+    if not FONT.match(name):
+        raise Refused(f"{name!r}: unexpected font name in the PDF")
     substitute = SUBSTITUTES.get(name, "")
     postscript = substitute or name
     if "," in postscript:

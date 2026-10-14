@@ -174,8 +174,10 @@ every document `scripts/corpus-import.py` writes a folder `reference/<group>/<na
 `page-001.png`, ... (every page rasterized by poppler's `pdftoppm` at 110 dpi in 8-bit
 grey) and `geometry.json` (page sizes, the boxes of every line and word from
 `pdftotext -bbox-layout` in points from the top left of the page, the page count, and Word's
-page breaks). Poppler rasterizes fonts the PDF does not embed with substitutes, so the Notes
-list them: their glyphs in the PNG files are not Word's, their positions in `geometry.json` are.
+page breaks). Fonts the PDF only references without embedding them are embedded into a
+temporary copy of it before rasterizing, from the maintainer's own installed font files, so
+the PNG files show Word's glyphs; the Notes name each such font by version and SHA-256, never
+by path.
 
 Word saves each document again before it exports it, and the PDF is made from that saved
 copy, which is kept under `resaved/` with the same path: its `w:lastRenderedPageBreak`
