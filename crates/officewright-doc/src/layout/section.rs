@@ -25,20 +25,16 @@ pub(super) fn settings(t: &mut Translator<'_>) -> ir::DocumentSettings {
     // written; of one written twice, the last value counts, as the model's docs say. A
     // setting is on when set to true. The flags are passed when on.
     let mut values: Vec<(ir::CompatFlag, bool)> = Vec::new();
-    let mut places: HashMap<ir::CompatFlag, usize> = HashMap::new();
-    let mut set = |flag: ir::CompatFlag, on: bool| {
-        #[cfg(test)]
-        super::work(|work| work.flags += 1);
-        match places.get(&flag) {
-            Some(&place) => {
-                if let Some(value) = values.get_mut(place) {
-                    value.1 = on;
-                }
+    let mut places: HashMap<Flag, usize> = HashMap::new();
+    let mut set = |flag: ir::CompatFlag, on: bool| match places.get(&Flag(flag.clone())) {
+        Some(&place) => {
+            if let Some(value) = values.get_mut(place) {
+                value.1 = on;
             }
-            None => {
-                places.insert(flag.clone(), values.len());
-                values.push((flag, on));
-            }
+        }
+        None => {
+            places.insert(Flag(flag.clone()), values.len());
+            values.push((flag, on));
         }
     };
     for (option, on) in settings.compatibility_options() {
@@ -243,3 +239,23 @@ pub(super) fn number_format(format: NumberFormat) -> ir::NumberFormat {
         other => ir::NumberFormat::Other(other.to_xml().to_owned()),
     }
 }
+
+/// A compatibility flag as the key of a map; in tests, each comparison of two is counted,
+/// so that a test sees what a lookup costs.
+struct Flag(ir::CompatFlag);
+
+impl std::hash::Hash for Flag {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
+
+impl PartialEq for Flag {
+    fn eq(&self, other: &Self) -> bool {
+        #[cfg(test)]
+        super::work(|work| work.flags += 1);
+        self.0 == other.0
+    }
+}
+
+impl Eq for Flag {}

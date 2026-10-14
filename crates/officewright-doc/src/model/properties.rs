@@ -209,7 +209,7 @@ xml_enum! {
 
 /// A colour as written: a value, a theme colour, or both, the theme colour then taking
 /// precedence (ECMA-376 Part 1, §17.3.2.6).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct Color {
     pub(crate) value: Option<ColorValue>,
@@ -278,7 +278,7 @@ impl Underline {
 }
 
 /// A shading: a pattern in a colour over a fill.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct Shading {
     pub(crate) pattern: Option<ShadingPattern>,

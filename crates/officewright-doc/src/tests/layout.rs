@@ -156,12 +156,17 @@ fn gives_each_distinct_run_format_one_run_style() {
         .iter()
         .flat_map(|paragraph| paragraph.inlines().iter().map(style_of))
         .collect();
-    // Three run styles for five formats: formats that give the same IR style share it.
-    // The run in the bold character style and the bold run differ only in the style they
-    // name, which the IR does not keep; the nil shading is no shading, as in the plain
-    // run. The second paragraph repeats the first's styles.
-    assert_eq!((ids[1], ids[4]), (ids[2], ids[0]));
-    assert!(ids[0] != ids[1] && ids[1] != ids[3] && ids[0] != ids[3]);
+    // Four run styles for five formats: the run in the bold character style and the bold
+    // run differ only in the style they name, which the IR does not keep, so they share
+    // one. The nil shading is no shading, as in the plain run, but is written, so it has a
+    // style of its own, equal to the plain run's. The second paragraph repeats the first's
+    // styles.
+    assert_eq!(ids[1], ids[2]);
+    let distinct = [ids[0], ids[1], ids[3], ids[4]];
+    for (n, id) in distinct.iter().enumerate() {
+        assert!(distinct[..n].iter().all(|other| other != id), "style {n}");
+    }
+    assert_eq!(ir.run_style(ids[4]), ir.run_style(ids[0]));
     assert_eq!(&ids[..5], &ids[5..]);
     assert_eq!(ir.run_style(ids[4]).unwrap().shading(), None);
     assert!(ir.run_style(ids[2]).unwrap().bold());
@@ -225,14 +230,14 @@ fn cuts_font_names_no_font_has() {
         .unwrap()
         .fonts()
         .clone();
-    assert_eq!(fonts.ascii(), "N".repeat(256));
+    assert_eq!(fonts.ascii(), "N".repeat(128));
     let messages: Vec<&str> = translation
         .left_out()
         .iter()
         .map(LeftOut::message)
         .collect();
-    assert_eq!(messages, ["a font name of more than 256 bytes is cut"]);
-    // The cut counts bytes and falls at the end of a character: 85 characters of three
+    assert_eq!(messages, ["a font name of more than 128 bytes is cut"]);
+    // The cut counts bytes and falls at the end of a character: 42 characters of three
     // bytes each.
     let document = open(&format!(
         r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="{}"/></w:rPr><w:t>x</w:t></w:r></w:p>"#,
@@ -247,7 +252,7 @@ fn cuts_font_names_no_font_has() {
         .fonts()
         .ascii()
         .to_owned();
-    assert_eq!(ascii, "€".repeat(85));
+    assert_eq!(ascii, "€".repeat(42));
 }
 
 #[test]
@@ -904,13 +909,13 @@ fn bounds_what_long_names_and_tags_copy() {
     for inline in paragraphs(&translation)[0].inlines() {
         let style = match inline {
             ir::Inline::Symbol { font, style, .. } => {
-                assert_eq!(font.len(), 256);
+                assert_eq!(font.len(), 128);
                 *style
             }
             inline => style_of(inline),
         };
         let style = ir.run_style(style).unwrap();
-        assert_eq!(style.fonts().ascii().len(), 256);
+        assert_eq!(style.fonts().ascii().len(), 128);
         let language = style.language();
         assert_eq!(
             (language.latin(), language.east_asia(), language.bidi()),
@@ -923,7 +928,7 @@ fn bounds_what_long_names_and_tags_copy() {
         .map(LeftOut::message)
         .collect();
     assert!(left_out.contains(&"a language tag of more than 64 bytes is left out"));
-    assert!(left_out.contains(&"a font name of more than 256 bytes is cut"));
+    assert!(left_out.contains(&"a font name of more than 128 bytes is cut"));
     // A tag of 64 bytes is passed on.
     let styles = format!(
         r#"<w:styles xmlns:w="{W}"><w:docDefaults><w:rPrDefault><w:rPr><w:lang w:val="{}"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>"#,
@@ -1077,7 +1082,7 @@ fn shares_run_styles_of_long_names_comparing_bounded_parts() {
         .map(style_of)
         .collect();
     assert_eq!(styles.len(), 1);
-    assert!(work <= RUNS * 2 * 4 * 256 + RUNS, "{work} bytes compared");
+    assert!(work <= RUNS * 2 * 4 * 128, "{work} bytes compared");
 }
 
 #[test]
@@ -1133,7 +1138,7 @@ fn looks_fonts_up_with_bounded_folding() {
     let translation = translate(&document);
     let folded = crate::model::FOLDED.get() - before;
     assert_eq!(translation.document().sections()[0].blocks().len(), 1);
-    assert!(folded <= 200 * 500 + 2_001 * 256, "{folded} bytes folded");
+    assert!(folded <= 200 * 500 + 2_001 * 128, "{folded} bytes folded");
 }
 
 #[test]
@@ -1174,4 +1179,177 @@ fn takes_a_fields_style_only_from_what_its_result_shows() {
         page.result().iter().map(describe).collect::<Vec<_>>(),
         ["text y"]
     );
+}
+
+#[test]
+fn builds_each_run_style_once() {
+    // 2,000 empty paragraphs and a run of one format, under defaults whose names are long
+    // and not ASCII: the run style is built once, and every other mark and run finds it
+    // by its key, without building it again (which took 18 µs a paragraph).
+    let euro = "€".repeat(1000);
+    let styles = format!(
+        r#"<w:styles xmlns:w="{W}"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="{euro}" w:hAnsi="{euro}" w:eastAsia="{euro}" w:cs="{euro}"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>"#
+    );
+    let body = format!(
+        "{}<w:p><w:r><w:t>x</w:t></w:r></w:p>",
+        "<w:p/>".repeat(2_000)
+    );
+    let document = with_parts(&body, &[("styles", "styles.xml", styles)]);
+    let (translation, built) = work_of(|work| work.built, || document.to_layout_ir());
+    assert_eq!(built, 1);
+    let marks: std::collections::HashSet<ir::RunStyleId> = paragraphs(&translation)
+        .iter()
+        .map(|paragraph| paragraph.mark())
+        .collect();
+    assert_eq!(marks.len(), 1);
+}
+
+#[test]
+fn takes_a_fields_style_from_an_inner_fields_result() {
+    let field_char = |kind: &str| format!(r#"<w:r><w:fldChar w:fldCharType="{kind}"/></w:r>"#);
+    let instruction = |text: &str| {
+        format!(r#"<w:r><w:instrText xml:space="preserve">{text}</w:instrText></w:r>"#)
+    };
+    let body = [
+        "<w:p>".to_owned(),
+        // PAGE's result starts with NUMPAGES's, bold.
+        field_char("begin"),
+        instruction("PAGE"),
+        field_char("separate"),
+        field_char("begin"),
+        instruction("NUMPAGES"),
+        field_char("separate"),
+        r#"<w:r><w:rPr><w:b/></w:rPr><w:t>x</w:t></w:r>"#.to_owned(),
+        field_char("end"),
+        field_char("end"),
+        "</w:p><w:p>".to_owned(),
+        // SECTIONPAGES's result holds a field that ends without a separator, then an
+        // italic piece, which gives SECTIONPAGES its style.
+        field_char("begin"),
+        instruction("SECTIONPAGES"),
+        field_char("separate"),
+        field_char("begin"),
+        instruction("TIME"),
+        field_char("end"),
+        r#"<w:r><w:rPr><w:i/></w:rPr><w:t>y</w:t></w:r>"#.to_owned(),
+        field_char("end"),
+        "</w:p>".to_owned(),
+    ]
+    .concat();
+    let translation = translate(&open(&body));
+    let ir = translation.document();
+    let found = paragraphs(&translation);
+    let [ir::Inline::Field(page)] = found[0].inlines() else {
+        panic!("one field");
+    };
+    assert!(ir.run_style(page.style()).unwrap().bold());
+    let [ir::Inline::Field(pages)] = found[1].inlines() else {
+        panic!("one field");
+    };
+    assert!(ir.run_style(pages.style()).unwrap().italic());
+}
+
+#[test]
+fn lists_each_cut_name_and_tag() {
+    // One document per attribute whose value is longer than the IR keeps.
+    let long_name = "N".repeat(200);
+    let long_tag = "t".repeat(80);
+    let cases = [
+        (
+            format!(r#"<w:rFonts w:ascii="{long_name}"/>"#),
+            "a font name of more than 128 bytes is cut",
+        ),
+        (
+            format!(r#"<w:rFonts w:hAnsi="{long_name}"/>"#),
+            "a font name of more than 128 bytes is cut",
+        ),
+        (
+            format!(r#"<w:rFonts w:eastAsia="{long_name}"/>"#),
+            "a font name of more than 128 bytes is cut",
+        ),
+        (
+            format!(r#"<w:rFonts w:cs="{long_name}"/>"#),
+            "a font name of more than 128 bytes is cut",
+        ),
+        (
+            format!(r#"<w:lang w:val="{long_tag}"/>"#),
+            "a language tag of more than 64 bytes is left out",
+        ),
+        (
+            format!(r#"<w:lang w:eastAsia="{long_tag}"/>"#),
+            "a language tag of more than 64 bytes is left out",
+        ),
+        (
+            format!(r#"<w:lang w:bidi="{long_tag}"/>"#),
+            "a language tag of more than 64 bytes is left out",
+        ),
+    ];
+    for (properties, message) in cases {
+        let body = format!(r#"<w:p><w:r><w:rPr>{properties}</w:rPr><w:t>x</w:t></w:r></w:p>"#);
+        let translation = translate(&open(&body));
+        let left_out: Vec<&str> = translation
+            .left_out()
+            .iter()
+            .map(LeftOut::message)
+            .collect();
+        assert_eq!(left_out, [message], "{properties}");
+    }
+    // A symbol's own font.
+    let body = format!(r#"<w:p><w:r><w:sym w:font="{long_name}" w:char="F020"/></w:r></w:p>"#);
+    let translation = translate(&open(&body));
+    let left_out: Vec<&str> = translation
+        .left_out()
+        .iter()
+        .map(LeftOut::message)
+        .collect();
+    assert_eq!(left_out, ["a font name of more than 128 bytes is cut"]);
+    let ir::Inline::Symbol { font, .. } = &paragraphs(&translation)[0].inlines()[0] else {
+        panic!("a symbol");
+    };
+    assert_eq!(font.len(), 128);
+}
+
+#[test]
+fn gives_runs_that_differ_in_one_property_different_run_styles() {
+    // For each property of a run style, two runs that differ in it alone get different
+    // run styles: the key that shares styles leaves none of them out.
+    let pairs = [
+        ("", r#"<w:color w:val="FF0000"/>"#),
+        (
+            r#"<w:u w:val="single"/>"#,
+            r#"<w:u w:val="single" w:color="00FF00"/>"#,
+        ),
+        ("", r#"<w:u w:val="double"/>"#),
+        ("", r#"<w:rFonts w:hint="eastAsia"/>"#),
+        ("", r#"<w:rFonts w:ascii="A"/>"#),
+        ("", r#"<w:rFonts w:hAnsi="A"/>"#),
+        ("", r#"<w:rFonts w:eastAsia="A"/>"#),
+        ("", r#"<w:rFonts w:cs="A"/>"#),
+        ("", r#"<w:lang w:val="de-DE"/>"#),
+        ("", r#"<w:lang w:eastAsia="ja-JP"/>"#),
+        ("", r#"<w:lang w:bidi="ar-SA"/>"#),
+        ("", r#"<w:kern w:val="24"/>"#),
+        ("", r#"<w:position w:val="4"/>"#),
+        ("", r#"<w:spacing w:val="20"/>"#),
+        ("", r#"<w:w w:val="80"/>"#),
+        ("", r#"<w:vertAlign w:val="subscript"/>"#),
+        ("", r#"<w:highlight w:val="yellow"/>"#),
+        ("", r#"<w:sz w:val="30"/>"#),
+        ("", r#"<w:szCs w:val="30"/>"#),
+        ("", r#"<w:shd w:val="clear" w:fill="00FF00"/>"#),
+        ("", "<w:i/>"),
+        ("", "<w:dstrike/>"),
+        ("", "<w:smallCaps/>"),
+    ];
+    for (a, b) in pairs {
+        let body = format!(
+            r#"<w:p><w:r><w:rPr>{a}</w:rPr><w:t>a</w:t></w:r><w:r><w:rPr>{b}</w:rPr><w:t>b</w:t></w:r></w:p>"#
+        );
+        let translation = translate(&open(&body));
+        let inlines = paragraphs(&translation)[0].inlines();
+        let (first, second) = (style_of(&inlines[0]), style_of(&inlines[1]));
+        assert_ne!(first, second, "{b}");
+        let ir = translation.document();
+        assert_ne!(ir.run_style(first), ir.run_style(second), "{b}");
+    }
 }

@@ -1,64 +1,160 @@
 //! Run formatting in effect as the IR's run styles, one per distinct format.
 
 use std::collections::HashMap;
-use std::hash::{DefaultHasher, Hasher};
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 use officewright_core::Color;
 use officewright_layout::ReportKind;
 use officewright_layout::ir;
 
 use super::Translator;
+use crate::model::properties::Toggle;
 use crate::model::{
     CharacterFormat, ColorValue, FontHint, Highlight, Shading, ShadingPattern, UnderlineStyle,
     VerticalPosition,
 };
 
-/// The longest font name passed on, in bytes, cut at the end of a character. No font has
-/// a longer name (Word allows 31 characters, MS-OI29500 §17.8.3.10(a)), and the IR keeps
-/// a copy of the names per run style and per symbol.
-const MAX_FONT_NAME: usize = 256;
+/// The longest font name passed on, in bytes, cut at the end of a character. Word allows
+/// 31 characters (MS-OI29500 §17.8.3.10(a)), at most 124 bytes, so no font's name is
+/// cut; the IR keeps a copy of the names per run style and per symbol.
+const MAX_FONT_NAME: usize = 128;
 
 /// The longest language tag passed on, in bytes; a longer one is left out. BCP 47 tags
 /// are far shorter, and the IR keeps a copy of the tags per run style.
 const MAX_LANGUAGE: usize = 64;
 
-/// How many run styles with the same key a new one is compared with before it gets a run
-/// style of its own. The key hashes the whole IR style, so styles that share a key are
+/// How many formats with the same hash a new one is compared with before it gets a run
+/// style of its own. The hash covers all of a [`StyleKey`], so formats that share it are
 /// almost always equal, and the first comparison finds them.
 const MAX_COMPARISONS: usize = 8;
 
-/// The run styles added to the IR so far, by a hash of the whole IR style.
+/// The run styles added to the IR so far, by a hash of their formats' [`StyleKey`].
 #[derive(Default)]
 pub(super) struct RunStyles {
-    by_key: HashMap<u64, Vec<ir::RunStyleId>>,
+    by_key: HashMap<u64, Vec<(CharacterFormat, ir::RunStyleId)>>,
+}
+
+/// What decides the IR run style of a format: its names and tags as the IR keeps them,
+/// cut and borrowed from the format, and each of its other properties. Formats with equal
+/// keys give equal run styles, and hashing or comparing a key costs a bounded amount,
+/// however long the document's names are. Nothing is copied: a run's key is built for
+/// every run, the IR style only for a new one.
+#[derive(PartialEq, Eq, Hash)]
+struct StyleKey<'f> {
+    names: [&'f str; 4],
+    hint: Option<FontHint>,
+    sizes: [u64; 2],
+    toggles: [bool; Toggle::COUNT],
+    colors: [ColorValue; 2],
+    underline: Option<UnderlineStyle>,
+    vertical_position: VerticalPosition,
+    offsets: [u64; 2],
+    scale: u16,
+    kerning: Option<u64>,
+    highlight: Option<Highlight>,
+    shading: Option<Shading>,
+    languages: [Option<&'f str>; 3],
+    /// Which names and tags were cut or left out: a format whose tag is left out is not
+    /// one without a tag, so that what is left out is listed once per key.
+    cuts: [bool; 7],
+}
+
+impl<'f> StyleKey<'f> {
+    fn of(format: &'f CharacterFormat) -> Self {
+        // Every field, so that one added to the format cannot be left out of the key.
+        let CharacterFormat {
+            // The IR keeps no style id; what the style gives is in the other fields.
+            style: _,
+            fonts,
+            size,
+            size_complex_script,
+            toggles,
+            color,
+            underline,
+            underline_color,
+            vertical_position,
+            position,
+            spacing,
+            scale,
+            kerning,
+            highlight,
+            shading,
+            language_latin,
+            language_east_asia,
+            language_bidi,
+        } = format;
+        let names = [
+            fonts.ascii(),
+            fonts.high_ansi(),
+            fonts.east_asia(),
+            fonts.complex_script(),
+        ];
+        let tags = [
+            language_latin.as_deref(),
+            language_east_asia.as_deref(),
+            language_bidi.as_deref(),
+        ];
+        let mut cuts = [false; 7];
+        for (cut, name) in cuts.iter_mut().zip(names) {
+            *cut = name.len() > MAX_FONT_NAME;
+        }
+        for (cut, tag) in cuts.iter_mut().skip(4).zip(tags) {
+            *cut = tag.is_some_and(|tag| tag.len() > MAX_LANGUAGE);
+        }
+        Self {
+            names: names.map(cut_name),
+            hint: fonts.hint(),
+            sizes: [size.0.to_bits(), size_complex_script.0.to_bits()],
+            toggles: *toggles,
+            colors: [*color, *underline_color],
+            underline: *underline,
+            vertical_position: *vertical_position,
+            offsets: [position.0.to_bits(), spacing.0.to_bits()],
+            scale: *scale,
+            kerning: kerning.map(|kerning| kerning.0.to_bits()),
+            highlight: *highlight,
+            shading: *shading,
+            languages: tags.map(cut_tag),
+            cuts,
+        }
+    }
+
+    /// The bytes of its names, for tests of the cost of comparing keys.
+    #[cfg(test)]
+    fn names_length(&self) -> usize {
+        self.names.iter().map(|name| name.len()).sum()
+    }
 }
 
 impl Translator<'_> {
-    /// The run style of a format, added to the IR the first time it is met. The format
-    /// becomes its IR style first, whose names and tags are cut, so hashing and comparing
-    /// it costs the same however long the document's names are; formats that give the same
-    /// IR style share it.
+    /// The run style of a format, added to the IR the first time a format with its
+    /// [`StyleKey`] is met: formats that give the same IR style share it.
     pub(super) fn run_style(&mut self, format: &CharacterFormat) -> ir::RunStyleId {
-        let style = self.translate_run_style(format);
-        let key = key(&style);
-        if let Some(ids) = self.run_styles.by_key.get(&key) {
-            for &id in ids.iter().take(MAX_COMPARISONS) {
-                let Some(known) = self.ir.run_style(id) else {
-                    continue;
-                };
+        let key = StyleKey::of(format);
+        let hash = {
+            let mut hasher = DefaultHasher::new();
+            key.hash(&mut hasher);
+            hasher.finish()
+        };
+        if let Some(known) = self.run_styles.by_key.get(&hash) {
+            for (known, id) in known.iter().take(MAX_COMPARISONS) {
+                let known = StyleKey::of(known);
                 #[cfg(test)]
-                super::work(|work| work.compared += names_length(known) + names_length(&style));
-                if *known == style {
-                    return id;
+                super::work(|work| work.compared += known.names_length() + key.names_length());
+                if known == key {
+                    return *id;
                 }
             }
         }
+        #[cfg(test)]
+        super::work(|work| work.built += 1);
         self.report_cuts(format);
+        let style = self.translate_run_style(format);
         let id = self.ir.add_run_style(style);
-        // Styles past the ones compared with are not kept.
-        let ids = self.run_styles.by_key.entry(key).or_default();
-        if ids.len() < MAX_COMPARISONS {
-            ids.push(id);
+        // Formats past the ones compared with are not kept.
+        let known = self.run_styles.by_key.entry(hash).or_default();
+        if known.len() < MAX_COMPARISONS {
+            known.push((format.clone(), id));
         }
         id
     }
@@ -224,44 +320,27 @@ impl Translator<'_> {
 }
 
 /// A font name cut to at most [`MAX_FONT_NAME`] bytes, at the end of a character.
-fn cut_font_name(name: &str) -> String {
+fn cut_name(name: &str) -> &str {
     let end = (0..=MAX_FONT_NAME.min(name.len()))
         .rev()
         .find(|&end| name.is_char_boundary(end))
         .unwrap_or(0);
-    name.get(..end).unwrap_or_default().to_owned()
+    name.get(..end).unwrap_or_default()
+}
+
+/// A font name as the IR keeps it, cut as [`cut_name`] does.
+fn cut_font_name(name: &str) -> String {
+    cut_name(name).to_owned()
 }
 
 /// A language tag as the IR gets it: none past [`MAX_LANGUAGE`] bytes.
-fn cut_language(tag: Option<&str>) -> Option<String> {
+fn cut_tag(tag: Option<&str>) -> Option<&str> {
     tag.filter(|tag| tag.len() <= MAX_LANGUAGE)
-        .map(str::to_owned)
 }
 
-/// A key of an IR run style: a hash of all of it, through its debug text, which costs a
-/// bounded amount since its names and tags are cut. Equal styles have equal keys.
-fn key(style: &ir::RunStyle) -> u64 {
-    struct Hashing<'a>(&'a mut DefaultHasher);
-    impl std::fmt::Write for Hashing<'_> {
-        fn write_str(&mut self, text: &str) -> std::fmt::Result {
-            self.0.write(text.as_bytes());
-            Ok(())
-        }
-    }
-    let mut hasher = DefaultHasher::new();
-    // reason: writing into a hasher cannot fail.
-    let _ = std::fmt::Write::write_fmt(&mut Hashing(&mut hasher), format_args!("{style:?}"));
-    hasher.finish()
-}
-
-/// The bytes of the font names of a style, for tests of the cost of comparing styles.
-#[cfg(test)]
-fn names_length(style: &ir::RunStyle) -> usize {
-    let fonts = style.fonts();
-    fonts.ascii().len()
-        + fonts.high_ansi().len()
-        + fonts.east_asia().len()
-        + fonts.complex_script().len()
+/// A language tag as the IR keeps it, as [`cut_tag`] gives it.
+fn cut_language(tag: Option<&str>) -> Option<String> {
+    cut_tag(tag).map(str::to_owned)
 }
 
 pub(super) fn color(value: ColorValue) -> ir::ColorValue {
