@@ -62,13 +62,14 @@
 
 /**
  * A face has the requested family name; the substitution is a synthetic style, a bold
- * or italic the face lacks.
+ * or italic the face lacks, or a bold face for regular text when the family has no
+ * regular face installed.
  */
 #define OW_RESOLUTION_EXACT 1
 
 /**
  * Windows maps the requested name to another family, such as "Times New Roman CYR" to
- * Times New Roman; reported only with a synthetic style.
+ * Times New Roman; reported only with a synthetic style or a bold face for regular text.
  */
 #define OW_RESOLUTION_ALIAS 2
 
@@ -102,17 +103,71 @@
 #define OW_RESOLUTION_MISSING 7
 
 /**
- * For `ow_pdf_document_set_compression`: page content and embedded fonts are stored as
- * they are, so the page content can be read in a text editor.
+ * For `ow_pdf_document_set_compression` and `ow_render_options_set_compression`: page
+ * content and embedded fonts are stored as they are, so the page content can be read in
+ * a text editor.
  */
 #define OW_COMPRESSION_NONE 0
 
 /**
- * For `ow_pdf_document_set_compression`: page content and embedded fonts are
- * compressed with the Flate filter wherever that makes them smaller. Every PDF reader
- * decompresses Flate, so this is the default.
+ * For `ow_pdf_document_set_compression` and `ow_render_options_set_compression`: page
+ * content and embedded fonts are compressed with the Flate filter wherever that makes
+ * them smaller. Every PDF reader decompresses Flate, so this is the default.
  */
 #define OW_COMPRESSION_FLATE 1
+
+/**
+ * A report entry of a kind this version of the header does not know, from
+ * `ow_layout_report_entry`; its message says what it is. Also the kind a failed
+ * `ow_layout_report_entry` returns.
+ */
+#define OW_REPORT_KIND_OTHER 0
+
+/**
+ * A report entry: a font is not available and another one is used in its place.
+ */
+#define OW_REPORT_KIND_FONT_SUBSTITUTED 1
+
+/**
+ * A report entry: no available font has a glyph for a character; the font's
+ * missing-glyph shape is drawn.
+ */
+#define OW_REPORT_KIND_GLYPH_MISSING 2
+
+/**
+ * A report entry: something the document uses is not laid out yet, or not the way Word
+ * does.
+ */
+#define OW_REPORT_KIND_FEATURE_UNSUPPORTED 3
+
+/**
+ * A report entry: a field whose value is not computed shows the result stored in the
+ * document.
+ */
+#define OW_REPORT_KIND_FIELD_CACHED 4
+
+/**
+ * A report entry: a legacy compatibility option is set that the layout does not follow.
+ */
+#define OW_REPORT_KIND_COMPAT_IGNORED 5
+
+/**
+ * A report entry: a value beyond what Word accepts, or what a PDF holds, was brought
+ * within its limits.
+ */
+#define OW_REPORT_KIND_VALUE_CLAMPED 6
+
+/**
+ * A report entry: content does not fit its area, such as a word wider than its column.
+ */
+#define OW_REPORT_KIND_OVERFLOW 7
+
+/**
+ * A report entry: a font is embedded with what its license or format restricts, or it
+ * cannot be embedded and its text is not drawn. Later versions add kinds with new
+ * values; existing values never change.
+ */
+#define OW_REPORT_KIND_FONT_EMBEDDING 8
 
 /**
  * The result of a fallible `ow_*` function.
@@ -164,6 +219,16 @@ typedef enum OwStatus {
 } OwStatus;
 
 /**
+ * A Word document (DOCX) opened for conversion.
+ *
+ * Created by `ow_doc_document_open_path` or `ow_doc_document_open_bytes` and released by
+ * `ow_doc_document_free`. Converting it does not change it, so it may be converted
+ * several times, with different options. Used by one thread at a time; may be moved
+ * between threads.
+ */
+typedef struct OwDocDocument OwDocDocument;
+
+/**
  * The fonts that can be chosen by family name: fonts the caller adds and the fonts
  * installed on the system.
  *
@@ -183,6 +248,16 @@ typedef struct OwFontBook OwFontBook;
 typedef struct OwFontResolver OwFontResolver;
 
 /**
+ * What a conversion did otherwise than Word would: fonts it substituted, glyphs it
+ * could not draw, features it does not lay out yet, values it brought within limits.
+ *
+ * Returned by `ow_doc_document_save_pdf_path` and `ow_doc_document_save_pdf_bytes`,
+ * read with `ow_layout_report_len` and `ow_layout_report_entry`, and released by
+ * `ow_layout_report_free`. Used by one thread at a time; may be moved between threads.
+ */
+typedef struct OwLayoutReport OwLayoutReport;
+
+/**
  * A PDF document being built.
  *
  * Created by `ow_pdf_document_new` or `ow_pdf_document_from_text` and released by
@@ -199,6 +274,17 @@ typedef struct OwPdfDocument OwPdfDocument;
  * by one thread at a time; may be moved between threads.
  */
 typedef struct OwPdfFont OwPdfFont;
+
+/**
+ * How a document is rendered into PDF: the most pages it may take, the fonts to use
+ * besides those the document embeds, and how the PDF's streams are compressed.
+ *
+ * Created by `ow_render_options_new` with the defaults (at most 100,000 pages, the
+ * system's fonts, Flate compression) and released by `ow_render_options_free`. It is
+ * read, never changed, by a conversion, so one may serve many conversions, one after
+ * another. Used by one thread at a time; may be moved between threads.
+ */
+typedef struct OwRenderOptions OwRenderOptions;
 
 #ifdef __cplusplus
 extern "C" {
@@ -625,8 +711,10 @@ enum OwStatus ow_font_resolver_new(const struct OwFontBook *book,
  * takes its metric-compatible substitute (Carlito for Calibri, Liberation for Arial,
  * Times New Roman and Courier New), else a font of similar design (Caladea for
  * Cambria, which lays out differently) or a common font of the same kind; a style the
- * face lacks is synthetic. Every such substitution is added to the resolver's report
- * (`ow_font_resolver_substitution`); synthetic styles are reported but not drawn yet.
+ * face lacks is synthetic, italic before taking a face of another weight, as Word does,
+ * and a family with no regular face installed gives regular text its bold one. Every
+ * such substitution is added to the resolver's report (`ow_font_resolver_substitution`);
+ * synthetic styles are reported but not drawn yet.
  *
  * Fails with `OW_STATUS_UNSUPPORTED` if no font could be found or the chosen font's
  * license forbids embedding, `OW_STATUS_INVALID_ARGUMENT` if `bold` or `italic` is not
@@ -685,6 +773,229 @@ enum OwStatus ow_font_resolver_substitution(const struct OwFontResolver *resolve
  * `resolver` must be NULL or a live handle, not used afterwards.
  */
 void ow_font_resolver_free(struct OwFontResolver *resolver);
+
+/**
+ * Opens the Word document (DOCX) in the file at `path` (UTF-8). On success `*out_doc`
+ * is a new handle for `ow_doc_document_free`.
+ *
+ * Fails with `OW_STATUS_IO` if the file cannot be read, `OW_STATUS_MALFORMED` if it is
+ * not a WordprocessingML package or its structure is broken, `OW_STATUS_UNSUPPORTED`
+ * for an encrypted or binary (DOC) Word document, and `OW_STATUS_LIMIT_EXCEEDED` if it
+ * exceeds the limits that keep the time and memory a file can take bounded.
+ *
+ * # Safety
+ *
+ * `path` must be NULL or a NUL-terminated string; `out_doc` must be NULL or valid for
+ * writing a pointer.
+ */
+enum OwStatus ow_doc_document_open_path(const char *path, struct OwDocDocument **out_doc);
+
+/**
+ * Opens the Word document (DOCX) in the `len` bytes at `data`, which the library
+ * copies. On success `*out_doc` is a new handle for `ow_doc_document_free`.
+ *
+ * Fails as `ow_doc_document_open_path` does, except with `OW_STATUS_IO`.
+ *
+ * # Safety
+ *
+ * `data` must be NULL or valid for reading `len` bytes; `out_doc` must be NULL or valid
+ * for writing a pointer.
+ */
+enum OwStatus ow_doc_document_open_bytes(const uint8_t *data,
+                                         size_t len,
+                                         struct OwDocDocument **out_doc);
+
+/**
+ * Renders `doc` into PDF with `options` and writes it to the file at `path` (UTF-8),
+ * which is replaced if it exists. When `out_report` is not NULL, `*out_report` is a new
+ * report of what the PDF shows otherwise than Word would, for `ow_layout_report_free`;
+ * NULL if the call fails.
+ *
+ * Fails with `OW_STATUS_IO` if the file cannot be written or a font folder of the
+ * options cannot be read, `OW_STATUS_MALFORMED` if a font the PDF embeds is damaged
+ * where only embedding looks (a glyph's outline, say), and `OW_STATUS_LIMIT_EXCEEDED`
+ * if the document takes more pages than the options allow or nests tables deeper than
+ * the layout follows. `OW_STATUS_INVALID_ARGUMENT` here would mean that officewright
+ * translated the document wrongly, a defect worth reporting with the document.
+ *
+ * # Safety
+ *
+ * `doc` and `options` must each be NULL or a live handle not modified by another thread
+ * during the call; `path` must be NULL or a NUL-terminated string; `out_report` must be
+ * NULL or valid for writing a pointer.
+ */
+enum OwStatus ow_doc_document_save_pdf_path(const struct OwDocDocument *doc,
+                                            const char *path,
+                                            const struct OwRenderOptions *options,
+                                            struct OwLayoutReport **out_report);
+
+/**
+ * Renders `doc` into PDF with `options` in memory: `*out_data` points to `*out_len`
+ * bytes, which the caller releases with `ow_bytes_free(*out_data, *out_len)`. When
+ * `out_report` is not NULL, `*out_report` is a new report as for
+ * `ow_doc_document_save_pdf_path`; NULL if the call fails.
+ *
+ * Fails as `ow_doc_document_save_pdf_path` does, except for writing the file.
+ *
+ * # Safety
+ *
+ * `doc` and `options` must each be NULL or a live handle not modified by another thread
+ * during the call; `out_data`, `out_len` and `out_report` must each be NULL or valid for
+ * writing.
+ */
+enum OwStatus ow_doc_document_save_pdf_bytes(const struct OwDocDocument *doc,
+                                             const struct OwRenderOptions *options,
+                                             uint8_t **out_data,
+                                             size_t *out_len,
+                                             struct OwLayoutReport **out_report);
+
+/**
+ * Releases a document. Does nothing if `doc` is NULL.
+ *
+ * # Safety
+ *
+ * `doc` must be NULL or a live handle, not used afterwards.
+ */
+void ow_doc_document_free(struct OwDocDocument *doc);
+
+/**
+ * Creates render options with the defaults: at most 100,000 pages, the fonts installed
+ * on the system, Flate compression. On success `*out_options` is a new handle for
+ * `ow_render_options_free`.
+ *
+ * # Safety
+ *
+ * `out_options` must be NULL or valid for writing a pointer.
+ */
+enum OwStatus ow_render_options_new(struct OwRenderOptions **out_options);
+
+/**
+ * Sets the most pages a document may take; past it, a conversion fails with
+ * `OW_STATUS_LIMIT_EXCEEDED`. Fails with `OW_STATUS_INVALID_ARGUMENT` for 0.
+ *
+ * # Safety
+ *
+ * `options` must be NULL or a live handle not used by another thread during the call.
+ */
+enum OwStatus ow_render_options_set_max_pages(struct OwRenderOptions *options, size_t max_pages);
+
+/**
+ * Sets whether the fonts installed on the system are used, after the folders and fonts
+ * added to the options: 1 (the default) or 0. Any other value fails with
+ * `OW_STATUS_INVALID_ARGUMENT`.
+ *
+ * # Safety
+ *
+ * `options` must be NULL or a live handle not used by another thread during the call.
+ */
+enum OwStatus ow_render_options_set_system_fonts(struct OwRenderOptions *options,
+                                                 int32_t system_fonts);
+
+/**
+ * Adds the folder at `path` (UTF-8): its fonts, and those of its subfolders, are used
+ * before the system's. The folder is read when a document is converted, which fails
+ * with `OW_STATUS_IO` if it cannot be read.
+ *
+ * # Safety
+ *
+ * `options` must be NULL or a live handle not used by another thread during the call;
+ * `path` must be NULL or a NUL-terminated string.
+ */
+enum OwStatus ow_render_options_add_font_dir(struct OwRenderOptions *options, const char *path);
+
+/**
+ * Adds the font file (TrueType, OpenType or a collection) in the `len` bytes at
+ * `data`, which the library copies; its fonts are used before the folders' and the
+ * system's. Fails with `OW_STATUS_MALFORMED` if the data is not a font or every face in
+ * it is damaged, leaving the options unchanged. The check reads what identifies the
+ * font, not every glyph: a font damaged deeper is accepted here, and the conversion that
+ * embeds it fails with `OW_STATUS_MALFORMED`.
+ *
+ * # Safety
+ *
+ * `options` must be NULL or a live handle not used by another thread during the call;
+ * `data` must be NULL or valid for reading `len` bytes.
+ */
+enum OwStatus ow_render_options_add_font_bytes(struct OwRenderOptions *options,
+                                               const uint8_t *data,
+                                               size_t len);
+
+/**
+ * Adds the font file (TrueType, OpenType or a collection) at `path` (UTF-8), which the
+ * library reads now; its fonts are used before the folders' and the system's, as those
+ * of `ow_render_options_add_font_bytes` are. Fails with `OW_STATUS_IO` if the file cannot
+ * be read and `OW_STATUS_MALFORMED` if it is not a font or every face in it is damaged,
+ * with the path in the message, leaving the options unchanged. Like that of
+ * `ow_render_options_add_font_bytes`, the check does not read every glyph.
+ *
+ * # Safety
+ *
+ * `options` must be NULL or a live handle not used by another thread during the call;
+ * `path` must be NULL or a NUL-terminated string.
+ */
+enum OwStatus ow_render_options_add_font_file(struct OwRenderOptions *options, const char *path);
+
+/**
+ * Sets how the PDF's streams are compressed: `OW_COMPRESSION_FLATE`, the default, or
+ * `OW_COMPRESSION_NONE`. Fails with `OW_STATUS_INVALID_ARGUMENT` for any other value,
+ * leaving the options unchanged.
+ *
+ * # Safety
+ *
+ * `options` must be NULL or a live handle not used by another thread during the call.
+ */
+enum OwStatus ow_render_options_set_compression(struct OwRenderOptions *options,
+                                                int32_t compression);
+
+/**
+ * Releases render options. Does nothing if `options` is NULL.
+ *
+ * # Safety
+ *
+ * `options` must be NULL or a live handle, not used afterwards.
+ */
+void ow_render_options_free(struct OwRenderOptions *options);
+
+/**
+ * Returns in `*out_len` the number of entries of `report`.
+ *
+ * # Safety
+ *
+ * `report` must be NULL or a live handle; `out_len` must be NULL or valid for writing a
+ * `size_t`.
+ */
+enum OwStatus ow_layout_report_len(const struct OwLayoutReport *report, size_t *out_len);
+
+/**
+ * Returns entry `index` (counting from 0) of `report`: its kind, an `OW_REPORT_KIND_*`
+ * value, in `*out_kind`; where it is in the document, as a path such as
+ * `sections[0].blocks[3]`, or `document` for the document as a whole, in
+ * `*out_location`; and
+ * what happened, a sentence, in `*out_message`. Both strings are UTF-8 and owned by the
+ * report: they stay valid until it is freed.
+ *
+ * Fails with `OW_STATUS_INVALID_ARGUMENT` if `index` is not below the count
+ * `ow_layout_report_len` gives.
+ *
+ * # Safety
+ *
+ * `report` must be NULL or a live handle; `out_kind`, `out_location` and `out_message`
+ * must each be NULL or valid for writing.
+ */
+enum OwStatus ow_layout_report_entry(const struct OwLayoutReport *report,
+                                     size_t index,
+                                     int32_t *out_kind,
+                                     const char **out_location,
+                                     const char **out_message);
+
+/**
+ * Releases a report. Does nothing if `report` is NULL.
+ *
+ * # Safety
+ *
+ * `report` must be NULL or a live handle, not used afterwards.
+ */
+void ow_layout_report_free(struct OwLayoutReport *report);
 
 #ifdef __cplusplus
 }  // extern "C"
