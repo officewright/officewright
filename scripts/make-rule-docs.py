@@ -37,6 +37,8 @@ SOURCES = ROOT / "tests" / "corpus" / "SOURCES.md"
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 WORD_URI = "http://schemas.microsoft.com/office/word"
+W14_NS = "http://schemas.microsoft.com/office/word/2010/wordml"
+MC_NS = "http://schemas.openxmlformats.org/markup-compatibility/2006"
 REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 CT_W = "application/vnd.openxmlformats-officedocument.wordprocessingml"
 
@@ -152,8 +154,10 @@ def ppr(
     space: str | None = None,
     ind: dict[str, int] | None = None,
     jc: str | None = None,
+    mark: str | None = None,
     sect: str | None = None,
 ) -> str:
+    """mark is the content of the paragraph mark's w:rPr."""
     parts = []
     if p_style:
         parts.append(f'<w:pStyle w:val="{p_style}"/>')
@@ -177,6 +181,8 @@ def ppr(
         parts.append("<w:ind " + " ".join(f'w:{k}="{v}"' for k, v in ind.items()) + "/>")
     if jc:
         parts.append(f'<w:jc w:val="{jc}"/>')
+    if mark:
+        parts.append(f"<w:rPr>{mark}</w:rPr>")
     if sect:
         parts.append(sect)
     return f"<w:pPr>{''.join(parts)}</w:pPr>" if parts else ""
@@ -258,14 +264,18 @@ def level(
     suffix: str | None = None,
     tab_stop: int | None = None,
     p_style: str | None = None,
+    label: str = "",
 ) -> str:
+    """label is the content of the level's w:rPr, the run properties of its label."""
     suff = f'<w:suff w:val="{suffix}"/>' if suffix else ""
     tabs = f'<w:tabs><w:tab w:val="num" w:pos="{tab_stop}"/></w:tabs>' if tab_stop else ""
     linked = f'<w:pStyle w:val="{p_style}"/>' if p_style else ""
     return (
         f'<w:lvl w:ilvl="{ilvl}"><w:start w:val="1"/><w:numFmt w:val="{fmt}"/>{linked}{suff}'
         f'<w:lvlText w:val="{attr(template)}"/><w:lvlJc w:val="left"/>'
-        f'<w:pPr>{tabs}<w:ind w:left="{left}" w:hanging="{hanging}"/></w:pPr></w:lvl>'
+        f'<w:pPr>{tabs}<w:ind w:left="{left}" w:hanging="{hanging}"/></w:pPr>'
+        + (f"<w:rPr>{label}</w:rPr>" if label else "")
+        + "</w:lvl>"
     )
 
 
@@ -277,13 +287,17 @@ def abstract_num(num_id: int, nsid: str, levels: list[str]) -> str:
     )
 
 
-def num(num_id: int, abstract: int, start_override: int | None = None) -> str:
+def num(
+    num_id: int, abstract: int, start_override: int | None = None, override_level: str = ""
+) -> str:
+    """override_level is a w:lvl that takes the place of level 0 of the definition."""
     override = ""
-    if start_override is not None:
-        override = (
-            '<w:lvlOverride w:ilvl="0">'
-            f'<w:startOverride w:val="{start_override}"/></w:lvlOverride>'
-        )
+    if start_override is not None or override_level:
+        start = ""
+        if start_override is not None:
+            start = f'<w:startOverride w:val="{start_override}"/>'
+        override = f'<w:lvlOverride w:ilvl="0">{start}{override_level}</w:lvlOverride>'
+
     return f'<w:num w:numId="{num_id}"><w:abstractNumId w:val="{abstract}"/>{override}</w:num>'
 
 
@@ -317,6 +331,9 @@ class Doc:
     # Entries of the colour mapping that differ from the identity, such as
     # (("t2", "accent3"),).
     color_mapping: tuple[tuple[str, str], ...] = ()
+    # Values other than 1 of the compatibility settings Word writes in mode 15
+    # (MODE_15_SETTINGS), such as (("enableOpenTypeFeatures", 0),); None leaves one out.
+    compat_values: tuple[tuple[str, int | None], ...] = ()
 
 
 def line_fonts_body(fonts: list[str]) -> str:
@@ -1113,6 +1130,163 @@ def default_paragraph_style() -> Doc:
     )
 
 
+# Run properties of list labels (#162). Each case is a list of its own, so every label
+# reads "1.", and every difference in formatting the label might take is visible: the
+# label's word box in geometry.json shows whether it took a size of 20 pt (where only the
+# label could take it, the line grows taller too), the rest shows in the rasters.
+BOLD = "<w:b/><w:bCs/>"
+NOT_BOLD = '<w:b w:val="0"/><w:bCs w:val="0"/>'
+ITALIC = "<w:i/><w:iCs/>"
+NOT_ITALIC = '<w:i w:val="0"/><w:iCs w:val="0"/>'
+SIZE_20 = '<w:sz w:val="40"/><w:szCs w:val="40"/>'
+
+
+def label_level(label: str = "", p_style: str | None = None) -> str:
+    return level(0, "decimal", "%1.", left=720, hanging=360, p_style=p_style, label=label)
+
+
+def label_lists(cases: list[tuple[str, dict, str, str]]) -> tuple[str, str]:
+    """The numbering part and the body: per case its label, its paragraph properties
+    (without the list), its definition's level 0 and the override level of its instance
+    ("" for none)."""
+    definitions, instances, body = [], [], []
+    for n, (label, props, definition, override) in enumerate(cases, 1):
+        definitions.append(abstract_num(n - 1, f"5C3A01{n:02X}", [definition]))
+        instances.append(num(n, n - 1, override_level=override))
+        body.append(para(run(f"Case {n:02d}: {label}"), list_item=(n, 0), **props))
+    return "".join(definitions) + "".join(instances), "".join(body)
+
+
+def linked_style(style_id: str, instance: int, rpr_xml: str) -> str:
+    """A paragraph style that names a list instance back (w:numPr), as Word writes the style
+    a list level links to with its w:pStyle."""
+    return (
+        f'<w:style w:type="paragraph" w:customStyle="1" w:styleId="{style_id}">'
+        f'<w:name w:val="{style_id}"/><w:basedOn w:val="Normal"/>'
+        f'<w:pPr><w:numPr><w:numId w:val="{instance}"/></w:numPr></w:pPr>'
+        f"<w:rPr>{rpr_xml}</w:rPr></w:style>"
+    )
+
+
+def list_label_format() -> Doc:
+    red_20 = '<w:color w:val="FF0000"/>' + SIZE_20
+    styles = "".join(
+        [
+            style("paragraph", "BoldStyle", BOLD, based_on="Normal"),
+            style("character", "MarkCharStyle", SIZE_20 + '<w:u w:val="single"/>'),
+            # Case 06's level links to it, and it names case 06's instance back.
+            linked_style("LabelParaStyle", 6, red_20),
+            # Case 08's level links to it, but it names no instance.
+            style("paragraph", "LabelParaOneWay", red_20, based_on="Normal"),
+        ]
+    )
+    cases = [
+        ("mark italic; level not italic", {"mark": ITALIC}, label_level(NOT_ITALIC), ""),
+        ("style BoldStyle (bold); level not bold", {"p_style": "BoldStyle"},
+         label_level(NOT_BOLD), ""),
+        ("style BoldStyle (bold); level bold", {"p_style": "BoldStyle"}, label_level(BOLD), ""),
+        ("definition's level bold, 20 pt; override level italic", {},
+         label_level(BOLD + SIZE_20), label_level(ITALIC)),
+        ("mark style MarkCharStyle (20 pt, underlined)",
+         {"mark": '<w:rStyle w:val="MarkCharStyle"/>'}, label_level(), ""),
+        ("level style LabelParaStyle (red, 20 pt), linked both ways", {},
+         label_level(p_style="LabelParaStyle"), ""),
+        ("mark bold; level 20 pt", {"mark": BOLD}, label_level(SIZE_20), ""),
+        ("level style LabelParaOneWay (red, 20 pt), linked one way", {},
+         label_level(p_style="LabelParaOneWay"), ""),
+    ]
+    numbering, body = label_lists(cases)
+    return Doc(
+        "E-list-label-format",
+        "The run properties of a list label: the paragraph mark's, its character style's and "
+        "its paragraph style's under a level's own, whether a level's on/off values set or "
+        "toggle, an override level's against its definition's, and a level's linked style",
+        body,
+        numbering=numbering,
+        styles=styles,
+    )
+
+
+def list_label_rstyle() -> Doc:
+    # MS-OI29500 §17.9.24(a): Word does not allow w:rStyle and w:highlight in a level's run
+    # properties. A document of their own, so that a file Word refuses costs no other case.
+    styles = style("character", "LabelCharStyle", SIZE_20)
+    cases = [
+        ("level character style LabelCharStyle (20 pt)", {},
+         label_level('<w:rStyle w:val="LabelCharStyle"/>'), ""),
+        ("level highlight yellow", {}, label_level('<w:highlight w:val="yellow"/>'), ""),
+    ]
+    numbering, body = label_lists(cases)
+    return Doc(
+        "E-list-label-rstyle",
+        "Whether Word opens a list level whose run properties name a character style or a "
+        "highlight, which MS-OI29500 says it does not allow, and whether the label shows them",
+        body,
+        numbering=numbering,
+        styles=styles,
+    )
+
+
+# OpenType features (#184): ligatures and kerning against enableOpenTypeFeatures.
+OPEN_TYPE_TEXT = "office affine fluffy AVATAR Type"
+LIGATURES = '<w14:ligatures w14:val="standard"/>'
+KERNING = '<w:kern w:val="2"/>'
+OPEN_TYPE_CASES = [
+    ("plain", ""),
+    ("standard ligatures", LIGATURES),
+    ("kerning from 1 pt", KERNING),
+    ("standard ligatures and kerning from 1 pt", KERNING + LIGATURES),
+]
+
+
+def open_type(name: str, mode: int, setting: int | None) -> Doc:
+    said = {1: "on", 0: "off", None: "not written"}[setting]
+    body = "".join(
+        para(run(f"Case {n:02d}: {label}"), space=spacing(after=6))
+        + para(
+            # Word 2010's w14 run properties follow every w: one, as Word writes them.
+            f"<w:r>{f'<w:rPr>{props}</w:rPr>' if props else ''}{text(OPEN_TYPE_TEXT)}</w:r>",
+            space=spacing(after=12),
+        )
+        for n, (label, props) in enumerate(OPEN_TYPE_CASES, 1)
+    )
+    return Doc(
+        name,
+        f"Ligatures (w14:ligatures) and kerning (w:kern) in Calibri 11 pt, in compatibility "
+        f"mode {mode} with the setting enableOpenTypeFeatures {said}: the rasters show the "
+        "ligatures, the word boxes the kerning of AVATAR",
+        body,
+        mode=mode,
+        compat_values=(("enableOpenTypeFeatures", setting),) if mode == 15 else (),
+    )
+
+
+def default_paragraph_style_after_normal() -> Doc:
+    # E-default-paragraph-style showed that of two default styles, neither of them Normal,
+    # Word takes the last. Here Normal is marked default and is not the last (#150).
+    later = para_style(
+        "LaterDefault",
+        '<w:spacing w:after="480"/><w:jc w:val="center"/>',
+        default=True,
+    )
+    body = "".join(
+        [
+            para(run("Case 01: a paragraph that names no style")),
+            para(run("Case 02: a paragraph that names Normal"), p_style="Normal"),
+            para(run("Case 03: a paragraph that names LaterDefault"), p_style="LaterDefault"),
+            para(run("Case 04: a paragraph that names no style, after the others")),
+        ]
+    )
+    return Doc(
+        "E-default-paragraph-style-after-normal",
+        "Which style a paragraph without w:pStyle takes when Normal (left-aligned, no space "
+        "after) is marked w:default and LaterDefault (centred, 24 pt after), written after it, "
+        "is marked w:default too",
+        body,
+        styles=later,
+    )
+
+
 def documents() -> list[Doc]:
     return [
         line_fonts(),
@@ -1145,6 +1319,13 @@ def documents() -> list[Doc]:
         list_level_inherit(),
         paragraph_units(),
         default_paragraph_style(),
+        list_label_format(),
+        list_label_rstyle(),
+        open_type("E-opentype-on", 15, 1),
+        open_type("E-opentype-off", 15, 0),
+        open_type("E-opentype-none", 15, None),
+        open_type("E-opentype-12", 12, None),
+        default_paragraph_style_after_normal(),
     ]
 
 
@@ -1250,6 +1431,16 @@ IDENTITY_MAPPING = (
 )
 
 
+# The settings Word writes into a new document in mode 15 ([MS-DOCX] 2.3.1 to 2.3.4), each
+# with the value 1.
+MODE_15_SETTINGS = (
+    "overrideTableStyleFontSizeAndJustification",
+    "enableOpenTypeFeatures",
+    "doNotFlipMirrorIndents",
+    "differentiateMultirowTableHeaders",
+)
+
+
 def settings_xml(doc: Doc) -> str:
     flags = "".join(f"<w:{flag}/>" for flag in doc.compat_flags)
     mapping = ""
@@ -1268,15 +1459,15 @@ def settings_xml(doc: Doc) -> str:
     settings = ""
     if doc.mode != 12:
         settings = compat_setting("compatibilityMode", doc.mode)
+    values = dict(doc.compat_values)
+    for name in values:
+        if name not in MODE_15_SETTINGS or doc.mode != 15:
+            raise ValueError(f"{doc.name}: {name} is not a setting Word writes in this mode")
     if doc.mode == 15:
-        # The settings Word writes into a new document in mode 15 ([MS-DOCX] 2.3.1 to 2.3.4).
-        for name in (
-            "overrideTableStyleFontSizeAndJustification",
-            "enableOpenTypeFeatures",
-            "doNotFlipMirrorIndents",
-            "differentiateMultirowTableHeaders",
-        ):
-            settings += compat_setting(name, 1)
+        for name in MODE_15_SETTINGS:
+            value = values.get(name, 1)
+            if value is not None:
+                settings += compat_setting(name, value)
     return (
         f'<w:settings xmlns:w="{W_NS}">'
         '<w:zoom w:percent="100"/>'
@@ -1325,8 +1516,13 @@ def relationships(rels: list[tuple[str, str]]) -> str:
 
 def parts(doc: Doc) -> list[tuple[str, bytes]]:
     """The package parts of a document, in the order they are stored."""
+    namespaces = f'xmlns:w="{W_NS}" xmlns:r="{R_NS}"'
+    if "<w14:" in doc.body:
+        # Word 2010's run properties, which an application that does not know them ignores
+        # (ECMA-376 Part 3, mc:Ignorable).
+        namespaces += f' xmlns:w14="{W14_NS}" xmlns:mc="{MC_NS}" mc:Ignorable="w14"'
     document = (
-        f'<w:document xmlns:w="{W_NS}" xmlns:r="{R_NS}">'
+        f"<w:document {namespaces}>"
         f"<w:body>{doc.body}{sect_pr()}</w:body></w:document>"
     )
     numbering = None

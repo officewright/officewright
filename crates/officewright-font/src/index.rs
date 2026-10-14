@@ -19,7 +19,7 @@ use skrifa::raw::tables::maxp::Maxp;
 
 use crate::coverage::{Allowance, Coverage};
 use crate::error::{Cause, Error};
-use crate::face::{FaceProperties, english_rank};
+use crate::face::{FaceProperties, NameReader, english_rank};
 use crate::font::{all_records, optional, required};
 
 /// How much of a table the index reads.
@@ -390,7 +390,8 @@ fn index_face(tables: &[(Tag, Vec<u8>)], present: &[Tag], face: u32) -> Result<I
 }
 
 /// The named instances of a variable font. Instances whose record or name cannot be
-/// read are left out.
+/// read are left out, and so are those whose name is too long to be kept or read past
+/// the budget of decoded records ([`NameReader`]).
 fn named_instances(fvar: &Fvar<'_>, name: &Name<'_>) -> Vec<NamedInstance> {
     let (Ok(axes), Ok(records)) = (fvar.axes(), fvar.instances()) else {
         return Vec::new();
@@ -410,7 +411,7 @@ fn named_instances(fvar: &Fvar<'_>, name: &Name<'_>) -> Vec<NamedInstance> {
         .iter()
         .map(|record| (record.subfamily_name_id.to_u16(), (u8::MAX, String::new())))
         .collect();
-    let data = name.string_data();
+    let mut reader = NameReader::new(name);
     for record in name.name_record() {
         let Some(best) = names.get_mut(&record.name_id().to_u16()) else {
             continue;
@@ -419,13 +420,8 @@ fn named_instances(fvar: &Fvar<'_>, name: &Name<'_>) -> Vec<NamedInstance> {
         if rank >= best.0 {
             continue;
         }
-        let Ok(string) = record.string(data) else {
-            continue;
-        };
-        let text: String = string.chars().collect();
-        let text = text.trim_matches(|c: char| c.is_whitespace() || c == '\0');
-        if !text.is_empty() {
-            *best = (rank, text.to_owned());
+        if let Some(text) = reader.text(record) {
+            *best = (rank, text);
         }
     }
     let coordinate =
@@ -1108,6 +1104,102 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn leaves_out_instances_whose_names_are_too_long_to_keep() {
+        let axes = [(b"wght", 100.0, 400.0, 900.0)];
+        let instances: [(u16, &[f64]); 3] = [(256, &[600.0]), (257, &[700.0]), (258, &[800.0])];
+        let at_limit = "一".repeat(170);
+        let font = TestFont::new("Test Var")
+            .name_record(256, &at_limit)
+            .name_record(257, &"二".repeat(171))
+            .name_record(258, &"B".repeat(513))
+            .with_table(b"fvar", testing::fvar(&axes, &instances))
+            .build();
+        let faces = index(&font).unwrap();
+        let names: Vec<_> = faces[0]
+            .1
+            .as_ref()
+            .unwrap()
+            .instances
+            .iter()
+            .map(|i| &i.name)
+            .collect();
+        assert_eq!(names, [&at_limit]);
+    }
+
+    /// A `name` table with the family "Test Var", then 64 Windows records of instance
+    /// name ID 256 that all point at one string, `shared` in UTF-16, then the Macintosh
+    /// name "SemiBold" of the same ID.
+    fn shared_instance_names(shared: &str) -> Vec<u8> {
+        let utf16 =
+            |text: &str| -> Vec<u8> { text.encode_utf16().flat_map(u16::to_be_bytes).collect() };
+        let (family, shared) = (utf16("Test Var"), utf16(shared));
+        let (family_len, shared_len) = (family.len() as u16, shared.len() as u16);
+        let mut records = vec![(3, 1, 0x409, 1, family_len, 0)];
+        records.extend(vec![(3, 1, 0x409, 256, shared_len, family_len); 64]);
+        records.push((1, 0, 0, 256, 8, family_len + shared_len));
+        let count = records.len() as u16;
+        let mut table = Vec::new();
+        for value in [0, count, 6 + 12 * count] {
+            table.extend(u16::to_be_bytes(value));
+        }
+        for (platform, encoding, language, id, length, offset) in records {
+            for value in [platform, encoding, language, id, length, offset] {
+                table.extend(u16::to_be_bytes(value));
+            }
+        }
+        table.extend([family, shared, b"SemiBold".to_vec()].concat());
+        table
+    }
+
+    #[test]
+    fn decodes_at_most_64_kib_of_records_for_the_instances() {
+        let axes = [(b"wght", 100.0, 400.0, 900.0)];
+        let instances: [(u16, &[f64]); 1] = [(256, &[600.0])];
+        let names = |shared: &str| -> Vec<String> {
+            let font = TestFont::new("Test Var")
+                .with_table(b"name", shared_instance_names(shared))
+                .with_table(b"fvar", testing::fvar(&axes, &instances))
+                .build();
+            let faces = index(&font).unwrap();
+            let face = faces[0].1.as_ref().unwrap();
+            face.instances.iter().map(|i| i.name.clone()).collect()
+        };
+        // 64 records of 1,024 bytes, decoded and too long to keep (1,536 bytes of UTF-8),
+        // use up the budget: the Macintosh name after them is not read.
+        assert_eq!(names(&"一".repeat(512)), Vec::<String>::new());
+        // Records over 1,024 bytes are not decoded and leave the budget whole.
+        assert_eq!(names(&"一".repeat(513)), ["SemiBold"]);
+    }
+
+    #[test]
+    fn an_instance_name_too_long_gives_way_to_one_of_a_lower_rank() {
+        let axes = [(b"wght", 100.0, 400.0, 900.0)];
+        let instances: [(u16, &[f64]); 1] = [(256, &[600.0])];
+        let long = "A".repeat(513);
+        let font = TestFont::new("Test Var")
+            .with_table(
+                b"name",
+                testing::name_table(&[
+                    (3, 1, 0x409, 1, "Test Var"),
+                    (3, 1, 0x409, 256, &long),
+                    (1, 0, 0, 256, "SemiBold"),
+                ]),
+            )
+            .with_table(b"fvar", testing::fvar(&axes, &instances))
+            .build();
+        let faces = index(&font).unwrap();
+        let names: Vec<_> = faces[0]
+            .1
+            .as_ref()
+            .unwrap()
+            .instances
+            .iter()
+            .map(|i| &i.name)
+            .collect();
+        assert_eq!(names, ["SemiBold"]);
     }
 
     #[test]
