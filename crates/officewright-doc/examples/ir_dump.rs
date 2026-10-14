@@ -179,8 +179,36 @@ fn describe(ir: &ir::Document, inline: &ir::Inline) -> String {
                 result.join("; ")
             )
         }
+        ir::Inline::Object(object) => {
+            format!(
+                "picture in the line {}",
+                object_text(ir, object.content(), object.size())
+            )
+        }
+        ir::Inline::Anchored(object) => format!(
+            "floating picture {}, across {:?} {:?}, down {:?} {:?}, wrap {:?}",
+            object_text(ir, object.content(), object.size()),
+            object.horizontal().relative_to(),
+            object.horizontal().placement(),
+            object.vertical().relative_to(),
+            object.vertical().placement(),
+            object.wrap()
+        ),
         other => format!("{other:?}"),
     }
+}
+
+/// What an object shows and its size, briefly.
+fn object_text(ir: &ir::Document, content: &ir::ObjectContent, size: ir::Size) -> String {
+    let image = match content {
+        ir::ObjectContent::Picture(picture) => ir.image(picture.image()),
+        _ => None,
+    };
+    let image = image.map_or_else(
+        || "of no image".to_owned(),
+        |image| format!("{:?} of {} bytes", image.format(), image.bytes().len()),
+    );
+    format!("{image}, {:.1}x{:.1}pt", size.width().0, size.height().0)
 }
 
 /// A run style, briefly.

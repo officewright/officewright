@@ -1,6 +1,7 @@
 //! The document model: what a document contains, independent of the file format it was
 //! read from.
 
+pub(crate) mod drawing;
 pub(crate) mod fonts;
 pub(crate) mod format;
 pub(crate) mod numbering;
@@ -20,6 +21,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use officewright_core::Pt;
 
+pub use drawing::{
+    Anchor, AnchorHorizontalAlign, AnchorVerticalAlign, Crop, Drawing, HorizontalReference, Image,
+    Offsets, Picture, VerticalReference, WrapKind,
+};
 pub use fonts::{
     EmbeddedFontReference, EmbeddedFontStyle, FontDeclaration, FontFamily, FontPitch, FontSignature,
 };
@@ -111,6 +116,9 @@ pub struct Document {
     /// The footnotes and the endnotes by their ids; of two with one id, the first.
     pub(crate) footnotes: HashMap<i64, u32>,
     pub(crate) endnotes: HashMap<i64, u32>,
+    /// The images pictures show, and where each image part is among them.
+    pub(crate) images: Vec<ImageData>,
+    pub(crate) image_parts: HashMap<Box<str>, Option<u32>>,
     pub(crate) kind: DocumentKind,
     pub(crate) conformance: Conformance,
     pub(crate) diagnostics: Vec<Diagnostic>,
@@ -128,6 +136,10 @@ pub(crate) struct Names {
     pub(crate) r: [Option<xml::Sym>; 2],
     /// The main namespace of DrawingML, of the theme.
     pub(crate) a: [Option<xml::Sym>; 2],
+    /// DrawingML's positioning in WordprocessingML (`wp:inline`, `wp:anchor`).
+    pub(crate) wp: [Option<xml::Sym>; 2],
+    /// DrawingML pictures (`pic:pic`).
+    pub(crate) pic: [Option<xml::Sym>; 2],
     pub(crate) mc: Option<xml::Sym>,
     /// Word 2010's extensions, such as `w14:ligatures`.
     pub(crate) w14: Option<xml::Sym>,
@@ -203,6 +215,8 @@ impl Document {
             header_footers: HashMap::new(),
             footnotes: HashMap::new(),
             endnotes: HashMap::new(),
+            images: Vec::new(),
+            image_parts: HashMap::new(),
             kind: DocumentKind::Document,
             conformance: Conformance::Transitional,
             diagnostics: Vec::new(),
@@ -545,6 +559,12 @@ pub(crate) enum RunItem {
     NoteNumber,
     Separator,
     ContinuationSeparator,
+    /// A `w:drawing` kept whole, and the image its picture shows, read when the part
+    /// that holds it was.
+    Drawing {
+        element: Span,
+        image: Option<u32>,
+    },
     LastRenderedPageBreak,
     Other(Span),
 }
@@ -561,4 +581,20 @@ thread_local! {
     /// The bytes of font names folded to lower case on this thread, for tests of the cost
     /// of looking fonts up.
     pub(crate) static FOLDED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// An image a picture of the document shows: the bytes of its part and its content
+/// type, read once however many pictures show it.
+pub(crate) struct ImageData {
+    pub(crate) content_type: Box<str>,
+    pub(crate) bytes: std::sync::Arc<[u8]>,
+}
+
+impl std::fmt::Debug for ImageData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImageData")
+            .field("content_type", &self.content_type)
+            .field("bytes", &self.bytes.len())
+            .finish()
+    }
 }

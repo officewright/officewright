@@ -43,11 +43,11 @@ fn open(body: &str) -> Document {
 }
 
 /// A ZIP archive with the entries stored.
-fn zip(entries: &[(String, String)]) -> Vec<u8> {
+fn zip(entries: &[(String, impl AsRef<[u8]>)]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut central = Vec::new();
     for (name, data) in entries {
-        let (name, data) = (name.as_bytes(), data.as_bytes());
+        let (name, data) = (name.as_bytes(), data.as_ref());
         let offset = out.len() as u32;
         let crc = crc32(data);
         out.extend_from_slice(&0x0403_4b50_u32.to_le_bytes());
@@ -119,6 +119,48 @@ fn with_parts(body: &str, parts: &[(&str, &str, String)]) -> Document {
     }
     let extra: Vec<(&str, &str)> = extra.iter().map(|(a, b)| (&**a, &**b)).collect();
     Document::from_bytes(package(DOCUMENT, &document_xml(body), &extra)).unwrap()
+}
+
+/// The PNG signature and the start of a header: enough for the reader, which does not
+/// decode images.
+const PNG_BYTES: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
+/// The start of a JPEG file.
+const JPEG_BYTES: &[u8] = b"\xFF\xD8\xFF\xE0\0\x10JFIF\0";
+
+/// A package whose body is `body`, with the relationships of the main part, the files
+/// of the package besides the main part (name and bytes), and `Default` content types
+/// besides those of `rels` and `xml`.
+fn files_package(
+    body: &str,
+    relationships: &str,
+    files: &[(&str, &[u8])],
+    defaults: &str,
+) -> Vec<u8> {
+    let mut entries: Vec<(String, Vec<u8>)> = vec![
+        (
+            "[Content_Types].xml".to_owned(),
+            format!(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>{defaults}<Override PartName="/word/document.xml" ContentType="{DOCUMENT}"/></Types>"#
+            )
+            .into_bytes(),
+        ),
+        (
+            "_rels/.rels".to_owned(),
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
+        ),
+        ("word/document.xml".to_owned(), document_xml(body).into_bytes()),
+        (
+            "word/_rels/document.xml.rels".to_owned(),
+            format!(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{relationships}</Relationships>"#
+            )
+            .into_bytes(),
+        ),
+    ];
+    for (name, bytes) in files {
+        entries.push(((*name).to_owned(), bytes.to_vec()));
+    }
+    zip(&entries)
 }
 
 /// One line per block, with the kinds of what is inside.
@@ -406,7 +448,7 @@ fn refuses_what_is_not_a_word_document() {
     );
     let no_main = zip(&[(
         "[Content_Types].xml".into(),
-        r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>"#.into(),
+        r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>"#,
     )]);
     assert_eq!(
         message(Document::from_bytes(no_main)),
@@ -3208,6 +3250,7 @@ fn repairs_a_damaged_theme() {
     assert!(messages[5].ends_with(": a second a:themeElements is ignored"));
 }
 
+mod drawing;
 mod format;
 #[cfg(feature = "pdf")]
 mod layout;

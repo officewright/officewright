@@ -25,8 +25,8 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use officewright_doc::{
-    Block, CharacterFormat, ColorValue, Document, Error, Formats, HeaderFooterKind, Inline,
-    Numbering, ParagraphFormat, Run, RunContent,
+    Block, CharacterFormat, ColorValue, Document, Drawing, Error, Formats, HeaderFooterKind,
+    Inline, Numbering, ParagraphFormat, Run, RunContent,
 };
 
 fn main() -> ExitCode {
@@ -180,6 +180,11 @@ fn print_block<'a>(
                 note = format!(" (+{} kept as written)", others + drawings);
             }
             println!("{indent}paragraph {:?}{note}", paragraph.text());
+            for item in paragraph.runs().flat_map(|run| run.content()) {
+                if let RunContent::Drawing(drawing) = item {
+                    println!("{indent}  {}", describe_drawing(drawing));
+                }
+            }
             if runs {
                 let properties = paragraph.properties();
                 let mut written = String::new();
@@ -444,4 +449,42 @@ fn in_effect(format: &CharacterFormat) -> String {
         out.push_str(" contextual-alternates");
     }
     out
+}
+
+/// A drawing, briefly: its size, where it is and what it shows.
+fn describe_drawing(drawing: Drawing<'_>) -> String {
+    let size = match (drawing.width(), drawing.height()) {
+        (Some(width), Some(height)) => format!("{:.1}x{:.1}pt", width.0, height.0),
+        _ => "without a size".to_owned(),
+    };
+    let place = match drawing.anchor() {
+        None => "in the line".to_owned(),
+        Some(anchor) => format!(
+            "floating, across {:?} {:?} {:?}, down {:?} {:?} {:?}, wrap {:?}{}",
+            anchor.horizontal_reference(),
+            anchor.horizontal_align(),
+            anchor.horizontal_offset(),
+            anchor.vertical_reference(),
+            anchor.vertical_align(),
+            anchor.vertical_offset(),
+            anchor.wrap(),
+            if anchor.behind_text() {
+                ", behind the text"
+            } else {
+                ""
+            },
+        ),
+    };
+    let shows = match drawing.picture() {
+        None => "no picture".to_owned(),
+        Some(picture) => match picture.image() {
+            Some(image) => format!(
+                "a picture, {} of {} bytes",
+                image.content_type(),
+                image.bytes().len()
+            ),
+            None => "a picture whose image the package does not have".to_owned(),
+        },
+    };
+    format!("drawing {size} {place}: {shows}")
 }
