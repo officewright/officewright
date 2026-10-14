@@ -282,8 +282,8 @@ impl Painter<'_, '_, '_> {
                 ReportKind::ValueClamped,
                 &Location::default(),
                 format!(
-                    "pages smaller than {MIN_PAGE_SIDE} pt each way, the least a PDF holds, \
-                     are made that large"
+                    "pages narrower or shorter than {MIN_PAGE_SIDE} pt, the least a PDF \
+                     holds, are made that large"
                 ),
             );
         }
@@ -352,7 +352,10 @@ impl Painter<'_, '_, '_> {
         self.fonts.report_once(
             ReportKind::ValueClamped,
             &Location::default(),
-            format!("lines thicker than {MAX_LINE_WIDTH} pt are drawn that thick"),
+            format!(
+                "lines thicker than {MAX_LINE_WIDTH} pt, more than a PDF holds for their \
+                 dashes, are drawn that thick"
+            ),
         );
         LineItem {
             width: Pt(MAX_LINE_WIDTH),
@@ -372,8 +375,15 @@ impl Painter<'_, '_, '_> {
         // No glyph is drawn farther than four times its size from its place.
         let reach = 4.0 * run.size.0;
         let (x, y) = (run.origin.x.0, flip(run.origin.y).0);
+        let skew = if run.synthetic_italic {
+            SYNTHETIC_ITALIC_SKEW
+        } else {
+            0.0
+        };
+        // Where a glyph is drawn: synthetic italic slants it about the run's baseline.
+        let place = |glyph: &DrawnGlyph| (x + glyph.x.0 + skew * glyph.y.0, y + glyph.y.0);
         let on_page = |glyph: &DrawnGlyph| {
-            let at = (x + glyph.x.0, y + glyph.y.0);
+            let at = place(glyph);
             page.reaches(at, at, reach)
         };
         // Glyph by glyph: a cluster may be many, such as the dots of a tab leader, of
@@ -383,16 +393,27 @@ impl Painter<'_, '_, '_> {
             .iter()
             .map(|cluster| {
                 let kept: Vec<&DrawnGlyph> = cluster.glyphs.iter().filter(|g| on_page(g)).collect();
-                (cluster.text.as_str(), kept)
+                // One glyph left of several would stand for all the cluster's text, which
+                // the PDF would then give it wherever else it is drawn: it stands for
+                // none, since the rest of the cluster is off the page.
+                let text = if kept.len() == 1 && cluster.glyphs.len() > 1 {
+                    ""
+                } else {
+                    cluster.text.as_str()
+                };
+                (text, kept)
             })
             .filter(|(_, kept)| !kept.is_empty())
             .collect();
-        // The run starts at its first glyph on the page, so that every position of it
-        // is near the page, within what a PDF holds.
+        // The run starts where its first glyph on the page is drawn, so that every
+        // position of it is near the page, within what a PDF holds. Synthetic italic
+        // slants about the run's start, so the offsets are taken from that glyph's place
+        // before the slant: every glyph is drawn where it would be from the baseline.
         let first = clusters.first()?.1.first().copied()?;
         let (first_x, first_y) = (first.x.0, first.y.0);
+        let start = place(first);
         let font = self.font(run.face)?;
-        let mut glyphs = pdf::GlyphRun::new(&font, run.size, Pt(x + first_x), Pt(y + first_y))
+        let mut glyphs = pdf::GlyphRun::new(&font, run.size, Pt(start.0), Pt(start.1))
             .with_color(run.color)
             .with_horizontal_scale(run.h_scale);
         if run.synthetic_bold {
@@ -1037,6 +1058,77 @@ mod tests {
             .map(|glyph| (glyph.x(), glyph.y()))
             .collect();
         assert_eq!(offsets, [(Pt(0.0), Pt(0.0))]);
+    }
+
+    #[test]
+    fn synthetic_italic_slants_about_the_baseline_wherever_the_run_starts() {
+        // A glyph raised 6 pt, then one on the baseline 10 pt on: slanted by a third
+        // about the baseline, they are drawn from 12 and 20 pt. The run starts where the
+        // first is drawn, and the offsets are taken from it before the slant.
+        let mut item = run(10.0, 50.0, &[(0.0, 6.0), (10.0, 0.0)]);
+        item.synthetic_italic = true;
+        let (drawn, _) = painted(
+            &Document::default(),
+            crate::testing::minimal(),
+            &[DisplayItem::Glyphs(item)],
+        );
+        let [Drawn::Glyphs(slanted)] = drawn.as_slice() else {
+            panic!("one run");
+        };
+        assert_eq!((slanted.x(), slanted.y()), (Pt(12.0), Pt(156.0)));
+        let drawn_at: Vec<(f64, f64)> = slanted
+            .glyphs()
+            .iter()
+            .map(|glyph| {
+                let (dx, dy) = (glyph.x().0, glyph.y().0);
+                (slanted.x().0 + dx + slanted.skew() * dy, slanted.y().0 + dy)
+            })
+            .collect();
+        assert_eq!(drawn_at, [(12.0, 156.0), (20.0, 150.0)]);
+        // From a line 300 pt below the page, raised 400 pt: on the page upright, but
+        // slanted 133 pt right, past the page's reach of 40 pt, so nothing is drawn.
+        let mut far = run(10.0, 500.0, &[(0.0, 400.0)]);
+        far.synthetic_italic = true;
+        let (drawn, _) = painted(
+            &Document::default(),
+            crate::testing::minimal(),
+            &[DisplayItem::Glyphs(far)],
+        );
+        assert!(drawn.is_empty());
+    }
+
+    #[test]
+    fn a_cluster_cut_down_to_one_glyph_stands_for_no_text() {
+        // "AB" of a glyph left of the page's reach and one on it; then "CD" whole.
+        let mut item = run(10.0, 50.0, &[]);
+        let glyph = |x: f64| DrawnGlyph {
+            glyph: officewright_font::GlyphId::new(1),
+            x: Pt(x),
+            y: Pt(0.0),
+        };
+        item.clusters = vec![
+            Cluster {
+                text: "AB".to_owned(),
+                glyphs: vec![glyph(-200.0), glyph(0.0)],
+            },
+            Cluster {
+                text: "CD".to_owned(),
+                glyphs: vec![glyph(10.0), glyph(20.0)],
+            },
+        ];
+        let (drawn, _) = painted(
+            &Document::default(),
+            crate::testing::minimal(),
+            &[DisplayItem::Glyphs(item)],
+        );
+        let [Drawn::Glyphs(cut)] = drawn.as_slice() else {
+            panic!("one run");
+        };
+        let texts: Vec<(String, usize)> = cut
+            .clusters()
+            .map(|(text, glyphs)| (text.to_owned(), glyphs.len()))
+            .collect();
+        assert_eq!(texts, [(String::new(), 1), ("CD".to_owned(), 2)]);
     }
 
     #[test]
