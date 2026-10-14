@@ -421,6 +421,26 @@ fn enforces_the_depth_and_attribute_limits() {
 }
 
 #[test]
+fn bounds_a_part_to_4096_namespaces_by_default() {
+    // One declaration on each of many siblings, inside the limits of attributes and depth.
+    let part = |count: usize| {
+        let children: String = (0..count)
+            .map(|n| format!("<b xmlns:n{n}='urn:{n}'/>"))
+            .collect();
+        format!("<a>{children}</a>")
+    };
+    assert!(trace_bytes(part(4096).as_bytes(), &Limits::new()).is_ok());
+    assert!(matches!(
+        trace_bytes(part(4097).as_bytes(), &Limits::new()),
+        Err(Error::LimitExceeded {
+            limit: Limit::XmlNamespaces,
+            maximum: 4096,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn bounds_the_namespaces_a_part_declares() {
     let limits = Limits::new().with_max_xml_namespaces(2);
     // A URI declared again, under any prefix, counts once.
