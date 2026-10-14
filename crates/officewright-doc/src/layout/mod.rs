@@ -34,6 +34,7 @@ thread_local! {
         built: 0,
         cut_steps: 0,
         flags: 0,
+        cell_copies: 0,
     }) };
 }
 
@@ -46,6 +47,9 @@ pub(crate) struct Work {
     pub(crate) built: usize,
     pub(crate) cut_steps: usize,
     pub(crate) flags: usize,
+    /// Table cells widened by a horizontal merge whose blocks were not where the cell
+    /// was built: copies, where the cell should have been moved.
+    pub(crate) cell_copies: usize,
 }
 
 /// Counts work for [`WORK`].

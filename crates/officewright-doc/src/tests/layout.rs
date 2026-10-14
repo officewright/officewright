@@ -1851,14 +1851,17 @@ fn translates_widths_beyond_range_and_negative_spacing_into_valid_ir() {
 #[test]
 fn folds_long_horizontal_merges_moving_the_widened_cell() {
     // A cell of many paragraphs, widened by as many continuing cells. The widened cell
-    // is moved, not copied once per continuing cell: copies took a minute at 30,000.
+    // is moved, not copied once per continuing cell, which took half a minute at 30,000:
+    // its blocks stay where they were built.
     let n = 10_000;
     let body = format!(
         r#"<w:tbl><w:tr><w:tc><w:tcPr><w:hMerge w:val="restart"/></w:tcPr>{}</w:tc>{}</w:tr></w:tbl><w:p/>"#,
         "<w:p/>".repeat(n),
         "<w:tc><w:tcPr><w:hMerge/></w:tcPr><w:p/></w:tc>".repeat(n)
     );
-    let translation = translate(&open(&body));
+    let document = open(&body);
+    let (translation, copies) = work_of(|work| work.cell_copies, || translate(&document));
+    assert_eq!(copies, 0);
     let cells = tables(&translation)[0].rows()[0].cells();
     assert_eq!(cells.len(), 1);
     assert_eq!(usize::from(cells[0].grid_span()), n + 1);
@@ -1887,7 +1890,7 @@ fn translates_cell_values_word_reads_its_own_way() {
                 .with_width(Pt(0.5))
         )
     );
-    // A table's nil margin is 0.
+    // A table's nil margin is taken as not written, as a cell's is.
     let margins = props.cell_margins();
     assert_eq!(
         (
@@ -1896,7 +1899,7 @@ fn translates_cell_values_word_reads_its_own_way() {
             margins.bottom(),
             margins.end()
         ),
-        (Pt(5.0), Pt(10.0), Pt(0.0), Pt(0.0))
+        (Pt(5.0), Pt(10.0), Pt(0.0), Pt(5.4))
     );
     let cells = table.rows()[0].cells();
     // Word ignores a cell's nil margin, which then comes from the table (MS-OI29500
@@ -1909,7 +1912,7 @@ fn translates_cell_values_word_reads_its_own_way() {
             margins.bottom(),
             margins.end()
         ),
-        (Pt(5.0), Pt(10.0), Pt(2.0), Pt(0.0))
+        (Pt(5.0), Pt(10.0), Pt(2.0), Pt(5.4))
     );
     // Both is top in a cell (MS-OI29500 §17.4.83(a)); so is none.
     assert_eq!(cells[0].vertical_align(), ir::CellVerticalAlign::Top);
@@ -1956,6 +1959,9 @@ fn floats_tables_as_word_does() {
         r#"<w:tblpPr w:tblpX="1" w:tblpY="0"/>"#,
         r#"<w:tblpPr w:tblpX="0" w:tblpY="1"/>"#,
         r#"<w:tblpPr w:tblpY="-720"/>"#,
+        // A position given as an alignment is no distance of 0 (n779642.docx).
+        r#"<w:tblpPr w:tblpYSpec="bottom"/>"#,
+        r#"<w:tblpPr w:horzAnchor="text" w:vertAnchor="page" w:tblpXSpec="center"/>"#,
     ] {
         assert!(floats(kept), "{kept}");
     }

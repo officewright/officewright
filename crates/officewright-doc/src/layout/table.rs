@@ -34,11 +34,7 @@ impl<'a> Translator<'a> {
                 "the table's style is not applied: table styles are not translated yet".into()
             });
         }
-        let margins = cell_margins(
-            properties.cell_margins(),
-            &ir::CellMargins::default(),
-            false,
-        );
+        let margins = cell_margins(properties.cell_margins(), &ir::CellMargins::default());
         let borders = properties.borders();
         let props = ir::TableProps::default()
             .with_width(preferred(properties.width()))
@@ -151,6 +147,9 @@ impl<'a> Translator<'a> {
         let mut cells: Vec<ir::Cell> = Vec::new();
         // The last cell, kept out of `cells` while the cells after it may widen it.
         let mut open: Option<ir::Cell> = None;
+        // In tests, where the last cell's blocks were built.
+        #[cfg(test)]
+        let mut built_at = 0;
         for cell in row.cells() {
             let properties = cell.properties();
             let span = properties
@@ -165,6 +164,13 @@ impl<'a> Translator<'a> {
                 if let Some(last) = open.take() {
                     let widened = last.grid_span().saturating_add(span);
                     open = Some(last.with_grid_span(widened));
+                    #[cfg(test)]
+                    if open
+                        .as_ref()
+                        .is_some_and(|cell| cell.blocks().as_ptr().addr() != built_at)
+                    {
+                        super::work(|work| work.cell_copies += 1);
+                    }
                     if has_content(cell) {
                         self.path
                             .extend([Step::Field("cells"), Step::Index(cells.len())]);
@@ -180,7 +186,12 @@ impl<'a> Translator<'a> {
             cells.extend(open.take());
             self.path
                 .extend([Step::Field("cells"), Step::Index(cells.len())]);
-            open = Some(self.cell(cell, &properties, span, &table.cell_margins()));
+            let built = self.cell(cell, &properties, span, &table.cell_margins());
+            #[cfg(test)]
+            {
+                built_at = built.blocks().as_ptr().addr();
+            }
+            open = Some(built);
             self.path.truncate(self.path.len().saturating_sub(2));
         }
         cells.extend(open);
@@ -251,7 +262,7 @@ impl<'a> Translator<'a> {
             .with_margins(
                 properties
                     .margins()
-                    .map(|written| cell_margins(Some(written), margins, true)),
+                    .map(|written| cell_margins(Some(written), margins)),
             )
             .with_borders(borders)
             .with_shading(
@@ -308,7 +319,10 @@ impl<'a> Translator<'a> {
     }
 }
 
-/// A preferred width; a width of 0 or `nil` is automatic (MS-OI29500 §17.4.71(a)).
+/// A preferred width of a table, a cell or the space before or after a row: automatic
+/// when it is written so, as `nil` or as 0 (MS-OI29500 §17.4.71(a) for a cell's), or not
+/// written; a negative one, which Word does not expect (MS-OI29500 §17.4.87(d)), is
+/// automatic too.
 fn preferred(width: Option<TableWidth>) -> ir::PreferredWidth {
     match width {
         Some(TableWidth::Length(length)) if length.0 > 0.0 => ir::PreferredWidth::Points(length),
@@ -352,16 +366,20 @@ fn floats(position: Option<&TablePosition>) -> bool {
         return false;
     };
     // A distance as written, 0 when it is not: Word writes 1 twip for 0 to avoid this
-    // case (§17.4.57(e)).
-    let at_zero = |distance: Option<Pt>| distance.is_none_or(|distance| distance.0 == 0.0);
-    let ignored = at_zero(position.x())
-        && at_zero(position.y())
+    // case (§17.4.57(e)). A position given as an alignment (`tblpXSpec`, `tblpYSpec`),
+    // which wins over the distance, is no distance of 0: Word 2007 writes tables placed
+    // at the bottom of the page so (n779642.docx of LibreOffice's tests).
+    let at_zero = |distance: Option<Pt>, aligned: bool| {
+        !aligned && distance.is_none_or(|distance| distance.0 == 0.0)
+    };
+    let ignored = at_zero(position.x(), position.horizontal_alignment().is_some())
+        && at_zero(position.y(), position.vertical_alignment().is_some())
         && position.horizontal_anchor().unwrap_or(PositionAnchor::Text) == PositionAnchor::Text
         && position.vertical_anchor().unwrap_or(PositionAnchor::Margin) != PositionAnchor::Text;
     !ignored
 }
 
-/// Whether a cell holds more than one empty paragraph.
+/// Whether a cell holds anything but a single empty paragraph.
 fn has_content(cell: TableCell<'_>) -> bool {
     let mut blocks = cell.blocks();
     match (blocks.next(), blocks.next()) {
@@ -371,26 +389,27 @@ fn has_content(cell: TableCell<'_>) -> bool {
     }
 }
 
-/// Cell margins: those written, the others from `below`, the table's for a cell.
+/// Cell margins: those written, the others from `below`: the table's for a cell, the
+/// IR's defaults, which are Word's, for a table.
 ///
 /// A margin of the table written as a percentage or automatic is 0: Word reads it so at
 /// the start and end (MS-OI29500 2.1.146 a, 2.1.125 a), as the IR's `CellMargins`
 /// describes, and it is taken so at the top and bottom too. A cell's own margin in
 /// percent or auto is taken as 0 as well, which no note confirms yet. Word ignores a
 /// side of a cell's `w:tcMar` of type `nil` (MS-OI29500 §17.4.2(a), §17.4.10(a),
-/// §17.4.77(a), and the same note for the start), so that side comes from the table; a
-/// table's `nil` is a width of 0, as the standard says.
+/// §17.4.77(a), and the same note for the start), so that side comes from the table.
+/// For the table's bottom margin the notes point to the same rule (§17.4.5), and a
+/// table's `nil` is taken as not written on every side, which a Word render is to
+/// confirm (#172).
 fn cell_margins(
     written: Option<&crate::model::CellMargins>,
     below: &ir::CellMargins,
-    in_cell: bool,
 ) -> ir::CellMargins {
     let Some(written) = written else {
         return *below;
     };
     let side = |width: Option<TableWidth>, default: Pt| match width {
-        None => default,
-        Some(TableWidth::Nil) if in_cell => default,
+        None | Some(TableWidth::Nil) => default,
         Some(TableWidth::Length(length)) => Pt(length.0.max(0.0)),
         Some(_) => Pt(0.0),
     };
