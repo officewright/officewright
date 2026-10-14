@@ -841,6 +841,13 @@ class Pdffonts(unittest.TestCase):
         row = f"{'Minion':<37}{'Type 1C ' + suffix:<18}Custom           no  no  no      17  0"
         self.assertEqual(importer.not_embedded(PDFFONTS + row + "\n"), ["Garamond", "Minion"])
 
+    def test_an_embedded_opentype_font_is_read_as_embedded(self):
+        # As pdffonts lists a CFF face embedded as /FontFile3 /OpenType: emb yes.
+        suffix = "(" + "O" + "T)"
+        name = "ABCDEF+Minion"
+        row = f"{name:<37}{'Type 1C ' + suffix:<18}Custom           yes yes no      17  0"
+        self.assertEqual(importer.not_embedded(PDFFONTS + row + "\n"), ["Garamond"])
+
 
 def word_export(parts, runs=True, texts=None):
     """make-reference.ps1's formatting export for a package, as Word would write it: the
