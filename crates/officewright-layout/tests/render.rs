@@ -401,7 +401,11 @@ fn content_beyond_what_a_pdf_holds_still_renders() -> TestResult {
                 );
             }
             "a page 2 pt square" => {
-                assert!(reported("pages smaller"), "{case}: {:?}", rendered.report());
+                assert!(
+                    reported("pages narrower or shorter"),
+                    "{case}: {:?}",
+                    rendered.report()
+                );
             }
             _ => {}
         }
