@@ -765,3 +765,47 @@ fn text_whose_drawn_and_source_bytes_differ_keeps_its_text() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn the_leader_bound_is_shared_by_the_paragraphs_of_a_document() -> TestResult {
+    // Three paragraphs of 50 dot-leader tabs at 1 pt and 1 %: each alone stays under the
+    // bound, together they would pass it.
+    let book = book()?;
+    let mut document = Document::default();
+    let tiny = styled(&mut document, |style| {
+        style.with_size(Pt(1.0)).with_scale(1)
+    });
+    let stops: Vec<TabStop> = (1..=50)
+        .map(|stop| {
+            TabStop::default()
+                .with_position(Pt(f64::from(stop) * 11.0))
+                .with_leader(TabLeader::Dot)
+        })
+        .collect();
+    let paragraph = || {
+        let mut inlines = vec![Inline::text("A", tiny)];
+        inlines.extend((0..50).map(|_| Inline::tab(tiny)));
+        Paragraph::new(tiny)
+            .with_props(ParagraphProps::default().with_tabs(stops.clone()))
+            .with_inlines(inlines)
+    };
+    let leader_glyphs = |painted: &Painted| -> usize {
+        items(painted, "glyphs")
+            .iter()
+            .filter(|run| run.contains("\"\\t\""))
+            .map(|run| glyph_xs(run).len())
+            .sum()
+    };
+    let one = fuzzing::paint(&book, &document, &[paragraph()], 1584.0);
+    let alone = leader_glyphs(&one);
+    assert!(alone > (1 << 18) / 3 && alone <= 1 << 18, "{alone}");
+    let three = fuzzing::paint(
+        &book,
+        &document,
+        &[paragraph(), paragraph(), paragraph()],
+        1584.0,
+    );
+    let together = leader_glyphs(&three);
+    assert!(together <= 1 << 18, "{together}");
+    Ok(())
+}
