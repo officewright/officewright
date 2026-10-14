@@ -892,6 +892,7 @@ fn compat_flags_map_names_both_ways() {
             "doNotBreakWrappedTables",
             CompatFlag::DoNotBreakWrappedTables,
         ),
+        ("ulTrailSpace", CompatFlag::UlTrailSpace),
     ];
     for (name, flag) in &named {
         assert_eq!(&CompatFlag::from_name(name), flag);

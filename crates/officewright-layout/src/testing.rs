@@ -123,6 +123,30 @@ pub(crate) fn with_family(font: Vec<u8>, family: &str) -> Vec<u8> {
     font
 }
 
+/// `font` (the test font) with its glyph of `A` mapped from `.` instead, in both
+/// subtables of its `cmap`, which share one format 4 table: a font with a period and no
+/// `A`.
+pub(crate) fn with_period(font: Vec<u8>) -> Vec<u8> {
+    let cmap = table(&font, b"cmap");
+    let subtable =
+        cmap + u32::from_be_bytes(font[cmap + 8..cmap + 12].try_into().unwrap()) as usize;
+    let segments_x2 = usize::from(u16::from_be_bytes([font[subtable + 6], font[subtable + 7]]));
+    // The second segment is `A` alone, to glyph 2 by its delta.
+    let end = subtable + 14 + 2;
+    let start = subtable + 16 + segments_x2 + 2;
+    let delta = subtable + 16 + 2 * segments_x2 + 2;
+    assert_eq!(
+        &font[start..start + 2],
+        &0x41u16.to_be_bytes(),
+        "the segment of A"
+    );
+    let mut font = font;
+    font[end..end + 2].copy_from_slice(&0x2Eu16.to_be_bytes());
+    font[start..start + 2].copy_from_slice(&0x2Eu16.to_be_bytes());
+    font[delta..delta + 2].copy_from_slice(&(2i16 - 0x2E).to_be_bytes());
+    font
+}
+
 /// `font` marked italic in `OS/2` `fsSelection` and `head` `macStyle`.
 pub(crate) fn italic(font: Vec<u8>) -> Vec<u8> {
     let at = table(&font, b"OS/2") + 62;

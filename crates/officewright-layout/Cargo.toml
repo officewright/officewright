@@ -14,6 +14,8 @@ exclude = [
   "tests/shaping.rs",
   "tests/fonts.rs",
   "tests/lines.rs",
+  "tests/display.rs",
+  "tests/snapshots",
   "tests/symbol_table.rs",
   "data",
 ]
@@ -39,6 +41,9 @@ unicode-linebreak = { version = "0.1.5", default-features = false }
 # HarfRust); no dependencies of its own, and officewright-pdf has it already.
 unicode-script = { version = "0.5.8", default-features = false }
 
+[dev-dependencies]
+insta = { version = "1.49.0", default-features = false }
+
 [lints]
 workspace = true
 
@@ -48,4 +53,8 @@ required-features = ["fuzzing"]
 
 [[example]]
 name = "paragraph_dump"
+required-features = ["fuzzing"]
+
+[[example]]
+name = "layout_dump"
 required-features = ["fuzzing"]
