@@ -147,6 +147,11 @@ impl fmt::Display for ReportEntry {
 pub enum ReportKind {
     /// A font is not available and another one is used in its place.
     FontSubstituted,
+    /// A font is embedded with what its license or its format restricts: for viewing
+    /// and printing only, for editing but not installing, whole rather than as a subset,
+    /// or only the default instance of a variable font; or it cannot be embedded, and its
+    /// text is not drawn.
+    FontEmbedding,
     /// No available font has a glyph for a character; the font's missing-glyph shape
     /// is drawn.
     GlyphMissing,

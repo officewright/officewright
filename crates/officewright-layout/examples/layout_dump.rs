@@ -52,6 +52,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             _ => return Err(usage.into()),
         }
     }
+    // Only pages are written as a PDF.
+    if pdf.is_some() && page.is_none() {
+        return Err(usage.into());
+    }
     let mut book = FontBook::new();
     book.add_dir(&dir)?;
     let mut document = Document::default();
@@ -124,7 +128,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 /// layout reported.
 #[cfg(feature = "pdf")]
 fn write_pdf(document: &Document, book: &FontBook, file: &str) -> Result<(), Box<dyn Error>> {
-    let options = officewright_layout::RenderOptions::new().with_system_fonts(false);
+    // The fonts are those of `book`, from FONT_DIR: the options' font settings only make
+    // a book.
+    let options = officewright_layout::RenderOptions::new();
     let rendered = officewright_layout::render_pdf(document, book, &options)?;
     rendered.pdf().save(file)?;
     for entry in rendered.report() {

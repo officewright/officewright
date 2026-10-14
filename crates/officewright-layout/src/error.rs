@@ -31,8 +31,9 @@ pub enum Error {
         /// The most pages allowed.
         limit: usize,
     },
-    /// The PDF could not be made, such as for a font whose license forbids embedding
-    /// it in a way the layout could not avoid.
+    /// `officewright-pdf` refused what the painter gave it, which `source` says. The
+    /// painter keeps every page within what a PDF holds, so this is a defect of the
+    /// layout, worth reporting with the document.
     #[cfg(feature = "pdf")]
     #[non_exhaustive]
     Pdf {
@@ -52,7 +53,7 @@ impl fmt::Display for Error {
                 write!(f, "the document takes more than {limit} pages")
             }
             #[cfg(feature = "pdf")]
-            Self::Pdf { source } => write!(f, "{source}"),
+            Self::Pdf { .. } => write!(f, "the PDF could not be made"),
         }
     }
 }

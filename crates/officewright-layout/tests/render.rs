@@ -289,3 +289,114 @@ fn every_random_document_renders() -> TestResult {
     }
     Ok(())
 }
+
+#[test]
+fn content_beyond_what_a_pdf_holds_still_renders() -> TestResult {
+    use officewright_layout::ir::{BreakClear, HeaderFooterSet};
+    let book = book()?;
+    let png = std::fs::read(repository().join("fuzz/seeds/png/rgb.png"))?;
+    let picture = |image, width: f64, height: f64| {
+        Inline::Object(InlineObject::new(
+            ObjectContent::Picture(Picture::new(image)),
+            Size::new(Pt(width), Pt(height)),
+        ))
+    };
+    // A paragraph of 3,000 lines, each "A".
+    let tall = |style| {
+        let mut inlines = Vec::new();
+        for line in 0..3_000 {
+            if line > 0 {
+                inlines.push(Inline::line_break(BreakClear::None, style));
+            }
+            inlines.push(Inline::text("A", style));
+        }
+        Paragraph::new(style).with_inlines(inlines)
+    };
+    let cases: Vec<(&str, Document)> = vec![
+        (
+            "pictures of no size",
+            document(|document, style| {
+                let image = document.add_image(ImageData::new(ImageFormat::Png, png.clone()));
+                vec![
+                    Paragraph::new(style)
+                        .with_inlines([picture(image, 0.0, 0.0), picture(image, 0.0, 20.0)]),
+                ]
+            }),
+        ),
+        (
+            "pictures of 40,000 pt",
+            document(|document, style| {
+                let image = document.add_image(ImageData::new(ImageFormat::Png, png.clone()));
+                let emf =
+                    document.add_image(ImageData::new(ImageFormat::Other("emf".into()), vec![1]));
+                vec![Paragraph::new(style).with_inlines([
+                    picture(image, 40_000.0, 40_000.0),
+                    picture(emf, 40_000.0, 40_000.0),
+                ])]
+            }),
+        ),
+        ("a header and a footer of 3,000 lines", {
+            let mut framed = Document::default();
+            let style = framed.add_run_style(
+                RunStyle::default()
+                    .with_fonts(RunFonts::new("Liberation Sans"))
+                    .with_size(Pt(11.0)),
+            );
+            let frame = HeaderFooterSet::default().with_primary([tall(style).into()]);
+            framed.add_section(
+                Section::new(PageSetup::new(PageSize::A4))
+                    .with_headers(frame.clone())
+                    .with_footers(frame)
+                    .with_blocks([Paragraph::new(style).into()]),
+            );
+            framed
+        }),
+        (
+            "a word of 6,000 letters",
+            document(|_, style| {
+                vec![Paragraph::new(style).with_inlines([Inline::text("W".repeat(6_000), style)])]
+            }),
+        ),
+    ];
+    for (case, document) in cases {
+        let rendered =
+            render_pdf(&document, &book, &plain()).map_err(|err| format!("{case}: {err}"))?;
+        let bytes = rendered.pdf().to_bytes()?;
+        assert!(bytes.starts_with(b"%PDF-"), "{case}");
+        if case == "pictures of 40,000 pt" {
+            assert!(
+                rendered
+                    .report()
+                    .entries()
+                    .iter()
+                    .any(|entry| entry.message().contains("more than a PDF holds")),
+                "{case}: {:?}",
+                rendered.report()
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn the_options_make_a_book_of_their_fonts() -> TestResult {
+    let fonts = repository().join("tests/fonts/carlito");
+    let families = |book: &officewright_font::FontBook| -> Vec<String> {
+        book.faces()
+            .filter_map(|(_, face)| face.names().family().map(str::to_owned))
+            .collect()
+    };
+    let from_dir = RenderOptions::new()
+        .with_system_fonts(false)
+        .with_font_dir(&fonts)
+        .font_book()?;
+    assert_eq!(from_dir.len(), 4);
+    assert!(families(&from_dir).iter().all(|family| family == "Carlito"));
+    let data = std::fs::read(repository().join("tests/fonts/liberation/LiberationMono-Bold.ttf"))?;
+    let in_memory = RenderOptions::new()
+        .with_system_fonts(false)
+        .with_font_data(data)
+        .font_book()?;
+    assert_eq!(families(&in_memory), ["Liberation Mono"]);
+    Ok(())
+}
