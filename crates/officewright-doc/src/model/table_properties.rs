@@ -788,6 +788,35 @@ impl TableRowProperties {
 }
 
 impl TableCellProperties {
+    /// Drops what Word does not allow in the `w:tcPr` of a table style or of its
+    /// conditional formats: the width, span, merges, fitting, hidden mark and text
+    /// direction (MS-OI29500 §17.7.6.8(b), §17.7.6.9(a)), and in the style's own, the
+    /// borders (§17.7.6.9(b)). As for `w:tblPr`, leaving them out is our choice (#172).
+    pub(crate) fn of_table_style(mut self, conditional: bool) -> Self {
+        self.width = None;
+        self.grid_span = None;
+        self.horizontal_merge = None;
+        self.vertical_merge = None;
+        self.fit_text = None;
+        self.hide_mark = None;
+        self.text_direction = None;
+        if !conditional {
+            self.borders = None;
+        }
+        self
+    }
+
+    /// What Word applies to whole rows of a conditional format's cell properties: no
+    /// wrapping, the margins and the vertical alignment (MS-OI29500 §17.7.6.8(a)).
+    pub(crate) fn of_whole_rows(&self) -> Self {
+        Self {
+            no_wrap: self.no_wrap,
+            margins: self.margins,
+            vertical_justification: self.vertical_justification,
+            ..Self::default()
+        }
+    }
+
     /// Lays `above` over these properties.
     pub(crate) fn overlay(&mut self, above: &Self) {
         overwrite(&mut self.width, &above.width);

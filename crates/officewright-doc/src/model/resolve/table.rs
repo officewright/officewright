@@ -82,7 +82,7 @@ impl Layer for TableStyleLevel {
             whole: TablePart {
                 table: style.table_properties().of_table_style(false),
                 row: style.row_properties(),
-                cell: style.cell_properties(),
+                cell: style.cell_properties().of_table_style(false),
             },
             gives_text: style.paragraph_properties() != Default::default()
                 || style.run_properties() != Default::default(),
@@ -95,7 +95,7 @@ impl Layer for TableStyleLevel {
             let part = TablePart {
                 table: format.table_properties().of_table_style(true),
                 row: format.row_properties(),
-                cell: format.cell_properties(),
+                cell: format.cell_properties().of_table_style(true),
             };
             level.gives_text |= format.paragraph_properties() != Default::default()
                 || format.run_properties() != Default::default();
@@ -141,7 +141,8 @@ pub(super) struct TableContext {
     properties: TableProperties,
     look: TableLook,
     rows: HashMap<u32, u16>,
-    cells: HashMap<u32, u16>,
+    /// The conditions each cell meets, and those any cell of its row meets.
+    cells: HashMap<u32, (u16, u16)>,
 }
 
 /// Word's options when a table has no `w:tblLook`: 0x04A0, the first row and the first
@@ -228,7 +229,9 @@ impl<'a> Formats<'a> {
 
     /// The cell properties in effect: the table style's, those of the conditional
     /// formats for the parts of the table the cell is in, in the order Word applies them
-    /// (MS-OI29500 §17.7.6.6(a)), then the cell's own.
+    /// (MS-OI29500 §17.7.6.6(a)), then the cell's own. A conditional format's no
+    /// wrapping, margins and vertical alignment apply to every cell of a row one of whose
+    /// cells it applies to (MS-OI29500 §17.7.6.8(a)).
     pub fn cell_properties(&mut self, cell: TableCell<'a>) -> TableCellProperties {
         let (document, index) = cell.place();
         if !std::ptr::eq(document, self.document) {
@@ -241,11 +244,13 @@ impl<'a> Formats<'a> {
         let Some(style) = &context.style else {
             return own;
         };
-        let conditions = context.cells.get(&index).copied().unwrap_or(0);
+        let (conditions, row) = context.cells.get(&index).copied().unwrap_or((0, 0));
         let mut properties = style.whole.cell.clone();
         for (place, part) in style.conditions.iter().enumerate() {
             if conditions & (1 << place) != 0 {
                 properties.overlay(&part.cell);
+            } else if row & (1 << place) != 0 {
+                properties.overlay(&part.cell.of_whole_rows());
             }
         }
         properties.overlay(&own);
@@ -261,7 +266,7 @@ impl<'a> Formats<'a> {
         }
         let conditions = self
             .context_of(index)
-            .and_then(|context| context.cells.get(&index).copied())
+            .and_then(|context| context.cells.get(&index).map(|&(cell, _)| cell))
             .unwrap_or(0);
         ORDER
             .iter()
@@ -377,6 +382,7 @@ impl<'a> Formats<'a> {
             row_conditions.insert(row_index, conditions);
             self.table_of.insert(row_index, index);
             let cells: Vec<TableCell<'a>> = row.cells().collect();
+            let mut in_row = Vec::with_capacity(cells.len());
             for (column, cell) in cells.iter().enumerate() {
                 let left = column == 0;
                 let right = column + 1 == cells.len();
@@ -425,8 +431,14 @@ impl<'a> Formats<'a> {
                     }
                 }
                 let (_, cell_index) = cell.place();
-                cell_conditions.insert(cell_index, conditions);
+                in_row.push((cell_index, conditions));
                 self.table_of.insert(cell_index, index);
+            }
+            let union = in_row
+                .iter()
+                .fold(0, |union, (_, conditions)| union | conditions);
+            for (cell_index, conditions) in in_row {
+                cell_conditions.insert(cell_index, (conditions, union));
             }
         }
         let context = Arc::new(TableContext {

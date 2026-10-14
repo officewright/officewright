@@ -135,9 +135,18 @@ fn applies_a_table_styles_conditional_formats_in_words_order() {
         last.vertical_justification(),
         Some(VerticalJustification::Center)
     );
+    // The last column's vertical alignment applies to whole rows (MS-OI29500
+    // §17.7.6.8(a)), its other properties not.
+    let first_cell = formats.cell_properties(cells[0]);
     assert_eq!(
-        formats.cell_properties(cells[0]).vertical_justification(),
-        None
+        first_cell.vertical_justification(),
+        Some(VerticalJustification::Center)
+    );
+    assert_eq!(
+        first_cell
+            .shading()
+            .and_then(|shading| shading.fill().value()),
+        Some(ColorValue::Rgb(0xFF, 0, 0))
     );
     // Rows: the style's, and the first row's format for the first row.
     let first = formats.row_properties(rows[0]);
@@ -254,7 +263,10 @@ fn applies_the_default_table_style_and_ignores_table_normal() {
 
 #[test]
 fn lays_the_rows_and_cells_own_properties_and_partial_looks_over_the_style() {
-    let styles = r#"<w:style w:type="table" w:styleId="Lines"><w:name w:val="Lines"/><w:trPr><w:cantSplit/></w:trPr><w:tcPr><w:tcBorders><w:top w:val="single" w:sz="4"/></w:tcBorders></w:tcPr><w:tblStylePr w:type="firstRow"><w:tblPr><w:tblStyleRowBandSize w:val="1"/></w:tblPr><w:tcPr><w:tcBorders><w:bottom w:val="double" w:sz="4"/></w:tcBorders></w:tcPr></w:tblStylePr><w:tblStylePr w:type="firstCol"><w:tcPr><w:noWrap/></w:tcPr></w:tblStylePr></w:style>"#;
+    // Word does not allow table-wide cell borders or a width in the style's own cell
+    // properties (MS-OI29500 §17.7.6.9); the whole table's conditional format may give
+    // borders.
+    let styles = r#"<w:style w:type="table" w:styleId="Lines"><w:name w:val="Lines"/><w:trPr><w:cantSplit/></w:trPr><w:tcPr><w:tcW w:w="500" w:type="dxa"/><w:tcBorders><w:start w:val="single" w:sz="4"/></w:tcBorders></w:tcPr><w:tblStylePr w:type="wholeTable"><w:tcPr><w:tcBorders><w:top w:val="single" w:sz="4"/></w:tcBorders></w:tcPr></w:tblStylePr><w:tblStylePr w:type="firstRow"><w:tblPr><w:tblStyleRowBandSize w:val="1"/></w:tblPr><w:tcPr><w:tcBorders><w:bottom w:val="double" w:sz="4"/></w:tcBorders></w:tcPr></w:tblStylePr><w:tblStylePr w:type="firstCol"><w:tcPr><w:noWrap/></w:tcPr></w:tblStylePr></w:style>"#;
     // A w:tblLook that gives only the first row: the options it leaves out are off.
     let body = r#"<w:tbl><w:tblPr><w:tblStyle w:val="Lines"/><w:tblLook w:firstRow="1"/></w:tblPr><w:tblGrid/><w:tr><w:trPr><w:cantSplit w:val="0"/></w:trPr><w:tc><w:p/></w:tc></w:tr><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl><w:p/>"#;
     let document = open_with(styles, body);
@@ -270,6 +282,8 @@ fn lays_the_rows_and_cells_own_properties_and_partial_looks_over_the_style() {
     let properties = formats.cell_properties(cell);
     let borders = properties.borders().unwrap().sides();
     assert!(borders.top().is_some() && borders.bottom().is_some());
+    assert!(borders.start().is_none());
+    assert_eq!(properties.width(), None);
     // The first column is off, so its format is not taken.
     assert_eq!(properties.no_wrap(), None);
     // A band size in a conditional format, which Word does not allow (MS-OI29500
