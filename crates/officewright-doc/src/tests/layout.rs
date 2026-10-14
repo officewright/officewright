@@ -1770,3 +1770,37 @@ fn leaves_out_tables_without_rows_and_tables_nested_too_deep() {
     }
     assert_eq!(kept, ir::MAX_TABLE_DEPTH);
 }
+
+#[test]
+fn translates_the_rest_of_table_properties() {
+    let table = r#"<w:tbl><w:tblPr><w:tblW w:w="0" w:type="pct"/><w:jc w:val="right"/><w:tblBorders><w:end w:val="single" w:sz="4"/><w:insideV w:val="dotted" w:sz="4"/></w:tblBorders><w:tblCellMar><w:top w:w="-100" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tblGrid><w:gridCol w:w="-100"/><w:gridCol w:w="1000"/></w:tblGrid>
+        <w:tr><w:trPr><w:gridBefore w:val="-1"/><w:trHeight w:val="400" w:hRule="auto"/></w:trPr>
+            <w:tc><w:tcPr><w:gridSpan w:val="0"/><w:vAlign w:val="bottom"/><w:textDirection w:val="tbRl"/></w:tcPr><w:p/></w:tc></w:tr></w:tbl>"#;
+    let translation = translate(&open(&format!("{table}<w:p/>")));
+    let table = tables(&translation)[0];
+    let props = table.props();
+    // A width of 0 percent is automatic (MS-OI29500 §17.4.71(a)).
+    assert_eq!(props.width(), ir::PreferredWidth::Auto);
+    assert_eq!(props.alignment(), ir::TableAlignment::End);
+    let line =
+        |style| ir::BorderSide::Line(ir::Border::default().with_style(style).with_width(Pt(0.5)));
+    assert_eq!(props.borders().end(), line(ir::BorderStyle::Single));
+    assert_eq!(
+        props.borders().inside_vertical(),
+        line(ir::BorderStyle::Dotted)
+    );
+    // Negative lengths and counts are 0; a span of 0 is 1.
+    assert_eq!(props.cell_margins().top(), Pt(0.0));
+    assert_eq!(table.grid(), [Pt(0.0), Pt(50.0)]);
+    let row = &table.rows()[0];
+    assert_eq!(row.grid_before(), 0);
+    // The rule auto ignores the height.
+    assert_eq!(row.height(), ir::RowHeight::Auto);
+    let cell = &row.cells()[0];
+    assert_eq!(cell.grid_span(), 1);
+    assert_eq!(cell.vertical_align(), ir::CellVerticalAlign::Bottom);
+    assert_eq!(
+        cell.text_direction(),
+        ir::TextDirection::TopToBottomRightToLeft
+    );
+}

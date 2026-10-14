@@ -72,10 +72,10 @@ impl<'a> Translator<'a> {
             )
             .with_floating(properties.position().is_some())
             .with_bidi_visual(properties.right_to_left().unwrap_or(false));
+        // The reader reads w:gridCol as ST_TwipsMeasure, which has no negative widths.
         let grid: Vec<Pt> = table
             .grid_columns()
-            .map(|width| width.unwrap_or_default().0.max(0.0))
-            .map(Pt)
+            .map(Option::unwrap_or_default)
             .collect();
         self.table_depth += 1;
         let mut rows = Vec::new();
@@ -119,9 +119,10 @@ impl<'a> Translator<'a> {
             },
             None => ir::RowHeight::Auto,
         };
+        // A negative count, or one too large, is 0.
         let count = |value: Option<i64>| {
             value
-                .and_then(|value| u16::try_from(value.max(0)).ok())
+                .and_then(|value| u16::try_from(value).ok())
                 .unwrap_or(0)
         };
         let mut cells: Vec<ir::Cell> = Vec::new();
