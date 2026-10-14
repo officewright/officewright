@@ -44,8 +44,10 @@ trap 'rm -rf "$work"' EXIT
 # failing find stops the script here.
 find tests/fonts ! -type d -print0 | sort -z >"$work/files"
 
-# Time limits, so that a server that does not answer cannot hold up the night.
-curl -fsSL --retry 3 --connect-timeout 30 --max-time 600 -o "$work/liberation.tar.gz" \
+# Time limits, so that a server that does not answer cannot hold up the night: a transfer
+# slower than 1 KB/s for a minute is given up, and so are the retries after 10 minutes.
+curl -fsSL --retry 3 --retry-max-time 600 --connect-timeout 30 --max-time 600 \
+	--speed-limit 1000 --speed-time 60 -o "$work/liberation.tar.gz" \
 	"$liberation_url" || cannot "download $liberation_url"
 got=$(sha256 "$work/liberation.tar.gz")
 if [ "$got" != "$liberation_sha256" ]; then
