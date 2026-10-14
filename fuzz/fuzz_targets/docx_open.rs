@@ -70,6 +70,7 @@ fuzz_target!(|data: &[u8]| {
                 let _ = paragraph.properties();
                 let _ = paragraph.text();
                 let _ = formats.paragraph_mark(paragraph);
+                let _ = formats.list_label(paragraph);
                 let format = formats.paragraph(paragraph);
                 if paragraphs_compared < 256 {
                     paragraphs_compared += 1;
