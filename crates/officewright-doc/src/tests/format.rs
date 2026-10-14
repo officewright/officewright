@@ -111,20 +111,26 @@ fn theme() -> String {
 
 #[test]
 fn a_run_without_styles_takes_words_defaults() {
+    // Without a styles part, Word gives its own run defaults: the theme's minor fonts,
+    // from its default theme when the document has none, at 11 pt with kerning from 1 pt
+    // (word-rules/E-defaults-empty.docx; see a_document_without_run_defaults_*).
     let document = open("<w:p><w:r><w:t>x</w:t></w:r></w:p>");
     let format = first_run(&document).format();
     let fonts = format.fonts();
-    for font in [
+    let families = [
         fonts.ascii(),
         fonts.high_ansi(),
         fonts.east_asia(),
         fonts.complex_script(),
-    ] {
-        assert_eq!(font, "Times New Roman");
-    }
+    ];
+    // The default theme's East Asian and complex script fonts are empty.
+    assert_eq!(
+        families,
+        ["Calibri", "Calibri", "Times New Roman", "Times New Roman"]
+    );
     assert_eq!(fonts.hint(), None);
-    assert_eq!(format.size(), Pt(10.0));
-    assert_eq!(format.size_complex_script(), Pt(10.0));
+    assert_eq!(format.size(), Pt(11.0));
+    assert_eq!(format.size_complex_script(), Pt(11.0));
     assert!(!format.bold() && !format.italic() && !format.hidden() && !format.math());
     assert_eq!(format.color(), ColorValue::Auto);
     assert_eq!(format.underline(), None);
@@ -133,11 +139,203 @@ fn a_run_without_styles_takes_words_defaults() {
     assert_eq!(format.position(), Pt(0.0));
     assert_eq!(format.spacing(), Pt(0.0));
     assert_eq!(format.scale(), 100);
-    assert_eq!(format.kerning(), None);
+    assert_eq!(format.kerning(), Some(Pt(1.0)));
     assert_eq!(format.highlight(), None);
     assert_eq!(format.shading(), None);
     assert_eq!(format.language(), None);
     assert_eq!(format.style(), None);
+
+    // Document defaults with run properties, though empty, keep what Word gives when
+    // nothing in the hierarchy names a font (MS-OI29500 §17.3.2.26(c)); the size is
+    // not confirmed against Word yet.
+    let document = build(&paragraph("", &[""]), &defaults(""), None, None);
+    let format = first_run(&document).format();
+    assert_eq!(format.fonts().ascii(), "Times New Roman");
+    assert_eq!(format.fonts().east_asia(), "Times New Roman");
+    assert_eq!(format.size(), Pt(10.0));
+    assert_eq!(format.kerning(), None);
+}
+
+#[test]
+fn a_document_without_run_defaults_takes_words_own() {
+    // word-rules/E-defaults-empty.docx: w:docDefaults without w:rPrDefault, no theme.
+    // Word's render shows Calibri 11 pt, Calibri 14 pt under a style that gives only the
+    // size, and Arial 11 pt under one that gives only the font.
+    let styles = [
+        "<w:docDefaults><w:pPrDefault/></w:docDefaults>".to_owned(),
+        style("paragraph", "Sized", None, r#"<w:sz w:val="28"/>"#),
+        style("paragraph", "Named", None, r#"<w:rFonts w:ascii="Arial"/>"#),
+        style(
+            "paragraph",
+            "Heading",
+            None,
+            r#"<w:rFonts w:asciiTheme="majorHAnsi"/>"#,
+        ),
+    ]
+    .concat();
+    let body = [
+        paragraph("", &[""]),
+        paragraph("Sized", &[""]),
+        paragraph("Named", &[""]),
+        paragraph("Heading", &[""]),
+    ]
+    .concat();
+    let document = build(&body, &styles, None, None);
+    let found: Vec<_> = runs(&document)
+        .iter()
+        .map(|format| (format.fonts().ascii().to_owned(), format.size()))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            ("Calibri".to_owned(), Pt(11.0)),
+            ("Calibri".to_owned(), Pt(14.0)),
+            ("Arial".to_owned(), Pt(11.0)),
+            // The default theme's major font.
+            ("Calibri Light".to_owned(), Pt(11.0)),
+        ]
+    );
+    // With a theme, its minor fonts, each of its slot (from the review of #151).
+    let theme = theme().replace(
+        r#"<a:minorFont><a:latin typeface="Minor Latin"/><a:ea typeface="Minor EA"/><a:cs typeface=""/>"#,
+        r#"<a:minorFont><a:latin typeface="Minor Latin"/><a:ea typeface="Minor EA"/><a:cs typeface="Minor CS"/>"#,
+    );
+    let document = build(&body, &styles, None, Some(&theme));
+    let fonts = runs(&document)[0].fonts().clone();
+    assert_eq!(
+        [
+            fonts.ascii(),
+            fonts.high_ansi(),
+            fonts.east_asia(),
+            fonts.complex_script()
+        ],
+        ["Minor Latin", "Minor Latin", "Minor EA", "Minor CS"]
+    );
+}
+
+#[test]
+fn shares_font_names_and_languages_between_runs() {
+    // Issue #87: every run copied the font names and languages it inherited, so one
+    // 10,000,000-character name in the document defaults was copied for every run.
+    let name = "N".repeat(100_000);
+    let styles = defaults(&format!(
+        r#"<w:rFonts w:ascii="{name}" w:hAnsiTheme="minorHAnsi" w:eastAsiaTheme="minorEastAsia"/><w:lang w:val="en-GB"/>"#
+    ));
+    let body = paragraph("", &["", "<w:b/>"]).repeat(2);
+    let document = build(&body, &styles, None, Some(&theme()));
+    let formats = runs(&document);
+    let [first, rest @ ..] = &formats[..] else {
+        panic!("four runs");
+    };
+    assert_eq!(first.fonts().ascii(), name);
+    assert_eq!(first.fonts().high_ansi(), "Minor Latin");
+    for other in rest {
+        let (a, b) = (first.fonts(), other.fonts());
+        assert!(std::sync::Arc::ptr_eq(&a.ascii, &b.ascii));
+        // A theme font is looked up once for all runs.
+        assert!(std::sync::Arc::ptr_eq(&a.high_ansi, &b.high_ansi));
+        assert!(std::sync::Arc::ptr_eq(&a.east_asia, &b.east_asia));
+        // Word's default font is shared too.
+        assert!(std::sync::Arc::ptr_eq(&a.complex_script, &b.complex_script));
+        let (a, b) = (&first.language_latin, &other.language_latin);
+        assert!(std::sync::Arc::ptr_eq(
+            a.as_ref().unwrap(),
+            b.as_ref().unwrap()
+        ));
+    }
+}
+
+#[test]
+fn shares_what_styles_and_unresolved_theme_fonts_give_between_runs() {
+    // From the review of #151: names and languages that come through a style, and a name
+    // written next to a theme font the theme leaves empty, must be shared too.
+    let name = "S".repeat(100_000);
+    let written = "W".repeat(100_000);
+    let styles = [
+        defaults(&format!(
+            r#"<w:rFonts w:hAnsiTheme="minorHAnsi" w:hAnsi="{written}"/><w:lang w:val="en-GB" w:eastAsia="ja-JP" w:bidi="ar-SA"/>"#
+        )),
+        style(
+            "paragraph",
+            "Base",
+            None,
+            &format!(r#"<w:rFonts w:ascii="{name}"/><w:lang w:eastAsia="zh-CN"/>"#),
+        ),
+        style("paragraph", "Derived", Some("Base"), "<w:b/>"),
+    ]
+    .concat();
+    // The theme's minor latin font is empty, so the name written next to the theme font
+    // stands in.
+    let theme = theme().replace(
+        r#"<a:latin typeface="Minor Latin"/>"#,
+        r#"<a:latin typeface=""/>"#,
+    );
+    let body = [
+        paragraph("Base", &["", "<w:i/>"]),
+        paragraph("Derived", &["", "<w:i/>"]),
+    ]
+    .concat();
+    let document = build(&body, &styles, None, Some(&theme));
+    let formats = runs(&document);
+    let [first, rest @ ..] = &formats[..] else {
+        panic!("four runs");
+    };
+    assert_eq!(first.fonts().ascii(), name);
+    assert_eq!(first.fonts().high_ansi(), written);
+    assert_eq!(first.language_east_asia(), Some("zh-CN"));
+    use std::sync::Arc;
+    let same = |a: &Option<Arc<str>>, b: &Option<Arc<str>>| {
+        Arc::ptr_eq(a.as_ref().unwrap(), b.as_ref().unwrap())
+    };
+    for other in rest {
+        let (a, b) = (first.fonts(), other.fonts());
+        assert!(Arc::ptr_eq(&a.ascii, &b.ascii));
+        assert!(Arc::ptr_eq(&a.high_ansi, &b.high_ansi));
+        assert!(same(&first.language_latin, &other.language_latin));
+        assert!(same(&first.language_east_asia, &other.language_east_asia));
+        assert!(same(&first.language_bidi, &other.language_bidi));
+    }
+}
+
+#[test]
+fn takes_words_defaults_for_an_empty_run_defaults_element_and_ascii_theme_fonts() {
+    // From the review of #151: w:rPrDefault without w:rPr gives no run properties, so
+    // Word's own apply; and the ascii theme fonts take the default theme too.
+    let styles = [
+        "<w:docDefaults><w:rPrDefault/></w:docDefaults>".to_owned(),
+        style(
+            "paragraph",
+            "Minor",
+            None,
+            r#"<w:rFonts w:asciiTheme="minorAscii"/>"#,
+        ),
+        style(
+            "paragraph",
+            "Major",
+            None,
+            r#"<w:rFonts w:asciiTheme="majorAscii"/>"#,
+        ),
+    ]
+    .concat();
+    let body = [
+        paragraph("", &[""]),
+        paragraph("Minor", &[""]),
+        paragraph("Major", &[""]),
+    ]
+    .concat();
+    let document = build(&body, &styles, None, None);
+    let found: Vec<(String, Pt)> = runs(&document)
+        .iter()
+        .map(|format| (format.fonts().ascii().to_owned(), format.size()))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            ("Calibri".to_owned(), Pt(11.0)),
+            ("Calibri".to_owned(), Pt(11.0)),
+            ("Calibri Light".to_owned(), Pt(11.0)),
+        ]
+    );
 }
 
 #[test]
@@ -467,11 +665,15 @@ fn falls_back_to_the_written_font_when_a_theme_font_cannot_be_resolved() {
         r#"<w:rFonts w:asciiTheme="minorHAnsi" w:ascii="Calibri" w:hAnsiTheme="minorHAnsi" w:eastAsiaTheme="minorEastAsia" w:eastAsia="MS Mincho"/>"#,
     );
     let body = paragraph("", &[""]);
-    // No theme: the font written next to the theme font, else Word's default.
-    let document = build(&body, &styles, Some(THEME_FONT_LANG), None);
+    // No theme: Word's default theme, whose East Asian font is empty, so the font
+    // written next to the theme font; else Word's default.
+    let styles_written = styles.replace(r#"w:ascii="Calibri""#, r#"w:ascii="Written""#);
+    let document = build(&body, &styles_written, Some(THEME_FONT_LANG), None);
     let format = first_run(&document).format();
     assert_eq!(format.fonts().ascii(), "Calibri");
-    assert_eq!(format.fonts().high_ansi(), "Times New Roman");
+    assert_eq!(format.fonts().high_ansi(), "Calibri");
+    assert_eq!(format.fonts().east_asia(), "MS Mincho");
+    assert_eq!(format.fonts().complex_script(), "Times New Roman");
     // A theme, but no theme font language for the empty East Asian slot.
     let theme_empty_ea =
         theme().replace(r#"<a:ea typeface="Minor EA"/>"#, r#"<a:ea typeface=""/>"#);
