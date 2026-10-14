@@ -11,7 +11,7 @@ use std::ops::Range;
 use officewright_core::{Color, Pt};
 use officewright_font::{FaceId, FontFace, GlyphId};
 
-use crate::fonts::Fonts;
+use crate::fonts::{Choice, Fonts};
 use crate::ir::{
     ColorValue, Crop, Document, Inline, ObjectContent, Paragraph, RunStyle, Shading,
     ShadingPattern, TabKind, TabLeader, UnderlineKind, VerticalPosition,
@@ -128,6 +128,12 @@ pub(crate) struct ImageItem {
     pub(crate) width: Pt,
     pub(crate) height: Pt,
     pub(crate) crop: Option<Crop>,
+    /// The rotation clockwise about the box's centre, in degrees.
+    pub(crate) rotation: f64,
+    /// Whether the picture is mirrored left to right.
+    pub(crate) flip_horizontal: bool,
+    /// Whether the picture is mirrored top to bottom.
+    pub(crate) flip_vertical: bool,
 }
 
 /// What the display list of a paragraph is made from.
@@ -188,8 +194,10 @@ impl Painting<'_, '_, '_> {
                             .run_style(run.style)
                             .cloned()
                             .unwrap_or_default();
+                        let reach = self.metrics(run);
+                        let raised = baseline - rise(run, &style);
                         let background =
-                            self.background_of(&style, &mut behind, run, piece, x, baseline);
+                            self.background_of(&style, &mut behind, reach, x, piece.width, raised);
                         let color = text_color(style.color(), background);
                         if let Some(glyphs) = self.glyphs(run, &style, piece, x, baseline, color) {
                             front.push(DisplayItem::Glyphs(glyphs));
@@ -206,7 +214,15 @@ impl Painting<'_, '_, '_> {
                         }
                     }
                     PieceKind::Tab { item, leader } => {
-                        self.leader(*item, *leader, x, piece.width.0, baseline, &mut front);
+                        self.tab(
+                            *item,
+                            *leader,
+                            x,
+                            piece.width,
+                            baseline,
+                            &mut behind,
+                            &mut front,
+                        );
                     }
                     PieceKind::Object {
                         item,
@@ -225,16 +241,17 @@ impl Painting<'_, '_, '_> {
         out.extend(front);
     }
 
-    /// The background of a piece of text in `style`: the run's shading or highlight,
-    /// whose rectangle goes to `behind`, else the paragraph's shading, else what is
-    /// behind the paragraph.
+    /// The background of a piece of text or a tab in `style`, `width` wide from `x`, on
+    /// `baseline` (raised for a superscript), whose font reaches `reach` above and below
+    /// it: the run's shading or highlight, whose rectangle goes to `behind`, else the
+    /// paragraph's shading, else what is behind the paragraph.
     fn background_of(
         &mut self,
         style: &RunStyle,
         behind: &mut Vec<DisplayItem>,
-        run: &TextRun,
-        piece: &Piece,
+        reach: (f64, f64),
         x: f64,
+        width: Pt,
         baseline: f64,
     ) -> Option<Color> {
         let shading = style
@@ -242,18 +259,19 @@ impl Painting<'_, '_, '_> {
             .and_then(|shading| self.shading_color(&shading));
         let own = style.highlight().or(shading);
         if let Some(color) = own {
-            // The run's own box: as high as its font reaches. Hypothesis until a Word
-            // reference (`E-highlight.docx`).
-            let metrics = self.metrics(run);
-            behind.push(DisplayItem::Rect {
-                at: Point {
-                    x: Pt(x),
-                    y: Pt(baseline - metrics.0),
-                },
-                width: piece.width,
-                height: Pt(metrics.0 + metrics.1),
-                color,
-            });
+            // The run's own box: as high as its font reaches, raised with its text.
+            // Hypothesis until a Word reference (`E-highlight.docx`).
+            if width.0 > 0.0 {
+                behind.push(DisplayItem::Rect {
+                    at: Point {
+                        x: Pt(x),
+                        y: Pt(baseline - reach.0),
+                    },
+                    width,
+                    height: Pt(reach.0 + reach.1),
+                    color,
+                });
+            }
             return Some(color);
         }
         let paragraph = self
@@ -426,24 +444,19 @@ impl Painting<'_, '_, '_> {
         }
     }
 
-    /// The leader of a tab of item `item`: repeated glyphs of the tab's font, the last
-    /// ending at the tab's end, or a line for the line leaders.
-    fn leader(
+    /// A tab of item `item`, `width` wide from `x`: the highlight or shading of its run
+    /// style behind it, and its leader in front, as the text of that style would be.
+    #[allow(clippy::too_many_arguments)] // reason: the place of the tab and both layers
+    fn tab(
         &mut self,
         item: usize,
         leader: TabLeader,
         x: f64,
-        width: f64,
+        width: Pt,
         baseline: f64,
-        out: &mut Vec<DisplayItem>,
+        behind: &mut Vec<DisplayItem>,
+        front: &mut Vec<DisplayItem>,
     ) {
-        let character = match leader {
-            TabLeader::None => return,
-            TabLeader::Dot => '.',
-            TabLeader::Hyphen => '-',
-            TabLeader::MiddleDot => '\u{00B7}',
-            TabLeader::Underscore | TabLeader::Heavy => '_',
-        };
         let Some(Item::Tab(style_id)) = self.layout.itemized.items.get(item) else {
             return;
         };
@@ -455,6 +468,61 @@ impl Painting<'_, '_, '_> {
         let choice = self
             .fonts
             .choose(style.fonts().ascii(), style.bold(), style.italic());
+        let size = style.size().0;
+        let face = choice.face.and_then(|id| self.fonts.face(id));
+        let reach = face.as_ref().map_or((size * 0.8, size * 0.2), |face| {
+            let metrics = line_metrics(face.face(), style.size(), TypoRule::default());
+            (metrics.ascent.0, metrics.descent.0)
+        });
+        let raised = baseline - rise_at(&style, size);
+        let background = self.background_of(&style, behind, reach, x, width, raised);
+        let color = text_color(style.color(), background);
+        self.leader(&style, choice, leader, x, width.0, raised, color, front);
+    }
+
+    /// The leader of a tab in `style`, whose font is `choice`: repeated glyphs, the last
+    /// ending at the tab's end, of that font or, when it lacks the character, of a font
+    /// that has it; or a line for the line leaders.
+    #[allow(clippy::too_many_arguments)] // reason: the tab's look, place and colour
+    fn leader(
+        &mut self,
+        style: &RunStyle,
+        choice: Choice,
+        leader: TabLeader,
+        x: f64,
+        width: f64,
+        baseline: f64,
+        color: Color,
+        out: &mut Vec<DisplayItem>,
+    ) {
+        let character = match leader {
+            TabLeader::None => return,
+            TabLeader::Dot => '.',
+            TabLeader::Hyphen => '-',
+            TabLeader::MiddleDot => '\u{00B7}',
+            TabLeader::Underscore | TabLeader::Heavy => '_',
+        };
+        let family = style.fonts().ascii();
+        let lines = matches!(leader, TabLeader::Underscore | TabLeader::Heavy);
+        let choice = match choice.face {
+            Some(id) if lines || self.fonts.has_glyph(id, character) => choice,
+            _ => match self
+                .fonts
+                .covering(character, family, style.bold(), style.italic())
+            {
+                Some(covering) => {
+                    if let Some(id) = covering.face {
+                        self.fonts
+                            .report_fallback(family, id, character, self.location);
+                    }
+                    covering
+                }
+                None => {
+                    self.fonts.missing(character, self.location);
+                    return;
+                }
+            },
+        };
         let Some(face_id) = choice.face else {
             return;
         };
@@ -463,8 +531,7 @@ impl Painting<'_, '_, '_> {
         };
         let face = face.face();
         let scale = style.size().0 / f64::from(face.units_per_em().max(1));
-        let color = text_color(style.color(), self.background);
-        if matches!(leader, TabLeader::Underscore | TabLeader::Heavy) {
+        if lines {
             let (position, thickness) = decoration(face, Decoration::Underline, scale);
             let thickness = if leader == TabLeader::Heavy {
                 thickness * 2.0
@@ -485,7 +552,9 @@ impl Painting<'_, '_, '_> {
         let Some(glyph) = face.glyph_id(character) else {
             return;
         };
-        let advance = f64::from(face.advance_width(glyph).unwrap_or(0)) * scale;
+        // The character scale (`w:w`) of the tab's style widens or narrows each glyph.
+        let h_scale = f64::from(style.scale()) / 100.0;
+        let advance = f64::from(face.advance_width(glyph).unwrap_or(0)) * scale * h_scale;
         if advance <= 0.0 || width < advance {
             return;
         }
@@ -503,7 +572,7 @@ impl Painting<'_, '_, '_> {
             face: face_id,
             size: style.size(),
             color,
-            h_scale: 1.0,
+            h_scale,
             synthetic_bold: choice.synthetic_bold,
             synthetic_italic: choice.synthetic_italic,
             origin: Point {
@@ -537,6 +606,9 @@ impl Painting<'_, '_, '_> {
                 width: size.width(),
                 height: size.height(),
                 crop: picture.crop(),
+                rotation: picture.rotation(),
+                flip_horizontal: picture.flip_horizontal(),
+                flip_vertical: picture.flip_vertical(),
             }),
         }
     }
@@ -544,7 +616,12 @@ impl Painting<'_, '_, '_> {
 
 /// How far the baseline of `run` in `style` is raised: superscripts up, subscripts down.
 fn rise(run: &TextRun, style: &RunStyle) -> f64 {
-    let size = run.formatted_size.0;
+    rise_at(style, run.formatted_size.0)
+}
+
+/// How far the baseline of text in `style` is raised, at `size`, the size its formatting
+/// gives.
+fn rise_at(style: &RunStyle, size: f64) -> f64 {
     let vertical = match style.vertical() {
         VerticalPosition::Superscript => size * SUPERSCRIPT_RISE,
         VerticalPosition::Subscript => -size * SUBSCRIPT_DROP,
@@ -554,18 +631,16 @@ fn rise(run: &TextRun, style: &RunStyle) -> f64 {
 }
 
 /// The glyphs `placed` of `piece` in clusters, each with the text it stands for: the
-/// source text where the run's drawn text has as many characters as its source (each
-/// cluster gets its characters' source characters), else the run's whole source with
-/// its first cluster.
+/// source characters of its drawn characters, each source character with the cluster
+/// that draws the first character drawn for it (`ß` in capitals, `SS`, goes with the
+/// first `S`).
 fn clusters(
     itemized: &Itemized,
     run: &TextRun,
     placed: &[PlacedGlyph],
     piece: &Piece,
 ) -> Vec<(String, Vec<PlacedGlyph>)> {
-    let drawn = itemized.text.get(run.range.clone()).unwrap_or("");
     let source = itemized.source.get(run.source.clone()).unwrap_or("");
-    let one_to_one = drawn.chars().count() == source.chars().count();
     let hyphen = matches!(piece.kind, PieceKind::Hyphen { .. });
     let mut out: Vec<(String, Vec<PlacedGlyph>)> = Vec::new();
     let mut index = 0;
@@ -597,18 +672,31 @@ fn clusters(
                 .text
                 .get(first.cluster..next)
                 .map_or(0, |cluster| cluster.chars().count());
-            if one_to_one {
+            if run.sources.is_empty() {
                 source.chars().skip(start_char).take(chars).collect()
-            } else if first.cluster == run.range.start {
-                source.to_owned()
             } else {
-                String::new()
+                expanded_source(itemized, run, first.cluster..next)
             }
         };
         out.push((text, glyphs));
         index = end;
     }
     out
+}
+
+/// The source text of the drawn bytes `drawn` of `run`, whose drawn text has more
+/// characters than its source: the source of every drawn character in `drawn` that is
+/// the first drawn for its source character.
+fn expanded_source(itemized: &Itemized, run: &TextRun, drawn: Range<usize>) -> String {
+    let mut text = String::new();
+    let mut previous: Option<&Range<usize>> = None;
+    for (at, source) in &run.sources {
+        if drawn.contains(at) && previous != Some(source) {
+            text.push_str(itemized.source.get(source.clone()).unwrap_or(""));
+        }
+        previous = Some(source);
+    }
+    text
 }
 
 /// The spans of `placed` that are words, leaving out spaces, where the glyphs are.
@@ -813,8 +901,9 @@ mod tests {
         Underline,
     };
     use crate::paragraph::lay_out;
+    use crate::report::LayoutReport;
     use crate::shape::Shaper;
-    use crate::testing::{book, minimal};
+    use crate::testing::{book, minimal, renamed, with_period};
 
     /// The display list of a paragraph of the inlines `make` gives for run styles made
     /// from the test font at 10 pt by `styles`, laid out 100 pt wide at the page's
@@ -823,7 +912,17 @@ mod tests {
         styles: &[RunStyle],
         make: impl Fn(&[crate::ir::RunStyleId], &mut Document) -> (ParagraphProps, Vec<Inline>),
     ) -> (Vec<DisplayItem>, usize) {
-        let book = book(vec![minimal()]);
+        let (items, report) = painted_with(vec![minimal()], styles, make);
+        (items, report.len())
+    }
+
+    /// [`painted`] with the fonts `fonts`, and the whole report.
+    fn painted_with(
+        fonts: Vec<Vec<u8>>,
+        styles: &[RunStyle],
+        make: impl Fn(&[crate::ir::RunStyleId], &mut Document) -> (ParagraphProps, Vec<Inline>),
+    ) -> (Vec<DisplayItem>, LayoutReport) {
+        let book = book(fonts);
         let mut document = Document::default();
         let ids: Vec<_> = styles
             .iter()
@@ -864,8 +963,175 @@ mod tests {
             y: Pt(20.0),
         };
         painting.paint(0..layout.lines.len(), origin, &mut items);
-        let reported = fonts.into_report().len();
-        (items, reported)
+        (items, fonts.into_report())
+    }
+
+    /// The glyph runs of `items`.
+    fn glyph_runs(items: &[DisplayItem]) -> Vec<&GlyphItem> {
+        items
+            .iter()
+            .filter_map(|item| match item {
+                DisplayItem::Glyphs(glyphs) => Some(glyphs),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The filled rectangles of `items`: top left corner, width, height and colour.
+    fn rects(items: &[DisplayItem]) -> Vec<(Point, Pt, Pt, Color)> {
+        items
+            .iter()
+            .filter_map(|item| match item {
+                DisplayItem::Rect {
+                    at,
+                    width,
+                    height,
+                    color,
+                } => Some((*at, *width, *height, *color)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A tab to 40 pt with `leader`, after an `A`.
+    fn leader_paragraph(
+        ids: &[crate::ir::RunStyleId],
+        leader: TabLeader,
+        tab_style: usize,
+    ) -> (ParagraphProps, Vec<Inline>) {
+        let style = ids.first().copied().expect("a style");
+        let tab = ids.get(tab_style).copied().expect("a style");
+        let props = ParagraphProps::default().with_tabs([TabStop::default()
+            .with_position(Pt(40.0))
+            .with_kind(TabKind::Start)
+            .with_leader(leader)]);
+        (props, vec![Inline::text("A", style), Inline::tab(tab)])
+    }
+
+    #[test]
+    fn a_leader_falls_back_to_a_font_with_its_character_and_takes_the_tab_s_scale() {
+        // The test font has no period; its copy "Officewright Dots" has one instead of
+        // `A`, with `A`'s glyph 2.
+        let dots = renamed(with_period(minimal()), "Officewright Dots");
+        let leader_of = |tab_style: usize| {
+            let plain = RunStyle::default();
+            let narrow = RunStyle::default().with_scale(50);
+            let (items, report) =
+                painted_with(vec![minimal(), dots.clone()], &[plain, narrow], |ids, _| {
+                    leader_paragraph(ids, TabLeader::Dot, tab_style)
+                });
+            let leader = glyph_runs(&items).get(1).map(|run| (*run).clone());
+            (
+                leader.unwrap_or_else(|| panic!("no leader: {items:?}")),
+                report,
+            )
+        };
+        let (full, report) = leader_of(0);
+        let (half, _) = leader_of(1);
+        for leader in [&full, &half] {
+            assert_eq!(leader.clusters.first().map(|c| c.text.as_str()), Some("\t"));
+            let glyphs: Vec<&DrawnGlyph> = leader.clusters.iter().flat_map(|c| &c.glyphs).collect();
+            assert!(glyphs.len() > 2, "{leader:?}");
+            assert!(glyphs.iter().all(|glyph| glyph.glyph == GlyphId::new(2)));
+        }
+        assert!(
+            report
+                .entries()
+                .iter()
+                .any(|entry| entry.kind() == ReportKind::FontSubstituted
+                    && entry.message().contains("Officewright Dots")),
+            "{report:?}"
+        );
+        // At half width the glyphs are drawn narrower and twice as close together.
+        let step = |leader: &GlyphItem| {
+            let glyphs: Vec<f64> = leader
+                .clusters
+                .iter()
+                .flat_map(|c| &c.glyphs)
+                .map(|glyph| glyph.x.0)
+                .collect();
+            glyphs.get(1).copied().unwrap_or_default() - glyphs.first().copied().unwrap_or_default()
+        };
+        assert_eq!((full.h_scale, half.h_scale), (1.0, 0.5));
+        assert!(step(&full) > 0.0);
+        assert!((step(&half) - step(&full) / 2.0).abs() < 1e-9);
+        // The last ends at the stop, 40 pt from the column's start at 50.
+        let last = half
+            .clusters
+            .iter()
+            .flat_map(|c| &c.glyphs)
+            .last()
+            .expect("a glyph");
+        assert!((half.origin.x.0 + last.x.0 + step(&half) - 90.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_tab_has_its_style_s_highlight_and_its_leader_the_colour_on_it() {
+        // On black paragraph shading, a leader in the automatic colour is white, as
+        // text is; a highlighted tab has its highlight behind it.
+        let dots = renamed(with_period(minimal()), "Officewright Dots");
+        let plain = RunStyle::default();
+        let highlighted = RunStyle::default().with_highlight(Some(Color::rgb(255, 255, 0)));
+        let shaded = |ids: &[crate::ir::RunStyleId], tab: usize| {
+            let (props, inlines) = leader_paragraph(ids, TabLeader::Dot, tab);
+            let props = props.with_shading(Some(
+                Shading::default().with_fill(ColorValue::Rgb(Color::BLACK)),
+            ));
+            (props, inlines)
+        };
+        let fonts = || vec![minimal(), dots.clone()];
+        let (items, _) = painted_with(fonts(), &[plain.clone(), highlighted.clone()], |ids, _| {
+            shaded(ids, 0)
+        });
+        let runs = glyph_runs(&items);
+        assert!(runs.len() == 2, "{items:?}");
+        assert!(runs.iter().all(|run| run.color == Color::WHITE), "{runs:?}");
+        // Highlighted: a yellow box from the end of `A` to the stop, and black dots on it.
+        let (items, _) = painted_with(fonts(), &[plain, highlighted], |ids, _| shaded(ids, 1));
+        let yellow: Vec<_> = rects(&items)
+            .into_iter()
+            .filter(|rect| rect.3 == Color::rgb(255, 255, 0))
+            .collect();
+        let [(at, width, _, _)] = yellow.as_slice() else {
+            panic!("{items:?}");
+        };
+        assert!((at.x.0 + width.0 - 90.0).abs() < 1e-9, "{at:?} {width:?}");
+        let leader = glyph_runs(&items).get(1).copied().expect("a leader");
+        assert_eq!(leader.color, Color::BLACK);
+    }
+
+    #[test]
+    fn the_highlight_of_raised_text_rises_with_it() {
+        let marked = RunStyle::default().with_highlight(Some(Color::rgb(255, 255, 0)));
+        let raised = marked
+            .clone()
+            .with_vertical(VerticalPosition::Superscript)
+            .with_position(Pt(2.0));
+        let (items, _) = painted(&[marked, raised], |ids, _| {
+            let (plain, up) = (
+                ids.first().copied().expect("a style"),
+                ids.get(1).copied().expect("a style"),
+            );
+            (
+                ParagraphProps::default(),
+                vec![Inline::text("A", plain), Inline::text("A", up)],
+            )
+        });
+        let runs = glyph_runs(&items);
+        let boxes = rects(&items);
+        assert_eq!((runs.len(), boxes.len()), (2, 2), "{items:?}");
+        // Each box reaches the font's ascent (900 units of 1000 at 10 pt) above its own
+        // run's baseline.
+        for (run, rect) in runs.iter().zip(&boxes) {
+            assert!(
+                (run.origin.y.0 - rect.0.y.0 - 9.0).abs() < 1e-9,
+                "{run:?} {rect:?}"
+            );
+        }
+        let (Some(low), Some(high)) = (runs.first(), runs.get(1)) else {
+            panic!("runs");
+        };
+        assert!((low.origin.y.0 - high.origin.y.0 - (2.0 + 10.0 / 3.0)).abs() < 1e-9);
     }
 
     #[test]
@@ -945,10 +1211,11 @@ mod tests {
                 ids.get(1).copied().expect("a style"),
             );
             let image = document.add_image(ImageData::new(ImageFormat::Png, Vec::new()));
-            let object = InlineObject::new(
-                ObjectContent::Picture(crate::ir::Picture::new(image)),
-                Size::new(Pt(8.0), Pt(5.0)),
-            );
+            let picture = crate::ir::Picture::new(image)
+                .with_rotation(90.0)
+                .with_flip_horizontal(true);
+            let object =
+                InlineObject::new(ObjectContent::Picture(picture), Size::new(Pt(8.0), Pt(5.0)));
             let props = ParagraphProps::default().with_tabs([TabStop::default()
                 .with_position(Pt(40.0))
                 .with_kind(TabKind::Start)
@@ -990,6 +1257,9 @@ mod tests {
             }
         );
         assert_eq!((picture.width, picture.height), (Pt(8.0), Pt(5.0)));
+        // Turned and mirrored as the picture is, for the painter.
+        assert_eq!(picture.rotation, 90.0);
+        assert!(picture.flip_horizontal && !picture.flip_vertical);
     }
 
     #[test]

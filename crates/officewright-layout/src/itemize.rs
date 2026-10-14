@@ -70,6 +70,10 @@ pub(crate) struct TextRun {
     pub(crate) range: Range<usize>,
     /// Its bytes of [`Itemized::source`].
     pub(crate) source: Range<usize>,
+    /// Where its drawn text has more characters than its source, as capitals do for `ß`
+    /// (`SS`): the bytes of the source of every drawn character, by the drawn
+    /// character's first byte. Empty when they correspond one to one.
+    pub(crate) sources: Vec<(usize, Range<usize>)>,
     pub(crate) style: RunStyleId,
     /// The face; `None` when there is no font at all, and nothing can be drawn.
     pub(crate) face: Option<FaceId>,
@@ -540,9 +544,22 @@ impl Builder<'_, '_, '_> {
                 break;
             };
             let script = scripts.get(start).copied().unwrap_or(Script::Common);
+            let placed = pending.get(start..end).unwrap_or(&[]);
+            let expanded = placed
+                .windows(2)
+                .any(|pair| matches!(pair, [a, b] if a.source == b.source));
+            let sources = if expanded {
+                placed
+                    .iter()
+                    .map(|placed| (placed.text.start, placed.source.clone()))
+                    .collect()
+            } else {
+                Vec::new()
+            };
             self.out.items.push(Item::Text(TextRun {
                 range: first.text.start..last.text.end,
                 source: first.source.start..last.source.end,
+                sources,
                 style: first.look.style,
                 face: first.look.face,
                 size: first.look.size,

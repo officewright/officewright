@@ -947,7 +947,7 @@ impl Painted {
     ///   the run's origin on its baseline;
     /// - `rect @X,Y WxH #RRGGBB`;
     /// - `line X,Y X,Y WIDTH STYLE #RRGGBB`;
-    /// - `image N @X,Y WxH`.
+    /// - `image N @X,Y WxH [rotated DEGREES] [flipped-horizontally] [flipped-vertically]`.
     pub fn text(&self) -> &str {
         &self.text
     }
@@ -1109,15 +1109,27 @@ pub fn paint(
                     hex(line.color)
                 )
             }
-            DisplayItem::Image(image) => writeln!(
-                text,
-                "image {} @{},{} {}x{}",
-                image.image.index(),
-                twips(image.at.x),
-                twips(image.at.y),
-                twips(image.width),
-                twips(image.height)
-            ),
+            DisplayItem::Image(image) => {
+                let mut flags = String::new();
+                if image.rotation != 0.0 {
+                    let _ = write!(flags, " rotated {}", image.rotation);
+                }
+                if image.flip_horizontal {
+                    flags.push_str(" flipped-horizontally");
+                }
+                if image.flip_vertical {
+                    flags.push_str(" flipped-vertically");
+                }
+                writeln!(
+                    text,
+                    "image {} @{},{} {}x{}{flags}",
+                    image.image.index(),
+                    twips(image.at.x),
+                    twips(image.at.y),
+                    twips(image.width),
+                    twips(image.height)
+                )
+            }
         };
     }
     Painted {

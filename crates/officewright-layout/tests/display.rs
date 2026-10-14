@@ -129,6 +129,29 @@ fn text_is_drawn_on_its_baseline_with_its_source_text() -> TestResult {
 }
 
 #[test]
+fn capitals_that_draw_more_characters_keep_their_text_on_the_line_that_draws_it() -> TestResult {
+    // In capitals, `ß` is drawn `SS`. Broken into lines, each line's glyph runs stand for
+    // its own words as written, so that copying a page gives the text on it.
+    let book = book()?;
+    let mut document = Document::default();
+    let caps = document.add_run_style(base().with_caps(true));
+    let words = "straße maße fuß groß";
+    let paragraph = one_paragraph(caps, vec![Inline::text(words, caps)]);
+    let painted = fuzzing::paint(&book, &document, &[paragraph], 60.0);
+    let runs = items(&painted, "glyphs");
+    assert!(runs.len() > 1, "{}", painted.text());
+    let texts: Vec<&str> = runs
+        .iter()
+        .map(|run| run.split('"').nth(1).unwrap_or_default())
+        .collect();
+    assert_eq!(texts.concat(), words, "{}", painted.text());
+    for text in &texts {
+        assert!(!text.is_empty(), "{}", painted.text());
+    }
+    Ok(())
+}
+
+#[test]
 fn bold_and_italic_take_the_family_s_faces_or_are_drawn_synthetic() -> TestResult {
     let book = book()?;
     let mut document = Document::default();
