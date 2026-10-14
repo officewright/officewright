@@ -2,6 +2,8 @@
 //! through with the PNG predictors of the FlateDecode filter where PDF can show them as
 //! they are, decoded otherwise (ISO 32000-1, 8.9 and 7.4.4.4).
 
+use std::borrow::Cow;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{fmt, fs};
@@ -80,6 +82,24 @@ struct Inner {
     encoding: Encoding,
 }
 
+impl Inner {
+    /// The data of the PNG chunks at `chunks` of the file, joined; borrowed from the file
+    /// when there is one chunk, as there usually is.
+    fn png_data(&self, chunks: &[Range<usize>]) -> Cow<'_, [u8]> {
+        match chunks {
+            [chunk] => Cow::Borrowed(self.source.get(chunk.clone()).unwrap_or_default()),
+            _ => Cow::Owned(
+                chunks
+                    .iter()
+                    .filter_map(|chunk| self.source.get(chunk.clone()))
+                    .flatten()
+                    .copied()
+                    .collect(),
+            ),
+        }
+    }
+}
+
 impl fmt::Debug for Inner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Image")
@@ -99,9 +119,11 @@ enum Encoding {
         /// The file has Adobe's `APP14` marker, so its CMYK samples are inverted.
         adobe: bool,
     },
-    /// The zlib stream of a PNG file's `IDAT` chunks, whose rows the PNG predictors undo.
+    /// The zlib stream of a PNG file's `IDAT` chunks, whose rows the PNG predictors undo:
+    /// where the data of each non-empty chunk is in the file, which is kept anyway, rather
+    /// than a second copy.
     Png {
-        data: Vec<u8>,
+        chunks: Vec<Range<usize>>,
         space: ColorSpace,
         bits: u8,
         /// The range of palette indices that are fully transparent.
@@ -124,13 +146,16 @@ impl fmt::Debug for Encoding {
                 .field("adobe", adobe)
                 .finish(),
             Self::Png {
-                data,
+                chunks,
                 space,
                 bits,
                 mask,
             } => f
                 .debug_struct("Png")
-                .field("data", &data.len())
+                .field(
+                    "data",
+                    &chunks.iter().map(ExactSizeIterator::len).sum::<usize>(),
+                )
                 .field("space", space)
                 .field("bits", bits)
                 .field("mask", mask)
@@ -293,11 +318,12 @@ impl Image {
                 vec![stream_object(&entries, &inner.source, Compression::None)]
             }
             Encoding::Png {
-                data,
+                chunks,
                 space,
                 bits,
                 mask,
             } => {
+                let data = inner.png_data(chunks);
                 let mask =
                     mask.map_or_else(String::new, |(min, max)| format!(" /Mask [{min} {max}]"));
                 let entries = format!(
@@ -308,7 +334,7 @@ impl Image {
                     inner.width,
                     space.entry()
                 );
-                vec![stream_object(&entries, data, Compression::None)]
+                vec![stream_object(&entries, &data, Compression::None)]
             }
             Encoding::Decoded {
                 samples,
@@ -554,6 +580,7 @@ fn read_png(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> {
     let mut palette = None;
     let mut transparency = None;
     let mut compressed = Vec::new();
+    let mut chunks = Vec::new();
     loop {
         let length = u32_at(data, at).ok_or_else(|| malformed("the PNG file has no IEND chunk"))?;
         // A chunk's length is at most 2^31 - 1 (5.3).
@@ -590,7 +617,12 @@ fn read_png(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> {
             b"IHDR" => header = Some(png_header(body)?),
             b"PLTE" => palette = Some(body.to_vec()),
             b"tRNS" => transparency = Some(body.to_vec()),
-            b"IDAT" => compressed.extend_from_slice(body),
+            b"IDAT" => {
+                compressed.extend_from_slice(body);
+                if !body.is_empty() {
+                    chunks.push(end - body.len()..end);
+                }
+            }
             b"IEND" => break,
             // A critical chunk this reader does not know (bit 5 of the first byte clear).
             [first, ..] if first.is_ascii_uppercase() => {
@@ -680,7 +712,7 @@ fn read_png(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> {
             header.width,
             header.height,
             Encoding::Png {
-                data: compressed,
+                chunks,
                 space,
                 bits: header.bits,
                 mask,
@@ -1284,7 +1316,7 @@ pub(crate) mod tests {
                     let image = Image::from_bytes(png.encode()).unwrap();
                     assert_eq!((image.width(), image.height()), (width, height));
                     let Encoding::Png {
-                        data,
+                        chunks,
                         space,
                         bits: written,
                         mask,
@@ -1292,7 +1324,10 @@ pub(crate) mod tests {
                     else {
                         panic!("type {color_type} at {bits} bits was not passed through");
                     };
-                    assert_eq!(*data, compress_to_vec_zlib(&png.rows(), 6));
+                    assert_eq!(
+                        *image.inner.png_data(chunks),
+                        compress_to_vec_zlib(&png.rows(), 6)
+                    );
                     assert_eq!((*written, *mask), (bits, None));
                     assert_eq!(image.needs_pdf_15(), bits == 16);
                     match space {
@@ -2004,6 +2039,39 @@ pub(crate) mod tests {
             object.contains("/BitsPerComponent 2 /Mask [1 2] >>"),
             "{object}"
         );
+    }
+
+    #[test]
+    fn writes_the_data_of_one_idat_chunk_or_several_as_it_is() {
+        let png = Png::new(5, 3, 2, 8);
+        let data = compress_to_vec_zlib(&png.rows(), 6);
+        let (first, second) = data.split_at(7);
+        // One chunk; empty chunks around and between two; three.
+        let layouts: [&[&[u8]]; 3] = [
+            &[&data],
+            &[b"", first, b"", second, b""],
+            &[first, &second[..1], &second[1..]],
+        ];
+        for chunks in layouts {
+            let mut file = PNG_SIGNATURE.to_vec();
+            Png::chunk(&mut file, b"IHDR", &png.header());
+            for chunk in chunks {
+                Png::chunk(&mut file, b"IDAT", chunk);
+            }
+            Png::chunk(&mut file, b"IEND", b"");
+            let image = Image::from_bytes(file).unwrap();
+            let object = image.objects(1, Compression::Flate).concat();
+            // The stream's data is the zlib stream, however the file cut it.
+            let head = format!(
+                "<< /Length {} /Filter /FlateDecode /DecodeParms",
+                data.len()
+            );
+            assert!(object.starts_with(head.as_bytes()), "{chunks:?}");
+            assert!(
+                object.ends_with(&[&data[..], b"\nendstream"].concat()),
+                "{chunks:?}"
+            );
+        }
     }
 
     #[test]
