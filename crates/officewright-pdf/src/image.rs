@@ -83,19 +83,40 @@ struct Inner {
 }
 
 impl Inner {
-    /// The data of the PNG chunks at `chunks` of the file, joined; borrowed from the file
-    /// when there is one chunk, as there usually is.
-    fn png_data(&self, chunks: &[Range<usize>]) -> Cow<'_, [u8]> {
-        match chunks {
-            [chunk] => Cow::Borrowed(self.source.get(chunk.clone()).unwrap_or_default()),
-            _ => Cow::Owned(
-                chunks
-                    .iter()
-                    .filter_map(|chunk| self.source.get(chunk.clone()))
-                    .flatten()
-                    .copied()
-                    .collect(),
-            ),
+    /// The compressed data of a PNG file, joined; borrowed from the file when it is one
+    /// chunk, as it usually is, or from the copy.
+    fn png_data<'a>(&'a self, data: &'a PngData) -> Cow<'a, [u8]> {
+        match data {
+            PngData::Copied(data) => Cow::Borrowed(data),
+            PngData::InFile(chunks) => match chunks.as_slice() {
+                [chunk] => Cow::Borrowed(self.source.get(chunk.clone()).unwrap_or_default()),
+                chunks => Cow::Owned(
+                    chunks
+                        .iter()
+                        .filter_map(|chunk| self.source.get(chunk.clone()))
+                        .flatten()
+                        .copied()
+                        .collect(),
+                ),
+            },
+        }
+    }
+}
+
+/// The zlib stream of a PNG file's `IDAT` chunks: where the data of each non-empty chunk
+/// is in the file, which is kept anyway, or, for chunks so small that their places would
+/// take more than a quarter of their data, a copy.
+enum PngData {
+    InFile(Vec<Range<usize>>),
+    Copied(Vec<u8>),
+}
+
+impl PngData {
+    /// The bytes of the zlib stream.
+    fn len(&self) -> usize {
+        match self {
+            Self::InFile(chunks) => chunks.iter().map(ExactSizeIterator::len).sum(),
+            Self::Copied(data) => data.len(),
         }
     }
 }
@@ -119,11 +140,9 @@ enum Encoding {
         /// The file has Adobe's `APP14` marker, so its CMYK samples are inverted.
         adobe: bool,
     },
-    /// The zlib stream of a PNG file's `IDAT` chunks, whose rows the PNG predictors undo:
-    /// where the data of each non-empty chunk is in the file, which is kept anyway, rather
-    /// than a second copy.
+    /// The zlib stream of a PNG file's `IDAT` chunks, whose rows the PNG predictors undo.
     Png {
-        chunks: Vec<Range<usize>>,
+        data: PngData,
         space: ColorSpace,
         bits: u8,
         /// The range of palette indices that are fully transparent.
@@ -146,16 +165,13 @@ impl fmt::Debug for Encoding {
                 .field("adobe", adobe)
                 .finish(),
             Self::Png {
-                chunks,
+                data,
                 space,
                 bits,
                 mask,
             } => f
                 .debug_struct("Png")
-                .field(
-                    "data",
-                    &chunks.iter().map(ExactSizeIterator::len).sum::<usize>(),
-                )
+                .field("data", &data.len())
                 .field("space", space)
                 .field("bits", bits)
                 .field("mask", mask)
@@ -318,12 +334,12 @@ impl Image {
                 vec![stream_object(&entries, &inner.source, Compression::None)]
             }
             Encoding::Png {
-                chunks,
+                data,
                 space,
                 bits,
                 mask,
             } => {
-                let data = inner.png_data(chunks);
+                let data = inner.png_data(data);
                 let mask =
                     mask.map_or_else(String::new, |(min, max)| format!(" /Mask [{min} {max}]"));
                 let entries = format!(
@@ -733,7 +749,9 @@ fn read_png(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> {
     let mut palette = None;
     let mut transparency = None;
     let mut compressed = Vec::new();
-    let mut chunks = Vec::new();
+    // Where the data of each chunk is, until those places would take more than a quarter
+    // of the data: the copy, which decompressing needs anyway, is kept then.
+    let mut chunks = Some(Vec::new());
     loop {
         let length = u32_at(data, at).ok_or_else(|| malformed("the PNG file has no IEND chunk"))?;
         // A chunk's length is at most 2^31 - 1 (5.3).
@@ -772,8 +790,13 @@ fn read_png(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> {
             b"tRNS" => transparency = Some(body.to_vec()),
             b"IDAT" => {
                 compressed.extend_from_slice(body);
-                if !body.is_empty() {
-                    chunks.push(end - body.len()..end);
+                if let Some(places) = &mut chunks {
+                    if !body.is_empty() {
+                        places.push(end - body.len()..end);
+                    }
+                    if 4 * size_of::<Range<usize>>() * places.len() > compressed.len() {
+                        chunks = None;
+                    }
                 }
             }
             b"IEND" => break,
@@ -865,7 +888,13 @@ fn read_png(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> {
             header.width,
             header.height,
             Encoding::Png {
-                chunks,
+                data: match chunks {
+                    Some(mut places) => {
+                        places.shrink_to_fit();
+                        PngData::InFile(places)
+                    }
+                    None => PngData::Copied(compressed),
+                },
                 space,
                 bits: header.bits,
                 mask,
@@ -1469,7 +1498,7 @@ pub(crate) mod tests {
                     let image = Image::from_bytes(png.encode()).unwrap();
                     assert_eq!((image.width(), image.height()), (width, height));
                     let Encoding::Png {
-                        chunks,
+                        data,
                         space,
                         bits: written,
                         mask,
@@ -1478,7 +1507,7 @@ pub(crate) mod tests {
                         panic!("type {color_type} at {bits} bits was not passed through");
                     };
                     assert_eq!(
-                        *image.inner.png_data(chunks),
+                        *image.inner.png_data(data),
                         compress_to_vec_zlib(&png.rows(), 6)
                     );
                     assert_eq!((*written, *mask), (bits, None));
@@ -2479,7 +2508,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn writes_the_data_of_one_idat_chunk_or_several_as_it_is() {
+    fn writes_the_data_of_one_png_idat_chunk_or_several_as_it_is() {
         let png = Png::new(5, 3, 2, 8);
         let data = compress_to_vec_zlib(&png.rows(), 6);
         let (first, second) = data.split_at(7);
@@ -2507,6 +2536,60 @@ pub(crate) mod tests {
             assert!(
                 object.ends_with(&[&data[..], b"\nendstream"].concat()),
                 "{chunks:?}"
+            );
+        }
+    }
+
+    /// A PNG file of `png`'s header, with `data` cut into `IDAT` chunks of `size` bytes.
+    fn png_in_chunks(png: &Png, data: &[u8], size: usize) -> Vec<u8> {
+        let mut file = PNG_SIGNATURE.to_vec();
+        Png::chunk(&mut file, b"IHDR", &png.header());
+        for chunk in data.chunks(size) {
+            Png::chunk(&mut file, b"IDAT", chunk);
+        }
+        Png::chunk(&mut file, b"IEND", b"");
+        file
+    }
+
+    #[test]
+    fn keeps_a_copy_of_png_data_in_chunks_too_small_to_point_at() {
+        // Chunks of 1 byte would take 16 bytes each to point at: the data is copied once.
+        // Chunks of 100 bytes are pointed at in the file.
+        let png = Png::new(40, 30, 2, 8);
+        let data = compress_to_vec_zlib(&png.rows(), 6);
+        for (size, copied) in [(1, true), (100, false)] {
+            let image = Image::from_bytes(png_in_chunks(&png, &data, size)).unwrap();
+            let Encoding::Png { data: kept, .. } = &image.inner.encoding else {
+                panic!("not passed through");
+            };
+            assert_eq!(matches!(kept, PngData::Copied(_)), copied, "{size}");
+            assert_eq!(*image.inner.png_data(kept), data, "{size}");
+            let object = image.objects(1, Compression::Flate).concat();
+            assert!(
+                object.ends_with(&[&data[..], b"\nendstream"].concat()),
+                "{size}"
+            );
+        }
+    }
+
+    #[test]
+    fn writes_png_data_as_it_is_whatever_the_compression() {
+        // Stored deflate blocks, which Flate would shrink a lot: the PNG's own zlib stream
+        // goes into the PDF unchanged, with one filter, whatever the document's setting.
+        let mut png = Png::new(64, 64, 0, 8);
+        for pixel in &mut png.pixels {
+            *pixel = vec![7];
+        }
+        let data = compress_to_vec_zlib(&png.rows(), 0);
+        assert!(compress_to_vec_zlib(&data, 6).len() < data.len() / 2);
+        let image = Image::from_bytes(png_in_chunks(&png, &data, data.len())).unwrap();
+        for compression in [Compression::Flate, Compression::None] {
+            let object = image.objects(1, compression).concat();
+            let text = String::from_utf8_lossy(&object);
+            assert_eq!(text.matches("/Filter").count(), 1, "{compression:?}");
+            assert!(
+                object.ends_with(&[&data[..], b"\nendstream"].concat()),
+                "{compression:?}"
             );
         }
     }
