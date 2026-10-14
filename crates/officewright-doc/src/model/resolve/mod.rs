@@ -201,8 +201,9 @@ impl<'a> Formats<'a> {
 }
 
 /// Works out once, after the styles are read, the paragraph style of every paragraph
-/// whose `w:pStyle` names one the resolver uses, so that no way of asking for a
-/// paragraph's or a run's formatting reads a `w:pPr` again. The `w:pStyle` is read as
+/// whose `w:pStyle` names one the resolver uses, so that a run's formatting never reads
+/// its paragraph's `w:pPr`; a paragraph's own formatting and its mark's read only the
+/// properties of that paragraph. The `w:pStyle` is read as
 /// [`Paragraph::properties`] reads it: through `mc:AlternateContent`, the last of several
 /// winning. Each paragraph's own `w:pPr` is walked once, so the work grows with the size
 /// of the document.

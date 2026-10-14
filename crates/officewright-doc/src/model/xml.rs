@@ -322,8 +322,8 @@ impl<'d> Element<'d> {
 
 /// The elements read in place of the children of an element, as ranges of its tokens;
 /// see [`Element::children_through_alternates`]. Each token is looked at once, and the
-/// start tag of an element it returns twice: an element is passed over by finding its end
-/// tag, an alternate or a taken branch is entered.
+/// start tag of an element it returns or passes over twice: such an element is passed
+/// over by finding its end tag, an alternate or a taken branch is entered.
 struct Alternates<'d> {
     tokens: &'d [Token],
     strings: &'d Strings,

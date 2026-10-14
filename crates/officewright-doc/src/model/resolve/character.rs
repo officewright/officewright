@@ -260,7 +260,8 @@ fn toggle(
 
 /// A font as a level writes it: by name, or as a font of the theme, with the name
 /// written next to it, which Word writes as the theme font's typeface and which stands in
-/// when the document has no theme.
+/// when the theme gives the font no typeface. A document without a theme has Word's
+/// default theme.
 #[derive(Clone, Debug)]
 enum FontSlot {
     Name(Arc<str>),

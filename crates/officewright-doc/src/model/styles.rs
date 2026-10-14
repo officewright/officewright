@@ -89,7 +89,8 @@ impl<'a> Styles<'a> {
     }
 
     /// The run properties of the document defaults (`w:docDefaults/w:rPrDefault`), the
-    /// bottom of every run's formatting.
+    /// bottom of every run's formatting when they give any. Without a `w:rPr` there,
+    /// Word gives runs defaults of its own, which [`Formats`](crate::Formats) applies.
     pub fn default_run_properties(self) -> RunProperties {
         let document = self.document;
         self.defaults(["rPrDefault", "rPr"])
