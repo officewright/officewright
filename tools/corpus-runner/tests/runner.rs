@@ -143,6 +143,14 @@ fn memory_over_the_limit_fails_the_file() -> io::Result<()> {
     if cfg!(target_os = "linux") {
         assert_eq!(code, 1, "{output}");
         assert!(output.contains("over the limit of 0 MiB"), "{output}");
+        // The summary rounds the peak as the file's message does.
+        let peak = |prefix: &str| {
+            output
+                .lines()
+                .find_map(|line| line.split(prefix).nth(1)?.split(" MiB").next())
+                .map(str::to_owned)
+        };
+        assert_eq!(peak("peak memory: "), peak("peak memory "), "{output}");
     } else {
         // Peak memory is measured on Linux only.
         assert_eq!(code, 0, "{output}");
@@ -261,21 +269,63 @@ fn paths_outside_the_root_and_bad_options_are_refused() -> io::Result<()> {
     let (code, output) = corpus.run(&["--root", "docs/nested", "docs"], None)?;
     assert_eq!(code, 2, "{output}");
     assert!(output.contains("is not under the root"), "{output}");
+    // ".." is resolved by name, the same on every system: a path through it that leaves the
+    // root is not under it (#68).
     let (code, output) =
         corpus.run(&["--root", "docs/nested", "docs/nested/../good.docx"], None)?;
     assert_eq!(code, 2, "a path through .. leaves the root: {output}");
-    assert!(
-        output.contains("a path through '..' is not accepted"),
-        "{output}"
+    assert!(output.contains("is not under the root"), "{output}");
+    Ok(())
+}
+
+/// A path through ".." that stays inside the root is the file it names, and so is a root
+/// through "..", also from a subfolder (#68).
+#[test]
+fn paths_through_dots_inside_the_root_are_resolved() -> io::Result<()> {
+    let corpus = Corpus::new("dots")?;
+    let path_of = |name: &str| -> io::Result<serde_json::Value> {
+        let report: serde_json::Value = serde_json::from_str(&corpus.read(name)?).unwrap();
+        Ok(report["files"][0]["path"].clone())
+    };
+    let (code, output) = corpus.run(&["--report", "a.json", "docs/nested/../good.docx"], None)?;
+    assert_eq!(code, 0, "{output}");
+    assert_eq!(path_of("a.json")?, "docs/good.docx");
+    let (code, output) = corpus.run(
+        &[
+            "--root",
+            "docs/nested/..",
+            "--report",
+            "b.json",
+            "docs/good.docx",
+        ],
+        None,
+    )?;
+    assert_eq!(code, 0, "{output}");
+    assert_eq!(path_of("b.json")?, "good.docx");
+    let from_docs = Command::new(env!("CARGO_BIN_EXE_corpus-runner"))
+        .current_dir(corpus.dir.join("docs"))
+        .args([
+            "run",
+            "--root",
+            "..",
+            "--report",
+            "../c.json",
+            "../docs/good.docx",
+        ])
+        .output()?;
+    assert_eq!(
+        from_docs.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&from_docs.stderr)
     );
-    // Also when it stays inside the root: '..' is refused, not resolved (#68).
-    let (code, output) = corpus.run(&["docs/nested/../good.docx"], None)?;
-    assert_eq!(code, 2, "{output}");
-    assert!(
-        output.contains("a path through '..' is not accepted"),
-        "{output}"
-    );
-    assert!(!output.contains("is not under the root"), "{output}");
+    assert_eq!(path_of("c.json")?, "docs/good.docx");
+    Ok(())
+}
+
+#[test]
+fn bad_options_are_refused() -> io::Result<()> {
+    let corpus = Corpus::new("options")?;
     let (code, output) = corpus.run(&["docs/notes-missing"], None)?;
     assert_eq!(code, 2, "{output}");
     let (code, output) = corpus.run(&["--allow-better", "docs"], None)?;
@@ -365,6 +415,14 @@ fn documents_with_a_reference_are_scored_or_say_why_not() -> io::Result<()> {
     assert!(
         report["files"][1].get("score_error").is_none(),
         "no reference, nothing to score"
+    );
+    // A path through ".." finds its reference too: the paths are compared resolved.
+    let dots = [&options[..4], &["docs/nested/../good.docx"]].concat();
+    let (code, output) = corpus.run(&dots, None)?;
+    assert_eq!(code, 0, "{output}");
+    assert!(
+        output.contains("not scored       docs/good.docx: no PDF of ours at ours"),
+        "{output}"
     );
 
     // A baseline that holds scores fails a run that does not score.

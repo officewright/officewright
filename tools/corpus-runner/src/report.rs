@@ -274,7 +274,9 @@ pub struct Changes {
     pub worse: Vec<String>,
     /// Statuses and scores that got better.
     pub better: Vec<String>,
+    /// The paths of the files with a line in `worse`.
     pub worse_files: BTreeSet<String>,
+    /// The paths of the files with a line in `better`.
     pub better_files: BTreeSet<String>,
 }
 
