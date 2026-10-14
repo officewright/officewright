@@ -134,6 +134,45 @@ fn with_fs_type(mut font: Vec<u8>, fs_type: u16) -> TestResult<Vec<u8>> {
     Ok(font)
 }
 
+/// The font with a `name` table whose only name is `postscript` as its PostScript name
+/// (name ID 6), added at the end of the file in place of its own.
+fn with_postscript_name(mut font: Vec<u8>, postscript: &str) -> TestResult<Vec<u8>> {
+    let tables = usize::from(u16_at(&font, 4).ok_or("short font")?);
+    let record = (0..tables)
+        .map(|i| 12 + 16 * i)
+        .find(|&record| font.get(record..record + 4) == Some(&b"name"[..]))
+        .ok_or("no name table")?;
+    let text: Vec<u8> = postscript
+        .encode_utf16()
+        .flat_map(u16::to_be_bytes)
+        .collect();
+    // Format 0, one record: Windows, Unicode BMP, US English, name ID 6, at offset 0 of
+    // the strings, which start after the 6-byte header and the 12-byte record.
+    let mut name = Vec::new();
+    for value in [0, 1, 18, 3, 1, 0x0409, 6, u16::try_from(text.len())?, 0] {
+        name.extend_from_slice(&u16::to_be_bytes(value));
+    }
+    name.extend_from_slice(&text);
+    font.resize(font.len().next_multiple_of(4), 0);
+    let offset = u32::try_from(font.len())?;
+    let length = u32::try_from(name.len())?;
+    font.extend_from_slice(&name);
+    font.get_mut(record + 8..record + 16)
+        .ok_or("short table directory")?
+        .copy_from_slice(&[offset.to_be_bytes(), length.to_be_bytes()].concat());
+    Ok(font)
+}
+
+/// The names of fonts in `pdf`, as written after `/BaseFont` and `/FontName`, without
+/// their slash.
+fn font_names(pdf: &str) -> Vec<&str> {
+    pdf.split("/BaseFont /")
+        .skip(1)
+        .chain(pdf.split("/FontName /").skip(1))
+        .filter_map(|rest| rest.split(' ').next())
+        .collect()
+}
+
 /// A collection of the two test fonts, Liberation Sans then Noto Sans, built here
 /// rather than committed.
 fn collection() -> TestResult<Vec<u8>> {
@@ -594,6 +633,44 @@ fn embeds_every_glyph_of_a_font_that_must_not_be_subset() -> TestResult {
     let zhe = face.glyph_id('Ж').ok_or("no Ж")?;
     assert_eq!(shown_cids(&text), [vec![zhe.to_u16()]]);
     assert!(whole_pdf.len() > 20 * subset_pdf.len());
+    Ok(())
+}
+
+#[test]
+fn cuts_font_names_to_what_readers_accept() -> TestResult {
+    // ISO 32000-1, Annex C: a reader has to accept names of up to 127 bytes. Every name
+    // of the font in the file takes that much here: the font's own name is cut after
+    // 120 bytes in a TrueType subset, which adds a tag of seven, after 109 in a CFF
+    // subset, whose Type 0 font adds "-Identity-H" too, and after 127 in a whole font
+    // (116 with CFF outlines). The fsType 0x0100 forbids subsetting.
+    let long = "Long".repeat(50);
+    let cases = [
+        (minimal()?, None, 120, [127, 127, 127]),
+        (noto_sans()?, None, 109, [127, 116, 116]),
+        (liberation_sans()?, Some(0x0100), 127, [127, 127, 127]),
+        (noto_sans()?, Some(0x0100), 116, [127, 116, 116]),
+    ];
+    for (data, fs_type, kept, lengths) in cases {
+        let mut data = with_postscript_name(data, &long)?;
+        if let Some(fs_type) = fs_type {
+            data = with_fs_type(data, fs_type)?;
+        }
+        let font = Font::from_bytes(data, 0)?;
+        assert_eq!(font.name(), &long[..kept]);
+        let pdf = pdf_text(&one_line(&font, "A A")?)?;
+        // The Type 0 font's /BaseFont, the CIDFont's and the descriptor's /FontName.
+        let names = font_names(&pdf);
+        assert_eq!(
+            names.iter().map(|name| name.len()).collect::<Vec<_>>(),
+            lengths
+        );
+        for name in names {
+            assert!(name.contains(&long[..kept]), "{name}");
+        }
+    }
+    // A name at the limit is kept whole.
+    let font = Font::from_bytes(with_postscript_name(minimal()?, &long[..120])?, 0)?;
+    assert_eq!(font.name(), &long[..120]);
     Ok(())
 }
 
