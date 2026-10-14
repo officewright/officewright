@@ -692,9 +692,33 @@ class Import(unittest.TestCase):
         self.change_resaved(record, {
             "word/settings.xml": [
                 (b'<w:listSeparator w:val=","/>', b'<w:listSeparator w:val=";"/>'),
+                (b'<w:decimalSymbol w:val="."/>', b'<w:decimalSymbol w:val=","/>'),
             ],
         })
         self.assertEqual(len(self.run_import(allow_locale=True)), 2)
+        # SOURCES.md names what was accepted, and only for that document.
+        rows = [
+            line for line in (self.corpus / "SOURCES.md").read_text(encoding="utf-8").splitlines()
+            if "accepted with --allow-locale" in line
+        ]
+        self.assertEqual(len(rows), 1)
+        self.assertIn(
+            f"| reference/word-rules/{rules.documents()[0].name}/ ", rows[0]
+        )
+        self.assertIn(
+            "accepted with --allow-locale: the re-saved copy has decimalSymbol ',', "
+            "the re-saved copy has listSeparator ';'",
+            rows[0],
+        )
+
+    def test_a_locale_trace_that_would_break_the_table_is_refused(self):
+        record = self.add_result(rules.documents()[0])
+        self.change_resaved(record, {
+            "word/settings.xml": [
+                (b'<w:listSeparator w:val=","/>', b'<w:listSeparator w:val="|"/>'),
+            ],
+        })
+        self.assertIn("which would break the SOURCES.md table", self.refused(allow_locale=True))
 
     def test_refuses_values_that_would_break_the_table(self):
         for key, value in (("word_build", "16.0 | x"), ("rendered", "today"),
@@ -1312,6 +1336,45 @@ class Summary(unittest.TestCase):
             lines[1],
             "  note: Helvetica is not embedded; rasterized with Arial Version 7.06, as Windows "
             "substitutes it for Helvetica",
+        )
+
+
+class FormattingNote(unittest.TestCase):
+    """SOURCES.md's note on a formatting export, made from the committed file."""
+
+    def result(self, **changes):
+        result = {"runs": True, "runs_note": "", "complete": True,
+                  "styles_from_resaved_copy": True,
+                  "stories": [{"paragraphs": [{}, {}]}, {"paragraphs": [{}]}]}
+        result.update(changes)
+        return result
+
+    def test_each_part_of_the_note(self):
+        note = importer.formatting_note
+        self.assertEqual(
+            note(self.result()), "formatting as Word computes it: 3 paragraphs, with runs"
+        )
+        self.assertEqual(
+            note(self.result(runs=False, runs_note=importer.SIZE_RUNS_NOTE)),
+            "formatting as Word computes it: 3 paragraphs, runs left out (size)",
+        )
+        self.assertEqual(
+            note(self.result(runs=False, complete=False, styles_from_resaved_copy=False)),
+            "formatting as Word computes it: 3 paragraphs, without runs, incomplete (time budget), "
+            "body styles not matched to the re-saved copy",
+        )
+
+    def test_a_file_over_the_limit_loses_its_runs_and_says_so(self):
+        font = {"name": "Calibri"}
+        paragraphs = [{"index": i, "text": "x", "font": 0, "runs": [[1, 1]] * 2000}
+                      for i in range(150)]
+        result = self.result(fonts=[font, dict(font, bold=True)], document="x.docx",
+                             stories=[{"story": "main", "instance": 0, "paragraphs": paragraphs}])
+        self.assertGreater(len(importer.formatting_bytes(result)), importer.MAX_FORMATTING_BYTES)
+        data, note = importer.within_size(result, importer.formatting_note(result))
+        self.assertLess(len(data), importer.MAX_FORMATTING_BYTES)
+        self.assertEqual(
+            note, "formatting as Word computes it: 150 paragraphs, runs left out (size)"
         )
 
 

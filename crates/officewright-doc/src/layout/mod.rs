@@ -29,7 +29,8 @@ thread_local! {
     /// Work the translation did on this thread, for tests of its cost: inlines added to
     /// paragraphs and field results, bytes of names and tags looked up to share run
     /// styles, run styles built, places tried to cut names, comparisons of compatibility
-    /// flags, and table cells copied where a horizontal merge should move them.
+    /// flags, table cells copied where a horizontal merge should move them, and cells
+    /// whose properties in effect were worked out.
     pub(crate) static WORK: std::cell::Cell<Work> = const { std::cell::Cell::new(Work {
         inlines: 0,
         compared: 0,
@@ -37,6 +38,7 @@ thread_local! {
         cut_steps: 0,
         flags: 0,
         cell_copies: 0,
+        cell_reads: 0,
     }) };
 }
 
@@ -52,6 +54,8 @@ pub(crate) struct Work {
     /// Table cells widened by a horizontal merge whose blocks were not where the cell
     /// was built: copies, where the cell should have been moved.
     pub(crate) cell_copies: usize,
+    /// Cells whose properties in effect the formatting worked out.
+    pub(crate) cell_reads: usize,
 }
 
 /// Counts work for [`WORK`].
@@ -237,6 +241,8 @@ impl<'a> Translator<'a> {
                 format!("{omitted} more entries are not listed"),
             ));
         }
+        #[cfg(test)]
+        work(|work| work.cell_reads += self.formats.work().cells);
         Translation {
             document: self.ir,
             left_out: self.left_out,

@@ -49,11 +49,11 @@ pub use model::{
     Anchor, AnchorHorizontalAlign, AnchorVerticalAlign, ArtBorder, Block, Border, BorderStyle,
     Break, BreakClear, BreakKind, CellBorders, CellMargins, CellMerge, ChapterSeparator,
     CharacterFormat, Color, ColorScheme, ColorSchemeIndex, ColorSchemeMapping, ColorValue, Column,
-    Columns, CompatibilityMode, CompatibilityOption, CompatibilitySetting, Conformance,
-    ContentControl, Crop, Document, DocumentGrid, DocumentGridKind, DocumentKind, Drawing,
-    EmbeddedFontReference, EmbeddedFontStyle, FieldCharKind, FontCollection, FontDeclaration,
-    FontFamilies, FontFamily, FontHint, FontPitch, FontScheme, FontSignature, Formats,
-    HeaderFooter, HeaderFooterKind, HeaderFooterReference, HeightRule, Highlight,
+    Columns, CompatibilityMode, CompatibilityOption, CompatibilitySetting, ConditionalFormat,
+    Conformance, ContentControl, Crop, Document, DocumentGrid, DocumentGridKind, DocumentKind,
+    Drawing, EmbeddedFontReference, EmbeddedFontStyle, FieldCharKind, FontCollection,
+    FontDeclaration, FontFamilies, FontFamily, FontHint, FontPitch, FontScheme, FontSignature,
+    Formats, HeaderFooter, HeaderFooterKind, HeaderFooterReference, HeightRule, Highlight,
     HorizontalAlignment, HorizontalReference, Hyperlink, Image, Indentation, Inline, Justification,
     Language, LegacyNumbering, LevelOverride, LevelSuffix, Ligatures, LineNumberRestart,
     LineNumbering, LineSpacing, ListDefinition, ListFormat, ListInstance, ListLevel,
@@ -66,8 +66,9 @@ pub use model::{
     Spacing, Style, StyleKind, Styles, SystemColor, TabKind, TabLeader, TabStop, Table,
     TableBorders, TableCell, TableCellProperties, TableId, TableJustification, TableLayout,
     TableLook, TableOverlap, TablePosition, TableProperties, TableRow, TableRowProperties,
-    TableWidth, TextDirection, Theme, ThemeColor, ThemeFont, Underline, UnderlineStyle,
-    VerticalAlignment, VerticalJustification, VerticalPosition, VerticalReference, WrapKind,
+    TableStyleCondition, TableWidth, TextDirection, Theme, ThemeColor, ThemeFont, Underline,
+    UnderlineStyle, VerticalAlignment, VerticalJustification, VerticalPosition, VerticalReference,
+    WrapKind,
 };
 /// What [`Document::save_pdf`] and the like report, and the options they take.
 #[cfg(feature = "pdf")]
