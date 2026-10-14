@@ -10,9 +10,7 @@ use officewright_core::{Color, PageSize, Pt};
 use officewright_font::{FaceId, FontBook, FontOrigin};
 use officewright_pdf as pdf;
 
-use crate::display::{
-    Cluster, DisplayItem, DrawnGlyph, GlyphItem, ImageItem, LineItem, LineStyle, Point,
-};
+use crate::display::{DisplayItem, DrawnGlyph, GlyphItem, ImageItem, LineItem, LineStyle, Point};
 use crate::error::{Error, Result};
 use crate::fonts::Fonts;
 use crate::ir::{Document, ImageFormat, ImageId};
@@ -38,11 +36,20 @@ const MAX_HALF_WAVES: f64 = 4096.0;
 /// The grey of the box drawn for a picture whose format cannot be drawn.
 const PLACEHOLDER: Color = Color::rgb(0xC0, 0xC0, 0xC0);
 
-/// The farthest a position may be from a page's corner, and the largest a picture may
-/// be, in a PDF: 32767 pt, the largest real number every reader must read (ISO 32000-1,
-/// Annex C), which `officewright-pdf` checks. The painter keeps within it, so that no
-/// content of a document can make the PDF fail.
+/// The farthest a position may be from a page's corner, and the largest a picture or a
+/// length of a dash may be, in a PDF: 32767 pt, the largest real number a PDF 1.4 reader
+/// must read (PDF Reference 1.4, Appendix C), which `officewright-pdf` checks. The
+/// painter keeps within it.
 const PDF_LIMIT: f64 = 32767.0;
+
+/// The thickest line drawn: the longest dash of a pattern is eight times the width, so
+/// that every dash stays within [`PDF_LIMIT`]. Only a font with broken metrics asks for
+/// more, and that is reported.
+const MAX_LINE_WIDTH: f64 = PDF_LIMIT / 8.0;
+
+/// The smallest side of a page a PDF holds (PDF Reference 1.4, Appendix C), which
+/// `officewright-pdf` checks; a smaller page is made this large, and that is reported.
+const MIN_PAGE_SIDE: f64 = 3.0;
 
 /// The smallest width or height of a picture that `officewright-pdf` draws; a smaller
 /// picture shows nothing, and is not drawn.
@@ -265,10 +272,23 @@ struct Painter<'a, 'f, 'b> {
 }
 
 impl Painter<'_, '_, '_> {
-    /// Adds a page of the size of `page` and paints what it draws.
+    /// Adds a page of the size of `page`, at least [`MIN_PAGE_SIDE`] each way, and paints
+    /// what it draws.
     fn page(&mut self, page: &Page) -> Result<()> {
-        let items = self.drawn(page.width, page.height, &page.items);
-        let pdf_page = self.pdf.add_page(PageSize::new(page.width, page.height))?;
+        let width = Pt(page.width.0.max(MIN_PAGE_SIDE));
+        let height = Pt(page.height.0.max(MIN_PAGE_SIDE));
+        if (width, height) != (page.width, page.height) {
+            self.fonts.report_once(
+                ReportKind::ValueClamped,
+                &Location::default(),
+                format!(
+                    "pages smaller than {MIN_PAGE_SIDE} pt each way, the least a PDF holds, \
+                     are made that large"
+                ),
+            );
+        }
+        let items = self.drawn(width, height, &page.items);
+        let pdf_page = self.pdf.add_page(PageSize::new(width, height))?;
         for item in &items {
             match item {
                 Drawn::Glyphs(run) => pdf_page.draw_glyphs(run)?,
@@ -312,7 +332,8 @@ impl Painter<'_, '_, '_> {
                     }
                 }
                 DisplayItem::Line(line) => {
-                    if let Some(line) = on_page(line, page) {
+                    let line = self.thin_enough(line);
+                    if let Some(line) = on_page(&line, page) {
                         let (path, stroke) = line_path(&line, flip);
                         drawn.push(Drawn::Stroke(path, stroke));
                     }
@@ -323,8 +344,25 @@ impl Painter<'_, '_, '_> {
         drawn
     }
 
-    /// The PDF glyph run of `run`, with its clusters that reach the page; `None` when
-    /// none does, or when its face cannot be embedded, which is reported.
+    /// `line`, at most [`MAX_LINE_WIDTH`] thick; a thicker one is reported.
+    fn thin_enough(&mut self, line: &LineItem) -> LineItem {
+        if line.width.0 <= MAX_LINE_WIDTH {
+            return *line;
+        }
+        self.fonts.report_once(
+            ReportKind::ValueClamped,
+            &Location::default(),
+            format!("lines thicker than {MAX_LINE_WIDTH} pt are drawn that thick"),
+        );
+        LineItem {
+            width: Pt(MAX_LINE_WIDTH),
+            ..*line
+        }
+    }
+
+    /// The PDF glyph run of `run`, with the glyphs of it that reach the page and a margin
+    /// around it, each cluster with its text; `None` when none does, or when its face
+    /// cannot be embedded, which is reported.
     fn glyphs(
         &mut self,
         run: &GlyphItem,
@@ -338,16 +376,23 @@ impl Painter<'_, '_, '_> {
             let at = (x + glyph.x.0, y + glyph.y.0);
             page.reaches(at, at, reach)
         };
-        let clusters: Vec<&Cluster> = run
+        // Glyph by glyph: a cluster may be many, such as the dots of a tab leader, of
+        // which only some are on the page.
+        let clusters: Vec<(&str, Vec<&DrawnGlyph>)> = run
             .clusters
             .iter()
-            .filter(|cluster| !cluster.glyphs.is_empty() && cluster.glyphs.iter().all(on_page))
+            .map(|cluster| {
+                let kept: Vec<&DrawnGlyph> = cluster.glyphs.iter().filter(|g| on_page(g)).collect();
+                (cluster.text.as_str(), kept)
+            })
+            .filter(|(_, kept)| !kept.is_empty())
             .collect();
         // The run starts at its first glyph on the page, so that every position of it
         // is near the page, within what a PDF holds.
-        let first = clusters.first()?.glyphs.first()?.x.0;
+        let first = clusters.first()?.1.first().copied()?;
+        let (first_x, first_y) = (first.x.0, first.y.0);
         let font = self.font(run.face)?;
-        let mut glyphs = pdf::GlyphRun::new(&font, run.size, Pt(x + first), Pt(y))
+        let mut glyphs = pdf::GlyphRun::new(&font, run.size, Pt(x + first_x), Pt(y + first_y))
             .with_color(run.color)
             .with_horizontal_scale(run.h_scale);
         if run.synthetic_bold {
@@ -356,12 +401,15 @@ impl Painter<'_, '_, '_> {
         if run.synthetic_italic {
             glyphs = glyphs.with_skew(SYNTHETIC_ITALIC_SKEW);
         }
-        for cluster in clusters {
-            let placed = cluster
-                .glyphs
-                .iter()
-                .map(|glyph| pdf::PlacedGlyph::new(glyph.glyph, Pt(glyph.x.0 - first), glyph.y));
-            glyphs.push_cluster(&cluster.text, placed);
+        for (text, kept) in clusters {
+            let placed = kept.into_iter().map(|glyph| {
+                pdf::PlacedGlyph::new(
+                    glyph.glyph,
+                    Pt(glyph.x.0 - first_x),
+                    Pt(glyph.y.0 - first_y),
+                )
+            });
+            glyphs.push_cluster(text, placed);
         }
         Some(glyphs)
     }
@@ -428,9 +476,11 @@ impl Painter<'_, '_, '_> {
                 image
             }
         };
-        let fits = [left, bottom, corner.0, corner.1]
-            .iter()
-            .all(|value| value.abs() <= PDF_LIMIT);
+        let fits = width <= PDF_LIMIT
+            && height <= PDF_LIMIT
+            && [left, bottom, corner.0, corner.1]
+                .iter()
+                .all(|value| value.abs() <= PDF_LIMIT);
         match image {
             Some(image) if fits => Some(Drawn::Image(
                 image,
@@ -442,8 +492,8 @@ impl Painter<'_, '_, '_> {
                         ReportKind::FeatureUnsupported,
                         &Location::default(),
                         format!(
-                            "pictures reaching farther than {PDF_LIMIT} pt from the page's \
-                             corner, more than a PDF holds, are drawn as grey boxes"
+                            "pictures larger than {PDF_LIMIT} pt or reaching farther from the \
+                             page's corner, more than a PDF holds, are drawn as grey boxes"
                         ),
                     );
                 }
@@ -627,6 +677,7 @@ impl From<pdf::Error> for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::display::Cluster;
 
     fn line(style: LineStyle, from: (f64, f64), to: (f64, f64)) -> LineItem {
         LineItem {
@@ -842,6 +893,10 @@ mod tests {
             DisplayItem::Image(picture(png, 500.0, 500.0, 10.0, 10.0)),
             // Larger than a PDF holds: a grey box of its part on the page.
             DisplayItem::Image(picture(png, 10.0, 20.0, 40_000.0, 40_000.0)),
+            // Wider than a PDF holds, though its corners are within it.
+            DisplayItem::Image(picture(png, -16_500.0, 20.0, 33_000.0, 40.0)),
+            // Narrower than the least a PDF draws: nothing.
+            DisplayItem::Image(picture(png, 10.0, 20.0, 0.005, 10.0)),
         ];
         let (drawn, report) = painted(&document, crate::testing::minimal(), &items);
         assert_eq!(
@@ -850,10 +905,16 @@ mod tests {
         );
         assert_eq!(
             fills(&drawn),
-            [(
-                pdf::GraphicsPath::rect(Pt(10.0), Pt(0.0), Pt(90.0), Pt(180.0)),
-                PLACEHOLDER
-            )]
+            [
+                (
+                    pdf::GraphicsPath::rect(Pt(10.0), Pt(0.0), Pt(90.0), Pt(180.0)),
+                    PLACEHOLDER
+                ),
+                (
+                    pdf::GraphicsPath::rect(Pt(0.0), Pt(140.0), Pt(100.0), Pt(40.0)),
+                    PLACEHOLDER
+                ),
+            ]
         );
         let all = messages(&report);
         assert!(
@@ -908,6 +969,19 @@ mod tests {
 
     #[test]
     fn glyphs_off_the_page_are_left_out() {
+        // A tab leader: one cluster of dots every 3 pt from 300 pt left of the page to
+        // 90 pt into it.
+        let mut leader = run(0.0, 70.0, &[]);
+        leader.clusters = vec![Cluster {
+            text: "\t".to_owned(),
+            glyphs: (0..=130)
+                .map(|n| DrawnGlyph {
+                    glyph: officewright_font::GlyphId::new(1),
+                    x: Pt(-300.0 + 3.0 * f64::from(n)),
+                    y: Pt(0.0),
+                })
+                .collect(),
+        }];
         let items = [
             // The second cluster is far past the right edge.
             DisplayItem::Glyphs(run(10.0, 50.0, &[(0.0, 0.0), (40_000.0, 0.0)])),
@@ -915,16 +989,54 @@ mod tests {
             DisplayItem::Glyphs(run(-40_000.0, 60.0, &[(0.0, 0.0), (40_010.0, 0.0)])),
             // Far below the page: nothing.
             DisplayItem::Glyphs(run(10.0, 1_000.0, &[(0.0, 0.0)])),
+            // Just past the right edge, within the reach of four times the size: kept.
+            DisplayItem::Glyphs(run(95.0, 80.0, &[(0.0, 0.0), (8.0, 0.0)])),
+            // The dots within the reach of the page: from 39 pt left of it.
+            DisplayItem::Glyphs(leader),
         ];
         let (drawn, _) = painted(&Document::default(), crate::testing::minimal(), &items);
-        let runs: Vec<(Pt, Pt, usize)> = drawn
+        let runs: Vec<(Pt, Pt, Vec<Pt>)> = drawn
             .iter()
             .filter_map(|item| match item {
-                Drawn::Glyphs(run) => Some((run.x(), run.y(), run.glyphs().len())),
+                Drawn::Glyphs(run) => Some((
+                    run.x(),
+                    run.y(),
+                    run.glyphs().iter().map(|glyph| glyph.x()).collect(),
+                )),
                 _ => None,
             })
             .collect();
-        assert_eq!(runs, [(Pt(10.0), Pt(150.0), 1), (Pt(10.0), Pt(140.0), 1)]);
+        let dots: Vec<Pt> = (0..44).map(|n| Pt(3.0 * f64::from(n))).collect();
+        assert_eq!(
+            runs,
+            [
+                (Pt(10.0), Pt(150.0), vec![Pt(0.0)]),
+                (Pt(10.0), Pt(140.0), vec![Pt(0.0)]),
+                (Pt(95.0), Pt(120.0), vec![Pt(0.0), Pt(8.0)]),
+                (Pt(-39.0), Pt(130.0), dots),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_glyph_raised_onto_the_page_starts_its_run() {
+        // On a line 40,000 pt down, raised 39,850 pt by its offset: 50 pt up the page,
+        // where its run starts, with no offset left.
+        let (drawn, _) = painted(
+            &Document::default(),
+            crate::testing::minimal(),
+            &[DisplayItem::Glyphs(run(10.0, 40_000.0, &[(0.0, 39_850.0)]))],
+        );
+        let [Drawn::Glyphs(raised)] = drawn.as_slice() else {
+            panic!("one run");
+        };
+        assert_eq!((raised.x(), raised.y()), (Pt(10.0), Pt(50.0)));
+        let offsets: Vec<(Pt, Pt)> = raised
+            .glyphs()
+            .iter()
+            .map(|glyph| (glyph.x(), glyph.y()))
+            .collect();
+        assert_eq!(offsets, [(Pt(0.0), Pt(0.0))]);
     }
 
     #[test]
@@ -953,22 +1065,54 @@ mod tests {
             },
             ..level
         };
-        let (drawn, _) = painted(
+        // Level, along the page but far above it.
+        let above = LineItem {
+            from: Point {
+                x: Pt(0.0),
+                y: Pt(-500.0),
+            },
+            to: Point {
+                x: Pt(50.0),
+                y: Pt(-500.0),
+            },
+            ..level
+        };
+        // Thicker than any dash pattern of it could be drawn: as thick as allowed.
+        let thick = LineItem {
+            width: Pt(10_000.0),
+            style: LineStyle::LongDashed,
+            ..level
+        };
+        let (drawn, report) = painted(
             &Document::default(),
             crate::testing::minimal(),
-            &[DisplayItem::Line(level), DisplayItem::Line(off)],
+            &[
+                DisplayItem::Line(level),
+                DisplayItem::Line(off),
+                DisplayItem::Line(above),
+                DisplayItem::Line(thick),
+            ],
         );
         // A margin of four widths and a point: 3 pt either side, at 150 pt up.
         let mut expected = pdf::GraphicsPath::new(Pt(-3.0), Pt(150.0));
         expected.line_to(Pt(103.0), Pt(150.0));
-        let paths: Vec<&pdf::GraphicsPath> = drawn
+        let strokes: Vec<(&pdf::GraphicsPath, &pdf::Stroke)> = drawn
             .iter()
             .filter_map(|item| match item {
-                Drawn::Stroke(path, _) => Some(path),
+                Drawn::Stroke(path, stroke) => Some((path, stroke)),
                 _ => None,
             })
             .collect();
-        assert_eq!(paths, [&expected]);
+        let [(path, _), (_, thick)] = strokes.as_slice() else {
+            panic!("two lines: {}", strokes.len());
+        };
+        assert_eq!(*path, &expected);
+        assert_eq!(thick.width(), Pt(MAX_LINE_WIDTH));
+        assert!(thick.dash().iter().all(|length| length.0 <= PDF_LIMIT));
+        assert!(
+            messages(&report).iter().any(|m| m.contains("thicker")),
+            "{report:?}"
+        );
     }
 
     #[test]

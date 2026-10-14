@@ -352,27 +352,58 @@ fn content_beyond_what_a_pdf_holds_still_renders() -> TestResult {
             framed
         }),
         (
-            "a word of 6,000 letters",
-            document(|_, style| {
-                vec![Paragraph::new(style).with_inlines([Inline::text("W".repeat(6_000), style)])]
+            "a picture 33,000 pt tall",
+            document(|document, style| {
+                let image = document.add_image(ImageData::new(ImageFormat::Png, png.clone()));
+                vec![Paragraph::new(style).with_inlines([picture(image, 40.0, 33_000.0)])]
             }),
         ),
+        ("a page 2 pt square", {
+            let mut tiny = Document::default();
+            let style = tiny.add_run_style(
+                RunStyle::default()
+                    .with_fonts(RunFonts::new("Liberation Sans"))
+                    .with_size(Pt(11.0)),
+            );
+            let setup = PageSetup::new(PageSize::new(Pt(2.0), Pt(2.0))).with_margins(
+                officewright_layout::ir::Margins::default()
+                    .with_top(Pt(0.0))
+                    .with_bottom(Pt(0.0))
+                    .with_left(Pt(0.0))
+                    .with_right(Pt(0.0)),
+            );
+            tiny.add_section(
+                Section::new(setup).with_blocks([Paragraph::new(style)
+                    .with_inlines([Inline::text("A", style)])
+                    .into()]),
+            );
+            tiny
+        }),
     ];
     for (case, document) in cases {
         let rendered =
             render_pdf(&document, &book, &plain()).map_err(|err| format!("{case}: {err}"))?;
         let bytes = rendered.pdf().to_bytes()?;
         assert!(bytes.starts_with(b"%PDF-"), "{case}");
-        if case == "pictures of 40,000 pt" {
-            assert!(
-                rendered
-                    .report()
-                    .entries()
-                    .iter()
-                    .any(|entry| entry.message().contains("more than a PDF holds")),
-                "{case}: {:?}",
-                rendered.report()
-            );
+        let reported = |text: &str| {
+            rendered
+                .report()
+                .entries()
+                .iter()
+                .any(|entry| entry.message().contains(text))
+        };
+        match case {
+            "pictures of 40,000 pt" | "a picture 33,000 pt tall" => {
+                assert!(
+                    reported("more than a PDF holds"),
+                    "{case}: {:?}",
+                    rendered.report()
+                );
+            }
+            "a page 2 pt square" => {
+                assert!(reported("pages smaller"), "{case}: {:?}", rendered.report());
+            }
+            _ => {}
         }
     }
     Ok(())
