@@ -306,6 +306,9 @@ pub struct FontBook {
     /// canonical paths of files that could not be indexed, and the canonical directory
     /// and name of font files and directories that could not be resolved or read.
     failed: HashMap<PathBuf, Failure>,
+    /// The canonical directory behind each location in `failed` of a directory that could
+    /// not be read, so that reading that directory by any path drops them all.
+    unreadable_dirs: HashMap<PathBuf, PathBuf>,
 }
 
 /// How a path that a directory scan could not add looked, so the next scan tries it
@@ -581,6 +584,7 @@ impl FontBook {
 
     /// Drops what was listed for a path that has now been read.
     fn forget_failure(&mut self, key: &Path) {
+        self.unreadable_dirs.remove(key);
         if self.failed.remove(key).is_some() {
             self.skipped
                 .retain(|skipped| skipped.key.as_deref() != Some(key));
@@ -661,8 +665,7 @@ impl FontBook {
         // read, as a font file that cannot be resolved is: the entry, not what it leads
         // to, so that replacing it with a link to another directory drops the entry. A
         // root without a name of its own, such as `.`, is listed under its canonical path.
-        let root_location = location(root).or_else(|| fs::canonicalize(root).ok());
-        let mut stack = vec![(root.to_owned(), root_location, 0)];
+        let mut stack = vec![(root.to_owned(), location(root), 0)];
         while let Some((dir, dir_location, depth)) = stack.pop() {
             // Following links can lead back to a directory already searched.
             let Ok(canonical_dir) = fs::canonicalize(&dir) else {
@@ -673,11 +676,20 @@ impl FontBook {
             }
             let dir_location = dir_location.unwrap_or_else(|| canonical_dir.clone());
             let entries = match fs::read_dir(&dir) {
-                // Read now, under this path or another: what was listed for the entry
-                // and for the directory itself is out of date.
+                // Read now, under this path or another: what was listed for the entry,
+                // and for every entry that leads to this directory (the directory itself
+                // among them, reached by its own path), is out of date.
                 Ok(entries) => {
                     self.forget_failure(&dir_location);
-                    self.forget_failure(&canonical_dir);
+                    let behind: Vec<PathBuf> = self
+                        .unreadable_dirs
+                        .iter()
+                        .filter(|(_, target)| **target == canonical_dir)
+                        .map(|(listed, _)| listed.clone())
+                        .collect();
+                    for listed in behind {
+                        self.forget_failure(&listed);
+                    }
                     entries
                 }
                 Err(source) => {
@@ -685,7 +697,8 @@ impl FontBook {
                         path: dir.clone(),
                         source,
                     };
-                    self.list_failure(dir_location, Failure::Unreachable, dir, error);
+                    self.list_failure(dir_location.clone(), Failure::Unreachable, dir, error);
+                    self.unreadable_dirs.insert(dir_location, canonical_dir);
                     continue;
                 }
             };
@@ -1214,17 +1227,33 @@ mod tests {
             fs::create_dir(path).unwrap();
         }
         fs::write(other.join("sans.ttf"), TestFont::new("Test Sans").build()).unwrap();
+        // Root reads every directory, so this has to run as an ordinary user.
         set_mode(&locked, 0o000).unwrap();
+        let readable = fs::read_dir(&locked).is_ok();
+        set_mode(&locked, 0o755).unwrap();
+        assert!(
+            !readable,
+            "run the tests as a user who cannot read mode 000"
+        );
+        // `fonts` reached through a link to it, to name a root another way.
+        let fonts_link = dir.0.join("fonts-link");
+        symlink(&fonts, &fonts_link).unwrap();
         let (sub, alias) = (fonts.join("sub"), fonts.join("alias"));
         let scan_fonts = |book: &mut FontBook| book.add_dir(&fonts).unwrap();
         // As the root of a scan, as the system font directories are.
         let scan_sub = |book: &mut FontBook| book.scan_dir(&sub, FontOrigin::User);
+        let scan_sub_linked =
+            |book: &mut FontBook| book.scan_dir(&fonts_link.join("sub"), FontOrigin::User);
         let scan_alias = |book: &mut FontBook| book.scan_dir(&alias, FontOrigin::User);
+        let scan_locked = |book: &mut FontBook| book.scan_dir(&locked, FontOrigin::User);
         let unreadable = || {
             fs::create_dir(&sub).unwrap();
             set_mode(&sub, 0o000).unwrap();
         };
-        let link_to_locked = || symlink(&locked, &sub).unwrap();
+        let link_to_locked = || {
+            set_mode(&locked, 0o000).unwrap();
+            symlink(&locked, &sub).unwrap();
+        };
         let relink = || {
             if fs::symlink_metadata(&sub).unwrap().is_dir() {
                 fs::remove_dir(&sub).unwrap();
@@ -1237,37 +1266,86 @@ mod tests {
             set_mode(&sub, 0o755).unwrap();
             symlink(&sub, &alias).unwrap();
         };
+        let unlock_locked = || set_mode(&locked, 0o755).unwrap();
+        // `alias` comes before `sub`, so a scan of `fonts` reads `locked` through it and
+        // skips `sub` as a directory it has read.
+        let unlock_locked_and_alias = || {
+            set_mode(&locked, 0o755).unwrap();
+            symlink(&locked, &alias).unwrap();
+        };
         type Scan<'a> = &'a dyn Fn(&mut FontBook) -> usize;
-        // A case: its name, how the directory is made, the first scan, the change, and
-        // the scan after it.
-        type Case<'a> = (&'a str, &'a dyn Fn(), Scan<'a>, &'a dyn Fn(), Scan<'a>);
-        let cases: [Case<'_>; 4] = [
+        // A case: its name, how the directory is made, the first scan, the change, the
+        // scan after it, and the faces that scan adds (Test Sans, through a link to
+        // `other`, or none).
+        type Case<'a> = (
+            &'a str,
+            &'a dyn Fn(),
+            Scan<'a>,
+            &'a dyn Fn(),
+            Scan<'a>,
+            usize,
+        );
+        let cases: [Case<'_>; 7] = [
             // A directory without permission, replaced by a link to a readable one,
-            // reached as a subdirectory and as a root.
+            // reached as a subdirectory, as a root, and as a root named another way.
             (
                 "subdirectory",
                 &unreadable,
                 &scan_fonts,
                 &relink,
                 &scan_fonts,
+                1,
             ),
-            ("root", &unreadable, &scan_sub, &relink, &scan_sub),
+            ("root", &unreadable, &scan_sub, &relink, &scan_sub, 1),
+            (
+                "root by another path",
+                &unreadable,
+                &scan_sub,
+                &relink,
+                &scan_sub_linked,
+                1,
+            ),
             // A link to a directory without permission, pointed at a readable one.
-            ("link", &link_to_locked, &scan_fonts, &relink, &scan_fonts),
-            // A directory without permission that becomes readable, and is read through
-            // another link to it.
+            (
+                "link",
+                &link_to_locked,
+                &scan_fonts,
+                &relink,
+                &scan_fonts,
+                1,
+            ),
+            // A directory without permission that becomes readable, read through
+            // another link to it: a link to `fonts/sub`, or one to the directory behind
+            // the link `fonts/sub`, or that directory as a root.
             (
                 "alias",
                 &unreadable,
                 &scan_fonts,
                 &unlock_and_alias,
                 &scan_alias,
+                0,
+            ),
+            (
+                "other link",
+                &link_to_locked,
+                &scan_fonts,
+                &unlock_locked_and_alias,
+                &scan_fonts,
+                0,
+            ),
+            (
+                "target",
+                &link_to_locked,
+                &scan_fonts,
+                &unlock_locked,
+                &scan_locked,
+                0,
             ),
         ];
         // For each case: what its book listed after the first scan, and what it listed
         // and how many faces it added after the second.
         let mut results = Vec::new();
-        for (name, before, first, change, second) in cases {
+        for (name, before, first, change, second, faces) in cases {
             before();
             let mut book = FontBook::new();
             first(&mut book);
@@ -1278,7 +1356,7 @@ mod tests {
                 .collect();
             change();
             let added = second(&mut book);
-            results.push((name, listed, added, book.skipped().to_vec()));
+            results.push((name, listed, added, faces, book.skipped().to_vec()));
             // The next case starts from an empty directory of fonts.
             for path in [&alias, &sub] {
                 match fs::symlink_metadata(path) {
@@ -1291,18 +1369,11 @@ mod tests {
                 }
             }
         }
-        let readable = fs::read_dir(&locked).is_ok();
         set_mode(&locked, 0o755).unwrap();
 
-        // Root reads every directory, so this has to run as an ordinary user.
-        assert!(
-            !readable,
-            "run the tests as a user who cannot read mode 000"
-        );
-        for (name, listed, added, skipped) in results {
+        for (name, listed, added, faces, skipped) in results {
             assert_eq!(listed, [Some(sub.clone())], "{name}");
-            // Test Sans, through the link to `other`; the alias leads to an empty directory.
-            assert_eq!(added, usize::from(name != "alias"), "{name}");
+            assert_eq!(added, faces, "{name}");
             assert!(skipped.is_empty(), "{name}: {skipped:?}");
         }
     }
