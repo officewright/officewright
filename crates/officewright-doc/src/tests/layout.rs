@@ -2139,7 +2139,14 @@ fn translates_headers_and_footers_in_effect() {
                 ),
             ),
             ("header", "header2.xml", story("hdr", "first header")),
-            ("footer", "footer1.xml", story("ftr", "default footer")),
+            (
+                "footer",
+                "footer1.xml",
+                story(
+                    "ftr",
+                    r#"default footer</w:t></w:r><w:r><w:ptab w:relativeTo="margin" w:alignment="right" w:leader="none"/></w:r><w:r><w:t>"#,
+                ),
+            ),
             ("footer", "footer2.xml", story("ftr", "even footer")),
         ],
     );
@@ -2152,7 +2159,10 @@ fn translates_headers_and_footers_in_effect() {
         .collect();
     assert_eq!(
         left_out,
-        ["sections[0].headers.primary[0].inlines: an absolute position tab is left out (w:ptab)"]
+        [
+            "sections[0].headers.primary[0].inlines: an absolute position tab is left out (w:ptab)",
+            "sections[0].footers.primary[0].inlines: an absolute position tab is left out (w:ptab)",
+        ]
     );
     let sections = translation.document().sections();
     let (first, second) = (&sections[0], &sections[1]);
