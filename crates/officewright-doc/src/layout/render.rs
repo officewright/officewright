@@ -239,11 +239,13 @@ const MAX_EMBEDDED_FACES: usize = 256;
 /// OpenType 63 in a PostScript name. Our choice, until the font book bounds them (#226).
 const MAX_NAME_BYTES: u16 = 512;
 
-/// Whether a face of `program` has a name the font book keeps (the family, subfamily,
-/// full, PostScript and typographic names, and those of instances and axes, ID 256 and
-/// up) longer than [`MAX_NAME_BYTES`]. Only the lengths of the name records are read
-/// (OpenType's `name` table), not the names; a face whose tables cannot be found has
-/// none, and the font book says why it cannot read it.
+/// Whether a face of `program` has a name the font book keeps longer than
+/// [`MAX_NAME_BYTES`]: its family, subfamily, full, PostScript and typographic names,
+/// those of IDs 21, 22 and 256 and up, and the name each named instance of a variable
+/// font gives as its subfamily, whatever its ID (OpenType's `fvar` table). Only the
+/// lengths of the name records are read (the `name` table), not the names; a face
+/// whose tables cannot be found has none, and the font book says why it cannot read
+/// it.
 fn has_long_name(program: &[u8]) -> bool {
     let u16_at = |at: Option<usize>| {
         let at = at?;
@@ -275,20 +277,43 @@ fn has_long_name(program: &[u8]) -> bool {
     let mut seen = HashSet::new();
     for face in faces {
         let tables = usize::from(u16_at(face.checked_add(4)).unwrap_or(0));
-        let name = (0..tables).find_map(|table| {
-            let record = place(face, 16, table, 12)?;
-            let tag = program.get(record..record.checked_add(4)?)?;
-            if tag == b"name" {
-                u32_at(record.checked_add(8))
-            } else {
-                None
-            }
-        });
-        let Some(name) = name else {
+        let table = |wanted: &[u8; 4]| {
+            (0..tables).find_map(|table| {
+                let record = place(face, 16, table, 12)?;
+                let tag = program.get(record..record.checked_add(4)?)?;
+                if tag == wanted {
+                    u32_at(record.checked_add(8))
+                } else {
+                    None
+                }
+            })
+        };
+        let Some(name) = table(b"name") else {
             continue;
         };
-        // The faces of a collection often share one name table.
-        if !seen.insert(name) {
+        // The IDs of the names the named instances of a variable font give as their
+        // subfamily, which the font book keeps too (the first 256 of them).
+        let mut instance_ids = HashSet::new();
+        if let Some(fvar) = table(b"fvar") {
+            let field = |at: usize| u16_at(fvar.checked_add(at)).map(usize::from);
+            if let (Some(axes), Some(axis_count), Some(axis_size), Some(count), Some(size)) =
+                (field(4), field(8), field(10), field(12), field(14))
+            {
+                let first = axis_count
+                    .checked_mul(axis_size)
+                    .and_then(|axes_size| fvar.checked_add(axes)?.checked_add(axes_size));
+                for instance in 0..count.min(256) {
+                    match first.and_then(|first| u16_at(place(first, size, instance, 0))) {
+                        Some(id) => instance_ids.insert(id),
+                        None => break,
+                    };
+                }
+            }
+        }
+        // The faces of a collection often share one name table and its instances.
+        let mut key: Vec<u16> = instance_ids.iter().copied().collect();
+        key.sort_unstable();
+        if !seen.insert((name, key)) {
             continue;
         }
         let count = usize::from(u16_at(name.checked_add(2)).unwrap_or(0));
@@ -299,7 +324,9 @@ fn has_long_name(program: &[u8]) -> bool {
             ) else {
                 break;
             };
-            let kept = matches!(id, 1 | 2 | 4 | 6 | 16 | 17 | 21 | 22) || id >= 256;
+            let kept = matches!(id, 1 | 2 | 4 | 6 | 16 | 17 | 21 | 22)
+                || id >= 256
+                || instance_ids.contains(&id);
             if kept && length > MAX_NAME_BYTES {
                 return true;
             }

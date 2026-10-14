@@ -556,36 +556,90 @@ fn uses_at_most_two_hundred_and_fifty_six_embedded_faces() {
     );
 }
 
-/// The test font with a family name of `bytes` bytes (`bytes / 2` letters A), its own
-/// name table replaced by one at its end that has only that name.
-fn with_family_of(bytes: u16) -> Vec<u8> {
+/// The test font with its name table replaced by one at its end with `records`, each
+/// (platform, language, name ID, length in bytes) of letters A; and, for each ID of
+/// `instances`, a named instance of a variable font whose subfamily name has that ID, in
+/// an `fvar` table that takes the place of `post`.
+fn with_names(records: &[(u16, u16, u16, u16)], instances: &[u16]) -> Vec<u8> {
     let mut program = test_font();
-    let table_at = program.len() as u32;
-    let mut table = Vec::new();
-    table.extend([0u16, 1, 18].iter().flat_map(|n| n.to_be_bytes()));
-    table.extend(
-        [3u16, 1, 0x409, 1, bytes, 0]
-            .iter()
-            .flat_map(|n| n.to_be_bytes()),
-    );
-    table.extend(std::iter::repeat_n([0u8, b'A'], usize::from(bytes / 2)).flatten());
     let tables = usize::from(u16::from_be_bytes([program[4], program[5]]));
-    let record = (0..tables)
-        .map(|table| 12 + 16 * table)
-        .find(|&at| &program[at..at + 4] == b"name")
-        .unwrap();
-    program[record + 8..record + 12].copy_from_slice(&table_at.to_be_bytes());
-    program[record + 12..record + 16].copy_from_slice(&(table.len() as u32).to_be_bytes());
-    program.extend(table);
+    let directory = |program: &[u8], tag: &[u8; 4]| {
+        (0..tables)
+            .map(|table| 12 + 16 * table)
+            .find(|&at| &program[at..at + 4] == tag)
+            .unwrap()
+    };
+    let words =
+        |values: &[u16]| -> Vec<u8> { values.iter().flat_map(|n| n.to_be_bytes()).collect() };
+    let longest = records.iter().map(|record| record.3).max().unwrap_or(0);
+    let count = records.len() as u16;
+    let mut name = words(&[0, count, 6 + 12 * count]);
+    for &(platform, language, id, bytes) in records {
+        name.extend(words(&[platform, 1, language, id, bytes, 0]));
+    }
+    name.extend(std::iter::repeat_n([0u8, b'A'], usize::from(longest / 2)).flatten());
+    let place = |program: &mut Vec<u8>, record: usize, table: Vec<u8>| {
+        let at = program.len() as u32;
+        program[record + 8..record + 12].copy_from_slice(&at.to_be_bytes());
+        program[record + 12..record + 16].copy_from_slice(&(table.len() as u32).to_be_bytes());
+        program.extend(table);
+    };
+    let record = directory(&program, b"name");
+    place(&mut program, record, name);
+    if !instances.is_empty() {
+        // One axis, wght, of 20 bytes; instances of 8 bytes: name ID, flags, a coordinate.
+        let mut fvar = words(&[1, 0, 16, 2, 1, 20, instances.len() as u16, 8]);
+        fvar.extend(b"wght");
+        fvar.extend(words(&[100, 0, 400, 0, 900, 0, 0, 256]));
+        for &id in instances {
+            fvar.extend(words(&[id, 0, 400, 0]));
+        }
+        let record = directory(&program, b"post");
+        program[record..record + 4].copy_from_slice(b"fvar");
+        place(&mut program, record, fvar);
+    }
     program
+}
+
+/// The test font with a family name of `bytes` bytes (`bytes / 2` letters A).
+fn with_family_of(bytes: u16) -> Vec<u8> {
+    with_names(&[(3, 0x409, 1, bytes)], &[])
+}
+
+/// A collection of `programs`, laid out in the file in that order, whose faces are
+/// `order`: the indexes of the programs.
+fn collection_of(programs: &[&[u8]], order: &[usize]) -> Vec<u8> {
+    let header = 12 + 4 * order.len();
+    let mut placed = Vec::new();
+    let mut data = Vec::new();
+    for program in programs {
+        let at = header + data.len();
+        let mut font = program.to_vec();
+        let tables = usize::from(u16::from_be_bytes([font[4], font[5]]));
+        for table in 0..tables {
+            let offset = 12 + 16 * table + 8;
+            let value = u32::from_be_bytes(font[offset..offset + 4].try_into().unwrap());
+            font[offset..offset + 4].copy_from_slice(&(value + at as u32).to_be_bytes());
+        }
+        placed.push(at as u32);
+        data.extend(font);
+    }
+    let mut bytes = b"ttcf".to_vec();
+    bytes.extend(0x0001_0000u32.to_be_bytes());
+    bytes.extend((order.len() as u32).to_be_bytes());
+    for &face in order {
+        bytes.extend(placed[face].to_be_bytes());
+    }
+    bytes.extend(data);
+    bytes
 }
 
 #[test]
 fn leaves_out_a_program_with_a_name_longer_than_any_font_s() {
     // The font book keeps names however long (#226): a program with a family of 600
     // bytes is left out before it reaches one; one of 500 bytes is not.
-    let left_out = |bytes: u16| {
-        let document = embedding(&[("Officewright Test", &with_family_of(bytes))]);
+    let left_out = |program: &[u8]| {
+        let document = embedding(&[("Officewright Test", program)]);
         let (_, report) = document.save_pdf_bytes(&without_system_fonts()).unwrap();
         report
             .iter()
@@ -593,7 +647,7 @@ fn leaves_out_a_program_with_a_name_longer_than_any_font_s() {
             .map(|entry| (entry.kind(), entry.to_string()))
     };
     assert_eq!(
-        left_out(600),
+        left_out(&with_family_of(600)),
         Some((
             ReportKind::FontEmbedding,
             "document: the w:embedRegular of the font Officewright Test has a name longer \
@@ -601,7 +655,39 @@ fn leaves_out_a_program_with_a_name_longer_than_any_font_s() {
                 .to_owned()
         ))
     );
-    assert_eq!(left_out(500), None);
+    assert!(left_out(&with_family_of(500)).is_none());
+    // A Macintosh family name, of language 0.
+    assert!(left_out(&with_names(&[(1, 0, 1, 600)], &[])).is_some());
+    // A long name the font book does not keep, such as a license: not left out.
+    assert!(left_out(&with_names(&[(3, 0x409, 1, 34), (3, 0x409, 13, 600)], &[])).is_none());
+    // A named instance's subfamily name, of any ID, which the font book keeps.
+    assert!(
+        left_out(&with_names(
+            &[(3, 0x409, 1, 34), (3, 0x409, 100, 600)],
+            &[100]
+        ))
+        .is_some()
+    );
+    assert!(
+        left_out(&with_names(
+            &[(3, 0x409, 1, 34), (3, 0x409, 100, 500)],
+            &[100]
+        ))
+        .is_none()
+    );
+    // Each face of a collection: the long name is the second face's; the first, at the
+    // end of the file, has a name table whose records run past it.
+    let mut cut = test_font();
+    let tables = usize::from(u16::from_be_bytes([cut[4], cut[5]]));
+    let name = (0..tables)
+        .map(|table| 12 + 16 * table)
+        .find(|&at| &cut[at..at + 4] == b"name")
+        .map(|at| u32::from_be_bytes(cut[at + 8..at + 12].try_into().unwrap()) as usize)
+        .unwrap();
+    cut[name + 2..name + 4].copy_from_slice(&u16::MAX.to_be_bytes());
+    let long = with_family_of(600);
+    assert!(left_out(&collection_of(&[&long, &cut], &[1, 0])).is_some());
+    assert!(left_out(&collection_of(&[&test_font(), &long], &[0, 1])).is_some());
 }
 
 #[test]
