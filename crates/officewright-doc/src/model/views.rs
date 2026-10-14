@@ -6,9 +6,9 @@ use officewright_core::Pt;
 use super::xml::Element;
 use super::xml::Span;
 use super::{
-    ControlLevel, Document, HyperlinkData, Kind, Node, ParagraphId, ParagraphProperties,
-    RevisionData, RunItem, RunProperties, SectionData, SectionProperties, TableCellProperties,
-    TableId, TableProperties, TableRowProperties, text,
+    ControlLevel, Document, HeaderFooterKind, HyperlinkData, Kind, Node, NoteType, ParagraphId,
+    ParagraphProperties, RevisionData, RunItem, RunProperties, SectionData, SectionProperties,
+    StoryData, StoryKind, TableCellProperties, TableId, TableProperties, TableRowProperties, text,
 };
 
 /// A section of a document: its page setup and the blocks laid out with it.
@@ -31,6 +31,94 @@ impl<'a> Section<'a> {
     /// The paragraphs, tables and other blocks of the section, in document order. A
     /// content control that a section break falls inside is split between the two
     /// sections (see [`ContentControl`]).
+    pub fn blocks(self) -> impl Iterator<Item = Block<'a>> + 'a {
+        blocks(self.document, &self.data.blocks)
+    }
+
+    /// The header of this kind in effect for the section: its own, or the one the
+    /// closest earlier section names, as each kind is inherited on its own (ECMA-376
+    /// Part 1, §17.10.5). Which kind a page shows depends on the title page and on the
+    /// document's different odd and even headers.
+    pub fn header(self, kind: HeaderFooterKind) -> Option<HeaderFooter<'a>> {
+        HeaderFooter::at(self.document, *self.data.headers.get(kind_index(kind))?)
+    }
+
+    /// The footer of this kind in effect for the section; see [`header`](Self::header).
+    pub fn footer(self, kind: HeaderFooterKind) -> Option<HeaderFooter<'a>> {
+        HeaderFooter::at(self.document, *self.data.footers.get(kind_index(kind))?)
+    }
+}
+
+/// The place of a kind of header or footer in a section's lists of them.
+pub(crate) fn kind_index(kind: HeaderFooterKind) -> usize {
+    match kind {
+        HeaderFooterKind::Default => 0,
+        HeaderFooterKind::First => 1,
+        HeaderFooterKind::Even => 2,
+    }
+}
+
+/// A header or a footer: a story of its own part, which sections name.
+#[derive(Clone, Copy, Debug)]
+pub struct HeaderFooter<'a> {
+    document: &'a Document,
+    data: &'a StoryData,
+}
+
+impl<'a> HeaderFooter<'a> {
+    fn at(document: &'a Document, index: Option<u32>) -> Option<Self> {
+        let data = document.stories.get(usize::try_from(index?).ok()?)?;
+        matches!(data.kind, StoryKind::Header | StoryKind::Footer)
+            .then_some(Self { document, data })
+    }
+
+    /// Whether it is a header, not a footer.
+    pub fn is_header(self) -> bool {
+        matches!(self.data.kind, StoryKind::Header)
+    }
+
+    /// Its paragraphs, tables and other blocks.
+    pub fn blocks(self) -> impl Iterator<Item = Block<'a>> + 'a {
+        blocks(self.document, &self.data.blocks)
+    }
+}
+
+/// A footnote or an endnote: a story of the notes part, which runs refer to by its id.
+#[derive(Clone, Copy, Debug)]
+pub struct Note<'a> {
+    document: &'a Document,
+    data: &'a StoryData,
+}
+
+impl<'a> Note<'a> {
+    pub(crate) fn at(document: &'a Document, index: u32) -> Option<Self> {
+        let data = document.stories.get(usize::try_from(index).ok()?)?;
+        matches!(data.kind, StoryKind::Note { .. }).then_some(Self { document, data })
+    }
+
+    /// Its id (`w:id`), which [`RunContent::FootnoteReference`] and
+    /// [`RunContent::EndnoteReference`] name.
+    pub fn id(self) -> i64 {
+        match self.data.kind {
+            StoryKind::Note { id, .. } => id,
+            _ => 0,
+        }
+    }
+
+    /// Whether it is an endnote, not a footnote.
+    pub fn is_endnote(self) -> bool {
+        matches!(self.data.kind, StoryKind::Note { endnote: true, .. })
+    }
+
+    /// What it is (`w:type`): a note the text refers to, or a separator.
+    pub fn note_type(self) -> NoteType {
+        match self.data.kind {
+            StoryKind::Note { note_type, .. } => note_type,
+            _ => NoteType::Normal,
+        }
+    }
+
+    /// Its paragraphs, tables and other blocks.
     pub fn blocks(self) -> impl Iterator<Item = Block<'a>> + 'a {
         blocks(self.document, &self.data.blocks)
     }
@@ -426,6 +514,14 @@ pub enum RunContent<'a> {
     EndnoteReference(i64),
     /// The anchor of the comment with this id.
     CommentReference(i64),
+    /// The number of the note this content is in (`w:footnoteRef`, `w:endnoteRef`).
+    NoteNumber,
+    /// The short line a separator note draws above the notes of a page
+    /// (`w:separator`).
+    Separator,
+    /// The full-width line above notes continued from the previous page
+    /// (`w:continuationSeparator`).
+    ContinuationSeparator,
     /// Where Word's last layout broke the page; a hint, not a break.
     LastRenderedPageBreak,
     /// An element kept without being understood, such as a drawing.
@@ -452,6 +548,9 @@ impl<'a> RunContent<'a> {
             RunItem::FootnoteReference(id) => Self::FootnoteReference(*id),
             RunItem::EndnoteReference(id) => Self::EndnoteReference(*id),
             RunItem::CommentReference(id) => Self::CommentReference(*id),
+            RunItem::NoteNumber => Self::NoteNumber,
+            RunItem::Separator => Self::Separator,
+            RunItem::ContinuationSeparator => Self::ContinuationSeparator,
             RunItem::LastRenderedPageBreak => Self::LastRenderedPageBreak,
             RunItem::Other(span) => Self::Other(Opaque::new(document, *span)),
         }

@@ -1,5 +1,6 @@
-//! The main document part (`w:document`, ECMA-376 Part 1, §17.2): the body, read into
-//! the model.
+//! The main document part (`w:document`, ECMA-376 Part 1, §17.2), its headers and
+//! footers (`w:hdr`, `w:ftr`, §17.10) and its notes (`w:footnotes`, `w:endnotes`, §17.11):
+//! the body and the other stories, read into the model.
 //!
 //! The part is read with an explicit stack of frames rather than recursion, so that
 //! tables nested as deep as the XML allows never decide how deep the call stack grows.
@@ -21,7 +22,8 @@ use crate::model::Names;
 use crate::model::xml::{Span, Sym};
 use crate::model::{
     Break, BreakClear, BreakKind, Conformance, ControlLevel, Document, FieldCharKind,
-    HyperlinkData, Kind, Node, RevisionData, RevisionKind, RunItem, SectionData, SectionProperties,
+    HyperlinkData, Kind, Node, NoteType, RevisionData, RevisionKind, RunItem, SectionData,
+    SectionProperties, StoryData, StoryKind,
 };
 use crate::units::twips_measure;
 use crate::{Error, Limits, Result};
@@ -43,8 +45,37 @@ enum Level {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Parent {
+    /// The story's own blocks: the body's, or a header's, footer's or note's.
     Body,
     Node(u32),
+}
+
+/// What the root element of a part holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Story {
+    /// `w:document`: the body, split into sections.
+    Document,
+    /// `w:hdr`: a header.
+    Header,
+    /// `w:ftr`: a footer.
+    Footer,
+    /// `w:footnotes`: footnotes, each a story of its own.
+    Footnotes,
+    /// `w:endnotes`: endnotes, each a story of its own.
+    Endnotes,
+}
+
+impl Story {
+    /// The local name of the root element.
+    fn root(self) -> &'static str {
+        match self {
+            Self::Document => "document",
+            Self::Header => "hdr",
+            Self::Footer => "ftr",
+            Self::Footnotes => "footnotes",
+            Self::Endnotes => "endnotes",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -89,6 +120,9 @@ enum TextKind {
 struct Reading<'d, 'p, 't> {
     c: Capture<'d, 'p, 't>,
     part: &'p Part<'p>,
+    story: Story,
+    /// The note being read: its frame, id and type.
+    note: Option<(usize, i64, NoteType)>,
     names: Names,
     /// The reader's ids of the namespaces read into the model.
     w: [NsId; 2],
@@ -125,6 +159,7 @@ pub(super) fn read(
     limits: &Limits,
     diagnostics: &mut Diagnostics,
     budget: &mut Budget,
+    story: Story,
 ) -> Result<()> {
     let part_name = part.name().as_str();
     let input = Input::decode(xml).map_err(|err| Error::from(err.in_part(part_name)))?;
@@ -140,6 +175,8 @@ pub(super) fn read(
     let mut reading = Reading {
         c: Capture::new(document, part_name, input.as_str(), diagnostics, budget),
         part,
+        story,
+        note: None,
         names,
         w,
         r,
@@ -213,22 +250,33 @@ impl Reading<'_, '_, '_> {
     ) -> Result<()> {
         let name = tag.name();
         if self.stack.is_empty() {
-            let conformance = if name.is(self.w[0], "document") {
+            let root = self.story.root();
+            let conformance = if name.is(self.w[0], root) {
                 Conformance::Transitional
-            } else if name.is(self.w[1], "document") {
+            } else if name.is(self.w[1], root) {
                 Conformance::Strict
             } else {
                 return Err(self.malformed(
                     reader,
                     &tag,
                     format!(
-                        "the root element is <{}>, not w:document",
+                        "the root element is <{}>, not w:{root}",
                         shorten(name.qname().as_str())
                     ),
                 ));
             };
-            self.c.document.conformance = conformance;
-            self.push(Frame::Root);
+            match self.story {
+                Story::Document => {
+                    self.c.document.conformance = conformance;
+                    self.push(Frame::Root);
+                }
+                // A header's or footer's blocks are the children of its root.
+                Story::Header | Story::Footer => self.push(Frame::Container {
+                    parent: Parent::Body,
+                    level: Level::Block,
+                }),
+                Story::Footnotes | Story::Endnotes => self.push(Frame::Root),
+            }
             return Ok(());
         }
         if let Some(Frame::Alternate { taken }) = self.stack.last_mut() {
@@ -262,18 +310,20 @@ impl Reading<'_, '_, '_> {
         let local = name.local();
         let frame = self.context();
         match frame {
-            Context::Root => {
-                if local == "body" {
+            Context::Root => match (self.story, local) {
+                (Story::Document, "body") => {
                     self.push(Frame::Container {
                         parent: Parent::Body,
                         level: Level::Block,
                     });
                     Ok(())
-                } else {
-                    // w:background and the like: kept for writing in a later version.
-                    self.c.capture(reader, mce, tag).map(drop)
                 }
-            }
+                (Story::Footnotes, "footnote") | (Story::Endnotes, "endnote") => {
+                    self.open_note(reader, mce, tag)
+                }
+                // w:background and the like: kept for writing in a later version.
+                _ => self.c.capture(reader, mce, tag).map(drop),
+            },
             Context::Text => {
                 let offset = tag.offset();
                 self.c
@@ -348,7 +398,7 @@ impl Reading<'_, '_, '_> {
                 },
                 Level::Row,
             ),
-            (Level::Block, "sectPr") if parent == Parent::Body => {
+            (Level::Block, "sectPr") if parent == Parent::Body && self.story == Story::Document => {
                 let place = self.c.place(tag.offset());
                 let span = self.c.capture(reader, mce, tag)?;
                 let element = span.of(&self.c.document.tokens, &self.c.document.strings);
@@ -449,6 +499,9 @@ impl Reading<'_, '_, '_> {
             "noBreakHyphen" => RunItem::NoBreakHyphen,
             "softHyphen" => RunItem::SoftHyphen,
             "lastRenderedPageBreak" => RunItem::LastRenderedPageBreak,
+            "footnoteRef" | "endnoteRef" => RunItem::NoteNumber,
+            "separator" => RunItem::Separator,
+            "continuationSeparator" => RunItem::ContinuationSeparator,
             "br" => {
                 let kind = match self.w_attribute(&tag, "type") {
                     None | Some("textWrapping") => BreakKind::Line,
@@ -572,6 +625,12 @@ impl Reading<'_, '_, '_> {
             Some(Frame::ContentControl { node, .. }) => self.drop_if_empty(node),
             _ => {}
         }
+        if self
+            .note
+            .is_some_and(|(frame, ..)| frame == self.stack.len())
+        {
+            self.close_note();
+        }
         Ok(())
     }
 
@@ -663,18 +722,96 @@ impl Reading<'_, '_, '_> {
         }
     }
 
-    /// Ends reading: splits the body into sections.
+    /// Begins a note (`w:footnote`, `w:endnote`): its blocks are read like a body's. One
+    /// without a valid id is kept without being read, as nothing can refer to it.
+    fn open_note(
+        &mut self,
+        reader: &mut Reader<'_>,
+        mce: &mut Processor,
+        tag: StartTag<'_>,
+    ) -> Result<()> {
+        let id = self
+            .w_attribute(&tag, "id")
+            .and_then(|id| id.parse::<i64>().ok());
+        let Some(id) = id else {
+            let value = self.w_attribute(&tag, "id").unwrap_or_default().to_owned();
+            self.invalid(&tag, "id", &value);
+            return self.c.capture(reader, mce, tag).map(drop);
+        };
+        let note_type = match self.w_attribute(&tag, "type") {
+            None => NoteType::Normal,
+            Some(value) => NoteType::from_xml(value).unwrap_or_else(|| {
+                let value = value.to_owned();
+                self.invalid(&tag, "type", &value);
+                NoteType::Normal
+            }),
+        };
+        self.push(Frame::Container {
+            parent: Parent::Body,
+            level: Level::Block,
+        });
+        self.note = Some((self.stack.len() - 1, id, note_type));
+        Ok(())
+    }
+
+    /// Ends the note being read: its blocks become a story of the document. Of two notes
+    /// with one id, the first is the one references lead to.
+    fn close_note(&mut self) {
+        let Some((_, id, note_type)) = self.note.take() else {
+            return;
+        };
+        let endnote = self.story == Story::Endnotes;
+        let blocks = std::mem::take(&mut self.body);
+        let document = &mut *self.c.document;
+        let index = document.stories.len() as u32;
+        document.stories.push(StoryData {
+            kind: StoryKind::Note {
+                endnote,
+                id,
+                note_type,
+            },
+            blocks,
+        });
+        let notes = if endnote {
+            &mut document.endnotes
+        } else {
+            &mut document.footnotes
+        };
+        notes.entry(id).or_insert(index);
+    }
+
+    /// Ends reading: splits the body into sections, or keeps a header's or footer's blocks
+    /// as a story.
     fn finish(mut self) {
+        match self.story {
+            Story::Document => {}
+            Story::Header | Story::Footer => {
+                let kind = if self.story == Story::Header {
+                    StoryKind::Header
+                } else {
+                    StoryKind::Footer
+                };
+                let blocks = std::mem::take(&mut self.body);
+                self.c.document.stories.push(StoryData { kind, blocks });
+                return;
+            }
+            Story::Footnotes | Story::Endnotes => return,
+        }
         let mut sections = Vec::with_capacity(self.breaks.len() + 1);
         let mut start = 0;
         for (end, properties) in std::mem::take(&mut self.breaks) {
             let blocks = self.body.get(start..end).unwrap_or_default().to_vec();
-            sections.push(SectionData { properties, blocks });
+            sections.push(SectionData {
+                properties,
+                blocks,
+                ..SectionData::default()
+            });
             start = end;
         }
         sections.push(SectionData {
             properties: self.last_section.take().unwrap_or_default(),
             blocks: self.body.get(start..).unwrap_or_default().to_vec(),
+            ..SectionData::default()
         });
         self.c.document.sections = sections;
     }
@@ -825,7 +962,8 @@ impl Reading<'_, '_, '_> {
     /// where its section break command splits the table instead; one found there ends no
     /// section until a rule document shows what Word makes of it.
     fn section_break(&mut self, paragraph: u32, p_pr: Span, offset: usize) {
-        if self.tables_open > 0 {
+        // Only the body has sections.
+        if self.tables_open > 0 || self.story != Story::Document {
             return;
         }
         let place = self.c.place(offset);

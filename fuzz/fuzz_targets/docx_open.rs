@@ -1,13 +1,14 @@
 //! Opens the input as a Word document and walks everything the model read from it:
-//! sections, blocks, tables, inline content and runs, the text, and the XML of every
-//! element kept without being understood, which must read back as XML. The formatting in
+//! sections, headers, footers and notes, blocks, tables, inline content and runs, the
+//! text, and the XML of every element kept without being understood, which must read back
+//! as XML. The formatting in
 //! effect of every paragraph, run and paragraph mark is resolved, and must not depend on
 //! what the resolver remembered from earlier ones. The document's translation into the
 //! layout IR must be valid IR.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use officewright_doc::{Block, Inline, Limits, LoadOptions, Opaque, RunContent};
+use officewright_doc::{Block, HeaderFooterKind, Inline, Limits, LoadOptions, Opaque, RunContent};
 use officewright_opc::xml::Input;
 
 fuzz_target!(|data: &[u8]| {
@@ -63,6 +64,25 @@ fuzz_target!(|data: &[u8]| {
     // not grow with their number × chain length.
     let (mut paragraphs_compared, mut runs_compared) = (0, 0);
     let mut blocks: Vec<Block<'_>> = document.sections().flat_map(|s| s.blocks()).collect();
+    // The headers, footers and notes, each walked like the body.
+    for section in document.sections() {
+        for kind in [
+            HeaderFooterKind::Default,
+            HeaderFooterKind::First,
+            HeaderFooterKind::Even,
+        ] {
+            for story in [section.header(kind), section.footer(kind)]
+                .into_iter()
+                .flatten()
+            {
+                blocks.extend(story.blocks());
+            }
+        }
+    }
+    for note in document.notes() {
+        let _ = (note.id(), note.note_type(), note.is_endnote());
+        blocks.extend(note.blocks());
+    }
     while let Some(block) = blocks.pop() {
         match block {
             Block::Paragraph(paragraph) => {

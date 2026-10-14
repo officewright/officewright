@@ -40,8 +40,8 @@ pub(crate) use resolve::assign_paragraph_styles;
 pub use section::{
     ChapterSeparator, Column, Columns, DocumentGrid, DocumentGridKind, HeaderFooterKind,
     HeaderFooterReference, LineNumberRestart, LineNumbering, NotePosition, NoteProperties,
-    NoteRestart, Orientation, PageBorderDisplay, PageBorderOffset, PageBorderZOrder, PageBorders,
-    PageMargins, PageNumbering, SectionProperties, SectionStart,
+    NoteRestart, NoteType, Orientation, PageBorderDisplay, PageBorderOffset, PageBorderZOrder,
+    PageBorders, PageMargins, PageNumbering, SectionProperties, SectionStart,
 };
 pub use settings::{
     ColorSchemeIndex, ColorSchemeMapping, CompatibilityMode, CompatibilityOption,
@@ -55,10 +55,11 @@ pub use table_properties::{
     VerticalAlignment, VerticalJustification,
 };
 pub use theme::{ColorScheme, FontCollection, FontScheme, SchemeColor, SystemColor, Theme};
+pub(crate) use views::kind_index;
 pub use views::{
-    Block, Break, BreakClear, BreakKind, ContentControl, FieldCharKind, Hyperlink, Inline, Opaque,
-    Paragraph, Revision, RevisionKind, Run, RunContent, Section, SimpleField, Table, TableCell,
-    TableRow,
+    Block, Break, BreakClear, BreakKind, ContentControl, FieldCharKind, HeaderFooter, Hyperlink,
+    Inline, Note, Opaque, Paragraph, Revision, RevisionKind, Run, RunContent, Section, SimpleField,
+    Table, TableCell, TableRow,
 };
 use xml::{Element, Span, Strings, Token};
 
@@ -103,6 +104,13 @@ pub struct Document {
     /// Where the first declaration of each font name is, by the name in lower case.
     pub(crate) font_index: HashMap<String, u32>,
     pub(crate) sections: Vec<SectionData>,
+    /// The headers, footers, footnotes and endnotes.
+    pub(crate) stories: Vec<StoryData>,
+    /// The header or footer each relationship of the main part leads to, by its id.
+    pub(crate) header_footers: HashMap<Box<str>, u32>,
+    /// The footnotes and the endnotes by their ids; of two with one id, the first.
+    pub(crate) footnotes: HashMap<i64, u32>,
+    pub(crate) endnotes: HashMap<i64, u32>,
     pub(crate) kind: DocumentKind,
     pub(crate) conformance: Conformance,
     pub(crate) diagnostics: Vec<Diagnostic>,
@@ -188,6 +196,10 @@ impl Document {
             fonts: Vec::new(),
             font_index: HashMap::new(),
             sections: Vec::new(),
+            stories: Vec::new(),
+            header_footers: HashMap::new(),
+            footnotes: HashMap::new(),
+            endnotes: HashMap::new(),
             kind: DocumentKind::Document,
             conformance: Conformance::Transitional,
             diagnostics: Vec::new(),
@@ -226,6 +238,22 @@ impl Document {
     /// The sections, in document order. Every document has at least one.
     pub fn sections(&self) -> impl ExactSizeIterator<Item = Section<'_>> {
         self.sections.iter().map(|data| Section::new(self, data))
+    }
+
+    /// The footnote with this id (`w:footnoteReference` names it), the first of several.
+    pub fn footnote(&self, id: i64) -> Option<Note<'_>> {
+        Note::at(self, *self.footnotes.get(&id)?)
+    }
+
+    /// The endnote with this id (`w:endnoteReference` names it), the first of several.
+    pub fn endnote(&self, id: i64) -> Option<Note<'_>> {
+        Note::at(self, *self.endnotes.get(&id)?)
+    }
+
+    /// Every footnote and endnote, separators included, in the order of their parts:
+    /// footnotes first.
+    pub fn notes(&self) -> impl Iterator<Item = Note<'_>> {
+        (0..self.stories.len()).filter_map(|index| Note::at(self, u32::try_from(index).ok()?))
     }
 
     /// The paragraph with this id, or `None` for an id of another document.
@@ -389,6 +417,29 @@ const _: () = {
 pub(crate) struct SectionData {
     pub(crate) properties: SectionProperties,
     pub(crate) blocks: Vec<u32>,
+    /// The stories of its headers and footers in effect, those it inherits from earlier
+    /// sections included, by kind: default, first, even.
+    pub(crate) headers: [Option<u32>; 3],
+    pub(crate) footers: [Option<u32>; 3],
+}
+
+/// A story other than the body: its kind and its blocks.
+#[derive(Debug)]
+pub(crate) struct StoryData {
+    pub(crate) kind: StoryKind,
+    pub(crate) blocks: Vec<u32>,
+}
+
+/// What a story is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StoryKind {
+    Header,
+    Footer,
+    Note {
+        endnote: bool,
+        id: i64,
+        note_type: NoteType,
+    },
 }
 
 /// One node of the document tree. Children are indices into [`Document::nodes`], so the
@@ -487,6 +538,9 @@ pub(crate) enum RunItem {
     FootnoteReference(i64),
     EndnoteReference(i64),
     CommentReference(i64),
+    NoteNumber,
+    Separator,
+    ContinuationSeparator,
     LastRenderedPageBreak,
     Other(Span),
 }

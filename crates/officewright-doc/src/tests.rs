@@ -94,6 +94,33 @@ fn crc32(data: &[u8]) -> u32 {
     !crc
 }
 
+/// A document whose body is `body`, with parts related to the main part, each given by
+/// the last segment of its relationship type, its target under `word/` and its XML.
+fn with_parts(body: &str, parts: &[(&str, &str, String)]) -> Document {
+    let relationships: String = parts
+        .iter()
+        .enumerate()
+        .map(|(n, (kind, target, _))| {
+            format!(
+                r#"<Relationship Id="rId{n}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{kind}" Target="{target}"/>"#
+            )
+        })
+        .collect();
+    let rels = format!(
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{relationships}</Relationships>"#
+    );
+    let mut extra = vec![("word/_rels/document.xml.rels".to_owned(), rels)];
+    for (_, target, xml) in parts {
+        // Two relationships may lead to one part, which the package holds once.
+        let name = format!("word/{target}");
+        if extra.iter().all(|(known, _)| *known != name) {
+            extra.push((name, xml.clone()));
+        }
+    }
+    let extra: Vec<(&str, &str)> = extra.iter().map(|(a, b)| (&**a, &**b)).collect();
+    Document::from_bytes(package(DOCUMENT, &document_xml(body), &extra)).unwrap()
+}
+
 /// One line per block, with the kinds of what is inside.
 fn outline(document: &Document) -> Vec<String> {
     let mut out = Vec::new();
@@ -3185,3 +3212,177 @@ mod format;
 #[cfg(feature = "pdf")]
 mod layout;
 mod paragraph_format;
+
+/// The text of the paragraphs of some blocks, one line each.
+fn block_text<'a>(blocks: impl Iterator<Item = Block<'a>>) -> Vec<String> {
+    blocks
+        .filter_map(|block| match block {
+            Block::Paragraph(paragraph) => Some(paragraph.text()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn reads_headers_and_footers_and_inherits_them_by_kind() {
+    let story = |root: &str, text: &str| {
+        format!(
+            r#"<w:{root} xmlns:w="{W}"><w:p><w:pPr><w:sectPr/></w:pPr><w:r><w:t>{text}</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl></w:{root}>"#
+        )
+    };
+    let body = r#"<w:p><w:pPr><w:sectPr><w:headerReference w:type="default" r:id="rId0"/><w:headerReference w:type="first" r:id="rId1"/><w:footerReference r:id="rId2"/><w:titlePg/></w:sectPr></w:pPr></w:p><w:p/><w:sectPr><w:headerReference w:type="first" r:id="rId3"/><w:footerReference w:type="even" r:id="rId4"/><w:headerReference w:type="default" r:id="rId9"/></w:sectPr>"#;
+    let document = with_parts(
+        body,
+        &[
+            ("header", "header1.xml", story("hdr", "default header")),
+            ("header", "header2.xml", story("hdr", "first header")),
+            ("footer", "footer1.xml", story("ftr", "default footer")),
+            // Two relationships to one part: it is read once.
+            ("header", "header2.xml", story("hdr", "first header")),
+            ("footer", "footer2.xml", story("ftr", "even footer")),
+        ],
+    );
+    assert!(messages(&document).is_empty(), "{:?}", messages(&document));
+    // A w:sectPr in a header ends no section.
+    assert_eq!(document.sections().len(), 2);
+    assert_eq!(document.stories.len(), 4);
+    let text = |story: Option<HeaderFooter<'_>>| story.map(|story| block_text(story.blocks()));
+    let [first, second] = document.sections().collect::<Vec<_>>()[..] else {
+        panic!("two sections");
+    };
+    assert_eq!(
+        text(first.header(HeaderFooterKind::Default)),
+        Some(vec!["default header".to_owned()])
+    );
+    assert_eq!(
+        text(first.header(HeaderFooterKind::First)),
+        Some(vec!["first header".to_owned()])
+    );
+    assert!(first.header(HeaderFooterKind::First).unwrap().is_header());
+    // A footer reference without w:type is of the default kind.
+    assert_eq!(
+        text(first.footer(HeaderFooterKind::Default)),
+        Some(vec!["default footer".to_owned()])
+    );
+    assert!(!first.footer(HeaderFooterKind::Default).unwrap().is_header());
+    assert!(first.header(HeaderFooterKind::Even).is_none());
+    // The second section inherits each kind it does not name, and a reference whose
+    // relationship does not exist counts as not written.
+    assert_eq!(
+        text(second.header(HeaderFooterKind::Default)),
+        Some(vec!["default header".to_owned()])
+    );
+    assert_eq!(
+        text(second.header(HeaderFooterKind::First)),
+        Some(vec!["first header".to_owned()])
+    );
+    assert_eq!(
+        text(second.footer(HeaderFooterKind::Default)),
+        Some(vec!["default footer".to_owned()])
+    );
+    assert_eq!(
+        text(second.footer(HeaderFooterKind::Even)),
+        Some(vec!["even footer".to_owned()])
+    );
+    // A header's blocks include its tables.
+    let blocks: Vec<String> = first
+        .header(HeaderFooterKind::Default)
+        .unwrap()
+        .blocks()
+        .map(|block| match block {
+            Block::Paragraph(_) => "p".to_owned(),
+            Block::Table(_) => "table".to_owned(),
+            _ => "other".to_owned(),
+        })
+        .collect();
+    assert_eq!(blocks, ["p", "table"]);
+}
+
+#[test]
+fn reads_footnotes_and_endnotes_with_their_separators() {
+    let notes = |root: &str, note: &str| {
+        format!(
+            r#"<w:{root} xmlns:w="{W}"><w:{note} w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:{note}><w:{note} w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:{note}><w:{note} w:id="1"><w:p><w:r><w:{note}Ref/></w:r><w:r><w:t xml:space="preserve"> first</w:t></w:r></w:p></w:{note}><w:{note} w:id="1"><w:p><w:r><w:t>second with id 1</w:t></w:r></w:p></w:{note}><w:{note} w:id="x"><w:p/></w:{note}><w:{note} w:id="2" w:type="unknown"><w:p><w:pPr><w:sectPr/></w:pPr><w:r><w:t>two</w:t></w:r></w:p></w:{note}></w:{root}>"#
+        )
+    };
+    let body = r#"<w:p><w:r><w:t>text</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r><w:r><w:endnoteReference w:id="2"/></w:r></w:p>"#;
+    let document = with_parts(
+        body,
+        &[
+            ("footnotes", "footnotes.xml", notes("footnotes", "footnote")),
+            ("endnotes", "endnotes.xml", notes("endnotes", "endnote")),
+        ],
+    );
+    // Of two notes with one id, the first counts.
+    let footnote = document.footnote(1).unwrap();
+    assert_eq!(block_text(footnote.blocks()), [" first"]);
+    assert_eq!((footnote.id(), footnote.is_endnote()), (1, false));
+    assert_eq!(footnote.note_type(), NoteType::Normal);
+    let first_run = match footnote.blocks().next() {
+        Some(Block::Paragraph(paragraph)) => paragraph.runs().next().unwrap(),
+        _ => panic!("a paragraph"),
+    };
+    assert!(matches!(
+        first_run.content().collect::<Vec<_>>()[..],
+        [RunContent::NoteNumber]
+    ));
+    let separator = document.footnote(-1).unwrap();
+    assert_eq!(separator.note_type(), NoteType::Separator);
+    let content = |note: Note<'_>| match note.blocks().next() {
+        Some(Block::Paragraph(paragraph)) => paragraph
+            .runs()
+            .flat_map(|run| run.content())
+            .map(|item| format!("{item:?}"))
+            .collect::<Vec<_>>(),
+        _ => panic!("a paragraph"),
+    };
+    assert_eq!(content(separator), ["Separator"]);
+    let continuation = document.footnote(0).unwrap();
+    assert_eq!(continuation.note_type(), NoteType::ContinuationSeparator);
+    assert_eq!(content(continuation), ["ContinuationSeparator"]);
+    let endnote = document.endnote(2).unwrap();
+    assert!(endnote.is_endnote());
+    // A type that is not one is a normal note, reported; a w:sectPr in a note ends no
+    // section.
+    assert_eq!(endnote.note_type(), NoteType::Normal);
+    assert_eq!(document.sections().len(), 1);
+    assert!(document.endnote(1).unwrap().is_endnote());
+    // Every note, those with a repeated id too, but not one without a valid id.
+    assert_eq!(
+        document.notes().filter(|note| !note.is_endnote()).count(),
+        5
+    );
+    assert_eq!(document.notes().count(), 10);
+    let messages = messages(&document);
+    assert_eq!(messages.len(), 4, "{messages:?}");
+    assert!(
+        messages[0].ends_with(r#": w:footnote w:id="x" is not valid; it is ignored"#),
+        "{messages:?}"
+    );
+    assert!(
+        messages[1].ends_with(r#": w:footnote w:type="unknown" is not valid; it is ignored"#),
+        "{messages:?}"
+    );
+    // The body's text is the body's alone.
+    assert_eq!(document.text(), "text\n");
+}
+
+#[test]
+fn refuses_a_header_part_whose_root_is_not_a_header() {
+    let body = r#"<w:p/><w:sectPr><w:headerReference w:type="default" r:id="rId0"/></w:sectPr>"#;
+    let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId0" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/></Relationships>"#;
+    let header = format!(r#"<w:ftr xmlns:w="{W}"/>"#);
+    let data = package(
+        DOCUMENT,
+        &document_xml(body),
+        &[
+            ("word/_rels/document.xml.rels", rels),
+            ("word/header1.xml", &header),
+        ],
+    );
+    let err = Document::from_bytes(data).unwrap_err().to_string();
+    assert!(
+        err.contains("the root element is <w:ftr>, not w:hdr"),
+        "{err}"
+    );
+}

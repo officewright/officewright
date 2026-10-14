@@ -8,7 +8,8 @@
 //!
 //! With one file it prints the theme's fonts, the compatibility mode, the sections with
 //! their page setup,
-//! columns and headers and footers, and their blocks. With
+//! columns and headers and footers, their blocks, the headers and footers in effect, and
+//! the footnotes and endnotes. With
 //! `--runs` it also prints:
 //! - the style, alignment and list of each paragraph, with the list's label template, and
 //!   its formatting in effect, and the formatting of its list label;
@@ -24,8 +25,8 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use officewright_doc::{
-    Block, CharacterFormat, ColorValue, Document, Error, Formats, Inline, Numbering,
-    ParagraphFormat, Run, RunContent,
+    Block, CharacterFormat, ColorValue, Document, Error, Formats, HeaderFooterKind, Inline,
+    Numbering, ParagraphFormat, Run, RunContent,
 };
 
 fn main() -> ExitCode {
@@ -115,7 +116,38 @@ fn dump(document: &Document, runs: bool) {
         );
         let numbering = document.numbering();
         let mut formats = document.formats();
+        // The headers and footers in effect, those inherited included.
+        for kind in [
+            HeaderFooterKind::Default,
+            HeaderFooterKind::First,
+            HeaderFooterKind::Even,
+        ] {
+            for (name, story) in [
+                ("header", section.header(kind)),
+                ("footer", section.footer(kind)),
+            ] {
+                if let Some(story) = story {
+                    println!("  {name} {kind:?}");
+                    for block in story.blocks() {
+                        print_block(numbering, &mut formats, block, 2, runs);
+                    }
+                }
+            }
+        }
         for block in section.blocks() {
+            print_block(numbering, &mut formats, block, 1, runs);
+        }
+    }
+    let numbering = document.numbering();
+    let mut formats = document.formats();
+    for note in document.notes() {
+        let kind = if note.is_endnote() {
+            "endnote"
+        } else {
+            "footnote"
+        };
+        println!("{kind} {} {:?}", note.id(), note.note_type());
+        for block in note.blocks() {
             print_block(numbering, &mut formats, block, 1, runs);
         }
     }

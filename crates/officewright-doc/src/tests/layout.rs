@@ -5,29 +5,6 @@ use officewright_layout::ir;
 
 use super::*;
 
-/// A document whose body is `body`, with parts related to the main part, each given by
-/// the last segment of its relationship type, its target under `word/` and its XML.
-fn with_parts(body: &str, parts: &[(&str, &str, String)]) -> Document {
-    let relationships: String = parts
-        .iter()
-        .enumerate()
-        .map(|(n, (kind, target, _))| {
-            format!(
-                r#"<Relationship Id="rId{n}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{kind}" Target="{target}"/>"#
-            )
-        })
-        .collect();
-    let rels = format!(
-        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{relationships}</Relationships>"#
-    );
-    let mut extra = vec![("word/_rels/document.xml.rels".to_owned(), rels)];
-    for (_, target, xml) in parts {
-        extra.push((format!("word/{target}"), xml.clone()));
-    }
-    let extra: Vec<(&str, &str)> = extra.iter().map(|(a, b)| (&**a, &**b)).collect();
-    Document::from_bytes(package(DOCUMENT, &document_xml(body), &extra)).unwrap()
-}
-
 /// The translation of a document, which must be valid IR.
 fn translate(document: &Document) -> Translation {
     let translation = document.to_layout_ir();

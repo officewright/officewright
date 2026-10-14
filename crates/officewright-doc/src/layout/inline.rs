@@ -119,6 +119,11 @@ impl<'a> Translator<'a> {
                         "an endnote reference is left out: notes are not translated yet".into()
                     });
                 }
+                RunContent::NoteNumber => content.push(ir::Inline::note_number(style)),
+                RunContent::Separator => content.push(ir::Inline::separator(style)),
+                RunContent::ContinuationSeparator => {
+                    content.push(ir::Inline::continuation_separator(style));
+                }
                 RunContent::CommentReference(_) | RunContent::LastRenderedPageBreak => {}
                 // The legacy page number: a PAGE field (ECMA-376 Part 1, §17.3.3.22).
                 RunContent::Other(other) if other.local_name() == "pgNum" => {
