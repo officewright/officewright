@@ -18,7 +18,13 @@ EXPECTED_ABI_VERSION = 1
 # OwStatus values, the standard font and the embedding notes from officewright.h.
 OK, NULL_ARGUMENT, INVALID_UTF8, INVALID_ARGUMENT, IO, UNSUPPORTED, PANIC, MALFORMED, LIMIT_EXCEEDED = range(9)
 OW_STANDARD_FONT_HELVETICA = 0
-OW_FONT_NOTE_OTHER, OW_FONT_NOTE_PREVIEW_AND_PRINT, OW_FONT_NOTE_EDITABLE, OW_FONT_NOTE_WHOLE_FONT = range(4)
+(
+    OW_FONT_NOTE_OTHER,
+    OW_FONT_NOTE_PREVIEW_AND_PRINT,
+    OW_FONT_NOTE_EDITABLE,
+    OW_FONT_NOTE_WHOLE_FONT,
+    OW_FONT_NOTE_DEFAULT_INSTANCE,
+) = range(5)
 (
     OW_RESOLUTION_OTHER,
     OW_RESOLUTION_EXACT,
@@ -89,6 +95,40 @@ def with_fs_type(font, fs_type):
             font[os2 + 8 : os2 + 10] = fs_type.to_bytes(2, "big")
             return bytes(font)
     raise ValueError("no OS/2 table")
+
+
+def with_table(font, tag, data):
+    """The font with table `tag` added: its table directory, sorted by tag as it must be,
+    gets a record more, and every table keeps its data."""
+    count = int.from_bytes(font[4:6], "big")
+    tables = {}
+    for record in range(12, 12 + 16 * count, 16):
+        offset = int.from_bytes(font[record + 8 : record + 12], "big")
+        length = int.from_bytes(font[record + 12 : record + 16], "big")
+        tables[font[record : record + 4]] = font[offset : offset + length]
+    tables[tag] = data
+    selector = len(tables).bit_length() - 1
+    search = 16 << selector
+    fields = (len(tables), search, selector, 16 * len(tables) - search)
+    directory = bytearray(font[:4] + b"".join(field.to_bytes(2, "big") for field in fields))
+    body = bytearray()
+    for tag in sorted(tables):
+        table = tables[tag] + bytes(-len(tables[tag]) % 4)
+        checksum = sum(int.from_bytes(table[at : at + 4], "big") for at in range(0, len(table), 4))
+        offset = 12 + 16 * len(tables) + len(body)
+        directory += tag + b"".join(v.to_bytes(4, "big") for v in (checksum & 0xFFFFFFFF, offset, len(tables[tag])))
+        body += table
+    return bytes(directory + body)
+
+
+# The fvar table of a variable font with one axis, weight from 100 to 900, its default
+# 400, named by name ID 2; it has no named instances.
+WEIGHT_AXIS = (
+    b"".join(field.to_bytes(2, "big") for field in (1, 0, 16, 2, 1, 20, 0, 8))
+    + b"wght"
+    + b"".join((value << 16).to_bytes(4, "big") for value in (100, 400, 900))
+    + b"\0\0\0\2"
+)
 
 
 def last_error():
@@ -301,6 +341,17 @@ class AbiTest(unittest.TestCase):
         self.check(lib.ow_pdf_font_open_bytes(restricted, len(restricted), 0, byref(font)), UNSUPPORTED)
         self.assertEqual(last_error(), "the license of font LiberationSans does not allow embedding it")
         self.assertFalse(font)
+
+    def test_notes_that_a_variable_font_is_embedded_as_its_default_instance(self):
+        variable = self.open_font(with_table(LIBERATION_SANS.read_bytes(), b"fvar", WEIGHT_AXIS))
+        self.assertEqual(
+            self.notes(variable),
+            [(OW_FONT_NOTE_DEFAULT_INSTANCE, "it is a variable font; only its default instance is embedded")],
+        )
+        doc = c_void_p()
+        self.check(lib.ow_pdf_document_from_text(b"Weight", 595.0, 842.0, variable, 12.0, byref(doc)))
+        self.addCleanup(lib.ow_pdf_document_free, doc)
+        self.assertIn(b"/FontFile2", self.save_bytes(doc))
 
     def test_reports_fonts_it_cannot_open(self):
         font = c_void_p(1)
