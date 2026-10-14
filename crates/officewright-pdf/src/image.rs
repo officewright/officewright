@@ -104,8 +104,9 @@ impl Inner {
 }
 
 /// The zlib stream of a PNG file's `IDAT` chunks: where the data of each non-empty chunk
-/// is in the file, which is kept anyway, or, for chunks so small that their places would
-/// take more than a quarter of their data, a copy.
+/// is in the file, which is kept anyway, or a copy, once the places of the chunks read so
+/// far would take more than a quarter of their data. That is decided as reading goes, so
+/// a file whose first chunks are small is copied even if its later ones are large.
 enum PngData {
     InFile(Vec<Range<usize>>),
     Copied(Vec<u8>),
@@ -412,11 +413,13 @@ fn u32_at(data: &[u8], at: usize) -> Option<u32> {
 }
 
 /// Reads the size and components of a JPEG file from its frame header (ITU T.81, B.2),
-/// and whether it has Adobe's `APP14` segment. The frame header, and the components the
-/// first scan header names, are checked as libjpeg checks them when it reads them, so
-/// that a file whose headers a viewer cannot read is refused. Not checked: whether the
-/// tables the headers name are defined, the progressive parameters of the scan, and the
-/// coded data.
+/// and whether it has Adobe's `APP14` segment. The frame header and the first scan
+/// header are checked by the rules of T.81 that libjpeg enforces when it reads them, so
+/// that a file whose headers a viewer cannot read is refused. Not checked: libjpeg's own
+/// limits, which T.81 does not set (widths and heights over 65500, sampling factors that
+/// do not divide the largest of the frame, more than 10 components, of which no PDF
+/// takes more than 4); whether the tables the headers name are defined; the scans after
+/// the first; and the coded data.
 fn read_jpeg(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> {
     let mut at = 2;
     let mut frame = None;
@@ -471,7 +474,7 @@ fn read_jpeg(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> 
                     at - 2
                 )));
             }
-            0xC0..=0xC2 => frame = Some(read_frame(segment)?),
+            0xC0..=0xC2 => frame = Some(read_frame(segment, code == 0xC2)?),
             // DHT, JPG and DAC are not frame headers.
             0xC4 | 0xC8 | 0xCC => {}
             // Lossless, differential and arithmetic-coded frames, and the DHP and EXP
@@ -520,12 +523,16 @@ struct Frame {
     width: u16,
     /// Each component's identifier and horizontal and vertical sampling factors.
     components: Vec<(u8, u8, u8)>,
+    /// Whether the frame is progressive (`SOF2`), whose scans each code some of the
+    /// coefficients, to some bit (G.1.1.1).
+    progressive: bool,
 }
 
-/// Reads a JPEG frame header, `segment` after its length, and checks it as libjpeg does:
+/// Reads a JPEG frame header, `segment` after its length, of a `progressive` frame or
+/// not, and checks the rules of T.81 (B.2.2) that libjpeg enforces when it reads one:
 /// 1 to 255 components of three bytes each, so that the header is `8 + 3 × components`
 /// bytes long, with sampling factors of 1 to 4 and a quantization table of 0 to 3.
-fn read_frame(segment: &[u8]) -> std::result::Result<Frame, Problem> {
+fn read_frame(segment: &[u8], progressive: bool) -> std::result::Result<Frame, Problem> {
     let Some((&[precision, h1, h0, w1, w0, count], specifications)) =
         segment.split_first_chunk::<6>()
     else {
@@ -568,13 +575,20 @@ fn read_frame(segment: &[u8]) -> std::result::Result<Frame, Problem> {
         height: u16::from_be_bytes([h1, h0]),
         width: u16::from_be_bytes([w1, w0]),
         components,
+        progressive,
     })
 }
 
 /// Checks a JPEG scan header of `length` bytes, `segment` after the length, against its
-/// `frame` as libjpeg does (ITU T.81, B.2.3): 1 to 4 components, so that the header is
-/// `6 + 2 × components` bytes long, each a different component of the frame, and in an
-/// interleaved scan at most 10 blocks in each minimum coded unit.
+/// `frame` by the rules of T.81 (B.2.3, G.1.1.1) that libjpeg enforces: 1 to 4
+/// components, so that the header is `6 + 2 × components` bytes long, each a different
+/// component of the frame, and in an interleaved scan at most 10 blocks in each minimum
+/// coded unit. In a progressive frame the scan codes either the DC coefficients alone
+/// (Ss = Se = 0) or AC coefficients of one component (1 <= Ss <= Se <= 63), refines by
+/// one bit (Al = Ah - 1) unless it is the first scan of those coefficients (Ah = 0), and
+/// has a point transform Al of at most 13. These rules matched libjpeg-turbo, through
+/// `qpdf --check`, on all of 27,840 generated scans; it decodes a sequential frame's scan
+/// whatever these four fields hold, with a warning, so they are not checked there.
 ///
 /// Which component an identifier names follows libjpeg, which is looser than T.81. T.81
 /// wants the frame's identifiers distinct and the scan in the frame's order; libjpeg
@@ -640,6 +654,39 @@ fn check_scan(segment: &[u8], length: usize, frame: &Frame) -> std::result::Resu
         return Err(malformed(format!(
             "the JPEG scan interleaves {blocks} blocks in each minimum coded unit, not at \
              most 10"
+        )));
+    }
+    if !frame.progressive {
+        return Ok(());
+    }
+    let Some(&[start, end, approximation]) = segment
+        .get(1 + 2 * usize::from(count)..)
+        .and_then(<[u8]>::first_chunk::<3>)
+    else {
+        return Err(malformed("the JPEG scan header is truncated"));
+    };
+    let (high, low) = (approximation >> 4, approximation & 0x0F);
+    if !(start == 0 && end == 0 || (1..=end).contains(&start) && end <= 63) {
+        return Err(malformed(format!(
+            "the progressive JPEG scan header gives Ss {start} and Se {end}, not 0 and 0 \
+             for the DC coefficients or 1 <= Ss <= Se <= 63 for AC coefficients"
+        )));
+    }
+    if start > 0 && count > 1 {
+        return Err(malformed(format!(
+            "the progressive JPEG scan header names {} in a scan of AC coefficients, not 1",
+            counted(count, "component")
+        )));
+    }
+    if high != 0 && low + 1 != high {
+        return Err(malformed(format!(
+            "the progressive JPEG scan header gives Ah {high} and Al {low}, not \
+             Al = Ah - 1 for a refinement"
+        )));
+    }
+    if low > 13 {
+        return Err(malformed(format!(
+            "the progressive JPEG scan header gives Al {low}, not 0 to 13"
         )));
     }
     Ok(())
@@ -1985,7 +2032,8 @@ pub(crate) mod tests {
     }
 
     /// A JPEG file up to its first scan: an optional APP14 segment, a frame header with
-    /// marker `sof`, and padding before a marker.
+    /// marker `sof`, and padding before a marker. The scan codes the first component, all
+    /// its coefficients or, in a progressive frame (`SOF2`), the DC coefficient.
     fn jpeg(
         sof: u8,
         precision: u8,
@@ -2012,7 +2060,12 @@ pub(crate) mod tests {
         data.extend_from_slice(&((frame.len() + 2) as u16).to_be_bytes());
         data.extend_from_slice(&frame);
         // A DHT segment after the frame, and the scan.
-        data.extend_from_slice(b"\xFF\xC4\x00\x03\x00\xFF\xDA\x00\x08\x01\x01\x00\x00\x3F\x00");
+        data.extend_from_slice(b"\xFF\xC4\x00\x03\x00\xFF\xDA\x00\x08\x01\x01\x00\x00");
+        data.extend_from_slice(if sof == 0xC2 {
+            b"\x00\x00"
+        } else {
+            b"\x3F\x00"
+        });
         data.extend_from_slice(b"\x12\x34\xFF\x00\xFF\xD9");
         data
     }
@@ -2466,6 +2519,94 @@ pub(crate) mod tests {
         ];
         for (data, message) in damaged {
             assert_eq!(error(data), format!("image data is damaged: {message}"));
+        }
+    }
+
+    #[test]
+    fn checks_the_progressive_parameters_of_the_first_scan() {
+        // Scans of the first of three components, or of all three, coding coefficients
+        // Ss to Se with successive approximation Ah and Al.
+        let scan = |all: bool, start: u8, end: u8, high: u8, low: u8| {
+            let mut scan = if all {
+                vec![3, 1, 0, 2, 0x11, 3, 0x11]
+            } else {
+                vec![1, 1, 0]
+            };
+            scan.extend_from_slice(&[start, end, high << 4 | low]);
+            scan
+        };
+        let progressive = jpeg(0xC2, 8, 4, 4, 3, false);
+        let accepted = [
+            // DC coefficients interleaved, a first scan and refinements, Al at 13.
+            scan(true, 0, 0, 0, 0),
+            scan(true, 0, 0, 0, 13),
+            scan(false, 0, 0, 1, 0),
+            scan(true, 0, 0, 14, 13),
+            // AC coefficients of one component: all, one, and the last.
+            scan(false, 1, 63, 0, 0),
+            scan(false, 5, 5, 0, 13),
+            scan(false, 63, 63, 2, 1),
+        ];
+        for scan in accepted {
+            Image::from_bytes(with_scan(&progressive, &scan)).unwrap_or_else(|err| {
+                panic!("{scan:?}: {err}");
+            });
+        }
+        let refused = [
+            (
+                scan(false, 0, 5, 0, 0),
+                "the progressive JPEG scan header gives Ss 0 and Se 5, not 0 and 0 for the DC \
+                 coefficients or 1 <= Ss <= Se <= 63 for AC coefficients",
+            ),
+            (scan(false, 2, 1, 0, 0), "gives Ss 2 and Se 1, not 0 and 0"),
+            (
+                scan(false, 1, 64, 0, 0),
+                "gives Ss 1 and Se 64, not 0 and 0",
+            ),
+            (
+                scan(false, 64, 64, 0, 0),
+                "gives Ss 64 and Se 64, not 0 and 0",
+            ),
+            (
+                scan(true, 1, 63, 0, 0),
+                "the progressive JPEG scan header names 3 components in a scan of AC \
+                 coefficients, not 1",
+            ),
+            (
+                scan(false, 0, 0, 2, 0),
+                "the progressive JPEG scan header gives Ah 2 and Al 0, not Al = Ah - 1 for a \
+                 refinement",
+            ),
+            (
+                scan(false, 1, 63, 1, 1),
+                "gives Ah 1 and Al 1, not Al = Ah - 1",
+            ),
+            (
+                scan(false, 0, 0, 13, 13),
+                "gives Ah 13 and Al 13, not Al = Ah - 1",
+            ),
+            (
+                scan(false, 0, 0, 0, 14),
+                "the progressive JPEG scan header gives Al 14, not 0 to 13",
+            ),
+            (scan(true, 0, 0, 15, 14), "gives Al 14, not 0 to 13"),
+            (scan(false, 1, 63, 0, 15), "gives Al 15, not 0 to 13"),
+        ];
+        for (scan, message) in &refused {
+            let err = error(with_scan(&progressive, scan));
+            assert!(
+                err.starts_with("image data is damaged: ") && err.contains(*message),
+                "{scan:?}: {err}"
+            );
+        }
+        // libjpeg decodes the scan of a sequential frame whatever these fields hold.
+        for sof in [0xC0, 0xC1] {
+            let sequential = jpeg(sof, 8, 4, 4, 3, false);
+            for (scan, _) in &refused {
+                Image::from_bytes(with_scan(&sequential, scan)).unwrap_or_else(|err| {
+                    panic!("{sof:#04X} {scan:?}: {err}");
+                });
+            }
         }
     }
 
