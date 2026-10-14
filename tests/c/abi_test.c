@@ -449,6 +449,38 @@ static void fonts_by_name(const char *fonts, const char *dir) {
     ow_pdf_font_free(arial);
     ow_pdf_font_free(bold);
 
+    /* Liberation Sans without its Italic face: italic text slants Regular, as Word
+     * does, rather than take Bold Italic. */
+    EXPECT(ow_font_book_new(&book), OW_STATUS_OK, NULL);
+    snprintf(path, sizeof path, "%s/liberation/LiberationSans-Regular.ttf", fonts);
+    EXPECT(ow_font_book_add_file(book, path, &added), OW_STATUS_OK, NULL);
+    snprintf(path, sizeof path, "%s/liberation/LiberationSans-BoldItalic.ttf", fonts);
+    EXPECT(ow_font_book_add_file(book, path, &added), OW_STATUS_OK, NULL);
+    EXPECT(ow_font_resolver_new(book, &resolver), OW_STATUS_OK, NULL);
+    ow_font_book_free(book);
+    EXPECT(ow_pdf_font_resolve(resolver, "Liberation Sans", 0, 1, &liberation), OW_STATUS_OK, NULL);
+    EXPECT(ow_font_resolver_substitution_count(resolver, &count), OW_STATUS_OK, NULL);
+    CHECK(count == 1);
+    EXPECT(ow_font_resolver_substitution(resolver, 0, &kind, &message), OW_STATUS_OK, NULL);
+    CHECK(kind == OW_RESOLUTION_EXACT);
+    CHECK(message != NULL && strstr(message, "with synthetic italic") != NULL);
+    ow_font_resolver_free(resolver);
+    ow_pdf_font_free(liberation);
+
+    /* Only its Bold face: regular text comes out bold, and the report says so. */
+    EXPECT(ow_font_book_new(&book), OW_STATUS_OK, NULL);
+    snprintf(path, sizeof path, "%s/liberation/LiberationSans-Bold.ttf", fonts);
+    EXPECT(ow_font_book_add_file(book, path, &added), OW_STATUS_OK, NULL);
+    EXPECT(ow_font_resolver_new(book, &resolver), OW_STATUS_OK, NULL);
+    ow_font_book_free(book);
+    EXPECT(ow_pdf_font_resolve(resolver, "Liberation Sans", 0, 0, &bold), OW_STATUS_OK, NULL);
+    EXPECT(ow_font_resolver_substitution(resolver, 0, &kind, &message), OW_STATUS_OK, NULL);
+    CHECK(kind == OW_RESOLUTION_EXACT);
+    CHECK(message != NULL &&
+          strstr(message, ", in bold: the family has no regular face installed") != NULL);
+    ow_font_resolver_free(resolver);
+    ow_pdf_font_free(bold);
+
     /* An empty book has nothing to stand in for a family. */
     EXPECT(ow_font_book_new(&empty), OW_STATUS_OK, NULL);
     EXPECT(ow_font_resolver_new(empty, &nothing), OW_STATUS_OK, NULL);
