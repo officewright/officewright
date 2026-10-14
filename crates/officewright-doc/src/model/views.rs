@@ -3,6 +3,7 @@
 
 use officewright_core::Pt;
 
+use super::drawing::Drawing;
 use super::xml::Element;
 use super::xml::Span;
 use super::{
@@ -551,9 +552,13 @@ pub enum RunContent<'a> {
     /// The full-width line above notes continued from the previous page
     /// (`w:continuationSeparator`).
     ContinuationSeparator,
+    /// A drawing (`w:drawing`): a picture, in the line or floating, or a shape, chart or
+    /// other graphic, which shows as no picture.
+    Drawing(Drawing<'a>),
     /// Where Word's last layout broke the page; a hint, not a break.
     LastRenderedPageBreak,
-    /// An element kept without being understood, such as a drawing.
+    /// An element kept without being understood, such as a VML picture (`w:pict`) or an
+    /// embedded object.
     Other(Opaque<'a>),
 }
 
@@ -580,6 +585,9 @@ impl<'a> RunContent<'a> {
             RunItem::NoteNumber => Self::NoteNumber,
             RunItem::Separator => Self::Separator,
             RunItem::ContinuationSeparator => Self::ContinuationSeparator,
+            RunItem::Drawing { element, image } => {
+                Self::Drawing(Drawing::new(document, *element, *image))
+            }
             RunItem::LastRenderedPageBreak => Self::LastRenderedPageBreak,
             RunItem::Other(span) => Self::Other(Opaque::new(document, *span)),
         }

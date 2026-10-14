@@ -19,11 +19,12 @@ use super::styles::{Properties, check_properties};
 use super::{R, R_STRICT, W, W_STRICT, section, shorten};
 use crate::diagnostic::{DiagnosticKind, Diagnostics};
 use crate::model::Names;
+use crate::model::drawing;
 use crate::model::xml::{Span, Sym};
 use crate::model::{
     Break, BreakClear, BreakKind, Conformance, ControlLevel, Document, FieldCharKind,
-    HyperlinkData, Kind, Node, NoteType, RevisionData, RevisionKind, RunItem, SectionData,
-    SectionProperties, StoryData, StoryKind,
+    HyperlinkData, ImageData, Kind, Node, NoteType, RevisionData, RevisionKind, RunItem,
+    SectionData, SectionProperties, StoryData, StoryKind,
 };
 use crate::units::twips_measure;
 use crate::{Error, Limits, Result};
@@ -150,6 +151,8 @@ struct Reading<'d, 'p, 't> {
     /// The external target of each hyperlink relationship read so far, interned once
     /// however many links name it.
     link_targets: HashMap<Box<str>, Option<Sym>>,
+    /// The image each relationship a picture named so far leads to.
+    images: HashMap<Box<str>, Option<u32>>,
 }
 
 pub(super) fn read(
@@ -192,6 +195,7 @@ pub(super) fn read(
         open_blocks: Vec::new(),
         continued: HashMap::new(),
         link_targets: HashMap::new(),
+        images: HashMap::new(),
     };
     reading
         .run(&mut reader, &mut mce)
@@ -512,6 +516,7 @@ impl Reading<'_, '_, '_> {
             "noBreakHyphen" => RunItem::NoBreakHyphen,
             "softHyphen" => RunItem::SoftHyphen,
             "lastRenderedPageBreak" => RunItem::LastRenderedPageBreak,
+            "drawing" => return self.drawing(reader, mce, tag, run),
             "footnoteRef" | "endnoteRef" => RunItem::NoteNumber,
             "separator" => RunItem::Separator,
             "continuationSeparator" => RunItem::ContinuationSeparator,
@@ -1062,6 +1067,94 @@ impl Reading<'_, '_, '_> {
             }
             Context::Root | Context::Text => Ok(()),
         }
+    }
+
+    /// A drawing (`w:drawing`), kept whole, with the image its picture shows read from
+    /// the package: the part the picture's `r:embed` names among the relationships of the
+    /// part being read, read once however many pictures show it. An image the package
+    /// does not have is reported, and the picture shows none; one outside the package
+    /// (`r:link`, or an external relationship) is never loaded.
+    fn drawing(
+        &mut self,
+        reader: &mut Reader<'_>,
+        mce: &mut Processor,
+        tag: StartTag<'_>,
+        run: u32,
+    ) -> Result<()> {
+        let offset = tag.offset();
+        let element = self.c.capture(reader, mce, tag)?;
+        let document = &*self.c.document;
+        let embed = drawing::picture(document.element(element), &document.names)
+            .and_then(|picture| drawing::embedded_image(picture, &document.names))
+            .map(str::to_owned);
+        let image = match embed {
+            Some(id) => self.image(&id, offset)?,
+            None => None,
+        };
+        self.push_item(run, RunItem::Drawing { element, image })
+    }
+
+    /// The image the relationship `id` of the part leads to, read the first time a
+    /// picture of the package shows it. One the part or the package does not have, or
+    /// that cannot be read, is reported once per relationship of the part, and the
+    /// pictures show none; only a limit of the package stops the reading.
+    fn image(&mut self, id: &str, offset: usize) -> Result<Option<u32>> {
+        if let Some(&image) = self.images.get(id) {
+            return Ok(image);
+        }
+        let image = self.read_image(id, offset)?;
+        self.images.insert(id.into(), image);
+        Ok(image)
+    }
+
+    fn read_image(&mut self, id: &str, offset: usize) -> Result<Option<u32>> {
+        let Some(relationship) = self.part.relationships().get(id) else {
+            let id = id.to_owned();
+            self.c
+                .diagnose(offset, DiagnosticKind::UnexpectedContent, || {
+                    format!(
+                        "a picture names the relationship {}, which the part does not have",
+                        shorten(&id)
+                    )
+                });
+            return Ok(None);
+        };
+        // None for an external target, which is never loaded.
+        let Some(name) = relationship.target_part() else {
+            return Ok(None);
+        };
+        if let Some(&index) = self.c.document.image_parts.get(name.as_str()) {
+            return Ok(Some(index));
+        }
+        let Some(part) = self.part.package().part(&name) else {
+            self.c
+                .diagnose(offset, DiagnosticKind::UnexpectedContent, || {
+                    format!(
+                        "a picture shows the image {}, which the package does not have",
+                        shorten(name.as_str())
+                    )
+                });
+            return Ok(None);
+        };
+        let bytes = match part.read() {
+            Ok(bytes) => bytes,
+            Err(err @ officewright_opc::Error::LimitExceeded { .. }) => return Err(err.into()),
+            Err(err) => {
+                self.c
+                    .diagnose(offset, DiagnosticKind::UnexpectedContent, || {
+                        format!("a picture's image cannot be read: {err}")
+                    });
+                return Ok(None);
+            }
+        };
+        let document = &mut *self.c.document;
+        let index = document.images.len() as u32;
+        document.images.push(ImageData {
+            content_type: part.content_type().unwrap_or_default().into(),
+            bytes: bytes.into(),
+        });
+        document.image_parts.insert(name.as_str().into(), index);
+        Ok(Some(index))
     }
 
     fn is_w(&self, tag: &StartTag<'_>) -> bool {

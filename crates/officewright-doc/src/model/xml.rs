@@ -198,6 +198,21 @@ impl<'d> Element<'d> {
         })
     }
 
+    /// The text directly in the element, not in its children.
+    pub(crate) fn text(self) -> String {
+        let mut text = String::new();
+        let mut depth = 0usize;
+        for token in self.tokens.iter().skip(1) {
+            match token {
+                Token::Start { .. } => depth += 1,
+                Token::End => depth = depth.saturating_sub(1),
+                Token::Text(part) if depth == 0 => text.push_str(part),
+                Token::Text(_) | Token::Comment(_) | Token::ProcessingInstruction { .. } => {}
+            }
+        }
+        text
+    }
+
     /// The child elements, each with everything in it.
     pub(crate) fn children(self) -> impl Iterator<Item = Element<'d>> + 'd {
         let (tokens, strings) = (self.tokens, self.strings);

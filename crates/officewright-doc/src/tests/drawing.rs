@@ -1,0 +1,386 @@
+//! Drawings: pictures in the line and floating, and their images.
+
+use super::*;
+
+const WP: &str = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
+const A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+const PIC: &str = "http://schemas.openxmlformats.org/drawingml/2006/picture";
+const PICTURE_URI: &str = "http://schemas.openxmlformats.org/drawingml/2006/picture";
+const IMAGE: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
+
+/// The `a:graphic` of a picture of the image of relationship `id`, with these extra
+/// children of `pic:blipFill` and of `pic:spPr`.
+pub(super) fn graphic(id: &str, fill: &str, shape: &str) -> String {
+    format!(
+        r#"<a:graphic xmlns:a="{A}"><a:graphicData uri="{PICTURE_URI}"><pic:pic xmlns:pic="{PIC}"><pic:nvPicPr><pic:cNvPr id="0" name="p"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="{id}"/>{fill}<a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr>{shape}<a:prstGeom prst="rect"/></pic:spPr></pic:pic></a:graphicData></a:graphic>"#
+    )
+}
+
+/// A run with a picture in the line, 144 by 72 pt, of the image of relationship `id`.
+pub(super) fn inline_picture(id: &str) -> String {
+    format!(
+        r#"<w:r><w:drawing><wp:inline xmlns:wp="{WP}" distT="0" distB="0" distL="0" distR="0"><wp:extent cx="1828800" cy="914400"/><wp:effectExtent l="0" t="25400" r="25400" b="0"/><wp:docPr id="1" name="Picture 1"/>{}</wp:inline></w:drawing></w:r>"#,
+        graphic(
+            id,
+            r#"<a:srcRect l="10000" b="-5000"/>"#,
+            r#"<a:xfrm rot="-5400000" flipH="1"><a:off x="0" y="0"/><a:ext cx="1828800" cy="914400"/></a:xfrm>"#
+        )
+    )
+}
+
+/// A run with a floating picture, 100 by 40 pt, of the image of relationship `id`: on
+/// the right of the page, 10 pt above the top margin (the fallback of a position Word
+/// 2010 writes in percent), behind the text, with square wrapping.
+pub(super) fn floating_picture(id: &str) -> String {
+    format!(
+        r#"<w:r><w:drawing><wp:anchor xmlns:wp="{WP}" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing" distT="0" distB="0" distL="114300" distR="-5" simplePos="0" relativeHeight="251659264" behindDoc="1" locked="0" layoutInCell="0" allowOverlap="false"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="page"><wp:align>right</wp:align></wp:positionH><mc:AlternateContent><mc:Choice Requires="wp14"><wp:positionV relativeFrom="margin"><wp14:pctPosVOffset>50000</wp14:pctPosVOffset></wp:positionV></mc:Choice><mc:Fallback><wp:positionV relativeFrom="topMargin"><wp:posOffset>-127000</wp:posOffset></wp:positionV></mc:Fallback></mc:AlternateContent><wp:extent cx="1270000" cy="508000"/><wp:effectExtent l="1in" t="0" r="0" b="0"/><wp:wrapSquare wrapText="bothSides"/><wp:docPr id="2" name="Logo"/>{}</wp:anchor></w:drawing></w:r>"#,
+        graphic(id, "", "")
+    )
+}
+
+/// A run with a floating picture of the image of relationship `id` that writes nothing
+/// it may leave out: no attributes on `wp:anchor`, positions without `relativeFrom`, no
+/// wrapping.
+pub(super) fn bare_floating_picture(id: &str) -> String {
+    format!(
+        r#"<w:r><w:drawing><wp:anchor xmlns:wp="{WP}"><wp:simplePos x="0" y="0"/><wp:positionH><wp:posOffset>12700</wp:posOffset></wp:positionH><wp:positionV><wp:posOffset>25400</wp:posOffset></wp:positionV><wp:extent cx="12700" cy="12700"/><wp:docPr id="4" name="Bare"/>{}</wp:anchor></w:drawing></w:r>"#,
+        graphic(id, "", "")
+    )
+}
+
+/// A run with a picture in the line whose width is negative.
+pub(super) fn picture_of_negative_width(id: &str) -> String {
+    format!(
+        r#"<w:r><w:drawing><wp:inline xmlns:wp="{WP}"><wp:extent cx="-12700" cy="12700"/><wp:docPr id="5" name="Negative"/>{}</wp:inline></w:drawing></w:r>"#,
+        graphic(id, "", "")
+    )
+}
+
+/// A run with a group in the line: a picture among its parts is not the drawing's.
+pub(super) fn group(id: &str) -> String {
+    let wpg = "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup";
+    format!(
+        r#"<w:r><w:drawing><wp:inline xmlns:wp="{WP}"><wp:extent cx="12700" cy="12700"/><wp:docPr id="3" name="Group"/><a:graphic xmlns:a="{A}"><a:graphicData uri="{wpg}"><wpg:wgp xmlns:wpg="{wpg}"><pic:pic xmlns:pic="{PIC}"><pic:blipFill><a:blip r:embed="{id}"/></pic:blipFill></pic:pic></wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"#
+    )
+}
+
+/// The relationships of the main part to the images of the tests: a PNG, a JPEG the
+/// package calls `application/octet-stream`, an EMF, a GIF without a content type, an
+/// image the package does not have, a linked image, and a header that shows the PNG
+/// too.
+pub(super) fn image_relationships() -> String {
+    let image = |id: &str, target: &str| {
+        format!(r#"<Relationship Id="{id}" Type="{IMAGE}" Target="{target}"/>"#)
+    };
+    [
+        image("rIdPng", "media/image1.png"),
+        image("rIdJpeg", "media/photo.bin"),
+        image("rIdEmf", "media/image3.emf"),
+        image("rIdGif", "media/animation"),
+        image("rIdGone", "media/gone.png"),
+        r#"<Relationship Id="rIdLink" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="http://example.com/a.png" TargetMode="External"/>"#.to_owned(),
+        r#"<Relationship Id="rIdHeader" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>"#.to_owned(),
+    ]
+    .concat()
+}
+
+/// A document with the images of [`image_relationships`] and `body`, whose last section
+/// has the header, which shows the PNG through a relationship of its own.
+pub(super) fn with_images(body: &str) -> Document {
+    Document::from_bytes(images_package(body)).unwrap()
+}
+
+/// The package [`with_images`] opens.
+fn images_package(body: &str) -> Vec<u8> {
+    let header = format!(
+        r#"<w:hdr xmlns:w="{W}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:p>{}</w:p></w:hdr>"#,
+        inline_picture("rId1")
+    );
+    let header_rels = format!(
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{IMAGE}" Target="media/image1.png"/></Relationships>"#
+    );
+    let body = format!(
+        r#"{body}<w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/></w:sectPr>"#
+    );
+    files_package(
+        &body,
+        &image_relationships(),
+        &[
+            ("word/media/image1.png", PNG_BYTES),
+            ("word/media/photo.bin", JPEG_BYTES),
+            ("word/media/image3.emf", b"\x01\0\0\0emf"),
+            ("word/media/animation", b"GIF89a\x01\0\x01\0"),
+            ("word/header1.xml", header.as_bytes()),
+            ("word/_rels/header1.xml.rels", header_rels.as_bytes()),
+        ],
+        r#"<Default Extension="png" ContentType="image/png"/><Default Extension="bin" ContentType="application/octet-stream"/><Default Extension="emf" ContentType="image/x-emf"/>"#,
+    )
+}
+
+/// The drawings of the body's runs, in order.
+fn drawings(document: &Document) -> Vec<Drawing<'_>> {
+    super::format::paragraphs(document)
+        .into_iter()
+        .flat_map(|paragraph| paragraph.runs())
+        .flat_map(|run| run.content())
+        .filter_map(|item| match item {
+            RunContent::Drawing(drawing) => Some(drawing),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn reads_pictures_in_the_line_and_floating() {
+    let body = format!(
+        "<w:p>{}{}{}</w:p>",
+        inline_picture("rIdPng"),
+        floating_picture("rIdPng"),
+        group("rIdJpeg")
+    );
+    let document = with_images(&body);
+    let drawings = drawings(&document);
+    assert_eq!(drawings.len(), 3);
+
+    let inline = drawings[0];
+    assert!(inline.is_inline());
+    assert_eq!(
+        (inline.width(), inline.height()),
+        (Some(Pt(144.0)), Some(Pt(72.0)))
+    );
+    let extent = inline.effect_extent();
+    assert_eq!(
+        (extent.left(), extent.top(), extent.right(), extent.bottom()),
+        (Pt(0.0), Pt(2.0), Pt(2.0), Pt(0.0))
+    );
+    assert_eq!(inline.anchor(), None);
+    let picture = inline.picture().unwrap();
+    let crop = picture.crop().unwrap();
+    assert_eq!(
+        (crop.left(), crop.top(), crop.right(), crop.bottom()),
+        (0.1, 0.0, 0.0, -0.05)
+    );
+    assert_eq!(picture.rotation(), -90.0);
+    assert!(picture.flip_horizontal());
+    assert!(!picture.flip_vertical());
+    let image = picture.image().unwrap();
+    assert_eq!(
+        (image.content_type(), image.bytes()),
+        ("image/png", PNG_BYTES)
+    );
+
+    let floating = drawings[1];
+    assert!(!floating.is_inline());
+    assert_eq!(
+        (floating.width(), floating.height()),
+        (Some(Pt(100.0)), Some(Pt(40.0)))
+    );
+    // A universal measure, as Strict writes ST_Coordinate.
+    assert_eq!(floating.effect_extent().left(), Pt(72.0));
+    let anchor = floating.anchor().unwrap();
+    assert_eq!(
+        anchor.horizontal_reference(),
+        Some(HorizontalReference::Page)
+    );
+    assert_eq!(
+        anchor.horizontal_align(),
+        Some(AnchorHorizontalAlign::Right)
+    );
+    assert_eq!(anchor.horizontal_offset(), None);
+    // The fallback, as the reader does not implement wp14.
+    assert_eq!(
+        anchor.vertical_reference(),
+        Some(VerticalReference::TopMargin)
+    );
+    assert_eq!(anchor.vertical_align(), None);
+    assert_eq!(anchor.vertical_offset(), Some(Pt(-10.0)));
+    assert_eq!(anchor.wrap(), Some(WrapKind::Square));
+    assert!(anchor.behind_text());
+    assert!(!anchor.layout_in_cell());
+    assert!(!anchor.allow_overlap());
+    assert_eq!(anchor.z_order(), 251_659_264);
+    let distances = anchor.distances();
+    // distR is unsigned: -5 is not a distance.
+    assert_eq!(
+        (
+            distances.left(),
+            distances.top(),
+            distances.right(),
+            distances.bottom()
+        ),
+        (Pt(9.0), Pt(0.0), Pt(0.0), Pt(0.0))
+    );
+    assert!(floating.picture().unwrap().crop().is_none());
+
+    // A group shows no picture of its own, and the image of the picture among its parts
+    // is not read.
+    assert!(drawings[2].picture().is_none());
+    assert!(drawings[2].is_inline());
+
+    // The PNG is read once for both pictures and the header's.
+    assert_eq!(document.images.len(), 1);
+    let header = document
+        .sections()
+        .next()
+        .unwrap()
+        .header(HeaderFooterKind::Default)
+        .unwrap();
+    let Block::Paragraph(paragraph) = header.blocks().next().unwrap() else {
+        panic!("a paragraph");
+    };
+    let shown = paragraph
+        .runs()
+        .flat_map(|run| run.content())
+        .find_map(|item| match item {
+            RunContent::Drawing(drawing) => drawing.picture()?.image(),
+            _ => None,
+        })
+        .unwrap();
+    assert!(std::ptr::eq(shown.bytes(), image.bytes()));
+    assert!(
+        document.diagnostics().is_empty(),
+        "{:?}",
+        document.diagnostics()
+    );
+}
+
+#[test]
+fn reads_pictures_whose_image_is_missing_or_linked() {
+    let body = format!(
+        "<w:p>{}{}{}{}</w:p>",
+        inline_picture("rIdNone"),
+        inline_picture("rIdGone"),
+        inline_picture("rIdLink"),
+        inline_picture("rIdJpeg")
+    );
+    let document = with_images(&body);
+    let drawings = drawings(&document);
+    let images: Vec<Option<&str>> = drawings
+        .iter()
+        .map(|drawing| Some(drawing.picture()?.image()?.content_type()))
+        .collect();
+    // The image the package calls octet-stream is still read; the layout knows it by
+    // its signature.
+    assert_eq!(images, [None, None, None, Some("application/octet-stream")]);
+    let messages: Vec<String> = document
+        .diagnostics()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert!(
+        messages[0]
+            .ends_with("a picture names the relationship rIdNone, which the part does not have")
+    );
+    assert!(messages[1].ends_with(
+        "a picture shows the image /word/media/gone.png, which the package does not have"
+    ));
+}
+
+#[test]
+fn reads_what_a_floating_picture_leaves_out_and_a_negative_size() {
+    let body = format!(
+        "<w:p>{}{}</w:p>",
+        bare_floating_picture("rIdPng"),
+        picture_of_negative_width("rIdPng")
+    );
+    let document = with_images(&body);
+    let drawings = drawings(&document);
+    let anchor = drawings[0].anchor().unwrap();
+    assert_eq!(
+        (anchor.horizontal_reference(), anchor.horizontal_offset()),
+        (None, Some(Pt(1.0)))
+    );
+    assert_eq!(
+        (anchor.vertical_reference(), anchor.vertical_offset()),
+        (None, Some(Pt(2.0)))
+    );
+    assert_eq!(anchor.wrap(), None);
+    // On when not written (ECMA-376 Part 1, §20.4.2.3), the others off.
+    assert!(anchor.layout_in_cell() && anchor.allow_overlap());
+    assert!(!anchor.behind_text());
+    assert_eq!(anchor.z_order(), 0);
+    assert_eq!(anchor.distances(), Offsets::default());
+    // ST_PositiveCoordinate: a negative width is no width.
+    assert_eq!(
+        (drawings[1].width(), drawings[1].height()),
+        (None, Some(Pt(1.0)))
+    );
+}
+
+#[test]
+fn reports_an_image_that_cannot_be_read_once_and_reads_the_rest() {
+    // Two pictures of one damaged image: the package's check of the entry fails, which
+    // is reported once; the document still opens.
+    let body = format!(
+        "<w:p>{}{}{}</w:p>",
+        inline_picture("rIdGif"),
+        inline_picture("rIdGif"),
+        inline_picture("rIdPng")
+    );
+    let mut package = images_package(&body);
+    let at = package
+        .windows(6)
+        .position(|window| window == b"GIF89a")
+        .unwrap();
+    package[at + 6] ^= 0xFF;
+    let document = Document::from_bytes(package).unwrap();
+    let images: Vec<bool> = drawings(&document)
+        .iter()
+        .map(|drawing| drawing.picture().unwrap().image().is_some())
+        .collect();
+    assert_eq!(images, [false, false, true]);
+    let messages: Vec<String> = document
+        .diagnostics()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(
+        messages[0].contains("a picture's image cannot be read: ")
+            && messages[0].contains("word/media/animation"),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn stops_at_a_limit_of_the_package_while_reading_images() {
+    // The only picture is the header's, so its image is the last part read: below the
+    // least total size of the parts read that opens the document, the limit stops the
+    // reading rather than being reported as an image that cannot be read.
+    let package = images_package("<w:p/>");
+    let opened = |total| {
+        LoadOptions::new()
+            .with_limits(Limits::new().with_max_total_size(total))
+            .open_bytes(package.clone())
+    };
+    let (mut low, mut high) = (0, 1 << 20);
+    while low + 1 < high {
+        let middle = (low + high) / 2;
+        if opened(middle).is_ok() {
+            high = middle;
+        } else {
+            low = middle;
+        }
+    }
+    let err = opened(high - 1).unwrap_err();
+    assert!(matches!(err, Error::LimitExceeded { .. }), "{err}");
+    let document = opened(high).unwrap();
+    let header = document
+        .sections()
+        .next()
+        .unwrap()
+        .header(HeaderFooterKind::Default)
+        .unwrap();
+    let Block::Paragraph(paragraph) = header.blocks().next().unwrap() else {
+        panic!("a paragraph");
+    };
+    let image = paragraph
+        .runs()
+        .flat_map(|run| run.content())
+        .find_map(|item| match item {
+            RunContent::Drawing(drawing) => drawing.picture()?.image(),
+            _ => None,
+        });
+    assert_eq!(image.map(Image::bytes), Some(PNG_BYTES));
+}

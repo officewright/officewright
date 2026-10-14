@@ -370,7 +370,7 @@ fn lists_what_it_leaves_out() {
     assert_eq!(
         left_out,
         [
-            "sections[0].blocks[0].inlines: a drawing is left out (w:drawing)",
+            "sections[0].blocks[0].inlines: a drawing that shows no picture (a shape, chart or group) is left out",
             "sections[0].blocks[0].inlines: a reference to footnote 1, which the document does not have, is left out",
             "sections[0].blocks[0].inlines: a reference to endnote 2, which the document does not have, is left out",
             "sections[0].blocks[0].inlines: an absolute position tab is left out (w:ptab)",
@@ -2533,4 +2533,164 @@ fn bounds_a_note_s_tables_by_the_tables_around_its_reference() {
     // thread's stack.
     let (depth, _) = note_depth(83, 83);
     assert_eq!(depth, 17);
+}
+
+#[test]
+fn translates_pictures_with_their_images() {
+    use super::drawing::{
+        bare_floating_picture, floating_picture, group, inline_picture, picture_of_negative_width,
+        with_images,
+    };
+    let body = format!(
+        "<w:p>{}{}{}{}{}{}{}{}{}{}</w:p>",
+        inline_picture("rIdPng"),
+        floating_picture("rIdPng"),
+        inline_picture("rIdJpeg"),
+        inline_picture("rIdEmf"),
+        inline_picture("rIdGif"),
+        inline_picture("rIdGone"),
+        inline_picture("rIdNone"),
+        group("rIdJpeg"),
+        bare_floating_picture("rIdPng"),
+        picture_of_negative_width("rIdPng"),
+    );
+    let translation = translate(&with_images(&body));
+    let ir = translation.document();
+    let picture = |inline: &ir::Inline| -> ir::Picture {
+        let content = match inline {
+            ir::Inline::Object(object) => object.content(),
+            ir::Inline::Anchored(object) => object.content(),
+            other => panic!("not an object: {other:?}"),
+        };
+        match content {
+            ir::ObjectContent::Picture(picture) => *picture,
+            other => panic!("not a picture: {other:?}"),
+        }
+    };
+    let image = |inline: &ir::Inline| ir.image(picture(inline).image()).unwrap();
+    let inlines = paragraphs(&translation)[0].inlines();
+    // The group and the picture without a width are left out.
+    assert_eq!(inlines.len(), 8);
+
+    let ir::Inline::Object(object) = &inlines[0] else {
+        panic!("a picture in the line");
+    };
+    assert_eq!(object.size(), ir::Size::new(Pt(144.0), Pt(72.0)));
+    assert_eq!(
+        object.effect_extent(),
+        ir::Insets::default().with_top(Pt(2.0)).with_right(Pt(2.0))
+    );
+    let shown = picture(&inlines[0]);
+    assert_eq!(
+        shown.crop(),
+        Some(ir::Crop::default().with_left(0.1).with_bottom(-0.05))
+    );
+    assert_eq!(shown.rotation(), -90.0);
+    assert!(shown.flip_horizontal() && !shown.flip_vertical());
+    assert_eq!(image(&inlines[0]).format(), &ir::ImageFormat::Png);
+    assert_eq!(&**image(&inlines[0]).bytes(), PNG_BYTES);
+
+    let ir::Inline::Anchored(floating) = &inlines[1] else {
+        panic!("a floating picture");
+    };
+    assert_eq!(floating.size(), ir::Size::new(Pt(100.0), Pt(40.0)));
+    assert_eq!(
+        floating.horizontal(),
+        ir::HorizontalAnchor::default()
+            .with_relative_to(ir::HorizontalReference::Page)
+            .with_placement(ir::HorizontalPlacement::Align(
+                ir::AnchorHorizontalAlign::Right
+            ))
+    );
+    assert_eq!(
+        floating.vertical(),
+        ir::VerticalAnchor::default()
+            .with_relative_to(ir::VerticalReference::TopMargin)
+            .with_placement(ir::VerticalPlacement::Offset(Pt(-10.0)))
+    );
+    assert_eq!(floating.wrap(), ir::Wrap::Square);
+    assert!(floating.behind_text());
+    assert!(!floating.layout_in_cell() && !floating.allow_overlap());
+    assert_eq!(floating.z_order(), 251_659_264);
+    assert_eq!(
+        floating.distances(),
+        ir::Insets::default().with_left(Pt(9.0))
+    );
+    assert_eq!(
+        floating.effect_extent(),
+        ir::Insets::default().with_left(Pt(72.0))
+    );
+    assert_eq!(
+        picture(&inlines[1]),
+        ir::Picture::new(picture(&inlines[0]).image())
+    );
+
+    // Formats by their signatures, whatever the package calls them, else by the content
+    // type.
+    assert_eq!(image(&inlines[2]).format(), &ir::ImageFormat::Jpeg);
+    assert_eq!(
+        image(&inlines[3]).format(),
+        &ir::ImageFormat::Other("emf".into())
+    );
+    assert_eq!(
+        image(&inlines[4]).format(),
+        &ir::ImageFormat::Other("gif".into())
+    );
+    // Pictures whose image the package does not have keep their frames, with one empty
+    // image.
+    assert_eq!(
+        image(&inlines[5]).format(),
+        &ir::ImageFormat::Other("missing".into())
+    );
+    assert!(image(&inlines[5]).bytes().is_empty());
+    assert_eq!(picture(&inlines[5]).image(), picture(&inlines[6]).image());
+    let ids: std::collections::HashSet<ir::ImageId> = inlines
+        .iter()
+        .map(|inline| picture(inline).image())
+        .collect();
+    assert_eq!(ids.len(), 5);
+
+    // Where a floating picture leaves them out: from the column and the paragraph, no
+    // wrapping, in the cell and overlapping.
+    let ir::Inline::Anchored(bare) = &inlines[7] else {
+        panic!("a floating picture");
+    };
+    assert_eq!(
+        (bare.horizontal(), bare.vertical()),
+        (
+            ir::HorizontalAnchor::default()
+                .with_relative_to(ir::HorizontalReference::Column)
+                .with_placement(ir::HorizontalPlacement::Offset(Pt(1.0))),
+            ir::VerticalAnchor::default()
+                .with_relative_to(ir::VerticalReference::Paragraph)
+                .with_placement(ir::VerticalPlacement::Offset(Pt(2.0)))
+        )
+    );
+    assert_eq!(bare.wrap(), ir::Wrap::None);
+    assert!(bare.layout_in_cell() && bare.allow_overlap() && !bare.behind_text());
+
+    // The header's picture shows the image the body's do.
+    let header = ir.sections()[0].headers().primary();
+    let ir::Block::Paragraph(paragraph) = &header[0] else {
+        panic!("a paragraph");
+    };
+    assert_eq!(
+        picture(&paragraph.inlines()[0]).image(),
+        picture(&inlines[0]).image()
+    );
+
+    let left_out: Vec<&str> = translation
+        .left_out()
+        .iter()
+        .map(LeftOut::message)
+        .collect();
+    assert_eq!(
+        left_out,
+        [
+            "a picture's image is not in the package: its frame is left empty",
+            "a picture's image is not in the package: its frame is left empty",
+            "a drawing that shows no picture (a shape, chart or group) is left out",
+            "a picture without a size is left out",
+        ]
+    );
 }

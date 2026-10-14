@@ -116,8 +116,23 @@ fuzz_target!(|data: &[u8]| {
                         Inline::Run(run) => {
                             let _ = run.properties();
                             for item in run.content() {
-                                if let RunContent::Other(opaque) = item {
-                                    check(opaque);
+                                match item {
+                                    RunContent::Other(opaque) => check(opaque),
+                                    RunContent::Drawing(drawing) => {
+                                        let _ = (drawing.is_inline(), drawing.width());
+                                        let _ = (drawing.height(), drawing.effect_extent());
+                                        let _ = drawing.anchor();
+                                        if let Some(picture) = drawing.picture() {
+                                            let _ = (picture.crop(), picture.rotation());
+                                            let _ = (
+                                                picture.flip_horizontal(),
+                                                picture.flip_vertical(),
+                                            );
+                                            let _ =
+                                                picture.image().map(|image| image.bytes().len());
+                                        }
+                                    }
+                                    _ => {}
                                 }
                             }
                         }

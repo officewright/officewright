@@ -7,6 +7,7 @@
 //! listed in [`Translation::left_out`], so that users know why the output differs from
 //! Word's.
 
+mod drawing;
 mod inline;
 mod list;
 mod notes;
@@ -213,6 +214,11 @@ struct Translator<'a> {
     in_note: bool,
     /// How many notes the IR has.
     notes_added: usize,
+    /// The IR image of each image of the package shown so far, by its place among the
+    /// document's images.
+    images: HashMap<u32, ir::ImageId>,
+    /// The empty image of pictures whose image the package does not have.
+    missing_image: Option<ir::ImageId>,
 }
 
 impl<'a> Translator<'a> {
@@ -234,6 +240,8 @@ impl<'a> Translator<'a> {
             notes: HashMap::new(),
             in_note: false,
             notes_added: 0,
+            images: HashMap::new(),
+            missing_image: None,
         }
     }
 
