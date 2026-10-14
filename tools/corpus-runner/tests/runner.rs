@@ -475,7 +475,8 @@ fn the_gate_refuses_a_branch_report_made_without_the_references() -> io::Result<
 
 /// Whether Word's font table is complete reaches the report, and the gate reads it from
 /// there (#133): an export without the runs gives no class, a complete one gives a class.
-/// Through pdftotext and pdftoppm, which check.sh requires on Linux and macOS.
+/// Scoring needs poppler and qpdf, which check.sh requires on Linux and macOS and the MSRV
+/// job installs.
 #[cfg(unix)]
 #[test]
 fn the_report_says_whether_word_s_fonts_are_all_known() -> io::Result<()> {

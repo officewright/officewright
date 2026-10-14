@@ -60,10 +60,10 @@ pub struct Scores {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub word_fonts: Option<Vec<String>>,
     /// Whether `word_fonts` holds every font Word used: the export read the runs of
-    /// formatting and was not cut short. Otherwise it has at most each paragraph's first
-    /// character, and none of the paragraphs after a time budget ran out, so other fonts may
-    /// be missing. A report written before this field
-    /// existed counts as not complete.
+    /// formatting and was not cut short. Otherwise it lacks the runs, which leaves only the
+    /// font of each paragraph's first character, or the paragraphs after its time budget ran
+    /// out, so other fonts may be missing. A report written before this field existed counts
+    /// as not complete.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub word_fonts_complete: Option<bool>,
 }
