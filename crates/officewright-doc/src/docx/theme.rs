@@ -5,12 +5,12 @@
 //! script font without its required attribute reads as not set. An element the schema
 //! allows once is ignored after the first, with a diagnostic, as in `w:sectPr`.
 //! Diagnostics name the position of `a:themeElements`. An `mc:AlternateContent`
-//! directly under `a:theme` is kept whole, so a scheme in it is not read; no document of
-//! the corpus has one.
+//! directly under `a:theme` is kept whole, and the `a:themeElements` in the branch it
+//! takes is read.
 
 use std::collections::HashSet;
 
-use officewright_opc::mce::{Disposition, Processor};
+use officewright_opc::mce::Processor;
 use officewright_opc::xml::{Event, Input};
 
 use super::capture::{Budget, Capture, Notes};
@@ -50,7 +50,7 @@ pub(super) fn read(
         match event {
             Event::Start(tag) => {
                 c.at = tag.offset();
-                let disposition = mce.start(&reader, &tag).map_err(opc)?;
+                mce.start(&reader, &tag).map_err(opc)?;
                 if !in_root {
                     if !a.iter().any(|&namespace| tag.name().is(namespace, "theme")) {
                         let message = format!(
@@ -64,23 +64,23 @@ pub(super) fn read(
                     continue;
                 }
                 let offset = tag.offset();
-                let understood = disposition == Disposition::Understood
-                    && tag.name().namespace().is_some_and(|ns| a.contains(&ns));
-                let local = tag.name().local();
-                // Every element is kept with the document's tokens for writing.
+                // Every element is kept with the document's tokens for writing. An
+                // mc:AlternateContent is kept whole, and the children of the branch it
+                // takes are read in its place.
                 let span = c.capture(&mut reader, &mut mce, tag)?;
-                if understood && local == "themeElements" {
-                    if elements_read {
-                        let mut notes = c.notes();
-                        notes.add(|| "a second a:themeElements is ignored".into());
-                        c.diagnose_notes(offset, notes);
+                for span in c.through_alternates(span) {
+                    if c.document.element(span).local_in(&names.a) != Some("themeElements") {
                         continue;
                     }
-                    elements_read = true;
                     let mut notes = c.notes();
-                    c.check_in(["a:", ""], span, offset, |element, report| {
-                        theme_elements(&mut theme, element, &names, report, &mut notes);
-                    });
+                    if elements_read {
+                        notes.add(|| "a second a:themeElements is ignored".into());
+                    } else {
+                        elements_read = true;
+                        c.check_in(["a:", ""], span, offset, |element, report| {
+                            theme_elements(&mut theme, element, &names, report, &mut notes);
+                        });
+                    }
                     c.diagnose_notes(offset, notes);
                 }
             }
@@ -102,7 +102,7 @@ fn once<'d>(
 ) -> Vec<(&'d str, Element<'d>)> {
     let mut seen: Vec<&str> = Vec::new();
     let mut children = Vec::new();
-    for child in element.children_through_fallback(names.mc) {
+    for child in element.children_through_alternates(names.mc) {
         let Some(local) = child.local_in(&names.a) else {
             continue;
         };
@@ -181,8 +181,7 @@ fn color_scheme(
         };
         let position = position(index);
         let color = child
-            .children_through_fallback(names.mc)
-            .into_iter()
+            .children_through_alternates(names.mc)
             .find_map(|model| scheme_color(model, names, report));
         if let Some(slot) = scheme.colors.get_mut(position) {
             *slot = color;

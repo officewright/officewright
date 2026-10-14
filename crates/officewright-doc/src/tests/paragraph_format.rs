@@ -1499,8 +1499,8 @@ fn a_hanging_indent_of_the_lowest_number_saturates() {
 
 #[test]
 fn reads_the_paragraph_style_as_the_paragraph_properties_do() {
-    // A w:pStyle in mc:AlternateContent counts, through its fallback, and of two the
-    // last wins, as Paragraph::properties reads them.
+    // A w:pStyle in mc:AlternateContent counts, through the branch taken (#116), and of
+    // two the last wins, as Paragraph::properties reads them.
     let styles = [
         defaults(""),
         style("paragraph", "Centred", None, r#"<w:jc w:val="center"/>"#),
@@ -1509,6 +1509,8 @@ fn reads_the_paragraph_style_as_the_paragraph_properties_do() {
     .concat();
     let body = [
         r#"<w:p><w:pPr><mc:AlternateContent><mc:Choice Requires="w99"><w:pStyle w:val="Right"/></mc:Choice><mc:Fallback><w:pStyle w:val="Centred"/></mc:Fallback></mc:AlternateContent></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
+        // A choice that requires only w is taken.
+        r#"<w:p><w:pPr><mc:AlternateContent><mc:Choice Requires="w"><w:pStyle w:val="Right"/></mc:Choice><mc:Fallback><w:pStyle w:val="Centred"/></mc:Fallback></mc:AlternateContent></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
         r#"<w:p><w:pPr><w:pStyle w:val="Centred"/><w:pStyle w:val="Right"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
         // The last w:pStyle names no style: the paragraph has the default style.
         r#"<w:p><w:pPr><w:pStyle w:val="Centred"/><w:pStyle/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
@@ -1534,6 +1536,7 @@ fn reads_the_paragraph_style_as_the_paragraph_properties_do() {
         [
             (Some("Centred".to_owned()), Justification::Center),
             (Some("Right".to_owned()), Justification::Right),
+            (Some("Right".to_owned()), Justification::Right),
             (None, Justification::Start),
             (Some("Right".to_owned()), Justification::Right),
         ]
@@ -1541,23 +1544,173 @@ fn reads_the_paragraph_style_as_the_paragraph_properties_do() {
 }
 
 #[test]
-fn reads_the_style_of_a_paragraph_once_for_its_runs() {
-    // Reading a paragraph's style walks its w:pPr, which can be long: the runs of a
-    // paragraph share one reading.
+fn reads_the_style_of_each_paragraph_once_for_the_document() {
+    // Issue #143: Run::format, and a Formats asked about another paragraph between two
+    // runs of one paragraph, walked the paragraph's whole w:pPr for every run. Each
+    // paragraph's style is now worked out once, when the document is read.
     let styles = [
         defaults(""),
         style("paragraph", "Centred", None, r#"<w:jc w:val="center"/>"#),
     ]
     .concat();
+    let filler = "<w:x/>".repeat(10_000);
     let runs = r#"<w:r><w:t>x</w:t></w:r>"#.repeat(300);
-    let body =
-        format!(r#"<w:p><w:pPr><w:pStyle w:val="Centred"/></w:pPr>{runs}</w:p><w:p>{runs}</w:p>"#);
+    let body = format!(
+        r#"<w:p><w:pPr><w:pStyle w:val="Centred"/>{filler}</w:pPr>{runs}</w:p><w:p><w:pPr>{filler}<w:pStyle w:val="Centred"/><w:pStyle w:val="Missing"/></w:pPr>{runs}</w:p>"#
+    );
     let document = build(&body, &styles, None);
+    let [first, second] = paragraphs(&document)[..] else {
+        panic!("two paragraphs");
+    };
+    crate::model::xml::STEPS.set(0);
     let mut formats = document.formats();
-    for paragraph in paragraphs(&document) {
-        for run in paragraph.runs() {
-            assert_eq!(formats.run(run), run.format());
-        }
+    let mut calls = 0;
+    for (a, b) in first.runs().zip(second.runs()) {
+        // Alternating between the paragraphs, and each run on its own.
+        assert_eq!(formats.run(a), a.format());
+        assert_eq!(formats.run(b), b.format());
+        calls += 4;
     }
-    assert_eq!(formats.work().paragraph_styles, 2);
+    let steps = crate::model::xml::STEPS.get();
+    // A walk of either w:pPr per run would take 20,000 steps or more each time; a run's
+    // formatting now walks only the few elements of the defaults and the style.
+    assert!(steps < calls * 100, "{steps} steps for {calls} calls");
+    // The last w:pStyle counts, and one naming no style leaves the default style.
+    assert_eq!(formats.paragraph(first).style(), Some("Centred"));
+    assert_eq!(formats.paragraph(second).style(), None);
+}
+
+#[test]
+fn a_list_label_takes_the_paragraph_style_and_the_marks_character_style() {
+    // Numbered headings take their labels' look from the paragraph style; the level
+    // lies over it and sets its on/off values.
+    let numbering = r#"<w:abstractNum w:abstractNumId="10"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:rPr><w:b w:val="0"/></w:rPr></w:lvl><w:lvl w:ilvl="1"><w:numFmt w:val="bullet"/><w:lvlText w:val="o"/><w:rPr><w:sz w:val="16"/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num>"#;
+    let styles = [
+        defaults(""),
+        r#"<w:style w:type="paragraph" w:styleId="Heading"><w:name w:val="Heading"/><w:rPr><w:b/><w:sz w:val="26"/></w:rPr></w:style>"#.to_owned(),
+        r#"<w:style w:type="character" w:styleId="Strong"><w:name w:val="Strong"/><w:rPr><w:u w:val="single"/></w:rPr></w:style>"#.to_owned(),
+    ]
+    .concat();
+    let item = |level: i64, r_pr: &str| {
+        format!(
+            r#"<w:numPr><w:ilvl w:val="{level}"/><w:numId w:val="1"/></w:numPr><w:rPr>{r_pr}</w:rPr>"#
+        )
+    };
+    let body = [
+        // The style's size and, set by the level, not its bold.
+        paragraph("Heading", &item(0, "")),
+        // The mark's character style.
+        paragraph("", &item(0, r#"<w:rStyle w:val="Strong"/>"#)),
+        // A level that gives only a size.
+        paragraph("", &item(1, r#"<w:sz w:val="28"/>"#)),
+    ]
+    .concat();
+    let document = build(&body, &styles, Some(numbering));
+    let mut formats = document.formats();
+    let labels: Vec<_> = paragraphs(&document)
+        .into_iter()
+        .map(|paragraph| formats.list_label(paragraph).unwrap())
+        .collect();
+    assert_eq!((labels[0].size(), labels[0].bold()), (Pt(13.0), false));
+    assert!(formats.paragraph_mark(paragraphs(&document)[0]).bold());
+    assert_eq!(labels[1].underline(), Some(UnderlineStyle::Single));
+    assert_eq!(labels[2].size(), Pt(8.0));
+
+    // A paragraph of another document is labelled by its own document's numbering and
+    // styles.
+    let numbering = numbering.replace(r#"<w:sz w:val="16"/>"#, r#"<w:sz w:val="20"/>"#);
+    let other = build(&paragraph("", &item(1, "")), &styles, Some(&numbering));
+    let theirs = paragraphs(&other)[0];
+    let label = document.formats().list_label(theirs).unwrap();
+    assert_eq!(label, other.formats().list_label(theirs).unwrap());
+    assert_eq!(label.size(), Pt(10.0));
+}
+
+#[test]
+fn formats_a_list_label_as_the_mark_with_the_level_over_it() {
+    // The label takes the paragraph mark's formatting with the level's run properties
+    // over it; Word ignores the level's w:rStyle, w:highlight and w:oMath there
+    // (MS-OI29500 §17.9.24(a)).
+    let level = |ilvl: i64, r_pr: &str| {
+        format!(
+            r#"<w:lvl w:ilvl="{ilvl}"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="o"/><w:rPr>{r_pr}</w:rPr></w:lvl>"#
+        )
+    };
+    let numbering = [
+        format!(
+            r#"<w:abstractNum w:abstractNumId="10">{}{}</w:abstractNum>"#,
+            level(
+                0,
+                r#"<w:rStyle w:val="Emphasis"/><w:rFonts w:ascii="Symbol" w:hAnsi="Symbol" w:hint="default"/><w:b/><w:i w:val="0"/><w:highlight w:val="yellow"/><w:oMath/>"#
+            ),
+            level(1, ""),
+        ),
+        r#"<w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num>"#.to_owned(),
+        // An override's replacement level gives the label its own run properties.
+        r#"<w:num w:numId="2"><w:abstractNumId w:val="10"/><w:lvlOverride w:ilvl="0"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:rPr><w:color w:val="00FF00"/></w:rPr></w:lvl></w:lvlOverride></w:num>"#.to_owned(),
+    ]
+    .concat();
+    let styles = [
+        defaults(""),
+        r#"<w:style w:type="character" w:styleId="Emphasis"><w:name w:val="Emphasis"/><w:rPr><w:u w:val="single"/><w:caps/></w:rPr></w:style>"#.to_owned(),
+    ]
+    .concat();
+    let item = |instance: i64, level: i64| {
+        format!(
+            r#"<w:numPr><w:ilvl w:val="{level}"/><w:numId w:val="{instance}"/></w:numPr><w:rPr><w:i/><w:color w:val="FF0000"/><w:sz w:val="28"/></w:rPr>"#
+        )
+    };
+    let body = [
+        paragraph("", &item(1, 0)),
+        paragraph("", &item(1, 1)),
+        paragraph("", &item(2, 0)),
+        paragraph("", r#"<w:rPr><w:sz w:val="28"/></w:rPr>"#),
+    ]
+    .concat()
+    .repeat(50);
+    let document = build(&body, &styles, Some(&numbering));
+    let mut formats = document.formats();
+    let labels: Vec<_> = paragraphs(&document)
+        .into_iter()
+        .map(|paragraph| formats.list_label(paragraph))
+        .collect();
+    let red = ColorValue::Rgb(255, 0, 0);
+
+    // Level 0: the level's font and bold, its "not italic" over the mark's italic; the
+    // mark's size and colour; no highlight, no maths, and nothing of the character style
+    // the level names.
+    let first = labels[0].as_ref().unwrap();
+    assert_eq!(first.fonts().ascii(), "Symbol");
+    assert_eq!((first.bold(), first.italic()), (true, false));
+    assert_eq!((first.size(), first.color()), (Pt(14.0), red));
+    assert_eq!(first.highlight(), None);
+    assert!(!first.math());
+    assert_eq!(
+        (first.underline(), first.caps(), first.style()),
+        (None, false, None)
+    );
+    // The paragraph's own mark is italic.
+    assert!(formats.paragraph_mark(paragraphs(&document)[0]).italic());
+
+    // Level 1 gives nothing: the label is formatted as the mark.
+    let second = labels[1].as_ref().unwrap();
+    assert_eq!(second, &formats.paragraph_mark(paragraphs(&document)[1]));
+
+    // The replacement level of instance 2: its colour, nothing of the definition's level.
+    let third = labels[2].as_ref().unwrap();
+    assert_eq!(third.color(), ColorValue::Rgb(0, 255, 0));
+    assert_eq!((third.bold(), third.italic()), (false, true));
+    // The mark's font: Word's defaults, as these styles give no run properties.
+    assert_eq!(third.fonts().ascii(), "Calibri");
+
+    // Not a list item.
+    assert_eq!(labels[3], None);
+    // The same for every repetition.
+    for (n, label) in labels.iter().enumerate() {
+        assert_eq!(label, &labels[n % 4]);
+    }
+    // Each level was read once for 150 list items: two of the definition, and the
+    // replacement in instance 2's override.
+    assert_eq!(formats.work().level_layers, 2);
+    assert_eq!(formats.work().replacements, 1);
 }

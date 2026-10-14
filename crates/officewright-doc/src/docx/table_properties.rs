@@ -19,7 +19,7 @@ pub(crate) fn table_properties(
     report: Report<'_>,
 ) -> TableProperties {
     let mut properties = TableProperties::default();
-    for child in tbl_pr.children_through_fallback(names.mc) {
+    for child in tbl_pr.children_through_alternates(names.mc) {
         let Some(local) = child.local_in(&names.w) else {
             continue;
         };
@@ -60,7 +60,7 @@ pub(crate) fn row_properties(
     report: Report<'_>,
 ) -> TableRowProperties {
     let mut properties = TableRowProperties::default();
-    for child in tr_pr.children_through_fallback(names.mc) {
+    for child in tr_pr.children_through_alternates(names.mc) {
         let Some(local) = child.local_in(&names.w) else {
             continue;
         };
@@ -93,7 +93,7 @@ pub(crate) fn cell_properties(
     report: Report<'_>,
 ) -> TableCellProperties {
     let mut properties = TableCellProperties::default();
-    for child in tc_pr.children_through_fallback(names.mc) {
+    for child in tc_pr.children_through_alternates(names.mc) {
         let Some(local) = child.local_in(&names.w) else {
             continue;
         };
@@ -253,7 +253,7 @@ fn merge(element: Element<'_>, names: &Names, report: Report<'_>) -> Option<Cell
 /// The borders of a `w:tblBorders`, or the side borders of a `w:tcBorders`.
 fn borders(element: Element<'_>, names: &Names, report: Report<'_>) -> TableBorders {
     let mut borders = TableBorders::default();
-    for child in element.children_through_fallback(names.mc) {
+    for child in element.children_through_alternates(names.mc) {
         let slot = match child.local_in(&names.w) {
             Some("top") => &mut borders.top,
             Some("bottom") => &mut borders.bottom,
@@ -273,7 +273,7 @@ fn cell_borders(element: Element<'_>, names: &Names, report: Report<'_>) -> Cell
         sides: self::borders(element, names, report),
         ..CellBorders::default()
     };
-    for child in element.children_through_fallback(names.mc) {
+    for child in element.children_through_alternates(names.mc) {
         let slot = match child.local_in(&names.w) {
             Some("tl2br") => &mut borders.top_left_to_bottom_right,
             Some("tr2bl") => &mut borders.top_right_to_bottom_left,
@@ -286,7 +286,7 @@ fn cell_borders(element: Element<'_>, names: &Names, report: Report<'_>) -> Cell
 
 fn margins(element: Element<'_>, names: &Names, report: Report<'_>) -> CellMargins {
     let mut margins = CellMargins::default();
-    for child in element.children_through_fallback(names.mc) {
+    for child in element.children_through_alternates(names.mc) {
         let slot = match child.local_in(&names.w) {
             Some("top") => &mut margins.top,
             Some("bottom") => &mut margins.bottom,

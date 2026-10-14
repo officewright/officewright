@@ -127,6 +127,7 @@ pub(crate) fn read(data: Vec<u8>, limits: &Limits) -> Result<Document> {
             &mut budget,
         )?;
     }
+    crate::model::assign_paragraph_styles(&mut document);
     document.diagnostics = diagnostics.finish();
     Ok(document)
 }

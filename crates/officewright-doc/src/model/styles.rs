@@ -89,13 +89,20 @@ impl<'a> Styles<'a> {
     }
 
     /// The run properties of the document defaults (`w:docDefaults/w:rPrDefault`), the
-    /// bottom of every run's formatting.
+    /// bottom of every run's formatting when they give any. Without a `w:rPr` there,
+    /// Word gives runs defaults of its own, which [`Formats`](crate::Formats) applies.
     pub fn default_run_properties(self) -> RunProperties {
         let document = self.document;
         self.defaults(["rPrDefault", "rPr"])
             .map_or_else(RunProperties::default, |r_pr| {
                 crate::docx::properties::run_properties(r_pr, &document.names, &mut |_, _, _| {})
             })
+    }
+
+    /// Whether the document defaults give run properties (a `w:rPr` in
+    /// `w:docDefaults/w:rPrDefault`); Word gives its own when they do not.
+    pub(crate) fn has_default_run_properties(self) -> bool {
+        self.defaults(["rPrDefault", "rPr"]).is_some()
     }
 
     /// The paragraph properties of the document defaults
@@ -118,8 +125,7 @@ impl<'a> Styles<'a> {
         let mut element = document.element(document.styles.defaults?);
         for local in path {
             element = element
-                .children_through_fallback(document.names.mc)
-                .into_iter()
+                .children_through_alternates(document.names.mc)
                 .find(|child| child.is(&document.names.w, local))?;
         }
         Some(element)
@@ -234,8 +240,7 @@ impl<'a> Style<'a> {
         let document = self.document;
         document
             .element(self.data.element)
-            .children_through_fallback(document.names.mc)
-            .into_iter()
+            .children_through_alternates(document.names.mc)
             .find(|child| child.is(&document.names.w, local))
     }
 

@@ -64,7 +64,7 @@ pub struct Paragraph<'a> {
 impl<'a> Paragraph<'a> {
     pub(super) fn at(document: &'a Document, index: u32) -> Option<Self> {
         let node = document.node(index)?;
-        matches!(node.kind, Kind::Paragraph).then_some(Self {
+        matches!(node.kind, Kind::Paragraph { .. }).then_some(Self {
             document,
             index,
             node,
@@ -644,7 +644,7 @@ fn blocks<'a>(document: &'a Document, children: &'a [u32]) -> impl Iterator<Item
     through_wrappers(document, children).filter_map(move |index| {
         let node = document.node(index)?;
         Some(match &node.kind {
-            Kind::Paragraph => Block::Paragraph(Paragraph {
+            Kind::Paragraph { .. } => Block::Paragraph(Paragraph {
                 document,
                 index,
                 node,

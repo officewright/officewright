@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::format::{CharacterFormat, ParagraphFormat};
+use super::properties::ThemeFont;
 use super::styles::StyleKind;
 use super::views::{Paragraph, Run};
 use super::{Document, Kind, Node};
@@ -36,11 +37,12 @@ pub struct Formats<'a> {
     paragraphs: StyleLevels<ParagraphLevel>,
     character_defaults: Option<Arc<CharacterLevel>>,
     paragraph_defaults: Option<Arc<ParagraphLevel>>,
+    /// The typeface each theme font stands for, once looked up.
+    theme_fonts: HashMap<ThemeFont, Option<Arc<str>>>,
+    /// Word's font when nothing gives one, shared by every run that has it.
+    default_font: Arc<str>,
     /// The index of the default paragraph style, once looked up.
     default_paragraph_style: Option<Option<usize>>,
-    /// The last paragraph whose style was looked up, and the style: the runs of a
-    /// paragraph come one after another, and reading the style walks its `w:pPr`.
-    last_paragraph: Option<(&'a Node, Option<usize>)>,
     /// The definition each list instance named so far uses.
     instances: HashMap<i64, Option<Arc<paragraph::InstanceDefinition>>>,
     /// The definition each definition an instance names leads to through
@@ -51,8 +53,9 @@ pub struct Formats<'a> {
     /// The parsed levels of each list definition used so far, which its instances
     /// share.
     definitions: HashMap<i64, Arc<paragraph::DefinitionLevels>>,
-    /// What each level of a definition that paragraphs use gives to them.
-    level_layers: HashMap<(i64, usize), Option<Arc<paragraph::ListLayer>>>,
+    /// What each level of a definition that paragraphs use gives to them and to their
+    /// labels.
+    level_layers: HashMap<(i64, usize), paragraph::LevelGives>,
     /// Each list instance's levels that paragraphs use, with the instance's overrides,
     /// and the numbers they start from.
     instance_levels: HashMap<(i64, usize), paragraph::InstanceLevel>,
@@ -74,14 +77,12 @@ pub(crate) struct Work {
     pub(crate) numbering_styles: usize,
     /// Definitions whose levels were parsed.
     pub(crate) definitions: usize,
-    /// Levels of definitions parsed for what they give to paragraphs.
+    /// Levels of definitions parsed for what they give to paragraphs and labels.
     pub(crate) level_layers: usize,
     /// Levels of instances replaced by an override's level.
     pub(crate) replacements: usize,
     /// A style's level and a list level laid over each other.
     pub(crate) combinations: usize,
-    /// Paragraphs whose `w:pPr` was read for their style.
-    pub(crate) paragraph_styles: usize,
 }
 
 impl<'a> Formats<'a> {
@@ -92,8 +93,9 @@ impl<'a> Formats<'a> {
             paragraphs: StyleLevels::default(),
             character_defaults: None,
             paragraph_defaults: None,
+            theme_fonts: HashMap::new(),
+            default_font: Arc::from(character::DEFAULT_FONT),
             default_paragraph_style: None,
-            last_paragraph: None,
             instances: HashMap::new(),
             links: HashMap::new(),
             numbering_styles: HashMap::new(),
@@ -123,7 +125,7 @@ impl<'a> Formats<'a> {
         }
         let direct = run.properties();
         let paragraph = self.paragraph_style(paragraph_of(self.document, run.node()));
-        self.resolve_run(paragraph, &direct)
+        self.resolve_run(paragraph, &direct, None)
     }
 
     /// The formatting of a paragraph's mark in effect, which decides, among other
@@ -134,7 +136,24 @@ impl<'a> Formats<'a> {
         }
         let direct = paragraph.properties().mark;
         let style = self.paragraph_style(Some(paragraph.node()));
-        self.resolve_run(style, &direct)
+        self.resolve_run(style, &direct, None)
+    }
+
+    /// The formatting of a list item's label, its number or bullet, in effect: the
+    /// paragraph mark's, with the run properties of the list level laid over it. Word
+    /// ignores the level's `w:rStyle`, `w:highlight` and `w:oMath` there (MS-OI29500
+    /// §17.9.24(a)). None when the paragraph is not a list item.
+    ///
+    /// What a level gives to labels is read once per level, however many paragraphs
+    /// use it.
+    pub fn list_label(&mut self, paragraph: Paragraph<'a>) -> Option<CharacterFormat> {
+        if !std::ptr::eq(paragraph.document(), self.document) {
+            return Formats::new(paragraph.document()).list_label(paragraph);
+        }
+        let properties = paragraph.properties();
+        let style = self.paragraph_style(Some(paragraph.node()));
+        let label = self.label_level(style, &properties)?;
+        Some(self.resolve_run(style, &properties.mark, label.as_deref()))
     }
 
     /// How many times a style's own properties were read, for tests of the work done.
@@ -156,54 +175,67 @@ impl<'a> Formats<'a> {
         self.combinations.len()
     }
 
-    /// The index of the paragraph style of the paragraph `node`: its `w:pStyle` when it
-    /// names a paragraph style, else the default paragraph style (the first, as
-    /// [`Styles::default_style`](super::Styles::default_style) gives it). The `w:pStyle`
-    /// is read as [`Paragraph::properties`] reads it: through `mc:AlternateContent`, the
-    /// last of several winning.
+    /// The index of the paragraph style of the paragraph `node`: the one worked out when
+    /// the document was read (see [`assign_paragraph_styles`]), else the default
+    /// paragraph style (the first, as
+    /// [`Styles::default_style`](super::Styles::default_style) gives it).
     fn paragraph_style(&mut self, node: Option<&'a Node>) -> Option<usize> {
-        if let (Some(node), Some((last, style))) = (node, self.last_paragraph) {
-            if std::ptr::eq(node, last) {
-                return style;
-            }
-        }
-        #[cfg(test)]
-        if node.is_some() {
-            self.work.paragraph_styles += 1;
-        }
-        let style = self.read_paragraph_style(node);
-        if let Some(node) = node {
-            self.last_paragraph = Some((node, style));
-        }
-        style
-    }
-
-    /// [`paragraph_style`](Self::paragraph_style), read from the paragraph's `w:pPr`.
-    fn read_paragraph_style(&mut self, node: Option<&'a Node>) -> Option<usize> {
-        let document = self.document;
-        let written = node.and_then(|node| {
-            node.properties
-                .iter()
-                .map(|&span| document.element(span))
-                .find(|element| element.is(&document.names.w, "pPr"))
-                .and_then(|p_pr| {
-                    p_pr.children_through_fallback(document.names.mc)
-                        .into_iter()
-                        .rfind(|child| child.is(&document.names.w, "pStyle"))
-                        .and_then(|p_style| p_style.attribute(&document.names.w, "val"))
-                })
+        let written = node.and_then(|node| match node.kind {
+            Kind::Paragraph { style } => style,
+            _ => None,
         });
-        let written = written.and_then(|id| style_index(document, id, StyleKind::Paragraph));
-        written.or_else(|| {
-            *self.default_paragraph_style.get_or_insert_with(|| {
-                document
-                    .styles
-                    .styles
-                    .iter()
-                    .take(MAX_STYLES)
-                    .position(|style| style.kind == StyleKind::Paragraph && style.is_default)
+        let document = self.document;
+        written
+            .and_then(|index| usize::try_from(index).ok())
+            .or_else(|| {
+                *self.default_paragraph_style.get_or_insert_with(|| {
+                    document
+                        .styles
+                        .styles
+                        .iter()
+                        .take(MAX_STYLES)
+                        .position(|style| style.kind == StyleKind::Paragraph && style.is_default)
+                })
             })
-        })
+    }
+}
+
+/// Works out once, after the styles are read, the paragraph style of every paragraph
+/// whose `w:pStyle` names one the resolver uses, so that a run's formatting never reads
+/// its paragraph's `w:pPr`; a paragraph's own formatting and its mark's read only the
+/// properties of that paragraph. The `w:pStyle` is read as
+/// [`Paragraph::properties`] reads it: through `mc:AlternateContent`, the last of several
+/// winning. Each paragraph's own `w:pPr` is walked once, so the work grows with the size
+/// of the document.
+pub(crate) fn assign_paragraph_styles(document: &mut Document) {
+    for index in 0..document.nodes.len() {
+        let Some(node) = document.nodes.get(index) else {
+            continue;
+        };
+        if !matches!(node.kind, Kind::Paragraph { .. }) {
+            continue;
+        }
+        let names = &document.names;
+        let style = node
+            .properties
+            .iter()
+            .map(|&span| document.element(span))
+            .find(|element| element.is(&names.w, "pPr"))
+            .and_then(|p_pr| {
+                p_pr.children_through_alternates(names.mc)
+                    .filter(|child| child.is(&names.w, "pStyle"))
+                    .last()
+            })
+            .and_then(|p_style| p_style.attribute(&names.w, "val"))
+            .and_then(|id| style_index(document, id, StyleKind::Paragraph))
+            .and_then(|index| u32::try_from(index).ok());
+        if let Some(Node {
+            kind: Kind::Paragraph { style: slot },
+            ..
+        }) = document.nodes.get_mut(index)
+        {
+            *slot = style;
+        }
     }
 }
 
@@ -324,9 +356,10 @@ impl<L: Layer> StyleLevels<L> {
 
 /// How many styles the resolver uses, the first ones of the styles part: as many as
 /// Word's binary format has entries for, fewer than 0x0FFE ([MS-DOC] 2.9.274
-/// Stshif.cstd), some of which may be empty. MS-OI29500 §17.7.4.17(c) says that Word does not open a
-/// document with more than 4,079, yet Word 2010 saved LibreOffice's test document
-/// `fdo76101.docx` with 4,091. The bound keeps what the resolver keeps per style small.
+/// Stshif.cstd), some of which may be empty. MS-OI29500 §17.7.4.17(c) says that Word
+/// does not open a document with more than 4,079, yet Word 2010 saved LibreOffice's test
+/// document `fdo76101.docx` with 4,091. The bound keeps what the resolver keeps per style
+/// small.
 const MAX_STYLES: usize = 4093;
 
 /// How many combinations of a paragraph style and a list level the resolver keeps at a
@@ -356,7 +389,7 @@ fn parent(document: &Document, index: usize) -> Option<usize> {
 fn paragraph_of<'a>(document: &'a Document, node: &'a Node) -> Option<&'a Node> {
     let mut current = node;
     for _ in 0..document.nodes.len() {
-        if matches!(current.kind, Kind::Paragraph) {
+        if matches!(current.kind, Kind::Paragraph { .. }) {
             return Some(current);
         }
         current = document.node(current.parent)?;

@@ -34,6 +34,7 @@ pub use properties::{
     TabLeader, TabStop, ThemeColor, ThemeFont, Underline, UnderlineStyle, VerticalPosition,
 };
 pub use resolve::Formats;
+pub(crate) use resolve::assign_paragraph_styles;
 pub use section::{
     ChapterSeparator, Column, Columns, DocumentGrid, DocumentGridKind, HeaderFooterKind,
     HeaderFooterReference, LineNumberRestart, LineNumbering, NotePosition, NoteProperties,
@@ -407,7 +408,12 @@ impl Node {
 
 #[derive(Debug)]
 pub(crate) enum Kind {
-    Paragraph,
+    Paragraph {
+        /// The index of the paragraph style the resolver uses for it, worked out once the
+        /// styles are read: its `w:pStyle` when that names one of the paragraph styles the
+        /// resolver uses; else none, and the paragraph has the default paragraph style.
+        style: Option<u32>,
+    },
     Table {
         columns: Vec<Option<Pt>>,
     },

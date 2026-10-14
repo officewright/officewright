@@ -323,7 +323,7 @@ impl Reading<'_, '_, '_> {
         // Properties of the parent element come first in it.
         let property = matches!(
             (parent_kind, local),
-            (Some(Kind::Paragraph), "pPr")
+            (Some(Kind::Paragraph { .. }), "pPr")
                 | (Some(Kind::Run { .. }), "rPr")
                 | (Some(Kind::Table { .. }), "tblPr" | "tblGrid")
                 | (Some(Kind::Row), "trPr" | "tblPrEx")
@@ -336,7 +336,9 @@ impl Reading<'_, '_, '_> {
             }
         }
         match (level, local) {
-            (Level::Block, "p") => self.open(parent, Kind::Paragraph, Level::Inline),
+            (Level::Block, "p") => {
+                self.open(parent, Kind::Paragraph { style: None }, Level::Inline)
+            }
             // Block-level w:ins, w:del, w:moveFrom and w:moveTo (around paragraphs or
             // rows) and a w:tbl written inside a paragraph are kept without being read.
             (Level::Block, "tbl") => self.open(
@@ -781,7 +783,7 @@ impl Reading<'_, '_, '_> {
         let span = self.c.capture(reader, mce, tag)?;
         let kind = self.c.document.node(node).map(|node| &node.kind);
         let (paragraph, table) = (
-            matches!(kind, Some(Kind::Paragraph)),
+            matches!(kind, Some(Kind::Paragraph { .. })),
             matches!(kind, Some(Kind::Table { .. })),
         );
         if paragraph {
@@ -800,7 +802,7 @@ impl Reading<'_, '_, '_> {
         let local = self.c.document.element(span).local_name();
         let which = match (self.c.document.node(node).map(|node| &node.kind), local) {
             (Some(Kind::Run { .. }), "rPr") => Some(Properties::Run),
-            (Some(Kind::Paragraph), "pPr") => Some(Properties::Paragraph),
+            (Some(Kind::Paragraph { .. }), "pPr") => Some(Properties::Paragraph),
             (Some(Kind::Table { .. }), "tblPr") | (Some(Kind::Row), "tblPrEx") => {
                 Some(Properties::Table)
             }

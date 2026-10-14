@@ -16,12 +16,19 @@ use crate::model::settings::{ColorSchemeIndex, ColorSchemeMapping};
 use crate::model::styles::StyleKind;
 
 /// Word's font when nothing in the hierarchy gives one (MS-OI29500 §17.3.2.26(c)).
-const DEFAULT_FONT: &str = "Times New Roman";
+pub(super) const DEFAULT_FONT: &str = "Times New Roman";
 
-/// The font size when nothing in the hierarchy gives one. The standard leaves it to the
-/// application (§17.3.2.38); 10 pt is to be confirmed by the reference render of the
-/// corpus file `word-rules/E-defaults-empty.docx`.
+/// The font size when nothing in the hierarchy gives one, though the document defaults
+/// give run properties. The standard leaves it to the application (§17.3.2.38); not
+/// confirmed against Word yet. Without run properties in the document defaults Word
+/// gives its own, 11 pt among them (see [`word_run_defaults`]).
 const DEFAULT_SIZE: Pt = Pt(10.0);
+
+/// The Latin typefaces of the theme Word uses when a document has no theme part, its
+/// default Office theme: major and minor (the theme Word writes into the re-saved copy of
+/// the corpus file `word-rules/E-defaults-empty.docx`, Word 16.0.17932). Its East Asian
+/// and complex script typefaces are empty, so those slots fall back as with a theme.
+const OFFICE_THEME_LATIN: [&str; 2] = ["Calibri Light", "Calibri"];
 
 /// The toggle properties of ECMA-376 §17.7.3.
 const TOGGLES: [Toggle; 12] = [
@@ -41,13 +48,15 @@ const TOGGLES: [Toggle; 12] = [
 
 impl Formats<'_> {
     /// Combines the levels of the hierarchy for a run whose paragraph style has the index
-    /// `paragraph_style` and whose own properties are `direct`. A run without a
-    /// `w:rStyle` gets no character style: Word's default character style is
-    /// DefaultParagraphFont, whose children it ignores.
+    /// `paragraph_style` and whose own properties are `direct`, with `label`, what a list
+    /// level gives to its label, laid over them. A run without a `w:rStyle` gets no
+    /// character style: Word's default character style is DefaultParagraphFont, whose
+    /// children it ignores.
     pub(super) fn resolve_run(
         &mut self,
         paragraph_style: Option<usize>,
         direct: &RunProperties,
+        label: Option<&CharacterLevel>,
     ) -> CharacterFormat {
         let document = self.document;
         let defaults = self.run_defaults();
@@ -71,6 +80,9 @@ impl Formats<'_> {
             effect.overlay(level);
         }
         effect.overlay(&direct);
+        if let Some(label) = label {
+            effect.overlay(label);
+        }
 
         // On/off properties: toggle properties by ECMA-376 §17.7.3, the others by the
         // last level that gives them.
@@ -98,6 +110,10 @@ impl Formats<'_> {
                     .or(levels.0)
                     .unwrap_or(false)
             };
+            // The list level's value, like direct formatting, sets it.
+            if let Some(value) = value(label, index) {
+                *slot = value;
+            }
         }
         // Word ignores specVanish unless the text is hidden too (MS-OI29500 §17.3.2.36(a)).
         if toggles.get(Toggle::Vanish as usize) != Some(&true) {
@@ -110,7 +126,7 @@ impl Formats<'_> {
             style: character_style
                 .and_then(|index| document.styles.styles.get(index))
                 .map(|style| Arc::clone(&style.id)),
-            fonts: effect.fonts(document),
+            fonts: self.families(&effect),
             size: effect.size.unwrap_or(DEFAULT_SIZE),
             size_complex_script: effect.size_complex_script.unwrap_or(DEFAULT_SIZE),
             toggles,
@@ -143,14 +159,76 @@ impl Formats<'_> {
         }
     }
 
-    /// What the document defaults give to runs.
+    /// What the document defaults give to runs; Word's own when they give no run
+    /// properties.
     fn run_defaults(&mut self) -> Arc<CharacterLevel> {
         let document = self.document;
         Arc::clone(self.character_defaults.get_or_insert_with(|| {
-            Arc::new(CharacterLevel::of(
-                &crate::model::Styles::new(document).default_run_properties(),
-            ))
+            let styles = crate::model::Styles::new(document);
+            Arc::new(if styles.has_default_run_properties() {
+                CharacterLevel::of(&styles.default_run_properties())
+            } else {
+                word_run_defaults()
+            })
         }))
+    }
+
+    /// The font families of a level, theme fonts resolved through the document's theme,
+    /// each theme font once for all runs. The names are shared with the level, not
+    /// copied, however long they are.
+    fn families(&mut self, level: &CharacterLevel) -> FontFamilies {
+        let mut slots: [Option<Arc<str>>; 4] = Default::default();
+        for (slot, font) in slots.iter_mut().zip(&level.fonts) {
+            *slot = match font {
+                Some(FontSlot::Name(name)) => Some(Arc::clone(name)),
+                Some(FontSlot::Theme(theme, written)) => {
+                    self.theme_font(*theme).or_else(|| written.clone())
+                }
+                None => None,
+            };
+        }
+        let [ascii, high_ansi, east_asia, complex_script] =
+            slots.map(|slot| slot.unwrap_or_else(|| Arc::clone(&self.default_font)));
+        FontFamilies {
+            ascii,
+            high_ansi,
+            east_asia,
+            complex_script,
+            hint: level.hint,
+        }
+    }
+
+    /// The typeface a theme font stands for, looked up once per theme font.
+    fn theme_font(&mut self, font: ThemeFont) -> Option<Arc<str>> {
+        let document = self.document;
+        self.theme_fonts
+            .entry(font)
+            .or_insert_with(|| theme_font(document, font).map(Into::into))
+            .clone()
+    }
+}
+
+/// The run properties Word gives when the document defaults give none (no `w:rPr` in
+/// `w:docDefaults/w:rPrDefault`): those it writes into `w:rPrDefault` when it saves such
+/// a document again (the re-saved copy of the corpus file
+/// `word-rules/E-defaults-empty.docx`, Word 16.0.17932), whose render shows Calibri
+/// 11 pt. They are the theme's minor fonts, 11 pt and kerning from 1 pt. Word also writes
+/// languages there, which may be those of its user's editing settings and are left out,
+/// and standard contextual ligatures (`w14:ligatures`), which officewright does not
+/// read yet.
+fn word_run_defaults() -> CharacterLevel {
+    let theme = |font| Some(FontSlot::Theme(font, None));
+    CharacterLevel {
+        fonts: [
+            theme(ThemeFont::MinorHAnsi),
+            theme(ThemeFont::MinorHAnsi),
+            theme(ThemeFont::MinorEastAsia),
+            theme(ThemeFont::MinorBidi),
+        ],
+        size: Some(Pt(11.0)),
+        size_complex_script: Some(Pt(11.0)),
+        kerning: Some(Pt(1.0)),
+        ..CharacterLevel::default()
     }
 }
 
@@ -182,11 +260,12 @@ fn toggle(
 
 /// A font as a level writes it: by name, or as a font of the theme, with the name
 /// written next to it, which Word writes as the theme font's typeface and which stands in
-/// when the document has no theme.
+/// when the theme gives the font no typeface. A document without a theme has Word's
+/// default theme.
 #[derive(Clone, Debug)]
 enum FontSlot {
-    Name(Box<str>),
-    Theme(ThemeFont, Option<Box<str>>),
+    Name(Arc<str>),
+    Theme(ThemeFont, Option<Arc<str>>),
 }
 
 /// What one level of the hierarchy gives — the document defaults, a style with the
@@ -209,10 +288,60 @@ pub(super) struct CharacterLevel {
     kerning: Option<Pt>,
     highlight: Option<Highlight>,
     shading: Option<Shading>,
-    languages: [Option<Box<str>>; 3],
+    languages: [Option<Arc<str>>; 3],
 }
 
 impl CharacterLevel {
+    /// What a list level's `w:rPr` gives to its label: Word ignores `w:rStyle`,
+    /// `w:highlight` and `w:oMath` there (MS-OI29500 §17.9.24(a)); `w:rPrChange` is not
+    /// read. None when it gives nothing.
+    pub(super) fn of_label(properties: &RunProperties) -> Option<Arc<Self>> {
+        let mut level = Self::of(properties);
+        level.highlight = None;
+        if let Some(math) = level.toggles.get_mut(Toggle::Math as usize) {
+            *math = None;
+        }
+        level.gives().then(|| Arc::new(level))
+    }
+
+    /// Whether the level gives anything.
+    fn gives(&self) -> bool {
+        let Self {
+            fonts,
+            hint,
+            toggles,
+            color,
+            underline_style,
+            underline_color,
+            size,
+            size_complex_script,
+            vertical_position,
+            position,
+            spacing,
+            scale,
+            kerning,
+            highlight,
+            shading,
+            languages,
+        } = self;
+        fonts.iter().any(Option::is_some)
+            || hint.is_some()
+            || toggles.iter().any(Option::is_some)
+            || color.is_some()
+            || underline_style.is_some()
+            || underline_color.is_some()
+            || size.is_some()
+            || size_complex_script.is_some()
+            || vertical_position.is_some()
+            || position.is_some()
+            || spacing.is_some()
+            || scale.is_some()
+            || kerning.is_some()
+            || highlight.is_some()
+            || shading.is_some()
+            || languages.iter().any(Option::is_some)
+    }
+
     /// What one `w:rPr` gives.
     fn of(properties: &RunProperties) -> Self {
         let fonts = &properties.fonts;
@@ -254,26 +383,6 @@ impl CharacterLevel {
             shading: properties.shading,
             languages: [&language.latin, &language.east_asia, &language.bidi]
                 .map(|language| language.as_deref().map(Into::into)),
-        }
-    }
-
-    /// The font families, theme fonts resolved through the document's theme.
-    fn fonts(&self, document: &Document) -> FontFamilies {
-        let [ascii, high_ansi, east_asia, complex_script] =
-            self.fonts.clone().map(|slot| match slot {
-                Some(FontSlot::Name(name)) => name,
-                Some(FontSlot::Theme(theme, written)) => theme_font(document, theme)
-                    .map(Into::into)
-                    .or(written)
-                    .unwrap_or_else(|| DEFAULT_FONT.into()),
-                None => DEFAULT_FONT.into(),
-            });
-        FontFamilies {
-            ascii,
-            high_ansi,
-            east_asia,
-            complex_script,
-            hint: self.hint,
         }
     }
 }
@@ -321,9 +430,18 @@ impl Layer for CharacterLevel {
 /// The typeface a theme font stands for (ECMA-376 §17.15.1.88): with `w:themeFontLang`,
 /// the theme's font for the script of the language it gives for the slot (`w:val` for
 /// ascii and hAnsi, `w:eastAsia`, `w:bidi`); else, or when the theme has no font for
-/// that script, the theme's latin, ea or cs font.
+/// that script, the theme's latin, ea or cs font. A document without a theme part has
+/// Word's default theme ([`OFFICE_THEME_LATIN`]).
 fn theme_font(document: &Document, font: ThemeFont) -> Option<String> {
-    let scheme = document.theme.as_ref()?.fonts()?;
+    let Some(theme) = document.theme.as_ref() else {
+        let [major, minor] = OFFICE_THEME_LATIN;
+        return match font {
+            ThemeFont::MajorAscii | ThemeFont::MajorHAnsi => Some(major.into()),
+            ThemeFont::MinorAscii | ThemeFont::MinorHAnsi => Some(minor.into()),
+            _ => None,
+        };
+    };
+    let scheme = theme.fonts()?;
     let (collection, slot) = match font {
         ThemeFont::MajorAscii | ThemeFont::MajorHAnsi => (scheme.major(), Slot::Latin),
         ThemeFont::MajorEastAsia => (scheme.major(), Slot::EastAsia),
