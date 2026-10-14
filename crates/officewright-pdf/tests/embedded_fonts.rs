@@ -4,6 +4,7 @@
 //!
 //! The PDF files themselves are checked by external tools in tests/pdf-output.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use officewright_font::{FontBook, FontFace, FontRequest, FontResolver, ResolutionKind};
@@ -197,6 +198,207 @@ fn collection() -> TestResult<Vec<u8>> {
         ttc.extend_from_slice(&font);
     }
     Ok(ttc)
+}
+
+/// The tables of a single font file, by tag.
+fn tables_of(font: &[u8]) -> TestResult<BTreeMap<[u8; 4], Vec<u8>>> {
+    let count = usize::from(u16_at(font, 4).ok_or("short font")?);
+    let mut tables = BTreeMap::new();
+    for record in (0..count).map(|i| 12 + 16 * i) {
+        let tag = font
+            .get(record..record + 4)
+            .ok_or("short table directory")?;
+        let offset = usize::try_from(u32_at(font, record + 8).ok_or("short table directory")?)?;
+        let length = usize::try_from(u32_at(font, record + 12).ok_or("short table directory")?)?;
+        let table = font.get(offset..offset + length).ok_or("short table")?;
+        tables.insert(tag.try_into()?, table.to_vec());
+    }
+    Ok(tables)
+}
+
+/// A single font file of `tables`, in the order of their tags, as the table directory
+/// lists them.
+fn font_of(tables: &BTreeMap<[u8; 4], Vec<u8>>) -> TestResult<Vec<u8>> {
+    let count = u16::try_from(tables.len())?;
+    let selector = u16::try_from(count.ilog2())?;
+    let search = 16 << selector;
+    // `OTTO` for CFF or CFF2 outlines, as such fonts start; 1.0 for TrueType outlines.
+    let cff = !tables.contains_key(b"glyf")
+        && (tables.contains_key(b"CFF ") || tables.contains_key(b"CFF2"));
+    let version = if cff {
+        u32::from_be_bytes(*b"OTTO")
+    } else {
+        0x0001_0000
+    };
+    let mut font = Bytes::default()
+        .u32s(&[version])
+        .u16s(&[count, search, selector, 16 * count - search])
+        .0;
+    let mut data = Vec::new();
+    for (tag, table) in tables {
+        let mut padded = table.clone();
+        padded.resize(table.len().next_multiple_of(4), 0);
+        let checksum = padded.chunks(4).try_fold(0u32, |sum, word| {
+            Ok::<_, std::array::TryFromSliceError>(
+                sum.wrapping_add(u32::from_be_bytes(word.try_into()?)),
+            )
+        })?;
+        let offset = u32::try_from(12 + 16 * tables.len() + data.len())?;
+        font.extend_from_slice(tag);
+        font.extend_from_slice(
+            &Bytes::default()
+                .u32s(&[checksum, offset, u32::try_from(table.len())?])
+                .0,
+        );
+        data.extend_from_slice(&padded);
+    }
+    font.extend_from_slice(&data);
+    Ok(font)
+}
+
+/// The data of a font table, written field by field, big-endian.
+#[derive(Default)]
+struct Bytes(Vec<u8>);
+
+impl Bytes {
+    fn u8s(mut self, values: &[u8]) -> Self {
+        self.0.extend_from_slice(values);
+        self
+    }
+
+    fn u16s(mut self, values: &[u16]) -> Self {
+        self.0
+            .extend(values.iter().flat_map(|value| value.to_be_bytes()));
+        self
+    }
+
+    fn u32s(mut self, values: &[u32]) -> Self {
+        self.0
+            .extend(values.iter().flat_map(|value| value.to_be_bytes()));
+        self
+    }
+}
+
+/// F2DOT14 coordinates of a variation axis: its top, halfway up and a quarter of the way.
+const TOP: u16 = 0x4000;
+const HALF: u16 = 0x2000;
+const QUARTER: u16 = 0x1000;
+/// The bottom of an axis, -1.0 in F2DOT14.
+const BOTTOM: u16 = 0xC000;
+
+/// An item variation store (OpenType `HVAR` and `MVAR`) with one region, the top of the
+/// axis, and an item for each of `deltas`.
+fn variation_store(deltas: &[u8]) -> TestResult<Vec<u8>> {
+    let regions = Bytes::default().u16s(&[1, 1, 0, TOP, TOP]).0;
+    let start = u32::try_from(12 + regions.len())?;
+    Ok(Bytes::default()
+        .u16s(&[1])
+        .u32s(&[12])
+        .u16s(&[1])
+        .u32s(&[start])
+        .u8s(&regions)
+        // Each item one byte-sized delta for region 0.
+        .u16s(&[u16::try_from(deltas.len())?, 0, 1, 0])
+        .u8s(deltas)
+        .0)
+}
+
+/// The `fvar` table of one axis, weight from 100 to 900, its default 400, and no named
+/// instances. The axis is named by name ID 2, which the font has; the specification asks
+/// for an ID of 256 or more, which no reader this test runs looks at.
+fn weight_axis() -> Vec<u8> {
+    Bytes::default()
+        // Axes at 16, two reserved bytes, one axis of 20 bytes, no named instances.
+        .u16s(&[1, 0, 16, 2, 1, 20, 0, 8])
+        .u8s(b"wght")
+        .u32s(&[100 << 16, 400 << 16, 900 << 16])
+        // No flags; named by name ID 2.
+        .u16s(&[0, 2])
+        .0
+}
+
+/// minimal.ttf made a variable font with one axis, weight from 100 to 900, its default
+/// 400 (`fvar`). At the top of the axis A's outline is 10 units further right (`gvar`),
+/// A and Á are 20 units wider by `HVAR` (`gvar` leaves A's advance point where it is, so
+/// a reader that takes advances from `gvar` alone keeps them) and the x-height is 10
+/// units higher (`MVAR`);
+/// `avar` maps halfway up the axis to a quarter of the way. A PDF shows the default
+/// instance, which is minimal.ttf itself.
+fn variable_minimal() -> TestResult<Vec<u8>> {
+    let mut tables = tables_of(&minimal()?)?;
+    let table = |tables: &BTreeMap<[u8; 4], Vec<u8>>, tag: &[u8; 4]| {
+        tables.get(tag).cloned().ok_or(format!("no {tag:?} table"))
+    };
+    let glyphs = u16_at(&table(&tables, b"maxp")?, 4).ok_or("short maxp")?;
+    // A, glyph 2, is a triangle: one contour that ends at point 2.
+    let loca = table(&tables, b"loca")?;
+    assert_eq!(u16_at(&table(&tables, b"head")?, 50), Some(1), "long loca");
+    let a = usize::try_from(u32_at(&loca, 8).ok_or("short loca")?)?;
+    let glyf = table(&tables, b"glyf")?;
+    assert_eq!(
+        (u16_at(&glyf, a), u16_at(&glyf, a + 10)),
+        (Some(1), Some(2))
+    );
+
+    let fvar = weight_axis();
+    let avar = Bytes::default()
+        .u16s(&[1, 0, 0, 1, 4])
+        .u16s(&[BOTTOM, BOTTOM, 0, 0, HALF, QUARTER, TOP, TOP])
+        .0;
+    // A's variation: one tuple, its data after the 6-byte header, peaking at the top of
+    // the axis with point numbers of its own (0xA000). Its points are all seven, A's
+    // three and the four phantom points; three move 10 units right.
+    let deltas = Bytes::default()
+        .u8s(&[0x00])
+        .u8s(&[2, 10, 10, 10, 0x80 | 3])
+        .u8s(&[0x80 | 6])
+        .0;
+    let mut variation = Bytes::default()
+        .u16s(&[1, 4 + 6, u16::try_from(deltas.len())?, 0xA000, TOP])
+        .u8s(&deltas)
+        .0;
+    variation.resize(variation.len().next_multiple_of(2), 0);
+    // Offsets of each glyph's variation data, in units of two bytes: only A has any.
+    let size = u16::try_from(variation.len() / 2)?;
+    let offsets: Vec<u16> = (0..=glyphs)
+        .map(|glyph| if glyph > 2 { size } else { 0 })
+        .collect();
+    let array = 20 + 2 * u32::try_from(offsets.len())?;
+    let gvar = Bytes::default()
+        // One axis, no shared tuples, short offsets.
+        .u16s(&[1, 0, 1, 0])
+        .u32s(&[array])
+        .u16s(&[glyphs, 0])
+        .u32s(&[array])
+        .u16s(&offsets)
+        .u8s(&variation)
+        .0;
+    let widths: Vec<u8> = (0..glyphs)
+        .map(|glyph| if glyph == 2 || glyph == 4 { 20 } else { 0 })
+        .collect();
+    let hvar = Bytes::default()
+        // The store at 20, and no mappings: glyph IDs are its items.
+        .u16s(&[1, 0])
+        .u32s(&[20, 0, 0, 0])
+        .u8s(&variation_store(&widths)?)
+        .0;
+    let mvar = Bytes::default()
+        // One 8-byte value record, the store at 20.
+        .u16s(&[1, 0, 0, 8, 1, 20])
+        .u8s(b"xhgt")
+        .u16s(&[0, 0])
+        .u8s(&variation_store(&[10])?)
+        .0;
+    for (tag, data) in [
+        (b"fvar", fvar),
+        (b"avar", avar),
+        (b"gvar", gvar),
+        (b"HVAR", hvar),
+        (b"MVAR", mvar),
+    ] {
+        tables.insert(*tag, data);
+    }
+    font_of(&tables)
 }
 
 /// The CIDs of every `<...> Tj` string in `pdf`.
@@ -637,6 +839,79 @@ fn embeds_every_glyph_of_a_font_that_must_not_be_subset() -> TestResult {
 }
 
 #[test]
+fn embeds_the_default_instance_of_a_variable_font() -> TestResult {
+    let variable = variable_minimal()?;
+    assert!(FontFace::from_bytes(variable.clone(), 0)?.is_variable());
+    // Subset, and whole where the license forbids subsetting.
+    for (fs_type, notes) in [
+        (0x0000, &[EmbeddingNote::DefaultInstance][..]),
+        (
+            0x0100,
+            &[EmbeddingNote::WholeFont, EmbeddingNote::DefaultInstance],
+        ),
+    ] {
+        let font = Font::from_bytes(with_fs_type(variable.clone(), fs_type)?, 0)?;
+        assert_eq!(font.embedding_notes(), notes);
+        let pdf = one_line(&font, "AÁ A")?.to_bytes()?;
+        let programs: Vec<Stream> = streams(&pdf)?
+            .into_iter()
+            .filter(|stream| stream.dictionary.contains("/Length1 "))
+            .collect();
+        assert_eq!(programs.len(), 1);
+        for program in programs {
+            let tables = tables_of(&program.data)?;
+            for tag in [b"fvar", b"avar", b"gvar", b"HVAR", b"MVAR"] {
+                let name = String::from_utf8_lossy(tag);
+                assert!(!tables.contains_key(tag), "{fs_type:#06x}: {name}");
+            }
+        }
+        // The file is the one the default instance, minimal.ttf, gives: its outlines and
+        // metrics.
+        let default = Font::from_bytes(with_fs_type(minimal()?, fs_type)?, 0)?;
+        assert!(
+            pdf == one_line(&default, "AÁ A")?.to_bytes()?,
+            "{fs_type:#06x}"
+        );
+    }
+    assert_eq!(
+        EmbeddingNote::DefaultInstance.to_string(),
+        "it is a variable font; only its default instance is embedded"
+    );
+    Ok(())
+}
+
+#[test]
+fn refuses_a_variable_font_with_cff2_outlines() -> TestResult {
+    // Noto Sans with its outlines under the tag `CFF2` and a weight axis: a variable font
+    // with CFF2 outlines, whose instances cannot be embedded yet. The library refuses it
+    // itself, not only because the subsetter cannot read CFF2.
+    let mut tables = tables_of(&noto_sans()?)?;
+    let outlines = tables.remove(b"CFF ").ok_or("no CFF table")?;
+    tables.insert(*b"CFF2", outlines);
+    tables.insert(*b"fvar", weight_axis());
+    let err = Font::from_bytes(font_of(&tables)?, 0).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            Error::Font {
+                source: officewright_font::Error::UnsupportedOutlines {
+                    format: Some(officewright_font::OutlineFormat::Cff2),
+                    ..
+                },
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    let source = std::error::Error::source(&err).ok_or("no source")?;
+    assert_eq!(
+        source.to_string(),
+        "font face 0: CFF2 outlines cannot be subset yet"
+    );
+    Ok(())
+}
+
+#[test]
 fn cuts_font_names_to_what_readers_accept() -> TestResult {
     // ISO 32000-1, Annex C: a reader has to accept names of up to 127 bytes. Every name
     // of the font in the file takes that much here: the font's own name is cut after
@@ -671,6 +946,14 @@ fn cuts_font_names_to_what_readers_accept() -> TestResult {
     // A name at the limit is kept whole.
     let font = Font::from_bytes(with_postscript_name(minimal()?, &long[..120])?, 0)?;
     assert_eq!(font.name(), &long[..120]);
+    // A null character, which no PDF name may hold (ISO 32000-1, 7.3.5), is left out.
+    let font = Font::from_bytes(with_postscript_name(minimal()?, "Foo\0Bar")?, 0)?;
+    assert_eq!(font.name(), "FooBar");
+    let pdf = pdf_text(&one_line(&font, "A")?)?;
+    for name in font_names(&pdf) {
+        assert!(name.ends_with("+FooBar"), "{name}");
+    }
+    assert!(!pdf.contains("#00"));
     Ok(())
 }
 
