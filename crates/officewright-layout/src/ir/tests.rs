@@ -2334,7 +2334,7 @@ fn paragraphs_styles_and_symbols_can_share_what_they_repeat() {
 }
 
 #[test]
-fn clamping_shared_properties_changes_a_paragraph_s_copy_only_when_it_must() {
+fn shared_properties_are_clamped_once_and_stay_shared() {
     use std::sync::Arc;
 
     let within =
@@ -2349,8 +2349,14 @@ fn clamping_shared_properties_changes_a_paragraph_s_copy_only_when_it_must() {
             .collect()
     });
     let report = document.clamp();
-    // Each paragraph whose shared properties are out of range is reported and clamped.
-    assert_eq!(report.len(), 2, "{:?}", entries(&report));
+    // Shared properties out of range are clamped once, where they are first met.
+    assert_eq!(
+        entries(&report),
+        [
+            "sections[0].blocks[2].props.tabs[0].position: tab stop position 3600 pt is outside \
+          Word's range of -1584 to 1584 pt and becomes 1584 pt"
+        ]
+    );
     let props: Vec<&ParagraphProps> = document.sections()[0]
         .blocks()
         .iter()
@@ -2359,9 +2365,11 @@ fn clamping_shared_properties_changes_a_paragraph_s_copy_only_when_it_must() {
             _ => panic!("a paragraph"),
         })
         .collect();
-    // Those within range still share the producer's copy; the others have their own.
+    // Those within range still share the producer's copy; the others share one clamped
+    // copy of theirs.
     assert!(std::ptr::eq(props[0], &*within) && std::ptr::eq(props[1], &*within));
     assert!(!std::ptr::eq(props[2], &*beyond));
+    assert!(std::ptr::eq(props[2], props[3]));
     assert_eq!(props[2].tabs()[0].position(), Pt(1584.0));
     assert_eq!(props[3].tabs()[0].position(), Pt(1584.0));
     // The producer's copy is as it was.
