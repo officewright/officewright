@@ -331,6 +331,19 @@ static void embedded_fonts(const char *fonts) {
     CHECK(contains(data, len, "/Subtype /CIDFontType0C"));
     CHECK(contains(data, len, "/ToUnicode"));
     ow_bytes_free(data, len);
+    /* Reducing Noto Sans (CFF) to its glyphs reads its charstrings, which a budget of 0
+     * does not allow; a large one does. */
+    EXPECT(ow_pdf_document_set_subset_budget(doc, 0), OW_STATUS_OK, NULL);
+    data = (uint8_t *)&len;
+    len = 99;
+    EXPECT(ow_pdf_document_save_bytes(doc, &data, &len), OW_STATUS_LIMIT_EXCEEDED,
+           "left of the budget it shares with other subsets");
+    CHECK(data == NULL && len == 0);
+    EXPECT(ow_pdf_document_set_subset_budget(doc, UINT64_MAX), OW_STATUS_OK, NULL);
+    EXPECT(ow_pdf_document_save_bytes(doc, &data, &len), OW_STATUS_OK, NULL);
+    CHECK(contains(data, len, "/Subtype /CIDFontType0C"));
+    ow_bytes_free(data, len);
+    EXPECT(ow_pdf_document_set_subset_budget(NULL, 0), OW_STATUS_NULL_ARGUMENT, "doc is null");
     ow_pdf_document_free(doc);
 
     /* Text an embedded font cannot show: Hebrew needs right-to-left layout, and Liberation
