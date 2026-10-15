@@ -13,8 +13,12 @@
 //! To find every DICT the subsetter rewrites, the table is read the way subsetter 0.2.6
 //! reads it (`Table::parse` in `src/cff/mod.rs`, `src/cff/index.rs` and `src/cff/dict/`)
 //! rather than with another parser, which could reject operands it accepts: the first
-//! DICT of the Top DICT INDEX, the Private DICT it points to, and each Font DICT of the
-//! FDArray with its Private DICT. That is a little more than the subsetter writes back:
+//! DICT of the Top DICT INDEX, the Private DICT its last Private operator points to, and
+//! the Font DICTs of the FDArray its last FDArray operator points to, up to the first that
+//! cannot be read, each with the Private DICT of every Private operator it has. Reading
+//! more than that could cost more than the subsetter's own work: a Top DICT may repeat its
+//! operators, and Font DICTs past one that cannot be read may all share one large Private
+//! DICT. That is a little more than the subsetter writes back:
 //! it rewrites only FontMatrix and FontBBox of the Top DICT, the top-level Private DICT
 //! only of a SID-keyed font and the FDArray only of a CID-keyed one. A real number past
 //! `f32::MAX` has no place in any of these, so finding one anywhere refuses the face.
@@ -145,13 +149,13 @@ fn dicts(cff: &[u8]) -> Vec<&[u8]> {
     };
     dicts.push(top);
     let top = operators(top);
-    for (operator, operands) in &top {
-        if *operator == PRIVATE {
-            dicts.extend(range(operands).and_then(|range| cff.get(range)));
-        }
+    // Of an operator given twice in the Top DICT, the subsetter keeps the last.
+    if let Some((_, operands)) = top.iter().rev().find(|(operator, _)| *operator == PRIVATE) {
+        dicts.extend(range(operands).and_then(|range| cff.get(range)));
     }
     for font_dict in font_dicts(cff, &top) {
         dicts.push(font_dict);
+        // `parse_font_dict` reads the Private DICT of every Private operator of a Font DICT.
         for (operator, operands) in operators(font_dict) {
             if operator == PRIVATE {
                 dicts.extend(range(&operands).and_then(|range| cff.get(range)));
@@ -170,16 +174,20 @@ fn top_dict(cff: &[u8]) -> Option<&[u8]> {
         .and_then(|top_dicts| top_dicts.get(0))
 }
 
-/// The Font DICTs of the FDArray that the Top DICT's operators `top` point to.
+/// The Font DICTs the subsetter reads, given the Top DICT's operators `top`: those of the
+/// FDArray that the last FDArray operator points to, up to the first that cannot be read.
 fn font_dicts<'a>(cff: &'a [u8], top: &[(u16, Vec<Operand>)]) -> Vec<&'a [u8]> {
-    top.iter()
-        .filter(|(operator, _)| *operator == FD_ARRAY)
-        .filter_map(|(_, operands)| offset(operands).and_then(|at| index(cff, at)))
-        .flat_map(|font_dicts| {
-            (0..font_dicts.len())
-                .filter_map(|i| font_dicts.get(i))
-                .collect::<Vec<_>>()
-        })
+    let Some(font_dicts) = top
+        .iter()
+        .rev()
+        .find(|(operator, _)| *operator == FD_ARRAY)
+        .and_then(|(_, operands)| offset(operands))
+        .and_then(|at| index(cff, at))
+    else {
+        return Vec::new();
+    };
+    (0..font_dicts.len())
+        .map_while(|i| font_dicts.get(i))
         .collect()
 }
 
@@ -1201,6 +1209,45 @@ mod tests {
         assert_eq!(dicts(&cff), [&top[..], &font_dict[..], &[139][..]]);
     }
 
+    #[test]
+    fn reads_only_the_dicts_the_subsetter_reads() {
+        // A Top DICT with two Private operators, "5 40 Private 5 50 Private": the subsetter
+        // keeps the second.
+        let mut cff = vec![1, 0, 4, 1];
+        cff.extend([0, 0]); // no names
+        let top = [144, 40 + 139, 18, 144, 50 + 139, 18];
+        cff.extend([0, 1, 1, 1, 7]);
+        cff.extend(top);
+        cff.resize(40, 0);
+        cff.extend([139; 5]);
+        cff.resize(50, 0);
+        let private = [140; 5];
+        cff.extend(private);
+        assert_eq!(dicts(&cff), [&top[..], &private[..]]);
+
+        // A Top DICT with two FDArray operators, "20 FDArray 40 FDArray": the subsetter
+        // keeps the second. Its INDEX has three Font DICTs, of which the second ends before
+        // it starts, so the subsetter reads only the first, "1 60 Private"; the third is
+        // readable but never read.
+        let mut cff = vec![1, 0, 4, 1];
+        cff.extend([0, 0]); // no names
+        let top = [20 + 139, 12, 36, 40 + 139, 12, 36];
+        cff.extend([0, 1, 1, 1, 7]);
+        cff.extend(top);
+        cff.resize(20, 0);
+        cff.extend([0, 1, 1, 1, 4, 140, 70 + 139, 18]);
+        cff.resize(40, 0);
+        let font_dict = [140, 60 + 139, 18];
+        cff.extend([0, 3, 1, 1, 4, 2, 7]);
+        cff.extend(font_dict);
+        cff.extend([139, 139, 139]);
+        cff.resize(60, 0);
+        cff.push(139);
+        cff.resize(70, 0);
+        cff.push(99);
+        assert_eq!(dicts(&cff), [&top[..], &font_dict[..], &[139][..]]);
+    }
+
     /// An INDEX of `items`, with the smallest offset size that holds them.
     fn index_of(items: &[Vec<u8>]) -> Vec<u8> {
         if items.is_empty() {
@@ -1539,8 +1586,8 @@ mod tests {
 
     #[test]
     fn counts_font_dicts_up_to_the_first_it_cannot_read() {
-        // 257 Font DICTs, of which object 201 ends before it starts: the subsetter takes
-        // the first 201, does not panic, and subsets.
+        // 257 Font DICTs, of which object 200 (counting from 0) ends before it starts: the
+        // subsetter takes the first 200, does not panic, and subsets.
         let format3 = [3, 0, 2, 0, 0, 0, 0, 3, 1, 0, 5];
         let mut cff = programs(
             &glyphs_with(4, vec![14]),
@@ -1566,6 +1613,55 @@ mod tests {
         cff[place(201)].copy_from_slice(&end[end.len() - size..]);
         assert!(!subsetter_panics(cff.clone(), &[4]));
         subset_glyphs(cff, &[4]).unwrap();
+    }
+
+    #[test]
+    fn counts_font_dicts_before_it_checks_the_reals() {
+        // A real number past f32 in the Top DICT, which the reals check refuses: with 255
+        // Font DICTs it does, with 256 the count refuses the font first, before the reals
+        // check reads the Private DICT of every Font DICT.
+        let format3 = vec![3, 0, 2, 0, 0, 0, 0, 3, 1, 0, 5];
+        for count in [255, 256] {
+            let cff = Spec {
+                glyphs: glyphs_with(4, vec![14]),
+                local: vec![vec![]; count],
+                fd_select: Some(format3.clone()),
+                top_prefix: PRIVATE_INFINITE.to_vec(),
+                ..Spec::default()
+            }
+            .build();
+            let refused = subset_glyphs(cff, &[4]).unwrap_err();
+            if count > MAX_FONT_DICTS {
+                assert!(
+                    matches!(refused, Error::SubsetUnsupported { .. }),
+                    "{refused}"
+                );
+            } else {
+                assert!(
+                    matches!(refused, Error::MalformedTable { table: "CFF ", .. }),
+                    "{refused}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn calls_no_subroutine_past_the_first_it_cannot_read() {
+        // The subsetter collects the first 1,239 global subroutines of `broken_global`;
+        // object 1,240 can be read on its own, but a call to it (operand 1,133) fails in
+        // the subsetter with an error of its own. The hints after the call are never
+        // counted, so the check leaves the glyph to the subsetter.
+        let glyph = [vec![28, 4, 109, 29], hinted_glyph(65_536, 29, false)].concat();
+        let cff = Spec {
+            glyphs: glyphs_with(4, glyph),
+            global: broken_global(),
+            local: vec![vec![]],
+            ..Spec::default()
+        }
+        .build();
+        assert!(!subsetter_panics(cff.clone(), &[4]));
+        let err = subset_glyphs(cff, &[4]).unwrap_err();
+        assert!(matches!(err, Error::Subset { .. }), "{err}");
     }
 
     #[test]

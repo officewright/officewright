@@ -130,9 +130,11 @@ impl FontFace {
         // lookup, not by the outline format the font parser reports.
         let font = crate::font::font_ref(self.data(), face)?;
         crate::name_offsets::check(&font, self.data(), face)?;
+        // The programs first: they count the Font DICTs before any Private DICT is read,
+        // and the reals check reads the Private DICT of every Font DICT.
         if subsetter_table(&font, self.data(), b"glyf").is_none() {
-            crate::cff::check_reals(&font, self.data(), face)?;
             crate::cff::check_programs(&font, self.data(), face, &ids)?;
+            crate::cff::check_reals(&font, self.data(), face)?;
         }
         let remapper = GlyphRemapper::new_from_glyphs_sorted(&ids);
         let data = self.data();
@@ -213,7 +215,7 @@ pub(crate) fn subsetter_table<'a>(
 /// number too large for an `f32` (<https://github.com/typst/subsetter/issues/31>), an
 /// overflow of a glyph's stem-hint count
 /// (<https://github.com/typst/subsetter/issues/33>), and a CID-keyed font with 256 Font
-/// DICTs, on which a `debug_assert!` fails and, when the kept glyphs use all 256, a
+/// DICTs or more, on which a `debug_assert!` fails and, when the kept glyphs use 256, a
 /// `u8` counter overflows in any build
 /// (<https://github.com/typst/subsetter/issues/34>).
 /// Catching relies on unwinding, like the C ABI: built with `-C panic=abort` the process
