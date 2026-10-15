@@ -53,8 +53,9 @@ but elsewhere too: lines and page breaks do not yet always fall where Word puts 
 
 It follows Word's rules for laying out text: the fonts the document embeds come first,
 then those you give and the system's, then for a missing font its metric-compatible
-substitute (Carlito for Calibri, Liberation for Arial, Times New Roman and Courier New),
-else one of similar design or a common font of the same kind; text is shaped with
+substitute (Carlito for Calibri, Liberation for Arial, Times New Roman and Courier New)
+if it is installed or given, else one of similar design or a common font of the same
+kind; text is shaped with
 HarfRust, or without kerning and ligatures from a font whose layout tables it cannot
 use; lines break and paragraphs are spaced, kept together and kept from widows as in
 Word; each section gets its page size and margins, headers, footers and page numbers.
@@ -77,17 +78,21 @@ The main things not laid out yet:
   shadow and emphasis marks;
 - right-to-left text (Arabic, Hebrew) in its reading order, and vertical text;
 - links, which keep their look but cannot be clicked, and automatic hyphenation;
-- cropped, rotated or mirrored pictures, which are drawn whole and upright, and pictures
-  in formats other than PNG and JPEG, which are drawn as grey boxes;
+- cropped, rotated or mirrored pictures, which are drawn whole and upright, pictures in
+  formats other than PNG and JPEG, which are drawn as grey boxes, and the outlines and
+  colour adjustments of pictures;
 - fields other than page numbers and page counts, which show the result stored in the
   document.
 
-Comments are left out and tracked changes are shown as accepted. Of all this, the report
-names tables, columns, paragraph borders, drawings other than pictures, pictures it
-cannot draw as Word does, and fields; the rest is not in the report yet
+Comments are left out. Tracked changes are shown as accepted, except that deleted
+paragraph marks and table rows stay, so a deleted paragraph leaves an empty line. Of all
+this, the report names tables, columns, paragraph borders, shapes, text boxes, charts,
+SmartArt, VML drawings, embedded objects and equations, pictures that are cropped, turned
+or mirrored or in a format other than PNG and JPEG, and fields; the rest, floating
+pictures included, is not in the report yet
 ([#303](https://github.com/officewright/officewright/issues/303)). It also names smaller
-differences that this list leaves out, such as absolute position tabs. DOC, RTF and
-password-protected files cannot be opened yet.
+differences that this list leaves out, such as absolute position tabs. DOC and RTF files,
+and files that need a password to open, cannot be opened yet.
 
 From the command line:
 
