@@ -882,10 +882,10 @@
       "text_score": 0.7911
     },
     "tests/corpus/word-rules/E-list-label-format.docx": {
-      "line_agreement": 0.9167,
-      "ssim_mean": 0.9749,
-      "ssim_min": 0.9749,
-      "text_score": 0.9977
+      "line_agreement": 1.0,
+      "ssim_mean": 0.9751,
+      "ssim_min": 0.9751,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-list-label-rstyle.docx": {
       "line_agreement": 1.0,
