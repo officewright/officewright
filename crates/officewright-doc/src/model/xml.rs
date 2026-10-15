@@ -6,12 +6,8 @@
 //! never recurses, however deep they nest. Names and namespaces are interned: an element
 //! costs a few machine words, not an allocation per name.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
-
-/// The namespace of `xmlns` attributes (Namespaces in XML 1.0, section 3): a token keeps
-/// the namespace declarations written on its element as attributes in it.
-pub(crate) const XMLNS: &str = "http://www.w3.org/2000/xmlns/";
 
 /// A string of a document's [`Strings`]: a namespace URI or a qualified name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -25,6 +21,12 @@ pub(crate) struct Strings {
 }
 
 impl Strings {
+    /// The bytes the strings take, each kept twice: in the list and as a key.
+    #[cfg(test)]
+    pub(crate) fn bytes(&self) -> usize {
+        2 * self.list.iter().map(|text| text.len()).sum::<usize>()
+    }
+
     pub(crate) fn intern(&mut self, text: &str) -> Sym {
         if let Some(&sym) = self.index.get(text) {
             return sym;
@@ -54,11 +56,31 @@ pub(crate) struct XmlAttribute {
     pub(crate) value: Box<str>,
 }
 
+/// A namespace declaration of an element: written on it, or the binding in scope where
+/// it was read of a prefix that one of its values names (see
+/// [`Token::Start`]'s `declarations`). Both are interned, so that a declaration costs a
+/// few bytes however long its URI is, and however many elements name it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Declaration {
+    /// The prefix declared; `None` for the default namespace.
+    pub(crate) prefix: Option<Sym>,
+    /// The namespace; `None` for `xmlns=""`.
+    pub(crate) uri: Option<Sym>,
+    /// Written on the element, rather than added for a value.
+    pub(crate) written: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Token {
     Start {
         name: XmlName,
         attributes: Box<[XmlAttribute]>,
+        /// The namespace declarations written on the element, and the binding of each
+        /// prefix that the value of a Markup Compatibility attribute or of `xsi:type`
+        /// names and the element does not declare itself, as it was in scope where the
+        /// element was read: such a prefix may be declared outside the element kept,
+        /// and the value means nothing without it.
+        declarations: Box<[Declaration]>,
         /// Whether the element is the branch of its `mc:AlternateContent` that the reader
         /// of its part takes: the first `mc:Choice` all of whose `Requires` namespaces
         /// the reader implements, else the `mc:Fallback` (ECMA-376 Part 3, §10.2).
@@ -246,72 +268,68 @@ impl<'d> Element<'d> {
     }
 
     /// The element and everything in it as XML that stands on its own: each element
-    /// keeps the namespace declarations written on it, and declares the prefixes it and
-    /// its attributes use where they are not yet bound to the same namespace.
+    /// keeps the namespace declarations written on it, and the prefixes its name, its
+    /// attributes and its values need are declared where they are not yet bound to the
+    /// same namespace. A prefix that no declaration inside the element binds is bound
+    /// outside it, the same everywhere in it, so it is declared once, on the element
+    /// itself: the XML grows with the element, not with how many of its elements need
+    /// a long URI.
     pub(crate) fn to_xml(self) -> String {
         let strings = self.strings;
         let uri = |namespace: Option<Sym>| namespace.map(|uri| strings.get(uri));
         let mut out = String::new();
+        let outside = self.outside_bindings();
         // The URI each prefix is bound to in scope, innermost last, and the prefixes each
         // open element bound.
         let mut bindings: HashMap<Option<&str>, Vec<Option<&str>>> = HashMap::new();
         let mut open: Vec<(&str, Vec<Option<&str>>)> = Vec::new();
+        let declare = |out: &mut String, prefix: Option<&str>, namespace: Option<&str>| {
+            match prefix {
+                Some(prefix) => {
+                    let _ = write!(out, " xmlns:{prefix}=\"");
+                }
+                None => out.push_str(" xmlns=\""),
+            }
+            escape(out, namespace.unwrap_or_default(), true);
+            out.push('"');
+        };
         for token in self.tokens {
             match token {
                 Token::Start {
-                    name, attributes, ..
+                    name,
+                    attributes,
+                    declarations,
+                    ..
                 } => {
                     let qname = strings.get(name.qname);
                     out.push('<');
                     out.push_str(qname);
                     let mut added = Vec::new();
-                    // The declarations the element keeps bind first, so that none is
-                    // made twice.
-                    let is_declaration =
-                        |attribute: &XmlAttribute| uri(attribute.name.namespace) == Some(XMLNS);
-                    for attribute in attributes.iter().filter(|a| is_declaration(a)) {
-                        let prefix = strings.get(attribute.name.qname).strip_prefix("xmlns:");
-                        let bound = (!attribute.value.is_empty()).then_some(&*attribute.value);
-                        bindings.entry(prefix).or_default().push(bound);
+                    for declaration in declarations.iter().filter(|d| d.written) {
+                        let prefix = declaration.prefix.map(|prefix| strings.get(prefix));
+                        let namespace = uri(declaration.uri);
+                        declare(&mut out, prefix, namespace);
+                        bindings.entry(prefix).or_default().push(namespace);
                         added.push(prefix);
                     }
-                    let names = std::iter::once((name, true)).chain(
-                        attributes
-                            .iter()
-                            .filter(|a| !is_declaration(a))
-                            .map(|attribute| (&attribute.name, false)),
-                    );
-                    for (name, is_element) in names {
-                        let prefix = prefix(strings.get(name.qname));
-                        // An unprefixed attribute is in no namespace and needs nothing;
-                        // xml is bound by definition.
-                        if (prefix.is_none() && !is_element) || prefix == Some("xml") {
-                            continue;
+                    if open.is_empty() {
+                        for &(prefix, namespace) in &outside {
+                            declare(&mut out, prefix, namespace);
+                            bindings.entry(prefix).or_default().push(namespace);
+                            added.push(prefix);
                         }
+                    }
+                    for (prefix, namespace) in needs(strings, name, attributes, declarations) {
                         let bound = bindings
                             .get(&prefix)
                             .and_then(|stack| stack.last().copied());
                         // The default namespace starts out as no namespace.
                         let bound = bound.or(prefix.is_none().then_some(None));
-                        if bound == Some(uri(name.namespace)) {
+                        if bound == Some(namespace) {
                             continue;
                         }
-                        match prefix {
-                            Some(prefix) => {
-                                let _ = write!(out, " xmlns:{prefix}=\"");
-                            }
-                            None => out.push_str(" xmlns=\""),
-                        }
-                        escape(
-                            &mut out,
-                            name.namespace.map_or("", |uri| strings.get(uri)),
-                            true,
-                        );
-                        out.push('"');
-                        bindings
-                            .entry(prefix)
-                            .or_default()
-                            .push(uri(name.namespace));
+                        declare(&mut out, prefix, namespace);
+                        bindings.entry(prefix).or_default().push(namespace);
                         added.push(prefix);
                     }
                     for attribute in attributes.iter() {
@@ -354,6 +372,88 @@ impl<'d> Element<'d> {
             }
         }
         out
+    }
+}
+
+/// The prefixes a start tag needs bound, with the namespace each needs: that of its
+/// name, those of its prefixed attributes, and those its values name (the declarations
+/// added for them). An unprefixed attribute is in no namespace and needs nothing; `xml`
+/// is bound by definition.
+fn needs<'s>(
+    strings: &'s Strings,
+    name: &'s XmlName,
+    attributes: &'s [XmlAttribute],
+    declarations: &'s [Declaration],
+) -> impl Iterator<Item = (Option<&'s str>, Option<&'s str>)> + 's {
+    let uri = |namespace: Option<Sym>| namespace.map(|uri| strings.get(uri));
+    let names = std::iter::once((name, true))
+        .chain(attributes.iter().map(|attribute| (&attribute.name, false)))
+        .filter_map(move |(name, is_element)| {
+            let prefix = prefix(strings.get(name.qname));
+            ((prefix.is_some() || is_element) && prefix != Some("xml"))
+                .then(|| (prefix, uri(name.namespace)))
+        });
+    let values = declarations
+        .iter()
+        .filter(|declaration| !declaration.written)
+        .map(move |declaration| {
+            (
+                declaration.prefix.map(|prefix| strings.get(prefix)),
+                uri(declaration.uri),
+            )
+        });
+    names.chain(values)
+}
+
+impl<'d> Element<'d> {
+    /// The bindings the element needs from outside it, each once, in the order first
+    /// needed: the prefixes its names and values need where no declaration written
+    /// inside it binds them. The default namespace is left out when it is no namespace,
+    /// as it is where [`to_xml`](Self::to_xml) starts.
+    fn outside_bindings(self) -> Vec<(Option<&'d str>, Option<&'d str>)> {
+        let strings = self.strings;
+        let mut outside: Vec<(Option<&str>, Option<&str>)> = Vec::new();
+        let mut seen: HashSet<Option<&str>> = HashSet::new();
+        // How many declarations written inside the element bind each prefix in scope, and
+        // the prefixes each open element declared.
+        let mut inside: HashMap<Option<&str>, usize> = HashMap::new();
+        let mut open: Vec<Vec<Option<&str>>> = Vec::new();
+        for token in self.tokens {
+            match token {
+                Token::Start {
+                    name,
+                    attributes,
+                    declarations,
+                    ..
+                } => {
+                    let mut declared = Vec::new();
+                    for declaration in declarations.iter().filter(|d| d.written) {
+                        let prefix = declaration.prefix.map(|prefix| strings.get(prefix));
+                        *inside.entry(prefix).or_default() += 1;
+                        declared.push(prefix);
+                    }
+                    for (prefix, namespace) in needs(strings, name, attributes, declarations) {
+                        let bound_inside = inside.get(&prefix).is_some_and(|&count| count > 0);
+                        if bound_inside || (prefix.is_none() && namespace.is_none()) {
+                            continue;
+                        }
+                        if seen.insert(prefix) {
+                            outside.push((prefix, namespace));
+                        }
+                    }
+                    open.push(declared);
+                }
+                Token::End => {
+                    for prefix in open.pop().unwrap_or_default() {
+                        if let Some(count) = inside.get_mut(&prefix) {
+                            *count = count.saturating_sub(1);
+                        }
+                    }
+                }
+                Token::Text(_) | Token::Comment(_) | Token::ProcessingInstruction { .. } => {}
+            }
+        }
+        outside
     }
 }
 
