@@ -630,6 +630,54 @@ class Refused(Exception):
     """A document that must not enter the corpus as it is; the message says why."""
 
 
+# What the corpus never takes, found by what a part is rather than by its usual name: OPC
+# compares part names without regard to case (ECMA-376 Part 2, §9.1.1.1), and a package may
+# put a part anywhere and say what it is by its content type and by the relationships that
+# point to it.
+EMBEDDED_FOLDERS = ("word/fonts/", "word/embeddings/", "word/activex/")
+ACTIVEX_TYPES = ("application/vnd.ms-office.activex+xml", "application/vnd.ms-office.activex")
+EMBEDDED_RELATIONSHIPS = (
+    f"{RELS_NS}/control",
+    f"{RELS_NS}/font",
+    f"{RELS_NS}/oleObject",
+    f"{RELS_NS}/package",
+    "http://schemas.microsoft.com/office/2006/relationships/activeXControlBinary",
+)
+
+
+def attribute(element: str, name: str) -> str:
+    """The value of an attribute of an XML start tag, "" when it has none."""
+    match = re.search(rf"""\b{name}\s*=\s*(?:"([^"]*)"|'([^']*)')""", element)
+    return (match.group(1) if match.group(1) is not None else match.group(2)) if match else ""
+
+
+def embedded_parts(parts: dict[str, bytes]) -> list[str]:
+    """The names of the parts that are embedded fonts or objects or ActiveX controls, as the
+    package spells them: by folder, by content type and by relationship type."""
+    by_lower = {name.lower(): name for name in parts}
+    found = {name for name in parts if name.lower().startswith(EMBEDDED_FOLDERS)}
+
+    def add(name: str) -> None:
+        found.add(by_lower.get(name.lower(), name))
+
+    types = parts.get("[Content_Types].xml", b"").decode("utf-8", "replace")
+    for element in re.findall(r"<Override\b[^>]*>", types):
+        if attribute(element, "ContentType").lower() in ACTIVEX_TYPES:
+            add(attribute(element, "PartName").lstrip("/"))
+    for element in re.findall(r"<Default\b[^>]*>", types):
+        if attribute(element, "ContentType").lower() in ACTIVEX_TYPES:
+            extension = "." + attribute(element, "Extension").lower()
+            found.update(name for name in parts if name.lower().endswith(extension))
+    for rels in (name for name in parts if name.lower().endswith(".rels")):
+        xml = parts[rels].decode("utf-8", "replace")
+        for element in re.findall(r"<Relationship\b[^>]*>", xml):
+            if attribute(element, "TargetMode") == "External":
+                continue
+            if attribute(element, "Type") in EMBEDDED_RELATIONSHIPS:
+                add(part_target(rels, attribute(element, "Target")))
+    return sorted(found)
+
+
 def part_target(rels_part: str, target: str) -> str:
     """The part a relationship's target names, from the .rels part that holds it."""
     if target.startswith("/"):
@@ -709,10 +757,11 @@ def clean(original: bytes, doc: PublicDoc) -> Cleaned:
     with zipfile.ZipFile(io.BytesIO(original)) as archive:
         entries = [(info, archive.read(info)) for info in archive.infolist()]
     names = [info.filename for info, _ in entries]
+    embedded = embedded_parts({info.filename: data for info, data in entries})
+    if embedded:
+        raise Refused(f"{doc.name}: embeds {', '.join(embedded)}")
     for name in names:
-        if name.startswith(("word/fonts/", "word/embeddings/", "word/activeX/")):
-            raise Refused(f"{doc.name}: embeds {name}")
-        if "vbaProject" in name:
+        if "vbaproject" in name.lower():
             raise Refused(f"{doc.name}: has macros")
         if name == "word/comments.xml":
             raise Refused(f"{doc.name}: has comments")
@@ -830,13 +879,13 @@ def problems(
     """What a committed document must not hold; empty for a clean one."""
     found = []
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
-        for name in archive.namelist():
-            body = archive.read(name)
+        parts = {name: archive.read(name) for name in archive.namelist()}
+        embedded = embedded_parts(parts)
+        found += [f"{name} is embedded" for name in embedded if name not in parts]
+        for name, body in parts.items():
             if DROPPED.match(name):
                 found.append(f"{name} is still there")
-            if name.startswith(("word/fonts/", "word/embeddings/", "word/activeX/")) or (
-                "vbaProject" in name
-            ):
+            if name in embedded or "vbaproject" in name.lower():
                 found.append(f"{name} is embedded")
             if MEDIA.match(name) and not is_placeholder(body):
                 found.append(f"{name} is not our placeholder")
