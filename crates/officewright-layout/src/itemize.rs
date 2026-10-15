@@ -190,6 +190,25 @@ struct Builder<'d, 'f, 'a> {
     shaper: Shaper,
 }
 
+/// Whether `script` is written from right to left. The layout shapes every run from left
+/// to right and does not reorder bidirectional text yet, so such text is reported.
+fn right_to_left(script: Script) -> bool {
+    matches!(
+        script,
+        Script::Arabic
+            | Script::Hebrew
+            | Script::Syriac
+            | Script::Thaana
+            | Script::Nko
+            | Script::Samaritan
+            | Script::Mandaic
+            | Script::Adlam
+            | Script::Hanifi_Rohingya
+            | Script::Mende_Kikakui
+            | Script::Yezidi
+    )
+}
+
 /// Characters that stay with the character before them, in its run and face: joiners,
 /// variation selectors, the soft hyphen, bidirectional controls, marks of the Inherited
 /// script and every mark with a canonical combining class (Hebrew points, Arabic
@@ -237,8 +256,15 @@ impl Builder<'_, '_, '_> {
             Inline::Tab { style, .. } => self.item(Item::Tab(*style)),
             Inline::Break { kind, style, .. } => self.item(Item::Break(*kind, *style)),
             Inline::Object(_) => self.item(Item::Object(path)),
-            Inline::Anchored(_) => self.item(Item::Anchored(path)),
+            Inline::Anchored(_) => {
+                self.unsupported("floating pictures, shapes and text boxes are not drawn yet");
+                self.item(Item::Anchored(path));
+            }
             Inline::NoteReference { style, .. } => {
+                self.unsupported(
+                    "footnotes and endnotes are not laid out yet: their reference marks and \
+                     their texts are left out",
+                );
                 self.item(Item::NoteReference(path, *style));
             }
             Inline::NoteNumber { style, .. }
@@ -254,6 +280,15 @@ impl Builder<'_, '_, '_> {
         self.out.items.push(item);
     }
 
+    /// Reports, once in the document, a feature the layout leaves out or shows otherwise.
+    fn unsupported(&mut self, message: &str) {
+        self.fonts.report_once(
+            ReportKind::FeatureUnsupported,
+            self.location,
+            message.to_owned(),
+        );
+    }
+
     fn style(&self, id: RunStyleId) -> RunStyle {
         self.document.run_style(id).cloned().unwrap_or_default()
     }
@@ -266,6 +301,12 @@ impl Builder<'_, '_, '_> {
 
     /// Adds `text` in style `id`, with the formatting `style`.
     fn text_in(&mut self, text: &str, id: RunStyleId, style: &RunStyle) {
+        if style.rtl() || text.chars().any(|ch| right_to_left(ch.script())) {
+            self.unsupported(
+                "right-to-left text is laid out from left to right, its characters in the \
+                 order they are stored",
+            );
+        }
         let turkic = style
             .language()
             .latin()
