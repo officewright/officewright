@@ -224,6 +224,7 @@ Not before the C ABI is stable. When they come: .NET (`netstandard2.0` + `net8.0
 
 - Conventional Commits with the crate as scope: `feat(pdf): write xref streams`, `fix(ffi): free buffer on error path`, `docs(readme): ...`, `ci: ...`. Breaking changes use `!` (`feat(pdf)!: ...`).
 - One logical change per commit; no "wip"/"fix stuff" commits.
+- Commits, PR descriptions and PR comments carry no line of Claude authorship: no `Co-Authored-By: Claude …` trailer, no "Generated with Claude Code". The squash commit of a merge included: GitHub copies the trailers of the branch's commits into its message, so the author removes them when merging. What is already published is neither rewritten nor edited.
 - Until Milestone 1 is merged, commit to `main`. After that, work on branches (`feat/<topic>`, `fix/<topic>`), open a PR, merge only with green CI. `main` is protected.
 - Releases (later): release-plz generates versions and CHANGELOG from commit messages; cargo-semver-checks runs before publishing, without the features `unstable-ir` of `officewright-layout` and `officewright-doc` and `unstable-drawing` of `officewright-pdf` (the IR, the translation into it and the drawing primitives are exempt until 1.0).
 
