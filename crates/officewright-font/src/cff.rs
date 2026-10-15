@@ -1810,7 +1810,9 @@ mod tests {
         hinted.extend([1, 19, 0xFF, 0x80, 14]);
         let cff = programs(&glyphs_with(3, hinted), &[], &[vec![]], None);
         check_within(cff.clone(), &[3], 25).unwrap();
-        assert!(over_limit(check_within(cff, &[3], 24)).contains("up to glyph 3,"));
+        assert!(over_limit(check_within(cff.clone(), &[3], 24)).contains("up to glyph 3,"));
+        // The limit also runs out within the hint mask's own cost.
+        assert!(over_limit(check_within(cff, &[3], 23)).contains("up to glyph 3,"));
 
         // Local subroutines: of a SID-keyed font (an operand, callsubr, 4 and endchar), and
         // of a CID-keyed font's Font DICT 1, which glyphs 3 and 4 use.
