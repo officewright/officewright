@@ -84,6 +84,20 @@ impl Budget {
     }
 }
 
+/// What Markup Compatibility makes of an element [`Capture::capture`] reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Role {
+    /// An `mc:AlternateContent` whose taken branch is read in place of the element
+    /// captured.
+    Alternate,
+    /// The branch such an alternate takes: its children are read.
+    Taken,
+    /// Started in `mce`, and kept as written inside.
+    Element,
+    /// Kept as written, never started in `mce`.
+    Kept,
+}
+
 /// The state of reading one part into a document.
 pub(super) struct Capture<'d, 'p, 't> {
     pub(super) document: &'d mut Document,
@@ -127,6 +141,14 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
     /// undeclared prefix, or lists more than
     /// [`Limits::max_mce_names`](officewright_opc::Limits::max_mce_names) names is not
     /// taken: what is inside is not read yet, so it is not an error.
+    ///
+    /// When the element is an `mc:AlternateContent`, the children of the branch it
+    /// takes are read in its place (see [`through_alternates`](Self::through_alternates)),
+    /// so they go through Markup Compatibility as the element did (#156): its branches,
+    /// the children of the branch taken, and the same again for an `mc:AlternateContent`
+    /// among them. An `mc:MustUnderstand` there that names a namespace `mce` does not
+    /// understand refuses the part, as it does in the body, and so does a choice whose
+    /// `Requires` is not valid.
     pub(super) fn capture(
         &mut self,
         reader: &mut Reader<'_>,
@@ -141,9 +163,15 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
         // The depth of each open mc:AlternateContent, and whether a branch of it has
         // been taken.
         let mut alternates: Vec<(usize, bool)> = Vec::new();
+        // What Markup Compatibility makes of each open element; the caller started the
+        // element itself and ends it.
+        let mut roles = vec![Role::Element];
         if tag.name().is(mc, "AlternateContent") {
             alternates.push((1, false));
+            roles = vec![Role::Alternate];
         }
+        let part = self.part;
+        let opc = |err: officewright_opc::Error| Error::from(err.in_part(part));
         self.push_start(reader, &tag, false)?;
         let mut depth = 1usize;
         while depth > 0 {
@@ -155,15 +183,30 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
             match event {
                 Some(Event::Start(tag)) => {
                     let name = tag.name();
+                    let parent = roles.last().copied().unwrap_or(Role::Kept);
+                    let processed = matches!(parent, Role::Alternate | Role::Taken);
+                    if processed {
+                        mce.start(reader, &tag).map_err(opc)?;
+                    }
                     let mut taken = false;
                     if let Some((at, branch_taken)) = alternates.last_mut() {
                         if *at == depth && !*branch_taken {
-                            taken = name.is(mc, "Fallback")
-                                || (name.is(mc, "Choice")
-                                    && mce.is_selectable(reader, &tag).unwrap_or(false));
+                            let selectable = || match mce.is_selectable(reader, &tag) {
+                                Ok(selectable) => Ok(selectable),
+                                Err(err) if processed => Err(opc(err)),
+                                Err(_) => Ok(false),
+                            };
+                            taken =
+                                name.is(mc, "Fallback") || (name.is(mc, "Choice") && selectable()?);
                             *branch_taken = taken;
                         }
                     }
+                    roles.push(match parent {
+                        Role::Alternate if taken => Role::Taken,
+                        Role::Taken if name.is(mc, "AlternateContent") => Role::Alternate,
+                        Role::Alternate | Role::Taken => Role::Element,
+                        Role::Element | Role::Kept => Role::Kept,
+                    });
                     depth += 1;
                     if name.is(mc, "AlternateContent") {
                         alternates.push((depth, false));
@@ -172,6 +215,10 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
                 }
                 Some(Event::End(_)) => {
                     self.document.tokens.push(Token::End);
+                    let role = roles.pop();
+                    if !roles.is_empty() && role.is_some_and(|role| role != Role::Kept) {
+                        mce.end();
+                    }
                     if alternates.last().is_some_and(|(at, _)| *at == depth) {
                         alternates.pop();
                     }
