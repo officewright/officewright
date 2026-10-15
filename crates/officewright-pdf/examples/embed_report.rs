@@ -93,6 +93,7 @@ fn kind(err: &officewright_pdf::Error) -> String {
                 "not supported by the subsetter yet".into()
             }
             officewright_font::Error::SubsetterPanicked { .. } => "the subsetter panicked".into(),
+            officewright_font::Error::TableOverLimit { .. } => "past a limit of the library".into(),
             _ => "damaged".into(),
         },
         officewright_pdf::Error::MissingGlyph { .. } => "no glyph for a space".into(),
