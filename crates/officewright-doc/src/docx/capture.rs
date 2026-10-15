@@ -163,8 +163,8 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
         // The depth of each open mc:AlternateContent, and whether a branch of it has
         // been taken.
         let mut alternates: Vec<(usize, bool)> = Vec::new();
-        // What Markup Compatibility makes of each open element; the caller started the
-        // element itself and ends it.
+        // What Markup Compatibility makes of each open element. The caller started the
+        // element itself; it is ended after the loop, not at its end tag.
         let mut roles = vec![Role::Element];
         if tag.name().is(mc, "AlternateContent") {
             alternates.push((1, false));
