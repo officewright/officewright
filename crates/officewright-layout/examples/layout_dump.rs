@@ -60,7 +60,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     book.add_dir(&dir)?;
     let mut document = Document::default();
     let plain = RunStyle::default()
-        .with_fonts(RunFonts::new(&family))
+        .with_fonts(RunFonts::new(family.as_str()))
         .with_size(Pt(size));
     let styles = Styles {
         plain: document.add_run_style(plain.clone()),
