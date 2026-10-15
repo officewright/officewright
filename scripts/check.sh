@@ -152,7 +152,7 @@ fi
 
 step "corpus runner over tests/corpus (against tests/corpus/baseline.json)"
 # Every committed Word document opens and is rendered into PDF in a child process, with the
-# fonts of tests/fonts and none of the system's; a panic, hang, memory blow-up, a document
+# fonts of tests/fonts-word/noto-truetype and tests/fonts and none of the system's; a panic, hang, memory blow-up, a document
 # that opens but cannot be rendered, or any change of a file's status from the baseline
 # fails. On Linux each document with a Word reference is also scored, and a score that
 # moves by more than 0.01 fails; macOS and Windows compare the statuses only, since

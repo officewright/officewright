@@ -339,8 +339,9 @@ PDF output of officewright text-to-pdf (tests/pdf-output): qpdf --check without 
   unfiltered by poppler, the committed fuzz seeds equal images.py's output; the example embed_report counts a font the
   subsetter does not support apart from a damaged one (Linux, macOS)
 corpus-runner over tests/corpus (committed corpus), every document rendered with the fonts of tests/fonts and, first,
-  tests/fonts-word (the TrueType Noto Sans, the build Word had for the references that use it), compared with
-  tests/corpus/baseline.json: statuses and the scores against Word's references (Linux), statuses only (macOS, Windows)
+  tests/fonts-word/noto-truetype (the TrueType Noto Sans, the build Word had for the references that use it),
+  compared with tests/corpus/baseline.json: statuses and the scores against Word's references (Linux), statuses only
+  (macOS, Windows)
 ```
 
 `scripts/nightly.sh` (scheduled CI; under an hour in parallel jobs, about six hours as one run): Miri on `officewright-ffi`, `fetch-corpus.sh --check all` (every pinned commit is still fetchable and every archive still has its pinned size; downloads nothing), the files of `tests/fonts` and `tests/fonts-word` compared byte for byte with the upstream sources THIRD-PARTY-NOTICES.md names (`scripts/check-test-fonts.sh`), fuzzing (30 min per target, each seeded with files of the format it reads, listed in `seeds()` in nightly.sh; 30 s per input, an allocation of 1 GiB or more fails the input, and the fuzzer may grow to 2.5 GiB, since it also holds its corpus and AddressSanitizer's quarantine and overhead; each target's crashing inputs uploaded as a CI artifact of its job; from Milestone 3), corpus-runner over the Word documents of `corpus-ext/` (Apache POI and LibreOffice, fetched by the run; each child under the 1 GiB limit; compared with `tools/corpus-runner/baseline-ext.json`), report uploaded as a CI artifact. `nightly.yml` runs `nightly.sh checks` (all but the fuzzing) in one job and `nightly.sh fuzz <target>` in a job of its own for each target that `nightly.sh fuzz-targets` lists, so no job nears GitHub's limit of 6 hours; with no arguments the script runs all of it, the targets one after another. The full `fetch-corpus.sh all` from scratch, which downloads every source and verifies every SHA-256, runs weekly.

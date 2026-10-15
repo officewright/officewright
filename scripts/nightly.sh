@@ -56,8 +56,8 @@ checks() {
 	fi
 
 	printf '==> %s\n' "test fonts (upstream sources)"
-	# Each file in tests/fonts against the upstream source THIRD-PARTY-NOTICES.md names for
-	# it. A failure, or a download that fails, fails the run but does not stop the parts
+	# Each file in tests/fonts and tests/fonts-word against the upstream source
+	# THIRD-PARTY-NOTICES.md names for it. A failure, or a download that fails, fails the run but does not stop the parts
 	# after it.
 	scripts/check-test-fonts.sh || fonts_failed=1
 }

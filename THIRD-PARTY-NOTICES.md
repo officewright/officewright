@@ -90,8 +90,10 @@ measured by `scripts/corpus-import.py`.
 
 ## Test fonts
 
-Fonts in `tests/fonts/`, at the repository root and so outside every crate. They are
-read by `crates/officewright-font/tests/third_party_fonts.rs`,
+Fonts in `tests/fonts/` and `tests/fonts-word/`, at the repository root and so outside
+every crate. Those of `tests/fonts-word/` are read only by the corpus runner of
+`scripts/check.sh`; those of `tests/fonts/` by it and by
+`crates/officewright-font/tests/third_party_fonts.rs`,
 `crates/officewright-font/tests/metric_compatible.rs`,
 `crates/officewright-pdf/tests/embedded_fonts.rs`,
 `crates/officewright-layout/tests/shaping.rs` and
@@ -99,7 +101,7 @@ read by `crates/officewright-font/tests/third_party_fonts.rs`,
 packages, by the C ABI tests in `tests/c` and `tests/ffi-python`, and by the PDF output
 checks in `tests/pdf-output` and `tests/corpus-tools/poppler/test_font_embedding.py`;
 they seed the fuzz targets in `fuzz/`. `tests/corpus-tools/test_test_fonts.py` checks
-that every file in `tests/fonts/` is listed below with its SHA-256, and that every file
+that every file in both folders is listed below with its SHA-256, and that every file
 listed is there; `scripts/check-test-fonts.sh`, run at night, that each is byte for byte
 the file of the source given for it. The tests embed the fonts, reduced to some of their
 glyphs, in PDF files they write to temporary directories; those files are not committed
