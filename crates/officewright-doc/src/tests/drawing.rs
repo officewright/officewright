@@ -658,3 +658,74 @@ fn reads_drawings_through_markup_compatibility() {
         }
     }
 }
+
+#[test]
+fn reads_drawings_through_markup_compatibility_everywhere_they_are() {
+    // From the review of #316: in a header as in the body, on a floating picture as on
+    // one in the line, and for what Markup Compatibility refuses besides an
+    // mc:MustUnderstand.
+    let must = r#"mc:MustUnderstand="w14" "#;
+    let refused = |document: Result<Document>, case: &str| match document {
+        Err(Error::Unsupported(message)) => {
+            assert!(message.contains("mc:MustUnderstand"), "{case}: {message}")
+        }
+        other => panic!("{case} gave {other:?}"),
+    };
+    // A picture in a header whose a:blip must be understood.
+    let header = format!(
+        r#"<w:hdr xmlns:w="{W}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" mc:Ignorable="w14"><w:p>{}</w:p></w:hdr>"#,
+        inline_picture("rId1").replace("<a:blip ", &format!("<a:blip {must}"))
+    );
+    let header_rels = format!(
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{IMAGE}" Target="media/image1.png"/></Relationships>"#
+    );
+    let package = files_package(
+        r#"<w:p/><w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/></w:sectPr>"#,
+        &image_relationships(),
+        &[
+            ("word/media/image1.png", PNG_BYTES),
+            ("word/header1.xml", header.as_bytes()),
+            ("word/_rels/header1.xml.rels", header_rels.as_bytes()),
+        ],
+        r#"<Default Extension="png" ContentType="image/png"/>"#,
+    );
+    refused(Document::from_bytes(package), "a header");
+    // A floating picture whose wp:anchor must be understood.
+    let anchored = floating_picture("rIdPng").replace("<wp:anchor ", &format!("<wp:anchor {must}"));
+    refused(
+        Document::from_bytes(images_package(&format!("<w:p>{anchored}</w:p>"))),
+        "wp:anchor",
+    );
+    // A choice that requires wp is taken in a drawing, not its fallback.
+    let position =
+        |offset: i64| format!("<wp:positionV><wp:posOffset>{offset}</wp:posOffset></wp:positionV>");
+    let chosen = bare_floating_picture("rIdPng").replace(
+        &position(25400),
+        &format!(
+            r#"<mc:AlternateContent><mc:Choice Requires="wp">{}</mc:Choice><mc:Fallback>{}</mc:Fallback></mc:AlternateContent>"#,
+            position(12700),
+            position(25400)
+        ),
+    );
+    let document = with_images(&format!("<w:p>{chosen}</w:p>"));
+    let anchor = drawings(&document)[0].anchor().unwrap();
+    assert_eq!(anchor.vertical_offset(), Some(Pt(1.0)));
+    // Below a:blip, a Requires that names an undeclared prefix and an attribute of the mc
+    // namespace that Markup Compatibility does not define refuse the document.
+    for (case, blip) in [
+        (
+            "Requires",
+            r#"<a:blip r:embed="rIdPng"><mc:AlternateContent><mc:Choice Requires="zz"><a:extLst/></mc:Choice></mc:AlternateContent></a:blip>"#,
+        ),
+        ("mc:Foo", r#"<a:blip r:embed="rIdPng" mc:Foo="1"/>"#),
+    ] {
+        let picture = inline_picture("rIdPng").replace(r#"<a:blip r:embed="rIdPng"/>"#, blip);
+        assert!(
+            matches!(
+                Document::from_bytes(images_package(&format!("<w:p>{picture}</w:p>"))),
+                Err(Error::Malformed { .. })
+            ),
+            "{case}"
+        );
+    }
+}
