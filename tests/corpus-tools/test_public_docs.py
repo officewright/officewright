@@ -482,19 +482,68 @@ class Cleaning(unittest.TestCase):
             "relationships in UTF-16": rels(
                 f'<Relationships xmlns="{PKG}">' + relationship.format(f"{REL}/control")
                 + "</Relationships>", encoding="utf-16"),
-            "a Strict relationship type": rels(
-                f'<Relationships xmlns="{PKG}">'
-                + relationship.format("http://purl.oclc.org/ooxml/officeDocument/relationships"
-                                      "/control") + "</Relationships>"),
+            "a Default content type with a parameter": types(
+                '<Default Extension="ocx" ContentType="application/vnd.ms-office.activeX;v=1"/>'),
+            "a percent-encoded Default extension": types(
+                '<Default Extension="%6Fcx" ContentType="application/vnd.ms-office.activeX"/>'),
         }
+        for kind in ("control", "font", "oleObject", "package"):
+            spellings[f"the Strict relationship type {kind}"] = rels(
+                f'<Relationships xmlns="{PKG}">'
+                + relationship.format(f"http://purl.oclc.org/ooxml/officeDocument/relationships"
+                                      f"/{kind}") + "</Relationships>")
         for label, package_parts in spellings.items():
             with self.subTest(label):
                 parts = {**package_parts, "word/controls/c1.xml": control,
                          "word/document.xml": b"<w:document xmlns:w='w'/>"}
+                if "Default" in label:
+                    # Found by its extension, not by a relationship or an Override.
+                    parts = {**package_parts, "word/controls/c1.ocx": b"\x00",
+                             "word/document.xml": b"<w:document xmlns:w='w'/>"}
+                    self.assertEqual(public.embedded_parts(parts), ["word/controls/c1.ocx"])
+                    continue
                 self.assertEqual(public.embedded_parts(parts), ["word/controls/c1.xml"])
         # Without any of them, the part is not found: the spellings above are what find it.
         plain = {**types(""), "word/controls/c1.xml": control}
         self.assertEqual(public.embedded_parts(plain), [])
+
+    def test_package_parts_opc_does_not_allow_are_refused_and_reported(self):
+        # Spellings officewright-opc refuses, which would otherwise hide a part from
+        # embedded_parts: a root in no or another namespace, a document type that gives
+        # TargetMode the default External, two content types streams, an unknown encoding.
+        control_rel = f'<Relationship Id="rId1" Type="{REL}/control" Target="controls/c1.xml"/>'
+        cases = {
+            "a .rels root without a namespace": (
+                {"word/_rels/document.xml.rels":
+                 f"<Relationships>{control_rel}</Relationships>"},
+                "word/_rels/document.xml.rels has the root element Relationships"),
+            "a content types root in another namespace": (
+                {"[Content_Types].xml": "<Types xmlns='urn:other'><Override "
+                 "PartName='/word/controls/c1.xml' ContentType='application/vnd.ms-office."
+                 "activeX+xml'/></Types>"},
+                "[Content_Types].xml has the root element {urn:other}Types"),
+            "a document type giving TargetMode a default": (
+                {"word/_rels/document.xml.rels":
+                 '<!DOCTYPE Relationships [<!ATTLIST Relationship TargetMode CDATA "External">]>'
+                 f'<Relationships xmlns="{PKG}">{control_rel}</Relationships>'},
+                "word/_rels/document.xml.rels declares a document type"),
+            "an encoding the parser does not know": (
+                {"word/_rels/document.xml.rels":
+                 f'<?xml version="1.0" encoding="x-unknown"?><Relationships xmlns="{PKG}"/>'},
+                "word/_rels/document.xml.rels is not well-formed XML"),
+        }
+        for label, (parts, said) in cases.items():
+            with self.subTest(label):
+                with self.assertRaises(public.Refused) as caught:
+                    public.clean(package(**parts), DOC)
+                self.assertIn(said, str(caught.exception))
+                self.assertTrue(any(p.startswith(said) for p in public.problems(package(**parts))),
+                                public.problems(package(**parts)))
+        # Two content types streams whose names differ only in case.
+        twice = {"[Content_Types].xml": b"<Types/>", "[content_types].xml": b"<Types/>"}
+        with self.assertRaises(public.Unreadable) as caught:
+            public.embedded_parts(twice)
+        self.assertIn("2 content types streams", str(caught.exception))
 
     def test_a_package_part_that_is_not_xml_is_refused_and_reported(self):
         for name in ("[Content_Types].xml", "word/_rels/document.xml.rels"):

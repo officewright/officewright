@@ -36,6 +36,7 @@ import posixpath
 import re
 import struct
 import sys
+import urllib.parse
 import urllib.request
 import zipfile
 import zlib
@@ -650,17 +651,38 @@ EMBEDDED_RELATIONSHIPS = tuple(
 
 
 class Unreadable(Exception):
-    """A package part that embedded_parts must read is not well-formed XML."""
+    """A package part that embedded_parts must read cannot be read as OPC allows it."""
 
 
-def package_xml(name: str, data: bytes) -> ElementTree.Element:
+class _Builder(ElementTree.TreeBuilder):
+    """A tree builder that notes a document type declaration, which OPC forbids in package
+    parts (ECMA-376 Part 2, §8.1.4) and which could give attributes defaults, such as a
+    TargetMode of External, that the markup does not show."""
+
+    doctype_seen = False
+
+    def doctype(self, name, pubid, system):
+        self.doctype_seen = True
+
+
+def package_xml(name: str, data: bytes, root: str) -> ElementTree.Element:
     """[Content_Types].xml or a .rels part, read as XML: the parser resolves character
     references and namespace prefixes, and reads UTF-16 (ECMA-376 Part 2 allows it), so
-    that no spelling of the markup hides a part."""
+    that no spelling of the markup hides a part. The part is refused when it is not
+    well-formed, declares a document type, or its root is not the element root names (with
+    its namespace), as officewright-opc refuses it."""
+    builder = _Builder()
+    parser = ElementTree.XMLParser(target=builder)
     try:
-        return ElementTree.fromstring(data)
-    except ElementTree.ParseError as error:
+        parser.feed(data)
+        element = parser.close()
+    except (ElementTree.ParseError, ValueError, LookupError) as error:
         raise Unreadable(f"{name} is not well-formed XML ({error})") from error
+    if builder.doctype_seen:
+        raise Unreadable(f"{name} declares a document type, which OPC forbids")
+    if element.tag != root:
+        raise Unreadable(f"{name} has the root element {element.tag}, not {root}")
+    return element
 
 
 def media_type(value: str) -> str:
@@ -672,26 +694,36 @@ def media_type(value: str) -> str:
 def embedded_parts(parts: dict[str, bytes]) -> list[str]:
     """The names of the parts that are embedded fonts or objects or ActiveX controls, as the
     package spells them: by folder, by content type and by relationship type. Raises
-    Unreadable when [Content_Types].xml or a .rels part is not well-formed XML."""
+    Unreadable when [Content_Types].xml or a .rels part cannot be read (package_xml), or the
+    package has two content types streams whose names differ only in case."""
     by_lower = {name.lower(): name for name in parts}
     found = {name for name in parts if name.lower().startswith(EMBEDDED_FOLDERS)}
 
     def add(name: str) -> None:
         found.add(by_lower.get(name.lower(), name))
 
-    # Part names compare without regard to case, that of the content types stream too.
-    types_name = by_lower.get("[content_types].xml")
-    if types_name is not None:
-        types = package_xml(types_name, parts[types_name])
+    # Part names compare without regard to case, that of the content types stream too, so
+    # two streams whose names differ only in case are one name twice.
+    streams = [name for name in parts if name.lower() == "[content_types].xml"]
+    if len(streams) > 1:
+        raise Unreadable(f"the package has {len(streams)} content types streams: "
+                         + ", ".join(sorted(streams)))
+    for types_name in streams:
+        types = package_xml(types_name, parts[types_name], f"{CONTENT_TYPES_NS}Types")
         for element in types.iter(f"{CONTENT_TYPES_NS}Override"):
             if media_type(element.get("ContentType", "")) in ACTIVEX_TYPES:
                 add(element.get("PartName", "").lstrip("/"))
         for element in types.iter(f"{CONTENT_TYPES_NS}Default"):
-            extension = element.get("Extension", "").lower()
+            # Extensions compare as part names do: percent-decoded, without regard to case.
+            extension = urllib.parse.unquote(element.get("Extension", "")).lower()
             if extension and media_type(element.get("ContentType", "")) in ACTIVEX_TYPES:
-                found.update(name for name in parts if name.lower().endswith("." + extension))
+                found.update(
+                    name for name in parts
+                    if urllib.parse.unquote(name).lower().endswith("." + extension)
+                )
     for rels in (name for name in parts if name.lower().endswith(".rels")):
-        for element in package_xml(rels, parts[rels]).iter(f"{PACKAGE_RELS_NS}Relationship"):
+        relationships = package_xml(rels, parts[rels], f"{PACKAGE_RELS_NS}Relationships")
+        for element in relationships.iter(f"{PACKAGE_RELS_NS}Relationship"):
             if element.get("TargetMode") == "External":
                 continue
             if element.get("Type") in EMBEDDED_RELATIONSHIPS:
