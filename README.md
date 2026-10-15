@@ -47,40 +47,47 @@ It cannot yet:
 ## DOCX to PDF (early version)
 
 The main branch converts Word documents (DOCX, and DOCM, DOTX and DOTM) to PDF. This is
-an early version that is not in a release yet: build it from source, and expect a
-document to look different from Word wherever it uses something from the list below.
+an early version that is not in a release yet: build it from source. Expect its pages to
+differ from Word's, most of all where a document uses something from the list below,
+but elsewhere too: lines and page breaks do not yet always fall where Word puts them.
 
-It lays out text as Word does: with the fonts the document embeds, then those you give
-and the system's, and metric-compatible substitutes for missing ones; shaped with
+It follows Word's rules for laying out text: the fonts the document embeds come first,
+then those you give and the system's, then for a missing font its metric-compatible
+substitute (Carlito for Calibri, Liberation for Arial, Times New Roman and Courier New),
+else one of similar design or a common font of the same kind; text is shaped with
 HarfRust, or without kerning and ligatures from a font whose layout tables it cannot
-use; with Word's line breaking, spacing, and keep and widow rules; on the pages of
-each section, with their sizes and margins, headers, footers and page numbers. It draws
-inline PNG and JPEG pictures, underlines, strikethrough, highlight and shading. What it
-knows it shows otherwise than Word would, such as a substituted font or something not
-laid out yet, it reports: the command line prints it as notes, and the C library and
+use; lines break and paragraphs are spaced, kept together and kept from widows as in
+Word; each section gets its page size and margins, headers, footers and page numbers.
+It draws inline PNG and JPEG pictures, underlines, strikethrough, highlight and shading.
+Much of what it shows otherwise than Word would, such as a substituted font or something
+not laid out yet, it reports: the command line prints it as notes, and the C library and
 Rust return it as a report.
 
-Not laid out yet:
+The main things not laid out yet:
 
 - tables: the paragraphs of their cells follow one another at the full width;
 - the bullets and numbers of lists;
-- footnotes and endnotes;
+- footnotes and endnotes, and the marks that refer to them;
 - floating (anchored) pictures and shapes, text boxes, charts, SmartArt, VML drawings,
   embedded objects and equations;
 - text in several columns (laid out in one column), paragraph and page borders, and line
   numbers;
+- the document grid, which sets the line height of many Chinese and Japanese documents;
+- frames and drop caps, and character borders and effects such as emboss, outline,
+  shadow and emphasis marks;
 - right-to-left text (Arabic, Hebrew) in its reading order, and vertical text;
-- links, which are plain text, and automatic hyphenation;
+- links, which keep their look but cannot be clicked, and automatic hyphenation;
 - cropped, rotated or mirrored pictures, which are drawn whole and upright, and pictures
   in formats other than PNG and JPEG, which are drawn as grey boxes;
 - fields other than page numbers and page counts, which show the result stored in the
   document.
 
-Comments are left out and tracked changes are shown as accepted. Lists, footnotes,
-floating objects, right-to-left and vertical text, links, hyphenation, page borders and
-line numbers are not in the report yet
-([#303](https://github.com/officewright/officewright/issues/303)). DOC and RTF files
-cannot be opened yet.
+Comments are left out and tracked changes are shown as accepted. Of all this, the report
+names tables, columns, paragraph borders, drawings other than pictures, pictures it
+cannot draw as Word does, and fields; the rest is not in the report yet
+([#303](https://github.com/officewright/officewright/issues/303)). It also names smaller
+differences that this list leaves out, such as absolute position tabs. DOC, RTF and
+password-protected files cannot be opened yet.
 
 From the command line:
 
@@ -90,17 +97,21 @@ target/release/officewright docx-to-pdf letter.docx letter.pdf
 target/release/officewright docx-to-pdf --font-dir ./fonts --report notes.json cv.docx cv.pdf
 ```
 
+It prints notes such as these:
+
 ```text
 note: sections[0].blocks[18]: tables are not laid out yet: the paragraphs of their cells follow one another at the full width
 note: document: "Calibri" → "Carlito" (metric-compatible substitute)
 ```
 
-`--font FILE` adds a font file, `--no-system-fonts` leaves out the system's fonts, and
-`--max-pages N` makes a document that takes more pages fail (100,000 by default).
+`--report FILE` also writes the notes to a JSON file, `--font FILE` adds a font file,
+`--no-system-fonts` leaves out the system's fonts, and `--max-pages N` makes a document
+that takes more pages fail (100,000 by default).
 
 From C, with the library that `scripts/install-capi.sh PREFIX` builds (it needs
 [cargo-c](https://github.com/lu-zero/cargo-c)) and installs in the layout of a release
-archive:
+archive. The example uses the fonts of a folder `fonts`, which must exist: a folder that
+cannot be read makes the conversion fail.
 
 ```c
 #include <stdio.h>
