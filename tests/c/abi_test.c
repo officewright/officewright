@@ -337,7 +337,7 @@ static void embedded_fonts(const char *fonts) {
     data = (uint8_t *)&len;
     len = 99;
     EXPECT(ow_pdf_document_save_bytes(doc, &data, &len), OW_STATUS_LIMIT_EXCEEDED,
-           "left of the budget it shares with other subsets");
+           "hint mask bytes left of its budget");
     CHECK(data == NULL && len == 0);
     EXPECT(ow_pdf_document_set_subset_budget(doc, UINT64_MAX), OW_STATUS_OK, NULL);
     EXPECT(ow_pdf_document_save_bytes(doc, &data, &len), OW_STATUS_OK, NULL);
