@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::child::Opened;
+use crate::child::{LayoutEntry, Opened};
 use crate::metrics::Scores;
 
 /// How one file ended.
@@ -64,6 +64,12 @@ pub struct FileResult {
     /// Why a document with a reference could not be scored.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score_error: Option<String>,
+    /// With `--render`: why the opened document could not be rendered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render_error: Option<String>,
+    /// With `--render`: what the layout reported for the document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout_report: Option<Vec<LayoutEntry>>,
 }
 
 /// What a child process did: its exit, what it printed, and whether it was stopped.
@@ -96,6 +102,8 @@ pub fn classify(
         diagnostics: None,
         scores: None,
         score_error: None,
+        render_error: None,
+        layout_report: None,
     };
     let first_line = |text: &str| {
         text.lines()
@@ -126,6 +134,8 @@ pub fn classify(
                     result.status = Status::Opened;
                     result.chars = opened.chars;
                     result.diagnostics = opened.diagnostics;
+                    result.render_error = opened.render_error;
+                    result.layout_report = opened.layout_report;
                 } else {
                     let kind = opened.error_kind.unwrap_or_default();
                     let message = opened.error.unwrap_or_default();
@@ -311,7 +321,21 @@ pub fn files_and_changes(files: usize, changes: usize) -> String {
     text
 }
 
+/// How `report` differs from `baseline`, in the files' statuses and in the scores.
 pub fn compare(baseline: &Baseline, report: &Report) -> Changes {
+    let mut changes = compare_statuses(baseline, report);
+    let now: BTreeMap<&str, &FileResult> = report
+        .files
+        .iter()
+        .map(|file| (file.path.as_str(), file))
+        .collect();
+    compare_scores(baseline, &now, &mut changes);
+    changes
+}
+
+/// How `report` differs from `baseline` in the files' statuses only, for a run that
+/// cannot score (`--statuses-only`).
+pub fn compare_statuses(baseline: &Baseline, report: &Report) -> Changes {
     let mut changes = Changes::default();
     let now: BTreeMap<&str, &FileResult> = report
         .files
@@ -352,7 +376,6 @@ pub fn compare(baseline: &Baseline, report: &Report) -> Changes {
             changes.worse(&file.path, line);
         }
     }
-    compare_scores(baseline, &now, &mut changes);
     changes
 }
 
@@ -516,6 +539,8 @@ mod tests {
             diagnostics: None,
             scores: None,
             score_error: None,
+            render_error: None,
+            layout_report: None,
         }
     }
 

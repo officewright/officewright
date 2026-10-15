@@ -34,3 +34,14 @@ todo = "warn"
 undocumented_unsafe_blocks = "warn"
 unimplemented = "warn"
 unwrap_used = "warn"
+
+# The corpus step of scripts/check.sh scores about a hundred documents against Word's
+# rasters (PNG decoding, SSIM) in a debug build, which unoptimised takes minutes on CI.
+# Only the optimisation level changes, and debug assertions and overflow checks stay. Our
+# library crates keep the dev profile, but miniz_oxide, the DEFLATE of officewright-opc
+# and officewright-pdf, is optimised in every dev and test build.
+[profile.dev.package.corpus-runner]
+opt-level = 3
+
+[profile.dev.package.miniz_oxide]
+opt-level = 3

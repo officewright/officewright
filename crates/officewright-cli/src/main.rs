@@ -8,7 +8,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
-use officewright_doc::{LayoutReport, RenderOptions, ReportKind};
+use officewright_doc::{LayoutReport, RenderOptions};
 use officewright_font::{FontBook, FontOrigin, FontRequest, FontResolver};
 use officewright_pdf::{Error, Font, PageSize, Pt, StandardFont, text_to_pdf};
 
@@ -284,7 +284,7 @@ fn render_options(args: &ArgMatches) -> Result<RenderOptions, String> {
 }
 
 /// `report` as JSON: `{"entries": [{"kind": ..., "location": ..., "message": ...}]}`, the
-/// kind in the words of `report_kind`.
+/// kind by its name (`ReportKind::name`).
 fn report_json(report: &LayoutReport) -> String {
     let entries: Vec<String> = report
         .entries()
@@ -292,7 +292,7 @@ fn report_json(report: &LayoutReport) -> String {
         .map(|entry| {
             format!(
                 "    {{\"kind\": {}, \"location\": {}, \"message\": {}}}",
-                json_string(report_kind(entry.kind())),
+                json_string(entry.kind().name()),
                 json_string(&entry.location().to_string()),
                 json_string(entry.message())
             )
@@ -302,22 +302,6 @@ fn report_json(report: &LayoutReport) -> String {
         "{\"entries\": []}\n".to_owned()
     } else {
         format!("{{\"entries\": [\n{}\n]}}\n", entries.join(",\n"))
-    }
-}
-
-/// The name of `kind` in the JSON report, which stays the same across versions;
-/// `other` for a kind this version does not know.
-fn report_kind(kind: ReportKind) -> &'static str {
-    match kind {
-        ReportKind::FontSubstituted => "font-substituted",
-        ReportKind::GlyphMissing => "glyph-missing",
-        ReportKind::FeatureUnsupported => "feature-unsupported",
-        ReportKind::FieldCached => "field-cached",
-        ReportKind::CompatIgnored => "compat-ignored",
-        ReportKind::ValueClamped => "value-clamped",
-        ReportKind::Overflow => "overflow",
-        ReportKind::FontEmbedding => "font-embedding",
-        _ => "other",
     }
 }
 
@@ -486,8 +470,9 @@ mod tests {
     }
 
     #[test]
-    fn every_report_kind_has_its_name() {
-        let names: Vec<&str> = [
+    fn the_json_report_names_every_kind() {
+        use officewright_doc::{Location, ReportEntry, ReportKind};
+        let report: LayoutReport = [
             ReportKind::FontSubstituted,
             ReportKind::GlyphMissing,
             ReportKind::FeatureUnsupported,
@@ -498,10 +483,15 @@ mod tests {
             ReportKind::FontEmbedding,
         ]
         .into_iter()
-        .map(report_kind)
+        .map(|kind| ReportEntry::new(kind, Location::document(), "a"))
         .collect();
+        let json = report_json(&report);
+        let kinds: Vec<&str> = json
+            .lines()
+            .filter_map(|line| line.split("\"kind\": \"").nth(1)?.split('"').next())
+            .collect();
         assert_eq!(
-            names,
+            kinds,
             [
                 "font-substituted",
                 "glyph-missing",
