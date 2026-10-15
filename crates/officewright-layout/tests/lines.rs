@@ -734,6 +734,95 @@ fn a_tab_whose_stop_is_past_the_end_reaches_the_end_and_the_text_wraps() -> Test
 }
 
 #[test]
+fn an_end_tab_at_the_end_of_the_line_keeps_the_text_after_it_on_the_line() -> TestResult {
+    use officewright_layout::ir::TabKind;
+
+    // `cv-en-compact.docx`: a letter page with margins of 864 twips, and an end tab at
+    // 10512 twips, where the margin is. The width, computed as the page computes it,
+    // comes out just below the stop; Word still ends the date at the margin.
+    let width = 612.0 - 864.0 / 20.0 - 864.0 / 20.0;
+    let position = 10512.0 / 20.0;
+    assert!(width < position, "the case needs the rounding");
+    let book = book()?;
+    let (document, style) = liberation(11.0);
+    let props = ParagraphProps::default().with_tabs([TabStop::default()
+        .with_position(Pt(position))
+        .with_kind(TabKind::End)]);
+    let inlines = vec![
+        Inline::text("Developer", style),
+        Inline::tab(style),
+        Inline::text("2022", style),
+    ];
+    let laid = fuzzing::lay_out(&book, &document, &paragraph(style, props, inlines), width);
+    let lines = laid.lines();
+    assert_eq!(lines.len(), 1);
+    let year = lines
+        .first()
+        .and_then(|line| line.words().last())
+        .ok_or("no year")?;
+    assert_eq!(year.text(), "2022");
+    assert!((year.end() - position).abs() < 1e-6, "{}", year.end());
+    // One twip further, the stop is past the end, and the year goes on the next line.
+    let props = ParagraphProps::default().with_tabs([TabStop::default()
+        .with_position(Pt(position + 1.0 / 20.0))
+        .with_kind(TabKind::End)]);
+    let inlines = vec![
+        Inline::text("Developer", style),
+        Inline::tab(style),
+        Inline::text("2022", style),
+    ];
+    let laid = fuzzing::lay_out(&book, &document, &paragraph(style, props, inlines), width);
+    assert_eq!(laid.lines().len(), 2);
+    Ok(())
+}
+
+#[test]
+fn a_tab_after_text_that_ends_at_a_stop_goes_to_the_next_stop() -> TestResult {
+    use officewright_layout::ir::{Indent, TabKind};
+
+    // After an end tab, the text ends at its stop, give or take rounding: the tab after
+    // it goes on to the next stop, never to the same one again. Indents and stops in
+    // whole twips, as WordprocessingML has them; stops from the column's start edge.
+    let book = book()?;
+    let (document, style) = liberation(11.0);
+    let mut cases = vec![(709, 3873)];
+    cases.extend((0..=1440).step_by(13).map(|indent| (indent, 3873)));
+    cases.extend((3800..=3900).map(|stop| (709, stop)));
+    for (indent, stop) in cases {
+        let (indent, stop) = (f64::from(indent) / 20.0, f64::from(stop) / 20.0);
+        let next = stop + 100.0;
+        let props = ParagraphProps::default()
+            .with_indent(Indent::default().with_start(Pt(indent)))
+            .with_tabs([
+                TabStop::default()
+                    .with_position(Pt(stop))
+                    .with_kind(TabKind::End),
+                TabStop::default().with_position(Pt(next)),
+            ]);
+        let inlines = vec![
+            Inline::text("Name", style),
+            Inline::tab(style),
+            Inline::text("Date", style),
+            Inline::tab(style),
+            Inline::text("Place", style),
+        ];
+        let laid = fuzzing::lay_out(&book, &document, &paragraph(style, props, inlines), 500.0);
+        let place = laid
+            .lines()
+            .first()
+            .and_then(|line| line.words().last())
+            .ok_or("no words")?;
+        assert_eq!(place.text(), "Place");
+        assert!(
+            (place.start() - next).abs() < 1e-6,
+            "indent {indent}, stop {stop}: Place at {}",
+            place.start()
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn empty_paragraphs_and_a_final_line_break_have_the_marks_height() -> TestResult {
     use officewright_layout::ir::BreakClear;
 
