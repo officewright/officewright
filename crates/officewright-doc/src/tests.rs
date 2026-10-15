@@ -3866,6 +3866,22 @@ fn reads_the_properties_of_the_body_through_markup_compatibility() {
 }
 
 #[test]
+fn ends_markup_compatibility_declarations_with_elements_kept_inside_properties() {
+    // From the review of #306: an element started in Markup Compatibility but kept as
+    // written inside a property element ends at its end tag. An mc:ProcessContent
+    // written on an ignorable element inside w:rPr ends with it.
+    let document = open(
+        r#"<w:p><w:r><w:rPr><w14:x mc:ProcessContent="w14:y"/><w14:y><w:b/></w14:y></w:rPr><w:t>x</w:t></w:r></w:p>"#,
+    );
+    assert_eq!(first_run(&document).properties().bold(), None);
+    // And one written on a branch not taken.
+    let document = open(
+        r#"<w:p><w:r><w:rPr><mc:AlternateContent><mc:Choice Requires="w14" mc:ProcessContent="w14:y"/><mc:Fallback/></mc:AlternateContent><w14:y><w:i/></w14:y></w:rPr><w:t>x</w:t></w:r></w:p>"#,
+    );
+    assert_eq!(first_run(&document).properties().italic(), None);
+}
+
+#[test]
 fn refuses_a_choice_whose_requires_is_not_valid_in_properties() {
     // Issue #296: properties are read as the body is, so a choice in them whose
     // Requires is missing, empty or names an undeclared prefix refuses the document,
