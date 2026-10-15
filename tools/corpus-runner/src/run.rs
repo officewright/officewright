@@ -228,8 +228,9 @@ fn lexical_absolute(path: &Path) -> Result<PathBuf, String> {
 }
 
 /// Where `path` is on disk, links followed: the canonical path of the longest part of it
-/// that exists, then the rest of it, its `.` and `..` resolved by their names, since
-/// nothing of the rest exists, so no link can be among it.
+/// that exists, then the rest of it part by part, its `.` and `..` resolved by their
+/// names, and canonical again wherever a `..` has climbed back to what exists, since a
+/// link can follow there (`missing/../link`).
 fn on_disk(path: &Path) -> Result<PathBuf, String> {
     let full = std::path::absolute(path).map_err(|error| format!("{}: {error}", path.display()))?;
     let parts: Vec<std::path::Component<'_>> = full.components().collect();
@@ -245,6 +246,9 @@ fn on_disk(path: &Path) -> Result<PathBuf, String> {
                     found.pop();
                 }
                 other => found.push(other.as_os_str()),
+            }
+            if let Ok(real) = std::fs::canonicalize(&found) {
+                found = real;
             }
         }
         return Ok(found);
