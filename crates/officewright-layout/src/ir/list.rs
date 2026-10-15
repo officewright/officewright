@@ -101,7 +101,12 @@ ir_struct! {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum LevelTextPart {
-    /// Text that is shown as it is.
+    /// Text that is shown as it is. Unlike the text of runs, it may hold control
+    /// characters: a level's text is one string in WordprocessingML, and Word itself
+    /// writes them there, such as a bullet of U+007F in Arial in a document it saved
+    /// (`tests/corpus/resaved/business/report-usds-tech-challenge-playbook.docx`). The
+    /// layout of labels gets them as they are: it decides what each one draws, and must
+    /// not let one break the label's line, as a line feed would in the line breaker.
     Literal(String),
     /// The number of a level, from 0: `%1` in WordprocessingML is level 0.
     Placeholder(u8),
