@@ -135,10 +135,13 @@ impl Formats<'_> {
     /// The list a paragraph is an item of, and what its level gives to the paragraph.
     /// The instance and the level are properties of their own, each from the last level
     /// that gives it, as Word keeps them. Without a level in direct formatting, the level
-    /// is the one the style hierarchy writes, which Word does not ignore (MS-OI29500
-    /// §17.3.1.19(a)), else the one whose `w:pStyle` names the paragraph style (ECMA-376
-    /// §17.9.23), else 0. Instance 0 is no list, even when a `w:num` has that id
-    /// (ECMA-376 §17.9.18).
+    /// is the one the style hierarchy writes, else the one whose `w:pStyle` names the
+    /// paragraph style (ECMA-376 §17.9.23), else 0. That order is what Word's render of
+    /// case 04 of word-rules/E-list-level-inherit.docx shows, for a level from 0 to 8
+    /// that the style itself writes; MS-OI29500 §17.3.1.19(a) says only that Word does
+    /// not ignore a level in a style's `w:numPr` and behaves unpredictably with one, and
+    /// the other cases are asked of Word in #293.
+    /// Instance 0 is no list, even when a `w:num` has that id (ECMA-376 §17.9.18).
     fn list(
         &mut self,
         base: &ParagraphLevel,
