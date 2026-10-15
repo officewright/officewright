@@ -50,8 +50,10 @@ pub enum Error {
         source: Cause,
     },
     /// A table is within the format but past a limit the library sets on the work of
-    /// reading it, which no real font comes near: `name` records that point at more than
-    /// 1 MiB of strings to keep when subsetting.
+    /// reading it: `name` records that point at more than 1 MiB of strings to keep when
+    /// subsetting, which no real font comes near, or glyphs to keep whose `CFF `
+    /// charstrings take more than 16,777,216 operands, operators and hint mask bytes to
+    /// decompile, which only the largest CJK fonts reach, kept whole.
     #[non_exhaustive]
     TableOverLimit {
         /// The face.
