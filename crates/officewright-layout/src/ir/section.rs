@@ -233,9 +233,11 @@ pub enum SectionStart {
     NextPage,
     /// On the same page, below the previous section.
     Continuous,
-    /// On the next even page, leaving a blank page when needed.
+    /// On a page whose number is even: on the next page, numbered one more when its
+    /// number would be odd, with a blank page for the skipped number when the section
+    /// continues the numbering of the one before.
     EvenPage,
-    /// On the next odd page, leaving a blank page when needed.
+    /// On a page whose number is odd, as [`EvenPage`](Self::EvenPage) is on an even one.
     OddPage,
     /// In the next column.
     NextColumn,

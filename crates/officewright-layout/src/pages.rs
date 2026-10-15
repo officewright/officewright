@@ -267,7 +267,7 @@ impl Totals {
     /// The counts of `pages` of `document`: all of them, but one less when the first
     /// section has a title page and numbers its pages from 0 (MS-OI29500 2.1.489 a). A
     /// section counts the blank page of its odd or even start, and not the page it starts
-    /// on when it is continuous: hypotheses until Word renders (`E-section-odd.docx`,
+    /// on when it is continuous: hypotheses until Word shows them (#298,
     /// `E-section-continuous-headers.docx`).
     fn of(pages: &[Page], document: &Document) -> Self {
         let count = |section: usize| {
@@ -747,13 +747,20 @@ impl<'d> Pager<'d, '_, '_> {
         // section continues the numbering of the one before; the first section, and one
         // that starts its numbering again, start on the next page, numbered one more
         // (Word's renders of `E-section-odd.docx` and `E-section-odd-first.docx`, #301).
+        // Numbering that starts again at 0 is laid out as before those renders until Word
+        // shows it (#298): its number is not raised, and after the first section the
+        // skipped number is a blank page.
+        let raises = section
+            .page_numbering()
+            .start()
+            .is_some_and(|start| start > 0);
         let wrong_parity = match section.start() {
             SectionStart::OddPage => self.next_number % 2 == 0,
             SectionStart::EvenPage => self.next_number % 2 == 1,
             _ => false,
         };
         let Some(current) = self.pages.last() else {
-            if wrong_parity {
+            if wrong_parity && (raises || section.page_numbering().start().is_none()) {
                 self.next_number = self.next_number.saturating_add(1);
             }
             self.new_page(index, section.page())?;
@@ -780,7 +787,7 @@ impl<'d> Pager<'d, '_, '_> {
             }
             SectionStart::EvenPage | SectionStart::OddPage => {
                 if wrong_parity {
-                    if section.page_numbering().start().is_some() {
+                    if raises {
                         self.next_number = self.next_number.saturating_add(1);
                     } else {
                         self.add_page(index, section.page(), true)?;
@@ -1778,7 +1785,7 @@ mod tests {
     fn a_chain_kept_with_the_next_ends_at_a_section_start_or_a_page_break() {
         // Moving a chain never undoes the page a section starts on, its blank page, its
         // numbering or a page break: keeping with the next does not reach past them.
-        let chain = |style, start: SectionStart, break_before: bool| {
+        let chain = |style, start: SectionStart, break_before: bool, restart: Option<u32>| {
             let mut first: Vec<Block> =
                 (0..6).map(|_| lines(style, 1, spacing(0.0, 0.0))).collect();
             first.push(lines(style, 1, spacing(0.0, 0.0).with_keep_next(true)));
@@ -1790,7 +1797,7 @@ mod tests {
                     .with_page_break_before(break_before),
             )];
             second.push(lines(style, 3, spacing(0.0, 0.0).with_keep_lines(true)));
-            let numbering = crate::ir::PageNumbering::default().with_start(Some(10));
+            let numbering = crate::ir::PageNumbering::default().with_start(restart);
             if break_before {
                 first.extend(second);
                 return vec![Section::new(setup()).with_blocks(first)];
@@ -1803,8 +1810,9 @@ mod tests {
                     .with_blocks(second),
             ]
         };
-        let summary = |start: SectionStart, break_before: bool| {
-            let (laid, _) = laid(&document(|style| chain(style, start, break_before)), 100);
+        let summary = |start: SectionStart, break_before: bool, restart: Option<u32>| {
+            let chained = document(|style| chain(style, start, break_before, restart));
+            let (laid, _) = laid(&chained, 100);
             laid.expect("pages")
                 .pages
                 .iter()
@@ -1817,7 +1825,7 @@ mod tests {
         // A section on the next page: it starts page 2, numbered 10; its chain moves its
         // last paragraph's companion with it to page 3.
         assert_eq!(
-            summary(SectionStart::NextPage, false),
+            summary(SectionStart::NextPage, false, Some(10)),
             [
                 (0, 1, vec![0, 1, 2, 3, 4, 5, 6]),
                 (1, 10, vec![7]),
@@ -1827,18 +1835,29 @@ mod tests {
         // On an odd page, numbered from 10: 10 is even, so the section starts page 2
         // numbered 11, with no blank page, since it starts its numbering again (#301).
         assert_eq!(
-            summary(SectionStart::OddPage, false),
+            summary(SectionStart::OddPage, false, Some(10)),
             [
                 (0, 1, vec![0, 1, 2, 3, 4, 5, 6]),
                 (1, 11, vec![7]),
                 (1, 12, vec![8])
             ]
         );
+        // On an odd page, continuing the numbering: page 2 is blank, and the chain starts
+        // page 3.
+        assert_eq!(
+            summary(SectionStart::OddPage, false, None),
+            [
+                (0, 1, vec![0, 1, 2, 3, 4, 5, 6]),
+                (1, 2, vec![]),
+                (1, 3, vec![7]),
+                (1, 4, vec![8])
+            ]
+        );
         // A continuous section that numbers its pages from 10: its next page is 10.
-        let continuous = summary(SectionStart::Continuous, false);
+        let continuous = summary(SectionStart::Continuous, false, Some(10));
         assert!(continuous.iter().any(|page| page.1 == 10), "{continuous:?}");
         // A page break before: three pages, not four, and the break stays where it is.
-        let broken = summary(SectionStart::NextPage, true);
+        let broken = summary(SectionStart::NextPage, true, Some(10));
         assert_eq!(broken.len(), 3, "{broken:?}");
         assert_eq!(broken[1].2, [7]);
     }
@@ -2243,6 +2262,21 @@ mod tests {
             ]
         });
         assert_eq!(summary(&first), [(0, 2, false), (1, 3, false)]);
+        // A first section that starts on an odd page is on page 1; numbered from 2, it is
+        // numbered 3.
+        for (restart, number) in [(None, 1), (Some(2), 3)] {
+            let odd = document(|style| vec![section(style, SectionStart::OddPage, restart)]);
+            assert_eq!(summary(&odd), [(0, number, false)], "{restart:?}");
+        }
+        // Numbering that starts again at 0 is laid out as before #301 until Word shows it
+        // (#298): not raised in the first section, a blank page in a later one.
+        let zero = document(|style| {
+            vec![
+                section(style, SectionStart::OddPage, Some(0)),
+                section(style, SectionStart::OddPage, Some(0)),
+            ]
+        });
+        assert_eq!(summary(&zero), [(0, 0, false), (1, 0, true), (1, 1, false)]);
     }
 
     #[test]
