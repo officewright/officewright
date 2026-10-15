@@ -171,6 +171,36 @@ class Packages(unittest.TestCase):
                 for rel in part(parts, rels).iter(f"{PR}Relationship"):
                     self.assertIn(base + rel.get("Target"), names, f"{doc.name}: {rels}")
 
+    def test_header_and_footer_parts_are_typed_and_referenced_by_their_kind(self):
+        # ECMA-376 §17.10.1 and §17.10.4: a w:headerReference names a header part through a
+        # header relationship, with the header content type and a w:hdr root; likewise for
+        # footers. The Default for .xml would type such a part as plain XML.
+        R = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+        relationship = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
+        content = "application/vnd.openxmlformats-officedocument.wordprocessingml."
+        for doc in self.docs:
+            parts = dict(rules.parts(doc))
+            types = ElementTree.fromstring(parts["[Content_Types].xml"])
+            overrides = {e.get("PartName"): e.get("ContentType")
+                         for e in types.iter(f"{CT}Override")}
+            rels = ElementTree.fromstring(parts["word/_rels/document.xml.rels"])
+            by_id = {r.get("Id"): r for r in rels.iter(f"{PR}Relationship")}
+            body = ElementTree.fromstring(parts["word/document.xml"])
+            referenced = set()
+            for kind, root in (("header", "hdr"), ("footer", "ftr")):
+                for reference in body.iter(f"{W}{kind}Reference"):
+                    rel = by_id.get(reference.get(f"{R}id"))
+                    self.assertIsNotNone(rel, doc.name)
+                    self.assertEqual(rel.get("Type"), relationship + kind, doc.name)
+                    name = "word/" + rel.get("Target")
+                    self.assertEqual(overrides.get("/" + name), f"{content}{kind}+xml", name)
+                    self.assertEqual(ElementTree.fromstring(parts[name]).tag, f"{W}{root}", name)
+                    referenced.add(rel.get("Id"))
+            # No header or footer part that nothing references.
+            for rel in by_id.values():
+                if rel.get("Type") in (relationship + "header", relationship + "footer"):
+                    self.assertIn(rel.get("Id"), referenced, doc.name)
+
     def test_font_table_lists_every_font_the_document_names(self):
         for doc in self.docs:
             parts = rules.parts(doc)
@@ -1514,40 +1544,55 @@ class Packages(unittest.TestCase):
                  "E-page-break-before-top", "E-para-shading", "E-header-tall",
                  "E-header-space-after", "E-header-negative-margin"]
         for name in names:
-            _, _, body, _ = load(name)
-            for paragraph in body.findall(f"{W}p"):
-                spacing = paragraph.find(f"{W}pPr/{W}spacing")
-                self.assertEqual((spacing.get(f"{W}line"), spacing.get(f"{W}lineRule")),
-                                 ("240", "exact"), name)
+            _, parts, body, _ = load(name)
+            # The headers and footers too, so that their heights are known whatever the font.
+            stories = [body] + [ElementTree.fromstring(data) for part_name, data in parts.items()
+                                if re.fullmatch(r"word/(header|footer)\d+\.xml", part_name)]
+            for story in stories:
+                for paragraph in story.findall(f"{W}p"):
+                    spacing = paragraph.find(f"{W}pPr/{W}spacing")
+                    self.assertIsNotNone(spacing, name)
+                    self.assertEqual((spacing.get(f"{W}line"), spacing.get(f"{W}lineRule")),
+                                     ("240", "exact"), name)
         self.assertEqual(rules.LINES_PER_PAGE, int((rules.PAGE_H - 2 * rules.MARGIN) / 240))
 
-        # E-section-odd: each section's label says its start type and numbering.
+        # E-section-odd: each section's label says its start type and numbering, and the
+        # parity of the page the section before ends on, as the start types and page counts
+        # give it (no page number is restarted before Section 6).
         doc, parts, body, targets = load("E-section-odd")
         found = sections(body, doc)
         self.assertEqual(len(found), 7)
-        pages_before = None
+        parity = {"odd": 1, "even": 0}
+        last_page = 0  # of the section before, by its parity only
         for n, (paragraphs, sect) in enumerate(found, 1):
             label = lines_of(paragraphs[0])[0]
             said = re.fullmatch(
-                rf"Section {n}: (?:one page|(odd|even) page start(?: after (?:one page|a section "
-                r"of (one|two) pages?))?(, page numbers restarted at 1)?(; two pages)?)", label)
+                rf"Section {n}: (?:one page|(odd|even) page start(?: after a section that ends "
+                r"on an? (odd|even) page)?(, page numbers restarted at 1)?(; two pages)?)",
+                label)
             self.assertIsNotNone(said, label)
             start, before, restart, two = said.groups()
             self.assertEqual(kind(sect), None if start is None else f"{start}Page", label)
             numbers = sect.find(f"{W}pgNumType")
             self.assertEqual(numbers is not None and numbers.get(f"{W}start") == "1",
                              bool(restart), label)
-            if before is not None or "after one page" in label:
-                expected = 2 if before == "two" else 1
-                self.assertEqual(pages_before, expected, label)
+            if before is not None:
+                self.assertEqual(last_page % 2, parity[before], label)
             pages = len(paragraphs)
             self.assertEqual(pages, 2 if two else 1, label)
             for paragraph in paragraphs[1:]:
                 self.assertTrue(flag(paragraph, "pageBreakBefore"), label)
-            pages_before = pages
+            first_page = last_page + 1
+            if start is not None and first_page % 2 != parity[start]:
+                first_page += 1
+            last_page = first_page + pages - 1
             # The header and footer are named once, by the first section.
             refs = sect.findall(f"{W}headerReference") + sect.findall(f"{W}footerReference")
             self.assertEqual(len(refs), 2 if n == 1 else 0, label)
+        # Section 6 begins after an odd page, on an even physical page numbered 1, and so
+        # tells the two rules apart; Section 7 follows a section of one page.
+        self.assertIn("ends on an odd page, page numbers restarted", lines_of(found[5][0][0])[0])
+        self.assertEqual(len(found[5][0]), 1)
         self.assertEqual(header_text(parts, targets, found[0][1]), ["header"])
         footer = parts["word/" + targets[found[0][1].find(f"{W}footerReference").get(f"{R}id")]]
         self.assertIn(b'w:instr=" PAGE "', footer)
@@ -1601,11 +1646,17 @@ class Packages(unittest.TestCase):
                              [f"Case {number:02d} chain {k}" for k in range(1, size + 1)], label)
             keeps = [flag(p, "keepNext") for p in chain]
             if "section break" in label:
-                # The chain's last paragraph keeps with the next, which is past the break.
+                # The chain's last paragraph keeps with the next, which is past the break: the
+                # chain's section ends there, and the type of the break is that of the
+                # section after it, in its own w:sectPr (ECMA-376 §17.6.22).
                 self.assertEqual(keeps, [True] * size, label)
-                sect = chain[-1].find(f"{W}pPr/{W}sectPr")
-                self.assertIsNotNone(sect, label)
-                expected = "continuous" if "continuous" in label else None
+                self.assertIsNotNone(chain[-1].find(f"{W}pPr/{W}sectPr"), label)
+                after_chain = paragraphs[start + 1 + size :]
+                sect = next((p.find(f"{W}pPr/{W}sectPr") for p in after_chain
+                             if p.find(f"{W}pPr/{W}sectPr") is not None), body.find(f"{W}sectPr"))
+                said = re.search(r"ends at a (next page|continuous) section break", label)
+                self.assertIsNotNone(said, label)
+                expected = {"next page": "nextPage", "continuous": "continuous"}[said.group(1)]
                 self.assertEqual(kind(sect), expected, label)
             else:
                 self.assertEqual(keeps, [True] * (size - 1) + ["before a paragraph with page "
@@ -1646,12 +1697,24 @@ class Packages(unittest.TestCase):
                 expected = {"left": "-360", "right": "-360"}
             self.assertEqual(values, expected, label)
             spacing = paragraph.find(f"{W}pPr/{W}spacing")
-            self.assertEqual(spacing.get(f"{W}before") is not None, "before and after" in label)
-        split = shaded[-1]
+            said = re.search(r"(\d+) pt before and after", label)
+            points = (str(int(said.group(1)) * 20),) * 2 if said else (None, None)
+            self.assertEqual((spacing.get(f"{W}before"), spacing.get(f"{W}after")), points, label)
+        # Cases 01 to 03 stand apart, between unshaded paragraphs; Cases 04 and 05 touch.
+        cases = [paragraphs.index(p) for p in shaded[:5]]
+        self.assertEqual([b - a for a, b in zip(cases, cases[1:])], [2, 2, 2, 1])
+        self.assertIn("first of two shaded paragraphs in a row", lines_of(shaded[3])[0])
+        self.assertIn("second of two shaded paragraphs in a row", lines_of(shaded[4])[0])
+        # Case 06 starts on the line its label says, on a page of its own, and splits.
+        split, before = shaded[-1], paragraphs[-2]
+        self.assertIs(paragraphs[-1], split)
+        self.assertTrue(flag(before, "pageBreakBefore"))
+        first = int(re.search(r"starts on line (\d+)", lines_of(split)[0]).group(1))
+        self.assertEqual(len(lines_of(before)) + 1, first)
         self.assertEqual(len(lines_of(split)), 10)
-        self.assertEqual(len(lines_of(paragraphs[-2])), rules.LINES_PER_PAGE - 4)
-        self.assertIn("starts on line 54", lines_of(split)[0])
-        self.assertEqual(rules.LINES_PER_PAGE - 4, 54)
+        # At least two lines on each page, so widow control leaves the split where it is.
+        on_first = rules.LINES_PER_PAGE - first + 1
+        self.assertTrue(2 <= on_first <= len(lines_of(split)) - 2, on_first)
 
         # The header documents.
         for name, top, header_lines, footer_lines in (
@@ -1663,6 +1726,9 @@ class Packages(unittest.TestCase):
             sect = body.find(f"{W}sectPr")
             margins = sect.find(f"{W}pgMar")
             self.assertEqual((margins.get(f"{W}top"), margins.get(f"{W}bottom")), (top, top))
+            distance = int(margins.get(f"{W}header")) / 20
+            self.assertEqual(int(margins.get(f"{W}footer")) / 20, distance, name)
+            margin = abs(int(top)) / 20
             header = ElementTree.fromstring(
                 parts["word/" + targets[sect.find(f"{W}headerReference").get(f"{R}id")]])
             got = sum(len(lines_of(p)) for p in header.findall(f"{W}p"))
@@ -1679,6 +1745,13 @@ class Packages(unittest.TestCase):
             if name == "E-header-space-after":
                 last = header.findall(f"{W}p")[-1]
                 self.assertEqual(last.find(f"{W}pPr/{W}spacing").get(f"{W}after"), "480")
+                # Inside the margin without the space after, past it with it.
+                self.assertTrue(distance + 12 * header_lines < margin
+                                < distance + 12 * header_lines + 24, name)
+            else:
+                # The header and the footer are taller than their margins.
+                self.assertTrue(distance + 12 * header_lines > margin, name)
+                self.assertTrue(distance + 12 * footer_lines > margin, name)
 
     def test_refuses_a_setting_word_does_not_write_in_the_mode(self):
         doc = next(doc for doc in self.docs if doc.name == "E-opentype-on")

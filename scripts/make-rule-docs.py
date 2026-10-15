@@ -2079,7 +2079,7 @@ def one_liners(prefix: str, count: int, **props) -> str:
 
 
 def page_footer(name: str = "footer1.xml") -> tuple[str, str]:
-    return header_part(name, para(run("page ") + page_field()))
+    return header_part(name, page_para(run("page ") + page_field()))
 
 
 def section_odd() -> Doc:
@@ -2088,11 +2088,19 @@ def section_odd() -> Doc:
     sections = [
         # (label, start type, first page number, page count)
         ("Section 1: one page", None, None, 1),
-        ("Section 2: odd page start after one page; two pages", "oddPage", None, 2),
-        ("Section 3: odd page start after a section of two pages", "oddPage", None, 1),
-        ("Section 4: even page start after a section of one page", "evenPage", None, 1),
-        ("Section 5: even page start after a section of one page", "evenPage", None, 1),
-        ("Section 6: odd page start, page numbers restarted at 1", "oddPage", 1, 1),
+        ("Section 2: odd page start after a section that ends on an odd page; two pages",
+         "oddPage", None, 2),
+        ("Section 3: odd page start after a section that ends on an even page",
+         "oddPage", None, 1),
+        ("Section 4: even page start after a section that ends on an odd page",
+         "evenPage", None, 1),
+        ("Section 5: even page start after a section that ends on an even page; two pages",
+         "evenPage", None, 2),
+        # Section 5 ends on an odd page, so Section 6 begins on an even physical page whose
+        # restarted number is 1: Section 6 and 7 tell parity by number from parity by
+        # physical page.
+        ("Section 6: odd page start after a section that ends on an odd page, page numbers "
+         "restarted at 1", "oddPage", 1, 1),
         ("Section 7: even page start, page numbers restarted at 1", "evenPage", 1, 1),
     ]
     # Each section's properties are in the w:sectPr of its last paragraph, the last
@@ -2109,11 +2117,12 @@ def section_odd() -> Doc:
                               sect=properties[n] if last else None)
     return Doc(
         "E-section-odd",
-        "Sections that start on an odd or an even page, after an odd and after an even "
-        "page count, with page numbers restarted and not: the blank pages Word adds, whether "
-        "they count and whether they have the header (header) and footer (page number)",
+        "Sections that start on an odd or an even page, after a section that ends on an odd "
+        "and on an even page, with page numbers restarted and not: the blank pages Word adds, "
+        "whether they count and whether they have the header (header) and footer (page "
+        "number)",
         body,
-        headers=(header_part("header1.xml", para(run("header"))), page_footer()),
+        headers=(header_part("header1.xml", page_para(run("header"))), page_footer()),
         last_section=properties[-1],
     )
 
@@ -2129,7 +2138,7 @@ def section_odd_first() -> Doc:
         "A first section that starts on an even page: whether Word adds a blank page before "
         "the document",
         body,
-        headers=(header_part("header1.xml", para(run("header"))), page_footer()),
+        headers=(header_part("header1.xml", page_para(run("header"))), page_footer()),
         last_section=section(),
     )
 
@@ -2144,8 +2153,8 @@ def section_continuous_headers() -> Doc:
         "A continuous section with a header of its own that starts in the middle of page 1 "
         "and runs onto page 2: from which page its header applies",
         body,
-        headers=(header_part("header1.xml", para(run("Header A"))),
-                 header_part("header2.xml", para(run("Header B")))),
+        headers=(header_part("header1.xml", page_para(run("Header A"))),
+                 header_part("header2.xml", page_para(run("Header B")))),
         last_section=section(kind="continuous", refs=second),
     )
 
@@ -2181,13 +2190,17 @@ def keepnext_chain() -> Doc:
     body += one_liners("Case 02 chain", 69, keep_next=True) + page_para(run("Case 02 chain 70"))
     body += filler(54, "Case 03: 54 lines, then a chain of 3 that ends at a next page section "
                    "break", page_break_before=True)
+    # A section's start type (w:type) is in its own w:sectPr, at its last paragraph, and
+    # says how it begins after the section before (ECMA-376 §17.6.22): the type of the break
+    # after Case 03's chain is in the w:sectPr after Case 04's chain, and that of the break
+    # after Case 04's chain in the last section's.
     body += one_liners("Case 03 chain", 2, keep_next=True)
     body += page_para(run("Case 03 chain 3"), keep_next=True, sect=section())
     body += page_para(run("Case 03: the first paragraph of the next section"))
     body += filler(55, "Case 04: 55 lines, then a chain of 2 that ends at a continuous section "
                    "break, then two lines", page_break_before=True)
     body += page_para(run("Case 04 chain 1"), keep_next=True)
-    body += page_para(run("Case 04 chain 2"), keep_next=True, sect=section(kind="continuous"))
+    body += page_para(run("Case 04 chain 2"), keep_next=True, sect=section(kind="nextPage"))
     body += page_para(lines(["Case 04: two lines after the", "continuous section break"]))
     body += filler(54, "Case 05: 54 lines, then a chain of 3 before a paragraph with page break "
                    "before", page_break_before=True)
@@ -2199,7 +2212,7 @@ def keepnext_chain() -> Doc:
         "a page, one that ends at a next page and one at a continuous section break, one "
         "before a paragraph with page break before",
         body,
-        last_section=section(kind="nextPage"),
+        last_section=section(kind="continuous"),
     )
 
 
@@ -2221,7 +2234,7 @@ SHADE = "D9D9D9"
 
 
 def para_shading() -> Doc:
-    text_3 = "three lines of shaded text in one paragraph, " * 9
+    text = "shaded text that runs over several lines of one paragraph, " * 9
     cases = [
         ("a hanging first line (left 72 pt, hanging 36 pt)",
          {"ind": {"left": 1440, "hanging": 720}}),
@@ -2230,12 +2243,15 @@ def para_shading() -> Doc:
         ("the first of two shaded paragraphs in a row", {}),
         ("the second of two shaded paragraphs in a row", {}),
     ]
+    # An unshaded paragraph after each of the first three cases keeps them apart; Cases 04
+    # and 05 touch.
     body = "".join(
-        page_para(run(f"Case {n:02d}: {label}: ") + run(text_3), shading=SHADE, **props)
+        page_para(run(f"Case {n:02d}: {label}: ") + run(text), shading=SHADE, **props)
+        + (page_para(run("not shaded")) if n <= 3 else "")
         for n, (label, props) in enumerate(cases, 1)
     )
-    # Ten lines that start on line 54 of a page: the paragraph splits over two pages.
-    body += filler(LINES_PER_PAGE - 4, "lines before the next case", page_break_before=True)
+    # Ten lines that start on line 54 of a page, after 53: the paragraph splits 5 and 5.
+    body += filler(LINES_PER_PAGE - 5, "lines before the next case", page_break_before=True)
     body += filler(10, "Case 06: a shaded paragraph of 10 lines that starts on line 54",
                    shading=SHADE)
     return Doc(
@@ -2248,7 +2264,7 @@ def para_shading() -> Doc:
 
 
 def tall(kind: str, count: int) -> str:
-    return para(lines([f"{kind} line {n}" for n in range(1, count + 1)]))
+    return page_para(lines([f"{kind} line {n}" for n in range(1, count + 1)]))
 
 
 HEADER_REFS = (("headerReference", "default", "header1.xml"),
@@ -2268,8 +2284,11 @@ def header_tall() -> Doc:
 
 
 def header_space_after() -> Doc:
-    header = para(run("header line 1")) + para(run("header line 2, with 24 pt after"),
-                                               space=spacing(after=24))
+    # 35.4 pt from the edge, two lines of 12 pt: 59.4 pt, inside the 72 pt margin; 83.4 pt
+    # with the 24 pt after, past it.
+    header = page_para(run("header line 1")) + page_para(
+        run("header line 2, with 24 pt after"), space=spacing(after=24, line=("exact", 12))
+    )
     return Doc(
         "E-header-space-after",
         "A header of two lines whose last paragraph has 24 pt after, taller with it than the "
