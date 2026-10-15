@@ -151,7 +151,7 @@ impl Clamp for PreferredWidth {
 /// least 0 except for the table indent (2.1.185 d); negative ones are rejected by
 /// `validate`.
 fn table_length(value: &mut Pt, clamper: &mut Clamper) {
-    rules::limit(
+    rules::limit_non_negative(
         value,
         Pt(0.0),
         WORD_MAX_SHORT_LENGTH,
@@ -361,7 +361,7 @@ impl Clamp for RowHeight {
 /// height must not be 0 (2.1.180 c); such a row is laid out as high as its content.
 fn row_height(height: &mut RowHeight, clamper: &mut Clamper) {
     if let RowHeight::AtLeast(value) | RowHeight::Exact(value) = height {
-        rules::limit(value, Pt(0.0), WORD_MAX_LENGTH, "row height", clamper);
+        rules::limit_non_negative(value, Pt(0.0), WORD_MAX_LENGTH, "row height", clamper);
     }
     if *height == RowHeight::Exact(Pt(0.0)) {
         clamper.clamped(
