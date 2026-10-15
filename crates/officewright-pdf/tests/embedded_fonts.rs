@@ -7,7 +7,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use officewright_font::{FontBook, FontFace, FontRequest, FontResolver, ResolutionKind};
+use officewright_font::{
+    FontBook, FontFace, FontRequest, FontResolver, ResolutionKind, SubsetBudget,
+};
 use officewright_pdf::{
     Compression, Document, EmbeddingNote, Error, Font, PageSize, Pt, StandardFont, text_to_pdf,
 };
@@ -1109,5 +1111,108 @@ fn reports_a_chosen_font_file_that_went_away() -> TestResult {
         err.to_string(),
         format!("cannot use the font in {}", path.display())
     );
+    Ok(())
+}
+
+#[test]
+fn the_fonts_of_a_document_share_its_subset_budget() -> TestResult {
+    // What reducing Noto Sans (CFF) to the glyphs of "Hello" reads.
+    let noto = noto_sans()?;
+    let face = FontFace::from_bytes(noto.clone(), 0)?;
+    let glyphs = "Hello"
+        .chars()
+        .map(|ch| face.glyph_id(ch).ok_or("no glyph"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut budget = SubsetBudget::new(u64::MAX);
+    face.subset_within(glyphs, &mut budget)?;
+    let one = u64::MAX - budget.left();
+    assert!(one > 0);
+
+    // A second font: the same file with a byte after its tables, which is no longer
+    // the same font to the document.
+    let mut copy = noto.clone();
+    copy.push(0);
+    let fonts = [Font::from_bytes(noto, 0)?, Font::from_bytes(copy, 0)?];
+    let liberation = Font::from_bytes(liberation_sans()?, 0)?;
+    let document = |units: u64| -> TestResult<Document> {
+        let mut doc = Document::new();
+        assert_eq!(doc.subset_budget(), 1 << 25);
+        doc.set_subset_budget(units);
+        let page = doc.add_page(PageSize::A4)?;
+        page.add_text(Pt(72.0), Pt(700.0), &fonts[0], Pt(12.0), "Hello")?;
+        page.add_text(Pt(72.0), Pt(680.0), &liberation, Pt(12.0), "Hello")?;
+        page.add_text(Pt(72.0), Pt(660.0), &fonts[1], Pt(12.0), "Hello")?;
+        Ok(doc)
+    };
+
+    // Both CFF fonts within the budget; TrueType takes nothing. Each writing of the
+    // document has the whole budget.
+    let doc = document(2 * one)?;
+    let pdf = doc.to_bytes()?;
+    assert_eq!(doc.to_bytes()?, pdf);
+    let err = document(2 * one - 1)?.to_bytes().unwrap_err();
+    let Error::Embed { font, source } = &err else {
+        return Err(format!("{err:?}").into());
+    };
+    assert_eq!(font, "NotoSans-Regular");
+    assert!(
+        matches!(source, officewright_font::Error::TableOverLimit { .. }),
+        "{source:?}"
+    );
+    assert_eq!(
+        std::error::Error::source(source)
+            .ok_or("no cause")?
+            .to_string(),
+        format!(
+            "decompiling the glyphs to keep, up to glyph {}, reads more than the {} operands, \
+             operators and hint mask bytes left of the budget it shares with other subsets",
+            face.glyph_id('o').ok_or("no glyph")?.to_u16(),
+            one - 1
+        )
+    );
+    assert!(matches!(
+        officewright_core::Error::from(err),
+        officewright_core::Error::LimitExceeded(_)
+    ));
+    // One font fits in a budget of what it reads.
+    let mut doc = Document::new();
+    doc.set_subset_budget(one);
+    doc.add_page(PageSize::A4)?
+        .add_text(Pt(72.0), Pt(700.0), &fonts[0], Pt(12.0), "Hello")?;
+    doc.to_bytes()?;
+    Ok(())
+}
+
+#[test]
+fn a_font_kept_whole_takes_from_the_subset_budget() -> TestResult {
+    // Noto Sans (CFF) whose license forbids subsetting: the document embeds all its
+    // glyphs, and reducing it reads what all of them read.
+    let noto = with_fs_type(noto_sans()?, 0x0100)?;
+    let face = FontFace::from_bytes(noto.clone(), 0)?;
+    let mut budget = SubsetBudget::new(u64::MAX);
+    face.subset_within(
+        (0..face.glyph_count()).map(officewright_font::GlyphId::new),
+        &mut budget,
+    )?;
+    let whole = u64::MAX - budget.left();
+    let font = Font::from_bytes(noto, 0)?;
+    assert!(font.embedding_notes().contains(&EmbeddingNote::WholeFont));
+    let mut doc = Document::new();
+    doc.add_page(PageSize::A4)?
+        .add_text(Pt(72.0), Pt(700.0), &font, Pt(12.0), "Hello")?;
+    doc.set_subset_budget(whole - 1);
+    let err = doc.to_bytes().unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            Error::Embed {
+                source: officewright_font::Error::TableOverLimit { .. },
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    doc.set_subset_budget(whole);
+    doc.to_bytes()?;
     Ok(())
 }
