@@ -59,9 +59,12 @@ fn run(options: &Options) -> Result<bool, String> {
             scoring.insert(name.clone(), pair.clone());
         }
     }
+    let renders = render_targets(options, &files)?;
 
     let started = Instant::now();
-    let report = Report::new(run_all(&launcher, &files, &expected, &scoring, options)?);
+    let report = Report::new(run_all(
+        &launcher, &files, &expected, &scoring, &renders, options,
+    )?);
     print_summary(&report, started.elapsed());
     for file in &report.files {
         if file.status == Status::Opened && expected.contains_key(&file.path) {
@@ -87,9 +90,35 @@ fn run(options: &Options) -> Result<bool, String> {
         );
         passed = false;
     }
+    let unrendered: Vec<&FileResult> = report
+        .files
+        .iter()
+        .filter(|file| file.render_error.is_some())
+        .collect();
+    for file in &unrendered {
+        println!(
+            "not rendered: {}: {}",
+            file.path,
+            file.render_error.as_deref().unwrap_or_default()
+        );
+    }
+    if !unrendered.is_empty() {
+        println!(
+            "FAILED: {} files opened but could not be rendered",
+            unrendered.len()
+        );
+        passed = false;
+    }
     if let Some(path) = &options.baseline {
         if options.update_baseline {
-            write_json(path, &Baseline::of(&report))?;
+            let mut baseline = Baseline::of(&report);
+            // A run that cannot score keeps the scores the baseline has.
+            if options.statuses_only && path.is_file() {
+                let old: Baseline = serde_json::from_str(&read(path)?)
+                    .map_err(|error| format!("{}: {error}", path.display()))?;
+                baseline.scores = old.scores;
+            }
+            write_json(path, &baseline)?;
             println!("wrote the baseline {}", path.display());
         } else {
             let baseline: Baseline = serde_json::from_str(&read(path)?)
@@ -101,7 +130,11 @@ fn run(options: &Options) -> Result<bool, String> {
                     baseline.format
                 ));
             }
-            let changes = report::compare(&baseline, &report);
+            let changes = if options.statuses_only {
+                report::compare_statuses(&baseline, &report)
+            } else {
+                report::compare(&baseline, &report)
+            };
             for line in &changes.worse {
                 println!("worse than the baseline: {line}");
             }
@@ -254,13 +287,54 @@ impl Launcher {
     }
 }
 
-/// Opens every file in a child process, `options.jobs` at a time. A failure of the runner
-/// itself, not of a file, stops the run.
+/// Where each file is rendered with `--render DIR`, by its name: `DIR/<path>.pdf`, the path
+/// relative to the folder above `--references` when the file lies under it (where the
+/// scoring looks for it), else its name, relative to the root. Empty without `--render`.
+/// Refuses two files that would be rendered to one PDF: names that differ only in their
+/// extension, or in case, which the file systems of macOS and Windows ignore.
+fn render_targets(
+    options: &Options,
+    files: &[(String, PathBuf)],
+) -> Result<BTreeMap<String, PathBuf>, String> {
+    let Some(dir) = &options.render else {
+        return Ok(BTreeMap::new());
+    };
+    let corpus = match &options.references {
+        Some(references) => lexical_absolute(references)?
+            .parent()
+            .map(Path::to_path_buf),
+        None => None,
+    };
+    let mut targets = BTreeMap::new();
+    for (name, file) in files {
+        let full = lexical_absolute(file)?;
+        let relative = corpus
+            .as_ref()
+            .and_then(|corpus| full.strip_prefix(corpus).ok())
+            .map_or_else(|| PathBuf::from(name), Path::to_path_buf);
+        targets.insert(name.clone(), dir.join(relative).with_extension("pdf"));
+    }
+    let mut seen: BTreeMap<String, &str> = BTreeMap::new();
+    for (name, pdf) in &targets {
+        if let Some(other) = seen.insert(pdf.to_string_lossy().to_lowercase(), name) {
+            return Err(format!(
+                "{other} and {name} would both be rendered to {}",
+                pdf.display()
+            ));
+        }
+    }
+    Ok(targets)
+}
+
+/// Opens every file in a child process, `options.jobs` at a time, rendering it to its
+/// target in `renders` if it has one. A failure of the runner itself, not of a file, stops
+/// the run.
 fn run_all(
     launcher: &Launcher,
     files: &[(String, PathBuf)],
     expected: &BTreeMap<String, String>,
     scoring: &BTreeMap<String, (PathBuf, PathBuf)>,
+    renders: &BTreeMap<String, PathBuf>,
     options: &Options,
 ) -> Result<Vec<FileResult>, String> {
     let next = AtomicUsize::new(0);
@@ -275,7 +349,22 @@ fn run_all(
             {
                 break;
             }
-            let (exit, elapsed) = match run_child(launcher, file, options.timeout) {
+            let render = renders
+                .get(name)
+                .map(|pdf| (pdf.as_path(), options.font_dirs.as_slice()));
+            if let Some((pdf, _)) = render {
+                // A PDF left by an earlier run would be scored if this one is not written.
+                if let Err(error) = std::fs::remove_file(pdf) {
+                    if std::fs::symlink_metadata(pdf).is_ok() {
+                        *fatal.lock().unwrap_or_else(PoisonError::into_inner) = Some(format!(
+                            "cannot remove {} of an earlier run: {error}",
+                            pdf.display()
+                        ));
+                        break;
+                    }
+                }
+            }
+            let (exit, elapsed) = match run_child(launcher, file, render, options.timeout) {
                 Ok(done) => done,
                 Err(error) => {
                     *fatal.lock().unwrap_or_else(PoisonError::into_inner) = Some(error);
@@ -291,9 +380,15 @@ fn run_all(
             );
             report::check_memory(&mut result, options.memory_limit_mb);
             if let Some((folder, pdf)) = scoring.get(name) {
-                match score_file(folder, pdf) {
-                    Ok(scores) => result.scores = Some(scores),
-                    Err(error) => result.score_error = Some(error),
+                let unrendered = render.is_some()
+                    && (result.status != Status::Opened || result.render_error.is_some());
+                if unrendered {
+                    result.score_error = Some("our PDF was not rendered".to_owned());
+                } else {
+                    match score_file(folder, pdf) {
+                        Ok(scores) => result.scores = Some(scores),
+                        Err(error) => result.score_error = Some(error),
+                    }
                 }
             }
             results
@@ -388,18 +483,25 @@ fn score_file(reference: &Path, pdf: &Path) -> Result<metrics::Scores, String> {
     Ok(scores)
 }
 
-/// Runs `corpus-runner open FILE`, stopping it after the time-out. `Err` is a failure of
-/// the runner: the child could not be watched.
+/// Runs `corpus-runner open FILE`, with `--render PDF --font-dir DIR...` when `render`
+/// gives the PDF and the font folders, stopping it after the time-out. `Err` is a failure
+/// of the runner: the child could not be watched.
 fn run_child(
     launcher: &Launcher,
     file: &Path,
+    render: Option<(&Path, &[PathBuf])>,
     timeout: Duration,
 ) -> Result<(ChildExit, Duration), String> {
     let started = Instant::now();
-    let child = Command::new(&launcher.program)
-        .args(&launcher.leading)
-        .arg("open")
-        .arg(file)
+    let mut command = Command::new(&launcher.program);
+    command.args(&launcher.leading).arg("open").arg(file);
+    if let Some((pdf, font_dirs)) = render {
+        command.arg("--render").arg(pdf);
+        for dir in font_dirs {
+            command.arg("--font-dir").arg(dir);
+        }
+    }
+    let child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -561,9 +663,14 @@ mod tests {
             program: PathBuf::from("/nonexistent/corpus-runner-child"),
             leading: Vec::new(),
         };
-        let error = run_child(&launcher, Path::new("docs/a.docx"), Duration::from_secs(5))
-            .err()
-            .unwrap();
+        let error = run_child(
+            &launcher,
+            Path::new("docs/a.docx"),
+            None,
+            Duration::from_secs(5),
+        )
+        .err()
+        .unwrap();
         assert!(
             error.starts_with("cannot start /nonexistent/corpus-runner-child to open docs/a.docx"),
             "{error}"
@@ -600,10 +707,14 @@ mod tests {
             jobs: 2,
             references: None,
             ours: None,
+            render: None,
+            font_dirs: Vec::new(),
+            statuses_only: false,
         };
         let outcome = run_all(
             &launcher,
             &files,
+            &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
             &options,
@@ -613,5 +724,50 @@ mod tests {
             error.starts_with("cannot start /nonexistent/corpus-runner-child"),
             "{error}"
         );
+    }
+
+    /// Names that differ only in case would share one PDF where the file system ignores
+    /// case, as those of macOS and Windows do.
+    #[test]
+    fn names_that_differ_only_in_case_are_refused() {
+        let files = [
+            (
+                "docs/Letter.docx".to_owned(),
+                PathBuf::from("docs/Letter.docx"),
+            ),
+            (
+                "docs/letter.docx".to_owned(),
+                PathBuf::from("docs/letter.docx"),
+            ),
+        ];
+        let options = Options {
+            paths: Vec::new(),
+            root: PathBuf::from("."),
+            report: None,
+            baseline: None,
+            update_baseline: false,
+            allow_better: false,
+            expected: None,
+            timeout: Duration::from_secs(5),
+            memory_limit_mb: 1024,
+            enforce_memory_limit: false,
+            jobs: 2,
+            references: None,
+            ours: None,
+            render: Some(PathBuf::from("pdfs")),
+            font_dirs: Vec::new(),
+            statuses_only: false,
+        };
+        let error = render_targets(&options, &files).unwrap_err();
+        assert!(
+            error.starts_with("docs/Letter.docx and docs/letter.docx would both be rendered to"),
+            "{error}"
+        );
+        // Without --render nothing is rendered, so nothing clashes.
+        let options = Options {
+            render: None,
+            ..options
+        };
+        assert!(render_targets(&options, &files).unwrap().is_empty());
     }
 }

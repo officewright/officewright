@@ -36,11 +36,27 @@ OW_STANDARD_FONT_HELVETICA = 0
     OW_RESOLUTION_MISSING,
 ) = range(8)
 OW_COMPRESSION_NONE, OW_COMPRESSION_FLATE = range(2)
+(
+    OW_REPORT_KIND_OTHER,
+    OW_REPORT_KIND_FONT_SUBSTITUTED,
+    OW_REPORT_KIND_GLYPH_MISSING,
+    OW_REPORT_KIND_FEATURE_UNSUPPORTED,
+    OW_REPORT_KIND_FIELD_CACHED,
+    OW_REPORT_KIND_COMPAT_IGNORED,
+    OW_REPORT_KIND_VALUE_CLAMPED,
+    OW_REPORT_KIND_OVERFLOW,
+    OW_REPORT_KIND_FONT_EMBEDDING,
+) = range(9)
 
 # The OFL test fonts at the repository root.
 FONTS = Path(__file__).resolve().parent.parent / "fonts"
 LIBERATION_SANS = FONTS / "liberation" / "LiberationSans-Regular.ttf"
 NOTO_SANS = FONTS / "noto" / "NotoSans-Regular.otf"
+
+# Word documents in the repository: "Hello, world" in Calibri, and one of several pages.
+REPOSITORY = FONTS.parent.parent
+HELLO_DOCX = REPOSITORY / "crates" / "officewright-doc" / "tests" / "data" / "hello.docx"
+PAGES_DOCX = REPOSITORY / "tests" / "corpus" / "word-rules" / "E-space-before-top.docx"
 
 lib = ctypes.CDLL(os.environ["OW_LIB"])
 
@@ -83,6 +99,30 @@ declare("ow_font_resolver_substitution_count", c_int, c_void_p, POINTER(c_size_t
 declare("ow_font_resolver_substitution", c_int, c_void_p, c_size_t, POINTER(ctypes.c_int32), POINTER(c_char_p))
 declare("ow_font_resolver_free", None, c_void_p)
 declare("ow_pdf_font_resolve", c_int, c_void_p, c_char_p, ctypes.c_int32, ctypes.c_int32, POINTER(c_void_p))
+declare("ow_doc_document_open_path", c_int, c_char_p, POINTER(c_void_p))
+declare("ow_doc_document_open_bytes", c_int, c_char_p, c_size_t, POINTER(c_void_p))
+declare("ow_doc_document_save_pdf_path", c_int, c_void_p, c_char_p, c_void_p, POINTER(c_void_p))
+declare(
+    "ow_doc_document_save_pdf_bytes",
+    c_int,
+    c_void_p,
+    c_void_p,
+    POINTER(POINTER(c_uint8)),
+    POINTER(c_size_t),
+    POINTER(c_void_p),
+)
+declare("ow_doc_document_free", None, c_void_p)
+declare("ow_render_options_new", c_int, POINTER(c_void_p))
+declare("ow_render_options_set_max_pages", c_int, c_void_p, c_size_t)
+declare("ow_render_options_set_system_fonts", c_int, c_void_p, ctypes.c_int32)
+declare("ow_render_options_add_font_dir", c_int, c_void_p, c_char_p)
+declare("ow_render_options_add_font_bytes", c_int, c_void_p, c_char_p, c_size_t)
+declare("ow_render_options_add_font_file", c_int, c_void_p, c_char_p)
+declare("ow_render_options_set_compression", c_int, c_void_p, ctypes.c_int32)
+declare("ow_render_options_free", None, c_void_p)
+declare("ow_layout_report_len", c_int, c_void_p, POINTER(c_size_t))
+declare("ow_layout_report_entry", c_int, c_void_p, c_size_t, POINTER(ctypes.c_int32), POINTER(c_char_p), POINTER(c_char_p))
+declare("ow_layout_report_free", None, c_void_p)
 
 
 def with_fs_type(font, fs_type):
@@ -385,9 +425,9 @@ class AbiTest(unittest.TestCase):
         self.addCleanup(lib.ow_font_resolver_free, resolver)
         return resolver
 
-    def resolve(self, resolver, family, bold=0, expected=OK):
+    def resolve(self, resolver, family, bold=0, italic=0, expected=OK):
         font = c_void_p(1)
-        self.check(lib.ow_pdf_font_resolve(resolver, family.encode(), bold, 0, byref(font)), expected)
+        self.check(lib.ow_pdf_font_resolve(resolver, family.encode(), bold, italic, byref(font)), expected)
         if expected == OK:
             self.addCleanup(lib.ow_pdf_font_free, font)
         else:
@@ -433,6 +473,37 @@ class AbiTest(unittest.TestCase):
         self.addCleanup(lib.ow_pdf_document_free, doc)
         self.assertIn(b"+LiberationSans", self.save_bytes(doc))
 
+    def test_styles_a_family_without_some_faces_as_word_does(self):
+        # Liberation Sans without its Italic face: italic text slants Regular, as Word
+        # does, rather than take Bold Italic.
+        book = self.new_book()
+        added = c_size_t()
+        for style in ("Regular", "Bold", "BoldItalic"):
+            path = FONTS / "liberation" / f"LiberationSans-{style}.ttf"
+            self.check(lib.ow_font_book_add_file(book, str(path).encode(), byref(added)))
+        resolver = self.resolver(book)
+        self.resolve(resolver, "Liberation Sans", italic=1)
+        self.resolve(resolver, "Liberation Sans", bold=1, italic=1)
+        self.assertEqual(
+            self.substitutions(resolver),
+            [(OW_RESOLUTION_EXACT, '"Liberation Sans" italic → "Liberation Sans" with synthetic italic')],
+        )
+        # Only its Bold face: regular text comes out bold, and the report says so.
+        book = self.new_book()
+        bold = FONTS / "liberation" / "LiberationSans-Bold.ttf"
+        self.check(lib.ow_font_book_add_file(book, str(bold).encode(), byref(added)))
+        resolver = self.resolver(book)
+        self.resolve(resolver, "Liberation Sans")
+        self.assertEqual(
+            self.substitutions(resolver),
+            [
+                (
+                    OW_RESOLUTION_EXACT,
+                    '"Liberation Sans" → "Liberation Sans", in bold: the family has no regular face installed',
+                )
+            ],
+        )
+
     def test_reports_a_family_nothing_stands_in_for(self):
         resolver = self.resolver(self.new_book())
         self.resolve(resolver, "Calibri", expected=UNSUPPORTED)
@@ -467,6 +538,141 @@ class AbiTest(unittest.TestCase):
             faces = c_size_t()
             self.check(lib.ow_font_book_face_count(book, byref(faces)))
             self.assertEqual(faces.value, 1)
+
+
+    def render_options(self):
+        """Options with the fonts of tests/fonts alone."""
+        options = c_void_p()
+        self.check(lib.ow_render_options_new(byref(options)))
+        self.addCleanup(lib.ow_render_options_free, options)
+        self.check(lib.ow_render_options_set_system_fonts(options, 0))
+        self.check(lib.ow_render_options_add_font_dir(options, str(FONTS).encode()))
+        return options
+
+    def open_docx(self, path):
+        doc = c_void_p()
+        self.check(lib.ow_doc_document_open_path(str(path).encode(), byref(doc)))
+        self.addCleanup(lib.ow_doc_document_free, doc)
+        return doc
+
+    def test_converts_a_word_document_to_pdf_and_reports_what_differs(self):
+        options = self.render_options()
+        doc = self.open_docx(HELLO_DOCX)
+        data = POINTER(c_uint8)()
+        length = c_size_t()
+        report = c_void_p()
+        self.check(lib.ow_doc_document_save_pdf_bytes(doc, options, byref(data), byref(length), byref(report)))
+        try:
+            pdf = ctypes.string_at(data, length.value)
+        finally:
+            lib.ow_bytes_free(data, length)
+        self.assertTrue(pdf.startswith(b"%PDF-"))
+        # Calibri, which tests/fonts lacks, is laid out in Carlito, and the report says so.
+        count = c_size_t()
+        self.check(lib.ow_layout_report_len(report, byref(count)))
+        entries = []
+        for index in range(count.value):
+            kind, location, message = ctypes.c_int32(), c_char_p(), c_char_p()
+            self.check(lib.ow_layout_report_entry(report, index, byref(kind), byref(location), byref(message)))
+            entries.append((kind.value, location.value.decode(), message.value.decode()))
+        lib.ow_layout_report_free(report)
+        self.assertIn(
+            (OW_REPORT_KIND_FONT_SUBSTITUTED, "document", '"Calibri" \u2192 "Carlito" (metric-compatible substitute)'),
+            entries,
+        )
+        # The same document from memory, written to a file without a report.
+        docx = HELLO_DOCX.read_bytes()
+        from_bytes = c_void_p()
+        self.check(lib.ow_doc_document_open_bytes(docx, len(docx), byref(from_bytes)))
+        self.addCleanup(lib.ow_doc_document_free, from_bytes)
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "hello.pdf"
+            self.check(lib.ow_doc_document_save_pdf_path(from_bytes, str(out).encode(), options, None))
+            self.assertEqual(out.read_bytes(), pdf)
+            # With a report; and to a folder that does not exist, the report reset.
+            report = c_void_p()
+            self.check(lib.ow_doc_document_save_pdf_path(from_bytes, str(out).encode(), options, byref(report)))
+            count = c_size_t()
+            self.check(lib.ow_layout_report_len(report, byref(count)))
+            self.assertGreater(count.value, 0)
+            lib.ow_layout_report_free(report)
+            report = c_void_p(1)
+            missing = Path(tmp) / "missing-dir" / "hello.pdf"
+            self.check(lib.ow_doc_document_save_pdf_path(from_bytes, str(missing).encode(), options, byref(report)), IO)
+            self.assertIsNone(report.value)
+
+    def test_a_font_file_by_its_path(self):
+        options = c_void_p()
+        self.check(lib.ow_render_options_new(byref(options)))
+        self.addCleanup(lib.ow_render_options_free, options)
+        self.check(lib.ow_render_options_set_system_fonts(options, 0))
+        carlito = FONTS / "carlito" / "Carlito-Regular.ttf"
+        self.check(lib.ow_render_options_add_font_file(options, str(carlito).encode()))
+        doc = self.open_docx(HELLO_DOCX)
+        data = POINTER(c_uint8)()
+        length = c_size_t()
+        self.check(lib.ow_doc_document_save_pdf_bytes(doc, options, byref(data), byref(length), None))
+        try:
+            self.assertIn(b"Carlito-Regular", ctypes.string_at(data, length.value))
+        finally:
+            lib.ow_bytes_free(data, length)
+        self.check(lib.ow_render_options_add_font_file(options, b"/nonexistent/font.ttf"), IO)
+        self.assertTrue(last_error().startswith("cannot read /nonexistent/font.ttf"))
+
+    def test_a_font_from_memory(self):
+        options = c_void_p()
+        self.check(lib.ow_render_options_new(byref(options)))
+        self.addCleanup(lib.ow_render_options_free, options)
+        self.check(lib.ow_render_options_set_system_fonts(options, 0))
+        carlito = (FONTS / "carlito" / "Carlito-Regular.ttf").read_bytes()
+        self.check(lib.ow_render_options_add_font_bytes(options, carlito, len(carlito)))
+        doc = self.open_docx(HELLO_DOCX)
+        data = POINTER(c_uint8)()
+        length = c_size_t()
+        self.check(lib.ow_doc_document_save_pdf_bytes(doc, options, byref(data), byref(length), None))
+        try:
+            self.assertIn(b"Carlito-Regular", ctypes.string_at(data, length.value))
+        finally:
+            lib.ow_bytes_free(data, length)
+
+    def test_conversion_errors_have_a_status_and_a_message(self):
+        options = self.render_options()
+        # More pages than allowed: no PDF and no report.
+        long_doc = self.open_docx(PAGES_DOCX)
+        self.check(lib.ow_render_options_set_max_pages(options, 1))
+        data = POINTER(c_uint8)()
+        length = c_size_t()
+        report = c_void_p(1)
+        self.check(
+            lib.ow_doc_document_save_pdf_bytes(long_doc, options, byref(data), byref(length), byref(report)),
+            LIMIT_EXCEEDED,
+        )
+        self.assertIn("pages", last_error())
+        self.assertFalse(data)
+        self.assertEqual(length.value, 0)
+        self.assertIsNone(report.value)
+        # A damaged document, and options out of range.
+        doc = c_void_p(1)
+        self.check(lib.ow_doc_document_open_bytes(b"not a docx", 10, byref(doc)), MALFORMED)
+        self.assertIsNone(doc.value)
+        self.check(lib.ow_render_options_set_max_pages(options, 0), INVALID_ARGUMENT)
+        self.check(lib.ow_render_options_set_system_fonts(options, 2), INVALID_ARGUMENT)
+        self.assertEqual(last_error(), "system_fonts is 2, not 0 or 1")
+        self.check(lib.ow_render_options_set_compression(options, 9), INVALID_ARGUMENT)
+        self.check(lib.ow_doc_document_open_path(None, byref(doc)), NULL_ARGUMENT)
+        self.assertEqual(last_error(), "path is null")
+        # Font data or a file that is not a font is refused when it is added, and leaves
+        # the options as they were.
+        refused = c_void_p()
+        self.check(lib.ow_render_options_new(byref(refused)))
+        self.addCleanup(lib.ow_render_options_free, refused)
+        self.check(lib.ow_render_options_set_system_fonts(refused, 0))
+        self.check(lib.ow_render_options_add_font_bytes(refused, b"no font", 7), MALFORMED)
+        self.check(lib.ow_render_options_add_font_file(refused, str(HELLO_DOCX).encode()), MALFORMED)
+        self.assertTrue(last_error().startswith(f"{HELLO_DOCX}: "))
+        hello = self.open_docx(HELLO_DOCX)
+        self.check(lib.ow_doc_document_save_pdf_bytes(hello, refused, byref(data), byref(length), None))
+        lib.ow_bytes_free(data, length)
 
 
 if __name__ == "__main__":
