@@ -7,6 +7,7 @@
 use officewright_core::Pt;
 
 use crate::ir::{CompatFlag, CompatMode, DocumentSettings, ParagraphProps, TabKind, TabLeader};
+use crate::lines::EPSILON;
 
 /// Where a tab takes the text, and how the text aligns there.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -71,12 +72,14 @@ impl TabStops {
     }
 
     /// The stop a tab at `x` takes the text to: the first stop after `x` (a stop at `x`
-    /// itself is passed by), then the automatic stops after the last stop, at the
-    /// multiples of the interval from the start edge of the column, negative ones for
-    /// text in the margin; that they go on into the margin is a hypothesis until a
-    /// Word render (`E-tab-margin.docx`). `None` when there is no stop after `x`,
-    /// which happens only when the interval is zero.
+    /// itself is passed by, also when rounding leaves `x` a hair before it, as after
+    /// text that an end tab ends at the stop), then the automatic stops after the last
+    /// stop, at the multiples of the interval from the start edge of the column,
+    /// negative ones for text in the margin; that they go on into the margin is a
+    /// hypothesis until a Word render (`E-tab-margin.docx`). `None` when there is no
+    /// stop after `x`, which happens only when the interval is zero.
     pub(crate) fn next(&self, x: Pt) -> Option<Stop> {
+        let x = Pt(x.0 + EPSILON);
         if let Some(stop) = self.stops.iter().find(|stop| stop.position.0 > x.0) {
             return Some(*stop);
         }
@@ -143,6 +146,12 @@ mod tests {
                 Some(108.0),
                 Some(144.0)
             ]
+        );
+        // A stop a hundredth of a point after the place is still taken: only rounding,
+        // far below a twip, passes one by.
+        assert_eq!(
+            positions(&stops, &[49.99, 99.99, 107.99]),
+            [Some(50.0), Some(100.0), Some(108.0)]
         );
         let end = stops.next(Pt(0.0));
         assert_eq!(

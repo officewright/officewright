@@ -1392,13 +1392,14 @@ fn takes_the_first_choice_of_alternate_content_that_officewright_can_read() {
         r#"<mc:AlternateContent><mc:Choice Requires="w"><w:b/></mc:Choice><mc:Fallback><w:i/></mc:Fallback></mc:AlternateContent>"#,
         // w14 is declared but not implemented: the fallback.
         r#"<mc:AlternateContent><mc:Choice Requires="w14"><w:caps/></mc:Choice><mc:Fallback><w:smallCaps/></mc:Fallback></mc:AlternateContent>"#,
-        // The first choice that can be taken: not one that also requires w14, nor one
-        // whose prefix is not declared, nor a later one, nor the fallback.
-        r#"<mc:AlternateContent><mc:Choice Requires="w w14"><w:strike/></mc:Choice><mc:Choice Requires="w99"><w:strike/></mc:Choice><mc:Choice Requires=" r  w "><w:dstrike/></mc:Choice><mc:Choice Requires="w"><w:strike/></mc:Choice><mc:Fallback><w:strike/></mc:Fallback></mc:AlternateContent>"#,
+        // The first choice that can be taken: not one that also requires w14, nor a
+        // later one, nor the fallback. A choice whose Requires is not valid refuses the
+        // document (see refuses_a_choice_whose_requires_is_not_valid_in_properties).
+        r#"<mc:AlternateContent><mc:Choice Requires="w w14"><w:strike/></mc:Choice><mc:Choice Requires=" r  w "><w:dstrike/></mc:Choice><mc:Choice Requires="w"><w:strike/></mc:Choice><mc:Fallback><w:strike/></mc:Fallback></mc:AlternateContent>"#,
         // No choice can be taken and there is no fallback: nothing is read.
         r#"<mc:AlternateContent><mc:Choice Requires="w14"><w:vanish/></mc:Choice></mc:AlternateContent>"#,
-        // A choice without Requires is not taken; alternates nest.
-        r#"<mc:AlternateContent><mc:Choice><w:emboss/></mc:Choice><mc:Fallback><mc:AlternateContent><mc:Choice Requires="w"><w:imprint/></mc:Choice><mc:Fallback><w:outline/></mc:Fallback></mc:AlternateContent></mc:Fallback></mc:AlternateContent>"#,
+        // Alternates nest.
+        r#"<mc:AlternateContent><mc:Choice Requires="w14"><w:emboss/></mc:Choice><mc:Fallback><mc:AlternateContent><mc:Choice Requires="w"><w:imprint/></mc:Choice><mc:Fallback><w:outline/></mc:Fallback></mc:AlternateContent></mc:Fallback></mc:AlternateContent>"#,
     ]
     .concat();
     let document = open(&format!(
@@ -3088,7 +3089,7 @@ fn shares_the_node_limit_with_the_numbering_part() {
 fn repairs_damaged_list_instances() {
     // From the review of #46.
     let numbering = format!(
-        r#"<w:numbering xmlns:w="{W}" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><w:abstractNum w:abstractNumId="-1"><w:nsid w:val="1A2B3C"/><w:lvl w:ilvl="0"><w:lvlText w:null="0"/></w:lvl><w:lvl w:ilvl="1"><w:lvlText w:val="%2)" w:null="1"/></w:lvl></w:abstractNum><w:abstractNum w:abstractNumId="0"><w:nsid w:val="1A2B3C"/><w:lvl w:ilvl="0"><w:lvlText w:null="0"/></w:lvl><w:lvl w:ilvl="1"><w:lvlText w:val="%2)" w:null="1"/></w:lvl></w:abstractNum><w:num w:numId="3"><mc:AlternateContent><mc:Choice Requires="w99"><w:abstractNumId w:val="9"/></mc:Choice><mc:Fallback><w:abstractNumId w:val="0"/></mc:Fallback></mc:AlternateContent><w:lvlOverride w:ilvl="0"><w:startOverride w:val="5"/></w:lvlOverride><w:lvlOverride w:ilvl="0"><w:startOverride w:val="7"/></w:lvlOverride><w:lvlOverride w:ilvl="2"><w:lvl w:ilvl="2"><w:numFmt w:val="lowerRoman"/></w:lvl><w:lvl w:ilvl="2"><w:numFmt w:val="decimal"/></w:lvl></w:lvlOverride><w:lvlOverride w:ilvl="1"><w:startOverride w:val="2"/><w:startOverride w:val="8"/><w:lvl w:ilvl="3"><w:numFmt w:val="upperRoman"/></w:lvl></w:lvlOverride></w:num><w:num w:numId="4"/></w:numbering>"#
+        r#"<w:numbering xmlns:w="{W}" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:abstractNum w:abstractNumId="-1"><w:nsid w:val="1A2B3C"/><w:lvl w:ilvl="0"><w:lvlText w:null="0"/></w:lvl><w:lvl w:ilvl="1"><w:lvlText w:val="%2)" w:null="1"/></w:lvl></w:abstractNum><w:abstractNum w:abstractNumId="0"><w:nsid w:val="1A2B3C"/><w:lvl w:ilvl="0"><w:lvlText w:null="0"/></w:lvl><w:lvl w:ilvl="1"><w:lvlText w:val="%2)" w:null="1"/></w:lvl></w:abstractNum><w:num w:numId="3"><mc:AlternateContent><mc:Choice Requires="w14"><w:abstractNumId w:val="9"/></mc:Choice><mc:Fallback><w:abstractNumId w:val="0"/></mc:Fallback></mc:AlternateContent><w:lvlOverride w:ilvl="0"><w:startOverride w:val="5"/></w:lvlOverride><w:lvlOverride w:ilvl="0"><w:startOverride w:val="7"/></w:lvlOverride><w:lvlOverride w:ilvl="2"><w:lvl w:ilvl="2"><w:numFmt w:val="lowerRoman"/></w:lvl><w:lvl w:ilvl="2"><w:numFmt w:val="decimal"/></w:lvl></w:lvlOverride><w:lvlOverride w:ilvl="1"><w:startOverride w:val="2"/><w:startOverride w:val="8"/><w:lvl w:ilvl="3"><w:numFmt w:val="upperRoman"/></w:lvl></w:lvlOverride></w:num><w:num w:numId="4"/></w:numbering>"#
     );
     let document = with_numbering("<w:p/>", &numbering);
     let numbering = document.numbering();
@@ -3422,7 +3423,7 @@ fn shares_the_node_limit_with_the_theme_and_the_font_table() {
 fn repairs_damaged_font_declarations() {
     // From the review of #51.
     let fonts = format!(
-        r#"<w:fonts xmlns:w="{W}" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" mc:Ignorable="w14"><w:font w:name="A"><w:charset w:val="00"/><w:charset w:val="80"/><w:family w:val="swiss"/><w:family w:val="roman"/><w:altName w:val="first"/><w:altName w:val="second"/><w:sig w:usb0="00000001" w:usb1="00000000"/><w:embedRegular w:fontKey="{{00000000-0000-0000-0000-000000000000}}"/><w:embedBold r:id="rId1"/><w:embedBold r:id="rId2"/></w:font><w:font w:name="B"><w:charset w:val="+F"/><mc:AlternateContent><mc:Choice Requires="w99"><w:family w:val="roman"/></mc:Choice><mc:Fallback><w:family w:val="modern"/></mc:Fallback></mc:AlternateContent></w:font><w14:font w:name="C"/></w:fonts>"#
+        r#"<w:fonts xmlns:w="{W}" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" mc:Ignorable="w14"><w:font w:name="A"><w:charset w:val="00"/><w:charset w:val="80"/><w:family w:val="swiss"/><w:family w:val="roman"/><w:altName w:val="first"/><w:altName w:val="second"/><w:sig w:usb0="00000001" w:usb1="00000000"/><w:embedRegular w:fontKey="{{00000000-0000-0000-0000-000000000000}}"/><w:embedBold r:id="rId1"/><w:embedBold r:id="rId2"/></w:font><w:font w:name="B"><w:charset w:val="+F"/><mc:AlternateContent><mc:Choice Requires="w14"><w:family w:val="roman"/></mc:Choice><mc:Fallback><w:family w:val="modern"/></mc:Fallback></mc:AlternateContent></w:font><w14:font w:name="C"/></w:fonts>"#
     );
     let document = with_part("fontTable", "fontTable.xml", &fonts).unwrap();
     // A font of another namespace is not read.
@@ -3459,6 +3460,464 @@ fn repairs_damaged_font_declarations() {
     assert!(
         messages[7].ends_with("names the relationship rId1, which the font table does not have")
     );
+}
+
+#[test]
+fn checks_markup_compatibility_in_the_branch_taken_at_the_top_of_parts() {
+    // Issue #156: the children of the branch an mc:AlternateContent takes at the top of a
+    // part are read in its place, so they go through Markup Compatibility as a child of
+    // the root does: an mc:MustUnderstand of a namespace officewright does not read
+    // refuses the document, as it does in the body. w14 is such a namespace.
+    const MC: &str = r#"xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" mc:Ignorable="w14""#;
+    let open_part = |kind: &str, target: &str, xml: &str| {
+        let rels = format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{kind}" Target="{target}"/></Relationships>"#
+        );
+        let path = format!("word/{target}");
+        Document::from_bytes(package(
+            DOCUMENT,
+            &document_xml("<w:p/>"),
+            &[("word/_rels/document.xml.rels", &rels), (&path, xml)],
+        ))
+    };
+    // Each part, its root, the namespace its choice requires, and a child to read.
+    let parts = [
+        (
+            "settings",
+            "settings.xml",
+            format!(r#"w:settings xmlns:w="{W}""#),
+            "w",
+            r#"<w:defaultTabStop w:val="360" ATTR/>"#,
+        ),
+        (
+            "numbering",
+            "numbering.xml",
+            format!(r#"w:numbering xmlns:w="{W}""#),
+            "w",
+            r#"<w:abstractNum w:abstractNumId="1" ATTR/>"#,
+        ),
+        (
+            "styles",
+            "styles.xml",
+            format!(r#"w:styles xmlns:w="{W}""#),
+            "w",
+            r#"<w:style w:styleId="S" ATTR/>"#,
+        ),
+        (
+            "fontTable",
+            "fontTable.xml",
+            format!(r#"w:fonts xmlns:w="{W}""#),
+            "w",
+            r#"<w:font w:name="F" ATTR/>"#,
+        ),
+        (
+            "theme",
+            "theme/theme1.xml",
+            format!(r#"a:theme xmlns:a="{A}""#),
+            "a",
+            r#"<a:themeElements ATTR/>"#,
+        ),
+    ];
+    for (kind, target, root, requires, child) in &parts {
+        let root_name = root.split(' ').next().unwrap();
+        let xml = |inside: &str| format!("<{root} {MC}>{inside}</{root_name}>");
+        let child = |attribute: &str| child.replace("ATTR", attribute);
+        let refused = |inside: String| match open_part(kind, target, &xml(&inside)) {
+            Err(Error::Unsupported(message)) => {
+                assert!(message.contains("mc:MustUnderstand"), "{kind}: {message}")
+            }
+            other => panic!("{kind}: {inside} gave {other:?}"),
+        };
+        let read = |inside: String| {
+            if let Err(err) = open_part(kind, target, &xml(&inside)) {
+                panic!("{kind}: {inside} gave {err}");
+            }
+        };
+        let must = child(r#"mc:MustUnderstand="w14""#);
+        // In the choice taken, and in a choice taken inside it.
+        refused(format!(
+            r#"<mc:AlternateContent><mc:Choice Requires="{requires}">{must}</mc:Choice></mc:AlternateContent>"#
+        ));
+        refused(format!(
+            r#"<mc:AlternateContent><mc:Choice Requires="w14"/><mc:Fallback><mc:AlternateContent><mc:Choice Requires="{requires}">{must}</mc:Choice></mc:AlternateContent></mc:Fallback></mc:AlternateContent>"#
+        ));
+        // As a child of the root.
+        refused(must.clone());
+        // A namespace officewright reads is understood.
+        read(format!(
+            r#"<mc:AlternateContent><mc:Choice Requires="{requires}">{}</mc:Choice></mc:AlternateContent>"#,
+            child(&format!(r#"mc:MustUnderstand="{requires}""#))
+        ));
+        // A branch not taken is kept, not read, so its mc:MustUnderstand does not count.
+        read(format!(
+            r#"<mc:AlternateContent><mc:Choice Requires="w14">{must}</mc:Choice><mc:Fallback>{}</mc:Fallback></mc:AlternateContent>"#,
+            child("")
+        ));
+    }
+    // A choice at the top of a part whose Requires names an undeclared prefix refuses
+    // the document, as it does in the body.
+    let styles = format!(
+        r#"<w:styles xmlns:w="{W}" {MC}><mc:AlternateContent><mc:Choice Requires="x"><w:style w:styleId="S"/></mc:Choice></mc:AlternateContent></w:styles>"#
+    );
+    assert!(matches!(
+        open_part("styles", "styles.xml", &styles),
+        Err(Error::Malformed { .. })
+    ));
+}
+
+#[test]
+fn ends_markup_compatibility_declarations_with_their_elements_at_the_top_of_parts() {
+    // From the review of #286: an mc:ProcessContent written on an element applies until
+    // that element ends, whether it is read in a taken branch, kept as written or the
+    // root. w14:foo is ignorable; when it is processed, its mc:MustUnderstand of w15, a
+    // namespace officewright does not read, refuses the document, and when it is not,
+    // it is left out without a look inside.
+    let open_settings = |root_attributes: &str, inside: &str| {
+        let settings = format!(
+            r#"<w:settings xmlns:w="{W}" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" mc:Ignorable="w14"{root_attributes}>{inside}</w:settings>"#
+        );
+        let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/></Relationships>"#;
+        Document::from_bytes(package(
+            DOCUMENT,
+            &document_xml("<w:p/>"),
+            &[
+                ("word/_rels/document.xml.rels", rels),
+                ("word/settings.xml", &settings),
+            ],
+        ))
+    };
+    let foo = r#"<w14:foo mc:MustUnderstand="w15"/>"#;
+    let refused = |root_attributes: &str, inside: &str| match open_settings(root_attributes, inside)
+    {
+        Err(Error::Unsupported(message)) => {
+            assert!(message.contains("mc:MustUnderstand"), "{inside}: {message}")
+        }
+        other => panic!("{inside} gave {other:?}"),
+    };
+    let read = |root_attributes: &str, inside: &str| {
+        if let Err(err) = open_settings(root_attributes, inside) {
+            panic!("{inside} gave {err}");
+        }
+    };
+    // Written on a child of the branch taken, it ends with that child.
+    read(
+        "",
+        &format!(
+            r#"<mc:AlternateContent><mc:Choice Requires="w"><w:defaultTabStop w:val="360" mc:ProcessContent="w14:foo"/>{foo}</mc:Choice></mc:AlternateContent>"#
+        ),
+    );
+    // Written on a child of the root, it ends with that child.
+    read(
+        "",
+        &format!(r#"<w:defaultTabStop w:val="360" mc:ProcessContent="w14:foo"/>{foo}"#),
+    );
+    // Written on the root, it still applies after an alternate read in place and after
+    // an element kept as written, with children of its own.
+    let on_root = r#" mc:ProcessContent="w14:foo""#;
+    refused(
+        on_root,
+        &format!(
+            r#"<mc:AlternateContent><mc:Choice Requires="w"><w:defaultTabStop w:val="360"/></mc:Choice></mc:AlternateContent>{foo}"#
+        ),
+    );
+    refused(on_root, &format!("<w:compat><w:x/></w:compat>{foo}"));
+}
+
+/// The parts besides the main one that are read from the children of their root: the
+/// relationship kind, the part, its root, the namespace that root is in, a child of the
+/// root with `ATTR` where an attribute may go, and whether the child was read.
+type PartCase = (
+    &'static str,
+    &'static str,
+    String,
+    &'static str,
+    &'static str,
+    fn(&Document) -> bool,
+);
+
+fn part_cases() -> [PartCase; 5] {
+    [
+        (
+            "settings",
+            "settings.xml",
+            format!(r#"w:settings xmlns:w="{W}""#),
+            "w",
+            r#"<w:defaultTabStop w:val="360" ATTR/>"#,
+            |document| document.settings().default_tab_stop() == Some(Pt(18.0)),
+        ),
+        (
+            "numbering",
+            "numbering.xml",
+            format!(r#"w:numbering xmlns:w="{W}""#),
+            "w",
+            r#"<w:abstractNum w:abstractNumId="1" ATTR/>"#,
+            |document| document.numbering().definition(1).is_some(),
+        ),
+        (
+            "styles",
+            "styles.xml",
+            format!(r#"w:styles xmlns:w="{W}""#),
+            "w",
+            r#"<w:style w:type="paragraph" w:styleId="S" ATTR/>"#,
+            |document| document.styles().iter().any(|style| style.id() == "S"),
+        ),
+        (
+            "fontTable",
+            "fontTable.xml",
+            format!(r#"w:fonts xmlns:w="{W}""#),
+            "w",
+            r#"<w:font w:name="F" ATTR/>"#,
+            |document| document.font("F").is_some(),
+        ),
+        (
+            "theme",
+            "theme/theme1.xml",
+            format!(r#"a:theme xmlns:a="{A}""#),
+            "a",
+            r#"<a:themeElements ATTR><a:clrScheme name="C"/></a:themeElements>"#,
+            |document| {
+                document
+                    .theme()
+                    .and_then(|theme| theme.colors())
+                    .and_then(|colors| colors.name())
+                    == Some("C")
+            },
+        ),
+    ]
+}
+
+/// The Markup Compatibility declarations of the roots in the tests of #296: w14 is
+/// declared and ignorable, and officewright does not read it.
+const MC_W14: &str = r#"xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" mc:Ignorable="w14""#;
+
+#[test]
+fn reads_the_content_mc_process_content_names_in_place_at_the_top_of_parts() {
+    // Issue #296: an ignorable element whose content mc:ProcessContent names is read in
+    // place of it, as in the body, whether the root or a taken choice names it.
+    for (kind, target, root, requires, child, was_read) in part_cases() {
+        let child = child.replace(" ATTR", "");
+        let root_name = root.split(' ').next().unwrap();
+        let open = |root_attributes: &str, inside: &str| {
+            let xml = format!("<{root} {MC_W14}{root_attributes}>{inside}</{root_name}>");
+            match with_part(kind, target, &xml) {
+                Ok(document) => document,
+                Err(err) => panic!("{kind}: {inside} gave {err}"),
+            }
+        };
+        let names = r#" mc:ProcessContent="w14:x""#;
+        let wrapped = format!("<w14:x>{child}</w14:x>");
+        assert!(
+            was_read(&open(names, &wrapped)),
+            "{kind}: named on the root"
+        );
+        assert!(
+            was_read(&open(names, &format!("<w14:x>{wrapped}</w14:x>"))),
+            "{kind}: one wrapper in another"
+        );
+        assert!(
+            was_read(&open(
+                "",
+                &format!(
+                    r#"<mc:AlternateContent><mc:Choice Requires="{requires}"{names}>{wrapped}</mc:Choice></mc:AlternateContent>"#
+                )
+            )),
+            "{kind}: named on the taken choice"
+        );
+        // Not named: the ignorable element is left out with what it holds.
+        assert!(!was_read(&open("", &wrapped)), "{kind}: not named");
+        // The control: the child itself is read.
+        assert!(was_read(&open("", &child)), "{kind}: the child alone");
+    }
+}
+
+#[test]
+fn checks_must_understand_below_the_children_of_a_parts_root() {
+    // Issue #296: what the readers read below a child of a part's root goes through
+    // Markup Compatibility as the body's elements do, so an mc:MustUnderstand of a
+    // namespace officewright does not read refuses the document there too.
+    for (kind, target, root, requires, child, _) in part_cases() {
+        let root_name = root.split(' ').next().unwrap();
+        let open = |inside: &str| {
+            with_part(
+                kind,
+                target,
+                &format!("<{root} {MC_W14}>{inside}</{root_name}>"),
+            )
+        };
+        let below = |attribute: &str| {
+            let child = child.replace(" ATTR", "");
+            // The child's own children: the attribute on an element inside it.
+            let (start, end) = child
+                .strip_suffix("/>")
+                .map(|start| (start.to_owned(), String::new()))
+                .unwrap_or_else(|| {
+                    let at = child.find('>').unwrap();
+                    (
+                        child[..at].to_owned(),
+                        child[at + 1..child.rfind("</").unwrap()].to_owned(),
+                    )
+                });
+            let close = format!("</{}>", start[1..].split(' ').next().unwrap());
+            let inner = match requires {
+                "w" => format!(r#"<w:rsid w:val="00000001"{attribute}/>"#),
+                _ => format!(r#"<a:extLst{attribute}/>"#),
+            };
+            format!("{start}>{inner}{end}{close}")
+        };
+        let must = r#" mc:MustUnderstand="w14""#;
+        for inside in [
+            below(must),
+            format!(
+                r#"<mc:AlternateContent><mc:Choice Requires="{requires}">{}</mc:Choice></mc:AlternateContent>"#,
+                below(must)
+            ),
+        ] {
+            match open(&inside) {
+                Err(Error::Unsupported(message)) => {
+                    assert!(message.contains("mc:MustUnderstand"), "{kind}: {message}")
+                }
+                other => panic!("{kind}: {inside} gave {other:?}"),
+            }
+        }
+        // In an ignorable element whose content is processed, the child is read, so it
+        // is checked.
+        let processed = format!(
+            r#"<w14:x>{}</w14:x>"#,
+            child.replace("ATTR", must.trim_start())
+        );
+        let with_names =
+            format!(r#"<{root} {MC_W14} mc:ProcessContent="w14:x">{processed}</{root_name}>"#);
+        match with_part(kind, target, &with_names) {
+            Err(Error::Unsupported(message)) => {
+                assert!(message.contains("mc:MustUnderstand"), "{kind}: {message}")
+            }
+            other => panic!("{kind}: {processed} gave {other:?}"),
+        }
+        // A namespace officewright reads is understood.
+        let understood = below(&format!(r#" mc:MustUnderstand="{requires}""#));
+        if let Err(err) = open(&understood) {
+            panic!("{kind}: {understood} gave {err}");
+        }
+        // Inside an ignorable element, what is kept as written is not looked at.
+        let kept = format!("<w14:y>{}</w14:y>", below(must));
+        if let Err(err) = open(&kept) {
+            panic!("{kind}: {kept} gave {err}");
+        }
+    }
+}
+
+#[test]
+fn reads_the_properties_of_the_body_through_markup_compatibility() {
+    // Issue #296: what a property element of the body holds goes through Markup
+    // Compatibility as the elements around it do.
+    let refused = |body: &str| match Document::from_bytes(docx(body)) {
+        Err(Error::Unsupported(message)) => {
+            assert!(message.contains("mc:MustUnderstand"), "{body}: {message}")
+        }
+        other => panic!("{body} gave {other:?}"),
+    };
+    let must = r#"mc:MustUnderstand="w14""#;
+    refused(&format!(
+        r#"<w:p><w:pPr><w:jc w:val="center" {must}/></w:pPr></w:p>"#
+    ));
+    refused(&format!(
+        r#"<w:p><w:r><w:rPr><w:b {must}/></w:rPr></w:r></w:p>"#
+    ));
+    refused(&format!(
+        r#"<w:p><w:pPr><w:sectPr><w:pgSz w:w="12240" {must}/></w:sectPr></w:pPr></w:p>"#
+    ));
+    refused(&format!(
+        r#"<w:p/><w:sectPr><w:pgSz w:w="12240" {must}/></w:sectPr>"#
+    ));
+    refused(&format!(
+        r#"<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto" {must}/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl><w:p/>"#
+    ));
+    refused(&format!(
+        r#"<w:p mc:ProcessContent="w14:x"><w:pPr><w14:x><w:jc w:val="center" {must}/></w14:x></w:pPr></w:p>"#
+    ));
+
+    // Content that mc:ProcessContent names is read in place of its ignorable element.
+    let document = open(
+        r#"<w:p mc:ProcessContent="w14:x"><w:pPr><w14:x><w:jc w:val="center"/></w14:x></w:pPr><w:r><w:rPr><w14:x><w14:x><w:b/></w14:x></w14:x></w:rPr><w:t>x</w:t></w:r></w:p>"#,
+    );
+    assert_eq!(
+        first_paragraph(&document).properties().justification(),
+        Some(Justification::Center)
+    );
+    assert_eq!(first_run(&document).properties().bold(), Some(true));
+
+    // An ignorable element not named is left out with what it holds, unread and
+    // unchecked; so is a branch not taken, and what the reader keeps as written.
+    let document = open(&format!(
+        r#"<w:p><w:pPr><w14:x><w:jc w:val="center" {must}/></w14:x><mc:AlternateContent><mc:Choice Requires="w14"><w:ind w:left="1" {must}/></mc:Choice><mc:Fallback><w:jc w:val="right"/></mc:Fallback></mc:AlternateContent></w:pPr><w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:name w:val="x" {must}/></w:ffData></w:fldChar></w:r></w:p><w14:y><w:p {must}/></w14:y>"#
+    ));
+    assert_eq!(
+        first_paragraph(&document).properties().justification(),
+        Some(Justification::Right)
+    );
+    // A child of the root that the reader keeps for writing is not looked at either.
+    let xml = document_xml("<w:p/>").replace(
+        "<w:body>",
+        &format!(r#"<w:background w:color="FFFFFF"><w:x {must}/></w:background><w:body>"#),
+    );
+    if let Err(err) = Document::from_bytes(package(DOCUMENT, &xml, &[])) {
+        panic!("a kept w:background gave {err}");
+    }
+}
+
+#[test]
+fn ends_markup_compatibility_declarations_with_elements_kept_inside_properties() {
+    // From the review of #306: an element started in Markup Compatibility but kept as
+    // written inside a property element ends at its end tag. An mc:ProcessContent
+    // written on an ignorable element inside w:rPr ends with it.
+    let document = open(
+        r#"<w:p><w:r><w:rPr><w14:x mc:ProcessContent="w14:y"/><w14:y><w:b/></w14:y></w:rPr><w:t>x</w:t></w:r></w:p>"#,
+    );
+    assert_eq!(first_run(&document).properties().bold(), None);
+    // And one written on a branch not taken.
+    let document = open(
+        r#"<w:p><w:r><w:rPr><mc:AlternateContent><mc:Choice Requires="w14" mc:ProcessContent="w14:y"/><mc:Fallback/></mc:AlternateContent><w14:y><w:i/></w14:y></w:rPr><w:t>x</w:t></w:r></w:p>"#,
+    );
+    assert_eq!(first_run(&document).properties().italic(), None);
+}
+
+#[test]
+fn refuses_a_choice_whose_requires_is_not_valid_in_properties() {
+    // Issue #296: properties are read as the body is, so a choice in them whose
+    // Requires is missing, empty or names an undeclared prefix refuses the document,
+    // as one around a paragraph does. In content kept as written it is passed by.
+    for choice in [
+        r#"<mc:Choice Requires="w99">"#,
+        "<mc:Choice>",
+        r#"<mc:Choice Requires="">"#,
+    ] {
+        let alternate =
+            format!("<mc:AlternateContent>{choice}<w:b/></mc:Choice></mc:AlternateContent>");
+        for body in [
+            format!("<w:p><w:r><w:rPr>{alternate}</w:rPr></w:r></w:p>"),
+            format!("{alternate}<w:p/>").replace("<w:b/>", "<w:p/>"),
+            format!("<w:p><w:r><w:drawing>{alternate}</w:drawing></w:r></w:p>"),
+        ] {
+            assert!(
+                matches!(
+                    Document::from_bytes(docx(&body)),
+                    Err(Error::Malformed { .. })
+                ),
+                "{body}"
+            );
+        }
+        let styles = format!(
+            r#"<w:styles xmlns:w="{W}" {MC_W14}><w:style w:type="paragraph" w:styleId="S"><w:rPr>{alternate}</w:rPr></w:style></w:styles>"#
+        );
+        assert!(
+            matches!(
+                with_part("styles", "styles.xml", &styles),
+                Err(Error::Malformed { .. })
+            ),
+            "{choice} in a style"
+        );
+        open(&format!("<w14:y>{alternate}</w14:y><w:p/>"));
+    }
 }
 
 #[test]
@@ -3578,7 +4037,7 @@ fn reads_the_branch_alternate_content_takes_at_the_top_of_parts() {
 #[test]
 fn repairs_a_damaged_theme() {
     let theme = format!(
-        r#"<a:theme xmlns:a="{A}" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><a:themeElements><mc:AlternateContent><mc:Choice Requires="w99"><a:clrScheme name="Choice"/></mc:Choice><mc:Fallback><a:clrScheme name="Fallback"><a:dk1><a:srgbClr val="010101"/></a:dk1><a:dk1><a:srgbClr val="020202"/></a:dk1></a:clrScheme></mc:Fallback></mc:AlternateContent><a:clrScheme name="Second"/><a:fontScheme name="F"><a:majorFont><a:latin typeface="One"/><a:latin typeface="Two"/><a:font script="Jpan" typeface="J1"/><a:font script="Jpan" typeface="J2"/></a:majorFont><a:minorFont/><a:minorFont><a:latin typeface="Other"/></a:minorFont></a:fontScheme></a:themeElements><a:themeElements><a:clrScheme name="Later"/></a:themeElements></a:theme>"#
+        r#"<a:theme xmlns:a="{A}" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><a:themeElements><mc:AlternateContent><mc:Choice Requires="w14"><a:clrScheme name="Choice"/></mc:Choice><mc:Fallback><a:clrScheme name="Fallback"><a:dk1><a:srgbClr val="010101"/></a:dk1><a:dk1><a:srgbClr val="020202"/></a:dk1></a:clrScheme></mc:Fallback></mc:AlternateContent><a:clrScheme name="Second"/><a:fontScheme name="F"><a:majorFont><a:latin typeface="One"/><a:latin typeface="Two"/><a:font script="Jpan" typeface="J1"/><a:font script="Jpan" typeface="J2"/></a:majorFont><a:minorFont/><a:minorFont><a:latin typeface="Other"/></a:minorFont></a:fontScheme></a:themeElements><a:themeElements><a:clrScheme name="Later"/></a:themeElements></a:theme>"#
     );
     let document = with_part("theme", "theme/theme1.xml", &theme).unwrap();
     let theme = document.theme().unwrap();
@@ -3939,7 +4398,7 @@ fn a_reference_to_a_part_of_the_other_kind_is_not_written() {
 #[test]
 fn reads_the_conditional_formats_of_a_table_style() {
     let styles = format!(
-        r#"<w:styles xmlns:w="{W}" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><w:style w:type="table" w:styleId="Grid"><w:name w:val="Grid"/><w:tblPr><w:tblStyleRowBandSize w:val="1"/></w:tblPr><w:tblStylePr w:type="firstRow"><w:rPr><w:b/></w:rPr><w:tcPr><w:shd w:val="clear" w:fill="FF0000"/></w:tcPr></w:tblStylePr><w:tblStylePr w:type="bogus"><w:rPr><w:i/></w:rPr></w:tblStylePr><mc:AlternateContent><mc:Choice Requires="w99"><w:tblStylePr w:type="lastRow"/></mc:Choice><mc:Fallback><w:tblStylePr w:type="band1Horz"><w:pPr><w:jc w:val="center"/></w:pPr><w:trPr><w:cantSplit/></w:trPr><w:tblPr><w:tblCellSpacing w:w="20" w:type="dxa"/></w:tblPr></w:tblStylePr></mc:Fallback></mc:AlternateContent></w:style></w:styles>"#
+        r#"<w:styles xmlns:w="{W}" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:style w:type="table" w:styleId="Grid"><w:name w:val="Grid"/><w:tblPr><w:tblStyleRowBandSize w:val="1"/></w:tblPr><w:tblStylePr w:type="firstRow"><w:rPr><w:b/></w:rPr><w:tcPr><w:shd w:val="clear" w:fill="FF0000"/></w:tcPr></w:tblStylePr><w:tblStylePr w:type="bogus"><w:rPr><w:i/></w:rPr></w:tblStylePr><mc:AlternateContent><mc:Choice Requires="w14"><w:tblStylePr w:type="lastRow"/></mc:Choice><mc:Fallback><w:tblStylePr w:type="band1Horz"><w:pPr><w:jc w:val="center"/></w:pPr><w:trPr><w:cantSplit/></w:trPr><w:tblPr><w:tblCellSpacing w:w="20" w:type="dxa"/></w:tblPr></w:tblStylePr></mc:Fallback></mc:AlternateContent></w:style></w:styles>"#
     );
     let document = with_part("styles", "styles.xml", &styles).unwrap();
     let grid = document.styles().get("Grid").unwrap();

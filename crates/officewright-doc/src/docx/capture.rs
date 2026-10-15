@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use officewright_opc::mce::Processor;
+use officewright_opc::mce::{Disposition, Processor};
 use officewright_opc::xml::{Event, NsId, Reader, StartTag};
 
 use crate::diagnostic::{DiagnosticKind, Diagnostics};
@@ -84,6 +84,21 @@ impl Budget {
     }
 }
 
+/// What Markup Compatibility makes of an element [`Capture::capture`] reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Role {
+    /// An `mc:AlternateContent` that is read: its branches are started in `mce`, and
+    /// the one it takes is read.
+    Alternate,
+    /// Read: started in `mce`, and so is every element in it.
+    Read,
+    /// Started in `mce`, and kept as written inside: an ignorable element, one `mce`
+    /// does not understand, a branch not taken, or an element the caller keeps.
+    Started,
+    /// Kept as written, never started in `mce`.
+    Kept,
+}
+
 /// The state of reading one part into a document.
 pub(super) struct Capture<'d, 'p, 't> {
     pub(super) document: &'d mut Document,
@@ -119,19 +134,35 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
         }
     }
 
-    /// Reads an element and everything in it into a fragment. Only the element itself
-    /// went through Markup Compatibility: what is inside is kept as written, except
-    /// that the branch of each `mc:AlternateContent` that `mce` would take is marked,
-    /// while the prefixes its `Requires` names can still be resolved (see
-    /// `Token::Start`). A choice whose `Requires` is missing or empty, names an
-    /// undeclared prefix, or lists more than
+    /// Reads an element and everything in it into a fragment. The caller started the
+    /// element in `mce`; `read` is what that gave when the reader reads the element,
+    /// and `None` when it keeps the element as written.
+    ///
+    /// Everything in an element read goes through Markup Compatibility as the elements
+    /// the body walks do (#156, #296): each element in it is started in `mce`, so an
+    /// `mc:MustUnderstand` that names a namespace `mce` does not understand refuses the
+    /// part; of each `mc:AlternateContent`, the branch `mce` takes is marked, and a
+    /// choice whose `Requires` is not valid refuses the part; and an ignorable element
+    /// whose content `mc:ProcessContent` names is marked too, so that its children are
+    /// read in place of it (see `Token::Start`). What an ignorable element, an element
+    /// `mce` does not understand or a branch not taken holds is kept as written.
+    ///
+    /// In an element kept as written, nothing is started in `mce`. The branch of each
+    /// `mc:AlternateContent` that `mce` would take is still marked, while the prefixes
+    /// its `Requires` names can be resolved; a choice whose `Requires` is missing or
+    /// empty, names an undeclared prefix, or lists more than
     /// [`Limits::max_mce_names`](officewright_opc::Limits::max_mce_names) names is not
-    /// taken: what is inside is not read yet, so it is not an error.
+    /// taken there: what is inside is not read, so it is not an error.
+    ///
+    /// When the element read is an `mc:AlternateContent`, or an ignorable element under
+    /// `mc:ProcessContent`, the reader of a part reads its children in its place (see
+    /// [`through_alternates`](Self::through_alternates)).
     pub(super) fn capture(
         &mut self,
         reader: &mut Reader<'_>,
         mce: &mut Processor,
         tag: StartTag<'_>,
+        read: Option<Disposition>,
     ) -> Result<Span> {
         self.spend(1)?;
         let start = self.document.tokens.len();
@@ -141,10 +172,22 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
         // The depth of each open mc:AlternateContent, and whether a branch of it has
         // been taken.
         let mut alternates: Vec<(usize, bool)> = Vec::new();
-        if tag.name().is(mc, "AlternateContent") {
+        // What Markup Compatibility makes of each open element. The caller started the
+        // element itself; it is ended after the loop, not at its end tag.
+        let alternate = tag.name().is(mc, "AlternateContent");
+        if alternate {
             alternates.push((1, false));
         }
-        self.push_start(reader, &tag, false)?;
+        let mut roles = vec![match read {
+            Some(Disposition::Understood | Disposition::ProcessContent) if alternate => {
+                Role::Alternate
+            }
+            Some(Disposition::Understood | Disposition::ProcessContent) => Role::Read,
+            _ => Role::Started,
+        }];
+        let part = self.part;
+        let opc = |err: officewright_opc::Error| Error::from(err.in_part(part));
+        self.push_start(reader, &tag, read == Some(Disposition::ProcessContent))?;
         let mut depth = 1usize;
         while depth > 0 {
             self.spend(1)?;
@@ -155,23 +198,51 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
             match event {
                 Some(Event::Start(tag)) => {
                     let name = tag.name();
+                    let parent = roles.last().copied().unwrap_or(Role::Kept);
+                    let processed = matches!(parent, Role::Alternate | Role::Read);
+                    let disposition = if processed {
+                        Some(mce.start(reader, &tag).map_err(opc)?)
+                    } else {
+                        None
+                    };
                     let mut taken = false;
                     if let Some((at, branch_taken)) = alternates.last_mut() {
                         if *at == depth && !*branch_taken {
-                            taken = name.is(mc, "Fallback")
-                                || (name.is(mc, "Choice")
-                                    && mce.is_selectable(reader, &tag).unwrap_or(false));
+                            let selectable = || match mce.is_selectable(reader, &tag) {
+                                Ok(selectable) => Ok(selectable),
+                                Err(err) if processed => Err(opc(err)),
+                                Err(_) => Ok(false),
+                            };
+                            taken =
+                                name.is(mc, "Fallback") || (name.is(mc, "Choice") && selectable()?);
                             *branch_taken = taken;
                         }
                     }
+                    let content = disposition == Some(Disposition::ProcessContent);
+                    roles.push(match parent {
+                        Role::Alternate if taken => Role::Read,
+                        Role::Alternate => Role::Started,
+                        Role::Read if name.is(mc, "AlternateContent") => Role::Alternate,
+                        Role::Read => match disposition {
+                            Some(Disposition::Understood | Disposition::ProcessContent) => {
+                                Role::Read
+                            }
+                            _ => Role::Started,
+                        },
+                        Role::Started | Role::Kept => Role::Kept,
+                    });
                     depth += 1;
                     if name.is(mc, "AlternateContent") {
                         alternates.push((depth, false));
                     }
-                    self.push_start(reader, &tag, taken)?;
+                    self.push_start(reader, &tag, taken || (parent == Role::Read && content))?;
                 }
                 Some(Event::End(_)) => {
                     self.document.tokens.push(Token::End);
+                    let role = roles.pop();
+                    if !roles.is_empty() && role.is_some_and(|role| role != Role::Kept) {
+                        mce.end();
+                    }
                     if alternates.last().is_some_and(|(at, _)| *at == depth) {
                         alternates.pop();
                     }
@@ -209,7 +280,7 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
         &mut self,
         reader: &Reader<'_>,
         tag: &StartTag<'_>,
-        taken: bool,
+        in_place: bool,
     ) -> Result<()> {
         let written = tag.namespace_declarations();
         self.spend(tag.attributes().len() + written.len())?;
@@ -255,7 +326,7 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
         self.document.tokens.push(Token::Start {
             name,
             attributes,
-            taken,
+            in_place,
         });
         if !declarations.is_empty() {
             self.document
@@ -287,7 +358,7 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
 
     /// The elements to read in place of the element of `span`, a child of a part's root:
     /// the element itself or, for an `mc:AlternateContent`, the children of the branch
-    /// it takes.
+    /// it takes, and for an ignorable element under `mc:ProcessContent`, its children.
     pub(super) fn through_alternates(&self, span: Span) -> Vec<Span> {
         let document = &self.document;
         span.through_alternates(&document.tokens, &document.strings, document.names.mc)
