@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Long-running checks, run on a schedule by .github/workflows/nightly.yml.
 #
-#   scripts/nightly.sh                   all of it, the fuzz targets one after another
+#   scripts/nightly.sh [all]             all of it, the fuzz targets one after another
 #   scripts/nightly.sh checks            Miri, the corpus pins, the corpus runner, the test fonts
 #   scripts/nightly.sh fuzz [TARGET...]  fuzzing, 30 minutes per target (by default every target)
 #   scripts/nightly.sh fuzz-targets      the fuzz targets as a JSON array
@@ -13,7 +13,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 usage() {
-	echo "usage: scripts/nightly.sh [checks | fuzz [TARGET...] | fuzz-targets]" >&2
+	echo "usage: scripts/nightly.sh [all | checks | fuzz [TARGET...] | fuzz-targets]" >&2
 	exit 2
 }
 
@@ -128,13 +128,14 @@ fuzz() {
 }
 
 # For the matrix of nightly.yml. Target names are Cargo binary names; one that JSON would
-# need to escape is refused rather than escaped.
+# need to escape is refused rather than escaped. The letters are listed one by one, because
+# a range such as a-z can also match other letters, depending on the locale and bash.
 fuzz_targets_json() {
 	targets=$(fuzz_targets)
 	json=
 	for target in $targets; do
 		case $target in
-		*[!A-Za-z0-9_-]*)
+		*[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-]*)
 			echo "nightly.sh: fuzz target name $target is not letters, digits, - and _" >&2
 			exit 1
 			;;
