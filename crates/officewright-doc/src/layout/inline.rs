@@ -7,7 +7,7 @@
 use officewright_layout::ReportKind;
 use officewright_layout::ir;
 
-use super::{Translator, is_marker};
+use super::{Once, Translator, is_marker};
 use crate::model::{
     BreakClear, BreakKind, FieldCharKind, Inline, Paragraph, RevisionKind, Run, RunContent,
 };
@@ -79,6 +79,44 @@ impl<'a> Translator<'a> {
     fn run(&mut self, run: Run<'a>, content: &mut Content) {
         let format = self.formats.run(run);
         let style = self.run_style(&format);
+        // The IR's run style has no place for these, so the PDF shows the text without
+        // them (#303).
+        for (on, once, message) in [
+            (
+                format.emboss(),
+                Once::Emboss,
+                "embossed text (w:emboss) is drawn plain, here and wherever else the document has it",
+            ),
+            (
+                format.imprint(),
+                Once::Imprint,
+                "engraved text (w:imprint) is drawn plain, here and wherever else the document has it",
+            ),
+            (
+                format.outline(),
+                Once::Outline,
+                "outlined text (w:outline) is drawn plain, here and wherever else the document has it",
+            ),
+            (
+                format.shadow(),
+                Once::Shadow,
+                "shadowed text (w:shadow) is drawn without its shadow, here and wherever else the document has it",
+            ),
+            (
+                format.emphasis_mark,
+                Once::EmphasisMark,
+                "emphasis marks (w:em) are not drawn, here and wherever else the document has them",
+            ),
+            (
+                format.border,
+                Once::RunBorder,
+                "borders around text (w:bdr) are not drawn, here and wherever else the document has them",
+            ),
+        ] {
+            if on {
+                self.report_once(once, message);
+            }
+        }
         for item in run.content() {
             match item {
                 RunContent::Text(text) => content.text(text, style),

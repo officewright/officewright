@@ -13,8 +13,8 @@ use crate::model::Document;
 use crate::model::format::{ListFormat, ParagraphFlag, ParagraphFormat};
 use crate::model::numbering::ListLevel;
 use crate::model::properties::{
-    Border, Justification, LineSpacing, ParagraphBorders, ParagraphProperties, Shading, TabKind,
-    TabStop,
+    Border, Frame, Justification, LineSpacing, ParagraphBorders, ParagraphProperties, Shading,
+    TabKind, TabStop,
 };
 use crate::model::styles::StyleKind;
 
@@ -593,6 +593,7 @@ pub(super) struct ParagraphLevel {
     outline_level: Option<i64>,
     list_instance: Option<i64>,
     list_level: Option<i64>,
+    frame: Option<Frame>,
 }
 
 impl ParagraphLevel {
@@ -622,6 +623,7 @@ impl ParagraphLevel {
                 .numbering
                 .and_then(|numbering| numbering.instance),
             list_level: properties.numbering.and_then(|numbering| numbering.level),
+            frame: properties.frame,
             ..Self::default()
         };
         if let Some(spacing) = &properties.spacing {
@@ -712,6 +714,7 @@ impl ParagraphLevel {
             tabs,
             outline_level,
             list,
+            frame: self.frame,
         }
     }
 }
@@ -749,6 +752,7 @@ impl Layer for ParagraphLevel {
         overwrite(&mut self.outline_level, above.outline_level);
         overwrite(&mut self.list_instance, above.list_instance);
         overwrite(&mut self.list_level, above.list_level);
+        overwrite(&mut self.frame, above.frame);
     }
 
     /// Once nothing lies below, a cleared stop has nothing left to remove.

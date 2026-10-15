@@ -196,6 +196,23 @@ struct Translator<'a> {
     images: HashMap<u32, ir::ImageId>,
     /// The empty image of pictures whose image the package does not have.
     missing_image: Option<ir::ImageId>,
+    /// What has been reported once for the document, a bit per [`Once`].
+    reported: u16,
+}
+
+/// What the translation reports once per document, at the first place it meets it: a
+/// feature of runs or paragraphs, which a document may use on every line.
+#[derive(Clone, Copy, Debug)]
+enum Once {
+    Emboss = 1,
+    Imprint = 1 << 1,
+    Outline = 1 << 2,
+    Shadow = 1 << 3,
+    EmphasisMark = 1 << 4,
+    RunBorder = 1 << 5,
+    RightToLeft = 1 << 6,
+    Frame = 1 << 7,
+    DropCap = 1 << 8,
 }
 
 impl<'a> Translator<'a> {
@@ -219,6 +236,7 @@ impl<'a> Translator<'a> {
             notes_added: 0,
             images: HashMap::new(),
             missing_image: None,
+            reported: 0,
         }
     }
 
@@ -330,6 +348,15 @@ impl<'a> Translator<'a> {
         }
         self.left_out
             .push(ReportEntry::new(kind, self.location(), message()));
+    }
+
+    /// Lists `message` the first time the document meets `once`, at that place.
+    fn report_once(&mut self, once: Once, message: &'static str) {
+        let bit = once as u16;
+        if self.reported & bit == 0 {
+            self.reported |= bit;
+            self.leave_out(ReportKind::FeatureUnsupported, || message.into());
+        }
     }
 
     /// The current place in the IR.

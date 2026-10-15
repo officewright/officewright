@@ -419,6 +419,21 @@ pub struct RunProperties {
     pub(crate) language: Language,
     pub(crate) ligatures: Option<Ligatures>,
     pub(crate) contextual_alternates: Option<bool>,
+    /// Whether `w:em` gives an emphasis mark (any but `none`); the mark itself is kept as
+    /// written, not typed yet, and the layout does not draw it.
+    pub(crate) emphasis_mark: Option<bool>,
+    /// Whether `w:bdr` gives a border around the run (any but `none` and `nil`); kept as
+    /// written, not typed yet, and the layout does not draw it.
+    pub(crate) border: Option<bool>,
+}
+
+/// What a paragraph's `w:framePr` makes of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Frame {
+    /// A text frame.
+    Frame,
+    /// A drop cap (`w:dropCap` `drop` or `margin`).
+    DropCap,
 }
 
 /// The kinds of ligatures text asks for (`w14:ligatures`, [MS-DOCX] 2.6.1.17, of type
@@ -1070,6 +1085,9 @@ pub struct ParagraphProperties {
     pub(crate) indentation: Option<Indentation>,
     pub(crate) justification: Option<Justification>,
     pub(crate) outline_level: Option<i64>,
+    /// Whether `w:framePr` makes the paragraph a text frame or a drop cap; the frame
+    /// itself is kept as written, not typed yet, and the layout does not place it.
+    pub(crate) frame: Option<Frame>,
     pub(crate) mark: RunProperties,
 }
 
