@@ -3464,7 +3464,7 @@ fn repairs_damaged_font_declarations() {
 #[test]
 fn reads_style_names_section_breaks_and_grid_columns_through_alternate_content() {
     // Issue #157: these skipped an mc:AlternateContent instead of reading the branch it
-    // takes. w14 is a namespace officewright does not read, so its choices are passed by.
+    // takes. w14 is declared but not implemented, so its choices are passed by.
     const MC: &str = r#"xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" mc:Ignorable="w14""#;
     let styles = format!(
         r#"<w:styles xmlns:w="{W}" {MC}><w:style w:type="paragraph" w:styleId="Quote"><mc:AlternateContent><mc:Choice Requires="w"><w:name w:val="Quote"/></mc:Choice><mc:Fallback><w:name w:val="Unread"/></mc:Fallback></mc:AlternateContent><mc:AlternateContent><mc:Choice Requires="w14"><w:basedOn w:val="Unread"/></mc:Choice><mc:Fallback><w:basedOn w:val="Normal"/><w:next w:val="Body"/><w:link w:val="QuoteChar"/></mc:Fallback></mc:AlternateContent></w:style></w:styles>"#
