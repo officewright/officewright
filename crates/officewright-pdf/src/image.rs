@@ -564,8 +564,8 @@ fn check_later_scans(data: &[u8], coded: usize, frame: &Frame) -> std::result::R
                     at - 2
                 )));
             }
-            // Segments: the other frame markers, DHT, DAC, DQT, DNL, DRI, APPn, COM and
-            // SOS. Any other marker is not followed.
+            // Segments: the other frame markers, DHT, DAC, DQT, DNL, DRI, APP0 to APP15,
+            // COM and SOS. Any other marker is not followed.
             0xC3..=0xCF | 0xDA..=0xDF | 0xE0..=0xEF | 0xFE => {}
             _ => return Ok(()),
         }
