@@ -41,9 +41,9 @@ impl ShapingFace {
 
     pub(crate) fn new(face: FontFace) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        // A face whose layout tables would take HarfRust more work than HarfBuzz allows
-        // is shaped as one HarfRust cannot read.
-        let font = lookups_within_budget(face.data(), face.index())
+        // A face whose layout tables would take HarfRust too much work is shaped as one
+        // HarfRust cannot read (issue #255).
+        let font = crate::layout_tables::within_budget(face.data(), face.index())
             .then(|| {
                 // The bytes are shared with the face, not copied.
                 let bytes: Arc<dyn AsRef<[u8]> + Send + Sync> = Arc::new(FaceBytes(face.clone()));
@@ -474,91 +474,6 @@ fn place(
     (glyphs, replaced)
 }
 
-/// HarfBuzz's budget for checking a table before it shapes with it, in operations per
-/// byte of the table (`HB_SANITIZE_MAX_OPS_FACTOR`): it drops a table whose check takes
-/// more. HarfBuzz also takes at least 16384 operations and at most 2^30 − 1; the least
-/// never decides here (a table shorter than 1024 bytes cannot refer to 64 subtables per
-/// byte), and the most only for tables over 16 MiB.
-const TABLE_OPS_PER_BYTE: u64 = 64;
-
-/// Whether the lookups of every `GSUB` and `GPOS` table of face `index` of the font file
-/// `data` refer to no more subtables than HarfBuzz's budget for checking the table.
-///
-/// Lookups may share their tables, so a damaged table of a few kilobytes can refer to
-/// millions of subtables, and HarfRust reads every subtable of a lookup the first time
-/// it applies it: seconds for the first run shaped in such a face (issue #255). HarfBuzz
-/// drops such a table, as checking it takes at least one operation per subtable.
-fn lookups_within_budget(data: &[u8], index: u32) -> bool {
-    let Some(directory) = table_directory(data, index) else {
-        return true;
-    };
-    let tables = u16_at(data, directory.saturating_add(4)).unwrap_or(0);
-    (0..usize::from(tables)).all(|i| {
-        // Saturating: a directory past the end of the file has no records to read.
-        let record = directory.saturating_add(12 + 16 * i);
-        let tag = data.get(record..record.saturating_add(4));
-        let layout = matches!(tag, Some(b"GSUB" | b"GPOS"));
-        let table = u32_at(data, record.saturating_add(8))
-            .zip(u32_at(data, record.saturating_add(12)))
-            .and_then(|(offset, length)| {
-                let offset = usize::try_from(offset).ok()?;
-                data.get(offset..offset.checked_add(usize::try_from(length).ok()?)?)
-            });
-        // A table the file does not hold, HarfRust does not read either.
-        match table.filter(|_| layout) {
-            Some(table) => {
-                let budget = u64::try_from(table.len())
-                    .unwrap_or(u64::MAX)
-                    .saturating_mul(TABLE_OPS_PER_BYTE);
-                subtable_references(table) <= budget
-            }
-            None => true,
-        }
-    })
-}
-
-/// Where the table directory of face `index` of the font file `data` starts.
-fn table_directory(data: &[u8], index: u32) -> Option<usize> {
-    if data.get(..4) == Some(b"ttcf".as_slice()) {
-        let entry = usize::try_from(index)
-            .ok()?
-            .checked_mul(4)?
-            .checked_add(12)?;
-        usize::try_from(u32_at(data, entry)?).ok()
-    } else {
-        Some(0)
-    }
-}
-
-/// How many subtables the lookups of `GSUB` or `GPOS` table `table` refer to, a lookup
-/// the lookup list names twice twice. A lookup whose subtable offsets run past the end
-/// of the table, which cannot be read, refers to none.
-fn subtable_references(table: &[u8]) -> u64 {
-    let Some(list) = u16_at(table, 8).map(usize::from) else {
-        return 0;
-    };
-    let count = u16_at(table, list).unwrap_or(0);
-    (0..usize::from(count))
-        .filter_map(|i| {
-            let lookup = list + usize::from(u16_at(table, list + 2 + 2 * i)?);
-            let subtables = u16_at(table, lookup + 4)?;
-            (lookup + 6 + 2 * usize::from(subtables) <= table.len()).then_some(u64::from(subtables))
-        })
-        .sum()
-}
-
-/// The big-endian `u16` at byte `at` of `data`.
-fn u16_at(data: &[u8], at: usize) -> Option<u16> {
-    let bytes = data.get(at..at.checked_add(2)?)?;
-    Some(u16::from_be_bytes(bytes.try_into().ok()?))
-}
-
-/// The big-endian `u32` at byte `at` of `data`.
-fn u32_at(data: &[u8], at: usize) -> Option<u32> {
-    let bytes = data.get(at..at.checked_add(4)?)?;
-    Some(u32::from_be_bytes(bytes.try_into().ok()?))
-}
-
 /// Shapes from the character map and the advances alone: one glyph per character, the
 /// missing-glyph shape for a character the face does not map.
 fn shape_nominal(face: &FontFace, text: &str) -> ShapedRun {
@@ -871,96 +786,31 @@ mod tests {
         );
     }
 
-    /// A `GSUB` or `GPOS` table of no scripts and no features whose lookup list names
-    /// one lookup of `subtables` subtables `lookups` times; 22 + 2 × (`lookups` +
-    /// `subtables`) bytes long.
-    fn shared_lookups(lookups: u16, subtables: u16) -> Vec<u8> {
-        let mut table = Vec::new();
-        // Version 1.0, then the script list at 10, the feature list at 12 (both empty)
-        // and the lookup list at 14.
-        for value in [1, 0, 10, 12, 14, 0, 0, lookups] {
-            table.extend_from_slice(&u16::to_be_bytes(value));
-        }
-        let lookup = 2 + 2 * lookups;
-        for _ in 0..lookups {
-            table.extend_from_slice(&lookup.to_be_bytes());
-        }
-        // A single positioning or substitution lookup; its subtables at offset 0.
-        for value in [1, 0, subtables] {
-            table.extend_from_slice(&u16::to_be_bytes(value));
-        }
-        table.resize(table.len() + 2 * usize::from(subtables), 0);
-        table
-    }
-
-    fn test_font() -> Vec<u8> {
-        include_bytes!("../../officewright-font/tests/data/minimal.ttf").to_vec()
-    }
-
     #[test]
-    fn counts_every_subtable_a_lookup_list_refers_to() {
-        assert_eq!(subtable_references(&shared_lookups(3, 5)), 15);
-        assert_eq!(subtable_references(&shared_lookups(1000, 1000)), 1_000_000);
-        // A lookup whose subtable offsets run past the end cannot be read.
-        let mut cut = shared_lookups(3, 5);
-        cut.pop();
-        assert_eq!(subtable_references(&cut), 0);
-        // Nor can a lookup list past the end, or a table too short for its header.
-        assert_eq!(subtable_references(&[0, 1, 0, 0, 0, 0, 0, 0, 0xFF, 0]), 0);
-        assert_eq!(subtable_references(&[0, 1]), 0);
-    }
-
-    #[test]
-    fn a_layout_table_may_refer_to_64_subtables_per_byte() {
-        // 267 × 256 = 68352 references in 1068 bytes, 64 per byte: within the budget;
-        // 268 × 256 = 68608 in 1070 bytes is not.
-        for (lookups, within) in [(267, true), (268, false)] {
-            let table = shared_lookups(lookups, 256);
-            for tag in [b"GSUB", b"GPOS"] {
-                let font = crate::testing::with_table(test_font(), tag, &table);
-                assert_eq!(lookups_within_budget(&font, 0), within, "{lookups} {tag:?}");
-            }
-            // Under another tag, the table is not a layout table.
-            let font = crate::testing::with_table(test_font(), b"GSUX", &table);
-            assert!(lookups_within_budget(&font, 0));
-        }
-        assert!(lookups_within_budget(&test_font(), 0));
-    }
-
-    #[test]
-    fn a_face_whose_lookups_refer_to_too_many_subtables_is_shaped_from_its_character_map() {
-        // Issue #255: HarfRust would read every subtable of the lookups it applies.
-        for tag in [b"GSUB", b"GPOS"] {
-            let damaged = crate::testing::with_table(test_font(), tag, &shared_lookups(1000, 1000));
-            let face = ShapingFace::new(FontFace::from_bytes(damaged, 0).expect("the font"));
-            let run = shape(&face, "A", &ShapeRequest::default(), &mut Plans::default());
-            assert!(run.is_nominal(), "{tag:?}");
-            assert_eq!(ids(&run), [(2, 0, 600)]);
-            let fine = crate::testing::with_table(test_font(), tag, &shared_lookups(10, 10));
-            let face = ShapingFace::new(FontFace::from_bytes(fine, 0).expect("the font"));
-            let run = shape(&face, "A", &ShapeRequest::default(), &mut Plans::default());
-            assert!(!run.is_nominal(), "{tag:?}");
-        }
-    }
-
-    #[test]
-    fn the_budget_holds_for_each_face_of_a_collection() {
-        let damaged = crate::testing::with_table(test_font(), b"GPOS", &shared_lookups(1000, 1000));
-        let fonts = crate::testing::collection(&[test_font(), damaged]);
-        assert!(lookups_within_budget(&fonts, 0));
-        assert!(!lookups_within_budget(&fonts, 1));
-        let shaped = |index| {
-            let face = FontFace::from_bytes(fonts.clone(), index).expect("the face");
-            shape(
-                &ShapingFace::new(face),
-                "A",
-                &ShapeRequest::default(),
-                &mut Plans::default(),
-            )
+    fn a_face_whose_layout_tables_take_too_much_work_is_shaped_from_its_character_map() {
+        // Issue #255: a GPOS whose one lookup refers 40,000 times to a subtable (offset 0,
+        // the lookup itself), past the limit of references; and one of 4 references.
+        let table = |references: u16| {
+            let mut table: Vec<u8> = [1u16, 0, 10, 12, 14, 0, 0, 1, 4, 1, 0, references]
+                .iter()
+                .flat_map(|value| value.to_be_bytes())
+                .collect();
+            table.resize(table.len() + 2 * usize::from(references), 0);
+            table
         };
-        assert!(!shaped(0).is_nominal());
-        assert!(shaped(1).is_nominal());
-        // A face the collection does not have: nothing to count.
-        assert!(lookups_within_budget(&fonts, 2));
+        let font = |references| {
+            let data = crate::testing::with_table(
+                include_bytes!("../../officewright-font/tests/data/minimal.ttf").to_vec(),
+                b"GPOS",
+                &table(references),
+            );
+            ShapingFace::new(FontFace::from_bytes(data, 0).expect("the test font"))
+        };
+        let shaped =
+            |face: &ShapingFace| shape(face, "A", &ShapeRequest::default(), &mut Plans::default());
+        let damaged = shaped(&font(40_000));
+        assert!(damaged.is_nominal());
+        assert_eq!(ids(&damaged), [(2, 0, 600)]);
+        assert!(!shaped(&font(4)).is_nominal());
     }
 }

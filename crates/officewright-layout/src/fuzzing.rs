@@ -596,6 +596,12 @@ pub fn symbol_unicode(font: &str, code: u32) -> Option<char> {
     SymbolFont::of(font)?.unicode(code)
 }
 
+/// Whether face `index` of the font file `data` is given to HarfRust: its layout tables
+/// are within what the layout lets HarfRust work on (issue #255).
+pub fn layout_tables_within_budget(data: &[u8], index: u32) -> bool {
+    crate::layout_tables::within_budget(data, index)
+}
+
 /// A word of a line as [`lay_out`] places it: what has no space in it, between spaces,
 /// tabs and the pieces that are not text.
 #[derive(Clone, Debug, PartialEq)]
