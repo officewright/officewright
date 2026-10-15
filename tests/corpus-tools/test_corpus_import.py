@@ -322,9 +322,9 @@ class Import(unittest.TestCase):
             "Word as resaved/word-rules/E-line-fonts.docx | Microsoft Word 16.0, build 16.0.1, "
             "Windows 10.0.26100.0 (24H2) | 2026-10-13 | compatibility mode 15; 3 pages; printer "
             "Microsoft Print to PDF; fonts Word substituted: none; w:compat settings Word "
-            "dropped from the re-saved copy: none; style and numbering properties Word dropped "
-            "from the re-saved copy: 0; paragraph styles it changed: 0 (geometry.json lists "
-            "them); fields as saved; PDF not "
+            "dropped from the re-saved copy: none; style and numbering properties of the "
+            "re-saved copy: 0 dropped, 0 added, 0 changed; paragraph styles changed: 0 "
+            "(geometry.json lists them); fields as saved; PDF not "
             f"committed, SHA-256 {pdf_sha256}; rasters and geometry by poppler 24.02.0 at 110 dpi, "
             "grey; fonts the PDF does not embed, rasterized with the maintainer's installed "
             f"copies: Garamond (Garamond, Version 2.40, SHA-256 {sha256(self.garamond)}) |",
@@ -404,79 +404,198 @@ class Import(unittest.TestCase):
         )
 
     def test_records_style_numbering_and_paragraph_style_changes(self):
-        # #297: what Word leaves out of the styles and the numbering of the copy it re-saves,
-        # and the paragraph styles it writes, go into geometry.json and the SOURCES.md row.
+        # #297: what Word drops, adds and changes in the styles and the numbering of the copy
+        # it re-saves, and the paragraph styles it writes, go into geometry.json, the
+        # SOURCES.md row and the import's summary.
         doc = next(d for d in rules.documents() if d.name == "E-list-label-format")
         record = self.add_result(doc)
         self.change_resaved(record, {
             "word/styles.xml": [
+                # The name is the user interface's: losing it changes nothing. The size is new.
                 (b'<w:style w:type="paragraph" w:customStyle="1" w:styleId="BoldStyle">'
-                 b'<w:name w:val="BoldStyle"/>',
+                 b'<w:name w:val="BoldStyle"/><w:basedOn w:val="Normal"/><w:rPr><w:b/><w:bCs/>'
+                 b'</w:rPr></w:style>',
                  b'<w:style w:type="paragraph" w:customStyle="1" w:styleId="BoldStyle">'
-                 b'<w:name w:val="BoldStyle"/><w:uiPriority w:val="9"/>'),
+                 b'<w:basedOn w:val="Normal"/><w:rPr><w:b/><w:bCs/><w:sz w:val="24"/>'
+                 b'</w:rPr></w:style>'),
                 (b'<w:style w:type="paragraph" w:default="1" w:styleId="Normal">',
                  b'<w:style w:type="paragraph" w:styleId="Normal">'),
             ],
-            "word/numbering.xml": [(b'<w:pStyle w:val="LabelParaOneWay"/>', b"")],
+            "word/numbering.xml": [
+                (b'<w:pStyle w:val="LabelParaOneWay"/>', b""),
+                # Word numbers definitions and instances again; the nsid stays.
+                (b'w:abstractNumId="0"><w:nsid w:val="5C3A0101"/>',
+                 b'w:abstractNumId="9"><w:nsid w:val="5C3A0101"/>'),
+                (b'<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>',
+                 b'<w:num w:numId="11"><w:abstractNumId w:val="9"/></w:num>'),
+                (b'w:abstractNumId="1"><w:nsid w:val="5C3A0102"/><w:multiLevelType '
+                 b'w:val="singleLevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt '
+                 b'w:val="decimal"/><w:lvlText w:val="%1."/>',
+                 b'w:abstractNumId="1"><w:nsid w:val="5C3A0102"/><w:multiLevelType '
+                 b'w:val="singleLevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt '
+                 b'w:val="decimal"/><w:lvlText w:val="%1)"/>'),
+            ],
             "word/document.xml": [
                 (b'<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/>',
                  b'<w:p><w:pPr><w:pStyle w:val="BoldStyle"/><w:numPr><w:ilvl w:val="0"/>'
                  b'<w:numId w:val="1"/>'),
             ],
         })
-        self.run_import()
+        checked = self.run_import()
         folder = self.corpus / "reference" / "word-rules" / doc.name
         geometry = json.loads((folder / "geometry.json").read_text(encoding="utf-8"))
-        # The style property Word added (uiPriority) is not a change of the looks.
-        self.assertEqual(geometry["styles_dropped"], ["Normal: default"])
-        self.assertEqual(len(geometry["numbering_dropped"]), 1)
-        self.assertRegex(geometry["numbering_dropped"][0],
-                         r"^abstractNum \d+ level 0: pStyle val=LabelParaOneWay$")
+        self.assertEqual(geometry["styles_changed"],
+                         ["+ BoldStyle: rPr/sz val=24", "- Normal: default"])
+        self.assertEqual(geometry["numbering_changed"], [
+            "~ abstractNum 1 level 0: lvlText val=%1. -> %1)",
+            "- abstractNum 7 level 0: pStyle val=LabelParaOneWay",
+        ])
         self.assertEqual(geometry["paragraph_styles_changed"], ["paragraph 1: none -> BoldStyle"])
         sources = (self.corpus / "SOURCES.md").read_text(encoding="utf-8")
         self.assertIn(
-            "style and numbering properties Word dropped from the re-saved copy: 2; paragraph "
-            "styles it changed: 1 (geometry.json lists them);",
+            "style and numbering properties of the re-saved copy: 2 dropped, 1 added, 1 changed; "
+            "paragraph styles changed: 1 (geometry.json lists them);",
             sources,
         )
+        lines = importer.summary(checked, "imported")
+        for line in (
+            "  note: styles of the re-saved copy: - Normal: default",
+            "  note: numbering of the re-saved copy: ~ abstractNum 1 level 0: lvlText val=%1. -> %1)",
+            "  note: Word changed the paragraph style of paragraph 1: none -> BoldStyle",
+        ):
+            self.assertIn(line, lines)
 
-    def test_style_and_numbering_properties_name_what_they_set(self):
-        styles = (
-            f'<w:styles xmlns:w="{importer.W[1:-1]}"><w:docDefaults><w:pPrDefault><w:pPr>'
-            '<w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault>'
-            '</w:docDefaults><w:style w:type="table" w:default="1" w:styleId="T">'
-            '<w:name w:val="T"/><w:uiPriority w:val="5"/><w:qFormat/><w:basedOn w:val="B"/>'
-            '<w:tblStylePr w:type="firstRow"><w:rPr><w:b/></w:rPr></w:tblStylePr></w:style>'
-            "</w:styles>"
+    def test_style_changes_name_each_attribute_word_dropped_added_or_changed(self):
+        def styles(body, defaults=""):
+            return {"word/styles.xml": (
+                f'<w:styles xmlns:w="{importer.W[1:-1]}" xmlns:x="urn:x">{defaults}{body}'
+                "</w:styles>").encode()}
+
+        def style(style_id, inner, default=""):
+            return (f'<w:style w:type="paragraph"{default} w:styleId="{style_id}">'
+                    f"{inner}</w:style>")
+
+        before = styles(
+            style("Title", '<w:name w:val="Title"/><w:uiPriority w:val="10"/><w:rsid w:val="1"/>'
+                  '<w:pPr><w:spacing w:after="120" w:before="0"/><w:ind w:leftChars="200"/>'
+                  '<w:tabs><w:tab w:val="left" w:pos="720"/><w:tab w:val="right" w:pos="9000"/>'
+                  '</w:tabs></w:pPr><w:rPr><w:rFonts w:ascii="A" w:hAnsi="A" x:y="1"/>'
+                  '<w:sz w:val="22"/></w:rPr>'
+                  '<w:tblStylePr w:type="firstRow"><w:rPr><w:b/></w:rPr></w:tblStylePr>'
+                  '<w:tblStylePr w:type="lastRow"><w:rPr><w:b/></w:rPr></w:tblStylePr>',
+                  ' w:default="1"'),
+            '<w:docDefaults><w:pPrDefault><w:pPr><w:spacing w:after="0"/></w:pPr>'
+            "</w:pPrDefault></w:docDefaults>",
         )
-        numbering = (
-            f'<w:numbering xmlns:w="{importer.W[1:-1]}"><w:abstractNum w:abstractNumId="4">'
-            '<w:lvl w:ilvl="2"><w:start w:val="1"/><w:pStyle w:val="P"/></w:lvl>'
-            '</w:abstractNum><w:num w:numId="7"><w:abstractNumId w:val="4"/></w:num>'
-            "</w:numbering>"
+        after = styles(
+            # The interface's children and other namespaces' attributes go; the attributes
+            # come in another order; "true" says default as "1" does.
+            style("Title", '<w:pPr><w:spacing w:after="120"/><w:ind w:left="200" '
+                  'w:leftChars="200"/><w:tabs><w:tab w:val="right" w:pos="9000"/></w:tabs>'
+                  '</w:pPr><w:rPr><w:rFonts w:hAnsi="A" w:ascii="A"/><w:sz w:val="24"/></w:rPr>'
+                  '<w:tblStylePr w:type="firstRow"><w:rPr><w:b/></w:rPr><w:tblPr/></w:tblStylePr>'
+                  '<w:tblStylePr w:type="lastRow"/>', ' w:default="true"')
+            # A style Word adds whole is not one the document used.
+            + style("Added", '<w:rPr><w:i/></w:rPr>'),
+            # Defaults every document has: what Word fills in there counts.
+            '<w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="22"/></w:rPr></w:rPrDefault>'
+            "<w:pPrDefault/></w:docDefaults>",
         )
-        parts = {"word/styles.xml": styles.encode(), "word/numbering.xml": numbering.encode()}
-        self.assertEqual(importer.style_properties(parts), {
-            "docDefaults: pPrDefault/pPr/spacing after=0 line=240 lineRule=auto",
-            "T: default",
-            "T: basedOn val=B",
-            "T: tblStylePr[firstRow]/rPr/b",
-        })
-        self.assertEqual(importer.numbering_properties(parts), {
-            "abstractNum 4 level 2: start val=1",
-            "abstractNum 4 level 2: pStyle val=P",
-            "num 7: abstractNumId val=4",
-        })
-        self.assertEqual(importer.style_properties({}), set())
-        self.assertEqual(importer.numbering_properties({}), set())
+        self.assertEqual(importer.style_changes(before, after), [
+            "- Title: pPr/ind left=200".replace("- ", "+ "),
+            "- Title: pPr/spacing before=0",
+            "- Title: pPr/tabs/tab[pos=720] val=left",
+            "~ Title: rPr/sz val=22 -> 24",
+            "- Title: tblStylePr[type=lastRow]/rPr/b",
+            "- docDefaults: pPrDefault/pPr/spacing after=0",
+            "+ docDefaults: rPrDefault/rPr/sz val=22",
+        ])
+        self.assertEqual(importer.style_changes(before, before), [])
+        self.assertEqual(importer.style_changes({}, {}), [])
+        # Elements that repeat with nothing to tell them apart are numbered, not folded.
+        twice = styles(style("T", '<w:pPr><w:x w:val="1"/><w:x w:val="2"/></w:pPr>'))
+        once = styles(style("T", '<w:pPr><w:x w:val="1"/></w:pPr>'))
+        self.assertEqual(importer.style_changes(twice, once),
+                         ["+ T: pPr/x val=1", "- T: pPr/x#1 val=1", "- T: pPr/x#2 val=2"])
+        without_default = styles(style("Title", "", ""))
+        self.assertIn("- Title: default",
+                      importer.style_changes(styles(style("Title", "", ' w:default="on"')),
+                                             without_default))
+
+    def test_numbering_changes_follow_definitions_word_numbers_again(self):
+        def numbering(*items):
+            return {"word/numbering.xml": (
+                f'<w:numbering xmlns:w="{importer.W[1:-1]}">{"".join(items)}</w:numbering>'
+            ).encode()}
+
+        def definition(number, nsid, levels, extra="", template="ABCD"):
+            body = "".join(
+                f'<w:lvl w:ilvl="{i}" w:tplc="0409000{i}"><w:start w:val="1"/>{inner}</w:lvl>'
+                for i, inner in levels
+            )
+            return (f'<w:abstractNum w:abstractNumId="{number}"><w:nsid w:val="{nsid}"/>'
+                    f'<w:tmpl w:val="{template}"/>{extra}{body}</w:abstractNum>')
+
+        def instance(number, uses, overrides=""):
+            return (f'<w:num w:numId="{number}"><w:abstractNumId w:val="{uses}"/>{overrides}'
+                    "</w:num>")
+
+        def override_level(code):
+            return (f'<w:lvlOverride w:ilvl="2"><w:lvl w:ilvl="2" w:tplc="{code}">'
+                    '<w:start w:val="3"/></w:lvl></w:lvlOverride>')
+
+        restart = ('<w:lvlOverride w:ilvl="0"><w:startOverride w:val="1"/></w:lvlOverride>'
+                   '<w:lvlOverride w:ilvl="1"><w:startOverride w:val="1"/></w:lvlOverride>'
+                   + override_level("1"))
+        before = numbering(
+            definition(1, "00AA", [(0, '<w:lvlText w:val="%1."/>')],
+                       '<w:multiLevelType w:val="hybridMultilevel"/>'),
+            definition(4, "00BB", [(0, '<w:pStyle w:val="P"/>'), (1, "")]),
+            instance(6, 1, restart), instance(2, 4),
+        )
+        # Word numbers the definitions from 0 and the instance 6 as 5, fills in levels the
+        # input did not give, drops one override and a level's pStyle, changes the type, and
+        # writes another template and level template codes, which only its interface reads.
+        after = numbering(
+            definition(0, "00AA", [(0, '<w:lvlText w:val="%1."/>'),
+                                   (1, '<w:lvlText w:val="%2."/>')],
+                       '<w:multiLevelType w:val="multilevel"/>', "1234"),
+            definition(1, "00BB", [(0, ""), (1, '<w:lvlJc w:val="left"/>')]),
+            instance(5, 0, '<w:lvlOverride w:ilvl="0"><w:startOverride w:val="1"/>'
+                     "</w:lvlOverride>" + override_level("2")),
+            instance(2, 1),
+        )
+        self.assertEqual(importer.numbering_changes(before, after), [
+            "~ abstractNum 1: multiLevelType val=hybridMultilevel -> multilevel",
+            "- abstractNum 4 level 0: pStyle val=P",
+            "+ abstractNum 4 level 1: lvlJc val=left",
+            "- num 6: lvlOverride[ilvl=1]/startOverride val=1",
+        ])
+        self.assertEqual(importer.numbering_changes(before, before), [])
+        self.assertEqual(importer.numbering_changes({}, after), [])
+        # A list instance a style names is mapped too, so its renumbering is no change.
+        styles_before = {"word/styles.xml": (
+            f'<w:styles xmlns:w="{importer.W[1:-1]}"><w:style w:type="paragraph" w:styleId="L">'
+            '<w:pPr><w:numPr><w:numId w:val="6"/></w:numPr></w:pPr></w:style></w:styles>'
+        ).encode()}
+        styles_after = {"word/styles.xml": styles_before["word/styles.xml"].replace(
+            b'w:val="6"', b'w:val="5"')}
+        self.assertEqual(importer.style_changes({**before, **styles_before},
+                                                {**after, **styles_after}), [])
+        self.assertEqual(importer.style_changes({**before, **styles_before},
+                                                {**before, **styles_after}),
+                         ["~ L: pPr/numPr/numId val=6 -> 5"])
 
     def test_paragraph_style_changes_compare_paragraphs_in_order(self):
-        def document(*styles):
+        def document(*paragraphs, wrap=lambda body: body):
             body = "".join(
-                "<w:p>" + (f'<w:pPr><w:pStyle w:val="{s}"/></w:pPr>' if s else "") + "</w:p>"
-                for s in styles
+                "<w:p>" + (f'<w:pPr><w:pStyle w:val="{s}"/></w:pPr>' if s else "")
+                + (f"<w:r><w:t>{t}</w:t></w:r>" if t else "") + "</w:p>"
+                for s, t in (p if isinstance(p, tuple) else (p, "") for p in paragraphs)
             )
-            xml = f'<w:document xmlns:w="{importer.W[1:-1]}"><w:body>{body}</w:body></w:document>'
+            xml = (f'<w:document xmlns:w="{importer.W[1:-1]}" xmlns:mc="http://schemas.'
+                   'openxmlformats.org/markup-compatibility/2006"><w:body>'
+                   f"{wrap(body)}</w:body></w:document>")
             return {"word/document.xml": xml.encode()}
 
         self.assertEqual(
@@ -484,7 +603,15 @@ class Import(unittest.TestCase):
             ["paragraph 1: none -> D", "paragraph 3: B -> none"],
         )
         self.assertEqual(importer.paragraph_style_changes(document("A"), document("A")), [])
-        # A text box is a story of its own: its paragraphs are not the body's.
+        # Paragraphs in tables and content controls are the body's.
+        for wrap in (lambda body: f"<w:tbl><w:tr><w:tc>{body}</w:tc></w:tr></w:tbl>",
+                     lambda body: f"<w:sdt><w:sdtContent>{body}</w:sdtContent></w:sdt>"):
+            self.assertEqual(
+                importer.paragraph_style_changes(document("A", wrap=wrap),
+                                                 document("B", wrap=wrap)),
+                ["paragraph 1: A -> B"],
+            )
+        # A text box is a story of its own, and alternative content is not the main story.
         boxed = document("A")
         boxed["word/document.xml"] = boxed["word/document.xml"].replace(
             b"</w:p>",
@@ -492,10 +619,24 @@ class Import(unittest.TestCase):
             b"</w:txbxContent></w:pict></w:r></w:p>",
         )
         self.assertEqual(importer.paragraph_style_changes(document("A"), boxed), [])
+        alternative = document("A", wrap=lambda body: body + (
+            '<mc:AlternateContent><mc:Choice Requires="w14"><w:p><w:pPr><w:pStyle w:val="C"/>'
+            "</w:pPr></w:p></mc:Choice></mc:AlternateContent>"))
+        self.assertEqual(importer.paragraph_style_changes(document("A"), alternative), [])
+        # Another number of paragraphs: said first, and the rest paired by their text.
         self.assertEqual(
-            importer.paragraph_style_changes(document("A"), document("A", None)),
-            ["the re-saved copy has 2 paragraphs, the input 1"],
+            importer.paragraph_style_changes(
+                document(("A", "one"), ("B", "two")),
+                document((None, "new"), ("A", "one"), ("C", "two"))),
+            ["the re-saved copy has 3 paragraphs, the input 2", "paragraph 2: B -> C"],
         )
+        # The main part is the one _rels/.rels names.
+        moved = {"word/main.xml": document("A")["word/document.xml"], "_rels/.rels": (
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://purl.oclc.org/ooxml/officeDocument/'
+            'relationships/officeDocument" Target="/word/main.xml"/></Relationships>').encode()}
+        self.assertEqual(importer.paragraph_style_changes(moved, document("B")),
+                         ["paragraph 1: A -> B"])
 
     def test_records_compat_settings_word_added_or_dropped(self):
         record = self.add_result(rules.documents()[0])

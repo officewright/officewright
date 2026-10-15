@@ -14,9 +14,10 @@ business/ and generated/ has a reference or a SOURCES.md row saying why it has n
 
 The notes of each SOURCES.md row say what the files show: the compatibility mode and the
 w:compat settings Word dropped from the re-saved copy, the fonts the rasters were drawn
-with, the formatting export and, from #297 on, the style and numbering properties Word
-dropped and the paragraph styles it changed; geometry.json names the settings Word dropped
-and added and lists those properties and paragraph styles; and the body paragraphs of
+with, the formatting export and, from #297 on, how many style and numbering properties Word
+dropped, added and changed and how many paragraph styles it changed; geometry.json names the
+settings Word dropped and added and lists those properties and paragraph styles; and the body
+paragraphs of
 formatting.json carry the style ids of the re-saved copy.
 """
 
@@ -217,7 +218,7 @@ class References(unittest.TestCase):
                 self.assertEqual(geometry["compat_flags_added"], sorted(after - before))
 
     def test_geometry_names_the_style_numbering_and_paragraph_style_changes(self):
-        keys = ("styles_dropped", "numbering_dropped", "paragraph_styles_changed")
+        keys = ("styles_changed", "numbering_changed", "paragraph_styles_changed")
         for folder in folders():
             resaved, original = self.resaved(folder)
             with self.subTest(document=f"{folder.parent.name}/{folder.name}"):
@@ -232,10 +233,9 @@ class References(unittest.TestCase):
                 self.assertTrue(all(present))
                 before = importer.read_parts(original)
                 after = importer.read_parts(resaved)
-                self.assertEqual(geometry["styles_dropped"], sorted(
-                    importer.style_properties(before) - importer.style_properties(after)))
-                self.assertEqual(geometry["numbering_dropped"], sorted(
-                    importer.numbering_properties(before) - importer.numbering_properties(after)))
+                self.assertEqual(geometry["styles_changed"], importer.style_changes(before, after))
+                self.assertEqual(geometry["numbering_changed"],
+                                 importer.numbering_changes(before, after))
                 self.assertEqual(geometry["paragraph_styles_changed"],
                                  importer.paragraph_style_changes(before, after))
                 self.assertEqual(said, [importer.style_note(geometry)])

@@ -55,8 +55,10 @@ PDF that does not embed every font, qpdf 11 or later.
 from __future__ import annotations
 
 import argparse
+import difflib
 import hashlib
 import json
+import posixpath
 import re
 import shutil
 import struct
@@ -355,75 +357,260 @@ STYLE_UI = {
     "rsid", "autoRedefine", "personal", "personalCompose", "personalReply",
 }
 
+# Children of a list definition that name it rather than format it: its identity (which Word
+# keeps while it renumbers the definitions), the template it came from, and its name.
+NUMBERING_IDENTITY = {"nsid", "tmpl", "name"}
 
-def property_leaves(element: ElementTree.Element, path: str = "") -> set[str]:
-    """Every leaf below a properties element as "path attribute=value ...", with the
-    WordprocessingML attributes in order; the path of a conditional format names its type."""
-    out = set()
-    for child in element:
+# Attributes of a list level that only Word's user interface reads.
+LEVEL_UI_ATTRIBUTES = {"tplc", "tentative"}
+
+# Elements that repeat among their siblings, and the attribute that tells them apart: the
+# path names it, so that two of them never fold into one entry.
+IDENTIFIED_BY = {"tblStylePr": "type", "lvl": "ilvl", "lvlOverride": "ilvl", "tab": "pos"}
+
+# Elements that only hold others: empty, they set nothing.
+CONTAINERS = {
+    "pPr", "rPr", "tblPr", "trPr", "tcPr", "pPrDefault", "rPrDefault", "tblStylePr", "tabs",
+    "pBdr", "tblBorders", "tcBorders", "tblCellMar", "tcMar", "numPr", "lvl", "lvlOverride",
+}
+
+# A property: who sets it (a style id, "docDefaults", "abstractNum 3", "num 2"), the path of
+# its element below that owner, and the attribute, or None for an element that sets something
+# by being there (<w:b/>, a style's w:default).
+Property = tuple[str, str, "str | None"]
+
+
+def property_values(
+    element: ElementTree.Element, owner: str, skipped: set[str] = STYLE_UI, path: str = ""
+) -> dict[Property, str]:
+    """Every property set below a properties element: each WordprocessingML attribute of each
+    element by itself, so that what Word keeps of an element is not reported with what it
+    drops, and an element with no attribute by its presence (empty containers set nothing).
+    A repeated element's path names the attribute that tells it apart
+    (tblStylePr[type=firstRow], lvlOverride[ilvl=1]); one that has none is numbered."""
+    out: dict[Property, str] = {}
+    children = [child for child in element if local_name(child.tag) not in skipped]
+    segments = []
+    for child in children:
         name = local_name(child.tag)
-        if name in STYLE_UI:
-            continue
-        if name == "tblStylePr":
-            name = f"tblStylePr[{child.get(f'{W}type', '')}]"
-        here = f"{path}/{name}" if path else name
+        key = IDENTIFIED_BY.get(name)
+        ident = child.get(f"{W}{key}") if key else None
+        segments.append(f"{name}[{key}={ident}]" if ident is not None else name)
+    for index, (child, segment) in enumerate(zip(children, segments)):
+        if segments.count(segment) > 1:
+            segment = f"{segment}#{segments[:index].count(segment) + 1}"
+        here = f"{path}/{segment}" if path else segment
+        name = local_name(child.tag)
+        ignored = {IDENTIFIED_BY.get(name)} | (LEVEL_UI_ATTRIBUTES if name == "lvl" else set())
+        attributes = {
+            local_name(attribute): value
+            for attribute, value in child.attrib.items()
+            if attribute.startswith(W) and local_name(attribute) not in ignored
+        }
+        for attribute, value in attributes.items():
+            out[(owner, here, attribute)] = value
         if len(child):
-            out |= property_leaves(child, here)
-        else:
-            attributes = " ".join(
-                f"{local_name(key)}={value}"
-                for key, value in sorted(child.attrib.items())
-                if key.startswith(W)
-            )
-            out.add(f"{here} {attributes}" if attributes else here)
+            out.update(property_values(child, owner, skipped, here))
+        elif not attributes and name not in CONTAINERS:
+            out[(owner, here, None)] = ""
     return out
 
 
-def style_properties(parts: dict[str, bytes]) -> set[str]:
-    """What styles.xml sets: "docDefaults: leaf", "styleId: leaf" for every style, and
-    "styleId: default" for a style marked default."""
+def style_values(parts: dict[str, bytes]) -> dict[Property, str]:
+    """What styles.xml sets, owned by "docDefaults" or by the style's id; a style marked
+    default has the property (id, "default", None)."""
     data = parts.get("word/styles.xml")
     if not data:
-        return set()
+        return {}
     root = ElementTree.fromstring(data)
-    out = set()
+    out: dict[Property, str] = {}
     defaults = root.find(f"{W}docDefaults")
     if defaults is not None:
-        out |= {f"docDefaults: {leaf}" for leaf in property_leaves(defaults)}
+        out.update(property_values(defaults, "docDefaults"))
     for style in root.iter(f"{W}style"):
         style_id = style.get(f"{W}styleId", "")
         if style.get(f"{W}default") in ("1", "true", "on"):
-            out.add(f"{style_id}: default")
-        out |= {f"{style_id}: {leaf}" for leaf in property_leaves(style)}
+            out[(style_id, "default", None)] = ""
+        out.update(property_values(style, style_id))
     return out
 
 
-def numbering_properties(parts: dict[str, bytes]) -> set[str]:
-    """What numbering.xml sets: "abstractNum N level L: leaf" for every level of every
-    definition, and "num N: leaf" for every instance and its overrides."""
-    data = parts.get("word/numbering.xml")
+def style_ids(parts: dict[str, bytes]) -> set[str]:
+    """The ids of the styles styles.xml defines."""
+    data = parts.get("word/styles.xml")
     if not data:
         return set()
-    root = ElementTree.fromstring(data)
-    out = set()
+    return {style.get(f"{W}styleId", "") for style in ElementTree.fromstring(data).iter(f"{W}style")}
+
+
+def numbering_root(parts: dict[str, bytes]) -> ElementTree.Element | None:
+    data = parts.get("word/numbering.xml")
+    return ElementTree.fromstring(data) if data else None
+
+
+def numbering_ids(
+    original: ElementTree.Element | None, resaved: ElementTree.Element | None
+) -> tuple[dict[str, str], dict[str, str]]:
+    """How the re-saved copy's list definitions and instances map onto the input's: Word
+    numbers the definitions (w:abstractNumId) and sometimes the instances (w:numId) again when
+    it saves, so they are matched by what stays: a definition by its w:nsid, else through the
+    instances that use it; an instance by the definition it uses. Copy id -> input id."""
+    if original is None or resaved is None:
+        return {}, {}
+
+    def definitions(root: ElementTree.Element) -> dict[str, str | None]:
+        out = {}
+        for definition in root.iter(f"{W}abstractNum"):
+            nsid = definition.find(f"{W}nsid")
+            out[definition.get(f"{W}abstractNumId", "")] = (
+                nsid.get(f"{W}val", "").upper() if nsid is not None else None
+            )
+        return out
+
+    def instances(root: ElementTree.Element) -> dict[str, str]:
+        out = {}
+        for instance in root.iter(f"{W}num"):
+            used = instance.find(f"{W}abstractNumId")
+            out[instance.get(f"{W}numId", "")] = used.get(f"{W}val", "") if used is not None else ""
+        return out
+
+    before, after = definitions(original), definitions(resaved)
+    uses_before, uses_after = instances(original), instances(resaved)
+    abstract: dict[str, str] = {}
+    for copy_id, nsid in after.items():
+        same = [i for i, n in before.items() if nsid is not None and n == nsid]
+        if len(same) == 1:
+            abstract[copy_id] = same[0]
+    for num, copy_id in uses_after.items():
+        if copy_id not in abstract and num in uses_before and uses_before[num] not in abstract.values():
+            abstract[copy_id] = uses_before[num]
+    for copy_id in after:
+        if copy_id not in abstract and copy_id in before and copy_id not in abstract.values():
+            abstract[copy_id] = copy_id
+    num: dict[str, str] = {}
+    for copy_num, copy_id in uses_after.items():
+        wanted = abstract.get(copy_id)
+        if copy_num in uses_before and uses_before[copy_num] == wanted:
+            num[copy_num] = copy_num
+            continue
+        same = [n for n, i in uses_before.items() if i == wanted and n not in uses_after]
+        if wanted is not None and len(same) == 1:
+            num[copy_num] = same[0]
+        elif copy_num in uses_before and copy_num not in num.values():
+            num[copy_num] = copy_num
+    return abstract, num
+
+
+def numbering_values(
+    root: ElementTree.Element | None, abstract: dict[str, str] | None = None,
+    num: dict[str, str] | None = None,
+) -> dict[Property, str]:
+    """What numbering.xml sets, owned by "abstractNum N" (its type and links), "abstractNum N
+    level L" and "num N" (the definition it uses and its overrides), with the ids mapped by
+    abstract and num."""
+    if root is None:
+        return {}
+    abstract, num = abstract or {}, num or {}
+    out: dict[Property, str] = {}
     for definition in root.iter(f"{W}abstractNum"):
         number = definition.get(f"{W}abstractNumId", "")
+        owner = f"abstractNum {abstract.get(number, number)}"
+        out.update(property_values(definition, owner, NUMBERING_IDENTITY | {"lvl"}))
         for level in definition.findall(f"{W}lvl"):
             ilvl = level.get(f"{W}ilvl", "")
-            out |= {f"abstractNum {number} level {ilvl}: {leaf}" for leaf in property_leaves(level)}
+            out.update(property_values(level, f"{owner} level {ilvl}"))
     for instance in root.iter(f"{W}num"):
         number = instance.get(f"{W}numId", "")
-        out |= {f"num {number}: {leaf}" for leaf in property_leaves(instance)}
+        for key, value in property_values(instance, f"num {num.get(number, number)}").items():
+            if key[1:] == ("abstractNumId", "val"):
+                value = abstract.get(value, value)
+            out[key] = value
     return out
 
 
-def explicit_paragraph_styles(parts: dict[str, bytes]) -> list[str | None]:
-    """The w:pStyle of every paragraph of the body, in order, None where it has none; text
-    boxes and alternative content are left out, as Word's main story leaves them out."""
+def property_changes(
+    before: dict[Property, str], after: dict[Property, str], owners: set[str]
+) -> list[str]:
+    """What the copy dropped ("- "), added ("+ ") and changed ("~ ", old -> new) of before's
+    properties; additions only to owners the input had, since a style or list Word adds whole
+    is not one the document used."""
+
+    def entry(key: Property, value: str) -> str:
+        owner, path, attribute = key
+        return f"{owner}: {path}" + (f" {attribute}={value}" if attribute is not None else "")
+
+    out = []
+    for key in sorted(before.keys() | after.keys(), key=lambda k: (k[0], k[1], k[2] or "")):
+        if key not in after:
+            out.append(f"- {entry(key, before[key])}")
+        elif key not in before:
+            if key[0] in owners:
+                out.append(f"+ {entry(key, after[key])}")
+        elif before[key] != after[key]:
+            out.append(f"~ {entry(key, before[key])} -> {after[key]}")
+    return out
+
+
+def style_changes(original: dict[str, bytes], resaved: dict[str, bytes]) -> list[str]:
+    """property_changes over styles.xml, with the copy's list instances in w:numPr mapped
+    onto the input's; additions to docDefaults (which every document has) and to the styles
+    the input defines."""
+    _, num = numbering_ids(numbering_root(original), numbering_root(resaved))
+    after = {
+        key: num.get(value, value) if key[1].endswith("numPr/numId") else value
+        for key, value in style_values(resaved).items()
+    }
+    return property_changes(style_values(original), after, style_ids(original) | {"docDefaults"})
+
+
+def numbering_changes(original: dict[str, bytes], resaved: dict[str, bytes]) -> list[str]:
+    """property_changes over numbering.xml, the copy's ids mapped onto the input's;
+    additions to the definitions, levels and instances the input had."""
+    before_root, after_root = numbering_root(original), numbering_root(resaved)
+    abstract, num = numbering_ids(before_root, after_root)
+    # Additions count only for the definitions, levels and instances the input had: Word
+    # writes out every level of a definition the input gave one or two.
+    owners = set()
+    if before_root is not None:
+        for definition in before_root.iter(f"{W}abstractNum"):
+            owner = f"abstractNum {definition.get(f'{W}abstractNumId', '')}"
+            owners.add(owner)
+            owners |= {f"{owner} level {level.get(f'{W}ilvl', '')}"
+                       for level in definition.findall(f"{W}lvl")}
+        owners |= {f"num {n.get(f'{W}numId', '')}" for n in before_root.iter(f"{W}num")}
+    return property_changes(
+        numbering_values(before_root), numbering_values(after_root, abstract, num), owners
+    )
+
+
+PACKAGE_RELATIONSHIPS = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+
+
+def main_document(parts: dict[str, bytes]) -> bytes | None:
+    """The main part of a WordprocessingML package, as _rels/.rels names it (transitional
+    or strict officeDocument relationship), else word/document.xml."""
+    rels = parts.get("_rels/.rels")
+    if rels:
+        for relationship in ElementTree.fromstring(rels).iter(f"{PACKAGE_RELATIONSHIPS}Relationship"):
+            if relationship.get("Type", "").endswith("/officeDocument"):
+                target = posixpath.normpath(relationship.get("Target", "").lstrip("/"))
+                if target in parts:
+                    return parts[target]
+    return parts.get("word/document.xml")
+
+
+def body_paragraphs(parts: dict[str, bytes]) -> list[tuple[str, str | None]]:
+    """The text and w:pStyle (None where there is none) of every paragraph of the body, in
+    order, those in tables and content controls included; text boxes and alternative content
+    are left out, as Word's main story leaves them out."""
     MC = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
     skipped = (f"{W}txbxContent", f"{MC}AlternateContent")
-    body = ElementTree.fromstring(parts["word/document.xml"]).find(f"{W}body")
-    out: list[str | None] = []
+    data = main_document(parts)
+    body = ElementTree.fromstring(data).find(f"{W}body") if data else None
+    out: list[tuple[str, str | None]] = []
+
+    def text(paragraph: ElementTree.Element) -> str:
+        return "".join(t.text or "" for t in paragraph.iter(f"{W}t"))
 
     def walk(element: ElementTree.Element) -> None:
         for child in element:
@@ -431,7 +618,7 @@ def explicit_paragraph_styles(parts: dict[str, bytes]) -> list[str | None]:
                 continue
             if child.tag == f"{W}p":
                 style = child.find(f"{W}pPr/{W}pStyle")
-                out.append(style.get(f"{W}val") if style is not None else None)
+                out.append((text(child), style.get(f"{W}val") if style is not None else None))
             walk(child)
 
     if body is not None:
@@ -441,16 +628,27 @@ def explicit_paragraph_styles(parts: dict[str, bytes]) -> list[str | None]:
 
 def paragraph_style_changes(original: dict[str, bytes], resaved: dict[str, bytes]) -> list[str]:
     """The body paragraphs whose w:pStyle the re-saved copy writes otherwise than the input,
-    as "paragraph N: input -> copy" ("none" where there is none); when the copy has another
-    number of paragraphs, that alone."""
-    before, after = explicit_paragraph_styles(original), explicit_paragraph_styles(resaved)
-    if len(before) != len(after):
-        return [f"the re-saved copy has {len(after)} paragraphs, the input {len(before)}"]
-    return [
-        f"paragraph {n}: {a or 'none'} -> {b or 'none'}"
-        for n, (a, b) in enumerate(zip(before, after), 1)
-        if a != b
-    ]
+    as "paragraph N: input -> copy" ("none" where there is none), N counted in the input.
+    When the copy has another number of paragraphs, that comes first, and the paragraphs are
+    paired by their text."""
+    before, after = body_paragraphs(original), body_paragraphs(resaved)
+    pairs: list[tuple[int, str | None, str | None]] = []
+    out = []
+    if len(before) == len(after):
+        pairs = [(n, a[1], b[1]) for n, (a, b) in enumerate(zip(before, after), 1)]
+    else:
+        out.append(f"the re-saved copy has {len(after)} paragraphs, the input {len(before)}")
+        matcher = difflib.SequenceMatcher(
+            None, [t for t, _ in before], [t for t, _ in after], autojunk=False
+        )
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag == "equal" or (tag == "replace" and i2 - i1 == j2 - j1):
+                pairs += [
+                    (n, a[1], b[1])
+                    for n, (a, b) in enumerate(zip(before[i1:i2], after[j1:j2]), i1 + 1)
+                ]
+    out += [f"paragraph {n}: {a or 'none'} -> {b or 'none'}" for n, a, b in pairs if a != b]
+    return out
 
 
 def locale_marks(parts: dict[str, bytes]) -> tuple[set[str], dict[str, str]]:
@@ -1402,11 +1600,13 @@ def rasterized_note(entries: list[dict]) -> str:
 def style_note(geometry: dict) -> str:
     """The SOURCES.md note on what Word changed in the styles, numbering and paragraph styles
     of the re-saved copy, which geometry.json lists (#297)."""
-    dropped = len(geometry["styles_dropped"]) + len(geometry["numbering_dropped"])
-    changed = len(geometry["paragraph_styles_changed"])
+    entries = geometry["styles_changed"] + geometry["numbering_changed"]
+    counts = {mark: sum(entry.startswith(mark) for entry in entries) for mark in "-+~"}
+    paragraphs = len(geometry["paragraph_styles_changed"])
     return (
-        f"style and numbering properties Word dropped from the re-saved copy: {dropped}; "
-        f"paragraph styles it changed: {changed} (geometry.json lists them)"
+        f"style and numbering properties of the re-saved copy: {counts['-']} dropped, "
+        f"{counts['+']} added, {counts['~']} changed; paragraph styles changed: {paragraphs} "
+        "(geometry.json lists them)"
     )
 
 
@@ -1531,14 +1731,11 @@ def check_result(
         # Word's for this input, so the import records the difference rather than refusing.
         dropped = sorted(compat_flags(original_parts) - compat_flags(resaved_parts))
         added = sorted(compat_flags(resaved_parts) - compat_flags(original_parts))
-        # Word also leaves out of the copy style and numbering properties it takes as given,
-        # those equal to what they inherit among them, and writes paragraph styles into
-        # paragraphs; the render is of the copy, so these are recorded too (#297). What it
-        # adds to the styles is not: it fills in much that changes nothing.
-        styles_dropped = sorted(style_properties(original_parts) - style_properties(resaved_parts))
-        numbering_dropped = sorted(
-            numbering_properties(original_parts) - numbering_properties(resaved_parts)
-        )
+        # Word also drops style and numbering properties it takes as given, fills in others,
+        # and writes paragraph styles into paragraphs; the render is of the copy, so what it
+        # changed is recorded too (#297).
+        styles_changed = style_changes(original_parts, resaved_parts)
+        numbering_changed = numbering_changes(original_parts, resaved_parts)
         paragraph_styles = paragraph_style_changes(original_parts, resaved_parts)
         page_breaks = rendered_page_breaks(resaved_parts)
     except (zipfile.BadZipFile, ElementTree.ParseError, ValueError, KeyError) as error:
@@ -1582,8 +1779,8 @@ def check_result(
         "fonts_rasterized_with": [font.describe() for font in drawn],
         "compat_flags_dropped": dropped,
         "compat_flags_added": added,
-        "styles_dropped": styles_dropped,
-        "numbering_dropped": numbering_dropped,
+        "styles_changed": styles_changed,
+        "numbering_changed": numbering_changed,
         "paragraph_styles_changed": paragraph_styles,
         "page_breaks": page_breaks,
         "pages": geometry_pages,
@@ -1748,9 +1945,9 @@ def summary(checked: list[Checked], verb: str) -> list[str]:
         lines.append(f"{verb} {item.record['file']}: {pages} page{'s' if pages != 1 else ''}")
         for flag in item.geometry["compat_flags_dropped"]:
             lines.append(f"  note: Word dropped the w:compat setting {flag} from the re-saved copy")
-        for kind in ("styles_dropped", "numbering_dropped"):
+        for kind, what in (("styles_changed", "styles"), ("numbering_changed", "numbering")):
             for entry in item.geometry.get(kind, []):
-                lines.append(f"  note: Word dropped {entry} from the re-saved copy")
+                lines.append(f"  note: {what} of the re-saved copy: {entry}")
         for entry in item.geometry.get("paragraph_styles_changed", []):
             lines.append(f"  note: Word changed the paragraph style of {entry}")
         if item.formatting_note:
