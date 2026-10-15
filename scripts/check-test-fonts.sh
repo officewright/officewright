@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Checks that every file in tests/fonts/ and tests/fonts-word/ is byte for byte the file of the
-# upstream source
-# THIRD-PARTY-NOTICES.md names for it. tests/corpus-tools/test_test_fonts.py compares the
-# files with the SHA-256 the notices list, and that the pins below are the notices'; this
-# compares them with upstream. Liberation comes from its release archive, whose SHA-256 is
-# checked first; Carlito and Noto Sans (its CFF and TrueType builds) from shallow, partial,
-# sparse clones of the pinned commits, which git verifies. Every entry of both folders must
-# be a regular file. Needs network, curl, tar and git. Run by scripts/nightly.sh.
+# upstream source THIRD-PARTY-NOTICES.md names for it. tests/corpus-tools/test_test_fonts.py
+# compares the files with the SHA-256 the notices list, and that the pins below are the
+# notices'; this compares them with upstream. Liberation comes from its release archive,
+# whose SHA-256 is checked first; Carlito and Noto Sans (its CFF and TrueType builds) from
+# shallow, partial, sparse clones of the pinned commits, which git verifies. Every entry of
+# both folders must be a regular file. Needs network, curl, tar and git. Run by
+# scripts/nightly.sh.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
