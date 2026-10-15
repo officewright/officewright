@@ -604,3 +604,128 @@ fn reads_lengths_and_shares_only_of_the_schema_s_pattern_and_range() {
         (Some(VerticalReference::Paragraph), Some(Pt(3.0)))
     );
 }
+
+#[test]
+fn reads_drawings_through_markup_compatibility() {
+    // Issue #312: what lies below w:drawing goes through Markup Compatibility as the
+    // rest of the body does, since the namespaces the picture reader reads are
+    // understood.
+    let picture = inline_picture("rIdPng");
+    for (from, to) in [
+        ("<a:blip ", r#"<a:blip mc:MustUnderstand="w14" "#),
+        ("<wp:inline ", r#"<wp:inline mc:MustUnderstand="w14" "#),
+        ("<pic:pic ", r#"<pic:pic mc:MustUnderstand="w14" "#),
+    ] {
+        let body = format!("<w:p>{}</w:p>", picture.replace(from, to));
+        match Document::from_bytes(images_package(&body)) {
+            Err(Error::Unsupported(message)) => {
+                assert!(message.contains("mc:MustUnderstand"), "{to}: {message}")
+            }
+            other => panic!("{to} gave {other:?}"),
+        }
+    }
+    // An ignorable wrapper around pic:pic whose content mc:ProcessContent names is read
+    // through; one that nothing names is left out, with the picture in it.
+    let wrapped = picture
+        .replace("<pic:pic ", "<w14:x><pic:pic ")
+        .replace("</pic:pic>", "</pic:pic></w14:x>");
+    let document = with_images(&format!(
+        r#"<w:p mc:ProcessContent="w14:x">{wrapped}</w:p>"#
+    ));
+    let image = drawings(&document)[0]
+        .picture()
+        .and_then(|picture| picture.image());
+    assert_eq!(image.map(|image| image.bytes()), Some(PNG_BYTES));
+    let document = with_images(&format!("<w:p>{wrapped}</w:p>"));
+    assert!(drawings(&document)[0].picture().is_none());
+
+    // The same in Strict, on each element of each of the three namespaces.
+    let strict = r#"<w:document xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main" xmlns:r="http://purl.oclc.org/ooxml/officeDocument/relationships" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" mc:Ignorable="w14" conformance="strict"><w:body><w:p><w:r><w:drawing><wp:inline xmlns:wp="http://purl.oclc.org/ooxml/drawingml/wordprocessingDrawing"WP><wp:extent cx="2in" cy="1in"/><wp:docPr id="1" name="p"/><a:graphic xmlns:a="http://purl.oclc.org/ooxml/drawingml/main"><a:graphicData uri="http://purl.oclc.org/ooxml/drawingml/picture"><pic:pic xmlns:pic="http://purl.oclc.org/ooxml/drawingml/picture"PIC><pic:blipFill><a:blip r:embed="rIdNone"A/></pic:blipFill><pic:spPr/></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body></w:document>"#;
+    let must = r#" mc:MustUnderstand="w14""#;
+    for at in ["WP", "PIC", "A"] {
+        let mut xml = strict.replace(&format!("\"{at}>"), &format!("\"{must}>"));
+        xml = xml.replace(&format!("\"{at}/>"), &format!("\"{must}/>"));
+        for other in ["WP", "PIC", "A"] {
+            xml = xml
+                .replace(&format!("\"{other}>"), "\">")
+                .replace(&format!("\"{other}/>"), "\"/>");
+        }
+        match Document::from_bytes(package(DOCUMENT, &xml, &[])) {
+            Err(Error::Unsupported(message)) => {
+                assert!(message.contains("mc:MustUnderstand"), "{at}: {message}")
+            }
+            other => panic!("{at} gave {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn reads_drawings_through_markup_compatibility_everywhere_they_are() {
+    // From the review of #316: in a header as in the body, on a floating picture as on
+    // one in the line, and for what Markup Compatibility refuses besides an
+    // mc:MustUnderstand.
+    let must = r#"mc:MustUnderstand="w14" "#;
+    let refused = |document: Result<Document>, case: &str| match document {
+        Err(Error::Unsupported(message)) => {
+            assert!(message.contains("mc:MustUnderstand"), "{case}: {message}")
+        }
+        other => panic!("{case} gave {other:?}"),
+    };
+    // A picture in a header whose a:blip must be understood.
+    let header = format!(
+        r#"<w:hdr xmlns:w="{W}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" mc:Ignorable="w14"><w:p>{}</w:p></w:hdr>"#,
+        inline_picture("rId1").replace("<a:blip ", &format!("<a:blip {must}"))
+    );
+    let header_rels = format!(
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{IMAGE}" Target="media/image1.png"/></Relationships>"#
+    );
+    let package = files_package(
+        r#"<w:p/><w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/></w:sectPr>"#,
+        &image_relationships(),
+        &[
+            ("word/media/image1.png", PNG_BYTES),
+            ("word/header1.xml", header.as_bytes()),
+            ("word/_rels/header1.xml.rels", header_rels.as_bytes()),
+        ],
+        r#"<Default Extension="png" ContentType="image/png"/>"#,
+    );
+    refused(Document::from_bytes(package), "a header");
+    // A floating picture whose wp:anchor must be understood.
+    let anchored = floating_picture("rIdPng").replace("<wp:anchor ", &format!("<wp:anchor {must}"));
+    refused(
+        Document::from_bytes(images_package(&format!("<w:p>{anchored}</w:p>"))),
+        "wp:anchor",
+    );
+    // A choice that requires wp is taken in a drawing, not its fallback.
+    let position =
+        |offset: i64| format!("<wp:positionV><wp:posOffset>{offset}</wp:posOffset></wp:positionV>");
+    let chosen = bare_floating_picture("rIdPng").replace(
+        &position(25400),
+        &format!(
+            r#"<mc:AlternateContent><mc:Choice Requires="wp">{}</mc:Choice><mc:Fallback>{}</mc:Fallback></mc:AlternateContent>"#,
+            position(12700),
+            position(25400)
+        ),
+    );
+    let document = with_images(&format!("<w:p>{chosen}</w:p>"));
+    let anchor = drawings(&document)[0].anchor().unwrap();
+    assert_eq!(anchor.vertical_offset(), Some(Pt(1.0)));
+    // Below a:blip, a Requires that names an undeclared prefix and an attribute of the mc
+    // namespace that Markup Compatibility does not define refuse the document.
+    for (case, blip) in [
+        (
+            "Requires",
+            r#"<a:blip r:embed="rIdPng"><mc:AlternateContent><mc:Choice Requires="zz"><a:extLst/></mc:Choice></mc:AlternateContent></a:blip>"#,
+        ),
+        ("mc:Foo", r#"<a:blip r:embed="rIdPng" mc:Foo="1"/>"#),
+    ] {
+        let picture = inline_picture("rIdPng").replace(r#"<a:blip r:embed="rIdPng"/>"#, blip);
+        assert!(
+            matches!(
+                Document::from_bytes(images_package(&format!("<w:p>{picture}</w:p>"))),
+                Err(Error::Malformed { .. })
+            ),
+            "{case}"
+        );
+    }
+}

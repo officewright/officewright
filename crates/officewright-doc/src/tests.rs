@@ -356,9 +356,10 @@ fn follows_markup_compatibility() {
     let document = open(
         r#"<w:p w14:paraId="1A2B"><w:r><mc:AlternateContent><mc:Choice Requires="wp"><w:t>choice</w:t></mc:Choice><mc:Fallback><w:t>fallback</w:t></mc:Fallback></mc:AlternateContent></w:r><mc:AlternateContent><mc:Choice Requires="w14"><w:r><w:t>w14</w:t></w:r></mc:Choice><mc:Fallback><w:r><w:t>plain</w:t></w:r></mc:Fallback></mc:AlternateContent><w14:extension><w:r><w:t>hidden</w:t></w:r></w14:extension></w:p>"#,
     );
-    // wp is not understood here (drawings are kept as they are), w14 is ignorable: the
-    // fallbacks are read, and the w14 element is kept in its place.
-    assert_eq!(document.text(), "fallbackplain\n");
+    // wp is understood, since the picture reader reads it (#312): its choice is taken.
+    // w14 is ignorable and not understood: its fallback is read, and the w14 element is
+    // kept in its place.
+    assert_eq!(document.text(), "choiceplain\n");
     let Some(Block::Paragraph(paragraph)) = document.sections().next().unwrap().blocks().next()
     else {
         panic!("no paragraph");
