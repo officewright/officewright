@@ -979,6 +979,13 @@ fn a_file_to_run_is_never_rendered_over() -> io::Result<()> {
             stored
         );
         assert!(!corpus.dir.join("store/new").exists());
+        // A `..` that climbs out of a folder that does not exist comes back to folders
+        // that do, where a link can follow: missing/../here is here, a link to ".".
+        let (code, output) = corpus.run(&["--render", "missing/../here", "notes.pdf"], None)?;
+        assert_eq!(code, 2, "{output}");
+        assert!(output.contains("a file to run"), "{output}");
+        assert_eq!(std::fs::read(corpus.dir.join("notes.pdf"))?, notes);
+        assert!(!corpus.dir.join("missing").exists());
     }
     // Rendered elsewhere, it runs.
     let (code, output) = corpus.run(&["--render", "out", "notes.pdf"], None)?;
