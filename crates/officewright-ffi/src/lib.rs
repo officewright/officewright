@@ -534,7 +534,8 @@ pub unsafe extern "C" fn ow_pdf_font_new_standard(
 /// not a font or is damaged, `OW_STATUS_LIMIT_EXCEEDED` if it is past a limit of the
 /// library (`name` records that point at more than 1 MiB of strings),
 /// `OW_STATUS_INVALID_ARGUMENT` if it has no such face, and `OW_STATUS_UNSUPPORTED` if its
-/// license forbids embedding or its outlines cannot be embedded (CFF2). On success
+/// license forbids embedding or its outlines cannot be embedded (CFF2, or CID-keyed CFF
+/// with more than 255 Font DICTs). On success
 /// `*out_font` is a new handle for `ow_pdf_font_free`.
 ///
 /// # Safety
@@ -988,9 +989,10 @@ pub unsafe extern "C" fn ow_font_resolver_new(
 /// such substitution is added to the resolver's report (`ow_font_resolver_substitution`);
 /// synthetic styles are reported but not drawn yet.
 ///
-/// Fails with `OW_STATUS_UNSUPPORTED` if no font could be found or the chosen font's
-/// license forbids embedding, `OW_STATUS_INVALID_ARGUMENT` if `bold` or `italic` is not
-/// 0 or 1, `OW_STATUS_MALFORMED` if the chosen font is damaged,
+/// Fails with `OW_STATUS_UNSUPPORTED` if no font could be found, or the chosen font's
+/// license forbids embedding or its outlines cannot be embedded (CFF2, or CID-keyed CFF
+/// with more than 255 Font DICTs), `OW_STATUS_INVALID_ARGUMENT` if `bold` or `italic`
+/// is not 0 or 1, `OW_STATUS_MALFORMED` if the chosen font is damaged,
 /// `OW_STATUS_LIMIT_EXCEEDED` if it is past a limit of the library, and `OW_STATUS_IO`
 /// if its file cannot be read any more.
 ///

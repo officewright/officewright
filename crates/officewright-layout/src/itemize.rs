@@ -327,9 +327,13 @@ impl Builder<'_, '_, '_> {
         if let (true, Some(face)) = (choice.installed, choice.face) {
             for ch in codes {
                 if self.fonts.has_glyph(face, ch) {
-                    let size = drawn_size(&style, style.size(), false);
-                    let look = self.look(id, &style, choice, size, style.size(), Slot::Ascii);
-                    self.push(ch, source, look);
+                    // A soft hyphen of a font that is not a symbol font stays with the
+                    // character before it, as in text.
+                    if !self.attach(ch, &source) {
+                        let size = drawn_size(&style, style.size(), false);
+                        let look = self.look(id, &style, choice, size, style.size(), Slot::Ascii);
+                        self.push(ch, source, look);
+                    }
                     return;
                 }
             }
@@ -349,6 +353,7 @@ impl Builder<'_, '_, '_> {
                          characters they stand for"
                     ),
                 );
+                // No symbol stands for a character that attaches (the tables' tests).
                 let face = self.face_for(ch, choice, &style, bold, italic, font);
                 let size = drawn_size(&style, style.size(), false);
                 let look = self.look(id, &style, face, size, style.size(), Slot::Ascii);
@@ -419,13 +424,8 @@ impl Builder<'_, '_, '_> {
         style: &RunStyle,
         small: bool,
     ) {
-        if attaches(ch) {
-            if let Some(previous) = self.pending.last() {
-                // In its base's run, face and script.
-                let (look, script) = (previous.look.clone(), previous.script);
-                self.push_as(ch, source, look, script);
-                return;
-            }
+        if self.attach(ch, &source) {
+            return;
         }
         let slot = slot(ch, style);
         let complex = slot == Slot::ComplexScript;
@@ -462,6 +462,20 @@ impl Builder<'_, '_, '_> {
         let face = self.face_for(ch, choice, style, bold, italic, &family);
         let look = self.look(id, style, face, size, formatted_size, slot);
         self.push(ch, source, look);
+    }
+
+    /// Adds `ch` to the run of the character before it, in its base's look and script,
+    /// when `ch` [`attaches`] and there is a character before it; returns whether it did.
+    fn attach(&mut self, ch: char, source: &Range<usize>) -> bool {
+        if !attaches(ch) {
+            return false;
+        }
+        let Some(previous) = self.pending.last() else {
+            return false;
+        };
+        let (look, script) = (previous.look.clone(), previous.script);
+        self.push_as(ch, source.clone(), look, script);
+        true
     }
 
     /// The face that draws `ch`: the chosen one if it has the character, else another
@@ -829,7 +843,7 @@ mod tests {
     use super::*;
     use crate::ir::{BreakClear, Field, FieldKind, Language, RunFonts};
     use crate::report::LayoutReport;
-    use crate::testing::{book, minimal, renamed};
+    use crate::testing::{book, minimal, renamed, with_soft_hyphen};
 
     const TEST: &str = "Officewright Test";
 
@@ -1415,6 +1429,34 @@ mod tests {
                 "symbol F0B7 of \"Symbol\" cannot be drawn: the font has no such symbol"
             )]
         );
+    }
+
+    #[test]
+    fn keeps_a_symbol_that_is_a_soft_hyphen_with_the_character_before_it() {
+        // Hyph is no symbol font and has a soft hyphen: symbol F0AD of it is U+00AD.
+        let hyph = renamed(with_soft_hyphen(minimal()), "Officewright Hyph");
+        let mut setup = Setup::new(vec![minimal(), hyph]);
+        let style = setup.style(plain(TEST));
+        let other = setup.style(plain(TEST).with_size(Pt(20.0)));
+        let (itemized, report, families) = setup.run(&[
+            Inline::text("A", style),
+            Inline::symbol("Officewright Hyph", 0xF0AD, other),
+            Inline::text("A", style),
+        ]);
+        // In the run, face and size of the A before it, as a soft hyphen of text is.
+        assert_eq!(runs(&itemized), [("A\u{AD}A", "A\u{F0AD}A", 10.0)]);
+        assert_eq!(families, [TEST]);
+        assert!(report.is_empty(), "{report:?}");
+        // With no character before it, in its own font.
+        let (itemized, _, families) = setup.run(&[
+            Inline::symbol("Officewright Hyph", 0xF0AD, other),
+            Inline::text("A", style),
+        ]);
+        assert_eq!(
+            runs(&itemized),
+            [("\u{AD}", "\u{F0AD}", 20.0), ("A", "A", 10.0)]
+        );
+        assert_eq!(families, ["Officewright Hyph", TEST]);
     }
 
     #[test]
