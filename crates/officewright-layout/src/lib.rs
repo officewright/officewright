@@ -36,6 +36,7 @@ pub mod fuzzing;
 #[cfg_attr(not(feature = "unstable-ir"), doc(hidden))]
 pub mod ir;
 mod itemize;
+mod layout_tables;
 mod lines;
 mod metrics;
 mod numbers;

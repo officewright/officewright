@@ -41,9 +41,15 @@ impl ShapingFace {
 
     pub(crate) fn new(face: FontFace) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        // The bytes are shared with the face, not copied.
-        let bytes: Arc<dyn AsRef<[u8]> + Send + Sync> = Arc::new(FaceBytes(face.clone()));
-        let font = harfrust::Font::new(harfrust::font::Blob::from(bytes), face.index());
+        // A face whose layout tables would take HarfRust too much work is shaped as one
+        // HarfRust cannot read (issue #255).
+        let font = crate::layout_tables::within_budget(face.data(), face.index())
+            .then(|| {
+                // The bytes are shared with the face, not copied.
+                let bytes: Arc<dyn AsRef<[u8]> + Send + Sync> = Arc::new(FaceBytes(face.clone()));
+                harfrust::Font::new(harfrust::font::Blob::from(bytes), face.index())
+            })
+            .flatten();
         Self {
             id: NEXT.fetch_add(1, Ordering::Relaxed),
             face,
@@ -778,5 +784,33 @@ mod tests {
             Features::of(&RunStyle::default(), Pt(72.0)),
             Features::default()
         );
+    }
+
+    #[test]
+    fn a_face_whose_layout_tables_take_too_much_work_is_shaped_from_its_character_map() {
+        // Issue #255: a GPOS whose one lookup refers 40,000 times to a subtable (offset 0,
+        // the lookup itself), past the limit of references; and one of 4 references.
+        let table = |references: u16| {
+            let mut table: Vec<u8> = [1u16, 0, 10, 12, 14, 0, 0, 1, 4, 1, 0, references]
+                .iter()
+                .flat_map(|value| value.to_be_bytes())
+                .collect();
+            table.resize(table.len() + 2 * usize::from(references), 0);
+            table
+        };
+        let font = |references| {
+            let data = crate::testing::with_table(
+                include_bytes!("../../officewright-font/tests/data/minimal.ttf").to_vec(),
+                b"GPOS",
+                &table(references),
+            );
+            ShapingFace::new(FontFace::from_bytes(data, 0).expect("the test font"))
+        };
+        let shaped =
+            |face: &ShapingFace| shape(face, "A", &ShapeRequest::default(), &mut Plans::default());
+        let damaged = shaped(&font(40_000));
+        assert!(damaged.is_nominal());
+        assert_eq!(ids(&damaged), [(2, 0, 600)]);
+        assert!(!shaped(&font(4)).is_nominal());
     }
 }
