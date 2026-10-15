@@ -180,7 +180,8 @@ impl Font {
     ///
     /// [`Error::EmbeddingNotAllowed`] if the license forbids embedding the outlines, and
     /// [`Error::Font`] if the face has no TrueType or CFF outlines (CFF2 cannot be
-    /// embedded yet), or if subsetting finds it damaged or past a limit of the library
+    /// embedded yet), has CID-keyed CFF outlines with more Font DICTs than the subsetter
+    /// takes (255), or if subsetting finds it damaged or past a limit of the library
     /// (`name` records that point at more than 1 MiB of strings).
     pub fn from_face(face: FontFace) -> Result<Self> {
         Self::embed(face, None)

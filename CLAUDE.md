@@ -224,6 +224,7 @@ Not before the C ABI is stable. When they come: .NET (`netstandard2.0` + `net8.0
 
 - Conventional Commits with the crate as scope: `feat(pdf): write xref streams`, `fix(ffi): free buffer on error path`, `docs(readme): ...`, `ci: ...`. Breaking changes use `!` (`feat(pdf)!: ...`).
 - One logical change per commit; no "wip"/"fix stuff" commits.
+- Commits, PR descriptions and PR comments (review comments included) carry no line of Claude authorship: no `Co-Authored-By: Claude …` trailer, no "Generated with Claude Code". The same holds for the squash commit of a merge: GitHub fills its message with the branch's commit messages, trailers and all, and adds `Co-authored-by` lines of its own, so the author merges with a message body that leaves out every line of Claude authorship (other trailers stay). What is already published is not rewritten or edited just to remove such lines.
 - Until Milestone 1 is merged, commit to `main`. After that, work on branches (`feat/<topic>`, `fix/<topic>`), open a PR, merge only with green CI. `main` is protected.
 - Releases (later): release-plz generates versions and CHANGELOG from commit messages; cargo-semver-checks runs before publishing, without the features `unstable-ir` of `officewright-layout` and `officewright-doc` and `unstable-drawing` of `officewright-pdf` (the IR, the translation into it and the drawing primitives are exempt until 1.0).
 
@@ -285,7 +286,7 @@ The author squash-merges their own PR when all hold:
 
 A PR that contains anything on the list "Always ask the maintainer first" is merged only with the maintainer's consent, which the author quotes in the PR with its date (the sessions and the maintainer post from the same account, so a quote from the chat is what records it). After each merge the author sends the maintainer a short report; the maintainer runs the "How to check by hand" steps when they choose.
 
-PRs are squash-merged; the PR title must be a Conventional Commit, since it becomes the commit message on main.
+PRs are squash-merged; the PR title must be a Conventional Commit, since it becomes the commit message on main. The message body carries no line of Claude authorship (Git workflow).
 
 ### Always ask the maintainer first
 The agent must not decide these alone:
