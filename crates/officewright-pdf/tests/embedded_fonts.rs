@@ -1182,3 +1182,37 @@ fn the_fonts_of_a_document_share_its_subset_budget() -> TestResult {
     doc.to_bytes()?;
     Ok(())
 }
+
+#[test]
+fn a_font_kept_whole_takes_from_the_subset_budget() -> TestResult {
+    // Noto Sans (CFF) whose license forbids subsetting: the document embeds all its
+    // glyphs, and reducing it reads what all of them read.
+    let noto = with_fs_type(noto_sans()?, 0x0100)?;
+    let face = FontFace::from_bytes(noto.clone(), 0)?;
+    let mut budget = SubsetBudget::new(u64::MAX);
+    face.subset_within(
+        (0..face.glyph_count()).map(officewright_font::GlyphId::new),
+        &mut budget,
+    )?;
+    let whole = u64::MAX - budget.left();
+    let font = Font::from_bytes(noto, 0)?;
+    assert!(font.embedding_notes().contains(&EmbeddingNote::WholeFont));
+    let mut doc = Document::new();
+    doc.add_page(PageSize::A4)?
+        .add_text(Pt(72.0), Pt(700.0), &font, Pt(12.0), "Hello")?;
+    doc.set_subset_budget(whole - 1);
+    let err = doc.to_bytes().unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            Error::Embed {
+                source: officewright_font::Error::TableOverLimit { .. },
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    doc.set_subset_budget(whole);
+    doc.to_bytes()?;
+    Ok(())
+}

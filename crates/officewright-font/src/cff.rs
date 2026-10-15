@@ -2293,8 +2293,8 @@ mod tests {
         );
 
         // A subset that the check lets through and the subsetter refuses takes nothing:
-        // the check stops at glyph 1, an operator the subsetter does not know (12 0),
-        // after reading 5 units of it.
+        // the check stops at glyph 1, at an operator the subsetter does not know (12 0),
+        // having read 5 units: 1 of .notdef and 4 of glyph 1, which comes before glyph 2.
         let mut glyphs = glyphs_with(1, vec![139, 139, 21, 12, 0]);
         glyphs[2] = vec![139, 139, 21, 14];
         let cff = programs(&glyphs, &[], &[vec![]], None);
