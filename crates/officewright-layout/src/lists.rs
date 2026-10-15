@@ -164,7 +164,7 @@ fn label_text(
     let mut text = String::new();
     for part in level.text() {
         match part {
-            LevelTextPart::Literal(literal) => text.push_str(literal),
+            LevelTextPart::Literal(literal) => text.extend(literal.chars().filter_map(drawn)),
             LevelTextPart::Placeholder(of) => {
                 let of = usize::from(*of);
                 if of > index {
@@ -190,6 +190,19 @@ fn label_text(
         }
     }
     text
+}
+
+/// What a character of a label's template draws. Word draws U+007F as a bullet: its
+/// render of `report-usds-tech-challenge-playbook.docx` shows "•" for bullets of U+007F
+/// in Arial, which has no glyph for that character. The other control characters, which
+/// the text of runs never holds, draw nothing, so that none of them breaks the label's
+/// line or moves to a tab stop; that is a hypothesis until a Word render.
+fn drawn(ch: char) -> Option<char> {
+    match ch {
+        '\u{7F}' => Some('\u{2022}'),
+        ch if ch.is_control() => None,
+        ch => Some(ch),
+    }
 }
 
 #[cfg(test)]
@@ -238,6 +251,31 @@ mod tests {
                     .map_or_else(|| "-".to_owned(), |label| label.text)
             })
             .collect()
+    }
+
+    #[test]
+    fn control_characters_of_a_template_are_drawn_as_word_draws_them() {
+        // U+007F is Word's bullet (report-usds-tech-challenge-playbook.docx); the others
+        // draw nothing.
+        let mut document = Document::default();
+        let levels = [
+            level(&[literal("\u{7F}")], NumberFormat::Bullet),
+            level(
+                &[
+                    literal("\t("),
+                    LevelTextPart::Placeholder(1),
+                    literal(")\n\r\u{0}\u{85}"),
+                ],
+                NumberFormat::LowerLetter,
+            )
+            .with_start(1),
+        ];
+        let list = document.add_list(ListDefinition::default().with_levels(levels));
+        let one = document.add_list_instance(ListInstance::new(list));
+        assert_eq!(
+            labels(&mut document, &[(one, 0), (one, 1)]),
+            ["\u{2022}", "(a)"]
+        );
     }
 
     #[test]

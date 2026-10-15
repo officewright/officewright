@@ -439,9 +439,9 @@
     "tests/corpus/business/report-usds-tech-challenge-playbook.docx": {
       "line_agreement": 0.4676,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.7541,
+      "ssim_mean": 0.7547,
       "ssim_min": 0.6006,
-      "text_score": 0.9958
+      "text_score": 0.9916
     },
     "tests/corpus/generated/contract-de-open.docx": {
       "line_agreement": 0.74,
