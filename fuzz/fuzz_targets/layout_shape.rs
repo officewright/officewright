@@ -212,7 +212,7 @@ fuzz_target!(|data: &[u8]| {
         let list = document.add_list(ListDefinition::default().with_levels([level]));
         let instance = document.add_list_instance(ListInstance::new(list));
         let label_style = styles.get(1).copied().unwrap_or(first);
-        panic!("list branch reached");
+        paragraph.with_list(Some(ListItem::new(instance, 0, label_style)))
     } else {
         paragraph
     };

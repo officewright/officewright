@@ -16,10 +16,14 @@ use crate::report::Location;
 /// The levels a list has: Word takes `w:ilvl` from 0 to 8 (MS-OI29500 2.1.280 a).
 const LEVELS: usize = 9;
 
-/// The most characters a label is drawn with. A level's template is written once but
-/// drawn for every item of the level, so a long one would take time and room in
-/// proportion to the items times its length; real labels ("1.1.1.", "Article 12.") are
-/// far shorter. What Word does with a longer template is a hypothesis until a Word render.
+/// The most characters a label is drawn with, and the most of its template that is read,
+/// counted as `w:lvlText` holds it (see [`read_template`]). A level's template is written
+/// once but read and drawn for every item of the level, so a long one would take time and
+/// room in proportion to the items times its length; real labels ("1.1.1.", "Article
+/// 12.") are far shorter. The rest of a longer template is as if it were not there: for
+/// the label's text, for the levels it shows and for the rule that ignores a template
+/// showing a deeper level. What Word does with a longer template is a hypothesis until a
+/// Word render (#320).
 pub(crate) const MAX_LABEL_CHARS: usize = 256;
 
 /// The label of a list item, and what follows it.
@@ -47,7 +51,8 @@ pub(crate) struct Counters {
     /// The first paragraph whose label has a number written in decimal because its
     /// format is one the layout does not write.
     pub(crate) unsupported_format: Option<Location>,
-    /// The first paragraph whose label is cut at [`MAX_LABEL_CHARS`].
+    /// The first paragraph whose label, or the template it is written from, is cut at
+    /// [`MAX_LABEL_CHARS`].
     pub(crate) long_label: Option<Location>,
 }
 
@@ -90,6 +95,7 @@ impl Counters {
             })
             .collect();
         let level = levels.get(index).copied().flatten()?;
+        let (template, long_template) = read_template(level.text());
         let start_of = |level: usize| {
             counting
                 .get(level)
@@ -123,8 +129,8 @@ impl Counters {
         // before it, the next item of the level above is "2." (E-list-level-inherit,
         // cases 01 to 05). A label that shows only its own level leaves the levels above
         // as they are; that is a hypothesis, which no reference shows since #292.
-        for part in level.text() {
-            if let LevelTextPart::Placeholder(above) = part {
+        for piece in &template {
+            if let Piece::Level(above) = piece {
                 let above = usize::from(*above);
                 if let (true, Some(slot)) = (above < index, sequence.values.get_mut(above)) {
                     if slot.is_none() {
@@ -147,13 +153,19 @@ impl Counters {
             }
         }
         let mut unsupported = false;
-        let mut cut = false;
+        let mut cut = long_template;
         let shown = Shown {
             levels: &levels,
             starts: &counting,
             values: &sequence.values,
         };
-        let text = label_text(level, index, &shown, (&mut unsupported, &mut cut));
+        let text = label_text(
+            &template,
+            level.legal(),
+            index,
+            &shown,
+            (&mut unsupported, &mut cut),
+        );
         if unsupported && self.unsupported_format.is_none() {
             self.unsupported_format = Some(location.clone());
         }
@@ -189,32 +201,74 @@ struct Shown<'a, 'd> {
     values: &'a [Option<u32>; LEVELS],
 }
 
-/// The text of the label of a paragraph at `index` of `level`: its template, each
-/// placeholder the value of its level in that level's format, a level with no value its
-/// start. A placeholder of a level below the paragraph's makes Word ignore the whole
-/// template (MS-OI29500 2.1.283 c). A legal level writes every number in decimal but that
-/// of a level without numbers (OI 2.1.278 a, b). The text ends at [`MAX_LABEL_CHARS`],
-/// and `cut` says when it does.
+/// A piece of a template as [`read_template`] reads it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Piece {
+    /// A character of its text, as the template holds it.
+    Char(char),
+    /// A placeholder: the number of this level.
+    Level(u8),
+}
+
+/// The pieces of `template` the layout reads, up to [`MAX_LABEL_CHARS`] counted as
+/// `w:lvlText` holds them: a character of text one, a placeholder two (`%1`), and a piece
+/// of text with no characters one, so that a template of many empty pieces is bounded too;
+/// and whether the template goes on past them.
+fn read_template(template: &[LevelTextPart]) -> (Vec<Piece>, bool) {
+    let mut pieces = Vec::new();
+    let mut left = MAX_LABEL_CHARS;
+    for part in template {
+        match part {
+            LevelTextPart::Literal(text) if text.is_empty() => {
+                if left == 0 {
+                    return (pieces, true);
+                }
+                left -= 1;
+            }
+            LevelTextPart::Literal(text) => {
+                for ch in text.chars() {
+                    if left == 0 {
+                        return (pieces, true);
+                    }
+                    left -= 1;
+                    pieces.push(Piece::Char(ch));
+                }
+            }
+            LevelTextPart::Placeholder(of) => {
+                if left < 2 {
+                    return (pieces, true);
+                }
+                left -= 2;
+                pieces.push(Piece::Level(*of));
+            }
+        }
+    }
+    (pieces, false)
+}
+
+/// The text of the label of a paragraph at `index` of a level with `template` (as
+/// [`read_template`] reads it), written in decimal when `legal`: each placeholder the
+/// value of its level in that level's format, a level with no value its start. A
+/// placeholder of a level below the paragraph's makes Word ignore the whole template
+/// (MS-OI29500 2.1.283 c). A legal level writes every number in decimal but that of a
+/// level without numbers (OI 2.1.278 a, b). The text ends at [`MAX_LABEL_CHARS`], and
+/// `cut` says when it does.
 fn label_text(
-    level: &Level,
+    template: &[Piece],
+    legal: bool,
     index: usize,
     shown: &Shown<'_, '_>,
     (unsupported, cut): (&mut bool, &mut bool),
 ) -> String {
     let mut text = String::new();
     let mut count = 0;
-    for part in level.text() {
-        if count == MAX_LABEL_CHARS {
-            // The rest of the template is not even written out.
-            *cut = true;
-            break;
-        }
-        match part {
-            LevelTextPart::Literal(literal) => {
-                *cut |= push_within(&mut text, &mut count, literal.chars().filter_map(drawn));
+    for piece in template {
+        match *piece {
+            Piece::Char(ch) => {
+                *cut |= push_within(&mut text, &mut count, drawn(ch).into_iter());
             }
-            LevelTextPart::Placeholder(of) => {
-                let of = usize::from(*of);
+            Piece::Level(of) => {
+                let of = usize::from(of);
                 if of > index {
                     return String::new();
                 }
@@ -227,7 +281,7 @@ fn label_text(
                     .or_else(|| shown.starts.get(of).copied().flatten().map(Level::start))
                     .unwrap_or(0);
                 let format = of_level.map_or(&NumberFormat::Decimal, Level::format);
-                let format = if level.legal() && *format != NumberFormat::None {
+                let format = if legal && *format != NumberFormat::None {
                     &NumberFormat::Decimal
                 } else {
                     format
@@ -587,7 +641,7 @@ mod tests {
     fn a_label_is_cut_at_its_bound_and_the_rest_of_its_template_is_not_written() {
         let mut document = Document::default();
         let long = "ab ".repeat(10_000);
-        let many = vec![LevelTextPart::Placeholder(0); 30_000];
+        let many = vec![LevelTextPart::Placeholder(1); 30_000];
         let levels = [
             level(
                 &[literal(&long), LevelTextPart::Placeholder(0)],
@@ -611,14 +665,126 @@ mod tests {
         let first = label(0);
         assert_eq!(first.chars().count(), MAX_LABEL_CHARS);
         assert!(first.starts_with("ab ab "));
-        // 30,000 placeholders of 27 letters each: cut after the first characters, at
-        // once.
-        let started = std::time::Instant::now();
+        // Placeholders of 27 letters each ("XXX…" for 700): cut after the first
+        // characters.
         let second = label(1);
-        assert_eq!(second.chars().count(), MAX_LABEL_CHARS);
-        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(second, "X".repeat(MAX_LABEL_CHARS));
         // Line and paragraph separators draw nothing.
         assert_eq!(label(2), "1.x");
         assert_eq!(counters.long_label, Some(location));
+    }
+
+    /// The label at level `index` of a list whose level `index` has `template` in
+    /// `format`, the other levels nothing, with whether it is reported as cut.
+    fn only(index: u8, template: Vec<LevelTextPart>, format: NumberFormat) -> (String, bool) {
+        let mut document = Document::default();
+        let levels = (0..=index).map(|at| {
+            if at == index {
+                level(&template, format.clone()).with_start(1)
+            } else {
+                Level::default().with_start(1)
+            }
+        });
+        let list = document.add_list(ListDefinition::default().with_levels(levels));
+        let one = document.add_list_instance(ListInstance::new(list));
+        let style = document.add_run_style(RunStyle::default());
+        let mut counters = Counters::default();
+        let text = counters
+            .label(
+                &document,
+                &ListItem::new(one, index, style),
+                &Location::default(),
+            )
+            .unwrap()
+            .text;
+        (text, counters.long_label.is_some())
+    }
+
+    #[test]
+    fn a_template_is_read_up_to_its_bound_whatever_its_pieces_write() {
+        let x = || literal("x");
+        let many = |part: LevelTextPart, count| std::iter::repeat_n(part, count);
+        // Pieces that write nothing count too: numbers of a level without numbers,
+        // control characters, empty text. The "x" after them is past the bound.
+        let none: Vec<_> = many(LevelTextPart::Placeholder(0), 1_000)
+            .chain([x()])
+            .collect();
+        assert_eq!(only(0, none, NumberFormat::None), (String::new(), true));
+        let controls = vec![
+            literal(&"\u{85}".repeat(1_000)),
+            LevelTextPart::Placeholder(0),
+        ];
+        assert_eq!(
+            only(0, controls, NumberFormat::Decimal),
+            (String::new(), true)
+        );
+        let empty: Vec<_> = many(literal(""), 1_000).chain([x()]).collect();
+        assert_eq!(only(0, empty, NumberFormat::Decimal), (String::new(), true));
+        // A placeholder counts two, as "%1" does: 127 of them and "xx" are read whole,
+        // 128 of them and "x" are not.
+        let fits: Vec<_> = many(LevelTextPart::Placeholder(0), 127)
+            .chain([literal("xx")])
+            .collect();
+        assert_eq!(only(0, fits, NumberFormat::None), ("xx".to_owned(), false));
+        let past: Vec<_> = many(LevelTextPart::Placeholder(0), 128)
+            .chain([x()])
+            .collect();
+        assert_eq!(only(0, past, NumberFormat::None), (String::new(), true));
+        // A placeholder of a deeper level makes Word ignore the template where it is
+        // read (MS-OI29500 2.1.283 c), and past the bound it is not.
+        let deeper = |before| vec![literal(&"x".repeat(before)), LevelTextPart::Placeholder(1)];
+        assert_eq!(
+            only(0, deeper(200), NumberFormat::Decimal),
+            (String::new(), false)
+        );
+        assert_eq!(
+            only(0, deeper(300), NumberFormat::Decimal),
+            ("x".repeat(MAX_LABEL_CHARS), true)
+        );
+        // The levels a template shows past the bound are not started either: at level 1,
+        // a template whose "%1" comes after 300 characters leaves level 0 as it was.
+        let mut document = Document::default();
+        let shows_above = [
+            literal(&"\u{85}".repeat(300)),
+            LevelTextPart::Placeholder(0),
+        ];
+        let list = document.add_list(ListDefinition::default().with_levels([
+            level(&[LevelTextPart::Placeholder(0)], NumberFormat::Decimal).with_start(1),
+            level(&shows_above, NumberFormat::Decimal).with_start(1),
+        ]));
+        let one = document.add_list_instance(ListInstance::new(list));
+        let style = document.add_run_style(RunStyle::default());
+        let mut counters = Counters::default();
+        let mut label = |level| {
+            counters
+                .label(
+                    &document,
+                    &ListItem::new(one, level, style),
+                    &Location::default(),
+                )
+                .unwrap()
+                .text
+        };
+        assert_eq!(label(1), "");
+        assert_eq!(label(0), "1");
+    }
+
+    #[test]
+    fn the_first_cut_label_is_the_one_reported() {
+        let mut document = Document::default();
+        let long = level(&[literal(&"x".repeat(300))], NumberFormat::Decimal);
+        let list = document.add_list(ListDefinition::default().with_levels([long]));
+        let one = document.add_list_instance(ListInstance::new(list));
+        let style = document.add_run_style(RunStyle::default());
+        let mut counters = Counters::default();
+        let at = |index| {
+            let mut location = Location::default();
+            location.push(crate::report::Step::Index(index));
+            location
+        };
+        for index in [4, 9] {
+            counters.label(&document, &ListItem::new(one, 0, style), &at(index));
+        }
+        assert_eq!(counters.long_label, Some(at(4)));
     }
 }

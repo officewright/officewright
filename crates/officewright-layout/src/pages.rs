@@ -154,7 +154,8 @@ fn report_list_formats(counters: &Counters, fonts: &mut Fonts<'_>) {
             ReportKind::ValueClamped,
             location,
             format!(
-                "list labels longer than {} characters are cut there",
+                "list labels, and the templates they are written from, longer than {} \
+                 characters are cut there",
                 crate::lists::MAX_LABEL_CHARS
             ),
         );
@@ -3623,5 +3624,44 @@ mod tests {
             .collect();
         assert_eq!(places.len(), 1, "{report:?}");
         assert!(places[0].contains("headers"), "{places:?}");
+    }
+
+    #[test]
+    fn a_cut_label_is_reported_once_at_the_first_paragraph_it_is_cut_in() {
+        use crate::ir::{Level, LevelTextPart, ListDefinition, ListInstance, ListItem};
+
+        let mut document = Document::default();
+        let style = document
+            .add_run_style(RunStyle::default().with_fonts(RunFonts::new("Officewright Test")));
+        let level = |text: String| {
+            Level::default()
+                .with_text([LevelTextPart::Literal(text), LevelTextPart::Placeholder(0)])
+        };
+        let short = document.add_list(ListDefinition::default().with_levels([level("a".into())]));
+        let long = document.add_list(
+            ListDefinition::default()
+                .with_levels([level("a".repeat(crate::lists::MAX_LABEL_CHARS + 1))]),
+        );
+        let short = document.add_list_instance(ListInstance::new(short));
+        let long = document.add_list_instance(ListInstance::new(long));
+        let item = |instance| -> Block {
+            Paragraph::new(style)
+                .with_list(Some(ListItem::new(instance, 0, style)))
+                .into()
+        };
+        document.add_section(Section::new(close_frames()).with_blocks(vec![
+            item(short),
+            item(long),
+            item(long),
+        ]));
+        let (_, report) = laid(&document, 100);
+        let places: Vec<String> = report
+            .iter()
+            .filter(|entry| {
+                entry.kind() == ReportKind::ValueClamped && entry.message().contains("list labels")
+            })
+            .map(|entry| entry.location().to_string())
+            .collect();
+        assert_eq!(places, ["sections[0].blocks[1]"], "{report:?}");
     }
 }

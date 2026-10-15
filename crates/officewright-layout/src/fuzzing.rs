@@ -909,6 +909,26 @@ pub fn check_lines(
     let indent = paragraph.props().indent();
     let (text, _) = crate::lines::break_text(&layout.itemized);
     let breaks = crate::breaks::BreakMap::new(&text, paragraph.props().word_wrap());
+    // A list label aligned at the centre or the end gives the first line the room it
+    // moves back by: half its width, or all of it, measured on the pieces of every line,
+    // since a label wider than the line wraps and the first line moves back by all of it.
+    let label_room = match layout.itemized.label {
+        Some(label) => {
+            let width: f64 = layout
+                .lines
+                .iter()
+                .flat_map(|line| &line.pieces)
+                .filter(|piece| piece_item(piece) < label.text)
+                .map(|piece| piece.width.0)
+                .sum();
+            match label.alignment {
+                crate::ir::LevelAlignment::Center => width / 2.0,
+                crate::ir::LevelAlignment::End => width,
+                _ => 0.0,
+            }
+        }
+        None => 0.0,
+    };
     let mut end = 0;
     for (index, line) in layout.lines.iter().enumerate() {
         if line.range.start != end {
@@ -918,24 +938,7 @@ pub fn check_lines(
             ));
         }
         end = line.range.end;
-        // A list label aligned at the centre or the end gives the first line the room it
-        // moves back by: half its width, or all of it, measured on the line's pieces.
-        let label_room = match layout.itemized.label.filter(|_| index == 0) {
-            Some(label) => {
-                let width: f64 = line
-                    .pieces
-                    .iter()
-                    .filter(|piece| piece_item(piece) < label.text)
-                    .map(|piece| piece.width.0)
-                    .sum();
-                match label.alignment {
-                    crate::ir::LevelAlignment::Center => width / 2.0,
-                    crate::ir::LevelAlignment::End => width,
-                    _ => 0.0,
-                }
-            }
-            None => 0.0,
-        };
+        let label_room = if index == 0 { label_room } else { 0.0 };
         let room = width
             - indent.start().0
             - indent.end().0

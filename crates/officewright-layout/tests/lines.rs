@@ -1894,14 +1894,19 @@ fn list_items_keep_what_line_breaking_promises_whatever_their_label() -> TestRes
         LevelAlignment::End,
     ] {
         for suffix in [Suffix::Tab, Suffix::Space, Suffix::Nothing] {
-            let (document, paragraph) = list_item(
-                "Article 12.",
-                (alignment, suffix),
-                ParagraphProps::default(),
-                SENTENCE,
-            );
-            fuzzing::check_lines(&book, &document, &paragraph, 200.0)
-                .map_err(|problem| format!("{alignment:?} {suffix:?}: {problem}"))?;
+            // Also a label wider than the line, which wraps: the first line moves back by
+            // the whole label, not only by the part of it that it holds.
+            for label in ["Article 12.".to_owned(), "ab ".repeat(80)] {
+                let (document, paragraph) = list_item(
+                    &label,
+                    (alignment, suffix),
+                    ParagraphProps::default(),
+                    SENTENCE,
+                );
+                fuzzing::check_lines(&book, &document, &paragraph, 200.0).map_err(|problem| {
+                    format!("{alignment:?} {suffix:?} {}: {problem}", label.len())
+                })?;
+            }
         }
     }
     Ok(())
