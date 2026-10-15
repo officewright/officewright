@@ -2368,17 +2368,18 @@ def sectioned(sections: list[tuple[list[str], str]]) -> str:
 def section_restart_parity() -> Doc:
     # E-section-odd showed that a section that restarts its numbering with an odd or even
     # start gets no blank page, and that its number went up by one where it had the wrong
-    # parity (#301). A restart at 5 after a page numbered 4 tells "restart + 1" (6) from
-    # "the restart is ignored" (5); a restart at 0 shows what Word does with 0. The footer
-    # counts the document's and the section's pages, so the counts show whether a blank
-    # page or a skipped number counts.
+    # parity (#301). An even start restarted at 5 after a page numbered 1 tells "restart + 1"
+    # (6) from "the restart is ignored" (2); Section 3 continues the numbering after an even
+    # number either way, so it gets a blank page; a restart at 0 shows what Word does with
+    # 0. The footer counts the document's and the section's pages, so the counts show
+    # whether a blank page or a skipped number counts.
     sections = [
         # (label, start type, first page number, page count)
         ("Section 1: one page", None, None, 1),
-        ("Section 2: odd page start after a section that ends on page 1; two pages",
-         "oddPage", None, 2),
-        ("Section 3: even page start after a section that ends on page 4, page numbers "
+        ("Section 2: even page start after a section that ends on page 1, page numbers "
          "restarted at 5", "evenPage", 5, 1),
+        ("Section 3: even page start after a section that ends on an even page number; two "
+         "pages", "evenPage", None, 2),
         ("Section 4: odd page start, page numbers restarted at 0", "oddPage", 0, 1),
         ("Section 5: next page start, page numbers continued", None, None, 1),
     ]
@@ -2395,7 +2396,7 @@ def section_restart_parity() -> Doc:
                               sect=properties[n] if last else None)
     return Doc(
         "E-section-restart-parity",
-        "Odd and even section starts with page numbers restarted at 5 (after page 4, even "
+        "Odd and even section starts with page numbers restarted at 5 (after page 1, even "
         "start) and at 0 (odd start), and a blank page before a section that continues the "
         "numbering: the page numbers Word gives, and whether NUMPAGES and SECTIONPAGES in "
         "the footer count blank pages and skipped numbers",
@@ -2440,32 +2441,35 @@ def section_continuous_title() -> Doc:
 def keepnext_break() -> Doc:
     # #186: the layout takes the lines after a page break to start a page whatever the keep
     # rules say, so a paragraph kept with the next that holds a page break is not moved, and
-    # is split when the paragraph after it does not fit.
-    body = filler(56, "Case 01: 56 lines, then a paragraph kept with the next whose text holds "
-                  "a page break before its last 6 lines, then a paragraph of 3 lines kept "
-                  "together")
-    body += page_para(run("Case 01 kept: A") + page_break_run()
-                      + lines([f"Case 01 kept, line {n}" for n in range(1, 7)]), keep_next=True)
-    body += page_para(lines([f"Case 01 together, line {n}" for n in range(1, 4)]),
-                      keep_lines=True)
-    body += filler(20, "Case 02: 20 lines, then a paragraph kept with the next whose text holds "
-                   "a page break before its last 56 lines, then a paragraph of 3 lines kept "
-                   "together", page_break_before=True)
-    body += page_para(run("Case 02 kept: A") + page_break_run()
-                      + lines([f"Case 02 kept, line {n}" for n in range(1, 57)]), keep_next=True)
-    body += page_para(lines([f"Case 02 together, line {n}" for n in range(1, 4)]),
-                      keep_lines=True)
-    body += filler(56, "Case 03: 56 lines, then a heading kept with the next whose first run is "
-                   "a page break, then a paragraph of 3 lines kept together",
-                   page_break_before=True)
-    body += page_para(page_break_run() + run("Case 03 heading"), keep_next=True)
-    body += page_para(lines([f"Case 03 together, line {n}" for n in range(1, 4)]),
-                      keep_lines=True)
+    # is split when the paragraph after it does not fit. Each label fits one line, so that
+    # the line counts are exact; widow control is off, so that only the keep rules decide.
+    off = {"widow_control": False}
+    cases = [
+        # (lines before, lines after the break, a heading whose first run is the break)
+        (56, 6, False),
+        (20, 56, False),
+        (56, None, True),
+    ]
+    body = ""
+    for n, (before, after, heading) in enumerate(cases, 1):
+        what = "a heading after a page break" if heading else "a paragraph with a page break"
+        body += filler(before, f"Case {n:02d}: {before} lines, then {what}, kept with the next",
+                       page_break_before=n > 1, **off)
+        if heading:
+            kept = page_break_run() + run(f"Case {n:02d} heading")
+        else:
+            kept = (run(f"Case {n:02d} kept: A") + page_break_run()
+                    + lines([f"Case {n:02d} kept, line {k}" for k in range(1, after + 1)]))
+        body += page_para(kept, keep_next=True, **off)
+        body += page_para(lines([f"Case {n:02d} together, line {k}" for k in range(1, 4)]),
+                          keep_lines=True, **off)
     return Doc(
         "E-keepnext-break",
-        "Keep with next on a paragraph that holds a page break: one whose lines after the "
-        "break and the next paragraph fit the page, one where the next paragraph (kept "
-        "together) does not fit, and a heading whose first run is a page break",
+        "Keep with next on a paragraph that holds a page break, followed by a paragraph of 3 "
+        "lines kept together: 56 lines, then the kept paragraph's first line, its break and 6 "
+        "lines, which with the 3 fit the page; 20 lines, then a break and 56 lines, after "
+        "which the 3 do not fit; and a heading whose first run is a page break; without widow "
+        "control",
         body,
     )
 
@@ -2623,9 +2627,9 @@ def number_formats() -> Doc:
     sections.append((contents, section()))
     return Doc(
         "E-number-formats",
-        "PAGE fields in every number format (\\* switch) at page numbers 0, 27, 53, 1665, 4000 "
-        "and 4999, ordinals and numbers in words in German, Chicago page numbers at 116 and "
-        "117, and NUMPAGES in four formats",
+        "PAGE fields in the eleven number formats of the \\* switch (Arabic to DollarText) at "
+        "page numbers 0, 27, 53, 1665, 4000 and 4999, ordinals and numbers in words in German, "
+        "Chicago page numbers at 116 and 117, and NUMPAGES in four formats",
         sectioned(sections),
         last_section=sections[-1][1],
     )

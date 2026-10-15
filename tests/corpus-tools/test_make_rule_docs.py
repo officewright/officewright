@@ -1831,33 +1831,46 @@ class Packages(unittest.TestCase):
                                      ("240", "exact"), name)
 
         # E-section-restart-parity: each section's start type, first number and pages are
-        # those of its label, and the page the section before ends on is the one the label
-        # names, by the rule E-section-odd showed for sections that continue the numbering.
+        # those of its label. The page numbers are followed under both readings of a restart
+        # with an odd or even start (#301): "restart + 1", and the restart ignored, where the
+        # numbering continues. A blank page comes, under both, where a section continues the
+        # numbering and its next number has the wrong parity. Each restart tells the two
+        # readings apart, and each "ends on" claim of a label holds under both.
         parts, body, targets = load("E-section-restart-parity")
         found = sections(body)
         self.assertEqual(len(found), 5)
-        last_page = 0
+        last = {"plus one": 0, "ignored": 0}  # the last page number of the section before
         for n, (paragraphs, sect) in enumerate(found, 1):
             label = lines_of(paragraphs[0])[0]
             said = re.fullmatch(
                 rf"Section {n}: (?:one page|(odd|even|next) page start(?: after a section that "
-                r"ends on page (\d+))?(?:, page numbers (?:restarted at (\d+)|(continued)))?"
-                r"(; two pages)?)", label)
+                r"ends on (?:page (\d+)|an? (odd|even) page number))?(?:, page numbers "
+                r"(?:restarted at (\d+)|(continued)))?(; two pages)?)", label)
             self.assertIsNotNone(said, label)
-            start, before, restart, _, two = said.groups()
+            start, page, parity, restart, _, two = said.groups()
             expected_kind = None if start in (None, "next") else f"{start}Page"
             self.assertEqual(kind(sect), expected_kind, label)
             numbers = sect.find(f"{W}pgNumType")
             self.assertEqual(None if numbers is None else numbers.get(f"{W}start"), restart, label)
-            if before is not None:
-                self.assertEqual(int(before), last_page, label)
+            for reading, before in last.items():
+                if page is not None:
+                    self.assertEqual(before, int(page), (label, reading))
+                if parity is not None:
+                    self.assertEqual(before % 2, {"odd": 1, "even": 0}[parity], (label, reading))
             self.assertEqual(len(paragraphs), 2 if two else 1, label)
             for paragraph in paragraphs[1:]:
                 self.assertTrue(flag(paragraph, "pageBreakBefore"), label)
-            first_page = last_page + 1
-            if expected_kind and restart is None and (first_page % 2 == 1) != (start == "odd"):
-                first_page += 1  # a blank page
-            last_page = first_page + len(paragraphs) - 1
+            first = {}
+            for reading, before in last.items():
+                number = before + 1
+                if restart is not None and reading == "plus one":
+                    number = int(restart)
+                if expected_kind and (number % 2 == 1) != (start == "odd"):
+                    number += 1  # the next number, or a blank page before it
+                first[reading] = number
+                last[reading] = number + len(paragraphs) - 1
+            if restart is not None:
+                self.assertNotEqual(first["plus one"], first["ignored"], label)
             refs = sect.findall(f"{W}headerReference") + sect.findall(f"{W}footerReference")
             self.assertEqual(len(refs), 2 if n == 1 else 0, label)
         footer = story(parts, targets, found[0][1], "footerReference")
@@ -1893,38 +1906,44 @@ class Packages(unittest.TestCase):
         self.assertTrue(before < lines_per_page < before + after - lines_per_page)
 
         # E-keepnext-break: per case, the lines before, the kept paragraph with its page
-        # break, and the paragraph kept together, as the label says.
+        # break, and the paragraph kept together, all without widow control. Each label fits
+        # one line (Calibri 11 pt is under 6 pt a character), so the line counts are exact:
+        # Case 01's kept line ends the page of the lines before, and its 6 lines and the 3
+        # fit the next page; Case 02's 56 lines and the 3 do not.
         _, body, _ = load("E-keepnext-break")
         paragraphs = body.findall(f"{W}p")
-        starts = [i for i, p in enumerate(paragraphs) if re.match(r"Case \d\d: \d+ lines",
-                                                                    lines_of(p)[0])]
-        self.assertEqual(len(starts), 3)
-        for number, start in enumerate(starts, 1):
-            filler, kept, together = paragraphs[start : start + 3]
+        self.assertEqual(len(paragraphs), 9)
+        for number in range(1, 4):
+            filler, kept, together = paragraphs[3 * number - 3 : 3 * number]
             label = lines_of(filler)[0]
-            self.assertTrue(label.startswith(f"Case {number:02d}: "), label)
-            count = int(re.search(r": (\d+) lines", label).group(1))
+            said = re.fullmatch(rf"Case {number:02d}: (\d+) lines, then (a paragraph with a page "
+                                r"break|a heading after a page break), kept with the next", label)
+            self.assertIsNotNone(said, label)
+            self.assertLessEqual(len(label), 75, label)
+            count = int(said.group(1))
             self.assertEqual(len(lines_of(filler)), count, label)
             self.assertEqual(flag(filler, "pageBreakBefore"), number > 1, label)
+            for paragraph in (filler, kept, together):
+                self.assertFalse(flag(paragraph, "widowControl"), label)
+                self.assertIsNotNone(paragraph.find(f"{W}pPr/{W}widowControl"), label)
             self.assertTrue(flag(kept, "keepNext"), label)
             self.assertEqual(len(page_breaks(kept)), 1, label)
             self.assertTrue(flag(together, "keepLines"), label)
             self.assertFalse(flag(together, "keepNext"), label)
             self.assertEqual(len(lines_of(together)), 3, label)
-            self.assertIn("then a paragraph of 3 lines kept together", label)
-            if "heading" in label:
+            if "heading" in said.group(2):
                 # The heading's first run is the page break.
-                first_run = kept.find(f"{W}r")
-                self.assertIsNotNone(first_run.find(f"{W}br"), label)
+                self.assertIsNotNone(kept.find(f"{W}r").find(f"{W}br"), label)
                 self.assertEqual(lines_of(kept)[0], "", label)
-                self.assertTrue(count < lines_per_page, label)
+                self.assertEqual(count, lines_per_page - 2, label)
                 continue
-            after = int(re.search(r"before its last (\d+) lines", label).group(1))
-            self.assertEqual(len(lines_of(kept)), 1 + after, label)
-            # The line before the break ends the page of the lines before it.
-            self.assertTrue(count + 1 <= lines_per_page, label)
-            fits = after + 3 <= lines_per_page
-            self.assertEqual(fits, number == 1, label)
+            after = len(lines_of(kept)) - 1
+            self.assertEqual(lines_of(kept)[0], f"Case {number:02d} kept: A")
+            # The line before the break ends the page of the lines before it, with a line to
+            # spare in case a label wraps after all.
+            self.assertTrue(count + 1 < lines_per_page, label)
+            self.assertEqual(after + 3 <= lines_per_page, number == 1, label)
+        self.assertEqual([len(lines_of(p)) - 1 for p in paragraphs[1:6:3]], [6, 56])
 
         # The header documents: the heights the purposes claim.
         parts, body, targets = load("E-header-no-room")
@@ -2047,6 +2066,19 @@ class Packages(unittest.TestCase):
                             if "German" not in lines_of(p)[0]]
                 self.assertEqual(switches, [f"PAGE \\* {s}: 1" for s in rules.NUMBER_SWITCHES])
         self.assertEqual(rules.NUMBER_STARTS, [0, 27, 53, 1665, 4000, 4999])
+        self.assertEqual(rules.NUMBER_SWITCHES, [
+            "Arabic", "ArabicDash", "ALPHABETIC", "alphabetic", "ROMAN", "roman", "Ordinal",
+            "CardText", "OrdText", "Hex", "DollarText"])
+        # Chicago numbers at 116 and 117 (MS-OI29500 2.1.548 k: nothing past 116), German on
+        # the page numbered 27.
+        chicago = [lines_of(paragraphs[0])[0] for paragraphs, _ in found
+                   if "Chicago" in lines_of(paragraphs[0])[0]]
+        self.assertEqual(chicago, ["Case 07: Chicago page numbers restarted at 116",
+                                   "Case 08: Chicago page numbers restarted at 117"])
+        german = [(lines_of(paragraphs[0])[0], lines_of(p)[0])
+                  for paragraphs, _ in found for p in paragraphs if "German" in lines_of(p)[0]]
+        self.assertEqual(german, [("Case 02: page numbers restarted at 27", f"PAGE \\* {s} in "
+                                   "German: 1") for s in ("Ordinal", "OrdText", "CardText")])
         # 27 and 53 are two and three letters, 1665 is 65 (ECMA-376 §17.18.59, upperLetter).
         self.assertEqual([(n - 1) // 26 + 1 for n in (27, 53, 1665)], [2, 3, 65])
 
@@ -2055,6 +2087,7 @@ class Packages(unittest.TestCase):
         _, body, _ = load("E-bold-missing")
         paragraphs = body.findall(f"{W}p")
         self.assertEqual(len(paragraphs), 14)
+        seen = []
         for n, paragraph in enumerate(paragraphs, 1):
             label_run, sample = paragraph.findall(f"{W}r")
             label = "".join(t.text for t in label_run.iter(f"{W}t"))
@@ -2067,6 +2100,11 @@ class Packages(unittest.TestCase):
             self.assertEqual(props.find(f"{W}sz").get(f"{W}val"), str(int(size) * 2), label)
             self.assertEqual(props.find(f"{W}b") is not None, "bold" in style, label)
             self.assertEqual(props.find(f"{W}i") is not None, "italic" in style, label)
+            seen.append((font, size, style))
+        expected = [(24, "regular")] + [(size, "bold") for size in (8, 11, 24, 48)] + [
+            (24, "italic"), (24, "bold italic")]
+        self.assertEqual(seen, [(font, str(size), style) for font in ("Lucida Console", "Impact")
+                                for size, style in expected])
 
         # E-soft-hyphen-font: a label paragraph, then the two halves in the default font with
         # the soft hyphen or the w:sym between them, in a narrow paragraph where the label
