@@ -2,6 +2,10 @@
 //! `Document::clamp`. The structs implement both through `ir_struct!`, which visits
 //! every field; the values at the leaves are here.
 
+use std::any::Any;
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use officewright_core::{Color, PageSize, Pt};
 
 use super::Document;
@@ -129,6 +133,12 @@ pub(crate) struct Clamper {
     report: LayoutReport,
     /// How many tables the walk is inside.
     table_depth: usize,
+    /// The values many items share that the walk has clamped, by the address of the
+    /// value: the value itself, and what clamping made of it. Holding the value keeps
+    /// the items that still share it from looking like its only holders, which
+    /// `Arc::get_mut` would let clamp it again in place, and keeps another value from
+    /// taking its address during the walk.
+    shared: HashMap<usize, Box<dyn Any>>,
 }
 
 impl Clamper {
@@ -245,6 +255,46 @@ impl<T: Clamp> Clamp for Vec<T> {
     }
 }
 
+impl<T: Check> Check for Arc<T> {
+    fn check(&self, checker: &mut Checker<'_>) -> Result<()> {
+        T::check(self, checker)
+    }
+}
+
+/// A value many items share is clamped once, where the walk first meets it, and every
+/// item that shares it takes the same result: it stays shared, and only the first item is
+/// reported. The producer's copy is never changed. The result does not depend on where
+/// the walk meets the value, which holds for values whose clamp rules use no context of
+/// the walk, such as paragraph properties; a shared value whose rules do (the depth of
+/// tables, for one) needs a memo by context too. A value that compares unequal to itself
+/// (one holding NaN, which `validate` rejects) is copied even when nothing changes.
+impl<T: Clamp + Clone + PartialEq + 'static> Clamp for Arc<T> {
+    fn clamp(&mut self, clamper: &mut Clamper) {
+        if let Some(value) = Arc::get_mut(self) {
+            value.clamp(clamper);
+            return;
+        }
+        let key = Arc::as_ptr(self).cast::<()>() as usize;
+        if let Some((_, done)) = clamper
+            .shared
+            .get(&key)
+            .and_then(|entry| entry.downcast_ref::<(Arc<T>, Arc<T>)>())
+        {
+            *self = Arc::clone(done);
+            return;
+        }
+        let mut value = T::clone(self);
+        value.clamp(clamper);
+        let done = if value == **self {
+            Arc::clone(self)
+        } else {
+            Arc::new(value)
+        };
+        let original = std::mem::replace(self, Arc::clone(&done));
+        clamper.shared.insert(key, Box::new((original, done)));
+    }
+}
+
 impl Clamp for Pt {
     fn clamp(&mut self, _: &mut Clamper) {}
 }
@@ -254,3 +304,4 @@ impl Clamp for PageSize {
 }
 
 no_rules!(bool, u8, u16, u32, char, String, Color);
+no_rules!(Arc<str>);

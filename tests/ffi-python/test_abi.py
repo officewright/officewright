@@ -358,7 +358,7 @@ class AbiTest(unittest.TestCase):
         data = ctypes.cast(placeholder, POINTER(c_uint8))
         size = c_size_t(99)
         self.check(lib.ow_pdf_document_save_bytes(doc, byref(data), byref(size)), LIMIT_EXCEEDED)
-        self.assertIn("left of the budget it shares with other subsets", last_error())
+        self.assertIn("hint mask bytes left of its budget", last_error())
         self.assertFalse(data)
         self.assertEqual(size.value, 0)
         self.check(lib.ow_pdf_document_set_subset_budget(doc, 2**64 - 1))
