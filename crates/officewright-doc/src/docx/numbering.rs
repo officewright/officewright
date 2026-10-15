@@ -47,7 +47,7 @@ pub(super) fn read(
         match event {
             Event::Start(tag) => {
                 c.at = tag.offset();
-                mce.start(&reader, &tag).map_err(opc)?;
+                let disposition = mce.start(&reader, &tag).map_err(opc)?;
                 if !in_root {
                     if !w
                         .iter()
@@ -64,9 +64,10 @@ pub(super) fn read(
                 }
                 let offset = tag.offset();
                 // Every element is kept with the document's tokens for writing; picture
-                // bullets are not read yet. An mc:AlternateContent is kept whole, and
-                // the children of the branch it takes are read in its place.
-                let span = c.capture(&mut reader, &mut mce, tag)?;
+                // bullets are not read yet. An mc:AlternateContent is kept whole, and the
+                // children of the branch it takes are read in its place; so are the
+                // children of an ignorable element whose content mc:ProcessContent names.
+                let span = c.capture(&mut reader, &mut mce, tag, Some(disposition))?;
                 for span in c.through_alternates(span) {
                     match c.document.element(span).local_in(&names.w) {
                         Some("abstractNum") => definition(&mut c, &names, span, offset),

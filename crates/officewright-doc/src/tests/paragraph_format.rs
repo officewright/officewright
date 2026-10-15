@@ -1508,7 +1508,7 @@ fn reads_the_paragraph_style_as_the_paragraph_properties_do() {
     ]
     .concat();
     let body = [
-        r#"<w:p><w:pPr><mc:AlternateContent><mc:Choice Requires="w99"><w:pStyle w:val="Right"/></mc:Choice><mc:Fallback><w:pStyle w:val="Centred"/></mc:Fallback></mc:AlternateContent></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
+        r#"<w:p><w:pPr><mc:AlternateContent><mc:Choice Requires="w14"><w:pStyle w:val="Right"/></mc:Choice><mc:Fallback><w:pStyle w:val="Centred"/></mc:Fallback></mc:AlternateContent></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
         // A choice that requires only w is taken.
         r#"<w:p><w:pPr><mc:AlternateContent><mc:Choice Requires="w"><w:pStyle w:val="Right"/></mc:Choice><mc:Fallback><w:pStyle w:val="Centred"/></mc:Fallback></mc:AlternateContent></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
         r#"<w:p><w:pPr><w:pStyle w:val="Centred"/><w:pStyle w:val="Right"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,

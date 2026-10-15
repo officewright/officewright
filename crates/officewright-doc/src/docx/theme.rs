@@ -50,7 +50,7 @@ pub(super) fn read(
         match event {
             Event::Start(tag) => {
                 c.at = tag.offset();
-                mce.start(&reader, &tag).map_err(opc)?;
+                let disposition = mce.start(&reader, &tag).map_err(opc)?;
                 if !in_root {
                     if !a.iter().any(|&namespace| tag.name().is(namespace, "theme")) {
                         let message = format!(
@@ -66,8 +66,9 @@ pub(super) fn read(
                 let offset = tag.offset();
                 // Every element is kept with the document's tokens for writing. An
                 // mc:AlternateContent is kept whole, and the children of the branch it
-                // takes are read in its place.
-                let span = c.capture(&mut reader, &mut mce, tag)?;
+                // takes are read in its place; so are the children of an ignorable element
+                // whose content mc:ProcessContent names.
+                let span = c.capture(&mut reader, &mut mce, tag, Some(disposition))?;
                 for span in c.through_alternates(span) {
                     if c.document.element(span).local_in(&names.a) != Some("themeElements") {
                         continue;
