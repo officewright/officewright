@@ -6,7 +6,11 @@
 //! tables nested as deep as the XML allows never decide how deep the call stack grows.
 //! Every element goes through the Markup Compatibility processor: elements of
 //! WordprocessingML are read into the model, one branch of each `mc:AlternateContent`
-//! is taken, and everything else is kept in its place without being understood.
+//! is taken, and everything else is kept in its place as written. The processor
+//! understands WordprocessingML, the relationships namespace and the DrawingML the
+//! picture reader reads (#312), so a kept element of those namespaces still has its own
+//! `mc:MustUnderstand` checked; one of an ignorable namespace is kept without being
+//! read, or read in place under `mc:ProcessContent`.
 
 use std::collections::HashMap;
 
