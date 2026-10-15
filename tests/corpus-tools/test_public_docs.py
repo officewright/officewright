@@ -442,6 +442,71 @@ class Cleaning(unittest.TestCase):
             with self.subTest(name):
                 self.assertIn(f"{name} is embedded", problems)
 
+    def test_embedded_parts_are_found_whatever_the_xml_spelling(self):
+        # #294: a control part stored as XML only, which no folder rule catches, named by a
+        # content type or a relationship spelled as XML and OPC allow but Word does not
+        # write. Each package has only one way to find it.
+        ct_ns = "http://schemas.openxmlformats.org/package/2006/content-types"
+        control = b"<ax:ocx xmlns:ax='a' ax:persistence='persistPropertyBag'/>"
+
+        def types(overrides, name="[Content_Types].xml", encoding="utf-8"):
+            xml = (f'<?xml version="1.0" encoding="{encoding}"?><Types xmlns="{ct_ns}">'
+                   '<Default Extension="xml" ContentType="application/xml"/>'
+                   f"{overrides}</Types>")
+            return {name: xml.encode(encoding)}
+
+        def rels(xml, encoding="utf-8"):
+            text = f'<?xml version="1.0" encoding="{encoding}"?>{xml}'
+            return {"word/_rels/document.xml.rels": text.encode(encoding)}
+
+        override = ('<Override PartName="/word/controls/c1.xml" '
+                    'ContentType="application/vnd.ms-office.activeX{}xml"/>')
+        relationship = '<Relationship Id="rId1" Type="{}" Target="controls/c1.xml"/>'
+        spellings = {
+            "a character reference in the content type": types(override.format("&#43;")),
+            "a prefixed content types element": {"[Content_Types].xml": (
+                f'<ct:Types xmlns:ct="{ct_ns}"><ct:Override PartName="/word/controls/c1.xml" '
+                'ContentType="application/vnd.ms-office.activeX+xml"/></ct:Types>').encode()},
+            "content types in UTF-16": types(override.format("+"), encoding="utf-16"),
+            "the content types stream in lower case": types(override.format("+"),
+                                                            name="[content_types].xml"),
+            "a content type with a parameter": types(
+                override.format("+").replace('+xml"', '+xml;v=1"')),
+            "a character reference in the relationship type": rels(
+                f'<Relationships xmlns="{PKG}">'
+                + relationship.format(f"{REL}/contr&#111;l") + "</Relationships>"),
+            "prefixed relationship elements": rels(
+                f'<r:Relationships xmlns:r="{PKG}">'
+                + relationship.format(f"{REL}/control").replace("<Relationship", "<r:Relationship")
+                + "</r:Relationships>"),
+            "relationships in UTF-16": rels(
+                f'<Relationships xmlns="{PKG}">' + relationship.format(f"{REL}/control")
+                + "</Relationships>", encoding="utf-16"),
+            "a Strict relationship type": rels(
+                f'<Relationships xmlns="{PKG}">'
+                + relationship.format("http://purl.oclc.org/ooxml/officeDocument/relationships"
+                                      "/control") + "</Relationships>"),
+        }
+        for label, package_parts in spellings.items():
+            with self.subTest(label):
+                parts = {**package_parts, "word/controls/c1.xml": control,
+                         "word/document.xml": b"<w:document xmlns:w='w'/>"}
+                self.assertEqual(public.embedded_parts(parts), ["word/controls/c1.xml"])
+        # Without any of them, the part is not found: the spellings above are what find it.
+        plain = {**types(""), "word/controls/c1.xml": control}
+        self.assertEqual(public.embedded_parts(plain), [])
+
+    def test_a_package_part_that_is_not_xml_is_refused_and_reported(self):
+        for name in ("[Content_Types].xml", "word/_rels/document.xml.rels"):
+            with self.subTest(name):
+                broken = {name: "<Types><Override PartName='/word/x.xml'"}
+                with self.assertRaises(public.Refused) as caught:
+                    public.clean(package(**broken), DOC)
+                self.assertIn(f"{name} is not well-formed XML", str(caught.exception))
+                self.assertTrue(
+                    any(p.startswith(f"{name} is not well-formed XML")
+                        for p in public.problems(package(**broken))))
+
     def test_text_after_a_nested_text_box_and_split_addresses_are_read(self):
         nested = (
             "<w:document xmlns:w='w'><w:body><w:p><w:r><w:t>See </w:t></w:r><w:r><w:pict>"
