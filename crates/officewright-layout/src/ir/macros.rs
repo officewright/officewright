@@ -13,6 +13,7 @@
 /// | `copy T` | `T` | `T` | `T` |
 /// | `ref T` | `T` | `&T` | `T` |
 /// | `shared T` | `Arc<T>` | `&T` | `impl Into<Arc<T>>` |
+/// | `shared_slice T` | `Arc<[T]>` | `&[T]` | `impl Into<Arc<[T]>>` |
 /// | `str Arc<str>` | `Arc<str>` | `&str` | `impl Into<Arc<str>>` |
 /// | `opt_str Option<Arc<str>>` | `Option<Arc<str>>` | `Option<&str>` | `Option<Arc<str>>` |
 /// | `vec T` | `Vec<T>` | `&[T]` | `impl IntoIterator<Item = T>` |
@@ -29,6 +30,7 @@ macro_rules! ir_struct {
     (@storage copy $ty:ty) => { $ty };
     (@storage ref $ty:ty) => { $ty };
     (@storage shared $ty:ty) => { std::sync::Arc<$ty> };
+    (@storage shared_slice $ty:ty) => { std::sync::Arc<[$ty]> };
     (@storage str $ty:ty) => { $ty };
     (@storage opt_str $ty:ty) => { $ty };
     (@storage vec $ty:ty) => { Vec<$ty> };
@@ -36,6 +38,7 @@ macro_rules! ir_struct {
     (@get_type copy $ty:ty) => { $ty };
     (@get_type ref $ty:ty) => { &$ty };
     (@get_type shared $ty:ty) => { &$ty };
+    (@get_type shared_slice $ty:ty) => { &[$ty] };
     (@get_type str $ty:ty) => { &str };
     (@get_type opt_str $ty:ty) => { Option<&str> };
     (@get_type vec $ty:ty) => { &[$ty] };
@@ -43,6 +46,7 @@ macro_rules! ir_struct {
     (@get copy $value:expr) => { $value };
     (@get ref $value:expr) => { &$value };
     (@get shared $value:expr) => { &$value };
+    (@get shared_slice $value:expr) => { &$value };
     (@get str $value:expr) => { &$value };
     (@get opt_str $value:expr) => { $value.as_deref() };
     (@get vec $value:expr) => { &$value };
@@ -50,6 +54,7 @@ macro_rules! ir_struct {
     (@set_type copy $ty:ty) => { $ty };
     (@set_type ref $ty:ty) => { $ty };
     (@set_type shared $ty:ty) => { impl Into<std::sync::Arc<$ty>> };
+    (@set_type shared_slice $ty:ty) => { impl Into<std::sync::Arc<[$ty]>> };
     (@set_type str $ty:ty) => { impl Into<$ty> };
     (@set_type opt_str $ty:ty) => { $ty };
     (@set_type vec $ty:ty) => { impl IntoIterator<Item = $ty> };
@@ -57,6 +62,7 @@ macro_rules! ir_struct {
     (@set copy $value:expr) => { $value };
     (@set ref $value:expr) => { $value };
     (@set shared $value:expr) => { $value.into() };
+    (@set shared_slice $value:expr) => { $value.into() };
     (@set str $value:expr) => { $value.into() };
     (@set opt_str $value:expr) => { $value };
     (@set vec $value:expr) => { $value.into_iter().collect() };

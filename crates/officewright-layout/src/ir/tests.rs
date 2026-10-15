@@ -2678,3 +2678,91 @@ fn shared_properties_are_clamped_once_and_stay_shared() {
     // The producer's copy is as it was.
     assert_eq!(beyond.tabs()[0].position(), Pt(3_600.0));
 }
+
+#[test]
+fn sections_tables_and_cells_can_share_what_they_repeat() {
+    // Issue #175: a header that many sections inherit, a table's properties, a cell's
+    // default borders.
+    use std::sync::Arc;
+
+    let mut document = Document::default();
+    let style = document.add_run_style(RunStyle::default());
+    let header: Arc<[Block]> = Arc::from(vec![Block::from(Paragraph::new(style))]);
+    let set = HeaderFooterSet::default().with_primary(Arc::clone(&header));
+    let first = Section::new(PageSetup::default()).with_headers(set.clone());
+    let second = Section::new(PageSetup::default()).with_headers(set);
+    assert!(std::ptr::eq(
+        first.headers().primary(),
+        second.headers().primary()
+    ));
+    let props = Arc::new(TableProps::default());
+    let tables = [
+        Table::default().with_props(Arc::clone(&props)),
+        Table::default().with_props(Arc::clone(&props)),
+    ];
+    assert!(std::ptr::eq(tables[0].props(), tables[1].props()));
+    assert!(std::ptr::eq(
+        Cell::default().borders(),
+        Cell::default().borders()
+    ));
+}
+
+#[test]
+fn a_header_many_sections_share_is_clamped_once_and_stays_shared() {
+    use std::sync::Arc;
+
+    let mut document = Document::default();
+    let style = document.add_run_style(RunStyle::default());
+    let beyond =
+        ParagraphProps::default().with_tabs([TabStop::default().with_position(Pt(3_600.0))]);
+    let header: Arc<[Block]> =
+        Arc::from(vec![Block::from(Paragraph::new(style).with_props(beyond))]);
+    for _ in 0..3 {
+        let set = HeaderFooterSet::default().with_primary(Arc::clone(&header));
+        document.add_section(Section::new(PageSetup::default()).with_headers(set));
+    }
+    let report = document.clamp();
+    assert_eq!(
+        entries(&report),
+        [
+            "sections[0].headers.primary[0].props.tabs[0].position: tab stop position 3600 pt \
+          is outside Word's range of -1584 to 1584 pt and becomes 1584 pt"
+        ]
+    );
+    let primaries: Vec<&[Block]> = document
+        .sections()
+        .iter()
+        .map(|section| section.headers().primary())
+        .collect();
+    assert!(std::ptr::eq(primaries[0], primaries[1]) && std::ptr::eq(primaries[1], primaries[2]));
+    let Some(Block::Paragraph(paragraph)) = primaries[0].first() else {
+        panic!("a paragraph");
+    };
+    assert_eq!(paragraph.props().tabs()[0].position(), Pt(1584.0));
+    // The producer's header is as it was.
+    let Some(Block::Paragraph(original)) = header.first() else {
+        panic!("a paragraph");
+    };
+    assert_eq!(original.props().tabs()[0].position(), Pt(3_600.0));
+    assert!(document.clamp().is_empty());
+    // The same when the producer no longer holds the header: the sections are then its
+    // only holders, and the last one must not clamp it again in place.
+    let mut document = Document::default();
+    let style = document.add_run_style(RunStyle::default());
+    let header: Arc<[Block]> = Arc::from(vec![Block::from(Paragraph::new(style).with_props(
+        ParagraphProps::default().with_tabs([TabStop::default().with_position(Pt(3_600.0))]),
+    ))]);
+    for _ in 0..3 {
+        let set = HeaderFooterSet::default().with_primary(Arc::clone(&header));
+        document.add_section(Section::new(PageSetup::default()).with_headers(set));
+    }
+    drop(header);
+    let report = document.clamp();
+    assert_eq!(entries(&report).len(), 1, "{:?}", entries(&report));
+    let primaries: Vec<&[Block]> = document
+        .sections()
+        .iter()
+        .map(|section| section.headers().primary())
+        .collect();
+    assert!(std::ptr::eq(primaries[0], primaries[1]) && std::ptr::eq(primaries[1], primaries[2]));
+}
