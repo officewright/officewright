@@ -1877,6 +1877,14 @@ class Packages(unittest.TestCase):
         self.assertEqual(instructions(footer), ["PAGE", "NUMPAGES", "SECTIONPAGES"])
         self.assertEqual(story_text(story(parts, targets, found[0][1], "headerReference")),
                          "header")
+        # The questions of #298 the sections ask: an even start restarted at 5 after page 1,
+        # an odd start restarted at 0, and an even start that continues after an even number
+        # and so gets a blank page.
+        self.assertEqual([(kind(sect), None if sect.find(f"{W}pgNumType") is None
+                           else sect.find(f"{W}pgNumType").get(f"{W}start"))
+                          for _, sect in found],
+                         [(None, None), ("evenPage", "5"), ("evenPage", None), ("oddPage", "0"),
+                          (None, None)])
 
         # E-section-continuous-title: Section 1 names Header A and Footer A; Section 2 is
         # continuous, has a title page and names its own default and first-page header and
@@ -1944,6 +1952,7 @@ class Packages(unittest.TestCase):
             self.assertTrue(count + 1 < lines_per_page, label)
             self.assertEqual(after + 3 <= lines_per_page, number == 1, label)
         self.assertEqual([len(lines_of(p)) - 1 for p in paragraphs[1:6:3]], [6, 56])
+        self.assertEqual([len(lines_of(p)) for p in paragraphs[0::3]], [56, 20, 56])
 
         # The header documents: the heights the purposes claim.
         parts, body, targets = load("E-header-no-room")
