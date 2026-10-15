@@ -1430,6 +1430,32 @@ mod tests {
         assert!(!subsetter_panics(cff.clone(), &[]));
         let err = subset_with(cff, false).unwrap_err();
         assert!(matches!(err, Error::Subset { .. }), "{err}");
+        // A SID-keyed font whose local subroutines cannot be read is still read: the
+        // subsetter subsets it, so 1E99999 in its Top DICT and a glyph of more stem hints
+        // than it counts, through global subroutines, are refused.
+        let unreadable = |glyphs: Vec<Vec<u8>>, global: Vec<u8>, top_prefix: Vec<u8>| {
+            Spec {
+                glyphs,
+                global,
+                local: vec![vec![]],
+                subrs: Subrs::PastTheEnd,
+                top_prefix,
+                ..Spec::default()
+            }
+            .build()
+        };
+        let real = unreadable(glyphs_with(4, vec![14]), vec![], PRIVATE_INFINITE.to_vec());
+        let err = subset_glyphs(real, &[4]).unwrap_err();
+        assert!(
+            matches!(err, Error::MalformedTable { table: "CFF ", .. }),
+            "{err}"
+        );
+        let hints = unreadable(
+            glyphs_with(1, hinted_glyph(65_536, 29, false)),
+            index_of(&hint_subrs(29)),
+            vec![],
+        );
+        assert!(refusal(subset_glyphs(hints, &[1])).starts_with("glyph 1 declares"));
         // A SID-keyed font whose subroutines cannot be read: the subsetter drops its Private
         // DICT and does not write it back, so 1E99999 there does not count.
         let private = [&PRIVATE_INFINITE[..], &int5(1_000_000), &[19]].concat();
