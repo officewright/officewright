@@ -11,6 +11,11 @@ does not name as accepted, no profile path in geometry.json or formatting.json, 
 the importer does not write, Word's page breaks as the re-saved copy has them, and the
 corpus limits of CLAUDE.md (each file under 1 MB, all under 50 MB). Every document of
 business/ and generated/ has a reference or a SOURCES.md row saying why it has none.
+
+The notes of each SOURCES.md row say what the files show: the compatibility mode and the
+w:compat settings Word dropped from the re-saved copy, the fonts the rasters were drawn
+with, and the formatting export; geometry.json names the settings Word dropped and added;
+and the body paragraphs of formatting.json carry the style ids of the re-saved copy.
 """
 
 import importlib.util
@@ -198,6 +203,16 @@ class References(unittest.TestCase):
                         + (", ".join(dropped) or "none")
                     ],
                 )
+
+    def test_geometry_names_the_settings_word_dropped_and_added(self):
+        for folder in folders():
+            resaved, original = self.resaved(folder)
+            with self.subTest(document=f"{folder.parent.name}/{folder.name}"):
+                geometry = json.loads((folder / "geometry.json").read_text(encoding="utf-8"))
+                before = importer.compat_flags(importer.read_parts(original))
+                after = importer.compat_flags(importer.read_parts(resaved))
+                self.assertEqual(geometry["compat_flags_dropped"], sorted(before - after))
+                self.assertEqual(geometry["compat_flags_added"], sorted(after - before))
 
     def test_the_notes_name_exactly_the_fonts_the_rasters_draw_with(self):
         for folder in folders():
