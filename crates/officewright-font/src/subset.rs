@@ -102,8 +102,9 @@ impl FontFace {
     /// subsetter cannot write back or a glyph with more stem hints than it can count, or
     /// a `name` table whose offsets it cannot compute,
     /// [`Error::TableOverLimit`] for a `name` table whose records to keep point at more
-    /// than 1 MiB of strings, or glyphs whose `CFF ` charstrings take more than
-    /// 16,777,216 operands, operators and hint mask bytes to decompile,
+    /// than 1 MiB of strings, `CFF ` Font DICTs that point at more than 1 MiB of Private
+    /// DICTs, or glyphs whose `CFF ` charstrings take more than 16,777,216 operands,
+    /// operators and hint mask bytes to decompile,
     /// [`Error::SubsetUnsupported`] if the face uses
     /// something the subsetter does not implement yet, and [`Error::Subset`] or
     /// [`Error::SubsetterPanicked`] if the face is damaged in a way that only subsetting
@@ -131,11 +132,8 @@ impl FontFace {
         // lookup, not by the outline format the font parser reports.
         let font = crate::font::font_ref(self.data(), face)?;
         crate::name_offsets::check(&font, self.data(), face)?;
-        // The programs first: they count the Font DICTs before any Private DICT is read,
-        // and the reals check reads the Private DICT of every Font DICT.
         if subsetter_table(&font, self.data(), b"glyf").is_none() {
-            crate::cff::check_programs(&font, self.data(), face, &ids)?;
-            crate::cff::check_reals(&font, self.data(), face)?;
+            crate::cff::check(&font, self.data(), face, &ids)?;
         }
         let remapper = GlyphRemapper::new_from_glyphs_sorted(&ids);
         let data = self.data();

@@ -3565,6 +3565,45 @@ fn checks_markup_compatibility_in_the_branch_taken_at_the_top_of_parts() {
 }
 
 #[test]
+fn reads_style_names_section_breaks_and_grid_columns_through_alternate_content() {
+    // Issue #157: these skipped an mc:AlternateContent instead of reading the branch it
+    // takes. w14 is declared but not implemented, so its choices are passed by.
+    const MC: &str = r#"xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" mc:Ignorable="w14""#;
+    let styles = format!(
+        r#"<w:styles xmlns:w="{W}" {MC}><w:style w:type="paragraph" w:styleId="Quote"><mc:AlternateContent><mc:Choice Requires="w"><w:name w:val="Quote"/></mc:Choice><mc:Fallback><w:name w:val="Unread"/></mc:Fallback></mc:AlternateContent><mc:AlternateContent><mc:Choice Requires="w14"><w:basedOn w:val="Unread"/></mc:Choice><mc:Fallback><w:basedOn w:val="Normal"/><w:next w:val="Body"/><w:link w:val="QuoteChar"/></mc:Fallback></mc:AlternateContent></w:style></w:styles>"#
+    );
+    let body = r#"<w:p><w:pPr><mc:AlternateContent><mc:Choice Requires="w14"><w:sectPr><w:type w:val="nextColumn"/></w:sectPr></mc:Choice><mc:Fallback><w:sectPr><w:type w:val="continuous"/></w:sectPr></mc:Fallback></mc:AlternateContent></w:pPr></w:p><w:tbl><w:tblGrid><mc:AlternateContent><mc:Choice Requires="w14"><w:gridCol w:w="1"/></mc:Choice><mc:Fallback><w:gridCol w:w="2000"/><w:gridCol w:w="1000"/></mc:Fallback></mc:AlternateContent></w:tblGrid><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl><w:p/>"#;
+    let document = with_styles(body, &styles);
+    let quote = document
+        .styles()
+        .iter()
+        .find(|s| s.id() == "Quote")
+        .unwrap();
+    assert_eq!(
+        (quote.name(), quote.based_on(), quote.next(), quote.link()),
+        (
+            Some("Quote"),
+            Some("Normal"),
+            Some("Body"),
+            Some("QuoteChar")
+        )
+    );
+    let sections: Vec<Section<'_>> = document.sections().collect();
+    assert_eq!(sections.len(), 2);
+    assert_eq!(
+        sections[0].properties().start(),
+        Some(SectionStart::Continuous)
+    );
+    let Some(Block::Table(table)) = sections[1].blocks().next() else {
+        panic!("no table");
+    };
+    assert_eq!(
+        table.grid_columns().collect::<Vec<_>>(),
+        [Some(Pt(100.0)), Some(Pt(50.0))]
+    );
+}
+
+#[test]
 fn reads_the_branch_alternate_content_takes_at_the_top_of_parts() {
     // Issue #116: an mc:AlternateContent directly under the root of the settings,
     // numbering, styles, font table and theme was kept without being read.
