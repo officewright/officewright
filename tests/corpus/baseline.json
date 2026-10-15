@@ -729,8 +729,8 @@
     },
     "tests/corpus/word-rules/E-italic-missing.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.7474,
-      "ssim_min": 0.7474,
+      "ssim_mean": 0.9046,
+      "ssim_min": 0.9046,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-line-at-least.docx": {
@@ -748,14 +748,14 @@
     "tests/corpus/word-rules/E-line-fonts-truetype.docx": {
       "line_agreement": 1.0,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.8868,
-      "ssim_min": 0.8455,
+      "ssim_mean": 0.936,
+      "ssim_min": 0.8728,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-line-fonts.docx": {
       "line_agreement": 1.0,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.9067,
+      "ssim_mean": 0.8953,
       "ssim_min": 0.845,
       "text_score": 1.0
     },
@@ -787,23 +787,23 @@
     "tests/corpus/word-rules/E-smallcaps-12.docx": {
       "line_agreement": 0.6667,
       "page_break_agreement": 0.0,
-      "ssim_mean": 0.8519,
-      "ssim_min": 0.828,
-      "text_score": 0.6448
+      "ssim_mean": 0.8567,
+      "ssim_min": 0.8301,
+      "text_score": 0.6905
     },
     "tests/corpus/word-rules/E-smallcaps-14.docx": {
       "line_agreement": 0.6667,
       "page_break_agreement": 0.0,
-      "ssim_mean": 0.8519,
-      "ssim_min": 0.828,
-      "text_score": 0.6448
+      "ssim_mean": 0.8567,
+      "ssim_min": 0.8301,
+      "text_score": 0.6905
     },
     "tests/corpus/word-rules/E-smallcaps-15.docx": {
       "line_agreement": 0.6667,
       "page_break_agreement": 0.0,
-      "ssim_mean": 0.8519,
-      "ssim_min": 0.828,
-      "text_score": 0.6448
+      "ssim_mean": 0.8567,
+      "ssim_min": 0.8301,
+      "text_score": 0.6905
     },
     "tests/corpus/word-rules/E-space-before-top.docx": {
       "line_agreement": 1.0,

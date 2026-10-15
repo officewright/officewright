@@ -16,6 +16,7 @@
 crates/officewright-pdf/data/afm/* -text
 crates/officewright-layout/data/* -text
 tests/fonts/** -text
+tests/fonts-word/** -text
 tests/corpus/poi/** -text
 
 # Exact bytes matter: the fixture has a CRLF line ending and a form feed.

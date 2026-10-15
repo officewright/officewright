@@ -96,6 +96,9 @@ tests/corpus-tools/     tests of make-rule-docs.py and corpus-import.py, and tha
 tests/scripts/          tests of scripts/check-added-files.sh in a throwaway git repository (Python)
 tests/fonts/            unmodified OFL test fonts with their license files, listed in THIRD-PARTY-NOTICES.md;
                         outside every crate, so never published
+tests/fonts-word/       the same for faces Word had installed when it rendered references, in a build tests/fonts
+                        does not hold: the TrueType Noto Sans (noto-truetype/; tests/fonts/noto/ is its CFF build);
+                        only the corpus runner of check.sh reads them, so the crates' tests do not see them
 tools/corpus-runner/    workspace member, publish = false: runs the library over a corpus, writes a JSON report
 tools/ooxml-validate/   small .NET tool: validates generated OOXML with Open XML SDK's OpenXmlValidator (MIT)
 corpus-ext/             gitignored: large external corpora downloaded by scripts/fetch-corpus.sh
@@ -111,7 +114,8 @@ scripts/check-capi.sh   checks such a prefix as a user would: files, exports, te
 scripts/package.sh      builds one release archive; release-in-container.sh wraps it for the Linux builds
 scripts/install-cargo-c.sh  the pinned prebuilt cargo-c, shared by ci.yml and release.yml
 scripts/nightly.sh      long-running checks (see below)
-scripts/check-test-fonts.sh  compares tests/fonts with the upstream sources THIRD-PARTY-NOTICES.md names
+scripts/check-test-fonts.sh  compares tests/fonts and tests/fonts-word with the upstream sources
+                        THIRD-PARTY-NOTICES.md names
 scripts/make-rule-docs.py  writes tests/corpus/word-rules/ (stored ZIP, fixed dates: same bytes everywhere)
 scripts/import-public-docs.py  cleans the listed public documents into tests/corpus/business/
 scripts/make-business-docs.py  writes tests/corpus/generated/ the same way, with open-font twins
@@ -311,7 +315,8 @@ cargo package --list -p officewright-pdf, -font, -layout, -cli: no third-party d
 typos && taplo fmt --check && shellcheck scripts/*.sh .githooks/pre-commit && actionlint
 scripts/check-added-files.sh: no tracked Python bytecode, no file naming a home directory; its tests in tests/scripts
 tests/corpus-tools (Python unittest): committed rule documents equal make-rule-docs.py output; corpus-import.py refusals;
-  every file in tests/fonts is listed with its SHA-256 in THIRD-PARTY-NOTICES.md, and check-test-fonts.sh's pins are its
+  every file in tests/fonts and tests/fonts-word is listed with its SHA-256 in THIRD-PARTY-NOTICES.md, and
+  check-test-fonts.sh's pins are its
 tests/corpus-tools/poppler (Linux, macOS): fonts corpus-import.py embeds are what poppler draws
 tests/corpus-tools/test_make_reference.ps1 (Windows): a Word step that hangs is stopped, checked and never waited on forever
 scripts/install-capi.sh target/capi --debug, copy the header, git diff --exit-code crates/officewright-ffi/include/officewright.h
@@ -330,11 +335,12 @@ PDF output of officewright text-to-pdf (tests/pdf-output): qpdf --check without 
   shows their colours and transparency, a PNG with every filter type renders the same decoded by officewright as
   unfiltered by poppler, the committed fuzz seeds equal images.py's output; the example embed_report counts a font the
   subsetter does not support apart from a damaged one (Linux, macOS)
-corpus-runner over tests/corpus (committed corpus), every document rendered with the fonts of tests/fonts, compared with
-  tests/corpus/baseline.json: statuses and the scores against Word's references (Linux), statuses only (macOS, Windows)
+corpus-runner over tests/corpus (committed corpus), every document rendered with the fonts of tests/fonts and, first,
+  tests/fonts-word (the TrueType Noto Sans, the build Word had for the references that use it), compared with tests/corpus/baseline.json: statuses
+  and the scores against Word's references (Linux), statuses only (macOS, Windows)
 ```
 
-`scripts/nightly.sh` (scheduled CI, hours): Miri on `officewright-ffi`, `fetch-corpus.sh --check all` (every pinned commit is still fetchable and every archive still has its pinned size; downloads nothing), the files of `tests/fonts` compared byte for byte with the upstream sources THIRD-PARTY-NOTICES.md names (`scripts/check-test-fonts.sh`), fuzzing (30 min per target, each seeded with files of the format it reads, listed in `seeds()` in nightly.sh; 30 s per input, an allocation of 1 GiB or more fails the input, and the fuzzer may grow to 2.5 GiB, since it also holds its corpus and AddressSanitizer's quarantine and overhead; crashing inputs uploaded as a CI artifact; from Milestone 3), corpus-runner over the Word documents of `corpus-ext/` (Apache POI and LibreOffice, fetched by the run; each child under the 1 GiB limit; compared with `tools/corpus-runner/baseline-ext.json`), report uploaded as a CI artifact. The full `fetch-corpus.sh all` from scratch, which downloads every source and verifies every SHA-256, runs weekly.
+`scripts/nightly.sh` (scheduled CI, hours): Miri on `officewright-ffi`, `fetch-corpus.sh --check all` (every pinned commit is still fetchable and every archive still has its pinned size; downloads nothing), the files of `tests/fonts` and `tests/fonts-word` compared byte for byte with the upstream sources THIRD-PARTY-NOTICES.md names (`scripts/check-test-fonts.sh`), fuzzing (30 min per target, each seeded with files of the format it reads, listed in `seeds()` in nightly.sh; 30 s per input, an allocation of 1 GiB or more fails the input, and the fuzzer may grow to 2.5 GiB, since it also holds its corpus and AddressSanitizer's quarantine and overhead; crashing inputs uploaded as a CI artifact; from Milestone 3), corpus-runner over the Word documents of `corpus-ext/` (Apache POI and LibreOffice, fetched by the run; each child under the 1 GiB limit; compared with `tools/corpus-runner/baseline-ext.json`), report uploaded as a CI artifact. The full `fetch-corpus.sh all` from scratch, which downloads every source and verifies every SHA-256, runs weekly.
 
 `.githooks/pre-commit` runs `scripts/check-added-files.sh --staged`, fmt, clippy and test. Enable once per clone: `git config core.hooksPath .githooks`. CI (`.github/workflows/ci.yml`) runs `check.sh` on Linux, Windows (Git Bash with the MSVC environment from `ilammy/msvc-dev-cmd`) and macOS plus an MSRV job on Rust 1.85 (`cargo test`, with poppler and qpdf for the corpus runner's tests); `nightly.yml` runs `nightly.sh` on Linux; `weekly.yml` runs the full corpus fetch on Linux. Actions are pinned by commit SHA and tools by version, except qpdf and poppler for the PDF output check and the MSRV job's corpus runner tests: they come from the runner's package manager (apt on `ubuntu-latest`, Homebrew on macOS), which keeps no installable old versions across runner image updates, so each CI step that installs them prints the versions it got.
 
