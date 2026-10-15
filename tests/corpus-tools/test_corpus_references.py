@@ -175,6 +175,78 @@ class References(unittest.TestCase):
                 else:
                     self.assertEqual(said, [], "the row describes a formatting.json")
 
+    def test_the_notes_give_the_mode_and_the_dropped_settings_of_the_re_saved_copy(self):
+        for folder in folders():
+            resaved, original = self.resaved(folder)
+            with self.subTest(document=f"{folder.parent.name}/{folder.name}"):
+                resaved_parts = importer.read_parts(resaved)
+                original_parts = importer.read_parts(original)
+                notes = self.notes(folder)
+                mode = importer.compatibility_mode(resaved_parts)
+                said = [note for note in notes if note.startswith("compatibility mode ")]
+                self.assertEqual(said, [f"compatibility mode {mode}"])
+                # The importer refuses a copy saved in another mode than the input's.
+                self.assertEqual(mode, importer.compatibility_mode(original_parts))
+                dropped = sorted(
+                    importer.compat_flags(original_parts) - importer.compat_flags(resaved_parts)
+                )
+                said = [note for note in notes if note.startswith("w:compat settings ")]
+                self.assertEqual(
+                    said,
+                    [
+                        "w:compat settings Word dropped from the re-saved copy: "
+                        + (", ".join(dropped) or "none")
+                    ],
+                )
+
+    def test_the_notes_name_exactly_the_fonts_the_rasters_draw_with(self):
+        for folder in folders():
+            with self.subTest(document=f"{folder.parent.name}/{folder.name}"):
+                geometry = json.loads((folder / "geometry.json").read_text(encoding="utf-8"))
+                said = [
+                    note for note in self.notes(folder)
+                    if note.startswith("fonts the PDF does not embed")
+                ]
+                # Both ways: a font the note adds fails, as does one it leaves out.
+                self.assertEqual(
+                    said, [importer.rasterized_note(geometry["fonts_rasterized_with"])]
+                )
+
+    def test_body_style_ids_are_those_of_the_re_saved_copy(self):
+        for folder in folders():
+            path = folder / "formatting.json"
+            if not path.exists():
+                continue
+            resaved, _ = self.resaved(folder)
+            with self.subTest(document=f"{folder.parent.name}/{folder.name}"):
+                formatting = json.loads(path.read_text(encoding="utf-8"))
+                main = [s for s in formatting["stories"] if s["story"] == "main"]
+                # Only the main story's paragraphs are matched to the copy.
+                for story in formatting["stories"]:
+                    if story["story"] != "main" or not formatting["styles_from_resaved_copy"]:
+                        for paragraph in story["paragraphs"]:
+                            self.assertNotIn("style_id", paragraph)
+                            self.assertNotIn("style_name", paragraph)
+                if not formatting["styles_from_resaved_copy"]:
+                    continue
+                self.assertEqual(len(main), 1)
+                expected = importer.body_paragraph_styles(importer.read_parts(resaved))
+                paragraphs = main[0]["paragraphs"]
+                self.assertEqual(len(paragraphs), len(expected))
+                for paragraph, (text, style_id, style_name) in zip(paragraphs, expected):
+                    # The importer's own test that the export and the copy line up.
+                    self.assertTrue(
+                        importer.alnum(text).startswith(importer.alnum(paragraph["text"])[:20]),
+                        (paragraph["index"], paragraph["text"], text),
+                    )
+                    # An entry Word folded empty hidden-mark paragraphs into has no style id
+                    # (report-hhs-usability-test-plan, entry 195).
+                    self.assertEqual(
+                        (paragraph.get("style_id"), paragraph.get("style_name")),
+                        (style_id, style_name),
+                        (paragraph["index"], paragraph["text"]),
+                    )
+
     def test_word_s_page_breaks_are_those_of_the_re_saved_copy(self):
         for folder in folders():
             resaved, _ = self.resaved(folder)

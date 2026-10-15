@@ -237,7 +237,24 @@ took longer for them than for the paragraphs, or ran out of time (its `runs_note
 which); "runs left out (size)" when they would make the file larger than 900,000 bytes,
 which keeps it under 1 MB. "incomplete (time budget)" means Word ran out of time before the
 last paragraph, and "body styles not matched to the re-saved copy" that the body paragraphs
-of the export and of the copy did not line up, so the style ids are left out.
+of the export and of the copy did not line up, so the style ids are left out. Word folds an
+empty paragraph whose mark is hidden into the paragraph after it, and the export has one entry
+for them: it has the text of the later paragraph but the indents, spacing and list label of the
+first one folded into it, and no style id, because the later paragraph's style is not the one
+Word applied (`reference/business/report-hhs-usability-test-plan/`, entry 195).
+
+The references of `word-rules/E-line-fonts-truetype`, `E-smallcaps-12`, `E-smallcaps-14`,
+`E-smallcaps-15` and `E-italic-missing` depend on which faces of Noto Sans were installed when
+Word rendered them, and their PDFs cannot tell, since Word embedded subsets. Word had exactly
+three, installed for the user and taken from `fonts/NotoSans/unhinted/ttf/` of
+notofonts/notofonts.github.io at commit `28b15b4b43b7bed62b5cf6e6b0b5ff5846270535`, and no
+Italic face: `NotoSans-Regular.ttf` (SHA-256
+f3961a9cde016d41a4879aecda1474d3a36d6bf54fa0e4643de029cc2248b0e8), `NotoSans-Bold.ttf`
+(SHA-256 87cb2d84472a7d66da659ee47b6cdb9552326e8c128245231f191b6ac72529d9) and
+`NotoSans-BoldItalic.ttf` (SHA-256
+3d367743f371f28671d2764e911a53d7c20ec9b6aa8791d059e7090389fc52a5). These are the TrueType build;
+`tests/fonts/noto/` holds only the Regular face of the CFF build, which Word lays out with other
+line heights.
 
 | File | Rendered from | Application and version | Date | Notes |
 |------|---------------|-------------------------|------|-------|
