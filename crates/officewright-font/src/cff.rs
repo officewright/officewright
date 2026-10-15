@@ -423,12 +423,13 @@ const MAX_FD_SELECT_RANGES: usize = 2048;
 /// Fails if the subsetter would panic on the `CFF ` table it takes from `font` (its file
 /// `data`) when it keeps `glyphs`, or would spend more on it than the library allows:
 /// when the table is CID-keyed with more Font DICTs than it takes, Private DICTs past
-/// [`MAX_PRIVATE_BYTES`] or an FDSelect of more than [`MAX_FD_SELECT_RANGES`] ranges; when a DICT it writes back has a real number too large for it;
-/// when a glyph it decompiles declares more stem hints than it can count; or if
-/// decompiling the glyphs takes more than [`MAX_STEPS`]. Where the subsetter fails on the
-/// table before it writes or decompiles anything, the table is left to it. The subsetter
-/// decompiles `.notdef` and then the kept glyphs in order, and stops at the first it
-/// cannot read; so does this check, leaving that error to the subsetter.
+/// [`MAX_PRIVATE_BYTES`] or an FDSelect of more than [`MAX_FD_SELECT_RANGES`] ranges;
+/// when a DICT it writes back has a real number too large for it; when a glyph it
+/// decompiles declares more stem hints than it can count; or if decompiling the glyphs
+/// takes more than [`MAX_STEPS`]. Where the subsetter fails on the table before it writes
+/// or decompiles anything, the table is left to it. The subsetter decompiles `.notdef`
+/// and then the kept glyphs in order, and stops at the first it cannot read; so does this
+/// check, leaving that error to the subsetter.
 pub(crate) fn check(font: &FontRef<'_>, data: &[u8], face: u32, glyphs: &[u16]) -> Result<()> {
     check_within(font, data, face, glyphs, MAX_STEPS)
 }
