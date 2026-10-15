@@ -548,6 +548,29 @@ fn bounds_the_number_of_nodes() {
 }
 
 #[test]
+fn bounds_the_namespaces_of_a_part() {
+    // The main part declares five namespaces, and its body two more, one of them twice
+    // (#100).
+    let body = "<w:p xmlns:x='urn:x'><w:r xmlns:y='urn:y' xmlns:z='urn:x'/></w:p>";
+    let options = LoadOptions::new().with_limits(Limits::new().with_max_xml_namespaces(6));
+    let err = options.open_bytes(docx(body)).unwrap_err();
+    // The error names the part, as those of the other limits of an XML part do.
+    assert!(
+        matches!(
+            &err,
+            Error::LimitExceeded {
+                limit: Limit::XmlNamespaces,
+                maximum: 6,
+                context,
+            } if context.starts_with("/word/document.xml, line 1, column ")
+        ),
+        "{err}"
+    );
+    let options = LoadOptions::new().with_limits(Limits::new().with_max_xml_namespaces(7));
+    assert!(options.open_bytes(docx(body)).is_ok());
+}
+
+#[test]
 fn bounds_the_size_of_the_file() {
     let data = docx("<w:p/>");
     let limits = Limits::new().with_max_file_size(data.len() as u64 - 1);
@@ -1662,6 +1685,37 @@ fn messages(document: &Document) -> Vec<&str> {
         .iter()
         .map(Diagnostic::message)
         .collect()
+}
+
+#[test]
+fn refuses_integers_with_whitespace_around_them_as_word_does() {
+    // ST_DecimalNumber is an xsd:integer, whose whitespace the schema collapses, but Office
+    // accepts only values already normalized (MS-OI29500 2.1.1(a)): each is reported and
+    // left out (#114).
+    let document = open(
+        "<w:p><w:pPr><w:numPr><w:ilvl w:val=\" 1 \"/><w:numId w:val=\"3 \"/></w:numPr><w:outlineLvl w:val=\"\r\n2 \"/></w:pPr></w:p>\
+         <w:tbl><w:tr><w:trPr><w:gridBefore w:val=\" 1\"/></w:trPr><w:tc><w:tcPr><w:gridSpan w:val=\"&#9;2&#13;&#10;\"/></w:tcPr><w:p/></w:tc></w:tr></w:tbl>",
+    );
+    let properties = first_paragraph(&document).properties();
+    let numbering = properties.numbering().unwrap();
+    assert_eq!((numbering.instance(), numbering.level()), (None, None));
+    assert_eq!(properties.outline_level(), None);
+    let row = first_table(&document).rows().next().unwrap();
+    assert_eq!(row.properties().grid_before(), None);
+    assert_eq!(row.cells().next().unwrap().properties().grid_span(), None);
+    let listed = messages(&document);
+    assert_eq!(listed.len(), 5, "{listed:?}");
+    // The same values written as Word writes them are read.
+    let document = open(
+        "<w:tbl><w:tr><w:trPr><w:gridBefore w:val=\"1\"/></w:trPr><w:tc><w:tcPr><w:gridSpan w:val=\"2\"/></w:tcPr><w:p/></w:tc></w:tr></w:tbl>",
+    );
+    let row = first_table(&document).rows().next().unwrap();
+    assert_eq!(row.properties().grid_before(), Some(1));
+    assert_eq!(
+        row.cells().next().unwrap().properties().grid_span(),
+        Some(2)
+    );
+    assert_eq!(messages(&document), Vec::<&str>::new());
 }
 
 #[test]
@@ -3268,6 +3322,8 @@ mod format;
 #[cfg(feature = "pdf")]
 mod layout;
 mod paragraph_format;
+#[cfg(feature = "pdf")]
+mod render;
 mod table_styles;
 
 /// The text of the paragraphs of some blocks, one line each.

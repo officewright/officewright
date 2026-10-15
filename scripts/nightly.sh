@@ -42,6 +42,12 @@ else
 	corpus_failed=1
 fi
 
+printf '==> %s\n' "test fonts (upstream sources)"
+# Each file in tests/fonts against the upstream source THIRD-PARTY-NOTICES.md names for
+# it. A failure, or a download that fails, fails the night but does not stop the fuzzing.
+fonts_failed=
+scripts/check-test-fonts.sh || fonts_failed=1
+
 printf '==> %s\n' "fuzzing (30 min per target)"
 # Each target is seeded with files of the format it reads; libFuzzer keeps the inputs it
 # finds in fuzz/corpus/<target> and writes crashing inputs to fuzz/artifacts/<target>,
@@ -86,6 +92,10 @@ if [ -n "$crashed" ]; then
 fi
 if [ -n "$corpus_failed" ]; then
 	echo "nightly.sh: the corpus checks failed (messages above; report in target/corpus-report.json)" >&2
+	failed=1
+fi
+if [ -n "$fonts_failed" ]; then
+	echo "nightly.sh: the test fonts differ from their upstream files, or could not be checked (messages above)" >&2
 	failed=1
 fi
 if [ -n "$failed" ]; then

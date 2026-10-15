@@ -1,7 +1,7 @@
 {
  "format": 1,
  "document": "word-rules/E-line-multiple.docx",
- "pdf_sha256": "d9836d9423d0d9562b39d9ed016cc28fbc85384478e9274a3f8685f05889d391",
+ "pdf_sha256": "1074a1ebfa5c6a7856bb2dcb8e75f52feb041037cbfcbde79911b1695f97369e",
  "made_with": "pdftotext 24.02.0 -bbox-layout",
  "units": "points, origin at the top left of the page, y downwards",
  "page_count": 2,

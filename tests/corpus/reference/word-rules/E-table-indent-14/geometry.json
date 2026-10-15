@@ -1,7 +1,7 @@
 {
  "format": 1,
  "document": "word-rules/E-table-indent-14.docx",
- "pdf_sha256": "787a2cb53d975cba610a139cc9661fe04ab8f1723230821525b5fc880581454f",
+ "pdf_sha256": "7c247732e83db413d57299c5f0b316a9e368d049641ce225835eca5349670680",
  "made_with": "pdftotext 24.02.0 -bbox-layout",
  "units": "points, origin at the top left of the page, y downwards",
  "page_count": 1,

@@ -140,7 +140,8 @@ impl Font {
     ///
     /// [`Error::Read`] if the file cannot be read, and the errors of
     /// [`from_face`](Self::from_face): [`Error::Font`] if it is not a font, has no such
-    /// face, is damaged or has outlines that cannot be embedded, and
+    /// face, is damaged, is past a limit of the library or has outlines that cannot be
+    /// embedded, and
     /// [`Error::EmbeddingNotAllowed`] if its license forbids embedding.
     pub fn from_file(path: impl AsRef<Path>, face_index: u32) -> Result<Self> {
         let path = path.as_ref();
@@ -179,7 +180,8 @@ impl Font {
     ///
     /// [`Error::EmbeddingNotAllowed`] if the license forbids embedding the outlines, and
     /// [`Error::Font`] if the face has no TrueType or CFF outlines (CFF2 cannot be
-    /// embedded yet) or is damaged in a way that subsetting finds.
+    /// embedded yet), or if subsetting finds it damaged or past a limit of the library
+    /// (`name` records that point at more than 1 MiB of strings).
     pub fn from_face(face: FontFace) -> Result<Self> {
         Self::embed(face, None)
     }

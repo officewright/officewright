@@ -1197,6 +1197,79 @@ class BodyParagraphs(unittest.TestCase):
             (second["style_id"], second["style_name"]), ("AlsoDefault", "Also Default")
         )
 
+    def test_an_empty_paragraph_with_a_hidden_mark_is_folded_into_the_next(self):
+        w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+
+        def paragraph(text, mark="", run="", style=None):
+            p_style = f'<w:pStyle w:val="{style}"/>' if style else ""
+            mark_xml = f"<w:rPr>{mark}</w:rPr>" if mark else ""
+            p_pr = f"<w:pPr>{p_style}{mark_xml}</w:pPr>" if style or mark else ""
+            r = f"<w:r><w:rPr>{run}</w:rPr><w:t>{text}</w:t></w:r>" if text or run else ""
+            return f"<w:p>{p_pr}{r}</w:p>"
+
+        hidden = "<w:vanish/>"
+        document = (
+            f"<w:document {w}><w:body>"
+            + paragraph("Before")
+            + paragraph("", hidden)  # folded into "Impact", as Word folds it
+            + paragraph("", '<w:vanish w:val="true"/>')  # folded too
+            + paragraph("Impact", style="Heading3")
+            + paragraph("Hidden mark", hidden)  # text: not folded
+            + paragraph("", '<w:vanish w:val="0"/>')
+            + paragraph("", '<w:vanish w:val="false"/>')
+            + paragraph("", '<w:vanish w:val="off"/>')
+            + paragraph("")
+            + paragraph("", "<w:b/>")
+            + paragraph("", run=hidden)  # a hidden run, not a hidden mark
+            + paragraph("After", style="Heading3")
+            + "</w:body></w:document>"
+        )
+        styles = (
+            f"<w:styles {w}>"
+            '<w:style w:type="paragraph" w:default="1" w:styleId="Normal">'
+            '<w:name w:val="Normal"/></w:style>'
+            '<w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="heading 3"/>'
+            "</w:style></w:styles>"
+        )
+        parts = {"word/document.xml": document.encode(), "word/styles.xml": styles.encode()}
+        normal = ("Normal", "Normal")
+        texts = ["Before", "Impact", "Hidden mark", "", "", "", "", "", "", "After"]
+        self.assertEqual(
+            importer.body_paragraph_styles(parts),
+            [
+                ("Before", *normal),
+                # Word gives the entry the formatting of the first paragraph folded into it,
+                # so the style of "Impact" is not the one Word applied.
+                ("Impact", None, None),
+                ("Hidden mark", *normal),
+                *[("", *normal)] * 6,
+                ("After", "Heading3", "heading 3"),
+            ],
+        )
+        # So the export of such a document lines up with the copy, and the folded entry
+        # gets no style id.
+        font = {"name": "Calibri", "size": 11, "bold": False, "italic": False,
+                "color": "auto", "theme": "minorHAnsi"}
+        export = {"format": 1, "complete": True, "runs": False, "runs_note": "", "stories": [
+            {"story": "main", "instance": 0, "paragraphs": [
+                {"index": i, "text": text, "style": None, "style_builtin": True,
+                 "left_indent": 0, "right_indent": 0, "first_line_indent": 0,
+                 "space_before": 0, "space_after": 0, "space_before_auto": False,
+                 "space_after_auto": False, "line_spacing": 12, "line_spacing_rule": "single",
+                 "alignment": "left", "list_string": "", "list_level": None, "font": font}
+                for i, text in enumerate(texts)
+            ]},
+        ]}
+        export = importer.read_formatting(json.dumps(export).encode())
+        result, note = importer.compact_formatting(export, parts, "x", "y")
+        self.assertTrue(result["styles_from_resaved_copy"])
+        self.assertNotIn("not matched", note)
+        paragraphs = result["stories"][0]["paragraphs"]
+        self.assertEqual(
+            [p.get("style_id") for p in paragraphs],
+            ["Normal", None] + ["Normal"] * 7 + ["Heading3"],
+        )
+
     def test_every_spelling_of_true_marks_the_default(self):
         w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
         document = (

@@ -15,8 +15,8 @@ from tests/fonts, and what the example embed_report counts:
   program keeps only the default instance, none of these tools can see: the Rust test
   embedded_fonts.rs checks its tables);
 - the example embed_report, which embeds every font of a directory, must count a font
-  the subsetter does not support, or one without outlines it can take, apart from a
-  damaged one.
+  the subsetter does not support, or one without outlines it can take, and a font past
+  a limit of the library apart from a damaged one.
 
 OW_CLI must point at the officewright binary, and OW_EMBED_REPORT at the example's
 (scripts/check.sh sets both).
@@ -67,8 +67,9 @@ def with_shared_glyph(font):
 
 
 def with_table(font, tag, data):
-    """The font with table `tag` added: its table directory, sorted by tag as it must be,
-    gets a record more, and every table keeps its data."""
+    """The font with table `tag` added, or put in place of the one it has: its table
+    directory, sorted by tag as it must be, gets a record more for a new tag, and every
+    other table keeps its data."""
     count = int.from_bytes(font[4:6], "big")
     tables = {}
     for record in range(12, 12 + 16 * count, 16):
@@ -88,6 +89,20 @@ def with_table(font, tag, data):
         directory += tag + b"".join(v.to_bytes(4, "big") for v in (checksum & 0xFFFFFFFF, offset, len(tables[tag])))
         body += table
     return bytes(directory + body)
+
+
+def name_past_the_limit():
+    """A name table of the family and 32 copyright records, which the subsetter keeps,
+    pointing at one string of 32,768 bytes: with the family's 8 bytes, more than the 1 MiB
+    of strings to keep that the library reads before subsetting."""
+    records = [(1, 8, 0)] + [(0, 32_768, 8)] * 32
+    table = bytearray()
+    for value in (0, len(records), 6 + 12 * len(records)):
+        table += value.to_bytes(2, "big")
+    for name_id, length, offset in records:
+        for value in (3, 1, 0x0409, name_id, length, offset):
+            table += value.to_bytes(2, "big")
+    return bytes(table + "Test".encode("utf-16-be") + b"\x00A" * 16_384)
 
 
 # The fvar table of a variable font with one axis, weight from 100 to 900, its default
@@ -286,11 +301,19 @@ class EmbeddedFontTest(unittest.TestCase):
             bold = FONTS / "liberation" / "LiberationSans-Bold.ttf"
             (fonts / "truncated.ttf").write_bytes(bold.read_bytes()[:5000])
             (fonts / "unsupported.otf").write_bytes(with_unsupported_notdef(noto.read_bytes()))
+            past = with_table(liberation.read_bytes(), b"name", name_past_the_limit())
+            (fonts / "past-limit.ttf").write_bytes(past)
             result = run([os.environ["OW_EMBED_REPORT"], str(Path(directory) / "out"), str(fonts)])
             lines = result.stdout.decode("utf-8").splitlines()
             self.assertEqual(
-                [line.strip() for line in lines[-4:]],
-                ["3 files", "1 damaged", "1 embedded", "1 not supported by the subsetter yet"],
+                [line.strip() for line in lines[-5:]],
+                [
+                    "4 files",
+                    "1 damaged",
+                    "1 embedded",
+                    "1 not supported by the subsetter yet",
+                    "1 past a limit of the library",
+                ],
             )
             # Each failure is printed with its cause.
             self.assertIn(
@@ -301,6 +324,11 @@ class EmbeddedFontTest(unittest.TestCase):
             self.assertIn(
                 f"{fonts / 'truncated.ttf'}, face 0: cannot use the font data: font face 0: "
                 "required table 'hmtx' is missing",
+                lines,
+            )
+            self.assertIn(
+                f"{fonts / 'past-limit.ttf'}, face 0: cannot use the font data: font face 0: "
+                "table 'name' is past a limit of the library",
                 lines,
             )
 

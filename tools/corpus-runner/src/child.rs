@@ -1,8 +1,10 @@
-//! The child: opens one file and prints one line of JSON about it.
+//! The child: opens one file, renders it into PDF when asked, and prints one line of JSON
+//! about it.
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 
-use officewright_doc::{Document, Error};
+use officewright_doc::{Document, Error, LayoutReport, RenderOptions};
 use serde::{Deserialize, Serialize};
 
 /// What the child prints.
@@ -18,32 +20,103 @@ pub struct Opened {
     pub diagnostics: Option<u64>,
     /// The child's peak resident memory in KiB, from /proc/self/status (Linux).
     pub peak_rss_kb: Option<u64>,
+    /// With `--render`: why the opened document could not be rendered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render_error: Option<String>,
+    /// With `--render`: what the PDF shows otherwise than Word would, entry by entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout_report: Option<Vec<LayoutEntry>>,
+}
+
+/// An entry of the layout's report: its kind, as the CLI names it in its JSON report
+/// (`font-substituted`, `feature-unsupported`, ...), where it is, and what it says.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct LayoutEntry {
+    pub kind: String,
+    pub location: String,
+    pub message: String,
+}
+
+/// What the child renders the document into, with `--render PDF`: the PDF to write, laid
+/// out with the fonts of each `--font-dir` and none of the system's, so that a run gives
+/// the same pages on every machine.
+#[derive(Debug, Default, PartialEq)]
+pub struct Render {
+    pub pdf: PathBuf,
+    pub font_dirs: Vec<PathBuf>,
+}
+
+/// The child's arguments: `FILE [--render PDF [--font-dir DIR]...]`.
+pub fn parse(args: &[String]) -> Result<(String, Option<Render>), String> {
+    let mut args = args.iter();
+    let file = args.next().ok_or("open needs a file")?.clone();
+    let mut pdf = None;
+    let mut font_dirs = Vec::new();
+    while let Some(arg) = args.next() {
+        let mut value = |name: &str| {
+            args.next()
+                .cloned()
+                .ok_or_else(|| format!("{name} needs a value"))
+        };
+        match arg.as_str() {
+            "--render" => pdf = Some(PathBuf::from(value("--render")?)),
+            "--font-dir" => font_dirs.push(PathBuf::from(value("--font-dir")?)),
+            other => return Err(format!("unknown argument {other}")),
+        }
+    }
+    match pdf {
+        Some(pdf) => Ok((file, Some(Render { pdf, font_dirs }))),
+        None if font_dirs.is_empty() => Ok((file, None)),
+        None => Err("--font-dir needs --render".to_owned()),
+    }
 }
 
 /// Makes the child misbehave, for the runner's own tests: `panic`, `hang`, `abort` or
 /// `allocation` (prints what Rust prints when an allocation fails, then aborts).
 pub const MISBEHAVE: &str = "CORPUS_RUNNER_MISBEHAVE";
 
-pub fn main(file: &str) -> ExitCode {
+pub fn main(args: &[String]) -> ExitCode {
+    let (file, render) = match parse(args) {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            eprintln!("corpus-runner open: {message}");
+            return ExitCode::from(2);
+        }
+    };
     misbehave();
-    let opened = match Document::open(file) {
-        Ok(document) => Opened {
-            status: "opened".to_owned(),
-            error_kind: None,
-            error: None,
-            chars: Some(document.text().chars().count() as u64),
-            diagnostics: Some(document.diagnostics().len() as u64),
-            peak_rss_kb: peak_rss_kb(),
-        },
+    let mut opened = match Document::open(&file) {
+        Ok(document) => {
+            let mut opened = Opened {
+                status: "opened".to_owned(),
+                error_kind: None,
+                error: None,
+                chars: Some(document.text().chars().count() as u64),
+                diagnostics: Some(document.diagnostics().len() as u64),
+                peak_rss_kb: None,
+                render_error: None,
+                layout_report: None,
+            };
+            if let Some(render) = &render {
+                match render_pdf(&document, render) {
+                    Ok(report) => opened.layout_report = Some(entries(&report)),
+                    Err(error) => opened.render_error = Some(error),
+                }
+            }
+            opened
+        }
         Err(error) => Opened {
             status: "error".to_owned(),
             error_kind: Some(kind(&error).to_owned()),
             error: Some(error.to_string()),
             chars: None,
             diagnostics: None,
-            peak_rss_kb: peak_rss_kb(),
+            peak_rss_kb: None,
+            render_error: None,
+            layout_report: None,
         },
     };
+    // After the rendering, so that its memory counts.
+    opened.peak_rss_kb = peak_rss_kb();
     match serde_json::to_string(&opened) {
         Ok(line) => {
             println!("{line}");
@@ -54,6 +127,52 @@ pub fn main(file: &str) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Renders `document` into `render.pdf`, making its folder; its report, or why it failed
+/// with each cause.
+fn render_pdf(document: &Document, render: &Render) -> Result<LayoutReport, String> {
+    if let Some(folder) = render.pdf.parent() {
+        std::fs::create_dir_all(folder)
+            .map_err(|error| format!("cannot make {}: {error}", folder.display()))?;
+    }
+    document
+        .save_pdf_path(&render.pdf, &render_options(render))
+        .map_err(|error| with_causes(&error))
+}
+
+/// The options of a rendering: the fonts of `render.font_dirs` besides those the document
+/// embeds, and none of the system's, so that a run gives the same pages on every machine.
+fn render_options(render: &Render) -> RenderOptions {
+    let mut options = RenderOptions::new().with_system_fonts(false);
+    for dir in &render.font_dirs {
+        options = options.with_font_dir(dir);
+    }
+    options
+}
+
+/// `error` with each of its causes.
+fn with_causes(error: &dyn std::error::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        message = format!("{message}: {cause}");
+        source = cause.source();
+    }
+    message
+}
+
+/// The entries of `report`, each kind by the name the CLI's JSON report gives it.
+fn entries(report: &LayoutReport) -> Vec<LayoutEntry> {
+    report
+        .entries()
+        .iter()
+        .map(|entry| LayoutEntry {
+            kind: entry.kind().name().to_owned(),
+            location: entry.location().to_string(),
+            message: entry.message().to_owned(),
+        })
+        .collect()
 }
 
 fn kind(error: &Error) -> &'static str {
@@ -85,5 +204,19 @@ fn misbehave() {
             std::process::abort()
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Render, render_options};
+
+    #[test]
+    fn a_rendering_uses_none_of_the_system_s_fonts() {
+        let render = Render {
+            pdf: "out.pdf".into(),
+            font_dirs: vec!["fonts".into()],
+        };
+        assert!(!render_options(&render).system_fonts());
     }
 }

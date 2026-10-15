@@ -297,9 +297,9 @@ pub fn measure_against(report: &Report, main: Option<&Report>, same_fonts: bool)
         .count();
     out.push(Measure::counted(crashes.to_string(), crashes));
 
-    // 2. Refusals: an unexpected error anywhere, and a reference document that did not
-    // open or could not be scored, which would also leave the rows below with fewer
-    // documents than main.
+    // 2. Refusals: an unexpected error anywhere, a document that opened but could not be
+    // rendered, and a reference document that did not open or could not be scored, which
+    // would also leave the rows below with fewer documents than main.
     let unexpected = report
         .files
         .iter()
@@ -317,10 +317,15 @@ pub fn measure_against(report: &Report, main: Option<&Report>, same_fonts: bool)
         .iter()
         .filter(|file| file.score_error.is_some() && file.status == Status::Opened)
         .count();
+    let unrendered = report
+        .files
+        .iter()
+        .filter(|file| file.render_error.is_some())
+        .count();
     let lacking = main.map(|main| missing(report, main)).unwrap_or_default();
     let mut text = format!(
-        "{unexpected} unexpected errors, {refused} reference documents not opened, \
-         {unscored} not scored"
+        "{unexpected} unexpected errors, {unrendered} not rendered, {refused} reference \
+         documents not opened, {unscored} not scored"
     );
     if !lacking.is_empty() {
         text.push_str(&format!(
@@ -332,9 +337,10 @@ pub fn measure_against(report: &Report, main: Option<&Report>, same_fonts: bool)
     let lacked = lacking.files.len() + lacking.references.len();
     out.push(Measure {
         text,
-        pass: Some(unexpected + refused + unscored + lacked == 0),
+        pass: Some(unexpected + unrendered + refused + unscored + lacked == 0),
         keys: vec![
             Key::count(unexpected),
+            Key::count(unrendered),
             Key::count(refused + unscored),
             Key::count(lacked),
         ],
@@ -538,7 +544,12 @@ pub fn measure_against(report: &Report, main: Option<&Report>, same_fonts: bool)
         out.push(measure);
     }
 
-    // 10. Speed and memory: opening only, until the runner renders.
+    // 10. Speed and memory: of opening and rendering when the run rendered, else of
+    // opening only.
+    let rendered = report
+        .files
+        .iter()
+        .any(|file| file.layout_report.is_some() || file.render_error.is_some());
     let slowest = report
         .files
         .iter()
@@ -564,12 +575,13 @@ pub fn measure_against(report: &Report, main: Option<&Report>, same_fonts: bool)
     }
     out.push(Measure {
         text: format!(
-            "slowest {:.2} s, peak {} (opening only)",
+            "slowest {:.2} s, peak {}{}",
             slowest as f64 / 1000.0,
             peak.map_or("not measured".to_owned(), |bytes| format!(
                 "{:.0} MB",
                 bytes as f64 / 1e6
-            ))
+            )),
+            if rendered { "" } else { " (opening only)" }
         ),
         pass: Some(slowest < TIME_LIMIT_MS && peak.is_none_or(|bytes| bytes < MEMORY_LIMIT)),
         keys,
@@ -577,10 +589,10 @@ pub fn measure_against(report: &Report, main: Option<&Report>, same_fonts: bool)
 
     // 11 and 12 need the layout report.
     out.push(Measure::unmeasured(
-        "not measured before the layout report (layout PR 10)",
+        "not measured yet: the layout report is in the run's report, the criterion to come (#239)",
     ));
     out.push(Measure::unmeasured(
-        "not measured before the layout report (layout PR 10)",
+        "not measured yet: the layout report is in the run's report, the criterion to come (#239)",
     ));
     out
 }
@@ -739,6 +751,8 @@ mod tests {
             diagnostics: None,
             scores,
             score_error: None,
+            render_error: None,
+            layout_report: None,
         }
     }
 
@@ -896,6 +910,9 @@ mod tests {
         let mut refused = file("c/refused.docx", Status::UnexpectedError, None);
         refused.score_error = Some("no PDF of ours".to_owned());
         report.files.push(refused);
+        let mut unrendered = file("c/unrendered.docx", Status::Opened, None);
+        unrendered.render_error = Some("cannot write out.pdf".to_owned());
+        report.files.push(unrendered);
         let measures = measure(&report, false);
         let failed: Vec<usize> = measures
             .iter()
@@ -906,7 +923,7 @@ mod tests {
         assert_eq!(failed, [1, 2, 3, 4, 5, 6, 7, 9]);
         assert_eq!(
             measures[1].text,
-            "2 unexpected errors, 1 reference documents not opened, 0 not scored"
+            "2 unexpected errors, 1 not rendered, 1 reference documents not opened, 0 not scored"
         );
     }
 
@@ -948,6 +965,28 @@ mod tests {
         );
         let alone = super::table(&branch, None);
         assert!(alone.starts_with("| # | Criterion | Target | Applies to | Value | Met |"));
+    }
+
+    /// A document that opens but cannot be rendered fails row 2 and is worse than main
+    /// there, whether or not it has a reference.
+    #[test]
+    fn a_document_that_cannot_be_rendered_is_worse() {
+        let main = measure(&good(), false);
+        let mut report = good();
+        let mut unrendered = file("c/no-reference.docx", Status::Opened, None);
+        unrendered.render_error = Some("cannot write out.pdf".to_owned());
+        report.files.push(unrendered);
+        let branch = measure(&report, false);
+        let row = table(&branch, Some(&main))
+            .lines()
+            .nth(3)
+            .unwrap()
+            .to_owned();
+        assert!(
+            row.contains("1 not rendered") && row.contains("(worse than main)"),
+            "{row}"
+        );
+        assert_eq!(branch[1].pass, Some(false));
     }
 
     /// A reference document that opens but drops out of scoring fails row 2 and is worse
@@ -1010,7 +1049,8 @@ mod tests {
         assert!(branch[1].worse_than(&main[1]));
         assert_eq!(
             branch[1].text,
-            "0 unexpected errors, 0 reference documents not opened, 0 not scored; of main's, \
+            "0 unexpected errors, 0 not rendered, 0 reference documents not opened, 0 not \
+             scored; of main's, \
              1 files missing and 1 reference documents not scored"
         );
         assert!(
@@ -1075,7 +1115,7 @@ mod tests {
         let measures = measure_against(&failed, Some(&good()), false);
         assert_eq!(
             measures[1].text,
-            "0 unexpected errors, 0 reference documents not opened, 1 not scored"
+            "0 unexpected errors, 0 not rendered, 0 reference documents not opened, 1 not scored"
         );
     }
 
@@ -1295,6 +1335,12 @@ mod tests {
         assert_eq!(row(5_000, 195_312).pass, Some(false));
         assert_eq!(row(4_999, 195_313).pass, Some(false));
         assert!(row(100, 50_000).text.ends_with("peak 51 MB (opening only)"));
+        // Once the run renders, opening and rendering together.
+        let mut rendered = file("c/a.docx", Status::Opened, None);
+        (rendered.duration_ms, rendered.peak_rss_kb) = (100, Some(50_000));
+        rendered.layout_report = Some(Vec::new());
+        let row10 = measure(&Report::new(vec![rendered]), false).swap_remove(9);
+        assert!(row10.text.ends_with("peak 51 MB"), "{}", row10.text);
         // Memory: 16 MiB more than main is noise, more than that is worse.
         let main = row(100, 50_000);
         assert!(!row(100, 50_000 + 16 * 1024).worse_than(&main));

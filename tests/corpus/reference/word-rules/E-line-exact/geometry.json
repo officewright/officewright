@@ -1,7 +1,7 @@
 {
  "format": 1,
  "document": "word-rules/E-line-exact.docx",
- "pdf_sha256": "45aceeac343613f017d14e941f8e67332dd70cfec32cf717a273f31e1b75d9ee",
+ "pdf_sha256": "4c310c84e1af6c4be178237a376a445f9a50ce799f79a0eda58dc1b2b0f9fb47",
  "made_with": "pdftotext 24.02.0 -bbox-layout",
  "units": "points, origin at the top left of the page, y downwards",
  "page_count": 1,

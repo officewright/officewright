@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use super::chars::{is_char, is_name_char, is_name_start, is_whitespace};
 use super::{
@@ -31,10 +32,17 @@ pub struct Reader<'a> {
     max_depth: usize,
     max_attributes: usize,
     max_mce_names: usize,
-    uris: Vec<Box<str>>,
-    ids: HashMap<Box<str>, NsId>,
+    max_namespaces: usize,
+    /// The namespace URIs met so far, by id, each stored once and shared with `ids`.
+    uris: Vec<Arc<str>>,
+    ids: HashMap<Arc<str>, NsId>,
+    /// Whether the document has declared each URI of `uris`, by id, and how many it has.
+    declared_uris: Vec<bool>,
+    declared_count: usize,
     /// The namespaces each prefix is bound to, innermost last; `""` is the default
-    /// namespace, `None` an undeclared default namespace.
+    /// namespace, `None` an undeclared default namespace. A prefix that no open element
+    /// binds has no entry, so that a document cannot grow it with prefixes it no longer
+    /// uses.
     bindings: HashMap<&'a str, Vec<Option<NsId>>>,
     /// The prefixes declared by the open elements, outermost first.
     declared: Vec<&'a str>,
@@ -69,8 +77,11 @@ impl<'a> Reader<'a> {
             max_depth: limits.max_xml_depth(),
             max_attributes: limits.max_xml_attributes(),
             max_mce_names: limits.max_mce_names(),
+            max_namespaces: limits.max_xml_namespaces(),
             uris: Vec::new(),
             ids: HashMap::new(),
+            declared_uris: Vec::new(),
+            declared_count: 0,
             bindings: HashMap::new(),
             declared: Vec::new(),
             open: Vec::new(),
@@ -91,8 +102,9 @@ impl<'a> Reader<'a> {
     /// an XML declaration that names an encoding other than UTF-8, UTF-16, US-ASCII or
     /// ASCII (a part labelled ASCII is read as UTF-8, any UTF-8 included), and
     /// [`Error::LimitExceeded`] when an element nests deeper than
-    /// [`Limits::max_xml_depth`] or has more attributes than
-    /// [`Limits::max_xml_attributes`].
+    /// [`Limits::max_xml_depth`], has more attributes than
+    /// [`Limits::max_xml_attributes`], or declares a namespace when the document has
+    /// declared [`Limits::max_xml_namespaces`] others already.
     pub fn read_event(&mut self) -> Result<Option<Event<'a>>> {
         let event = self.next_event();
         if event.is_err() {
@@ -126,8 +138,9 @@ impl<'a> Reader<'a> {
             return id;
         }
         let id = NsId(u32::try_from(self.uris.len()).unwrap_or(u32::MAX));
-        self.uris.push(uri.into());
-        self.ids.insert(uri.into(), id);
+        let uri: Arc<str> = uri.into();
+        self.uris.push(Arc::clone(&uri));
+        self.ids.insert(uri, id);
         id
     }
 
@@ -406,6 +419,9 @@ impl<'a> Reader<'a> {
             if let Some(prefix) = self.declared.pop() {
                 if let Some(stack) = self.bindings.get_mut(prefix) {
                     stack.pop();
+                    if stack.is_empty() {
+                        self.bindings.remove(prefix);
+                    }
                 }
             }
         }
@@ -730,6 +746,19 @@ impl<'a> Reader<'a> {
             _ => {}
         }
         let namespace = self.intern(uri);
+        let index = usize::try_from(namespace.0).unwrap_or(usize::MAX);
+        if !self.declared_uris.get(index).copied().unwrap_or(false) {
+            if self.declared_count == self.max_namespaces {
+                return Err(self.limit(Limit::XmlNamespaces, offset));
+            }
+            self.declared_count += 1;
+            if self.declared_uris.len() <= index {
+                self.declared_uris.resize(index.saturating_add(1), false);
+            }
+            if let Some(declared) = self.declared_uris.get_mut(index) {
+                *declared = true;
+            }
+        }
         self.bind(prefix.unwrap_or_default(), Some(namespace));
         Ok(Some(namespace))
     }
@@ -762,6 +791,12 @@ impl<'a> Reader<'a> {
         })
     }
 
+    /// How many prefixes have an entry among the bindings.
+    #[cfg(test)]
+    pub(super) fn bound_prefixes(&self) -> usize {
+        self.bindings.len()
+    }
+
     /// [`Limits::max_mce_names`] of the limits this reader was made with.
     pub(crate) fn max_mce_names(&self) -> usize {
         self.max_mce_names
@@ -774,6 +809,7 @@ impl<'a> Reader<'a> {
         let maximum = match limit {
             Limit::XmlDepth => self.max_depth,
             Limit::MceNames => self.max_mce_names,
+            Limit::XmlNamespaces => self.max_namespaces,
             _ => self.max_attributes,
         };
         Error::LimitExceeded {
