@@ -75,12 +75,14 @@ pub(crate) enum Token {
     Start {
         name: XmlName,
         attributes: Box<[XmlAttribute]>,
-        /// Whether the element is the branch of its `mc:AlternateContent` that the reader
-        /// of its part takes: the first `mc:Choice` all of whose `Requires` namespaces
-        /// the reader implements, else the `mc:Fallback` (ECMA-376 Part 3, §10.2).
-        /// Decided as the element is read, while the prefixes `Requires` names are still
-        /// in scope; false for every other element.
-        taken: bool,
+        /// Whether readers read the element's children in place of it: the branch of its
+        /// `mc:AlternateContent` that the reader of its part takes (the first
+        /// `mc:Choice` all of whose `Requires` namespaces the reader implements, else
+        /// the `mc:Fallback`; ECMA-376 Part 3, §10.2), or an ignorable element read
+        /// whose content `mc:ProcessContent` names (§10.1). Decided as the element is
+        /// read, while the prefixes `Requires` names and the declarations in scope are
+        /// known; false for every other element.
+        in_place: bool,
     },
     /// Right after the start tag of an element that has any: the namespace declarations
     /// written on it, and the binding of each prefix that the value of a Markup
@@ -123,9 +125,9 @@ impl Span {
     }
 
     /// The elements a reader reads in place of the element of this span: the element
-    /// itself or, for an `mc:AlternateContent`, the children of the branch it takes,
-    /// each read through its own alternates as
-    /// [`Element::children_through_alternates`] reads them.
+    /// itself; for an `mc:AlternateContent`, the children of the branch it takes; for
+    /// an element read in place (see `Token::Start`), its children; each read through
+    /// its own alternates as [`Element::children_through_alternates`] reads them.
     pub(crate) fn through_alternates<'d>(
         self,
         tokens: &'d [Token],
@@ -136,6 +138,8 @@ impl Span {
         let alternate = mc.is_some() && element.is(&[mc], "AlternateContent");
         let (whole, inside) = if alternate {
             (None, Some(Alternates::new(element, mc, true)))
+        } else if element.in_place() {
+            (None, Some(Alternates::new(element, mc, false)))
         } else {
             (Some(0..element.tokens.len()), None)
         };
@@ -162,6 +166,14 @@ impl<'d> Element<'d> {
             }) => Some((name, attributes)),
             _ => None,
         }
+    }
+
+    /// Whether readers read the element's children in place of it (see `Token::Start`).
+    fn in_place(self) -> bool {
+        matches!(
+            self.tokens.first(),
+            Some(Token::Start { in_place: true, .. })
+        )
     }
 
     /// The namespace URI, empty for none.
@@ -210,8 +222,10 @@ impl<'d> Element<'d> {
     /// The child elements, with each `mc:AlternateContent` replaced by the children of
     /// the branch the reader of the part takes (ECMA-376 Part 3, §10.2): the first
     /// `mc:Choice` that requires only namespaces it implements, else the `mc:Fallback`,
-    /// else nothing. The branch was chosen as the part was read (see `Token::Start`).
-    /// One pass over the element's tokens, however deep alternates nest in each other.
+    /// else nothing; and each ignorable element whose content `mc:ProcessContent`
+    /// names replaced by its children (§10.1). Both were decided as the part was read
+    /// (see `Token::Start`). One pass over the element's tokens, however deep
+    /// alternates and such elements nest in each other.
     pub(crate) fn children_through_alternates(
         self,
         mc: Option<Sym>,
@@ -446,7 +460,7 @@ impl<'d> Element<'d> {
 /// The elements read in place of the children of an element, as ranges of its tokens;
 /// see [`Element::children_through_alternates`]. Each token is looked at once, and the
 /// start tag of an element it returns or passes over twice: such an element is passed
-/// over by finding its end tag, an alternate or a taken branch is entered.
+/// over by finding its end tag, an alternate or an element read in place is entered.
 struct Alternates<'d> {
     tokens: &'d [Token],
     strings: &'d Strings,
@@ -455,8 +469,9 @@ struct Alternates<'d> {
     next: usize,
     /// The element's end tag, where the walk stops.
     end: usize,
-    /// For each `mc:AlternateContent` and each taken branch open at `next`, outermost
-    /// first: whether it is an `mc:AlternateContent`, whose children are branches.
+    /// For each `mc:AlternateContent` and each element read in place open at `next`,
+    /// outermost first: whether it is an `mc:AlternateContent`, whose children are
+    /// branches.
     open: Vec<bool>,
 }
 
@@ -507,10 +522,10 @@ impl Iterator for Alternates<'_> {
             #[cfg(test)]
             STEPS.set(STEPS.get() + 1);
             match self.tokens.get(i)? {
-                Token::Start { name, taken, .. } => {
+                Token::Start { name, in_place, .. } => {
                     if self.open.last() == Some(&true) {
                         // A branch, or anything else an mc:AlternateContent holds.
-                        if *taken {
+                        if *in_place {
                             self.open.push(false);
                             self.next = i + 1;
                         } else {
@@ -521,6 +536,10 @@ impl Iterator for Alternates<'_> {
                         && local(self.strings.get(name.qname)) == "AlternateContent"
                     {
                         self.open.push(true);
+                        self.next = i + 1;
+                    } else if *in_place {
+                        // An ignorable element whose content is processed.
+                        self.open.push(false);
                         self.next = i + 1;
                     } else {
                         let end = self.end_of(i)?;
