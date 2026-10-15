@@ -179,6 +179,19 @@ impl FaceInfo {
         self.properties.italic
     }
 
+    /// Whether the face is its family's bold one: its style bits say so, and its subfamily
+    /// name, if it has one, says Bold. A heavy family of its own, such as Arial Black, is
+    /// not, whatever its weight; nor is one whose bits say bold but whose subfamily is
+    /// "Regular", as Yu Gothic UI Semibold's do.
+    pub(crate) fn is_bold(&self) -> bool {
+        self.properties.bold
+            && self
+                .properties
+                .names
+                .subfamily()
+                .is_none_or(|subfamily| subfamily.to_lowercase().contains("bold"))
+    }
+
     /// What the font license allows when the face is embedded in a document.
     pub fn embedding(&self) -> EmbeddingPermissions {
         self.properties.embedding

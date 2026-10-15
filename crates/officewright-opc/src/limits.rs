@@ -4,8 +4,9 @@
 /// file cannot exhaust memory: across the Apache POI and LibreOffice test documents,
 /// packages have at most about 1,700 entries, part names of 81 bytes, 1,500
 /// relationships and 500 content types,
-/// XML nests at most about 50 elements deep, no element has more than 25 attributes and
-/// no Markup Compatibility attribute lists more than about 10 names.
+/// XML nests at most about 50 elements deep, no element has more than 25 attributes, no
+/// part declares more than 50 namespaces and no Markup Compatibility attribute lists
+/// more than about 10 names.
 ///
 /// ```
 /// use officewright_opc::Limits;
@@ -24,14 +25,15 @@ pub struct Limits {
     total_size: u64,
     xml_depth: usize,
     xml_attributes: usize,
+    xml_namespaces: usize,
     mce_names: usize,
 }
 
 impl Limits {
     /// The default limits: 65,536 ZIP entries, 256 MiB per part, 1 GiB for all parts
     /// read from one package, part names of 1,024 bytes, 262,144 relationships, 65,536
-    /// content types, XML nesting 256 elements deep, 256 attributes per element and 256
-    /// names per Markup Compatibility attribute.
+    /// content types, XML nesting 256 elements deep, 256 attributes per element, 4,096
+    /// namespaces per part and 256 names per Markup Compatibility attribute.
     pub const fn new() -> Self {
         Self {
             entries: 1 << 16,
@@ -42,6 +44,7 @@ impl Limits {
             total_size: 1 << 30,
             xml_depth: 256,
             xml_attributes: 256,
+            xml_namespaces: 4096,
             mce_names: 256,
         }
     }
@@ -146,6 +149,18 @@ impl Limits {
     #[must_use]
     pub const fn with_max_xml_attributes(mut self, value: usize) -> Self {
         self.xml_attributes = value;
+        self
+    }
+
+    /// The most distinct namespace URIs one XML part may declare.
+    pub const fn max_xml_namespaces(&self) -> usize {
+        self.xml_namespaces
+    }
+
+    /// Sets [`max_xml_namespaces`](Self::max_xml_namespaces).
+    #[must_use]
+    pub const fn with_max_xml_namespaces(mut self, value: usize) -> Self {
+        self.xml_namespaces = value;
         self
     }
 

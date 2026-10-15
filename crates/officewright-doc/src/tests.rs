@@ -548,6 +548,29 @@ fn bounds_the_number_of_nodes() {
 }
 
 #[test]
+fn bounds_the_namespaces_of_a_part() {
+    // The main part declares five namespaces, and its body two more, one of them twice
+    // (#100).
+    let body = "<w:p xmlns:x='urn:x'><w:r xmlns:y='urn:y' xmlns:z='urn:x'/></w:p>";
+    let options = LoadOptions::new().with_limits(Limits::new().with_max_xml_namespaces(6));
+    let err = options.open_bytes(docx(body)).unwrap_err();
+    // The error names the part, as those of the other limits of an XML part do.
+    assert!(
+        matches!(
+            &err,
+            Error::LimitExceeded {
+                limit: Limit::XmlNamespaces,
+                maximum: 6,
+                context,
+            } if context.starts_with("/word/document.xml, line 1, column ")
+        ),
+        "{err}"
+    );
+    let options = LoadOptions::new().with_limits(Limits::new().with_max_xml_namespaces(7));
+    assert!(options.open_bytes(docx(body)).is_ok());
+}
+
+#[test]
 fn bounds_the_size_of_the_file() {
     let data = docx("<w:p/>");
     let limits = Limits::new().with_max_file_size(data.len() as u64 - 1);

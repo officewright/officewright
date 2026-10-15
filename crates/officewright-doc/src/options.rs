@@ -164,6 +164,19 @@ impl Limits {
         self
     }
 
+    /// The most distinct namespace URIs one XML part may declare: 4,096 by default, where
+    /// real parts declare at most about 50.
+    pub const fn max_xml_namespaces(&self) -> usize {
+        self.package.max_xml_namespaces()
+    }
+
+    /// Sets [`max_xml_namespaces`](Self::max_xml_namespaces).
+    #[must_use]
+    pub const fn with_max_xml_namespaces(mut self, value: usize) -> Self {
+        self.package = self.package.with_max_xml_namespaces(value);
+        self
+    }
+
     /// The most names one Markup Compatibility attribute (such as `mc:Ignorable`) may
     /// list.
     pub const fn max_mce_names(&self) -> usize {
