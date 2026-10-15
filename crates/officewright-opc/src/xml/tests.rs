@@ -198,6 +198,7 @@ fn rejects_bytes_that_are_not_utf8_or_utf16() {
     };
     assert_eq!(message(b"<a>\n\xC3</a>"), "2:1: invalid UTF-8");
     // A carriage return ends a line in an error's place, as in the decoded text.
+    assert_eq!(message(b"a\rb\xC3"), "2:2: invalid UTF-8");
     assert_eq!(
         message(b"<a>\r\x01</a>"),
         "2:1: character U+0001 is not allowed in XML"

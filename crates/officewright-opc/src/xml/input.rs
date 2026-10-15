@@ -79,7 +79,8 @@ fn utf8(bytes: &[u8]) -> Result<Cow<'_, str>> {
                 .and_then(|valid| std::str::from_utf8(valid).ok())
                 .unwrap_or_default();
             // Lines are counted as in the decoded text, where a carriage return ends one.
-            error_at(valid, valid.len(), "invalid UTF-8")
+            let valid = normalize(Cow::Borrowed(valid));
+            error_at(&valid, valid.len(), "invalid UTF-8")
         })
 }
 
