@@ -831,9 +831,9 @@ impl TableCellProperties {
     /// The properties a conditional format gives one cell of the group of cells it
     /// applies to, such as its first column: a side of the cell on an edge of the group
     /// takes the group's border of that side, a side inside the group its `w:insideH` or
-    /// `w:insideV`, the borders of the group's inner edges (ISO/IEC 29500-1, insideH and
-    /// insideV of tcBorders; MS-OI29500 §17.4.23, §17.4.25). An inside border the format
-    /// omits leaves those edges as they are.
+    /// `w:insideV`, the borders of the group's inner edges (ISO/IEC 29500-1, `w:insideH`
+    /// and `w:insideV` of `w:tcBorders`). An inside border the format omits leaves those
+    /// edges as they are.
     pub(crate) fn in_group(&self, edges: GroupEdges) -> Self {
         let mut cell = self.clone();
         if let Some(borders) = &mut cell.borders {
