@@ -895,8 +895,8 @@
     },
     "tests/corpus/word-rules/E-list-level-inherit.docx": {
       "line_agreement": 0.2222,
-      "ssim_mean": 0.9576,
-      "ssim_min": 0.9576,
+      "ssim_mean": 0.9586,
+      "ssim_min": 0.9586,
       "text_score": 0.9383
     },
     "tests/corpus/word-rules/E-list-shared-abstract.docx": {
@@ -964,18 +964,18 @@
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-section-odd-first.docx": {
-      "line_agreement": 0.6667,
+      "line_agreement": 1.0,
       "page_break_agreement": 1.0,
       "ssim_mean": 0.9996,
-      "ssim_min": 0.9994,
-      "text_score": 0.9808
+      "ssim_min": 0.9995,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-section-odd.docx": {
       "line_agreement": 1.0,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.9158,
-      "ssim_min": 0.0,
-      "text_score": 0.8333
+      "ssim_mean": 0.9996,
+      "ssim_min": 0.9993,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-smallcaps-12.docx": {
       "line_agreement": 0.6667,
