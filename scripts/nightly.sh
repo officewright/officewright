@@ -57,8 +57,8 @@ printf '==> %s\n' "fuzzing (30 min per target)"
 # than the input's own memory: libFuzzer's corpus, AddressSanitizer's quarantine of freed
 # memory, and AddressSanitizer's overhead on every allocation. With the fonts as seeds the
 # process passed 1 GiB within a quarter of an hour while no input took more than 50 MB,
-# and layout_shape, whose inputs take up to 200 MB without AddressSanitizer, passed it in
-# four minutes. A crash in one target does not stop the others. The targets
+# and layout_shape, whose seeds take up to 200 MB each without AddressSanitizer, passed it
+# in under three minutes. A crash in one target does not stop the others. The targets
 # and their seeds are looked up in statements of their own, so that `set -e` stops the
 # script if either fails.
 seeds() {
