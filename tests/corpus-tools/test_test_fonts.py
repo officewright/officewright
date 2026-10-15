@@ -12,9 +12,11 @@ FONTS = ROOT / "tests" / "fonts"
 NOTICES = ROOT / "THIRD-PARTY-NOTICES.md"
 
 
-# An assignment of a pin in scripts/check-test-fonts.sh, in every form bash takes: indented
-# (inside an `if`, say), after `export`, `readonly`, `declare` or `local` and their options,
-# or appended to with `+=`. The value is the rest of the line, a comment included.
+# An assignment of a pin in scripts/check-test-fonts.sh as the first word of its line:
+# indented (inside an `if`, say), after `export`, `readonly`, `declare`, `local` or `typeset`
+# and their options, or appended to with `+=`. The value is the rest of the line, a comment
+# included. `pin_errors` also counts a pin's name assigned later in a line; what it does not
+# see (`printf -v`, `read`) is left to the nightly run, which compares the files themselves.
 PIN = (
     r"^[ \t]*(?:(?:export|readonly|declare|local|typeset)(?:[ \t]+-\w+)*[ \t]+)?"
     r"(\w+_(?:url|sha256|commit))\+?=(.*)$"
@@ -62,6 +64,13 @@ def pin_errors(script, notices):
     names = [name for name, _ in assignments]
     if sorted(names) != sorted(EXPECTED):
         errors.append(f"pins assigned: {sorted(names)}, expected each of {sorted(EXPECTED)} once")
+    # Each name assigned once anywhere outside comments: also after `then`, `&&`, `;`, `{`,
+    # another assignment or `declare --`, to an index, or in `eval`.
+    code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
+    for name in EXPECTED:
+        count = len(re.findall(rf"(?<![\w$]){name}(?:\[[^\]]*\])?\+?=", code))
+        if count != 1:
+            errors.append(f"{name} is assigned {count} times, not once")
     for name, value in assignments:
         font, kind = name.rsplit("_", 1)
         context, shape = CONTEXTS[kind]
@@ -131,17 +140,43 @@ def wrong_pins(script, notices):
         f"export noto_commit={'0' * 40}",
         f"readonly noto_commit={'0' * 40}",
         f"declare -r noto_commit={'0' * 40}",
+        f"typeset noto_commit={'0' * 40}",
+        f"local noto_commit={'0' * 40}",
         f"noto_commit+={'0' * 40}",
+        # Later in a line, which the second count finds.
+        f"if true; then noto_commit={'0' * 40}; fi",
+        f"true && noto_commit={'0' * 40}",
+        f"true; noto_commit={'0' * 40}",
+        f"{{ noto_commit={'0' * 40}; }}",
+        f"foo=1 noto_commit={'0' * 40}",
+        f"declare -- noto_commit={'0' * 40}",
+        f"declare +x noto_commit={'0' * 40}",
+        f"noto_commit[0]={'0' * 40}",
+        f"eval noto_commit={'0' * 40}",
     ):
         cases[f"assigned again: {again}"] = script.replace(
             f"noto_commit={commit}", f"noto_commit={commit}\n{again}"
         )
+    poi = re.search(r"## Apache POI.*?commit\s+`([0-9a-f]{40})`", notices, re.S).group(1)
+    cases["another section's commit (POI's) for Noto's"] = assigned("noto_commit", poi)
     found = {case: (changed, notices) for case, changed in cases.items()}
     # A short commit, which git would take, written in the notices too.
     short = commit[:7]
     found["a short commit in the script and the notices"] = (
         assigned("noto_commit", short),
         notices.replace(f"`{commit}`", f"`{short}`"),
+    )
+    # Pins of the wrong shape, written in the notices too.
+    archive = pins["liberation_sha256"]
+    found["a short archive SHA-256 in the script and the notices"] = (
+        assigned("liberation_sha256", archive[:12]),
+        notices.replace(f"`{archive}`", f"`{archive[:12]}`"),
+    )
+    url = pins["carlito_url"]
+    plain = url.replace("https://", "http://", 1)
+    found["an http URL in the script and the notices"] = (
+        assigned("carlito_url", plain),
+        notices.replace(f"<{url}>", f"<{plain}>"),
     )
     return found
 
@@ -167,6 +202,12 @@ class TestFonts(unittest.TestCase):
         for width in (None, 40, 72, 1000):
             with self.subTest(width=width):
                 self.assertEqual(pin_errors(script, reflowed(notices, width)), [])
+        # A comment may name an old pin.
+        commented = re.sub(
+            r"^(noto_commit=.*)$", f"# was noto_commit={'0' * 40}\n\\1", script, flags=re.M
+        )
+        self.assertNotEqual(commented, script)
+        self.assertEqual(pin_errors(commented, notices), [])
 
     def test_wrong_pins_are_found(self):
         script = (ROOT / "scripts" / "check-test-fonts.sh").read_text(encoding="utf-8")
