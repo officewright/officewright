@@ -26,8 +26,10 @@ tests/corpus/reference/<group>/<name>/ go instead
     resolution and colour model the SSIM comparison uses;
   - geometry.json: page sizes and the position of every line and word (pdftotext
     -bbox-layout, in points from the top left of the page), the page count, Word's own page
-    breaks (the w:lastRenderedPageBreak marks of the re-saved copy), and the fonts the PDF
-    references without embedding them;
+    breaks (the w:lastRenderedPageBreak marks of the re-saved copy), the fonts the PDF
+    references without embedding them, and what Word changed when it saved the copy: the
+    w:compat settings it dropped and added, the style and numbering properties it dropped,
+    and the paragraphs whose style it changed;
   - formatting.json, from make-reference.ps1 format 3 on: the formatting Word computes for
     every paragraph of every story, with its runs of formatting when Word gave them, and the
     body paragraphs' style ids and names taken from the re-saved copy.
@@ -344,6 +346,111 @@ def compat_flags(parts: dict[str, bytes]) -> set[str]:
         elif value not in ("0", "false", "off"):
             flags.add(name)
     return flags
+
+
+# Children of a style that say how Word's user interface shows it, not how it formats: Word
+# adds and drops them freely when it saves, so they are left out of the comparison (#297).
+STYLE_UI = {
+    "name", "aliases", "uiPriority", "semiHidden", "unhideWhenUsed", "qFormat", "locked",
+    "rsid", "autoRedefine", "personal", "personalCompose", "personalReply",
+}
+
+
+def property_leaves(element: ElementTree.Element, path: str = "") -> set[str]:
+    """Every leaf below a properties element as "path attribute=value ...", with the
+    WordprocessingML attributes in order; the path of a conditional format names its type."""
+    out = set()
+    for child in element:
+        name = local_name(child.tag)
+        if name in STYLE_UI:
+            continue
+        if name == "tblStylePr":
+            name = f"tblStylePr[{child.get(f'{W}type', '')}]"
+        here = f"{path}/{name}" if path else name
+        if len(child):
+            out |= property_leaves(child, here)
+        else:
+            attributes = " ".join(
+                f"{local_name(key)}={value}"
+                for key, value in sorted(child.attrib.items())
+                if key.startswith(W)
+            )
+            out.add(f"{here} {attributes}" if attributes else here)
+    return out
+
+
+def style_properties(parts: dict[str, bytes]) -> set[str]:
+    """What styles.xml sets: "docDefaults: leaf", "styleId: leaf" for every style, and
+    "styleId: default" for a style marked default."""
+    data = parts.get("word/styles.xml")
+    if not data:
+        return set()
+    root = ElementTree.fromstring(data)
+    out = set()
+    defaults = root.find(f"{W}docDefaults")
+    if defaults is not None:
+        out |= {f"docDefaults: {leaf}" for leaf in property_leaves(defaults)}
+    for style in root.iter(f"{W}style"):
+        style_id = style.get(f"{W}styleId", "")
+        if style.get(f"{W}default") in ("1", "true", "on"):
+            out.add(f"{style_id}: default")
+        out |= {f"{style_id}: {leaf}" for leaf in property_leaves(style)}
+    return out
+
+
+def numbering_properties(parts: dict[str, bytes]) -> set[str]:
+    """What numbering.xml sets: "abstractNum N level L: leaf" for every level of every
+    definition, and "num N: leaf" for every instance and its overrides."""
+    data = parts.get("word/numbering.xml")
+    if not data:
+        return set()
+    root = ElementTree.fromstring(data)
+    out = set()
+    for definition in root.iter(f"{W}abstractNum"):
+        number = definition.get(f"{W}abstractNumId", "")
+        for level in definition.findall(f"{W}lvl"):
+            ilvl = level.get(f"{W}ilvl", "")
+            out |= {f"abstractNum {number} level {ilvl}: {leaf}" for leaf in property_leaves(level)}
+    for instance in root.iter(f"{W}num"):
+        number = instance.get(f"{W}numId", "")
+        out |= {f"num {number}: {leaf}" for leaf in property_leaves(instance)}
+    return out
+
+
+def explicit_paragraph_styles(parts: dict[str, bytes]) -> list[str | None]:
+    """The w:pStyle of every paragraph of the body, in order, None where it has none; text
+    boxes and alternative content are left out, as Word's main story leaves them out."""
+    MC = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
+    skipped = (f"{W}txbxContent", f"{MC}AlternateContent")
+    body = ElementTree.fromstring(parts["word/document.xml"]).find(f"{W}body")
+    out: list[str | None] = []
+
+    def walk(element: ElementTree.Element) -> None:
+        for child in element:
+            if child.tag in skipped:
+                continue
+            if child.tag == f"{W}p":
+                style = child.find(f"{W}pPr/{W}pStyle")
+                out.append(style.get(f"{W}val") if style is not None else None)
+            walk(child)
+
+    if body is not None:
+        walk(body)
+    return out
+
+
+def paragraph_style_changes(original: dict[str, bytes], resaved: dict[str, bytes]) -> list[str]:
+    """The body paragraphs whose w:pStyle the re-saved copy writes otherwise than the input,
+    as "paragraph N: input -> copy" ("none" where there is none); when the copy has another
+    number of paragraphs, that alone."""
+    before, after = explicit_paragraph_styles(original), explicit_paragraph_styles(resaved)
+    if len(before) != len(after):
+        return [f"the re-saved copy has {len(after)} paragraphs, the input {len(before)}"]
+    return [
+        f"paragraph {n}: {a or 'none'} -> {b or 'none'}"
+        for n, (a, b) in enumerate(zip(before, after), 1)
+        if a != b
+    ]
 
 
 def locale_marks(parts: dict[str, bytes]) -> tuple[set[str], dict[str, str]]:
@@ -1292,6 +1399,17 @@ def rasterized_note(entries: list[dict]) -> str:
     )
 
 
+def style_note(geometry: dict) -> str:
+    """The SOURCES.md note on what Word changed in the styles, numbering and paragraph styles
+    of the re-saved copy, which geometry.json lists (#297)."""
+    dropped = len(geometry["styles_dropped"]) + len(geometry["numbering_dropped"])
+    changed = len(geometry["paragraph_styles_changed"])
+    return (
+        f"style and numbering properties Word dropped from the re-saved copy: {dropped}; "
+        f"paragraph styles it changed: {changed} (geometry.json lists them)"
+    )
+
+
 def reference_row(
     group: str,
     record: dict,
@@ -1300,6 +1418,7 @@ def reference_row(
     dropped: list[str],
     formatting_note: str = "",
     locale_accepted: list[str] | None = None,
+    styles: str = "",
 ) -> str:
     base = Path(record["file"]).stem
     windows = record["windows_version"]
@@ -1315,6 +1434,7 @@ def reference_row(
         printer,
         "fonts Word substituted: " + (", ".join(record["fonts_missing"]) or "none"),
         "w:compat settings Word dropped from the re-saved copy: " + (", ".join(dropped) or "none"),
+        *([styles] if styles else []),
         "fields as saved",
         f"PDF not committed, SHA-256 {record['pdf_sha256']}",
         f"rasters and geometry by poppler {poppler} at {RASTER_DPI} dpi, grey",
@@ -1411,6 +1531,15 @@ def check_result(
         # Word's for this input, so the import records the difference rather than refusing.
         dropped = sorted(compat_flags(original_parts) - compat_flags(resaved_parts))
         added = sorted(compat_flags(resaved_parts) - compat_flags(original_parts))
+        # Word also leaves out of the copy style and numbering properties it takes as given,
+        # those equal to what they inherit among them, and writes paragraph styles into
+        # paragraphs; the render is of the copy, so these are recorded too (#297). What it
+        # adds to the styles is not: it fills in much that changes nothing.
+        styles_dropped = sorted(style_properties(original_parts) - style_properties(resaved_parts))
+        numbering_dropped = sorted(
+            numbering_properties(original_parts) - numbering_properties(resaved_parts)
+        )
+        paragraph_styles = paragraph_style_changes(original_parts, resaved_parts)
         page_breaks = rendered_page_breaks(resaved_parts)
     except (zipfile.BadZipFile, ElementTree.ParseError, ValueError, KeyError) as error:
         raise Refused(f"{record['file']}: cannot read a package: {error}") from error
@@ -1453,13 +1582,18 @@ def check_result(
         "fonts_rasterized_with": [font.describe() for font in drawn],
         "compat_flags_dropped": dropped,
         "compat_flags_added": added,
+        "styles_dropped": styles_dropped,
+        "numbering_dropped": numbering_dropped,
+        "paragraph_styles_changed": paragraph_styles,
         "page_breaks": page_breaks,
         "pages": geometry_pages,
     }
     formatting, formatting_note = None, ""
     if record["script_version"] >= 3:
         formatting, formatting_note = checked_formatting(record, results, resaved_parts, group)
-    row = reference_row(group, record, drawn, poppler, dropped, formatting_note, accepted)
+    row = reference_row(
+        group, record, drawn, poppler, dropped, formatting_note, accepted, style_note(geometry)
+    )
     return Checked(record, pdf, resaved, row, geometry, drawn, formatting, formatting_note)
 
 
@@ -1614,6 +1748,11 @@ def summary(checked: list[Checked], verb: str) -> list[str]:
         lines.append(f"{verb} {item.record['file']}: {pages} page{'s' if pages != 1 else ''}")
         for flag in item.geometry["compat_flags_dropped"]:
             lines.append(f"  note: Word dropped the w:compat setting {flag} from the re-saved copy")
+        for kind in ("styles_dropped", "numbering_dropped"):
+            for entry in item.geometry.get(kind, []):
+                lines.append(f"  note: Word dropped {entry} from the re-saved copy")
+        for entry in item.geometry.get("paragraph_styles_changed", []):
+            lines.append(f"  note: Word changed the paragraph style of {entry}")
         if item.formatting_note:
             lines.append(f"  {item.formatting_note}")
         for font in item.drawn:

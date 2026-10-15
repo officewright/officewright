@@ -322,7 +322,9 @@ class Import(unittest.TestCase):
             "Word as resaved/word-rules/E-line-fonts.docx | Microsoft Word 16.0, build 16.0.1, "
             "Windows 10.0.26100.0 (24H2) | 2026-10-13 | compatibility mode 15; 3 pages; printer "
             "Microsoft Print to PDF; fonts Word substituted: none; w:compat settings Word "
-            "dropped from the re-saved copy: none; fields as saved; PDF not "
+            "dropped from the re-saved copy: none; style and numbering properties Word dropped "
+            "from the re-saved copy: 0; paragraph styles it changed: 0 (geometry.json lists "
+            "them); fields as saved; PDF not "
             f"committed, SHA-256 {pdf_sha256}; rasters and geometry by poppler 24.02.0 at 110 dpi, "
             "grey; fonts the PDF does not embed, rasterized with the maintainer's installed "
             f"copies: Garamond (Garamond, Version 2.40, SHA-256 {sha256(self.garamond)}) |",
@@ -399,6 +401,100 @@ class Import(unittest.TestCase):
             "w:compat settings Word dropped from the re-saved copy: "
             "doNotUseIndentAsNumberingTabStop;",
             sources,
+        )
+
+    def test_records_style_numbering_and_paragraph_style_changes(self):
+        # #297: what Word leaves out of the styles and the numbering of the copy it re-saves,
+        # and the paragraph styles it writes, go into geometry.json and the SOURCES.md row.
+        doc = next(d for d in rules.documents() if d.name == "E-list-label-format")
+        record = self.add_result(doc)
+        self.change_resaved(record, {
+            "word/styles.xml": [
+                (b'<w:style w:type="paragraph" w:customStyle="1" w:styleId="BoldStyle">'
+                 b'<w:name w:val="BoldStyle"/>',
+                 b'<w:style w:type="paragraph" w:customStyle="1" w:styleId="BoldStyle">'
+                 b'<w:name w:val="BoldStyle"/><w:uiPriority w:val="9"/>'),
+                (b'<w:style w:type="paragraph" w:default="1" w:styleId="Normal">',
+                 b'<w:style w:type="paragraph" w:styleId="Normal">'),
+            ],
+            "word/numbering.xml": [(b'<w:pStyle w:val="LabelParaOneWay"/>', b"")],
+            "word/document.xml": [
+                (b'<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/>',
+                 b'<w:p><w:pPr><w:pStyle w:val="BoldStyle"/><w:numPr><w:ilvl w:val="0"/>'
+                 b'<w:numId w:val="1"/>'),
+            ],
+        })
+        self.run_import()
+        folder = self.corpus / "reference" / "word-rules" / doc.name
+        geometry = json.loads((folder / "geometry.json").read_text(encoding="utf-8"))
+        # The style property Word added (uiPriority) is not a change of the looks.
+        self.assertEqual(geometry["styles_dropped"], ["Normal: default"])
+        self.assertEqual(len(geometry["numbering_dropped"]), 1)
+        self.assertRegex(geometry["numbering_dropped"][0],
+                         r"^abstractNum \d+ level 0: pStyle val=LabelParaOneWay$")
+        self.assertEqual(geometry["paragraph_styles_changed"], ["paragraph 1: none -> BoldStyle"])
+        sources = (self.corpus / "SOURCES.md").read_text(encoding="utf-8")
+        self.assertIn(
+            "style and numbering properties Word dropped from the re-saved copy: 2; paragraph "
+            "styles it changed: 1 (geometry.json lists them);",
+            sources,
+        )
+
+    def test_style_and_numbering_properties_name_what_they_set(self):
+        styles = (
+            f'<w:styles xmlns:w="{importer.W[1:-1]}"><w:docDefaults><w:pPrDefault><w:pPr>'
+            '<w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault>'
+            '</w:docDefaults><w:style w:type="table" w:default="1" w:styleId="T">'
+            '<w:name w:val="T"/><w:uiPriority w:val="5"/><w:qFormat/><w:basedOn w:val="B"/>'
+            '<w:tblStylePr w:type="firstRow"><w:rPr><w:b/></w:rPr></w:tblStylePr></w:style>'
+            "</w:styles>"
+        )
+        numbering = (
+            f'<w:numbering xmlns:w="{importer.W[1:-1]}"><w:abstractNum w:abstractNumId="4">'
+            '<w:lvl w:ilvl="2"><w:start w:val="1"/><w:pStyle w:val="P"/></w:lvl>'
+            '</w:abstractNum><w:num w:numId="7"><w:abstractNumId w:val="4"/></w:num>'
+            "</w:numbering>"
+        )
+        parts = {"word/styles.xml": styles.encode(), "word/numbering.xml": numbering.encode()}
+        self.assertEqual(importer.style_properties(parts), {
+            "docDefaults: pPrDefault/pPr/spacing after=0 line=240 lineRule=auto",
+            "T: default",
+            "T: basedOn val=B",
+            "T: tblStylePr[firstRow]/rPr/b",
+        })
+        self.assertEqual(importer.numbering_properties(parts), {
+            "abstractNum 4 level 2: start val=1",
+            "abstractNum 4 level 2: pStyle val=P",
+            "num 7: abstractNumId val=4",
+        })
+        self.assertEqual(importer.style_properties({}), set())
+        self.assertEqual(importer.numbering_properties({}), set())
+
+    def test_paragraph_style_changes_compare_paragraphs_in_order(self):
+        def document(*styles):
+            body = "".join(
+                "<w:p>" + (f'<w:pPr><w:pStyle w:val="{s}"/></w:pPr>' if s else "") + "</w:p>"
+                for s in styles
+            )
+            xml = f'<w:document xmlns:w="{importer.W[1:-1]}"><w:body>{body}</w:body></w:document>'
+            return {"word/document.xml": xml.encode()}
+
+        self.assertEqual(
+            importer.paragraph_style_changes(document(None, "A", "B"), document("D", "A", None)),
+            ["paragraph 1: none -> D", "paragraph 3: B -> none"],
+        )
+        self.assertEqual(importer.paragraph_style_changes(document("A"), document("A")), [])
+        # A text box is a story of its own: its paragraphs are not the body's.
+        boxed = document("A")
+        boxed["word/document.xml"] = boxed["word/document.xml"].replace(
+            b"</w:p>",
+            b"<w:r><w:pict><w:txbxContent><w:p><w:pPr><w:pStyle w:val=\"Box\"/></w:pPr></w:p>"
+            b"</w:txbxContent></w:pict></w:r></w:p>",
+        )
+        self.assertEqual(importer.paragraph_style_changes(document("A"), boxed), [])
+        self.assertEqual(
+            importer.paragraph_style_changes(document("A"), document("A", None)),
+            ["the re-saved copy has 2 paragraphs, the input 1"],
         )
 
     def test_records_compat_settings_word_added_or_dropped(self):
