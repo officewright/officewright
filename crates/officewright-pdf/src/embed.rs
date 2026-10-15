@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use officewright_font::{GlyphId, Subset};
+use officewright_font::{GlyphId, Subset, SubsetBudget};
 
 use crate::document::number;
 use crate::font::{Embedded, Lookup};
@@ -59,22 +59,25 @@ pub(crate) struct Prepared<'a> {
 
 impl<'a> Prepared<'a> {
     /// Subsets `font` to the glyphs in `usage`, or to all of them if its license
-    /// forbids subsetting.
+    /// forbids subsetting, within `budget`.
     ///
     /// # Errors
     ///
-    /// [`Error::Embed`] if subsetting finds the font damaged.
-    pub(crate) fn new(font: &'a Embedded, usage: Usage) -> Result<Self> {
+    /// [`Error::Embed`] if subsetting finds the font damaged, or past a limit of the
+    /// library or of `budget`.
+    pub(crate) fn new(font: &'a Embedded, usage: Usage, budget: &mut SubsetBudget) -> Result<Self> {
         let face = &font.face;
         let glyphs: Vec<GlyphId> = if font.whole {
             (0..face.glyph_count()).map(GlyphId::new).collect()
         } else {
             usage.glyphs.keys().copied().map(GlyphId::new).collect()
         };
-        let subset = face.subset(glyphs).map_err(|source| Error::Embed {
-            font: font.name.clone(),
-            source,
-        })?;
+        let subset = face
+            .subset_within(glyphs, budget)
+            .map_err(|source| Error::Embed {
+                font: font.name.clone(),
+                source,
+            })?;
         // A subset's name starts with a tag of six capital letters and a plus sign
         // (ISO 32000-1, 9.6.4); a whole font keeps its name.
         let base_font = if font.whole {

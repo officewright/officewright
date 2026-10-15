@@ -91,10 +91,15 @@ use walk::{Checker, Clamper};
 /// assert!(document.clamp().is_empty());
 /// # Ok::<(), officewright_layout::Error>(())
 /// ```
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 #[non_exhaustive]
 pub struct Document {
+    /// What the ids of the entries this document adds carry.
     tag: DocumentTag,
+    /// The documents this one is a clone of, the nearest last, each with how many entries
+    /// each table had when it was cloned: their ids below those counts name the same
+    /// entries here, and ids they made later name none.
+    ancestors: Vec<(DocumentTag, TableCounts)>,
     settings: DocumentSettings,
     run_styles: Vec<RunStyle>,
     lists: Vec<ListDefinition>,
@@ -111,6 +116,7 @@ impl Document {
     pub fn new(settings: DocumentSettings) -> Self {
         Self {
             tag: DocumentTag::next(),
+            ancestors: Vec::new(),
             settings,
             run_styles: Vec::new(),
             lists: Vec::new(),
@@ -128,8 +134,8 @@ impl Document {
         &self.settings
     }
 
-    /// Adds a run style and returns its id, which only this document and its clones
-    /// accept.
+    /// Adds a run style and returns its id, which this document and the clones made of it
+    /// afterwards accept.
     pub fn add_run_style(&mut self, style: RunStyle) -> RunStyleId {
         let index = self.run_styles.len();
         self.run_styles.push(style);
@@ -141,11 +147,13 @@ impl Document {
 
     /// The run style with this id; `None` for an id of another document.
     pub fn run_style(&self, id: RunStyleId) -> Option<&RunStyle> {
-        self.entry(id.document, id.index, &self.run_styles)
+        self.entry(id.document, id.index, &self.run_styles, |counts| {
+            counts.run_styles
+        })
     }
 
-    /// Adds a list definition and returns its id, which only this document and its
-    /// clones accept.
+    /// Adds a list definition and returns its id, which this document and the clones made
+    /// of it afterwards accept.
     pub fn add_list(&mut self, list: ListDefinition) -> ListId {
         let index = self.lists.len();
         self.lists.push(list);
@@ -157,11 +165,11 @@ impl Document {
 
     /// The list definition with this id; `None` for an id of another document.
     pub fn list(&self, id: ListId) -> Option<&ListDefinition> {
-        self.entry(id.document, id.index, &self.lists)
+        self.entry(id.document, id.index, &self.lists, |counts| counts.lists)
     }
 
-    /// Adds an instance of a list definition and returns its id, which only this
-    /// document and its clones accept.
+    /// Adds an instance of a list definition and returns its id, which this document and
+    /// the clones made of it afterwards accept.
     pub fn add_list_instance(&mut self, instance: ListInstance) -> ListInstanceId {
         let index = self.list_instances.len();
         self.list_instances.push(instance);
@@ -173,11 +181,13 @@ impl Document {
 
     /// The list instance with this id; `None` for an id of another document.
     pub fn list_instance(&self, id: ListInstanceId) -> Option<&ListInstance> {
-        self.entry(id.document, id.index, &self.list_instances)
+        self.entry(id.document, id.index, &self.list_instances, |counts| {
+            counts.list_instances
+        })
     }
 
-    /// Adds the data of an image and returns its id, which only this document and its
-    /// clones accept.
+    /// Adds the data of an image and returns its id, which this document and the clones
+    /// made of it afterwards accept.
     pub fn add_image(&mut self, image: ImageData) -> ImageId {
         let index = self.images.len();
         self.images.push(image);
@@ -189,11 +199,11 @@ impl Document {
 
     /// The image data with this id; `None` for an id of another document.
     pub fn image(&self, id: ImageId) -> Option<&ImageData> {
-        self.entry(id.document, id.index, &self.images)
+        self.entry(id.document, id.index, &self.images, |counts| counts.images)
     }
 
-    /// Adds a footnote or an endnote and returns its id, which only this document and its
-    /// clones accept.
+    /// Adds a footnote or an endnote and returns its id, which this document and the
+    /// clones made of it afterwards accept.
     pub fn add_note(&mut self, note: Note) -> NoteId {
         let index = self.notes.len();
         self.notes.push(note);
@@ -205,7 +215,7 @@ impl Document {
 
     /// The note with this id; `None` for an id of another document.
     pub fn note(&self, id: NoteId) -> Option<&Note> {
-        self.entry(id.document, id.index, &self.notes)
+        self.entry(id.document, id.index, &self.notes, |counts| counts.notes)
     }
 
     /// Sets the lines that separate the notes of a kind from the text.
@@ -236,8 +246,9 @@ impl Document {
 
     /// Checks that the document keeps the rules of the IR, which no correct producer
     /// breaks: every length is a finite number, lengths that WordprocessingML only has
-    /// unsigned are not negative, every id is of this document, text holds no control
-    /// characters, list levels are 0 to 8, tables have rows, rows have cells and cells
+    /// unsigned are not negative, every id is of this document, the text of runs holds no
+    /// control characters (that of list labels may, see [`LevelTextPart::Literal`]),
+    /// list levels are 0 to 8, tables have rows, rows have cells and cells
     /// have content, notes hold no note references, the document has a section. It does
     /// not change the document.
     ///
@@ -277,8 +288,11 @@ impl Document {
 
     /// Brings the values that a document may hold, but Word does not accept, within
     /// Word's limits, such as a tab stop beyond 22 inches, and reports each change as
-    /// [`ReportKind::ValueClamped`](crate::ReportKind::ValueClamped). A second call
-    /// changes nothing. Values that [`validate`](Self::validate) rejects are left alone.
+    /// [`ReportKind::ValueClamped`](crate::ReportKind::ValueClamped). A value that
+    /// several items share, such as paragraph properties, is clamped and reported once,
+    /// at the first item that holds it, and the others take the same result. A second
+    /// call changes nothing. Values that [`validate`](Self::validate) rejects are left
+    /// alone.
     ///
     /// ```
     /// use officewright_core::{PageSize, Pt};
@@ -306,30 +320,59 @@ impl Document {
         clamper.finish()
     }
 
-    fn entry<'a, T>(&self, document: DocumentTag, index: usize, table: &'a [T]) -> Option<&'a T> {
-        if document != self.tag {
+    fn entry<'a, T>(
+        &self,
+        document: DocumentTag,
+        index: usize,
+        table: &'a [T],
+        inherited: fn(&TableCounts) -> usize,
+    ) -> Option<&'a T> {
+        if !self.owns(document, index, inherited) {
             return None;
         }
         table.get(index)
     }
 
-    /// Checks that an id of `what` names an entry of this document, whose table has
-    /// `count` entries.
+    /// Whether an id of `document` with `index` is one of this document's: one it made,
+    /// or one a document it is a clone of made before it was cloned, below `inherited` of
+    /// that document's counts then.
+    fn owns(
+        &self,
+        document: DocumentTag,
+        index: usize,
+        inherited: fn(&TableCounts) -> usize,
+    ) -> bool {
+        document == self.tag
+            || self
+                .ancestors
+                .iter()
+                .any(|(tag, counts)| *tag == document && index < inherited(counts))
+    }
+
+    /// How many entries each table has.
+    fn counts(&self) -> TableCounts {
+        TableCounts {
+            run_styles: self.run_styles.len(),
+            lists: self.lists.len(),
+            list_instances: self.list_instances.len(),
+            images: self.images.len(),
+            notes: self.notes.len(),
+        }
+    }
+
+    /// Checks that an id of `what` names an entry of this document. An id it owns names
+    /// one: its own ids are below the lengths its tables had when it made them, an
+    /// ancestor's below the counts at the clone, and tables only grow.
     fn check_id(
         &self,
         document: DocumentTag,
         index: usize,
-        count: usize,
+        inherited: fn(&TableCounts) -> usize,
         what: &str,
         checker: &Checker<'_>,
     ) -> Result<()> {
-        if document != self.tag {
+        if !self.owns(document, index, inherited) {
             return Err(checker.error(format!("the {what} id is of another document")));
-        }
-        if index >= count {
-            return Err(checker.error(format!(
-                "{what} {index} does not exist; the document has {count}"
-            )));
         }
         Ok(())
     }
@@ -339,6 +382,39 @@ impl Default for Document {
     fn default() -> Self {
         Self::new(DocumentSettings::default())
     }
+}
+
+/// A clone holds the same entries under the same ids, but the entries it adds later get
+/// ids of its own: an id the original makes after the clone is not the clone's, nor the
+/// other way round, and [`Document::validate`] rejects it.
+impl Clone for Document {
+    fn clone(&self) -> Self {
+        let mut ancestors = self.ancestors.clone();
+        ancestors.push((self.tag, self.counts()));
+        Self {
+            tag: DocumentTag::next(),
+            ancestors,
+            settings: self.settings.clone(),
+            run_styles: self.run_styles.clone(),
+            lists: self.lists.clone(),
+            list_instances: self.list_instances.clone(),
+            images: self.images.clone(),
+            notes: self.notes.clone(),
+            footnote_separators: self.footnote_separators.clone(),
+            endnote_separators: self.endnote_separators.clone(),
+            sections: self.sections.clone(),
+        }
+    }
+}
+
+/// How many entries each table of a document has.
+#[derive(Clone, Copy, Debug)]
+struct TableCounts {
+    run_styles: usize,
+    lists: usize,
+    list_instances: usize,
+    images: usize,
+    notes: usize,
 }
 
 /// Which document an id belongs to.
@@ -367,8 +443,8 @@ macro_rules! document_ids {
             impl walk::Check for $name {
                 fn check(&self, checker: &mut Checker<'_>) -> Result<()> {
                     let document = checker.document();
-                    let count = document.$table.len();
-                    document.check_id(self.document, self.index, count, $what, checker)
+                    let inherited = (|counts: &TableCounts| counts.$table) as fn(&TableCounts) -> usize;
+                    document.check_id(self.document, self.index, inherited, $what, checker)
                 }
             }
 

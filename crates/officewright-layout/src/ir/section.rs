@@ -115,12 +115,23 @@ fn page_size_within_margins(setup: &mut PageSetup, clamper: &mut Clamper) {
     let margins = setup.margins;
     let across = margins.left.0 + margins.right.0 + margins.gutter.0;
     let down = margins.top.0.abs() + margins.bottom.0.abs();
-    // A margin that is not a number gives no bound; `validate` rejects it.
-    if !across.is_finite() || !down.is_finite() {
-        return;
-    }
     let mut width = setup.size.width();
     let mut height = setup.size.height();
+    // A margin or a page size that `validate` rejects gives no bound, and the page is
+    // left alone: a margin that is not a number, a negative one across, or a negative or
+    // infinite side.
+    let rejected = |value: f64| !value.is_finite() || value < 0.0;
+    let negative_across = [margins.left, margins.right, margins.gutter]
+        .iter()
+        .any(|margin| margin.0 < 0.0);
+    if negative_across
+        || !across.is_finite()
+        || !down.is_finite()
+        || rejected(width.0)
+        || rejected(height.0)
+    {
+        return;
+    }
     let max = WORD_MAX_LENGTH;
     rules::limit(
         &mut width,
@@ -192,7 +203,8 @@ ir_struct! {
 }
 
 /// Word allows 1 to 45 columns (MS-OI29500 2.1.213 a), and requires the number of
-/// explicit columns to be that count (2.1.213 c).
+/// explicit columns to be that count (2.1.213 c). Explicit columns of which `validate`
+/// rejects one, a width or a spacing that is negative or not a number, are left to it.
 fn column_count(columns: &mut Columns, clamper: &mut Clamper) {
     const MAX: u16 = 45;
     if columns.count == 0 || columns.count > MAX {
@@ -203,7 +215,12 @@ fn column_count(columns: &mut Columns, clamper: &mut Clamper) {
         ));
         columns.count = clamped;
     }
-    if columns.widths.len() > usize::from(MAX) {
+    let rejected = |length: Pt| !length.0.is_finite() || length.0 < 0.0;
+    let any_rejected = columns
+        .widths
+        .iter()
+        .any(|column| rejected(column.width) || rejected(column.spacing));
+    if columns.widths.len() > usize::from(MAX) && !any_rejected {
         clamper.clamped(format!(
             "{} columns of their own widths are more than Word's {MAX}; the columns after \
              the first {MAX} are left out",
@@ -233,9 +250,11 @@ pub enum SectionStart {
     NextPage,
     /// On the same page, below the previous section.
     Continuous,
-    /// On the next even page, leaving a blank page when needed.
+    /// On a page whose number is even: on the next page, numbered one more when its
+    /// number would be odd, with a blank page for the skipped number when the section
+    /// continues the numbering of the one before.
     EvenPage,
-    /// On the next odd page, leaving a blank page when needed.
+    /// On a page whose number is odd, as [`EvenPage`](Self::EvenPage) is on an even one.
     OddPage,
     /// In the next column.
     NextColumn,

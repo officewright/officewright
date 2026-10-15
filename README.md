@@ -8,8 +8,9 @@ shipped as prebuilt libraries with a C header, so any language with an FFI can c
 it without a Rust toolchain.
 
 > **Status: pre-release 0.1.0.** It writes PDF files with text from Rust, C and the
-> command line. It does not convert DOCX or other office documents to PDF yet; see
-> [what 0.1.0 does](#what-010-does).
+> command line; see [what 0.1.0 does](#what-010-does). The main branch also converts
+> DOCX to PDF, in an early version that is not in a release yet; see
+> [DOCX to PDF](#docx-to-pdf-early-version).
 
 Officewright is a source-available alternative to Spire.Office and Aspose. It is not
 affiliated with, endorsed by or connected to the makers of either product; the
@@ -34,14 +35,120 @@ It can:
 
 It cannot yet:
 
-- convert DOCX, DOC, XLSX or PPTX to PDF. A DOCX reader is in the Rust crates, but the
-  layout engine that turns documents into pages is still being written;
+- convert DOCX, DOC, XLSX or PPTX to PDF. The main branch converts DOCX in an early
+  version, [described below](#docx-to-pdf-early-version);
 - shape text (Arabic, Hebrew, the Indic scripts), or draw images, tables and vector
   graphics;
 - read PDF files;
 - be installed from crates.io or a package manager.
 
 [CHANGELOG.md](CHANGELOG.md) lists everything in the release.
+
+## DOCX to PDF (early version)
+
+The main branch converts Word documents (DOCX, and DOCM, DOTX and DOTM) to PDF. This is
+an early version that is not in a release yet: build it from source. Expect its pages to
+differ from Word's, most of all where a document uses something from the list below,
+but elsewhere too: lines and page breaks do not yet always fall where Word puts them.
+
+It follows Word's rules for laying out text: the fonts the document embeds come first,
+then those you give and the system's, then for a missing font its metric-compatible
+substitute (Carlito for Calibri, Liberation for Arial, Times New Roman and Courier New)
+if it is installed or given, else one of similar design or a common font of the same
+kind; text is shaped with
+HarfRust, or without kerning and ligatures from a font whose layout tables it cannot
+use; lines break and paragraphs are spaced, kept together and kept from widows as in
+Word; each section gets its page size and margins, headers, footers and page numbers.
+It draws inline PNG and JPEG pictures, underlines, strikethrough, highlight and shading.
+Much of what it shows otherwise than Word would, such as a substituted font or something
+not laid out yet, it reports: the command line prints it as notes, and the C library and
+Rust return it as a report.
+
+The main things not laid out yet:
+
+- tables: the paragraphs of their cells follow one another at the full width;
+- the bullets and numbers of lists;
+- footnotes and endnotes, and the marks that refer to them;
+- floating (anchored) pictures and shapes, text boxes, charts, SmartArt, VML drawings,
+  embedded objects and equations;
+- text in several columns (laid out in one column), paragraph and page borders, and line
+  numbers;
+- the document grid, which sets the line height of many Chinese and Japanese documents;
+- frames and drop caps, and character borders and effects such as emboss, outline,
+  shadow and emphasis marks;
+- right-to-left text (Arabic, Hebrew) in its reading order, and vertical text;
+- links, which keep their look but cannot be clicked, and automatic hyphenation;
+- cropped, rotated or mirrored pictures, which are drawn whole and upright, pictures in
+  formats other than PNG and JPEG, which are drawn as grey boxes, and the outlines and
+  colour adjustments of pictures;
+- fields other than page numbers and page counts, which show the result stored in the
+  document.
+
+Comments are left out. Tracked changes are shown as accepted, except that deleted
+paragraph marks and table rows stay, so a deleted paragraph leaves an empty line. Of all
+this, the report names tables, columns, paragraph borders, shapes, text boxes, charts,
+SmartArt, VML drawings, embedded objects and equations, pictures that are cropped, turned
+or mirrored or in a format other than PNG and JPEG, and fields; the rest, floating
+pictures included, is not in the report yet
+([#303](https://github.com/officewright/officewright/issues/303)). It also names smaller
+differences that this list leaves out, such as absolute position tabs. DOC and RTF files,
+and files that need a password to open, cannot be opened yet.
+
+From the command line:
+
+```sh
+cargo build --release -p officewright-cli
+target/release/officewright docx-to-pdf letter.docx letter.pdf
+target/release/officewright docx-to-pdf --font-dir ./fonts --report notes.json cv.docx cv.pdf
+```
+
+It prints notes such as these:
+
+```text
+note: sections[0].blocks[18]: tables are not laid out yet: the paragraphs of their cells follow one another at the full width
+note: document: "Calibri" → "Carlito" (metric-compatible substitute)
+```
+
+`--report FILE` also writes the notes to a JSON file, `--font FILE` adds a font file,
+`--no-system-fonts` leaves out the system's fonts, and `--max-pages N` makes a document
+that takes more pages fail (100,000 by default).
+
+From C, with the library that `scripts/install-capi.sh PREFIX` builds (it needs
+[cargo-c](https://github.com/lu-zero/cargo-c)) and installs in the layout of a release
+archive. The example uses the fonts of a folder `fonts`, which must exist: a folder that
+cannot be read makes the conversion fail.
+
+```c
+#include <stdio.h>
+#include <officewright.h>
+
+int main(void) {
+    OwDocDocument *doc = NULL;
+    OwRenderOptions *options = NULL;
+    OwLayoutReport *report = NULL;
+    size_t len = 0;
+    int ok = ow_doc_document_open_path("report.docx", &doc) == OW_STATUS_OK
+          && ow_render_options_new(&options) == OW_STATUS_OK
+          && ow_render_options_add_font_dir(options, "fonts") == OW_STATUS_OK
+          && ow_doc_document_save_pdf_path(doc, "report.pdf", options, &report) == OW_STATUS_OK
+          && ow_layout_report_len(report, &len) == OW_STATUS_OK;
+    if (!ok) fprintf(stderr, "error: %s\n", ow_last_error_message());
+    for (size_t i = 0; i < len; i++) {
+        int32_t kind;
+        const char *location, *message;
+        if (ow_layout_report_entry(report, i, &kind, &location, &message) == OW_STATUS_OK)
+            printf("note: %s: %s\n", location, message);
+    }
+    ow_layout_report_free(report);
+    ow_render_options_free(options);
+    ow_doc_document_free(doc);
+    return ok ? 0 : 1;
+}
+```
+
+`ow_doc_document_open_bytes` and `ow_doc_document_save_pdf_bytes` do the same in
+memory. From Rust, `officewright_doc::Document::open` and `save_pdf_path` do it, with the
+crate's feature `pdf`.
 
 ## Command line
 
@@ -111,7 +218,8 @@ library; `tests/ffi-python` does it with Python's `ctypes`.
 5. XLSX and PPTX read/write, PDF reading and text extraction.
 6. Language packages (.NET, Python, Node, Java, Go, WebAssembly).
 
-0.1.0 has steps 1 to 3; step 4 is in progress.
+0.1.0 has steps 1 to 3; step 4 is in progress, and the main branch converts DOCX to PDF
+in an [early version](#docx-to-pdf-early-version).
 
 ## Clean room
 

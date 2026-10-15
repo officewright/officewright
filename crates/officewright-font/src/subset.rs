@@ -86,13 +86,56 @@ impl fmt::Debug for Subset {
     }
 }
 
+/// The work that several subsets may take together, such as the subsets of the fonts one
+/// PDF file embeds.
+///
+/// Reducing a face with CFF outlines decompiles the charstrings of the glyphs it keeps,
+/// reading every subroutine again for each call, and the work and memory that takes grow
+/// with what it reads: about 30 bytes for each operand, operator and hint mask byte while
+/// the subset is made, and about 5 bytes for each in the subset made. One subset may read
+/// at most 16,777,216 of them, a limit of the library; a budget bounds what several
+/// subsets that are kept together read in all. [`FontFace::subset_within`] takes what a
+/// subset reads off the budget, and refuses a subset that would read more than is left.
+/// TrueType outlines take nothing from it.
+///
+/// ```
+/// use officewright_font::{FontFace, SubsetBudget};
+///
+/// let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/minimal.ttf"))?;
+/// let font = FontFace::from_bytes(data, 0)?;
+/// let a = font.glyph_id('A').expect("the font has A");
+/// let mut budget = SubsetBudget::new(1_000_000);
+/// let subset = font.subset_within([a], &mut budget)?;
+/// assert_eq!(subset.glyph_id(a).map(u16::from), Some(1));
+/// // The font has TrueType outlines.
+/// assert_eq!(budget.left(), 1_000_000);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubsetBudget {
+    left: u64,
+}
+
+impl SubsetBudget {
+    /// A budget of `units` operands, operators and hint mask bytes.
+    pub fn new(units: u64) -> Self {
+        Self { left: units }
+    }
+
+    /// The units left.
+    pub fn left(&self) -> u64 {
+        self.left
+    }
+}
+
 impl FontFace {
     /// Reduces the face to `glyphs`, plus `.notdef` and the components of composite
     /// glyphs, for embedding in a PDF.
     ///
     /// This does not check [`embedding`](Self::embedding) permissions; the caller
     /// decides what to do with a font whose license forbids embedding or subsetting.
-    /// A variable font is reduced to its default instance.
+    /// A variable font is reduced to its default instance. Several subsets kept together
+    /// are bounded together by [`subset_within`](Self::subset_within).
     ///
     /// # Errors
     ///
@@ -103,13 +146,31 @@ impl FontFace {
     /// a `name` table whose offsets it cannot compute,
     /// [`Error::TableOverLimit`] for a `name` table whose records to keep point at more
     /// than 1 MiB of strings, `CFF ` Font DICTs that point at more than 1 MiB of Private
-    /// DICTs, an FDSelect of more than 2,048 ranges, or glyphs whose `CFF ` charstrings
-    /// take more than 16,777,216 operands, operators and hint mask bytes to decompile,
+    /// DICTs or have more than 262,144 local subroutines in all, an FDSelect of more than
+    /// 2,048 ranges, or glyphs whose `CFF ` charstrings take more than 16,777,216
+    /// operands, operators and hint mask bytes to decompile,
     /// [`Error::SubsetUnsupported`] if the face uses
     /// something the subsetter does not implement yet, and [`Error::Subset`] or
     /// [`Error::SubsetterPanicked`] if the face is damaged in a way that only subsetting
     /// finds.
     pub fn subset(&self, glyphs: impl IntoIterator<Item = GlyphId>) -> Result<Subset> {
+        self.subset_within(glyphs, &mut SubsetBudget::new(u64::MAX))
+    }
+
+    /// [`subset`](Self::subset) within `budget`: decompiling the CFF glyphs to keep may
+    /// read no more than is left of it, nor than the limit of one subset, and what it
+    /// reads is taken off the budget once the subset is made. A subset that fails takes
+    /// nothing.
+    ///
+    /// # Errors
+    ///
+    /// Those of [`subset`](Self::subset), and [`Error::TableOverLimit`] if decompiling
+    /// the glyphs to keep reads more than is left of `budget`.
+    pub fn subset_within(
+        &self,
+        glyphs: impl IntoIterator<Item = GlyphId>,
+        budget: &mut SubsetBudget,
+    ) -> Result<Subset> {
         let face = self.index();
         let outline_format = match self.outline_format() {
             Some(format @ (OutlineFormat::TrueType | OutlineFormat::Cff)) => format,
@@ -132,9 +193,12 @@ impl FontFace {
         // lookup, not by the outline format the font parser reports.
         let font = crate::font::font_ref(self.data(), face)?;
         crate::name_offsets::check(&font, self.data(), face)?;
-        if subsetter_table(&font, self.data(), b"glyf").is_none() {
-            crate::cff::check(&font, self.data(), face, &ids)?;
-        }
+        let read = if subsetter_table(&font, self.data(), b"glyf").is_none() {
+            let limit = crate::cff::Limit::within(budget.left);
+            crate::cff::check(&font, self.data(), face, &ids, limit)?
+        } else {
+            0
+        };
         let remapper = GlyphRemapper::new_from_glyphs_sorted(&ids);
         let data = self.data();
         let data = catch_subsetter_panic(face, || subsetter::subset(data, face, &remapper))?
@@ -157,6 +221,7 @@ impl FontFace {
             ),
             _ => None,
         };
+        budget.left = budget.left.saturating_sub(u64::from(read));
         Ok(Subset {
             data,
             remapper,

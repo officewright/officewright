@@ -1612,7 +1612,7 @@ fn reads_the_paragraph_style_as_the_paragraph_properties_do() {
     ]
     .concat();
     let body = [
-        r#"<w:p><w:pPr><mc:AlternateContent><mc:Choice Requires="w99"><w:pStyle w:val="Right"/></mc:Choice><mc:Fallback><w:pStyle w:val="Centred"/></mc:Fallback></mc:AlternateContent></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
+        r#"<w:p><w:pPr><mc:AlternateContent><mc:Choice Requires="w14"><w:pStyle w:val="Right"/></mc:Choice><mc:Fallback><w:pStyle w:val="Centred"/></mc:Fallback></mc:AlternateContent></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
         // A choice that requires only w is taken.
         r#"<w:p><w:pPr><mc:AlternateContent><mc:Choice Requires="w"><w:pStyle w:val="Right"/></mc:Choice><mc:Fallback><w:pStyle w:val="Centred"/></mc:Fallback></mc:AlternateContent></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
         r#"<w:p><w:pPr><w:pStyle w:val="Centred"/><w:pStyle w:val="Right"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
@@ -1748,8 +1748,9 @@ fn a_list_label_takes_the_paragraph_style_and_the_marks_character_style() {
 #[test]
 fn formats_a_list_label_as_the_mark_with_the_level_over_it() {
     // The label takes the paragraph mark's formatting with the level's run properties
-    // over it; Word ignores the level's w:rStyle, w:highlight and w:oMath there
-    // (MS-OI29500 §17.9.24(a)).
+    // over it; Word does not allow the level's w:rStyle, w:highlight and w:oMath there
+    // (MS-OI29500 §17.9.24(a)), but draws its highlight
+    // (word-rules/E-list-label-rstyle.docx, case 02, #308).
     let level = |ilvl: i64, r_pr: &str| {
         format!(
             r#"<w:lvl w:ilvl="{ilvl}"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="o"/><w:rPr>{r_pr}</w:rPr></w:lvl>"#
@@ -1796,13 +1797,13 @@ fn formats_a_list_label_as_the_mark_with_the_level_over_it() {
     let red = ColorValue::Rgb(255, 0, 0);
 
     // Level 0: the level's font and bold, its "not italic" over the mark's italic; the
-    // mark's size and colour; no highlight, no maths, and nothing of the character style
-    // the level names.
+    // mark's size and colour; the level's highlight; no maths, and nothing of the
+    // character style the level names.
     let first = labels[0].as_ref().unwrap();
     assert_eq!(first.fonts().ascii(), "Symbol");
     assert_eq!((first.bold(), first.italic()), (true, false));
     assert_eq!((first.size(), first.color()), (Pt(14.0), red));
-    assert_eq!(first.highlight(), None);
+    assert_eq!(first.highlight(), Some(Highlight::Yellow));
     assert!(!first.math());
     assert_eq!(
         (first.underline(), first.caps(), first.style()),
@@ -1832,4 +1833,65 @@ fn formats_a_list_label_as_the_mark_with_the_level_over_it() {
     // replacement in instance 2's override.
     assert_eq!(formats.work().level_layers, 2);
     assert_eq!(formats.work().replacements, 1);
+}
+
+#[test]
+fn takes_the_last_paragraph_style_marked_default() {
+    // #308: of several paragraph styles marked w:default, Word takes the last, even when
+    // Normal is one of them (word-rules/E-default-paragraph-style-after-normal.docx), and
+    // when neither is Normal (E-default-paragraph-style.docx).
+    let default = |id: &str, p_pr: &str| {
+        format!(
+            r#"<w:style w:type="paragraph" w:default="1" w:styleId="{id}"><w:name w:val="{id}"/><w:pPr>{p_pr}</w:pPr></w:style>"#
+        )
+    };
+    let styles = [
+        defaults(""),
+        default("Normal", ""),
+        style("paragraph", "Other", None, r#"<w:jc w:val="right"/>"#),
+        default(
+            "LaterDefault",
+            r#"<w:spacing w:after="480"/><w:jc w:val="center"/>"#,
+        ),
+    ]
+    .concat();
+    let body = [paragraph("", ""), paragraph("Normal", "")].concat();
+    let document = build(&body, &styles, None);
+    let found: Vec<_> = formats(&document)
+        .iter()
+        .map(|format| {
+            (
+                format.style().map(str::to_owned),
+                format.justification(),
+                format.after_spacing(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        found,
+        [
+            (
+                Some("LaterDefault".to_owned()),
+                Justification::Center,
+                Pt(24.0)
+            ),
+            (Some("Normal".to_owned()), Justification::Start, Pt(0.0)),
+        ]
+    );
+    assert_eq!(
+        document
+            .styles()
+            .default_style(StyleKind::Paragraph)
+            .map(Style::id),
+        Some("LaterDefault")
+    );
+    // Two default styles, neither of them Normal: the second.
+    let styles = [
+        defaults(""),
+        default("First", r#"<w:jc w:val="right"/>"#),
+        default("Second", r#"<w:jc w:val="center"/>"#),
+    ]
+    .concat();
+    let document = build(&paragraph("", ""), &styles, None);
+    assert_eq!(formats(&document)[0].justification(), Justification::Center);
 }
