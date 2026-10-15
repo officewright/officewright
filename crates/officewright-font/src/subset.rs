@@ -146,8 +146,9 @@ impl FontFace {
     /// a `name` table whose offsets it cannot compute,
     /// [`Error::TableOverLimit`] for a `name` table whose records to keep point at more
     /// than 1 MiB of strings, `CFF ` Font DICTs that point at more than 1 MiB of Private
-    /// DICTs, an FDSelect of more than 2,048 ranges, or glyphs whose `CFF ` charstrings
-    /// take more than 16,777,216 operands, operators and hint mask bytes to decompile,
+    /// DICTs or have more than 262,144 local subroutines in all, an FDSelect of more than
+    /// 2,048 ranges, or glyphs whose `CFF ` charstrings take more than 16,777,216
+    /// operands, operators and hint mask bytes to decompile,
     /// [`Error::SubsetUnsupported`] if the face uses
     /// something the subsetter does not implement yet, and [`Error::Subset`] or
     /// [`Error::SubsetterPanicked`] if the face is damaged in a way that only subsetting

@@ -496,7 +496,7 @@ fn translates_paragraph_formatting() {
 #[test]
 fn translates_lists_as_paragraphs_use_them() {
     let numbering = format!(
-        r#"<w:numbering xmlns:w="{W}"><w:abstractNum w:abstractNumId="10"><w:lvl w:ilvl="0"><w:start w:val="3"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="right"/></w:lvl><w:lvl w:ilvl="1"><w:numFmt w:val="lowerLetter"/><w:lvlRestart w:val="0"/><w:lvlText w:val="%1.%2)"/><w:suff w:val="space"/><w:isLgl/></w:lvl><w:lvl w:ilvl="3"><w:numFmt w:val="bullet"/><w:lvlText w:val="%1"/><w:lvlRestart w:val="2"/><w:suff w:val="nothing"/><w:rPr><w:b/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num><w:num w:numId="2"><w:abstractNumId w:val="10"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="5"/></w:lvlOverride><w:lvlOverride w:ilvl="1"><w:lvl w:ilvl="1"><w:numFmt w:val="lowerRoman"/><w:lvlText w:val="(%2)"/></w:lvl></w:lvlOverride></w:num><w:num w:numId="3"><w:abstractNumId w:val="99"/></w:num></w:numbering>"#
+        r#"<w:numbering xmlns:w="{W}"><w:abstractNum w:abstractNumId="10"><w:lvl w:ilvl="0"><w:start w:val="3"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="right"/></w:lvl><w:lvl w:ilvl="1"><w:numFmt w:val="lowerLetter"/><w:lvlRestart w:val="0"/><w:lvlText w:val="%1.%2)"/><w:suff w:val="space"/><w:isLgl/></w:lvl><w:lvl w:ilvl="3"><w:numFmt w:val="bullet"/><w:lvlText w:val="%1"/><w:lvlRestart w:val="2"/><w:suff w:val="nothing"/><w:rPr><w:b/><w:highlight w:val="yellow"/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num><w:num w:numId="2"><w:abstractNumId w:val="10"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="5"/></w:lvlOverride><w:lvlOverride w:ilvl="1"><w:lvl w:ilvl="1"><w:numFmt w:val="lowerRoman"/><w:lvlText w:val="(%2)"/></w:lvl></w:lvlOverride></w:num><w:num w:numId="3"><w:abstractNumId w:val="99"/></w:num></w:numbering>"#
     );
     let item = |instance: i64, level: i64| {
         format!(
@@ -533,9 +533,14 @@ fn translates_lists_as_paragraphs_use_them() {
     assert_eq!(first.instance(), bullet.instance());
     assert_ne!(first.instance(), second.instance());
     assert_eq!((first.level(), bullet.level(), roman.level()), (0, 3, 1));
-    // The label of the bullet level is bold.
-    assert!(ir.run_style(bullet.label_style()).unwrap().bold());
-    assert!(!ir.run_style(first.label_style()).unwrap().bold());
+    // The label of the bullet level is bold and highlighted: Word draws a level's
+    // highlight (word-rules/E-list-label-rstyle.docx, case 02, #308).
+    let (bullet_style, first_style) = (
+        ir.run_style(bullet.label_style()).unwrap(),
+        ir.run_style(first.label_style()).unwrap(),
+    );
+    assert!(bullet_style.bold() && bullet_style.highlight().is_some());
+    assert!(!first_style.bold() && first_style.highlight().is_none());
 
     // Both instances use one definition.
     let one = ir.list_instance(first.instance()).unwrap();

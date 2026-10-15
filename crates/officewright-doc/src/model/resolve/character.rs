@@ -303,12 +303,13 @@ pub(super) struct CharacterLevel {
 
 impl CharacterLevel {
     /// What a list level's `w:rPr` gives to its label. Word does not allow `w:rStyle`,
-    /// `w:highlight`, `w:oMath` and `w:rPrChange` there (MS-OI29500 §17.9.24(a)); the
-    /// note does not say what Word does with a file that has them, and dropping them is
-    /// our choice (`w:rPrChange` is never read). None when it gives nothing.
+    /// `w:highlight`, `w:oMath` and `w:rPrChange` there (MS-OI29500 §17.9.24(a)), but it
+    /// keeps a level's highlight when it saves and draws it behind the label
+    /// (word-rules/E-list-label-rstyle.docx, case 02, #308), so the highlight is taken.
+    /// Dropping `w:oMath` is our choice (`w:rStyle` and `w:rPrChange` are never read
+    /// here). None when it gives nothing.
     pub(super) fn of_label(properties: &RunProperties) -> Option<Arc<Self>> {
         let mut level = Self::of(properties);
-        level.highlight = None;
         if let Some(math) = level.toggles.get_mut(Toggle::Math as usize) {
             *math = None;
         }

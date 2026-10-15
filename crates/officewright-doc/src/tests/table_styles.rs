@@ -1029,3 +1029,23 @@ fn gives_every_header_row_the_first_row_s_row_properties_and_both_top_corners() 
         .collect();
     assert_eq!(cant_split, [Some(true), Some(true), None]);
 }
+
+#[test]
+fn takes_the_last_table_style_marked_default() {
+    // Of several table styles marked w:default, the last, as the standard says
+    // ([MS-WPE376] Part 4 §2.7.3.17 quotes it) and Word shows for paragraph styles (#308).
+    let styles = format!(
+        r#"<w:style w:type="table" w:default="1" w:styleId="First"><w:name w:val="First"/>{}</w:style><w:style w:type="table" w:default="1" w:styleId="Second"><w:name w:val="Second"/>{}</w:style>"#,
+        shading("111111"),
+        shading("222222")
+    );
+    let document = open_with(&styles, &table("", 1, 1));
+    assert_eq!(fills(&document), [["222222"]]);
+    assert_eq!(
+        document
+            .styles()
+            .default_style(StyleKind::Table)
+            .map(Style::id),
+        Some("Second")
+    );
+}
