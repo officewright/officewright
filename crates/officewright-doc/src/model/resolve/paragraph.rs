@@ -135,9 +135,10 @@ impl Formats<'_> {
     /// The list a paragraph is an item of, and what its level gives to the paragraph.
     /// The instance and the level are properties of their own, each from the last level
     /// that gives it, as Word keeps them. Without a level in direct formatting, the level
-    /// is the one whose `w:pStyle` names the paragraph style (ECMA-376 §17.9.23), else the
-    /// one the style writes, which Word does not ignore (MS-OI29500 §17.3.1.19(a)), else
-    /// 0. Instance 0 is no list, even when a `w:num` has that id (ECMA-376 §17.9.18).
+    /// is the one the style hierarchy writes, which Word does not ignore (MS-OI29500
+    /// §17.3.1.19(a)), else the one whose `w:pStyle` names the paragraph style (ECMA-376
+    /// §17.9.23), else 0. Instance 0 is no list, even when a `w:num` has that id
+    /// (ECMA-376 §17.9.18).
     fn list(
         &mut self,
         base: &ParagraphLevel,
@@ -149,11 +150,13 @@ impl Formats<'_> {
             .or(base.list_instance)
             .filter(|&id| id != 0)?;
         let found = self.instance(instance)?;
-        let written_level = direct.list_level.or_else(|| {
-            style
-                .and_then(|style| found.shared.level_of_style(style))
-                .or(base.list_level)
-        });
+        // Word deviates from ECMA-376 §17.9.23, which takes the level from w:pStyle
+        // first: see case 04 of tests/corpus/word-rules/E-list-level-inherit.docx and
+        // Word's reference of it.
+        let written_level = direct
+            .list_level
+            .or(base.list_level)
+            .or_else(|| style.and_then(|style| found.shared.level_of_style(style)));
         let level_number = usize::try_from(written_level.unwrap_or(0))
             .ok()
             .filter(|&level| level <= 8)?;
