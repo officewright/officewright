@@ -156,3 +156,77 @@ pub(crate) fn italic(font: Vec<u8>) -> Vec<u8> {
     let style = u16::from_be_bytes([font[at], font[at + 1]]) | 2;
     patched(font, b"head", 44, &style.to_be_bytes())
 }
+
+/// `font` with table `tag` added: its record in the directory, in the order of tags, and
+/// the table at the end of the file. The tables after the directory move by the record's
+/// 16 bytes.
+pub(crate) fn with_table(font: Vec<u8>, tag: &[u8; 4], table: &[u8]) -> Vec<u8> {
+    let tables = usize::from(u16::from_be_bytes([font[4], font[5]]));
+    let directory_end = 12 + 16 * tables;
+    let mut records: Vec<[u8; 16]> = (0..tables)
+        .map(|i| {
+            let mut record: [u8; 16] = font[12 + 16 * i..28 + 16 * i].try_into().unwrap();
+            let offset = u32::from_be_bytes(record[8..12].try_into().unwrap()) + 16;
+            record[8..12].copy_from_slice(&offset.to_be_bytes());
+            record
+        })
+        .collect();
+    let mut body = font[directory_end..].to_vec();
+    while (directory_end + 16 + body.len()) % 4 != 0 {
+        body.push(0);
+    }
+    let mut record = [0; 16];
+    record[..4].copy_from_slice(tag);
+    record[8..12].copy_from_slice(&((directory_end + 16 + body.len()) as u32).to_be_bytes());
+    record[12..16].copy_from_slice(&(table.len() as u32).to_be_bytes());
+    let at = records.partition_point(|other| other[..4] < tag[..]);
+    records.insert(at, record);
+    // The binary search fields of the header, for one more table.
+    let count = tables + 1;
+    let power = 1usize << count.ilog2();
+    let mut font_out = font[..4].to_vec();
+    for value in [
+        count,
+        16 * power,
+        power.ilog2() as usize,
+        16 * (count - power),
+    ] {
+        font_out.extend_from_slice(&(value as u16).to_be_bytes());
+    }
+    for record in &records {
+        font_out.extend_from_slice(record);
+    }
+    font_out.extend_from_slice(&body);
+    font_out.extend_from_slice(table);
+    font_out
+}
+
+/// A font collection (`ttcf`) of `fonts`, each font's tables moved to where it starts.
+pub(crate) fn collection(fonts: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = b"ttcf".to_vec();
+    out.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+    out.extend_from_slice(&(fonts.len() as u32).to_be_bytes());
+    let header = out.len() + 4 * fonts.len();
+    let mut starts = Vec::new();
+    let mut body = Vec::new();
+    for font in fonts {
+        let start = header + body.len();
+        starts.push(start as u32);
+        let mut font = font.clone();
+        let tables = usize::from(u16::from_be_bytes([font[4], font[5]]));
+        for i in 0..tables {
+            let at = 12 + 16 * i + 8;
+            let offset = u32::from_be_bytes(font[at..at + 4].try_into().unwrap()) + start as u32;
+            font[at..at + 4].copy_from_slice(&offset.to_be_bytes());
+        }
+        body.extend_from_slice(&font);
+        while body.len() % 4 != 0 {
+            body.push(0);
+        }
+    }
+    for start in starts {
+        out.extend_from_slice(&start.to_be_bytes());
+    }
+    out.extend_from_slice(&body);
+    out
+}
