@@ -7,7 +7,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use officewright_font::{FontBook, FontFace, FontRequest, FontResolver, ResolutionKind};
+use officewright_font::{
+    FontBook, FontFace, FontRequest, FontResolver, ResolutionKind, SubsetBudget,
+};
 use officewright_pdf::{
     Compression, Document, EmbeddingNote, Error, Font, PageSize, Pt, StandardFont, text_to_pdf,
 };
@@ -1109,5 +1111,211 @@ fn reports_a_chosen_font_file_that_went_away() -> TestResult {
         err.to_string(),
         format!("cannot use the font in {}", path.display())
     );
+    Ok(())
+}
+
+#[test]
+fn the_fonts_of_a_document_share_its_subset_budget() -> TestResult {
+    // What reducing Noto Sans (CFF) to the glyphs of "Hello" reads.
+    let noto = noto_sans()?;
+    let face = FontFace::from_bytes(noto.clone(), 0)?;
+    let glyphs = "Hello"
+        .chars()
+        .map(|ch| face.glyph_id(ch).ok_or("no glyph"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut budget = SubsetBudget::new(u64::MAX);
+    face.subset_within(glyphs, &mut budget)?;
+    let one = u64::MAX - budget.left();
+    assert!(one > 0);
+
+    // A second font: the same file with a byte after its tables, which is no longer
+    // the same font to the document.
+    let mut copy = noto.clone();
+    copy.push(0);
+    let fonts = [Font::from_bytes(noto, 0)?, Font::from_bytes(copy, 0)?];
+    let liberation = Font::from_bytes(liberation_sans()?, 0)?;
+    let document = |units: u64| -> TestResult<Document> {
+        let mut doc = Document::new();
+        assert_eq!(doc.subset_budget(), 1 << 25);
+        doc.set_subset_budget(units);
+        let page = doc.add_page(PageSize::A4)?;
+        page.add_text(Pt(72.0), Pt(700.0), &fonts[0], Pt(12.0), "Hello")?;
+        page.add_text(Pt(72.0), Pt(680.0), &liberation, Pt(12.0), "Hello")?;
+        page.add_text(Pt(72.0), Pt(660.0), &fonts[1], Pt(12.0), "Hello")?;
+        Ok(doc)
+    };
+
+    // Both CFF fonts within the budget; TrueType takes nothing. Each writing of the
+    // document has the whole budget.
+    let doc = document(2 * one)?;
+    let pdf = doc.to_bytes()?;
+    assert_eq!(doc.to_bytes()?, pdf);
+    let err = document(2 * one - 1)?.to_bytes().unwrap_err();
+    let Error::Embed { font, source } = &err else {
+        return Err(format!("{err:?}").into());
+    };
+    assert_eq!(font, "NotoSans-Regular");
+    assert!(
+        matches!(source, officewright_font::Error::TableOverLimit { .. }),
+        "{source:?}"
+    );
+    assert_eq!(
+        std::error::Error::source(source)
+            .ok_or("no cause")?
+            .to_string(),
+        format!(
+            "decompiling the glyphs to keep, up to glyph {}, reads more than the {} operands, \
+             operators and hint mask bytes left of its budget",
+            face.glyph_id('o').ok_or("no glyph")?.to_u16(),
+            one - 1
+        )
+    );
+    assert!(matches!(
+        officewright_core::Error::from(err),
+        officewright_core::Error::LimitExceeded(_)
+    ));
+    // One font fits in a budget of what it reads.
+    let mut doc = Document::new();
+    doc.set_subset_budget(one);
+    doc.add_page(PageSize::A4)?
+        .add_text(Pt(72.0), Pt(700.0), &fonts[0], Pt(12.0), "Hello")?;
+    doc.to_bytes()?;
+    Ok(())
+}
+
+#[test]
+fn a_font_kept_whole_takes_from_the_subset_budget() -> TestResult {
+    // Noto Sans (CFF) whose license forbids subsetting: the document embeds all its
+    // glyphs, and reducing it reads what all of them read.
+    let noto = with_fs_type(noto_sans()?, 0x0100)?;
+    let face = FontFace::from_bytes(noto.clone(), 0)?;
+    let mut budget = SubsetBudget::new(u64::MAX);
+    face.subset_within(
+        (0..face.glyph_count()).map(officewright_font::GlyphId::new),
+        &mut budget,
+    )?;
+    let whole = u64::MAX - budget.left();
+    let font = Font::from_bytes(noto, 0)?;
+    assert!(font.embedding_notes().contains(&EmbeddingNote::WholeFont));
+    let mut doc = Document::new();
+    doc.add_page(PageSize::A4)?
+        .add_text(Pt(72.0), Pt(700.0), &font, Pt(12.0), "Hello")?;
+    doc.set_subset_budget(whole - 1);
+    let err = doc.to_bytes().unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            Error::Embed {
+                source: officewright_font::Error::TableOverLimit { .. },
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    doc.set_subset_budget(whole);
+    doc.to_bytes()?;
+    Ok(())
+}
+
+/// An INDEX of the CFF format with `items`.
+fn cff_index(items: &[Vec<u8>]) -> TestResult<Vec<u8>> {
+    if items.is_empty() {
+        return Ok(vec![0, 0]);
+    }
+    let mut offsets = vec![1];
+    for item in items {
+        offsets.push(offsets.last().ok_or("no offset")? + item.len());
+    }
+    let mut out = u16::try_from(items.len())?.to_be_bytes().to_vec();
+    out.push(4);
+    for offset in offsets {
+        out.extend(u32::try_from(offset)?.to_be_bytes());
+    }
+    for item in items {
+        out.extend(item);
+    }
+    Ok(out)
+}
+
+/// A SID-keyed `CFF ` table of `glyphs` glyphs: `.notdef` calls global subroutine 1 `calls`
+/// times, which calls global subroutine 0, a bare return, 2,000 times; the other glyphs
+/// are empty. Decompiling `.notdef` reads `calls` × 6,003 + 1 operands and operators.
+fn cff_with_heavy_notdef(glyphs: usize, calls: usize) -> TestResult<Vec<u8>> {
+    // Five-byte integers keep the Top DICT's size whatever the offsets.
+    let int = |value: usize| -> TestResult<Vec<u8>> {
+        Ok([vec![29], i32::try_from(value)?.to_be_bytes().to_vec()].concat())
+    };
+    // Two global subroutines have a bias of 107: operand 32 (-107) calls 0, 33 calls 1.
+    let mut subr = [32, 29].repeat(2000);
+    subr.push(11);
+    let global = cff_index(&[vec![11], subr])?;
+    let mut notdef = [33, 29].repeat(calls);
+    notdef.push(14);
+    let mut charstrings = vec![notdef];
+    charstrings.resize(glyphs, vec![14]);
+    let charstrings = cff_index(&charstrings)?;
+    let private = vec![139, 20];
+    let head = [1, 0, 4, 1];
+    let names = cff_index(&[b"Heavy".to_vec()])?;
+    let top = |charstrings_at, private_at| -> TestResult<Vec<u8>> {
+        Ok([
+            int(charstrings_at)?,
+            vec![17],
+            int(private.len())?,
+            int(private_at)?,
+            vec![18],
+        ]
+        .concat())
+    };
+    let top_len = cff_index(&[top(0, 0)?])?.len();
+    let strings = cff_index(&[])?;
+    let charstrings_at = head.len() + names.len() + top_len + strings.len() + global.len();
+    let private_at = charstrings_at + charstrings.len();
+    let top = top(charstrings_at, private_at)?;
+    Ok([
+        head.to_vec(),
+        names,
+        cff_index(&[top])?,
+        strings,
+        global,
+        charstrings,
+        private,
+    ]
+    .concat())
+}
+
+#[test]
+fn opening_a_font_bounds_what_its_notdef_reads() -> TestResult {
+    // Noto Sans with a `CFF ` table whose `.notdef` reads 60,031 or 66,034 operands and
+    // operators: opening the font reduces it to `.notdef` within 65,536, far more than a
+    // real glyph reads, so that a document of many crafted fonts opens quickly.
+    let noto = noto_sans()?;
+    let glyphs = FontFace::from_bytes(noto.clone(), 0)?.glyph_count();
+    let font = |calls| -> TestResult<Vec<u8>> {
+        let mut tables = tables_of(&noto)?;
+        tables.insert(*b"CFF ", cff_with_heavy_notdef(usize::from(glyphs), calls)?);
+        font_of(&tables)
+    };
+    let opened = Font::from_bytes(font(10)?, 0)?;
+    one_line(&opened, "Hello")?.to_bytes()?;
+    let err = Font::from_bytes(font(11)?, 0).unwrap_err();
+    let Error::Font { source, .. } = &err else {
+        return Err(format!("{err:?}").into());
+    };
+    assert!(
+        matches!(source, officewright_font::Error::TableOverLimit { .. }),
+        "{source:?}"
+    );
+    assert_eq!(
+        std::error::Error::source(source)
+            .ok_or("no cause")?
+            .to_string(),
+        "decompiling the glyphs to keep, up to glyph 0, reads more than the 65536 operands, \
+         operators and hint mask bytes left of its budget"
+    );
+    assert!(matches!(
+        officewright_core::Error::from(err),
+        officewright_core::Error::LimitExceeded(_)
+    ));
     Ok(())
 }

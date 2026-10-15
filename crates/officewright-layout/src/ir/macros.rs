@@ -12,9 +12,13 @@
 /// |---|---|---|---|
 /// | `copy T` | `T` | `T` | `T` |
 /// | `ref T` | `T` | `&T` | `T` |
-/// | `str String` | `String` | `&str` | `impl Into<String>` |
-/// | `opt_str Option<String>` | `Option<String>` | `Option<&str>` | `Option<String>` |
+/// | `shared T` | `Arc<T>` | `&T` | `impl Into<Arc<T>>` |
+/// | `str Arc<str>` | `Arc<str>` | `&str` | `impl Into<Arc<str>>` |
+/// | `opt_str Option<Arc<str>>` | `Option<Arc<str>>` | `Option<&str>` | `Option<Arc<str>>` |
 /// | `vec T` | `Vec<T>` | `&[T]` | `impl IntoIterator<Item = T>` |
+///
+/// `shared` and `Arc<str>` let many items hold one value: a producer that passes the same
+/// `Arc` to each keeps one copy of it (issue #175).
 ///
 /// When every field has a default, the struct implements `Default` with them. A `check`
 /// rule is a function `fn(&Stored, &mut Checker) -> Result<()>` that `validate` runs on the
@@ -24,30 +28,35 @@
 macro_rules! ir_struct {
     (@storage copy $ty:ty) => { $ty };
     (@storage ref $ty:ty) => { $ty };
+    (@storage shared $ty:ty) => { std::sync::Arc<$ty> };
     (@storage str $ty:ty) => { $ty };
     (@storage opt_str $ty:ty) => { $ty };
     (@storage vec $ty:ty) => { Vec<$ty> };
 
     (@get_type copy $ty:ty) => { $ty };
     (@get_type ref $ty:ty) => { &$ty };
+    (@get_type shared $ty:ty) => { &$ty };
     (@get_type str $ty:ty) => { &str };
     (@get_type opt_str $ty:ty) => { Option<&str> };
     (@get_type vec $ty:ty) => { &[$ty] };
 
     (@get copy $value:expr) => { $value };
     (@get ref $value:expr) => { &$value };
+    (@get shared $value:expr) => { &$value };
     (@get str $value:expr) => { &$value };
     (@get opt_str $value:expr) => { $value.as_deref() };
     (@get vec $value:expr) => { &$value };
 
     (@set_type copy $ty:ty) => { $ty };
     (@set_type ref $ty:ty) => { $ty };
+    (@set_type shared $ty:ty) => { impl Into<std::sync::Arc<$ty>> };
     (@set_type str $ty:ty) => { impl Into<$ty> };
     (@set_type opt_str $ty:ty) => { $ty };
     (@set_type vec $ty:ty) => { impl IntoIterator<Item = $ty> };
 
     (@set copy $value:expr) => { $value };
     (@set ref $value:expr) => { $value };
+    (@set shared $value:expr) => { $value.into() };
     (@set str $value:expr) => { $value.into() };
     (@set opt_str $value:expr) => { $value };
     (@set vec $value:expr) => { $value.into_iter().collect() };

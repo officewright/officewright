@@ -503,28 +503,28 @@
       "text_score": 0.5837
     },
     "tests/corpus/generated/contract-ru-open.docx": {
-      "line_agreement": 0.42,
-      "ssim_mean": 0.3137,
+      "line_agreement": 0.44,
+      "ssim_mean": 0.3579,
       "ssim_min": 0.0,
-      "text_score": 0.4452
+      "text_score": 0.4481
     },
     "tests/corpus/generated/contract-ru.docx": {
-      "line_agreement": 0.42,
-      "ssim_mean": 0.315,
+      "line_agreement": 0.44,
+      "ssim_mean": 0.3582,
       "ssim_min": 0.0,
-      "text_score": 0.4452
+      "text_score": 0.4481
     },
     "tests/corpus/generated/contract-uk-open.docx": {
       "line_agreement": 0.3333,
-      "ssim_mean": 0.3161,
+      "ssim_mean": 0.3644,
       "ssim_min": 0.0,
-      "text_score": 0.4556
+      "text_score": 0.466
     },
     "tests/corpus/generated/contract-uk.docx": {
       "line_agreement": 0.3333,
-      "ssim_mean": 0.3166,
+      "ssim_mean": 0.3633,
       "ssim_min": 0.0,
-      "text_score": 0.4556
+      "text_score": 0.466
     },
     "tests/corpus/generated/contract-zh.docx": {
       "line_agreement": 0.2162,
@@ -559,29 +559,29 @@
     },
     "tests/corpus/generated/cv-en-compact-open.docx": {
       "line_agreement": 0.5161,
-      "ssim_mean": 0.8424,
-      "ssim_min": 0.8424,
-      "text_score": 0.8565
+      "ssim_mean": 0.8742,
+      "ssim_min": 0.8742,
+      "text_score": 0.7983
     },
     "tests/corpus/generated/cv-en-compact.docx": {
       "line_agreement": 0.5161,
-      "ssim_mean": 0.8426,
-      "ssim_min": 0.8426,
-      "text_score": 0.8565
+      "ssim_mean": 0.8731,
+      "ssim_min": 0.8731,
+      "text_score": 0.7983
     },
     "tests/corpus/generated/cv-en-leaders-open.docx": {
-      "line_agreement": 0.4186,
-      "page_break_agreement": 0.0,
-      "ssim_mean": 0.8184,
-      "ssim_min": 0.6832,
-      "text_score": 0.3337
+      "line_agreement": 0.4419,
+      "page_break_agreement": 1.0,
+      "ssim_mean": 0.8689,
+      "ssim_min": 0.739,
+      "text_score": 0.404
     },
     "tests/corpus/generated/cv-en-leaders.docx": {
-      "line_agreement": 0.4186,
-      "page_break_agreement": 0.0,
-      "ssim_mean": 0.8204,
-      "ssim_min": 0.6871,
-      "text_score": 0.3337
+      "line_agreement": 0.4419,
+      "page_break_agreement": 1.0,
+      "ssim_mean": 0.8668,
+      "ssim_min": 0.7357,
+      "text_score": 0.404
     },
     "tests/corpus/generated/cv-en-sidebar-open.docx": {
       "line_agreement": 0.3243,
@@ -596,16 +596,16 @@
       "text_score": 0.6266
     },
     "tests/corpus/generated/invoice-de-open.docx": {
-      "line_agreement": 0.6842,
-      "ssim_mean": 0.4192,
-      "ssim_min": 0.0,
-      "text_score": 0.4406
+      "line_agreement": 0.7193,
+      "ssim_mean": 0.8367,
+      "ssim_min": 0.8367,
+      "text_score": 0.9371
     },
     "tests/corpus/generated/invoice-de.docx": {
-      "line_agreement": 0.6842,
-      "ssim_mean": 0.4193,
-      "ssim_min": 0.0,
-      "text_score": 0.4406
+      "line_agreement": 0.7193,
+      "ssim_mean": 0.8371,
+      "ssim_min": 0.8371,
+      "text_score": 0.9371
     },
     "tests/corpus/generated/invoice-en-decimal-open.docx": {
       "line_agreement": 0.5652,
@@ -682,16 +682,16 @@
       "text_score": 0.6798
     },
     "tests/corpus/generated/invoice-uk-open.docx": {
-      "line_agreement": 0.4419,
-      "ssim_mean": 0.8538,
-      "ssim_min": 0.8538,
-      "text_score": 0.6853
+      "line_agreement": 0.4186,
+      "ssim_mean": 0.8536,
+      "ssim_min": 0.8536,
+      "text_score": 0.6925
     },
     "tests/corpus/generated/invoice-uk.docx": {
-      "line_agreement": 0.4419,
-      "ssim_mean": 0.8518,
-      "ssim_min": 0.8518,
-      "text_score": 0.6853
+      "line_agreement": 0.4186,
+      "ssim_mean": 0.8517,
+      "ssim_min": 0.8517,
+      "text_score": 0.6925
     },
     "tests/corpus/generated/letter-de-open.docx": {
       "line_agreement": 0.9048,
@@ -785,14 +785,14 @@
     },
     "tests/corpus/word-rules/E-default-paragraph-style-after-normal.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9641,
-      "ssim_min": 0.9641,
+      "ssim_mean": 0.9967,
+      "ssim_min": 0.9967,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-default-paragraph-style.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9553,
-      "ssim_min": 0.9553,
+      "ssim_mean": 0.9962,
+      "ssim_min": 0.9962,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-defaults-empty.docx": {
@@ -1006,10 +1006,10 @@
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-spacing-condensed.docx": {
-      "line_agreement": 0.5,
-      "ssim_mean": 0.9237,
-      "ssim_min": 0.9237,
-      "text_score": 0.9047
+      "line_agreement": 0.5333,
+      "ssim_mean": 0.9859,
+      "ssim_min": 0.9859,
+      "text_score": 0.9241
     },
     "tests/corpus/word-rules/E-strike.docx": {
       "line_agreement": 1.0,

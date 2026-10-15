@@ -224,7 +224,7 @@ impl<'a> Formats<'a> {
 
     /// The index of the paragraph style of the paragraph `node`: the one worked out when
     /// the document was read (see [`assign_paragraph_styles`]), else the default
-    /// paragraph style (the first, as
+    /// paragraph style (the last, as
     /// [`Styles::default_style`](super::Styles::default_style) gives it).
     fn paragraph_style(&mut self, node: Option<&'a Node>) -> Option<usize> {
         let written = node.and_then(|node| match node.kind {
@@ -241,7 +241,7 @@ impl<'a> Formats<'a> {
                         .styles
                         .iter()
                         .take(MAX_STYLES)
-                        .position(|style| style.kind == StyleKind::Paragraph && style.is_default)
+                        .rposition(|style| style.kind == StyleKind::Paragraph && style.is_default)
                 })
             })
     }
