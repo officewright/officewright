@@ -887,6 +887,27 @@ fn two_documents_are_never_rendered_to_one_pdf() -> io::Result<()> {
 }
 
 #[test]
+fn a_file_to_run_is_never_rendered_over() -> io::Result<()> {
+    // Issue #257: a file named on the command line runs whatever its extension, and the
+    // target of notes.pdf rendered into "." is notes.pdf itself; that of Notes.PDF is
+    // Notes.pdf, the same file where names do not tell case apart.
+    let corpus = Corpus::new("own-target")?;
+    for name in ["notes.pdf", "Notes.PDF"] {
+        std::fs::copy(corpus.dir.join("docs/good.docx"), corpus.dir.join(name))?;
+        let before = std::fs::read(corpus.dir.join(name))?;
+        let (code, output) = corpus.run(&["--render", ".", name], None)?;
+        assert_eq!(code, 2, "{name}: {output}");
+        assert!(output.contains("a file to run"), "{name}: {output}");
+        assert_eq!(std::fs::read(corpus.dir.join(name))?, before, "{name}");
+    }
+    // Rendered elsewhere, it runs.
+    let (code, output) = corpus.run(&["--render", "pdfs", "notes.pdf"], None)?;
+    assert_eq!(code, 0, "{output}");
+    assert!(corpus.dir.join("pdfs/notes.pdf").exists(), "{output}");
+    Ok(())
+}
+
+#[test]
 fn a_pdf_of_an_earlier_run_is_never_scored() -> io::Result<()> {
     let corpus = Corpus::new("stale")?;
     let reference = corpus.dir.join("docs/references/group/good");

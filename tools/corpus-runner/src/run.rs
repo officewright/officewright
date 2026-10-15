@@ -323,6 +323,24 @@ fn render_targets(
             ));
         }
     }
+    // A target is removed before its document runs, so none may be a file to run, in any
+    // case of its name either.
+    let mut inputs: BTreeMap<String, &str> = BTreeMap::new();
+    for (name, file) in files {
+        inputs.insert(
+            lexical_absolute(file)?.to_string_lossy().to_lowercase(),
+            name,
+        );
+    }
+    for (name, pdf) in &targets {
+        let target = lexical_absolute(pdf)?.to_string_lossy().to_lowercase();
+        if let Some(input) = inputs.get(&target) {
+            return Err(format!(
+                "{name} would be rendered to {}, which is {input}, a file to run",
+                pdf.display()
+            ));
+        }
+    }
     Ok(targets)
 }
 
