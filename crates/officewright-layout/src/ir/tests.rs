@@ -2607,6 +2607,36 @@ fn paragraphs_styles_and_symbols_can_share_what_they_repeat() {
 }
 
 #[test]
+fn shared_properties_the_producer_no_longer_holds_are_clamped_once_too() {
+    use std::sync::Arc;
+
+    // A translator drops its own copy once the document is built: the paragraphs are then
+    // the only holders. Clamping the first must not leave the last one alone holding the
+    // original, which it would then clamp again in place.
+    let beyond = Arc::new(
+        ParagraphProps::default().with_tabs([TabStop::default().with_position(Pt(3_600.0))]),
+    );
+    let mut document = document_with(|style| {
+        (0..3)
+            .map(|_| Paragraph::new(style).with_props(Arc::clone(&beyond)).into())
+            .collect()
+    });
+    drop(beyond);
+    let report = document.clamp();
+    assert_eq!(entries(&report).len(), 1, "{:?}", entries(&report));
+    let props: Vec<&ParagraphProps> = document.sections()[0]
+        .blocks()
+        .iter()
+        .map(|block| match block {
+            Block::Paragraph(paragraph) => paragraph.props(),
+            _ => panic!("a paragraph"),
+        })
+        .collect();
+    assert!(std::ptr::eq(props[0], props[1]) && std::ptr::eq(props[1], props[2]));
+    assert_eq!(props[2].tabs()[0].position(), Pt(1584.0));
+}
+
+#[test]
 fn shared_properties_are_clamped_once_and_stay_shared() {
     use std::sync::Arc;
 

@@ -134,8 +134,10 @@ pub(crate) struct Clamper {
     /// How many tables the walk is inside.
     table_depth: usize,
     /// The values many items share that the walk has clamped, by the address of the
-    /// value: the value itself, kept alive so that no other value takes its address
-    /// during the walk, and what clamping made of it.
+    /// value: the value itself, and what clamping made of it. Holding the value keeps
+    /// the items that still share it from looking like its only holders, which
+    /// `Arc::get_mut` would let clamp it again in place, and keeps another value from
+    /// taking its address during the walk.
     shared: HashMap<usize, Box<dyn Any>>,
 }
 
@@ -261,7 +263,11 @@ impl<T: Check> Check for Arc<T> {
 
 /// A value many items share is clamped once, where the walk first meets it, and every
 /// item that shares it takes the same result: it stays shared, and only the first item is
-/// reported. The producer's copy is never changed.
+/// reported. The producer's copy is never changed. The result does not depend on where
+/// the walk meets the value, which holds for values whose clamp rules use no context of
+/// the walk, such as paragraph properties; a shared value whose rules do (the depth of
+/// tables, for one) needs a memo by context too. A value that compares unequal to itself
+/// (one holding NaN, which `validate` rejects) is copied even when nothing changes.
 impl<T: Clamp + Clone + PartialEq + 'static> Clamp for Arc<T> {
     fn clamp(&mut self, clamper: &mut Clamper) {
         if let Some(value) = Arc::get_mut(self) {
