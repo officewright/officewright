@@ -298,8 +298,180 @@ fn a_run_style_added_to_a_clone_is_not_in_the_original() {
     );
     assert_eq!(
         invalid(&original),
-        "sections[1].blocks[0].mark: run style 1 does not exist; the document has 1"
+        "sections[1].blocks[0].mark: the run style id is of another document"
     );
+}
+
+#[test]
+fn ids_made_after_a_clone_are_only_the_maker_s() {
+    // Issue #123: both add a run style after the clone, at the same index.
+    let mut original = document_with(|_| Vec::new());
+    let before = original.add_run_style(RunStyle::default().with_italic(true));
+    let mut clone = original.clone();
+    let in_original = original.add_run_style(RunStyle::default().with_bold(true));
+    let in_clone = clone.add_run_style(RunStyle::default().with_caps(true));
+    // The id of before the clone names the same style in both.
+    assert!(original.run_style(before).is_some_and(RunStyle::italic));
+    assert!(clone.run_style(before).is_some_and(RunStyle::italic));
+    assert!(clone.run_style(in_original).is_none());
+    assert!(original.run_style(in_clone).is_none());
+    for (document, foreign) in [(&mut original, in_clone), (&mut clone, in_original)] {
+        document.add_section(Section::new(PageSetup::default()).with_blocks([
+            Paragraph::new(before).into(),
+            Paragraph::new(foreign).into(),
+        ]));
+        assert_eq!(
+            invalid(document),
+            "sections[1].blocks[1].mark: the run style id is of another document"
+        );
+    }
+    // A clone of the clone takes the ids its parent took, and none made later.
+    let mut grandchild = clone.clone();
+    let later = clone.add_run_style(RunStyle::default());
+    assert!(grandchild.run_style(before).is_some_and(RunStyle::italic));
+    assert!(grandchild.run_style(in_clone).is_some_and(RunStyle::caps));
+    assert!(grandchild.run_style(in_original).is_none());
+    assert!(grandchild.run_style(later).is_none());
+    let mine = grandchild.add_run_style(RunStyle::default().with_bold(true));
+    assert!(grandchild.run_style(mine).is_some_and(RunStyle::bold));
+    assert!(clone.run_style(mine).is_none());
+}
+
+/// One id of each table of a document.
+#[derive(Clone, Copy)]
+struct Ids {
+    style: RunStyleId,
+    list: ListId,
+    instance: ListInstanceId,
+    image: ImageId,
+    note: NoteId,
+}
+
+impl Ids {
+    /// Adds one entry to each table of `document`.
+    fn add(document: &mut Document) -> Self {
+        let list = document.add_list(ListDefinition::default());
+        Self {
+            style: document.add_run_style(RunStyle::default()),
+            list,
+            instance: document.add_list_instance(ListInstance::new(list)),
+            image: document.add_image(ImageData::new(ImageFormat::Png, PNG)),
+            note: document.add_note(Note::new(NoteKind::Footnote, [])),
+        }
+    }
+
+    /// Adds to `document` an instance of the list, and a section whose paragraph is an
+    /// item of the instance, in the style, showing the image and referring to the note.
+    fn used_in(self, document: &mut Document) {
+        document.add_list_instance(ListInstance::new(self.list));
+        let picture = InlineObject::new(
+            ObjectContent::Picture(Picture::new(self.image)),
+            Size::new(Pt(10.0), Pt(10.0)),
+        );
+        let paragraph = Paragraph::new(self.style)
+            .with_list(Some(ListItem::new(self.instance, 0, self.style)))
+            .with_inlines([
+                picture.into(),
+                Inline::note_reference(self.note, false, self.style),
+            ]);
+        document.add_section(Section::new(PageSetup::default()).with_blocks([paragraph.into()]));
+    }
+}
+
+#[test]
+fn ids_of_every_table_made_after_a_clone_are_only_the_maker_s() {
+    // Issue #123 for every table. Each table holds a different number of entries when
+    // the document is cloned, so that an id checked against another table's count is
+    // refused, or accepted, wrongly.
+    let mut original = Document::default();
+    let mut before = Ids::add(&mut original);
+    for _ in 0..2 {
+        before.style = original.add_run_style(RunStyle::default());
+    }
+    for _ in 0..3 {
+        before.list = original.add_list(ListDefinition::default());
+    }
+    for _ in 0..4 {
+        before.instance = original.add_list_instance(ListInstance::new(before.list));
+    }
+    for _ in 0..5 {
+        before.image = original.add_image(ImageData::new(ImageFormat::Png, PNG));
+    }
+    for _ in 0..6 {
+        before.note = original.add_note(Note::new(NoteKind::Footnote, []));
+    }
+    let mut clone = original.clone();
+    let after = Ids::add(&mut original);
+    // The clone's own entries take the same indices as the original's after the clone.
+    let mine = Ids::add(&mut clone);
+
+    // The last ids before the clone name entries in both; the first ones after it only
+    // in the document that made them, though the other has an entry at that index.
+    for document in [&original, &clone] {
+        assert!(document.run_style(before.style).is_some());
+        assert!(document.list(before.list).is_some());
+        assert!(document.list_instance(before.instance).is_some());
+        assert!(document.image(before.image).is_some());
+        assert!(document.note(before.note).is_some());
+    }
+    for (document, foreign) in [(&clone, after), (&original, mine)] {
+        assert!(document.run_style(foreign.style).is_none());
+        assert!(document.list(foreign.list).is_none());
+        assert!(document.list_instance(foreign.instance).is_none());
+        assert!(document.image(foreign.image).is_none());
+        assert!(document.note(foreign.note).is_none());
+    }
+
+    // The clone validates with the ids of before, and refuses each of the ids of after.
+    let mut valid = clone.clone();
+    before.used_in(&mut valid);
+    assert!(valid.validate().is_ok(), "{:?}", valid.validate());
+    let cases = [
+        (
+            Ids {
+                style: after.style,
+                ..before
+            },
+            "run style",
+        ),
+        (
+            Ids {
+                list: after.list,
+                ..before
+            },
+            "list definition",
+        ),
+        (
+            Ids {
+                instance: after.instance,
+                ..before
+            },
+            "list instance",
+        ),
+        (
+            Ids {
+                image: after.image,
+                ..before
+            },
+            "image",
+        ),
+        (
+            Ids {
+                note: after.note,
+                ..before
+            },
+            "note",
+        ),
+    ];
+    for (ids, what) in cases {
+        let mut document = clone.clone();
+        ids.used_in(&mut document);
+        let message = invalid(&document);
+        assert!(
+            message.ends_with(&format!("the {what} id is of another document")),
+            "{what}: {message}"
+        );
+    }
 }
 
 #[test]
@@ -618,14 +790,19 @@ fn clamp_reaches_headers_and_footers() {
 }
 
 #[test]
-fn clamp_leaves_values_that_are_not_numbers_to_validate() {
+fn clamp_leaves_values_that_are_not_finite_numbers_to_validate() {
     let mut document = document_with(|style| {
         paragraph_with(
             style,
-            ParagraphProps::default().with_tabs([TabStop::default().with_position(Pt(f64::NAN))]),
+            ParagraphProps::default().with_tabs([
+                TabStop::default().with_position(Pt(f64::NAN)),
+                TabStop::default().with_position(Pt(f64::INFINITY)),
+            ]),
         )
     });
     document.add_run_style(RunStyle::default().with_letter_spacing(Pt(f64::NAN)));
+    // Infinities are not clamped to Word's limits either.
+    document.add_run_style(RunStyle::default().with_letter_spacing(Pt(f64::NEG_INFINITY)));
     // A margin that is not a number gives the page no bound: its valid width stays.
     let nan_margin = Margins::default().with_left(Pt(f64::NAN));
     document.add_section(Section::new(
@@ -633,16 +810,15 @@ fn clamp_leaves_values_that_are_not_numbers_to_validate() {
     ));
     let size = PageSize::new(Pt(f64::NAN), Pt(f64::INFINITY));
     document.add_section(Section::new(PageSetup::new(size)));
+    // Neither NaN nor an infinite page height is clamped: `validate` rejects both
+    // (issue #124).
     let report = document.clamp();
-    // Only the infinite page height is out of range; NaN compares with nothing.
-    assert_eq!(
-        entries(&report),
-        [
-            "sections[2].page: page height inf pt is outside Word's range of 144 to 1584 pt and \
-          becomes 1584 pt"
-        ]
-    );
+    assert!(report.is_empty(), "{:?}", entries(&report));
     assert_eq!(document.sections()[1].page().size(), PageSize::A4);
+    assert_eq!(
+        document.sections()[2].page().size().height(),
+        Pt(f64::INFINITY)
+    );
     assert!(document.validate().is_err());
 }
 
@@ -719,6 +895,21 @@ fn every_length_that_wordprocessingml_keeps_unsigned_is_checked() {
             in_columns(Columns::default().with_widths([Column::default().with_spacing(minus)])),
             "sections[0].columns.widths[0].spacing",
         ),
+        // Past Word's 45 columns, where clamping would leave the column out.
+        (
+            in_columns(
+                Columns::default()
+                    .with_widths(columns_ending_with(Column::default().with_width(minus))),
+            ),
+            "sections[0].columns.widths[45].width",
+        ),
+        (
+            in_columns(
+                Columns::default()
+                    .with_widths(columns_ending_with(Column::default().with_spacing(minus))),
+            ),
+            "sections[0].columns.widths[45].spacing",
+        ),
         (
             in_props(ParagraphProps::default().with_spacing(Spacing::default().with_before(minus))),
             "sections[0].blocks[0].props.spacing.before",
@@ -748,9 +939,37 @@ fn every_length_that_wordprocessingml_keeps_unsigned_is_checked() {
             "run_styles[1].kern_min",
         ),
     ];
-    for (document, location) in cases {
+    for (mut document, location) in cases {
         assert_eq!(invalid(&document), format!("{location}: -1 pt is negative"));
+        assert_clamp_leaves_alone(&mut document, location);
     }
+    let mut document = in_columns(Columns::default().with_widths(columns_ending_with(
+        Column::default().with_width(Pt(f64::NAN)),
+    )));
+    assert_eq!(
+        invalid(&document),
+        "sections[0].columns.widths[45].width: NaN is not a finite length"
+    );
+    assert_clamp_leaves_alone(&mut document, "a 46th column that is not a number wide");
+    let mut document = in_columns(Columns::default().with_widths(columns_ending_with(
+        Column::default().with_width(Pt(f64::INFINITY)),
+    )));
+    assert_eq!(
+        invalid(&document),
+        "sections[0].columns.widths[45].width: inf is not a finite length"
+    );
+    assert_clamp_leaves_alone(&mut document, "a 46th column infinitely wide");
+    // A rejected column among the first 45 keeps the columns past them too.
+    let mut columns = columns_ending_with(Column::default().with_width(Pt(10.0)));
+    if let Some(first) = columns.first_mut() {
+        *first = Column::default().with_width(minus);
+    }
+    let mut document = in_columns(Columns::default().with_widths(columns));
+    assert_eq!(
+        invalid(&document),
+        "sections[0].columns.widths[0].width: -1 pt is negative"
+    );
+    assert_clamp_leaves_alone(&mut document, "46 columns, the first -1 pt wide");
 
     for (size, problem) in [
         (
@@ -762,9 +981,36 @@ fn every_length_that_wordprocessingml_keeps_unsigned_is_checked() {
             "size.height: NaN is not a finite length",
         ),
     ] {
-        let document = in_section(Section::new(PageSetup::new(size)));
+        let mut document = in_section(Section::new(PageSetup::new(size)));
         assert_eq!(invalid(&document), format!("sections[0].page.{problem}"));
+        assert_clamp_leaves_alone(&mut document, problem);
     }
+    // A page narrower than its margins, one of them negative: the margin gives no bound,
+    // so the page is not widened to the others.
+    let margins = Margins::default().with_left(minus).with_right(Pt(100.0));
+    let page = PageSetup::new(PageSize::new(Pt(50.0), Pt(792.0))).with_margins(margins);
+    let mut document = in_section(Section::new(page));
+    assert_eq!(
+        invalid(&document),
+        "sections[0].page.margins.left: -1 pt is negative"
+    );
+    assert_clamp_leaves_alone(&mut document, "a page narrower than its margins");
+}
+
+/// 45 columns of 10 pt, then `last`: one more than Word allows.
+fn columns_ending_with(last: Column) -> Vec<Column> {
+    let mut columns = vec![Column::default().with_width(Pt(10.0)); 45];
+    columns.push(last);
+    columns
+}
+
+/// `clamp` reports nothing for `document` and leaves it as it was: what `validate`
+/// rejects is left to it (issue #124).
+fn assert_clamp_leaves_alone(document: &mut Document, what: &str) {
+    let before = format!("{document:?}");
+    let report = document.clamp();
+    assert!(report.is_empty(), "{what}: {:?}", entries(&report));
+    assert_eq!(format!("{document:?}"), before, "{what}");
 }
 
 #[test]
@@ -996,6 +1242,25 @@ fn list_definitions_have_levels_0_to_8() {
         "lists[1].levels[0].text[1]: level 9 does not exist; levels are 0 to 8"
     );
 
+    // A label's text may hold control characters, which run text may not: Word writes
+    // a bullet of U+007F in Arial (issue #127; report-usds-tech-challenge-playbook.docx).
+    let mut document = list_document(|instance, style| ListItem::new(instance, 0, style));
+    let bullet = Level::default().with_text([LevelTextPart::Literal("\u{7F}".into())]);
+    document.add_list(ListDefinition::default().with_levels([bullet]));
+    assert!(document.validate().is_ok());
+    let document = document_with(|style| {
+        vec![
+            Paragraph::new(style)
+                .with_inlines([Inline::text("\u{7F}", style)])
+                .into(),
+        ]
+    });
+    assert_eq!(
+        invalid(&document),
+        "sections[0].blocks[0].inlines[0]: text has the control character U+007F at byte 0; \
+         tabs and breaks are inlines of their own"
+    );
+
     // Word takes w:lvlRestart from 0 to 7 (MS-OI29500 2.1.282 a): after levels 0 to 6.
     for (level, valid) in [(6, true), (7, false), (12, false)] {
         let mut document = list_document(|instance, style| ListItem::new(instance, 0, style));
@@ -1073,7 +1338,7 @@ fn list_ids_belong_to_their_document() {
     original.add_list_instance(ListInstance::new(list));
     assert_eq!(
         invalid(&original),
-        "list_instances[2].definition: list definition 1 does not exist; the document has 1"
+        "list_instances[2].definition: the list definition id is of another document"
     );
 }
 
@@ -1230,11 +1495,12 @@ fn table_widths_and_margins_are_not_negative() {
         ),
     ];
     for (change, problem) in cases {
-        let document = document_with(|style| vec![change(table(style, 1, 2)).into()]);
+        let mut document = document_with(|style| vec![change(table(style, 1, 2)).into()]);
         assert_eq!(
             invalid(&document),
             format!("sections[0].blocks[0].{problem}")
         );
+        assert_clamp_leaves_alone(&mut document, problem);
     }
 
     let border = Border::default().with_width(Pt(f64::NAN));
@@ -1337,11 +1603,12 @@ fn every_length_of_a_table_that_word_keeps_unsigned_is_checked() {
             "rows[0].cells[0].margins.end",
         ),
     ];
-    for (document, location) in cases {
+    for (mut document, location) in cases {
         assert_eq!(
             invalid(&document),
             format!("sections[0].blocks[0].{location}: -1 pt is negative")
         );
+        assert_clamp_leaves_alone(&mut document, location);
     }
 }
 
@@ -2225,21 +2492,27 @@ fn table_measurements_are_clamped_to_a_short_of_twips() {
 }
 
 #[test]
-fn a_negative_exact_row_height_is_clamped_in_one_go() {
-    let mut document = document_with(|style| {
-        let cell = Cell::default().with_blocks([Paragraph::new(style).into()]);
-        let row = Row::default()
-            .with_height(RowHeight::Exact(Pt(-1.0)))
-            .with_cells([cell]);
-        vec![
-            Table::default()
-                .with_grid([Pt(10.0)])
-                .with_rows([row])
-                .into(),
-        ]
-    });
-    assert_eq!(document.clamp().len(), 2);
+fn an_exact_row_height_of_0_is_clamped_in_one_go_and_a_negative_one_left_to_validate() {
+    let with_height = |height: f64| {
+        document_with(|style| {
+            let cell = Cell::default().with_blocks([Paragraph::new(style).into()]);
+            let row = Row::default()
+                .with_height(RowHeight::Exact(Pt(height)))
+                .with_cells([cell]);
+            vec![
+                Table::default()
+                    .with_grid([Pt(10.0)])
+                    .with_rows([row])
+                    .into(),
+            ]
+        })
+    };
+    let mut document = with_height(0.0);
+    assert_eq!(document.clamp().len(), 1);
     assert!(document.clamp().is_empty());
+    let mut document = with_height(-1.0);
+    assert!(document.clamp().is_empty());
+    assert!(document.validate().is_err());
 }
 
 #[test]
