@@ -75,6 +75,7 @@ declare("ow_pdf_document_from_text", c_int, c_char_p, c_double, c_double, c_void
 declare("ow_pdf_document_add_page", c_int, c_void_p, c_double, c_double, POINTER(c_size_t))
 declare("ow_pdf_document_add_text", c_int, c_void_p, c_size_t, c_double, c_double, c_void_p, c_double, c_char_p)
 declare("ow_pdf_document_set_compression", c_int, c_void_p, ctypes.c_int32)
+declare("ow_pdf_document_set_subset_budget", c_int, c_void_p, ctypes.c_uint64)
 declare("ow_pdf_document_save_path", c_int, c_void_p, c_char_p)
 declare("ow_pdf_document_save_bytes", c_int, c_void_p, POINTER(POINTER(c_uint8)), POINTER(c_size_t))
 declare("ow_pdf_document_free", None, c_void_p)
@@ -349,6 +350,21 @@ class AbiTest(unittest.TestCase):
         self.assertIn(b"/FontFile2", pdf)
         self.assertIn(b"/Subtype /CIDFontType0C", pdf)
         self.assertEqual(pdf.count(b"/ToUnicode"), 2)
+
+        # Reducing Noto Sans (CFF) to its glyphs reads its charstrings, which a budget of 0
+        # does not allow; a large one does.
+        self.check(lib.ow_pdf_document_set_subset_budget(doc, 0))
+        placeholder = ctypes.create_string_buffer(1)
+        data = ctypes.cast(placeholder, POINTER(c_uint8))
+        size = c_size_t(99)
+        self.check(lib.ow_pdf_document_save_bytes(doc, byref(data), byref(size)), LIMIT_EXCEEDED)
+        self.assertIn("left of the budget it shares with other subsets", last_error())
+        self.assertFalse(data)
+        self.assertEqual(size.value, 0)
+        self.check(lib.ow_pdf_document_set_subset_budget(doc, 2**64 - 1))
+        self.assertEqual(self.save_bytes(doc), pdf)
+        self.check(lib.ow_pdf_document_set_subset_budget(None, 0), NULL_ARGUMENT)
+        self.assertEqual(last_error(), "doc is null")
 
         width = c_double()
         self.check(lib.ow_pdf_font_text_width(noto, "Жж".encode(), 10.0, byref(width)))

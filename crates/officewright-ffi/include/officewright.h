@@ -408,6 +408,22 @@ enum OwStatus ow_pdf_document_add_text(struct OwPdfDocument *doc,
 enum OwStatus ow_pdf_document_set_compression(struct OwPdfDocument *doc, int32_t compression);
 
 /**
+ * Sets how much reducing the document's embedded fonts to the glyphs it shows may read
+ * of their CFF charstrings in all, in operands, operators and hint mask bytes:
+ * 33,554,432 unless set otherwise, room for two CJK fonts the size of Noto Sans CJK SC
+ * kept whole. The fonts are reduced when the document is saved, one after another in the
+ * order the pages first use them, and every subset is kept until the file is: a unit
+ * costs about 30 bytes of memory while its font is reduced and about 5 bytes after.
+ * Fonts with TrueType outlines take nothing from the budget. Saving fails with
+ * `OW_STATUS_LIMIT_EXCEEDED` at the first font past what is left.
+ *
+ * # Safety
+ *
+ * `doc` must be NULL or a live handle not used by another thread during the call.
+ */
+enum OwStatus ow_pdf_document_set_subset_budget(struct OwPdfDocument *doc, uint64_t units);
+
+/**
  * Writes the document as a PDF file at `path` (UTF-8), replacing any existing file.
  *
  * The file is generated in memory first, so a document error never touches `path`;
@@ -416,8 +432,9 @@ enum OwStatus ow_pdf_document_set_compression(struct OwPdfDocument *doc, int32_t
  * embedded font turns out to be damaged when it is reduced to the glyphs the document
  * uses, `OW_STATUS_LIMIT_EXCEEDED` if decompiling the glyphs the document uses of a CFF
  * font reads more than 16,777,216 operands, operators and hint mask bytes, a limit of
- * the library, `OW_STATUS_UNSUPPORTED` if it uses a feature that cannot be subset yet,
- * and `OW_STATUS_IO` if the file cannot be written.
+ * the library, or more than is left of the document's subset budget
+ * (`ow_pdf_document_set_subset_budget`), `OW_STATUS_UNSUPPORTED` if it uses a feature
+ * that cannot be subset yet, and `OW_STATUS_IO` if the file cannot be written.
  *
  * # Safety
  *
@@ -434,8 +451,9 @@ enum OwStatus ow_pdf_document_save_path(const struct OwPdfDocument *doc, const c
  * `OW_STATUS_MALFORMED` if an embedded font turns out to be damaged when it is reduced
  * to the glyphs the document uses, `OW_STATUS_LIMIT_EXCEEDED` if decompiling the glyphs
  * the document uses of a CFF font reads more than 16,777,216 operands, operators and
- * hint mask bytes, and `OW_STATUS_UNSUPPORTED` if it uses a feature that cannot be
- * subset yet.
+ * hint mask bytes, or more than is left of the document's subset budget
+ * (`ow_pdf_document_set_subset_budget`), and `OW_STATUS_UNSUPPORTED` if it uses a
+ * feature that cannot be subset yet.
  *
  * # Safety
  *
@@ -827,7 +845,9 @@ enum OwStatus ow_doc_document_open_bytes(const uint8_t *data,
  * where only embedding looks (a glyph's outline, say), and `OW_STATUS_LIMIT_EXCEEDED`
  * if the document takes more pages than the options allow, nests tables deeper than
  * the layout follows, or uses glyphs of a CFF font that take more than 16,777,216
- * operands, operators and hint mask bytes to decompile, a limit of the library.
+ * operands, operators and hint mask bytes to decompile, or of all its CFF fonts together
+ * more than 33,554,432 (the default of `ow_pdf_document_set_subset_budget`), limits of
+ * the library.
  * `OW_STATUS_INVALID_ARGUMENT` here would mean that officewright
  * translated the document wrongly, a defect worth reporting with the document. A font
  * that `ow_pdf_font_open_bytes` would refuse is no error here: its text is not drawn,
