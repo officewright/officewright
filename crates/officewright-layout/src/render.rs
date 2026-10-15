@@ -287,7 +287,12 @@ impl Painter<'_, '_, '_> {
                 ),
             );
         }
-        let items = self.drawn(width, height, &page.items);
+        self.paint(width, height, &page.items)
+    }
+
+    /// Adds a page `width` by `height` and paints `items` on it.
+    fn paint(&mut self, width: Pt, height: Pt, items: &[DisplayItem]) -> Result<()> {
+        let items = self.drawn(width, height, items);
         let pdf_page = self.pdf.add_page(PageSize::new(width, height))?;
         for item in &items {
             match item {
@@ -318,7 +323,7 @@ impl Painter<'_, '_, '_> {
         for item in items {
             match item {
                 DisplayItem::Glyphs(run) => {
-                    drawn.extend(self.glyphs(run, flip, page).map(Drawn::Glyphs));
+                    drawn.extend(self.glyphs(run, flip, page).into_iter().map(Drawn::Glyphs));
                 }
                 DisplayItem::Rect {
                     at,
@@ -363,16 +368,17 @@ impl Painter<'_, '_, '_> {
         }
     }
 
-    /// The PDF glyph run of `run`, with the glyphs of it that reach the page and a margin
+    /// The PDF glyph runs of `run`, with the glyphs of it that reach the page and a margin
     /// around it, each cluster with its text, but a cluster cut down to one of its several
-    /// glyphs with none; `None` when no glyph reaches the page, or when its face cannot be
-    /// embedded, which is reported.
+    /// glyphs with none; none when no glyph reaches the page, or when its face cannot be
+    /// embedded, which is reported. A run starts again wherever a glyph would be farther
+    /// from the start of the one before than a PDF holds.
     fn glyphs(
         &mut self,
         run: &GlyphItem,
         flip: impl Fn(Pt) -> Pt,
         page: Area,
-    ) -> Option<pdf::GlyphRun> {
+    ) -> Vec<pdf::GlyphRun> {
         // No glyph is drawn farther than four times its size from its place, nor, scaled
         // wider (`w:w`), farther across than that times its scale; but a glyph kept is
         // never placed farther from the page's corner than a PDF holds.
@@ -386,57 +392,75 @@ impl Painter<'_, '_, '_> {
         };
         // Where a glyph is drawn: synthetic italic slants it about the run's baseline.
         let place = |glyph: &DrawnGlyph| (x + glyph.x.0 + skew * glyph.y.0, y + glyph.y.0);
-        let on_page = |glyph: &DrawnGlyph| {
+        let on_page = |glyph: &&DrawnGlyph| {
             let at = place(glyph);
             page.reaches_by(at, at, across, reach)
         };
+        let mut runs = Vec::new();
+        let mut font = None;
+        let mut current: Option<OpenRun> = None;
         // Glyph by glyph: a cluster may be many, such as the dots of a tab leader, of
         // which only some are on the page.
-        let clusters: Vec<(&str, Vec<&DrawnGlyph>)> = run
-            .clusters
-            .iter()
-            .map(|cluster| {
-                let kept: Vec<&DrawnGlyph> = cluster.glyphs.iter().filter(|g| on_page(g)).collect();
-                // One glyph left of several would stand for all the cluster's text, which
-                // the PDF would then give it wherever else it is drawn: it stands for
-                // none, since the rest of the cluster is off the page.
-                let text = if kept.len() == 1 && cluster.glyphs.len() > 1 {
-                    ""
-                } else {
-                    cluster.text.as_str()
+        for cluster in &run.clusters {
+            let on: Vec<&DrawnGlyph> = cluster.glyphs.iter().filter(on_page).collect();
+            let Some(&lead) = on.first() else {
+                continue;
+            };
+            let held = current
+                .as_ref()
+                .is_some_and(|open| holds(open.start, offset(lead, open.first)));
+            if !held {
+                let start = place(lead);
+                if !holds(start, (0.0, 0.0)) {
+                    continue;
+                }
+                let font = match &font {
+                    Some(font) => font,
+                    None => match self.font(run.face) {
+                        Some(made) => font.insert(made),
+                        None => return Vec::new(),
+                    },
                 };
-                (text, kept)
-            })
-            .filter(|(_, kept)| !kept.is_empty())
-            .collect();
-        // The run starts where its first glyph on the page is drawn, so that every
-        // position of it is near the page, within what a PDF holds. Synthetic italic
-        // slants about the run's start, so the offsets are taken from that glyph's place
-        // before the slant: every glyph is drawn where it would be from the baseline.
-        let first = clusters.first()?.1.first().copied()?;
-        let (first_x, first_y) = (first.x.0, first.y.0);
-        let start = place(first);
-        let font = self.font(run.face)?;
-        let mut glyphs = pdf::GlyphRun::new(&font, run.size, Pt(start.0), Pt(start.1))
-            .with_color(run.color)
-            .with_horizontal_scale(run.h_scale);
-        if run.synthetic_bold {
-            glyphs = glyphs.with_stroke(Pt(run.size.0 * SYNTHETIC_BOLD_STROKE));
-        }
-        if run.synthetic_italic {
-            glyphs = glyphs.with_skew(SYNTHETIC_ITALIC_SKEW);
-        }
-        for (text, kept) in clusters {
+                let mut glyphs = pdf::GlyphRun::new(font, run.size, Pt(start.0), Pt(start.1))
+                    .with_color(run.color)
+                    .with_horizontal_scale(run.h_scale);
+                if run.synthetic_bold {
+                    glyphs = glyphs.with_stroke(Pt(run.size.0 * SYNTHETIC_BOLD_STROKE));
+                }
+                if run.synthetic_italic {
+                    glyphs = glyphs.with_skew(SYNTHETIC_ITALIC_SKEW);
+                }
+                runs.extend(current.take().map(|open| open.glyphs));
+                current = Some(OpenRun {
+                    glyphs,
+                    first: (lead.x.0, lead.y.0),
+                    start,
+                });
+            }
+            let Some(open) = current.as_mut() else {
+                continue;
+            };
+            let kept: Vec<&DrawnGlyph> = on
+                .into_iter()
+                .filter(|glyph| holds(open.start, offset(glyph, open.first)))
+                .collect();
+            // One glyph left of several would stand for all the cluster's text, which the
+            // PDF would then give it wherever else it is drawn: it stands for none, since
+            // the rest of the cluster is off the page.
+            let text = if kept.len() == 1 && cluster.glyphs.len() > 1 {
+                ""
+            } else {
+                cluster.text.as_str()
+            };
+            let first = open.first;
             let placed = kept.into_iter().map(|glyph| {
-                pdf::PlacedGlyph::new(
-                    glyph.glyph,
-                    Pt(glyph.x.0 - first_x),
-                    Pt(glyph.y.0 - first_y),
-                )
+                let (dx, dy) = offset(glyph, first);
+                pdf::PlacedGlyph::new(glyph.glyph, Pt(dx), Pt(dy))
             });
-            glyphs.push_cluster(text, placed);
+            open.glyphs.push_cluster(text, placed);
         }
-        Some(glyphs)
+        runs.extend(current.map(|open| open.glyphs));
+        runs
     }
 
     /// The PDF font of face `id`, made once, with what its license or format restricts
@@ -655,6 +679,32 @@ fn on_page(line: &LineItem, page: Area) -> Option<LineItem> {
         to: point(end),
         ..*line
     })
+}
+
+/// A PDF glyph run being made. It starts where its first glyph is drawn, so that every
+/// position of it is near the page. Synthetic italic slants about the run's start, so
+/// the offsets are taken from that glyph's place before the slant: every glyph is drawn
+/// where it would be from the baseline.
+struct OpenRun {
+    glyphs: pdf::GlyphRun,
+    /// The place of its first glyph, before the slant.
+    first: (f64, f64),
+    /// Where it starts.
+    start: (f64, f64),
+}
+
+/// The offset of `glyph` from the place `first`, before the slant: where a PDF glyph run
+/// that starts at the glyph at `first` places it.
+fn offset(glyph: &DrawnGlyph, first: (f64, f64)) -> (f64, f64) {
+    (glyph.x.0 - first.0, glyph.y.0 - first.1)
+}
+
+/// Whether a PDF glyph run that starts at `start` holds a glyph at `offset` from it: the
+/// offset and the place it makes, before the slant, within what a PDF holds, as
+/// officewright-pdf checks them.
+fn holds(start: (f64, f64), offset: (f64, f64)) -> bool {
+    let within = |value: f64| value.abs() <= PDF_LIMIT;
+    within(offset.0) && within(offset.1) && within(start.0 + offset.0) && within(start.1 + offset.1)
 }
 
 /// The path and stroke of `line`: dashes as a pattern of the stroke, a wave as one path
@@ -1071,6 +1121,11 @@ mod tests {
             DisplayItem::Glyphs(scaled(-241.0, 70.0, 10.0)),
             DisplayItem::Glyphs(scaled(10.0, -39.0, 10.0)),
             DisplayItem::Glyphs(scaled(10.0, -41.0, 10.0)),
+            // Right of the page the same, 240 pt; below it, 40 pt.
+            DisplayItem::Glyphs(scaled(339.0, 110.0, 10.0)),
+            DisplayItem::Glyphs(scaled(341.0, 120.0, 10.0)),
+            DisplayItem::Glyphs(scaled(10.0, 239.0, 10.0)),
+            DisplayItem::Glyphs(scaled(10.0, 241.0, 10.0)),
             // 6 × 4 × 1638 pt across, cut to 32767 pt from the page's corner.
             DisplayItem::Glyphs(scaled(-32_660.0, 80.0, 1638.0)),
             DisplayItem::Glyphs(scaled(-32_680.0, 90.0, 1638.0)),
@@ -1094,8 +1149,97 @@ mod tests {
                 (Pt(-100.0), Pt(150.0)),
                 (Pt(-239.0), Pt(140.0)),
                 (Pt(10.0), Pt(239.0)),
+                (Pt(339.0), Pt(90.0)),
+                (Pt(10.0), Pt(-39.0)),
                 (Pt(-32_660.0), Pt(120.0)),
                 (Pt(-30.0), Pt(100.0)),
+            ]
+        );
+    }
+
+    /// What `items` draw on a page 100 by 200 pt, and whether officewright-pdf takes it.
+    fn painted_into_pdf(items: &[DisplayItem]) -> (Vec<Drawn>, Result<()>) {
+        let document = Document::default();
+        let book = crate::testing::book(vec![crate::testing::minimal()]);
+        let mut fonts = Fonts::new(&book);
+        let mut painter = Painter {
+            document: &document,
+            fonts: &mut fonts,
+            pdf_fonts: HashMap::new(),
+            images: HashMap::new(),
+            pdf: pdf::Document::new(),
+        };
+        let drawn = painter.drawn(Pt(100.0), Pt(200.0), items);
+        (drawn, painter.paint(Pt(100.0), Pt(200.0), items))
+    }
+
+    /// The start of a glyph run and the offsets of its glyphs.
+    type RunPlaces = ((Pt, Pt), Vec<(Pt, Pt)>);
+
+    /// The start and the glyphs' offsets of every glyph run of `drawn`.
+    fn runs_of(drawn: &[Drawn]) -> Vec<RunPlaces> {
+        drawn
+            .iter()
+            .filter_map(|item| match item {
+                Drawn::Glyphs(run) => Some((
+                    (run.x(), run.y()),
+                    run.glyphs()
+                        .iter()
+                        .map(|glyph| (glyph.x(), glyph.y()))
+                        .collect(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_run_wider_than_a_pdf_holds_is_drawn_as_several() {
+        // Review of #270: glyphs of 1,638 pt at 600 % reach 32,667 pt across, so the
+        // glyphs of one run that reach the page can be farther apart than a PDF holds
+        // from a run's start: 20 of them 2,222 pt apart from 1,510 pt left of the page.
+        // The 16 that reach the page are drawn, in a second run from the one that would
+        // be more than 32,767 pt from the first.
+        let offsets: Vec<(f64, f64)> = (0..20).map(|n| (2222.0 * f64::from(n), 0.0)).collect();
+        let item = GlyphItem {
+            size: Pt(1638.0),
+            h_scale: 6.0,
+            ..run(-1510.0, 100.0, &offsets)
+        };
+        let (drawn, painted) = painted_into_pdf(&[DisplayItem::Glyphs(item)]);
+        assert!(painted.is_ok(), "{painted:?}");
+        let runs = runs_of(&drawn);
+        let starts: Vec<(Pt, Pt)> = runs.iter().map(|(start, _)| *start).collect();
+        assert_eq!(
+            starts,
+            [
+                (Pt(-1510.0), Pt(100.0)),
+                (Pt(-1510.0 + 2222.0 * 15.0), Pt(100.0))
+            ]
+        );
+        let counts: Vec<usize> = runs.iter().map(|(_, glyphs)| glyphs.len()).collect();
+        assert_eq!(counts, [15, 1]);
+    }
+
+    #[test]
+    fn a_slanted_run_starts_again_where_its_offsets_would_leave_a_pdf() {
+        // Review of #270: synthetic italic slants about the run's start, so a glyph
+        // raised 1,500 pt starts the run 500 pt farther right than the glyph after it
+        // would be placed from it; that glyph, 700 pt on, would then be 33,200 pt from the
+        // page's corner. It starts a run of its own.
+        let item = GlyphItem {
+            size: Pt(1638.0),
+            h_scale: 6.0,
+            synthetic_italic: true,
+            ..run(32_000.0, 50.0, &[(0.0, 1500.0), (700.0, 0.0)])
+        };
+        let (drawn, painted) = painted_into_pdf(&[DisplayItem::Glyphs(item)]);
+        assert!(painted.is_ok(), "{painted:?}");
+        assert_eq!(
+            runs_of(&drawn),
+            [
+                ((Pt(32_500.0), Pt(1650.0)), vec![(Pt(0.0), Pt(0.0))]),
+                ((Pt(32_700.0), Pt(150.0)), vec![(Pt(0.0), Pt(0.0))]),
             ]
         );
     }

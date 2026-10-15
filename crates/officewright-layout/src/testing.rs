@@ -183,6 +183,7 @@ pub(crate) fn italic(font: Vec<u8>) -> Vec<u8> {
 /// of 32768 bytes each that all point at one run of strings: from 32 copies on, the
 /// strings the records to keep point at pass the 1 MiB that subsetting reads, and
 /// `officewright-pdf` cannot embed the font.
+#[cfg(feature = "pdf")]
 pub(crate) fn with_name_copies(font: Vec<u8>, copies: u16) -> Vec<u8> {
     let mut font = font;
     font.resize(font.len().next_multiple_of(4), 0);
