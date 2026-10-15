@@ -150,7 +150,7 @@ def ppr(
     list_item: tuple[int, int] | None = None,
     num_pr: str | None = None,
     shading: str | None = None,
-    tabs: list[tuple[str, int]] | None = None,
+    tabs: list[tuple[str, int] | tuple[str, int, str]] | None = None,
     space: str | None = None,
     ind: dict[str, int] | None = None,
     jc: str | None = None,
@@ -173,7 +173,13 @@ def ppr(
     if shading:
         parts.append(f'<w:shd w:val="clear" w:color="auto" w:fill="{shading}"/>')
     if tabs:
-        stops = "".join(f'<w:tab w:val="{kind}" w:pos="{pos}"/>' for kind, pos in tabs)
+        # A stop is (w:val, w:pos) or (w:val, w:pos, w:leader).
+        stops = "".join(
+            f'<w:tab w:val="{stop[0]}"'
+            + (f' w:leader="{stop[2]}"' if len(stop) > 2 else "")
+            + f' w:pos="{stop[1]}"/>'
+            for stop in tabs
+        )
         parts.append(f"<w:tabs>{stops}</w:tabs>")
     if space:
         parts.append(space)
@@ -1625,9 +1631,10 @@ def table_style_toggles_defaults() -> Doc:
         ]
     )
     # Defaults bold. In Normal, BoldOff gives not bold under both readings, and bold if Word
-    # ignored the table style: it shows that w:b off applies. BoldOn gives bold under both
-    # readings and if ignored; it gives not bold only under the standard's own rule, which
-    # MS-OI29500 §17.7.6(b) quotes: a table style's true toggles the level before it. Under
+    # ignored the table style or followed the standard's own rule, which MS-OI29500
+    # §17.7.6(b) quotes: a table style's false leaves the value as it is, and its true
+    # toggles the level before it. BoldOn gives bold under both readings and if ignored, and
+    # not bold only under that rule, so the two cells together tell the four apart. Under
     # BoldOff, a run in CharBoldOff is bold under L (two flips) and not bold under B (same
     # as the base); a run in CharBold is not bold under L (one flip) and bold under B.
     off_cells = [[
@@ -1679,6 +1686,318 @@ def table_style_header_rows(setting: int) -> Doc:
         body,
         styles=header,
         compat_values=(("differentiateMultirowTableHeaders", setting),),
+    )
+
+
+# Lines and drawing (#186, layout-engine.md E6 and E27 to E33). Calibri 11 pt unless a case
+# says otherwise; each case labels itself, and the sample it is about follows in a run of
+# its own, so the word boxes of geometry.json show the sample alone.
+def styled_run(value: str, props: str) -> str:
+    """A run of text with these run properties (the children of w:rPr, in schema order)."""
+    return f"<w:r>{f'<w:rPr>{props}</w:rPr>' if props else ''}{text(value)}</w:r>"
+
+
+def soft_hyphenated(word: str, props: str) -> str:
+    """A run of the word with a soft hyphen (w:softHyphen) at every hyphen in it."""
+    pieces = word.split("-")
+    inner = "<w:softHyphen/>".join(text(piece) for piece in pieces)
+    return f"<w:r>{f'<w:rPr>{props}</w:rPr>' if props else ''}{inner}</w:r>"
+
+
+def tab_run(props: str = "") -> str:
+    return f"<w:r>{f'<w:rPr>{props}</w:rPr>' if props else ''}<w:tab/></w:r>"
+
+
+def labelled(n: int, label: str, *samples: str, **props) -> str:
+    """A paragraph: the case's label in a run of its own, then the samples."""
+    return para(run(f"Case {n:02d}: {label}: ") + "".join(samples), **props)
+
+
+# A word long enough to break at one of its soft hyphens in a narrow paragraph.
+LONG_WORD = "ex-tra-or-di-nar-i-ly"
+# One word of 150 letters with a soft hyphen after every syllable: wider than NARROW's 150
+# pt even condensed, so its lines can only break at its soft hyphens.
+LONGER_WORD = "-".join([LONG_WORD] * 10)
+# A right indent that leaves 150 pt for the text.
+NARROW = {"right": TEXT_W - 3000}
+
+
+def spacing_condensed() -> Doc:
+    cases = []
+    for points in (3, 6):
+        props = f'<w:spacing w:val="{-twips(points)}"/>'
+        said = f"condensed by {points} pt"
+        # At 11 pt, most letters are narrower than 6 pt, and condensed by 6 pt the word
+        # would take no room; at 24 pt it still fills three lines.
+        long_props, size = props, ""
+        if points == 6:
+            long_props, size = props + '<w:sz w:val="48"/><w:szCs w:val="48"/>', ", 24 pt text"
+        cases += [
+            (f"{said}{size}, a narrow paragraph of one long word with soft hyphens",
+             [soft_hyphenated(LONGER_WORD, long_props)], {"ind": NARROW}),
+            (f"{said}, characters after spaces", [styled_run("a b c d e f", props)], {}),
+            (f"{said}, zero-width spaces (U+200B) between letters",
+             [styled_run("ab\u200bcd\u200bef", props)], {}),
+            (f"{said}, after a right tab", [tab_run(), styled_run("at the end", props)],
+             {"tabs": [("right", TEXT_W)]}),
+            (f"{said}, narrow letters", [styled_run("iiiii lllll", props)], {}),
+        ]
+    body = "".join(
+        labelled(n, label, *samples, **props) for n, (label, samples, props) in enumerate(cases, 1)
+    )
+    return Doc(
+        "E-spacing-condensed",
+        "Letter spacing (w:spacing) of -3 and -6 pt: on text that breaks at a soft hyphen, "
+        "after a space, on zero-width spaces, after a right tab, and on letters narrower than "
+        "the spacing, which would go below zero width",
+        body,
+    )
+
+
+def tab_margin() -> Doc:
+    # The text runs from 0 to TEXT_W; a stop at TEXT_W + 360 is in the right margin, one at
+    # PAGE_W - MARGIN + 360 is past the edge of the page.
+    in_margin, past_edge = TEXT_W + 360, PAGE_W - MARGIN + 360
+    cases = [
+        ("a left stop 18 pt into the right margin", [("left", in_margin)]),
+        ("a left stop 18 pt past the right edge of the page", [("left", past_edge)]),
+        ("a right stop 18 pt into the right margin", [("right", in_margin)]),
+    ]
+    body = "".join(
+        labelled(n, label, styled_run("before", ""), tab_run(), styled_run("after", ""),
+                 tabs=stops)
+        for n, (label, stops) in enumerate(cases, 1)
+    )
+    # A tab after "(", where no line may break, near the end of the line: one of these
+    # lengths puts it past the last default stop the line has room for.
+    for n, count in enumerate((86, 88, 90, 92, 94), len(cases) + 1):
+        body += para(
+            run(f"Case {n:02d}: {count} x, then an opening bracket and two tabs:"),
+        ) + para(styled_run("x" * count + "(", "") + tab_run() + tab_run() + styled_run("end", ""))
+    return Doc(
+        "E-tab-margin",
+        "Tab stops in the right margin and past the edge of the page, and two tabs after an "
+        "opening bracket near the end of a line, where the line may not break",
+        body,
+    )
+
+
+HIGHLIGHT = '<w:highlight w:val="darkYellow"/>'
+RUN_SHADING = '<w:shd w:val="clear" w:color="auto" w:fill="D9D9D9"/>'
+
+
+def highlight() -> Doc:
+    base = styled_run("base", "")
+    superscript = HIGHLIGHT + '<w:vertAlign w:val="superscript"/>'
+    subscript = HIGHLIGHT + '<w:vertAlign w:val="subscript"/>'
+    raised = '<w:position w:val="12"/>' + HIGHLIGHT
+    cases = [
+        ("highlighted", [styled_run("highlighted text", HIGHLIGHT)], {}),
+        ("highlighted superscript", [base, styled_run("raised", superscript)], {}),
+        ("highlighted subscript", [base, styled_run("lowered", subscript)], {}),
+        ("highlighted text raised 6 pt (w:position 12)", [base, styled_run("raised", raised)],
+         {}),
+        ("highlighted under exact 9 pt line spacing", [styled_run("highlighted text", HIGHLIGHT)],
+         {"space": spacing(line=("exact", 9))}),
+        ("highlighted words of a justified paragraph, three spaces between them",
+         [styled_run("   ".join(["highlighted"] * 18), HIGHLIGHT)], {"jc": "both"}),
+        ("highlight and run shading on one run", [styled_run("both", HIGHLIGHT + RUN_SHADING)], {}),
+        ("a highlighted tab", [styled_run("before", HIGHLIGHT), tab_run(HIGHLIGHT),
+                               styled_run("after", HIGHLIGHT)], {}),
+    ]
+    body = "".join(
+        labelled(n, label, *samples, **props) for n, (label, samples, props) in enumerate(cases, 1)
+    )
+    return Doc(
+        "E-highlight",
+        "The box of highlighted text (dark yellow): plain, superscript, subscript and raised "
+        "text, under exact line spacing smaller than the font, at the hanging spaces of a "
+        "justified line, over run shading, and on a tab",
+        body,
+    )
+
+
+# Every value of ST_Underline but none.
+UNDERLINES = [
+    "single", "words", "double", "thick", "dotted", "dottedHeavy", "dash", "dashedHeavy",
+    "dashLong", "dashLongHeavy", "dotDash", "dashDotHeavy", "dotDotDash", "dashDotDotHeavy",
+    "wave", "wavyHeavy", "wavyDouble",
+]
+
+
+def underline_props(kind: str) -> str:
+    return f'<w:u w:val="{kind}"/>'
+
+
+def trailing_space_cases(first: int) -> list[str]:
+    single = underline_props("single")
+    return [
+        labelled(first, "underlined words ending a line in three spaces, left aligned",
+                 styled_run("underlined   " * 14, single)),
+        labelled(first + 1, "underlined words ending a line in three spaces, justified",
+                 styled_run("underlined   " * 14, single), jc="both"),
+    ]
+
+
+def underline() -> Doc:
+    body = "".join(
+        labelled(
+            n, f"underline {kind}", styled_run("underlined sample text", underline_props(kind))
+        )
+        for n, kind in enumerate(UNDERLINES, 1)
+    )
+    n = len(UNDERLINES)
+    single = underline_props("single")
+    body += labelled(n + 1, "single under small capitals",
+                     styled_run("Small Capitals", "<w:smallCaps/>" + single))
+    body += labelled(n + 2, "single under a superscript in a word",
+                     styled_run("1", single),
+                     styled_run("st", single + '<w:vertAlign w:val="superscript"/>'),
+                     styled_run(" place", single))
+    body += labelled(n + 3, "single under a tab", styled_run("before", single), tab_run(single),
+                     styled_run("after", single))
+    body += labelled(n + 4, "words only, in a narrow paragraph that breaks at soft hyphens",
+                     soft_hyphenated(" ".join([LONG_WORD] * 6), underline_props("words")),
+                     ind=NARROW)
+    body += "".join(trailing_space_cases(n + 5))
+    return Doc(
+        "E-underline",
+        "Every kind of underline (w:u), and single underline under small capitals, under a "
+        "superscript in a word and under a tab; words-only underline at soft hyphen breaks; "
+        "underlined spaces at the end of a line without w:ulTrailSpace",
+        body,
+    )
+
+
+def underline_trail_space() -> Doc:
+    return Doc(
+        "E-underline-trailspace",
+        "Underlined spaces at the end of a line with the w:compat setting ulTrailSpace, the "
+        "same cases as the last two of E-underline",
+        "".join(trailing_space_cases(1)),
+        compat_flags=("ulTrailSpace",),
+    )
+
+
+def strike() -> Doc:
+    cases = []
+    for size in (11, 24):
+        for kind in ("strike", "dstrike"):
+            said = "single" if kind == "strike" else "double"
+            hp = half_points(size)
+            cases.append((f"{said} strikethrough, {size} pt",
+                          f'<w:{kind}/><w:sz w:val="{hp}"/><w:szCs w:val="{hp}"/>'))
+    body = "".join(
+        labelled(n, label, styled_run("struck through", props))
+        for n, (label, props) in enumerate(cases, 1)
+    )
+    return Doc(
+        "E-strike",
+        "Single and double strikethrough at 11 and 24 pt: where each line is drawn and how "
+        "thick",
+        body,
+    )
+
+
+LEADERS = ["dot", "hyphen", "middleDot", "underscore", "heavy"]
+LEADER_STOPS = [("left", 4320, "x"), ("right", 4320, "x"), ("center", 4320, "x"),
+                ("decimal", 4320, "12.34")]
+
+
+def tab_leader() -> Doc:
+    # Each label in a paragraph of its own: the sample starts with its tab at the left
+    # margin, so the leader runs from there to the stop at 216 pt.
+    body, n = "", 0
+    for leader in LEADERS:
+        for kind, pos, after in LEADER_STOPS:
+            n += 1
+            body += para(run(f"Case {n:02d}: {leader} leader to a {kind} stop at 216 pt:"))
+            body += para(tab_run() + styled_run(after, ""), tabs=[(kind, pos, leader)])
+    extra = [
+        ("dot leader at 1 pt", '<w:sz w:val="2"/><w:szCs w:val="2"/>'),
+        ("dot leader at a character scale of 50 %", '<w:w w:val="50"/>'),
+        ("dot leader under an underlined tab", underline_props("single")),
+    ]
+    for label, props in extra:
+        n += 1
+        body += para(run(f"Case {n:02d}: {label}:"))
+        body += para(tab_run(props) + styled_run("x", ""), tabs=[("left", 4320, "dot")])
+    return Doc(
+        "E-tab-leader",
+        "Tab leaders (dot, hyphen, middle dot, underscore, heavy) to left, right, centre and "
+        "decimal stops, and a dot leader at 1 pt, at a character scale of 50 % and under an "
+        "underlined tab: how many glyphs, where the last ends, where line leaders lie",
+        body,
+    )
+
+
+def bar_tab() -> Doc:
+    two_lines = "two lines of text in one paragraph with a bar tab at 144 pt, " * 2
+    cases = [
+        ("single spacing", {}),
+        ("1.5 lines spacing", {"space": spacing(line=("auto", 360))}),
+        ("exact 18 pt spacing", {"space": spacing(line=("exact", 18))}),
+        ("12 pt before and after", {"space": spacing(before=12, after=12)}),
+        ("dark paragraph shading", {"shading": "404040"}),
+    ]
+    body = "".join(
+        labelled(n, label, styled_run(two_lines, ""), tabs=[("bar", 2880)], **props)
+        for n, (label, props) in enumerate(cases, 1)
+    )
+    # Two paragraphs in a row with the same bar tab: one line, or two?
+    n = len(cases) + 1
+    body += labelled(n, "the first of two paragraphs with a bar tab", tabs=[("bar", 2880)])
+    body += labelled(n + 1, "the second of two paragraphs with a bar tab", tabs=[("bar", 2880)])
+    return Doc(
+        "E-bar-tab",
+        "Bar tabs (w:tab w:val=bar) through paragraphs with single, 1.5 and exact spacing, "
+        "with space before and after, on dark paragraph shading, and in two paragraphs in a "
+        "row: their width, extent and colour",
+        body,
+    )
+
+
+# Greys of 10 % to 90 % black, and a few saturated colours.
+AUTO_COLOR_FILLS = [(f"{k * 10} % grey", f"{round(255 * (1 - k / 10)):02X}" * 3)
+                    for k in range(1, 10)] + [
+    ("red", "FF0000"), ("green", "00B050"), ("blue", "0000FF"), ("yellow", "FFFF00"),
+    ("dark blue", "002060"),
+]
+
+
+def auto_color() -> Doc:
+    body, n = "", 0
+    for name, fill in AUTO_COLOR_FILLS:
+        n += 1
+        shade = f'<w:shd w:val="clear" w:color="auto" w:fill="{fill}"/>'
+        body += labelled(n, f"run shading {name} ({fill})", styled_run("automatic colour", shade))
+        n += 1
+        body += labelled(n, f"paragraph shading {name} ({fill})",
+                         styled_run("automatic colour", ""), shading=fill)
+    return Doc(
+        "E-auto-color",
+        "Text in the automatic colour on run shading and on paragraph shading of greys from "
+        "10 % to 90 % and of a few saturated colours: where Word turns it white",
+        body,
+    )
+
+
+def superscript() -> Doc:
+    cases = []
+    for size in (11, 24):
+        hp = half_points(size)
+        size_props = f'<w:sz w:val="{hp}"/><w:szCs w:val="{hp}"/>'
+        for kind in ("superscript", "subscript"):
+            cases.append((f"{kind} at {size} pt", size_props, kind))
+    body = "".join(
+        labelled(n, label, styled_run("Base", props),
+                 styled_run("123", props + f'<w:vertAlign w:val="{kind}"/>'))
+        for n, (label, props, kind) in enumerate(cases, 1)
+    )
+    return Doc(
+        "E-superscript",
+        "The size and the baseline shift of superscript and subscript text at 11 and 24 pt",
+        body,
     )
 
 
@@ -1734,6 +2053,16 @@ def documents() -> list[Doc]:
         table_style_toggles_defaults(),
         table_style_header_rows(1),
         table_style_header_rows(0),
+        spacing_condensed(),
+        tab_margin(),
+        highlight(),
+        underline(),
+        underline_trail_space(),
+        strike(),
+        tab_leader(),
+        bar_tab(),
+        auto_color(),
+        superscript(),
     ]
 
 
