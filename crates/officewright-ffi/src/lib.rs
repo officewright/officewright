@@ -6,8 +6,9 @@
 //! Conventions for every function:
 //!
 //! - Fallible functions return [`OwStatus`]; results go through out-parameters, which
-//!   must not be NULL. On failure an out-parameter is set to NULL or 0, and
-//!   [`ow_last_error_message`] describes the error.
+//!   must not be NULL, except a report out-parameter that a function says may be. On
+//!   failure an out-parameter is set to NULL or 0, and [`ow_last_error_message`]
+//!   describes the error.
 //! - Strings are NUL-terminated UTF-8.
 //! - Handles are created by `ow_<type>_new` (or another constructor) and released by
 //!   `ow_<type>_free`, which accepts NULL. A handle may be used by one thread at a time
@@ -25,6 +26,7 @@ use std::ptr;
 use std::sync::Arc;
 
 use officewright_core::Error;
+use officewright_doc::{LayoutReport, RenderOptions, ReportKind};
 use officewright_font::{FontBook, FontOrigin, FontRequest, FontResolver, ResolutionKind};
 use officewright_pdf::{Compression, Document, EmbeddingNote, Font, PageSize, Pt, StandardFont};
 
@@ -168,11 +170,12 @@ pub struct OwFontResolver {
 pub const OW_RESOLUTION_OTHER: i32 = 0;
 
 /// A face has the requested family name; the substitution is a synthetic style, a bold
-/// or italic the face lacks.
+/// or italic the face lacks, or a bold face for regular text when the family has no
+/// regular face installed.
 pub const OW_RESOLUTION_EXACT: i32 = 1;
 
 /// Windows maps the requested name to another family, such as "Times New Roman CYR" to
-/// Times New Roman; reported only with a synthetic style.
+/// Times New Roman; reported only with a synthetic style or a bold face for regular text.
 pub const OW_RESOLUTION_ALIAS: i32 = 2;
 
 /// No face has the requested family name, but one has it as its typographic family,
@@ -194,13 +197,14 @@ pub const OW_RESOLUTION_FALLBACK: i32 = 6;
 /// No font could be found at all.
 pub const OW_RESOLUTION_MISSING: i32 = 7;
 
-/// For `ow_pdf_document_set_compression`: page content and embedded fonts are stored as
-/// they are, so the page content can be read in a text editor.
+/// For `ow_pdf_document_set_compression` and `ow_render_options_set_compression`: page
+/// content and embedded fonts are stored as they are, so the page content can be read in
+/// a text editor.
 pub const OW_COMPRESSION_NONE: i32 = 0;
 
-/// For `ow_pdf_document_set_compression`: page content and embedded fonts are
-/// compressed with the Flate filter wherever that makes them smaller. Every PDF reader
-/// decompresses Flate, so this is the default.
+/// For `ow_pdf_document_set_compression` and `ow_render_options_set_compression`: page
+/// content and embedded fonts are compressed with the Flate filter wherever that makes
+/// them smaller. Every PDF reader decompresses Flate, so this is the default.
 pub const OW_COMPRESSION_FLATE: i32 = 1;
 
 /// Returns the C ABI version of the loaded library.
@@ -395,19 +399,7 @@ pub unsafe extern "C" fn ow_pdf_document_set_compression(
     guard(|| {
         // SAFETY: the caller passes NULL or a live handle it does not share.
         let doc = unsafe { doc_mut(doc) }?;
-        doc.set_compression(match compression {
-            OW_COMPRESSION_NONE => Compression::None,
-            OW_COMPRESSION_FLATE => Compression::Flate,
-            other => {
-                return Err(Failure {
-                    status: OwStatus::InvalidArgument,
-                    message: format!(
-                        "compression is {other}, not OW_COMPRESSION_NONE (0) or \
-                         OW_COMPRESSION_FLATE (1)"
-                    ),
-                });
-            }
-        });
+        doc.set_compression(compression_arg(compression)?);
         Ok(())
     })
 }
@@ -990,8 +982,10 @@ pub unsafe extern "C" fn ow_font_resolver_new(
 /// takes its metric-compatible substitute (Carlito for Calibri, Liberation for Arial,
 /// Times New Roman and Courier New), else a font of similar design (Caladea for
 /// Cambria, which lays out differently) or a common font of the same kind; a style the
-/// face lacks is synthetic. Every such substitution is added to the resolver's report
-/// (`ow_font_resolver_substitution`); synthetic styles are reported but not drawn yet.
+/// face lacks is synthetic, italic before taking a face of another weight, as Word does,
+/// and a family with no regular face installed gives regular text its bold one. Every
+/// such substitution is added to the resolver's report (`ow_font_resolver_substitution`);
+/// synthetic styles are reported but not drawn yet.
 ///
 /// Fails with `OW_STATUS_UNSUPPORTED` if no font could be found or the chosen font's
 /// license forbids embedding, `OW_STATUS_INVALID_ARGUMENT` if `bold` or `italic` is not
@@ -1129,6 +1123,519 @@ thread_local! {
     static LAST_ERROR: RefCell<CString> = RefCell::new(CString::default());
 }
 
+/// A Word document (DOCX) opened for conversion.
+///
+/// Created by `ow_doc_document_open_path` or `ow_doc_document_open_bytes` and released by
+/// `ow_doc_document_free`. Converting it does not change it, so it may be converted
+/// several times, with different options. Used by one thread at a time; may be moved
+/// between threads.
+pub struct OwDocDocument(officewright_doc::Document);
+
+/// How a document is rendered into PDF: the most pages it may take, the fonts to use
+/// besides those the document embeds, and how the PDF's streams are compressed.
+///
+/// Created by `ow_render_options_new` with the defaults (at most 100,000 pages, the
+/// system's fonts, Flate compression) and released by `ow_render_options_free`. It is
+/// read, never changed, by a conversion, so one may serve many conversions, one after
+/// another. Used by one thread at a time; may be moved between threads.
+pub struct OwRenderOptions(RenderOptions);
+
+/// What a conversion did otherwise than Word would: fonts it substituted, glyphs it
+/// could not draw, features it does not lay out yet, values it brought within limits.
+///
+/// Returned by `ow_doc_document_save_pdf_path` and `ow_doc_document_save_pdf_bytes`,
+/// read with `ow_layout_report_len` and `ow_layout_report_entry`, and released by
+/// `ow_layout_report_free`. Used by one thread at a time; may be moved between threads.
+pub struct OwLayoutReport {
+    /// Each entry's kind, an `OW_REPORT_KIND_*` value, its place and its message.
+    entries: Vec<(i32, CString, CString)>,
+}
+
+impl OwLayoutReport {
+    fn new(report: LayoutReport) -> Self {
+        let entries = report
+            .into_iter()
+            .map(|entry| {
+                let kind = match entry.kind() {
+                    ReportKind::FontSubstituted => OW_REPORT_KIND_FONT_SUBSTITUTED,
+                    ReportKind::GlyphMissing => OW_REPORT_KIND_GLYPH_MISSING,
+                    ReportKind::FeatureUnsupported => OW_REPORT_KIND_FEATURE_UNSUPPORTED,
+                    ReportKind::FieldCached => OW_REPORT_KIND_FIELD_CACHED,
+                    ReportKind::CompatIgnored => OW_REPORT_KIND_COMPAT_IGNORED,
+                    ReportKind::ValueClamped => OW_REPORT_KIND_VALUE_CLAMPED,
+                    ReportKind::Overflow => OW_REPORT_KIND_OVERFLOW,
+                    ReportKind::FontEmbedding => OW_REPORT_KIND_FONT_EMBEDDING,
+                    _ => OW_REPORT_KIND_OTHER,
+                };
+                (
+                    kind,
+                    c_string(entry.location().to_string()),
+                    c_string(entry.message().to_owned()),
+                )
+            })
+            .collect();
+        Self { entries }
+    }
+}
+
+/// A report entry of a kind this version of the header does not know, from
+/// `ow_layout_report_entry`; its message says what it is. Also the kind a failed
+/// `ow_layout_report_entry` returns.
+pub const OW_REPORT_KIND_OTHER: i32 = 0;
+/// A report entry: a font is not available and another one is used in its place.
+pub const OW_REPORT_KIND_FONT_SUBSTITUTED: i32 = 1;
+/// A report entry: no available font has a glyph for a character; the font's
+/// missing-glyph shape is drawn.
+pub const OW_REPORT_KIND_GLYPH_MISSING: i32 = 2;
+/// A report entry: something the document uses is not laid out yet, or not the way Word
+/// does.
+pub const OW_REPORT_KIND_FEATURE_UNSUPPORTED: i32 = 3;
+/// A report entry: a field whose value is not computed shows the result stored in the
+/// document.
+pub const OW_REPORT_KIND_FIELD_CACHED: i32 = 4;
+/// A report entry: a legacy compatibility option is set that the layout does not follow.
+pub const OW_REPORT_KIND_COMPAT_IGNORED: i32 = 5;
+/// A report entry: a value beyond what Word accepts, or what a PDF holds, was brought
+/// within its limits.
+pub const OW_REPORT_KIND_VALUE_CLAMPED: i32 = 6;
+/// A report entry: content does not fit its area, such as a word wider than its column.
+pub const OW_REPORT_KIND_OVERFLOW: i32 = 7;
+/// A report entry: a font is embedded with what its license or format restricts, or it
+/// cannot be embedded and its text is not drawn. Later versions add kinds with new
+/// values; existing values never change.
+pub const OW_REPORT_KIND_FONT_EMBEDDING: i32 = 8;
+
+/// Opens the Word document (DOCX) in the file at `path` (UTF-8). On success `*out_doc`
+/// is a new handle for `ow_doc_document_free`.
+///
+/// Fails with `OW_STATUS_IO` if the file cannot be read, `OW_STATUS_MALFORMED` if it is
+/// not a WordprocessingML package or its structure is broken, `OW_STATUS_UNSUPPORTED`
+/// for an encrypted or binary (DOC) Word document, and `OW_STATUS_LIMIT_EXCEEDED` if it
+/// exceeds the limits that keep the time and memory a file can take bounded.
+///
+/// # Safety
+///
+/// `path` must be NULL or a NUL-terminated string; `out_doc` must be NULL or valid for
+/// writing a pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_doc_document_open_path(
+    path: *const c_char,
+    out_doc: *mut *mut OwDocDocument,
+) -> OwStatus {
+    guard(|| {
+        // SAFETY: the caller passes NULL or a pointer valid for writes.
+        unsafe { put(out_doc, "out_doc", ptr::null_mut()) }?;
+        // SAFETY: the caller passes NULL or a NUL-terminated string.
+        let path = unsafe { str_arg(path, "path") }?;
+        let doc = officewright_doc::Document::open(path)?;
+        let doc = Box::into_raw(Box::new(OwDocDocument(doc)));
+        // SAFETY: as above.
+        unsafe { put(out_doc, "out_doc", doc) }
+    })
+}
+
+/// Opens the Word document (DOCX) in the `len` bytes at `data`, which the library
+/// copies. On success `*out_doc` is a new handle for `ow_doc_document_free`.
+///
+/// Fails as `ow_doc_document_open_path` does, except with `OW_STATUS_IO`.
+///
+/// # Safety
+///
+/// `data` must be NULL or valid for reading `len` bytes; `out_doc` must be NULL or valid
+/// for writing a pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_doc_document_open_bytes(
+    data: *const u8,
+    len: usize,
+    out_doc: *mut *mut OwDocDocument,
+) -> OwStatus {
+    guard(|| {
+        // SAFETY: the caller passes NULL or a pointer valid for writes.
+        unsafe { put(out_doc, "out_doc", ptr::null_mut()) }?;
+        // SAFETY: the caller passes NULL or `len` readable bytes.
+        let bytes = unsafe { bytes_arg(data, len, "data") }?;
+        let doc = officewright_doc::Document::from_bytes(bytes.to_vec())?;
+        let doc = Box::into_raw(Box::new(OwDocDocument(doc)));
+        // SAFETY: as above.
+        unsafe { put(out_doc, "out_doc", doc) }
+    })
+}
+
+/// Renders `doc` into PDF with `options` and writes it to the file at `path` (UTF-8),
+/// which is replaced if it exists. When `out_report` is not NULL, `*out_report` is a new
+/// report of what the PDF shows otherwise than Word would, for `ow_layout_report_free`;
+/// NULL if the call fails.
+///
+/// Fails with `OW_STATUS_IO` if the file cannot be written or a font folder of the
+/// options cannot be read, `OW_STATUS_MALFORMED` if a font the PDF embeds is damaged
+/// where only embedding looks (a glyph's outline, say), and `OW_STATUS_LIMIT_EXCEEDED`
+/// if the document takes more pages than the options allow or nests tables deeper than
+/// the layout follows. `OW_STATUS_INVALID_ARGUMENT` here would mean that officewright
+/// translated the document wrongly, a defect worth reporting with the document.
+///
+/// # Safety
+///
+/// `doc` and `options` must each be NULL or a live handle not modified by another thread
+/// during the call; `path` must be NULL or a NUL-terminated string; `out_report` must be
+/// NULL or valid for writing a pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_doc_document_save_pdf_path(
+    doc: *const OwDocDocument,
+    path: *const c_char,
+    options: *const OwRenderOptions,
+    out_report: *mut *mut OwLayoutReport,
+) -> OwStatus {
+    guard(|| {
+        // SAFETY: the caller passes NULL or a pointer valid for writes.
+        unsafe { put_optional(out_report, ptr::null_mut()) };
+        // SAFETY: the caller passes NULL or a live handle.
+        let doc = unsafe { doc_document_ref(doc) }?;
+        // SAFETY: the caller passes NULL or a NUL-terminated string.
+        let path = unsafe { str_arg(path, "path") }?;
+        // SAFETY: the caller passes NULL or a live handle.
+        let options = unsafe { options_ref(options) }?;
+        let report = doc.save_pdf_path(path, options)?;
+        let report = Box::into_raw(Box::new(OwLayoutReport::new(report)));
+        // SAFETY: as above; the report is freed here if nobody takes it.
+        unsafe { give_optional(out_report, report) };
+        Ok(())
+    })
+}
+
+/// Renders `doc` into PDF with `options` in memory: `*out_data` points to `*out_len`
+/// bytes, which the caller releases with `ow_bytes_free(*out_data, *out_len)`. When
+/// `out_report` is not NULL, `*out_report` is a new report as for
+/// `ow_doc_document_save_pdf_path`; NULL if the call fails.
+///
+/// Fails as `ow_doc_document_save_pdf_path` does, except for writing the file.
+///
+/// # Safety
+///
+/// `doc` and `options` must each be NULL or a live handle not modified by another thread
+/// during the call; `out_data`, `out_len` and `out_report` must each be NULL or valid for
+/// writing.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_doc_document_save_pdf_bytes(
+    doc: *const OwDocDocument,
+    options: *const OwRenderOptions,
+    out_data: *mut *mut u8,
+    out_len: *mut usize,
+    out_report: *mut *mut OwLayoutReport,
+) -> OwStatus {
+    guard(|| {
+        // SAFETY: the caller passes NULL or pointers valid for writes.
+        unsafe { put_optional(out_report, ptr::null_mut()) };
+        // SAFETY: as above.
+        unsafe { put(out_data, "out_data", ptr::null_mut()) }?;
+        // SAFETY: as above.
+        unsafe { put(out_len, "out_len", 0) }?;
+        // SAFETY: the caller passes NULL or a live handle.
+        let doc = unsafe { doc_document_ref(doc) }?;
+        // SAFETY: the caller passes NULL or a live handle.
+        let options = unsafe { options_ref(options) }?;
+        let (bytes, report) = doc.save_pdf_bytes(options)?;
+        let bytes = bytes.into_boxed_slice();
+        let len = bytes.len();
+        let data = Box::into_raw(bytes).cast::<u8>();
+        // SAFETY: both pointers were checked above.
+        unsafe { put(out_len, "out_len", len) }?;
+        // SAFETY: as above.
+        unsafe { put(out_data, "out_data", data) }?;
+        let report = Box::into_raw(Box::new(OwLayoutReport::new(report)));
+        // SAFETY: as above; the report is freed here if nobody takes it.
+        unsafe { give_optional(out_report, report) };
+        Ok(())
+    })
+}
+
+/// Releases a document. Does nothing if `doc` is NULL.
+///
+/// # Safety
+///
+/// `doc` must be NULL or a live handle, not used afterwards.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_doc_document_free(doc: *mut OwDocDocument) {
+    let _ = panic::catch_unwind(AssertUnwindSafe(|| {
+        if !doc.is_null() {
+            // SAFETY: the handle came from `Box::into_raw` and is released only once.
+            drop(unsafe { Box::from_raw(doc) });
+        }
+    }));
+}
+
+/// Creates render options with the defaults: at most 100,000 pages, the fonts installed
+/// on the system, Flate compression. On success `*out_options` is a new handle for
+/// `ow_render_options_free`.
+///
+/// # Safety
+///
+/// `out_options` must be NULL or valid for writing a pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_render_options_new(out_options: *mut *mut OwRenderOptions) -> OwStatus {
+    guard(|| {
+        // SAFETY: the caller passes NULL or a pointer valid for writes.
+        unsafe { put(out_options, "out_options", ptr::null_mut()) }?;
+        let options = Box::into_raw(Box::new(OwRenderOptions(RenderOptions::new())));
+        // SAFETY: as above.
+        unsafe { put(out_options, "out_options", options) }
+    })
+}
+
+/// Sets the most pages a document may take; past it, a conversion fails with
+/// `OW_STATUS_LIMIT_EXCEEDED`. Fails with `OW_STATUS_INVALID_ARGUMENT` for 0.
+///
+/// # Safety
+///
+/// `options` must be NULL or a live handle not used by another thread during the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_render_options_set_max_pages(
+    options: *mut OwRenderOptions,
+    max_pages: usize,
+) -> OwStatus {
+    guard(|| {
+        // SAFETY: the caller passes NULL or a live handle it does not share.
+        let options = unsafe { options_mut(options) }?;
+        if max_pages == 0 {
+            return Err(Failure {
+                status: OwStatus::InvalidArgument,
+                message: "max_pages is 0; a document takes at least one page".to_owned(),
+            });
+        }
+        options.0 = std::mem::take(&mut options.0).with_max_pages(max_pages);
+        Ok(())
+    })
+}
+
+/// Sets whether the fonts installed on the system are used, after the folders and fonts
+/// added to the options: 1 (the default) or 0. Any other value fails with
+/// `OW_STATUS_INVALID_ARGUMENT`.
+///
+/// # Safety
+///
+/// `options` must be NULL or a live handle not used by another thread during the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_render_options_set_system_fonts(
+    options: *mut OwRenderOptions,
+    system_fonts: i32,
+) -> OwStatus {
+    guard(|| {
+        // SAFETY: the caller passes NULL or a live handle it does not share.
+        let options = unsafe { options_mut(options) }?;
+        let system_fonts = flag(system_fonts, "system_fonts")?;
+        options.0 = std::mem::take(&mut options.0).with_system_fonts(system_fonts);
+        Ok(())
+    })
+}
+
+/// Adds the folder at `path` (UTF-8): its fonts, and those of its subfolders, are used
+/// before the system's. The folder is read when a document is converted, which fails
+/// with `OW_STATUS_IO` if it cannot be read.
+///
+/// # Safety
+///
+/// `options` must be NULL or a live handle not used by another thread during the call;
+/// `path` must be NULL or a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_render_options_add_font_dir(
+    options: *mut OwRenderOptions,
+    path: *const c_char,
+) -> OwStatus {
+    guard(|| {
+        // SAFETY: the caller passes NULL or a live handle it does not share.
+        let options = unsafe { options_mut(options) }?;
+        // SAFETY: the caller passes NULL or a NUL-terminated string.
+        let path = unsafe { str_arg(path, "path") }?;
+        options.0 = std::mem::take(&mut options.0).with_font_dir(path);
+        Ok(())
+    })
+}
+
+/// Adds the font file (TrueType, OpenType or a collection) in the `len` bytes at
+/// `data`, which the library copies; its fonts are used before the folders' and the
+/// system's. Fails with `OW_STATUS_MALFORMED` if the data is not a font or every face in
+/// it is damaged, leaving the options unchanged. The check reads what identifies the
+/// font, not every glyph: a font damaged deeper is accepted here, and the conversion that
+/// embeds it fails with `OW_STATUS_MALFORMED`.
+///
+/// # Safety
+///
+/// `options` must be NULL or a live handle not used by another thread during the call;
+/// `data` must be NULL or valid for reading `len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_render_options_add_font_bytes(
+    options: *mut OwRenderOptions,
+    data: *const u8,
+    len: usize,
+) -> OwStatus {
+    guard(|| {
+        // SAFETY: the caller passes NULL or a live handle it does not share.
+        let options = unsafe { options_mut(options) }?;
+        // SAFETY: the caller passes NULL or `len` readable bytes.
+        let bytes = unsafe { bytes_arg(data, len, "data") }?;
+        add_font(options, Arc::from(bytes))
+    })
+}
+
+/// Adds the font file (TrueType, OpenType or a collection) at `path` (UTF-8), which the
+/// library reads now; its fonts are used before the folders' and the system's, as those
+/// of `ow_render_options_add_font_bytes` are. Fails with `OW_STATUS_IO` if the file cannot
+/// be read and `OW_STATUS_MALFORMED` if it is not a font or every face in it is damaged,
+/// with the path in the message, leaving the options unchanged. Like that of
+/// `ow_render_options_add_font_bytes`, the check does not read every glyph.
+///
+/// # Safety
+///
+/// `options` must be NULL or a live handle not used by another thread during the call;
+/// `path` must be NULL or a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_render_options_add_font_file(
+    options: *mut OwRenderOptions,
+    path: *const c_char,
+) -> OwStatus {
+    guard(|| {
+        // SAFETY: the caller passes NULL or a live handle it does not share.
+        let options = unsafe { options_mut(options) }?;
+        // SAFETY: the caller passes NULL or a NUL-terminated string.
+        let path = unsafe { str_arg(path, "path") }?;
+        let data = std::fs::read(path).map_err(|source| Failure {
+            status: OwStatus::Io,
+            message: format!("cannot read {path}: {source}"),
+        })?;
+        add_font(options, Arc::from(data)).map_err(|failure| Failure {
+            status: failure.status,
+            message: format!("{path}: {}", failure.message),
+        })
+    })
+}
+
+/// Adds `data` to the options once it has been read as a font, so that data that is not
+/// one fails here, where the caller can tell which it is, rather than at the conversion.
+fn add_font(options: &mut OwRenderOptions, data: Arc<[u8]>) -> Result<(), Failure> {
+    FontBook::new().add_bytes(Arc::clone(&data), FontOrigin::User)?;
+    options.0 = std::mem::take(&mut options.0).with_font_data(data);
+    Ok(())
+}
+
+/// Sets how the PDF's streams are compressed: `OW_COMPRESSION_FLATE`, the default, or
+/// `OW_COMPRESSION_NONE`. Fails with `OW_STATUS_INVALID_ARGUMENT` for any other value,
+/// leaving the options unchanged.
+///
+/// # Safety
+///
+/// `options` must be NULL or a live handle not used by another thread during the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_render_options_set_compression(
+    options: *mut OwRenderOptions,
+    compression: i32,
+) -> OwStatus {
+    guard(|| {
+        // SAFETY: the caller passes NULL or a live handle it does not share.
+        let options = unsafe { options_mut(options) }?;
+        let compression = compression_arg(compression)?;
+        options.0 = std::mem::take(&mut options.0).with_compression(compression);
+        Ok(())
+    })
+}
+
+/// Releases render options. Does nothing if `options` is NULL.
+///
+/// # Safety
+///
+/// `options` must be NULL or a live handle, not used afterwards.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_render_options_free(options: *mut OwRenderOptions) {
+    let _ = panic::catch_unwind(AssertUnwindSafe(|| {
+        if !options.is_null() {
+            // SAFETY: the handle came from `Box::into_raw` and is released only once.
+            drop(unsafe { Box::from_raw(options) });
+        }
+    }));
+}
+
+/// Returns in `*out_len` the number of entries of `report`.
+///
+/// # Safety
+///
+/// `report` must be NULL or a live handle; `out_len` must be NULL or valid for writing a
+/// `size_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_layout_report_len(
+    report: *const OwLayoutReport,
+    out_len: *mut usize,
+) -> OwStatus {
+    guard(|| {
+        // SAFETY: the caller passes NULL or a pointer valid for writes.
+        unsafe { put(out_len, "out_len", 0) }?;
+        // SAFETY: the caller passes NULL or a live handle.
+        let report = unsafe { report_ref(report) }?;
+        // SAFETY: as above.
+        unsafe { put(out_len, "out_len", report.entries.len()) }
+    })
+}
+
+/// Returns entry `index` (counting from 0) of `report`: its kind, an `OW_REPORT_KIND_*`
+/// value, in `*out_kind`; where it is in the document, as a path such as
+/// `sections[0].blocks[3]`, or `document` for the document as a whole, in
+/// `*out_location`; and
+/// what happened, a sentence, in `*out_message`. Both strings are UTF-8 and owned by the
+/// report: they stay valid until it is freed.
+///
+/// Fails with `OW_STATUS_INVALID_ARGUMENT` if `index` is not below the count
+/// `ow_layout_report_len` gives.
+///
+/// # Safety
+///
+/// `report` must be NULL or a live handle; `out_kind`, `out_location` and `out_message`
+/// must each be NULL or valid for writing.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_layout_report_entry(
+    report: *const OwLayoutReport,
+    index: usize,
+    out_kind: *mut i32,
+    out_location: *mut *const c_char,
+    out_message: *mut *const c_char,
+) -> OwStatus {
+    guard(|| {
+        // SAFETY: the caller passes NULL or pointers valid for writes.
+        unsafe { put(out_kind, "out_kind", OW_REPORT_KIND_OTHER) }?;
+        // SAFETY: as above.
+        unsafe { put(out_location, "out_location", ptr::null()) }?;
+        // SAFETY: as above.
+        unsafe { put(out_message, "out_message", ptr::null()) }?;
+        // SAFETY: the caller passes NULL or a live handle.
+        let report = unsafe { report_ref(report) }?;
+        let (kind, location, message) = report.entries.get(index).ok_or_else(|| Failure {
+            status: OwStatus::InvalidArgument,
+            message: format!(
+                "entry index {index} is out of range for a report with {} entries",
+                report.entries.len()
+            ),
+        })?;
+        // SAFETY: the pointers were checked above. The strings live as long as the
+        // handle.
+        unsafe { put(out_kind, "out_kind", *kind) }?;
+        // SAFETY: as above.
+        unsafe { put(out_location, "out_location", location.as_ptr()) }?;
+        // SAFETY: as above.
+        unsafe { put(out_message, "out_message", message.as_ptr()) }
+    })
+}
+
+/// Releases a report. Does nothing if `report` is NULL.
+///
+/// # Safety
+///
+/// `report` must be NULL or a live handle, not used afterwards.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_layout_report_free(report: *mut OwLayoutReport) {
+    let _ = panic::catch_unwind(AssertUnwindSafe(|| {
+        if !report.is_null() {
+            // SAFETY: the handle came from `Box::into_raw` and is released only once.
+            drop(unsafe { Box::from_raw(report) });
+        }
+    }));
+}
+
 /// Why a call failed.
 struct Failure {
     status: OwStatus,
@@ -1168,6 +1675,12 @@ impl From<Error> for Failure {
 
 impl From<officewright_font::Error> for Failure {
     fn from(err: officewright_font::Error) -> Self {
+        Error::from(err).into()
+    }
+}
+
+impl From<officewright_doc::Error> for Failure {
+    fn from(err: officewright_doc::Error) -> Self {
         Error::from(err).into()
     }
 }
@@ -1221,6 +1734,21 @@ fn flag(value: i32, name: &str) -> Result<bool, Failure> {
     }
 }
 
+/// Reads an `OW_COMPRESSION_*` argument.
+fn compression_arg(value: i32) -> Result<Compression, Failure> {
+    match value {
+        OW_COMPRESSION_NONE => Ok(Compression::None),
+        OW_COMPRESSION_FLATE => Ok(Compression::Flate),
+        other => Err(Failure {
+            status: OwStatus::InvalidArgument,
+            message: format!(
+                "compression is {other}, not OW_COMPRESSION_NONE (0) or \
+                 OW_COMPRESSION_FLATE (1)"
+            ),
+        }),
+    }
+}
+
 /// Stores `message` for `ow_last_error_message`. Never panics.
 fn set_last_error(message: &str) {
     let message = CString::new(message.replace('\0', "\u{FFFD}")).unwrap_or_default();
@@ -1244,6 +1772,96 @@ unsafe fn put<T>(out: *mut T, name: &str, value: T) -> Result<(), Failure> {
     // not read or drop the previous, possibly uninitialized, value.
     unsafe { out.write(value) };
     Ok(())
+}
+
+/// Writes `value` through the out-parameter `out` when it is not NULL.
+///
+/// # Safety
+///
+/// `out` must be NULL or valid for writing a `T`.
+unsafe fn put_optional<T>(out: *mut T, value: T) {
+    if !out.is_null() {
+        // SAFETY: not NULL, and the caller guarantees it is valid for writes.
+        unsafe { out.write(value) };
+    }
+}
+
+/// Gives the new `report` to the caller through `out` when it is not NULL, and frees it
+/// otherwise.
+///
+/// # Safety
+///
+/// `out` must be NULL or valid for writing a pointer; `report` must come from
+/// `Box::into_raw` and be given to nobody else.
+unsafe fn give_optional(out: *mut *mut OwLayoutReport, report: *mut OwLayoutReport) {
+    if out.is_null() {
+        // SAFETY: the caller gives up `report`, which nobody else has.
+        drop(unsafe { Box::from_raw(report) });
+    } else {
+        // SAFETY: not NULL, and the caller guarantees it is valid for writes.
+        unsafe { out.write(report) };
+    }
+}
+
+/// Borrows `len` bytes at `data`.
+///
+/// # Safety
+///
+/// `data` must be NULL or valid for reading `len` bytes that outlive the call.
+unsafe fn bytes_arg<'a>(data: *const u8, len: usize, name: &str) -> Result<&'a [u8], Failure> {
+    if data.is_null() {
+        return Err(Failure::null(name));
+    }
+    // SAFETY: not NULL, and the caller guarantees `len` readable bytes.
+    Ok(unsafe { std::slice::from_raw_parts(data, len) })
+}
+
+/// Borrows a Word document handle.
+///
+/// # Safety
+///
+/// `doc` must be NULL or a live handle that is not modified during the borrow.
+unsafe fn doc_document_ref<'a>(
+    doc: *const OwDocDocument,
+) -> Result<&'a officewright_doc::Document, Failure> {
+    // SAFETY: the caller guarantees a live handle if not NULL.
+    unsafe { doc.as_ref() }
+        .map(|doc| &doc.0)
+        .ok_or_else(|| Failure::null("doc"))
+}
+
+/// Borrows a render options handle.
+///
+/// # Safety
+///
+/// `options` must be NULL or a live handle that is not modified during the borrow.
+unsafe fn options_ref<'a>(options: *const OwRenderOptions) -> Result<&'a RenderOptions, Failure> {
+    // SAFETY: the caller guarantees a live handle if not NULL.
+    unsafe { options.as_ref() }
+        .map(|options| &options.0)
+        .ok_or_else(|| Failure::null("options"))
+}
+
+/// Borrows a render options handle mutably.
+///
+/// # Safety
+///
+/// `options` must be NULL or a live handle that nothing else uses during the borrow.
+unsafe fn options_mut<'a>(
+    options: *mut OwRenderOptions,
+) -> Result<&'a mut OwRenderOptions, Failure> {
+    // SAFETY: the caller guarantees a live, unshared handle if not NULL.
+    unsafe { options.as_mut() }.ok_or_else(|| Failure::null("options"))
+}
+
+/// Borrows a report handle.
+///
+/// # Safety
+///
+/// `report` must be NULL or a live handle.
+unsafe fn report_ref<'a>(report: *const OwLayoutReport) -> Result<&'a OwLayoutReport, Failure> {
+    // SAFETY: the caller guarantees a live handle if not NULL.
+    unsafe { report.as_ref() }.ok_or_else(|| Failure::null("report"))
 }
 
 /// Borrows a NUL-terminated UTF-8 string argument.
@@ -1755,6 +2373,445 @@ mod tests {
     fn keeps_messages_with_nul_bytes() {
         set_last_error("a\0b");
         assert_eq!(last_error(), "a\u{FFFD}b");
+    }
+
+    /// officewright-doc's smallest test document, "Hello, world", small enough for Miri.
+    fn hello_docx_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../officewright-doc/tests/data/hello.docx")
+    }
+
+    /// Render options with only the minimal test font: no system fonts, no compression.
+    fn minimal_options() -> *mut OwRenderOptions {
+        let font = fs::read(minimal_font_path()).unwrap();
+        let mut options = ptr::null_mut();
+        // SAFETY: valid pointers and handles throughout.
+        unsafe {
+            assert_eq!(ow_render_options_new(&mut options), OwStatus::Ok);
+            assert_eq!(ow_render_options_set_system_fonts(options, 0), OwStatus::Ok);
+            assert_eq!(
+                ow_render_options_add_font_bytes(options, font.as_ptr(), font.len()),
+                OwStatus::Ok
+            );
+            assert_eq!(
+                ow_render_options_set_compression(options, OW_COMPRESSION_NONE),
+                OwStatus::Ok
+            );
+        }
+        options
+    }
+
+    /// The entries of `report`: kind, location and message.
+    fn report_entries(report: *const OwLayoutReport) -> Vec<(i32, String, String)> {
+        let mut len = 0;
+        // SAFETY: a live report and valid out-parameters.
+        unsafe {
+            assert_eq!(ow_layout_report_len(report, &mut len), OwStatus::Ok);
+            (0..len)
+                .map(|index| {
+                    let (mut kind, mut location, mut message) = (0, ptr::null(), ptr::null());
+                    assert_eq!(
+                        ow_layout_report_entry(
+                            report,
+                            index,
+                            &mut kind,
+                            &mut location,
+                            &mut message
+                        ),
+                        OwStatus::Ok
+                    );
+                    let text = |ptr| CStr::from_ptr(ptr).to_str().unwrap().to_owned();
+                    (kind, text(location), text(message))
+                })
+                .collect()
+        }
+    }
+
+    #[test]
+    fn converts_a_word_document_to_pdf_in_memory_and_to_a_path() {
+        let path = CString::new(hello_docx_path().to_str().unwrap()).unwrap();
+        let bytes = fs::read(hello_docx_path()).unwrap();
+        let options = minimal_options();
+        // SAFETY: valid pointers and handles throughout.
+        unsafe {
+            let (mut from_path, mut from_bytes) = (ptr::null_mut(), ptr::null_mut());
+            assert_eq!(
+                ow_doc_document_open_path(path.as_ptr(), &mut from_path),
+                OwStatus::Ok
+            );
+            assert_eq!(
+                ow_doc_document_open_bytes(bytes.as_ptr(), bytes.len(), &mut from_bytes),
+                OwStatus::Ok
+            );
+            let (mut data, mut len, mut report) = (ptr::null_mut(), 0, ptr::null_mut());
+            assert_eq!(
+                ow_doc_document_save_pdf_bytes(
+                    from_bytes,
+                    options,
+                    &mut data,
+                    &mut len,
+                    &mut report
+                ),
+                OwStatus::Ok
+            );
+            let pdf = std::slice::from_raw_parts(data, len).to_vec();
+            ow_bytes_free(data, len);
+            assert!(pdf.starts_with(b"%PDF-"));
+            // The options lack the document's font (Calibri), and the report says so.
+            let entries = report_entries(report);
+            assert!(
+                entries.iter().any(
+                    |(kind, _, message)| *kind == OW_REPORT_KIND_FONT_SUBSTITUTED
+                        && !message.is_empty()
+                ),
+                "{entries:?}"
+            );
+            ow_layout_report_free(report);
+            // The minimal font, given from memory, is in the book the options make.
+            let book = (*options).0.font_book().unwrap();
+            let families: Vec<&str> = book
+                .faces()
+                .filter_map(|(_, face)| face.names().family())
+                .collect();
+            assert_eq!(families, ["Officewright Test"]);
+            // Through a path, without a report: the same file.
+            let dir =
+                std::env::temp_dir().join(format!("officewright-ffi-docx-{}", std::process::id()));
+            fs::create_dir_all(&dir).unwrap();
+            let out = dir.join("hello.pdf");
+            let out_c = CString::new(out.to_str().unwrap()).unwrap();
+            assert_eq!(
+                ow_doc_document_save_pdf_path(from_path, out_c.as_ptr(), options, ptr::null_mut()),
+                OwStatus::Ok
+            );
+            assert_eq!(fs::read(&out).unwrap(), pdf);
+            fs::remove_dir_all(&dir).unwrap();
+            ow_doc_document_free(from_path);
+            ow_doc_document_free(from_bytes);
+            ow_render_options_free(options);
+        }
+    }
+
+    #[test]
+    fn conversion_errors_have_a_status_and_a_message() {
+        let bytes = fs::read(hello_docx_path()).unwrap();
+        let options = minimal_options();
+        // SAFETY: valid pointers and handles throughout, NULL where the test says.
+        unsafe {
+            let mut doc = ptr::null_mut();
+            // Not a Word document.
+            assert_eq!(
+                ow_doc_document_open_bytes(b"not a zip".as_ptr(), 9, &mut doc),
+                OwStatus::Malformed
+            );
+            assert!(doc.is_null() && !last_error().is_empty());
+            assert_eq!(
+                ow_doc_document_open_bytes(ptr::null(), 0, &mut doc),
+                OwStatus::NullArgument
+            );
+            assert_eq!(last_error(), "data is null");
+            let missing = CString::new("/nonexistent/officewright/hello.docx").unwrap();
+            assert_eq!(
+                ow_doc_document_open_path(missing.as_ptr(), &mut doc),
+                OwStatus::Io
+            );
+            assert_eq!(
+                ow_doc_document_open_bytes(bytes.as_ptr(), bytes.len(), &mut doc),
+                OwStatus::Ok
+            );
+            // Options: no pages, a flag that is not 0 or 1, an unknown compression.
+            assert_eq!(
+                ow_render_options_set_max_pages(options, 0),
+                OwStatus::InvalidArgument
+            );
+            assert_eq!(
+                ow_render_options_set_system_fonts(options, 2),
+                OwStatus::InvalidArgument
+            );
+            assert_eq!(last_error(), "system_fonts is 2, not 0 or 1");
+            assert_eq!(
+                ow_render_options_set_compression(options, 9),
+                OwStatus::InvalidArgument
+            );
+            // A report entry out of range, and the out-parameters reset.
+            let (mut data, mut len, mut report) = (ptr::null_mut(), 0, ptr::null_mut());
+            assert_eq!(
+                ow_doc_document_save_pdf_bytes(doc, options, &mut data, &mut len, &mut report),
+                OwStatus::Ok
+            );
+            ow_bytes_free(data, len);
+            let mut count = 0;
+            assert_eq!(ow_layout_report_len(report, &mut count), OwStatus::Ok);
+            let (mut kind, mut location, mut message) = (7, ptr::null(), ptr::null());
+            assert_eq!(
+                ow_layout_report_entry(report, count, &mut kind, &mut location, &mut message),
+                OwStatus::InvalidArgument
+            );
+            assert!(kind == OW_REPORT_KIND_OTHER && location.is_null() && message.is_null());
+            ow_layout_report_free(report);
+            // Font data that is not a font is refused at once, and leaves the options as
+            // they were.
+            let mut damaged = ptr::null_mut();
+            assert_eq!(ow_render_options_new(&mut damaged), OwStatus::Ok);
+            assert_eq!(ow_render_options_set_system_fonts(damaged, 0), OwStatus::Ok);
+            assert_eq!(
+                ow_render_options_add_font_bytes(damaged, b"no font".as_ptr(), 7),
+                OwStatus::Malformed
+            );
+            assert!(last_error().starts_with("data is not a TrueType or OpenType font"));
+            assert_eq!(
+                ow_doc_document_save_pdf_bytes(doc, damaged, &mut data, &mut len, ptr::null_mut()),
+                OwStatus::Ok
+            );
+            ow_bytes_free(data, len);
+            // A conversion that fails (a font folder that cannot be read) gives no PDF and
+            // no report.
+            let missing = CString::new("/nonexistent/officewright/fonts").unwrap();
+            assert_eq!(
+                ow_render_options_add_font_dir(damaged, missing.as_ptr()),
+                OwStatus::Ok
+            );
+            let mut report = ptr::dangling_mut::<OwLayoutReport>();
+            let (mut data, mut len) = (ptr::dangling_mut::<u8>(), 7);
+            assert_eq!(
+                ow_doc_document_save_pdf_bytes(doc, damaged, &mut data, &mut len, &mut report),
+                OwStatus::Io
+            );
+            assert!(report.is_null() && data.is_null() && len == 0);
+            // NULL handles.
+            assert_eq!(
+                ow_doc_document_save_pdf_bytes(
+                    ptr::null(),
+                    options,
+                    &mut data,
+                    &mut len,
+                    ptr::null_mut()
+                ),
+                OwStatus::NullArgument
+            );
+            assert_eq!(last_error(), "doc is null");
+            assert_eq!(
+                ow_doc_document_save_pdf_bytes(
+                    doc,
+                    ptr::null(),
+                    &mut data,
+                    &mut len,
+                    ptr::null_mut()
+                ),
+                OwStatus::NullArgument
+            );
+            assert_eq!(last_error(), "options is null");
+            assert_eq!(
+                ow_layout_report_len(ptr::null(), &mut count),
+                OwStatus::NullArgument
+            );
+            // Freeing NULL does nothing.
+            ow_doc_document_free(ptr::null_mut());
+            ow_render_options_free(ptr::null_mut());
+            ow_layout_report_free(ptr::null_mut());
+            ow_render_options_free(damaged);
+            ow_doc_document_free(doc);
+            ow_render_options_free(options);
+        }
+    }
+
+    #[test]
+    fn a_report_from_a_path_is_given_or_reset() {
+        let bytes = fs::read(hello_docx_path()).unwrap();
+        let options = minimal_options();
+        let dir =
+            std::env::temp_dir().join(format!("officewright-ffi-report-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let out = CString::new(dir.join("hello.pdf").to_str().unwrap()).unwrap();
+        let unwritable =
+            CString::new(dir.join("missing-dir").join("hello.pdf").to_str().unwrap()).unwrap();
+        // SAFETY: valid pointers and handles throughout.
+        unsafe {
+            let mut doc = ptr::null_mut();
+            assert_eq!(
+                ow_doc_document_open_bytes(bytes.as_ptr(), bytes.len(), &mut doc),
+                OwStatus::Ok
+            );
+            let mut report = ptr::null_mut();
+            assert_eq!(
+                ow_doc_document_save_pdf_path(doc, out.as_ptr(), options, &mut report),
+                OwStatus::Ok
+            );
+            assert!(
+                report_entries(report)
+                    .iter()
+                    .any(|(kind, _, _)| *kind == OW_REPORT_KIND_FONT_SUBSTITUTED)
+            );
+            ow_layout_report_free(report);
+            // A file that cannot be written: IO, and the report reset.
+            let mut report = ptr::dangling_mut::<OwLayoutReport>();
+            assert_eq!(
+                ow_doc_document_save_pdf_path(doc, unwritable.as_ptr(), options, &mut report),
+                OwStatus::Io
+            );
+            assert!(report.is_null());
+            ow_doc_document_free(doc);
+            ow_render_options_free(options);
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn every_report_kind_has_its_constant() {
+        use officewright_doc::{Location, ReportEntry};
+        let kinds = [
+            (
+                ReportKind::FontSubstituted,
+                OW_REPORT_KIND_FONT_SUBSTITUTED,
+                1,
+            ),
+            (ReportKind::GlyphMissing, OW_REPORT_KIND_GLYPH_MISSING, 2),
+            (
+                ReportKind::FeatureUnsupported,
+                OW_REPORT_KIND_FEATURE_UNSUPPORTED,
+                3,
+            ),
+            (ReportKind::FieldCached, OW_REPORT_KIND_FIELD_CACHED, 4),
+            (ReportKind::CompatIgnored, OW_REPORT_KIND_COMPAT_IGNORED, 5),
+            (ReportKind::ValueClamped, OW_REPORT_KIND_VALUE_CLAMPED, 6),
+            (ReportKind::Overflow, OW_REPORT_KIND_OVERFLOW, 7),
+            (ReportKind::FontEmbedding, OW_REPORT_KIND_FONT_EMBEDDING, 8),
+        ];
+        let report: LayoutReport = kinds
+            .iter()
+            .map(|(kind, _, _)| ReportEntry::new(*kind, Location::document(), "a"))
+            .collect();
+        let handle = OwLayoutReport::new(report);
+        let found: Vec<i32> = handle.entries.iter().map(|(kind, _, _)| *kind).collect();
+        // The values are fixed: bindings hard-code them.
+        let expected: Vec<i32> = kinds
+            .iter()
+            .map(|(_, constant, value)| {
+                assert_eq!(constant, value);
+                *value
+            })
+            .collect();
+        assert_eq!(found, expected);
+        assert_eq!(OW_REPORT_KIND_OTHER, 0);
+    }
+
+    #[test]
+    fn conversion_statuses_name_the_failure() {
+        // SAFETY: valid pointers and handles throughout.
+        unsafe {
+            // A binary Word document (an OLE compound file) is not supported.
+            let mut ole = vec![0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+            ole.resize(512, 0);
+            let mut doc = ptr::null_mut();
+            assert_eq!(
+                ow_doc_document_open_bytes(ole.as_ptr(), ole.len(), &mut doc),
+                OwStatus::Unsupported
+            );
+            assert!(doc.is_null());
+            // A font folder that cannot be read fails the conversion with IO.
+            let bytes = fs::read(hello_docx_path()).unwrap();
+            assert_eq!(
+                ow_doc_document_open_bytes(bytes.as_ptr(), bytes.len(), &mut doc),
+                OwStatus::Ok
+            );
+            let mut options = ptr::null_mut();
+            assert_eq!(ow_render_options_new(&mut options), OwStatus::Ok);
+            assert_eq!(ow_render_options_set_system_fonts(options, 0), OwStatus::Ok);
+            let missing = CString::new("/nonexistent/officewright/fonts").unwrap();
+            assert_eq!(
+                ow_render_options_add_font_dir(options, missing.as_ptr()),
+                OwStatus::Ok
+            );
+            let (mut data, mut len) = (ptr::null_mut(), 0);
+            assert_eq!(
+                ow_doc_document_save_pdf_bytes(doc, options, &mut data, &mut len, ptr::null_mut()),
+                OwStatus::Io
+            );
+            // A font file read from a path: IO when it is missing, used when it is there.
+            let missing_file = CString::new("/nonexistent/officewright/font.ttf").unwrap();
+            assert_eq!(
+                ow_render_options_add_font_file(options, missing_file.as_ptr()),
+                OwStatus::Io
+            );
+            assert!(last_error().starts_with("cannot read /nonexistent/officewright/font.ttf"));
+            assert_eq!(
+                ow_render_options_add_font_file(options, ptr::null()),
+                OwStatus::NullArgument
+            );
+            // A file that is not a font: refused at once, with its path.
+            let docx = CString::new(hello_docx_path().to_str().unwrap()).unwrap();
+            assert_eq!(
+                ow_render_options_add_font_file(options, docx.as_ptr()),
+                OwStatus::Malformed
+            );
+            assert!(last_error().starts_with(&format!("{}: data is not", docx.to_str().unwrap())));
+            ow_render_options_free(options);
+            let mut options = ptr::null_mut();
+            assert_eq!(ow_render_options_new(&mut options), OwStatus::Ok);
+            assert_eq!(ow_render_options_set_system_fonts(options, 0), OwStatus::Ok);
+            let font = CString::new(minimal_font_path().to_str().unwrap()).unwrap();
+            assert_eq!(
+                ow_render_options_add_font_file(options, font.as_ptr()),
+                OwStatus::Ok
+            );
+            // The file's font is in the book the options make, as from memory.
+            let book = (*options).0.font_book().unwrap();
+            let families: Vec<&str> = book
+                .faces()
+                .filter_map(|(_, face)| face.names().family())
+                .collect();
+            assert_eq!(families, ["Officewright Test"]);
+            ow_render_options_free(options);
+            ow_doc_document_free(doc);
+        }
+    }
+
+    #[test]
+    fn render_options_keep_what_they_are_set_to() {
+        let mut options = ptr::null_mut();
+        // SAFETY: valid pointers and a live handle throughout.
+        unsafe {
+            assert_eq!(ow_render_options_new(&mut options), OwStatus::Ok);
+            let inner = |options: *mut OwRenderOptions| &(*options).0;
+            assert_eq!(inner(options).max_pages(), 100_000);
+            assert!(inner(options).system_fonts());
+            assert_eq!(inner(options).compression(), Compression::Flate);
+            assert_eq!(ow_render_options_set_max_pages(options, 7), OwStatus::Ok);
+            assert_eq!(ow_render_options_set_system_fonts(options, 0), OwStatus::Ok);
+            assert_eq!(
+                ow_render_options_set_compression(options, OW_COMPRESSION_NONE),
+                OwStatus::Ok
+            );
+            assert_eq!(inner(options).max_pages(), 7);
+            assert!(!inner(options).system_fonts());
+            assert_eq!(inner(options).compression(), Compression::None);
+            ow_render_options_free(options);
+        }
+    }
+
+    #[test]
+    fn a_page_limit_of_the_document_s_pages_lets_it_through() {
+        // "Hello, world" takes one page, so a limit of one passes. A document of more
+        // pages is refused in tests/c and tests/ffi-python, which are not run under Miri.
+        let options = minimal_options();
+        let bytes = fs::read(hello_docx_path()).unwrap();
+        // SAFETY: valid pointers and handles throughout.
+        unsafe {
+            let mut doc = ptr::null_mut();
+            assert_eq!(
+                ow_doc_document_open_bytes(bytes.as_ptr(), bytes.len(), &mut doc),
+                OwStatus::Ok
+            );
+            assert_eq!(ow_render_options_set_max_pages(options, 1), OwStatus::Ok);
+            let (mut data, mut len) = (ptr::null_mut(), 0);
+            assert_eq!(
+                ow_doc_document_save_pdf_bytes(doc, options, &mut data, &mut len, ptr::null_mut()),
+                OwStatus::Ok
+            );
+            ow_bytes_free(data, len);
+            ow_doc_document_free(doc);
+            ow_render_options_free(options);
+        }
     }
 
     /// officewright-font's minimal test font, small enough for Miri.
