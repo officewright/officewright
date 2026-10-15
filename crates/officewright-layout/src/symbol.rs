@@ -310,6 +310,19 @@ mod tests {
     }
 
     #[test]
+    fn no_symbol_stands_for_a_character_that_attaches() {
+        // The itemizer gives a symbol of a font that is not installed a run of its own
+        // look, which a mark, a joiner or a soft hyphen must not have.
+        for font in [SymbolFont::Symbol, SymbolFont::Wingdings] {
+            for code in 0xF000..=0xF0FF {
+                if let Some(ch) = font.unicode(code) {
+                    assert!(!crate::itemize::attaches(ch), "{font:?} {code:04X}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn knows_symbol_fonts_by_family_in_any_case() {
         assert_eq!(SymbolFont::of("SYMBOL"), Some(SymbolFont::Symbol));
         assert_eq!(SymbolFont::of("wingdings"), Some(SymbolFont::Wingdings));

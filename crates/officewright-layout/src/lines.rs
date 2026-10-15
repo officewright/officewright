@@ -481,12 +481,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                 end += 1;
             }
             let next = glyphs.get(end).map_or(text.len(), |glyph| glyph.cluster);
-            let advance: i64 = glyphs
-                .get(first..end)
-                .unwrap_or(&[])
-                .iter()
-                .map(|glyph| i64::from(glyph.x_advance))
-                .sum();
+            let advance = design_advance(run, &(first..end));
             let width = scale.map_or(Pt(0.0), |scale| {
                 Pt(advance as f64 * scale.per_unit + cluster_spacing(advance, scale))
             });
@@ -706,8 +701,9 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                 kind => {
                     let what = self.decimal_char(kind);
                     let x = cursor.peek(unit.width, what);
-                    // What takes no room fits wherever the line has got to.
-                    let over = unit.width.0 > 0.0 && x.0 > right.0 + EPSILON;
+                    // What does not show fits wherever the line has got to; characters
+                    // condensed to no width show, and must start before the end.
+                    let over = shows(&unit) && x.0 > right.0 + EPSILON;
                     if over {
                         // The line ends at its last place to end, if it has one (after
                         // spaces at its start, too), else before the unit that does not
@@ -988,7 +984,9 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         let units: Vec<Unit> = self.units.get(start..end).unwrap_or(&[]).to_vec();
         // The spaces after the last piece of content hang past the end of the line, in
         // pieces of their own: those before the break that ends the line, and those
-        // before what takes no room, such as soft hyphens, too.
+        // before what takes no room, such as soft hyphens, too. Characters that letter
+        // spacing condenses to no width are content still: they are drawn, so the
+        // spaces before them do not hang, and the hyphen comes after them.
         // A tab that starts past the end hangs too.
         let hanging_tab = fit.hanging_tab.and_then(|tab| tab.checked_sub(start));
         let last_content = units
@@ -996,8 +994,8 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             .enumerate()
             .rposition(|(index, unit)| match unit.kind {
                 UnitKind::Tab { .. } => hanging_tab.is_none_or(|tab| index < tab),
-                UnitKind::Object { .. } => unit.width.0 > 0.0,
-                UnitKind::Glyphs { .. } => unit.width.0 > 0.0 && !self.is_space_unit(unit),
+                UnitKind::Object { .. } => shows(unit),
+                UnitKind::Glyphs { .. } => shows(unit) && !self.is_space_unit(unit),
                 UnitKind::Break { .. } | UnitKind::Zero { .. } => false,
             })
             .map_or(0, |index| index + 1);
@@ -1699,6 +1697,26 @@ fn stretchable_spaces(itemized: &Itemized, text: &Range<usize>) -> usize {
             .filter(|&ch| ch == ' ' || ch == '\u{00A0}')
             .count()
     })
+}
+
+/// Whether `unit` shows on its line: it takes room, or it is glyphs with an advance of
+/// their own that letter spacing (`w:spacing`) condenses to no width, which are drawn
+/// all the same. A soft hyphen, a joiner and an object of no size do not show. What
+/// Word does with such characters is a hypothesis until a Word render
+/// (`E-spacing-condensed.docx`).
+fn shows(unit: &Unit) -> bool {
+    unit.width.0 > 0.0
+        || matches!(&unit.kind, UnitKind::Glyphs { run, glyphs, .. } if design_advance(run, glyphs) > 0)
+}
+
+/// The advance of glyphs `glyphs` of `run` in design units, before letter spacing.
+fn design_advance(run: &ShapedRun, glyphs: &Range<usize>) -> i64 {
+    run.glyphs()
+        .get(glyphs.clone())
+        .unwrap_or(&[])
+        .iter()
+        .map(|glyph| i64::from(glyph.x_advance))
+        .sum()
 }
 
 /// How many clusters glyphs `glyphs` of `run` form.
