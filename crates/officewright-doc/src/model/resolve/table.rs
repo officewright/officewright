@@ -602,7 +602,8 @@ impl<'a> Formats<'a> {
         Some(context)
     }
 
-    /// The index of the default table style, once looked up.
+    /// The index of the default table style, once looked up: the last, as
+    /// [`Styles::default_style`](crate::Styles::default_style) gives it.
     fn default_table_style(&mut self) -> Option<usize> {
         let document = self.document;
         *self.default_table_style.get_or_insert_with(|| {
@@ -611,7 +612,7 @@ impl<'a> Formats<'a> {
                 .styles
                 .iter()
                 .take(super::MAX_STYLES)
-                .position(|style| style.kind == StyleKind::Table && style.is_default)
+                .rposition(|style| style.kind == StyleKind::Table && style.is_default)
         })
     }
 }
