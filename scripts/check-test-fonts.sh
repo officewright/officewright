@@ -45,8 +45,11 @@ trap 'rm -rf "$work"' EXIT
 find tests/fonts ! -type d -print0 | sort -z >"$work/files"
 
 # Time limits, so that a server that does not answer cannot hold up the night: a transfer
-# slower than 1 KB/s for a minute is given up, and so are the retries after 10 minutes.
-curl -fsSL --retry 3 --retry-max-time 600 --connect-timeout 30 --max-time 600 \
+# slower than 1 KB/s for a minute is given up, and the download after about 10 minutes in
+# all. A transfer takes at most 5 minutes, and no retry starts after 5 minutes, though one
+# that curl decided on before then starts after its wait (1, 2 or 4 seconds) and runs its
+# full 5.
+curl -fsSL --retry 3 --retry-max-time 300 --connect-timeout 30 --max-time 300 \
 	--speed-limit 1000 --speed-time 60 -o "$work/liberation.tar.gz" \
 	"$liberation_url" || cannot "download $liberation_url"
 got=$(sha256 "$work/liberation.tar.gz")
