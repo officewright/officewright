@@ -3565,6 +3565,64 @@ fn checks_markup_compatibility_in_the_branch_taken_at_the_top_of_parts() {
 }
 
 #[test]
+fn ends_markup_compatibility_declarations_with_their_elements_at_the_top_of_parts() {
+    // From the review of #286: an mc:ProcessContent written on an element applies until
+    // that element ends, whether it is read in a taken branch, kept as written or the
+    // root. w14:foo is ignorable; when it is processed, its mc:MustUnderstand of w15, a
+    // namespace officewright does not read, refuses the document, and when it is not,
+    // it is left out without a look inside.
+    let open_settings = |root_attributes: &str, inside: &str| {
+        let settings = format!(
+            r#"<w:settings xmlns:w="{W}" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" mc:Ignorable="w14"{root_attributes}>{inside}</w:settings>"#
+        );
+        let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/></Relationships>"#;
+        Document::from_bytes(package(
+            DOCUMENT,
+            &document_xml("<w:p/>"),
+            &[
+                ("word/_rels/document.xml.rels", rels),
+                ("word/settings.xml", &settings),
+            ],
+        ))
+    };
+    let foo = r#"<w14:foo mc:MustUnderstand="w15"/>"#;
+    let refused = |root_attributes: &str, inside: &str| match open_settings(root_attributes, inside)
+    {
+        Err(Error::Unsupported(message)) => {
+            assert!(message.contains("mc:MustUnderstand"), "{inside}: {message}")
+        }
+        other => panic!("{inside} gave {other:?}"),
+    };
+    let read = |root_attributes: &str, inside: &str| {
+        if let Err(err) = open_settings(root_attributes, inside) {
+            panic!("{inside} gave {err}");
+        }
+    };
+    // Written on a child of the branch taken, it ends with that child.
+    read(
+        "",
+        &format!(
+            r#"<mc:AlternateContent><mc:Choice Requires="w"><w:defaultTabStop w:val="360" mc:ProcessContent="w14:foo"/>{foo}</mc:Choice></mc:AlternateContent>"#
+        ),
+    );
+    // Written on a child of the root, it ends with that child.
+    read(
+        "",
+        &format!(r#"<w:defaultTabStop w:val="360" mc:ProcessContent="w14:foo"/>{foo}"#),
+    );
+    // Written on the root, it still applies after an alternate read in place and after
+    // an element kept as written, with children of its own.
+    let on_root = r#" mc:ProcessContent="w14:foo""#;
+    refused(
+        on_root,
+        &format!(
+            r#"<mc:AlternateContent><mc:Choice Requires="w"><w:defaultTabStop w:val="360"/></mc:Choice></mc:AlternateContent>{foo}"#
+        ),
+    );
+    refused(on_root, &format!("<w:compat><w:x/></w:compat>{foo}"));
+}
+
+#[test]
 fn reads_style_names_section_breaks_and_grid_columns_through_alternate_content() {
     // Issue #157: these skipped an mc:AlternateContent instead of reading the branch it
     // takes. w14 is declared but not implemented, so its choices are passed by.
