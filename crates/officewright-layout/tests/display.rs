@@ -325,8 +325,9 @@ fn automatic_text_is_white_on_dark_shading() -> TestResult {
 }
 
 /// The first leader glyph's x and the number of glyphs of each case of
-/// `E-tab-leader.docx` in Word's reference, by case number: the first word of the line
-/// after the case's title.
+/// `E-tab-leader.docx` in Word's reference, by case number: the first text after the
+/// case's title that starts with a leader character, and the run of that character it
+/// starts with (pdftotext joins the dots of case 22 and the "x" after them into one word).
 fn word_leaders() -> TestResult<Vec<(u32, f64, usize)>> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/corpus/reference/word-rules/E-tab-leader/geometry.json");
@@ -357,15 +358,13 @@ fn word_leaders() -> TestResult<Vec<(u32, f64, usize)>> {
         else {
             continue;
         };
-        // The leader: the first text after the title made of one leader character only.
-        let leader = texts.iter().skip(index + 1).find(|(text, _)| {
-            let mut chars = text.chars();
-            chars.next().is_some_and(|first| {
-                ['.', '-', '\u{00B7}', '_'].contains(&first) && chars.all(|ch| ch == first)
-            })
+        let leader = texts.iter().skip(index + 1).find_map(|(text, left)| {
+            let first = text.chars().next()?;
+            let count = text.chars().take_while(|&ch| ch == first).count();
+            (['.', '-', '\u{00B7}', '_'].contains(&first) && count > 1).then_some((*left, count))
         });
-        if let Some((text, left)) = leader {
-            cases.push((number, *left, text.chars().count()));
+        if let Some((left, count)) = leader {
+            cases.push((number, left, count));
         }
     }
     Ok(cases)
@@ -377,16 +376,19 @@ fn leaders_stand_on_word_s_grid_from_the_page_edge() -> TestResult {
     // margin at 72 pt to a stop 216 pt further, then "x". Word puts whole glyphs on a
     // grid from the page's left edge whose pitch is the glyph's advance rounded to
     // 1/600 in (2.76 pt for the period), one in every cell wholly within the tab: the
-    // first at 74.52, not at 72, and none ending past where "x" starts.
+    // first at 74.52, not at 72, and none ending past where "x" starts. At a character
+    // scale of 50 % (case 22) the advance is scaled before it is rounded: a pitch of 1.44,
+    // which puts the first at 72 and draws 150 glyphs, where 1.38 would draw 155.
     let word = word_leaders()?;
     let book = book()?;
     let mut document = Document::default();
-    let style = document.add_run_style(
-        RunStyle::default()
-            .with_fonts(RunFonts::new("Carlito"))
-            .with_size(Pt(11.0)),
-    );
+    let carlito = RunStyle::default()
+        .with_fonts(RunFonts::new("Carlito"))
+        .with_size(Pt(11.0));
+    let plain = document.add_run_style(carlito.clone());
+    let narrow = document.add_run_style(carlito.with_scale(50));
     let cases = [
+        (22, TabLeader::Dot, TabKind::Start),
         (1, TabLeader::Dot, TabKind::Start),
         (2, TabLeader::Dot, TabKind::End),
         (5, TabLeader::Hyphen, TabKind::Start),
@@ -398,6 +400,7 @@ fn leaders_stand_on_word_s_grid_from_the_page_edge() -> TestResult {
         (18, TabLeader::Heavy, TabKind::End),
     ];
     for (case, leader, kind) in cases {
+        let style = if case == 22 { narrow } else { plain };
         let (_, left, count) = word
             .iter()
             .find(|(number, _, _)| *number == case)
