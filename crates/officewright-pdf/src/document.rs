@@ -155,7 +155,8 @@ impl Document {
     /// # Errors
     ///
     /// [`Error::NoPages`] if the document has no pages, [`Error::Embed`] if an embedded
-    /// font turns out to be damaged when it is reduced, [`Error::TooLarge`] if the file
+    /// font turns out to be damaged when it is reduced, or its glyphs the document uses
+    /// are past a limit of the library, [`Error::TooLarge`] if the file
     /// would exceed 10<sup>10</sup> bytes, and [`Error::Io`] if writing fails.
     pub fn write_to(&self, out: impl Write) -> Result<()> {
         if self.pages.is_empty() {

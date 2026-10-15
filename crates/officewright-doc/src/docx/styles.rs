@@ -118,7 +118,7 @@ fn style(c: &mut Capture<'_, '_, '_>, names: &Names, span: Span, offset: usize) 
     };
     let child = |local| {
         element
-            .children()
+            .children_through_alternates(names.mc)
             .find(|child| child.is(w, local))
             .and_then(|child| child.attribute(w, "val"))
             .map(Into::into)
