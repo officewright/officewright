@@ -1636,3 +1636,99 @@ fn the_hyphen_at_a_soft_hyphen_is_measured_as_it_is_drawn() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn characters_condensed_to_nothing_after_a_space_stay_before_the_hyphen() -> TestResult {
+    use officewright_layout::ir::Alignment;
+
+    // "ii" condensed to no width after "W " and before a soft hyphen (issue #181): they
+    // are drawn where the line's content ends, before the hyphen, and never past the
+    // edge; the space before them does not hang.
+    let book = book()?;
+    let (mut document, style) = liberation(10.0);
+    let space = space_width(&book, &document, style);
+    let w = width_of(&book, &document, style, "W");
+    for spacing in [-6.0, -3.0] {
+        let condensed = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Liberation Sans"))
+                .with_size(Pt(10.0))
+                .with_letter_spacing(Pt(spacing)),
+        );
+        for alignment in [Alignment::Start, Alignment::End] {
+            let paragraph = Paragraph::new(style)
+                .with_props(ParagraphProps::default().with_alignment(alignment))
+                .with_inlines([
+                    Inline::text("W ", style),
+                    Inline::text("ii\u{00AD}", condensed),
+                    Inline::text("WW", style),
+                ]);
+            fuzzing::check_lines(&book, &document, &paragraph, 20.0)?;
+            let laid = fuzzing::lay_out(&book, &document, &paragraph, 20.0);
+            let first = laid.lines().first().ok_or("no line")?;
+            assert_eq!(first.text(), "W ii\u{00AD}-", "{spacing} pt {alignment:?}");
+            assert!(
+                first.width() > w + space - 1e-9,
+                "{spacing} pt {alignment:?}: {} wide",
+                first.width()
+            );
+            // Where the line's content ends: at its width from the start, or at the edge.
+            let content_end = match alignment {
+                Alignment::End => 20.0,
+                _ => first.width(),
+            };
+            for word in first.words() {
+                assert!(
+                    word.end() <= content_end + 1e-9,
+                    "{spacing} pt {alignment:?}: {:?} ends at {} past {content_end}",
+                    word.text(),
+                    word.end()
+                );
+            }
+            // In every column from one W wide, before a soft hyphen or a space: no line
+            // is wider than its column or starts with a space (the condensed characters
+            // that do not fit after "W " go on the next line), and nothing is drawn past
+            // where its content ends, nor before the line's start.
+            for after in ["\u{00AD}", " "] {
+                let paragraph = Paragraph::new(style)
+                    .with_props(ParagraphProps::default().with_alignment(alignment))
+                    .with_inlines([
+                        Inline::text("W ", style),
+                        Inline::text(format!("ii{after}"), condensed),
+                        Inline::text("WW", style),
+                    ]);
+                let mut width = w + 0.01;
+                while width < 25.0 {
+                    let at = format!("{spacing} pt {alignment:?} {after:?} in {width} pt");
+                    fuzzing::check_lines(&book, &document, &paragraph, width)
+                        .map_err(|problem| format!("{at}: {problem}"))?;
+                    let laid = fuzzing::lay_out(&book, &document, &paragraph, width);
+                    for (index, line) in laid.lines().iter().enumerate() {
+                        // A line ends after a space, never before it.
+                        assert!(
+                            index == 0 || !line.text().starts_with(' '),
+                            "{at}: line {index} is {:?}",
+                            line.text()
+                        );
+                        let content_end = match alignment {
+                            Alignment::End => width,
+                            _ => line.width(),
+                        };
+                        for word in line.words() {
+                            assert!(
+                                word.end() <= content_end + 1e-9 && word.start() >= -1e-9,
+                                "{at}: {:?} of {:?} at {}..{}",
+                                word.text(),
+                                line.text(),
+                                word.start(),
+                                word.end()
+                            );
+                        }
+                    }
+                    width += 0.1;
+                }
+            }
+        }
+    }
+    Ok(())
+}
