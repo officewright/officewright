@@ -102,7 +102,8 @@ pub enum Error {
     SubsetUnsupported {
         /// The face.
         face: u32,
-        /// What the subsetter reported.
+        /// What the subsetter reported, or what the library found that the subsetter does
+        /// not take.
         source: Cause,
     },
     /// The subsetter panicked on the data of the face. The panic was caught; the font

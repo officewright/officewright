@@ -212,8 +212,9 @@ pub(crate) fn subsetter_table<'a>(
 /// (<https://github.com/typst/subsetter/issues/30>), `unreachable!()` for a CFF real
 /// number too large for an `f32` (<https://github.com/typst/subsetter/issues/31>), an
 /// overflow of a glyph's stem-hint count
-/// (<https://github.com/typst/subsetter/issues/33>), and a `debug_assert!` that a
-/// CID-keyed font has at most 255 Font DICTs
+/// (<https://github.com/typst/subsetter/issues/33>), and a CID-keyed font with 256 Font
+/// DICTs, on which a `debug_assert!` fails and, when the kept glyphs use all 256, a
+/// `u8` counter overflows in any build
 /// (<https://github.com/typst/subsetter/issues/34>).
 /// Catching relies on unwinding, like the C ABI: built with `-C panic=abort` the process
 /// aborts instead. The default panic hook still prints the message to stderr, since a
