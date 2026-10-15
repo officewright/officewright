@@ -785,14 +785,14 @@
     },
     "tests/corpus/word-rules/E-default-paragraph-style-after-normal.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9641,
-      "ssim_min": 0.9641,
+      "ssim_mean": 0.9967,
+      "ssim_min": 0.9967,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-default-paragraph-style.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9553,
-      "ssim_min": 0.9553,
+      "ssim_mean": 0.9962,
+      "ssim_min": 0.9962,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-defaults-empty.docx": {
