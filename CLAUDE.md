@@ -286,7 +286,7 @@ The author squash-merges their own PR when all hold:
 
 A PR that contains anything on the list "Always ask the maintainer first" is merged only with the maintainer's consent, which the author quotes in the PR with its date (the sessions and the maintainer post from the same account, so a quote from the chat is what records it). After each merge the author sends the maintainer a short report; the maintainer runs the "How to check by hand" steps when they choose.
 
-PRs are squash-merged; the PR title must be a Conventional Commit, since it becomes the commit message on main, and the message body carries no line of Claude authorship (Git workflow).
+PRs are squash-merged; the PR title must be a Conventional Commit, since it becomes the commit message on main. The message body carries no line of Claude authorship (Git workflow).
 
 ### Always ask the maintainer first
 The agent must not decide these alone:
