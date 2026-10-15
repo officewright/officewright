@@ -90,8 +90,10 @@ measured by `scripts/corpus-import.py`.
 
 ## Test fonts
 
-Fonts in `tests/fonts/`, at the repository root and so outside every crate. They are
-read by `crates/officewright-font/tests/third_party_fonts.rs`,
+Fonts in `tests/fonts/` and `tests/fonts-word/`, at the repository root and so outside
+every crate. Those of `tests/fonts-word/` are read only by the corpus runner of
+`scripts/check.sh`; those of `tests/fonts/` by it and by
+`crates/officewright-font/tests/third_party_fonts.rs`,
 `crates/officewright-font/tests/metric_compatible.rs`,
 `crates/officewright-pdf/tests/embedded_fonts.rs`,
 `crates/officewright-layout/tests/shaping.rs` and
@@ -99,7 +101,7 @@ read by `crates/officewright-font/tests/third_party_fonts.rs`,
 packages, by the C ABI tests in `tests/c` and `tests/ffi-python`, and by the PDF output
 checks in `tests/pdf-output` and `tests/corpus-tools/poppler/test_font_embedding.py`;
 they seed the fuzz targets in `fuzz/`. `tests/corpus-tools/test_test_fonts.py` checks
-that every file in `tests/fonts/` is listed below with its SHA-256, and that every file
+that every file in both folders is listed below with its SHA-256, and that every file
 listed is there; `scripts/check-test-fonts.sh`, run at night, that each is byte for byte
 the file of the source given for it. The tests embed the fonts, reduced to some of their
 glyphs, in PDF files they write to temporary directories; those files are not committed
@@ -179,8 +181,25 @@ distributed with, byte for byte.
   `fonts/NotoSans/unhinted/otf/NotoSans-Regular.otf` and `fonts/LICENSE` of
   <https://github.com/notofonts/notofonts.github.io> at commit
   `28b15b4b43b7bed62b5cf6e6b0b5ff5846270535`.
+- Files of the TrueType build: `tests/fonts-word/noto-truetype/NotoSans-Regular.ttf`
+  (SHA-256 `f3961a9cde016d41a4879aecda1474d3a36d6bf54fa0e4643de029cc2248b0e8`),
+  `tests/fonts-word/noto-truetype/NotoSans-Bold.ttf`
+  (SHA-256 `87cb2d84472a7d66da659ee47b6cdb9552326e8c128245231f191b6ac72529d9`),
+  `tests/fonts-word/noto-truetype/NotoSans-BoldItalic.ttf`
+  (SHA-256 `3d367743f371f28671d2764e911a53d7c20ec9b6aa8791d059e7090389fc52a5`) and
+  `tests/fonts-word/noto-truetype/LICENSE`
+  (SHA-256 `f2095b08bed08b23a6fe26112fcd679a2bee3f002eef077eb05d215ed1051bd8`), the files
+  `fonts/NotoSans/unhinted/ttf/NotoSans-Regular.ttf`, `NotoSans-Bold.ttf`,
+  `NotoSans-BoldItalic.ttf` and `fonts/LICENSE` of the same repository at the same commit.
 - License: SIL Open Font License 1.1. Copyright 2022 The Noto Project Authors.
-- Why: an OpenType font with CFF outlines.
+- Why: the CFF build is an OpenType font with CFF outlines. The TrueType build holds the
+  three faces Word had installed when it rendered the references of
+  `E-line-fonts-truetype`, `E-smallcaps-12`, `-14`, `-15` and `E-italic-missing`. Word
+  lays the two builds out with different line heights, so the corpus runner lays those
+  references out with this build: `scripts/check.sh` gives it this folder before
+  `tests/fonts`. It lies outside `tests/fonts`, so the tests of the crates, some of which
+  need a family without a Bold face, do not see it. There is no Italic face because Word had
+  none, and it slanted the Regular.
 
 ## Apache POI test documents
 
