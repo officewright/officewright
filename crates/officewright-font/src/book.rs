@@ -712,8 +712,18 @@ impl FontBook {
                         .filter(|(_, target)| **target == canonical_dir)
                         .map(|(listed, _)| listed.clone())
                         .collect();
+                    // An entry leads where it leads now, not where it led when it was
+                    // listed: a link repointed since to another directory that cannot be
+                    // read stays listed, behind that directory. One that cannot be
+                    // resolved now stays listed as it was.
                     for listed in behind {
-                        self.forget_failure(&listed);
+                        match fs::canonicalize(&listed) {
+                            Ok(target) if target == canonical_dir => self.forget_failure(&listed),
+                            Ok(target) => {
+                                self.unreadable_dirs.insert(listed, target);
+                            }
+                            Err(_) => {}
+                        }
                     }
                     entries
                 }
@@ -1527,6 +1537,69 @@ mod tests {
         assert_eq!(listed, 2);
         assert_eq!(added, 1);
         assert!(skipped.is_empty(), "{skipped:?}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_link_repointed_to_another_unreadable_directory_stays_listed() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let set_mode =
+            |path: &Path, mode| fs::set_permissions(path, fs::Permissions::from_mode(mode));
+        let paths = |book: &FontBook| -> Vec<PathBuf> {
+            book.skipped()
+                .iter()
+                .filter_map(|skipped| skipped.path().map(Path::to_owned))
+                .collect()
+        };
+        let dir = TempDir::new("repointed-locked");
+        let (fonts, first, second) = (dir.0.join("fonts"), dir.0.join("t1"), dir.0.join("t2"));
+        for path in [&fonts, &first, &second] {
+            fs::create_dir(path).unwrap();
+        }
+        set_mode(&first, 0o000).unwrap();
+        set_mode(&second, 0o000).unwrap();
+        let link = fonts.join("l");
+        symlink(&first, &link).unwrap();
+        let mut book = FontBook::new();
+        book.add_dir(&fonts).unwrap();
+        // `l` now leads to `t2`, which cannot be read either; `t1` can be read now, and is
+        // read as a root, which does not reach `l`.
+        fs::remove_file(&link).unwrap();
+        symlink(&second, &link).unwrap();
+        set_mode(&first, 0o755).unwrap();
+        book.add_dir(&first).unwrap();
+        let after_root = paths(&book);
+        // Once `t2` can be read, reading it as a root drops `l`, which leads there now.
+        set_mode(&second, 0o755).unwrap();
+        book.add_dir(&second).unwrap();
+        let after_target = paths(&book);
+
+        // The same within one scan: `1` leads to `t2` and `2` to `t1`, both reached before
+        // `l`; reading `t1` through `2` keeps `l`, which leads to `t2`.
+        let dir = TempDir::new("repointed-in-scan");
+        let (fonts, first, second) = (dir.0.join("fonts"), dir.0.join("t1"), dir.0.join("t2"));
+        for path in [&fonts, &first, &second] {
+            fs::create_dir(path).unwrap();
+        }
+        set_mode(&first, 0o000).unwrap();
+        set_mode(&second, 0o000).unwrap();
+        let in_scan = fonts.join("l");
+        symlink(&first, &in_scan).unwrap();
+        let mut scanned = FontBook::new();
+        scanned.add_dir(&fonts).unwrap();
+        fs::remove_file(&in_scan).unwrap();
+        symlink(&second, &in_scan).unwrap();
+        symlink(&second, fonts.join("1")).unwrap();
+        symlink(&first, fonts.join("2")).unwrap();
+        set_mode(&first, 0o755).unwrap();
+        scanned.add_dir(&fonts).unwrap();
+        let after_scan = paths(&scanned);
+        set_mode(&second, 0o755).unwrap();
+
+        assert_eq!(after_root, [link]);
+        assert!(after_target.is_empty(), "{after_target:?}");
+        assert_eq!(after_scan, [in_scan, fonts.join("1")]);
     }
 
     #[test]
