@@ -316,8 +316,9 @@ class Doc:
     # Normal, ahead of the built-in ones (styles_before_normal).
     styles: str = ""
     styles_before_normal: str = ""
-    # Whether Normal is marked w:default.
+    # Whether Normal is marked w:default, and the w:pPr and w:rPr of Normal.
     normal_default: bool = True
+    normal_props: str = ""
     # Whether the document defaults give run properties (Calibri 11 pt), and properties
     # added to them.
     run_defaults: bool = True
@@ -738,8 +739,10 @@ def tab_hanging(no_indent_tab: bool, mode: int = 15) -> Doc:
     # Word 16 drops the flag from a document in mode 15 when it saves it and renders as if
     # it were absent (the references of #13). In mode 14 it keeps the flag and applies it
     # (#18, references of #50): the re-saved E-tab-hanging-noindenttab-14 still has it, and
-    # the text after the list label moves from 122.06 pt to 108.02 pt in case B and to
-    # 144.02 pt in case G (reference/word-rules/E-tab-hanging-noindenttab-14/geometry.json).
+    # the text after the list label starts at 108.02 pt in case B and at 144.02 pt in case G
+    # (36 pt and 72 pt past the margin), where E-tab-hanging-14 has it at 122.06 pt in both.
+    # Each x is from the left page edge, the margin at 72.02 pt, in
+    # tests/corpus/reference/word-rules/E-tab-hanging-noindenttab-14/geometry.json.
     where = ""
     if mode != 15:
         name += f"-{mode}"
@@ -1287,6 +1290,398 @@ def default_paragraph_style_after_normal() -> Doc:
     )
 
 
+# Table styles (#172). Each conditional format of a table style gives its cells a text
+# colour of its own and a grey of its own: formatting.json records the colour of every
+# cell paragraph's first character, so it names the format that won in each cell, and the
+# rasters show the greys.
+CONDITIONS = [
+    # (w:type of w:tblStylePr, text colour, cell fill), in the order of ST_TblStyleOverrideType
+    ("firstRow", "C00000", "F2F2F2"),
+    ("lastRow", "00B050", "E6E6E6"),
+    ("firstCol", "0070C0", "D9D9D9"),
+    ("lastCol", "7030A0", "CCCCCC"),
+    ("band1Vert", "FFC000", "BFBFBF"),
+    ("band2Vert", "00B0F0", "B3B3B3"),
+    ("band1Horz", "FF0000", "A6A6A6"),
+    ("band2Horz", "92D050", "999999"),
+    ("neCell", "002060", "8C8C8C"),
+    ("nwCell", "833C0B", "808080"),
+    ("seCell", "375623", "737373"),
+    ("swCell", "C55A11", "666666"),
+]
+ROW_BANDS = [c for c in CONDITIONS if c[0] in ("band1Horz", "band2Horz")]
+COL_BANDS = [c for c in CONDITIONS if c[0] in ("band1Vert", "band2Vert")]
+
+
+def look(first_row: int, last_row: int, first_col: int, last_col: int, rows: int, cols: int):
+    """The attributes of w:tblLook; rows and cols say whether row and column bands are on."""
+    return (
+        f'w:firstRow="{first_row}" w:lastRow="{last_row}" w:firstColumn="{first_col}" '
+        f'w:lastColumn="{last_col}" w:noHBand="{1 - rows}" w:noVBand="{1 - cols}"'
+    )
+
+
+def table_style(
+    style_id: str,
+    conditions: list[tuple[str, str, str]],
+    *,
+    row_band: int | None = None,
+    col_band: int | None = None,
+    width: str = "",
+    layout: str = "",
+    whole: str = "",
+) -> str:
+    """A table style with single borders whose conditional formats give a text colour and a
+    cell fill each. width and layout go into its w:tblPr in their places (w:tblW before
+    the borders, w:tblLayout after them); whole is the w:pPr and w:rPr of the whole table."""
+    bands = ""
+    if row_band is not None:
+        bands += f'<w:tblStyleRowBandSize w:val="{row_band}"/>'
+    if col_band is not None:
+        bands += f'<w:tblStyleColBandSize w:val="{col_band}"/>'
+    sides = ("top", "left", "bottom", "right", "insideH", "insideV")
+    borders = "<w:tblBorders>" + "".join(border(s) for s in sides) + "</w:tblBorders>"
+    overrides = "".join(
+        f'<w:tblStylePr w:type="{kind}"><w:rPr><w:color w:val="{color}"/></w:rPr>'
+        f'<w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="{fill}"/></w:tcPr>'
+        "</w:tblStylePr>"
+        for kind, color, fill in conditions
+    )
+    return (
+        f'<w:style w:type="table" w:customStyle="1" w:styleId="{style_id}">'
+        f'<w:name w:val="{style_id}"/><w:basedOn w:val="TableNormal"/>{whole}'
+        f"<w:tblPr>{bands}{width}{borders}{layout}</w:tblPr>{overrides}</w:style>"
+    )
+
+
+def styled_table(
+    style_id: str,
+    cells: list[list[str]],
+    *,
+    look_attributes: str | None = None,
+    widths: list[int] | None = None,
+    grid: list[int] | None = None,
+    header_rows: int = 0,
+) -> str:
+    """A table in the table style; cells holds the paragraphs of each cell, row by row.
+    look_attributes None leaves w:tblLook out. widths gives the grid and each cell's
+    width; None leaves the table and cell widths out, which leaves them to the table style
+    or to Word, over the given grid (an even one by default). The first header_rows rows
+    repeat as header rows (w:tblHeader)."""
+    cols = len(cells[0])
+    grid = widths or grid or [TEXT_W // cols] * cols
+    tbl_pr = f'<w:tblStyle w:val="{style_id}"/>'
+    if widths:
+        tbl_pr += f'<w:tblW w:w="{sum(widths)}" w:type="dxa"/>'
+    if look_attributes is not None:
+        tbl_pr += f"<w:tblLook {look_attributes}/>"
+    grid_xml = "".join(f'<w:gridCol w:w="{w}"/>' for w in grid)
+    rows = []
+    for number, row in enumerate(cells):
+        if len(row) != cols:
+            raise ValueError("every row has as many cells as the first")
+        tcs = []
+        for content, width in zip(row, grid):
+            tc_pr = f'<w:tcPr><w:tcW w:w="{width}" w:type="dxa"/></w:tcPr>' if widths else ""
+            tcs.append(f"<w:tc>{tc_pr}{content}</w:tc>")
+        tr_pr = "<w:trPr><w:tblHeader/></w:trPr>" if number < header_rows else ""
+        rows.append(f"<w:tr>{tr_pr}{''.join(tcs)}</w:tr>")
+    return (
+        f"<w:tbl><w:tblPr>{tbl_pr}</w:tblPr><w:tblGrid>{grid_xml}</w:tblGrid>"
+        f"{''.join(rows)}</w:tbl>"
+    )
+
+
+def named_cells(rows: int, cols: int) -> list[list[str]]:
+    """Cells holding r<row>c<column>, so that formatting.json says which cell each is."""
+    return [
+        [para(run(f"r{r}c{c}")) for c in range(1, cols + 1)] for r in range(1, rows + 1)
+    ]
+
+
+def table_case(n: int, label: str, table_xml: str) -> str:
+    """A labelled table, and an empty paragraph after it, so that no two tables touch."""
+    return para(run(f"Case {n:02d}: {label}")) + table_xml + para()
+
+
+def table_style_look() -> Doc:
+    even = [TEXT_W // 5] * 5
+    cases = [
+        ("every condition on", look(1, 1, 1, 1, 1, 1)),
+        ("no w:tblLook", None),
+        ("first row and last column on, the rest off", look(1, 0, 0, 1, 0, 0)),
+        ("only the old bitmask, w:val 04A0", 'w:val="04A0"'),
+        ("w:val 04A0 and w:firstRow 0", 'w:val="04A0" w:firstRow="0"'),
+        # #172: are the options a partial w:tblLook leaves out off or on?
+        ("only w:firstRow 1", 'w:firstRow="1"'),
+    ]
+    body = "".join(
+        table_case(
+            n, label,
+            styled_table("Conditions", named_cells(5, 5), look_attributes=attrs, widths=even),
+        )
+        for n, (label, attrs) in enumerate(cases, 1)
+    )
+    return Doc(
+        "E-table-style-look",
+        "Which conditional format of a table style each cell of a 5x5 table takes, by its "
+        "w:tblLook: every condition on, none written, first row and last column only, the "
+        "old bitmask alone and with a newer attribute, and only w:firstRow; each format "
+        "gives a text colour of its own, which formatting.json records, and a grey of its "
+        "own",
+        body,
+        styles=table_style("Conditions", CONDITIONS, row_band=1, col_band=1),
+    )
+
+
+def table_style_bands() -> Doc:
+    rows_only, cols_only = look(0, 0, 0, 0, 1, 0), look(0, 0, 0, 0, 0, 1)
+    styles = "".join(
+        [
+            table_style("RowBandsUnset", ROW_BANDS),
+            table_style("RowBands0", ROW_BANDS, row_band=0),
+            table_style("RowBands1", ROW_BANDS, row_band=1),
+            table_style("RowBands2", ROW_BANDS, row_band=2),
+            table_style("ColBands2", COL_BANDS, col_band=2),
+        ]
+    )
+    cases = [
+        ("row bands, no band size written", "RowBandsUnset", 6, 3, rows_only),
+        ("row band size 0", "RowBands0", 6, 3, rows_only),
+        ("row band size 1", "RowBands1", 6, 3, rows_only),
+        ("row band size 2", "RowBands2", 6, 3, rows_only),
+        ("column band size 2", "ColBands2", 3, 6, cols_only),
+    ]
+    body = "".join(
+        table_case(
+            n, label,
+            styled_table(style_id, named_cells(rows, cols), look_attributes=attrs,
+                         widths=[TEXT_W // cols] * cols),
+        )
+        for n, (label, style_id, rows, cols, attrs) in enumerate(cases, 1)
+    )
+    return Doc(
+        "E-table-style-bands",
+        "How many rows or columns each band of a table style spans: row band sizes of 0, 1 "
+        "and 2 and none written, and a column band size of 2; each band gives a text colour "
+        "of its own and a grey of its own",
+        body,
+        styles=styles,
+    )
+
+
+def table_style_bands_5() -> Doc:
+    # MS-OI29500 §17.7.6.7(c): Word restricts the band size to 0 to 3 (#172). ECMA-376's
+    # schema allows any integer, but the Open XML SDK's does not allow more than 3. A
+    # document of its own, so that a file Word refuses costs no other case.
+    body = table_case(
+        1, "row band size 5, which Word restricts to 0 to 3",
+        styled_table("RowBands5", named_cells(8, 3), look_attributes=look(0, 0, 0, 0, 1, 0),
+                     widths=[TEXT_W // 3] * 3),
+    )
+    return Doc(
+        "E-table-style-bands-5",
+        "How many rows each band of a table style spans with a row band size of 5, above the "
+        "3 Word allows: by 5, by 3, by 1 or not at all; each band gives a text colour of its "
+        "own and a grey of its own",
+        body,
+        styles=table_style("RowBands5", ROW_BANDS, row_band=5),
+    )
+
+
+def table_style_size(size: int, setting: int | None, mode: int = 15) -> Doc:
+    # [MS-DOCX] 2.3.1, overrideTableStyleFontSizeAndJustification: when it is false, a
+    # default paragraph style of 11 or 12 pt does not override a table style's font size,
+    # and a justification of left does not override its justification. Word writes the
+    # setting only in mode 15; the mode-14 twins lack it the way documents of Word 2010
+    # do, in case Word adds it to the mode-15 documents that leave it out when it saves
+    # them again.
+    big = table_style(
+        "Big", [],
+        whole='<w:pPr><w:jc w:val="center"/></w:pPr>'
+        '<w:rPr><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr>',
+    )
+    half = [TEXT_W // 2] * 2
+    hp = half_points(size)
+    said = {1: "on", None: "not written"}[setting]
+    if mode != 15:
+        said = f"not written, in compatibility mode {mode}"
+    body = table_case(
+        1, f"a table in the style Big (14 pt, centred); Normal {size} pt, left",
+        styled_table("Big", named_cells(2, 2), widths=half),
+    ) + para(run("Case 02: a paragraph after the table, in Normal"))
+    suffix = "" if setting == 1 else "-none" if mode == 15 else f"-{mode}"
+    return Doc(
+        f"E-table-style-size-{size}pt{suffix}",
+        f"Whether a Normal style of {size} pt, justified left, overrides the 14 pt and the "
+        "centring of a table style, with the setting overrideTableStyleFontSizeAndJustification "
+        f"{said}",
+        body,
+        styles=big,
+        normal_props=f'<w:pPr><w:jc w:val="left"/></w:pPr>'
+        f'<w:rPr><w:sz w:val="{hp}"/><w:szCs w:val="{hp}"/></w:rPr>',
+        mode=mode,
+        compat_values=(
+            (("overrideTableStyleFontSizeAndJustification", setting),) if mode == 15 else ()
+        ),
+    )
+
+
+def table_style_not_allowed() -> Doc:
+    # MS-OI29500 §17.7.6.4(a): Word does not allow w:tblW and w:tblLayout in a table
+    # style's w:tblPr. A document of its own, so that a file Word refuses costs no other
+    # case. The tables give no width of their own, over a grid of two 40 pt columns, 80 pt
+    # in all, that each hold one word wider than 40 pt (77.4 pt in Carlito, 176 pt for the
+    # table with the cell margins): an autofit column widens for it, a fixed one does not.
+    # A width alone shows only if it is wider than the autofit table, so Width5000 gives
+    # 250 pt; Width2000's 100 pt shows only together with its fixed layout.
+    styles = "".join(
+        [
+            table_style("Width2000", [], width='<w:tblW w:w="2000" w:type="dxa"/>',
+                        layout='<w:tblLayout w:type="fixed"/>'),
+            table_style("NoWidth", []),
+            table_style("Width5000", [], width='<w:tblW w:w="5000" w:type="dxa"/>'),
+            table_style("FixedOnly", [], layout='<w:tblLayout w:type="fixed"/>'),
+        ]
+    )
+    cells = [[para(run("Hamburgefontsiv")), para(run("Hamburgefontsiv"))]]
+    narrow = [800, 800]
+    body = table_case(
+        1, "the style Width2000 gives w:tblW 100 pt and a fixed layout; a grid of two 40 pt "
+        "columns, each holding one word wider than 40 pt",
+        styled_table("Width2000", cells, grid=narrow),
+    ) + table_case(
+        2, "the style NoWidth, otherwise the same", styled_table("NoWidth", cells, grid=narrow)
+    ) + table_case(
+        3, "the style Width5000 gives only w:tblW 250 pt, otherwise the same",
+        styled_table("Width5000", cells, grid=narrow),
+    ) + table_case(
+        4, "the style FixedOnly gives only a fixed layout, otherwise the same",
+        styled_table("FixedOnly", cells, grid=narrow),
+    )
+    return Doc(
+        "E-table-style-not-allowed",
+        "Whether Word opens table styles whose w:tblPr holds w:tblW or w:tblLayout, which "
+        "MS-OI29500 says it does not allow, and whether a table without its own width or "
+        "layout takes them: both, the width alone (250 pt, wider than the table's autofit "
+        "176 pt) and the fixed layout alone",
+        body,
+        styles=styles,
+    )
+
+
+def char_styled(value: str, style_id: str) -> str:
+    """A paragraph whose one run is in the character style."""
+    return para(f'<w:r><w:rPr><w:rStyle w:val="{style_id}"/></w:rPr>{text(value)}</w:r>')
+
+
+# How Word combines bold, a toggle property, across styles (MS-OI29500 §17.7.3(a)): it starts
+# from the document defaults, and each style whose value differs from them flips the result.
+# E-style-toggles and E-style-toggles-defaults show it for paragraph and character styles.
+# For a table style, the lowest style, two readings remain: it is one more such level (L),
+# or its value is the base the styles above count from (B, a reading of MS-OI29500
+# §17.7.6(b): "Word resets the value of the toggle property to the value specified by the
+# table style if a value is present"). At the table style itself both give the same; they
+# part in the styles above it. formatting.json records whether each cell's first character
+# is bold.
+def table_style_toggles() -> Doc:
+    styles = "".join(
+        [
+            table_style("BoldTable", [], whole="<w:rPr><w:b/><w:bCs/></w:rPr>"),
+            style("paragraph", "BoldPara", "<w:b/><w:bCs/>", based_on="Normal"),
+            style("character", "CharBold", "<w:b/><w:bCs/>"),
+        ]
+    )
+    # Defaults not bold: in BoldPara and in CharBold, L flips twice (not bold) and B keeps
+    # the base (bold); in Normal both give bold. MS-OI29500 §17.7.8(a), a paragraph style
+    # that resets the value, would also give bold in BoldPara, but not in CharBold.
+    cells = [[
+        para(run("in BoldPara"), p_style="BoldPara"),
+        para(run("in Normal")),
+        char_styled("in CharBold", "CharBold"),
+    ]]
+    body = table_case(
+        1, "the table style BoldTable (bold); a paragraph in BoldPara (bold), one in Normal, "
+        "and one in Normal whose run is in CharBold (bold)",
+        styled_table("BoldTable", cells, widths=[TEXT_W // 3] * 3),
+    )
+    return Doc(
+        "E-table-style-toggles",
+        "How a bold table style combines with a bold paragraph style and a bold character "
+        "style, with document defaults that are not bold: as one more toggle level, which "
+        "gives not bold in both, or as the base they count from, which gives bold",
+        body,
+        styles=styles,
+    )
+
+
+def table_style_toggles_defaults() -> Doc:
+    styles = "".join(
+        [
+            table_style("BoldOn", [], whole="<w:rPr><w:b/><w:bCs/></w:rPr>"),
+            table_style("BoldOff", [], whole='<w:rPr><w:b w:val="0"/><w:bCs w:val="0"/></w:rPr>'),
+            style("character", "CharBold", "<w:b/><w:bCs/>"),
+            style("character", "CharBoldOff", '<w:b w:val="0"/><w:bCs w:val="0"/>'),
+        ]
+    )
+    # Defaults bold. In Normal, BoldOff gives not bold under both readings, and bold if Word
+    # ignored the table style: it shows that w:b off applies. BoldOn gives bold under both
+    # readings and if ignored; it gives not bold only under the standard's own rule, which
+    # MS-OI29500 §17.7.6(b) quotes: a table style's true toggles the level before it. Under
+    # BoldOff, a run in CharBoldOff is bold under L (two flips) and not bold under B (same
+    # as the base); a run in CharBold is not bold under L (one flip) and bold under B.
+    off_cells = [[
+        para(run("in Normal")),
+        char_styled("in CharBoldOff", "CharBoldOff"),
+        char_styled("in CharBold", "CharBold"),
+    ]]
+    body = table_case(
+        1, "the table style BoldOn (w:b on); a paragraph in Normal",
+        styled_table("BoldOn", [[para(run("in Normal"))]], widths=[TEXT_W // 3]),
+    ) + table_case(
+        2, "the table style BoldOff (w:b off); a paragraph in Normal, one whose run is in "
+        "CharBoldOff (w:b off), and one whose run is in CharBold (w:b on)",
+        styled_table("BoldOff", off_cells, widths=[TEXT_W // 3] * 3),
+    )
+    return Doc(
+        "E-table-style-toggles-defaults",
+        "With bold document defaults, whether a table style's w:b off applies and whether its "
+        "w:b on toggles the defaults off, as the standard says; and how a character style's "
+        "bold combines with a table style's w:b off: as one more toggle level, which gives "
+        "bold for CharBoldOff and not bold for CharBold, or as the base they count from, "
+        "which gives the reverse",
+        body,
+        styles=styles,
+        run_defaults_extra="<w:b/><w:bCs/>",
+    )
+
+
+def table_style_header_rows(setting: int) -> Doc:
+    # #172: whether Word gives the first-row format of a table style to every header row
+    # (w:tblHeader), by the setting differentiateMultirowTableHeaders ([MS-DOCX] 2.3.4).
+    # The style also bands rows by one. [MS-DOCX] 2.3.4 says the setting decides whether the
+    # conditional formatting of table rows applies to multi-row headers; whether that
+    # includes the bands is a reading, which the render shows.
+    formats = [c for c in CONDITIONS if c[0] == "firstRow"] + ROW_BANDS
+    header = table_style("HeaderRows", formats, row_band=1)
+    body = table_case(
+        1, "rows 1 and 2 are header rows (w:tblHeader); the style formats its first row and "
+        "bands rows by one",
+        styled_table("HeaderRows", named_cells(6, 3), look_attributes=look(1, 0, 0, 0, 1, 0),
+                     widths=[TEXT_W // 3] * 3, header_rows=2),
+    )
+    said = {1: "on", 0: "off"}[setting]
+    return Doc(
+        f"E-table-style-header-rows-{said}",
+        "Which header rows of a table take its style's first-row format, with the setting "
+        f"differentiateMultirowTableHeaders {said}: two header rows, then four banded rows; "
+        "each format gives a text colour and a grey",
+        body,
+        styles=header,
+        compat_values=(("differentiateMultirowTableHeaders", setting),),
+    )
+
+
 def documents() -> list[Doc]:
     return [
         line_fonts(),
@@ -1326,6 +1721,19 @@ def documents() -> list[Doc]:
         open_type("E-opentype-none", 15, None),
         open_type("E-opentype-12", 12, None),
         default_paragraph_style_after_normal(),
+        table_style_look(),
+        table_style_bands(),
+        table_style_bands_5(),
+        *(
+            table_style_size(size, setting, mode)
+            for size in (11, 12, 13)
+            for setting, mode in ((1, 15), (None, 15), (None, 14))
+        ),
+        table_style_not_allowed(),
+        table_style_toggles(),
+        table_style_toggles_defaults(),
+        table_style_header_rows(1),
+        table_style_header_rows(0),
     ]
 
 
@@ -1359,7 +1767,7 @@ def styles_xml(doc: Doc) -> str:
         "</w:docDefaults>"
         f"{doc.styles_before_normal}"
         f'<w:style w:type="paragraph"{normal_default} w:styleId="Normal">'
-        '<w:name w:val="Normal"/><w:qFormat/></w:style>'
+        f'<w:name w:val="Normal"/><w:qFormat/>{doc.normal_props}</w:style>'
         '<w:style w:type="character" w:default="1" w:styleId="DefaultParagraphFont">'
         '<w:name w:val="Default Paragraph Font"/><w:uiPriority w:val="1"/>'
         "<w:semiHidden/><w:unhideWhenUsed/></w:style>"
