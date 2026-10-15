@@ -908,6 +908,16 @@ fn takes_the_options_a_partial_look_leaves_out_as_on() {
             ["BBBBBB", "BBBBBB", "BBBBBB"]
         ]
     );
+    // A w:tblLook with neither w:val nor an option: everything off, so both bands are
+    // on, and column bands over row bands (our choice; no render shows it yet).
+    assert_eq!(
+        fill(""),
+        [
+            ["333333", "444444", "333333"],
+            ["333333", "444444", "333333"],
+            ["333333", "444444", "333333"]
+        ]
+    );
     // Case 04, w:val 04A0 alone: the mask, the first row and column and row bands.
     assert_eq!(
         fill(r#"w:val="04A0""#),
@@ -952,7 +962,8 @@ fn takes_the_first_row_format_for_every_header_row() {
         ),
         ["AAAAAA", "AAAAAA", "111111", "222222", "111111", "222222"]
     );
-    // Only the header rows at the top: one after a row that is not one is a body row.
+    // Only the header rows at the top: one after a row that is not one is a body row
+    // (our choice, as Word repeats only those at the top; no render shows it yet, #298).
     assert_eq!(
         rows(&[false, true, false, false], first_row_and_row_bands),
         ["AAAAAA", "111111", "222222", "111111"]
@@ -961,7 +972,8 @@ fn takes_the_first_row_format_for_every_header_row() {
         rows(&[true, false, true, false], first_row_and_row_bands),
         ["AAAAAA", "111111", "222222", "111111"]
     );
-    // With the first row's format off, header rows are banded like the rest.
+    // With the first row's format off, header rows are banded like the rest (our choice;
+    // no render shows it yet, #298).
     let row_bands = r#"w:firstRow="0" w:lastRow="0" w:firstColumn="0" w:lastColumn="0" w:noHBand="0" w:noVBand="1""#;
     assert_eq!(
         rows(&[true, true, false, false], row_bands),
@@ -992,4 +1004,28 @@ fn makes_the_header_rows_one_group_of_the_first_row_s_format() {
         [(Some(1.0), Some(0.5)), (Some(0.5), Some(2.0)), (None, None)]
     );
     assert_eq!(fills(&document), [["ABCDEF"], ["ABCDEF"], ["-"]]);
+}
+
+#[test]
+fn gives_every_header_row_the_first_row_s_row_properties_and_both_top_corners() {
+    // The rest of the choice no render shows yet (#298): every header row takes the first
+    // row's row properties and the top right corner as well as the top left.
+    let styles = r#"<w:style w:type="table" w:styleId="Head"><w:name w:val="Head"/><w:tblStylePr w:type="firstRow"><w:trPr><w:cantSplit/></w:trPr></w:tblStylePr><w:tblStylePr w:type="nwCell"><w:tcPr><w:shd w:val="clear" w:fill="AAAAAA"/></w:tcPr></w:tblStylePr><w:tblStylePr w:type="neCell"><w:tcPr><w:shd w:val="clear" w:fill="BBBBBB"/></w:tcPr></w:tblStylePr></w:style>"#;
+    let header = "<w:trPr><w:tblHeader/></w:trPr>";
+    let cells = "<w:tc><w:p/></w:tc><w:tc><w:p/></w:tc>";
+    let body = format!(
+        r#"<w:tbl><w:tblPr><w:tblStyle w:val="Head"/><w:tblLook w:firstRow="1" w:lastRow="0" w:firstColumn="1" w:lastColumn="1" w:noHBand="1" w:noVBand="1"/></w:tblPr><w:tblGrid/><w:tr>{header}{cells}</w:tr><w:tr>{header}{cells}</w:tr><w:tr>{cells}</w:tr></w:tbl><w:p/>"#
+    );
+    let document = open_with(styles, &body);
+    assert_eq!(
+        fills(&document),
+        [["AAAAAA", "BBBBBB"], ["AAAAAA", "BBBBBB"], ["-", "-"]]
+    );
+    let mut formats = document.formats();
+    let rows: Vec<TableRow<'_>> = first_table(&document).rows().collect();
+    let cant_split: Vec<_> = rows
+        .iter()
+        .map(|&row| formats.row_properties(row).cant_split())
+        .collect();
+    assert_eq!(cant_split, [Some(true), Some(true), None]);
 }
