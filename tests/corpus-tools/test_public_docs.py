@@ -407,6 +407,41 @@ class Cleaning(unittest.TestCase):
             public.clean(package(**{"word/VBAProject.bin": b"\x00"}), DOC)
         self.assertIn("has macros", str(caught.exception))
 
+    def test_embedded_parts_are_found_whatever_the_case_of_their_names(self):
+        # Part names compare without case (ECMA-376 Part 2, §9.1.1.1): a folder, a .rels
+        # part and an extension the content types name in other cases than Word writes.
+        ms = "http://schemas.microsoft.com/office/2006/relationships"
+        types = (
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Default Extension="OCX" ContentType="application/vnd.ms-office.activeX"/></Types>'
+        )
+        parts = {
+            "[Content_Types].xml": types.encode(),
+            "word/_rels/document.xml.rels": relationships(
+                (f"{REL}/control", "controls/control2.xml", "")
+            ).encode(),
+            "word/controls/_RELS/control2.xml.RELS": relationships(
+                (f"{ms}/activeXControlBinary", "control2.bin", "")
+            ).encode(),
+            "word/controls/control2.xml": b"<ax:ocx xmlns:ax='a'/>",
+            "word/controls/control2.bin": b"\x00",  # through the upper-case .RELS part
+            "word/controls/Legacy.OCX": b"\x00",  # by the extension, both in upper case
+            "word/Embeddings/oleObject2.bin": b"\x00",  # by its folder only
+            "word/VBAProject.bin": b"\x00",  # macros, which problems() reports too
+        }
+        found = [
+            "word/Embeddings/oleObject2.bin",
+            "word/controls/Legacy.OCX",
+            "word/controls/control2.bin",
+            "word/controls/control2.xml",
+        ]
+        self.assertEqual(public.embedded_parts(parts), found)
+        problems = public.problems(package(**parts))
+        for name in found + ["word/VBAProject.bin"]:
+            with self.subTest(name):
+                self.assertIn(f"{name} is embedded", problems)
+
     def test_text_after_a_nested_text_box_and_split_addresses_are_read(self):
         nested = (
             "<w:document xmlns:w='w'><w:body><w:p><w:r><w:t>See </w:t></w:r><w:r><w:pict>"
