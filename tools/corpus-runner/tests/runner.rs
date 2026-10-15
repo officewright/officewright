@@ -979,6 +979,24 @@ fn a_file_to_run_is_never_rendered_over() -> io::Result<()> {
             stored
         );
         assert!(!corpus.dir.join("store/new").exists());
+        // A `..` that climbs out of a folder that does not exist comes back to folders
+        // that do, where a link can follow: missing/../here is here, a link to ".".
+        let (code, output) = corpus.run(&["--render", "missing/../here", "notes.pdf"], None)?;
+        assert_eq!(code, 2, "{output}");
+        assert!(output.contains("a file to run"), "{output}");
+        assert_eq!(std::fs::read(corpus.dir.join("notes.pdf"))?, notes);
+        assert!(!corpus.dir.join("missing").exists());
+        // The target itself a link to the file to run, after such a climb: removing
+        // missing/../b.pdf finds nothing while `missing` does not exist, and writing it
+        // would follow the link.
+        std::fs::copy(corpus.dir.join("docs/good.docx"), corpus.dir.join("b.docx"))?;
+        std::os::unix::fs::symlink("b.docx", corpus.dir.join("b.pdf"))?;
+        let b = std::fs::read(corpus.dir.join("b.docx"))?;
+        let (code, output) = corpus.run(&["--render", "missing/..", "b.docx"], None)?;
+        assert_eq!(code, 2, "{output}");
+        assert!(output.contains("a file to run"), "{output}");
+        assert_eq!(std::fs::read(corpus.dir.join("b.docx"))?, b);
+        assert!(!corpus.dir.join("missing").exists());
     }
     // Rendered elsewhere, it runs.
     let (code, output) = corpus.run(&["--render", "out", "notes.pdf"], None)?;
