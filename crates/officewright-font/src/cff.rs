@@ -31,6 +31,13 @@
 //! where it stops, and the face is refused past [`MAX_PRIVATE_BYTES`], a limit of the
 //! library.
 //!
+//! A CID-keyed font's FDSelect of format 3 gives the Font DICT of each glyph by ranges of
+//! glyphs. The subsetter finds the Font DICT of each glyph it keeps by going through the
+//! ranges in order, twice, and the walk below does so once, so a font of one range per
+//! glyph costs time quadratic in the glyphs kept
+//! (<https://github.com/officewright/officewright/issues/278>); the face is refused past
+//! [`MAX_FD_SELECT_RANGES`], a limit of the library, after the Font DICTs are counted.
+//!
 //! subsetter 0.2.6 also counts the stem hints of each glyph it keeps in a `u16`
 //! (`count_hints` in `src/cff/charstring.rs`), as it decompiles the glyph's charstring
 //! and the subroutines it calls. A glyph that declares more than 65,535 hints overflows
@@ -585,26 +592,26 @@ impl<'a> Programs<'a> {
         let (local, fd_select) = if top.iter().any(|(operator, _)| *operator == ROS) {
             let (font_dicts, _) = parsed_index(cff, offset(last(FD_ARRAY)?)?)?;
             let fd_select = cff.get(offset(last(FD_SELECT)?)?..)?;
-            match fd_select.first()? {
+            let ranges = match fd_select.first()? {
                 // A font DICT number for each glyph.
                 0 => {
                     fd_select.get(1..glyph_count.checked_add(1)?)?;
+                    0
                 }
                 // Ranges of glyphs; the subsetter goes through them for every glyph it keeps,
                 // twice, and so does the walk, once.
-                3 => {
-                    let ranges = usize::from(u16_at(fd_select, 1)?);
-                    if ranges > MAX_FD_SELECT_RANGES {
-                        return Some(Read::FdSelectRanges(ranges));
-                    }
-                }
+                3 => usize::from(u16_at(fd_select, 1)?),
                 _ => return None,
-            }
+            };
             let count = (0..font_dicts.len())
                 .take_while(|&i| font_dicts.get(i).is_some())
                 .count();
+            // The subsetter's own limit first, then the library's.
             if count > MAX_FONT_DICTS {
                 return Some(Read::FontDicts(count));
+            }
+            if ranges > MAX_FD_SELECT_RANGES {
+                return Some(Read::FdSelectRanges(ranges));
             }
             let font_dicts: Vec<&[u8]> = (0..count).filter_map(|i| font_dicts.get(i)).collect();
             // `parse_font_dict` reads the Private DICT of every Private operator of a Font
@@ -1512,18 +1519,18 @@ mod tests {
             select.extend(5u16.to_be_bytes());
             select
         };
-        let font = |ranges| {
+        let font = |ranges, font_dicts| {
             Spec {
                 glyphs: glyphs_with(4, vec![14]),
-                local: vec![vec![]],
+                local: vec![vec![]; font_dicts],
                 fd_select: Some(fd_select(ranges)),
                 ..Spec::default()
             }
             .build()
         };
-        assert!(!subsetter_panics(font(2048), &[4]));
-        subset_glyphs(font(2048), &[4]).unwrap();
-        let err = subset_glyphs(font(2049), &[4]).unwrap_err();
+        assert!(!subsetter_panics(font(2048, 1), &[4]));
+        subset_glyphs(font(2048, 1), &[4]).unwrap();
+        let err = subset_glyphs(font(2049, 1), &[4]).unwrap_err();
         assert!(
             matches!(err, Error::TableOverLimit { table: "CFF ", .. }),
             "{err}"
@@ -1532,6 +1539,9 @@ mod tests {
             std::error::Error::source(&err).unwrap().to_string(),
             "the FDSelect declares 2049 ranges, more than the 2048 read before subsetting"
         );
+        // The subsetter's own limit on Font DICTs comes first.
+        let err = subset_glyphs(font(2049, 256), &[4]).unwrap_err();
+        assert!(matches!(err, Error::SubsetUnsupported { .. }), "{err}");
     }
 
     #[test]
