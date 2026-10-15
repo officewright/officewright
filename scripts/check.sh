@@ -152,15 +152,18 @@ fi
 
 step "corpus runner over tests/corpus (against tests/corpus/baseline.json)"
 # Every committed Word document opens and is rendered into PDF in a child process, with the
-# fonts of tests/fonts and none of the system's; a panic, hang, memory blow-up, a document
+# fonts of tests/fonts-word/noto-truetype and tests/fonts and none of the system's; a panic, hang, memory blow-up, a document
 # that opens but cannot be rendered, or any change of a file's status from the baseline
 # fails. On Linux each document with a Word reference is also scored, and a score that
 # moves by more than 0.01 fails; macOS and Windows compare the statuses only, since
 # rasterizing differs between poppler builds and Windows has no official one. An
 # improvement is accepted by running this on Linux with --update-baseline and committing
 # the baseline.
+# The TrueType Noto Sans comes first: of two faces of one family and style, the font book
+# takes the one added first, and the references that use Noto Sans were rendered by Word
+# with that build, but for E-line-fonts (THIRD-PARTY-NOTICES.md).
 rm -rf target/corpus-pdf
-corpus_options=(--render target/corpus-pdf --font-dir tests/fonts)
+corpus_options=(--render target/corpus-pdf --font-dir tests/fonts-word/noto-truetype --font-dir tests/fonts)
 if [ "$os" = linux ]; then
 	corpus_options+=(--references tests/corpus/reference)
 else
