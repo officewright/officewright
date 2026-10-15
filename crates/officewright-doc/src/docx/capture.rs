@@ -1,15 +1,74 @@
 //! Reading the elements of a part into a document: tokens of elements kept as written,
 //! the node limit all parts share, and the positions and diagnostics of a part.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use officewright_opc::mce::Processor;
 use officewright_opc::xml::{Event, NsId, Reader, StartTag};
 
 use crate::diagnostic::{DiagnosticKind, Diagnostics};
 use crate::model::Document;
-use crate::model::xml::{Span, Sym, Token, XmlAttribute, XmlName};
+use crate::model::xml::{Declaration, Span, Sym, Token, XmlAttribute, XmlName};
 use crate::{Error, Limit, Result};
+
+/// The namespace of `xsi:type`, whose value is a qualified name.
+const XSI_NAMESPACE: &str = "http://www.w3.org/2001/XMLSchema-instance";
+
+/// The prefixes the value of an attribute names: those of the Markup Compatibility
+/// attributes (ECMA-376 Part 3, §7 and §10.2) and of `xsi:type`; none for any other.
+/// `None` stands for the default namespace, which an unprefixed `xsi:type` names (XML
+/// Schema resolves a QName without a prefix in it).
+fn value_prefixes<'v>(
+    reader: &Reader<'_>,
+    tag: &StartTag<'_>,
+    attribute: &'v officewright_opc::xml::Attribute<'_>,
+) -> impl Iterator<Item = Option<&'v str>> + 'v {
+    let name = attribute.name();
+    let uri = name
+        .namespace()
+        .map_or("", |namespace| reader.namespace_uri(namespace));
+    let tag_uri = tag
+        .name()
+        .namespace()
+        .map_or("", |namespace| reader.namespace_uri(namespace));
+    // Lists of prefixes, lists of qualified names, and one qualified name.
+    let (prefixes, names, qualified) = match (uri, name.local()) {
+        (officewright_opc::mce::NAMESPACE, "Ignorable" | "MustUnderstand") => (true, false, false),
+        (
+            officewright_opc::mce::NAMESPACE,
+            "ProcessContent" | "PreserveElements" | "PreserveAttributes",
+        ) => (false, true, false),
+        ("", "Requires")
+            if tag_uri == officewright_opc::mce::NAMESPACE && tag.name().local() == "Choice" =>
+        {
+            (true, false, false)
+        }
+        (XSI_NAMESPACE, "type") => (false, false, true),
+        _ => (false, false, false),
+    };
+    let value: &'v str = attribute.value();
+    let tokens = (prefixes || names).then(|| value.split_ascii_whitespace());
+    let one = qualified.then(|| value.trim_matches([' ', '\t', '\n', '\r']));
+    tokens
+        .into_iter()
+        .flatten()
+        .chain(one)
+        .filter_map(move |token| {
+            if prefixes {
+                Some(Some(token))
+            } else {
+                match token.split_once(':') {
+                    Some((prefix, _)) => Some(Some(prefix)),
+                    // A list of qualified names needs prefixes (§10.2); one QName may
+                    // have none.
+                    None => qualified.then_some(None),
+                }
+            }
+        })
+        .filter(|prefix| {
+            prefix.is_none_or(|prefix| !prefix.is_empty() && prefix != "xml" && prefix != "xmlns")
+        })
+}
 
 /// What is left of [`Limits::max_nodes`](crate::Limits::max_nodes) for the parts still
 /// to read.
@@ -85,8 +144,7 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
         if tag.name().is(mc, "AlternateContent") {
             alternates.push((1, false));
         }
-        let token = self.start_token(reader, &tag, false)?;
-        self.document.tokens.push(token);
+        self.push_start(reader, &tag, false)?;
         let mut depth = 1usize;
         while depth > 0 {
             self.spend(1)?;
@@ -110,8 +168,7 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
                     if name.is(mc, "AlternateContent") {
                         alternates.push((depth, false));
                     }
-                    let token = self.start_token(reader, &tag, taken)?;
-                    self.document.tokens.push(token);
+                    self.push_start(reader, &tag, taken)?;
                 }
                 Some(Event::End(_)) => {
                     self.document.tokens.push(Token::End);
@@ -138,16 +195,55 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
         Ok(Span::new(start, self.document.tokens.len()))
     }
 
-    /// A start tag as a token, its names interned in the document. Its attributes count
-    /// against the node limit, as each costs memory of its own.
-    pub(super) fn start_token(
+    /// Pushes a start tag as a token, its names interned in the document, and its
+    /// namespace declarations, if it has any, as a [`Token::Declarations`] after it. Its attributes count
+    /// against the node limit, as each costs memory of its own, and so do its namespace
+    /// declarations.
+    ///
+    /// The declarations written on the tag are kept, and so is the binding of each prefix
+    /// the value of a Markup Compatibility attribute or of `xsi:type` names that the tag
+    /// does not declare itself, as it is in scope where the tag is read: such a prefix
+    /// may be declared outside the element kept, and the value means nothing without it.
+    /// A prefix is looked at once per tag, however often its values name it.
+    pub(super) fn push_start(
         &mut self,
         reader: &Reader<'_>,
         tag: &StartTag<'_>,
         taken: bool,
-    ) -> Result<Token> {
-        self.spend(tag.attributes().len())?;
+    ) -> Result<()> {
+        let written = tag.namespace_declarations();
+        self.spend(tag.attributes().len() + written.len())?;
         let name = self.name(reader, tag.name());
+        let mut declarations = Vec::with_capacity(written.len());
+        // The prefixes the tag declares, and those its values named so far.
+        let mut seen: HashSet<Option<&str>> = HashSet::with_capacity(written.len());
+        for declaration in written {
+            seen.insert(declaration.prefix());
+            declarations.push(Declaration {
+                prefix: declaration
+                    .prefix()
+                    .map(|prefix| self.document.strings.intern(prefix)),
+                uri: declaration
+                    .namespace()
+                    .map(|namespace| self.uri(reader, namespace)),
+                written: true,
+            });
+        }
+        for attribute in tag.attributes() {
+            for prefix in value_prefixes(reader, tag, attribute) {
+                if !seen.insert(prefix) {
+                    continue;
+                }
+                if let Some(namespace) = reader.resolve_prefix(prefix.unwrap_or_default()) {
+                    self.spend(1)?;
+                    declarations.push(Declaration {
+                        prefix: prefix.map(|prefix| self.document.strings.intern(prefix)),
+                        uri: Some(self.uri(reader, namespace)),
+                        written: false,
+                    });
+                }
+            }
+        }
         let attributes = tag
             .attributes()
             .iter()
@@ -156,11 +252,17 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
                 value: attribute.value().into(),
             })
             .collect();
-        Ok(Token::Start {
+        self.document.tokens.push(Token::Start {
             name,
             attributes,
             taken,
-        })
+        });
+        if !declarations.is_empty() {
+            self.document
+                .tokens
+                .push(Token::Declarations(declarations.into_boxed_slice()));
+        }
+        Ok(())
     }
 
     fn name(&mut self, reader: &Reader<'_>, name: officewright_opc::xml::Name<'_>) -> XmlName {

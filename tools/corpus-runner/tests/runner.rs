@@ -887,6 +887,125 @@ fn two_documents_are_never_rendered_to_one_pdf() -> io::Result<()> {
 }
 
 #[test]
+fn a_file_to_run_is_never_rendered_over() -> io::Result<()> {
+    // Issue #257: a file named on the command line runs whatever its extension, and the
+    // target of notes.pdf rendered into "." is notes.pdf itself; that of Notes.PDF is
+    // Notes.pdf, the same file where names do not tell case apart.
+    let corpus = Corpus::new("own-target")?;
+    for name in ["notes.pdf", "Notes.PDF"] {
+        std::fs::copy(corpus.dir.join("docs/good.docx"), corpus.dir.join(name))?;
+        let before = std::fs::read(corpus.dir.join(name))?;
+        let (code, output) = corpus.run(&["--render", ".", name], None)?;
+        assert_eq!(code, 2, "{name}: {output}");
+        assert!(output.contains("a file to run"), "{name}: {output}");
+        assert_eq!(std::fs::read(corpus.dir.join(name))?, before, "{name}");
+    }
+    // Nor over another file to run: docs/good.docx is rendered to pdfs/docs/good.pdf.
+    std::fs::create_dir_all(corpus.dir.join("pdfs/docs"))?;
+    std::fs::copy(
+        corpus.dir.join("docs/good.docx"),
+        corpus.dir.join("pdfs/docs/good.pdf"),
+    )?;
+    let before = std::fs::read(corpus.dir.join("pdfs/docs/good.pdf"))?;
+    let (code, output) = corpus.run(
+        &["--render", "pdfs", "docs/good.docx", "pdfs/docs/good.pdf"],
+        None,
+    )?;
+    assert_eq!(code, 2, "{output}");
+    assert!(
+        output.contains("docs/good.docx would be rendered to") && output.contains("a file to run"),
+        "{output}"
+    );
+    assert_eq!(
+        std::fs::read(corpus.dir.join("pdfs/docs/good.pdf"))?,
+        before
+    );
+    // Nor through a link to the folder it is in.
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(".", corpus.dir.join("here"))?;
+        let (code, output) = corpus.run(&["--render", "here", "notes.pdf"], None)?;
+        assert_eq!(code, 2, "{output}");
+        assert!(output.contains("a file to run"), "{output}");
+        assert_eq!(std::fs::read(corpus.dir.join("notes.pdf"))?.len(), {
+            std::fs::read(corpus.dir.join("docs/good.docx"))?.len()
+        });
+        // A link's `..` is the parent of where it leads: jump/.. is elsewhere, not here,
+        // so notes.pdf is rendered there.
+        std::fs::create_dir_all(corpus.dir.join("elsewhere/inner"))?;
+        std::os::unix::fs::symlink("elsewhere/inner", corpus.dir.join("jump"))?;
+        let (code, output) = corpus.run(&["--render", "jump/..", "notes.pdf"], None)?;
+        assert_eq!(code, 0, "{output}");
+        assert!(corpus.dir.join("elsewhere/notes.pdf").exists(), "{output}");
+        // Inputs are where they are on disk too: one named through a link, and one that is
+        // itself a link to its target.
+        let notes = std::fs::read(corpus.dir.join("notes.pdf"))?;
+        let (code, output) = corpus.run(&["--render", ".", "here/notes.pdf"], None)?;
+        assert_eq!(code, 2, "{output}");
+        assert!(output.contains("a file to run"), "{output}");
+        assert_eq!(std::fs::read(corpus.dir.join("notes.pdf"))?, notes);
+        std::fs::create_dir_all(corpus.dir.join("store"))?;
+        std::fs::copy(
+            corpus.dir.join("docs/good.docx"),
+            corpus.dir.join("store/a.pdf"),
+        )?;
+        std::os::unix::fs::symlink("store/a.pdf", corpus.dir.join("a.docx"))?;
+        let stored = std::fs::read(corpus.dir.join("store/a.pdf"))?;
+        let (code, output) = corpus.run(&["--render", "store", "a.docx"], None)?;
+        assert_eq!(code, 2, "{output}");
+        assert!(output.contains("a file to run"), "{output}");
+        assert_eq!(std::fs::read(corpus.dir.join("store/a.pdf"))?, stored);
+        // A folder of the target that does not exist yet, under a link: link/new/.. is the
+        // link's folder, where the second file to run is.
+        std::os::unix::fs::symlink("store", corpus.dir.join("link"))?;
+        std::fs::create_dir_all(corpus.dir.join("store/docs"))?;
+        std::fs::copy(
+            corpus.dir.join("docs/good.docx"),
+            corpus.dir.join("store/docs/good.pdf"),
+        )?;
+        let (code, output) = corpus.run(
+            &[
+                "--render",
+                "link/new/..",
+                "docs/good.docx",
+                "store/docs/good.pdf",
+            ],
+            None,
+        )?;
+        assert_eq!(code, 2, "{output}");
+        assert!(output.contains("a file to run"), "{output}");
+        assert_eq!(
+            std::fs::read(corpus.dir.join("store/docs/good.pdf"))?,
+            stored
+        );
+        assert!(!corpus.dir.join("store/new").exists());
+        // A `..` that climbs out of a folder that does not exist comes back to folders
+        // that do, where a link can follow: missing/../here is here, a link to ".".
+        let (code, output) = corpus.run(&["--render", "missing/../here", "notes.pdf"], None)?;
+        assert_eq!(code, 2, "{output}");
+        assert!(output.contains("a file to run"), "{output}");
+        assert_eq!(std::fs::read(corpus.dir.join("notes.pdf"))?, notes);
+        assert!(!corpus.dir.join("missing").exists());
+        // The target itself a link to the file to run, after such a climb: removing
+        // missing/../b.pdf finds nothing while `missing` does not exist, and writing it
+        // would follow the link.
+        std::fs::copy(corpus.dir.join("docs/good.docx"), corpus.dir.join("b.docx"))?;
+        std::os::unix::fs::symlink("b.docx", corpus.dir.join("b.pdf"))?;
+        let b = std::fs::read(corpus.dir.join("b.docx"))?;
+        let (code, output) = corpus.run(&["--render", "missing/..", "b.docx"], None)?;
+        assert_eq!(code, 2, "{output}");
+        assert!(output.contains("a file to run"), "{output}");
+        assert_eq!(std::fs::read(corpus.dir.join("b.docx"))?, b);
+        assert!(!corpus.dir.join("missing").exists());
+    }
+    // Rendered elsewhere, it runs.
+    let (code, output) = corpus.run(&["--render", "out", "notes.pdf"], None)?;
+    assert_eq!(code, 0, "{output}");
+    assert!(corpus.dir.join("out/notes.pdf").exists(), "{output}");
+    Ok(())
+}
+
+#[test]
 fn a_pdf_of_an_earlier_run_is_never_scored() -> io::Result<()> {
     let corpus = Corpus::new("stale")?;
     let reference = corpus.dir.join("docs/references/group/good");

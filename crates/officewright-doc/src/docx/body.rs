@@ -986,7 +986,10 @@ impl Reading<'_, '_, '_> {
         }
         let place = self.c.place(offset);
         let p_pr = p_pr.of(&self.c.document.tokens, &self.c.document.strings);
-        let Some(sect_pr) = p_pr.children().find(|c| c.is(&self.names.w, "sectPr")) else {
+        let Some(sect_pr) = p_pr
+            .children_through_alternates(self.names.mc)
+            .find(|c| c.is(&self.names.w, "sectPr"))
+        else {
             return;
         };
         let properties = section::read(sect_pr, &self.names, &place, self.c.diagnostics);
@@ -1000,7 +1003,7 @@ impl Reading<'_, '_, '_> {
         let mut columns = Vec::new();
         for col in tbl_grid
             .of(&self.c.document.tokens, &self.c.document.strings)
-            .children()
+            .children_through_alternates(self.names.mc)
         {
             if !col.is(&w, "gridCol") {
                 continue;

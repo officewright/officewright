@@ -205,7 +205,10 @@ fn turns_what_stops_the_rendering_into_errors() {
         .save_pdf_bytes(&without_system_fonts().with_max_pages(1))
         .unwrap_err();
     assert!(matches!(err, Error::Layout { .. }), "{err:?}");
-    assert!(err.to_string().contains("more than 1 pages"), "{err}");
+    assert!(
+        err.to_string().contains("more pages than the limit of 1"),
+        "{err}"
+    );
     assert!(matches!(
         officewright_core::Error::from(err),
         officewright_core::Error::LimitExceeded(_)
