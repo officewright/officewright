@@ -151,6 +151,16 @@ fn subsets_truetype_and_cff_fonts() -> TestResult {
 }
 
 #[test]
+fn keeps_every_glyph_of_a_real_cff_font() -> TestResult {
+    // As a font that forbids subsetting is kept. Decompiling Noto Sans whole reads
+    // 271,888 operands, operators and hint mask bytes, far within the limit on that work.
+    let font = noto_sans()?;
+    let subset = font.subset((0..font.glyph_count()).map(GlyphId::new))?;
+    assert_eq!(subset.glyph_count(), font.glyph_count());
+    Ok(())
+}
+
+#[test]
 fn reads_a_collection_of_real_fonts() -> TestResult {
     // A .ttc of two real fonts, built here rather than committed.
     let fonts = [

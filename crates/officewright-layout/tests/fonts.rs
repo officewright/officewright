@@ -373,6 +373,32 @@ fn a_run_cut_for_its_length_starts_where_a_cluster_starts() -> TestResult {
 }
 
 #[test]
+fn every_test_font_is_within_the_budget_of_its_layout_tables() -> TestResult {
+    // Issue #255: the limits leave real fonts a wide margin.
+    let mut checked = 0;
+    for family in ["carlito", "liberation", "noto"] {
+        for entry in std::fs::read_dir(repository().join("tests/fonts").join(family))? {
+            let path = entry?.path();
+            if !path
+                .extension()
+                .is_some_and(|extension| extension == "ttf" || extension == "otf")
+            {
+                continue;
+            }
+            let data = std::fs::read(&path)?;
+            assert!(
+                fuzzing::layout_tables_within_budget(&data, 0),
+                "{}",
+                path.display()
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked >= 15, "{checked} fonts");
+    Ok(())
+}
+
+#[test]
 fn a_symbol_that_is_a_soft_hyphen_stays_with_the_character_before_it() -> TestResult {
     // Symbol F0AD of Noto Sans, which is no symbol font, is its soft hyphen (issue #164).
     let book = book()?;
