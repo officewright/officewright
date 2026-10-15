@@ -900,10 +900,48 @@ fn a_file_to_run_is_never_rendered_over() -> io::Result<()> {
         assert!(output.contains("a file to run"), "{name}: {output}");
         assert_eq!(std::fs::read(corpus.dir.join(name))?, before, "{name}");
     }
+    // Nor over another file to run: docs/good.docx is rendered to pdfs/docs/good.pdf.
+    std::fs::create_dir_all(corpus.dir.join("pdfs/docs"))?;
+    std::fs::copy(
+        corpus.dir.join("docs/good.docx"),
+        corpus.dir.join("pdfs/docs/good.pdf"),
+    )?;
+    let before = std::fs::read(corpus.dir.join("pdfs/docs/good.pdf"))?;
+    let (code, output) = corpus.run(
+        &["--render", "pdfs", "docs/good.docx", "pdfs/docs/good.pdf"],
+        None,
+    )?;
+    assert_eq!(code, 2, "{output}");
+    assert!(
+        output.contains("docs/good.docx would be rendered to") && output.contains("a file to run"),
+        "{output}"
+    );
+    assert_eq!(
+        std::fs::read(corpus.dir.join("pdfs/docs/good.pdf"))?,
+        before
+    );
+    // Nor through a link to the folder it is in.
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(".", corpus.dir.join("here"))?;
+        let (code, output) = corpus.run(&["--render", "here", "notes.pdf"], None)?;
+        assert_eq!(code, 2, "{output}");
+        assert!(output.contains("a file to run"), "{output}");
+        assert_eq!(std::fs::read(corpus.dir.join("notes.pdf"))?.len(), {
+            std::fs::read(corpus.dir.join("docs/good.docx"))?.len()
+        });
+        // A link's `..` is the parent of where it leads: jump/.. is elsewhere, not here,
+        // so notes.pdf is rendered there.
+        std::fs::create_dir_all(corpus.dir.join("elsewhere/inner"))?;
+        std::os::unix::fs::symlink("elsewhere/inner", corpus.dir.join("jump"))?;
+        let (code, output) = corpus.run(&["--render", "jump/..", "notes.pdf"], None)?;
+        assert_eq!(code, 0, "{output}");
+        assert!(corpus.dir.join("elsewhere/notes.pdf").exists(), "{output}");
+    }
     // Rendered elsewhere, it runs.
-    let (code, output) = corpus.run(&["--render", "pdfs", "notes.pdf"], None)?;
+    let (code, output) = corpus.run(&["--render", "out", "notes.pdf"], None)?;
     assert_eq!(code, 0, "{output}");
-    assert!(corpus.dir.join("pdfs/notes.pdf").exists(), "{output}");
+    assert!(corpus.dir.join("out/notes.pdf").exists(), "{output}");
     Ok(())
 }
 

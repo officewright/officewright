@@ -227,6 +227,20 @@ fn lexical_absolute(path: &Path) -> Result<PathBuf, String> {
     Ok(out)
 }
 
+/// Where `path` is on disk, links followed: the canonical path of the file when it
+/// exists, else that of its folder with its name; else, when the folder does not exist
+/// either, so that nothing can be there, the path made absolute by its parts.
+fn on_disk(path: &Path) -> Result<PathBuf, String> {
+    let full = std::path::absolute(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    if let Ok(found) = std::fs::canonicalize(&full) {
+        return Ok(found);
+    }
+    match (full.parent().map(std::fs::canonicalize), full.file_name()) {
+        (Some(Ok(folder)), Some(name)) => Ok(folder.join(name)),
+        _ => lexical_absolute(path),
+    }
+}
+
 /// The file's path under the root, with forward slashes, the same on every system.
 fn relative(root: &Path, file: &Path) -> Result<String, String> {
     let full = lexical_absolute(file)?;
@@ -291,7 +305,9 @@ impl Launcher {
 /// relative to the folder above `--references` when the file lies under it (where the
 /// scoring looks for it), else its name, relative to the root. Empty without `--render`.
 /// Refuses two files that would be rendered to one PDF: names that differ only in their
-/// extension, or in case, which the file systems of macOS and Windows ignore.
+/// extension, or in case, which the file systems of macOS and Windows ignore. Refuses as
+/// well a target that is one of the files to run, compared where they are on disk (links
+/// followed) and without case: a target is removed before its document runs.
 fn render_targets(
     options: &Options,
     files: &[(String, PathBuf)],
@@ -324,16 +340,13 @@ fn render_targets(
         }
     }
     // A target is removed before its document runs, so none may be a file to run, in any
-    // case of its name either.
+    // case of its name either, nor through a link.
     let mut inputs: BTreeMap<String, &str> = BTreeMap::new();
     for (name, file) in files {
-        inputs.insert(
-            lexical_absolute(file)?.to_string_lossy().to_lowercase(),
-            name,
-        );
+        inputs.insert(on_disk(file)?.to_string_lossy().to_lowercase(), name);
     }
     for (name, pdf) in &targets {
-        let target = lexical_absolute(pdf)?.to_string_lossy().to_lowercase();
+        let target = on_disk(pdf)?.to_string_lossy().to_lowercase();
         if let Some(input) = inputs.get(&target) {
             return Err(format!(
                 "{name} would be rendered to {}, which is {input}, a file to run",
