@@ -2,9 +2,10 @@
 //!
 //! ```text
 //! corpus-runner run [--root DIR] [--report FILE]
-//!                   [--baseline FILE [--update-baseline | --allow-better]]
+//!                   [--baseline FILE [--update-baseline | --allow-better] [--statuses-only]]
 //!                   [--expected FILE] [--timeout SECONDS] [--memory-limit MIB]
-//!                   [--enforce-memory-limit] [--jobs N] [--references DIR --ours DIR]
+//!                   [--enforce-memory-limit] [--jobs N]
+//!                   [--render DIR [--font-dir DIR]...] [--references DIR [--ours DIR]]
 //!                   PATH...
 //! corpus-runner score --ours FILE.pdf --reference DIR
 //! ```
@@ -43,6 +44,18 @@
 //! them: a drop of more than 0.01 fails, as a rise does until it is accepted. `score`
 //! prints the same metrics for one PDF and one reference folder. Both need pdftotext and
 //! pdftoppm (poppler).
+//!
+//! With `--render DIR`, each child also renders the document it opened into PDF, with the
+//! fonts of each `--font-dir` and none of the system's, so that a run gives the same pages
+//! on every machine. The PDF goes to `DIR/<path>.pdf`, the path relative to the folder above
+//! `--references` when the document lies under it, else relative to the root. The report
+//! records what the layout reported for each document, or why it could not be rendered.
+//! With `--references` too, the PDFs rendered are the ones scored, unless `--ours` names
+//! others.
+//!
+//! `--statuses-only` compares only the files' statuses with the baseline, and keeps the
+//! baseline's scores with `--update-baseline`: for a machine that cannot score, such as
+//! Windows, which has no official poppler build.
 #![forbid(unsafe_code)]
 
 mod align;
@@ -61,16 +74,18 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 const USAGE: &str = "usage: corpus-runner run [--root DIR] [--report FILE] \
-[--baseline FILE [--update-baseline | --allow-better]] [--expected FILE] [--timeout SECONDS] \
-[--memory-limit MIB] [--enforce-memory-limit] [--jobs N] [--references DIR --ours DIR] PATH...
+[--baseline FILE [--update-baseline | --allow-better] [--statuses-only]] [--expected FILE] \
+[--timeout SECONDS] \
+[--memory-limit MIB] [--enforce-memory-limit] [--jobs N] [--render DIR [--font-dir DIR]...] \
+[--references DIR [--ours DIR]] PATH...
        corpus-runner score --ours FILE.pdf --reference DIR
        corpus-runner gate [--main MAIN.json] [--same-fonts] REPORT.json
-       corpus-runner open FILE";
+       corpus-runner open FILE [--render PDF [--font-dir DIR]...]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.split_first() {
-        Some((command, [file])) if command == "open" => child::main(file),
+        Some((command, rest)) if command == "open" => child::main(rest),
         Some((command, rest)) if command == "score" => score(rest),
         Some((command, rest)) if command == "gate" => gate(rest),
         Some((command, rest)) if command == "run" => match parse(rest) {
@@ -214,6 +229,12 @@ pub struct Options {
     pub references: Option<PathBuf>,
     /// The folder of our PDFs to score against them, named like the documents.
     pub ours: Option<PathBuf>,
+    /// The folder each child renders the document it opened into, as a PDF.
+    pub render: Option<PathBuf>,
+    /// The fonts to render with.
+    pub font_dirs: Vec<PathBuf>,
+    /// Compare only the statuses with the baseline, and keep its scores when updating it.
+    pub statuses_only: bool,
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
@@ -231,6 +252,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
         jobs: std::thread::available_parallelism().map_or(1, |n| n.get()),
         references: None,
         ours: None,
+        render: None,
+        font_dirs: Vec::new(),
+        statuses_only: false,
     };
     let mut args = args.iter();
     while let Some(arg) = args.next() {
@@ -246,7 +270,10 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--expected" => options.expected = Some(PathBuf::from(value("--expected")?)),
             "--references" => options.references = Some(PathBuf::from(value("--references")?)),
             "--ours" => options.ours = Some(PathBuf::from(value("--ours")?)),
+            "--render" => options.render = Some(PathBuf::from(value("--render")?)),
+            "--font-dir" => options.font_dirs.push(PathBuf::from(value("--font-dir")?)),
             "--update-baseline" => options.update_baseline = true,
+            "--statuses-only" => options.statuses_only = true,
             "--allow-better" => options.allow_better = true,
             "--enforce-memory-limit" => options.enforce_memory_limit = true,
             "--timeout" => {
@@ -276,11 +303,25 @@ fn parse(args: &[String]) -> Result<Options, String> {
     if options.paths.is_empty() {
         return Err("no paths to run over".to_owned());
     }
-    if (options.update_baseline || options.allow_better) && options.baseline.is_none() {
-        return Err("--update-baseline and --allow-better need --baseline".to_owned());
+    if (options.update_baseline || options.allow_better || options.statuses_only)
+        && options.baseline.is_none()
+    {
+        return Err(
+            "--update-baseline, --allow-better and --statuses-only need --baseline".to_owned(),
+        );
+    }
+    if options.statuses_only && options.references.is_some() {
+        return Err("--statuses-only compares no scores, so it takes no --references".to_owned());
+    }
+    // The PDFs rendered are the ones scored, unless --ours names others.
+    if options.references.is_some() && options.ours.is_none() {
+        options.ours = options.render.clone();
     }
     if options.references.is_some() != options.ours.is_some() {
-        return Err("--references and --ours go together".to_owned());
+        return Err("--references and --ours go together; --render stands for --ours".to_owned());
+    }
+    if !options.font_dirs.is_empty() && options.render.is_none() {
+        return Err("--font-dir needs --render".to_owned());
     }
     Ok(options)
 }
