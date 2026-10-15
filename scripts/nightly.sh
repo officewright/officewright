@@ -53,10 +53,12 @@ printf '==> %s\n' "fuzzing (30 min per target)"
 # finds in fuzz/corpus/<target> and writes crashing inputs to fuzz/artifacts/<target>,
 # which nightly.yml uploads. The limits follow the corpus rules of CLAUDE.md: 30 s per
 # input, and 1 GiB for what an input asks for at once (-malloc_limit_mb). The process may
-# grow to 2.5 GiB, the limit OSS-Fuzz runs with (-rss_limit_mb), because besides the input
-# it holds libFuzzer's corpus and AddressSanitizer's quarantine of freed memory: with the
-# fonts as seeds those two passed 1 GiB within a quarter of an hour while no input took
-# more than 50 MB. A crash in one target does not stop the others. The targets
+# grow to 2.5 GiB, the limit OSS-Fuzz runs with (-rss_limit_mb), because it holds more
+# than the input's own memory: libFuzzer's corpus, AddressSanitizer's quarantine of freed
+# memory, and AddressSanitizer's overhead on every allocation. With the fonts as seeds the
+# process passed 1 GiB within a quarter of an hour while no input took more than 50 MB,
+# and layout_shape, whose inputs take up to 200 MB without AddressSanitizer, passed it in
+# four minutes. A crash in one target does not stop the others. The targets
 # and their seeds are looked up in statements of their own, so that `set -e` stops the
 # script if either fails.
 seeds() {
