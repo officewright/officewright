@@ -882,22 +882,22 @@
       "text_score": 0.7911
     },
     "tests/corpus/word-rules/E-list-label-format.docx": {
-      "line_agreement": 0.3333,
-      "ssim_mean": 0.9526,
-      "ssim_min": 0.9526,
-      "text_score": 0.945
+      "line_agreement": 0.9167,
+      "ssim_mean": 0.9749,
+      "ssim_min": 0.9749,
+      "text_score": 0.9977
     },
     "tests/corpus/word-rules/E-list-label-rstyle.docx": {
-      "line_agreement": 0.0,
-      "ssim_mean": 0.9907,
-      "ssim_min": 0.9907,
-      "text_score": 0.9341
+      "line_agreement": 1.0,
+      "ssim_mean": 0.9967,
+      "ssim_min": 0.9967,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-list-level-inherit.docx": {
-      "line_agreement": 0.8889,
-      "ssim_mean": 0.982,
-      "ssim_min": 0.982,
-      "text_score": 0.9959
+      "line_agreement": 1.0,
+      "ssim_mean": 0.9899,
+      "ssim_min": 0.9899,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-list-shared-abstract.docx": {
       "line_agreement": 1.0,
