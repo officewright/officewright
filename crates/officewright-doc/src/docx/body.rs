@@ -339,7 +339,7 @@ impl Reading<'_, '_, '_> {
                     self.open_note(reader, mce, tag)
                 }
                 // w:background and the like: kept for writing in a later version.
-                _ => self.c.capture(reader, mce, tag).map(drop),
+                _ => self.c.capture(reader, mce, tag, None).map(drop),
             },
             Context::Text => {
                 let offset = tag.offset();
@@ -417,7 +417,9 @@ impl Reading<'_, '_, '_> {
             ),
             (Level::Block, "sectPr") if parent == Parent::Body && self.story == Story::Document => {
                 let place = self.c.place(tag.offset());
-                let span = self.c.capture(reader, mce, tag)?;
+                let span = self
+                    .c
+                    .capture(reader, mce, tag, Some(Disposition::Understood))?;
                 let element = span.of(&self.c.document.tokens, &self.c.document.strings);
                 let properties = section::read(element, &self.names, &place, self.c.diagnostics);
                 self.last_section = Some(properties);
@@ -553,7 +555,7 @@ impl Reading<'_, '_, '_> {
                     }
                 };
                 // The element is kept whole: it may hold form field data (w:ffData).
-                let element = self.c.capture(reader, mce, tag)?;
+                let element = self.c.capture(reader, mce, tag, None)?;
                 return self.push_item(run, RunItem::FieldChar { kind, element });
             }
             "sym" => {
@@ -754,7 +756,7 @@ impl Reading<'_, '_, '_> {
         let Some(id) = id else {
             let value = self.w_attribute(&tag, "id").unwrap_or_default().to_owned();
             self.invalid(&tag, "id", &value);
-            return self.c.capture(reader, mce, tag).map(drop);
+            return self.c.capture(reader, mce, tag, None).map(drop);
         };
         let note_type = match self.w_attribute(&tag, "type") {
             None => NoteType::Normal,
@@ -935,7 +937,9 @@ impl Reading<'_, '_, '_> {
         node: u32,
     ) -> Result<()> {
         let offset = tag.offset();
-        let span = self.c.capture(reader, mce, tag)?;
+        let span = self
+            .c
+            .capture(reader, mce, tag, Some(Disposition::Understood))?;
         let kind = self.c.document.node(node).map(|node| &node.kind);
         let (paragraph, table) = (
             matches!(kind, Some(Kind::Paragraph { .. })),
@@ -1058,7 +1062,7 @@ impl Reading<'_, '_, '_> {
         mce: &mut Processor,
         tag: StartTag<'_>,
     ) -> Result<()> {
-        let span = self.c.capture(reader, mce, tag)?;
+        let span = self.c.capture(reader, mce, tag, None)?;
         match self.context() {
             Context::Container {
                 parent: Parent::Node(run),
@@ -1085,7 +1089,9 @@ impl Reading<'_, '_, '_> {
         run: u32,
     ) -> Result<()> {
         let offset = tag.offset();
-        let element = self.c.capture(reader, mce, tag)?;
+        let element = self
+            .c
+            .capture(reader, mce, tag, Some(Disposition::Understood))?;
         let document = &*self.c.document;
         let embed = drawing::picture(document.element(element), &document.names)
             .and_then(|picture| drawing::embedded_image(picture, &document.names))
