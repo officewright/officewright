@@ -1271,14 +1271,24 @@ def locale_note(accepted: list[str]) -> str:
     return "accepted with --allow-locale: " + ", ".join(accepted)
 
 
-def drawn_font_note(font: DrawnFont) -> str:
-    """How SOURCES.md names a font the rasters draw with the maintainer's copy."""
+def drawn_font_note(entry: dict) -> str:
+    """How SOURCES.md names a font the rasters draw with the maintainer's copy, made from its
+    entry in geometry.json (DrawnFont.describe), so that tests/corpus-tools can check the two
+    agree."""
     substitute = ""
-    if font.substitute:
-        substitute = f"drawn with {font.substitute} as Windows substitutes it, "
+    if "windows_substitute" in entry:
+        substitute = f"drawn with {entry['windows_substitute']} as Windows substitutes it, "
     return (
-        f"{font.name} ({substitute}{font.face.full_name}, "
-        f"{font.face.version or 'no version'}, SHA-256 {font.describe()['sha256']})"
+        f"{entry['font']} ({substitute}{entry['full_name']}, "
+        f"{entry['version'] or 'no version'}, SHA-256 {entry['sha256']})"
+    )
+
+
+def rasterized_note(entries: list[dict]) -> str:
+    """SOURCES.md's note on the fonts the rasters draw with the maintainer's copies, made from
+    geometry.json's fonts_rasterized_with."""
+    return "fonts the PDF does not embed, rasterized with the maintainer's installed copies: " + (
+        ", ".join(drawn_font_note(entry) for entry in entries) or "none"
     )
 
 
@@ -1308,11 +1318,7 @@ def reference_row(
         "fields as saved",
         f"PDF not committed, SHA-256 {record['pdf_sha256']}",
         f"rasters and geometry by poppler {poppler} at {RASTER_DPI} dpi, grey",
-        "fonts the PDF does not embed, rasterized with the maintainer's installed copies: "
-        + (
-            ", ".join(drawn_font_note(font) for font in drawn)
-            or "none"
-        ),
+        rasterized_note([font.describe() for font in drawn]),
     ]
     if locale_accepted:
         notes.append(locale_note(locale_accepted))
