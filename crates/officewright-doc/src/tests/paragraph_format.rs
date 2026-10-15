@@ -1063,6 +1063,43 @@ fn takes_the_level_the_style_writes_before_the_level_that_names_the_style() {
 }
 
 #[test]
+fn takes_a_level_beyond_8_the_style_writes_before_the_level_that_names_the_style() {
+    // From the review of #292: the style writes level 9 and level 2 of its list names
+    // the style, as Heading 3 of LibreOffice's tdf141966_chapterNumberTortureTest.docx
+    // does. The level the style writes comes first, as in case 04 of
+    // word-rules/E-list-level-inherit.docx, and a level beyond 8 is no list, as one
+    // written on the paragraph is. No render of Word confirms this case yet (#293).
+    let numbering = [
+        definition(10, r#"<w:pStyle w:val="Linked"/>"#),
+        r#"<w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num>"#.to_owned(),
+    ]
+    .concat();
+    let styles = [
+        defaults(""),
+        style(
+            "paragraph",
+            "Linked",
+            None,
+            r#"<w:numPr><w:ilvl w:val="9"/><w:numId w:val="1"/></w:numPr>"#,
+        ),
+    ]
+    .concat();
+    let body = [
+        paragraph("Linked", ""),
+        paragraph(
+            "",
+            r#"<w:numPr><w:ilvl w:val="9"/><w:numId w:val="1"/></w:numPr>"#,
+        ),
+    ]
+    .concat();
+    let lists: Vec<_> = formats(&build(&body, &styles, Some(&numbering)))
+        .iter()
+        .map(|format| format.list().map(|list| list.level_number()))
+        .collect();
+    assert_eq!(lists, [None, None]);
+}
+
+#[test]
 fn bounds_set_and_cleared_tab_stops_apart() {
     // [MS-DOC] 2.9.179 and 2.9.180: one change adds at most 64 stops and removes at most
     // 64, so cleared stops do not take the place of set ones.
