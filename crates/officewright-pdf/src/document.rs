@@ -37,9 +37,11 @@ const MAX_XREF_OFFSET: u64 = 9_999_999_999;
 /// subsets of about 82 MB while the subsetter takes about 490 MB for the ninth (#277). The
 /// subsetter spends about 30 bytes for each unit while it reduces a font, and a subset
 /// keeps about 5 bytes for each; with this budget the subsets of a document take at most
-/// about 600 MB while they are made. It leaves room for two of the largest CJK fonts kept
-/// whole (Noto Sans CJK SC reads 16,082,053), where a document reduced to the glyphs it
-/// uses reads far less.
+/// about 600 MB while they are made, and the subsetter's copy of the local subroutines of
+/// every Font DICT, which the units do not count, up to about 267 MB more in one run
+/// (#284). It leaves room for two CJK fonts the size of Noto Sans CJK SC kept whole
+/// (16,082,053 units each); larger ones are past the limit of one subset anyway, and a
+/// document reduced to the glyphs it uses reads far less.
 const SUBSET_BUDGET: u64 = 1 << 25;
 
 /// A PDF document being built.
@@ -168,11 +170,11 @@ impl Document {
     /// Sets how much reducing the embedded fonts to the glyphs the document shows may read
     /// of their CFF charstrings in all, in operands, operators and hint mask bytes
     /// ([`SubsetBudget`](officewright_font::SubsetBudget)): 33,554,432 unless set
-    /// otherwise, room for two of the largest CJK fonts kept whole. The fonts are reduced
-    /// when the document is written, one after another in the order the pages first use
-    /// them, and each subset is kept until the file is: a unit costs about 30 bytes of
-    /// memory while its font is reduced and about 5 bytes after. Fonts with TrueType
-    /// outlines take nothing from the budget.
+    /// otherwise, room for two CJK fonts the size of Noto Sans CJK SC kept whole. The fonts
+    /// are reduced when the document is written, one after another in the order the pages
+    /// first use them, and each subset is kept until the file is: a unit costs about 30
+    /// bytes of memory while its font is reduced and about 5 bytes after. Fonts with
+    /// TrueType outlines take nothing from the budget.
     ///
     /// ```
     /// use officewright_pdf::Document;

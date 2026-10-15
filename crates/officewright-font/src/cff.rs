@@ -2286,16 +2286,31 @@ mod tests {
         );
         assert_eq!(budget.left(), 13);
         let mut budget = SubsetBudget::new(0);
-        assert!(subset_within(cff, &[], &mut budget).is_err());
+        let err = subset_within(cff, &[], &mut budget).unwrap_err();
+        assert!(
+            over_limit(Err(err)).contains("up to glyph 0, reads more than the 0 operands"),
+            "a budget of 0"
+        );
+
+        // A subset that the check lets through and the subsetter refuses takes nothing:
+        // the check stops at glyph 1, an operator the subsetter does not know (12 0),
+        // after reading 5 units of it.
+        let mut glyphs = glyphs_with(1, vec![139, 139, 21, 12, 0]);
+        glyphs[2] = vec![139, 139, 21, 14];
+        let cff = programs(&glyphs, &[], &[vec![]], None);
+        let mut budget = SubsetBudget::new(100);
+        let err = subset_within(cff, &[2, 1], &mut budget).unwrap_err();
+        assert!(matches!(err, Error::Subset { .. }), "{err}");
+        assert_eq!(budget.left(), 100);
 
         // TrueType outlines take nothing.
         let truetype = crate::testing::TestFont::new("Test Sans").build();
         let truetype = crate::font::FontFace::from_bytes(truetype, 0).unwrap();
-        let mut budget = SubsetBudget::new(0);
+        let mut budget = SubsetBudget::new(100);
         truetype
             .subset_within([crate::font::GlyphId::new(2)], &mut budget)
             .unwrap();
-        assert_eq!(budget.left(), 0);
+        assert_eq!(budget.left(), 100);
     }
 
     #[test]
