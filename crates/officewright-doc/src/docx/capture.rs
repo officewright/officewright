@@ -144,8 +144,7 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
         if tag.name().is(mc, "AlternateContent") {
             alternates.push((1, false));
         }
-        let token = self.start_token(reader, &tag, false)?;
-        self.document.tokens.push(token);
+        self.push_start(reader, &tag, false)?;
         let mut depth = 1usize;
         while depth > 0 {
             self.spend(1)?;
@@ -169,8 +168,7 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
                     if name.is(mc, "AlternateContent") {
                         alternates.push((depth, false));
                     }
-                    let token = self.start_token(reader, &tag, taken)?;
-                    self.document.tokens.push(token);
+                    self.push_start(reader, &tag, taken)?;
                 }
                 Some(Event::End(_)) => {
                     self.document.tokens.push(Token::End);
@@ -197,7 +195,8 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
         Ok(Span::new(start, self.document.tokens.len()))
     }
 
-    /// A start tag as a token, its names interned in the document. Its attributes count
+    /// Pushes a start tag as a token, its names interned in the document, and its
+    /// namespace declarations, if it has any, as a [`Token::Declarations`] after it. Its attributes count
     /// against the node limit, as each costs memory of its own, and so do its namespace
     /// declarations.
     ///
@@ -206,12 +205,12 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
     /// does not declare itself, as it is in scope where the tag is read: such a prefix
     /// may be declared outside the element kept, and the value means nothing without it.
     /// A prefix is looked at once per tag, however often its values name it.
-    pub(super) fn start_token(
+    pub(super) fn push_start(
         &mut self,
         reader: &Reader<'_>,
         tag: &StartTag<'_>,
         taken: bool,
-    ) -> Result<Token> {
+    ) -> Result<()> {
         let written = tag.namespace_declarations();
         self.spend(tag.attributes().len() + written.len())?;
         let name = self.name(reader, tag.name());
@@ -253,12 +252,17 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
                 value: attribute.value().into(),
             })
             .collect();
-        Ok(Token::Start {
+        self.document.tokens.push(Token::Start {
             name,
             attributes,
-            declarations: declarations.into_boxed_slice(),
             taken,
-        })
+        });
+        if !declarations.is_empty() {
+            self.document
+                .tokens
+                .push(Token::Declarations(declarations.into_boxed_slice()));
+        }
+        Ok(())
     }
 
     fn name(&mut self, reader: &Reader<'_>, name: officewright_opc::xml::Name<'_>) -> XmlName {

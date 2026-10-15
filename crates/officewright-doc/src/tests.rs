@@ -549,7 +549,7 @@ fn keeps_a_long_namespace_once_however_many_kept_elements_name_it() {
             .sum(),
         model::xml::Token::Text(text) | model::xml::Token::Comment(text) => text.len(),
         model::xml::Token::ProcessingInstruction { target, data } => target.len() + data.len(),
-        model::xml::Token::End => 0,
+        model::xml::Token::Declarations(_) | model::xml::Token::End => 0,
     };
     let held = document.strings.bytes() + document.tokens.iter().map(token_bytes).sum::<usize>();
     assert!(

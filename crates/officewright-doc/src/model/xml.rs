@@ -57,9 +57,9 @@ pub(crate) struct XmlAttribute {
 }
 
 /// A namespace declaration of an element: written on it, or the binding in scope where
-/// it was read of a prefix that one of its values names (see
-/// [`Token::Start`]'s `declarations`). Both are interned, so that a declaration costs a
-/// few bytes however long its URI is, and however many elements name it.
+/// it was read of a prefix that one of its values names (see [`Token::Declarations`]).
+/// Both are interned, so that a declaration costs a few bytes however long its URI is,
+/// and however many elements name it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Declaration {
     /// The prefix declared; `None` for the default namespace.
@@ -75,12 +75,6 @@ pub(crate) enum Token {
     Start {
         name: XmlName,
         attributes: Box<[XmlAttribute]>,
-        /// The namespace declarations written on the element, and the binding of each
-        /// prefix that the value of a Markup Compatibility attribute or of `xsi:type`
-        /// names and the element does not declare itself, as it was in scope where the
-        /// element was read: such a prefix may be declared outside the element kept,
-        /// and the value means nothing without it.
-        declarations: Box<[Declaration]>,
         /// Whether the element is the branch of its `mc:AlternateContent` that the reader
         /// of its part takes: the first `mc:Choice` all of whose `Requires` namespaces
         /// the reader implements, else the `mc:Fallback` (ECMA-376 Part 3, §10.2).
@@ -88,6 +82,13 @@ pub(crate) enum Token {
         /// in scope; false for every other element.
         taken: bool,
     },
+    /// Right after the start tag of an element that has any: the namespace declarations
+    /// written on it, and the binding of each prefix that the value of a Markup
+    /// Compatibility attribute or of `xsi:type` names and the element does not declare
+    /// itself, as it was in scope where the element was read. Such a prefix may be
+    /// declared outside the element kept, and the value means nothing without it. A
+    /// token of its own, so that the many elements without any cost nothing more.
+    Declarations(Box<[Declaration]>),
     End,
     Text(Box<str>),
     Comment(Box<str>),
@@ -233,7 +234,10 @@ impl<'d> Element<'d> {
                 Token::Start { .. } => depth += 1,
                 Token::End => depth = depth.saturating_sub(1),
                 Token::Text(part) if depth == 0 => text.push_str(part),
-                Token::Text(_) | Token::Comment(_) | Token::ProcessingInstruction { .. } => {}
+                Token::Text(_)
+                | Token::Comment(_)
+                | Token::ProcessingInstruction { .. }
+                | Token::Declarations(_) => {}
             }
         }
         text
@@ -263,7 +267,10 @@ impl<'d> Element<'d> {
                     }
                     None
                 }
-                Token::Text(_) | Token::Comment(_) | Token::ProcessingInstruction { .. } => None,
+                Token::Text(_)
+                | Token::Comment(_)
+                | Token::ProcessingInstruction { .. }
+                | Token::Declarations(_) => None,
             })
     }
 
@@ -293,14 +300,12 @@ impl<'d> Element<'d> {
             escape(out, namespace.unwrap_or_default(), true);
             out.push('"');
         };
-        for token in self.tokens {
+        for (i, token) in self.tokens.iter().enumerate() {
             match token {
                 Token::Start {
-                    name,
-                    attributes,
-                    declarations,
-                    ..
+                    name, attributes, ..
                 } => {
+                    let declarations = self.declarations_at(i + 1);
                     let qname = strings.get(name.qname);
                     out.push('<');
                     out.push_str(qname);
@@ -354,6 +359,8 @@ impl<'d> Element<'d> {
                         }
                     }
                 }
+                // Written with the start tag before them.
+                Token::Declarations(_) => {}
                 Token::Text(text) => escape(&mut out, text, false),
                 Token::Comment(text) => {
                     out.push_str("<!--");
@@ -406,6 +413,15 @@ fn needs<'s>(
 }
 
 impl<'d> Element<'d> {
+    /// The declarations of the element whose start tag is just before `index`: those of
+    /// the token at `index`, if it is [`Token::Declarations`].
+    fn declarations_at(self, index: usize) -> &'d [Declaration] {
+        match self.tokens.get(index) {
+            Some(Token::Declarations(declarations)) => declarations,
+            _ => &[],
+        }
+    }
+
     /// The bindings the element needs from outside it, each once, in the order first
     /// needed: the prefixes its names and values need where no declaration written
     /// inside it binds them. The default namespace is left out when it is no namespace,
@@ -418,14 +434,12 @@ impl<'d> Element<'d> {
         // the prefixes each open element declared.
         let mut inside: HashMap<Option<&str>, usize> = HashMap::new();
         let mut open: Vec<Vec<Option<&str>>> = Vec::new();
-        for token in self.tokens {
+        for (i, token) in self.tokens.iter().enumerate() {
             match token {
                 Token::Start {
-                    name,
-                    attributes,
-                    declarations,
-                    ..
+                    name, attributes, ..
                 } => {
+                    let declarations = self.declarations_at(i + 1);
                     let mut declared = Vec::new();
                     for declaration in declarations.iter().filter(|d| d.written) {
                         let prefix = declaration.prefix.map(|prefix| strings.get(prefix));
@@ -450,7 +464,10 @@ impl<'d> Element<'d> {
                         }
                     }
                 }
-                Token::Text(_) | Token::Comment(_) | Token::ProcessingInstruction { .. } => {}
+                Token::Text(_)
+                | Token::Comment(_)
+                | Token::ProcessingInstruction { .. }
+                | Token::Declarations(_) => {}
             }
         }
         outside
@@ -502,7 +519,10 @@ impl<'d> Alternates<'d> {
                         return Some(i);
                     }
                 }
-                Token::Text(_) | Token::Comment(_) | Token::ProcessingInstruction { .. } => {}
+                Token::Text(_)
+                | Token::Comment(_)
+                | Token::ProcessingInstruction { .. }
+                | Token::Declarations(_) => {}
             }
         }
         None
@@ -543,7 +563,10 @@ impl Iterator for Alternates<'_> {
                     self.open.pop();
                     self.next = i + 1;
                 }
-                Token::Text(_) | Token::Comment(_) | Token::ProcessingInstruction { .. } => {
+                Token::Text(_)
+                | Token::Comment(_)
+                | Token::ProcessingInstruction { .. }
+                | Token::Declarations(_) => {
                     self.next = i + 1;
                 }
             }
