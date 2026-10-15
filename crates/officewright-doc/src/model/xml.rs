@@ -243,37 +243,6 @@ impl<'d> Element<'d> {
         text
     }
 
-    /// The child elements, each with everything in it.
-    pub(crate) fn children(self) -> impl Iterator<Item = Element<'d>> + 'd {
-        let (tokens, strings) = (self.tokens, self.strings);
-        let mut depth = 0usize;
-        let mut start = None;
-        tokens
-            .iter()
-            .enumerate()
-            .filter_map(move |(i, token)| match token {
-                Token::Start { .. } => {
-                    depth += 1;
-                    if depth == 2 {
-                        start = Some(i);
-                    }
-                    None
-                }
-                Token::End => {
-                    depth = depth.saturating_sub(1);
-                    if depth == 1 {
-                        let tokens = tokens.get(start.take()?..=i)?;
-                        return Some(Element { tokens, strings });
-                    }
-                    None
-                }
-                Token::Text(_)
-                | Token::Comment(_)
-                | Token::ProcessingInstruction { .. }
-                | Token::Declarations(_) => None,
-            })
-    }
-
     /// The element and everything in it as XML that stands on its own: each element
     /// keeps the namespace declarations written on it, and the prefixes its name, its
     /// attributes and its values need are declared where they are not yet bound to the
