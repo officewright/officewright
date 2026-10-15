@@ -604,3 +604,57 @@ fn reads_lengths_and_shares_only_of_the_schema_s_pattern_and_range() {
         (Some(VerticalReference::Paragraph), Some(Pt(3.0)))
     );
 }
+
+#[test]
+fn reads_drawings_through_markup_compatibility() {
+    // Issue #312: what lies below w:drawing goes through Markup Compatibility as the
+    // rest of the body does, since the namespaces the picture reader reads are
+    // understood.
+    let picture = inline_picture("rIdPng");
+    for (from, to) in [
+        ("<a:blip ", r#"<a:blip mc:MustUnderstand="w14" "#),
+        ("<wp:inline ", r#"<wp:inline mc:MustUnderstand="w14" "#),
+        ("<pic:pic ", r#"<pic:pic mc:MustUnderstand="w14" "#),
+    ] {
+        let body = format!("<w:p>{}</w:p>", picture.replace(from, to));
+        match Document::from_bytes(images_package(&body)) {
+            Err(Error::Unsupported(message)) => {
+                assert!(message.contains("mc:MustUnderstand"), "{to}: {message}")
+            }
+            other => panic!("{to} gave {other:?}"),
+        }
+    }
+    // An ignorable wrapper around pic:pic whose content mc:ProcessContent names is read
+    // through; one that nothing names is left out, with the picture in it.
+    let wrapped = picture
+        .replace("<pic:pic ", "<w14:x><pic:pic ")
+        .replace("</pic:pic>", "</pic:pic></w14:x>");
+    let document = with_images(&format!(
+        r#"<w:p mc:ProcessContent="w14:x">{wrapped}</w:p>"#
+    ));
+    let image = drawings(&document)[0]
+        .picture()
+        .and_then(|picture| picture.image());
+    assert_eq!(image.map(|image| image.bytes()), Some(PNG_BYTES));
+    let document = with_images(&format!("<w:p>{wrapped}</w:p>"));
+    assert!(drawings(&document)[0].picture().is_none());
+
+    // The same in Strict, on each element of each of the three namespaces.
+    let strict = r#"<w:document xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main" xmlns:r="http://purl.oclc.org/ooxml/officeDocument/relationships" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" mc:Ignorable="w14" conformance="strict"><w:body><w:p><w:r><w:drawing><wp:inline xmlns:wp="http://purl.oclc.org/ooxml/drawingml/wordprocessingDrawing"WP><wp:extent cx="2in" cy="1in"/><wp:docPr id="1" name="p"/><a:graphic xmlns:a="http://purl.oclc.org/ooxml/drawingml/main"><a:graphicData uri="http://purl.oclc.org/ooxml/drawingml/picture"><pic:pic xmlns:pic="http://purl.oclc.org/ooxml/drawingml/picture"PIC><pic:blipFill><a:blip r:embed="rIdNone"A/></pic:blipFill><pic:spPr/></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body></w:document>"#;
+    let must = r#" mc:MustUnderstand="w14""#;
+    for at in ["WP", "PIC", "A"] {
+        let mut xml = strict.replace(&format!("\"{at}>"), &format!("\"{must}>"));
+        xml = xml.replace(&format!("\"{at}/>"), &format!("\"{must}/>"));
+        for other in ["WP", "PIC", "A"] {
+            xml = xml
+                .replace(&format!("\"{other}>"), "\">")
+                .replace(&format!("\"{other}/>"), "\"/>");
+        }
+        match Document::from_bytes(package(DOCUMENT, &xml, &[])) {
+            Err(Error::Unsupported(message)) => {
+                assert!(message.contains("mc:MustUnderstand"), "{at}: {message}")
+            }
+            other => panic!("{at} gave {other:?}"),
+        }
+    }
+}
