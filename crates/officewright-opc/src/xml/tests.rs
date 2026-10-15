@@ -121,6 +121,71 @@ fn decodes_utf8_and_utf16_with_and_without_byte_order_marks() {
 }
 
 #[test]
+fn decodes_utf16_into_the_room_it_needs_with_line_ends_normalised() {
+    // Text of one, two, three and four UTF-8 bytes a character, and line ends of every
+    // kind, among them a carriage return at the very end (#99).
+    let body = format!("a\r\nЖ\r中\n😀{}\r", "中".repeat(10_000));
+    let xml = format!("<a>{body}</a>\r\n\r");
+    for unit in [u16::to_le_bytes, u16::to_be_bytes] {
+        let bom = unit(0xFEFF);
+        let bytes: Vec<u8> = bom
+            .into_iter()
+            .chain(xml.encode_utf16().flat_map(unit))
+            .collect();
+        let input = Input::decode(&bytes).unwrap();
+        let expected = xml.replace("\r\n", "\n").replace('\r', "\n");
+        assert_eq!(input.as_str(), expected);
+        // The room of the text before normalisation, which is the text's length and one
+        // byte for each line end of two characters.
+        assert_eq!(input.capacity(), expected.len() + 2);
+    }
+    // Without line ends the room is the text's length exactly, for characters at every
+    // edge of the length in UTF-8: 1, 2 and 3 bytes, the code points around the
+    // surrogates, and characters beyond the BMP, which UTF-16 writes as pairs.
+    let xml = format!(
+        "<a>\u{7F}\u{80}\u{7FF}\u{800}\u{D7FF}\u{E000}\u{FFFD}\u{10000}\u{10FFFF}{}</a>",
+        "中".repeat(10_000)
+    );
+    for unit in [u16::to_le_bytes, u16::to_be_bytes] {
+        let bytes: Vec<u8> = unit(0xFEFF)
+            .into_iter()
+            .chain(xml.encode_utf16().flat_map(unit))
+            .collect();
+        let input = Input::decode(&bytes).unwrap();
+        assert_eq!(input.as_str(), xml);
+        assert_eq!(input.capacity(), xml.len());
+    }
+    // UTF-8 is borrowed unless a line end needs normalising.
+    assert_eq!(Input::decode(b"<a>\n</a>").unwrap().capacity(), 0);
+    let input = Input::decode(b"<a>\r\n</a>").unwrap();
+    assert_eq!(input.as_str(), "<a>\n</a>");
+    // After a byte order mark too.
+    let input = Input::decode(b"\xEF\xBB\xBF<a>\r\n\r</a>").unwrap();
+    assert_eq!(input.as_str(), "<a>\n\n</a>");
+}
+
+#[test]
+fn decodes_with_at_most_one_copy_of_the_text() {
+    // A UTF-16 part is decoded with its line ends normalised in the one copy it needs; UTF-8
+    // is copied only to normalise a line end (#99).
+    let copies = |bytes: &[u8]| {
+        let before = input::COPIES.get();
+        Input::decode(bytes).unwrap();
+        input::COPIES.get() - before
+    };
+    let utf16 = |text: &str| -> Vec<u8> {
+        [0xFF, 0xFE]
+            .into_iter()
+            .chain(text.encode_utf16().flat_map(u16::to_le_bytes))
+            .collect()
+    };
+    assert_eq!(copies(&utf16("<a>\r\n中\r</a>")), 1);
+    assert_eq!(copies(&utf16("<a>中</a>")), 1);
+    assert_eq!(copies(b"<a>\r\n</a>"), 1);
+    assert_eq!(copies(b"<a>\n</a>"), 0);
+}
+
+#[test]
 fn rejects_bytes_that_are_not_utf8_or_utf16() {
     let message = |bytes: &[u8]| match Input::decode(bytes) {
         Err(Error::Xml {
@@ -132,6 +197,17 @@ fn rejects_bytes_that_are_not_utf8_or_utf16() {
         other => panic!("expected an xml error, got {other:?}"),
     };
     assert_eq!(message(b"<a>\n\xC3</a>"), "2:1: invalid UTF-8");
+    // A carriage return ends a line in an error's place, as in the decoded text.
+    assert_eq!(message(b"a\rb\xC3"), "2:2: invalid UTF-8");
+    assert_eq!(
+        message(b"<a>\r\x01</a>"),
+        "2:1: character U+0001 is not allowed in XML"
+    );
+    // The characters of a UTF-16 part are checked too.
+    assert_eq!(
+        message(b"\xFF\xFE<\x00\x01\x00"),
+        "1:2: character U+0001 is not allowed in XML"
+    );
     assert_eq!(message(b"\xFF\xFE<\x00\x00\xD8"), "1:2: invalid UTF-16");
     assert_eq!(
         message(b"\xFF\xFE<\x00a"),
