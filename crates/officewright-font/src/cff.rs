@@ -414,10 +414,16 @@ const MAX_FONT_DICTS: usize = 255;
 /// Noto Sans CJK SC and Noto Serif CJK SC have 18 Font DICTs and 526 to 605 bytes.
 const MAX_PRIVATE_BYTES: usize = 1 << 20;
 
+/// The most ranges an FDSelect of format 3 may declare. subsetter 0.2.6 finds the Font
+/// DICT of each glyph it keeps by going through the ranges in order, twice, and the walk
+/// does it once, so a font kept whole costs up to 65,535 times this. Real fonts declare a
+/// few hundred: Noto Sans CJK SC 118, Noto Serif CJK SC 221.
+const MAX_FD_SELECT_RANGES: usize = 2048;
+
 /// Fails if the subsetter would panic on the `CFF ` table it takes from `font` (its file
 /// `data`) when it keeps `glyphs`, or would spend more on it than the library allows:
-/// when the table is CID-keyed with more Font DICTs than it takes, or Private DICTs past
-/// [`MAX_PRIVATE_BYTES`]; when a DICT it writes back has a real number too large for it;
+/// when the table is CID-keyed with more Font DICTs than it takes, Private DICTs past
+/// [`MAX_PRIVATE_BYTES`] or an FDSelect of more than [`MAX_FD_SELECT_RANGES`] ranges; when a DICT it writes back has a real number too large for it;
 /// when a glyph it decompiles declares more stem hints than it can count; or if
 /// decompiling the glyphs takes more than [`MAX_STEPS`]. Where the subsetter fails on the
 /// table before it writes or decompiles anything, the table is left to it. The subsetter
@@ -449,6 +455,16 @@ fn check_within(
                 source: Cause::new(format!(
                     "the CFF table has {count} Font DICTs, more than the subsetter takes \
                      ({MAX_FONT_DICTS})"
+                )),
+            });
+        }
+        Some(Read::FdSelectRanges(ranges)) => {
+            return Err(Error::TableOverLimit {
+                face,
+                table: "CFF ",
+                source: Cause::new(format!(
+                    "the FDSelect declares {ranges} ranges, more than the \
+                     {MAX_FD_SELECT_RANGES} read before subsetting"
                 )),
             });
         }
@@ -506,6 +522,9 @@ enum Read<'a> {
     /// Font DICTs whose Private operators point at this many bytes of Private DICTs in
     /// all, more than [`MAX_PRIVATE_BYTES`].
     PrivateBytes(usize),
+    /// An FDSelect of format 3 that declares this many ranges, more than
+    /// [`MAX_FD_SELECT_RANGES`].
+    FdSelectRanges(usize),
 }
 
 /// What the subsetter decompiles glyphs with, read as `Table::parse` in its
@@ -570,7 +589,14 @@ impl<'a> Programs<'a> {
                 0 => {
                     fd_select.get(1..glyph_count.checked_add(1)?)?;
                 }
-                3 => {}
+                // Ranges of glyphs; the subsetter goes through them for every glyph it keeps,
+                // twice, and so does the walk, once.
+                3 => {
+                    let ranges = usize::from(u16_at(fd_select, 1)?);
+                    if ranges > MAX_FD_SELECT_RANGES {
+                        return Some(Read::FdSelectRanges(ranges));
+                    }
+                }
                 _ => return None,
             }
             let count = (0..font_dicts.len())
@@ -1468,6 +1494,42 @@ mod tests {
         assert!(
             matches!(err, Error::MalformedTable { table: "CFF ", .. }),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn bounds_the_ranges_of_an_fd_select() {
+        // An FDSelect of format 3 for the five glyphs, one range each, then empty ranges
+        // that start at the sentinel, 5: 2,048 ranges are read, 2,049 are refused.
+        let fd_select = |ranges: u16| {
+            let mut select = vec![3];
+            select.extend(ranges.to_be_bytes());
+            for first in (0..5).chain(std::iter::repeat_n(5, usize::from(ranges) - 5)) {
+                select.extend(u16::to_be_bytes(first));
+                select.push(0);
+            }
+            select.extend(5u16.to_be_bytes());
+            select
+        };
+        let font = |ranges| {
+            Spec {
+                glyphs: glyphs_with(4, vec![14]),
+                local: vec![vec![]],
+                fd_select: Some(fd_select(ranges)),
+                ..Spec::default()
+            }
+            .build()
+        };
+        assert!(!subsetter_panics(font(2048), &[4]));
+        subset_glyphs(font(2048), &[4]).unwrap();
+        let err = subset_glyphs(font(2049), &[4]).unwrap_err();
+        assert!(
+            matches!(err, Error::TableOverLimit { table: "CFF ", .. }),
+            "{err}"
+        );
+        assert_eq!(
+            std::error::Error::source(&err).unwrap().to_string(),
+            "the FDSelect declares 2049 ranges, more than the 2048 read before subsetting"
         );
     }
 
