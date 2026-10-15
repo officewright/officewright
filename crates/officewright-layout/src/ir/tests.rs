@@ -951,6 +951,25 @@ fn every_length_that_wordprocessingml_keeps_unsigned_is_checked() {
         "sections[0].columns.widths[45].width: NaN is not a finite length"
     );
     assert_clamp_leaves_alone(&mut document, "a 46th column that is not a number wide");
+    let mut document = in_columns(Columns::default().with_widths(columns_ending_with(
+        Column::default().with_width(Pt(f64::INFINITY)),
+    )));
+    assert_eq!(
+        invalid(&document),
+        "sections[0].columns.widths[45].width: inf is not a finite length"
+    );
+    assert_clamp_leaves_alone(&mut document, "a 46th column infinitely wide");
+    // A rejected column among the first 45 keeps the columns past them too.
+    let mut columns = columns_ending_with(Column::default().with_width(Pt(10.0)));
+    if let Some(first) = columns.first_mut() {
+        *first = Column::default().with_width(minus);
+    }
+    let mut document = in_columns(Columns::default().with_widths(columns));
+    assert_eq!(
+        invalid(&document),
+        "sections[0].columns.widths[0].width: -1 pt is negative"
+    );
+    assert_clamp_leaves_alone(&mut document, "46 columns, the first -1 pt wide");
 
     for (size, problem) in [
         (
