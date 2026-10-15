@@ -38,5 +38,5 @@ pub use font::{
     WinMetrics,
 };
 pub use resolve::{FontRequest, FontResolver, GenericFamily, Resolution, ResolutionKind};
-pub use subset::Subset;
+pub use subset::{Subset, SubsetBudget};
 pub use system::system_font_dirs;

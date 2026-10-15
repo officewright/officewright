@@ -404,6 +404,31 @@ pub unsafe extern "C" fn ow_pdf_document_set_compression(
     })
 }
 
+/// Sets how much reducing the document's embedded fonts to the glyphs it shows may read
+/// of their CFF charstrings in all, in operands, operators and hint mask bytes:
+/// 33,554,432 unless set otherwise, room for two of the largest CJK fonts kept whole. The
+/// fonts are reduced when the document is saved, one after another in the order the pages
+/// first use them, and every subset is kept until the file is: a unit costs about 30
+/// bytes of memory while its font is reduced and about 5 bytes after. Fonts with TrueType
+/// outlines take nothing from the budget. Saving fails with `OW_STATUS_LIMIT_EXCEEDED`
+/// at the first font past what is left.
+///
+/// # Safety
+///
+/// `doc` must be NULL or a live handle not used by another thread during the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_pdf_document_set_subset_budget(
+    doc: *mut OwPdfDocument,
+    units: u64,
+) -> OwStatus {
+    guard(|| {
+        // SAFETY: the caller passes NULL or a live handle it does not share.
+        let doc = unsafe { doc_mut(doc) }?;
+        doc.set_subset_budget(units);
+        Ok(())
+    })
+}
+
 /// Writes the document as a PDF file at `path` (UTF-8), replacing any existing file.
 ///
 /// The file is generated in memory first, so a document error never touches `path`;
@@ -412,8 +437,9 @@ pub unsafe extern "C" fn ow_pdf_document_set_compression(
 /// embedded font turns out to be damaged when it is reduced to the glyphs the document
 /// uses, `OW_STATUS_LIMIT_EXCEEDED` if decompiling the glyphs the document uses of a CFF
 /// font reads more than 16,777,216 operands, operators and hint mask bytes, a limit of
-/// the library, `OW_STATUS_UNSUPPORTED` if it uses a feature that cannot be subset yet,
-/// and `OW_STATUS_IO` if the file cannot be written.
+/// the library, or more than is left of the document's subset budget
+/// (`ow_pdf_document_set_subset_budget`), `OW_STATUS_UNSUPPORTED` if it uses a feature
+/// that cannot be subset yet, and `OW_STATUS_IO` if the file cannot be written.
 ///
 /// # Safety
 ///
@@ -441,8 +467,9 @@ pub unsafe extern "C" fn ow_pdf_document_save_path(
 /// `OW_STATUS_MALFORMED` if an embedded font turns out to be damaged when it is reduced
 /// to the glyphs the document uses, `OW_STATUS_LIMIT_EXCEEDED` if decompiling the glyphs
 /// the document uses of a CFF font reads more than 16,777,216 operands, operators and
-/// hint mask bytes, and `OW_STATUS_UNSUPPORTED` if it uses a feature that cannot be
-/// subset yet.
+/// hint mask bytes, or more than is left of the document's subset budget
+/// (`ow_pdf_document_set_subset_budget`), and `OW_STATUS_UNSUPPORTED` if it uses a
+/// feature that cannot be subset yet.
 ///
 /// # Safety
 ///

@@ -3,6 +3,7 @@ use std::path::Path;
 use std::{fs, io};
 
 use officewright_core::{PageSize, Pt};
+use officewright_font::SubsetBudget;
 
 use officewright_core::Color;
 
@@ -29,13 +30,36 @@ const MIN_IMAGE_SIDE: f64 = 0.01;
 /// The largest byte offset the 10-digit fields of a cross-reference table can hold.
 const MAX_XREF_OFFSET: u64 = 9_999_999_999;
 
+/// What reducing the embedded fonts of a document may read of their CFF charstrings in
+/// all, unless set otherwise. Every subset is kept until the file is written, so without a
+/// budget for all of them, a document with nine crafted fonts, each within the limit of one
+/// subset (2^24 units, `MAX_STEPS` in officewright-font's `cff.rs`), would keep eight
+/// subsets of about 82 MB while the subsetter takes about 490 MB for the ninth (#277). The
+/// subsetter spends about 30 bytes for each unit while it reduces a font, and a subset
+/// keeps about 5 bytes for each; with this budget the subsets of a document take at most
+/// about 600 MB while they are made. It leaves room for two of the largest CJK fonts kept
+/// whole (Noto Sans CJK SC reads 16,082,053), where a document reduced to the glyphs it
+/// uses reads far less.
+const SUBSET_BUDGET: u64 = 1 << 25;
+
 /// A PDF document being built.
 ///
 /// A `Document` can be moved between threads; it has no interior mutability.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Document {
     pages: Vec<Page>,
     compression: Compression,
+    subset_budget: u64,
+}
+
+impl Default for Document {
+    fn default() -> Self {
+        Self {
+            pages: Vec::new(),
+            compression: Compression::default(),
+            subset_budget: SUBSET_BUDGET,
+        }
+    }
 }
 
 /// A page of a [`Document`].
@@ -141,6 +165,33 @@ impl Document {
         self.compression
     }
 
+    /// Sets how much reducing the embedded fonts to the glyphs the document shows may read
+    /// of their CFF charstrings in all, in operands, operators and hint mask bytes
+    /// ([`SubsetBudget`](officewright_font::SubsetBudget)): 33,554,432 unless set
+    /// otherwise, room for two of the largest CJK fonts kept whole. The fonts are reduced
+    /// when the document is written, one after another in the order the pages first use
+    /// them, and each subset is kept until the file is: a unit costs about 30 bytes of
+    /// memory while its font is reduced and about 5 bytes after. Fonts with TrueType
+    /// outlines take nothing from the budget.
+    ///
+    /// ```
+    /// use officewright_pdf::Document;
+    ///
+    /// let mut doc = Document::new();
+    /// assert_eq!(doc.subset_budget(), 33_554_432);
+    /// doc.set_subset_budget(1 << 20);
+    /// assert_eq!(doc.subset_budget(), 1 << 20);
+    /// ```
+    pub fn set_subset_budget(&mut self, units: u64) {
+        self.subset_budget = units;
+    }
+
+    /// How much reducing the embedded fonts may read of their CFF charstrings in all; see
+    /// [`set_subset_budget`](Self::set_subset_budget).
+    pub fn subset_budget(&self) -> u64 {
+        self.subset_budget
+    }
+
     /// Writes the document as a PDF file to `out`.
     ///
     /// Embedded fonts are reduced to the glyphs the document shows now, unless a font's
@@ -156,7 +207,9 @@ impl Document {
     ///
     /// [`Error::NoPages`] if the document has no pages, [`Error::Embed`] if an embedded
     /// font turns out to be damaged when it is reduced, or its glyphs the document uses
-    /// are past a limit of the library, [`Error::TooLarge`] if the file
+    /// are past a limit of the library or past what is left of the
+    /// [subset budget](Self::set_subset_budget) after the fonts reduced before it,
+    /// [`Error::TooLarge`] if the file
     /// would exceed 10<sup>10</sup> bytes, and [`Error::Io`] if writing fails.
     pub fn write_to(&self, out: impl Write) -> Result<()> {
         if self.pages.is_empty() {
@@ -229,11 +282,17 @@ impl Document {
                 }
             }
         }
+        // The fonts share one budget, since all their subsets are kept until the file is
+        // written.
+        let mut budget = SubsetBudget::new(self.subset_budget);
         let encoders = fonts
             .iter()
             .zip(usages)
             .map(|(&font, usage)| match font.embedded() {
-                Some(embedded) => Ok(Encoder::Embedded(font, Prepared::new(embedded, usage)?)),
+                Some(embedded) => Ok(Encoder::Embedded(
+                    font,
+                    Prepared::new(embedded, usage, &mut budget)?,
+                )),
                 None => Ok(Encoder::Standard(font)),
             })
             .collect::<Result<Vec<_>>>()?;
