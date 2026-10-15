@@ -922,8 +922,9 @@ enum OwStatus ow_render_options_add_font_dir(struct OwRenderOptions *options, co
  * `data`, which the library copies; its fonts are used before the folders' and the
  * system's. Fails with `OW_STATUS_MALFORMED` if the data is not a font or every face in
  * it is damaged, leaving the options unchanged. The check reads what identifies the
- * font, not every glyph: a font damaged deeper is accepted here, and the conversion that
- * embeds it fails with `OW_STATUS_MALFORMED`.
+ * font, not every glyph: a font damaged deeper is accepted here. The conversion that
+ * embeds it then fails with `OW_STATUS_MALFORMED`, or, when the font cannot be embedded
+ * at all, reports it (`OW_REPORT_KIND_FONT_EMBEDDING`) and does not draw its text.
  *
  * # Safety
  *
@@ -984,9 +985,8 @@ enum OwStatus ow_layout_report_len(const struct OwLayoutReport *report, size_t *
  * Returns entry `index` (counting from 0) of `report`: its kind, an `OW_REPORT_KIND_*`
  * value, in `*out_kind`; where it is in the document, as a path such as
  * `sections[0].blocks[3]`, or `document` for the document as a whole, in
- * `*out_location`; and
- * what happened, a sentence, in `*out_message`. Both strings are UTF-8 and owned by the
- * report: they stay valid until it is freed.
+ * `*out_location`; and what happened, a sentence, in `*out_message`. Both strings are
+ * UTF-8 and owned by the report: they stay valid until it is freed.
  *
  * Fails with `OW_STATUS_INVALID_ARGUMENT` if `index` is not below the count
  * `ow_layout_report_len` gives.

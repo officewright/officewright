@@ -50,7 +50,7 @@ impl fmt::Display for Error {
                 write!(f, "{location}: tables are nested more than {limit} deep")
             }
             Self::TooManyPages { limit } => {
-                write!(f, "the document takes more than {limit} pages")
+                write!(f, "the document takes more pages than the limit of {limit}")
             }
             #[cfg(feature = "pdf")]
             Self::Pdf { .. } => write!(f, "the PDF could not be made"),
