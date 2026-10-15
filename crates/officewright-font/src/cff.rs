@@ -1551,12 +1551,14 @@ mod tests {
         // An FDSelect of format 3 at the end of the table, cut off after its format or
         // within its count of ranges: the subsetter takes the table, and with 256 Font
         // DICTs it panics (subsetter#34), so the count of Font DICTs still refuses it.
+        // With one Font DICT the table is left to the subsetter, which finds it damaged;
+        // a count it cannot read is no count past the limit.
         let format3 = [3, 0, 2, 0, 0, 0, 0, 3, 1, 0, 5];
-        for cut in [&[3][..], &[3, 0]] {
+        for (font_dicts, cut) in [(256, &[3][..]), (256, &[3, 0]), (1, &[3]), (1, &[3, 0])] {
             let mut cff = programs(
                 &glyphs_with(4, vec![14]),
                 &[],
-                &vec![vec![]; 256],
+                &vec![vec![]; font_dicts],
                 Some(&format3),
             );
             // The FDSelect operator, a five-byte integer and 12 37, in the Top DICT.
@@ -1567,6 +1569,11 @@ mod tests {
             let offset = int5(cff.len());
             cff.splice(at..at + 5, offset);
             cff.extend(cut);
+            if font_dicts == 1 {
+                let err = subset_glyphs(cff, &[4]).unwrap_err();
+                assert!(matches!(err, Error::Subset { .. }), "{cut:?}: {err}");
+                continue;
+            }
             if cfg!(debug_assertions) {
                 assert!(subsetter_panics(cff.clone(), &[4]), "{cut:?}");
             }
