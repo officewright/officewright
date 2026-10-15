@@ -31,7 +31,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (Some(dir), Some(family), Some(text)) = (args.next(), args.next(), args.next()) else {
         return Err(usage.into());
     };
-    let mut style = RunStyle::default().with_fonts(RunFonts::new(&family));
+    let mut style = RunStyle::default().with_fonts(RunFonts::new(family.as_str()));
     let mut symbols = Vec::new();
     let mut width = None;
     let mut alignment = Alignment::Start;
