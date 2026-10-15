@@ -414,9 +414,8 @@ enum OwStatus ow_pdf_document_set_compression(struct OwPdfDocument *doc, int32_t
  * an I/O error while writing can leave a partial file. Fails with
  * `OW_STATUS_INVALID_ARGUMENT` if the document has no pages, `OW_STATUS_MALFORMED` if an
  * embedded font turns out to be damaged when it is reduced to the glyphs the document
- * uses, `OW_STATUS_LIMIT_EXCEEDED` if one is past a limit of the library (`name`
- * records that point at more than 1 MiB of strings), `OW_STATUS_UNSUPPORTED` if it uses
- * a feature that cannot be subset yet, and `OW_STATUS_IO` if the file cannot be written.
+ * uses, `OW_STATUS_UNSUPPORTED` if it uses a feature that cannot be subset yet, and
+ * `OW_STATUS_IO` if the file cannot be written.
  *
  * # Safety
  *
@@ -431,9 +430,8 @@ enum OwStatus ow_pdf_document_save_path(const struct OwPdfDocument *doc, const c
  *
  * Fails with `OW_STATUS_INVALID_ARGUMENT` if the document has no pages,
  * `OW_STATUS_MALFORMED` if an embedded font turns out to be damaged when it is reduced
- * to the glyphs the document uses, `OW_STATUS_LIMIT_EXCEEDED` if one is past a limit of
- * the library, and `OW_STATUS_UNSUPPORTED` if it uses a feature that cannot be subset
- * yet.
+ * to the glyphs the document uses, and `OW_STATUS_UNSUPPORTED` if it uses a feature
+ * that cannot be subset yet.
  *
  * # Safety
  *
@@ -818,9 +816,11 @@ enum OwStatus ow_doc_document_open_bytes(const uint8_t *data,
  * Fails with `OW_STATUS_IO` if the file cannot be written or a font folder of the
  * options cannot be read, `OW_STATUS_MALFORMED` if a font the PDF embeds is damaged
  * where only embedding looks (a glyph's outline, say), and `OW_STATUS_LIMIT_EXCEEDED`
- * if the document takes more pages than the options allow, nests tables deeper than
- * the layout follows, or embeds a font past a limit of the font reader. `OW_STATUS_INVALID_ARGUMENT` here would mean that officewright
- * translated the document wrongly, a defect worth reporting with the document.
+ * if the document takes more pages than the options allow or nests tables deeper than
+ * the layout follows. `OW_STATUS_INVALID_ARGUMENT` here would mean that officewright
+ * translated the document wrongly, a defect worth reporting with the document. A font
+ * that `ow_pdf_font_open_bytes` would refuse is no error here: its text is not drawn,
+ * and the report says so (`OW_REPORT_KIND_FONT_EMBEDDING`).
  *
  * # Safety
  *

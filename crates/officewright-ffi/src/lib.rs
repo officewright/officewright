@@ -410,9 +410,8 @@ pub unsafe extern "C" fn ow_pdf_document_set_compression(
 /// an I/O error while writing can leave a partial file. Fails with
 /// `OW_STATUS_INVALID_ARGUMENT` if the document has no pages, `OW_STATUS_MALFORMED` if an
 /// embedded font turns out to be damaged when it is reduced to the glyphs the document
-/// uses, `OW_STATUS_LIMIT_EXCEEDED` if one is past a limit of the library (`name`
-/// records that point at more than 1 MiB of strings), `OW_STATUS_UNSUPPORTED` if it uses
-/// a feature that cannot be subset yet, and `OW_STATUS_IO` if the file cannot be written.
+/// uses, `OW_STATUS_UNSUPPORTED` if it uses a feature that cannot be subset yet, and
+/// `OW_STATUS_IO` if the file cannot be written.
 ///
 /// # Safety
 ///
@@ -438,9 +437,8 @@ pub unsafe extern "C" fn ow_pdf_document_save_path(
 ///
 /// Fails with `OW_STATUS_INVALID_ARGUMENT` if the document has no pages,
 /// `OW_STATUS_MALFORMED` if an embedded font turns out to be damaged when it is reduced
-/// to the glyphs the document uses, `OW_STATUS_LIMIT_EXCEEDED` if one is past a limit of
-/// the library, and `OW_STATUS_UNSUPPORTED` if it uses a feature that cannot be subset
-/// yet.
+/// to the glyphs the document uses, and `OW_STATUS_UNSUPPORTED` if it uses a feature
+/// that cannot be subset yet.
 ///
 /// # Safety
 ///
@@ -1273,9 +1271,11 @@ pub unsafe extern "C" fn ow_doc_document_open_bytes(
 /// Fails with `OW_STATUS_IO` if the file cannot be written or a font folder of the
 /// options cannot be read, `OW_STATUS_MALFORMED` if a font the PDF embeds is damaged
 /// where only embedding looks (a glyph's outline, say), and `OW_STATUS_LIMIT_EXCEEDED`
-/// if the document takes more pages than the options allow, nests tables deeper than
-/// the layout follows, or embeds a font past a limit of the font reader. `OW_STATUS_INVALID_ARGUMENT` here would mean that officewright
-/// translated the document wrongly, a defect worth reporting with the document.
+/// if the document takes more pages than the options allow or nests tables deeper than
+/// the layout follows. `OW_STATUS_INVALID_ARGUMENT` here would mean that officewright
+/// translated the document wrongly, a defect worth reporting with the document. A font
+/// that `ow_pdf_font_open_bytes` would refuse is no error here: its text is not drawn,
+/// and the report says so (`OW_REPORT_KIND_FONT_EMBEDDING`).
 ///
 /// # Safety
 ///
@@ -2837,6 +2837,42 @@ mod tests {
         font
     }
 
+    /// The minimal font with a new `name` table: the family, and `copies` records that
+    /// the subsetter keeps (copyright, Windows Unicode) pointing at one string of 32,768
+    /// bytes. With the family's 8 bytes, 31 copies point at less than 1 MiB of strings
+    /// and 32 at more.
+    fn minimal_font_with_name_copies(copies: u16) -> Vec<u8> {
+        let mut font = fs::read(minimal_font_path()).unwrap();
+        font.resize(font.len().next_multiple_of(4), 0);
+        let count = copies + 1;
+        let mut name = [0u16, count, 6 + 12 * count]
+            .iter()
+            .flat_map(|value| value.to_be_bytes())
+            .collect::<Vec<u8>>();
+        let mut record = |id: u16, length: u16, offset: u16| {
+            for value in [3, 1, 0x0409, id, length, offset] {
+                name.extend(u16::to_be_bytes(value));
+            }
+        };
+        record(1, 8, 0);
+        for _ in 0..copies {
+            record(0, 32_768, 8);
+        }
+        name.extend("Test".encode_utf16().flat_map(u16::to_be_bytes));
+        name.extend([0, b'A'].repeat(16_384));
+        let tables = usize::from(u16::from_be_bytes([font[4], font[5]]));
+        let entry = (0..tables)
+            .map(|i| 12 + 16 * i)
+            .find(|&entry| &font[entry..entry + 4] == b"name")
+            .unwrap();
+        let offset = u32::try_from(font.len()).unwrap();
+        let length = u32::try_from(name.len()).unwrap();
+        font[entry + 8..entry + 12].copy_from_slice(&offset.to_be_bytes());
+        font[entry + 12..entry + 16].copy_from_slice(&length.to_be_bytes());
+        font.extend(name);
+        font
+    }
+
     fn open_bytes(data: &[u8]) -> (OwStatus, *mut OwPdfFont) {
         let mut font: *mut OwPdfFont = placeholder();
         // SAFETY: `data` is valid for its length; a valid out-pointer.
@@ -2950,6 +2986,23 @@ mod tests {
             );
             assert_eq!(last_error(), "out_font is null");
         }
+    }
+
+    #[test]
+    fn a_font_past_a_limit_of_the_library_is_refused_as_a_limit() {
+        let (status, font) = open_bytes(&minimal_font_with_name_copies(31));
+        assert_eq!(status, OwStatus::Ok, "{}", last_error());
+        // SAFETY: a live handle, freed once.
+        unsafe { ow_pdf_font_free(font) };
+        let (status, font) = open_bytes(&minimal_font_with_name_copies(32));
+        assert_eq!(status, OwStatus::LimitExceeded, "{}", last_error());
+        assert!(font.is_null());
+        assert_eq!(
+            last_error(),
+            "cannot use the font data: font face 0: table 'name' is past a limit of the \
+             library: the name records to keep point at 1048584 bytes of strings, more \
+             than the 1048576 read before subsetting"
+        );
     }
 
     #[test]

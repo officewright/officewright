@@ -190,15 +190,28 @@ mod tests {
         table
     }
 
+    /// Why the test font with `name` as its `name` table is refused as damaged, by a rule
+    /// about the subsetter's offsets; `None` if it subsets. Any other error fails the test.
     fn subset_error(name: Vec<u8>) -> Option<String> {
+        refusal_of(name, false)
+    }
+
+    /// Why it is refused as past the 1 MiB rule, a limit of ours; `None` if it subsets.
+    fn limit_error(name: Vec<u8>) -> Option<String> {
+        refusal_of(name, true)
+    }
+
+    fn refusal_of(name: Vec<u8>, limit: bool) -> Option<String> {
         let data = TestFont::new("Test Sans").with_table(b"name", name).build();
         let font = FontFace::from_bytes(data, 0).unwrap();
         match font.subset([]) {
             Ok(_) => None,
-            Err(
-                err @ (Error::MalformedTable { table: "name", .. }
-                | Error::TableOverLimit { table: "name", .. }),
-            ) => Some(std::error::Error::source(&err).unwrap().to_string()),
+            Err(err @ Error::MalformedTable { table: "name", .. }) if !limit => {
+                Some(std::error::Error::source(&err).unwrap().to_string())
+            }
+            Err(err @ Error::TableOverLimit { table: "name", .. }) if limit => {
+                Some(std::error::Error::source(&err).unwrap().to_string())
+            }
             Err(err) => panic!("{err}"),
         }
     }
@@ -306,7 +319,7 @@ mod tests {
             officewright_core::Error::LimitExceeded(_)
         ));
         assert_eq!(
-            subset_error(raw_name_table(&records(Some(1)), &storage)).as_deref(),
+            limit_error(raw_name_table(&records(Some(1)), &storage)).as_deref(),
             Some(
                 "the name records to keep point at 1048577 bytes of strings, more than the \
                  1048576 read before subsetting"
@@ -328,7 +341,7 @@ mod tests {
         let mut outside = records(Some(1));
         outside.insert(0, (3, 1, 1, 2, 40_000));
         assert!(
-            subset_error(raw_name_table(&outside, &storage))
+            limit_error(raw_name_table(&outside, &storage))
                 .is_some_and(|err| err.contains("1048579 bytes"))
         );
     }
