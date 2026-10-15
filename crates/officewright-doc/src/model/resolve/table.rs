@@ -195,21 +195,21 @@ fn default_look() -> TableLook {
 }
 
 /// The band of `size` items, counted from 0, that holds the item at `at` among `count`,
-/// and whether the item is the band's first and its last; with `skip_first` and
-/// `skip_last` items at the ends out of the bands. None for an item outside the bands or
-/// when the size is 0, which Word takes for no bands (MS-OI29500 §17.7.6.5(c),
-/// §17.7.6.7(b)). Leaving the first and last row or column out of the bands when they
-/// are formatted on their own is what Word's built-in styles show; our choice, not yet
-/// confirmed against Word (#172).
+/// and whether the item is the band's first and its last; with the first `skip_first`
+/// items and, with `skip_last`, the last one out of the bands. None for an item outside
+/// the bands or when the size is 0, which Word takes for no bands (MS-OI29500
+/// §17.7.6.5(c), §17.7.6.7(b)). Word leaves the first and last row or column out of the
+/// bands when they are formatted on their own, and every header row (#300):
+/// word-rules/E-table-style-bands.docx and E-table-style-header-rows-on.docx.
 fn band(
     at: usize,
     count: usize,
     size: i64,
-    skip_first: bool,
+    skip_first: usize,
     skip_last: bool,
 ) -> Option<(usize, bool, bool)> {
     let size = usize::try_from(size).ok().filter(|&size| size > 0)?;
-    let first = usize::from(skip_first);
+    let first = skip_first;
     let end = count.checked_sub(usize::from(skip_last))?;
     if at < first || at >= end {
         return None;
@@ -270,8 +270,8 @@ impl<'a> Formats<'a> {
     }
 
     /// The options of the table's `w:tblLook` in effect, each given: Word's 0x04A0 when
-    /// the table has none (MS-OI29500 §17.4.55(a)), and off for an option a `w:tblLook`
-    /// leaves out.
+    /// the table has none (MS-OI29500 §17.4.55(a)), and on for an option a `w:tblLook`
+    /// that writes another one leaves out, as Word takes it.
     pub fn table_look(&mut self, table: Table<'a>) -> TableLook {
         let (document, index) = table.place();
         if !std::ptr::eq(document, self.document) {
@@ -455,37 +455,66 @@ impl<'a> Formats<'a> {
             .map(|style| style.whole.table.clone())
             .unwrap_or_default();
         properties.overlay(&own.without_band_sizes());
-        let look = properties.look.map_or_else(default_look, |look| TableLook {
-            first_row: Some(look.first_row.unwrap_or(false)),
-            last_row: Some(look.last_row.unwrap_or(false)),
-            first_column: Some(look.first_column.unwrap_or(false)),
-            last_column: Some(look.last_column.unwrap_or(false)),
-            no_horizontal_bands: Some(look.no_horizontal_bands.unwrap_or(false)),
-            no_vertical_bands: Some(look.no_vertical_bands.unwrap_or(false)),
+        // Once one of the six options is written, Word ignores the mask of w:val
+        // (MS-OI29500 §17.4.55(c)) and takes each option not written as on:
+        // word-rules/E-table-style-look.docx, cases 05 and 06, and the copy Word saved
+        // of it (#300). A w:tblLook with neither is taken as all off, which no render
+        // shows yet.
+        let look = properties.look.map_or_else(default_look, |look| {
+            let written = [
+                look.first_row,
+                look.last_row,
+                look.first_column,
+                look.last_column,
+                look.no_horizontal_bands,
+                look.no_vertical_bands,
+            ]
+            .iter()
+            .any(Option::is_some);
+            let option = |option: Option<bool>| Some(option.unwrap_or(written));
+            TableLook {
+                first_row: option(look.first_row),
+                last_row: option(look.last_row),
+                first_column: option(look.first_column),
+                last_column: option(look.last_column),
+                no_horizontal_bands: option(look.no_horizontal_bands),
+                no_vertical_bands: option(look.no_vertical_bands),
+            }
         });
         let on = |option: Option<bool>| option.unwrap_or(false);
         let (first_row, last_row) = (on(look.first_row), on(look.last_row));
         let (first_column, last_column) = (on(look.first_column), on(look.last_column));
-        // Word keeps a band size within 0 to 3 (MS-OI29500 §17.7.6.5(a), §17.7.6.7(c));
-        // taking a larger one as 3 is our choice (#172).
+        // MS-OI29500 §17.7.6.5(a) and §17.7.6.7(c) say Word keeps a band size within 0
+        // to 3, but Word bands by a larger size as written, and keeps it when it saves:
+        // word-rules/E-table-style-bands-5.docx bands rows by 5 (#300).
         let band_size = |no_bands: Option<bool>, size: Option<i64>| {
-            if on(no_bands) {
-                0
-            } else {
-                size.unwrap_or(0).min(3)
-            }
+            if on(no_bands) { 0 } else { size.unwrap_or(0) }
         };
         let row_band = band_size(look.no_horizontal_bands, properties.row_band_size);
         let column_band = band_size(look.no_vertical_bands, properties.column_band_size);
         let rows: Vec<TableRow<'a>> = table.rows().collect();
+        // With the first row's format on, every header row (w:tblHeader) at the top of
+        // the table takes it, and the row bands start after the last of them, whatever
+        // differentiateMultirowTableHeaders says: word-rules/E-table-style-header-rows-on
+        // and -off.docx (#300). The header rows make one group for the format's borders,
+        // and each takes the corner formats; no render shows those yet (#298).
+        let header_rows = if first_row {
+            rows.iter()
+                .take_while(|row| row.properties().header() == Some(true))
+                .count()
+                .max(1)
+        } else {
+            0
+        };
         let mut row_conditions = HashMap::new();
         let mut cell_places = HashMap::new();
         for (at, row) in rows.iter().enumerate() {
             let top = at == 0;
             let bottom = at + 1 == rows.len();
-            let row_band = band(at, rows.len(), row_band, first_row, last_row);
+            let header = at < header_rows;
+            let row_band = band(at, rows.len(), row_band, header_rows, last_row);
             let mut conditions = 0;
-            if first_row && top {
+            if header {
                 conditions |= bit(TableStyleCondition::FirstRow);
             }
             if last_row && bottom {
@@ -517,9 +546,13 @@ impl<'a> Formats<'a> {
                     );
                     place.meets(condition, edge_bits(first, last, left, right));
                 }
-                if let Some((band, first, last)) =
-                    band(column, cells.len(), column_band, first_column, last_column)
-                {
+                if let Some((band, first, last)) = band(
+                    column,
+                    cells.len(),
+                    column_band,
+                    usize::from(first_column),
+                    last_column,
+                ) {
                     let condition = band_condition(
                         band,
                         TableStyleCondition::OddColumnBand,
@@ -539,10 +572,10 @@ impl<'a> Formats<'a> {
                         edge_bits(top, bottom, true, true),
                     );
                 }
-                if first_row && top {
+                if header {
                     place.meets(
                         TableStyleCondition::FirstRow,
-                        edge_bits(true, true, left, right),
+                        edge_bits(top, at + 1 == header_rows, left, right),
                     );
                 }
                 if last_row && bottom {
@@ -556,12 +589,12 @@ impl<'a> Formats<'a> {
                 for (corner, row_on, column_on) in [
                     (
                         TableStyleCondition::TopLeftCell,
-                        first_row && top,
+                        header,
                         first_column && left,
                     ),
                     (
                         TableStyleCondition::TopRightCell,
-                        first_row && top,
+                        header,
                         last_column && right,
                     ),
                     (
