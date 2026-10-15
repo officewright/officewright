@@ -486,6 +486,8 @@ class Cleaning(unittest.TestCase):
                 '<Default Extension="ocx" ContentType="application/vnd.ms-office.activeX;v=1"/>'),
             "a percent-encoded Default extension": types(
                 '<Default Extension="%6Fcx" ContentType="application/vnd.ms-office.activeX"/>'),
+            "a Default extension that the part name percent-encodes": types(
+                '<Default Extension="ocx" ContentType="application/vnd.ms-office.activeX"/>'),
         }
         for kind in ("control", "font", "oleObject", "package"):
             spellings[f"the Strict relationship type {kind}"] = rels(
@@ -498,9 +500,11 @@ class Cleaning(unittest.TestCase):
                          "word/document.xml": b"<w:document xmlns:w='w'/>"}
                 if "Default" in label:
                     # Found by its extension, not by a relationship or an Override.
-                    parts = {**package_parts, "word/controls/c1.ocx": b"\x00",
+                    name = ("word/controls/c1.%6Fcx" if "part name" in label
+                            else "word/controls/c1.ocx")
+                    parts = {**package_parts, name: b"\x00",
                              "word/document.xml": b"<w:document xmlns:w='w'/>"}
-                    self.assertEqual(public.embedded_parts(parts), ["word/controls/c1.ocx"])
+                    self.assertEqual(public.embedded_parts(parts), [name])
                     continue
                 self.assertEqual(public.embedded_parts(parts), ["word/controls/c1.xml"])
         # Without any of them, the part is not found: the spellings above are what find it.
@@ -530,6 +534,10 @@ class Cleaning(unittest.TestCase):
             "an encoding the parser does not know": (
                 {"word/_rels/document.xml.rels":
                  f'<?xml version="1.0" encoding="x-unknown"?><Relationships xmlns="{PKG}"/>'},
+                "word/_rels/document.xml.rels is not well-formed XML"),
+            "a multi-byte encoding the parser cannot read": (
+                {"word/_rels/document.xml.rels":
+                 f'<?xml version="1.0" encoding="UTF-32"?><Relationships xmlns="{PKG}"/>'},
                 "word/_rels/document.xml.rels is not well-formed XML"),
         }
         for label, (parts, said) in cases.items():
