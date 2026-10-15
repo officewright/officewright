@@ -17,17 +17,19 @@
 //! and the Private DICT its last Private operator points to for a SID-keyed font, or for
 //! a CID-keyed one the Font DICTs of the FDArray its last FDArray operator points to, up to
 //! the first that cannot be read, each with the Private DICT its last Private operator
-//! points to. That is a little more than the subsetter writes back: of the Top DICT only
-//! FontMatrix and FontBBox. A real number past `f32::MAX` has no place in any of these, so
-//! finding one anywhere refuses the face. Where the subsetter fails to parse the table, it
-//! writes nothing back, and nothing is refused here.
+//! points to. That is more than the subsetter writes back: of the Top DICT only FontMatrix
+//! and FontBBox, and of a CID-keyed font only the Font DICTs the kept glyphs use. A real
+//! number past `f32::MAX` has no place in any of these, so finding one anywhere refuses
+//! the face. Where the subsetter fails to parse the table, it writes nothing back, and
+//! nothing is refused here.
 //!
 //! The subsetter reads the Private DICT of every Private operator of a Font DICT, to find
 //! its subroutines, and so does this check. Font DICTs may repeat the operator and share
 //! one large Private DICT, which would cost their number times its size to read here and
 //! in the subsetter (<https://github.com/officewright/officewright/issues/271>); so the
-//! sizes are added up first, and the face is refused past [`MAX_PRIVATE_BYTES`], a limit
-//! of the library.
+//! sizes are added up first, up to the first Private operator the subsetter cannot take,
+//! where it stops, and the face is refused past [`MAX_PRIVATE_BYTES`], a limit of the
+//! library.
 //!
 //! subsetter 0.2.6 also counts the stem hints of each glyph it keeps in a `u16`
 //! (`count_hints` in `src/cff/charstring.rs`), as it decompiles the glyph's charstring
@@ -515,9 +517,10 @@ struct Programs<'a> {
     local: Vec<Subroutines<'a>>,
     /// A CID-keyed font's FDSelect, from its format byte on.
     fd_select: Option<&'a [u8]>,
-    /// The DICTs whose real numbers the subsetter writes back: the Top DICT, and the
-    /// top-level Private DICT of a SID-keyed font, or each Font DICT of a CID-keyed one
-    /// with the Private DICT its last Private operator points to.
+    /// The DICTs whose real numbers the subsetter may write back: the Top DICT, and the
+    /// top-level Private DICT of a SID-keyed font whose subroutines it can read, or each
+    /// Font DICT of a CID-keyed one with the Private DICT its last Private operator points
+    /// to, also of Font DICTs no kept glyph uses.
     written: Vec<&'a [u8]>,
     /// The Font DICTs of a CID-keyed font whose Top DICT has no FontMatrix: the subsetter
     /// scales theirs by 1000.
@@ -579,14 +582,22 @@ impl<'a> Programs<'a> {
             let font_dicts: Vec<&[u8]> = (0..count).filter_map(|i| font_dicts.get(i)).collect();
             // `parse_font_dict` reads the Private DICT of every Private operator of a Font
             // DICT, and so does this check; Font DICTs may repeat the operator and share
-            // one large Private DICT. Their sizes are added up before any is read.
+            // one large Private DICT. Their sizes are added up before any is read, up to
+            // the first Private operator the subsetter cannot take (no range, or one past the
+            // end of the table): it fails there, after reading the Private DICTs before it.
             let mut privates = Vec::new();
             let mut bytes = 0usize;
-            for font_dict in &font_dicts {
+            let mut taken = true;
+            'font_dicts: for font_dict in &font_dicts {
                 let mut ranges = Vec::new();
                 for (operator, operands) in operators(font_dict) {
                     if operator == PRIVATE {
-                        let private = range(&operands)?;
+                        let Some(private) =
+                            range(&operands).filter(|private| private.end <= cff.len())
+                        else {
+                            taken = false;
+                            break 'font_dicts;
+                        };
                         bytes = bytes.saturating_add(private.len());
                         ranges.push(private);
                     }
@@ -595,6 +606,9 @@ impl<'a> Programs<'a> {
             }
             if bytes > MAX_PRIVATE_BYTES {
                 return Some(Read::PrivateBytes(bytes));
+            }
+            if !taken {
+                return None;
             }
             let mut local = Vec::new();
             for (&font_dict, ranges) in font_dicts.iter().zip(privates) {
@@ -615,12 +629,20 @@ impl<'a> Programs<'a> {
             }
             (local, Some(fd_select))
         } else {
+            // A SID-keyed font whose local subroutines cannot be read has none, and the
+            // subsetter drops its Private DICT then (`parse_sid_metadata` in its
+            // `src/cff/sid_font.rs`), so that is not written back either.
             let private = last(PRIVATE).and_then(range);
-            written.extend(private.clone().and_then(|private| cff.get(private)));
-            // A SID-keyed font whose local subroutines cannot be read has none.
             let subrs = private
-                .and_then(|private| local_subrs(cff, private))
-                .unwrap_or_else(Subroutines::none);
+                .clone()
+                .and_then(|private| Some((cff.get(private.clone())?, local_subrs(cff, private)?)));
+            let subrs = match subrs {
+                Some((private, subrs)) => {
+                    written.push(private);
+                    subrs
+                }
+                None => Subroutines::none(),
+            };
             (vec![subrs], None)
         };
         Some(Read::Programs(Self {
@@ -1408,6 +1430,12 @@ mod tests {
         assert!(!subsetter_panics(cff.clone(), &[]));
         let err = subset_with(cff, false).unwrap_err();
         assert!(matches!(err, Error::Subset { .. }), "{err}");
+        // A SID-keyed font whose subroutines cannot be read: the subsetter drops its Private
+        // DICT and does not write it back, so 1E99999 there does not count.
+        let private = [&PRIVATE_INFINITE[..], &int5(1_000_000), &[19]].concat();
+        let sid = cff_table(&[], &[], &private, None);
+        assert!(!subsetter_panics(sid.clone(), &[]));
+        subset_with(sid, false).unwrap();
         // The last Private DICT of a Font DICT is written back, so 1E99999 there is refused.
         let cff = cff_table(&ROS_ADOBE_IDENTITY, &[], &PRIVATE_INFINITE, Some(&[]));
         let err = subset_with(cff, false).unwrap_err();
@@ -1448,12 +1476,23 @@ mod tests {
             "the Font DICTs point at 1048832 bytes of Private DICTs, more than the 1048576 \
              read before subsetting"
         );
-        // One Font DICT that repeats the Private operator 300 times.
-        let err = subset_glyphs(font(1, shared(3500).repeat(300), 3500), &[4]).unwrap_err();
-        assert!(
-            matches!(err, Error::TableOverLimit { table: "CFF ", .. }),
-            "{err}"
-        );
+        // One Font DICT that repeats the Private operator 300 times, also when a Private
+        // operator the subsetter cannot take ("0 Private", one operand) follows them: the
+        // subsetter reads the 300 before it fails on that one.
+        for after in [vec![], vec![139, 18]] {
+            let prefix = [shared(3500).repeat(300), after].concat();
+            let err = subset_glyphs(font(1, prefix, 3500), &[4]).unwrap_err();
+            assert!(
+                matches!(err, Error::TableOverLimit { table: "CFF ", .. }),
+                "{err}"
+            );
+        }
+        // A Private DICT that runs past the end of the table is not counted: the subsetter
+        // fails on it with an error of its own, and so it does here.
+        let past = font(1, shared(2_000_000), 6);
+        assert!(!subsetter_panics(past.clone(), &[4]));
+        let err = subset_glyphs(past, &[4]).unwrap_err();
+        assert!(matches!(err, Error::Subset { .. }), "{err}");
     }
 
     /// An INDEX of `items`, with the smallest offset size that holds them.
