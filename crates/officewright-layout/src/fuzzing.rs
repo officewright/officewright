@@ -1140,6 +1140,8 @@ pub fn paint(
             location: &location,
             background: None,
             leaders: &mut leaders,
+            page: None,
+            floats: Vec::new(),
         };
         let origin = Point {
             x: Pt(0.0),
