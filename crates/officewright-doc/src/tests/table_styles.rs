@@ -1033,7 +1033,8 @@ fn gives_every_header_row_the_first_row_s_row_properties_and_both_top_corners() 
 #[test]
 fn takes_the_last_table_style_marked_default() {
     // Of several table styles marked w:default, the last, as the standard says
-    // ([MS-WPE376] Part 4 §2.7.3.17 quotes it) and Word shows for paragraph styles (#308).
+    // (ECMA-376 Part 1 §17.7.4.17) and Word shows for paragraph styles (#308); a render
+    // for table styles is asked in #298.
     let styles = format!(
         r#"<w:style w:type="table" w:default="1" w:styleId="First"><w:name w:val="First"/>{}</w:style><w:style w:type="table" w:default="1" w:styleId="Second"><w:name w:val="Second"/>{}</w:style>"#,
         shading("111111"),

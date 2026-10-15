@@ -170,14 +170,17 @@ impl<'a> Formats<'a> {
     /// paragraph mark's, with the run properties of the list level laid over it, whose
     /// on/off values set the value as direct formatting does. Word does not allow the
     /// level's `w:rStyle`, `w:highlight`, `w:oMath` and `w:rPrChange` there (MS-OI29500
-    /// §17.9.24(a)); a file that has them is read, and they are dropped. None when the
-    /// paragraph is not a list item.
+    /// §17.9.24(a)); a file that has them is read, the level's highlight is taken, as
+    /// Word draws it, and the others are dropped. None when the paragraph is not a list
+    /// item.
     ///
-    /// Not confirmed against Word yet: [MS-DOC] ("Determining List Formatting of a
-    /// Paragraph", part 3) lays the level over the mark this way, and the reference
-    /// renders of the rule documents asked for in issue #162 are to confirm it. The
-    /// level's linked paragraph style, which [MS-DOC] applies too, does not reach the
-    /// label.
+    /// Word's renders of word-rules/E-list-label-format.docx and E-list-label-rstyle.docx
+    /// (#299) show this, as [MS-DOC] ("Determining List Formatting of a Paragraph", part
+    /// 3) lays it out: the level's values set over the mark's, an override's level in
+    /// place of the definition's, and the level's linked paragraph style, which [MS-DOC]
+    /// applies too, not reaching the label. One difference is left (#330): Word gives
+    /// the label the size of the mark's character style but not its underline, which
+    /// this takes.
     ///
     /// What a level gives to labels is read once per level, however many paragraphs
     /// use it.
@@ -406,8 +409,8 @@ impl<L: Layer> StyleLevels<L> {
 /// Stshif.cstd), some of which may be empty. MS-OI29500 §17.7.4.17(c) says that Word
 /// does not open a document with more than 4,079, yet Word 2010 saved LibreOffice's test
 /// document `fdo76101.docx` with 4,091. The bound keeps what the resolver keeps per style
-/// small.
-const MAX_STYLES: usize = 4093;
+/// small. [`Styles::default_style`](super::Styles::default_style) looks among them too.
+pub(crate) const MAX_STYLES: usize = 4093;
 
 /// How many combinations of a paragraph style and a list level the resolver keeps at a
 /// time: each is a full set of paragraph properties, and the paragraphs of a document
