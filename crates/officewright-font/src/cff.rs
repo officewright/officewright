@@ -35,6 +35,15 @@
 //!
 //! The same check refuses a CID-keyed font with more Font DICTs than subsetter 0.2.6
 //! takes ([`MAX_FONT_DICTS`]), on which it panics.
+//!
+//! The subsetter decompiles every subroutine each time a glyph calls it, and keeps the
+//! whole program of every kept glyph in memory, about 30 bytes for each operand and
+//! operator it reads. Subroutines that call each other many times make that exponential
+//! in the depth of the calls (<https://github.com/officewright/officewright/issues/235>),
+//! within the format's limits on the length of a charstring and the depth of calls. So the
+//! same walk counts the operands and operators it reads, and the bytes of each hint mask,
+//! which the subsetter copies, and refuses the face once the kept glyphs together take more
+//! than [`MAX_STEPS`]: a limit of the library, since such a font is within the format.
 
 use std::cell::OnceCell;
 use std::ops::Range;
@@ -77,6 +86,18 @@ const MAX_HINTS: u32 = 0xFFFF;
 
 /// How deep the subsetter follows subroutine calls.
 const MAX_CALL_DEPTH: u8 = 64;
+
+/// The most operands, operators and hint mask bytes the walk may read in the charstrings
+/// of the glyphs one subset keeps, reading a subroutine again for every call.
+///
+/// Measured on real fonts kept whole: Noto Sans (3,884 glyphs) reads 271,888, New
+/// Computer Modern Math (7,041) 923,133, Noto Sans CJK SC (65,535) 15,754,967, on which
+/// the subsetter peaks at 550 MB, its Black weight 17,499,955, and Noto Serif CJK SC
+/// 31,169,024, on which the subsetter peaks at 890 MB; the most for one glyph was 2,965.
+/// A document reaches the limit only with about half the glyphs of the largest CJK fonts
+/// or more, but such a font kept whole, as one that forbids subsetting is, can be refused.
+/// A limit that admitted it would let a crafted font cost the subsetter well over 1 GiB.
+const MAX_STEPS: u32 = 1 << 24;
 
 /// Fails if a DICT the subsetter rewrites, in the `CFF ` table it takes from `font` (its
 /// file `data`), has a real number that is finite in the font but too large for an
@@ -440,7 +461,8 @@ const MAX_FONT_DICTS: usize = 255;
 
 /// Fails if the subsetter would panic on the `CFF ` table it takes from `font` (its file
 /// `data`) when it keeps `glyphs`: when the table is CID-keyed with more Font DICTs than
-/// it takes, or when a glyph it decompiles declares more stem hints than it can count.
+/// it takes, or when a glyph it decompiles declares more stem hints than it can count; or
+/// if decompiling the glyphs takes more than [`MAX_STEPS`].
 /// The subsetter decompiles `.notdef` and then the kept glyphs in order, and stops at the
 /// first it cannot read; so does this check, leaving that error to the subsetter.
 pub(crate) fn check_programs(
@@ -448,6 +470,17 @@ pub(crate) fn check_programs(
     data: &[u8],
     face: u32,
     glyphs: &[u16],
+) -> Result<()> {
+    check_programs_within(font, data, face, glyphs, MAX_STEPS)
+}
+
+/// [`check_programs`] with `limit` in place of [`MAX_STEPS`].
+fn check_programs_within(
+    font: &FontRef<'_>,
+    data: &[u8],
+    face: u32,
+    glyphs: &[u16],
+    limit: u32,
 ) -> Result<()> {
     let Some(cff) = subsetter_table(font, data, b"CFF ") else {
         return Ok(());
@@ -471,9 +504,20 @@ pub(crate) fn check_programs(
     let mut kept = glyphs.to_vec();
     kept.sort_unstable();
     kept.dedup();
+    let mut steps = limit;
     for glyph in std::iter::once(0).chain(kept.into_iter().filter(|&glyph| glyph != 0)) {
-        match programs.walk(glyph) {
+        match programs.walk(glyph, &mut steps) {
             Ok(()) => {}
+            Err(Stop::Limit) => {
+                return Err(Error::TableOverLimit {
+                    face,
+                    table: "CFF ",
+                    source: Cause::new(format!(
+                        "decompiling the glyphs to keep, up to glyph {glyph}, reads more \
+                         than {limit} operands, operators and hint mask bytes"
+                    )),
+                });
+            }
             Err(Stop::Overflow) => {
                 return Err(Error::MalformedTable {
                     face,
@@ -585,8 +629,10 @@ impl<'a> Programs<'a> {
         }))
     }
 
-    /// Walks the charstring of `glyph` as the subsetter decompiles it.
-    fn walk(&self, glyph: u16) -> std::result::Result<(), Stop> {
+    /// Walks the charstring of `glyph` as the subsetter decompiles it, reading at most
+    /// `steps` operands, operators and hint mask bytes, and takes those it read off
+    /// `steps`.
+    fn walk(&self, glyph: u16, steps: &mut u32) -> std::result::Result<(), Stop> {
         let font_dict = match self.fd_select {
             Some(fd_select) => font_dict(fd_select, glyph).ok_or(Stop::Unreadable)?,
             None => 0,
@@ -605,8 +651,11 @@ impl<'a> Programs<'a> {
             stack: Vec::new(),
             hints: 0,
             mask_bytes: 0,
+            steps: *steps,
         };
-        walk.run(charstring, 1).map(|_| ())
+        let walked = walk.run(charstring, 1);
+        *steps = walk.steps;
+        walked.map(|_| ())
     }
 }
 
@@ -736,6 +785,9 @@ enum Stop {
     Overflow,
     /// The subsetter fails on the glyph with an error of its own.
     Unreadable,
+    /// The glyphs walked so far take more operands, operators and hint mask bytes than
+    /// the walk may read.
+    Limit,
 }
 
 /// How a charstring or subroutine ended.
@@ -755,6 +807,8 @@ struct Walk<'a> {
     hints: u32,
     /// The length of a hint mask, set at the first.
     mask_bytes: usize,
+    /// How many more operands, operators and hint mask bytes the walk may read.
+    steps: u32,
 }
 
 impl Walk<'_> {
@@ -764,6 +818,7 @@ impl Walk<'_> {
         }
         let mut at = 0;
         while let Some(&b0) = charstring.get(at) {
+            self.steps = self.steps.checked_sub(1).ok_or(Stop::Limit)?;
             if matches!(b0, 28 | 32..=255) {
                 let (operand, len) = charstring_number(charstring.get(at..).unwrap_or_default())
                     .ok_or(Stop::Unreadable)?;
@@ -813,6 +868,10 @@ impl Walk<'_> {
                         .checked_add(self.mask_bytes)
                         .filter(|&end| end <= charstring.len())
                         .ok_or(Stop::Unreadable)?;
+                    self.steps = u32::try_from(self.mask_bytes)
+                        .ok()
+                        .and_then(|bytes| self.steps.checked_sub(bytes))
+                        .ok_or(Stop::Limit)?;
                 }
                 // endchar; with four operands it would be an accented character, which
                 // the subsetter does not implement.
@@ -1694,6 +1753,90 @@ mod tests {
                 assert!(matches!(refused, Error::Subset { .. }), "{refused}");
             }
         }
+    }
+
+    /// [`check_programs_within`] `limit` on the test font with `cff` as its outlines,
+    /// keeping `glyphs`.
+    fn check_within(cff: Vec<u8>, glyphs: &[u16], limit: u32) -> Result<()> {
+        let font = crate::testing::TestFont::new("Test Sans")
+            .with_table(b"CFF ", cff)
+            .without_table(b"glyf")
+            .without_table(b"loca")
+            .build();
+        let font_ref = FontRef::new(&font).unwrap();
+        check_programs_within(&font_ref, &font, 0, glyphs, limit)
+    }
+
+    /// The message of a refusal by [`check_programs_within`] for its limit.
+    fn over_limit(result: Result<()>) -> String {
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, Error::TableOverLimit { table: "CFF ", .. }),
+            "{err}"
+        );
+        std::error::Error::source(&err).unwrap().to_string()
+    }
+
+    #[test]
+    fn bounds_what_decompiling_the_kept_glyphs_reads() {
+        // Global subroutine 0 is two operands, rmoveto and return: 4 operands and
+        // operators. Glyph 1 calls it twice, with an operand and callgsubr each time, and
+        // ends: 13. .notdef's endchar makes 14.
+        let twice = vec![32, 29, 32, 29, 14];
+        let mut glyphs = glyphs_with(1, twice.clone());
+        glyphs[2] = twice;
+        let cff = programs(&glyphs, &[vec![139, 139, 21, 11]], &[vec![]], None);
+        check_within(cff.clone(), &[1], 14).unwrap();
+        assert_eq!(
+            over_limit(check_within(cff.clone(), &[1], 13)),
+            "decompiling the glyphs to keep, up to glyph 1, reads more than 13 operands, \
+             operators and hint mask bytes"
+        );
+        // The kept glyphs share the limit: glyph 2 takes 13 more.
+        check_within(cff.clone(), &[2, 1], 27).unwrap();
+        assert!(over_limit(check_within(cff.clone(), &[2, 1], 26)).contains("up to glyph 2,"));
+        // .notdef is walked first, also when it is not asked for.
+        assert!(over_limit(check_within(cff, &[1], 0)).contains("up to glyph 0,"));
+
+        // Nine stem hints (18 operands and hstem: 19), a hintmask and its two bytes (3),
+        // and endchar.
+        let mut hinted = vec![139; 18];
+        hinted.extend([1, 19, 0xFF, 0x80, 14]);
+        let cff = programs(&glyphs_with(3, hinted), &[], &[vec![]], None);
+        check_within(cff.clone(), &[3], 24).unwrap();
+        assert!(over_limit(check_within(cff, &[3], 23)).contains("up to glyph 3,"));
+
+        // Local subroutines: of a SID-keyed font (an operand, callsubr, 4 and endchar), and
+        // of a CID-keyed font's Font DICT 1, which glyphs 3 and 4 use.
+        let local = vec![vec![139, 139, 21, 11]];
+        let cff = programs(
+            &glyphs_with(3, vec![32, 10, 14]),
+            &[],
+            std::slice::from_ref(&local),
+            None,
+        );
+        check_within(cff.clone(), &[3], 8).unwrap();
+        assert!(over_limit(check_within(cff, &[3], 7)).contains("up to glyph 3,"));
+        let format3 = [3, 0, 2, 0, 0, 0, 0, 3, 1, 0, 5];
+        let cff = programs(
+            &glyphs_with(4, vec![32, 10, 32, 10, 14]),
+            &[],
+            &[vec![], local],
+            Some(&format3),
+        );
+        check_within(cff.clone(), &[4], 14).unwrap();
+        assert!(over_limit(check_within(cff, &[4], 13)).contains("up to glyph 4,"));
+    }
+
+    #[test]
+    fn leaves_a_glyph_it_cannot_read_to_the_subsetter_before_the_limit() {
+        // Glyph 1 has an operator the subsetter does not know (12 0); glyph 2 alone is
+        // past the limit. The subsetter fails on glyph 1 first, so the check leaves it.
+        let mut glyphs = glyphs_with(1, vec![12, 0]);
+        glyphs[2] = vec![139; 40].into_iter().chain([21, 14]).collect();
+        let cff = programs(&glyphs, &[], &[vec![]], None);
+        check_within(cff.clone(), &[1, 2], 10).unwrap();
+        check_within(cff, &[2], 10).unwrap_err();
     }
 
     /// The test font with `cff` as its outlines, subset to `glyphs`.
