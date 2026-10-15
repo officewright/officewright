@@ -32,8 +32,11 @@ const EXACT_BASELINE: f64 = 0.8;
 
 /// How far past the end of a line a piece or a tab stop may reach and still fit:
 /// rounding in sums of advances, and in the end itself, which is the page's width less
-/// its margins and indents (612 − 43.2 − 43.2 is just below 525.6).
-const EPSILON: f64 = 1e-9;
+/// its margins and indents (612 − 43.2 − 43.2 is just below 525.6). Also how far after
+/// a place a tab stop must be for a tab there to go to it ([`TabStops::next`]).
+///
+/// [`TabStops::next`]: crate::tabs::TabStops::next
+pub(crate) const EPSILON: f64 = 1e-9;
 
 /// How many clusters after a cut are shaped again at most when HarfRust marks none of
 /// them safe to break before, which bounds the work per line in a run kerned
@@ -1527,7 +1530,7 @@ impl Cursor {
     ///
     /// A tab whose stop is past the end of the line, or that has no stop, reaches the
     /// end of the line, so that the text after it goes on the next line. That is a
-    /// hypothesis until a Word render (`E-tab-overflow`). A stop at the end itself is
+    /// hypothesis until a Word render (`E-tab-margin.docx`). A stop at the end itself is
     /// within the line: Word's render of `cv-en-compact.docx` ends the text of an end
     /// tab at the right margin.
     fn tab(&mut self, tabs: &TabStops, end: Pt) -> (Pt, Pt, TabLeader) {
