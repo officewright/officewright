@@ -1204,7 +1204,8 @@ class Packages(unittest.TestCase):
     def test_line_and_drawing_cases_have_the_markup_their_labels_name(self):
         def cases(name):
             """Per paragraph with a case label: the label without its number, the sample
-            runs (text, run properties by tag, tab or not) and the paragraph's w:pPr."""
+            runs (text, run properties by tag, tab or not) and the w:pPr of the paragraph
+            that holds them: the label's own, or that of the paragraph after it."""
             doc = next(doc for doc in self.docs if doc.name == name)
             body = part(rules.parts(doc), "word/document.xml").find(f"{W}body")
             found, n = [], 0
@@ -1212,7 +1213,10 @@ class Packages(unittest.TestCase):
                 runs = paragraph.findall(f"{W}r")
                 first = "".join(t.text for t in runs[0].iter(f"{W}t")) if runs else ""
                 if not first.startswith("Case "):
-                    found[-1][1].extend(sample(r) for r in runs)  # a sample paragraph
+                    # A sample paragraph of its own: its runs and its w:pPr are the case's.
+                    label, samples, _ = found[-1]
+                    samples.extend(sample(r) for r in runs)
+                    found[-1] = (label, samples, paragraph.find(f"{W}pPr"))
                     continue
                 n += 1
                 self.assertTrue(first.startswith(f"Case {n:02d}: "), first)
@@ -1245,12 +1249,21 @@ class Packages(unittest.TestCase):
             points = int(re.match(r"condensed by (\d) pt", label).group(1))
             text_runs = [s for s in samples if not s[2]]
             self.assertTrue(text_runs, label)
+            expected = {"spacing": {"val": str(-points * 20)}}
+            if "24 pt text" in label:
+                expected.update(sz={"val": "48"}, szCs={"val": "48"})
             for _, tags, _ in text_runs:
-                self.assertEqual(tags, {"spacing": {"val": str(-points * 20)}}, label)
+                self.assertEqual(tags, expected, label)
             if "soft hyphens" in label:
-                self.assertIn("\u00ad", text_runs[0][0])
+                # One word of 150 letters, a soft hyphen after each syllable, no space.
+                word = text_runs[0][0]
+                self.assertNotIn(" ", word, label)
+                self.assertEqual(len(word.replace("\u00ad", "")), 150, label)
+                self.assertEqual(word.count("\u00ad"), 69, label)
                 ind = p_pr.find(f"{W}ind")
                 self.assertEqual(int(ind.get(f"{W}right")), rules.TEXT_W - 3000)
+                # At -6 pt most letters at 11 pt would take no room.
+                self.assertEqual("24 pt text" in label, points == 6, label)
             if "zero-width" in label:
                 self.assertEqual(text_runs[0][0].count("\u200b"), 2)
             if "right tab" in label:
@@ -1294,6 +1307,8 @@ class Packages(unittest.TestCase):
                                  ("180", "exact"))
             if "justified" in label:
                 self.assertEqual(p_pr.find(f"{W}jc").get(f"{W}val"), "both")
+                self.assertIn("highlighted   highlighted", samples[0][0], label)
+                self.assertNotIn("highlighted    highlighted", samples[0][0], label)
             if "run shading" in label:
                 self.assertIn("shd", marked[0], label)
             if "tab" in label:
@@ -1324,6 +1339,13 @@ class Packages(unittest.TestCase):
                                  [None, {"val": "superscript"}, None])
             if "under a tab" in label:
                 self.assertTrue(samples[1][2], label)
+            if "soft hyphen" in label:
+                self.assertIn("\u00ad", samples[0][0], label)
+                ind = p_pr.find(f"{W}ind")
+                self.assertEqual(int(ind.get(f"{W}right")), rules.TEXT_W - 3000, label)
+            if "three spaces" in label:
+                self.assertIn("underlined   underlined", samples[0][0], label)
+                self.assertNotIn("underlined    underlined", samples[0][0], label)
         trailing = [(label, p_pr) for label, _, p_pr in rest[-2:]]
         self.assertEqual(
             [(label, p_pr is not None and p_pr.find(f"{W}jc") is not None)
@@ -1344,7 +1366,18 @@ class Packages(unittest.TestCase):
             size = str(int(re.search(r"(\d+) pt", label).group(1)) * 2)
             self.assertEqual(tags, {kind: {}, "sz": {"val": size}, "szCs": {"val": size}}, label)
 
-        # E-tab-leader: every leader to every kind of stop, then the three variants.
+        # E-tab-leader: every leader to every kind of stop, then the three variants. Each
+        # label is a paragraph of its own, so that its text does not pass the stop: the
+        # sample paragraph starts with its tab.
+        doc = next(doc for doc in self.docs if doc.name == "E-tab-leader")
+        for paragraph in part(rules.parts(doc), "word/document.xml").iter(f"{W}p"):
+            text = "".join(t.text for t in paragraph.iter(f"{W}t"))
+            if text.startswith("Case "):
+                self.assertIsNone(paragraph.find(f".//{W}tab"), text)
+                self.assertIsNone(paragraph.find(f"{W}pPr/{W}tabs"), text)
+            else:
+                first = paragraph.find(f"{W}r")
+                self.assertIsNotNone(first.find(f"{W}tab"), text)
         found = cases("E-tab-leader")
         leaders = ["dot", "hyphen", "middleDot", "underscore", "heavy"]
         stops = ["left", "right", "center", "decimal"]

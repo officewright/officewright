@@ -1715,6 +1715,9 @@ def labelled(n: int, label: str, *samples: str, **props) -> str:
 
 # A word long enough to break at one of its soft hyphens in a narrow paragraph.
 LONG_WORD = "ex-tra-or-di-nar-i-ly"
+# One word of 150 letters with a soft hyphen after every syllable: wider than NARROW's 150
+# pt even condensed, so its lines can only break at its soft hyphens.
+LONGER_WORD = "-".join([LONG_WORD] * 10)
 # A right indent that leaves 150 pt for the text.
 NARROW = {"right": TEXT_W - 3000}
 
@@ -1724,9 +1727,14 @@ def spacing_condensed() -> Doc:
     for points in (3, 6):
         props = f'<w:spacing w:val="{-twips(points)}"/>'
         said = f"condensed by {points} pt"
+        # At 11 pt, most letters are narrower than 6 pt, and condensed by 6 pt the word
+        # would take no room; at 24 pt it still fills three lines.
+        long_props, size = props, ""
+        if points == 6:
+            long_props, size = props + '<w:sz w:val="48"/><w:szCs w:val="48"/>', ", 24 pt text"
         cases += [
-            (f"{said}, a narrow paragraph that breaks at soft hyphens",
-             [soft_hyphenated(" ".join([LONG_WORD] * 6), props)], {"ind": NARROW}),
+            (f"{said}{size}, a narrow paragraph of one long word with soft hyphens",
+             [soft_hyphenated(LONGER_WORD, long_props)], {"ind": NARROW}),
             (f"{said}, characters after spaces", [styled_run("a b c d e f", props)], {}),
             (f"{said}, zero-width spaces (U+200B) between letters",
              [styled_run("ab\u200bcd\u200bef", props)], {}),
@@ -1897,12 +1905,14 @@ LEADER_STOPS = [("left", 4320, "x"), ("right", 4320, "x"), ("center", 4320, "x")
 
 
 def tab_leader() -> Doc:
+    # Each label in a paragraph of its own: the sample starts with its tab at the left
+    # margin, so the leader runs from there to the stop at 216 pt.
     body, n = "", 0
     for leader in LEADERS:
         for kind, pos, after in LEADER_STOPS:
             n += 1
-            body += labelled(n, f"{leader} leader to a {kind} stop at 216 pt", tab_run(),
-                             styled_run(after, ""), tabs=[(kind, pos, leader)])
+            body += para(run(f"Case {n:02d}: {leader} leader to a {kind} stop at 216 pt:"))
+            body += para(tab_run() + styled_run(after, ""), tabs=[(kind, pos, leader)])
     extra = [
         ("dot leader at 1 pt", '<w:sz w:val="2"/><w:szCs w:val="2"/>'),
         ("dot leader at a character scale of 50 %", '<w:w w:val="50"/>'),
@@ -1910,8 +1920,8 @@ def tab_leader() -> Doc:
     ]
     for label, props in extra:
         n += 1
-        body += labelled(n, label, tab_run(props), styled_run("x", ""),
-                         tabs=[("left", 4320, "dot")])
+        body += para(run(f"Case {n:02d}: {label}:"))
+        body += para(tab_run(props) + styled_run("x", ""), tabs=[("left", 4320, "dot")])
     return Doc(
         "E-tab-leader",
         "Tab leaders (dot, hyphen, middle dot, underscore, heavy) to left, right, centre and "
