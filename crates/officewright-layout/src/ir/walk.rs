@@ -245,6 +245,28 @@ impl<T: Clamp> Clamp for Vec<T> {
     }
 }
 
+impl<T: Check> Check for std::sync::Arc<T> {
+    fn check(&self, checker: &mut Checker<'_>) -> Result<()> {
+        T::check(self, checker)
+    }
+}
+
+/// A value many items may share is changed only for the item being clamped, and only when
+/// clamping changes it.
+impl<T: Clamp + Clone + PartialEq> Clamp for std::sync::Arc<T> {
+    fn clamp(&mut self, clamper: &mut Clamper) {
+        if let Some(value) = std::sync::Arc::get_mut(self) {
+            value.clamp(clamper);
+            return;
+        }
+        let mut value = T::clone(self);
+        value.clamp(clamper);
+        if value != **self {
+            *self = std::sync::Arc::new(value);
+        }
+    }
+}
+
 impl Clamp for Pt {
     fn clamp(&mut self, _: &mut Clamper) {}
 }
@@ -254,3 +276,4 @@ impl Clamp for PageSize {
 }
 
 no_rules!(bool, u8, u16, u32, char, String, Color);
+no_rules!(std::sync::Arc<str>);
