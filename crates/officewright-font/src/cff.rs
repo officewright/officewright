@@ -446,6 +446,16 @@ const MAX_FONT_DICTS: usize = 255;
 /// Noto Sans CJK SC and Noto Serif CJK SC have 18 Font DICTs and 526 to 605 bytes.
 const MAX_PRIVATE_BYTES: usize = 1 << 20;
 
+/// The most local subroutines the subsetter may collect for the Font DICTs of a face, counted
+/// once for each Font DICT, also where several share one Subrs INDEX. subsetter 0.2.6
+/// collects the subroutines of every Font DICT into a list of its own, 16 bytes for each,
+/// before it decompiles a glyph (`subset_charstrings` in its `src/cff/mod.rs`), so 255 Font
+/// DICTs that share an INDEX of 65,535 would take 267 MB of a table of under 100 KB
+/// (<https://github.com/officewright/officewright/issues/284>); this is 4 MiB. Real fonts
+/// come to tens of thousands: Noto Sans CJK SC 45,206 over 18 Font DICTs, its Black weight
+/// 47,857, Noto Serif CJK SC 54,004.
+const MAX_LOCAL_SUBRS: usize = 1 << 18;
+
 /// The most ranges an FDSelect of format 3 may declare. subsetter 0.2.6 finds the Font
 /// DICT of each glyph it keeps by going through the ranges in order, twice, and the walk
 /// does it once, so a font kept whole costs up to 65,535 times this. Real fonts declare a
@@ -512,6 +522,17 @@ pub(crate) fn check(
         None => return Ok(0),
     };
     check_reals(&programs, face)?;
+    let subrs = programs.collected_local_subrs();
+    if subrs > MAX_LOCAL_SUBRS {
+        return Err(Error::TableOverLimit {
+            face,
+            table: "CFF ",
+            source: Cause::new(format!(
+                "the Font DICTs have {subrs} local subroutines in all, more than the \
+                 {MAX_LOCAL_SUBRS} the subsetter is let collect"
+            )),
+        });
+    }
     let mut kept = glyphs.to_vec();
     kept.sort_unstable();
     kept.dedup();
@@ -525,8 +546,8 @@ pub(crate) fn check(
                         steps,
                         shared: true,
                     } => format!(
-                        "the {steps} operands, operators and hint mask bytes left of the \
-                         budget it shares with other subsets"
+                        "the {steps} operands, operators and hint mask bytes left of its \
+                         budget"
                     ),
                     Limit { steps, .. } => {
                         format!("{steps} operands, operators and hint mask bytes")
@@ -724,6 +745,32 @@ impl<'a> Programs<'a> {
             written,
             scaled,
         }))
+    }
+
+    /// How many local subroutines the subsetter collects for all Font DICTs: those it can
+    /// read of each one's Subrs INDEX, counted again for each Font DICT that shares it.
+    /// Where the INDEXes declare no more than [`MAX_LOCAL_SUBRS`] in all, that is all
+    /// that is counted; otherwise each INDEX is read once.
+    fn collected_local_subrs(&self) -> usize {
+        let declared = self
+            .local
+            .iter()
+            .fold(0usize, |sum, subrs| sum.saturating_add(subrs.index.len()));
+        if declared <= MAX_LOCAL_SUBRS {
+            return declared;
+        }
+        self.local
+            .iter()
+            .enumerate()
+            .fold(0usize, |sum, (i, subrs)| {
+                let first = self
+                    .local
+                    .iter()
+                    .take(i)
+                    .find(|other| std::ptr::eq(other.index.offsets, subrs.index.offsets))
+                    .unwrap_or(subrs);
+                sum.saturating_add(first.len())
+            })
     }
 
     /// Walks the charstring of `glyph` as the subsetter decompiles it, reading at most
@@ -1620,6 +1667,84 @@ mod tests {
         }
     }
 
+    /// A CID-keyed table of `font_dicts` Font DICTs whose local subroutines are
+    /// `local`, the first `local.len()` Font DICTs' each, and none for the others.
+    fn with_local_subrs(local: Vec<Vec<Vec<u8>>>, font_dicts: usize) -> Vec<u8> {
+        let mut all = local;
+        all.resize(font_dicts, vec![]);
+        Spec {
+            glyphs: glyphs_with(4, vec![14]),
+            local: all,
+            fd_select: Some(vec![3, 0, 2, 0, 0, 0, 0, 3, 1, 0, 5]),
+            ..Spec::default()
+        }
+        .build()
+    }
+
+    /// Points the Private operator of every Font DICT of `cff`, made by [`Spec`] with one
+    /// Private operator each, at the first Font DICT's Private DICT, and returns where that
+    /// is.
+    fn sharing_the_first_private(cff: &mut [u8]) -> usize {
+        // Each Font DICT ends in the size of its Private DICT, 6, its offset and 18.
+        let size = int5(6);
+        let at: Vec<usize> = (0..cff.len().saturating_sub(10))
+            .filter(|&i| cff[i..i + 5] == size[..] && cff[i + 5] == 29 && cff[i + 10] == 18)
+            .map(|i| i + 5)
+            .collect();
+        let first = cff[at[0]..at[0] + 5].to_vec();
+        for &i in &at {
+            cff[i..i + 5].copy_from_slice(&first);
+        }
+        usize::try_from(i32::from_be_bytes(first[1..].try_into().unwrap())).unwrap()
+    }
+
+    #[test]
+    fn bounds_the_local_subroutines_the_subsetter_collects() {
+        let message = |count: usize| {
+            format!(
+                "the Font DICTs have {count} local subroutines in all, more than the 262144 \
+                 the subsetter is let collect"
+            )
+        };
+        // Eight Font DICTs of 32,768 each come to the limit; one more subroutine is past it.
+        let subrs = vec![vec![11]; 32768];
+        let at_limit = with_local_subrs(vec![subrs.clone(); 8], 8);
+        check_with_limit(at_limit.clone(), &[4], 1 << 20).unwrap();
+        subset_glyphs(at_limit, &[4]).unwrap();
+        let mut local = vec![subrs; 8];
+        local.push(vec![vec![11]]);
+        let past = with_local_subrs(local, 9);
+        assert_eq!(
+            over_limit(check_with_limit(past, &[4], 1 << 20)),
+            message(262_145)
+        );
+
+        // Font DICTs that share one Subrs INDEX make the subsetter collect it for each.
+        let mut shared = with_local_subrs(vec![vec![vec![11]; 65535]], 4);
+        sharing_the_first_private(&mut shared);
+        check_with_limit(shared, &[4], 1 << 20).unwrap();
+        let mut shared = with_local_subrs(vec![vec![vec![11]; 65535]], 5);
+        sharing_the_first_private(&mut shared);
+        assert_eq!(
+            over_limit(check_with_limit(shared, &[4], 1 << 20)),
+            message(327_675)
+        );
+
+        // The subsetter collects only up to the first subroutine it cannot read: a shared
+        // INDEX that declares 65,535 but holds 10 is no count past the limit.
+        let mut damaged = with_local_subrs(vec![vec![]], 5);
+        let private = sharing_the_first_private(&mut damaged);
+        let subrs_at = damaged.len() - private;
+        let mut index = vec![0xFF, 0xFF, 1];
+        index.extend(1..=11);
+        index.resize(3 + 65535, 0);
+        index.push(11);
+        index.extend([11; 10]);
+        damaged.extend(index);
+        damaged[private..private + 5].copy_from_slice(&int5(subrs_at));
+        check_with_limit(damaged, &[4], 1 << 20).unwrap();
+    }
+
     #[test]
     fn bounds_the_private_dicts_the_font_dicts_point_at() {
         // 128 Font DICTs, each with a first Private operator pointing at one Private DICT
@@ -2282,7 +2407,7 @@ mod tests {
         assert_eq!(
             std::error::Error::source(&err).unwrap().to_string(),
             "decompiling the glyphs to keep, up to glyph 1, reads more than the 13 operands, \
-             operators and hint mask bytes left of the budget it shares with other subsets"
+             operators and hint mask bytes left of its budget"
         );
         assert_eq!(budget.left(), 13);
         let mut budget = SubsetBudget::new(0);
