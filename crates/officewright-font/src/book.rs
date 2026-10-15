@@ -713,16 +713,20 @@ impl FontBook {
                         .map(|(listed, _)| listed.clone())
                         .collect();
                     // An entry leads where it leads now, not where it led when it was
-                    // listed: a link repointed since to another directory that cannot be
-                    // read stays listed, behind that directory. One that cannot be
-                    // resolved now stays listed as it was.
+                    // listed: one repointed since to another directory that cannot be read
+                    // stays listed, behind that directory. One that leads here, to a
+                    // directory that can be read, to something else or nowhere leaves the
+                    // list, as a new book would not list it.
                     for listed in behind {
                         match fs::canonicalize(&listed) {
-                            Ok(target) if target == canonical_dir => self.forget_failure(&listed),
-                            Ok(target) => {
+                            Ok(target)
+                                if target != canonical_dir
+                                    && target.is_dir()
+                                    && fs::read_dir(&target).is_err() =>
+                            {
                                 self.unreadable_dirs.insert(listed, target);
                             }
-                            Err(_) => {}
+                            _ => self.forget_failure(&listed),
                         }
                     }
                     entries
@@ -846,7 +850,25 @@ mod tests {
 
     impl Drop for TempDir {
         fn drop(&mut self) {
+            // A test that fails midway can leave a directory without permission behind.
+            #[cfg(unix)]
+            permit(&self.0);
             let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Gives `dir` and the directories under it, not following links, back their
+    /// permissions, so that they can be removed.
+    #[cfg(unix)]
+    fn permit(dir: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o755));
+        for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_dir()) {
+                permit(&path);
+            }
         }
     }
 
@@ -1600,6 +1622,69 @@ mod tests {
         assert_eq!(after_root, [link]);
         assert!(after_target.is_empty(), "{after_target:?}");
         assert_eq!(after_scan, [in_scan, fonts.join("1")]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_listed_link_that_no_longer_leads_to_an_unreadable_directory_leaves_the_list() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let set_mode =
+            |path: &Path, mode| fs::set_permissions(path, fs::Permissions::from_mode(mode));
+        // `fonts/l` is listed as leading to `t1`, which cannot be read; then it leads to
+        // the directory `t3`, which can, to the file `f`, or nowhere, and `t1` becomes
+        // readable. However `t1` is then read, a new book would not list `l`, and neither
+        // does this one.
+        type Read<'a> = &'a dyn Fn(&mut FontBook, &Path);
+        let roots = |book: &mut FontBook, dir: &Path, first: &Path, second: &Path| {
+            let other = dir.join("other");
+            fs::create_dir(&other).unwrap();
+            symlink(first, other.join("a")).unwrap();
+            symlink(second, other.join("b")).unwrap();
+            book.add_dir(&other).unwrap();
+        };
+        let cases: [(&str, &str, Read<'_>); 5] = [
+            ("t3", "t3 then t1 in one scan", &|book, dir| {
+                roots(book, dir, &dir.join("t3"), &dir.join("t1"));
+            }),
+            ("t3", "t1 then t3 in one scan", &|book, dir| {
+                roots(book, dir, &dir.join("t1"), &dir.join("t3"));
+            }),
+            ("t3", "t3 then t1 as roots", &|book, dir| {
+                book.add_dir(dir.join("t3")).unwrap();
+                book.add_dir(dir.join("t1")).unwrap();
+            }),
+            ("f", "t1 as a root", &|book, dir| {
+                book.add_dir(dir.join("t1")).unwrap();
+            }),
+            ("gone", "t1 as a root", &|book, dir| {
+                book.add_dir(dir.join("t1")).unwrap();
+            }),
+        ];
+        for (index, (target, name, read)) in cases.into_iter().enumerate() {
+            let dir = TempDir::new(&format!("no-longer-locked-{index}"));
+            let (fonts, first) = (dir.0.join("fonts"), dir.0.join("t1"));
+            for path in [&fonts, &first, &dir.0.join("t3")] {
+                fs::create_dir(path).unwrap();
+            }
+            fs::write(dir.0.join("f"), b"").unwrap();
+            set_mode(&first, 0o000).unwrap();
+            let link = fonts.join("l");
+            symlink(&first, &link).unwrap();
+            let mut book = FontBook::new();
+            book.add_dir(&fonts).unwrap();
+            let listed = book.skipped().len();
+            fs::remove_file(&link).unwrap();
+            symlink(dir.0.join(target), &link).unwrap();
+            set_mode(&first, 0o755).unwrap();
+            read(&mut book, &dir.0);
+            assert_eq!(listed, 1, "{target}, {name}");
+            assert!(
+                book.skipped().is_empty(),
+                "{target}, {name}: {:?}",
+                book.skipped()
+            );
+        }
     }
 
     #[test]
