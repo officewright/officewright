@@ -4,10 +4,18 @@ use std::{fmt, fs};
 
 use officewright_core::Pt;
 use officewright_font::{
-    CharMap, EmbeddingLicense, FontFace, FontRequest, FontResolver, OutlineFormat,
+    CharMap, EmbeddingLicense, FontFace, FontRequest, FontResolver, OutlineFormat, SubsetBudget,
 };
 
 use crate::{Error, Result, embed, encoding, helvetica, script};
+
+/// What reducing a font to `.notdef` may read of its CFF charstrings when the font is
+/// opened, to check that it can be embedded: far more than a glyph of a real font reads
+/// (3,056 at most, as measured for `MAX_STEPS` in officewright-font's `cff.rs`), and far
+/// less than the 16,777,216 of one subset, so that opening many crafted fonts, as one DOCX
+/// may embed 256, takes little time and memory
+/// (<https://github.com/officewright/officewright/issues/311>).
+const PROBE_BUDGET: u64 = 1 << 16;
 
 /// A font to draw and measure text with.
 ///
@@ -183,9 +191,9 @@ impl Font {
     /// embedded yet), has CID-keyed CFF outlines with more Font DICTs than the subsetter
     /// takes (255), or if subsetting finds it damaged or past a limit of the library
     /// (`name` records that point at more than 1 MiB of strings, CFF Font DICTs that point
-    /// at more than 1 MiB of Private DICTs, an FDSelect of more than 2,048 ranges, or a CFF
-    /// `.notdef` glyph that takes more than 16,777,216 operands, operators and hint mask
-    /// bytes to decompile).
+    /// at more than 1 MiB of Private DICTs or have more than 262,144 local subroutines in
+    /// all, an FDSelect of more than 2,048 ranges, or a CFF `.notdef` glyph that takes more
+    /// than 65,536 operands, operators and hint mask bytes to decompile).
     pub fn from_face(face: FontFace) -> Result<Self> {
         Self::embed(face, None)
     }
@@ -245,10 +253,11 @@ impl Font {
         }
         // Subsetting to no glyphs checks now that the outlines can be embedded, rather
         // than when a document is written.
-        face.subset([]).map_err(|source| Error::Font {
-            path: path.map(Path::to_owned),
-            source,
-        })?;
+        face.subset_within([], &mut SubsetBudget::new(PROBE_BUDGET))
+            .map_err(|source| Error::Font {
+                path: path.map(Path::to_owned),
+                source,
+            })?;
         let mut notes = Vec::new();
         match permissions.license() {
             EmbeddingLicense::PreviewAndPrint => notes.push(EmbeddingNote::PreviewAndPrint),

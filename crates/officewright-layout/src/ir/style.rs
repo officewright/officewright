@@ -1,5 +1,7 @@
 //! The formatting of runs of text.
 
+use std::sync::{Arc, OnceLock};
+
 use officewright_core::{Color, Pt};
 
 use super::macros::{ir_struct, no_rules};
@@ -84,13 +86,13 @@ ir_struct! {
     #[derive(Clone, Debug, PartialEq)]
     pub struct RunFonts {
         /// For characters U+0000 to U+007F (`w:ascii`).
-        str ascii: String = String::from(DEFAULT_FONT) => with_ascii;
+        str ascii: Arc<str> = default_font() => with_ascii;
         /// For other characters that are not East Asian or complex script (`w:hAnsi`).
-        str high_ansi: String = String::from(DEFAULT_FONT) => with_high_ansi;
+        str high_ansi: Arc<str> = default_font() => with_high_ansi;
         /// For East Asian characters (`w:eastAsia`).
-        str east_asia: String = String::from(DEFAULT_FONT) => with_east_asia;
+        str east_asia: Arc<str> = default_font() => with_east_asia;
         /// For complex script characters (`w:cs`).
-        str complex_script: String = String::from(DEFAULT_FONT) => with_complex_script;
+        str complex_script: Arc<str> = default_font() => with_complex_script;
         /// Which font the characters that several kinds share take (`w:hint`).
         copy hint: FontHint = FontHint::Default => with_hint;
         /// The character set of the East Asian font, from the document's font table: some
@@ -104,14 +106,21 @@ ir_struct! {
 /// 2.1.88 c).
 const DEFAULT_FONT: &str = "Times New Roman";
 
+/// The font of text whose style names none, one copy shared by every run style.
+fn default_font() -> Arc<str> {
+    static FONT: OnceLock<Arc<str>> = OnceLock::new();
+    Arc::clone(FONT.get_or_init(|| Arc::from(DEFAULT_FONT)))
+}
+
 impl RunFonts {
-    /// The same family for every kind of character.
-    pub fn new(family: impl AsRef<str>) -> Self {
-        let family = family.as_ref();
+    /// The same family for every kind of character, one copy of its name for all four. A
+    /// producer that passes the same `Arc<str>` to many run styles keeps one copy in all.
+    pub fn new(family: impl Into<Arc<str>>) -> Self {
+        let family = family.into();
         Self::default()
-            .with_ascii(family)
-            .with_high_ansi(family)
-            .with_east_asia(family)
+            .with_ascii(Arc::clone(&family))
+            .with_high_ansi(Arc::clone(&family))
+            .with_east_asia(Arc::clone(&family))
             .with_complex_script(family)
     }
 }
@@ -241,11 +250,11 @@ ir_struct! {
     #[derive(Clone, Debug, Default, PartialEq)]
     pub struct Language {
         /// Of text that is neither East Asian nor complex script (`w:val`).
-        opt_str latin: Option<String> => with_latin;
+        opt_str latin: Option<Arc<str>> => with_latin;
         /// Of East Asian text.
-        opt_str east_asia: Option<String> => with_east_asia;
+        opt_str east_asia: Option<Arc<str>> => with_east_asia;
         /// Of complex script text.
-        opt_str bidi: Option<String> => with_bidi;
+        opt_str bidi: Option<Arc<str>> => with_bidi;
     }
 }
 
