@@ -38,6 +38,13 @@
 //! (<https://github.com/officewright/officewright/issues/278>); the face is refused past
 //! [`MAX_FD_SELECT_RANGES`], a limit of the library, after the Font DICTs are counted.
 //!
+//! Before it decompiles a glyph, the subsetter also copies the local subroutines of every
+//! Font DICT into a list of its own, also where Font DICTs share one Subrs INDEX, so a
+//! small table could make it allocate hundreds of megabytes
+//! (<https://github.com/officewright/officewright/issues/284>). The check counts them as
+//! the subsetter collects them and refuses the face past [`MAX_LOCAL_SUBRS`], a limit of
+//! the library, before it walks a glyph.
+//!
 //! subsetter 0.2.6 also counts the stem hints of each glyph it keeps in a `u16`
 //! (`count_hints` in `src/cff/charstring.rs`), as it decompiles the glyph's charstring
 //! and the subroutines it calls. A glyph that declares more than 65,535 hints overflows
@@ -125,7 +132,7 @@ pub(crate) struct Limit {
 }
 
 impl Limit {
-    /// The limit of a subset made with `left` units left of the budget it shares.
+    /// The limit of a subset made with `left` units left of its budget.
     pub(crate) fn within(left: u64) -> Self {
         match u32::try_from(left) {
             Ok(steps) if steps < MAX_STEPS => Self {
@@ -466,9 +473,10 @@ const MAX_FD_SELECT_RANGES: usize = 2048;
 /// `data`) when it keeps `glyphs`, or would spend more on it than the library allows:
 /// when the table is CID-keyed with more Font DICTs than it takes, Private DICTs past
 /// [`MAX_PRIVATE_BYTES`] or an FDSelect of more than [`MAX_FD_SELECT_RANGES`] ranges;
-/// when a DICT it writes back has a real number too large for it; when a glyph it
-/// decompiles declares more stem hints than it can count; or if decompiling the glyphs
-/// takes more than `limit`. Where the subsetter fails on the table before it writes or
+/// when a DICT it writes back has a real number too large for it; when its Font DICTs have
+/// more than [`MAX_LOCAL_SUBRS`] local subroutines in all; when a glyph it decompiles
+/// declares more stem hints than it can count; or if decompiling the glyphs takes more
+/// than `limit`. Where the subsetter fails on the table before it writes or
 /// decompiles anything, the table is left to it. The subsetter decompiles `.notdef` and
 /// then the kept glyphs in order, and stops at the first it cannot read; so does this
 /// check, leaving that error to the subsetter.
@@ -529,7 +537,7 @@ pub(crate) fn check(
             table: "CFF ",
             source: Cause::new(format!(
                 "the Font DICTs have {subrs} local subroutines in all, more than the \
-                 {MAX_LOCAL_SUBRS} the subsetter is let collect"
+                 {MAX_LOCAL_SUBRS} the subsetter may collect"
             )),
         });
     }
@@ -759,6 +767,9 @@ impl<'a> Programs<'a> {
         if declared <= MAX_LOCAL_SUBRS {
             return declared;
         }
+        // Each INDEX is read once, by the first Font DICT that has it: 255 Font DICTs that
+        // share an INDEX of 65,535 would otherwise read it 255 times, the work the bound is
+        // there to spare the subsetter.
         self.local
             .iter()
             .enumerate()
@@ -1703,7 +1714,7 @@ mod tests {
         let message = |count: usize| {
             format!(
                 "the Font DICTs have {count} local subroutines in all, more than the 262144 \
-                 the subsetter is let collect"
+                 the subsetter may collect"
             )
         };
         // Eight Font DICTs of 32,768 each come to the limit; one more subroutine is past it.
@@ -1726,7 +1737,23 @@ mod tests {
         let mut shared = with_local_subrs(vec![vec![vec![11]; 65535]], 5);
         sharing_the_first_private(&mut shared);
         assert_eq!(
-            over_limit(check_with_limit(shared, &[4], 1 << 20)),
+            over_limit(check_with_limit(shared.clone(), &[4], 1 << 20)),
+            message(327_675)
+        );
+        // The INDEX is read once, by the first Font DICT, however many share it.
+        let Some(Read::Programs(programs)) = Programs::read(&shared) else {
+            panic!("the table is not read");
+        };
+        assert_eq!(programs.collected_local_subrs(), 327_675);
+        assert!(programs.local[0].count.get().is_some());
+        assert!(
+            programs.local[1..]
+                .iter()
+                .all(|subrs| subrs.count.get().is_none())
+        );
+        // The count comes before any glyph is walked.
+        assert_eq!(
+            over_limit(check_with_limit(shared, &[4], 0)),
             message(327_675)
         );
 
