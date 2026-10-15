@@ -10,18 +10,20 @@
 //! here, before the subsetter runs. Remove this once a subsetter release returns an
 //! error.
 //!
-//! To find every DICT the subsetter rewrites, the table is read the way subsetter 0.2.6
-//! reads it (`Table::parse` in `src/cff/mod.rs`, `src/cff/index.rs` and `src/cff/dict/`)
+//! To find every DICT the subsetter rewrites, the table is read with subsetter 0.2.6's
+//! rules (`Table::parse` in `src/cff/mod.rs`, `src/cff/index.rs` and `src/cff/dict/`)
 //! rather than with another parser, which could reject operands it accepts: the first
 //! DICT of the Top DICT INDEX, the Private DICT its last Private operator points to, and
 //! the Font DICTs of the FDArray its last FDArray operator points to, up to the first that
-//! cannot be read, each with the Private DICT of every Private operator it has. Reading
-//! more than that could cost more than the subsetter's own work: a Top DICT may repeat its
-//! operators, and Font DICTs past one that cannot be read may all share one large Private
-//! DICT. That is a little more than the subsetter writes back:
-//! it rewrites only FontMatrix and FontBBox of the Top DICT, the top-level Private DICT
-//! only of a SID-keyed font and the FDArray only of a CID-keyed one. A real number past
-//! `f32::MAX` has no place in any of these, so finding one anywhere refuses the face.
+//! cannot be read, each with the Private DICT of every Private operator it has. Of a Top
+//! DICT that repeats its operators, or an FDArray with a Font DICT that cannot be read,
+//! nothing more is read. That is still more than the subsetter reads and writes back: it
+//! reads Font DICTs only of a CID-keyed table it can parse, and rewrites only FontMatrix
+//! and FontBBox of the Top DICT, the top-level Private DICT only of a SID-keyed font, and
+//! of a CID-keyed one the Font DICTs with the last Private DICT of each. A real number
+//! past `f32::MAX` has no place in any of these, so finding one anywhere refuses the face.
+//! Bounding the work of this reading by the subsetter's own is
+//! <https://github.com/officewright/officewright/issues/271>.
 //!
 //! subsetter 0.2.6 also counts the stem hints of each glyph it keeps in a `u16`
 //! (`count_hints` in `src/cff/charstring.rs`), as it decompiles the glyph's charstring
