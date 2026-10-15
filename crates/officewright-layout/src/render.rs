@@ -353,8 +353,8 @@ impl Painter<'_, '_, '_> {
             ReportKind::ValueClamped,
             &Location::default(),
             format!(
-                "lines thicker than {MAX_LINE_WIDTH} pt, more than a PDF holds for their \
-                 dashes, are drawn that thick"
+                "lines thicker than {MAX_LINE_WIDTH} pt are drawn that thick, which keeps \
+                 their dashes and the margin they are cut to within what a PDF holds"
             ),
         );
         LineItem {
@@ -364,16 +364,20 @@ impl Painter<'_, '_, '_> {
     }
 
     /// The PDF glyph run of `run`, with the glyphs of it that reach the page and a margin
-    /// around it, each cluster with its text; `None` when none does, or when its face
-    /// cannot be embedded, which is reported.
+    /// around it, each cluster with its text, but a cluster cut down to one of its several
+    /// glyphs with none; `None` when no glyph reaches the page, or when its face cannot be
+    /// embedded, which is reported.
     fn glyphs(
         &mut self,
         run: &GlyphItem,
         flip: impl Fn(Pt) -> Pt,
         page: Area,
     ) -> Option<pdf::GlyphRun> {
-        // No glyph is drawn farther than four times its size from its place.
+        // No glyph is drawn farther than four times its size from its place, nor, scaled
+        // wider (`w:w`), farther across than that times its scale; but a glyph kept is
+        // never placed farther from the page's corner than a PDF holds.
         let reach = 4.0 * run.size.0;
+        let across = (reach * run.h_scale.max(1.0)).min((PDF_LIMIT - page.width).max(0.0));
         let (x, y) = (run.origin.x.0, flip(run.origin.y).0);
         let skew = if run.synthetic_italic {
             SYNTHETIC_ITALIC_SKEW
@@ -384,7 +388,7 @@ impl Painter<'_, '_, '_> {
         let place = |glyph: &DrawnGlyph| (x + glyph.x.0 + skew * glyph.y.0, y + glyph.y.0);
         let on_page = |glyph: &DrawnGlyph| {
             let at = place(glyph);
-            page.reaches(at, at, reach)
+            page.reaches_by(at, at, across, reach)
         };
         // Glyph by glyph: a cluster may be many, such as the dots of a tab leader, of
         // which only some are on the page.
@@ -456,10 +460,17 @@ impl Painter<'_, '_, '_> {
                     Some(font)
                 }
                 Err(err) => {
+                    // With the causes, which say why the font cannot be used.
+                    let mut why = err.to_string();
+                    let mut cause = std::error::Error::source(&err);
+                    while let Some(inner) = cause {
+                        why = format!("{why}: {inner}");
+                        cause = inner.source();
+                    }
                     self.fonts.report_once(
                         ReportKind::FontEmbedding,
                         &Location::default(),
-                        format!("the text in {name} is not drawn: {err}"),
+                        format!("the text in {name} is not drawn: {why}"),
                     );
                     None
                 }
@@ -578,10 +589,16 @@ impl Area {
     /// Whether the box with corners `a` and `b` reaches the page widened by `margin` on
     /// each side.
     fn reaches(self, a: (f64, f64), b: (f64, f64), margin: f64) -> bool {
-        a.0.max(b.0) >= -margin
-            && a.0.min(b.0) <= self.width + margin
-            && a.1.max(b.1) >= -margin
-            && a.1.min(b.1) <= self.height + margin
+        self.reaches_by(a, b, margin, margin)
+    }
+
+    /// Whether the box with corners `a` and `b` reaches the page widened by `across` on
+    /// its left and right and by `up` above and below it.
+    fn reaches_by(self, a: (f64, f64), b: (f64, f64), across: f64, up: f64) -> bool {
+        a.0.max(b.0) >= -across
+            && a.0.min(b.0) <= self.width + across
+            && a.1.max(b.1) >= -up
+            && a.1.min(b.1) <= self.height + up
     }
 
     /// The part on the page of the box `width` by `height` from `left`, `bottom`, as the
@@ -1040,6 +1057,50 @@ mod tests {
     }
 
     #[test]
+    fn glyphs_scaled_wider_reach_farther_across() {
+        // Issue #215: at 600 %, a glyph of 10 pt reaches 240 pt across, not 40 pt, but
+        // still 40 pt up and down; at most as far as a PDF holds positions.
+        let scaled = |x: f64, y: f64, size: f64| GlyphItem {
+            h_scale: 6.0,
+            size: Pt(size),
+            ..run(x, y, &[(0.0, 0.0)])
+        };
+        let items = [
+            DisplayItem::Glyphs(scaled(-100.0, 50.0, 10.0)),
+            DisplayItem::Glyphs(scaled(-239.0, 60.0, 10.0)),
+            DisplayItem::Glyphs(scaled(-241.0, 70.0, 10.0)),
+            DisplayItem::Glyphs(scaled(10.0, -39.0, 10.0)),
+            DisplayItem::Glyphs(scaled(10.0, -41.0, 10.0)),
+            // 6 × 4 × 1638 pt across, cut to 32767 pt from the page's corner.
+            DisplayItem::Glyphs(scaled(-32_660.0, 80.0, 1638.0)),
+            DisplayItem::Glyphs(scaled(-32_680.0, 90.0, 1638.0)),
+            // Condensed: as far as at 100 %, not half as far.
+            DisplayItem::Glyphs(GlyphItem {
+                h_scale: 0.5,
+                ..run(-30.0, 100.0, &[(0.0, 0.0)])
+            }),
+        ];
+        let (drawn, _) = painted(&Document::default(), crate::testing::minimal(), &items);
+        let starts: Vec<(Pt, Pt)> = drawn
+            .iter()
+            .filter_map(|item| match item {
+                Drawn::Glyphs(run) => Some((run.x(), run.y())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            starts,
+            [
+                (Pt(-100.0), Pt(150.0)),
+                (Pt(-239.0), Pt(140.0)),
+                (Pt(10.0), Pt(239.0)),
+                (Pt(-32_660.0), Pt(120.0)),
+                (Pt(-30.0), Pt(100.0)),
+            ]
+        );
+    }
+
+    #[test]
     fn a_glyph_raised_onto_the_page_starts_its_run() {
         // On a line 40,000 pt down, raised 39,850 pt by its offset: 50 pt up the page,
         // where its run starts, with no offset left.
@@ -1325,6 +1386,32 @@ mod tests {
             );
             assert_eq!(drawn.len(), usize::from(bits != 0x0002), "{bits:#06x}");
         }
+    }
+
+    #[test]
+    fn the_report_of_a_font_it_cannot_embed_says_why() {
+        // Issue #258: the reason is in the error's causes.
+        let font = crate::testing::with_name_copies(crate::testing::minimal(), 32);
+        let (drawn, report) = painted(
+            &Document::default(),
+            font,
+            &[DisplayItem::Glyphs(run(10.0, 50.0, &[(0.0, 0.0)]))],
+        );
+        assert!(drawn.is_empty());
+        let messages: Vec<&str> = report
+            .entries()
+            .iter()
+            .filter(|entry| entry.kind() == ReportKind::FontEmbedding)
+            .map(|entry| entry.message())
+            .collect();
+        assert_eq!(
+            messages,
+            [
+                "the text in Test is not drawn: cannot use the font data: font face 0: table \
+              'name' is past a limit of the library: the name records to keep point at \
+              1048584 bytes of strings, more than the 1048576 read before subsetting"
+            ]
+        );
     }
 
     #[test]

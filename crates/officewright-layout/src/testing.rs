@@ -156,3 +156,38 @@ pub(crate) fn italic(font: Vec<u8>) -> Vec<u8> {
     let style = u16::from_be_bytes([font[at], font[at + 1]]) | 2;
     patched(font, b"head", 44, &style.to_be_bytes())
 }
+
+/// `font` with a new `name` table whose family is "Test", followed by `copies` records
+/// of 32768 bytes each that all point at one run of strings: from 32 copies on, the
+/// strings the records to keep point at pass the 1 MiB that subsetting reads, and
+/// `officewright-pdf` cannot embed the font.
+pub(crate) fn with_name_copies(font: Vec<u8>, copies: u16) -> Vec<u8> {
+    let mut font = font;
+    font.resize(font.len().next_multiple_of(4), 0);
+    let count = copies + 1;
+    let mut name: Vec<u8> = [0u16, count, 6 + 12 * count]
+        .iter()
+        .flat_map(|value| value.to_be_bytes())
+        .collect();
+    let mut record = |id: u16, length: u16, offset: u16| {
+        for value in [3, 1, 0x0409, id, length, offset] {
+            name.extend(u16::to_be_bytes(value));
+        }
+    };
+    record(1, 8, 0);
+    for _ in 0..copies {
+        record(0, 32_768, 8);
+    }
+    name.extend("Test".encode_utf16().flat_map(u16::to_be_bytes));
+    name.extend([0, b'A'].repeat(16_384));
+    let tables = usize::from(u16::from_be_bytes([font[4], font[5]]));
+    let entry = (0..tables)
+        .map(|i| 12 + 16 * i)
+        .find(|&entry| &font[entry..entry + 4] == b"name")
+        .expect("a name table");
+    let offset = font.len() as u32;
+    font[entry + 8..entry + 12].copy_from_slice(&offset.to_be_bytes());
+    font[entry + 12..entry + 16].copy_from_slice(&(name.len() as u32).to_be_bytes());
+    font.extend(name);
+    font
+}
