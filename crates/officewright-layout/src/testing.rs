@@ -127,23 +127,45 @@ pub(crate) fn with_family(font: Vec<u8>, family: &str) -> Vec<u8> {
 /// subtables of its `cmap`, which share one format 4 table: a font with a period and no
 /// `A`.
 pub(crate) fn with_period(font: Vec<u8>) -> Vec<u8> {
+    // The second segment is `A` alone.
+    remapped(font, 1, 0x41, 0x2E)
+}
+
+/// `font` (the test font) with its glyph of the acute mapped from the soft hyphen
+/// (U+00AD) instead, as [`with_period`] does: a font that is no symbol font and has a
+/// soft hyphen.
+pub(crate) fn with_soft_hyphen(font: Vec<u8>) -> Vec<u8> {
+    // The third segment is the acute (U+00B4) alone.
+    remapped(font, 2, 0xB4, 0xAD)
+}
+
+/// `font` with segment `index` of its format 4 `cmap`, character `from` alone, mapped
+/// from `to` instead, to the glyph its delta gives `from`; `to` must keep the segments
+/// in order.
+fn remapped(font: Vec<u8>, index: usize, from: u16, to: u16) -> Vec<u8> {
     let cmap = table(&font, b"cmap");
     let subtable =
         cmap + u32::from_be_bytes(font[cmap + 8..cmap + 12].try_into().unwrap()) as usize;
     let segments_x2 = usize::from(u16::from_be_bytes([font[subtable + 6], font[subtable + 7]]));
-    // The second segment is `A` alone, to glyph 2 by its delta.
-    let end = subtable + 14 + 2;
-    let start = subtable + 16 + segments_x2 + 2;
-    let delta = subtable + 16 + 2 * segments_x2 + 2;
+    let end = subtable + 14 + 2 * index;
+    let start = subtable + 16 + segments_x2 + 2 * index;
+    let delta = subtable + 16 + 2 * segments_x2 + 2 * index;
+    let range_offset = subtable + 16 + 3 * segments_x2 + 2 * index;
     assert_eq!(
-        &font[start..start + 2],
-        &0x41u16.to_be_bytes(),
-        "the segment of A"
+        (&font[end..end + 2], &font[start..start + 2]),
+        (&from.to_be_bytes()[..], &from.to_be_bytes()[..]),
+        "the segment of {from:04X}"
     );
+    assert_eq!(
+        &font[range_offset..range_offset + 2],
+        &[0, 0],
+        "the segment of {from:04X} maps by its delta"
+    );
+    let glyph = from.wrapping_add(u16::from_be_bytes([font[delta], font[delta + 1]]));
     let mut font = font;
-    font[end..end + 2].copy_from_slice(&0x2Eu16.to_be_bytes());
-    font[start..start + 2].copy_from_slice(&0x2Eu16.to_be_bytes());
-    font[delta..delta + 2].copy_from_slice(&(2i16 - 0x2E).to_be_bytes());
+    font[end..end + 2].copy_from_slice(&to.to_be_bytes());
+    font[start..start + 2].copy_from_slice(&to.to_be_bytes());
+    font[delta..delta + 2].copy_from_slice(&glyph.wrapping_sub(to).to_be_bytes());
     font
 }
 
