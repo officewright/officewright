@@ -67,8 +67,9 @@ def with_shared_glyph(font):
 
 
 def with_table(font, tag, data):
-    """The font with table `tag` added: its table directory, sorted by tag as it must be,
-    gets a record more, and every table keeps its data."""
+    """The font with table `tag` added, or put in place of the one it has: its table
+    directory, sorted by tag as it must be, gets a record more for a new tag, and every
+    other table keeps its data."""
     count = int.from_bytes(font[4:6], "big")
     tables = {}
     for record in range(12, 12 + 16 * count, 16):
