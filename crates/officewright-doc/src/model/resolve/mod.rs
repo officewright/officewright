@@ -17,7 +17,7 @@ use super::styles::StyleKind;
 use super::views::{Paragraph, Run};
 use super::{Document, Kind, Node};
 
-use character::CharacterLevel;
+use character::{CharacterLevel, Resolving};
 use paragraph::ParagraphLevel;
 
 /// Styles whose child elements Word ignores, `w:basedOn`, `w:pPr` and `w:rPr` among
@@ -142,7 +142,7 @@ impl<'a> Formats<'a> {
         }
         let direct = run.properties();
         let paragraph = self.paragraph_style(paragraph_of(self.document, run.node()));
-        self.resolve_run(paragraph, &direct, None)
+        self.resolve_run(paragraph, &direct, Resolving::Run)
     }
 
     /// The formatting of a paragraph's mark in effect, which decides, among other
@@ -153,7 +153,7 @@ impl<'a> Formats<'a> {
         }
         let direct = paragraph.properties().mark;
         let style = self.paragraph_style(Some(paragraph.node()));
-        self.resolve_run(style, &direct, None)
+        self.resolve_run(style, &direct, Resolving::Run)
     }
 
     /// The formatting in effect of the mark of a paragraph that has the default
@@ -163,7 +163,11 @@ impl<'a> Formats<'a> {
     #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
     pub(crate) fn default_mark(&mut self) -> CharacterFormat {
         let style = self.paragraph_style(None);
-        self.resolve_run(style, &super::properties::RunProperties::default(), None)
+        self.resolve_run(
+            style,
+            &super::properties::RunProperties::default(),
+            Resolving::Run,
+        )
     }
 
     /// The formatting of a list item's label, its number or bullet, in effect: the
@@ -188,7 +192,7 @@ impl<'a> Formats<'a> {
         let properties = paragraph.properties();
         let style = self.paragraph_style(Some(paragraph.node()));
         let label = self.label_level(style, &properties)?;
-        Some(self.resolve_run(style, &properties.mark, label.as_deref()))
+        Some(self.resolve_run(style, &properties.mark, Resolving::Label(label.as_deref())))
     }
 
     /// The place among the styles of a paragraph's style: its own, else the default
