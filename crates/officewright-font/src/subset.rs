@@ -102,7 +102,8 @@ impl FontFace {
     /// subsetter cannot write back or a glyph with more stem hints than it can count, or
     /// a `name` table whose offsets it cannot compute,
     /// [`Error::TableOverLimit`] for a `name` table whose records to keep point at more
-    /// than 1 MiB of strings,
+    /// than 1 MiB of strings, or glyphs whose `CFF ` charstrings take more than
+    /// 16,777,216 operands, operators and hint mask bytes to decompile,
     /// [`Error::SubsetUnsupported`] if the face uses
     /// something the subsetter does not implement yet, and [`Error::Subset`] or
     /// [`Error::SubsetterPanicked`] if the face is damaged in a way that only subsetting
