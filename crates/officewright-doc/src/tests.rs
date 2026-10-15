@@ -377,8 +377,258 @@ fn follows_markup_compatibility() {
     assert_eq!(
         other.to_xml(),
         format!(
-            r#"<w14:extension xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:r xmlns:w="{W}"><w:t>hidden</w:t></w:r></w14:extension>"#
+            r#"<w14:extension xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:w="{W}"><w:r><w:t>hidden</w:t></w:r></w14:extension>"#
         )
+    );
+}
+
+/// What the XML of a kept element reads back as: each element's qualified name with
+/// its namespace, and each prefix its values name, with the attribute's local name and
+/// the namespace the prefix is bound to ("" for the default namespace). Panics if the
+/// XML is not well-formed.
+type ReadBack = (
+    Vec<(String, Option<String>)>,
+    Vec<(String, String, Option<String>)>,
+);
+fn read_back(xml: &str) -> ReadBack {
+    let input = officewright_opc::xml::Input::decode(xml.as_bytes()).unwrap();
+    let mut reader = input.reader(&officewright_opc::Limits::new());
+    let (mut names, mut values) = (Vec::new(), Vec::new());
+    while let Some(event) = reader
+        .read_event()
+        .unwrap_or_else(|err| panic!("{err}: {xml}"))
+    {
+        let officewright_opc::xml::Event::Start(tag) = event else {
+            continue;
+        };
+        let namespace = |ns: Option<officewright_opc::xml::NsId>| {
+            ns.map(|ns| reader.namespace_uri(ns).to_owned())
+        };
+        names.push((
+            tag.name().qname().as_str().to_owned(),
+            namespace(tag.name().namespace()),
+        ));
+        for attribute in tag.attributes() {
+            let local = attribute.name().local().to_owned();
+            let value = attribute.value();
+            let prefixes: Vec<&str> = match local.as_str() {
+                "Ignorable" | "MustUnderstand" | "Requires" => value.split_whitespace().collect(),
+                "ProcessContent" | "PreserveElements" | "PreserveAttributes" => value
+                    .split_whitespace()
+                    .filter_map(|name| name.split_once(':').map(|(prefix, _)| prefix))
+                    .collect(),
+                "type" => vec![value.split_once(':').map_or("", |(prefix, _)| prefix)],
+                _ => continue,
+            };
+            for prefix in prefixes {
+                let bound = namespace(reader.resolve_prefix(prefix));
+                values.push((local.clone(), prefix.to_owned(), bound));
+            }
+        }
+    }
+    (names, values)
+}
+
+/// The XML of each element kept in the first paragraph.
+fn kept_xml(document: &Document) -> Vec<String> {
+    let Some(Block::Paragraph(paragraph)) = document.sections().next().unwrap().blocks().next()
+    else {
+        panic!("no paragraph");
+    };
+    paragraph
+        .inlines()
+        .filter_map(|inline| match inline {
+            Inline::Other(other) => Some(other.to_xml()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn keeps_the_namespaces_that_values_in_kept_xml_name() {
+    // Prefixes named only in values (#110): by every Markup Compatibility attribute, by
+    // Requires and by xsi:type. Each case names a prefix of its own, bound on the
+    // paragraph outside the element kept, so that no case binds one another needs.
+    let outside: String = (1..=9)
+        .map(|n| format!(r#" xmlns:p{n}="urn:p{n}""#))
+        .collect();
+    let xsi = r#"xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance""#;
+    let document = open(&format!(
+        r#"<w:p xmlns="urn:d"{outside}><w14:a xmlns:v="urn:v"><w14:d mc:Ignorable="p1" mc:ProcessContent="p2:x" mc:MustUnderstand="p3"/><w14:g mc:PreserveElements="p4:x" mc:PreserveAttributes="p5:y"/><mc:AlternateContent><mc:Choice Requires="p6"><w14:b/></mc:Choice><mc:Fallback/></mc:AlternateContent><w14:c {xsi} xsi:type="p7:T"/><w14:h {xsi} xsi:type="T"/><w14:i mc:Ignorable="p8 p8" mc:ProcessContent="p8:x"/><w14:j xmlns=""><k/></w14:j><w14:l xmlns:p9="urn:other"><p9:z/></w14:l><p9:m mc:Ignorable="p9"/><w14:n xmlns:q="urn:q"><w14:o mc:Ignorable="q"/></w14:n><w14:e xmlns:t="urn:t" mc:Ignorable="t"/></w14:a></w:p>"#
+    ));
+    let xml = kept_xml(&document).remove(0);
+    let (names, values) = read_back(&xml);
+    let expected = [
+        ("Ignorable", "p1", "urn:p1"),
+        ("ProcessContent", "p2", "urn:p2"),
+        ("MustUnderstand", "p3", "urn:p3"),
+        ("PreserveElements", "p4", "urn:p4"),
+        ("PreserveAttributes", "p5", "urn:p5"),
+        ("Requires", "p6", "urn:p6"),
+        ("type", "p7", "urn:p7"),
+        // An unprefixed xsi:type names the default namespace.
+        ("type", "", "urn:d"),
+        // A prefix the values of one element name three times.
+        ("Ignorable", "p8", "urn:p8"),
+        ("Ignorable", "p8", "urn:p8"),
+        ("ProcessContent", "p8", "urn:p8"),
+        // Bound outside, after an element inside bound it to another namespace.
+        ("Ignorable", "p9", "urn:p9"),
+        // Bound by an element inside the one kept.
+        ("Ignorable", "q", "urn:q"),
+        ("Ignorable", "t", "urn:t"),
+    ]
+    .map(|(attribute, prefix, uri)| {
+        (
+            attribute.to_owned(),
+            prefix.to_owned(),
+            Some(uri.to_owned()),
+        )
+    });
+    assert_eq!(values, expected, "{xml}");
+    // Names mean what they meant: xmlns="" leaves k without a namespace, and p9 is
+    // urn:other inside l, and urn:p9 again after it.
+    for (name, uri) in [
+        ("k", None),
+        ("p9:z", Some("urn:other")),
+        ("p9:m", Some("urn:p9")),
+    ] {
+        assert!(
+            names.contains(&(name.to_owned(), uri.map(str::to_owned))),
+            "{name} in {xml}"
+        );
+    }
+    // The declarations written on the elements kept are kept as written, and each
+    // binding from outside is declared once, on the element kept.
+    let root = xml.split('>').next().unwrap();
+    assert!(
+        root.starts_with(r#"<w14:a xmlns:v="urn:v" xmlns:w14="#),
+        "{xml}"
+    );
+    for n in 1..=9 {
+        assert!(
+            root.contains(&format!(r#" xmlns:p{n}="urn:p{n}""#)),
+            "p{n} in {xml}"
+        );
+    }
+    assert!(root.contains(r#" xmlns="urn:d""#), "{xml}");
+    for (declaration, count) in [
+        ("xmlns:p8=", 1),
+        ("xmlns:p9=", 2),
+        ("xmlns:q=", 1),
+        ("xmlns:t=", 1),
+        ("xmlns=\"\"", 1),
+        ("xmlns=\"urn:d\"", 1),
+        ("xmlns:xsi=", 2),
+    ] {
+        assert_eq!(
+            xml.matches(declaration).count(),
+            count,
+            "{declaration} in {xml}"
+        );
+    }
+}
+
+#[test]
+fn escapes_the_namespaces_kept_xml_declares() {
+    // A quotation mark would end the attribute early, and a tab would read back as a
+    // space, which is another namespace.
+    let document =
+        open(r#"<w:p xmlns:p="urn:a&quot;b&#9;c"><w14:a><w14:b mc:Ignorable="p"/></w14:a></w:p>"#);
+    let xml = kept_xml(&document).remove(0);
+    let (_, values) = read_back(&xml);
+    assert_eq!(
+        values,
+        [(
+            "Ignorable".to_owned(),
+            "p".to_owned(),
+            Some("urn:a\"b\tc".to_owned())
+        )],
+        "{xml}"
+    );
+}
+
+#[test]
+fn keeps_a_long_namespace_once_however_many_kept_elements_name_it() {
+    // A reviewer of #222 found each declaration added for a value copied its URI: a
+    // 1 MB URI that 2,000 kept elements named took 1.9 GiB. And each element of a kept
+    // one that needed a prefix bound outside declared it again in the XML written back.
+    let uri = format!("urn:{}", "x".repeat(100_000));
+    let n = 1_000;
+    let body = format!(
+        r#"<w:p xmlns:p="{uri}">{}<w14:a>{}</w14:a></w:p>"#,
+        r#"<w14:b mc:Ignorable="p"/>"#.repeat(n),
+        r#"<p:c mc:Ignorable="p"/>"#.repeat(n)
+    );
+    let document = open(&body);
+    let token_bytes = |token: &model::xml::Token| match token {
+        model::xml::Token::Start { attributes, .. } => attributes
+            .iter()
+            .map(|attribute| attribute.value.len())
+            .sum(),
+        model::xml::Token::Text(text) | model::xml::Token::Comment(text) => text.len(),
+        model::xml::Token::ProcessingInstruction { target, data } => target.len() + data.len(),
+        model::xml::Token::Declarations(_) | model::xml::Token::End => 0,
+    };
+    let held = document.strings.bytes() + document.tokens.iter().map(token_bytes).sum::<usize>();
+    assert!(
+        held < 4 * body.len(),
+        "{held} bytes for {} of XML",
+        body.len()
+    );
+    let kept = kept_xml(&document);
+    assert_eq!(kept.len(), n + 1);
+    for xml in kept {
+        assert!(xml.len() < uri.len() + 30 * n, "{} bytes", xml.len());
+        assert_eq!(xml.matches("xmlns:p=").count(), 1);
+    }
+}
+
+#[test]
+fn looks_at_each_prefix_a_kept_value_names_once() {
+    // A reviewer of #222 found every prefix of a value compared with each one before:
+    // 200,000 prefixes nobody declared, in one mc:Ignorable of a kept element, took 50 s.
+    let prefixes: String = (0..300_000).map(|n| format!(" u{n}")).collect();
+    let document = open_in_linear_time(&format!(
+        r#"<w:p><w14:a><w14:b mc:Ignorable="{prefixes}"/></w14:a></w:p>"#
+    ));
+    assert_eq!(kept_xml(&document).len(), 1);
+}
+
+#[test]
+fn counts_the_declarations_added_for_values_against_the_node_limit() {
+    let fewest = |body: &str| {
+        (1..1000)
+            .find(|&max| {
+                LoadOptions::new()
+                    .with_limits(Limits::new().with_max_nodes(max))
+                    .open_bytes(docx(body))
+                    .is_ok()
+            })
+            .unwrap()
+    };
+    // wp is bound outside the element kept, so a declaration is added for it; zz is
+    // bound nowhere, so nothing is.
+    let bound = fewest(r#"<w:p><w14:a><w14:b mc:Ignorable="wp"/></w14:a></w:p>"#);
+    let unbound = fewest(r#"<w:p><w14:a><w14:b mc:Ignorable="zz"/></w14:a></w:p>"#);
+    assert_eq!(bound, unbound + 1);
+    // One declaration for a prefix, however often the values of the element name it.
+    let named_often = fewest(
+        r#"<w:p><w14:a><w14:b mc:Ignorable="wp wp wp" mc:ProcessContent="wp:x"/></w14:a></w:p>"#,
+    );
+    let named_once = fewest(
+        r#"<w:p><w14:a><w14:b mc:Ignorable="wp zz zz" mc:ProcessContent="zz:x"/></w14:a></w:p>"#,
+    );
+    assert_eq!(named_often, named_once);
+    // A declaration written on a kept element costs a node.
+    assert_eq!(
+        fewest(r#"<w:p><w14:a><w14:b xmlns:q="urn:q"/></w14:a></w:p>"#),
+        fewest(r#"<w:p><w14:a><w14:b/></w14:a></w:p>"#) + 1
+    );
+    // A prefix the element declares itself costs nothing more when its values name it.
+    assert_eq!(
+        fewest(r#"<w:p><w14:a><w14:b xmlns:q="urn:q" mc:Ignorable="q"/></w14:a></w:p>"#),
+        fewest(r#"<w:p><w14:a><w14:b xmlns:q="urn:q" mc:Ignorable="zz"/></w14:a></w:p>"#)
     );
 }
 
@@ -3208,6 +3458,45 @@ fn repairs_damaged_font_declarations() {
     assert!(messages[6].ends_with(r#": w:charset w:val="+F" is not valid; it is ignored"#));
     assert!(
         messages[7].ends_with("names the relationship rId1, which the font table does not have")
+    );
+}
+
+#[test]
+fn reads_style_names_section_breaks_and_grid_columns_through_alternate_content() {
+    // Issue #157: these skipped an mc:AlternateContent instead of reading the branch it
+    // takes. w14 is declared but not implemented, so its choices are passed by.
+    const MC: &str = r#"xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" mc:Ignorable="w14""#;
+    let styles = format!(
+        r#"<w:styles xmlns:w="{W}" {MC}><w:style w:type="paragraph" w:styleId="Quote"><mc:AlternateContent><mc:Choice Requires="w"><w:name w:val="Quote"/></mc:Choice><mc:Fallback><w:name w:val="Unread"/></mc:Fallback></mc:AlternateContent><mc:AlternateContent><mc:Choice Requires="w14"><w:basedOn w:val="Unread"/></mc:Choice><mc:Fallback><w:basedOn w:val="Normal"/><w:next w:val="Body"/><w:link w:val="QuoteChar"/></mc:Fallback></mc:AlternateContent></w:style></w:styles>"#
+    );
+    let body = r#"<w:p><w:pPr><mc:AlternateContent><mc:Choice Requires="w14"><w:sectPr><w:type w:val="nextColumn"/></w:sectPr></mc:Choice><mc:Fallback><w:sectPr><w:type w:val="continuous"/></w:sectPr></mc:Fallback></mc:AlternateContent></w:pPr></w:p><w:tbl><w:tblGrid><mc:AlternateContent><mc:Choice Requires="w14"><w:gridCol w:w="1"/></mc:Choice><mc:Fallback><w:gridCol w:w="2000"/><w:gridCol w:w="1000"/></mc:Fallback></mc:AlternateContent></w:tblGrid><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl><w:p/>"#;
+    let document = with_styles(body, &styles);
+    let quote = document
+        .styles()
+        .iter()
+        .find(|s| s.id() == "Quote")
+        .unwrap();
+    assert_eq!(
+        (quote.name(), quote.based_on(), quote.next(), quote.link()),
+        (
+            Some("Quote"),
+            Some("Normal"),
+            Some("Body"),
+            Some("QuoteChar")
+        )
+    );
+    let sections: Vec<Section<'_>> = document.sections().collect();
+    assert_eq!(sections.len(), 2);
+    assert_eq!(
+        sections[0].properties().start(),
+        Some(SectionStart::Continuous)
+    );
+    let Some(Block::Table(table)) = sections[1].blocks().next() else {
+        panic!("no table");
+    };
+    assert_eq!(
+        table.grid_columns().collect::<Vec<_>>(),
+        [Some(Pt(100.0)), Some(Pt(50.0))]
     );
 }
 
