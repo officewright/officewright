@@ -203,7 +203,8 @@ ir_struct! {
 }
 
 /// Word allows 1 to 45 columns (MS-OI29500 2.1.213 a), and requires the number of
-/// explicit columns to be that count (2.1.213 c).
+/// explicit columns to be that count (2.1.213 c). Explicit columns of which `validate`
+/// rejects one, a width or a spacing that is negative or not a number, are left to it.
 fn column_count(columns: &mut Columns, clamper: &mut Clamper) {
     const MAX: u16 = 45;
     if columns.count == 0 || columns.count > MAX {
@@ -214,7 +215,12 @@ fn column_count(columns: &mut Columns, clamper: &mut Clamper) {
         ));
         columns.count = clamped;
     }
-    if columns.widths.len() > usize::from(MAX) {
+    let rejected = |length: Pt| !length.0.is_finite() || length.0 < 0.0;
+    let any_rejected = columns
+        .widths
+        .iter()
+        .any(|column| rejected(column.width) || rejected(column.spacing));
+    if columns.widths.len() > usize::from(MAX) && !any_rejected {
         clamper.clamped(format!(
             "{} columns of their own widths are more than Word's {MAX}; the columns after \
              the first {MAX} are left out",

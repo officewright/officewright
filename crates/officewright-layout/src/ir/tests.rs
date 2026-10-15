@@ -337,6 +337,143 @@ fn ids_made_after_a_clone_are_only_the_maker_s() {
     assert!(clone.run_style(mine).is_none());
 }
 
+/// One id of each table of a document.
+#[derive(Clone, Copy)]
+struct Ids {
+    style: RunStyleId,
+    list: ListId,
+    instance: ListInstanceId,
+    image: ImageId,
+    note: NoteId,
+}
+
+impl Ids {
+    /// Adds one entry to each table of `document`.
+    fn add(document: &mut Document) -> Self {
+        let list = document.add_list(ListDefinition::default());
+        Self {
+            style: document.add_run_style(RunStyle::default()),
+            list,
+            instance: document.add_list_instance(ListInstance::new(list)),
+            image: document.add_image(ImageData::new(ImageFormat::Png, PNG)),
+            note: document.add_note(Note::new(NoteKind::Footnote, [])),
+        }
+    }
+
+    /// Adds to `document` an instance of the list, and a section whose paragraph is an
+    /// item of the instance, in the style, showing the image and referring to the note.
+    fn used_in(self, document: &mut Document) {
+        document.add_list_instance(ListInstance::new(self.list));
+        let picture = InlineObject::new(
+            ObjectContent::Picture(Picture::new(self.image)),
+            Size::new(Pt(10.0), Pt(10.0)),
+        );
+        let paragraph = Paragraph::new(self.style)
+            .with_list(Some(ListItem::new(self.instance, 0, self.style)))
+            .with_inlines([
+                picture.into(),
+                Inline::note_reference(self.note, false, self.style),
+            ]);
+        document.add_section(Section::new(PageSetup::default()).with_blocks([paragraph.into()]));
+    }
+}
+
+#[test]
+fn ids_of_every_table_made_after_a_clone_are_only_the_maker_s() {
+    // Issue #123 for every table. Each table holds a different number of entries when
+    // the document is cloned, so that an id checked against another table's count is
+    // refused, or accepted, wrongly.
+    let mut original = Document::default();
+    let mut before = Ids::add(&mut original);
+    for _ in 0..2 {
+        before.style = original.add_run_style(RunStyle::default());
+    }
+    for _ in 0..3 {
+        before.list = original.add_list(ListDefinition::default());
+    }
+    for _ in 0..4 {
+        before.instance = original.add_list_instance(ListInstance::new(before.list));
+    }
+    for _ in 0..5 {
+        before.image = original.add_image(ImageData::new(ImageFormat::Png, PNG));
+    }
+    for _ in 0..6 {
+        before.note = original.add_note(Note::new(NoteKind::Footnote, []));
+    }
+    let mut clone = original.clone();
+    let after = Ids::add(&mut original);
+    // The clone's own entries take the same indices as the original's after the clone.
+    let mine = Ids::add(&mut clone);
+
+    // The last ids before the clone name entries in both; the first ones after it only
+    // in the document that made them, though the other has an entry at that index.
+    for document in [&original, &clone] {
+        assert!(document.run_style(before.style).is_some());
+        assert!(document.list(before.list).is_some());
+        assert!(document.list_instance(before.instance).is_some());
+        assert!(document.image(before.image).is_some());
+        assert!(document.note(before.note).is_some());
+    }
+    for (document, foreign) in [(&clone, after), (&original, mine)] {
+        assert!(document.run_style(foreign.style).is_none());
+        assert!(document.list(foreign.list).is_none());
+        assert!(document.list_instance(foreign.instance).is_none());
+        assert!(document.image(foreign.image).is_none());
+        assert!(document.note(foreign.note).is_none());
+    }
+
+    // The clone validates with the ids of before, and refuses each of the ids of after.
+    let mut valid = clone.clone();
+    before.used_in(&mut valid);
+    assert!(valid.validate().is_ok(), "{:?}", valid.validate());
+    let cases = [
+        (
+            Ids {
+                style: after.style,
+                ..before
+            },
+            "run style",
+        ),
+        (
+            Ids {
+                list: after.list,
+                ..before
+            },
+            "list definition",
+        ),
+        (
+            Ids {
+                instance: after.instance,
+                ..before
+            },
+            "list instance",
+        ),
+        (
+            Ids {
+                image: after.image,
+                ..before
+            },
+            "image",
+        ),
+        (
+            Ids {
+                note: after.note,
+                ..before
+            },
+            "note",
+        ),
+    ];
+    for (ids, what) in cases {
+        let mut document = clone.clone();
+        ids.used_in(&mut document);
+        let message = invalid(&document);
+        assert!(
+            message.ends_with(&format!("the {what} id is of another document")),
+            "{what}: {message}"
+        );
+    }
+}
+
 #[test]
 fn every_inline_checks_its_style() {
     let mut other = Document::default();
@@ -758,6 +895,21 @@ fn every_length_that_wordprocessingml_keeps_unsigned_is_checked() {
             in_columns(Columns::default().with_widths([Column::default().with_spacing(minus)])),
             "sections[0].columns.widths[0].spacing",
         ),
+        // Past Word's 45 columns, where clamping would leave the column out.
+        (
+            in_columns(
+                Columns::default()
+                    .with_widths(columns_ending_with(Column::default().with_width(minus))),
+            ),
+            "sections[0].columns.widths[45].width",
+        ),
+        (
+            in_columns(
+                Columns::default()
+                    .with_widths(columns_ending_with(Column::default().with_spacing(minus))),
+            ),
+            "sections[0].columns.widths[45].spacing",
+        ),
         (
             in_props(ParagraphProps::default().with_spacing(Spacing::default().with_before(minus))),
             "sections[0].blocks[0].props.spacing.before",
@@ -791,6 +943,14 @@ fn every_length_that_wordprocessingml_keeps_unsigned_is_checked() {
         assert_eq!(invalid(&document), format!("{location}: -1 pt is negative"));
         assert_clamp_leaves_alone(&mut document, location);
     }
+    let mut document = in_columns(Columns::default().with_widths(columns_ending_with(
+        Column::default().with_width(Pt(f64::NAN)),
+    )));
+    assert_eq!(
+        invalid(&document),
+        "sections[0].columns.widths[45].width: NaN is not a finite length"
+    );
+    assert_clamp_leaves_alone(&mut document, "a 46th column that is not a number wide");
 
     for (size, problem) in [
         (
@@ -816,6 +976,13 @@ fn every_length_that_wordprocessingml_keeps_unsigned_is_checked() {
         "sections[0].page.margins.left: -1 pt is negative"
     );
     assert_clamp_leaves_alone(&mut document, "a page narrower than its margins");
+}
+
+/// 45 columns of 10 pt, then `last`: one more than Word allows.
+fn columns_ending_with(last: Column) -> Vec<Column> {
+    let mut columns = vec![Column::default().with_width(Pt(10.0)); 45];
+    columns.push(last);
+    columns
 }
 
 /// `clamp` reports nothing for `document` and leaves it as it was: what `validate`
@@ -1417,11 +1584,12 @@ fn every_length_of_a_table_that_word_keeps_unsigned_is_checked() {
             "rows[0].cells[0].margins.end",
         ),
     ];
-    for (document, location) in cases {
+    for (mut document, location) in cases {
         assert_eq!(
             invalid(&document),
             format!("sections[0].blocks[0].{location}: -1 pt is negative")
         );
+        assert_clamp_leaves_alone(&mut document, location);
     }
 }
 

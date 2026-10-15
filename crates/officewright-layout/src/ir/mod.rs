@@ -134,8 +134,8 @@ impl Document {
         &self.settings
     }
 
-    /// Adds a run style and returns its id, which only this document and its clones
-    /// accept.
+    /// Adds a run style and returns its id, which this document and the clones made of it
+    /// afterwards accept.
     pub fn add_run_style(&mut self, style: RunStyle) -> RunStyleId {
         let index = self.run_styles.len();
         self.run_styles.push(style);
@@ -152,8 +152,8 @@ impl Document {
         })
     }
 
-    /// Adds a list definition and returns its id, which only this document and its
-    /// clones accept.
+    /// Adds a list definition and returns its id, which this document and the clones made
+    /// of it afterwards accept.
     pub fn add_list(&mut self, list: ListDefinition) -> ListId {
         let index = self.lists.len();
         self.lists.push(list);
@@ -168,8 +168,8 @@ impl Document {
         self.entry(id.document, id.index, &self.lists, |counts| counts.lists)
     }
 
-    /// Adds an instance of a list definition and returns its id, which only this
-    /// document and its clones accept.
+    /// Adds an instance of a list definition and returns its id, which this document and
+    /// the clones made of it afterwards accept.
     pub fn add_list_instance(&mut self, instance: ListInstance) -> ListInstanceId {
         let index = self.list_instances.len();
         self.list_instances.push(instance);
@@ -186,8 +186,8 @@ impl Document {
         })
     }
 
-    /// Adds the data of an image and returns its id, which only this document and its
-    /// clones accept.
+    /// Adds the data of an image and returns its id, which this document and the clones
+    /// made of it afterwards accept.
     pub fn add_image(&mut self, image: ImageData) -> ImageId {
         let index = self.images.len();
         self.images.push(image);
@@ -202,8 +202,8 @@ impl Document {
         self.entry(id.document, id.index, &self.images, |counts| counts.images)
     }
 
-    /// Adds a footnote or an endnote and returns its id, which only this document and its
-    /// clones accept.
+    /// Adds a footnote or an endnote and returns its id, which this document and the
+    /// clones made of it afterwards accept.
     pub fn add_note(&mut self, note: Note) -> NoteId {
         let index = self.notes.len();
         self.notes.push(note);
@@ -357,23 +357,19 @@ impl Document {
         }
     }
 
-    /// Checks that an id of `what` names an entry of this document, whose table has
-    /// `count` entries.
+    /// Checks that an id of `what` names an entry of this document. An id it owns names
+    /// one: its own ids are below the lengths its tables had when it made them, an
+    /// ancestor's below the counts at the clone, and tables only grow.
     fn check_id(
         &self,
         document: DocumentTag,
         index: usize,
-        (count, inherited): (usize, fn(&TableCounts) -> usize),
+        inherited: fn(&TableCounts) -> usize,
         what: &str,
         checker: &Checker<'_>,
     ) -> Result<()> {
         if !self.owns(document, index, inherited) {
             return Err(checker.error(format!("the {what} id is of another document")));
-        }
-        if index >= count {
-            return Err(checker.error(format!(
-                "{what} {index} does not exist; the document has {count}"
-            )));
         }
         Ok(())
     }
@@ -444,9 +440,8 @@ macro_rules! document_ids {
             impl walk::Check for $name {
                 fn check(&self, checker: &mut Checker<'_>) -> Result<()> {
                     let document = checker.document();
-                    let count = document.$table.len();
-                    let table = (count, (|counts: &TableCounts| counts.$table) as fn(&TableCounts) -> usize);
-                    document.check_id(self.document, self.index, table, $what, checker)
+                    let inherited = (|counts: &TableCounts| counts.$table) as fn(&TableCounts) -> usize;
+                    document.check_id(self.document, self.index, inherited, $what, checker)
                 }
             }
 
