@@ -1631,9 +1631,10 @@ def table_style_toggles_defaults() -> Doc:
         ]
     )
     # Defaults bold. In Normal, BoldOff gives not bold under both readings, and bold if Word
-    # ignored the table style: it shows that w:b off applies. BoldOn gives bold under both
-    # readings and if ignored; it gives not bold only under the standard's own rule, which
-    # MS-OI29500 §17.7.6(b) quotes: a table style's true toggles the level before it. Under
+    # ignored the table style or followed the standard's own rule, which MS-OI29500
+    # §17.7.6(b) quotes: a table style's false leaves the value as it is, and its true
+    # toggles the level before it. BoldOn gives bold under both readings and if ignored, and
+    # not bold only under that rule, so the two cells together tell the four apart. Under
     # BoldOff, a run in CharBoldOff is bold under L (two flips) and not bold under B (same
     # as the base); a run in CharBold is not bold under L (one flip) and bold under B.
     off_cells = [[
