@@ -66,7 +66,7 @@ seeds() {
 	docx_open) echo tests/corpus/word-rules tests/corpus/resaved tests/corpus/poi crates/officewright-doc/tests/data ;;
 	font_* | pdf_embed | shape_font) echo tests/fonts crates/officewright-font/tests/data ;;
 	jpeg_header) echo fuzz/seeds/jpeg ;;
-	layout_shape) echo tests/pdf-output ;;
+	layout_shape) echo tests/pdf-output fuzz/seeds/layout_shape ;;
 	package) echo fuzz/seeds/package ;;
 	png_decode) echo fuzz/seeds/png tests/corpus/reference ;;
 	xml) echo fuzz/seeds/xml ;;
