@@ -937,6 +937,48 @@ fn a_file_to_run_is_never_rendered_over() -> io::Result<()> {
         let (code, output) = corpus.run(&["--render", "jump/..", "notes.pdf"], None)?;
         assert_eq!(code, 0, "{output}");
         assert!(corpus.dir.join("elsewhere/notes.pdf").exists(), "{output}");
+        // Inputs are where they are on disk too: one named through a link, and one that is
+        // itself a link to its target.
+        let notes = std::fs::read(corpus.dir.join("notes.pdf"))?;
+        let (code, output) = corpus.run(&["--render", ".", "here/notes.pdf"], None)?;
+        assert_eq!(code, 2, "{output}");
+        assert!(output.contains("a file to run"), "{output}");
+        assert_eq!(std::fs::read(corpus.dir.join("notes.pdf"))?, notes);
+        std::fs::create_dir_all(corpus.dir.join("store"))?;
+        std::fs::copy(
+            corpus.dir.join("docs/good.docx"),
+            corpus.dir.join("store/a.pdf"),
+        )?;
+        std::os::unix::fs::symlink("store/a.pdf", corpus.dir.join("a.docx"))?;
+        let stored = std::fs::read(corpus.dir.join("store/a.pdf"))?;
+        let (code, output) = corpus.run(&["--render", "store", "a.docx"], None)?;
+        assert_eq!(code, 2, "{output}");
+        assert!(output.contains("a file to run"), "{output}");
+        assert_eq!(std::fs::read(corpus.dir.join("store/a.pdf"))?, stored);
+        // A folder of the target that does not exist yet, under a link: link/new/.. is the
+        // link's folder, where the second file to run is.
+        std::os::unix::fs::symlink("store", corpus.dir.join("link"))?;
+        std::fs::create_dir_all(corpus.dir.join("store/docs"))?;
+        std::fs::copy(
+            corpus.dir.join("docs/good.docx"),
+            corpus.dir.join("store/docs/good.pdf"),
+        )?;
+        let (code, output) = corpus.run(
+            &[
+                "--render",
+                "link/new/..",
+                "docs/good.docx",
+                "store/docs/good.pdf",
+            ],
+            None,
+        )?;
+        assert_eq!(code, 2, "{output}");
+        assert!(output.contains("a file to run"), "{output}");
+        assert_eq!(
+            std::fs::read(corpus.dir.join("store/docs/good.pdf"))?,
+            stored
+        );
+        assert!(!corpus.dir.join("store/new").exists());
     }
     // Rendered elsewhere, it runs.
     let (code, output) = corpus.run(&["--render", "out", "notes.pdf"], None)?;

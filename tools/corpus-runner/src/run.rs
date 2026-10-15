@@ -227,18 +227,29 @@ fn lexical_absolute(path: &Path) -> Result<PathBuf, String> {
     Ok(out)
 }
 
-/// Where `path` is on disk, links followed: the canonical path of the file when it
-/// exists, else that of its folder with its name; else, when the folder does not exist
-/// either, so that nothing can be there, the path made absolute by its parts.
+/// Where `path` is on disk, links followed: the canonical path of the longest part of it
+/// that exists, then the rest of it, its `.` and `..` resolved by their names, since
+/// nothing of the rest exists, so no link can be among it.
 fn on_disk(path: &Path) -> Result<PathBuf, String> {
     let full = std::path::absolute(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    if let Ok(found) = std::fs::canonicalize(&full) {
+    let parts: Vec<std::path::Component<'_>> = full.components().collect();
+    for existing in (1..=parts.len()).rev() {
+        let (head, rest) = parts.split_at(existing);
+        let Ok(mut found) = std::fs::canonicalize(head.iter().collect::<PathBuf>()) else {
+            continue;
+        };
+        for part in rest {
+            match part {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    found.pop();
+                }
+                other => found.push(other.as_os_str()),
+            }
+        }
         return Ok(found);
     }
-    match (full.parent().map(std::fs::canonicalize), full.file_name()) {
-        (Some(Ok(folder)), Some(name)) => Ok(folder.join(name)),
-        _ => lexical_absolute(path),
-    }
+    lexical_absolute(path)
 }
 
 /// The file's path under the root, with forward slashes, the same on every system.
@@ -307,7 +318,9 @@ impl Launcher {
 /// Refuses two files that would be rendered to one PDF: names that differ only in their
 /// extension, or in case, which the file systems of macOS and Windows ignore. Refuses as
 /// well a target that is one of the files to run, compared where they are on disk (links
-/// followed) and without case: a target is removed before its document runs.
+/// followed) and without case: a target is removed before its document runs. A target
+/// that is a link to a file to run is refused too, though removing it would remove only
+/// the link.
 fn render_targets(
     options: &Options,
     files: &[(String, PathBuf)],
