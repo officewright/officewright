@@ -147,6 +147,12 @@ mod tests {
                 Some(144.0)
             ]
         );
+        // A stop a hundredth of a point after the place is still taken: only rounding,
+        // far below a twip, passes one by.
+        assert_eq!(
+            positions(&stops, &[49.99, 99.99, 107.99]),
+            [Some(50.0), Some(100.0), Some(108.0)]
+        );
         let end = stops.next(Pt(0.0));
         assert_eq!(
             end.map(|stop| (stop.kind, stop.leader)),
