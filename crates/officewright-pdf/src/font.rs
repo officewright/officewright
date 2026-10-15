@@ -183,8 +183,9 @@ impl Font {
     /// embedded yet), has CID-keyed CFF outlines with more Font DICTs than the subsetter
     /// takes (255), or if subsetting finds it damaged or past a limit of the library
     /// (`name` records that point at more than 1 MiB of strings, CFF Font DICTs that point
-    /// at more than 1 MiB of Private DICTs, or a CFF `.notdef` glyph that takes more than
-    /// 16,777,216 operands, operators and hint mask bytes to decompile).
+    /// at more than 1 MiB of Private DICTs, an FDSelect of more than 2,048 ranges, or a CFF
+    /// `.notdef` glyph that takes more than 16,777,216 operands, operators and hint mask
+    /// bytes to decompile).
     pub fn from_face(face: FontFace) -> Result<Self> {
         Self::embed(face, None)
     }

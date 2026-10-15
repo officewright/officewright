@@ -402,9 +402,10 @@ fn resolves_the_list_and_lays_its_level_between_the_style_and_direct_formatting(
         // direct formatting over the level's.
         paragraph("Indented", &numbered(0, 1)),
         paragraph("", &format!(r#"{}<w:ind w:left="0"/>"#, numbered(0, 1))),
-        // A style's list: the level whose w:pStyle names the style (ECMA-376 §17.9.23).
+        // A style's list without a level: the level whose w:pStyle names the style
+        // (ECMA-376 §17.9.23).
         paragraph("ListStyle", ""),
-        // Else the level the style writes (MS-OI29500 §17.3.1.19(a)).
+        // A style's list with a level: that level (MS-OI29500 §17.3.1.19(a)).
         paragraph("StyleLevel", ""),
         // Instance 0 takes the paragraph out of its style's list.
         paragraph("ListStyle", &numbered(0, 0)),
@@ -972,10 +973,102 @@ fn adds_the_tab_stops_of_the_list_level() {
 }
 
 #[test]
-fn takes_the_level_a_definition_links_to_the_style_before_the_styles_own() {
-    // The style writes level 0, level 2 of the definition names the style: the level of
-    // w:pStyle comes first (ECMA-376 §17.9.23). Word calls the combination unpredictable
-    // (MS-OI29500 §17.3.1.19(a)); a rule document for Word to render is pending.
+fn takes_the_level_the_style_writes_before_the_level_that_names_the_style() {
+    // The cases of word-rules/E-list-level-inherit.docx, with the list level and indents
+    // of Word's reference (formatting.json). In case 04 the style writes level 0 and
+    // level 2 of its list names the style: Word takes level 0, not the level of w:pStyle
+    // that ECMA-376 §17.9.23 gives (#279).
+    let levels = |definition: i64, linked: &str| {
+        let levels: String = (0..3)
+            .map(|level| {
+                let p_style = if level == 2 && !linked.is_empty() {
+                    format!(r#"<w:pStyle w:val="{linked}"/>"#)
+                } else {
+                    String::new()
+                };
+                format!(
+                    r#"<w:lvl w:ilvl="{level}"><w:start w:val="1"/><w:numFmt w:val="decimal"/>{p_style}<w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="{}" w:hanging="360"/></w:pPr></w:lvl>"#,
+                    720 * (level + 1)
+                )
+            })
+            .collect();
+        format!(r#"<w:abstractNum w:abstractNumId="{definition}">{levels}</w:abstractNum>"#)
+    };
+    let numbering = [
+        levels(0, ""),
+        levels(1, "Linked"),
+        r#"<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#.to_owned(),
+        r#"<w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num>"#.to_owned(),
+    ]
+    .concat();
+    let styles = [
+        defaults(""),
+        style(
+            "paragraph",
+            "StyleLevel1",
+            None,
+            r#"<w:numPr><w:ilvl w:val="1"/><w:numId w:val="1"/></w:numPr>"#,
+        ),
+        style(
+            "paragraph",
+            "StyleNoLevel",
+            None,
+            r#"<w:numPr><w:numId w:val="1"/></w:numPr>"#,
+        ),
+        style(
+            "paragraph",
+            "Linked",
+            None,
+            r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="2"/></w:numPr>"#,
+        ),
+    ]
+    .concat();
+    let num_pr = |inside: &str| format!("<w:numPr>{inside}</w:numPr>");
+    let body = [
+        paragraph("StyleLevel1", ""),
+        paragraph("StyleLevel1", &num_pr(r#"<w:numId w:val="1"/>"#)),
+        paragraph("StyleLevel1", &num_pr(r#"<w:ilvl w:val="2"/>"#)),
+        paragraph("Linked", ""),
+        paragraph("StyleNoLevel", ""),
+        paragraph("", &num_pr(r#"<w:numId w:val="1"/>"#)),
+        paragraph("StyleLevel1", &num_pr(r#"<w:numId w:val="0"/>"#)),
+        paragraph("StyleLevel1", &num_pr(r#"<w:numId w:val="2"/>"#)),
+    ]
+    .concat();
+    let found: Vec<_> = formats(&build(&body, &styles, Some(&numbering)))
+        .iter()
+        .map(|format| {
+            (
+                format
+                    .list()
+                    .map(|list| (list.instance(), list.level_number())),
+                format.start_indent().0,
+                format.first_line_indent().0,
+            )
+        })
+        .collect();
+    assert_eq!(
+        found,
+        [
+            (Some((1, 1)), 72.0, -18.0),
+            (Some((1, 1)), 72.0, -18.0),
+            (Some((1, 2)), 108.0, -18.0),
+            (Some((2, 0)), 36.0, -18.0),
+            (Some((1, 0)), 36.0, -18.0),
+            (Some((1, 0)), 36.0, -18.0),
+            (None, 0.0, 0.0),
+            (Some((2, 1)), 72.0, -18.0),
+        ]
+    );
+}
+
+#[test]
+fn takes_a_level_beyond_8_the_style_writes_before_the_level_that_names_the_style() {
+    // From the review of #292: the style writes level 9 and level 2 of its list names
+    // the style, as Heading 3 of LibreOffice's tdf141966_chapterNumberTortureTest.docx
+    // does. The level the style writes comes first, as in case 04 of
+    // word-rules/E-list-level-inherit.docx, and a level beyond 8 is no list, as one
+    // written on the paragraph is. No render of Word confirms this case yet (#293).
     let numbering = [
         definition(10, r#"<w:pStyle w:val="Linked"/>"#),
         r#"<w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num>"#.to_owned(),
@@ -987,12 +1080,23 @@ fn takes_the_level_a_definition_links_to_the_style_before_the_styles_own() {
             "paragraph",
             "Linked",
             None,
-            r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>"#,
+            r#"<w:numPr><w:ilvl w:val="9"/><w:numId w:val="1"/></w:numPr>"#,
         ),
     ]
     .concat();
-    let format = &formats(&build(&paragraph("Linked", ""), &styles, Some(&numbering)))[0];
-    assert_eq!(format.list().unwrap().level_number(), 2);
+    let body = [
+        paragraph("Linked", ""),
+        paragraph(
+            "",
+            r#"<w:numPr><w:ilvl w:val="9"/><w:numId w:val="1"/></w:numPr>"#,
+        ),
+    ]
+    .concat();
+    let lists: Vec<_> = formats(&build(&body, &styles, Some(&numbering)))
+        .iter()
+        .map(|format| format.list().map(|list| list.level_number()))
+        .collect();
+    assert_eq!(lists, [None, None]);
 }
 
 #[test]
