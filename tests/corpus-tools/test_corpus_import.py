@@ -1222,6 +1222,9 @@ class BodyParagraphs(unittest.TestCase):
             + paragraph("", "<w:b/>")
             + paragraph("", run=hidden)  # a hidden run, not a hidden mark
             + paragraph("After", style="Heading3")
+            + paragraph("", hidden)
+            + paragraph("", hidden)
+            + paragraph("")  # an empty paragraph after them takes the fold as well
             + "</w:body></w:document>"
         )
         styles = (
@@ -1233,7 +1236,7 @@ class BodyParagraphs(unittest.TestCase):
         )
         parts = {"word/document.xml": document.encode(), "word/styles.xml": styles.encode()}
         normal = ("Normal", "Normal")
-        texts = ["Before", "Impact", "Hidden mark", "", "", "", "", "", "", "After"]
+        texts = ["Before", "Impact", "Hidden mark", "", "", "", "", "", "", "After", ""]
         self.assertEqual(
             importer.body_paragraph_styles(parts),
             [
@@ -1244,6 +1247,7 @@ class BodyParagraphs(unittest.TestCase):
                 ("Hidden mark", *normal),
                 *[("", *normal)] * 6,
                 ("After", "Heading3", "heading 3"),
+                ("", None, None),
             ],
         )
         # So the export of such a document lines up with the copy, and the folded entry
@@ -1267,7 +1271,7 @@ class BodyParagraphs(unittest.TestCase):
         paragraphs = result["stories"][0]["paragraphs"]
         self.assertEqual(
             [p.get("style_id") for p in paragraphs],
-            ["Normal", None] + ["Normal"] * 7 + ["Heading3"],
+            ["Normal", None] + ["Normal"] * 7 + ["Heading3", None],
         )
 
     def test_every_spelling_of_true_marks_the_default(self):
