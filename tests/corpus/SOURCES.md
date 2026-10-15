@@ -116,6 +116,8 @@ writes.
 | word-rules/E-table-cell-margins.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | A cell's own margins (w:tcMar) of type pct, auto and nil, against the table's margins of 5 pt: where the text of each cell starts and ends |
 | word-rules/E-table-cell-margins-nil.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | A table's own cell margins (w:tblCellMar) of type nil, one side per table: whether Word ignores them, so that the table style's margins apply |
 | word-rules/E-table-float-align.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Floating tables (w:tblpPr) placed only by an alignment, bottom or centre, with both distances left out: whether Word floats them and where, or keeps them in the text |
+| word-rules/E-bold-italic-missing.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Bold italic text in a family without a Bold Italic face (#245): Garamond, installed with Regular, Italic and Bold only, and Liberation Sans, installed complete, at 11 and 20 pt in regular, italic, bold and bold italic |
+| word-rules/E-list-level-linked-no-level.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Which list level a paragraph takes whose style gives a list but no level, when level 2 of that list names the style (#293): level 2, as ECMA-376 says, or level 0 |
 
 ## Apache POI test documents (`poi/`)
 

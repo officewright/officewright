@@ -3082,6 +3082,60 @@ def table_float_align() -> Doc:
     )
 
 
+def bold_italic_missing() -> Doc:
+    # #245: E-italic-missing showed italic text in a family without an Italic face drawn
+    # with Regular, slanted. Bold italic in a family without a Bold Italic face could take
+    # Bold, slanted, or Italic, emboldened. Garamond, which comes with Office, has Regular,
+    # Italic and Bold faces only; Liberation Sans, installed complete, shows each face as it
+    # is. The label is in Calibri, the sample in a run of its own.
+    bold, italic = "<w:b/><w:bCs/>", "<w:i/><w:iCs/>"
+    body, n = "", 0
+    for font in ("Garamond", "Liberation Sans"):
+        for size in (11, 20):
+            for label, toggles in (("regular", ""), ("italic", italic), ("bold", bold),
+                                   ("bold italic", bold + italic)):
+                n += 1
+                body += para(run(f"Case {n:02d}: {font} {size} pt {label}: ")
+                             + run("Hamburgefonts gjpqy", font, size, toggles))
+    return Doc(
+        "E-bold-italic-missing",
+        "Bold italic text in a family without a Bold Italic face (#245): Garamond, installed "
+        "with Regular, Italic and Bold only, and Liberation Sans, installed complete, at 11 "
+        "and 20 pt in regular, italic, bold and bold italic",
+        body,
+    )
+
+
+def list_level_linked_no_level() -> Doc:
+    # #293: a paragraph style that writes a list but no level, which level 2 of that list
+    # names with its w:pStyle. ECMA-376 §17.9.23 gives the paragraph the level that names
+    # its style; E-list-level-inherit's case 04 showed that a level the style writes comes
+    # first, and its case 05 a style without a level that no level names. The labels of
+    # the three levels differ, so the label shows the level.
+    levels = [
+        level(ilvl, "lowerLetter", template, left=720 * (ilvl + 1), hanging=360,
+              p_style="LinkedNoLevel" if ilvl == 2 else None)
+        for ilvl, template in enumerate(["%1)", "(%2)", "[%3]"])
+    ]
+    numbering = abstract_num(0, "5C3A0031", levels) + num(1, 0)
+    styles = para_style("LinkedNoLevel", '<w:numPr><w:numId w:val="1"/></w:numPr>')
+    body = "".join(
+        para(run(f"Case {n:02d}: {label}"), p_style="LinkedNoLevel")
+        for n, label in enumerate([
+            "the style LinkedNoLevel gives instance 1 and no level; level 2 names the style",
+            "a second paragraph in the same style",
+        ], 1)
+    )
+    return Doc(
+        "E-list-level-linked-no-level",
+        "Which list level a paragraph takes whose style gives a list but no level, when "
+        "level 2 of that list names the style (#293): level 2, as ECMA-376 says, or level 0",
+        body,
+        numbering=numbering,
+        styles=styles,
+    )
+
+
 def documents() -> list[Doc]:
     return [
         line_fonts(),
@@ -3183,6 +3237,8 @@ def documents() -> list[Doc]:
         table_cell_margins(),
         table_cell_margins_nil(),
         table_float_align(),
+        bold_italic_missing(),
+        list_level_linked_no_level(),
     ]
 
 

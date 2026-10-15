@@ -2457,6 +2457,47 @@ class Packages(unittest.TestCase):
             after = children[children.index(table) + 1]
             self.assertTrue("".join(t.text for t in after.iter(f"{W}t")).startswith("Text around"))
 
+        # E-bold-italic-missing: each sample is in the font, size and style its label names.
+        _, _, body = load("E-bold-italic-missing")
+        paragraphs = body.findall(f"{W}p")
+        self.assertEqual(len(paragraphs), 16)
+        styles_seen = set()
+        for n, paragraph in enumerate(paragraphs, 1):
+            label_run, sample = paragraph.findall(f"{W}r")
+            label = "".join(t.text for t in label_run.iter(f"{W}t"))
+            font, size, style = re.fullmatch(
+                rf"Case {n:02d}: (Garamond|Liberation Sans) (11|20) pt (regular|italic|bold|bold "
+                r"italic): ", label).groups()
+            styles_seen.add((font, size, style))
+            self.assertIsNone(label_run.find(f"{W}rPr"), label)
+            props = props_of(sample, f"{W}rPr")
+            self.assertEqual(props["rFonts"]["ascii"], font, label)
+            self.assertEqual(props["sz"], {"val": str(int(size) * 2)}, label)
+            self.assertEqual("b" in props, "bold" in style, label)
+            self.assertEqual("i" in props, "italic" in style, label)
+        self.assertEqual(len(styles_seen), 16)
+
+        # E-list-level-linked-no-level: the style gives instance 1 and no level; only level 2
+        # of its definition names the style; the paragraphs have the style and nothing else.
+        _, parts, body = load("E-list-level-linked-no-level")
+        styles = ElementTree.fromstring(parts["word/styles.xml"])
+        linked = next(s for s in styles.iter(f"{W}style")
+                      if s.get(f"{W}styleId") == "LinkedNoLevel")
+        num_pr = linked.find(f"{W}pPr/{W}numPr")
+        self.assertEqual([c.tag.replace(W, "") for c in num_pr], ["numId"])
+        self.assertEqual(num_pr.find(f"{W}numId").get(f"{W}val"), "1")
+        numbering = ElementTree.fromstring(parts["word/numbering.xml"])
+        naming = [lvl.get(f"{W}ilvl") for lvl in numbering.iter(f"{W}lvl")
+                  if lvl.find(f"{W}pStyle") is not None
+                  and lvl.find(f"{W}pStyle").get(f"{W}val") == "LinkedNoLevel"]
+        self.assertEqual(naming, ["2"])
+        templates = [lvl.find(f"{W}lvlText").get(f"{W}val") for lvl in numbering.iter(f"{W}lvl")]
+        self.assertEqual(len(set(templates)), len(templates))
+        paragraphs = body.findall(f"{W}p")
+        self.assertEqual(len(paragraphs), 2)
+        for paragraph in paragraphs:
+            self.assertEqual(props_of(paragraph, f"{W}pPr"), {"pStyle": {"val": "LinkedNoLevel"}})
+
     def test_refuses_a_setting_word_does_not_write_in_the_mode(self):
         doc = next(doc for doc in self.docs if doc.name == "E-opentype-on")
         for mode, values in ((15, (("enableOpenTypeFeature", 0),)),
