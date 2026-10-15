@@ -727,12 +727,11 @@ pub fn lay_out(
     let mut fonts = Fonts::new(book);
     let mut shaper = Shaper::new();
     let location = Location::default();
-    let layout = crate::paragraph::lay_out(
+    let layout = laid_out(
         document,
         paragraph,
         Pt(width),
-        &mut fonts,
-        &mut shaper,
+        (&mut fonts, &mut shaper),
         &location,
     );
     let itemized = &layout.itemized;
@@ -829,6 +828,28 @@ pub fn lay_out(
     }
 }
 
+/// `paragraph` laid out as the layout does; a list item with its label as the first item
+/// of its list.
+fn laid_out(
+    document: &Document,
+    paragraph: &crate::ir::Paragraph,
+    width: Pt,
+    (fonts, shaper): (&mut Fonts<'_>, &mut Shaper),
+    location: &Location,
+) -> crate::paragraph::ParagraphLayout {
+    let label = paragraph
+        .list()
+        .and_then(|item| crate::lists::Counters::default().label(document, &item, location));
+    crate::paragraph::lay_out_with(
+        document,
+        (paragraph, label.as_ref()),
+        width,
+        (fonts, shaper),
+        location,
+        None,
+    )
+}
+
 /// The space between a paragraph with `above` of `document` and the one with `below`
 /// that follows it.
 pub fn space_between(
@@ -862,12 +883,11 @@ pub fn check_lines(
     let mut fonts = Fonts::new(book);
     let mut shaper = Shaper::new();
     let location = Location::default();
-    let layout = crate::paragraph::lay_out(
+    let layout = laid_out(
         document,
         paragraph,
         Pt(width),
-        &mut fonts,
-        &mut shaper,
+        (&mut fonts, &mut shaper),
         &location,
     );
     let report = fonts.into_report();
@@ -1124,12 +1144,11 @@ pub fn paint(
             None => crate::paragraph::space_before(document, paragraph.props()),
         }
         .0;
-        let layout = crate::paragraph::lay_out(
+        let layout = laid_out(
             document,
             paragraph,
             Pt(width),
-            &mut fonts,
-            &mut shaper,
+            (&mut fonts, &mut shaper),
             &location,
         );
         let mut painting = Painting {
@@ -1325,13 +1344,13 @@ pub fn check_pages(book: &FontBook, document: &Document, max_pages: usize) -> Re
             for flowed in &flow {
                 let setup = setup_of(flowed.section).unwrap_or_default();
                 let width = crate::pages::body(&setup).width;
-                let layout = crate::paragraph::lay_out(
+                let layout = crate::paragraph::lay_out_with(
                     document,
-                    flowed.paragraph,
+                    (flowed.paragraph, flowed.label.as_ref()),
                     width,
-                    &mut fonts,
-                    &mut shaper,
+                    (&mut fonts, &mut shaper),
                     &flowed.location,
+                    None,
                 );
                 lines += layout.lines.len();
             }

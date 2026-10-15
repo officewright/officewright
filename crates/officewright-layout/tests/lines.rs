@@ -1732,3 +1732,212 @@ fn characters_condensed_to_nothing_after_a_space_stay_before_the_hyphen() -> Tes
     }
     Ok(())
 }
+
+#[test]
+fn a_cluster_is_as_wide_as_all_its_glyphs() -> TestResult {
+    // Carlito has no combining acute: "q" and the missing-glyph box Carlito draws for the
+    // accent make one cluster of two glyphs, each with an advance of its own. With no
+    // other font in the book, nothing else draws the accent.
+    let path = common::repository().join("tests/fonts/carlito/Carlito-Regular.ttf");
+    let mut book = FontBook::new();
+    book.add_file(&path)?;
+    let face = officewright_font::FontFace::from_bytes(std::fs::read(&path)?, 0)?;
+    let text = "q\u{0301}";
+    let shaped = fuzzing::shape(&face, text, &fuzzing::Settings::new());
+    let glyphs = shaped.glyphs();
+    assert_eq!(glyphs.len(), 2);
+    assert!(
+        glyphs
+            .iter()
+            .all(|glyph| glyph.cluster() == 0 && glyph.x_advance() > 0)
+    );
+    let advance: i32 = glyphs.iter().map(|glyph| glyph.x_advance()).sum();
+    let (document, style) = calibri(10.0);
+    let width = width_of(&book, &document, style, text);
+    let expected = f64::from(advance) * 10.0 / f64::from(face.units_per_em());
+    assert!((width - expected).abs() < 1e-6, "{width} for {expected}");
+    Ok(())
+}
+
+/// A paragraph of `text` that is the first item of a list whose label is `label` (no
+/// numbers in it) with `alignment` and `suffix`, indented 36 pt with a hanging indent of
+/// 18 pt, in Liberation Sans 10 pt.
+fn list_item(
+    label: &str,
+    (alignment, suffix): (
+        officewright_layout::ir::LevelAlignment,
+        officewright_layout::ir::Suffix,
+    ),
+    props: ParagraphProps,
+    text: &str,
+) -> (Document, Paragraph) {
+    use officewright_layout::ir::{Level, LevelTextPart, ListDefinition, ListInstance, ListItem};
+
+    let (mut document, style) = liberation(10.0);
+    let level = Level::default()
+        .with_text([LevelTextPart::Literal(label.into())])
+        .with_alignment(alignment)
+        .with_suffix(suffix);
+    let list = document.add_list(ListDefinition::default().with_levels([level]));
+    let instance = document.add_list_instance(ListInstance::new(list));
+    let props = props.with_indent(
+        Indent::default()
+            .with_start(Pt(36.0))
+            .with_first_line(Pt(-18.0)),
+    );
+    let paragraph = Paragraph::new(style)
+        .with_props(props)
+        .with_list(Some(ListItem::new(instance, 0, style)))
+        .with_inlines([Inline::text(text, style)]);
+    (document, paragraph)
+}
+
+#[test]
+fn a_list_label_stands_at_the_first_line_s_start_as_its_level_aligns_it() -> TestResult {
+    use officewright_layout::ir::{LevelAlignment, Suffix};
+
+    // Design 7.3: the label stands with its alignment at the first line's start, 18 pt;
+    // a tab after it goes to the text's indent, 36 pt, where every hanging indent puts a
+    // stop.
+    let book = book()?;
+    let width_of_label = {
+        let (document, style) = liberation(10.0);
+        width_of(&book, &document, style, "1.")
+    };
+    for (alignment, start) in [
+        (LevelAlignment::Start, 18.0),
+        (LevelAlignment::Center, 18.0 - width_of_label / 2.0),
+        (LevelAlignment::End, 18.0 - width_of_label),
+    ] {
+        let (document, paragraph) = list_item(
+            "1.",
+            (alignment, Suffix::Tab),
+            ParagraphProps::default(),
+            "text",
+        );
+        let laid = fuzzing::lay_out(&book, &document, &paragraph, 400.0);
+        let line = laid.lines().first().ok_or("no line")?;
+        assert_eq!(line.text(), "1.\ttext", "{alignment:?}");
+        let words: Vec<(f64, f64)> = line.words().iter().map(|w| (w.start(), w.end())).collect();
+        assert!(
+            (words[0].0 - start).abs() < 1e-6,
+            "{alignment:?}: {words:?}"
+        );
+        assert!((words[1].0 - 36.0).abs() < 1e-6, "{alignment:?}: {words:?}");
+    }
+    // Aligned at the end, the label's own text ends at the first line's start, and the
+    // space after it follows.
+    let (document, paragraph) = list_item(
+        "1.",
+        (LevelAlignment::End, Suffix::Space),
+        ParagraphProps::default(),
+        "text",
+    );
+    let laid = fuzzing::lay_out(&book, &document, &paragraph, 400.0);
+    let line = laid.lines().first().ok_or("no line")?;
+    let words: Vec<(f64, f64)> = line.words().iter().map(|w| (w.start(), w.end())).collect();
+    let (document, style) = liberation(10.0);
+    let space = space_width(&book, &document, style);
+    assert!((words[0].1 - 18.0).abs() < 1e-6, "{words:?}");
+    assert!((words[1].0 - (18.0 + space)).abs() < 1e-6, "{words:?}");
+    // The label moves only the first line: the next ones start at the text's indent.
+    let (document, paragraph) = list_item(
+        "1.",
+        (LevelAlignment::End, Suffix::Tab),
+        ParagraphProps::default(),
+        SENTENCE,
+    );
+    let laid = fuzzing::lay_out(&book, &document, &paragraph, 200.0);
+    let second = laid.lines().get(1).ok_or("one line")?;
+    let word = second.words().first().ok_or("no word")?;
+    assert!((word.start() - 36.0).abs() < 1e-6, "{:?}", second.words());
+    // A label wider than the room before the text's indent: the tab goes on to the next
+    // default stop, 36 pt apart, here at 72 pt.
+    let (document, paragraph) = list_item(
+        "Article 1.",
+        (LevelAlignment::Start, Suffix::Tab),
+        ParagraphProps::default(),
+        "text",
+    );
+    let laid = fuzzing::lay_out(&book, &document, &paragraph, 400.0);
+    let line = laid.lines().first().ok_or("no line")?;
+    let text = line.words().last().ok_or("no word")?;
+    assert!((text.start() - 72.0).abs() < 1e-6, "{:?}", line.words());
+    // A space after the label, or nothing: then label and text make one word.
+    let (document, style) = liberation(10.0);
+    let label = width_of(&book, &document, style, "1.");
+    let space = space_width(&book, &document, style);
+    let joined = width_of(&book, &document, style, "1.text");
+    let (document, paragraph) = list_item(
+        "1.",
+        (LevelAlignment::Start, Suffix::Space),
+        ParagraphProps::default(),
+        "text",
+    );
+    let laid = fuzzing::lay_out(&book, &document, &paragraph, 400.0);
+    let line = laid.lines().first().ok_or("no line")?;
+    let last = line.words().last().ok_or("no word")?;
+    assert!(
+        (last.start() - (18.0 + label + space)).abs() < 1e-6,
+        "{:?}",
+        line.words()
+    );
+    let (document, paragraph) = list_item(
+        "1.",
+        (LevelAlignment::Start, Suffix::Nothing),
+        ParagraphProps::default(),
+        "text",
+    );
+    let laid = fuzzing::lay_out(&book, &document, &paragraph, 400.0);
+    let line = laid.lines().first().ok_or("no line")?;
+    let word = line.words().first().ok_or("no word")?;
+    assert_eq!(word.text(), "1.text");
+    assert!(
+        (word.start() - 18.0).abs() < 1e-6 && (word.end() - (18.0 + joined)).abs() < 1e-6,
+        "{word:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_list_label_is_never_stretched() -> TestResult {
+    use officewright_layout::ir::{Alignment, LevelAlignment, Suffix};
+
+    // Justified, the spaces of the text widen; those of the label do not (design 7.3).
+    let book = book()?;
+    let laid = |alignment: Alignment| -> TestResult<fuzzing::LaidOut> {
+        let props = ParagraphProps::default().with_alignment(alignment);
+        let (document, paragraph) = list_item(
+            "Art. 1",
+            (LevelAlignment::Start, Suffix::Space),
+            props,
+            SENTENCE,
+        );
+        Ok(fuzzing::lay_out(&book, &document, &paragraph, 200.0))
+    };
+    let (justified, plain) = (laid(Alignment::Both)?, laid(Alignment::Start)?);
+    let first = |laid: &fuzzing::LaidOut| -> TestResult<Vec<(String, f64)>> {
+        let line = laid.lines().first().ok_or("no line")?;
+        Ok(line
+            .words()
+            .iter()
+            .map(|word| (word.text().to_owned(), word.start()))
+            .collect())
+    };
+    let (justified_words, plain_words) = (first(&justified)?, first(&plain)?);
+    assert!(plain_words.len() > 4, "{plain_words:?}");
+    // "Art." and "1" stand where they stand without justification, and so does the first
+    // word of the text after the label's space; the words after it moved.
+    assert_eq!(justified_words[..3], plain_words[..3]);
+    assert!(
+        justified_words[3].1 > plain_words[3].1 + 1e-6,
+        "{justified_words:?}"
+    );
+    let line = justified.lines().first().ok_or("no line")?;
+    assert!(
+        (line.width() - (200.0 - 18.0)).abs() < 1e-6,
+        "{}",
+        line.width()
+    );
+    Ok(())
+}
