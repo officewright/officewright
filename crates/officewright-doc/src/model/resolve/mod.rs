@@ -17,7 +17,7 @@ use super::styles::StyleKind;
 use super::views::{Paragraph, Run};
 use super::{Document, Kind, Node};
 
-use character::CharacterLevel;
+use character::{CharacterLevel, Resolving};
 use paragraph::ParagraphLevel;
 
 /// Styles whose child elements Word ignores, `w:basedOn`, `w:pPr` and `w:rPr` among
@@ -142,7 +142,7 @@ impl<'a> Formats<'a> {
         }
         let direct = run.properties();
         let paragraph = self.paragraph_style(paragraph_of(self.document, run.node()));
-        self.resolve_run(paragraph, &direct, None)
+        self.resolve_run(paragraph, &direct, Resolving::Run)
     }
 
     /// The formatting of a paragraph's mark in effect, which decides, among other
@@ -153,7 +153,7 @@ impl<'a> Formats<'a> {
         }
         let direct = paragraph.properties().mark;
         let style = self.paragraph_style(Some(paragraph.node()));
-        self.resolve_run(style, &direct, None)
+        self.resolve_run(style, &direct, Resolving::Run)
     }
 
     /// The formatting in effect of the mark of a paragraph that has the default
@@ -163,7 +163,11 @@ impl<'a> Formats<'a> {
     #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
     pub(crate) fn default_mark(&mut self) -> CharacterFormat {
         let style = self.paragraph_style(None);
-        self.resolve_run(style, &super::properties::RunProperties::default(), None)
+        self.resolve_run(
+            style,
+            &super::properties::RunProperties::default(),
+            Resolving::Run,
+        )
     }
 
     /// The formatting of a list item's label, its number or bullet, in effect: the
@@ -173,11 +177,13 @@ impl<'a> Formats<'a> {
     /// §17.9.24(a)); a file that has them is read, and they are dropped. None when the
     /// paragraph is not a list item.
     ///
-    /// Not confirmed against Word yet: [MS-DOC] ("Determining List Formatting of a
-    /// Paragraph", part 3) lays the level over the mark this way, and the reference
-    /// renders of the rule documents asked for in issue #162 are to confirm it. The
-    /// level's linked paragraph style, which [MS-DOC] applies too, does not reach the
-    /// label.
+    /// Word's renders of word-rules/E-list-label-format.docx and E-list-label-rstyle.docx
+    /// (#299) show this, as [MS-DOC] ("Determining List Formatting of a Paragraph", part
+    /// 3) lays it out: the level's values set over the mark's, an override's level in
+    /// place of the definition's, and the level's linked paragraph style, which [MS-DOC]
+    /// applies too, not reaching the label. Word gives the label the size of the mark's
+    /// character style but not its underline (E-list-label-format.docx, case 05, #330),
+    /// and so does this.
     ///
     /// What a level gives to labels is read once per level, however many paragraphs
     /// use it.
@@ -188,7 +194,7 @@ impl<'a> Formats<'a> {
         let properties = paragraph.properties();
         let style = self.paragraph_style(Some(paragraph.node()));
         let label = self.label_level(style, &properties)?;
-        Some(self.resolve_run(style, &properties.mark, label.as_deref()))
+        Some(self.resolve_run(style, &properties.mark, Resolving::Label(label.as_deref())))
     }
 
     /// The place among the styles of a paragraph's style: its own, else the default

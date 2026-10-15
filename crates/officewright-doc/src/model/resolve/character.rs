@@ -112,8 +112,12 @@ impl Formats<'_> {
         &mut self,
         paragraph_style: Option<usize>,
         direct: &RunProperties,
-        label: Option<&CharacterLevel>,
+        resolving: Resolving<'_>,
     ) -> CharacterFormat {
+        let label = match resolving {
+            Resolving::Run => None,
+            Resolving::Label(level) => level,
+        };
         let document = self.document;
         let defaults = self.run_defaults();
         let paragraph = paragraph_style.map(|index| {
@@ -132,8 +136,17 @@ impl Formats<'_> {
 
         // Each level replaces what it gives.
         let mut effect = CharacterLevel::clone(&defaults);
-        for level in paragraph.iter().chain(character.iter()) {
-            effect.overlay(level);
+        if let Some(paragraph) = &paragraph {
+            effect.overlay(paragraph);
+        }
+        if let Some(character) = &character {
+            let underline = (effect.underline_style, effect.underline_color);
+            effect.overlay(character);
+            // Word gives a list label the size of the mark's character style but not its
+            // underline: word-rules/E-list-label-format.docx, case 05 (#330).
+            if matches!(resolving, Resolving::Label(_)) {
+                (effect.underline_style, effect.underline_color) = underline;
+            }
         }
         effect.overlay(&direct);
         if let Some(label) = label {
@@ -168,7 +181,8 @@ impl Formats<'_> {
             };
             // The list level's value, like direct formatting, sets it, as [MS-DOC] applies
             // the level's properties to the number text ("Determining List Formatting of
-            // a Paragraph", part 3, step 2); not confirmed against Word yet (#162).
+            // a Paragraph", part 3, step 2) and Word's render of
+            // word-rules/E-list-label-format.docx shows (cases 01 to 03).
             if let Some(value) = value(label, index) {
                 *slot = value;
             }
@@ -374,6 +388,15 @@ impl TextEffects {
         overwrite(&mut self.turned, above.turned);
         overwrite(&mut self.depth, above.depth);
     }
+}
+
+/// What [`Formats::resolve_run`] resolves.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Resolving<'l> {
+    /// A run or a paragraph mark.
+    Run,
+    /// A list label, with what its level gives, if anything.
+    Label(Option<&'l CharacterLevel>),
 }
 
 impl CharacterLevel {
