@@ -406,9 +406,12 @@ impl Painter<'_, '_, '_> {
             let Some(&lead) = on.first() else {
                 continue;
             };
-            let held = current
-                .as_ref()
-                .is_some_and(|open| holds(open.start, offset(lead, open.first)));
+            // The run made so far takes the cluster when it holds every glyph of it that
+            // reaches the page; else a run starts at the cluster's first.
+            let held = current.as_ref().is_some_and(|open| {
+                on.iter()
+                    .all(|glyph| holds(open.start, offset(glyph, open.first)))
+            });
             if !held {
                 let start = place(lead);
                 if !holds(start, (0.0, 0.0)) {
@@ -1242,6 +1245,89 @@ mod tests {
                 ((Pt(32_700.0), Pt(150.0)), vec![(Pt(0.0), Pt(0.0))]),
             ]
         );
+        // Every run is slanted, and scaled, as the item is.
+        for item in &drawn {
+            if let Drawn::Glyphs(run) = item {
+                assert_eq!(
+                    (run.skew(), run.horizontal_scale()),
+                    (SYNTHETIC_ITALIC_SKEW, 6.0)
+                );
+            }
+        }
+    }
+
+    /// A glyph of the test font at (`x`, `y`) from its run's origin.
+    fn glyph(x: f64, y: f64) -> DrawnGlyph {
+        DrawnGlyph {
+            glyph: officewright_font::GlyphId::new(1),
+            x: Pt(x),
+            y: Pt(y),
+        }
+    }
+
+    #[test]
+    fn a_cluster_goes_whole_into_a_run_that_holds_all_of_it() {
+        // Review of #270: a cluster whose first glyph the run made so far holds, but not
+        // its second, starts a run of its own rather than losing the second and its text.
+        let item = GlyphItem {
+            size: Pt(1638.0),
+            h_scale: 6.0,
+            clusters: vec![
+                Cluster {
+                    text: "A".to_owned(),
+                    glyphs: vec![glyph(-32_667.0, 0.0)],
+                },
+                Cluster {
+                    text: "e\u{301}".to_owned(),
+                    glyphs: vec![glyph(50.0, 0.0), glyph(150.0, 0.0)],
+                },
+            ],
+            ..run(0.0, 100.0, &[])
+        };
+        let (drawn, painted) = painted_into_pdf(&[DisplayItem::Glyphs(item)]);
+        assert!(painted.is_ok(), "{painted:?}");
+        let clusters: Vec<Vec<(String, usize)>> = drawn
+            .iter()
+            .filter_map(|item| match item {
+                Drawn::Glyphs(run) => Some(
+                    run.clusters()
+                        .map(|(text, glyphs)| (text.to_owned(), glyphs.len()))
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            clusters,
+            [vec![("A".to_owned(), 1)], vec![("e\u{301}".to_owned(), 2)]]
+        );
+    }
+
+    #[test]
+    fn a_cluster_wider_than_a_pdf_holds_keeps_what_its_run_holds() {
+        // One cluster whose two glyphs both reach the page but are 65,300 pt apart: no
+        // run holds both, so the first is drawn, without the cluster's text, and the PDF
+        // is made.
+        let item = GlyphItem {
+            size: Pt(1638.0),
+            h_scale: 6.0,
+            clusters: vec![Cluster {
+                text: "AB".to_owned(),
+                glyphs: vec![glyph(-32_600.0, 0.0), glyph(32_700.0, 0.0)],
+            }],
+            ..run(0.0, 100.0, &[])
+        };
+        let (drawn, painted) = painted_into_pdf(&[DisplayItem::Glyphs(item)]);
+        assert!(painted.is_ok(), "{painted:?}");
+        assert_eq!(
+            runs_of(&drawn),
+            [((Pt(-32_600.0), Pt(100.0)), vec![(Pt(0.0), Pt(0.0))])]
+        );
+        let Some(Drawn::Glyphs(run)) = drawn.first() else {
+            panic!("a glyph run");
+        };
+        let texts: Vec<&str> = run.clusters().map(|(text, _)| text).collect();
+        assert_eq!(texts, [""]);
     }
 
     #[test]
