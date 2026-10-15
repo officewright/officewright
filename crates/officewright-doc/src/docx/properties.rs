@@ -105,6 +105,8 @@ pub(crate) fn run_properties(
             // Only whether there is one, so that the layout's report can say that it is
             // not drawn (#303).
             "em" => properties.emphasis_mark = child.attribute(w, "val").map(|v| v != "none"),
+            // Only in a paragraph mark's properties.
+            "del" | "moveFrom" => properties.deleted = Some(true),
             "bdr" => {
                 properties.border = child
                     .attribute(w, "val")

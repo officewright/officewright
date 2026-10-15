@@ -425,6 +425,10 @@ pub struct RunProperties {
     /// Whether `w:bdr` gives a border around the run (any but `none` and `nil`); kept as
     /// written, not typed yet, and the layout does not draw it.
     pub(crate) border: Option<bool>,
+    /// In a paragraph mark's properties: whether the mark is deleted as a tracked change
+    /// (`w:del`, or `w:moveFrom`); the translation into the layout IR keeps the
+    /// paragraph whole, which it lists.
+    pub(crate) deleted: Option<bool>,
 }
 
 /// What a paragraph's `w:framePr` makes of it.

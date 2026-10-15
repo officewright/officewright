@@ -6,7 +6,7 @@ use officewright_core::{PageSize, Pt};
 use officewright_layout::ReportKind;
 use officewright_layout::ir;
 
-use super::{Step, Translator};
+use super::{Once, Step, Translator};
 use crate::model::{
     Border, BorderStyle, DocumentGrid, DocumentGridKind, HeaderFooterKind, LineNumbering,
     NotePosition, NoteProperties, NoteRestart, NumberFormat, Orientation, Section,
@@ -14,14 +14,16 @@ use crate::model::{
 };
 
 /// Lists what a section has that the IR has no place for yet, so that the PDF shows the
-/// section without it (#303).
+/// section without it (#303); each once per document.
 fn left_out(t: &mut Translator<'_>, properties: &SectionProperties) {
+    // A side draws a line, or pictures (w:art), whose style is then not written.
     let drawn = |border: Option<&Border>| {
         border.is_some_and(|border| {
-            !matches!(
-                border.style(),
-                None | Some(BorderStyle::None | BorderStyle::Nil)
-            )
+            border.art().is_some()
+                || !matches!(
+                    border.style(),
+                    None | Some(BorderStyle::None | BorderStyle::Nil)
+                )
         })
     };
     if properties.page_borders().is_some_and(|borders| {
@@ -34,9 +36,10 @@ fn left_out(t: &mut Translator<'_>, properties: &SectionProperties) {
         .into_iter()
         .any(drawn)
     }) {
-        t.leave_out(ReportKind::FeatureUnsupported, || {
-            "the section's page borders (w:pgBorders) are not drawn".into()
-        });
+        t.report_once(
+            Once::PageBorders,
+            "page borders (w:pgBorders) are not drawn, here and in every other section that has them",
+        );
     }
     // Every corpus file that numbers lines writes w:countBy; what Word does without it is
     // not known, so only a count of 1 or more is listed.
@@ -45,26 +48,29 @@ fn left_out(t: &mut Translator<'_>, properties: &SectionProperties) {
         .and_then(LineNumbering::count_by)
         .is_some_and(|count| count > 0)
     {
-        t.leave_out(ReportKind::FeatureUnsupported, || {
-            "the section's line numbers (w:lnNumType) are not drawn".into()
-        });
+        t.report_once(
+            Once::LineNumbers,
+            "line numbers (w:lnNumType) are not drawn, here and in every other section that has them",
+        );
     }
     if properties
         .grid()
         .and_then(DocumentGrid::kind)
         .is_some_and(|kind| kind != DocumentGridKind::Default)
     {
-        t.leave_out(ReportKind::FeatureUnsupported, || {
-            "the section's document grid (w:docGrid) is not followed".into()
-        });
+        t.report_once(
+            Once::DocumentGrid,
+            "the document grid (w:docGrid) is not followed, here and in every other section that has one",
+        );
     }
     if properties
         .text_direction()
         .is_some_and(|direction| direction != TextDirection::LeftToRightTopToBottom)
     {
-        t.leave_out(ReportKind::FeatureUnsupported, || {
-            "the section's text direction (w:textDirection) is not followed: its text is laid out horizontally".into()
-        });
+        t.report_once(
+            Once::TextDirection,
+            "vertical text (w:textDirection) is laid out horizontally, here and in every other section that has it",
+        );
     }
 }
 

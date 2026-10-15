@@ -305,6 +305,9 @@ pub struct ParagraphFormat {
     /// Whether the paragraph is a text frame or a drop cap (`w:framePr`), which the layout
     /// does not place.
     pub(crate) frame: Option<Frame>,
+    /// Whether the paragraph's mark is deleted as a tracked change, written on the
+    /// paragraph itself.
+    pub(crate) mark_deleted: bool,
 }
 
 macro_rules! paragraph_flags {

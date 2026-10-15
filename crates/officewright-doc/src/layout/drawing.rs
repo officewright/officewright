@@ -6,7 +6,7 @@ use officewright_core::Pt;
 use officewright_layout::ReportKind;
 use officewright_layout::ir;
 
-use super::Translator;
+use super::{Once, Translator};
 use crate::model::{
     Anchor, AnchorHorizontalAlign, AnchorVerticalAlign, Drawing, HorizontalReference, Image,
     Offsets, VerticalReference, WrapKind,
@@ -43,6 +43,19 @@ impl<'a> Translator<'a> {
                 self.missing_image()
             }
         };
+        // The IR's picture has no outline and no colour effects yet (#303).
+        if picture.has_outline() {
+            self.report_once(
+                Once::PictureOutline,
+                "a picture's outline (a:ln) is not drawn, here and wherever else the document has one",
+            );
+        }
+        if picture.has_color_effects() {
+            self.report_once(
+                Once::PictureColor,
+                "a picture's colour or transparency effects (a:blip, such as a:grayscl or a:lum) are not applied, here and wherever else the document has them",
+            );
+        }
         let crop = picture.crop().map(|crop| {
             ir::Crop::default()
                 .with_left(crop.left())

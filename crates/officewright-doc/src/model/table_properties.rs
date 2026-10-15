@@ -534,6 +534,9 @@ pub struct TableRowProperties {
     pub(crate) cell_spacing: Option<TableWidth>,
     pub(crate) justification: Option<TableJustification>,
     pub(crate) hidden: Option<bool>,
+    /// Whether the row is deleted as a tracked change (`w:del`); the translation into the
+    /// layout IR keeps the row, which it lists.
+    pub(crate) deleted: Option<bool>,
 }
 
 impl TableRowProperties {
@@ -806,6 +809,7 @@ impl TableRowProperties {
         overwrite(&mut self.cell_spacing, &above.cell_spacing);
         overwrite(&mut self.justification, &above.justification);
         overwrite(&mut self.hidden, &above.hidden);
+        overwrite(&mut self.deleted, &above.deleted);
     }
 }
 

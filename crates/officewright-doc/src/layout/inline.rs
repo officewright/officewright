@@ -9,7 +9,8 @@ use officewright_layout::ir;
 
 use super::{Once, Translator, is_marker};
 use crate::model::{
-    BreakClear, BreakKind, FieldCharKind, Inline, Paragraph, RevisionKind, Run, RunContent,
+    BreakClear, BreakKind, CharacterFormat, FieldCharKind, Inline, Paragraph, RevisionKind, Run,
+    RunContent,
 };
 
 /// The longest part of a field's instruction read: far more than the name and switches
@@ -79,47 +80,18 @@ impl<'a> Translator<'a> {
     fn run(&mut self, run: Run<'a>, content: &mut Content) {
         let format = self.formats.run(run);
         let style = self.run_style(&format);
-        // The IR's run style has no place for these, so the PDF shows the text without
-        // them (#303).
-        for (on, once, message) in [
-            (
-                format.emboss(),
-                Once::Emboss,
-                "embossed text (w:emboss) is drawn plain, here and wherever else the document has it",
-            ),
-            (
-                format.imprint(),
-                Once::Imprint,
-                "engraved text (w:imprint) is drawn plain, here and wherever else the document has it",
-            ),
-            (
-                format.outline(),
-                Once::Outline,
-                "outlined text (w:outline) is drawn plain, here and wherever else the document has it",
-            ),
-            (
-                format.shadow(),
-                Once::Shadow,
-                "shadowed text (w:shadow) is drawn without its shadow, here and wherever else the document has it",
-            ),
-            (
-                format.emphasis_mark,
-                Once::EmphasisMark,
-                "emphasis marks (w:em) are not drawn, here and wherever else the document has them",
-            ),
-            (
-                format.border,
-                Once::RunBorder,
-                "borders around text (w:bdr) are not drawn, here and wherever else the document has them",
-            ),
-        ] {
-            if on {
-                self.report_once(once, message);
-            }
-        }
+        // Whether the run shows text, which its features would change.
+        let mut shows = false;
         for item in run.content() {
             match item {
-                RunContent::Text(text) => content.text(text, style),
+                RunContent::Text(text) => {
+                    shows = true;
+                    content.text(text, style);
+                }
+                // Tracked changes are taken as accepted, and comments are left out, as
+                // Word's PDF of the document without markup shows them (the references are
+                // exported with ExportAsFixedFormat's Item 0, wdExportDocumentContent), so
+                // neither is listed (#303).
                 RunContent::DeletedText(_) | RunContent::DeletedFieldCode(_) => {}
                 RunContent::FieldCode(text) => content.instruction(text),
                 RunContent::Tab => content.push(ir::Inline::tab(style)),
@@ -132,6 +104,7 @@ impl<'a> Translator<'a> {
                     content.push(ir::Inline::line_break(ir::BreakClear::None, style));
                 }
                 RunContent::Symbol { font, char } => {
+                    shows = true;
                     // w:sym writes four hexadecimal digits.
                     let Ok(code) = u16::try_from(u32::from(char)) else {
                         self.leave_out(ReportKind::FeatureUnsupported, || {
@@ -145,7 +118,10 @@ impl<'a> Translator<'a> {
                 RunContent::FieldChar(FieldCharKind::Begin) => content.begin(style),
                 RunContent::FieldChar(FieldCharKind::Separate) => content.separate(),
                 RunContent::FieldChar(FieldCharKind::End) => content.end(),
-                RunContent::NoBreakHyphen => content.push(ir::Inline::no_break_hyphen(style)),
+                RunContent::NoBreakHyphen => {
+                    shows = true;
+                    content.push(ir::Inline::no_break_hyphen(style));
+                }
                 RunContent::SoftHyphen => content.push(ir::Inline::soft_hyphen(style)),
                 RunContent::FootnoteReference(id) => {
                     if let Some(note) = self.note_reference(false, id) {
@@ -196,6 +172,52 @@ impl<'a> Translator<'a> {
                         format!("{message} (w:{name})")
                     });
                 }
+            }
+        }
+        if shows && !format.hidden() {
+            self.report_run_features(&format);
+        }
+    }
+
+    /// Lists the features of a run's formatting that the IR's run style has no place
+    /// for, so that the PDF shows its text without them (#303). Only a run that shows
+    /// text and is not hidden counts: a hidden run, or one that holds only a field's
+    /// instruction, shows nothing they could change.
+    fn report_run_features(&mut self, format: &CharacterFormat) {
+        for (on, once, message) in [
+            (
+                format.emboss(),
+                Once::Emboss,
+                "embossed text (w:emboss) is drawn plain, here and wherever else the document has it",
+            ),
+            (
+                format.imprint(),
+                Once::Imprint,
+                "engraved text (w:imprint) is drawn plain, here and wherever else the document has it",
+            ),
+            (
+                format.outline(),
+                Once::Outline,
+                "outlined text (w:outline) is drawn plain, here and wherever else the document has it",
+            ),
+            (
+                format.shadow(),
+                Once::Shadow,
+                "shadowed text (w:shadow) is drawn without its shadow, here and wherever else the document has it",
+            ),
+            (
+                format.emphasis_mark,
+                Once::EmphasisMark,
+                "emphasis marks (w:em) are not drawn, here and wherever else the document has them",
+            ),
+            (
+                format.border,
+                Once::RunBorder,
+                "borders around text (w:bdr) are not drawn, here and wherever else the document has them",
+            ),
+        ] {
+            if on {
+                self.report_once(once, message);
             }
         }
     }

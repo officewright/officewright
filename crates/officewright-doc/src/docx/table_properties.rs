@@ -80,6 +80,7 @@ pub(crate) fn row_properties(
             "tblCellSpacing" => properties.cell_spacing = width(child, names, report),
             "jc" => properties.justification = justification(child, names, report),
             "hidden" => properties.hidden = on_off(child, names, report),
+            "del" => properties.deleted = Some(true),
             _ => {}
         }
     }

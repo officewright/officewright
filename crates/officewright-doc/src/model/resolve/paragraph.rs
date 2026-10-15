@@ -41,6 +41,7 @@ impl Formats<'_> {
             Some(index) => self.paragraphs.level(document, index, &defaults),
             None => defaults,
         };
+        let mark_deleted = direct.mark.deleted == Some(true);
         let direct = ParagraphLevel::of(direct);
         let style_id = style
             .and_then(|index| document.styles.styles.get(index))
@@ -61,7 +62,9 @@ impl Formats<'_> {
         };
         let mut effect = ParagraphLevel::clone(&below_direct);
         effect.overlay(&direct);
-        effect.format(style_id, list)
+        let mut format = effect.format(style_id, list);
+        format.mark_deleted = mark_deleted;
+        format
     }
 
     /// What the list level of a paragraph whose style has the index `style` and whose
@@ -715,6 +718,7 @@ impl ParagraphLevel {
             outline_level,
             list,
             frame: self.frame,
+            mark_deleted: false,
         }
     }
 }
