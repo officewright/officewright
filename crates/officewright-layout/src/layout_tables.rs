@@ -191,7 +191,10 @@ impl<'a> Counter<'a> {
                 }
             }
         }
-        self.most_references_per_glyph() <= MAX_REFERENCES_PER_GLYPH
+        // No glyph can be held by more references than there are.
+        let references: u64 = self.first_coverages.values().sum();
+        references <= MAX_REFERENCES_PER_GLYPH
+            || self.most_references_per_glyph() <= MAX_REFERENCES_PER_GLYPH
     }
 
     /// The coverage HarfRust tests a glyph against first for the subtable at `at` of
