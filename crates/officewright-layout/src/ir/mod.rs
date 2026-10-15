@@ -288,8 +288,11 @@ impl Document {
 
     /// Brings the values that a document may hold, but Word does not accept, within
     /// Word's limits, such as a tab stop beyond 22 inches, and reports each change as
-    /// [`ReportKind::ValueClamped`](crate::ReportKind::ValueClamped). A second call
-    /// changes nothing. Values that [`validate`](Self::validate) rejects are left alone.
+    /// [`ReportKind::ValueClamped`](crate::ReportKind::ValueClamped). A value that
+    /// several items share, such as paragraph properties, is clamped and reported once,
+    /// at the first item that holds it, and the others take the same result. A second
+    /// call changes nothing. Values that [`validate`](Self::validate) rejects are left
+    /// alone.
     ///
     /// ```
     /// use officewright_core::{PageSize, Pt};

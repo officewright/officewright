@@ -1,5 +1,7 @@
 //! The text and objects inside a paragraph.
 
+use std::sync::Arc;
+
 use super::image::{AnchoredObject, InlineObject};
 use super::macros::{ir_struct, no_rules};
 use super::section::NumberFormat;
@@ -40,8 +42,8 @@ pub enum Inline {
     /// A symbol from a font, by its code in that font (`w:sym`).
     #[non_exhaustive]
     Symbol {
-        /// The font, such as `Wingdings`.
-        font: String,
+        /// The font, such as `Wingdings`; many symbols may share one name.
+        font: Arc<str>,
         /// The character code in the font, as written: symbol fonts use U+F020 to
         /// U+F0FF.
         code: u16,
@@ -141,7 +143,7 @@ impl Inline {
     }
 
     /// A symbol from a font.
-    pub fn symbol(font: impl Into<String>, code: u16, style: RunStyleId) -> Self {
+    pub fn symbol(font: impl Into<Arc<str>>, code: u16, style: RunStyleId) -> Self {
         Self::Symbol {
             font: font.into(),
             code,
