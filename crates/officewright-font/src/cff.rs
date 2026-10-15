@@ -42,7 +42,8 @@
 //! in the depth of the calls (<https://github.com/officewright/officewright/issues/235>),
 //! within the format's limits on the length of a charstring and the depth of calls. So the
 //! same walk counts the operands and operators it reads, and the bytes of each hint mask,
-//! which the subsetter copies, and refuses the face once the kept glyphs together take more
+//! which the subsetter copies, counting a hint mask operator twice, as the subsetter keeps
+//! it as two instructions, and refuses the face once the kept glyphs together take more
 //! than [`MAX_STEPS`]: a limit of the library, since such a font is within the format.
 
 use std::cell::OnceCell;
@@ -88,15 +89,17 @@ const MAX_HINTS: u32 = 0xFFFF;
 const MAX_CALL_DEPTH: u8 = 64;
 
 /// The most operands, operators and hint mask bytes the walk may read in the charstrings
-/// of the glyphs one subset keeps, reading a subroutine again for every call.
+/// of the glyphs one subset keeps, reading a subroutine again for every call, and counting
+/// a hint mask operator twice, since the subsetter keeps it as two instructions.
 ///
 /// Measured on real fonts kept whole: Noto Sans (3,884 glyphs) reads 271,888, New
-/// Computer Modern Math (7,041) 923,133, Noto Sans CJK SC (65,535) 15,754,967, on which
-/// the subsetter peaks at 550 MB, its Black weight 17,499,955, and Noto Serif CJK SC
-/// 31,169,024, on which the subsetter peaks at 890 MB; the most for one glyph was 2,965.
+/// Computer Modern Math (7,041) 930,772, Noto Sans CJK SC (65,535) 16,082,053, on which
+/// the subsetter peaks at 550 MB, its Black weight 18,085,581, and Noto Serif CJK SC
+/// 31,768,357, on which the subsetter peaks at 890 MB; the most for one glyph was 3,056.
 /// A document reaches the limit only with about half the glyphs of the largest CJK fonts
 /// or more, but such a font kept whole, as one that forbids subsetting is, can be refused.
-/// A limit that admitted it would let a crafted font cost the subsetter well over 1 GiB.
+/// A limit that admitted it would let a crafted font cost the subsetter well over 1 GiB:
+/// it spends about 25 to 30 bytes for each unit counted.
 const MAX_STEPS: u32 = 1 << 24;
 
 /// Fails if a DICT the subsetter rewrites, in the `CFF ` table it takes from `font` (its
@@ -868,9 +871,12 @@ impl Walk<'_> {
                         .checked_add(self.mask_bytes)
                         .filter(|&end| end <= charstring.len())
                         .ok_or(Stop::Unreadable)?;
+                    // The subsetter keeps the operator and its mask as two instructions, and
+                    // copies the mask's bytes: one more besides the operator, and the bytes.
                     self.steps = u32::try_from(self.mask_bytes)
                         .ok()
-                        .and_then(|bytes| self.steps.checked_sub(bytes))
+                        .and_then(|bytes| bytes.checked_add(1))
+                        .and_then(|cost| self.steps.checked_sub(cost))
                         .ok_or(Stop::Limit)?;
                 }
                 // endchar; with four operands it would be an accented character, which
@@ -1798,13 +1804,13 @@ mod tests {
         // .notdef is walked first, also when it is not asked for.
         assert!(over_limit(check_within(cff, &[1], 0)).contains("up to glyph 0,"));
 
-        // Nine stem hints (18 operands and hstem: 19), a hintmask and its two bytes (3),
-        // and endchar.
+        // Nine stem hints (18 operands and hstem: 19), a hintmask, counted twice, and its two
+        // bytes (4), and endchar.
         let mut hinted = vec![139; 18];
         hinted.extend([1, 19, 0xFF, 0x80, 14]);
         let cff = programs(&glyphs_with(3, hinted), &[], &[vec![]], None);
-        check_within(cff.clone(), &[3], 24).unwrap();
-        assert!(over_limit(check_within(cff, &[3], 23)).contains("up to glyph 3,"));
+        check_within(cff.clone(), &[3], 25).unwrap();
+        assert!(over_limit(check_within(cff, &[3], 24)).contains("up to glyph 3,"));
 
         // Local subroutines: of a SID-keyed font (an operand, callsubr, 4 and endchar), and
         // of a CID-keyed font's Font DICT 1, which glyphs 3 and 4 use.
@@ -1829,6 +1835,36 @@ mod tests {
     }
 
     #[test]
+    fn checks_the_limit_on_the_way_subset_checks() {
+        // Global subroutine 0 returns; 1 calls 0 2,000 times; 2 calls 1 2,000 times, which
+        // reads 12,006,001 operands and operators. A glyph that calls 2 twice is past the
+        // limit, one that calls it once is not. `check_programs` is what `FontFace::subset`
+        // calls; the subsetter itself never runs here, also if the limit were broken.
+        let calls = |subr: u8, times: usize| {
+            let mut program = [subr + 32, 29].repeat(times);
+            program.push(11);
+            program
+        };
+        let global = [vec![11], calls(0, 2000), calls(1, 2000)];
+        let check = |glyph: Vec<u8>| {
+            let cff = programs(&glyphs_with(1, glyph), &global, &[vec![]], None);
+            let font = crate::testing::TestFont::new("Test Sans")
+                .with_table(b"CFF ", cff)
+                .without_table(b"glyf")
+                .without_table(b"loca")
+                .build();
+            let font_ref = FontRef::new(&font).unwrap();
+            check_programs(&font_ref, &font, 0, &[1])
+        };
+        assert_eq!(
+            over_limit(check(vec![34, 29, 34, 29, 14])),
+            "decompiling the glyphs to keep, up to glyph 1, reads more than 16777216 \
+             operands, operators and hint mask bytes"
+        );
+        check(vec![34, 29, 14]).unwrap();
+    }
+
+    #[test]
     fn leaves_a_glyph_it_cannot_read_to_the_subsetter_before_the_limit() {
         // Glyph 1 has an operator the subsetter does not know (12 0); glyph 2 alone is
         // past the limit. The subsetter fails on glyph 1 first, so the check leaves it.
@@ -1836,7 +1872,7 @@ mod tests {
         glyphs[2] = vec![139; 40].into_iter().chain([21, 14]).collect();
         let cff = programs(&glyphs, &[], &[vec![]], None);
         check_within(cff.clone(), &[1, 2], 10).unwrap();
-        check_within(cff, &[2], 10).unwrap_err();
+        assert!(over_limit(check_within(cff, &[2], 10)).contains("up to glyph 2,"));
     }
 
     /// The test font with `cff` as its outlines, subset to `glyphs`.
