@@ -1344,15 +1344,29 @@ pub fn check_pages(book: &FontBook, document: &Document, max_pages: usize) -> Re
             for flowed in &flow {
                 let setup = setup_of(flowed.section).unwrap_or_default();
                 let width = crate::pages::body(&setup).width;
-                let layout = crate::paragraph::lay_out_with(
-                    document,
-                    (flowed.paragraph, flowed.label.as_ref()),
-                    width,
-                    (&mut fonts, &mut shaper),
-                    &flowed.location,
-                    None,
-                );
-                lines += layout.lines.len();
+                lines += match &flowed.content {
+                    crate::pages::Content::Paragraph(paragraph, label) => {
+                        crate::paragraph::lay_out_with(
+                            document,
+                            (paragraph, label.as_ref()),
+                            width,
+                            (&mut fonts, &mut shaper),
+                            &flowed.location,
+                            None,
+                        )
+                        .lines
+                        .len()
+                    }
+                    crate::pages::Content::Table(table, labels) => crate::tables::Prepared::new(
+                        document,
+                        table,
+                        labels,
+                        width,
+                        &flowed.location,
+                        &mut fonts,
+                    )
+                    .band_count(),
+                };
             }
             if bound(2 * lines) > max_pages {
                 return Ok(());

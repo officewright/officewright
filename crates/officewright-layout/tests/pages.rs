@@ -11,8 +11,9 @@ use common::{TestResult, book, random_paragraph, word_lines};
 use officewright_core::{PageSize, Pt};
 use officewright_layout::fuzzing;
 use officewright_layout::ir::{
-    Block, BreakClear, Cell, Document, Inline, LineSpacing, Margins, PageSetup, Paragraph,
-    ParagraphProps, Row, RunFonts, RunStyle, RunStyleId, Section, Spacing, Table,
+    Block, Border, BorderSide, BreakClear, Cell, Document, Inline, LineSpacing, Margins, PageSetup,
+    Paragraph, ParagraphProps, PreferredWidth, Row, RunFonts, RunStyle, RunStyleId, Section,
+    Spacing, Table, TableBorders, TableLayout, TableProps,
 };
 
 /// How far Word's lines may be from ours: the printer's grid of 600 dots per inch and
@@ -46,9 +47,25 @@ fn paragraph(style: RunStyleId, props: ParagraphProps, inlines: Vec<Inline>) -> 
         .into()
 }
 
-/// A table of one cell holding `block`.
+/// A table of one cell holding `block`, as `E-space-before-top` has them: as wide as the
+/// text, with single borders of 0.5 pt.
 fn in_table(block: Block) -> Block {
+    let line = BorderSide::Line(Border::default().with_width(Pt(0.5)));
+    let borders = TableBorders::default()
+        .with_top(line)
+        .with_start(line)
+        .with_bottom(line)
+        .with_end(line)
+        .with_inside_horizontal(line)
+        .with_inside_vertical(line);
     Table::default()
+        .with_grid([Pt(451.3)])
+        .with_props(
+            TableProps::default()
+                .with_width(PreferredWidth::Points(Pt(451.3)))
+                .with_layout(TableLayout::Fixed)
+                .with_borders(borders),
+        )
         .with_rows(vec![
             Row::default().with_cells(vec![Cell::default().with_blocks([block])]),
         ])
@@ -179,19 +196,19 @@ fn space_above_at_the_top_of_a_page_is_where_word_keeps_it() -> TestResult {
             number + 1,
             first.text
         );
-        // The table's top border, 0.5 pt, is above the cell on page 8; tables are not
-        // laid out yet.
-        let border = if label.starts_with("Case 7") {
-            0.5
+        // Page 8 starts with a table: the cell's first line is below the table's top
+        // border, 0.5 pt, and the space before it, which a cell keeps at the top of a
+        // page.
+        let ours = if label.starts_with("Case 7") {
+            fragment.top() + 0.5 + 24.0
         } else {
-            0.0
+            fragment.top()
         };
         let theirs = first.top - offset;
         assert!(
-            (fragment.top() - theirs).abs() <= GRID + border,
-            "page {}: {label} at {} where Word has {theirs}",
+            (ours - theirs).abs() <= GRID,
+            "page {}: {label} at {ours} where Word has {theirs}",
             number + 1,
-            fragment.top()
         );
     }
     Ok(())
