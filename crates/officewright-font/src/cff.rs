@@ -1692,21 +1692,21 @@ mod tests {
         .build()
     }
 
-    /// Points the Private operator of every Font DICT of `cff`, made by [`Spec`] with one
-    /// Private operator each, at the first Font DICT's Private DICT, and returns where that
-    /// is.
-    fn sharing_the_first_private(cff: &mut [u8]) -> usize {
+    /// Points the Private operator of every Font DICT of `cff` from Font DICT `from` on,
+    /// made by [`Spec`] with one Private operator each, at Font DICT `from`'s Private
+    /// DICT, and returns where that is.
+    fn sharing_a_private(cff: &mut [u8], from: usize) -> usize {
         // Each Font DICT ends in the size of its Private DICT, 6, its offset and 18.
         let size = int5(6);
         let at: Vec<usize> = (0..cff.len().saturating_sub(10))
             .filter(|&i| cff[i..i + 5] == size[..] && cff[i + 5] == 29 && cff[i + 10] == 18)
             .map(|i| i + 5)
             .collect();
-        let first = cff[at[0]..at[0] + 5].to_vec();
-        for &i in &at {
-            cff[i..i + 5].copy_from_slice(&first);
+        let shared = cff[at[from]..at[from] + 5].to_vec();
+        for &i in &at[from..] {
+            cff[i..i + 5].copy_from_slice(&shared);
         }
-        usize::try_from(i32::from_be_bytes(first[1..].try_into().unwrap())).unwrap()
+        usize::try_from(i32::from_be_bytes(shared[1..].try_into().unwrap())).unwrap()
     }
 
     #[test]
@@ -1732,10 +1732,10 @@ mod tests {
 
         // Font DICTs that share one Subrs INDEX make the subsetter collect it for each.
         let mut shared = with_local_subrs(vec![vec![vec![11]; 65535]], 4);
-        sharing_the_first_private(&mut shared);
+        sharing_a_private(&mut shared, 0);
         check_with_limit(shared, &[4], 1 << 20).unwrap();
         let mut shared = with_local_subrs(vec![vec![vec![11]; 65535]], 5);
-        sharing_the_first_private(&mut shared);
+        sharing_a_private(&mut shared, 0);
         assert_eq!(
             over_limit(check_with_limit(shared.clone(), &[4], 1 << 20)),
             message(327_675)
@@ -1751,6 +1751,23 @@ mod tests {
                 .iter()
                 .all(|subrs| subrs.count.get().is_none())
         );
+        // Also where the Font DICTs that share an INDEX come after one with its own.
+        let mut after = with_local_subrs(vec![vec![vec![11]; 10], vec![vec![11]; 65535]], 5);
+        sharing_a_private(&mut after, 1);
+        let Some(Read::Programs(programs)) = Programs::read(&after) else {
+            panic!("the table is not read");
+        };
+        assert_eq!(programs.collected_local_subrs(), 262_150);
+        assert!(
+            programs.local[..2]
+                .iter()
+                .all(|subrs| subrs.count.get().is_some())
+        );
+        assert!(
+            programs.local[2..]
+                .iter()
+                .all(|subrs| subrs.count.get().is_none())
+        );
         // The count comes before any glyph is walked.
         assert_eq!(
             over_limit(check_with_limit(shared, &[4], 0)),
@@ -1760,7 +1777,7 @@ mod tests {
         // The subsetter collects only up to the first subroutine it cannot read: a shared
         // INDEX that declares 65,535 but holds 10 is no count past the limit.
         let mut damaged = with_local_subrs(vec![vec![]], 5);
-        let private = sharing_the_first_private(&mut damaged);
+        let private = sharing_a_private(&mut damaged, 0);
         let subrs_at = damaged.len() - private;
         let mut index = vec![0xFF, 0xFF, 1];
         index.extend(1..=11);
