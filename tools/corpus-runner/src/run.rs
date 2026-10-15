@@ -227,6 +227,31 @@ fn lexical_absolute(path: &Path) -> Result<PathBuf, String> {
     Ok(out)
 }
 
+/// Where `path` is on disk, links followed: the canonical path of the longest part of it
+/// that exists, then the rest of it, its `.` and `..` resolved by their names, since
+/// nothing of the rest exists, so no link can be among it.
+fn on_disk(path: &Path) -> Result<PathBuf, String> {
+    let full = std::path::absolute(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let parts: Vec<std::path::Component<'_>> = full.components().collect();
+    for existing in (1..=parts.len()).rev() {
+        let (head, rest) = parts.split_at(existing);
+        let Ok(mut found) = std::fs::canonicalize(head.iter().collect::<PathBuf>()) else {
+            continue;
+        };
+        for part in rest {
+            match part {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    found.pop();
+                }
+                other => found.push(other.as_os_str()),
+            }
+        }
+        return Ok(found);
+    }
+    lexical_absolute(path)
+}
+
 /// The file's path under the root, with forward slashes, the same on every system.
 fn relative(root: &Path, file: &Path) -> Result<String, String> {
     let full = lexical_absolute(file)?;
@@ -291,7 +316,11 @@ impl Launcher {
 /// relative to the folder above `--references` when the file lies under it (where the
 /// scoring looks for it), else its name, relative to the root. Empty without `--render`.
 /// Refuses two files that would be rendered to one PDF: names that differ only in their
-/// extension, or in case, which the file systems of macOS and Windows ignore.
+/// extension, or in case, which the file systems of macOS and Windows ignore. Refuses as
+/// well a target that is one of the files to run, compared where they are on disk (links
+/// followed) and without case: a target is removed before its document runs. A target
+/// that is a link to a file to run is refused too, though removing it would remove only
+/// the link.
 fn render_targets(
     options: &Options,
     files: &[(String, PathBuf)],
@@ -319,6 +348,21 @@ fn render_targets(
         if let Some(other) = seen.insert(pdf.to_string_lossy().to_lowercase(), name) {
             return Err(format!(
                 "{other} and {name} would both be rendered to {}",
+                pdf.display()
+            ));
+        }
+    }
+    // A target is removed before its document runs, so none may be a file to run, in any
+    // case of its name either, nor through a link.
+    let mut inputs: BTreeMap<String, &str> = BTreeMap::new();
+    for (name, file) in files {
+        inputs.insert(on_disk(file)?.to_string_lossy().to_lowercase(), name);
+    }
+    for (name, pdf) in &targets {
+        let target = on_disk(pdf)?.to_string_lossy().to_lowercase();
+        if let Some(input) = inputs.get(&target) {
+            return Err(format!(
+                "{name} would be rendered to {}, which is {input}, a file to run",
                 pdf.display()
             ));
         }
