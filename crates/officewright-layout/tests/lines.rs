@@ -734,6 +734,38 @@ fn a_tab_whose_stop_is_past_the_end_reaches_the_end_and_the_text_wraps() -> Test
 }
 
 #[test]
+fn an_end_tab_at_the_end_of_the_line_keeps_the_text_after_it_on_the_line() -> TestResult {
+    use officewright_layout::ir::TabKind;
+
+    // `cv-en-compact.docx`: a letter page with margins of 864 twips, and an end tab at
+    // 10512 twips, where the margin is. The width, computed as the page computes it,
+    // comes out just below the stop; Word still ends the date at the margin.
+    let width = 612.0 - 864.0 / 20.0 - 864.0 / 20.0;
+    let position = 10512.0 / 20.0;
+    assert!(width < position, "the case needs the rounding");
+    let book = book()?;
+    let (document, style) = liberation(11.0);
+    let props = ParagraphProps::default().with_tabs([TabStop::default()
+        .with_position(Pt(position))
+        .with_kind(TabKind::End)]);
+    let inlines = vec![
+        Inline::text("Developer", style),
+        Inline::tab(style),
+        Inline::text("2022", style),
+    ];
+    let laid = fuzzing::lay_out(&book, &document, &paragraph(style, props, inlines), width);
+    let lines = laid.lines();
+    assert_eq!(lines.len(), 1);
+    let year = lines
+        .first()
+        .and_then(|line| line.words().last())
+        .ok_or("no year")?;
+    assert_eq!(year.text(), "2022");
+    assert!((year.end() - position).abs() < 1e-6, "{}", year.end());
+    Ok(())
+}
+
+#[test]
 fn empty_paragraphs_and_a_final_line_break_have_the_marks_height() -> TestResult {
     use officewright_layout::ir::BreakClear;
 
