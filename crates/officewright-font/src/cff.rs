@@ -599,8 +599,10 @@ impl<'a> Programs<'a> {
                     0
                 }
                 // Ranges of glyphs; the subsetter goes through them for every glyph it keeps,
-                // twice, and so does the walk, once.
-                3 => usize::from(u16_at(fd_select, 1)?),
+                // twice, and so does the walk, once. The subsetter takes a table whose count
+                // is cut off by its end, and still asserts on the Font DICTs, so they are
+                // counted below all the same.
+                3 => u16_at(fd_select, 1).map_or(0, usize::from),
                 _ => return None,
             };
             let count = (0..font_dicts.len())
@@ -1542,6 +1544,38 @@ mod tests {
         // The subsetter's own limit on Font DICTs comes first.
         let err = subset_glyphs(font(2049, 256), &[4]).unwrap_err();
         assert!(matches!(err, Error::SubsetUnsupported { .. }), "{err}");
+    }
+
+    #[test]
+    fn counts_the_font_dicts_when_the_fd_select_is_cut_off() {
+        // An FDSelect of format 3 at the end of the table, cut off after its format or
+        // within its count of ranges: the subsetter takes the table, and with 256 Font
+        // DICTs it panics (subsetter#34), so the count of Font DICTs still refuses it.
+        let format3 = [3, 0, 2, 0, 0, 0, 0, 3, 1, 0, 5];
+        for cut in [&[3][..], &[3, 0]] {
+            let mut cff = programs(
+                &glyphs_with(4, vec![14]),
+                &[],
+                &vec![vec![]; 256],
+                Some(&format3),
+            );
+            // The FDSelect operator, a five-byte integer and 12 37, in the Top DICT.
+            let at = cff
+                .windows(7)
+                .position(|w| w[0] == 29 && w[5..] == [12, 37])
+                .unwrap();
+            let offset = int5(cff.len());
+            cff.splice(at..at + 5, offset);
+            cff.extend(cut);
+            if cfg!(debug_assertions) {
+                assert!(subsetter_panics(cff.clone(), &[4]), "{cut:?}");
+            }
+            let err = subset_glyphs(cff, &[4]).unwrap_err();
+            assert!(
+                matches!(err, Error::SubsetUnsupported { .. }),
+                "{cut:?}: {err}"
+            );
+        }
     }
 
     #[test]
