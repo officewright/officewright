@@ -24,8 +24,12 @@ case "$*" in
 	set -- $*
 	case " $FAKE_CRASH " in *" $4 "*) exit 1 ;; esac
 	;;
-"+nightly miri test -p officewright-ffi") exit "${FAKE_MIRI_STATUS:-0}" ;;
-"build --release -p corpus-runner") exit 0 ;;
+"+nightly miri test -p officewright-ffi")
+	# The tests write files, which Miri allows only without isolation.
+	[ "$MIRIFLAGS" = -Zmiri-disable-isolation ] || exit 7
+	exit "${FAKE_MIRI_STATUS:-0}"
+	;;
+"build --release -p corpus-runner") exit "${FAKE_BUILD_STATUS:-0}" ;;
 *) echo "fake cargo: unexpected arguments: $*" >&2; exit 99 ;;
 esac
 """
@@ -135,6 +139,13 @@ class Nightly(unittest.TestCase):
         self.assertEqual(self.fuzzed(), ["xml", "png_decode", "jpeg_header"])
         self.assertIn("fuzzing failed in: xml jpeg_header", err)
 
+    def test_fuzzing_every_target_stops_when_the_list_fails(self):
+        for args in [("fuzz",), ()]:
+            self.log.unlink(missing_ok=True)
+            code, _, _ = self.run_script(*args, targets="xml\\n", list_status="3")
+            self.assertEqual(code, 1, args)
+            self.assertEqual(self.fuzzed(), [], args)
+
     def test_a_target_without_seeds_stops_the_run(self):
         code, _, err = self.run_script("fuzz", "new_target", "xml")
         self.assertEqual(code, 1)
@@ -193,6 +204,13 @@ class Nightly(unittest.TestCase):
             self.assertEqual(code, 1, fake)
             self.assertIn(message, err, fake)
             self.assertEqual(self.ran()[-1], "test-fonts ", fake)
+
+    def test_a_failed_build_of_the_corpus_runner_fails_the_checks_at_the_end(self):
+        code, _, err = self.run_script("checks", build_status="1")
+        self.assertEqual(code, 1)
+        self.assertIn("the corpus checks failed", err)
+        self.assertEqual(self.ran()[-1], "test-fonts ")
+        self.assertFalse(any(line.startswith("corpus-runner ") for line in self.ran()))
 
     def test_a_poi_document_that_differs_fails_the_corpus_checks(self):
         self.write("corpus-ext/poi/test-data/document/a.docx", "changed")
