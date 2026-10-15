@@ -4,6 +4,18 @@ use super::chars::is_char;
 use super::reader::{Reader, error_at};
 use crate::{Limits, Result};
 
+#[cfg(test)]
+thread_local! {
+    /// Copies of a part's text the decoder made on this thread, for tests of its memory.
+    pub(super) static COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Counts a copy of the text for [`COPIES`].
+#[cfg(test)]
+fn copied() {
+    COPIES.set(COPIES.get() + 1);
+}
+
 /// The text of an XML part, decoded and checked, ready to [read](Input::reader).
 ///
 /// ECMA-376 Part 2 allows XML parts in UTF-8 and UTF-16 only. A byte order mark selects
@@ -66,6 +78,7 @@ fn utf8(bytes: &[u8]) -> Result<Cow<'_, str>> {
                 .get(..err.valid_up_to())
                 .and_then(|valid| std::str::from_utf8(valid).ok())
                 .unwrap_or_default();
+            // Lines are counted as in the decoded text, where a carriage return ends one.
             error_at(valid, valid.len(), "invalid UTF-8")
         })
 }
@@ -87,6 +100,8 @@ fn utf16(bytes: &[u8], unit: fn([u8; 2]) -> u16) -> Result<Cow<'static, str>> {
         })
         .sum();
     let mut text = String::with_capacity(length);
+    #[cfg(test)]
+    copied();
     let mut after_carriage_return = false;
     for c in char::decode_utf16(units()) {
         match c {
@@ -114,6 +129,8 @@ fn normalize(text: Cow<'_, str>) -> Cow<'_, str> {
         return text;
     }
     let mut normalized = String::with_capacity(text.len());
+    #[cfg(test)]
+    copied();
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '\r' {
