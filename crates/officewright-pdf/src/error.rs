@@ -185,8 +185,9 @@ pub enum Error {
         family: String,
     },
     /// A font could not be reduced to the glyphs the document uses: it is damaged in a
-    /// way that only subsetting those glyphs finds, or uses a feature the subsetter does
-    /// not support yet.
+    /// way that only subsetting those glyphs finds, those glyphs are past a limit of the
+    /// library (CFF glyphs that take too much work to decompile), or it uses a feature
+    /// the subsetter does not support yet.
     Embed {
         /// The font's name.
         font: String,
