@@ -31,8 +31,11 @@ pub(crate) fn non_negative_if_set(value: &Option<Pt>, checker: &mut Checker<'_>)
 }
 
 /// Brings `value` within `min` to `max` and reports the change, naming the value as
-/// `what`. A value that is not a number is left alone: `validate` rejects it.
+/// `what`. A value that is not a finite number is left alone: `validate` rejects it.
 pub(crate) fn limit(value: &mut Pt, min: Pt, max: Pt, what: &str, clamper: &mut Clamper) {
+    if !value.0.is_finite() {
+        return;
+    }
     let clamped = if value.0 < min.0 {
         min
     } else if value.0 > max.0 {
@@ -45,6 +48,21 @@ pub(crate) fn limit(value: &mut Pt, min: Pt, max: Pt, what: &str, clamper: &mut 
         value.0, min.0, max.0, clamped.0
     ));
     *value = clamped;
+}
+
+/// [`limit`] for a length that must not be negative: a negative one is left alone, as
+/// `validate` rejects it.
+pub(crate) fn limit_non_negative(
+    value: &mut Pt,
+    min: Pt,
+    max: Pt,
+    what: &str,
+    clamper: &mut Clamper,
+) {
+    if value.0 < 0.0 {
+        return;
+    }
+    limit(value, min, max, what, clamper);
 }
 
 /// Word restricts a tab stop's position to ±22 inches (MS-OI29500 2.1.61 a).
@@ -64,7 +82,7 @@ pub(crate) fn letter_spacing(value: &mut Pt, clamper: &mut Clamper) {
 /// (MS-OI29500 2.1.83 a); negative sizes are rejected by `validate`.
 pub(crate) fn kerning(value: &mut Option<Pt>, clamper: &mut Clamper) {
     if let Some(value) = value {
-        limit(
+        limit_non_negative(
             value,
             Pt(0.0),
             Pt(3277.0 / 2.0),
@@ -77,19 +95,19 @@ pub(crate) fn kerning(value: &mut Option<Pt>, clamper: &mut Clamper) {
 /// Word takes font sizes from 2 to 3277 half-points (ST_HpsMeasure, MS-OI29500 2.1.544
 /// a); negative sizes are rejected by `validate`.
 pub(crate) fn font_size(value: &mut Pt, clamper: &mut Clamper) {
-    limit(value, Pt(1.0), Pt(3277.0 / 2.0), "font size", clamper);
+    limit_non_negative(value, Pt(1.0), Pt(3277.0 / 2.0), "font size", clamper);
 }
 
 /// Word takes the distance between a border and the text from 0 to 31 pt
 /// (ST_PointMeasure, MS-OI29500 2.1.550 a); negative distances are rejected by `validate`.
 pub(crate) fn border_space(value: &mut Pt, clamper: &mut Clamper) {
-    limit(value, Pt(0.0), Pt(31.0), "border distance", clamper);
+    limit_non_negative(value, Pt(0.0), Pt(31.0), "border distance", clamper);
 }
 
 /// Word stores the distance between automatic tab stops as a `short` of twips, at least
 /// 0 (MS-OI29500 2.1.399 a); negative distances are rejected by `validate`.
 pub(crate) fn default_tab_stop(value: &mut Pt, clamper: &mut Clamper) {
-    limit(
+    limit_non_negative(
         value,
         Pt(0.0),
         WORD_MAX_SHORT_LENGTH,
@@ -101,7 +119,7 @@ pub(crate) fn default_tab_stop(value: &mut Pt, clamper: &mut Clamper) {
 /// The left, right, header, footer and gutter margins are at most 22 inches in Word
 /// (MS-OI29500 2.1.218 a); negative ones are rejected by `validate`.
 pub(crate) fn margin(value: &mut Pt, clamper: &mut Clamper) {
-    limit(value, Pt(0.0), WORD_MAX_LENGTH, "margin", clamper);
+    limit_non_negative(value, Pt(0.0), WORD_MAX_LENGTH, "margin", clamper);
 }
 
 /// The top and bottom margins are between -22 and 22 inches in Word (MS-OI29500

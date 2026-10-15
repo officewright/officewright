@@ -115,12 +115,23 @@ fn page_size_within_margins(setup: &mut PageSetup, clamper: &mut Clamper) {
     let margins = setup.margins;
     let across = margins.left.0 + margins.right.0 + margins.gutter.0;
     let down = margins.top.0.abs() + margins.bottom.0.abs();
-    // A margin that is not a number gives no bound; `validate` rejects it.
-    if !across.is_finite() || !down.is_finite() {
-        return;
-    }
     let mut width = setup.size.width();
     let mut height = setup.size.height();
+    // A margin or a page size that `validate` rejects gives no bound, and the page is
+    // left alone: a margin that is not a number, a negative one across, or a negative or
+    // infinite side.
+    let rejected = |value: f64| !value.is_finite() || value < 0.0;
+    let negative_across = [margins.left, margins.right, margins.gutter]
+        .iter()
+        .any(|margin| margin.0 < 0.0);
+    if negative_across
+        || !across.is_finite()
+        || !down.is_finite()
+        || rejected(width.0)
+        || rejected(height.0)
+    {
+        return;
+    }
     let max = WORD_MAX_LENGTH;
     rules::limit(
         &mut width,
