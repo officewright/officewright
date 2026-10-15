@@ -18,7 +18,6 @@ use crate::ir::{
 };
 use crate::itemize::{Item, Itemized, TextRun, drawn_size};
 use crate::lines::{Piece, PieceKind, PlacedGlyph, inline_at};
-use crate::metrics::{TypoRule, line_metrics};
 use crate::paragraph::ParagraphLayout;
 use crate::report::{Location, ReportKind};
 
@@ -275,19 +274,11 @@ impl Painting<'_, '_, '_> {
                             .run_style(run.style)
                             .cloned()
                             .unwrap_or_default();
-                        let reach = self.metrics(run);
-                        let raised = baseline - rise(run, &style);
                         // Spaces that hang past the end of the line have no box: like
                         // their underline, it would reach into the margin.
                         let width = if piece.hanging { Pt(0.0) } else { piece.width };
-                        let background = self.background_of(
-                            &style,
-                            &mut behind,
-                            reach,
-                            (x, width),
-                            raised,
-                            bounds,
-                        );
+                        let background =
+                            self.background_of(&style, &mut behind, (x, width), bounds);
                         let color = text_color(style.color(), background);
                         let placed = (piece, x, baseline);
                         if let Some(glyphs) =
@@ -374,31 +365,28 @@ impl Painting<'_, '_, '_> {
     }
 
     /// The background of a piece of text or a tab in `style`, `span` its start and width,
-    /// on `baseline` (raised for a superscript), whose font reaches `reach` above and
-    /// below it, on a line from `bounds.0` to `bounds.1`: the run's highlight or shading,
-    /// whose rectangle goes to `behind`, else the paragraph's shading, else what is
-    /// behind the paragraph.
+    /// on a line from `bounds.0` to `bounds.1`: the run's highlight or shading, whose
+    /// rectangle goes to `behind`, else the paragraph's shading, else what is behind the
+    /// paragraph.
     fn background_of(
         &mut self,
         style: &RunStyle,
         behind: &mut Vec<DisplayItem>,
-        reach: (f64, f64),
         span: (f64, Pt),
-        baseline: f64,
         bounds: (f64, f64),
     ) -> Option<Color> {
         let shading = style
             .shading()
             .and_then(|shading| self.shading_color(&shading));
-        // A highlight hides the run's shading. Hypothesis until a Word reference
-        // (`E-highlight.docx`), like the box: as high as the run's font reaches at the
-        // size its formatting gives, raised or lowered with its text, but within its
-        // line, which a superscript or subscript would otherwise leave.
+        // A highlight hides the run's shading, which is then not painted at all; either
+        // is one rectangle the height of the line, whatever the run's size or place on
+        // it: Word's references of `E-highlight.docx` show it the full line for raised,
+        // lowered, superscript and subscript text and cut to an exact line, and that of
+        // `E-auto-color.docx` shows run shading reaching the top of the line (#309).
         let own = style.highlight().or(shading);
         if let Some(color) = own {
             let (x, width) = span;
-            let top = (baseline - reach.0).max(bounds.0);
-            let bottom = (baseline + reach.1).min(bounds.1);
+            let (top, bottom) = bounds;
             if width.0 > 0.0 && bottom > top {
                 behind.push(DisplayItem::Rect {
                     at: Point {
@@ -497,19 +485,6 @@ impl Painting<'_, '_, '_> {
         }
         let under = fill.unwrap_or(Color::WHITE);
         Some(mix(color, under, share))
-    }
-
-    /// How far the font of `run` reaches above and below its baseline, at the size its
-    /// formatting gives.
-    fn metrics(&mut self, run: &TextRun) -> (f64, f64) {
-        let face = run.face.and_then(|id| self.fonts.face(id));
-        match face {
-            Some(face) => {
-                let metrics = line_metrics(face.face(), run.formatted_size, TypoRule::default());
-                (metrics.ascent.0, metrics.descent.0)
-            }
-            None => (run.formatted_size.0 * 0.8, run.formatted_size.0 * 0.2),
-        }
     }
 
     /// The glyph run of a piece of text.
@@ -710,14 +685,8 @@ impl Painting<'_, '_, '_> {
         let size = drawn_size(&style, formatted, false);
         let choice = self.fonts.choose(&family, bold, italic);
         let face = choice.face.and_then(|id| self.fonts.face(id));
-        let reach = face
-            .as_ref()
-            .map_or((formatted.0 * 0.8, formatted.0 * 0.2), |face| {
-                let metrics = line_metrics(face.face(), formatted, TypoRule::default());
-                (metrics.ascent.0, metrics.descent.0)
-            });
         let raised = baseline - rise_at(&style, formatted.0);
-        let background = self.background_of(&style, behind, reach, span, raised, bounds);
+        let background = self.background_of(&style, behind, span, bounds);
         let color = text_color(style.color(), background);
         let (x, width) = span;
         if width.0 <= 0.0 {
@@ -1428,7 +1397,7 @@ mod tests {
     }
 
     #[test]
-    fn the_highlight_of_raised_text_rises_with_it() {
+    fn a_highlight_is_the_height_of_its_line_wherever_its_text_stands() {
         let marked = RunStyle::default().with_highlight(Some(Color::rgb(255, 255, 0)));
         let raised = marked
             .clone()
@@ -1447,25 +1416,44 @@ mod tests {
         let runs = glyph_runs(&items);
         let boxes = rects(&items);
         assert_eq!((runs.len(), boxes.len()), (2, 2), "{items:?}");
-        // Each box reaches the font's ascent (900 units of 1000 at 10 pt) above its own
-        // run's baseline and its descent (250) below, but stays within the line, from
-        // 20 to 31.5: the raised one is cut at the line's top.
-        let (Some(low), Some(high)) = (runs.first(), runs.get(1)) else {
-            panic!("runs");
-        };
+        // Both boxes are the line's, from its top at 20 to its bottom, whatever the run's
+        // place on it (E-highlight).
         let ((plain_at, _, plain_height, _), (raised_at, _, raised_height, _)) =
             (boxes[0], boxes[1]);
-        assert!(
-            (plain_at.y.0 - (low.origin.y.0 - 9.0)).abs() < 1e-9,
-            "{boxes:?}"
-        );
-        assert!((plain_at.y.0 + plain_height.0 - (low.origin.y.0 + 2.5)).abs() < 1e-9);
-        assert!((raised_at.y.0 - 20.0).abs() < 1e-9, "{boxes:?}");
-        assert!((raised_at.y.0 + raised_height.0 - (high.origin.y.0 + 2.5)).abs() < 1e-9);
+        assert!((plain_at.y.0 - 20.0).abs() < 1e-9, "{boxes:?}");
+        assert_eq!((raised_at.y, raised_height), (plain_at.y, plain_height));
+        assert!(plain_height.0 > 11.0, "{boxes:?}");
         let (Some(low), Some(high)) = (runs.first(), runs.get(1)) else {
             panic!("runs");
         };
         assert!((low.origin.y.0 - high.origin.y.0 - (2.0 + 10.0 / 3.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn highlight_and_run_shading_fill_their_line_cut_to_an_exact_one() {
+        // E-highlight case 05: under exact 9 pt line spacing the highlight is cut to the
+        // 9 pt line; run shading without a highlight fills the line too.
+        let marked = RunStyle::default().with_highlight(Some(Color::rgb(255, 255, 0)));
+        let shaded = RunStyle::default().with_shading(Some(
+            Shading::default().with_fill(ColorValue::Rgb(Color::rgb(0, 0, 255))),
+        ));
+        for style in [marked, shaded] {
+            let (items, _) = painted(&[style], |ids, _| {
+                let id = ids.first().copied().expect("a style");
+                (
+                    ParagraphProps::default().with_spacing(
+                        crate::ir::Spacing::default()
+                            .with_line(crate::ir::LineSpacing::Exact(Pt(9.0))),
+                    ),
+                    vec![Inline::text("A", id)],
+                )
+            });
+            let boxes = rects(&items);
+            assert_eq!(boxes.len(), 1, "{items:?}");
+            let (at, _, height, _) = boxes[0];
+            assert!((at.y.0 - 20.0).abs() < 1e-9, "{boxes:?}");
+            assert!((height.0 - 9.0).abs() < 1e-9, "{boxes:?}");
+        }
     }
 
     /// The lines of `items`.
