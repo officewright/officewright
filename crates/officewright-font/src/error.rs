@@ -51,10 +51,11 @@ pub enum Error {
     },
     /// A table is within the format but past a limit the library sets on the work of
     /// reading it: `name` records that point at more than 1 MiB of strings to keep when
-    /// subsetting, or `CFF ` Font DICTs that point at more than 1 MiB of Private DICTs,
-    /// which no real font comes near; or glyphs to keep whose `CFF ` charstrings take more
-    /// than 16,777,216 operands, operators and hint mask bytes to decompile, which only the
-    /// largest CJK fonts reach, kept whole.
+    /// subsetting, `CFF ` Font DICTs that point at more than 1 MiB of Private DICTs, or an
+    /// FDSelect that declares more than 2,048 ranges, which no real font comes near; or
+    /// glyphs to keep whose `CFF ` charstrings take more than 16,777,216 operands,
+    /// operators and hint mask bytes to decompile, which only the largest CJK fonts
+    /// reach, kept whole.
     #[non_exhaustive]
     TableOverLimit {
         /// The face.

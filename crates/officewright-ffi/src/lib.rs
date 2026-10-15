@@ -537,8 +537,9 @@ pub unsafe extern "C" fn ow_pdf_font_new_standard(
 /// Fails with `OW_STATUS_IO` if the file cannot be read, `OW_STATUS_MALFORMED` if it is
 /// not a font or is damaged, `OW_STATUS_LIMIT_EXCEEDED` if it is past a limit of the
 /// library (`name` records that point at more than 1 MiB of strings, CFF Font DICTs that
-/// point at more than 1 MiB of Private DICTs, or a CFF `.notdef` glyph that takes more
-/// than 16,777,216 operands, operators and hint mask bytes to decompile),
+/// point at more than 1 MiB of Private DICTs, an FDSelect of more than 2,048 ranges, or a
+/// CFF `.notdef` glyph that takes more than 16,777,216 operands, operators and hint mask
+/// bytes to decompile),
 /// `OW_STATUS_INVALID_ARGUMENT` if it has no such face, and `OW_STATUS_UNSUPPORTED` if its
 /// license forbids embedding or its outlines cannot be embedded (CFF2, or CID-keyed CFF
 /// with more than 255 Font DICTs). On success
