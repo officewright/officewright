@@ -530,6 +530,25 @@ fn keeps_the_namespaces_that_values_in_kept_xml_name() {
 }
 
 #[test]
+fn escapes_the_namespaces_kept_xml_declares() {
+    // A quotation mark would end the attribute early, and a tab would read back as a
+    // space, which is another namespace.
+    let document =
+        open(r#"<w:p xmlns:p="urn:a&quot;b&#9;c"><w14:a><w14:b mc:Ignorable="p"/></w14:a></w:p>"#);
+    let xml = kept_xml(&document).remove(0);
+    let (_, values) = read_back(&xml);
+    assert_eq!(
+        values,
+        [(
+            "Ignorable".to_owned(),
+            "p".to_owned(),
+            Some("urn:a\"b\tc".to_owned())
+        )],
+        "{xml}"
+    );
+}
+
+#[test]
 fn keeps_a_long_namespace_once_however_many_kept_elements_name_it() {
     // A reviewer of #222 found each declaration added for a value copied its URI: a
     // 1 MB URI that 2,000 kept elements named took 1.9 GiB. And each element of a kept
@@ -601,6 +620,16 @@ fn counts_the_declarations_added_for_values_against_the_node_limit() {
         r#"<w:p><w14:a><w14:b mc:Ignorable="wp zz zz" mc:ProcessContent="zz:x"/></w14:a></w:p>"#,
     );
     assert_eq!(named_often, named_once);
+    // A declaration written on a kept element costs a node.
+    assert_eq!(
+        fewest(r#"<w:p><w14:a><w14:b xmlns:q="urn:q"/></w14:a></w:p>"#),
+        fewest(r#"<w:p><w14:a><w14:b/></w14:a></w:p>"#) + 1
+    );
+    // A prefix the element declares itself costs nothing more when its values name it.
+    assert_eq!(
+        fewest(r#"<w:p><w14:a><w14:b xmlns:q="urn:q" mc:Ignorable="q"/></w14:a></w:p>"#),
+        fewest(r#"<w:p><w14:a><w14:b xmlns:q="urn:q" mc:Ignorable="zz"/></w14:a></w:p>"#)
+    );
 }
 
 #[test]
