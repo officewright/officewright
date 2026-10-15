@@ -1,18 +1,18 @@
 //! Builds a paragraph from the input and itemizes and shapes it with the test fonts of
-//! tests/fonts, as the layout does: the first bytes describe up to four run styles
-//! (fonts, among them missing ones and the symbol fonts Symbol and Wingdings; bold,
-//! italic, capitals, small capitals, complex script, right to left, the East Asian hint,
-//! kerning; size), the rest are pieces of text, symbols, tabs, soft hyphens, and page and
-//! column breaks in those styles.
-//! The paragraph must keep what the layout relies on (`check_paragraph`), and break into
-//! lines that hold its text in order, in a column, with a line spacing, an alignment, a
-//! hanging indent and tab stops the first bytes give too (`check_lines`). Up to four
-//! copies of it, kept with the next, kept together, with or without widow control and
-//! a page break before as the first bytes say, are then laid out on pages of a height
-//! they give, the last of them in a second section of a start the first bytes give when
-//! they say so, with every line on exactly one page inside its body (`check_pages`);
-//! with the paragraph as their header and the page fields as their footer, in a number
-//! format, with a title page and even pages of their own, when the first bytes say so.
+//! tests/fonts, as the layout does: the first bytes describe up to four run styles (fonts,
+//! among them missing ones and the symbol fonts Symbol and Wingdings; bold, italic,
+//! capitals, small capitals, complex script, right to left, the East Asian hint, kerning;
+//! size), the rest are pieces of text, symbols, tabs, soft hyphens, and page and column
+//! breaks in those styles. The paragraph must keep what the layout relies on
+//! (`check_paragraph`), and break into lines that hold its text in order, in a column, with
+//! a line spacing, an alignment, a hanging indent and tab stops the first bytes give too,
+//! and a list label when they say so (`check_lines`). Up to four copies of it, kept with
+//! the next, kept together, with or without widow control and a page break before as the
+//! first bytes say, are then laid out on pages of a height they give, the last of them in a
+//! second section of a start the first bytes give when they say so, with every line on
+//! exactly one page inside its body (`check_pages`); with the paragraph as their header and
+//! the page fields as their footer, in a number format, with a title page and even pages of
+//! their own, when the first bytes say so.
 #![no_main]
 
 use std::path::Path;
@@ -25,8 +25,9 @@ use officewright_font::{FontBook, FontOrigin};
 use officewright_layout::fuzzing::{check_lines, check_pages, check_paragraph};
 use officewright_layout::ir::{
     Alignment, Document, DocumentSettings, Field, FieldKind, FontHint, HeaderFooterSet, Indent,
-    Inline, LineSpacing, Margins, NumberFormat, PageSetup, Paragraph, ParagraphProps, RunFonts,
-    RunStyle, Section, SectionStart, Spacing, TabKind, TabStop,
+    Inline, Level, LevelAlignment, LevelTextPart, LineSpacing, ListDefinition, ListInstance,
+    ListItem, Margins, NumberFormat, PageSetup, Paragraph, ParagraphProps, RunFonts, RunStyle,
+    Section, SectionStart, Spacing, Suffix, TabKind, TabStop,
 };
 
 const FAMILIES: [&str; 8] = [
@@ -167,6 +168,54 @@ fuzz_target!(|data: &[u8]| {
     let paragraph = Paragraph::new(first)
         .with_props(props)
         .with_inlines(inlines);
+    // A list item when bit 7 of byte 1 says so (its bits 0 to 2 choose a font). Its label
+    // is the number of level 0, from a start and in a format the high bits of byte 0 give,
+    // then the text of the first piece, which may be long or hold control characters;
+    // aligned and followed as bits 3 to 6 of byte 1 say; in the second style. Its copies
+    // count on, and the header's counts afresh.
+    let paragraph = if byte(1) & 0x80 != 0 {
+        let formats = [
+            NumberFormat::Decimal,
+            NumberFormat::UpperRoman,
+            NumberFormat::LowerLetter,
+            NumberFormat::Ordinal,
+            NumberFormat::Chicago,
+            NumberFormat::DecimalZero,
+            NumberFormat::None,
+            NumberFormat::Bullet,
+            NumberFormat::Other("hebrew1".to_owned()),
+        ];
+        let high = byte(0) >> 3;
+        let literal = rest
+            .split(|&byte| byte == 0xFF)
+            .next()
+            .and_then(|piece| piece.get(1..))
+            .map(|text| String::from_utf8_lossy(text).into_owned())
+            .unwrap_or_default();
+        let level = Level::default()
+            .with_start(u32::from(high) * 37)
+            .with_format(formats[usize::from(high) % formats.len()].clone())
+            .with_text([
+                LevelTextPart::Placeholder(0),
+                LevelTextPart::Literal(literal),
+            ])
+            .with_alignment(
+                [
+                    LevelAlignment::Start,
+                    LevelAlignment::Center,
+                    LevelAlignment::End,
+                ][usize::from(byte(1) >> 3 & 3) % 3],
+            )
+            .with_suffix(
+                [Suffix::Tab, Suffix::Space, Suffix::Nothing][usize::from(byte(1) >> 5 & 3) % 3],
+            );
+        let list = document.add_list(ListDefinition::default().with_levels([level]));
+        let instance = document.add_list_instance(ListInstance::new(list));
+        let label_style = styles.get(1).copied().unwrap_or(first);
+        panic!("list branch reached");
+    } else {
+        paragraph
+    };
     let width = 1.0 + f64::from(byte(13)) * 3.0;
     if let Err(problem) = check_lines(book(), &document, &paragraph, width) {
         panic!("{problem}");

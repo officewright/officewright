@@ -16,6 +16,12 @@ use crate::report::Location;
 /// The levels a list has: Word takes `w:ilvl` from 0 to 8 (MS-OI29500 2.1.280 a).
 const LEVELS: usize = 9;
 
+/// The most characters a label is drawn with. A level's template is written once but
+/// drawn for every item of the level, so a long one would take time and room in
+/// proportion to the items times its length; real labels ("1.1.1.", "Article 12.") are
+/// far shorter. What Word does with a longer template is a hypothesis until a Word render.
+pub(crate) const MAX_LABEL_CHARS: usize = 256;
+
 /// The label of a list item, and what follows it.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Label {
@@ -41,15 +47,16 @@ pub(crate) struct Counters {
     /// The first paragraph whose label has a number written in decimal because its
     /// format is one the layout does not write.
     pub(crate) unsupported_format: Option<Location>,
+    /// The first paragraph whose label is cut at [`MAX_LABEL_CHARS`].
+    pub(crate) long_label: Option<Location>,
 }
 
 /// The values of the levels of one list definition.
 #[derive(Debug, Default)]
 struct Sequence {
-    /// Each level's value, once it has had a paragraph.
+    /// Each level's value, once it has had a paragraph; `None` again when a level above
+    /// restarts it, so that it is shown, and counts on, from its start.
     values: [Option<u32>; LEVELS],
-    /// Whether each level starts again at its next paragraph.
-    restart: [bool; LEVELS],
 }
 
 impl Counters {
@@ -67,10 +74,29 @@ impl Counters {
             return None;
         }
         let instance = document.list_instance(item.instance())?;
+        // What the labels show comes from each level as the instance has it, replaced or
+        // not; how a level counts, its start and when it starts again, from the
+        // definition, since Word ignores those of a replacing level (MS-OI29500
+        // 2.1.282 b, 2.1.292 b).
         let levels: Vec<Option<&Level>> = (0..LEVELS)
             .map(|level| effective_level(document, item, level))
             .collect();
+        let definition = document.list(instance.definition());
+        let counting: Vec<Option<&Level>> = (0..LEVELS)
+            .map(|level| {
+                definition
+                    .and_then(|list| list.levels().get(level))
+                    .or_else(|| levels.get(level).copied().flatten())
+            })
+            .collect();
         let level = levels.get(index).copied().flatten()?;
+        let start_of = |level: usize| {
+            counting
+                .get(level)
+                .copied()
+                .flatten()
+                .map_or(0, Level::start)
+        };
         let first_of_instance = self.started.insert((item.instance(), item.level()));
         let start_override = instance
             .overrides()
@@ -80,53 +106,59 @@ impl Counters {
             .filter(|_| first_of_instance);
         let sequence = self.lists.entry(instance.definition()).or_default();
         // An instance's start override sets the value of its first paragraph at the level
-        // outright; else the level starts again after a level above it, or counts on.
+        // outright; else the level counts on, or starts at its start when it has had no
+        // paragraph since a level above restarted it.
         let value = match start_override {
             Some(start) => start,
             None => match sequence.values.get(index).copied().flatten() {
-                Some(previous) if !sequence.restart.get(index).copied().unwrap_or(true) => {
-                    previous.saturating_add(1)
-                }
-                _ => level.start(),
+                Some(previous) => previous.saturating_add(1),
+                None => start_of(index),
             },
         };
         if let Some(slot) = sequence.values.get_mut(index) {
             *slot = Some(value);
         }
-        // A level above that has had no paragraph and that the label shows, shows its
-        // start, and Word counts on from there: after "1.1." with no "1." before it, the next
-        // item of the level above is "2."; a label that shows only its own level leaves the
-        // levels above as they are (E-list-level-inherit, cases 01 to 05 and 04 to 08).
+        // A level above that has had no paragraph since it started, and that the label
+        // shows, shows its start, and Word counts on from there: after "1.1." with no "1."
+        // before it, the next item of the level above is "2." (E-list-level-inherit,
+        // cases 01 to 05). A label that shows only its own level leaves the levels above
+        // as they are; that is a hypothesis, which no reference shows since #292.
         for part in level.text() {
             if let LevelTextPart::Placeholder(above) = part {
                 let above = usize::from(*above);
                 if let (true, Some(slot)) = (above < index, sequence.values.get_mut(above)) {
                     if slot.is_none() {
-                        *slot = Some(levels.get(above).copied().flatten().map_or(0, Level::start));
+                        *slot = Some(start_of(above));
                     }
                 }
             }
         }
-        if let Some(slot) = sequence.restart.get_mut(index) {
-            *slot = false;
-        }
         // The levels below this one start again at their next paragraph, as their rule
         // says: after any level above them (the default, OI 2.1.282 d), after a given
         // level or any above it (`w:lvlRestart`, OI 2.1.282 c), or never.
-        for (deeper, rule) in levels.iter().enumerate().skip(index + 1) {
+        for (deeper, rule) in counting.iter().enumerate().skip(index + 1) {
             let restarts = match rule.map(|level| level.restart()) {
                 Some(Restart::Default) | None => true,
                 Some(Restart::AfterLevel(after)) => index <= usize::from(after),
                 Some(Restart::Never) => false,
             };
-            if let (true, Some(slot)) = (restarts, sequence.restart.get_mut(deeper)) {
-                *slot = true;
+            if let (true, Some(slot)) = (restarts, sequence.values.get_mut(deeper)) {
+                *slot = None;
             }
         }
         let mut unsupported = false;
-        let text = label_text(level, index, &levels, &sequence.values, &mut unsupported);
+        let mut cut = false;
+        let shown = Shown {
+            levels: &levels,
+            starts: &counting,
+            values: &sequence.values,
+        };
+        let text = label_text(level, index, &shown, (&mut unsupported, &mut cut));
         if unsupported && self.unsupported_format.is_none() {
             self.unsupported_format = Some(location.clone());
+        }
+        if cut && self.long_label.is_none() {
+            self.long_label = Some(location.clone());
         }
         Some(Label {
             text,
@@ -149,33 +181,50 @@ fn effective_level<'d>(document: &'d Document, item: &ListItem, level: usize) ->
     replacement.or_else(|| document.list(instance.definition())?.levels().get(level))
 }
 
+/// What a label shows of each level of its list: the level as the instance has it, the
+/// level whose start counts, and the level's value.
+struct Shown<'a, 'd> {
+    levels: &'a [Option<&'d Level>],
+    starts: &'a [Option<&'d Level>],
+    values: &'a [Option<u32>; LEVELS],
+}
+
 /// The text of the label of a paragraph at `index` of `level`: its template, each
-/// placeholder the value of its level in that level's format. A placeholder of a level
-/// below the paragraph's makes Word ignore the whole template (MS-OI29500 2.1.283 c). A
-/// legal level writes every number in decimal but that of a level without numbers
-/// (OI 2.1.278 a, b).
+/// placeholder the value of its level in that level's format, a level with no value its
+/// start. A placeholder of a level below the paragraph's makes Word ignore the whole
+/// template (MS-OI29500 2.1.283 c). A legal level writes every number in decimal but that
+/// of a level without numbers (OI 2.1.278 a, b). The text ends at [`MAX_LABEL_CHARS`],
+/// and `cut` says when it does.
 fn label_text(
     level: &Level,
     index: usize,
-    levels: &[Option<&Level>],
-    values: &[Option<u32>; LEVELS],
-    unsupported: &mut bool,
+    shown: &Shown<'_, '_>,
+    (unsupported, cut): (&mut bool, &mut bool),
 ) -> String {
     let mut text = String::new();
+    let mut count = 0;
     for part in level.text() {
+        if count == MAX_LABEL_CHARS {
+            // The rest of the template is not even written out.
+            *cut = true;
+            break;
+        }
         match part {
-            LevelTextPart::Literal(literal) => text.extend(literal.chars().filter_map(drawn)),
+            LevelTextPart::Literal(literal) => {
+                *cut |= push_within(&mut text, &mut count, literal.chars().filter_map(drawn));
+            }
             LevelTextPart::Placeholder(of) => {
                 let of = usize::from(*of);
                 if of > index {
                     return String::new();
                 }
-                let of_level = levels.get(of).copied().flatten();
-                let value = values
+                let of_level = shown.levels.get(of).copied().flatten();
+                let value = shown
+                    .values
                     .get(of)
                     .copied()
                     .flatten()
-                    .or_else(|| of_level.map(Level::start))
+                    .or_else(|| shown.starts.get(of).copied().flatten().map(Level::start))
                     .unwrap_or(0);
                 let format = of_level.map_or(&NumberFormat::Decimal, Level::format);
                 let format = if level.legal() && *format != NumberFormat::None {
@@ -185,21 +234,36 @@ fn label_text(
                 };
                 let (number, decimal) = number_text(value, format);
                 *unsupported |= decimal;
-                text.push_str(&number);
+                *cut |= push_within(&mut text, &mut count, number.chars());
             }
         }
     }
     text
 }
 
+/// Adds `chars` to `text`, of which `count` characters are written, up to
+/// [`MAX_LABEL_CHARS`]; whether some are left out.
+fn push_within(text: &mut String, count: &mut usize, chars: impl Iterator<Item = char>) -> bool {
+    for ch in chars {
+        if *count == MAX_LABEL_CHARS {
+            return true;
+        }
+        text.push(ch);
+        *count += 1;
+    }
+    false
+}
+
 /// What a character of a label's template draws. Word draws U+007F as a bullet: its
 /// render of `report-usds-tech-challenge-playbook.docx` shows "•" for bullets of U+007F
 /// in Arial, which has no glyph for that character. The other control characters, which
-/// the text of runs never holds, draw nothing, so that none of them breaks the label's
-/// line or moves to a tab stop; that is a hypothesis until a Word render.
+/// the text of runs never holds, and the line and paragraph separators draw nothing, so
+/// that none of them breaks the label's line or moves to a tab stop; that is a
+/// hypothesis until a Word render.
 fn drawn(ch: char) -> Option<char> {
     match ch {
         '\u{7F}' => Some('\u{2022}'),
+        '\u{2028}' | '\u{2029}' => None,
         ch if ch.is_control() => None,
         ch => Some(ch),
     }
@@ -310,7 +374,8 @@ mod tests {
             ["1.1.", "1.2.", "1.2.1.", "2.", "3."]
         );
         // A label that shows only its own level leaves the levels above unused: after
-        // "a)" at level 2, the first item at level 1 starts at its start (cases 04, 08).
+        // "a)" at level 2, the first item at level 1 starts at its start. A hypothesis: no
+        // reference shows this order since #292 put case 04 at level 0.
         let mut document = Document::default();
         let own = |of: u8, format: NumberFormat| {
             level(&[LevelTextPart::Placeholder(of), literal(")")], format).with_start(1)
@@ -446,6 +511,114 @@ mod tests {
             .label(&document, &ListItem::new(one, 0, style), &location)
             .unwrap();
         assert_eq!(label.text, "5");
+        assert_eq!(counters.unsupported_format, Some(location.clone()));
+        // A later paragraph in that format leaves the report naming the first.
+        let mut later = Location::default();
+        later.push(crate::report::Step::Index(7));
+        let label = counters
+            .label(&document, &ListItem::new(one, 0, style), &later)
+            .unwrap();
+        assert_eq!(label.text, "6");
         assert_eq!(counters.unsupported_format, Some(location));
+    }
+
+    #[test]
+    fn a_replacing_level_counts_as_the_definition_s_level_does() {
+        // Word ignores the start and the restart rule of a level an override replaces
+        // (MS-OI29500 2.1.282 b, 2.1.292 b): E-list-label-format, case 04.
+        let mut document = Document::default();
+        let definition = [
+            level(
+                &[LevelTextPart::Placeholder(0), literal(".")],
+                NumberFormat::Decimal,
+            )
+            .with_start(3),
+            level(
+                &[LevelTextPart::Placeholder(1), literal(")")],
+                NumberFormat::LowerLetter,
+            )
+            .with_start(1)
+            .with_restart(Restart::Never),
+        ];
+        let list = document.add_list(ListDefinition::default().with_levels(definition));
+        // The replacements show other templates, and leave start and restart at their
+        // defaults, as the producer writes them.
+        let replace = |of: u8, template: &str| {
+            LevelOverride::new(of).with_replacement(Some(level(
+                &[LevelTextPart::Placeholder(of), literal(template)],
+                NumberFormat::Decimal,
+            )))
+        };
+        let replaced = document.add_list_instance(
+            ListInstance::new(list).with_overrides([replace(0, ":"), replace(1, "]")]),
+        );
+        assert_eq!(
+            labels(
+                &mut document,
+                &[(replaced, 0), (replaced, 1), (replaced, 0), (replaced, 1)]
+            ),
+            ["3:", "1]", "4:", "2]"]
+        );
+    }
+
+    #[test]
+    fn a_level_restarted_above_shows_its_start_where_a_deeper_label_shows_it() {
+        // Levels 0, 1, 1, 1, 0, 2, 1: after "2.", level 1 starts again, so "2.1.1." shows
+        // its start, and the next item of level 1 counts on from there.
+        let mut document = Document::default();
+        let list = document.add_list(outline());
+        let one = document.add_list_instance(ListInstance::new(list));
+        let items = [
+            (one, 0),
+            (one, 1),
+            (one, 1),
+            (one, 1),
+            (one, 0),
+            (one, 2),
+            (one, 1),
+        ];
+        assert_eq!(
+            labels(&mut document, &items),
+            ["1.", "1.1.", "1.2.", "1.3.", "2.", "2.1.1.", "2.2."]
+        );
+    }
+
+    #[test]
+    fn a_label_is_cut_at_its_bound_and_the_rest_of_its_template_is_not_written() {
+        let mut document = Document::default();
+        let long = "ab ".repeat(10_000);
+        let many = vec![LevelTextPart::Placeholder(0); 30_000];
+        let levels = [
+            level(
+                &[literal(&long), LevelTextPart::Placeholder(0)],
+                NumberFormat::Decimal,
+            ),
+            level(&many, NumberFormat::UpperLetter).with_start(700),
+            level(&[literal("1.\u{2028}x\u{2029}")], NumberFormat::Bullet),
+        ];
+        let list = document.add_list(ListDefinition::default().with_levels(levels));
+        let one = document.add_list_instance(ListInstance::new(list));
+        let style = document.add_run_style(RunStyle::default());
+        let mut counters = Counters::default();
+        let mut location = Location::default();
+        location.push(crate::report::Step::Index(2));
+        let mut label = |level| {
+            counters
+                .label(&document, &ListItem::new(one, level, style), &location)
+                .unwrap()
+                .text
+        };
+        let first = label(0);
+        assert_eq!(first.chars().count(), MAX_LABEL_CHARS);
+        assert!(first.starts_with("ab ab "));
+        // 30,000 placeholders of 27 letters each: cut after the first characters, at
+        // once.
+        let started = std::time::Instant::now();
+        let second = label(1);
+        assert_eq!(second.chars().count(), MAX_LABEL_CHARS);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        // Line and paragraph separators draw nothing.
+        assert_eq!(label(2), "1.x");
+        assert_eq!(counters.long_label, Some(location));
     }
 }

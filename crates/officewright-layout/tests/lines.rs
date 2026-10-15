@@ -1882,6 +1882,32 @@ fn list_item(
 }
 
 #[test]
+fn list_items_keep_what_line_breaking_promises_whatever_their_label() -> TestResult {
+    use officewright_layout::ir::{LevelAlignment, Suffix};
+
+    // A label at the centre or the end moves the first line's start back: the checks the
+    // fuzz targets run take that room into account.
+    let book = book()?;
+    for alignment in [
+        LevelAlignment::Start,
+        LevelAlignment::Center,
+        LevelAlignment::End,
+    ] {
+        for suffix in [Suffix::Tab, Suffix::Space, Suffix::Nothing] {
+            let (document, paragraph) = list_item(
+                "Article 12.",
+                (alignment, suffix),
+                ParagraphProps::default(),
+                SENTENCE,
+            );
+            fuzzing::check_lines(&book, &document, &paragraph, 200.0)
+                .map_err(|problem| format!("{alignment:?} {suffix:?}: {problem}"))?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn a_list_label_stands_at_the_first_line_s_start_as_its_level_aligns_it() -> TestResult {
     use officewright_layout::ir::{LevelAlignment, Suffix};
 

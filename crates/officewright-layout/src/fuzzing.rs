@@ -868,6 +868,18 @@ fn piece_text_end(kind: &crate::lines::PieceKind) -> usize {
     }
 }
 
+/// The item of the paragraph `piece` draws.
+fn piece_item(piece: &crate::lines::Piece) -> usize {
+    use crate::lines::PieceKind;
+    match &piece.kind {
+        PieceKind::Text { item, .. }
+        | PieceKind::Hyphen { item, .. }
+        | PieceKind::Tab { item, .. }
+        | PieceKind::Break { item }
+        | PieceKind::Object { item, .. } => *item,
+    }
+}
+
 /// Lays out `paragraph` of `document` in a column `width` points wide with the fonts of
 /// `book`, and checks what pagination relies on: the lines hold the paragraph's text in
 /// order, all of it, each byte once; a line wider than its room is one the breaker
@@ -906,6 +918,24 @@ pub fn check_lines(
             ));
         }
         end = line.range.end;
+        // A list label aligned at the centre or the end gives the first line the room it
+        // moves back by: half its width, or all of it, measured on the line's pieces.
+        let label_room = match layout.itemized.label.filter(|_| index == 0) {
+            Some(label) => {
+                let width: f64 = line
+                    .pieces
+                    .iter()
+                    .filter(|piece| piece_item(piece) < label.text)
+                    .map(|piece| piece.width.0)
+                    .sum();
+                match label.alignment {
+                    crate::ir::LevelAlignment::Center => width / 2.0,
+                    crate::ir::LevelAlignment::End => width,
+                    _ => 0.0,
+                }
+            }
+            None => 0.0,
+        };
         let room = width
             - indent.start().0
             - indent.end().0
@@ -913,7 +943,8 @@ pub fn check_lines(
                 indent.first_line().0
             } else {
                 0.0
-            };
+            }
+            + label_room;
         let wide = line.width.0 > room.max(0.0) + 1e-6 && line.width.0 > 0.0;
         if wide && !(line.overflow && reported) {
             return Err(format!(

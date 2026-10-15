@@ -149,6 +149,16 @@ fn report_list_formats(counters: &Counters, fonts: &mut Fonts<'_>) {
             "list numbers in a format the layout does not write are written in decimal".to_owned(),
         );
     }
+    if let Some(location) = &counters.long_label {
+        fonts.report_once(
+            ReportKind::ValueClamped,
+            location,
+            format!(
+                "list labels longer than {} characters are cut there",
+                crate::lists::MAX_LABEL_CHARS
+            ),
+        );
+    }
 }
 
 impl<'a> Walk<'a, '_> {
@@ -1209,7 +1219,8 @@ impl<'d> Pager<'d, '_, '_> {
         location.push(Step::Field(name));
         let mut table = None;
         let mut flowed = Vec::new();
-        // The lists of each header and footer count from their start.
+        // The lists of each header and footer count from their start: a hypothesis until a
+        // Word render, since no reference document has a list in a header or footer.
         let mut counters = Counters::default();
         let mut walk = Walk {
             document: self.document,
@@ -3584,5 +3595,33 @@ mod tests {
             .map(|entry| entry.location().to_string())
             .collect();
         assert_eq!(places, ["sections[1].blocks[1]"], "{report:?}");
+        // A header's list in such a format is reported too, at the header's paragraph.
+        let mut in_header = Document::default();
+        let style = in_header
+            .add_run_style(RunStyle::default().with_fonts(RunFonts::new("Officewright Test")));
+        let other = Level::default()
+            .with_text([LevelTextPart::Placeholder(0)])
+            .with_format(NumberFormat::Other("hebrew1".into()));
+        let hebrew = in_header.add_list(ListDefinition::default().with_levels([other]));
+        let hebrew = in_header.add_list_instance(ListInstance::new(hebrew));
+        let header = HeaderFooterSet::default().with_primary(vec![
+            Paragraph::new(style)
+                .with_list(Some(ListItem::new(hebrew, 0, style)))
+                .with_inlines([Inline::text("A", style)])
+                .into(),
+        ]);
+        in_header.add_section(
+            Section::new(close_frames())
+                .with_headers(header)
+                .with_blocks(vec![Paragraph::new(style).into()]),
+        );
+        let (_, report) = self::laid(&in_header, 10);
+        let places: Vec<String> = report
+            .iter()
+            .filter(|entry| entry.message().contains("list numbers"))
+            .map(|entry| entry.location().to_string())
+            .collect();
+        assert_eq!(places.len(), 1, "{report:?}");
+        assert!(places[0].contains("headers"), "{places:?}");
     }
 }
