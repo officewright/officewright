@@ -234,6 +234,47 @@ class Cleaning(unittest.TestCase):
         header = self.parts["word/_rels/header1.xml.rels"].decode()
         self.assertIn('Target="media/image2.png"', header)
 
+    def test_external_links_to_local_files_are_refused_however_they_are_written(self):
+        # #331: relationships in single quotes, or with a character reference in TargetMode,
+        # escaped the regular expressions of edit_relationships, which kept the link.
+        spellings = {
+            "single quotes": f"<Relationship Id='rId9' Type='{REL}/hyperlink' "
+            "Target='file:///D:/private/report.docx' TargetMode='External'/>",
+            "a character reference in TargetMode": f'<Relationship Id="rId9" Type="{REL}/'
+            'hyperlink" Target="D:/private/report.docx" TargetMode="&#69;xternal"/>',
+            "spaces around the equals signs": f"<Relationship Id = 'rId9' Type = '{REL}/"
+            "hyperlink' Target = '\\\\server\\share\\x.docx' TargetMode = 'External'/>",
+        }
+        for label, element in spellings.items():
+            rels = f'<?xml version="1.0"?><Relationships xmlns="{PKG}">{element}</Relationships>'
+            data = package(**{"word/_rels/header1.xml.rels": rels})
+            with self.subTest(label):
+                with self.assertRaises(public.Refused) as caught:
+                    public.clean(data, DOC)
+                self.assertIn("header1.xml.rels", str(caught.exception))
+                self.assertIn("links to a local file or another scheme", str(caught.exception))
+                self.assertNotIn("private", str(caught.exception))
+                self.assertIn("word/_rels/header1.xml.rels links to a local file or another scheme",
+                              public.problems(data))
+        # A web address in single quotes stays, and so does an internal target.
+        rels = (f'<?xml version="1.0"?><Relationships xmlns="{PKG}">'
+                f"<Relationship Id='rId8' Type='{REL}/hyperlink' Target='https://example.gov/'"
+                " TargetMode='External'/></Relationships>")
+        cleaned = public.clean(package(**{"word/_rels/header1.xml.rels": rels}), DOC)
+        with zipfile.ZipFile(io.BytesIO(cleaned.data)) as archive:
+            self.assertIn("Target='https://example.gov/'",
+                          archive.read("word/_rels/header1.xml.rels").decode())
+
+    def test_a_picture_target_in_single_quotes_is_renamed_too(self):
+        rels = (f'<?xml version="1.0"?><Relationships xmlns="{PKG}">'
+                f"<Relationship Id='rId1' Type='{REL}/image' Target='media/image1.emf'/>"
+                "</Relationships>")
+        cleaned = public.clean(package(**{"word/_rels/header1.xml.rels": rels}), DOC)
+        with zipfile.ZipFile(io.BytesIO(cleaned.data)) as archive:
+            header = archive.read("word/_rels/header1.xml.rels").decode()
+        self.assertIn("Target='media/image1.png'", header)
+        self.assertNotIn("image1.emf", header)
+
     def test_the_placeholder_is_a_grey_frame_with_diagonals(self):
         data = public.placeholder(20, 10)
         position, idat = 8, b""

@@ -739,29 +739,55 @@ def part_target(rels_part: str, target: str) -> str:
     return posixpath.normpath(posixpath.join(source_dir, target))
 
 
+# The schemes an external relationship may link to: a link anywhere else (file:, a UNC or
+# drive path, a relative path) names a place on someone's machine or network.
+LINK_SCHEMES = re.compile(r"(?i)(https?|mailto):")
+
+
+def external_link_problems(parts: dict[str, bytes]) -> list[str]:
+    """The .rels parts with an external relationship to anything but a web or mail address,
+    read as XML whatever the quoting, prefixes or character references (#331); the target
+    itself is not named, since it may name a person's folder."""
+    found = []
+    for rels in sorted(name for name in parts if name.lower().endswith(".rels")):
+        root = package_xml(rels, parts[rels], f"{PACKAGE_RELS_NS}Relationships")
+        for element in root.iter(f"{PACKAGE_RELS_NS}Relationship"):
+            if element.get("TargetMode") == "External" and not LINK_SCHEMES.match(
+                element.get("Target", "")
+            ):
+                found.append(f"{rels} links to a local file or another scheme")
+                break
+    return found
+
+
+def attribute(element: str, name: str) -> re.Match | None:
+    """An attribute of an XML start tag, in double or single quotes: group 2 is its value."""
+    return re.search(rf"""\b{name}\s*=\s*(["'])(.*?)\1""", element)
+
+
 def edit_relationships(rels_part: str, xml: str, dropped: set[str], renamed: dict[str, str]) -> str:
     """Removes relationships to dropped parts and to attached templates; renames picture
-    targets."""
+    targets. External links are kept as they are: clean() refuses those to anything but web
+    and mail addresses afterwards (external_link_problems), whatever their spelling."""
 
     def edit(match: re.Match) -> str:
         element = match.group(0)
-        kind = re.search(r'Type="([^"]*)"', element)
-        target = re.search(r'Target="([^"]*)"', element)
+        kind = attribute(element, "Type")
+        target = attribute(element, "Target")
         if not kind or not target:
             return element
-        if kind.group(1).endswith("/attachedTemplate"):
+        if kind.group(2).endswith("/attachedTemplate"):
             return ""
-        if 'TargetMode="External"' in element:
-            if not re.match(r"(?i)(https?|mailto):", target.group(1)):
-                raise Refused(f"{rels_part}: links to a local file or another scheme")
+        mode = attribute(element, "TargetMode")
+        if mode and mode.group(2) == "External":
             return element
-        part = part_target(rels_part, target.group(1))
+        part = part_target(rels_part, target.group(2))
         if part in dropped:
             return ""
         if part in renamed:
-            old = target.group(1)
+            old = target.group(2)
             new = old[: len(old) - len(posixpath.basename(old))] + posixpath.basename(renamed[part])
-            return element.replace(f'Target="{old}"', f'Target="{new}"')
+            return element.replace(target.group(0), f"Target={target.group(1)}{new}{target.group(1)}")
         return element
 
     return re.sub(r"<Relationship\b[^>]*/>", edit, xml)
@@ -892,6 +918,15 @@ def clean(original: bytes, doc: PublicDoc) -> Cleaned:
         out.append((info, data))
     if pending:
         raise Refused(f"{doc.name}: no part {pending[0].part} for a replacement")
+    # What the cleaning keeps, read as XML: an external link it did not see in some spelling
+    # of the markup is refused here (#331). An attached template is removed above, so the
+    # check comes after the edits.
+    try:
+        links = external_link_problems({info.filename: data for info, data in out})
+    except Unreadable as error:
+        raise Refused(f"{doc.name}: {error}") from error
+    if links:
+        raise Refused(f"{doc.name}: {'; '.join(links)}")
     if people:
         changes.insert(0, "document properties emptied: " + ", ".join(people))
     if settings_removed:
@@ -938,6 +973,7 @@ def problems(
         parts = {name: archive.read(name) for name in archive.namelist()}
         try:
             embedded = embedded_parts(parts)
+            found += external_link_problems(parts)
         except Unreadable as error:
             found.append(str(error))
             embedded = []
