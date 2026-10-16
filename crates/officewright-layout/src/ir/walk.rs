@@ -10,6 +10,7 @@ use officewright_core::{Color, PageSize, Pt};
 
 use super::Document;
 use super::macros::no_rules;
+use super::paragraph::Block;
 use crate::report::{LayoutReport, Location, ReportKind, Step};
 use crate::{Error, Result};
 
@@ -247,11 +248,7 @@ impl<T: Clamp> Clamp for Option<T> {
 
 impl<T: Clamp> Clamp for Vec<T> {
     fn clamp(&mut self, clamper: &mut Clamper) {
-        for (index, value) in self.iter_mut().enumerate() {
-            clamper.location.push(Step::Index(index));
-            value.clamp(clamper);
-            clamper.location.pop();
-        }
+        clamp_each(self, clamper);
     }
 }
 
@@ -292,6 +289,59 @@ impl<T: Clamp + Clone + PartialEq + 'static> Clamp for Arc<T> {
         };
         let original = std::mem::replace(self, Arc::clone(&done));
         clamper.shared.insert(key, Box::new((original, done)));
+    }
+}
+
+impl Check for Arc<[Block]> {
+    fn check(&self, checker: &mut Checker<'_>) -> Result<()> {
+        for (index, value) in self.iter().enumerate() {
+            checker.location.push(Step::Index(index));
+            value.check(checker)?;
+            checker.location.pop();
+        }
+        Ok(())
+    }
+}
+
+/// Blocks many values share, such as those of a header that many sections inherit, are
+/// clamped once, as a shared value is, and the memo holds the original for the same
+/// reasons. The walk meets such blocks where a section holds its headers and footers,
+/// outside any table, so the result does not depend on where it meets them. (Only
+/// blocks: image data, also an `Arc<[u8]>`, has no rules and is not walked byte by
+/// byte.)
+impl Clamp for Arc<[Block]> {
+    fn clamp(&mut self, clamper: &mut Clamper) {
+        if let Some(values) = Arc::get_mut(self) {
+            clamp_each(values, clamper);
+            return;
+        }
+        let key = Arc::as_ptr(self).cast::<()>() as usize;
+        if let Some((_, done)) = clamper
+            .shared
+            .get(&key)
+            .and_then(|entry| entry.downcast_ref::<(Arc<[Block]>, Arc<[Block]>)>())
+        {
+            *self = Arc::clone(done);
+            return;
+        }
+        let mut values = self.to_vec();
+        clamp_each(&mut values, clamper);
+        let done: Arc<[Block]> = if values.as_slice() == &**self {
+            Arc::clone(self)
+        } else {
+            values.into()
+        };
+        let original = std::mem::replace(self, Arc::clone(&done));
+        clamper.shared.insert(key, Box::new((original, done)));
+    }
+}
+
+/// Clamps each of `values`, at its index.
+fn clamp_each<T: Clamp>(values: &mut [T], clamper: &mut Clamper) {
+    for (index, value) in values.iter_mut().enumerate() {
+        clamper.location.push(Step::Index(index));
+        value.clamp(clamper);
+        clamper.location.pop();
     }
 }
 

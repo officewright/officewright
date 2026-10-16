@@ -204,7 +204,8 @@ ir_struct! {
 
 /// Word allows 1 to 45 columns (MS-OI29500 2.1.213 a), and requires the number of
 /// explicit columns to be that count (2.1.213 c). Explicit columns of which `validate`
-/// rejects one, a width or a spacing that is negative or not a number, are left to it.
+/// rejects one, a width or a spacing that is negative or not a finite number, are left
+/// to it.
 fn column_count(columns: &mut Columns, clamper: &mut Clamper) {
     const MAX: u16 = 45;
     if columns.count == 0 || columns.count > MAX {
@@ -252,7 +253,9 @@ pub enum SectionStart {
     Continuous,
     /// On a page whose number is even: on the next page, numbered one more when its
     /// number would be odd, with a blank page for the skipped number when the section
-    /// continues the numbering of the one before.
+    /// continues the numbering of the one before. Numbering that starts again at 0 is
+    /// laid out as before Word showed this: not raised in the first section, a blank
+    /// page in a later one (a hypothesis until Word shows it, #298).
     EvenPage,
     /// On a page whose number is odd, as [`EvenPage`](Self::EvenPage) is on an even one.
     OddPage,
@@ -262,15 +265,16 @@ pub enum SectionStart {
 
 ir_struct! {
     /// The headers or the footers of a section. An empty list means an empty header or
-    /// footer, which takes no room.
+    /// footer, which takes no room. Sections that inherit a header or footer may share its
+    /// blocks: a producer that passes the same `Arc<[Block]>` to each keeps one copy.
     #[derive(Clone, Debug, Default, PartialEq)]
     pub struct HeaderFooterSet {
         /// For every page the other two do not cover (`w:type="default"`).
-        vec primary: Block => with_primary;
+        shared_slice primary: Block => with_primary;
         /// For the first page of the section, when it has a title page.
-        vec first: Block => with_first;
+        shared_slice first: Block => with_first;
         /// For even pages, when the document has headers and footers for them.
-        vec even: Block => with_even;
+        shared_slice even: Block => with_even;
     }
 }
 

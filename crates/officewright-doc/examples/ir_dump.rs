@@ -125,7 +125,7 @@ fn print_blocks(ir: &ir::Document, blocks: &[ir::Block], indent: &str) {
                         if let Some(margins) = cell.margins() {
                             println!("{indent}      own {margins:?}");
                         }
-                        if cell.borders() != ir::CellBorders::default() {
+                        if *cell.borders() != ir::CellBorders::default() {
                             println!("{indent}      {:?}", cell.borders());
                         }
                         print_blocks(ir, cell.blocks(), &format!("{indent}      "));

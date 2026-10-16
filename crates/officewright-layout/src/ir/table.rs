@@ -1,5 +1,7 @@
 //! Tables: their grid, rows and cells, with widths, margins, borders and shading.
 
+use std::sync::{Arc, OnceLock};
+
 use officewright_core::Pt;
 
 use super::macros::{ir_struct, no_rules};
@@ -50,13 +52,19 @@ ir_struct! {
     #[derive(Clone, Debug, Default, PartialEq)]
     pub struct Table {
         /// The table's properties.
-        ref props: TableProps => with_props;
+        shared props: TableProps => with_props;
         /// The widths of the grid's columns, from the start edge (`w:tblGrid`). Each cell
         /// covers one or more grid columns.
         vec grid: Pt => with_grid, check grid_widths;
         /// The rows, from the top.
         vec rows: Row => with_rows, check at_least_one_row;
     }
+}
+
+/// A cell's default borders, one copy shared by every cell given none.
+fn default_borders() -> Arc<CellBorders> {
+    static BORDERS: OnceLock<Arc<CellBorders>> = OnceLock::new();
+    Arc::clone(BORDERS.get_or_init(|| Arc::new(CellBorders::default())))
 }
 
 fn grid_widths(grid: &[Pt], checker: &mut Checker<'_>) -> Result<()> {
@@ -391,7 +399,7 @@ ir_struct! {
         copy margins: Option<CellMargins> = None => with_margins;
         /// The cell's borders, with those of the table style and the row's exceptions
         /// applied.
-        copy borders: CellBorders = CellBorders::default() => with_borders;
+        shared borders: CellBorders = default_borders() => with_borders;
         /// The shading behind the cell.
         copy shading: Option<Shading> = None => with_shading;
         /// Where the content sits between the top and bottom of the cell.
