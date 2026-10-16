@@ -244,6 +244,7 @@ class Packages(unittest.TestCase):
                 "E-tab-hanging-noindenttab": {"doNotUseIndentAsNumberingTabStop"},
                 "E-tab-hanging-noindenttab-14": {"doNotUseIndentAsNumberingTabStop"},
                 "E-underline-trailspace": {"ulTrailSpace"},
+                "E-underline-trailspace-margin": {"ulTrailSpace"},
             }.get(doc.name, set())
             self.assertEqual(flags, expected, doc.name)
             # The documents about a setting name its value; every other document in mode 15
@@ -255,6 +256,8 @@ class Packages(unittest.TestCase):
                 "E-opentype-12": ("enableOpenTypeFeatures", []),
                 "E-table-style-header-rows-on": ("differentiateMultirowTableHeaders", ["1"]),
                 "E-table-style-header-rows-off": ("differentiateMultirowTableHeaders", ["0"]),
+                "E-table-style-header-rows-3-on": ("differentiateMultirowTableHeaders", ["1"]),
+                "E-table-style-header-rows-3-off": ("differentiateMultirowTableHeaders", ["0"]),
             }
             for size in (11, 12, 13):
                 named[f"E-table-style-size-{size}pt"] = (
@@ -2148,6 +2151,352 @@ class Packages(unittest.TestCase):
                 self.assertEqual(int(ind.get(f"{W}right")), rules.TEXT_W - 3000, label)
             else:
                 self.assertIn("middle of a line", label)
+
+    def test_second_drawing_label_and_table_cases_have_the_markup_their_labels_name(self):
+        def load(name):
+            doc = next(doc for doc in self.docs if doc.name == name)
+            parts = dict(rules.parts(doc))
+            return doc, parts, ElementTree.fromstring(parts["word/document.xml"]).find(f"{W}body")
+
+        def props_of(element, path):
+            """The children of a properties element as {tag: {attribute: value}}."""
+            found = element.find(path)
+            return {} if found is None else {
+                c.tag.replace(W, ""): {k.replace(W, ""): v for k, v in c.attrib.items()}
+                for c in found
+            }
+
+        def cases(name):
+            """Per case: the label without its number, the sample runs (text, run
+            properties, tab or not) and the w:pPr of the paragraph that holds them."""
+            _, _, body = load(name)
+            found, n = [], 0
+            for paragraph in body.findall(f"{W}p"):
+                runs = paragraph.findall(f"{W}r")
+                first = "".join(t.text for t in runs[0].iter(f"{W}t")) if runs else ""
+                sample = [("".join(t.text for t in r.iter(f"{W}t")), props_of(r, f"{W}rPr"),
+                           r.find(f"{W}tab") is not None) for r in runs]
+                if not first.startswith("Case "):
+                    label, samples, _ = found[-1]
+                    found[-1] = (label, samples + sample, paragraph.find(f"{W}pPr"))
+                    continue
+                n += 1
+                self.assertTrue(first.startswith(f"Case {n:02d}: "), first)
+                label = first.removeprefix(f"Case {n:02d}: ").rstrip(": ")
+                found.append((label, sample[1:], paragraph.find(f"{W}pPr")))
+            return found
+
+        def tabs(p_pr):
+            stops = [] if p_pr is None else p_pr.findall(f"{W}tabs/{W}tab")
+            return [{k.replace(W, ""): v for k, v in t.attrib.items()} for t in stops]
+
+        def spacing_of(p_pr):
+            return props_of(p_pr, ".").get("spacing", {}) if p_pr is not None else {}
+
+        size_24 = {"sz": {"val": "48"}, "szCs": {"val": "48"}}
+        single = {"u": {"val": "single"}}
+
+        # E-underline-24: every kind at 24 pt, then the three cases across runs.
+        found = cases("E-underline-24")
+        kinds = rules.UNDERLINES
+        self.assertEqual(len(kinds), 17)
+        for (label, samples, _), kind in zip(found, kinds):
+            self.assertEqual(label, f"underline {kind} at 24 pt")
+            ((_, tags, _),) = samples
+            self.assertEqual(tags, {**size_24, "u": {"val": kind}}, label)
+        rest = found[len(kinds):]
+        self.assertEqual([label for label, _, _ in rest], [
+            "single across runs of 11, 24 and 11 pt",
+            "single under a superscript whose neighbours are not underlined",
+            "double across runs of 11 and 24 pt",
+        ])
+        self.assertEqual([tags for _, tags, _ in rest[0][1]],
+                         [single, {**size_24, **single}, single])
+        self.assertEqual([tags for _, tags, _ in rest[1][1]],
+                         [{}, {**single, "vertAlign": {"val": "superscript"}}, {}])
+        double = {"u": {"val": "double"}}
+        self.assertEqual([tags for _, tags, _ in rest[2][1]], [double, {**size_24, **double}])
+
+        # E-superscript-sizes: every size its purpose names, twice: superscript and subscript.
+        doc, _, _ = load("E-superscript-sizes")
+        listed = re.search(r"at ([\d, ]+) and (\d+) pt", doc.purpose)
+        sizes = [int(n) for n in listed.group(1).split(", ")] + [int(listed.group(2))]
+        self.assertEqual(sizes, [8, 9, 10, 12, 16, 20, 36, 48])
+        found = cases("E-superscript-sizes")
+        self.assertEqual([label for label, _, _ in found],
+                         [f"{kind} at {size} pt" for size in sizes
+                          for kind in ("superscript", "subscript")])
+        for label, (base, raised), _ in found:
+            kind, size = re.fullmatch(r"(\w+) at (\d+) pt", label).groups()
+            half = {"val": str(int(size) * 2)}
+            self.assertEqual(base[1], {"sz": half, "szCs": half}, label)
+            self.assertEqual(raised[1], {"sz": half, "szCs": half, "vertAlign": {"val": kind}})
+
+        # E-auto-color-threshold: run shading of every grey between the ones where text stayed
+        # black (404040) and turned white (333333), and of a red the two luma formulas put on
+        # either side of their thresholds; then bar tabs on dark paragraph shading.
+        found = cases("E-auto-color-threshold")
+        fills = rules.AUTO_COLOR_THRESHOLD_FILLS
+        self.assertEqual(len(found), len(fills) + 2)
+        for (label, samples, p_pr), fill in zip(found, fills):
+            self.assertEqual(label, f"run shading {fill}")
+            ((_, tags, _),) = samples
+            self.assertEqual(tags, {"shd": {"val": "clear", "color": "auto", "fill": fill}})
+            self.assertIsNone(p_pr, label)
+        greys = [int(fill[:2], 16) for fill in fills if fill == fill[:2] * 3]
+        self.assertEqual(greys, list(range(0x34, 0x40)))
+        # The red: black text by Rec. 601 luma (above 0.251), white by Rec. 709 (below 0.200).
+        red = fills[-1]
+        self.assertEqual(red[2:], "0000")
+        level = int(red[:2], 16) / 255
+        self.assertTrue(0.299 * level > 0.251 and 0.2126 * level < 0.200, red)
+        for (label, _, p_pr), fill in zip(found[len(fills):], ("333333", "000000")):
+            self.assertEqual(label, f"a bar tab on paragraph shading {fill}")
+            self.assertEqual(tabs(p_pr), [{"val": "bar", "pos": "2880"}], label)
+            self.assertEqual(p_pr.find(f"{W}shd").get(f"{W}fill"), fill, label)
+
+        # E-highlight-tall: the spacing each label names, and the highlight.
+        found = cases("E-highlight-tall")
+        highlight = {"highlight": {"val": "darkYellow"}}
+        expected = {
+            "highlighted, 1.5 lines spacing": {"line": "360", "lineRule": "auto"},
+            "highlighted, double spacing": {"line": "480", "lineRule": "auto"},
+            "highlighted, at least 24 pt spacing": {"line": "480", "lineRule": "atLeast"},
+            "highlighted, exact 24 pt spacing": {"line": "480", "lineRule": "exact"},
+        }
+        self.assertEqual([label for label, _, _ in found[:4]], list(expected))
+        for label, samples, p_pr in found[:4]:
+            self.assertEqual(spacing_of(p_pr), expected[label], label)
+            self.assertEqual([tags for _, tags, _ in samples], [highlight], label)
+        label, samples, p_pr = found[4]
+        self.assertEqual(label, "highlighted 11 pt text on a line with a 24 pt run")
+        self.assertEqual([tags for _, tags, _ in samples], [highlight, size_24])
+        self.assertIsNone(p_pr)
+
+        # E-underline-trailspace-margin: n words, 30 spaces and a word, all underlined.
+        found = cases("E-underline-trailspace-margin")
+        self.assertEqual(len(found), 5)
+        for label, ((value, tags, _),), p_pr in found:
+            count = int(re.fullmatch(r"(\d+) underlined words, 30 spaces and a word, left "
+                                     r"aligned", label).group(1))
+            self.assertEqual(value, " ".join(["underlined"] * count) + " " * 30 + "end")
+            self.assertEqual(tags, single, label)
+            self.assertIsNone(p_pr, label)
+
+        # E-tab-margin-alone in modes 15, 14 and 12: the same cases; each sample paragraph has
+        # the stop its label names, and its tab is underlined where the label says so.
+        in_margin, past_edge = rules.TEXT_W + 360, rules.PAGE_W - rules.MARGIN + 360
+        for suffix in ("", "-14", "-12"):
+            found = cases(f"E-tab-margin-alone{suffix}")
+            self.assertEqual(len(found), 3, suffix)
+            for label, samples, p_pr in found:
+                place = re.search(r"a left stop 18 pt (into the right margin|past the right edge "
+                                  r"of the page)", label).group(1)
+                pos = in_margin if place == "into the right margin" else past_edge
+                stop = {"val": "left", "pos": str(pos)}
+                if "dot leader" in label:
+                    stop = {"val": "left", "leader": "dot", "pos": str(pos)}
+                self.assertEqual(tabs(p_pr), [stop], label)
+                self.assertEqual([(value, is_tab) for value, _, is_tab in samples],
+                                 [("before", False), ("", True), ("after", False)], label)
+                underlined = samples[1][1] == single
+                self.assertEqual(underlined, "tab underlined" in label, label)
+
+        # E-list-label-height: each list case's level and mark have the sizes and underline
+        # its label names; then two paragraphs outside any list.
+        doc, parts, body = load("E-list-label-height")
+        numbering = ElementTree.fromstring(parts["word/numbering.xml"])
+        levels = {a.get(f"{W}abstractNumId"): a.find(f"{W}lvl")
+                  for a in numbering.iter(f"{W}abstractNum")}
+        instances = {n.get(f"{W}numId"): n.find(f"{W}abstractNumId").get(f"{W}val")
+                     for n in numbering.iter(f"{W}num")}
+        paragraphs = body.findall(f"{W}p")
+        self.assertEqual(len(paragraphs), 6)
+        size_20 = {"sz": {"val": "40"}, "szCs": {"val": "40"}}
+        for n, paragraph in enumerate(paragraphs, 1):
+            label = "".join(t.text for t in paragraph.iter(f"{W}t"))
+            self.assertTrue(label.startswith(f"Case {n:02d}: "), label)
+            mark = props_of(paragraph, f"{W}pPr/{W}rPr")
+            num_id = paragraph.find(f"{W}pPr/{W}numPr/{W}numId")
+            if label.endswith("no list, mark 20 pt") or label.endswith("no list, mark 11 pt"):
+                self.assertIsNone(num_id, label)
+                self.assertEqual(mark, size_20 if "20 pt" in label else {}, label)
+                continue
+            level = props_of(levels[instances[num_id.get(f"{W}val")]], f"{W}rPr")
+            self.assertEqual(level, size_20 if "level 20 pt" in label else {}, label)
+            expected = {}
+            if "mark 20 pt" in label:
+                expected = size_20
+            if "mark underlined" in label:
+                expected = single
+            self.assertEqual(mark, expected, label)
+        self.assertEqual(len(set(instances.values())), 4)
+
+        # E-table-style-defaults-size: document defaults 12 pt, Normal 11 pt and justified,
+        # the table style Big 14 pt and centred; mode 15 with the setting on, and mode 14.
+        for name, mode in (("E-table-style-defaults-size", 15),
+                           ("E-table-style-defaults-size-14", 14)):
+            doc, parts, body = load(name)
+            styles = ElementTree.fromstring(parts["word/styles.xml"])
+            defaults = props_of(styles, f"{W}docDefaults/{W}rPrDefault/{W}rPr")
+            self.assertEqual((defaults["sz"], defaults["szCs"]), ({"val": "24"}, {"val": "24"}))
+            normal = next(s for s in styles.iter(f"{W}style") if s.get(f"{W}styleId") == "Normal")
+            self.assertEqual(props_of(normal, f"{W}rPr"), {"sz": {"val": "22"},
+                                                           "szCs": {"val": "22"}}, name)
+            self.assertEqual(props_of(normal, f"{W}pPr"), {"jc": {"val": "both"}}, name)
+            big = next(s for s in styles.iter(f"{W}style") if s.get(f"{W}styleId") == "Big")
+            self.assertEqual(props_of(big, f"{W}rPr"), {"sz": {"val": "28"},
+                                                        "szCs": {"val": "28"}}, name)
+            self.assertEqual(props_of(big, f"{W}pPr"), {"jc": {"val": "center"}}, name)
+            self.assertEqual(doc.mode, mode)
+            label = "".join(t.text for t in body.find(f"{W}p").iter(f"{W}t"))
+            self.assertIn("document defaults 12 pt, Normal 11 pt, justified", label)
+
+        def table_styles(parts):
+            styles = ElementTree.fromstring(parts["word/styles.xml"])
+            return {s.get(f"{W}styleId"): s for s in styles.iter(f"{W}style")
+                    if s.get(f"{W}type") == "table"}
+
+        def formats(style):
+            return [p.get(f"{W}type") for p in style.findall(f"{W}tblStylePr")]
+
+        def look_of(table):
+            look = table.find(f"{W}tblPr/{W}tblLook")
+            return {k.replace(W, ""): v for k, v in look.attrib.items()}
+
+        # E-table-style-rows-cols.
+        _, parts, body = load("E-table-style-rows-cols")
+        styles = table_styles(parts)
+        self.assertEqual(formats(styles["NoCorners"]),
+                         ["firstRow", "lastRow", "firstCol", "lastCol"])
+        self.assertEqual(formats(styles["RowBandsOnly"]), ["band1Horz", "band2Horz"])
+        self.assertEqual(formats(styles["ColBandsOnly"]), ["band1Vert", "band2Vert"])
+        tables = body.findall(f"{W}tbl")
+        self.assertEqual(len(tables), 3)
+        on = {"firstRow": "1", "lastRow": "1", "firstColumn": "1", "lastColumn": "1",
+              "noHBand": "1", "noVBand": "1"}
+        off = {key: "0" for key in on} | {"noHBand": "1", "noVBand": "1"}
+        self.assertEqual(look_of(tables[0]), on)
+        self.assertEqual(look_of(tables[1]), off | {"firstRow": "1", "noHBand": "0"})
+        self.assertEqual(look_of(tables[2]), off | {"firstColumn": "1", "noVBand": "0"})
+        self.assertEqual(len(tables[1].findall(f"{W}tr")), 6)
+        self.assertEqual(len(tables[2].find(f"{W}tr").findall(f"{W}tc")), 6)
+
+        # E-table-style-header-rows-3: three header rows of 70, a first-row format with a
+        # 3 pt bottom border; 70 rows of at least 12 pt are more than a page.
+        for said in ("on", "off"):
+            doc, parts, body = load(f"E-table-style-header-rows-3-{said}")
+            self.assertEqual(dict(doc.compat_values),
+                             {"differentiateMultirowTableHeaders": 1 if said == "on" else 0})
+            style = table_styles(parts)["ThreeHeaders"]
+            self.assertEqual(formats(style), ["firstRow", "band1Horz", "band2Horz"])
+            first = style.find(f"{W}tblStylePr")
+            bottom = first.find(f"{W}tcPr/{W}tcBorders/{W}bottom")
+            self.assertEqual((bottom.get(f"{W}val"), bottom.get(f"{W}sz")), ("single", "24"))
+            (table,) = body.findall(f"{W}tbl")
+            rows = table.findall(f"{W}tr")
+            self.assertEqual(len(rows), 70)
+            headers = [row.find(f"{W}trPr/{W}tblHeader") is not None for row in rows]
+            self.assertEqual(headers, [True] * 3 + [False] * 67)
+            self.assertEqual(look_of(table)["firstRow"], "1")
+            self.assertTrue(70 * 12 > rules.PAGE_H / 20 - 2 * rules.MARGIN / 20)
+
+        def margins(element):
+            return {c.tag.replace(W, ""): (c.get(f"{W}w"), c.get(f"{W}type"))
+                    for c in ([] if element is None else element)}
+
+        # E-table-cell-margins: the table's margins of 5 pt, and each cell's own margins of
+        # the type its text names.
+        _, _, body = load("E-table-cell-margins")
+        (table,) = body.findall(f"{W}tbl")
+        five = ("100", "dxa")
+        self.assertEqual(margins(table.find(f"{W}tblPr/{W}tblCellMar")),
+                         {side: five for side in rules.SIDES})
+        cells = table.findall(f"{W}tr/{W}tc")
+        self.assertEqual(len(cells), 4)
+        expected = [("pct", "500"), ("auto", "200"), ("nil", "0"), None]
+        for cell, want in zip(cells, expected):
+            value = "".join(t.text for t in cell.iter(f"{W}t"))
+            own = margins(cell.find(f"{W}tcPr/{W}tcMar"))
+            if want is None:
+                self.assertTrue(value.startswith("no cell margins of its own"), value)
+                self.assertEqual(own, {})
+            else:
+                kind, width = want
+                self.assertTrue(value.startswith(f"cell margins of type {kind}: "), value)
+                self.assertEqual(own, {side: (width, kind) for side in rules.SIDES})
+
+        # E-table-cell-margins-nil: one table per side, whose only cell margin is that side,
+        # of type nil.
+        found = cases("E-table-cell-margins-nil")
+        _, _, body = load("E-table-cell-margins-nil")
+        tables = body.findall(f"{W}tbl")
+        self.assertEqual(len(tables), 4)
+        for (label, _, _), table, side in zip(found, tables, rules.SIDES):
+            self.assertEqual(label, f"the table's {side} cell margin of type nil")
+            self.assertEqual(margins(table.find(f"{W}tblPr/{W}tblCellMar")), {side: ("0", "nil")})
+
+        # E-table-float-align: each table floats by the one alignment its label names.
+        _, _, body = load("E-table-float-align")
+        tables = body.findall(f"{W}tbl")
+        found = cases("E-table-float-align")
+        self.assertEqual(len(tables), 2)
+        for (label, _, p_pr), table in zip(found, tables):
+            attribute, value = re.search(r"only w:(tblp[XY]Spec) (\w+)", label).groups()
+            placed = table.find(f"{W}tblPr/{W}tblpPr")
+            self.assertEqual({k.replace(W, ""): v for k, v in placed.attrib.items()},
+                             {attribute: value}, label)
+        labels = [p for p in body.findall(f"{W}p")
+                  if "".join(t.text for t in p.iter(f"{W}t")).startswith("Case ")]
+        self.assertEqual([p.find(f"{W}pPr/{W}pageBreakBefore") is not None for p in labels],
+                         [False, True])
+        # Each table comes right after its label, and text after it.
+        children = list(body)
+        for label, table in zip(labels, tables):
+            self.assertIs(children[children.index(label) + 1], table)
+            after = children[children.index(table) + 1]
+            self.assertTrue("".join(t.text for t in after.iter(f"{W}t")).startswith("Text around"))
+
+        # E-bold-italic-missing: each sample is in the font, size and style its label names.
+        _, _, body = load("E-bold-italic-missing")
+        paragraphs = body.findall(f"{W}p")
+        self.assertEqual(len(paragraphs), 16)
+        styles_seen = set()
+        for n, paragraph in enumerate(paragraphs, 1):
+            label_run, sample = paragraph.findall(f"{W}r")
+            label = "".join(t.text for t in label_run.iter(f"{W}t"))
+            font, size, style = re.fullmatch(
+                rf"Case {n:02d}: (Garamond|Liberation Sans) (11|20) pt (regular|italic|bold|bold "
+                r"italic): ", label).groups()
+            styles_seen.add((font, size, style))
+            self.assertIsNone(label_run.find(f"{W}rPr"), label)
+            props = props_of(sample, f"{W}rPr")
+            self.assertEqual(props["rFonts"]["ascii"], font, label)
+            self.assertEqual(props["sz"], {"val": str(int(size) * 2)}, label)
+            self.assertEqual("b" in props, "bold" in style, label)
+            self.assertEqual("i" in props, "italic" in style, label)
+        self.assertEqual(len(styles_seen), 16)
+
+        # E-list-level-linked-no-level: the style gives instance 1 and no level; only level 2
+        # of its definition names the style; the paragraphs have the style and nothing else.
+        _, parts, body = load("E-list-level-linked-no-level")
+        styles = ElementTree.fromstring(parts["word/styles.xml"])
+        linked = next(s for s in styles.iter(f"{W}style")
+                      if s.get(f"{W}styleId") == "LinkedNoLevel")
+        num_pr = linked.find(f"{W}pPr/{W}numPr")
+        self.assertEqual([c.tag.replace(W, "") for c in num_pr], ["numId"])
+        self.assertEqual(num_pr.find(f"{W}numId").get(f"{W}val"), "1")
+        numbering = ElementTree.fromstring(parts["word/numbering.xml"])
+        naming = [lvl.get(f"{W}ilvl") for lvl in numbering.iter(f"{W}lvl")
+                  if lvl.find(f"{W}pStyle") is not None
+                  and lvl.find(f"{W}pStyle").get(f"{W}val") == "LinkedNoLevel"]
+        self.assertEqual(naming, ["2"])
+        templates = [lvl.find(f"{W}lvlText").get(f"{W}val") for lvl in numbering.iter(f"{W}lvl")]
+        self.assertEqual(len(set(templates)), len(templates))
+        paragraphs = body.findall(f"{W}p")
+        self.assertEqual(len(paragraphs), 2)
+        for paragraph in paragraphs:
+            self.assertEqual(props_of(paragraph, f"{W}pPr"), {"pStyle": {"val": "LinkedNoLevel"}})
 
     def test_refuses_a_setting_word_does_not_write_in_the_mode(self):
         doc = next(doc for doc in self.docs if doc.name == "E-opentype-on")
