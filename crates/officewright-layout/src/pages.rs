@@ -2467,9 +2467,10 @@ mod tests {
             })
             .collect();
         // Two lines on each page; from 5 pt into the margin side of the start indent
-        // (10 - 15) to 30 pt before the end of the 260 pt column.
-        let left = Pt(20.0 - 5.0);
-        let width = Pt(260.0 - 30.0 + 5.0);
+        // (10 - 15) to 30 pt before the end of the 260 pt column, and 1.5 pt further on
+        // each side, as Word shades (E-para-shading).
+        let left = Pt(20.0 - 5.0 - 1.5);
+        let width = Pt(260.0 - 30.0 + 5.0 + 3.0);
         assert_eq!(
             boxes,
             [

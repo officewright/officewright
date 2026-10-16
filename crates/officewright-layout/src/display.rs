@@ -31,9 +31,9 @@ const SUPERSCRIPT_RISE: f64 = 1.0 / 3.0;
 /// gives. Hypothesis, like [`SUPERSCRIPT_RISE`].
 const SUBSCRIPT_DROP: f64 = 1.0 / 3.0;
 
-/// The width of the line a bar tab draws. Hypothesis until a Word reference shows it
-/// (`E-bar-tab.docx`).
-const BAR_TAB_WIDTH: Pt = Pt(0.75);
+/// The width of the line a bar tab draws, as Word's reference of `E-bar-tab.docx` shows
+/// it (#309).
+const BAR_TAB_WIDTH: Pt = Pt(0.14);
 
 /// The most glyphs a tab leader is drawn with. A longer one, which only a tiny font in a
 /// wide tab makes, is drawn as a dotted or dashed line instead, and reported.
@@ -48,9 +48,17 @@ const MAX_RUN_LEADER_GLYPHS: usize = 1 << 18;
 const MAX_BAR_TABS: usize = 256;
 
 /// The luminance (0 to 1) below which a background is dark, so that text in the
-/// automatic colour is white on it rather than black. Hypothesis until a Word reference
-/// shows where Word turns it (`E-auto-color.docx`).
-const DARK_BACKGROUND: f64 = 0.5;
+/// automatic colour is white on it rather than black. Word's reference of
+/// `E-auto-color.docx` (#309) turns it white on 80 % grey (333333, 0.200) and darker and
+/// on blue (0000FF, 002060), and keeps it black on 70 % grey (4D4D4D) and lighter, on
+/// 75 % grey (404040, 0.251, in `E-bar-tab.docx`), red (FF0000, 0.299) and green
+/// (00B050): the threshold lies in (0.200, 0.251], and 0.25 is darker than 75 % grey.
+const DARK_BACKGROUND: f64 = 0.25;
+
+/// How far a paragraph's shading reaches past its outermost indent and its end indent,
+/// each side: Word's reference of `E-para-shading.docx` (#309) shades 1.42 to 1.56 pt
+/// further, within the rounding of its coordinates.
+const SHADING_OUTSET: f64 = 1.5;
 
 /// A point on a page: from its left edge and from its top edge.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -329,10 +337,10 @@ impl Painting<'_, '_, '_> {
     }
 
     /// The paragraph's shading behind `lines` of it, the first with its top at
-    /// `origin.y`, in a column whose start edge is at `origin.x`: from its start indent,
-    /// or its first line's where that hangs further out, to its end indent, over the
-    /// lines only. Hypothesis until a Word reference (`E-para-shading.docx`): Word may
-    /// shade the spacing around the paragraph, or join the shading of neighbours.
+    /// `origin.y`, in a column whose start edge is at `origin.x`: from
+    /// [`SHADING_OUTSET`] before its start indent, or its first line's where that hangs
+    /// further out, to as far past its end indent, over the lines only, as Word's
+    /// reference of `E-para-shading.docx` shows it.
     pub(crate) fn paint_shading(
         &mut self,
         lines: Range<usize>,
@@ -350,8 +358,9 @@ impl Painting<'_, '_, '_> {
         let start = indent
             .start()
             .0
-            .min(indent.start().0 + indent.first_line().0);
-        let end = self.layout.width.0 - indent.end().0;
+            .min(indent.start().0 + indent.first_line().0)
+            - SHADING_OUTSET;
+        let end = self.layout.width.0 - indent.end().0 + SHADING_OUTSET;
         let height: f64 = self
             .layout
             .lines
@@ -428,8 +437,10 @@ impl Painting<'_, '_, '_> {
 
     /// The bar tabs of the paragraph, each a vertical line through `lines`, the first of
     /// them with its top at `origin.y`: from the top of the first line to the bottom of
-    /// the last, its spacing included, in the automatic colour on what is behind the
-    /// paragraph. Hypothesis until a Word reference (`E-bar-tab.docx`), like their width.
+    /// the last, its spacing included, as Word's reference of `E-bar-tab.docx` shows,
+    /// [`BAR_TAB_WIDTH`] wide. In the automatic colour on what is behind the paragraph:
+    /// a hypothesis, since the reference shades it 404040, on which that colour is black
+    /// anyway.
     fn bars(&mut self, lines: &[crate::lines::Line], origin: Point, out: &mut Vec<DisplayItem>) {
         let mut bars: Vec<f64> = self
             .paragraph
@@ -1815,5 +1826,26 @@ mod tests {
             Share::Approximate(_)
         ));
         assert!(luminance(Color::WHITE) > 0.99 && luminance(Color::BLACK) < 0.01);
+    }
+
+    #[test]
+    fn automatic_text_turns_white_where_word_s_reference_turns_it() {
+        // E-auto-color.docx, and 404040 from E-bar-tab.docx: the fills on which Word
+        // draws automatic text white.
+        let white = [0x333333, 0x191919, 0x0000FF, 0x002060];
+        let black = [
+            0xE6E6E6, 0xCCCCCC, 0xB2B2B2, 0x999999, 0x808080, 0x666666, 0x4D4D4D, 0x404040,
+            0xFF0000, 0x00B050, 0xFFFF00,
+        ];
+        let rgb = |hex: u32| Color::rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
+        for (fills, expected) in [(&white[..], Color::WHITE), (&black[..], Color::BLACK)] {
+            for &fill in fills {
+                assert_eq!(
+                    text_color(ColorValue::Auto, Some(rgb(fill))),
+                    expected,
+                    "{fill:06X}"
+                );
+            }
+        }
     }
 }
