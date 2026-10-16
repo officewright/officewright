@@ -102,6 +102,16 @@ impl Document {
     /// horizontal merge. A cell that does not end with a paragraph, which Word refuses
     /// to open, gets an empty one, and that is listed too.
     ///
+    /// And, once per document at the first place each is met, what the IR has no place
+    /// for yet in sections, paragraphs, runs and pictures: page borders, line numbers,
+    /// the document grid and vertical text; right-to-left paragraphs, text frames and
+    /// drop caps; embossed, engraved, outlined and shadowed text, emphasis marks and
+    /// borders around text (of a run that shows text and is not hidden); a picture's
+    /// outline and its colour effects; and a paragraph mark or a table row deleted as a
+    /// tracked change, which the IR keeps. Other tracked changes are taken as accepted
+    /// and comments are left out, as Word's PDF of the document without markup shows
+    /// them, so they are not listed.
+    ///
     /// ```
     /// # fn main() -> officewright_doc::Result<()> {
     /// use officewright_doc::Document;
@@ -196,6 +206,33 @@ struct Translator<'a> {
     images: HashMap<u32, ir::ImageId>,
     /// The empty image of pictures whose image the package does not have.
     missing_image: Option<ir::ImageId>,
+    /// What has been reported once for the document, a bit per [`Once`].
+    reported: u32,
+}
+
+/// What the translation reports once per document, at the first place it meets it: a
+/// feature that a document may use on every line, in every row or picture, or in every
+/// section (a mail merge writes a section per letter), so that the report's 1,000
+/// entries are not spent on one feature.
+#[derive(Clone, Copy, Debug)]
+enum Once {
+    Emboss = 1,
+    Imprint = 1 << 1,
+    Outline = 1 << 2,
+    Shadow = 1 << 3,
+    EmphasisMark = 1 << 4,
+    RunBorder = 1 << 5,
+    RightToLeft = 1 << 6,
+    Frame = 1 << 7,
+    DropCap = 1 << 8,
+    PageBorders = 1 << 9,
+    LineNumbers = 1 << 10,
+    DocumentGrid = 1 << 11,
+    TextDirection = 1 << 12,
+    DeletedMark = 1 << 13,
+    DeletedRow = 1 << 14,
+    PictureOutline = 1 << 15,
+    PictureColor = 1 << 16,
 }
 
 impl<'a> Translator<'a> {
@@ -219,6 +256,7 @@ impl<'a> Translator<'a> {
             notes_added: 0,
             images: HashMap::new(),
             missing_image: None,
+            reported: 0,
         }
     }
 
@@ -330,6 +368,15 @@ impl<'a> Translator<'a> {
         }
         self.left_out
             .push(ReportEntry::new(kind, self.location(), message()));
+    }
+
+    /// Lists `message` the first time the document meets `once`, at that place.
+    fn report_once(&mut self, once: Once, message: &'static str) {
+        let bit = once as u32;
+        if self.reported & bit == 0 {
+            self.reported |= bit;
+            self.leave_out(ReportKind::FeatureUnsupported, || message.into());
+        }
     }
 
     /// The current place in the IR.

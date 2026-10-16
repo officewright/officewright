@@ -9,7 +9,7 @@ use officewright_layout::ReportKind;
 use officewright_layout::ir;
 
 use super::paragraph::border;
-use super::{Step, Translator};
+use super::{Once, Step, Translator};
 use crate::model::{
     Block, Border, BorderStyle, CellMerge, HeightRule, PositionAnchor, Table, TableBorders,
     TableCell, TableCellProperties, TableJustification, TableLayout, TablePosition, TableRow,
@@ -176,6 +176,12 @@ impl<'a> Translator<'a> {
     #[inline(never)]
     fn row_head(&mut self, row: TableRow<'a>, table: &ir::TableProps) -> ir::Row {
         let properties = self.formats.row_properties(row);
+        if properties.deleted == Some(true) {
+            self.report_once(
+                Once::DeletedRow,
+                "a table row deleted as a tracked change (w:del) is kept, where Word's PDF of the document without markup leaves it out, here and wherever else the document has one",
+            );
+        }
         if row.table_property_exceptions() != Default::default() {
             self.leave_out(ReportKind::FeatureUnsupported, || {
                 "the row's table property exceptions are not applied".into()

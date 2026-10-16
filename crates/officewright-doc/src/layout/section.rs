@@ -6,11 +6,73 @@ use officewright_core::{PageSize, Pt};
 use officewright_layout::ReportKind;
 use officewright_layout::ir;
 
-use super::{Step, Translator};
+use super::{Once, Step, Translator};
 use crate::model::{
-    HeaderFooterKind, NotePosition, NoteProperties, NoteRestart, NumberFormat, Orientation,
-    Section, SectionStart, VerticalJustification,
+    Border, BorderStyle, DocumentGrid, DocumentGridKind, HeaderFooterKind, LineNumbering,
+    NotePosition, NoteProperties, NoteRestart, NumberFormat, Orientation, Section,
+    SectionProperties, SectionStart, TextDirection, VerticalJustification,
 };
+
+/// Lists what a section has that the IR has no place for yet, so that the PDF shows the
+/// section without it (#303); each once per document.
+fn left_out(t: &mut Translator<'_>, properties: &SectionProperties) {
+    // A side draws a line, or pictures (w:art), whose style is then not written.
+    let drawn = |border: Option<&Border>| {
+        border.is_some_and(|border| {
+            border.art().is_some()
+                || !matches!(
+                    border.style(),
+                    None | Some(BorderStyle::None | BorderStyle::Nil)
+                )
+        })
+    };
+    if properties.page_borders().is_some_and(|borders| {
+        [
+            borders.top(),
+            borders.left(),
+            borders.bottom(),
+            borders.right(),
+        ]
+        .into_iter()
+        .any(drawn)
+    }) {
+        t.report_once(
+            Once::PageBorders,
+            "page borders (w:pgBorders) are not drawn, here and in every other section that has them",
+        );
+    }
+    // Every corpus file that numbers lines writes w:countBy; what Word does without it is
+    // not known, so only a count of 1 or more is listed.
+    if properties
+        .line_numbering()
+        .and_then(LineNumbering::count_by)
+        .is_some_and(|count| count > 0)
+    {
+        t.report_once(
+            Once::LineNumbers,
+            "line numbers (w:lnNumType) are not drawn, here and in every other section that has them",
+        );
+    }
+    if properties
+        .grid()
+        .and_then(DocumentGrid::kind)
+        .is_some_and(|kind| kind != DocumentGridKind::Default)
+    {
+        t.report_once(
+            Once::DocumentGrid,
+            "the document grid (w:docGrid) is not followed, here and in every other section that has one",
+        );
+    }
+    if properties
+        .text_direction()
+        .is_some_and(|direction| direction != TextDirection::LeftToRightTopToBottom)
+    {
+        t.report_once(
+            Once::TextDirection,
+            "vertical text (w:textDirection) is laid out horizontally, here and in every other section that has it",
+        );
+    }
+}
 
 /// The settings that apply to the whole document.
 pub(super) fn settings(t: &mut Translator<'_>) -> ir::DocumentSettings {
@@ -87,6 +149,7 @@ pub(super) fn settings(t: &mut Translator<'_>) -> ir::DocumentSettings {
 /// A section with its blocks.
 pub(super) fn section<'a>(t: &mut Translator<'a>, section: Section<'a>) -> ir::Section {
     let properties = section.properties();
+    left_out(t, properties);
     // Word's page when the document gives none: Letter, as Word writes into a new
     // document in the United States; margins the IR's defaults.
     let size = properties.page_size().unwrap_or(PageSize::LETTER);

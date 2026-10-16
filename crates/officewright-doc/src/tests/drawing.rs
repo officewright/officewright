@@ -729,3 +729,45 @@ fn reads_drawings_through_markup_compatibility_everywhere_they_are() {
         );
     }
 }
+
+#[test]
+fn lists_a_picture_s_outline_and_colour_effects_once() {
+    // Issue #303: the IR's picture has no outline and no colour effects yet, so the
+    // report says so, once per document; an outline of no fill and a blip with only
+    // its extensions are nothing to list.
+    let entries = |body: &str| -> Vec<String> {
+        with_images(body)
+            .to_layout_ir()
+            .left_out()
+            .iter()
+            .map(|entry| entry.message().to_owned())
+            .filter(|message| message.starts_with("a picture's"))
+            .collect()
+    };
+    let picture = |line: &str, blip: &str| {
+        inline_picture("rIdPng")
+            .replace(
+                r#"<a:blip r:embed="rIdPng"/>"#,
+                &format!(r#"<a:blip r:embed="rIdPng">{blip}</a:blip>"#),
+            )
+            .replace(
+                r#"<a:prstGeom prst="rect"/>"#,
+                &format!(r#"<a:prstGeom prst="rect"/>{line}"#),
+            )
+    };
+    let red = r#"<a:ln w="76200"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:ln>"#;
+    let body = format!(
+        "<w:p>{}{}</w:p>",
+        picture(red, "<a:grayscl/>"),
+        picture(red, r#"<a:lum bright="20000"/>"#)
+    );
+    assert_eq!(
+        entries(&body),
+        [
+            "a picture's outline (a:ln) is not drawn, here and wherever else the document has one",
+            "a picture's colour or transparency effects (a:blip, such as a:grayscl or a:lum) are not applied, here and wherever else the document has them",
+        ]
+    );
+    let plain = picture("<a:ln><a:noFill/></a:ln>", "<a:extLst/>");
+    assert!(entries(&format!("<w:p>{plain}</w:p>")).is_empty());
+}

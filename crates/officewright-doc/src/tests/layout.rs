@@ -388,6 +388,139 @@ fn lists_what_it_leaves_out() {
 }
 
 #[test]
+fn lists_what_sections_paragraphs_and_runs_have_that_the_ir_leaves_out() {
+    // Issue #303: the PDF shows these otherwise than Word would, so the report says so,
+    // each once per document, at its first place: a document may use one on every line,
+    // in every row, or in every section (a mail merge writes a section per letter).
+    let runs: String = [
+        "<w:emboss/>",
+        "<w:imprint/>",
+        "<w:outline/>",
+        "<w:shadow/>",
+        r#"<w:em w:val="dot"/>"#,
+        r#"<w:bdr w:val="single" w:sz="4"/>"#,
+    ]
+    .map(|r_pr| format!("<w:r><w:rPr>{r_pr}</w:rPr><w:t>x</w:t></w:r>"))
+    .concat();
+    let paragraphs = [
+        r#"<w:p><w:pPr><w:bidi/></w:pPr></w:p>"#,
+        r#"<w:p><w:pPr><w:framePr w:w="2000" w:hAnchor="page"/></w:pPr></w:p>"#,
+        r#"<w:p><w:pPr><w:framePr w:dropCap="drop" w:lines="3"/></w:pPr></w:p>"#,
+        r#"<w:p><w:pPr><w:rPr><w:del w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z"/></w:rPr></w:pPr><w:r><w:t>first</w:t></w:r></w:p>"#,
+        r#"<w:tbl><w:tr><w:trPr><w:del w:id="2" w:author="A" w:date="2026-01-01T00:00:00Z"/></w:trPr><w:tc><w:p/></w:tc></w:tr></w:tbl>"#,
+    ]
+    .concat();
+    let section = r#"<w:pgBorders><w:top w:val="single" w:sz="4"/></w:pgBorders><w:lnNumType w:countBy="1"/><w:textDirection w:val="tbRl"/><w:docGrid w:type="lines" w:linePitch="360"/>"#;
+    let body = format!(
+        "<w:p>{runs}{runs}</w:p>{paragraphs}<w:p><w:pPr><w:sectPr>{section}</w:sectPr></w:pPr></w:p>{paragraphs}<w:p/><w:sectPr>{section}</w:sectPr>"
+    );
+    let translation = translate(&open(&body));
+    let left_out: Vec<String> = translation
+        .left_out()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        left_out,
+        [
+            "sections[0]: page borders (w:pgBorders) are not drawn, here and in every other section that has them",
+            "sections[0]: line numbers (w:lnNumType) are not drawn, here and in every other section that has them",
+            "sections[0]: the document grid (w:docGrid) is not followed, here and in every other section that has one",
+            "sections[0]: vertical text (w:textDirection) is laid out horizontally, here and in every other section that has it",
+            "sections[0].blocks[0].inlines: embossed text (w:emboss) is drawn plain, here and wherever else the document has it",
+            "sections[0].blocks[0].inlines: engraved text (w:imprint) is drawn plain, here and wherever else the document has it",
+            "sections[0].blocks[0].inlines: outlined text (w:outline) is drawn plain, here and wherever else the document has it",
+            "sections[0].blocks[0].inlines: shadowed text (w:shadow) is drawn without its shadow, here and wherever else the document has it",
+            "sections[0].blocks[0].inlines: emphasis marks (w:em) are not drawn, here and wherever else the document has them",
+            "sections[0].blocks[0].inlines: borders around text (w:bdr) are not drawn, here and wherever else the document has them",
+            "sections[0].blocks[1]: a right-to-left paragraph (w:bidi) is laid out left to right, here and wherever else the document has one",
+            "sections[0].blocks[2]: a text frame (w:framePr) is laid out as an ordinary paragraph, here and wherever else the document has one",
+            "sections[0].blocks[3]: a drop cap (w:framePr) is laid out as an ordinary paragraph, here and wherever else the document has one",
+            "sections[0].blocks[4]: a paragraph mark deleted as a tracked change (w:del) is kept, so the paragraph is not joined to the next as in Word's PDF of the document without markup, here and wherever else the document has one",
+            "sections[0].blocks[5].rows[0]: a table row deleted as a tracked change (w:del) is kept, where Word's PDF of the document without markup leaves it out, here and wherever else the document has one",
+        ]
+    );
+}
+
+#[test]
+fn lists_page_borders_of_any_side_or_of_pictures_and_drop_caps_in_the_margin() {
+    // Issue #303 and the review of #326: a page border on any one side, or one of
+    // pictures (w:art, whose w:val then names the art); a drop cap in the margin.
+    let entries = |body: &str| -> Vec<String> {
+        translate(&open(body))
+            .left_out()
+            .iter()
+            .map(|entry| entry.message().to_owned())
+            .collect()
+    };
+    let borders =
+        "page borders (w:pgBorders) are not drawn, here and in every other section that has them";
+    for side in [
+        r#"<w:left w:val="single" w:sz="4"/>"#,
+        r#"<w:bottom w:val="double" w:sz="4"/>"#,
+        r#"<w:right w:val="dotted" w:sz="4"/>"#,
+        r#"<w:top w:val="apples" w:sz="20"/>"#,
+    ] {
+        let body = format!("<w:p/><w:sectPr><w:pgBorders>{side}</w:pgBorders></w:sectPr>");
+        assert_eq!(entries(&body), [borders], "{side}");
+    }
+    assert_eq!(
+        entries(r#"<w:p><w:pPr><w:framePr w:dropCap="margin" w:lines="2"/></w:pPr></w:p>"#),
+        [
+            "a drop cap (w:framePr) is laid out as an ordinary paragraph, here and wherever else the document has one"
+        ]
+    );
+}
+
+#[test]
+fn lists_no_feature_of_a_run_that_shows_no_text() {
+    // From the review of #326: a hidden run, or one that holds only a field's
+    // instruction, shows nothing its features could change.
+    let body = r#"<w:p><w:r><w:rPr><w:emboss/><w:vanish/></w:rPr><w:t>hidden</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:rPr><w:shadow/></w:rPr><w:instrText> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#;
+    let translation = translate(&open(body));
+    assert!(
+        translation.left_out().is_empty(),
+        "{:?}",
+        translation.left_out()
+    );
+}
+
+#[test]
+fn lists_nothing_for_what_is_off_and_follows_styles() {
+    // Issue #303: a section or run feature that is off, empty or none is no entry; one a
+    // style gives is, and direct formatting that turns it off wins.
+    let styles = (
+        "styles",
+        "styles.xml",
+        format!(
+            r#"<w:styles xmlns:w="{W}"><w:style w:type="character" w:styleId="Embossed"><w:name w:val="Embossed"/><w:rPr><w:emboss/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Framed"><w:name w:val="Framed"/><w:pPr><w:framePr w:w="2000"/></w:pPr></w:style></w:styles>"#
+        ),
+    );
+    let off = r#"<w:p><w:r><w:rPr><w:rStyle w:val="Embossed"/><w:emboss w:val="0"/><w:imprint w:val="false"/><w:em w:val="none"/><w:bdr w:val="none"/></w:rPr><w:t>x</w:t></w:r><w:r><w:rPr><w:bdr w:val="nil"/></w:rPr><w:t>x</w:t></w:r></w:p><w:p><w:pPr><w:bidi w:val="0"/></w:pPr></w:p><w:sectPr><w:pgBorders><w:top w:val="none"/><w:left w:val="nil"/></w:pgBorders><w:lnNumType w:countBy="0"/><w:textDirection w:val="lrTb"/><w:docGrid w:type="default" w:linePitch="360"/></w:sectPr>"#;
+    let translation = translate(&with_parts(off, std::slice::from_ref(&styles)));
+    assert!(
+        translation.left_out().is_empty(),
+        "{:?}",
+        translation.left_out()
+    );
+    // What the styles give.
+    let on = r#"<w:p><w:pPr><w:pStyle w:val="Framed"/></w:pPr><w:r><w:rPr><w:rStyle w:val="Embossed"/></w:rPr><w:t>x</w:t></w:r></w:p>"#;
+    let translation = translate(&with_parts(on, &[styles]));
+    let left_out: Vec<&str> = translation
+        .left_out()
+        .iter()
+        .map(|entry| entry.message())
+        .collect();
+    assert_eq!(
+        left_out,
+        [
+            "a text frame (w:framePr) is laid out as an ordinary paragraph, here and wherever else the document has one",
+            "embossed text (w:emboss) is drawn plain, here and wherever else the document has it",
+        ]
+    );
+}
+
+#[test]
 fn lists_at_most_a_thousand_entries() {
     let drawings = r#"<w:r><w:drawing/></w:r>"#.repeat(1200);
     let document = open(&format!("<w:p>{drawings}</w:p>"));

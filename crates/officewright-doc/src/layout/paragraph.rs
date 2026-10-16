@@ -3,8 +3,9 @@
 use officewright_layout::ReportKind;
 use officewright_layout::ir;
 
-use super::Translator;
 use super::style::color;
+use super::{Once, Translator};
+use crate::model::properties::Frame;
 use crate::model::{
     Border, BorderStyle, Justification, LineSpacing, Paragraph, ParagraphFormat, TabKind, TabLeader,
 };
@@ -12,6 +13,31 @@ use crate::model::{
 /// A paragraph: its formatting, its mark, its list and its content.
 pub(super) fn paragraph<'a>(t: &mut Translator<'a>, paragraph: Paragraph<'a>) -> ir::Paragraph {
     let format = t.formats.paragraph(paragraph);
+    // The IR has no right-to-left paragraphs and no frames yet, so the PDF lays these out
+    // as ordinary paragraphs, left to right (#303).
+    if format.right_to_left() {
+        t.report_once(
+            Once::RightToLeft,
+            "a right-to-left paragraph (w:bidi) is laid out left to right, here and wherever else the document has one",
+        );
+    }
+    match format.frame {
+        Some(Frame::Frame) => t.report_once(
+            Once::Frame,
+            "a text frame (w:framePr) is laid out as an ordinary paragraph, here and wherever else the document has one",
+        ),
+        Some(Frame::DropCap) => t.report_once(
+            Once::DropCap,
+            "a drop cap (w:framePr) is laid out as an ordinary paragraph, here and wherever else the document has one",
+        ),
+        None => {}
+    }
+    if format.mark_deleted {
+        t.report_once(
+            Once::DeletedMark,
+            "a paragraph mark deleted as a tracked change (w:del) is kept, so the paragraph is not joined to the next as in Word's PDF of the document without markup, here and wherever else the document has one",
+        );
+    }
     let mark = t.formats.paragraph_mark(paragraph);
     let mark = t.run_style(&mark);
     let list = format.list().and_then(|list| {

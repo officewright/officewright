@@ -299,6 +299,42 @@ impl<'a> Picture<'a> {
         child(self.element, &self.document.names, namespaces, name)
     }
 
+    /// Whether its outline (`a:ln` of `pic:spPr`) draws a line: one filled other than
+    /// with `a:noFill`. The layout does not draw it yet.
+    // reason: only the translation into the layout IR asks for it.
+    #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
+    pub(crate) fn has_outline(self) -> bool {
+        let names = &self.document.names;
+        self.child(&names.pic, "spPr")
+            .and_then(|shape| child(shape, names, &names.a, "ln"))
+            .is_some_and(|line| {
+                line.children_through_alternates(names.mc).any(|fill| {
+                    matches!(
+                        fill.local_in(&names.a),
+                        Some("solidFill" | "gradFill" | "pattFill")
+                    )
+                })
+            })
+    }
+
+    /// Whether its image is changed in colour or transparency: an effect of `a:blip`, such
+    /// as `a:grayscl` or `a:lum`, anything but its `a:extLst`. The layout does not apply
+    /// them yet.
+    // reason: only the translation into the layout IR asks for it.
+    #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
+    pub(crate) fn has_color_effects(self) -> bool {
+        let names = &self.document.names;
+        self.child(&names.pic, "blipFill")
+            .and_then(|fill| child(fill, names, &names.a, "blip"))
+            .is_some_and(|blip| {
+                blip.children_through_alternates(names.mc).any(|effect| {
+                    effect
+                        .local_in(&names.a)
+                        .is_some_and(|local| local != "extLst")
+                })
+            })
+    }
+
     fn transform(self) -> Option<Element<'a>> {
         let names = &self.document.names;
         child(self.child(&names.pic, "spPr")?, names, &names.a, "xfrm")
