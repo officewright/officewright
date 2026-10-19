@@ -104,19 +104,23 @@ const TOGGLES: [Toggle; 12] = [
 ];
 
 impl Formats<'_> {
-    /// Combines the levels of the hierarchy for a run whose paragraph style has the index
-    /// `paragraph_style` and whose own properties are `direct`, with `label`, what a list
-    /// level gives to its label, laid over them; in a cell, `table`, what the table style
-    /// gives, lies between the document defaults and the paragraph style (ECMA-376 Part 1,
-    /// §17.7.2). A run without a `w:rStyle` gets no character style: Word's default
+    /// Combines the levels of the hierarchy for a run, or a list label as `resolving`
+    /// says, whose paragraph style has the index `paragraph_style` and whose own
+    /// properties are `direct`; a label has what its level gives laid over them. In a
+    /// cell, `table`, what the table style gives, lies between the document defaults and
+    /// the paragraph style (ECMA-376 Part 1, §17.7.2). A run without a `w:rStyle` gets no character style: Word's default
     /// character style is DefaultParagraphFont, whose children it ignores.
     pub(super) fn resolve_run(
         &mut self,
         paragraph_style: Option<usize>,
         direct: &RunProperties,
         table: Option<&TableText>,
-        label: Option<&CharacterLevel>,
+        resolving: Resolving<'_>,
     ) -> CharacterFormat {
+        let label = match resolving {
+            Resolving::Run => None,
+            Resolving::Label(level) => level,
+        };
         let document = self.document;
         let defaults = self.run_defaults();
         let table = table.map(|table| &table.character);
@@ -158,7 +162,13 @@ impl Formats<'_> {
             }
         }
         if let Some(character) = &character {
+            let underline = (effect.underline_style, effect.underline_color);
             effect.overlay(character);
+            // Word gives a list label the size of the mark's character style but not its
+            // underline: word-rules/E-list-label-format.docx, case 05 (#330).
+            if matches!(resolving, Resolving::Label(_)) {
+                (effect.underline_style, effect.underline_color) = underline;
+            }
         }
         effect.overlay(&direct);
         if let Some(label) = label {
@@ -192,7 +202,8 @@ impl Formats<'_> {
             };
             // The list level's value, like direct formatting, sets it, as [MS-DOC] applies
             // the level's properties to the number text ("Determining List Formatting of
-            // a Paragraph", part 3, step 2); not confirmed against Word yet (#162).
+            // a Paragraph", part 3, step 2) and Word's render of
+            // word-rules/E-list-label-format.docx shows (cases 01 to 03).
             if let Some(value) = value(label, index) {
                 *slot = value;
             }
@@ -410,6 +421,15 @@ impl TextEffects {
         overwrite(&mut self.turned, above.turned);
         overwrite(&mut self.depth, above.depth);
     }
+}
+
+/// What [`Formats::resolve_run`] resolves.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Resolving<'l> {
+    /// A run or a paragraph mark.
+    Run,
+    /// A list label, with what its level gives, if anything.
+    Label(Option<&'l CharacterLevel>),
 }
 
 impl CharacterLevel {
