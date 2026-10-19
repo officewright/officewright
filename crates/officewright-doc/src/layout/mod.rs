@@ -106,21 +106,21 @@ impl Document {
     /// And, once per document at the first place each is met, what the IR has no place for
     /// yet in sections, paragraphs, runs and pictures: page borders, line numbers, the
     /// document grid and vertical text; right-to-left paragraphs, text frames and drop
-    /// caps; in a run that shows text and is not hidden, embossed, engraved, outlined and
-    /// shadowed text, emphasis marks, Word 2010's effects of text (glow, shadow,
-    /// reflection, outline, fill and 3-D) unless their values change nothing, and, with
-    /// `enableOpenTypeFeatures` on, its forms and spacing of figures and stylistic sets
-    /// other than the font's default; borders around text, in a run that is not hidden and
-    /// shows text, a tab or a picture in the line; a picture's outline, its colour effects,
-    /// its shadow, reflection, glow, soft edges and 3-D effects, and a shape it is cut to;
-    /// and a paragraph mark, a table row or a table cell deleted as a tracked change, which
-    /// the IR keeps, and a paragraph mark moved away. A deleted mark is listed only where a
-    /// paragraph or a table follows, in the same cell or story or in the next section: the
-    /// last paragraph of a cell or a story is joined to nothing. A row in which the last
-    /// paragraph mark of every cell is deleted or moved away is listed as a deleted row,
-    /// since that is how Word writes a row it moves. Other tracked changes are taken as
-    /// accepted and comments are left out, as Word's PDF of the document without markup
-    /// shows them, so they are not listed.
+    /// caps; in a run that shows text and is not hidden, or in a list label that is not
+    /// hidden, embossed, engraved, outlined and shadowed text, emphasis marks, Word 2010's
+    /// effects of text (glow, shadow, reflection, outline, fill and 3-D) unless their
+    /// values change nothing, and, with `enableOpenTypeFeatures` on, its forms and spacing
+    /// of figures and stylistic sets other than the font's default; borders around text, in
+    /// a run that is not hidden and shows text, a tab or a picture in the line; a picture's
+    /// outline, its colour effects, its shadow, reflection, glow, soft edges and 3-D
+    /// effects, and a shape it is cut to; and a paragraph mark, a table row or a table cell
+    /// deleted as a tracked change, which the IR keeps, and a paragraph mark moved away. A
+    /// deleted mark is listed only where a paragraph or a table follows, in the same cell
+    /// or story or in the next section: the last paragraph of a cell or a story is joined
+    /// to nothing. A row in which the last paragraph mark of every cell is deleted or moved
+    /// away is listed as a deleted row, since that is how Word writes a row it moves. Other
+    /// tracked changes are taken as accepted and comments are left out, as Word's PDF of
+    /// the document without markup shows them, so they are not listed.
     ///
     /// ```
     /// # fn main() -> officewright_doc::Result<()> {
