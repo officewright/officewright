@@ -665,15 +665,24 @@ fn falls_back_to_the_written_font_when_a_theme_font_cannot_be_resolved() {
         r#"<w:rFonts w:asciiTheme="minorHAnsi" w:ascii="Calibri" w:hAnsiTheme="minorHAnsi" w:eastAsiaTheme="minorEastAsia" w:eastAsia="MS Mincho"/>"#,
     );
     let body = paragraph("", &[""]);
-    // No theme: Word's default theme, whose East Asian font is empty, so the font
-    // written next to the theme font; else Word's default.
+    // No theme: Word's default theme, whose East Asian font is empty, so without a
+    // theme font language for East Asian text the font written next to the theme font;
+    // else Word's default.
     let styles_written = styles.replace(r#"w:ascii="Calibri""#, r#"w:ascii="Written""#);
-    let document = build(&body, &styles_written, Some(THEME_FONT_LANG), None);
+    let latin_only = r#"<w:themeFontLang w:val="en-US"/>"#;
+    let document = build(&body, &styles_written, Some(latin_only), None);
     let format = first_run(&document).format();
     assert_eq!(format.fonts().ascii(), "Calibri");
     assert_eq!(format.fonts().high_ansi(), "Calibri");
     assert_eq!(format.fonts().east_asia(), "MS Mincho");
     assert_eq!(format.fonts().complex_script(), "Times New Roman");
+    // With one whose script the default theme gives no font, the same.
+    let cyrillic = r#"<w:themeFontLang w:val="en-US" w:eastAsia="ru-RU"/>"#;
+    let document = build(&body, &styles_written, Some(cyrillic), None);
+    assert_eq!(
+        first_run(&document).format().fonts().east_asia(),
+        "MS Mincho"
+    );
     // A theme, but no theme font language for the empty East Asian slot.
     let theme_empty_ea =
         theme().replace(r#"<a:ea typeface="Minor EA"/>"#, r#"<a:ea typeface=""/>"#);
@@ -687,6 +696,46 @@ fn falls_back_to_the_written_font_when_a_theme_font_cannot_be_resolved() {
     assert_eq!(
         first_run(&document).format().fonts().east_asia(),
         "Minor EA"
+    );
+}
+
+#[test]
+fn a_document_without_a_theme_takes_the_script_fonts_of_words_default_theme() {
+    // Issue #155: Word's default theme gives fonts to scripts (the theme Word writes into
+    // the re-saved copy of word-rules/E-defaults-empty.docx; tests/default_theme.rs
+    // checks every one against it), which a theme font language selects.
+    let styles = defaults(
+        r#"<w:rFonts w:asciiTheme="minorHAnsi" w:hAnsiTheme="majorHAnsi" w:eastAsiaTheme="minorEastAsia" w:cstheme="minorBidi"/>"#,
+    );
+    let body = paragraph("", &[""]);
+    let document = build(&body, &styles, Some(THEME_FONT_LANG), None);
+    let fonts = first_run(&document).format().fonts().clone();
+    assert_eq!(
+        [
+            fonts.ascii(),
+            fonts.high_ansi(),
+            fonts.east_asia(),
+            fonts.complex_script()
+        ],
+        ["Calibri", "Calibri Light", "游明朝", "Arial"]
+    );
+    let major = styles
+        .replace("minorEastAsia", "majorEastAsia")
+        .replace("minorBidi", "majorBidi");
+    let document = build(&body, &major, Some(THEME_FONT_LANG), None);
+    let fonts = first_run(&document).format().fonts().clone();
+    assert_eq!(
+        [fonts.east_asia(), fonts.complex_script()],
+        ["游ゴシック Light", "Times New Roman"]
+    );
+    // Latin text takes the font of its language's script too (ECMA-376 §17.15.1.88):
+    // the default theme gives Vietnamese Arial and Times New Roman.
+    let vietnamese = r#"<w:themeFontLang w:val="vi-VN"/>"#;
+    let document = build(&body, &styles, Some(vietnamese), None);
+    let fonts = first_run(&document).format().fonts().clone();
+    assert_eq!(
+        [fonts.ascii(), fonts.high_ansi()],
+        ["Arial", "Times New Roman"]
     );
 }
 
