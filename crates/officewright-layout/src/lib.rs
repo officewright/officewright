@@ -49,6 +49,7 @@ mod report;
 mod shape;
 mod slot;
 mod symbol;
+mod tables;
 mod tabs;
 #[cfg(test)]
 mod testing;

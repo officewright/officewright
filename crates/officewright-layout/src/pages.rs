@@ -16,7 +16,7 @@ use crate::error::{Error, Result};
 use crate::fonts::Fonts;
 use crate::ir::{
     Block, CompatFlag, CompatMode, Document, FieldKind, Inline, MAX_TABLE_DEPTH, PageSetup,
-    PageVerticalAlign, Paragraph, ParagraphProps, Section, SectionStart,
+    PageVerticalAlign, Paragraph, ParagraphProps, Section, SectionStart, Table,
 };
 use crate::itemize::FieldValues;
 use crate::lines::{LineEnd, PieceKind};
@@ -24,6 +24,7 @@ use crate::lists::{Counters, Label};
 use crate::paragraph::{self, ParagraphLayout};
 use crate::report::{Location, ReportKind, Step};
 use crate::shape::Shaper;
+use crate::tables::{self, Context, Drawn, Prepared};
 
 /// Lengths closer than this are equal, so that lines that reach the bottom of the body
 /// but for rounding still fit.
@@ -59,12 +60,14 @@ pub(crate) struct Body {
     pub(crate) bottom: Pt,
 }
 
-/// Lines of a paragraph on a page.
+/// Lines of a paragraph, or bands of a table, on a page.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Fragment {
-    /// The paragraph, by its place in the flow: every paragraph of the body in reading
-    /// order, those of table cells included.
+    /// The paragraph or table, by its place in the flow: every paragraph and table of
+    /// the body in reading order.
     pub(crate) paragraph: usize,
+    /// Its lines, or for a table its bands: rows that a vertically merged cell ties
+    /// together.
     pub(crate) lines: Range<usize>,
     /// The top of its first line.
     pub(crate) top: Pt,
@@ -72,29 +75,38 @@ pub(crate) struct Fragment {
     pub(crate) height: Pt,
 }
 
-/// A paragraph of the flow, with where it comes from.
+/// What an item of the flow is.
+pub(crate) enum Content<'a> {
+    /// A paragraph, with its list label when it is a list item, as the counters of its
+    /// story make it.
+    Paragraph(&'a Paragraph, Option<Label>),
+    /// A table, with the list labels of its paragraphs, nested tables' included, in
+    /// reading order.
+    Table(&'a Table, Vec<Option<Label>>),
+}
+
+/// A paragraph or a table of the flow, with where it comes from.
 pub(crate) struct Flowed<'a> {
     /// Its section, by its place in the document.
     pub(crate) section: usize,
-    pub(crate) paragraph: &'a Paragraph,
+    pub(crate) content: Content<'a>,
     pub(crate) location: Location,
-    /// Whether it is in a table cell, where keeping lines together and widow control do
-    /// not apply (MS-OI29500 2.1.46 a, 2.1.66 a). Keeping with the next, which Word applies
-    /// to a cell's row, waits for tables to be laid out (plan PR 12).
-    pub(crate) in_cell: bool,
-    /// Whether it is the first paragraph of a table cell, which keeps the space above it
-    /// at the top of a page.
-    pub(crate) first_in_cell: bool,
-    /// Its list label, when it is a list item, as the counters of its story make it.
-    pub(crate) label: Option<Label>,
 }
 
-/// The paragraphs of the body of every section of `document`, in reading order. Tables
-/// are not laid out yet: the paragraphs of their cells follow one another at the full
-/// width, and that is reported.
+impl<'a> Flowed<'a> {
+    /// The paragraph, unless it is a table.
+    pub(crate) fn paragraph(&self) -> Option<&'a Paragraph> {
+        match self.content {
+            Content::Paragraph(paragraph, _) => Some(paragraph),
+            Content::Table(..) => None,
+        }
+    }
+}
+
+/// The paragraphs and tables of the body of every section of `document`, in reading
+/// order.
 pub(crate) fn flow<'a>(document: &'a Document, fonts: &mut Fonts<'_>) -> Result<Vec<Flowed<'a>>> {
     let mut out = Vec::new();
-    let mut table = None;
     let mut location = Location::default();
     // The lists of the body count on from section to section.
     let mut counters = Counters::default();
@@ -106,24 +118,14 @@ pub(crate) fn flow<'a>(document: &'a Document, fonts: &mut Fonts<'_>) -> Result<
             document,
             section: index,
             location: &mut location,
-            table: &mut table,
             counters: &mut counters,
             out: &mut out,
         };
-        walk.blocks(section.blocks(), false, 0)?;
+        walk.blocks(section.blocks())?;
         location.pop();
         location.pop();
     }
     report_list_formats(&counters, fonts);
-    if let Some(location) = table {
-        fonts.report_once(
-            ReportKind::FeatureUnsupported,
-            &location,
-            "tables are not laid out yet: the paragraphs of their cells follow one another at \
-             the full width"
-                .to_owned(),
-        );
-    }
     Ok(out)
 }
 
@@ -132,8 +134,6 @@ struct Walk<'a, 'w> {
     document: &'a Document,
     section: usize,
     location: &'w mut Location,
-    /// The place of the first table.
-    table: &'w mut Option<Location>,
     /// The counters of the lists of the story walked.
     counters: &'w mut Counters,
     out: &'w mut Vec<Flowed<'a>>,
@@ -163,58 +163,80 @@ fn report_list_formats(counters: &Counters, fonts: &mut Fonts<'_>) {
 }
 
 impl<'a> Walk<'a, '_> {
-    /// Adds the paragraphs of `blocks`, those of a table cell when `in_cell`, in tables
-    /// nested `depth` deep.
-    fn blocks(&mut self, blocks: &'a [Block], in_cell: bool, depth: usize) -> Result<()> {
+    /// Adds the paragraphs and tables of `blocks`.
+    fn blocks(&mut self, blocks: &'a [Block]) -> Result<()> {
         for (index, block) in blocks.iter().enumerate() {
             self.location.push(Step::Index(index));
-            match block {
-                Block::Paragraph(paragraph) => self.out.push(Flowed {
-                    section: self.section,
-                    paragraph,
-                    location: self.location.clone(),
-                    in_cell,
-                    first_in_cell: in_cell && index == 0,
-                    label: paragraph
-                        .list()
-                        .and_then(|item| self.counters.label(self.document, &item, self.location)),
-                }),
+            let content = match block {
+                Block::Paragraph(paragraph) => Content::Paragraph(paragraph, self.label(paragraph)),
                 Block::Table(table) => {
-                    if depth >= MAX_TABLE_DEPTH {
-                        return Err(Error::NestingTooDeep {
-                            location: self.location.clone(),
-                            limit: MAX_TABLE_DEPTH,
-                        });
-                    }
-                    self.table.get_or_insert_with(|| self.location.clone());
-                    self.location.push(Step::Field("rows"));
-                    for (row_index, row) in table.rows().iter().enumerate() {
-                        self.location.push(Step::Index(row_index));
-                        self.location.push(Step::Field("cells"));
-                        for (cell_index, cell) in row.cells().iter().enumerate() {
-                            self.location.push(Step::Index(cell_index));
-                            self.location.push(Step::Field("blocks"));
-                            self.blocks(cell.blocks(), true, depth + 1)?;
-                            self.location.pop();
-                            self.location.pop();
-                        }
-                        self.location.pop();
-                        self.location.pop();
-                    }
-                    self.location.pop();
+                    let mut labels = Vec::new();
+                    self.table_labels(table, 0, &mut labels)?;
+                    Content::Table(table, labels)
                 }
-            }
+            };
+            self.out.push(Flowed {
+                section: self.section,
+                content,
+                location: self.location.clone(),
+            });
             self.location.pop();
         }
         Ok(())
     }
-}
 
+    /// The list label of `paragraph`, at the walk's place, which advances its list.
+    fn label(&mut self, paragraph: &Paragraph) -> Option<Label> {
+        paragraph
+            .list()
+            .and_then(|item| self.counters.label(self.document, &item, self.location))
+    }
+
+    /// Adds to `labels` those of the paragraphs of `table`, nested `depth` deep in other
+    /// tables, in reading order, nested tables' included: the lists count through table
+    /// cells as through the text around them.
+    fn table_labels(
+        &mut self,
+        table: &Table,
+        depth: usize,
+        labels: &mut Vec<Option<Label>>,
+    ) -> Result<()> {
+        if depth >= MAX_TABLE_DEPTH {
+            return Err(Error::NestingTooDeep {
+                location: self.location.clone(),
+                limit: MAX_TABLE_DEPTH,
+            });
+        }
+        self.location.push(Step::Field("rows"));
+        for (row_index, row) in table.rows().iter().enumerate() {
+            self.location.push(Step::Index(row_index));
+            self.location.push(Step::Field("cells"));
+            for (cell_index, cell) in row.cells().iter().enumerate() {
+                self.location.push(Step::Index(cell_index));
+                self.location.push(Step::Field("blocks"));
+                for (index, block) in cell.blocks().iter().enumerate() {
+                    self.location.push(Step::Index(index));
+                    match block {
+                        Block::Paragraph(paragraph) => labels.push(self.label(paragraph)),
+                        Block::Table(table) => self.table_labels(table, depth + 1, labels)?,
+                    }
+                    self.location.pop();
+                }
+                self.location.pop();
+                self.location.pop();
+            }
+            self.location.pop();
+            self.location.pop();
+        }
+        self.location.pop();
+        Ok(())
+    }
+}
 /// The body of a document laid out on pages.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Paginated {
     pub(crate) pages: Vec<Page>,
-    /// The number of lines of every paragraph of the flow.
+    /// The number of lines of every paragraph of the flow, and of bands of every table.
     pub(crate) lines: Vec<usize>,
 }
 
@@ -238,7 +260,7 @@ impl PageSink for Vec<Page> {
 struct Laid<S> {
     /// The sink of the last layout pass, which has taken every page.
     sink: S,
-    /// The number of lines of every paragraph of the flow.
+    /// The number of lines of every paragraph of the flow, and of bands of every table.
     lines: Vec<usize>,
     /// The most pages held at once before they went to the sink, and the most paragraph
     /// layouts.
@@ -454,9 +476,8 @@ fn field_past_first_page(layout: &ParagraphLayout, first: Option<&Page>, index: 
 }
 
 /// Whether `flowed` has a `PAGE` field, whose value depends on the page it lands on.
-fn has_page_field(flowed: &Flowed<'_>) -> bool {
-    flowed
-        .paragraph
+fn has_page_field(paragraph: &Paragraph) -> bool {
+    paragraph
         .inlines()
         .iter()
         .any(|inline| matches!(inline, Inline::Field(field) if *field.kind() == FieldKind::Page))
@@ -511,9 +532,11 @@ enum Kind {
     Primary,
 }
 
-/// The most paragraphs of a header or footer that are laid out and drawn; more are left
-/// out, and reported, so that a frame drawn on every page stays bounded.
-const MAX_FRAME_PARAGRAPHS: usize = 256;
+/// The most work of a header or footer that is laid out and drawn: a paragraph counts
+/// one, a table its paragraphs, rows, cells and grid columns, nested tables' included
+/// ([`tables::work`]); more is left out, and reported, so that a frame drawn on every
+/// page stays bounded.
+const MAX_FRAME_WORK: usize = 256;
 
 /// The most glyphs and shapes the headers and footers of a document draw in all, on every
 /// page together; past it they are left out, and reported. A frame is drawn on every page,
@@ -521,7 +544,7 @@ const MAX_FRAME_PARAGRAPHS: usize = 256;
 const MAX_FRAME_DRAWN: usize = 1 << 20;
 
 /// A header or footer as each pass prepares it once: the paragraphs that may be drawn,
-/// in order (the first [`MAX_FRAME_PARAGRAPHS`] of a header, the last of a footer), each
+/// in order (the first [`MAX_FRAME_WORK`] of a header, the last of a footer), each
 /// with whether it has a field the layout computes; whether any of them has a `PAGE`
 /// field; whether it is a header; and where it is, for the report.
 struct Candidates<'d> {
@@ -536,9 +559,44 @@ struct Candidates<'d> {
 /// height; and, when it has a `PAGE` field, the field values it was laid out with.
 struct Frame<'d> {
     candidates: Rc<Candidates<'d>>,
-    parts: Vec<(usize, Rc<ParagraphLayout>, f64)>,
+    parts: Vec<(usize, Rc<FramePart>, f64)>,
     height: f64,
     values: Option<FieldValues>,
+}
+
+/// A paragraph of a header or footer laid out, or a table of it drawn.
+enum FramePart {
+    Paragraph(ParagraphLayout),
+    Table(Drawn),
+}
+
+impl FramePart {
+    /// Its height.
+    fn height(&self) -> f64 {
+        match self {
+            Self::Paragraph(layout) => layout.height().0,
+            Self::Table(drawn) => drawn.height.0,
+        }
+    }
+}
+
+/// The space between `above` and `below` in a stack of paragraphs and tables, or above
+/// `below` when it comes first: a table has no spacing of its own (design 8.6).
+fn stack_space(document: &Document, above: Option<&Flowed<'_>>, below: &Flowed<'_>) -> f64 {
+    match (above.and_then(Flowed::paragraph), below.paragraph()) {
+        (Some(above), Some(below)) => {
+            paragraph::space_between(document, above.props(), below.props()).0
+        }
+        (None, Some(below)) => paragraph::space_before(document, below.props()).0,
+        (Some(above), None) => paragraph::space_after(document, above.props()).0,
+        (None, None) => 0.0,
+    }
+}
+
+/// The space below `last`, the last of a stack.
+fn trailing_space(document: &Document, last: &Flowed<'_>) -> f64 {
+    last.paragraph()
+        .map_or(0.0, |last| paragraph::space_after(document, last.props()).0)
 }
 
 /// What is laid out so far, to return to when a keep rule moves paragraphs.
@@ -560,7 +618,7 @@ struct Checkpoint {
     at_top: bool,
 }
 
-/// Where a paragraph's lines went.
+/// Where a paragraph's lines, or a table's bands, went.
 #[derive(Clone, Copy)]
 struct Placed {
     first_page: usize,
@@ -623,8 +681,9 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         let sections = self.document.sections();
         // Each paragraph's layout, with the page number its `PAGE` fields show, while it
         // may be placed again: from where a chain kept with the next paragraph starts while
-        // the chain can still move, or from the paragraph placed next. Those before are
-        // dropped (`dropped` of them), their number of lines kept.
+        // the chain can still move, or from the item placed next. Those before are dropped
+        // (`dropped` of them), their number of lines kept, as tables keep their number of
+        // bands.
         let mut layouts: Vec<Option<(ParagraphLayout, u32)>> = Vec::new();
         layouts.resize_with(flow.len(), || None);
         let mut dropped = 0;
@@ -671,7 +730,74 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 self.new_page(flowed.section, section.page())?;
                 pending_break = false;
             }
-            let props = flowed.paragraph.props();
+            let (paragraph, label) = match &flowed.content {
+                Content::Paragraph(paragraph, label) => (*paragraph, label.as_ref()),
+                Content::Table(table, labels) => {
+                    // A table, band by band. It ends a chain kept with the next paragraph,
+                    // which moves to the next page, once, when the table's first band is
+                    // not on the page where the chain's last paragraph ends; and it is kept
+                    // with nothing itself yet.
+                    let boundary = broke_page || section_here;
+                    let ends = chain.filter(|_| !boundary).map(|start| {
+                        let previous = index
+                            .checked_sub(1)
+                            .and_then(|i| placed.get(i).copied().flatten())
+                            .map(|previous| previous.last_page);
+                        (
+                            start,
+                            !start.at_top && !moved.contains(&start.index),
+                            previous,
+                        )
+                    });
+                    let decided = ends.map(|(_, movable, previous)| (movable, previous));
+                    let (first_page, bands) = match (
+                        self.place_table((flow, index), (table, labels), decided)?,
+                        ends,
+                    ) {
+                        (Some(table), _) => table,
+                        (None, Some((start, ..))) => {
+                            // The whole chain to the next page, once.
+                            moved.insert(start.index);
+                            self.restore(start);
+                            chain = None;
+                            let section = flow.get(start.index).map_or(0, |f| f.section);
+                            let setup = sections
+                                .get(section)
+                                .map_or_else(PageSetup::default, |s| *s.page());
+                            self.new_page(section, &setup)?;
+                            index = start.index;
+                            broke_page = false;
+                            continue;
+                        }
+                        // A table moves only the chain it ends.
+                        (None, None) => (self.page_count().saturating_sub(1), 0),
+                    };
+                    if let Some(count) = line_counts.get_mut(index) {
+                        *count = bands;
+                    }
+                    let here = Placed {
+                        first_page,
+                        last_page: self.page_count().saturating_sub(1),
+                    };
+                    if let Some(slot) = placed.get_mut(index) {
+                        *slot = Some(here);
+                    }
+                    chain = None;
+                    // Nothing goes back past the next item's start now.
+                    self.keep_from = usize::MAX;
+                    self.release()?;
+                    for slot in layouts.iter_mut().take(index + 1).skip(dropped) {
+                        if slot.take().is_some() {
+                            self.layouts_held -= 1;
+                        }
+                    }
+                    dropped = dropped.max(index + 1);
+                    broke_page = false;
+                    index += 1;
+                    continue;
+                }
+            };
+            let props = paragraph.props();
             // A page break before a paragraph that already starts a page makes no page.
             // Hypothesis until a Word render (`E-page-break-before-top.docx`).
             if props.page_break_before() && !self.page_is_empty() {
@@ -683,8 +809,8 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             // than the one they were laid out for, and moving a chain it starts goes back
             // here later, unless it starts at the top of a page, from where a chain does not
             // move: its first page stays until then.
-            let page_field = has_page_field(flowed);
-            let starts_chain = props.keep_next() && !flowed.in_cell && !checkpoint.at_top;
+            let page_field = has_page_field(paragraph);
+            let starts_chain = props.keep_next() && !checkpoint.at_top;
             if page_field || starts_chain {
                 self.keep_from = self.keep_from.min(checkpoint.pages.saturating_sub(1));
             }
@@ -696,7 +822,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 Some(slot) => {
                     let layout = paragraph::lay_out_with(
                         self.document,
-                        (flowed.paragraph, flowed.label.as_ref()),
+                        (paragraph, label),
                         self.body()?.width,
                         (&mut *self.fonts, &mut *self.shaper),
                         &flowed.location,
@@ -709,7 +835,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 }
                 None => break,
             };
-            let keeps_space = kept_top || index == 0 || flowed.first_in_cell;
+            let keeps_space = kept_top || index == 0;
             let (mut first_page, mut ends_with_break) =
                 self.place(flow, index, layout, keeps_space)?;
             // A `PAGE` field shows the number of the page its paragraph starts on: laid out
@@ -726,7 +852,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 *laid_for = landed;
                 *layout = paragraph::lay_out_with(
                     self.document,
-                    (flowed.paragraph, flowed.label.as_ref()),
+                    (paragraph, label),
                     self.body()?.width,
                     (&mut *self.fonts, &mut *self.shaper),
                     &flowed.location,
@@ -797,17 +923,11 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                         broke_page = false;
                         continue;
                     }
-                    self.fonts.report_once(
-                        ReportKind::Overflow,
-                        &flowed.location,
-                        "paragraphs kept with the next one do not fit on a page together, so \
-                         they are split"
-                            .to_owned(),
-                    );
+                    self.report_split_chain(&flowed.location);
                 }
             }
             chain = match chain {
-                _ if !props.keep_next() || flowed.in_cell => None,
+                _ if !props.keep_next() => None,
                 // Its last lines, kept with the next paragraph, start a page after the
                 // break inside it: the chain starts there, at the top of a page, and
                 // moving it would only take the lines before the break along.
@@ -968,14 +1088,17 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         layout: &ParagraphLayout,
         keeps_space: bool,
     ) -> Result<(usize, bool)> {
-        let Some(flowed) = flow.get(index) else {
+        let Some((flowed, paragraph)) = flow
+            .get(index)
+            .and_then(|flowed| Some((flowed, flowed.paragraph()?)))
+        else {
             return Ok((self.page_count().saturating_sub(1), false));
         };
-        let props = flowed.paragraph.props();
+        let props = paragraph.props();
         let lines = &layout.lines;
         let count = lines.len();
-        let keep_lines = props.keep_lines() && !flowed.in_cell;
-        let widow_control = props.widow_control() && !flowed.in_cell;
+        let keep_lines = props.keep_lines();
+        let widow_control = props.widow_control();
         let section = self
             .document
             .sections()
@@ -986,14 +1109,17 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         loop {
             let empty = self.page_is_empty();
             let body = self.body()?;
-            // Space above: between this paragraph and the one above it on the page; at
-            // the top of a page only at the start of the document or of a section, and
-            // in a table cell. Word's render of `E-space-before-top.docx`: dropped after
-            // flowing and after page breaks alike.
+            // Space above: between this paragraph and the one above it on the page, or
+            // its own below a table; at the top of a page only at the start of the
+            // document or of a section. Word's render of `E-space-before-top.docx`:
+            // dropped after flowing and after page breaks alike.
             let gap = if first > 0 {
                 0.0
             } else if let Some(above) = self.above.filter(|_| !empty).and_then(|i| flow.get(i)) {
-                paragraph::space_between(self.document, above.paragraph.props(), props).0
+                match above.paragraph() {
+                    Some(above) => paragraph::space_between(self.document, above.props(), props).0,
+                    None => paragraph::space_before(self.document, props).0,
+                }
             } else if keeps_space {
                 paragraph::space_before(self.document, props).0
             } else {
@@ -1019,12 +1145,21 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 self.above
                     .filter(|_| !empty)
                     .and_then(|i| flow.get(i))
-                    .map(|above| above.paragraph.props()),
-                flow.get(index + 1).map(|below| below.paragraph.props()),
+                    .and_then(|above| above.paragraph())
+                    .map(Paragraph::props),
+                flow.get(index + 1)
+                    .and_then(Flowed::paragraph)
+                    .map(Paragraph::props),
             );
             let (fit, breaks) = fitting(lines, first, top, body.bottom.0);
             if fit == rest || (breaks && fit > 0) {
-                self.put(index, (flowed, neighbours), layout, first..first + fit, top);
+                self.put(
+                    index,
+                    (flowed, paragraph, neighbours),
+                    layout,
+                    first..first + fit,
+                    top,
+                );
                 first_page.get_or_insert(here);
                 first += fit;
                 if first == count {
@@ -1075,7 +1210,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             }
             self.put(
                 index,
-                (flowed, neighbours),
+                (flowed, paragraph, neighbours),
                 layout,
                 first..first + take,
                 top,
@@ -1112,7 +1247,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
     fn put(
         &mut self,
         index: usize,
-        (flowed, neighbours): (&Flowed<'_>, Neighbours<'_>),
+        (flowed, paragraph, neighbours): (&Flowed<'_>, &Paragraph, Neighbours<'_>),
         layout: &ParagraphLayout,
         lines: Range<usize>,
         top: f64,
@@ -1129,7 +1264,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             .map(|line| line.height.0)
             .sum();
         let mut items = Vec::new();
-        self.report_borders(flowed);
+        tables::report_borders(paragraph, &flowed.location, self.fonts);
         let origin = Point {
             x: left,
             y: Pt(top),
@@ -1143,7 +1278,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         // Hypotheses until a Word reference: a neighbour without a bar (each bar reaching
         // through its own paragraph's space only), a gap larger than the paragraph's own
         // space, the cut at the body's bottom and a paragraph split over pages.
-        let props = flowed.paragraph.props();
+        let props = paragraph.props();
         let above = paragraph::own_space_before(self.document, props, neighbours.0)
             .0
             .min((top - self.cursor).max(0.0));
@@ -1156,7 +1291,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         };
         let mut painting = Painting {
             document: self.document,
-            paragraph: flowed.paragraph,
+            paragraph,
             layout,
             fonts: self.fonts,
             location: &flowed.location,
@@ -1176,6 +1311,140 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             });
         }
         self.cursor = top + height;
+        self.above = Some(index);
+    }
+
+    /// Places table `index` of the flow, `flowed`, band by band: a band goes to the next
+    /// page when it does not fit, unless it starts the page, and it is laid out with the
+    /// field values of the page it goes on. Returns the page of its first band and its
+    /// number of bands.
+    fn place_table(
+        &mut self,
+        (flow, index): (&[Flowed<'d>], usize),
+        (table, labels): (&'d Table, &[Option<Label>]),
+        ends: Option<(bool, Option<usize>)>,
+    ) -> Result<Option<(usize, usize)>> {
+        let Some(flowed) = flow.get(index) else {
+            return Ok(Some((self.page_count().saturating_sub(1), 0)));
+        };
+        let setup = self
+            .document
+            .sections()
+            .get(flowed.section)
+            .map_or_else(PageSetup::default, |section| *section.page());
+        let width = self.body()?.width;
+        let prepared = Prepared::new(
+            self.document,
+            table,
+            labels,
+            width,
+            &flowed.location,
+            self.fonts,
+        );
+        let count = prepared.band_count();
+        let mut first_page = None;
+        for band in 0..count {
+            loop {
+                let empty = self.page_is_empty();
+                let body = self.body()?;
+                // The space below the paragraph above (design 8.6: a table has no
+                // spacing of its own).
+                let above = self
+                    .above
+                    .filter(|_| !empty && band == 0)
+                    .and_then(|above| flow.get(above))
+                    .and_then(Flowed::paragraph);
+                let gap = above.map_or(0.0, |above| {
+                    paragraph::space_after(self.document, above.props()).0
+                });
+                let values = self.field_values(flowed.section);
+                let mut context = Context {
+                    document: self.document,
+                    fonts: &mut *self.fonts,
+                    shaper: &mut *self.shaper,
+                    leaders: &mut self.leaders,
+                    values: Some(&values),
+                };
+                let drawn = prepared.band(band, &mut context);
+                let top = self.cursor + gap;
+                let fits = top + drawn.height.0 <= body.bottom.0 + EPSILON;
+                if fits || empty {
+                    if !fits {
+                        self.fonts.report_once(
+                            ReportKind::Overflow,
+                            &flowed.location,
+                            "table rows are taller than the body of their page".to_owned(),
+                        );
+                    }
+                    let here = self.page_count().saturating_sub(1);
+                    if band == 0 {
+                        if let Some((movable, previous)) = ends {
+                            if previous.is_some_and(|previous| previous != here) {
+                                if movable {
+                                    // The chain before the table moves; the run places it
+                                    // and the table again.
+                                    return Ok(None);
+                                }
+                                self.report_split_chain(&flowed.location);
+                            }
+                        }
+                        // Nothing goes back past the table's first band: the pages before
+                        // it go on.
+                        self.keep_from = usize::MAX;
+                        self.release()?;
+                    }
+                    let first = *first_page.get_or_insert(here);
+                    if here != first && tables::has_header_rows(table) {
+                        self.fonts.report_once(
+                            ReportKind::FeatureUnsupported,
+                            &flowed.location,
+                            "table header rows are not repeated on the pages their table \
+                             continues on"
+                                .to_owned(),
+                        );
+                    }
+                    self.put_band(index, band, drawn, top);
+                    break;
+                }
+                self.new_page(flowed.section, &setup)?;
+            }
+        }
+        if count == 0 {
+            first_page = Some(self.page_count().saturating_sub(1));
+        }
+        Ok(Some((
+            first_page.unwrap_or_else(|| self.page_count().saturating_sub(1)),
+            count,
+        )))
+    }
+
+    /// Reports, once, that a chain of paragraphs kept with the next one is split.
+    fn report_split_chain(&mut self, location: &Location) {
+        self.fonts.report_once(
+            ReportKind::Overflow,
+            location,
+            "paragraphs kept with the next one do not fit on a page together, so they are \
+             split"
+                .to_owned(),
+        );
+    }
+
+    /// Puts band `band` of table `index`, `drawn`, on the current page with its top at
+    /// `top`.
+    fn put_band(&mut self, index: usize, band: usize, drawn: Drawn, top: f64) {
+        let Some(page) = self.pages.last_mut() else {
+            return;
+        };
+        let mut items = drawn.items;
+        tables::shift(&mut items, page.body.left.0, top);
+        page.items.extend(items);
+        page.fragments.push(Fragment {
+            paragraph: index,
+            lines: band..band + 1,
+            top: Pt(top),
+            height: drawn.height,
+        });
+        self.cursor = top + drawn.height.0;
         self.above = Some(index);
     }
 
@@ -1312,28 +1581,6 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         Ok(())
     }
 
-    /// Reports, once, that the borders of `flowed` are not drawn.
-    fn report_borders(&mut self, flowed: &Flowed<'_>) {
-        let borders = flowed.paragraph.props().borders();
-        let bordered = [
-            borders.top(),
-            borders.bottom(),
-            borders.start(),
-            borders.end(),
-            borders.between(),
-            borders.bar(),
-        ]
-        .iter()
-        .any(Option::is_some);
-        if bordered {
-            self.fonts.report_once(
-                ReportKind::FeatureUnsupported,
-                &flowed.location,
-                "paragraph borders are not drawn yet".to_owned(),
-            );
-        }
-    }
-
     /// The values of the fields of section `section` on the current page.
     fn field_values(&self, section: usize) -> FieldValues {
         let format = self
@@ -1357,7 +1604,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
     /// field values are `values`, `room.0` wide on a page `room.1` high: the last layout of
     /// it while its `PAGE` fields show the same; otherwise laid out again, its paragraphs
     /// without fields the layout computes taken from the last layout. A page touches at
-    /// most [`MAX_FRAME_PARAGRAPHS`] of its paragraphs: the rest are walked once a pass.
+    /// most [`MAX_FRAME_WORK`] of its work: the rest is walked once a pass.
     fn cached_frame(
         &mut self,
         ir: &'d Section,
@@ -1385,7 +1632,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
     }
 
     /// The [`Candidates`] of the header (`header`) or footer of `kind` of section
-    /// `section`. Tables in it, and paragraphs past [`MAX_FRAME_PARAGRAPHS`], are reported.
+    /// `section`. What is past [`MAX_FRAME_WORK`] is left out, and reported.
     fn candidates(
         &mut self,
         ir: &'d Section,
@@ -1404,7 +1651,6 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         location.push(Step::Index(section));
         location.push(Step::Field(if header { "headers" } else { "footers" }));
         location.push(Step::Field(name));
-        let mut table = None;
         let mut flowed = Vec::new();
         // The lists of each header and footer count from their start: a hypothesis until a
         // Word render, since no reference document has a list in a header or footer.
@@ -1413,42 +1659,55 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             document: self.document,
             section,
             location: &mut location,
-            table: &mut table,
             counters: &mut counters,
             out: &mut flowed,
         };
-        walk.blocks(blocks, false, 0)?;
+        walk.blocks(blocks)?;
         report_list_formats(&counters, self.fonts);
-        if let Some(location) = table {
-            self.fonts.report_once(
-                ReportKind::FeatureUnsupported,
-                &location,
-                "tables are not laid out yet: the paragraphs of their cells follow one another \
-                 at the full width"
-                    .to_owned(),
-            );
-        }
         // A header is laid out from its first paragraph, a footer from its last, which is
-        // nearest its distance.
-        let past = flowed.len().saturating_sub(MAX_FRAME_PARAGRAPHS);
+        // nearest its distance. A table counts its paragraphs, rows, cells and grid
+        // columns, nested tables' too, as it is laid out again on every page where a field
+        // in it changes.
+        let weight = |part: &Flowed<'_>| match &part.content {
+            Content::Paragraph(..) => 1,
+            Content::Table(table, _) => tables::table_work(table),
+        };
+        let mut taken = 0usize;
+        let mut fits = |part: &Flowed<'_>| {
+            taken = taken.saturating_add(weight(part));
+            taken <= MAX_FRAME_WORK
+        };
+        let kept = if header {
+            flowed.iter().take_while(|part| fits(part)).count()
+        } else {
+            flowed.iter().rev().take_while(|part| fits(part)).count()
+        };
+        let past = flowed.len().saturating_sub(kept);
         if past > 0 {
             self.report_cut(&location);
             if header {
-                flowed.truncate(MAX_FRAME_PARAGRAPHS);
+                flowed.truncate(kept);
             } else {
                 flowed.drain(..past);
             }
         }
+        let kinds = |part: &Flowed<'_>| match &part.content {
+            Content::Paragraph(paragraph, _) => paragraph_field_kinds(paragraph),
+            Content::Table(table, _) => table
+                .rows()
+                .iter()
+                .flat_map(|row| row.cells())
+                .map(|cell| field_kinds(cell.blocks(), 1))
+                .fold((false, false), |a, b| (a.0 || b.0, a.1 || b.1)),
+        };
         let parts: Vec<(Flowed<'d>, bool)> = flowed
             .into_iter()
             .map(|part| {
-                let fields = paragraph_field_kinds(part.paragraph) != (false, false);
+                let fields = kinds(&part) != (false, false);
                 (part, fields)
             })
             .collect();
-        let page_field = parts
-            .iter()
-            .any(|(part, _)| paragraph_field_kinds(part.paragraph).0);
+        let page_field = parts.iter().any(|(part, _)| kinds(part).0);
         Ok(Candidates {
             parts,
             page_field,
@@ -1464,7 +1723,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             location,
             format!(
                 "a header or footer taller than its page, or of more than \
-                 {MAX_FRAME_PARAGRAPHS} paragraphs, is cut"
+                 {MAX_FRAME_WORK} paragraphs, table rows, cells and columns together, is cut"
             ),
         );
     }
@@ -1483,7 +1742,8 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         (width, page_height): (Pt, Pt),
         last: Option<Rc<Frame<'d>>>,
     ) -> Result<Frame<'d>> {
-        let reusable: HashMap<usize, Rc<ParagraphLayout>> = last
+        let document = self.document;
+        let reusable: HashMap<usize, Rc<FramePart>> = last
             .iter()
             .flat_map(|frame| frame.parts.iter())
             .filter(|(index, _, _)| {
@@ -1492,7 +1752,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                     .get(*index)
                     .is_some_and(|(_, fields)| !fields)
             })
-            .map(|(index, layout, _)| (*index, Rc::clone(layout)))
+            .map(|(index, part, _)| (*index, Rc::clone(part)))
             .collect();
         let count = candidates.parts.len();
         let order: Vec<usize> = if candidates.header {
@@ -1500,68 +1760,52 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         } else {
             (0..count).rev().collect()
         };
-        let mut kept: Vec<(usize, Rc<ParagraphLayout>)> = Vec::new();
+        let mut kept: Vec<(usize, Rc<FramePart>)> = Vec::new();
         let mut taken = 0.0;
-        // The paragraph laid out before, next to this one: above it in a header, below
-        // it in a footer.
-        let mut before: Option<&'d Paragraph> = None;
+        // The part laid out before, next to this one: above it in a header, below it in
+        // a footer.
+        let mut before: Option<&Flowed<'d>> = None;
         for index in order {
             let Some((part, _)) = candidates.parts.get(index) else {
                 continue;
             };
-            // The space between it and the paragraph before, or before a header's first
-            // and after a footer's last: a paragraph that would start past the page's
-            // height is not laid out, nor any after it.
-            let props = part.paragraph.props();
+            // The space between it and the part before, or before a header's first and
+            // after a footer's last: a part that would start past the page's height is
+            // not laid out, nor any after it.
             let gap = match (before, candidates.header) {
-                (None, true) => paragraph::space_before(self.document, props).0,
-                (None, false) => paragraph::space_after(self.document, props).0,
-                (Some(above), true) => {
-                    paragraph::space_between(self.document, above.props(), props).0
-                }
-                (Some(below), false) => {
-                    paragraph::space_between(self.document, props, below.props()).0
-                }
+                (None, true) => stack_space(document, None, part),
+                (None, false) => trailing_space(document, part),
+                (Some(above), true) => stack_space(document, Some(above), part),
+                (Some(below), false) => stack_space(document, Some(part), below),
             };
             if taken + gap >= page_height.0 {
                 self.report_cut(&candidates.location);
                 break;
             }
-            let layout = match reusable.get(&index) {
-                Some(layout) => Rc::clone(layout),
-                None => Rc::new(paragraph::lay_out_with(
-                    self.document,
-                    (part.paragraph, part.label.as_ref()),
-                    width,
-                    (&mut *self.fonts, &mut *self.shaper),
-                    &part.location,
-                    Some(values),
-                )),
+            let laid = match reusable.get(&index) {
+                Some(laid) => Rc::clone(laid),
+                None => Rc::new(self.frame_part(part, values, width)),
             };
-            taken += gap + layout.height().0;
-            before = Some(part.paragraph);
-            kept.push((index, layout));
+            taken += gap + laid.height();
+            before = Some(part);
+            kept.push((index, laid));
         }
         kept.sort_by_key(|(index, _)| *index);
         let mut parts = Vec::new();
         let mut height = 0.0;
-        let mut above: Option<&'d Paragraph> = None;
-        for (index, layout) in kept {
+        let mut above: Option<&Flowed<'d>> = None;
+        for (index, laid) in kept {
             let Some((part, _)) = candidates.parts.get(index) else {
                 continue;
             };
-            let props = part.paragraph.props();
-            height += match above {
-                Some(above) => paragraph::space_between(self.document, above.props(), props).0,
-                None => paragraph::space_before(self.document, props).0,
-            };
+            height += stack_space(document, above, part);
             let top = height;
-            height += layout.height().0;
-            above = Some(part.paragraph);
-            parts.push((index, layout, top));
+            height += laid.height();
+            above = Some(part);
+            parts.push((index, laid, top));
         }
         if let Some(last) = above {
-            height += paragraph::space_after(self.document, last.props()).0;
+            height += trailing_space(document, last);
         }
         Ok(Frame {
             candidates,
@@ -1571,36 +1815,79 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         })
     }
 
+    /// A paragraph of a header or footer laid out `width` wide, or a table of it drawn,
+    /// with the field values `values`.
+    fn frame_part(&mut self, part: &Flowed<'d>, values: &FieldValues, width: Pt) -> FramePart {
+        match &part.content {
+            Content::Paragraph(paragraph, label) => FramePart::Paragraph(paragraph::lay_out_with(
+                self.document,
+                (paragraph, label.as_ref()),
+                width,
+                (&mut *self.fonts, &mut *self.shaper),
+                &part.location,
+                Some(values),
+            )),
+            Content::Table(table, labels) => {
+                let prepared = Prepared::new(
+                    self.document,
+                    table,
+                    labels,
+                    width,
+                    &part.location,
+                    self.fonts,
+                );
+                let mut context = Context {
+                    document: self.document,
+                    fonts: &mut *self.fonts,
+                    shaper: &mut *self.shaper,
+                    leaders: &mut self.leaders,
+                    values: Some(values),
+                };
+                FramePart::Table(prepared.whole(&mut context))
+            }
+        }
+    }
+
     /// Adds to `items` what `frame` draws, its top left corner at `origin`, as far as the
-    /// budget of what frames draw goes: a paragraph that would take more than is left is
-    /// not drawn, nor is anything of a frame after it.
+    /// budget of what frames draw goes: a part that would take more than is left is not
+    /// drawn, nor is anything of a frame after it.
     fn paint_frame(&mut self, frame: &Frame<'d>, origin: Point, items: &mut Vec<DisplayItem>) {
-        for (index, layout, top) in &frame.parts {
+        for (index, laid, top) in &frame.parts {
             let Some((part, _)) = frame.candidates.parts.get(*index) else {
                 continue;
             };
             if self.frame_budget > 0 {
-                self.report_borders(part);
                 let start = items.len();
                 let at = Point {
                     x: origin.x,
                     y: Pt(origin.y.0 + top),
                 };
-                let mut painting = Painting {
-                    document: self.document,
-                    paragraph: part.paragraph,
-                    layout,
-                    fonts: self.fonts,
-                    location: &part.location,
-                    background: None,
-                    leaders: &mut self.leaders,
-                    // Hypothesis: in headers and footers, as no reference shows them, bar
-                    // tabs reach only through the lines.
-                    bar_reach: (0.0, 0.0),
-                };
-                let lines = 0..layout.lines.len();
-                painting.paint_shading(lines.clone(), at, items);
-                painting.paint(lines, at, items);
+                match (laid.as_ref(), part.paragraph()) {
+                    (FramePart::Paragraph(layout), Some(paragraph)) => {
+                        tables::report_borders(paragraph, &part.location, self.fonts);
+                        let mut painting = Painting {
+                            document: self.document,
+                            paragraph,
+                            layout,
+                            fonts: self.fonts,
+                            location: &part.location,
+                            background: None,
+                            leaders: &mut self.leaders,
+                            // Hypothesis: in headers and footers, as no reference shows them,
+                            // bar tabs reach only through the lines.
+                            bar_reach: (0.0, 0.0),
+                        };
+                        let lines = 0..layout.lines.len();
+                        painting.paint_shading(lines.clone(), at, items);
+                        painting.paint(lines, at, items);
+                    }
+                    (FramePart::Table(drawn), _) => {
+                        let mut table = drawn.items.clone();
+                        tables::shift(&mut table, at.x.0, at.y.0);
+                        items.extend(table);
+                    }
+                    (FramePart::Paragraph(_), None) => {}
+                }
                 let cost: usize = items.iter().skip(start).map(drawn).sum();
                 if cost <= self.frame_budget {
                     self.frame_budget -= cost;
@@ -1720,7 +2007,7 @@ mod tests {
     use super::*;
     use crate::ir::{
         BreakClear, Cell, HeaderFooterSet, Inline, LineSpacing, Margins, ParagraphProps, Row,
-        RunFonts, RunStyle, RunStyleId, Spacing, Table,
+        RunFonts, RunStyle, RunStyleId, Spacing, Table, VerticalMerge,
     };
     use crate::report::LayoutReport;
     use crate::testing::{book, minimal};
@@ -1855,6 +2142,182 @@ mod tests {
             )])
         });
         assert_eq!(held(&one_kept), ((1..=50).collect(), (2, 1)));
+        // A table of 400 rows of one line goes on its 50 pages the same way: its bands are
+        // placed like lines.
+        let table = document(|style| {
+            let row = || {
+                Row::default().with_cells(vec![Cell::default().with_blocks([lines(
+                    style,
+                    1,
+                    spacing(0.0, 0.0),
+                )])])
+            };
+            one_section(vec![
+                Table::default()
+                    .with_grid([Pt(50.0)])
+                    .with_rows((0..400).map(|_| row()).collect::<Vec<_>>())
+                    .into(),
+            ])
+        });
+        assert_eq!(held(&table), ((1..=50).collect(), (2, 0)));
+        // A heading kept with the table after it holds its page only until the table's
+        // first row is placed: then the table goes on two pages at a time too.
+        let kept = document(|style| {
+            let row = || {
+                Row::default().with_cells(vec![Cell::default().with_blocks([lines(
+                    style,
+                    1,
+                    spacing(0.0, 0.0),
+                )])])
+            };
+            one_section(vec![
+                lines(style, 1, spacing(0.0, 0.0)),
+                lines(style, 1, spacing(0.0, 0.0).with_keep_next(true)),
+                Table::default()
+                    .with_grid([Pt(50.0)])
+                    .with_rows((0..400).map(|_| row()).collect::<Vec<_>>())
+                    .into(),
+            ])
+        });
+        let (numbers, (pages, _)) = held(&kept);
+        assert_eq!((numbers.len(), pages), (51, 2));
+    }
+
+    /// A table of `rows` rows of one cell of one line, over a column 100 pt wide; the
+    /// first row a header row with `header`.
+    fn table_of(style: RunStyleId, rows: usize, header: bool) -> Block {
+        let row = |n: usize| {
+            Row::default()
+                .with_header(header && n == 0)
+                .with_cells(vec![Cell::default().with_blocks([lines(
+                    style,
+                    1,
+                    spacing(0.0, 0.0),
+                )])])
+        };
+        Table::default()
+            .with_grid([Pt(100.0)])
+            .with_rows((0..rows).map(row).collect::<Vec<_>>())
+            .into()
+    }
+
+    #[test]
+    fn a_paragraph_kept_with_a_table_goes_with_its_first_row() {
+        // Seven lines, then a heading kept with the next on the last line of page 1, then a
+        // table whose first row is two lines: the row does not fit, so the heading goes to
+        // page 2 with it.
+        let moved = document(|style| {
+            let mut blocks: Vec<Block> =
+                (0..7).map(|_| lines(style, 1, spacing(0.0, 0.0))).collect();
+            blocks.push(lines(style, 1, spacing(0.0, 0.0).with_keep_next(true)));
+            let cell = Cell::default().with_blocks([lines(style, 2, spacing(0.0, 0.0))]);
+            blocks.push(
+                Table::default()
+                    .with_grid([Pt(100.0)])
+                    .with_rows(vec![Row::default().with_cells(vec![cell])])
+                    .into(),
+            );
+            one_section(blocks)
+        });
+        let moved = pages(&moved);
+        assert_eq!(moved[0].len(), 7);
+        assert_eq!(moved[1], [(7, 0..1, 20.0), (8, 0..1, 40.0)]);
+        // A heading at the top of a page cannot move: the table's first row of eight lines
+        // goes to the next page without it, and the split is reported.
+        let split = document(|style| {
+            let cell = Cell::default().with_blocks([lines(style, 8, spacing(0.0, 0.0))]);
+            one_section(vec![
+                lines(style, 1, spacing(0.0, 0.0).with_keep_next(true)),
+                Table::default()
+                    .with_grid([Pt(100.0)])
+                    .with_rows(vec![Row::default().with_cells(vec![cell])])
+                    .into(),
+            ])
+        });
+        let (laid, report) = laid(&split, 100);
+        assert_eq!(laid.expect("pages").pages.len(), 2);
+        assert!(
+            messages(&report)
+                .iter()
+                .any(|message| message.starts_with("paragraphs kept with the next one")),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn header_rows_that_are_not_repeated_are_reported() {
+        // A table with a header row that goes on to page 2, where Word repeats the header
+        // row: not done yet, and reported. One that ends on its first page, and one without
+        // header rows, report nothing.
+        let note = |rows: usize, header: bool| {
+            let document = document(|style| one_section(vec![table_of(style, rows, header)]));
+            let (_, report) = laid(&document, 100);
+            messages(&report)
+                .iter()
+                .any(|message| message.starts_with("table header rows are not repeated"))
+        };
+        assert!(note(12, true));
+        assert!(!note(4, true));
+        assert!(!note(12, false));
+    }
+
+    #[test]
+    fn a_table_takes_the_space_of_the_paragraphs_around_it() {
+        // Design 8.6: a table has no spacing of its own. Below a paragraph with 30 pt after
+        // it, the table starts 30 pt lower; the paragraph after it, with 10 pt before it,
+        // starts 10 pt below the table, not 30.
+        let document = document(|style| {
+            one_section(vec![
+                lines(style, 1, spacing(0.0, 30.0)),
+                table_of(style, 1, false),
+                lines(style, 1, spacing(10.0, 0.0)),
+            ])
+        });
+        assert_eq!(
+            pages(&document),
+            [vec![(0, 0..1, 20.0), (1, 0..1, 70.0), (2, 0..1, 100.0)]]
+        );
+    }
+
+    #[test]
+    fn a_header_s_table_takes_the_space_after_the_paragraph_above_it() {
+        // A header of a paragraph with 10 pt after it, then a table: the table's text is
+        // 30 pt below the paragraph's, its line and the space after it.
+        let document = document(|style| {
+            let paragraph = text_paragraph(style, "P", spacing(0.0, 10.0));
+            let cell = Cell::default().with_blocks([text_paragraph(style, "T", spacing(0.0, 0.0))]);
+            let table = Table::default()
+                .with_grid([Pt(100.0)])
+                .with_rows(vec![Row::default().with_cells(vec![cell])]);
+            vec![
+                Section::new(close_frames())
+                    .with_headers(
+                        HeaderFooterSet::default().with_primary([paragraph, table.into()]),
+                    )
+                    .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+            ]
+        });
+        let (laid, _) = laid(&document, 100);
+        let pages = laid.expect("pages").pages;
+        let baseline = |text: &str| {
+            pages[0].items.iter().find_map(|item| match item {
+                DisplayItem::Glyphs(run)
+                    if run
+                        .clusters
+                        .iter()
+                        .map(|c| c.text.as_str())
+                        .collect::<String>()
+                        == text =>
+                {
+                    Some(run.origin.y.0)
+                }
+                _ => None,
+            })
+        };
+        let (Some(p), Some(t)) = (baseline("P"), baseline("T")) else {
+            panic!("{:?}", texts(&pages[0]));
+        };
+        assert!((t - p - 30.0).abs() < 1e-9, "{p} {t}");
     }
 
     /// The entries of `kind` in `report` whose message starts with `what`, as their locations.
@@ -2668,34 +3131,45 @@ mod tests {
     }
 
     #[test]
-    fn keep_rules_and_widow_control_wait_in_table_cells() {
-        // In a cell, a paragraph kept together that does not fit is split, and widow
-        // control leaves one line at the top of the next page (MS-OI29500 2.1.46 a,
-        // 2.1.66 a); keeping with the next waits for tables.
-        let cell_paragraph = |style, count, props: ParagraphProps| -> Block {
-            let cell = Cell::default().with_blocks([lines(style, count, props)]);
+    fn a_table_row_that_does_not_fit_goes_to_the_next_page_whole() {
+        // Rows are not split yet (plan PR 13): a row of three lines after six lines of a
+        // body of eight goes whole to page 2, and a row taller than a body takes a page of
+        // its own and is reported.
+        let row_of = |style, count| -> Block {
+            let cell = Cell::default().with_blocks([lines(style, count, spacing(0.0, 0.0))]);
             Table::default()
+                .with_grid([Pt(100.0)])
                 .with_rows(vec![Row::default().with_cells(vec![cell])])
                 .into()
         };
-        let kept = document(|style| {
+        let moved = document(|style| {
             let mut blocks: Vec<Block> =
                 (0..6).map(|_| lines(style, 1, spacing(0.0, 0.0))).collect();
-            blocks.push(cell_paragraph(
-                style,
-                3,
-                spacing(0.0, 0.0).with_keep_lines(true),
-            ));
+            blocks.push(row_of(style, 3));
             one_section(blocks)
         });
-        assert_eq!(pages(&kept)[0].last(), Some(&(6, 0..2, 140.0)));
-        let widowed = document(|style| {
-            let mut blocks: Vec<Block> =
-                (0..5).map(|_| lines(style, 1, spacing(0.0, 0.0))).collect();
-            blocks.push(cell_paragraph(style, 4, spacing(0.0, 0.0)));
-            one_section(blocks)
+        let moved = pages(&moved);
+        assert_eq!(moved[0].last(), Some(&(5, 0..1, 120.0)));
+        assert_eq!(moved[1], [(6, 0..1, 20.0)]);
+        let tall = document(|style| {
+            one_section(vec![lines(style, 1, spacing(0.0, 0.0)), row_of(style, 9)])
         });
-        assert_eq!(pages(&widowed)[1], [(5, 3..4, 20.0)]);
+        let (laid, report) = laid(&tall, 100);
+        let pages: Vec<usize> = laid
+            .expect("pages")
+            .pages
+            .iter()
+            .map(|page| page.fragments.len())
+            .collect();
+        assert_eq!(pages, [1, 1]);
+        assert!(
+            report
+                .entries()
+                .iter()
+                .any(|entry| entry.kind() == ReportKind::Overflow
+                    && entry.message().contains("table rows")),
+            "{report:?}"
+        );
     }
 
     #[test]
@@ -3047,24 +3521,45 @@ mod tests {
     }
 
     #[test]
-    fn tables_are_their_cells_paragraphs_until_they_are_laid_out() {
+    fn tables_go_on_pages_band_by_band() {
+        // Two rows of cells of one and two lines: rows 40 pt high. A cell merged over the
+        // second and third rows ties them into one band; the paragraph after the table
+        // comes below it.
         let document = document(|style| {
             let cell =
                 |count| Cell::default().with_blocks([lines(style, count, spacing(0.0, 0.0))]);
-            let table =
-                Table::default().with_rows(vec![Row::default().with_cells(vec![cell(1), cell(2)])]);
+            let row = |cells| Row::default().with_cells(cells);
+            let merged = |merge| cell(1).with_vertical_merge(merge);
+            let table = Table::default()
+                .with_grid([Pt(50.0), Pt(50.0)])
+                .with_rows(vec![
+                    row(vec![cell(1), cell(2)]),
+                    row(vec![merged(VerticalMerge::Restart), cell(1)]),
+                    row(vec![merged(VerticalMerge::Continue), cell(1)]),
+                ]);
             one_section(vec![table.into(), lines(style, 1, spacing(0.0, 0.0))])
         });
         let (laid, report) = laid(&document, 100);
         let laid = laid.expect("pages");
-        assert_eq!(laid.lines, [1, 2, 1]);
-        assert_eq!(laid.pages[0].fragments.len(), 3);
+        assert_eq!(laid.lines, [2, 1]);
+        let fragments: Vec<(usize, Range<usize>, f64, f64)> = laid.pages[0]
+            .fragments
+            .iter()
+            .map(|f| (f.paragraph, f.lines.clone(), f.top.0, f.height.0))
+            .collect();
+        assert_eq!(
+            fragments,
+            [
+                (0, 0..1, 20.0, 40.0),
+                (0, 1..2, 60.0, 40.0),
+                (1, 0..1, 100.0, 20.0)
+            ]
+        );
         assert!(
             report
                 .entries()
                 .iter()
-                .any(|entry| entry.kind() == ReportKind::FeatureUnsupported
-                    && entry.message().contains("tables")),
+                .all(|entry| !entry.message().contains("not laid out")),
             "{report:?}"
         );
     }
@@ -3808,7 +4303,7 @@ mod tests {
             });
             let (laid, report) = laid(&document, 100);
             let drawn = texts(&laid.expect("pages").pages[0]);
-            assert_eq!(drawn.len(), MAX_FRAME_PARAGRAPHS + 1);
+            assert_eq!(drawn.len(), MAX_FRAME_WORK + 1);
             let (kept, left_out) = if header {
                 ("F0", "F299")
             } else {
@@ -3821,6 +4316,106 @@ mod tests {
                 "{report:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_frame_s_tables_count_their_paragraphs_rows_cells_and_columns_towards_its_bound() {
+        // A table is laid out again on every page where a field in it changes, so each of
+        // its paragraphs, rows, cells and grid columns counts. Exact lines of 0.1 pt, so
+        // that all fit.
+        let tiny = ParagraphProps::default()
+            .with_spacing(Spacing::default().with_line(LineSpacing::Exact(Pt(0.1))));
+        // Rows of one cell of one paragraph, over one column: 3 for each row, and 1.
+        let table = |style, rows: usize| -> Block {
+            let rows = (0..rows)
+                .map(|n| {
+                    let text = text_paragraph(style, &format!("T{n}"), tiny.clone());
+                    Row::default().with_cells(vec![Cell::default().with_blocks([text])])
+                })
+                .collect::<Vec<Row>>();
+            Table::default()
+                .with_grid([Pt(100.0)])
+                .with_rows(rows)
+                .into()
+        };
+        let drawn = |header: &dyn Fn(RunStyleId) -> Vec<Block>| {
+            let document = document(|style| {
+                vec![
+                    Section::new(close_frames())
+                        .with_headers(HeaderFooterSet::default().with_primary(header(style)))
+                        .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+                ]
+            });
+            let (laid, report) = laid(&document, 100);
+            (texts(&laid.expect("pages").pages[0]), messages(&report))
+        };
+        let has = |texts: &[String], text: &str| texts.iter().any(|drawn| drawn == text);
+        let cut = |report: &[String]| report.iter().any(|m| m.contains("is cut"));
+        // A table of 84 rows (253) and three paragraphs: 256, all drawn; the next is cut.
+        let (texts, report) = drawn(&|style| {
+            vec![
+                table(style, 84),
+                text_paragraph(style, "in", tiny.clone()),
+                text_paragraph(style, "in", tiny.clone()),
+                text_paragraph(style, "in", tiny.clone()),
+                text_paragraph(style, "out", tiny.clone()),
+            ]
+        });
+        assert!(has(&texts, "T0") && has(&texts, "T83") && has(&texts, "in"));
+        assert!(!has(&texts, "out"), "{texts:?}");
+        assert!(cut(&report), "{report:?}");
+        // One paragraph, then a table of 85 rows (256): the table is cut.
+        let (texts, _) = drawn(&|style| {
+            vec![
+                text_paragraph(style, "first", tiny.clone()),
+                table(style, 85),
+            ]
+        });
+        assert!(has(&texts, "first"));
+        assert!(
+            !texts.iter().any(|drawn| drawn.starts_with('T')),
+            "{texts:?}"
+        );
+        // Whatever its paragraphs: one cell over a grid of 300 columns, or a row of 300
+        // cells without content, is cut too.
+        let (texts, report) = drawn(&|style| {
+            vec![
+                Table::default()
+                    .with_grid(vec![Pt(0.1); 300])
+                    .with_rows(vec![Row::default().with_cells(vec![
+                        Cell::default().with_blocks([text_paragraph(style, "W", tiny.clone())]),
+                    ])])
+                    .into(),
+            ]
+        });
+        assert!(!has(&texts, "W") && cut(&report), "{texts:?} {report:?}");
+        // A nested table counts the same: inside a cell of a table of one column.
+        let (texts, report) = drawn(&|style| {
+            let nested = Table::default()
+                .with_grid(vec![Pt(0.1); 300])
+                .with_rows(vec![Row::default().with_cells(vec![
+                    Cell::default().with_blocks([text_paragraph(style, "N", tiny.clone())]),
+                ])]);
+            vec![
+                Table::default()
+                    .with_grid([Pt(100.0)])
+                    .with_rows(vec![
+                        Row::default()
+                            .with_cells(vec![Cell::default().with_blocks([nested.into()])]),
+                    ])
+                    .into(),
+            ]
+        });
+        assert!(!has(&texts, "N") && cut(&report), "{texts:?} {report:?}");
+        let (_, report) = drawn(&|_| {
+            vec![
+                Table::default()
+                    .with_grid([Pt(100.0)])
+                    .with_rows(vec![Row::default().with_cells(vec![Cell::default(); 300])])
+                    .into(),
+            ]
+        });
+        assert!(cut(&report), "{report:?}");
     }
 
     #[test]
