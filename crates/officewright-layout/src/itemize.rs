@@ -334,10 +334,7 @@ impl Builder<'_, '_, '_> {
             Inline::Tab { style, .. } => self.item(Item::Tab(*style)),
             Inline::Break { kind, style, .. } => self.item(Item::Break(*kind, *style)),
             Inline::Object(_) => self.item(Item::Object(path)),
-            Inline::Anchored(_) => {
-                self.unsupported("floating pictures are not drawn yet");
-                self.item(Item::Anchored(path));
-            }
+            Inline::Anchored(_) => self.item(Item::Anchored(path)),
             Inline::NoteReference { style, .. } => {
                 self.unsupported(
                     "footnotes and endnotes are not laid out yet: their texts are left out, \

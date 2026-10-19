@@ -429,6 +429,68 @@ pub struct RunProperties {
     /// (`w:del`, or `w:moveFrom`); the translation into the layout IR keeps the
     /// paragraph whole, which it lists.
     pub(crate) deleted: Option<bool>,
+    /// Word 2010's effects of text; kept as written, not typed yet, and the layout draws
+    /// none of them.
+    pub(crate) text_effects: TextEffects,
+    /// Word 2010's choices of the font's forms of figures and stylistic sets; kept as
+    /// written, not typed yet, and the layout applies none of them.
+    pub(crate) font_choices: FontChoices,
+}
+
+/// Whether each of Word 2010's choices of the font's glyphs ([MS-DOCX] 2.6.1:
+/// `w14:numForm`, `w14:numSpacing`, `w14:stylisticSets`) asks for other than the font's
+/// default, or none where it is not set; laid over the levels below one by one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FontChoices {
+    /// Lining or old-style figures.
+    pub(crate) number_form: Option<bool>,
+    /// Proportional or tabular figures.
+    pub(crate) number_spacing: Option<bool>,
+    /// A stylistic set turned on.
+    pub(crate) stylistic_sets: Option<bool>,
+}
+
+impl FontChoices {
+    /// Whether any is set.
+    pub(crate) fn is_set(&self) -> bool {
+        *self != Self::default()
+    }
+}
+
+/// Whether each of Word 2010's effects of text ([MS-DOCX] 2.6.1: `w14:glow`,
+/// `w14:shadow`, `w14:reflection`, `w14:textOutline`, `w14:textFill`, `w14:scene3d` and
+/// `w14:props3d`) changes what is drawn, or none where it is not set. Each is laid over
+/// the levels below it on its own, as the other run properties are.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TextEffects {
+    pub(crate) glow: Option<bool>,
+    pub(crate) shadow: Option<bool>,
+    pub(crate) reflection: Option<bool>,
+    pub(crate) outline: Option<bool>,
+    pub(crate) fill: Option<TextFill>,
+    /// A camera that turns the text (`w14:scene3d`).
+    pub(crate) turned: Option<bool>,
+    /// A bevel, depth or contour (`w14:props3d`).
+    pub(crate) depth: Option<bool>,
+}
+
+/// What a `w14:textFill` fills text with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TextFill {
+    /// One colour, as written, which changes nothing when it is the text's own.
+    Solid(u8, u8, u8),
+    /// One colour of the theme, likewise.
+    Scheme(ThemeColor),
+    /// Anything else: no fill, a gradient, or a colour changed by transparency or
+    /// luminance.
+    Other,
+}
+
+impl TextEffects {
+    /// Whether any is set.
+    pub(crate) fn is_set(&self) -> bool {
+        *self != Self::default()
+    }
 }
 
 /// What a paragraph's `w:framePr` makes of it.

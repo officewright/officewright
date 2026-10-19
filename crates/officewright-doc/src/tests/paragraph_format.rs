@@ -1685,6 +1685,33 @@ fn reads_the_style_of_each_paragraph_once_for_the_document() {
 }
 
 #[test]
+fn a_list_level_that_gives_only_a_text_effect_gives_it_to_its_label() {
+    // Word writes text effects into list levels (#339); a level that gives nothing else
+    // still gives its label that.
+    let numbering = r#"<w:abstractNum w:abstractNumId="10"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:rPr><w14:glow xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" w14:rad="63500"/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num>"#;
+    let item = r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>"#;
+    let document = build(&paragraph("", item), &defaults(""), Some(numbering));
+    let label = document
+        .formats()
+        .list_label(paragraphs(&document)[0])
+        .unwrap();
+    assert_eq!(label.text_effects.glow, Some(true));
+}
+
+#[test]
+fn a_list_level_that_gives_only_a_choice_of_figures_gives_it_to_its_label() {
+    // #361: a level that gives only w14:numForm still gives its label that.
+    let numbering = r#"<w:abstractNum w:abstractNumId="10"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:rPr><w14:numForm xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" w14:val="oldStyle"/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num>"#;
+    let item = r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>"#;
+    let document = build(&paragraph("", item), &defaults(""), Some(numbering));
+    let label = document
+        .formats()
+        .list_label(paragraphs(&document)[0])
+        .unwrap();
+    assert_eq!(label.font_choices.number_form, Some(true));
+}
+
+#[test]
 fn a_list_level_that_gives_only_ligatures_gives_them_to_its_label() {
     let numbering = r#"<w:abstractNum w:abstractNumId="10"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:rPr><w14:ligatures xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" w14:val="all"/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num>"#;
     let item = r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>"#;
@@ -1707,7 +1734,8 @@ fn a_list_label_takes_the_paragraph_style_and_the_marks_character_style() {
     let styles = [
         defaults(""),
         r#"<w:style w:type="paragraph" w:styleId="Heading"><w:name w:val="Heading"/><w:rPr><w:b/><w:sz w:val="26"/></w:rPr></w:style>"#.to_owned(),
-        r#"<w:style w:type="character" w:styleId="Strong"><w:name w:val="Strong"/><w:rPr><w:u w:val="single"/></w:rPr></w:style>"#.to_owned(),
+        r#"<w:style w:type="character" w:styleId="Strong"><w:name w:val="Strong"/><w:rPr><w:u w:val="single" w:color="FF0000"/><w:sz w:val="40"/></w:rPr></w:style>"#.to_owned(),
+        r#"<w:style w:type="paragraph" w:styleId="Lined"><w:name w:val="Lined"/><w:rPr><w:u w:val="double" w:color="0000FF"/></w:rPr></w:style>"#.to_owned(),
     ]
     .concat();
     let item = |level: i64, r_pr: &str| {
@@ -1718,10 +1746,18 @@ fn a_list_label_takes_the_paragraph_style_and_the_marks_character_style() {
     let body = [
         // The style's size and, set by the level, not its bold.
         paragraph("Heading", &item(0, "")),
-        // The mark's character style.
+        // The mark's character style: its size, not its underline
+        // (word-rules/E-list-label-format.docx, case 05, #330).
         paragraph("", &item(0, r#"<w:rStyle w:val="Strong"/>"#)),
         // A level that gives only a size.
         paragraph("", &item(1, r#"<w:sz w:val="28"/>"#)),
+        // Only the character style's underline is left out: one of the paragraph style,
+        // and one written on the mark itself, stay. No render shows these yet (#298).
+        paragraph("Lined", &item(0, r#"<w:rStyle w:val="Strong"/>"#)),
+        paragraph(
+            "",
+            &item(0, r#"<w:rStyle w:val="Strong"/><w:u w:val="dotted"/>"#),
+        ),
     ]
     .concat();
     let document = build(&body, &styles, Some(numbering));
@@ -1732,8 +1768,26 @@ fn a_list_label_takes_the_paragraph_style_and_the_marks_character_style() {
         .collect();
     assert_eq!((labels[0].size(), labels[0].bold()), (Pt(13.0), false));
     assert!(formats.paragraph_mark(paragraphs(&document)[0]).bold());
-    assert_eq!(labels[1].underline(), Some(UnderlineStyle::Single));
+    assert_eq!(
+        (
+            labels[1].size(),
+            labels[1].underline(),
+            labels[1].underline_color()
+        ),
+        (Pt(20.0), None, ColorValue::Auto)
+    );
+    // A run of that paragraph would be underlined, in red.
+    let mark = formats.paragraph_mark(paragraphs(&document)[1]);
+    assert_eq!(
+        (mark.underline(), mark.underline_color()),
+        (Some(UnderlineStyle::Single), ColorValue::Rgb(255, 0, 0))
+    );
     assert_eq!(labels[2].size(), Pt(8.0));
+    assert_eq!(
+        (labels[3].underline(), labels[3].underline_color()),
+        (Some(UnderlineStyle::Double), ColorValue::Rgb(0, 0, 255))
+    );
+    assert_eq!(labels[4].underline(), Some(UnderlineStyle::Dotted));
 
     // A paragraph of another document is labelled by its own document's numbering and
     // styles.

@@ -1,6 +1,7 @@
 //! Resolving the formatting in effect (ECMA-376 Part 1, §17.7.2): the document defaults,
-//! the paragraph's style, numbering, the run's character style and direct formatting,
-//! combined as Word combines them.
+//! in a cell what the table's style gives, the paragraph's style, its list level, the
+//! run's character style and direct formatting, combined as Word combines them (the list
+//! level over the paragraph style, see `combination`).
 
 mod character;
 mod paragraph;
@@ -17,7 +18,7 @@ use super::styles::StyleKind;
 use super::views::{Paragraph, Run};
 use super::{Document, Kind, Node};
 
-use character::CharacterLevel;
+use character::{CharacterLevel, Resolving};
 use paragraph::ParagraphLevel;
 
 /// Styles whose child elements Word ignores, `w:basedOn`, `w:pPr` and `w:rPr` among
@@ -69,12 +70,43 @@ pub struct Formats<'a> {
     /// The index of the default table style, once looked up.
     default_table_style: Option<Option<usize>>,
     /// The defaults and a paragraph style with a list level laid over them, by the
-    /// style and where the level comes from; at most [`MAX_COMBINATIONS`] at a time.
-    combinations: HashMap<(Option<usize>, paragraph::LayerSource), Arc<ParagraphLevel>>,
+    /// style, where the level comes from and the table layer below the style, if any; at
+    /// most [`MAX_COMBINATIONS`] at a time.
+    combinations:
+        HashMap<(Option<usize>, paragraph::LayerSource, Option<u64>), Arc<ParagraphLevel>>,
+    /// What table styles give the paragraphs and runs of cells, by the table style and
+    /// the set of conditions of the cells.
+    table_texts: HashMap<(usize, u16), Arc<table::TableText>>,
+    /// The id the last table text got.
+    next_table_text: u64,
+    /// Over each table text, by its id: the paragraph defaults with it laid over them,
+    /// and the default paragraph style's level once its justification gave way.
+    cell_paragraphs: HashMap<u64, CellParagraphs>,
+    /// What each paragraph style gives with the styles it is based on, before anything
+    /// lies below it: its cleared tab stops kept, to clear those of the table text a
+    /// cell's paragraph lies on. Worked out once per style, whatever the number of table
+    /// texts.
+    paragraph_chains: StyleLevels<ParagraphLevel>,
+    /// A paragraph style's chain laid over a table text, by the table text's id and the
+    /// style; at most [`MAX_CELL_LEVELS`] at a time.
+    cell_levels: HashMap<(u64, usize), Arc<ParagraphLevel>>,
+    /// Whether a size of 11 or 12 pt and a left justification that the default paragraph
+    /// style gives give way to a table style's ([MS-DOCX] 2.3.x
+    /// `overrideTableStyleFontSizeAndJustification` off), once worked out.
+    table_style_wins: Option<bool>,
     /// How much work the caches saved, for tests.
     #[cfg(test)]
     work: Work,
 }
+
+/// What lies under the paragraphs of cells of one table text: the paragraph defaults with
+/// it laid over them, and the default paragraph style's level once its justification gave
+/// way to the table style's.
+type CellParagraphs = (Arc<ParagraphLevel>, Option<Arc<ParagraphLevel>>);
+
+/// How many paragraph style chains laid over table texts are kept at a time: each is one
+/// level, so the bound keeps them small whatever the number of table texts and styles.
+const MAX_CELL_LEVELS: usize = 4096;
 
 /// How many times each kind of work was done, for tests that the caches are used.
 #[cfg(test)]
@@ -96,6 +128,12 @@ pub(crate) struct Work {
     pub(crate) tables: usize,
     /// Cells whose properties in effect were worked out.
     pub(crate) cells: usize,
+    /// What a table style gives paragraphs and runs worked out for a set of conditions.
+    pub(crate) table_texts: usize,
+    /// What a paragraph style writes itself read for the style chains in cells.
+    pub(crate) cell_style_reads: usize,
+    /// Paragraph style chains laid over a table text.
+    pub(crate) cell_levels: usize,
 }
 
 impl<'a> Formats<'a> {
@@ -116,6 +154,12 @@ impl<'a> Formats<'a> {
             level_layers: HashMap::new(),
             instance_levels: HashMap::new(),
             combinations: HashMap::new(),
+            table_texts: HashMap::new(),
+            next_table_text: 0,
+            cell_paragraphs: HashMap::new(),
+            paragraph_chains: StyleLevels::unsettled(),
+            cell_levels: HashMap::new(),
+            table_style_wins: None,
             table_styles: StyleLevels::default(),
             tables: HashMap::new(),
             table_of: HashMap::new(),
@@ -132,7 +176,8 @@ impl<'a> Formats<'a> {
             return Formats::new(paragraph.document()).paragraph(paragraph);
         }
         let style = self.paragraph_style(Some(paragraph.node()));
-        self.resolve_paragraph(style, &paragraph.properties())
+        let table = self.table_text(paragraph.node());
+        self.resolve_paragraph(style, &paragraph.properties(), table.as_deref())
     }
 
     /// The formatting of a run in effect.
@@ -141,8 +186,10 @@ impl<'a> Formats<'a> {
             return Formats::new(run.document()).run(run);
         }
         let direct = run.properties();
-        let paragraph = self.paragraph_style(paragraph_of(self.document, run.node()));
-        self.resolve_run(paragraph, &direct, None)
+        let paragraph = paragraph_of(self.document, run.node());
+        let table = paragraph.and_then(|paragraph| self.table_text(paragraph));
+        let style = self.paragraph_style(paragraph);
+        self.resolve_run(style, &direct, table.as_deref(), Resolving::Run)
     }
 
     /// The formatting of a paragraph's mark in effect, which decides, among other
@@ -153,7 +200,8 @@ impl<'a> Formats<'a> {
         }
         let direct = paragraph.properties().mark;
         let style = self.paragraph_style(Some(paragraph.node()));
-        self.resolve_run(style, &direct, None)
+        let table = self.table_text(paragraph.node());
+        self.resolve_run(style, &direct, table.as_deref(), Resolving::Run)
     }
 
     /// The formatting in effect of the mark of a paragraph that has the default
@@ -163,21 +211,30 @@ impl<'a> Formats<'a> {
     #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
     pub(crate) fn default_mark(&mut self) -> CharacterFormat {
         let style = self.paragraph_style(None);
-        self.resolve_run(style, &super::properties::RunProperties::default(), None)
+        self.resolve_run(
+            style,
+            &super::properties::RunProperties::default(),
+            None,
+            Resolving::Run,
+        )
     }
 
     /// The formatting of a list item's label, its number or bullet, in effect: the
     /// paragraph mark's, with the run properties of the list level laid over it, whose
     /// on/off values set the value as direct formatting does. Word does not allow the
     /// level's `w:rStyle`, `w:highlight`, `w:oMath` and `w:rPrChange` there (MS-OI29500
-    /// §17.9.24(a)); a file that has them is read, and they are dropped. None when the
-    /// paragraph is not a list item.
+    /// §17.9.24(a)); a file that has them is read, and they are dropped, but for the
+    /// highlight, which Word keeps and draws behind the label
+    /// (word-rules/E-list-label-rstyle.docx, case 02, #308). None when the paragraph is
+    /// not a list item.
     ///
-    /// Not confirmed against Word yet: [MS-DOC] ("Determining List Formatting of a
-    /// Paragraph", part 3) lays the level over the mark this way, and the reference
-    /// renders of the rule documents asked for in issue #162 are to confirm it. The
-    /// level's linked paragraph style, which [MS-DOC] applies too, does not reach the
-    /// label.
+    /// Word's renders of word-rules/E-list-label-format.docx and E-list-label-rstyle.docx
+    /// (#299) show this, as [MS-DOC] ("Determining List Formatting of a Paragraph", part
+    /// 3) lays it out: the level's values set over the mark's, an override's level in
+    /// place of the definition's, and the level's linked paragraph style, which [MS-DOC]
+    /// applies too, not reaching the label. Word gives the label the size of the mark's
+    /// character style but not its underline (E-list-label-format.docx, case 05, #330),
+    /// and so does this.
     ///
     /// What a level gives to labels is read once per level, however many paragraphs
     /// use it.
@@ -188,7 +245,13 @@ impl<'a> Formats<'a> {
         let properties = paragraph.properties();
         let style = self.paragraph_style(Some(paragraph.node()));
         let label = self.label_level(style, &properties)?;
-        Some(self.resolve_run(style, &properties.mark, label.as_deref()))
+        let table = self.table_text(paragraph.node());
+        Some(self.resolve_run(
+            style,
+            &properties.mark,
+            table.as_deref(),
+            Resolving::Label(label.as_deref()),
+        ))
     }
 
     /// The place among the styles of a paragraph's style: its own, else the default
@@ -215,6 +278,18 @@ impl<'a> Formats<'a> {
         &self.work
     }
 
+    /// How many table texts, paragraph defaults laid under styles in cells, style chains
+    /// and those chains laid over table texts are kept, for tests of the bounds.
+    #[cfg(test)]
+    pub(crate) fn kept_table_texts(&self) -> (usize, usize, usize, usize) {
+        (
+            self.table_texts.len(),
+            self.cell_paragraphs.len(),
+            self.paragraph_chains.levels.len(),
+            self.cell_levels.len(),
+        )
+    }
+
     /// How many combinations of a style and a list level are kept, for tests of the
     /// bound.
     #[cfg(test)]
@@ -235,16 +310,37 @@ impl<'a> Formats<'a> {
         written
             .and_then(|index| usize::try_from(index).ok())
             .or_else(|| {
-                *self.default_paragraph_style.get_or_insert_with(|| {
-                    document
-                        .styles
-                        .styles
-                        .iter()
-                        .take(MAX_STYLES)
-                        .rposition(|style| style.kind == StyleKind::Paragraph && style.is_default)
-                })
+                *self
+                    .default_paragraph_style
+                    .get_or_insert_with(|| default_paragraph_style(document))
             })
     }
+}
+
+/// The default paragraph style: the last paragraph style marked default.
+fn default_paragraph_style(document: &Document) -> Option<usize> {
+    document
+        .styles
+        .styles
+        .iter()
+        .take(MAX_STYLES)
+        .rposition(|style| style.kind == StyleKind::Paragraph && style.is_default)
+}
+
+/// Whether the style at `index` is the default paragraph style, whose values equal to
+/// the document defaults' Word does not keep as its own: it drops them from the copy it
+/// saves, and draws the cells of word-rules/E-table-style-size-*.docx as if the style did
+/// not give them, in the table style's size and justification whatever the setting
+/// `overrideTableStyleFontSizeAndJustification` says (Normal's `w:sz` equal to the
+/// defaults' and its `w:jc left`, #297). Outside tables nothing changes: the defaults give
+/// the same value.
+fn drops_values_equal_to_defaults(document: &Document, index: usize) -> bool {
+    document
+        .styles
+        .styles
+        .get(index)
+        .is_some_and(|style| style.kind == StyleKind::Paragraph && style.is_default)
+        && default_paragraph_style(document) == Some(index)
 }
 
 /// Works out once, after the styles are read, the paragraph style of every paragraph
@@ -304,6 +400,9 @@ trait Layer: Clone + Default {
 #[derive(Debug)]
 struct StyleLevels<L> {
     levels: HashMap<usize, Arc<L>>,
+    /// Whether each level is settled, as it is once it lies over the root; not for chains
+    /// that are laid over another level later.
+    settles: bool,
     /// How many times a style's own properties were read.
     #[cfg(test)]
     reads: usize,
@@ -313,8 +412,19 @@ impl<L> Default for StyleLevels<L> {
     fn default() -> Self {
         Self {
             levels: HashMap::new(),
+            settles: true,
             #[cfg(test)]
             reads: 0,
+        }
+    }
+}
+
+impl<L> StyleLevels<L> {
+    /// Levels that are not settled, for chains laid over another level later.
+    fn unsettled() -> Self {
+        Self {
+            settles: false,
+            ..Self::default()
         }
     }
 }
@@ -359,7 +469,9 @@ impl<L: Layer> StyleLevels<L> {
         for &style in cycle {
             let mut level = root.clone();
             level.overlay(&self.own(document, style));
-            level.settle();
+            if self.settles {
+                level.settle();
+            }
             self.levels.insert(style, Arc::new(level));
         }
         let tail = path
@@ -372,7 +484,9 @@ impl<L: Layer> StyleLevels<L> {
         for &style in tail.iter().rev() {
             let mut level = below.as_deref().unwrap_or(root).clone();
             level.overlay(&self.own(document, style));
-            level.settle();
+            if self.settles {
+                level.settle();
+            }
             let level = Arc::new(level);
             self.levels.insert(style, Arc::clone(&level));
             below = Some(level);
@@ -408,6 +522,42 @@ impl<L: Layer> StyleLevels<L> {
 /// document `fdo76101.docx` with 4,091. The bound keeps what the resolver keeps per style
 /// small.
 const MAX_STYLES: usize = 4093;
+
+impl Formats<'_> {
+    /// Forgets the table texts and what is laid over them, when there are too many.
+    fn forget_table_texts(&mut self) {
+        self.table_texts.clear();
+        self.cell_paragraphs.clear();
+        self.cell_levels.clear();
+    }
+
+    /// Whether, in a cell, the size of 11 or 12 pt and the left justification that the
+    /// default paragraph style gives give way to the table style's: when the setting
+    /// `overrideTableStyleFontSizeAndJustification` ([MS-DOCX] 2.3.x) is off. Not written,
+    /// it is off below compatibility mode 15, as word-rules/E-table-style-size-12pt-14.docx
+    /// shows (Word draws the cells in the table style's 14 pt over Normal's 12 pt), and on
+    /// from mode 15: Word writes it on when it saves such a document
+    /// (E-table-style-size-12pt-none.docx and the copy Word saved of it), and draws Normal's
+    /// 12 pt.
+    fn table_style_wins(&mut self) -> bool {
+        if let Some(wins) = self.table_style_wins {
+            return wins;
+        }
+        let settings = &self.document.settings;
+        let written = settings
+            .compatibility_settings()
+            .iter()
+            .rev()
+            .find(|setting| setting.name() == "overrideTableStyleFontSizeAndJustification")
+            .and_then(|setting| setting.value())
+            .map(|value| matches!(value.trim(), "1" | "true" | "on"));
+        let overrides = written.unwrap_or_else(|| {
+            settings.effective_compatibility_mode() >= super::CompatibilityMode::WORD_2013
+        });
+        self.table_style_wins = Some(!overrides);
+        !overrides
+    }
+}
 
 /// How many combinations of a paragraph style and a list level the resolver keeps at a
 /// time: each is a full set of paragraph properties, and the paragraphs of a document
