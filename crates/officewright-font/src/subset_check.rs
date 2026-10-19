@@ -64,6 +64,9 @@ struct Tables {
     /// Where the `CFF ` table is, and what the checks of its glyphs need of it, if the
     /// subsetter takes the CFF outlines.
     cff: Option<(Range<usize>, crate::cff::CffGlyphs)>,
+    /// Whether the subsetter's glyph closure may read more than [`MAX_CLOSURE_COST`]
+    /// for a glyph and `.notdef` ([`Glyf::may_read_long`]).
+    heavy: bool,
 }
 
 struct Glyf {
@@ -157,6 +160,7 @@ impl State {
                     glyf,
                     data,
                     glyph_count: face.glyph_count(),
+                    heavy: tables.heavy,
                 },
                 glyph,
                 &mut Found {
@@ -217,6 +221,9 @@ fn mark(bits: &mut [u64], glyph: u16) {
 enum Failure {
     /// The glyph and the glyphs its components use take every glyph ID with `.notdef`.
     AllIds,
+    /// The subsetter's glyph closure of the glyph and `.notdef` costs this, more than
+    /// [`MAX_CLOSURE_COST`].
+    TooLong(u64),
     /// Glyph `.0`, the glyph checked or one of the components it uses, is damaged.
     Glyph(u16, String),
     /// Glyph `.0` was found damaged before.
@@ -247,6 +254,14 @@ impl Failure {
                      IDs with .notdef, more than the subsetter can number"
                 )),
             },
+            Self::TooLong(cost) => Error::TableOverLimit {
+                face,
+                table: "glyf",
+                source: Cause::new(format!(
+                    "the subsetter's glyph closure of glyph {glyph} may read the glyphs and \
+                     their components {cost} times, more than {MAX_CLOSURE_COST}"
+                )),
+            },
             Self::Limit => Error::TableOverLimit {
                 face,
                 table: "glyf",
@@ -259,21 +274,22 @@ impl Failure {
     }
 }
 
-/// Whether subsetting the TrueType outlines of `face` to `glyphs` would make the subsetter
-/// number all 65,536 glyph IDs in its glyph closure, on which it panics
-/// ([`closure_overflows`]); false for a face whose `glyf` table it does not take.
-pub(crate) fn subset_overflows(face: &FontFace, glyphs: &[u16]) -> bool {
+/// Fails where subsetting the TrueType outlines of `face` to `glyphs` would make the
+/// subsetter's glyph closure number all 65,536 glyph IDs, on which it panics
+/// ([`number_closure`]), or cost more than [`MAX_CLOSURE_COST`] ([`closure_cost`]); Ok for
+/// a face whose `glyf` table it does not take.
+pub(crate) fn check_subset_closure(face: &FontFace, glyphs: &[u16]) -> Result<()> {
     let data = face.data();
     let Ok(font) = crate::font::font_ref(data, face.index()) else {
-        return false;
+        return Ok(());
     };
     let table = |tag: &[u8; 4]| subsetter_table_range(&font, data, tag);
     let (Some(glyf), Some(loca), Some(head)) = (table(b"glyf"), table(b"loca"), table(b"head"))
     else {
-        return false;
+        return Ok(());
     };
     let Some(long) = data.get(head).and_then(|head| i16_at(head, 50)) else {
-        return false;
+        return Ok(());
     };
     let glyf = Glyf {
         loca,
@@ -285,7 +301,27 @@ pub(crate) fn subset_overflows(face: &FontFace, glyphs: &[u16]) -> bool {
     kept.sort_unstable();
     kept.dedup();
     kept.insert(0, 0);
-    closure_overflows(&glyf, data, &kept, None).unwrap_or(false)
+    let face = face.index();
+    if let Some(Numbering::AllIds) = number_closure(&glyf, data, &kept, None) {
+        return Err(Error::SubsetUnsupported {
+            face,
+            source: Cause::new(
+                "the glyphs to keep and the glyphs their components use take all 65536 glyph \
+                 IDs with .notdef, more than the subsetter can number",
+            ),
+        });
+    }
+    match closure_cost(&glyf, data, &kept, None) {
+        Some(cost) if cost > MAX_CLOSURE_COST => Err(Error::TableOverLimit {
+            face,
+            table: "glyf",
+            source: Cause::new(format!(
+                "the subsetter's glyph closure of the glyphs to keep may read the glyphs and \
+                 their components {cost} times, more than {MAX_CLOSURE_COST}"
+            )),
+        }),
+        _ => Ok(()),
+    }
 }
 
 /// What [`check_closure`] reads a face's glyphs from.
@@ -294,6 +330,9 @@ struct ClosureCheck<'a> {
     glyf: &'a Glyf,
     data: &'a [u8],
     glyph_count: u16,
+    /// Whether the subsetter's closure of a glyph with `.notdef` may read more than
+    /// [`MAX_CLOSURE_COST`] in this face ([`Glyf::may_read_long`]).
+    heavy: bool,
 }
 
 /// What the checks of a face's TrueType glyphs found so far.
@@ -313,7 +352,7 @@ struct Found<'a> {
 /// Components may name glyphs past the face's glyph count, which the subsetter keeps
 /// where `loca` gives them an entry. Where the glyph's components, or `.notdef`'s, reach
 /// one, the glyphs they use might take every glyph ID with `.notdef`, on which the
-/// subsetter panics, so that is checked as it numbers them ([`closure_overflows`]),
+/// subsetter panics, so that is checked as it numbers them ([`number_closure`]),
 /// within the components the checks may follow.
 fn check_closure(
     face: &ClosureCheck<'_>,
@@ -347,9 +386,18 @@ fn check_closure(
         }
     }
     if reaches_past || found.notdef_past {
-        match closure_overflows(face.glyf, face.data, &[0, glyph], Some(found.components)) {
-            Some(true) => return Err(Failure::AllIds),
-            Some(false) => {}
+        let components = Some(&mut *found.components);
+        match number_closure(face.glyf, face.data, &[0, glyph], components) {
+            Some(Numbering::AllIds) => return Err(Failure::AllIds),
+            Some(Numbering::Ends) => {}
+            None => return Err(Failure::Limit),
+        }
+    }
+    if face.heavy {
+        let components = Some(&mut *found.components);
+        match closure_cost(face.glyf, face.data, &[0, glyph], components) {
+            Some(cost) if cost > MAX_CLOSURE_COST => return Err(Failure::TooLong(cost)),
+            Some(_) => {}
             None => return Err(Failure::Limit),
         }
     }
@@ -387,27 +435,112 @@ fn reaches_past(glyf: &Glyf, data: &[u8], glyph_count: u16, components: &mut u32
     false
 }
 
-/// Whether the subsetter numbers all 65,536 glyph IDs when it forms the glyph closure of
-/// `kept` (`glyf::closure` in its `src/glyf.rs`), on which it panics ("remapper was
-/// overflowed"): it takes the glyphs to keep, and each glyph's components as it reaches
-/// the glyph, reading them as its `component_glyphs` does, which stops at the first it
-/// cannot read; it stops at a glyph whose entry is too short for a header, with an error
-/// of its own.
-///
-/// The subsetter reads a glyph's components again each time it reaches the glyph; by
-/// then every one of them has been numbered, so reading them again numbers nothing and
-/// fails nowhere, and is skipped here. Each component read takes one off `components`,
-/// if given; `None` where none are left.
-fn closure_overflows(
+/// The most that the subsetter's glyph closure of one subset may cost, as
+/// [`closure_cost`] bounds it. The subsetter reads a glyph and its components again each
+/// time it reaches the glyph (<https://github.com/typst/subsetter/issues/36>), which
+/// costs a composite that names one glyph many times, which names many in turn, their
+/// product; at this bound it takes about 0.05 to 0.1 s. A subset of every glyph of a real
+/// font costs well under a tenth of it.
+pub(crate) const MAX_CLOSURE_COST: u64 = 1 << 24;
+
+/// How the subsetter's glyph closure of a set of glyphs ends, as [`number_closure`] finds.
+#[derive(Debug, PartialEq, Eq)]
+enum Numbering {
+    /// It ends, numbering every glyph it reaches, or stops with an error of its own.
+    Ends,
+    /// It numbers all 65,536 glyph IDs, and panics.
+    AllIds,
+}
+
+/// A bound on what the subsetter's glyph closure of `kept` reads: the sum, over the
+/// glyphs that `kept` and the components it uses reach, as the subsetter's
+/// `component_glyphs` reads components, of (1 + the times the composites among them name
+/// the glyph) × (1 + the glyph's components). The subsetter reaches a glyph at most once
+/// for each time a composite it read names it, and once more if it is kept, and reads its
+/// components each time, so it reads no more than this; and the bound grows with the
+/// glyphs kept, whatever order the subsetter takes them in, so that a glyph whose subset
+/// it refuses refuses every subset that keeps it, and one it takes, every subset of its
+/// own glyphs. Each component read takes one off `components`, if given; `None` where a
+/// composite has more than are left, which uses them up, and with none left a composite
+/// is not read at all.
+fn closure_cost(
     glyf: &Glyf,
     data: &[u8],
     kept: &[u16],
     mut components: Option<&mut u32>,
-) -> Option<bool> {
+) -> Option<u64> {
+    let mut named: HashMap<u16, u64> = HashMap::new();
+    let mut own: HashMap<u16, u64> = HashMap::new();
+    let mut stack: Vec<u16> = Vec::new();
+    for &glyph in kept {
+        if own.insert(glyph, 0).is_none() {
+            stack.push(glyph);
+        }
+    }
+    while let Some(glyph) = stack.pop() {
+        let entry = glyf
+            .entry(data, glyph)
+            .filter(|entry| i16_at(entry, 0).is_some_and(|contours| contours < 0));
+        // None left: the composite is not read at all, so that the next checks do not
+        // read it again either.
+        if entry.is_some() && components.as_deref() == Some(&0) {
+            return None;
+        }
+        let found = entry.and_then(closure_components).unwrap_or_default();
+        if let Some(components) = components.as_deref_mut() {
+            let len = u32::try_from(found.len()).unwrap_or(u32::MAX);
+            let Some(left) = components.checked_sub(len) else {
+                *components = 0;
+                return None;
+            };
+            *components = left;
+        }
+        own.insert(glyph, found.len() as u64);
+        for component in found {
+            *named.entry(component).or_insert(0) += 1;
+            if let std::collections::hash_map::Entry::Vacant(entry) = own.entry(component) {
+                entry.insert(0);
+                stack.push(component);
+            }
+        }
+    }
+    Some(own.iter().fold(0u64, |cost, (glyph, &components)| {
+        let named = named.get(glyph).copied().unwrap_or(0);
+        cost.saturating_add((1 + named).saturating_mul(1 + components))
+    }))
+}
+
+/// How the subsetter forms the glyph closure of `kept` (`glyf::closure` in its
+/// `src/glyf.rs`): it takes the glyphs to keep, and each glyph's components as it reaches
+/// the glyph, reading them as its `component_glyphs` does, which stops at the first it
+/// cannot read; it stops at a glyph whose entry is too short for a header, with an error
+/// of its own; it panics ("remapper was overflowed") once it numbers all 65,536 glyph
+/// IDs; and it reads a glyph again each time it reaches the glyph, which it does once for
+/// each time the glyph was put aside to read before it was numbered.
+///
+/// A glyph reached again has had every component it has numbered by then, so reading it
+/// again numbers nothing and fails nowhere, and here it is not read again. Each component
+/// read the first time takes one off `components`, if given; `None` where none are left.
+fn number_closure(
+    glyf: &Glyf,
+    data: &[u8],
+    kept: &[u16],
+    mut components: Option<&mut u32>,
+) -> Option<Numbering> {
     let mut numbered = vec![0u64; 1024];
     let mut read = vec![0u64; 1024];
     let mut count = 0usize;
     let mut stack: Vec<u16> = kept.to_vec();
+    let take = |components: &mut Option<&mut u32>, len: u32| -> Option<()> {
+        if let Some(components) = components.as_deref_mut() {
+            let Some(left) = components.checked_sub(len) else {
+                *components = 0;
+                return None;
+            };
+            *components = left;
+        }
+        Some(())
+    };
     for &glyph in kept {
         if !is_marked(&numbered, glyph) {
             mark(&mut numbered, glyph);
@@ -420,7 +553,7 @@ fn closure_overflows(
             count += 1;
         }
         if count > usize::from(u16::MAX) {
-            return Some(true);
+            return Some(Numbering::AllIds);
         }
         if is_marked(&read, glyph) {
             continue;
@@ -433,7 +566,7 @@ fn closure_overflows(
             continue;
         }
         let Some(contours) = i16_at(entry, 0) else {
-            return Some(false);
+            return Some(Numbering::Ends);
         };
         if contours >= 0 {
             continue;
@@ -444,19 +577,15 @@ fn closure_overflows(
             return None;
         }
         let Some(found) = closure_components(entry) else {
-            return Some(false);
+            return Some(Numbering::Ends);
         };
-        if let Some(components) = components.as_deref_mut() {
-            let len = u32::try_from(found.len()).unwrap_or(u32::MAX);
-            let Some(left) = components.checked_sub(len) else {
-                *components = 0;
-                return None;
-            };
-            *components = left;
-        }
+        take(
+            &mut components,
+            u32::try_from(found.len()).unwrap_or(u32::MAX),
+        )?;
         stack.extend(found.into_iter().filter(|&c| !is_marked(&numbered, c)));
     }
-    Some(false)
+    Some(Numbering::Ends)
 }
 
 impl Tables {
@@ -504,11 +633,13 @@ impl Tables {
             Some(_) => None,
             None => crate::cff::CffGlyphs::read(&font, data),
         };
+        let heavy = glyf.as_ref().is_some_and(|glyf| glyf.may_read_long(data));
         Ok(Self {
             glyf,
             hmtx,
             post,
             cff,
+            heavy,
         })
     }
 
@@ -548,6 +679,32 @@ fn number_of_h_metrics(hhea: &[u8]) -> Option<u16> {
 }
 
 impl Glyf {
+    /// Whether a glyph closure with `.notdef` and one glyph more can cost more than
+    /// [`MAX_CLOSURE_COST`] in this face ([`closure_cost`]): with `total` components in all
+    /// the face's composites and `most` in one, it reaches at most `total` + 2 glyphs, which
+    /// composites name `total` times in all, so it costs at most
+    /// (2 × `total` + 2) × (`most` + 1). Real fonts stay far below.
+    fn may_read_long(&self, data: &[u8]) -> bool {
+        let entries = data
+            .get(self.loca.clone())
+            .map_or(0, |loca| loca.len() / if self.long { 4 } else { 2 });
+        let (mut total, mut most) = (0u64, 0u64);
+        for glyph in 0..entries.min(1 << 16) {
+            let Some(entry) = u16::try_from(glyph)
+                .ok()
+                .and_then(|glyph| self.entry(data, glyph))
+            else {
+                continue;
+            };
+            if i16_at(entry, 0).is_some_and(|contours| contours < 0) {
+                let found = closure_components(entry).map_or(0, |found| found.len() as u64);
+                total += found;
+                most = most.max(found);
+            }
+        }
+        (2 * total + 2).saturating_mul(most + 1) > MAX_CLOSURE_COST
+    }
+
     /// The `glyf` entry of `glyph`, as the subsetter's `Table::glyph_data` finds it from its
     /// `loca` entries; `None` where they give no range of the table.
     fn entry<'a>(&self, data: &'a [u8], glyph: u16) -> Option<&'a [u8]> {
@@ -1161,7 +1318,8 @@ mod tests {
     fn numbers_a_closure_reading_each_glyph_once() {
         // Glyph 1 uses glyph 2 20,000 times, and glyph 2 uses glyph 3 as often. The
         // subsetter reads glyph 2 again each time it reaches it; that numbers nothing new,
-        // and the numbering reads it once.
+        // and the numbering reads it once. The closure costs about 400 million: past the
+        // limit.
         let mut entries = vec![Vec::new(); 4];
         entries[0] = glyph_entries()[0].clone();
         entries[1] = composite_of(&[2; 20_000]);
@@ -1171,10 +1329,11 @@ mod tests {
         let glyf = tables.glyf.unwrap();
         let mut components = 100_000;
         assert_eq!(
-            closure_overflows(&glyf, face.data(), &[0, 1], Some(&mut components)),
-            Some(false)
+            number_closure(&glyf, face.data(), &[0, 1], Some(&mut components)),
+            Some(Numbering::Ends)
         );
         assert_eq!(components, 60_000);
+        assert!(closure_cost(&glyf, face.data(), &[0, 1], None).unwrap() > MAX_CLOSURE_COST);
         // With none left, a composite is not read at all: here one whose header is cut off,
         // which ends the numbering when it is read.
         let mut entries = vec![Vec::new(); 2];
@@ -1184,13 +1343,13 @@ mod tests {
         let glyf = Tables::read(&face).unwrap().glyf.unwrap();
         let mut none = 0;
         assert_eq!(
-            closure_overflows(&glyf, face.data(), &[0, 1], Some(&mut none)),
+            number_closure(&glyf, face.data(), &[0, 1], Some(&mut none)),
             None
         );
         let mut one = 1;
         assert_eq!(
-            closure_overflows(&glyf, face.data(), &[0, 1], Some(&mut one)),
-            Some(false)
+            number_closure(&glyf, face.data(), &[0, 1], Some(&mut one)),
+            Some(Numbering::Ends)
         );
     }
 
@@ -1249,6 +1408,166 @@ mod tests {
         assert!(state.notdef_past);
         assert!(state.check(&face, 1).is_err());
         assert!(face.subset([GlyphId::new(1)]).is_err());
+    }
+
+    #[test]
+    fn bounds_what_the_subsetters_closure_reads() {
+        // .notdef uses glyph 1 three times, glyph 1 glyph 2 three times: .notdef costs
+        // 1 × 4, glyph 1, named three times, 4 × 4, and glyph 2 4 × 1: 24. The subsetter
+        // reads 19 times: .notdef and its 3 components, glyph 1 and its 3, glyph 2 three
+        // times, and glyph 1 twice more.
+        let mut entries = vec![Vec::new(); 3];
+        entries[0] = composite_of(&[1; 3]);
+        entries[1] = composite_of(&[2; 3]);
+        let face = crate::FontFace::from_bytes(font_of(&entries, false).build(), 0).unwrap();
+        let glyf = Tables::read(&face).unwrap().glyf.unwrap();
+        assert_eq!(closure_cost(&glyf, face.data(), &[0], None), Some(24));
+        // Keeping glyph 2 alone costs no more than keeping it in the closure of .notdef.
+        assert_eq!(closure_cost(&glyf, face.data(), &[2], None), Some(1));
+        // The components read are taken off what is left, and none left gives `None`.
+        let mut components = 6;
+        assert_eq!(
+            closure_cost(&glyf, face.data(), &[0], Some(&mut components)),
+            Some(24)
+        );
+        assert_eq!(components, 0);
+        let mut components = 5;
+        assert_eq!(
+            closure_cost(&glyf, face.data(), &[0], Some(&mut components)),
+            None
+        );
+        assert_eq!(components, 0);
+        // With none left, a composite is not read at all: here one whose header is cut off,
+        // which reads as no components when it is read.
+        let mut entries = vec![Vec::new(); 2];
+        entries[0] = glyph_entries()[0].clone();
+        entries[1] = vec![0xFF, 0xFF, 0, 0];
+        let face = crate::FontFace::from_bytes(font_of(&entries, false).build(), 0).unwrap();
+        let glyf = Tables::read(&face).unwrap().glyf.unwrap();
+        assert_eq!(
+            closure_cost(&glyf, face.data(), &[0, 1], Some(&mut 0)),
+            None
+        );
+        // A simple glyph of no contours, with an instruction length and instructions after
+        // its header, has no components.
+        let mut entries = vec![Vec::new(); 2];
+        entries[0] = glyph_entries()[0].clone();
+        entries[1] = [vec![0; 10], vec![0, 4, 0xB0, 0x01, 0xB0, 0x02]].concat();
+        let face = crate::FontFace::from_bytes(font_of(&entries, false).build(), 0).unwrap();
+        let glyf = Tables::read(&face).unwrap().glyf.unwrap();
+        assert_eq!(closure_cost(&glyf, face.data(), &[0, 1], None), Some(2));
+    }
+
+    #[test]
+    fn reads_no_composite_once_the_components_are_used_up() {
+        // With none left, the count reads no composite: once the components run out,
+        // checking every glyph takes time in proportion to the face, not glyphs times
+        // .notdef's components.
+        let mut entries = vec![Vec::new(); 30_000];
+        entries[0] = composite_of(&vec![1; 30_000]);
+        let face = crate::FontFace::from_bytes(font_of(&entries, false).build(), 0).unwrap();
+        // Following .notdef's 30,000 components when the face is first checked leaves one.
+        let mut state = State::new(&face, 30_001);
+        let started = std::time::Instant::now();
+        for glyph in 1..30_000 {
+            assert!(state.check(&face, glyph).is_err());
+        }
+        assert_eq!(state.components, 0);
+        // Reading .notdef's components for each glyph took over a minute in a debug build.
+        assert!(
+            started.elapsed().as_secs_f64() < 1.0,
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn refuses_a_closure_that_reads_more_than_the_subsetter_may() {
+        // Glyph 3 uses glyph 1 `n` times, glyph 1 glyph 2 `n` times: the closure of glyph 3
+        // and .notdef costs 1 + (n + 1) + (n + 1)² + (n + 1) = (n + 2)², 2²⁴ at n = 4094.
+        let font = |n: usize| {
+            let mut entries = vec![Vec::new(); 4];
+            entries[0] = glyph_entries()[0].clone();
+            entries[1] = composite_of(&vec![2; n]);
+            entries[3] = composite_of(&vec![1; n]);
+            font_of(&entries, false).build()
+        };
+        let face = crate::FontFace::from_bytes(font(4095), 0).unwrap();
+        assert!(Tables::read(&face).unwrap().heavy);
+        let refused = |result: Result<()>| {
+            let err = result.unwrap_err();
+            assert!(
+                matches!(err, Error::TableOverLimit { table: "glyf", .. }),
+                "{err}"
+            );
+            std::error::Error::source(&err).unwrap().to_string()
+        };
+        assert_eq!(
+            refused(face.subset([GlyphId::new(3)]).map(|_| ())),
+            format!(
+                "the subsetter's glyph closure of the glyphs to keep may read the glyphs and \
+                 their components 16785409 times, more than {MAX_CLOSURE_COST}"
+            )
+        );
+        assert_eq!(
+            refused(face.check_subset_glyph(GlyphId::new(3))),
+            format!(
+                "the subsetter's glyph closure of glyph 3 may read the glyphs and their \
+                 components 16785409 times, more than {MAX_CLOSURE_COST}"
+            )
+        );
+        face.check_subset_glyph(GlyphId::new(1)).unwrap();
+        face.subset([GlyphId::new(1)]).unwrap();
+        // The bound grows with the glyphs kept, so the checks agree with fresh subsets in
+        // either order: glyph 1 passes after glyph 3 failed, and glyph 3 fails after glyph
+        // 1 passed.
+        let face = crate::FontFace::from_bytes(font(4095), 0).unwrap();
+        assert!(face.check_subset_glyph(GlyphId::new(3)).is_err());
+        face.check_subset_glyph(GlyphId::new(1)).unwrap();
+        // At n = 4094 it costs the limit itself, and passes; the subsetter is not run on it
+        // here.
+        let face = crate::FontFace::from_bytes(font(4094), 0).unwrap();
+        face.check_subset_glyph(GlyphId::new(3)).unwrap();
+        check_subset_closure(&face, &[3]).unwrap();
+        // The check of glyph 3 follows its 4,094 components, and glyph 1's 4,094 (8,188),
+        // and the count of its closure reads them again (16,376): within what the checks
+        // may follow, or not.
+        let mut state = State::new(&face, 10_000);
+        let err = state.check(&face, 3).unwrap_err();
+        assert!(
+            std::error::Error::source(&err)
+                .unwrap()
+                .to_string()
+                .contains("follows more than"),
+            "{err}"
+        );
+        let mut state = State::new(&face, 20_000);
+        state.check(&face, 3).unwrap();
+        assert_eq!(20_000 - state.components, 16_376);
+        // A face is heavy where (2 × components in all + 2) × (most in one + 1) is past the
+        // limit: one composite of 2,896 components is, of 2,895 not; 128 composites of 255
+        // and one of 128 (32,768 in all, 255 the most) are just past it, so neither the 2
+        // nor the 1 can go; and the total is of all composites, the most of the largest.
+        let heavy = |sizes: &[usize]| {
+            let mut entries = vec![Vec::new(); sizes.len() + 2];
+            entries[0] = glyph_entries()[0].clone();
+            let target = u16::try_from(sizes.len() + 1).unwrap();
+            for (i, &n) in sizes.iter().enumerate() {
+                entries[i + 1] = composite_of(&vec![target; n]);
+            }
+            let face = crate::FontFace::from_bytes(font_of(&entries, false).build(), 0).unwrap();
+            Tables::read(&face).unwrap().heavy
+        };
+        assert!(heavy(&[2896]));
+        assert!(!heavy(&[2895]));
+        let mut sizes = vec![255; 128];
+        sizes.push(128);
+        assert!(heavy(&sizes));
+        assert!(heavy(&[2500, 1000]));
+        assert!(heavy(&[1000, 2500]));
+        // A face whose closures cannot cost that much is not counted for each glyph.
+        let face = crate::FontFace::from_bytes(TestFont::new("Check Sans").build(), 0).unwrap();
+        assert!(!Tables::read(&face).unwrap().heavy);
     }
 
     /// The font `data` with its table `tag` replaced by `table`, of the same length.
