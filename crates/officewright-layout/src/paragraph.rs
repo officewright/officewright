@@ -10,6 +10,7 @@ use crate::fonts::Fonts;
 use crate::ir::{CompatFlag, Document, Paragraph, ParagraphProps};
 use crate::itemize::{FieldValues, Itemized, itemize_with, shape_runs};
 use crate::lines::{Breaker, Input, Line};
+use crate::lists::Label;
 use crate::report::Location;
 use crate::shape::Shaper;
 
@@ -35,8 +36,10 @@ impl ParagraphLayout {
     }
 }
 
-/// Lays out `paragraph` of `document` in a column `width` wide; `location` is its place,
-/// for the report. Its fields show the results the document stores.
+/// Lays out `paragraph` of `document` in a column `width` wide, without a list label;
+/// `location` is its place, for the report. Its fields show the results the document
+/// stores. For the unit tests.
+#[cfg(test)]
 pub(crate) fn lay_out(
     document: &Document,
     paragraph: &Paragraph,
@@ -45,19 +48,34 @@ pub(crate) fn lay_out(
     shaper: &mut Shaper,
     location: &Location,
 ) -> ParagraphLayout {
-    lay_out_with(document, paragraph, width, (fonts, shaper), location, None)
+    lay_out_with(
+        document,
+        (paragraph, None),
+        width,
+        (fonts, shaper),
+        location,
+        None,
+    )
 }
 
-/// [`lay_out`], with `fields` the values of the fields the layout computes.
+/// Lays out `paragraph` of `document` in a column `width` wide, starting with `label` when
+/// it is a list item; `location` is its place, for the report. Its fields show the values
+/// `fields` gives for those the layout computes, else the results the document stores.
 pub(crate) fn lay_out_with(
     document: &Document,
-    paragraph: &Paragraph,
+    (paragraph, label): (&Paragraph, Option<&Label>),
     width: Pt,
     (fonts, shaper): (&mut Fonts<'_>, &mut Shaper),
     location: &Location,
     fields: Option<&FieldValues>,
 ) -> ParagraphLayout {
-    let itemized = itemize_with(document, paragraph.inlines(), fonts, location, fields);
+    let itemized = itemize_with(
+        document,
+        (label, paragraph.inlines()),
+        fonts,
+        location,
+        fields,
+    );
     let shaped = shape_runs(document, &itemized, fonts, shaper, location);
     let input = Input {
         document,
