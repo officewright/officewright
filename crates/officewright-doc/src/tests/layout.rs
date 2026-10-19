@@ -566,6 +566,234 @@ fn lists_a_border_around_a_run_of_a_tab_and_the_glyph_features_of_symbols_and_re
 }
 
 #[test]
+fn lists_word_s_text_effects_once_but_no_value_that_changes_nothing() {
+    // Issue #339: Word 2010's effects of text ([MS-DOCX] 2.6.1) have no place in the
+    // IR's run style, so the PDF draws the text plain. Word writes some with values that
+    // change nothing, as in the list levels of LibreOffice's
+    // tdf166205_first_page_header_footer_visible.docx: those are no entry. Attributes not
+    // written take [MS-DOCX]'s defaults (2.6.3), mostly 0.
+    const W14: &str = "http://schemas.microsoft.com/office/word/2010/wordml";
+    let messages = |r_pr: &str, content: &str| -> Vec<String> {
+        let body =
+            format!(r#"<w:p><w:r><w:rPr xmlns:w14="{W14}">{r_pr}</w:rPr>{content}</w:r></w:p>"#);
+        translate(&open(&body))
+            .left_out()
+            .iter()
+            .map(|entry| entry.message().to_owned())
+            .collect()
+    };
+    let glow = "glowing text (w14:glow) is drawn without its glow, here and wherever else the document has it";
+    let shadow = "text with a shadow effect (w14:shadow) is drawn without its shadow, here and wherever else the document has it";
+    let reflection = "a reflection of text (w14:reflection) is not drawn, here and wherever else the document has one";
+    let outline = "an outline of text (w14:textOutline) is not drawn, here and wherever else the document has one";
+    let fill = "a fill of text (w14:textFill) is not applied, so the text is drawn in its colour, here and wherever else the document has one";
+    let depth = "3-D text (w14:scene3d, w14:props3d) is drawn flat, here and wherever else the document has it";
+    let red = r#"<w14:srgbClr w14:val="FF0000"/>"#;
+    let full = r#"w14:sx="100000" w14:sy="100000""#;
+    let front = r#"<w14:camera w14:prst="orthographicFront"/>"#;
+    let listed = [
+        (format!(r#"<w14:glow w14:rad="63500">{red}</w14:glow>"#), glow),
+        (
+            format!(
+                r#"<w14:shadow w14:blurRad="50800" w14:dist="38100" w14:dir="2700000" w14:sx="100000" w14:sy="100000" w14:kx="0" w14:ky="0" w14:algn="tl">{red}</w14:shadow>"#
+            ),
+            shadow,
+        ),
+        // A blurred shadow right under the text shows as a halo; each other difference
+        // from one right under it shows too.
+        (format!(r#"<w14:shadow w14:blurRad="25400" {full}>{red}</w14:shadow>"#), shadow),
+        (format!(r#"<w14:shadow w14:dist="38100" {full}>{red}</w14:shadow>"#), shadow),
+        (format!(r#"<w14:shadow w14:sx="90000" w14:sy="100000">{red}</w14:shadow>"#), shadow),
+        (format!(r#"<w14:shadow w14:sx="100000" w14:sy="90000">{red}</w14:shadow>"#), shadow),
+        (format!(r#"<w14:shadow w14:kx="-800400" {full}>{red}</w14:shadow>"#), shadow),
+        (format!(r#"<w14:shadow w14:ky="800400" {full}>{red}</w14:shadow>"#), shadow),
+        (
+            r#"<w14:reflection w14:blurRad="6350" w14:stA="50000" w14:stPos="0" w14:endA="300" w14:endPos="50000" w14:dist="29997" w14:dir="5400000" w14:fadeDir="5400000" w14:sx="100000" w14:sy="-100000" w14:kx="0" w14:ky="0" w14:algn="bl"/>"#.to_owned(),
+            reflection,
+        ),
+        // Only an end opacity, or only a start one, the other at its default of 0.
+        (format!(r#"<w14:reflection w14:endA="300" {full}/>"#), reflection),
+        (format!(r#"<w14:reflection w14:stA="47000" {full}/>"#), reflection),
+        (
+            format!(r#"<w14:textOutline w14:w="9525"><w14:solidFill>{red}</w14:solidFill></w14:textOutline>"#),
+            outline,
+        ),
+        (
+            format!(r#"<w14:textOutline w14:w="0"><w14:gradFill><w14:gsLst><w14:gs w14:pos="0">{red}</w14:gs></w14:gsLst></w14:gradFill></w14:textOutline>"#),
+            outline,
+        ),
+        ("<w14:textFill><w14:noFill/></w14:textFill>".to_owned(), fill),
+        (
+            format!(r#"<w14:textFill><w14:gradFill><w14:gsLst><w14:gs w14:pos="0">{red}</w14:gs></w14:gsLst></w14:gradFill></w14:textFill>"#),
+            fill,
+        ),
+        // Another colour than the text's (automatic), one changed by transparency, black
+        // over red text (a fill without a child, a solid fill without a colour), and a
+        // theme colour without a theme part to resolve it.
+        (format!("<w14:textFill><w14:solidFill>{red}</w14:solidFill></w14:textFill>"), fill),
+        (
+            r#"<w:color w:val="FF0000"/><w14:textFill><w14:solidFill><w14:srgbClr w14:val="FF0000"><w14:alpha w14:val="74000"/></w14:srgbClr></w14:solidFill></w14:textFill>"#.to_owned(),
+            fill,
+        ),
+        (r#"<w:color w:val="FF0000"/><w14:textFill/>"#.to_owned(), fill),
+        (
+            r#"<w:color w:val="FF0000"/><w14:textFill><w14:solidFill/></w14:textFill>"#.to_owned(),
+            fill,
+        ),
+        (
+            r#"<w14:textFill><w14:solidFill><w14:schemeClr w14:val="tx1"/></w14:solidFill></w14:textFill>"#.to_owned(),
+            fill,
+        ),
+        (
+            r#"<w14:scene3d><w14:camera w14:prst="isometricRightUp"/><w14:lightRig w14:rig="threePt" w14:dir="t"/></w14:scene3d>"#.to_owned(),
+            depth,
+        ),
+        (
+            r#"<w14:props3d w14:extrusionH="0" w14:contourW="0" w14:prstMaterial="warmMatte"><w14:bevelT w14:w="27940" w14:h="12700" w14:prst="circle"/></w14:props3d>"#.to_owned(),
+            depth,
+        ),
+        (r#"<w14:props3d w14:contourW="8890"/>"#.to_owned(), depth),
+    ];
+    for (r_pr, message) in &listed {
+        assert_eq!(messages(r_pr, "<w:t>x</w:t>"), [*message], "{r_pr}");
+    }
+    // Values that change nothing, all in one run; the text's own colour as a fill.
+    let nothing = format!(
+        r#"<w:color w:val="FF0000"/><w14:glow w14:rad="0">{red}</w14:glow><w14:shadow w14:blurRad="0" w14:dist="0" w14:dir="0" w14:sx="0" w14:sy="0" w14:kx="0" w14:ky="0" w14:algn="none">{red}</w14:shadow><w14:reflection w14:blurRad="0" w14:stA="0" w14:stPos="0" w14:endA="0" w14:endPos="0" w14:dist="0" w14:dir="0" w14:fadeDir="0" w14:sx="0" w14:sy="0" w14:kx="0" w14:ky="0" w14:algn="none"/><w14:textOutline w14:w="0" w14:cap="rnd" w14:cmpd="sng" w14:algn="ctr"><w14:noFill/><w14:prstDash w14:val="solid"/><w14:bevel/></w14:textOutline><w14:textFill><w14:solidFill>{red}</w14:solidFill></w14:textFill><w14:scene3d>{front}<w14:lightRig w14:rig="threePt" w14:dir="t"><w14:rot w14:lat="0" w14:lon="0" w14:rev="0"/></w14:lightRig></w14:scene3d><w14:props3d w14:extrusionH="0" w14:contourW="0" w14:prstMaterial="none"/>"#
+    );
+    assert!(messages(&nothing, "<w:t>x</w:t>").is_empty());
+    for r_pr in [
+        "<w14:glow/>".to_owned(),
+        // Scaled to nothing: sx and sy are 0 unless written.
+        format!("<w14:shadow>{red}</w14:shadow>"),
+        format!(r#"<w14:shadow w14:blurRad="25400">{red}</w14:shadow>"#),
+        format!(r#"<w14:shadow w14:blurRad="25400" w14:sx="0" w14:sy="100000">{red}</w14:shadow>"#),
+        format!(r#"<w14:shadow w14:blurRad="25400" w14:sx="100000" w14:sy="0">{red}</w14:shadow>"#),
+        format!(r#"<w14:shadow {full}>{red}</w14:shadow>"#),
+        "<w14:reflection/>".to_owned(),
+        format!("<w14:reflection {full}/>"),
+        r#"<w14:reflection w14:stA="50000" w14:sx="0" w14:sy="-100000"/>"#.to_owned(),
+        r#"<w14:reflection w14:stA="50000" w14:sx="100000" w14:sy="0"/>"#.to_owned(),
+        r#"<w14:textOutline w14:w="9525"/>"#.to_owned(),
+        // Black over black text.
+        r#"<w:color w:val="000000"/><w14:textFill/>"#.to_owned(),
+        r#"<w:color w:val="000000"/><w14:textFill><w14:solidFill/></w14:textFill>"#.to_owned(),
+        format!("<w14:scene3d>{front}</w14:scene3d>"),
+        // A bevel without a width or a height (0 unless written), and depth and a bottom
+        // bevel facing away from a camera in front.
+        "<w14:props3d><w14:bevelT/></w14:props3d>".to_owned(),
+        r#"<w14:props3d><w14:bevelT w14:w="38100"/></w14:props3d>"#.to_owned(),
+        r#"<w14:props3d><w14:bevelT w14:h="38100"/></w14:props3d>"#.to_owned(),
+        r#"<w14:props3d w14:extrusionH="57150"><w14:bevelB w14:w="38100" w14:h="38100"/></w14:props3d>"#.to_owned(),
+    ] {
+        assert!(messages(&r_pr, "<w:t>x</w:t>").is_empty(), "{r_pr}");
+    }
+    // A hidden run, or one with no text, shows nothing they could change.
+    let glowing = format!(r#"<w14:glow w14:rad="63500">{red}</w14:glow>"#);
+    assert!(messages(&format!("<w:vanish/>{glowing}"), "<w:t>x</w:t>").is_empty());
+    assert!(messages(&glowing, "<w:tab/>").is_empty());
+    // What a style gives counts, effect by effect, and a run's own value that changes
+    // nothing wins over it.
+    let off = [
+        r#"<w14:glow w14:rad="0"/>"#,
+        "<w14:shadow/>",
+        "<w14:reflection/>",
+        "<w14:textOutline><w14:noFill/></w14:textOutline>",
+        r#"<w14:textFill><w14:solidFill><w14:srgbClr w14:val="000000"/></w14:solidFill></w14:textFill>"#,
+        format!("<w14:scene3d>{front}</w14:scene3d>").leak(),
+        "<w14:props3d/>",
+    ];
+    let given = [0, 1, 8, 11, 13, 20, 21];
+    for (&at, own) in given.iter().zip(off) {
+        let (r_pr, message) = &listed[at];
+        let styles = (
+            "styles",
+            "styles.xml",
+            format!(
+                r#"<w:styles xmlns:w="{W}" xmlns:w14="{W14}"><w:style w:type="character" w:styleId="Effect"><w:name w:val="Effect"/><w:rPr>{r_pr}</w:rPr></w:style></w:styles>"#
+            ),
+        );
+        let entries = |own: &str| -> Vec<String> {
+            let body = format!(
+                r#"<w:p><w:r><w:rPr xmlns:w14="{W14}"><w:rStyle w:val="Effect"/><w:color w:val="000000"/>{own}</w:rPr><w:t>x</w:t></w:r></w:p>"#
+            );
+            translate(&with_parts(&body, std::slice::from_ref(&styles)))
+                .left_out()
+                .iter()
+                .map(|entry| entry.message().to_owned())
+                .collect()
+        };
+        assert_eq!(entries(""), [*message], "{r_pr}");
+        assert!(entries(own).is_empty(), "{own} over {r_pr}");
+    }
+    // A fill of a theme colour is the theme's colour: the text's own changes nothing.
+    let theme = (
+        "theme",
+        "theme/theme1.xml",
+        format!(
+            r#"<a:theme xmlns:a="{A}" name="T"><a:themeElements><a:clrScheme name="C"><a:dk1><a:srgbClr val="000000"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="111111"/></a:dk2><a:lt2><a:srgbClr val="EEEEEE"/></a:lt2><a:accent1><a:srgbClr val="4F81BD"/></a:accent1><a:accent2><a:srgbClr val="C0504D"/></a:accent2><a:accent3><a:srgbClr val="030303"/></a:accent3><a:accent4><a:srgbClr val="040404"/></a:accent4><a:accent5><a:srgbClr val="050505"/></a:accent5><a:accent6><a:srgbClr val="060606"/></a:accent6><a:hlink><a:srgbClr val="0000FF"/></a:hlink><a:folHlink><a:srgbClr val="800080"/></a:folHlink></a:clrScheme><a:fontScheme name="F"><a:majorFont><a:latin typeface="Major"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont><a:minorFont><a:latin typeface="Minor"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont></a:fontScheme><a:fmtScheme name="S"/></a:themeElements></a:theme>"#
+        ),
+    );
+    let themed = |scheme: &str| -> Vec<String> {
+        let body = format!(
+            r#"<w:p><w:r><w:rPr xmlns:w14="{W14}"><w:color w:val="4F81BD" w:themeColor="accent1"/><w14:textFill><w14:solidFill><w14:schemeClr w14:val="{scheme}"/></w14:solidFill></w14:textFill></w:rPr><w:t>x</w:t></w:r></w:p>"#
+        );
+        translate(&with_parts(&body, std::slice::from_ref(&theme)))
+            .left_out()
+            .iter()
+            .map(|entry| entry.message().to_owned())
+            .collect()
+    };
+    assert!(themed("accent1").is_empty());
+    assert_eq!(themed("accent2"), [fill]);
+    // Each colour of the scheme is its theme colour, text and background through the
+    // document's mapping, which here swaps them: a fill of each over text of its own theme
+    // colour changes nothing, and one over another does.
+    let mapping = (
+        "settings",
+        "settings.xml",
+        format!(
+            r#"<w:settings xmlns:w="{W}"><w:clrSchemeMapping w:bg1="dark1" w:t1="light1" w:bg2="dark2" w:t2="light2" w:accent1="accent1" w:accent2="accent2" w:accent3="accent3" w:accent4="accent4" w:accent5="accent5" w:accent6="accent6" w:hyperlink="hyperlink" w:followedHyperlink="followedHyperlink"/></w:settings>"#
+        ),
+    );
+    let mapped = |text: &str, scheme: &str| -> Vec<String> {
+        let body = format!(
+            r#"<w:p><w:r><w:rPr xmlns:w14="{W14}"><w:color w:val="000000" w:themeColor="{text}"/><w14:textFill><w14:solidFill><w14:schemeClr w14:val="{scheme}"/></w14:solidFill></w14:textFill></w:rPr><w:t>x</w:t></w:r></w:p>"#
+        );
+        translate(&with_parts(&body, &[theme.clone(), mapping.clone()]))
+            .left_out()
+            .iter()
+            .map(|entry| entry.message().to_owned())
+            .collect()
+    };
+    let pairs = [
+        ("background1", "bg1"),
+        ("text1", "tx1"),
+        ("background2", "bg2"),
+        ("text2", "tx2"),
+        ("dark1", "dk1"),
+        ("light1", "lt1"),
+        ("dark2", "dk2"),
+        ("light2", "lt2"),
+        ("accent3", "accent3"),
+        ("accent4", "accent4"),
+        ("accent5", "accent5"),
+        ("accent6", "accent6"),
+        ("hyperlink", "hlink"),
+        ("followedHyperlink", "folHlink"),
+    ];
+    for (text, scheme) in pairs {
+        assert!(mapped(text, scheme).is_empty(), "{scheme} over {text}");
+    }
+    // tx1 is light 1 through the mapping, dk1 dark 1 whatever the mapping says.
+    assert_eq!(mapped("text1", "dk1"), [fill]);
+    assert_eq!(mapped("dark1", "tx1"), [fill]);
+    // A gradient is listed over text of any colour, black too.
+    let gradient = r#"<w:color w:val="000000"/><w14:textFill><w14:gradFill><w14:gsLst><w14:gs w14:pos="0"><w14:srgbClr w14:val="000000"/></w14:gs></w14:gsLst></w14:gradFill></w14:textFill>"#;
+    assert_eq!(messages(gradient, "<w:t>x</w:t>"), [fill]);
+}
+
+#[test]
 fn lists_a_deleted_mark_only_where_a_block_follows_it() {
     // From the re-checks of #326: Word joins a paragraph whose mark is deleted to what
     // follows it, but the last paragraph of a cell or a story has nothing after it. Word
