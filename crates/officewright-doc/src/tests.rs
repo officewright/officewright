@@ -1977,6 +1977,44 @@ fn messages(document: &Document) -> Vec<&str> {
 }
 
 #[test]
+fn refuses_lengths_and_widths_with_whitespace_around_them_as_word_does() {
+    // As integers: Office accepts only atomic values already normalized (MS-OI29500
+    // 2.1.1(a), #243). Each is reported and left out.
+    let document = open(
+        "<w:p><w:pPr><w:ind w:left=\" 720 \"/><w:spacing w:after=\"240&#9;\"/></w:pPr></w:p>\
+         <w:tbl><w:tblPr><w:tblW w:w=\" 5000\" w:type=\"dxa\"/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>",
+    );
+    let properties = first_paragraph(&document).properties();
+    assert_eq!(properties.indentation().and_then(Indentation::start), None);
+    assert_eq!(properties.spacing().and_then(Spacing::after), None);
+    assert_eq!(first_table(&document).properties().width(), None);
+    let listed = messages(&document);
+    assert_eq!(listed.len(), 3, "{listed:?}");
+    assert!(
+        listed
+            .iter()
+            .all(|m| m.ends_with("is not valid; it is ignored")),
+        "{listed:?}"
+    );
+    // Written as Word writes them, they are read.
+    let document = open(
+        "<w:p><w:pPr><w:ind w:left=\"720\"/><w:spacing w:after=\"240\"/></w:pPr></w:p>\
+         <w:tbl><w:tblPr><w:tblW w:w=\"5000\" w:type=\"dxa\"/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>",
+    );
+    let properties = first_paragraph(&document).properties();
+    assert_eq!(
+        properties.indentation().and_then(Indentation::start),
+        Some(Pt(36.0))
+    );
+    assert_eq!(
+        properties.spacing().and_then(Spacing::after),
+        Some(Pt(12.0))
+    );
+    assert!(first_table(&document).properties().width().is_some());
+    assert!(messages(&document).is_empty());
+}
+
+#[test]
 fn refuses_integers_with_whitespace_around_them_as_word_does() {
     // ST_DecimalNumber is an xsd:integer, whose whitespace the schema collapses, but Office
     // accepts only values already normalized (MS-OI29500 2.1.1(a)): each is reported and

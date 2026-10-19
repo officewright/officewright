@@ -333,7 +333,9 @@ pub(super) fn read_programs(
 /// The 16 bytes of a `w:fontKey` (ST_Guid, `{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}`):
 /// those its hexadecimal digits give, read in pairs as written, in reverse order.
 fn font_key(value: &str) -> Option<[u8; 16]> {
-    let digits = value.trim().strip_prefix('{')?.strip_suffix('}')?;
+    // Not trimmed: Office takes atomic values only with their whitespace already
+    // normalized (MS-OI29500 2.1.1(a), #243).
+    let digits = value.strip_prefix('{')?.strip_suffix('}')?;
     let groups: Vec<&str> = digits.split('-').collect();
     let lengths: Vec<usize> = groups.iter().map(|group| group.len()).collect();
     if lengths != [8, 4, 4, 4, 12] {
@@ -381,4 +383,19 @@ fn is_font(bytes: &[u8]) -> bool {
         bytes.get(..4),
         Some(b"\x00\x01\x00\x00" | b"OTTO" | b"true" | b"ttcf")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refuses_a_font_key_with_whitespace_around_it_as_word_does() {
+        // MS-OI29500 2.1.1(a), #243.
+        let key = "{01234567-89AB-CDEF-0123-456789ABCDEF}";
+        assert!(font_key(key).is_some());
+        for value in [format!(" {key}"), format!("{key}\n"), format!("\t{key} ")] {
+            assert_eq!(font_key(&value), None, "{value:?}");
+        }
+    }
 }

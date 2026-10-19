@@ -476,6 +476,32 @@ fn places_a_picture_by_its_simple_position_when_the_anchor_says_so() {
 }
 
 #[test]
+fn refuses_a_picture_s_attribute_values_with_whitespace_around_them_as_word_does() {
+    // Office accepts only atomic values already normalized (MS-OI29500 2.1.1(a), #243):
+    // " 914400 " is no width, " 1 " does not put the picture behind the text, and " 7" is
+    // no stacking order. A picture written so takes the defaults.
+    let picture = |behind: &str, height: &str, cx: &str| {
+        format!(
+            r#"<w:p><w:r><w:drawing><wp:anchor xmlns:wp="{WP}" relativeHeight="{height}" behindDoc="{behind}" locked="0" layoutInCell="1" allowOverlap="1" simplePos="0"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="{cx}" cy="12700"/><wp:wrapNone/><wp:docPr id="1" name="p"/>{}</wp:anchor></w:drawing></w:r></w:p>"#,
+            graphic("rIdPng", "", "")
+        )
+    };
+    let document = with_images(&picture(" 1 ", " 7", " 914400 "));
+    let drawing = drawings(&document)[0];
+    let anchor = drawing.anchor().unwrap();
+    assert!(!anchor.behind_text());
+    assert_eq!(anchor.z_order(), 0);
+    assert_eq!((drawing.width(), drawing.height()), (None, Some(Pt(1.0))));
+    // Written as Word writes them, they are read.
+    let document = with_images(&picture("1", "7", "914400"));
+    let drawing = drawings(&document)[0];
+    let anchor = drawing.anchor().unwrap();
+    assert!(anchor.behind_text());
+    assert_eq!(anchor.z_order(), 7);
+    assert_eq!(drawing.width(), Some(Pt(72.0)));
+}
+
+#[test]
 fn reads_a_strict_picture() {
     let xml = r#"<w:document xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main" xmlns:r="http://purl.oclc.org/ooxml/officeDocument/relationships" conformance="strict"><w:body><w:p><w:r><w:drawing><wp:inline xmlns:wp="http://purl.oclc.org/ooxml/drawingml/wordprocessingDrawing"><wp:extent cx="2in" cy="1in"/><wp:docPr id="1" name="p"/><a:graphic xmlns:a="http://purl.oclc.org/ooxml/drawingml/main"><a:graphicData uri="http://purl.oclc.org/ooxml/drawingml/picture"><pic:pic xmlns:pic="http://purl.oclc.org/ooxml/drawingml/picture"><pic:blipFill><a:blip r:embed="rIdNone"/><a:srcRect l="10%" r="-5.5%"/></pic:blipFill><pic:spPr/></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body></w:document>"#;
     let document = Document::from_bytes(package(DOCUMENT, xml, &[])).unwrap();
