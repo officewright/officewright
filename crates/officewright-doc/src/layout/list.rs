@@ -68,7 +68,8 @@ impl Translator<'_> {
     /// that writes its number, and no placeholder of a deeper level, which makes Word
     /// ignore the whole text (MS-OI29500 2.1.283 c). Worked out once for each instance
     /// and level, from the IR's levels, so that the cost does not grow with the items or
-    /// the length of a text.
+    /// the length of a text. It looks at the level, not at an item's number: a format that
+    /// writes nothing for some numbers, such as Chicago's past 116, counts as drawing.
     pub(super) fn label_draws(&mut self, id: i64, level: u8) -> bool {
         if let Some(&draws) = self.lists.draws.get(&(id, level)) {
             return draws;
@@ -150,7 +151,10 @@ impl Translator<'_> {
 }
 
 /// The layout's bound on what it reads of a level's text, counted as it counts: a
-/// character one, a placeholder two, a piece of text with no characters one.
+/// character one, a placeholder two, a piece of text with no characters one. A copy of
+/// `MAX_LABEL_CHARS` in officewright-layout's `lists.rs`, which is private there, as the
+/// characters drawn below copy its `drawn`: a change there is made here too, or the
+/// report and the PDF disagree.
 const MAX_LABEL_CHARS: usize = 256;
 
 /// Whether the label of an item at `index` of `instance` draws something; see
