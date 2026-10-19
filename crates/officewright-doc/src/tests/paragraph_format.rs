@@ -1953,28 +1953,34 @@ fn takes_the_last_paragraph_style_marked_default() {
 #[test]
 fn looks_for_the_default_style_among_the_styles_the_resolver_uses() {
     // From the review of #319: a default paragraph style past the first 4,093 styles is
-    // taken neither by the resolver nor by Styles::default_style, so the two agree.
-    let many: String = (0..4100)
-        .map(|n| {
-            format!(
-                r#"<w:style w:type="character" w:styleId="C{n}"><w:name w:val="C{n}"/></w:style>"#
-            )
-        })
-        .collect();
-    let styles = [
-        defaults(""),
-        r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>"#.to_owned(),
-        many,
-        r#"<w:style w:type="paragraph" w:default="1" w:styleId="Late"><w:name w:val="Late"/><w:pPr><w:jc w:val="center"/></w:pPr></w:style>"#.to_owned(),
-    ]
-    .concat();
-    let document = build(&paragraph("", ""), &styles, None);
-    assert_eq!(formats(&document)[0].style(), Some("Normal"));
-    assert_eq!(
-        document
+    // taken neither by the resolver nor by Styles::default_style, so the two agree. With
+    // Normal first, `fillers` character styles put the late default at index fillers + 1:
+    // 4,092 is the last style used, 4,093 the first one left out.
+    let default_with = |fillers: usize| {
+        let many: String = (0..fillers)
+            .map(|n| {
+                format!(
+                    r#"<w:style w:type="character" w:styleId="C{n}"><w:name w:val="C{n}"/></w:style>"#
+                )
+            })
+            .collect();
+        let styles = [
+            defaults(""),
+            r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>"#.to_owned(),
+            many,
+            r#"<w:style w:type="paragraph" w:default="1" w:styleId="Late"><w:name w:val="Late"/><w:pPr><w:jc w:val="center"/></w:pPr></w:style>"#.to_owned(),
+        ]
+        .concat();
+        let document = build(&paragraph("", ""), &styles, None);
+        let resolver = formats(&document)[0].style().map(str::to_owned);
+        let styles = document
             .styles()
             .default_style(StyleKind::Paragraph)
-            .map(Style::id),
-        Some("Normal")
-    );
+            .map(|style| style.id().to_owned());
+        assert_eq!(resolver, styles, "{fillers}");
+        styles
+    };
+    assert_eq!(default_with(4091).as_deref(), Some("Late"));
+    assert_eq!(default_with(4092).as_deref(), Some("Normal"));
+    assert_eq!(default_with(4100).as_deref(), Some("Normal"));
 }
