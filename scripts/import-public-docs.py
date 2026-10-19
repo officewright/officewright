@@ -855,7 +855,9 @@ def part_roles(parts: dict[str, bytes]) -> dict[str, set[str]]:
     by_key = {part_key(name): name for name in parts}
 
     def add(name: str, role: str | None) -> None:
-        if role:
+        # The content types stream is no part (ECMA-376 Part 2, §10.1.2): nothing gives it
+        # a role, an Override that names it included.
+        if role and name.lower() != "[content_types].xml":
             roles.setdefault(name, set()).add(role)
 
     for name in parts:
@@ -970,11 +972,16 @@ def edit_relationships(rels_part: str, xml: str, dropped: set[str], renamed: dic
 
 def edit_content_types(xml: str, dropped: set[str], renamed: dict[str, str]) -> str:
     gone = {part_key(part) for part in dropped | set(renamed)}
-    xml = re.sub(
-        r"""<Override\b[^>]*PartName=(["'])(.*?)\1[^>]*/>""",
-        lambda m: "" if part_key(m.group(2).strip(URI_SPACE).lstrip("/")) in gone else m.group(0),
-        xml,
-    )
+
+    def edit(match: re.Match) -> str:
+        part_name = attribute(match.group(1), "PartName")
+        if part_name and part_key(part_name.group(2).strip(URI_SPACE).lstrip("/")) in gone:
+            return ""
+        return match.group(0)
+
+    # Each Override, self-closing or with an end tag, and its PartName in either quote and
+    # with spaces around "=".
+    xml = re.sub(r"(<Override\b[^>]*?)(?:/>|>.*?</Override\s*>)", edit, xml, flags=re.S)
     if not re.search(r'<Default\b[^>]*Extension="png"', xml, re.I):
         xml = xml.replace(
             "</Types>", '<Default Extension="png" ContentType="image/png"/></Types>'

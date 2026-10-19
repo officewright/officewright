@@ -10,6 +10,7 @@ import dataclasses
 import hashlib
 import importlib.util
 import io
+import re
 import shutil
 import tempfile
 import struct
@@ -902,6 +903,32 @@ class Cleaning(unittest.TestCase):
             "<Override PartName=' /docProps/custom.xml ' ")
         cleaned = parts_of(public.clean(package(**{"[Content_Types].xml": types}), DOC).data)
         self.assertNotIn("custom.xml", cleaned["[Content_Types].xml"].decode())
+        # An Override with an end tag before it, and a PartName with spaces around "=" (#380).
+        custom = "application/vnd.openxmlformats-officedocument.custom-properties+xml"
+        main = ("application/vnd.openxmlformats-officedocument.wordprocessingml.document.main"
+                "+xml")
+        for spelling in (
+            f'<Override PartName="/word/document.xml" ContentType="{main}"></Override>'
+            f'<Override PartName="/docProps/custom.xml" ContentType="{custom}"/>',
+            f'<Override PartName = "/docProps/custom.xml" ContentType="{custom}"></Override >',
+        ):
+            types = parts_of(package())["[Content_Types].xml"].decode()
+            types = re.sub(r'<Override PartName="/(docProps/custom|word/document)\.xml"[^>]*/>',
+                           "", types).replace("</Types>", spelling + "</Types>")
+            with self.subTest(spelling):
+                cleaned = parts_of(public.clean(package(**{"[Content_Types].xml": types}),
+                                                DOC).data)
+                self.assertNotIn("custom.xml", cleaned["[Content_Types].xml"].decode())
+                if "/word/document.xml" in spelling:
+                    self.assertIn("/word/document.xml", cleaned["[Content_Types].xml"].decode())
+
+    def test_the_content_types_stream_gets_no_role(self):
+        custom = "application/vnd.openxmlformats-officedocument.custom-properties+xml"
+        types = parts_of(package())["[Content_Types].xml"].decode().replace(
+            "</Types>", f'<Override PartName="/[Content_Types].xml" ContentType="{custom}"/>'
+            "</Types>")
+        cleaned = parts_of(public.clean(package(**{"[Content_Types].xml": types}), DOC).data)
+        self.assertIn("[Content_Types].xml", cleaned)
 
     def test_people_in_properties_and_settings_are_found_in_any_spelling(self):
         # The edits match the usual spelling; what is left is read as XML, and a part that
