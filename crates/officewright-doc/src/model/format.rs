@@ -11,7 +11,7 @@ use super::Document;
 use super::numbering::ListLevel;
 use super::properties::{
     ColorValue, FontHint, Frame, Highlight, Justification, Ligatures, LineSpacing,
-    ParagraphBorders, Shading, TabStop, Toggle, UnderlineStyle, VerticalPosition,
+    ParagraphBorders, Shading, TabStop, TextEffects, Toggle, UnderlineStyle, VerticalPosition,
 };
 
 /// The font families of a run in effect, by the kind of character, with theme fonts
@@ -86,6 +86,8 @@ pub struct CharacterFormat {
     pub(crate) emphasis_mark: bool,
     /// Whether the text has a border around it (`w:bdr`), which the layout does not draw.
     pub(crate) border: bool,
+    /// Word 2010's effects of the text, which the layout does not draw.
+    pub(crate) text_effects: TextEffects,
 }
 
 macro_rules! flags {
