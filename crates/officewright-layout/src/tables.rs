@@ -1946,10 +1946,11 @@ mod tests {
     }
 
     #[test]
-    fn a_row_of_many_cells_takes_time_in_proportion_to_them() {
-        // The room the borders along a grid line take is found once for the line, not
-        // once for each cell: one row of 20,000 cells, whose top borders are 0.5 and 1 pt
-        // in turn, over a grid of 20,000 columns, is 1 pt high.
+    fn a_row_s_top_border_takes_the_room_of_its_thickest_segment() {
+        // One row of 20,000 cells without content, whose top borders are 0.5 and 1 pt in
+        // turn, over a grid of 20,000 columns, is 1 pt high. The room is found once for the
+        // grid line, not once for each cell: this case took seconds when it was found for
+        // each cell, which no assertion here can tell from milliseconds.
         let (document, _) = document(CompatMode::Word2013);
         let top = |width: f64| {
             CellBorders::default()

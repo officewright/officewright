@@ -4389,6 +4389,24 @@ mod tests {
             ]
         });
         assert!(!has(&texts, "W") && cut(&report), "{texts:?} {report:?}");
+        // A nested table counts the same: inside a cell of a table of one column.
+        let (texts, report) = drawn(&|style| {
+            let nested = Table::default()
+                .with_grid(vec![Pt(0.1); 300])
+                .with_rows(vec![Row::default().with_cells(vec![
+                    Cell::default().with_blocks([text_paragraph(style, "N", tiny.clone())]),
+                ])]);
+            vec![
+                Table::default()
+                    .with_grid([Pt(100.0)])
+                    .with_rows(vec![
+                        Row::default()
+                            .with_cells(vec![Cell::default().with_blocks([nested.into()])]),
+                    ])
+                    .into(),
+            ]
+        });
+        assert!(!has(&texts, "N") && cut(&report), "{texts:?} {report:?}");
         let (_, report) = drawn(&|_| {
             vec![
                 Table::default()
