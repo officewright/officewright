@@ -1524,3 +1524,41 @@ fn keeps_at_most_256_table_texts() {
     }
     assert_eq!(n, 300);
 }
+
+#[test]
+fn reads_a_paragraph_style_once_for_the_cells_of_every_table_style() {
+    // The style chains of cells are laid over each table text, but what a paragraph style
+    // writes itself is read once: 300 tables in styles of their own, each cell in one
+    // paragraph style based on another, read two styles.
+    let mut styles: String = (0..300)
+        .map(|n| {
+            format!(
+                r#"<w:style w:type="table" w:styleId="S{n}"><w:name w:val="S{n}"/><w:rPr><w:sz w:val="{}"/></w:rPr></w:style>"#,
+                10 + n % 40
+            )
+        })
+        .collect();
+    styles.push_str(r#"<w:style w:type="paragraph" w:styleId="Base"><w:name w:val="Base"/><w:pPr><w:tabs><w:tab w:val="left" w:pos="720"/></w:tabs></w:pPr></w:style><w:style w:type="paragraph" w:styleId="Cell"><w:name w:val="Cell"/><w:basedOn w:val="Base"/><w:pPr><w:jc w:val="center"/></w:pPr></w:style>"#);
+    let body: String = (0..300)
+        .map(|n| {
+            format!(
+                r#"<w:tbl><w:tblPr><w:tblStyle w:val="S{n}"/></w:tblPr><w:tblGrid/><w:tr><w:tc><w:p><w:pPr><w:pStyle w:val="Cell"/></w:pPr></w:p></w:tc></w:tr></w:tbl><w:p/>"#
+            )
+        })
+        .collect();
+    let document = open_with(&styles, &body);
+    let mut formats = document.formats();
+    for block in document.sections().next().unwrap().blocks() {
+        let Block::Table(table) = block else {
+            continue;
+        };
+        let cell = table.rows().next().unwrap().cells().next().unwrap();
+        let Some(Block::Paragraph(paragraph)) = cell.blocks().next() else {
+            panic!("no paragraph");
+        };
+        let format = formats.paragraph(paragraph);
+        assert_eq!(format.justification(), Justification::Center);
+        assert_eq!(format.tabs().len(), 1);
+    }
+    assert_eq!(formats.work().cell_style_reads, 2);
+}

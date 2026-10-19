@@ -123,7 +123,13 @@ impl Formats<'_> {
         let Some(index) = style else {
             return Arc::clone(root);
         };
-        let level = levels.level(document, index, root);
+        #[cfg(test)]
+        let known = self.paragraph_owns.len();
+        let level = levels.level_from(document, index, root, Some(&mut self.paragraph_owns));
+        #[cfg(test)]
+        {
+            self.work.cell_style_reads += self.paragraph_owns.len() - known;
+        }
         if !yields || level.justification != Some(Justification::Left) {
             return level;
         }
