@@ -796,26 +796,26 @@
     },
     "tests/corpus/word-rules/E-auto-color.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9314,
-      "ssim_min": 0.9314,
+      "ssim_mean": 0.9781,
+      "ssim_min": 0.9781,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-autospacing-nohtml.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9816,
-      "ssim_min": 0.9816,
+      "ssim_mean": 0.986,
+      "ssim_min": 0.986,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-autospacing.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9108,
-      "ssim_min": 0.9108,
+      "ssim_mean": 0.9149,
+      "ssim_min": 0.9149,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-bar-tab.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9702,
-      "ssim_min": 0.9702,
+      "ssim_mean": 0.9904,
+      "ssim_min": 0.9904,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-default-paragraph-style-after-normal.docx": {
@@ -859,8 +859,8 @@
     },
     "tests/corpus/word-rules/E-highlight.docx": {
       "line_agreement": 0.7692,
-      "ssim_mean": 0.9546,
-      "ssim_min": 0.9546,
+      "ssim_mean": 0.9742,
+      "ssim_min": 0.9742,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-italic-missing.docx": {
@@ -885,35 +885,35 @@
     },
     "tests/corpus/word-rules/E-line-at-least.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9665,
-      "ssim_min": 0.9665,
+      "ssim_mean": 0.972,
+      "ssim_min": 0.972,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-line-exact.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9779,
-      "ssim_min": 0.9779,
+      "ssim_mean": 0.9827,
+      "ssim_min": 0.9827,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-line-fonts-truetype.docx": {
       "line_agreement": 1.0,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.936,
-      "ssim_min": 0.8728,
+      "ssim_mean": 0.94,
+      "ssim_min": 0.8764,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-line-fonts.docx": {
       "line_agreement": 1.0,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.8953,
-      "ssim_min": 0.845,
+      "ssim_mean": 0.8991,
+      "ssim_min": 0.8488,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-line-multiple.docx": {
       "line_agreement": 1.0,
       "page_break_agreement": 0.0,
-      "ssim_mean": 0.9438,
-      "ssim_min": 0.9395,
+      "ssim_mean": 0.9478,
+      "ssim_min": 0.9402,
       "text_score": 0.7911
     },
     "tests/corpus/word-rules/E-list-label-format.docx": {
@@ -974,14 +974,14 @@
     "tests/corpus/word-rules/E-para-shading.docx": {
       "line_agreement": 1.0,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.9897,
-      "ssim_min": 0.9773,
+      "ssim_mean": 0.9918,
+      "ssim_min": 0.9821,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-paragraph-units.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9342,
-      "ssim_min": 0.9342,
+      "ssim_mean": 0.9349,
+      "ssim_min": 0.9349,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-section-continuous-headers.docx": {
@@ -1036,7 +1036,7 @@
     "tests/corpus/word-rules/E-space-before-top.docx": {
       "line_agreement": 1.0,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.9931,
+      "ssim_mean": 0.9934,
       "ssim_min": 0.956,
       "text_score": 1.0
     },
