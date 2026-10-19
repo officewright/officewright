@@ -5313,6 +5313,61 @@ mod tests {
     }
 
     #[test]
+    fn results_a_header_does_not_lay_out_cost_it_nothing_of_the_bound() {
+        use crate::ir::{Field, FieldKind};
+
+        // Third re-check of #379. Beside a header's `PAGE` field: a `NUMPAGES` or `SECTIONPAGES` field whose stored
+        // result is 1,000 tabs, or a `DATE` field whose stored result is 10,000 hidden
+        // characters. None of them is laid out, so with 5,000 to lay out the header is drawn
+        // on all 100 pages, and nothing is reported.
+        let numbered = |case: u8| {
+            let mut document = Document::default();
+            let style = document.add_run_style(
+                RunStyle::default()
+                    .with_fonts(RunFonts::new("Officewright Test"))
+                    .with_size(Pt(10.0)),
+            );
+            let hidden = document.add_run_style(
+                RunStyle::default()
+                    .with_fonts(RunFonts::new("Officewright Test"))
+                    .with_size(Pt(10.0))
+                    .with_hidden(true),
+            );
+            let tabs = || (0..1000).map(|_| Inline::tab(style)).collect::<Vec<_>>();
+            let other = match case {
+                0 => Field::new(FieldKind::NumPages, style).with_result(tabs()),
+                1 => Field::new(FieldKind::SectionPages, style).with_result(tabs()),
+                _ => Field::new(FieldKind::Other("DATE".into()), style)
+                    .with_result([Inline::text("x".repeat(10_000), hidden)]),
+            };
+            let header = Paragraph::new(style)
+                .with_props(spacing(0.0, 0.0))
+                .with_inlines(vec![
+                    Inline::Field(Field::new(FieldKind::Page, style)),
+                    Inline::Field(other),
+                ]);
+            let blocks: Vec<Block> = (0..100)
+                .map(|n| lines(style, 1, spacing(0.0, 0.0).with_page_break_before(n > 0)))
+                .collect();
+            document.add_section(
+                Section::new(close_frames())
+                    .with_headers(HeaderFooterSet::default().with_primary([header.into()]))
+                    .with_blocks(blocks),
+            );
+            let (laid, report) = laid_within(&document, (MAX_FRAME_DRAWN, 5000));
+            let count = laid
+                .sink
+                .iter()
+                .filter(|page| texts(page).iter().any(|text| text != "A"))
+                .count();
+            (count, report.iter().any(|m| m.contains("left out past")))
+        };
+        assert_eq!(numbered(0), (100, false));
+        assert_eq!(numbered(1), (100, false));
+        assert_eq!(numbered(2), (100, false));
+    }
+
+    #[test]
     fn a_header_table_that_lays_out_much_and_draws_little_is_bounded_too() {
         use crate::ir::FieldKind;
 
