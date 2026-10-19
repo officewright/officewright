@@ -19,6 +19,7 @@ mod table;
 
 use std::collections::HashMap;
 
+use officewright_core::Pt;
 use officewright_layout::ir;
 use officewright_layout::{LayoutReport, Location, ReportEntry, ReportKind};
 
@@ -190,6 +191,9 @@ struct Translator<'a> {
     formats: Formats<'a>,
     ir: ir::Document,
     run_styles: style::RunStyles,
+    /// What a line of spacing in line units is in the section being translated: 12 pt
+    /// without a document grid, none on one, where the units keep their value in points.
+    line_unit: Option<Pt>,
     lists: list::Lists,
     /// A key per paragraph style, by its place among the styles, for contextual spacing.
     style_keys: HashMap<usize, ir::StyleKey>,
@@ -280,6 +284,7 @@ impl<'a> Translator<'a> {
             formats: document.formats(),
             ir: ir::Document::default(),
             run_styles: style::RunStyles::default(),
+            line_unit: Some(Pt(12.0)),
             lists: list::Lists::default(),
             style_keys: HashMap::new(),
             left_out: Vec::new(),

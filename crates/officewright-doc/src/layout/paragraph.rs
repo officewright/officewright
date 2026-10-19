@@ -1,5 +1,6 @@
 //! Paragraphs and their formatting in effect as IR paragraphs.
 
+use officewright_core::Pt;
 use officewright_layout::ReportKind;
 use officewright_layout::ir;
 
@@ -38,6 +39,7 @@ pub(super) fn paragraph<'a>(
         None => {}
     }
     let mark = t.formats.paragraph_mark(paragraph);
+    let mark_size = mark.size();
     let mark = t.run_style(&mark);
     let list = format.list().and_then(|list| {
         let instance = t.list_instance(list.instance())?;
@@ -46,7 +48,7 @@ pub(super) fn paragraph<'a>(
         let level = u8::try_from(list.level_number()).ok()?;
         Some(ir::ListItem::new(instance, level, label))
     });
-    let props = props(t, &format).with_style_key(t.style_key(paragraph));
+    let props = props(t, &format, mark_size).with_style_key(t.style_key(paragraph));
     t.path.push(super::Step::Field("inlines"));
     let inlines = t.inlines(paragraph, mark);
     t.path.pop();
@@ -57,17 +59,35 @@ pub(super) fn paragraph<'a>(
     (paragraph, format.mark_deleted)
 }
 
-fn props(t: &mut Translator<'_>, format: &ParagraphFormat) -> ir::ParagraphProps {
-    let units = [
-        format.start_indent_chars(),
-        format.end_indent_chars(),
-        format.first_line_indent_chars(),
-        format.before_spacing_lines(),
-        format.after_spacing_lines(),
-    ];
-    if units.iter().flatten().any(|&units| units != 0) {
+/// The paragraph's properties in the IR. Indents in character units are hundredths of the
+/// paragraph mark's size, and spacing in line units hundredths of 12 pt without a document
+/// grid, as Word's render of word-rules/E-paragraph-units.docx shows for 11 pt text (a
+/// character of 11 pt, a line of 12 pt). Which size a character takes when the mark's
+/// differs from Normal's, and what a line is on a document grid, no render shows yet: on a
+/// grid, spacing in line units keeps its value in points, and that is listed.
+fn props(t: &mut Translator<'_>, format: &ParagraphFormat, mark_size: Pt) -> ir::ParagraphProps {
+    // As far as lengths in points go (`units::measure`); hundredths come from the file.
+    let bound = f64::from(i32::MAX) / 20.0;
+    let in_chars = |chars: Option<i64>, points: Pt| {
+        chars.map_or(points, |chars| {
+            Pt((chars as f64 / 100.0 * mark_size.0).clamp(-bound, bound))
+        })
+    };
+    let line_unit = t.line_unit;
+    let mut points_kept = false;
+    let mut in_lines = |lines: Option<i64>, points: Pt| match (lines, line_unit) {
+        (None, _) => points,
+        (Some(lines), Some(unit)) => Pt((lines as f64 / 100.0 * unit.0).clamp(0.0, bound)),
+        (Some(_), None) => {
+            points_kept = true;
+            points
+        }
+    };
+    let before = in_lines(format.before_spacing_lines(), format.before_spacing());
+    let after = in_lines(format.after_spacing_lines(), format.after_spacing());
+    if points_kept {
         t.leave_out(ReportKind::FeatureUnsupported, || {
-            "indents or spacing in character or line units keep their value in points".into()
+            "spacing in line units on a document grid keeps its value in points".into()
         });
     }
     let alignment = match format.justification() {
@@ -84,17 +104,20 @@ fn props(t: &mut Translator<'_>, format: &ParagraphFormat) -> ir::ParagraphProps
         }
     };
     let indent = ir::Indent::default()
-        .with_start(format.start_indent())
-        .with_end(format.end_indent())
-        .with_first_line(format.first_line_indent());
+        .with_start(in_chars(format.start_indent_chars(), format.start_indent()))
+        .with_end(in_chars(format.end_indent_chars(), format.end_indent()))
+        .with_first_line(in_chars(
+            format.first_line_indent_chars(),
+            format.first_line_indent(),
+        ));
     let line = match format.line_spacing() {
         LineSpacing::Multiple(factor) => ir::LineSpacing::Multiple(factor),
         LineSpacing::Exact(height) => ir::LineSpacing::Exact(height),
         LineSpacing::AtLeast(height) => ir::LineSpacing::AtLeast(height),
     };
     let spacing = ir::Spacing::default()
-        .with_before(format.before_spacing())
-        .with_after(format.after_spacing())
+        .with_before(before)
+        .with_after(after)
         .with_before_auto(format.before_auto_spacing())
         .with_after_auto(format.after_auto_spacing())
         .with_line(line);

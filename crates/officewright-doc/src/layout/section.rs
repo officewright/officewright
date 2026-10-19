@@ -150,6 +150,12 @@ pub(super) fn settings(t: &mut Translator<'_>) -> ir::DocumentSettings {
 pub(super) fn section<'a>(t: &mut Translator<'a>, section: Section<'a>) -> ir::Section {
     let properties = section.properties();
     left_out(t, properties);
+    // A line unit of spacing is 12 pt without a document grid (E-paragraph-units, cases
+    // 05 to 08); what it is on a grid is not known yet.
+    t.line_unit = match properties.grid().and_then(DocumentGrid::kind) {
+        None | Some(DocumentGridKind::Default) => Some(Pt(12.0)),
+        Some(_) => None,
+    };
     // Word's page when the document gives none: Letter, as Word writes into a new
     // document in the United States; margins the IR's defaults.
     let size = properties.page_size().unwrap_or(PageSize::LETTER);

@@ -9,7 +9,7 @@ license-file.workspace = true
 repository.workspace = true
 # Read the committed corpus at the root of the repository, which is not part of the
 # crate.
-exclude = ["tests/default_theme.rs", "tests/layout_corpus.rs"]
+exclude = ["tests/default_theme.rs", "tests/layout_corpus.rs", "tests/paragraph_units.rs"]
 
 [features]
 # The document rendered into PDF (`Document::save_pdf` and the like), through its
