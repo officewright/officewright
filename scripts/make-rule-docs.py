@@ -151,6 +151,7 @@ def ppr(
     widow_control: bool | None = None,
     list_item: tuple[int, int] | None = None,
     num_pr: str | None = None,
+    borders: str | None = None,
     shading: str | None = None,
     tabs: list[tuple[str, int] | tuple[str, int, str]] | None = None,
     space: str | None = None,
@@ -159,7 +160,7 @@ def ppr(
     mark: str | None = None,
     sect: str | None = None,
 ) -> str:
-    """mark is the content of the paragraph mark's w:rPr."""
+    """mark is the content of the paragraph mark's w:rPr; borders is a w:pBdr."""
     parts = []
     if p_style:
         parts.append(f'<w:pStyle w:val="{p_style}"/>')
@@ -176,6 +177,8 @@ def ppr(
         parts.append(f'<w:numPr><w:ilvl w:val="{ilvl}"/><w:numId w:val="{num_id}"/></w:numPr>')
     if num_pr is not None:
         parts.append(f"<w:numPr>{num_pr}</w:numPr>")
+    if borders:
+        parts.append(borders)
     if shading:
         parts.append(f'<w:shd w:val="clear" w:color="auto" w:fill="{shading}"/>')
     if tabs:
@@ -223,23 +226,30 @@ def section(
     refs: tuple[tuple[str, str, str], ...] = (),
     page_start: int | None = None,
     margins: tuple[int, int] = (MARGIN, MARGIN),
+    page_format: str | None = None,
+    title_page: bool = False,
 ) -> str:
     """A section's properties: A4 portrait as sect_pr(), with a start type (w:type), header
     and footer references as (headerReference or footerReference, w:type, part name), a
-    first page number and the top and bottom margins (negative for a fixed body edge)."""
+    first page number and the top and bottom margins (negative for a fixed body edge); the
+    format of its page numbers (w:pgNumType w:fmt) and a title page (w:titlePg)."""
     references = "".join(
         f'<w:{element} w:type="{ref_type}" r:id="{part_id(name)}"/>'
         for element, ref_type, name in refs
     )
     start = f'<w:type w:val="{kind}"/>' if kind else ""
     numbers = f'<w:pgNumType w:start="{page_start}"/>' if page_start is not None else ""
+    if page_format is not None:
+        first = f' w:start="{page_start}"' if page_start is not None else ""
+        numbers = f'<w:pgNumType w:fmt="{page_format}"{first}/>'
+    title = "<w:titlePg/>" if title_page else ""
     top, bottom = margins
     return (
         f"<w:sectPr>{references}{start}"
         f'<w:pgSz w:w="{PAGE_W}" w:h="{PAGE_H}"/>'
         f'<w:pgMar w:top="{top}" w:right="{MARGIN}" w:bottom="{bottom}" w:left="{MARGIN}"'
         ' w:header="708" w:footer="708" w:gutter="0"/>'
-        f'{numbers}<w:cols w:space="708"/>'
+        f'{numbers}<w:cols w:space="708"/>{title}'
         '<w:docGrid w:linePitch="360"/>'
         "</w:sectPr>"
     )
@@ -2311,6 +2321,373 @@ def header_negative_margin() -> Doc:
     )
 
 
+# Pages, second batch (#298): the questions the references of the first left open, and the
+# cases of #186's comments. Exact 12 pt lines, as in the first batch.
+
+
+def field(instr: str, result: str = "1", props: str = "") -> str:
+    """A simple field (w:fldSimple) whose placeholder result Word replaces when it lays the
+    page out; props are the run properties of that result."""
+    r_pr = f"<w:rPr>{props}</w:rPr>" if props else ""
+    return f'<w:fldSimple w:instr=" {attr(instr)} "><w:r>{r_pr}{text(result)}</w:r></w:fldSimple>'
+
+
+def complex_field(instr: str, result: str, props: str) -> str:
+    """A field of w:fldChar and w:instrText runs, every one of them with these run
+    properties, so that the field's code has them too (a language, say)."""
+    r_pr = f"<w:rPr>{props}</w:rPr>"
+    return (
+        f'<w:r>{r_pr}<w:fldChar w:fldCharType="begin"/></w:r>'
+        f'<w:r>{r_pr}<w:instrText xml:space="preserve"> {escape(instr)} </w:instrText></w:r>'
+        f'<w:r>{r_pr}<w:fldChar w:fldCharType="separate"/></w:r>'
+        f"<w:r>{r_pr}{text(result)}</w:r>"
+        f'<w:r>{r_pr}<w:fldChar w:fldCharType="end"/></w:r>'
+    )
+
+
+def counting_footer(name: str = "footer1.xml", label: str = "page") -> tuple[str, str]:
+    """A footer that says the page's number, the pages of the document and of the section."""
+    return header_part(name, page_para(
+        run(f"{label} ") + field("PAGE") + run(" of ") + field("NUMPAGES") + run(", ")
+        + field("SECTIONPAGES") + run(" in this section")
+    ))
+
+
+def sectioned(sections: list[tuple[list[str], str]]) -> str:
+    """Sections of one-line paragraphs, given as (the paragraphs' contents, w:sectPr):
+    each section's properties are in its last paragraph, but the last section's, which
+    are the document's (Doc.last_section)."""
+    body = ""
+    for n, (contents, properties) in enumerate(sections):
+        last = n == len(sections) - 1
+        body += "".join(page_para(c) for c in contents[:-1])
+        body += page_para(contents[-1], sect=None if last else properties)
+    return body
+
+
+def section_restart_parity() -> Doc:
+    # E-section-odd showed that a section that restarts its numbering with an odd or even
+    # start gets no blank page, and that its number went up by one where it had the wrong
+    # parity (#301). An even start restarted at 5 after a page numbered 1 tells "restart + 1"
+    # (6) from "the restart is ignored" (2); Section 3 continues the numbering after an even
+    # number either way, so it gets a blank page; a restart at 0 shows what Word does with
+    # 0. The footer counts the document's and the section's pages, so the counts show
+    # whether a blank page or a skipped number counts.
+    sections = [
+        # (label, start type, first page number, page count)
+        ("Section 1: one page", None, None, 1),
+        ("Section 2: even page start after a section that ends on page 1, page numbers "
+         "restarted at 5", "evenPage", 5, 1),
+        ("Section 3: even page start after a section that ends on an even page number; two "
+         "pages", "evenPage", None, 2),
+        ("Section 4: odd page start, page numbers restarted at 0", "oddPage", 0, 1),
+        ("Section 5: next page start, page numbers continued", None, None, 1),
+    ]
+    properties = [
+        section(kind=kind, page_start=start, refs=HEADER_REFS if n == 0 else ())
+        for n, (_, kind, start, _) in enumerate(sections)
+    ]
+    body = ""
+    for n, (label, _, _, pages) in enumerate(sections):
+        texts = [label] + [f"{label.split(':')[0]}, page {page}" for page in range(2, pages + 1)]
+        for i, value in enumerate(texts):
+            last = i == len(texts) - 1 and n < len(sections) - 1
+            body += page_para(run(value), page_break_before=i > 0,
+                              sect=properties[n] if last else None)
+    return Doc(
+        "E-section-restart-parity",
+        "Odd and even section starts with page numbers restarted at 5 (after page 1, even "
+        "start) and at 0 (odd start), and a blank page before a section that continues the "
+        "numbering: the page numbers Word gives, and whether NUMPAGES and SECTIONPAGES in "
+        "the footer count blank pages and skipped numbers",
+        body,
+        headers=(header_part("header1.xml", page_para(run("header"))), counting_footer()),
+        last_section=properties[-1],
+    )
+
+
+def section_continuous_title() -> Doc:
+    # E-section-continuous-headers showed that a continuous section's headers apply from
+    # its first page of its own (#186). With a title page (w:titlePg), is that page its
+    # first page, with the first-page header? And SECTIONPAGES: does the page where the
+    # continuous section starts count toward the section before?
+    first = (("headerReference", "default", "header1.xml"),
+             ("footerReference", "default", "footer1.xml"))
+    second = (("headerReference", "default", "header2.xml"),
+              ("headerReference", "first", "header3.xml"),
+              ("footerReference", "default", "footer2.xml"),
+              ("footerReference", "first", "footer3.xml"))
+    body = filler(29, "Section 1: 29 lines, with Header A and Footer A", sect=section(refs=first))
+    body += filler(100, "Section 2: a continuous section of 100 lines with a title page, with "
+                   "Header B and Footer B, and First header B and First footer B")
+    return Doc(
+        "E-section-continuous-title",
+        "A continuous section with a title page (w:titlePg) that starts in the middle of page "
+        "1 and runs onto pages 2 and 3: which header and footer each page takes, and whether "
+        "SECTIONPAGES counts page 1 toward the section before",
+        body,
+        headers=(
+            header_part("header1.xml", page_para(run("Header A"))),
+            counting_footer("footer1.xml", "Footer A, page"),
+            header_part("header2.xml", page_para(run("Header B"))),
+            header_part("header3.xml", page_para(run("First header B"))),
+            counting_footer("footer2.xml", "Footer B, page"),
+            counting_footer("footer3.xml", "First footer B, page"),
+        ),
+        last_section=section(kind="continuous", refs=second, title_page=True),
+    )
+
+
+def keepnext_break() -> Doc:
+    # #186: the layout takes the lines after a page break to start a page whatever the keep
+    # rules say, so a paragraph kept with the next that holds a page break is not moved, and
+    # is split when the paragraph after it does not fit. Each label fits one line, so that
+    # the line counts are exact; widow control is off, so that only the keep rules decide.
+    off = {"widow_control": False}
+    cases = [
+        # (lines before, lines after the break, a heading whose first run is the break)
+        (56, 6, False),
+        (20, 56, False),
+        (56, None, True),
+    ]
+    body = ""
+    for n, (before, after, heading) in enumerate(cases, 1):
+        what = "a heading after a page break" if heading else "a paragraph with a page break"
+        body += filler(before, f"Case {n:02d}: {before} lines, then {what}, kept with the next",
+                       page_break_before=n > 1, **off)
+        if heading:
+            kept = page_break_run() + run(f"Case {n:02d} heading")
+        else:
+            kept = (run(f"Case {n:02d} kept: A") + page_break_run()
+                    + lines([f"Case {n:02d} kept, line {k}" for k in range(1, after + 1)]))
+        body += page_para(kept, keep_next=True, **off)
+        body += page_para(lines([f"Case {n:02d} together, line {k}" for k in range(1, 4)]),
+                          keep_lines=True, **off)
+    return Doc(
+        "E-keepnext-break",
+        "Keep with next on a paragraph that holds a page break, followed by a paragraph of 3 "
+        "lines kept together: 56 lines, then the kept paragraph's first line, its break and 6 "
+        "lines, which with the 3 fit the page; 20 lines, then a break and 56 lines, after "
+        "which the 3 do not fit; and a heading whose first run is a page break; without widow "
+        "control",
+        body,
+    )
+
+
+def header_no_room() -> Doc:
+    # 35.4 pt from each edge, 33 lines of 12 pt each: the header ends at 431.4 pt and the
+    # footer starts at 410.5 pt, so they overlap and leave the body no room (#186).
+    return Doc(
+        "E-header-no-room",
+        "A header and a footer of 33 lines each, which together leave the body no room on "
+        "the page: where Word puts the body and how many pages it makes",
+        filler(10, "the body: 10 lines"),
+        headers=(header_part("header1.xml", tall("header", 33)),
+                 header_part("footer1.xml", tall("footer", 33))),
+        last_section=section(refs=HEADER_REFS),
+    )
+
+
+def header_taller_than_page() -> Doc:
+    # 80 lines of 12 pt, 960 pt, taller than the 841.9 pt page (#186).
+    return Doc(
+        "E-header-taller-than-page",
+        "A header of 80 lines, taller than the whole page: how much of it Word draws, where "
+        "the body goes and how many pages it makes",
+        filler(10, "the body: 10 lines"),
+        headers=(header_part("header1.xml", tall("header", 80)),),
+        last_section=section(refs=(HEADER_REFS[0],)),
+    )
+
+
+def header_space_before() -> Doc:
+    # E-header-space-after showed that a header's last space after counts toward its height
+    # (#186). 35.4 pt from the edge, 24 pt before and two lines: 83.4 pt with the space
+    # before, past the 72 pt margin, and 59.4 pt without it, inside.
+    header = page_para(
+        run("header line 1, with 24 pt before"), space=spacing(before=24, line=("exact", 12))
+    ) + page_para(run("header line 2"))
+    return Doc(
+        "E-header-space-before",
+        "A header of two lines whose first paragraph has 24 pt before, taller with it than "
+        "the top margin: whether the space before counts toward the header's height",
+        filler(70, "the body: 70 lines"),
+        headers=(header_part("header1.xml", header),),
+        last_section=section(refs=(HEADER_REFS[0],)),
+    )
+
+
+# The heights of the first line of each case of E-footer-tall-bottom: the 53rd line of the
+# page ends at 707 to 720 pt, over the whole range E-header-tall leaves open.
+FOOTER_FIRST_LINES = list(range(11, 25))
+
+
+def footer_tall_bottom() -> Doc:
+    # E-header-tall bounds the body's bottom under a footer of 8 lines between 707.4 and
+    # 719.4 pt. Here each case starts a page with one line of 11 to 24 pt, then 52 lines of
+    # 12 pt: whether the 53rd line still fits places the bottom to 1 pt. Widow control
+    # is off, so a line that does not fit goes to the next page alone.
+    body = ""
+    for n, first in enumerate(FOOTER_FIRST_LINES, 1):
+        label = f"Case {n:02d}: a first line of {first} pt, then 52 lines of 12 pt"
+        body += para(run(label), space=spacing(line=("exact", first)), widow_control=False,
+                     page_break_before=n > 1)
+        body += page_para(lines([f"Case {n:02d}, line {k}" for k in range(2, 54)]),
+                          widow_control=False)
+    return Doc(
+        "E-footer-tall-bottom",
+        "A footer of 8 lines, taller than the bottom margin, and pages whose first line is "
+        "11 to 24 pt high, then 52 lines of 12 pt: where the body ends, to 1 pt",
+        body,
+        headers=(header_part("footer1.xml", tall("footer", 8)),),
+        last_section=section(refs=(HEADER_REFS[1],)),
+    )
+
+
+def paragraph_borders(space: int = 4, sides: tuple[str, ...] = ("top", "left", "bottom", "right")
+                      ) -> str:
+    """A w:pBdr of single 0.5 pt lines on these sides, space points from the text."""
+    lines_xml = "".join(
+        f'<w:{side} w:val="single" w:sz="4" w:space="{space}" w:color="000000"/>'
+        for side in sides
+    )
+    return f"<w:pBdr>{lines_xml}</w:pBdr>"
+
+
+def para_shading_borders() -> Doc:
+    # E-para-shading showed the fill about 1.5 pt wider than the indents on each side, and
+    # shaded paragraphs without space between them as one band (#298). With borders, does
+    # the fill reach the border lines? And is the space between two shaded paragraphs
+    # shaded?
+    text = "shaded text that runs over several lines of one paragraph, " * 5
+    apart = page_para(run("not shaded"))
+    cases = [
+        ("a box border 4 pt from the text", {"borders": paragraph_borders(4)}, True),
+        ("a box border 0 pt from the text", {"borders": paragraph_borders(0)}, True),
+        ("a left border only, 4 pt from the text",
+         {"borders": paragraph_borders(4, ("left",))}, True),
+        ("the first of two shaded paragraphs, with 12 pt after",
+         {"space": spacing(after=12, line=("exact", 12))}, False),
+        ("the second of two shaded paragraphs, with 12 pt before",
+         {"space": spacing(before=12, line=("exact", 12))}, True),
+        ("the first of two shaded paragraphs in a row with the same box border",
+         {"borders": paragraph_borders(4)}, False),
+        ("the second of two shaded paragraphs in a row with the same box border",
+         {"borders": paragraph_borders(4)}, True),
+    ]
+    body = "".join(
+        page_para(run(f"Case {n:02d}: {label}: ") + run(text), shading=SHADE, **props)
+        + (apart if separate else "")
+        for n, (label, props, separate) in enumerate(cases, 1)
+    )
+    return Doc(
+        "E-para-shading-borders",
+        "Paragraph shading with a box border 4 and 0 pt from the text and with a left border "
+        "only, two shaded paragraphs with 24 pt between them, and two in a row with the same "
+        "box border: how far the fill reaches",
+        body,
+    )
+
+
+# The general formatting switches (\*) for numbers (ECMA-376 §17.16.4.3).
+NUMBER_SWITCHES = [
+    "Arabic", "ArabicDash", "ALPHABETIC", "alphabetic", "ROMAN", "roman", "Ordinal",
+    "CardText", "OrdText", "Hex", "DollarText",
+]
+# The first page numbers of E-number-formats: 0, letters of two and three (27, 53) and of 65
+# (1665) characters, and Roman numerals of 4000 and above.
+NUMBER_STARTS = [0, 27, 53, 1665, 4000, 4999]
+GERMAN = '<w:lang w:val="de-DE"/>'
+
+
+def number_formats() -> Doc:
+    # #186: the layout writes 0 as decimal, Roman thousands as repeated M, letters capped at
+    # 64, ordinals with English suffixes, and nothing for a Chicago number past 116 (MS-OI29500
+    # 2.1.548 k). Each case is a section of one page whose numbers start where its label
+    # says; PAGE shows its number in every format.
+    sections = []
+    for n, start in enumerate(NUMBER_STARTS, 1):
+        contents = [run(f"Case {n:02d}: page numbers restarted at {start}")]
+        contents += [run(f"PAGE \\* {switch}: ") + field(f"PAGE \\* {switch}")
+                     for switch in NUMBER_SWITCHES]
+        if start == 27:
+            contents += [run(f"PAGE \\* {switch} in German: ")
+                         + complex_field(f"PAGE \\* {switch}", "1", GERMAN)
+                         for switch in ("Ordinal", "OrdText", "CardText")]
+        sections.append((contents, section(page_start=start)))
+    n = len(NUMBER_STARTS)
+    for k, start in enumerate((116, 117), n + 1):
+        contents = [run(f"Case {k:02d}: Chicago page numbers restarted at {start}"),
+                    run("PAGE: ") + field("PAGE"),
+                    run("PAGE \\* Arabic: ") + field("PAGE \\* Arabic")]
+        sections.append((contents, section(page_start=start, page_format="chicago")))
+    contents = [run(f"Case {n + 3:02d}: the number of pages")]
+    contents += [run(f"NUMPAGES \\* {switch}: ") + field(f"NUMPAGES \\* {switch}")
+                 for switch in ("Arabic", "ROMAN", "alphabetic", "CardText")]
+    sections.append((contents, section()))
+    return Doc(
+        "E-number-formats",
+        "PAGE fields in the eleven number formats of the \\* switch (Arabic to DollarText) at "
+        "page numbers 0, 27, 53, 1665, 4000 and 4999, ordinals and numbers in words in German, "
+        "Chicago page numbers at 116 and 117, and NUMPAGES in four formats",
+        sectioned(sections),
+        last_section=sections[-1][1],
+    )
+
+
+def bold_missing() -> Doc:
+    # #186: bold in a family without a Bold face, which the layout draws by stroking the
+    # outlines 1/30 of the size wide. Lucida Console and Impact come with Windows with a
+    # Regular face only. The label is in Calibri, the sample in a run of its own.
+    bold, italic = "<w:b/><w:bCs/>", "<w:i/><w:iCs/>"
+    samples = [(24, "regular", "")] + [(size, "bold", bold) for size in (8, 11, 24, 48)] + [
+        (24, "italic", italic), (24, "bold italic", bold + italic)]
+    body, n = "", 0
+    for font in ("Lucida Console", "Impact"):
+        for size, label, toggles in samples:
+            n += 1
+            body += para(run(f"Case {n:02d}: {font} {size} pt {label}: ")
+                         + run("Hamburgefonts", font, size, toggles))
+    return Doc(
+        "E-bold-missing",
+        "Bold, italic and bold italic in families without those faces, Lucida Console and "
+        "Impact, at 8 to 48 pt: how Word draws the bold it makes up (stroke width) and the "
+        "italic (slant)",
+        body,
+    )
+
+
+def soft_hyphen_font() -> Doc:
+    # #186: the layout keeps a soft hyphen in the run of the character before it, so a line
+    # that ends there shows a hyphen in that character's face and size. Here the soft hyphen
+    # has a font and size of its own, Noto Sans 20 pt; and a w:sym of Noto Sans, not a symbol
+    # font, whose code F0AD stands for U+00AD. In a paragraph 150 pt wide, the word of two
+    # halves (155 pt in Calibri) can break only at it; in a full-width paragraph it does not.
+    half = "Hamburgefontsiv"
+    big = rpr("Noto Sans", 20)
+    soft = f"<w:r>{big}<w:softHyphen/></w:r>"
+    symbol = '<w:r><w:sym w:font="Noto Sans" w:char="F0AD"/></w:r>'
+    cases = [
+        ("a soft hyphen in Noto Sans 20 pt between two halves in Calibri, at the end of a line",
+         soft, NARROW),
+        ("the same in the middle of a line", soft, None),
+        ("a w:sym of Noto Sans F0AD between two halves in Calibri, at the end of a line",
+         symbol, NARROW),
+        ("the same in the middle of a line", symbol, None),
+    ]
+    body = ""
+    for n, (label, middle, ind) in enumerate(cases, 1):
+        body += para(run(f"Case {n:02d}: {label}:"))
+        body += para(run(half) + middle + run(half), ind=ind)
+    return Doc(
+        "E-soft-hyphen-font",
+        "A soft hyphen in another font and size than the letters before it, and a w:sym "
+        "standing for one, at the end of a line and in the middle of one: whether Word breaks "
+        "there and in which font and size it draws the hyphen",
+        body,
+    )
+
+
 def documents() -> list[Doc]:
     return [
         line_fonts(),
@@ -2384,6 +2761,17 @@ def documents() -> list[Doc]:
         header_tall(),
         header_space_after(),
         header_negative_margin(),
+        section_restart_parity(),
+        section_continuous_title(),
+        keepnext_break(),
+        header_no_room(),
+        header_taller_than_page(),
+        header_space_before(),
+        footer_tall_bottom(),
+        para_shading_borders(),
+        number_formats(),
+        bold_missing(),
+        soft_hyphen_font(),
     ]
 
 
