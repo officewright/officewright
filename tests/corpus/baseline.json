@@ -382,8 +382,8 @@
     "tests/corpus/business/contract-hhs-sow-usability-testing.docx": {
       "line_agreement": 0.8733,
       "page_break_agreement": 0.0,
-      "ssim_mean": 0.5113,
-      "ssim_min": 0.4423,
+      "ssim_mean": 0.5122,
+      "ssim_min": 0.4426,
       "text_score": 0.6292
     },
     "tests/corpus/business/contract-hhs-teaming-agreement.docx": {
@@ -505,15 +505,15 @@
     "tests/corpus/business/report-hhs-usability-test-plan.docx": {
       "line_agreement": 0.1496,
       "page_break_agreement": 0.2222,
-      "ssim_mean": 0.5023,
+      "ssim_mean": 0.5039,
       "ssim_min": 0.0,
       "text_score": 0.4125
     },
     "tests/corpus/business/report-hhs-usability-test-report.docx": {
       "line_agreement": 0.6655,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.7499,
-      "ssim_min": 0.5746,
+      "ssim_mean": 0.7515,
+      "ssim_min": 0.5777,
       "text_score": 0.8546
     },
     "tests/corpus/business/report-usds-tech-challenge-playbook.docx": {
