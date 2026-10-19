@@ -36,11 +36,13 @@ import posixpath
 import re
 import struct
 import sys
+import urllib.parse
 import urllib.request
 import zipfile
 import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
+from xml.etree import ElementTree
 
 ROOT = Path(__file__).resolve().parent.parent
 CORPUS = ROOT / "tests" / "corpus"
@@ -58,6 +60,11 @@ PROFILE_PATH = re.compile(rb"(?i)(\\|/)(users|documents and settings)(\\|/)")
 FICTIONAL = re.compile(rb"@example\.(com|gov|org)$")
 
 RELS_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+# The same relationship types in ISO/IEC 29500 Strict (Part 1, §8.1).
+STRICT_RELS_NS = "http://purl.oclc.org/ooxml/officeDocument/relationships"
+# The namespaces of [Content_Types].xml and of .rels parts (ECMA-376 Part 2).
+CONTENT_TYPES_NS = "{http://schemas.openxmlformats.org/package/2006/content-types}"
+PACKAGE_RELS_NS = "{http://schemas.openxmlformats.org/package/2006/relationships}"
 
 
 @dataclass(frozen=True)
@@ -636,45 +643,91 @@ class Refused(Exception):
 # point to it.
 EMBEDDED_FOLDERS = ("word/fonts/", "word/embeddings/", "word/activex/")
 ACTIVEX_TYPES = ("application/vnd.ms-office.activex+xml", "application/vnd.ms-office.activex")
-EMBEDDED_RELATIONSHIPS = (
-    f"{RELS_NS}/control",
-    f"{RELS_NS}/font",
-    f"{RELS_NS}/oleObject",
-    f"{RELS_NS}/package",
-    "http://schemas.microsoft.com/office/2006/relationships/activeXControlBinary",
-)
+EMBEDDED_RELATIONSHIPS = tuple(
+    f"{namespace}/{kind}"
+    for namespace in (RELS_NS, STRICT_RELS_NS)
+    for kind in ("control", "font", "oleObject", "package")
+) + ("http://schemas.microsoft.com/office/2006/relationships/activeXControlBinary",)
 
 
-def attribute(element: str, name: str) -> str:
-    """The value of an attribute of an XML start tag, "" when it has none."""
-    match = re.search(rf"""\b{name}\s*=\s*(?:"([^"]*)"|'([^']*)')""", element)
-    return (match.group(1) if match.group(1) is not None else match.group(2)) if match else ""
+class Unreadable(Exception):
+    """A package part that embedded_parts must read cannot be read as OPC allows it."""
+
+
+class _Builder(ElementTree.TreeBuilder):
+    """A tree builder that notes a document type declaration, which OPC forbids in package
+    parts (ECMA-376 Part 2, §8.1.4) and which could give attributes defaults, such as a
+    TargetMode of External, that the markup does not show."""
+
+    doctype_seen = False
+
+    def doctype(self, name, pubid, system):
+        self.doctype_seen = True
+
+
+def package_xml(name: str, data: bytes, root: str) -> ElementTree.Element:
+    """[Content_Types].xml or a .rels part, read as XML: the parser resolves character
+    references and namespace prefixes, and reads UTF-16 (ECMA-376 Part 2 allows it), so
+    that no spelling of the markup hides a part. The part is refused when it is not
+    well-formed, declares a document type, or its root is not the element root names (with
+    its namespace), as officewright-opc refuses it."""
+    builder = _Builder()
+    parser = ElementTree.XMLParser(target=builder)
+    try:
+        parser.feed(data)
+        element = parser.close()
+    except (ElementTree.ParseError, ValueError, LookupError) as error:
+        raise Unreadable(f"{name} is not well-formed XML ({error})") from error
+    if builder.doctype_seen:
+        raise Unreadable(f"{name} declares a document type, which OPC forbids")
+    if element.tag != root:
+        raise Unreadable(f"{name} has the root element {element.tag}, not {root}")
+    return element
+
+
+def media_type(value: str) -> str:
+    """A content type without its parameters, in lower case: types, subtypes and parameter
+    names compare without regard to case (RFC 2045, §5.1)."""
+    return value.split(";", 1)[0].strip().lower()
 
 
 def embedded_parts(parts: dict[str, bytes]) -> list[str]:
     """The names of the parts that are embedded fonts or objects or ActiveX controls, as the
-    package spells them: by folder, by content type and by relationship type."""
+    package spells them: by folder, by content type and by relationship type. Raises
+    Unreadable when [Content_Types].xml or a .rels part cannot be read (package_xml), or the
+    package has two content types streams whose names differ only in case."""
     by_lower = {name.lower(): name for name in parts}
     found = {name for name in parts if name.lower().startswith(EMBEDDED_FOLDERS)}
 
     def add(name: str) -> None:
         found.add(by_lower.get(name.lower(), name))
 
-    types = parts.get("[Content_Types].xml", b"").decode("utf-8", "replace")
-    for element in re.findall(r"<Override\b[^>]*>", types):
-        if attribute(element, "ContentType").lower() in ACTIVEX_TYPES:
-            add(attribute(element, "PartName").lstrip("/"))
-    for element in re.findall(r"<Default\b[^>]*>", types):
-        if attribute(element, "ContentType").lower() in ACTIVEX_TYPES:
-            extension = "." + attribute(element, "Extension").lower()
-            found.update(name for name in parts if name.lower().endswith(extension))
+    # Part names compare without regard to case, that of the content types stream too, so
+    # two streams whose names differ only in case are one name twice.
+    streams = [name for name in parts if name.lower() == "[content_types].xml"]
+    if len(streams) > 1:
+        raise Unreadable(f"the package has {len(streams)} content types streams: "
+                         + ", ".join(sorted(streams)))
+    for types_name in streams:
+        types = package_xml(types_name, parts[types_name], f"{CONTENT_TYPES_NS}Types")
+        for element in types.iter(f"{CONTENT_TYPES_NS}Override"):
+            if media_type(element.get("ContentType", "")) in ACTIVEX_TYPES:
+                add(element.get("PartName", "").lstrip("/"))
+        for element in types.iter(f"{CONTENT_TYPES_NS}Default"):
+            # Extensions compare as part names do: percent-decoded, without regard to case.
+            extension = urllib.parse.unquote(element.get("Extension", "")).lower()
+            if extension and media_type(element.get("ContentType", "")) in ACTIVEX_TYPES:
+                found.update(
+                    name for name in parts
+                    if urllib.parse.unquote(name).lower().endswith("." + extension)
+                )
     for rels in (name for name in parts if name.lower().endswith(".rels")):
-        xml = parts[rels].decode("utf-8", "replace")
-        for element in re.findall(r"<Relationship\b[^>]*>", xml):
-            if attribute(element, "TargetMode") == "External":
+        relationships = package_xml(rels, parts[rels], f"{PACKAGE_RELS_NS}Relationships")
+        for element in relationships.iter(f"{PACKAGE_RELS_NS}Relationship"):
+            if element.get("TargetMode") == "External":
                 continue
-            if attribute(element, "Type") in EMBEDDED_RELATIONSHIPS:
-                add(part_target(rels, attribute(element, "Target")))
+            if element.get("Type") in EMBEDDED_RELATIONSHIPS:
+                add(part_target(rels, element.get("Target", "")))
     return sorted(found)
 
 
@@ -757,7 +810,10 @@ def clean(original: bytes, doc: PublicDoc) -> Cleaned:
     with zipfile.ZipFile(io.BytesIO(original)) as archive:
         entries = [(info, archive.read(info)) for info in archive.infolist()]
     names = [info.filename for info, _ in entries]
-    embedded = embedded_parts({info.filename: data for info, data in entries})
+    try:
+        embedded = embedded_parts({info.filename: data for info, data in entries})
+    except Unreadable as error:
+        raise Refused(f"{doc.name}: {error}") from error
     if embedded:
         raise Refused(f"{doc.name}: embeds {', '.join(embedded)}")
     for name in names:
@@ -880,7 +936,11 @@ def problems(
     found = []
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         parts = {name: archive.read(name) for name in archive.namelist()}
-        embedded = embedded_parts(parts)
+        try:
+            embedded = embedded_parts(parts)
+        except Unreadable as error:
+            found.append(str(error))
+            embedded = []
         found += [f"{name} is embedded" for name in embedded if name not in parts]
         for name, body in parts.items():
             if DROPPED.match(name):

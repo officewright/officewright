@@ -15,8 +15,8 @@ use crate::breaks::{
 };
 use crate::fonts::Fonts;
 use crate::ir::{
-    Alignment, BreakKind, CompatFlag, Document, Inline, LineSpacing, Paragraph, RunStyleId,
-    TabKind, TabLeader,
+    Alignment, BreakKind, CompatFlag, Document, Inline, LevelAlignment, LineSpacing, Paragraph,
+    RunStyleId, TabKind, TabLeader,
 };
 use crate::itemize::{InlinePath, Item, Itemized, request};
 use crate::metrics::{LineMetrics, TypoRule, line_metrics};
@@ -340,6 +340,8 @@ pub(crate) struct Breaker<'p, 'f, 'b> {
     overflow_reported: bool,
     /// What the last call of `settle` replaced, if it shaped again.
     splice: Option<Splice>,
+    /// How far the list label moves the first line's start.
+    label_shift: Pt,
 }
 
 impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
@@ -378,10 +380,32 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             width,
             overflow_reported: false,
             splice: None,
+            label_shift: Pt(0.0),
         };
         breaker.scales = breaker.measure_items();
         breaker.units = breaker.make_units(shaped);
+        breaker.label_shift = breaker.label_shift();
         breaker
+    }
+
+    /// How far a list label moves the start of the first line from where the paragraph's
+    /// indents put it: a label aligned at the end ends there, one centred is centred there
+    /// (design 7.3).
+    fn label_shift(&self) -> Pt {
+        let Some(label) = self.itemized.label else {
+            return Pt(0.0);
+        };
+        let width: f64 = self
+            .units
+            .iter()
+            .filter(|unit| unit.kind.item() < label.text)
+            .map(|unit| unit.width.0)
+            .sum();
+        Pt(match label.alignment {
+            LevelAlignment::Start => 0.0,
+            LevelAlignment::Center => -width / 2.0,
+            LevelAlignment::End => -width,
+        })
     }
 
     /// How each text item's glyphs are measured.
@@ -655,7 +679,12 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
     /// The edges of a line, from the start edge of the column.
     fn edges(&self, first: bool) -> (Pt, Pt) {
         let indent = self.paragraph.props().indent();
-        let start = indent.start().0 + if first { indent.first_line().0 } else { 0.0 };
+        let start = indent.start().0
+            + if first {
+                indent.first_line().0 + self.label_shift.0
+            } else {
+                0.0
+            };
         (Pt(start), Pt(self.width.0 - indent.end().0))
     }
 
@@ -834,11 +863,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         let Some(scale) = self.scales.get(item).copied().flatten() else {
             return Pt(0.0);
         };
-        let advance: i64 = run
-            .glyphs()
-            .iter()
-            .map(|glyph| i64::from(glyph.x_advance))
-            .sum();
+        let advance = design_advance(run, &(0..run.glyphs().len()));
         // One cluster, measured as `Piece::glyphs` draws it.
         Pt(advance as f64 * scale.per_unit + cluster_spacing(advance, scale))
     }
@@ -1142,9 +1167,21 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                 break;
             }
             if let PieceKind::Text {
-                text, run, glyphs, ..
+                item,
+                text,
+                run,
+                glyphs,
+                ..
             } = &piece.kind
             {
+                // A list label is never stretched (design 7.3).
+                if self
+                    .itemized
+                    .label
+                    .is_some_and(|label| *item < label.with_suffix)
+                {
+                    continue;
+                }
                 let count = match how {
                     Stretch::Spaces => stretchable_spaces(self.itemized, text),
                     Stretch::Clusters => clusters(run, glyphs),
