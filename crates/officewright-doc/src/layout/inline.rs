@@ -7,9 +7,11 @@
 use officewright_layout::ReportKind;
 use officewright_layout::ir;
 
-use super::{Translator, is_marker};
+use super::{Once, Translator, is_marker};
+use crate::model::properties::{Color, TextFill};
 use crate::model::{
-    BreakClear, BreakKind, FieldCharKind, Inline, Paragraph, RevisionKind, Run, RunContent,
+    BreakClear, BreakKind, CharacterFormat, ColorValue, FieldCharKind, Inline, Paragraph,
+    RevisionKind, Run, RunContent,
 };
 
 /// The longest part of a field's instruction read: far more than the name and switches
@@ -79,12 +81,25 @@ impl<'a> Translator<'a> {
     fn run(&mut self, run: Run<'a>, content: &mut Content) {
         let format = self.formats.run(run);
         let style = self.run_style(&format);
+        // Whether the run shows text, which its features would change, and whether it
+        // holds a tab or a picture in the line, which a border around it would surround.
+        let (mut shows, mut boxed) = (false, false);
         for item in run.content() {
             match item {
-                RunContent::Text(text) => content.text(text, style),
+                RunContent::Text(text) => {
+                    shows = true;
+                    content.text(text, style);
+                }
+                // Tracked changes are taken as accepted, and comments are left out, as
+                // Word's PDF of the document without markup shows them (the references are
+                // exported with ExportAsFixedFormat's Item 0, wdExportDocumentContent), so
+                // neither is listed (#303).
                 RunContent::DeletedText(_) | RunContent::DeletedFieldCode(_) => {}
                 RunContent::FieldCode(text) => content.instruction(text),
-                RunContent::Tab => content.push(ir::Inline::tab(style)),
+                RunContent::Tab => {
+                    boxed = true;
+                    content.push(ir::Inline::tab(style));
+                }
                 RunContent::Break(brk) => content.push(match brk.kind() {
                     BreakKind::Line => ir::Inline::line_break(clear(brk.clear()), style),
                     BreakKind::Page => ir::Inline::page_break(style),
@@ -94,6 +109,7 @@ impl<'a> Translator<'a> {
                     content.push(ir::Inline::line_break(ir::BreakClear::None, style));
                 }
                 RunContent::Symbol { font, char } => {
+                    shows = true;
                     // w:sym writes four hexadecimal digits.
                     let Ok(code) = u16::try_from(u32::from(char)) else {
                         self.leave_out(ReportKind::FeatureUnsupported, || {
@@ -107,25 +123,34 @@ impl<'a> Translator<'a> {
                 RunContent::FieldChar(FieldCharKind::Begin) => content.begin(style),
                 RunContent::FieldChar(FieldCharKind::Separate) => content.separate(),
                 RunContent::FieldChar(FieldCharKind::End) => content.end(),
-                RunContent::NoBreakHyphen => content.push(ir::Inline::no_break_hyphen(style)),
+                RunContent::NoBreakHyphen => {
+                    shows = true;
+                    content.push(ir::Inline::no_break_hyphen(style));
+                }
                 RunContent::SoftHyphen => content.push(ir::Inline::soft_hyphen(style)),
                 RunContent::FootnoteReference(id) => {
                     if let Some(note) = self.note_reference(false, id) {
+                        shows = true;
                         content.push(ir::Inline::note_reference(note, false, style));
                     }
                 }
                 RunContent::EndnoteReference(id) => {
                     if let Some(note) = self.note_reference(true, id) {
+                        shows = true;
                         content.push(ir::Inline::note_reference(note, false, style));
                     }
                 }
-                RunContent::NoteNumber => content.push(ir::Inline::note_number(style)),
+                RunContent::NoteNumber => {
+                    shows = true;
+                    content.push(ir::Inline::note_number(style));
+                }
                 RunContent::Separator => content.push(ir::Inline::separator(style)),
                 RunContent::ContinuationSeparator => {
                     content.push(ir::Inline::continuation_separator(style));
                 }
                 RunContent::Drawing(drawing) => {
                     if let Some(object) = self.drawing(drawing) {
+                        boxed |= drawing.is_inline();
                         content.push(object);
                     }
                 }
@@ -133,6 +158,7 @@ impl<'a> Translator<'a> {
                 // The legacy page number: a PAGE field (ECMA-376 Part 1, §17.3.3.22).
                 RunContent::Other(other) if other.local_name() == "pgNum" => {
                     if content.fields.is_empty() {
+                        shows = true;
                         content.push(ir::Inline::Field(ir::Field::new(
                             ir::FieldKind::Page,
                             style,
@@ -158,6 +184,123 @@ impl<'a> Translator<'a> {
                         format!("{message} (w:{name})")
                     });
                 }
+            }
+        }
+        if !format.hidden() && (shows || boxed) {
+            self.report_run_features(&format, shows);
+        }
+    }
+
+    /// Lists the features of a run's formatting that the IR's run style has no place
+    /// for, so that the PDF shows the run without them (#303). Only a run that is not
+    /// hidden counts, and one that `shows` text for the features of its glyphs: a hidden
+    /// run, or one that holds only a field's instruction, shows nothing they could
+    /// change. A border surrounds a tab or a picture in the line too.
+    pub(super) fn report_run_features(&mut self, format: &CharacterFormat, shows: bool) {
+        if format.border {
+            self.report_once(
+                Once::RunBorder,
+                "borders around text (w:bdr) are not drawn, here and wherever else the document has them",
+            );
+        }
+        if !shows {
+            return;
+        }
+        let effects = &format.text_effects;
+        let choices = &format.font_choices;
+        // A fill of one colour changes nothing when it is the text's own.
+        let fill_changes = match effects.fill {
+            None => false,
+            Some(TextFill::Solid(red, green, blue)) => {
+                format.color() != ColorValue::Rgb(red, green, blue)
+            }
+            // One the theme does not resolve, without a theme part, counts as a change.
+            Some(TextFill::Scheme(theme)) => {
+                let theme = Color {
+                    theme: Some(theme),
+                    ..Color::default()
+                };
+                let filled = self.document.resolve_color(&theme);
+                filled == ColorValue::Auto || format.color() != filled
+            }
+            Some(TextFill::Other) => true,
+        };
+        for (on, once, message) in [
+            (
+                format.emboss(),
+                Once::Emboss,
+                "embossed text (w:emboss) is drawn plain, here and wherever else the document has it",
+            ),
+            (
+                format.imprint(),
+                Once::Imprint,
+                "engraved text (w:imprint) is drawn plain, here and wherever else the document has it",
+            ),
+            (
+                format.outline(),
+                Once::Outline,
+                "outlined text (w:outline) is drawn plain, here and wherever else the document has it",
+            ),
+            (
+                format.shadow(),
+                Once::Shadow,
+                "shadowed text (w:shadow) is drawn without its shadow, here and wherever else the document has it",
+            ),
+            (
+                format.emphasis_mark,
+                Once::EmphasisMark,
+                "emphasis marks (w:em) are not drawn, here and wherever else the document has them",
+            ),
+            (
+                effects.glow == Some(true),
+                Once::Glow,
+                "glowing text (w14:glow) is drawn without its glow, here and wherever else the document has it",
+            ),
+            (
+                effects.shadow == Some(true),
+                Once::TextShadow,
+                "text with a shadow effect (w14:shadow) is drawn without its shadow, here and wherever else the document has it",
+            ),
+            (
+                effects.reflection == Some(true),
+                Once::Reflection,
+                "a reflection of text (w14:reflection) is not drawn, here and wherever else the document has one",
+            ),
+            (
+                effects.outline == Some(true),
+                Once::TextOutline,
+                "an outline of text (w14:textOutline) is not drawn, here and wherever else the document has one",
+            ),
+            (
+                fill_changes,
+                Once::TextFill,
+                "a fill of text (w14:textFill) is not applied, so the text is drawn in its colour, here and wherever else the document has one",
+            ),
+            (
+                effects.turned == Some(true) || effects.depth == Some(true),
+                Once::Text3d,
+                "3-D text (w14:scene3d, w14:props3d) is drawn flat, here and wherever else the document has it",
+            ),
+            // Word applies the font's features only with enableOpenTypeFeatures on, as it
+            // does ligatures.
+            (
+                self.open_type_features && choices.number_form == Some(true),
+                Once::NumberForm,
+                "lining or old-style figures (w14:numForm) are drawn in the font's default form, here and wherever else the document asks for them",
+            ),
+            (
+                self.open_type_features && choices.number_spacing == Some(true),
+                Once::NumberSpacing,
+                "proportional or tabular figures (w14:numSpacing) are drawn in the font's default spacing, here and wherever else the document asks for them",
+            ),
+            (
+                self.open_type_features && choices.stylistic_sets == Some(true),
+                Once::StylisticSets,
+                "stylistic sets (w14:stylisticSets) are not applied, here and wherever else the document has them",
+            ),
+        ] {
+            if on {
+                self.report_once(once, message);
             }
         }
     }

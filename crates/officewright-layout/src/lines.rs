@@ -1432,7 +1432,7 @@ impl Extent {
 }
 
 /// The metrics of text at `size` when there is no font at all.
-fn no_font(size: Pt) -> LineMetrics {
+pub(crate) fn no_font(size: Pt) -> LineMetrics {
     LineMetrics {
         ascent: Pt(size.0 * 0.8),
         descent: Pt(size.0 * 0.2),

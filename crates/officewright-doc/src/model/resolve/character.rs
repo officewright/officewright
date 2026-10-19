@@ -5,12 +5,13 @@ use std::sync::Arc;
 
 use officewright_core::Pt;
 
+use super::table::TableText;
 use super::{Formats, Layer, overwrite, style_index};
 use crate::model::Document;
 use crate::model::format::{CharacterFormat, FontFamilies};
 use crate::model::properties::{
-    Color, ColorValue, FontHint, Highlight, Ligatures, RunProperties, Shading, ThemeColor,
-    ThemeFont, Toggle, UnderlineStyle, VerticalPosition,
+    Color, ColorValue, FontChoices, FontHint, Highlight, Ligatures, RunProperties, Shading,
+    TextEffects, ThemeColor, ThemeFont, Toggle, UnderlineStyle, VerticalPosition,
 };
 use crate::model::settings::{ColorSchemeIndex, ColorSchemeMapping};
 use crate::model::styles::StyleKind;
@@ -27,8 +28,64 @@ const DEFAULT_SIZE: Pt = Pt(10.0);
 /// The Latin typefaces of the theme Word uses when a document has no theme part, its
 /// default Office theme: major and minor (the theme Word writes into the re-saved copy of
 /// the corpus file `word-rules/E-defaults-empty.docx`, Word 16.0.17932). Its East Asian
-/// and complex script typefaces are empty, so those slots fall back as with a theme.
+/// and complex script typefaces are empty, so those slots fall back as with a theme,
+/// unless a theme font language names a script of [`OFFICE_THEME_SCRIPTS`].
 const OFFICE_THEME_LATIN: [&str; 2] = ["Calibri Light", "Calibri"];
+
+/// The typefaces the same theme gives scripts, by their ISO 15924 codes, major and minor,
+/// in the order Word writes them (`a:font` of `a:majorFont` and `a:minorFont` in
+/// `word/theme/theme1.xml` of `tests/corpus/resaved/word-rules/E-defaults-empty.docx`,
+/// the copy Word 16.0.17932 re-saved). The maintainer allowed keeping them as data with
+/// that source named (#155).
+const OFFICE_THEME_SCRIPTS: [(&str, &str, &str); 47] = [
+    ("Jpan", "游ゴシック Light", "游明朝"),
+    ("Hang", "맑은 고딕", "맑은 고딕"),
+    ("Hans", "等线 Light", "等线"),
+    ("Hant", "新細明體", "新細明體"),
+    ("Arab", "Times New Roman", "Arial"),
+    ("Hebr", "Times New Roman", "Arial"),
+    ("Thai", "Angsana New", "Cordia New"),
+    ("Ethi", "Nyala", "Nyala"),
+    ("Beng", "Vrinda", "Vrinda"),
+    ("Gujr", "Shruti", "Shruti"),
+    ("Khmr", "MoolBoran", "DaunPenh"),
+    ("Knda", "Tunga", "Tunga"),
+    ("Guru", "Raavi", "Raavi"),
+    ("Cans", "Euphemia", "Euphemia"),
+    ("Cher", "Plantagenet Cherokee", "Plantagenet Cherokee"),
+    ("Yiii", "Microsoft Yi Baiti", "Microsoft Yi Baiti"),
+    ("Tibt", "Microsoft Himalaya", "Microsoft Himalaya"),
+    ("Thaa", "MV Boli", "MV Boli"),
+    ("Deva", "Mangal", "Mangal"),
+    ("Telu", "Gautami", "Gautami"),
+    ("Taml", "Latha", "Latha"),
+    ("Syrc", "Estrangelo Edessa", "Estrangelo Edessa"),
+    ("Orya", "Kalinga", "Kalinga"),
+    ("Mlym", "Kartika", "Kartika"),
+    ("Laoo", "DokChampa", "DokChampa"),
+    ("Sinh", "Iskoola Pota", "Iskoola Pota"),
+    ("Mong", "Mongolian Baiti", "Mongolian Baiti"),
+    ("Viet", "Times New Roman", "Arial"),
+    ("Uigh", "Microsoft Uighur", "Microsoft Uighur"),
+    ("Geor", "Sylfaen", "Sylfaen"),
+    ("Armn", "Arial", "Arial"),
+    ("Bugi", "Leelawadee UI", "Leelawadee UI"),
+    ("Bopo", "Microsoft JhengHei", "Microsoft JhengHei"),
+    ("Java", "Javanese Text", "Javanese Text"),
+    ("Lisu", "Segoe UI", "Segoe UI"),
+    ("Mymr", "Myanmar Text", "Myanmar Text"),
+    ("Nkoo", "Ebrima", "Ebrima"),
+    ("Olck", "Nirmala UI", "Nirmala UI"),
+    ("Osma", "Ebrima", "Ebrima"),
+    ("Phag", "Phagspa", "Phagspa"),
+    ("Syrn", "Estrangelo Edessa", "Estrangelo Edessa"),
+    ("Syrj", "Estrangelo Edessa", "Estrangelo Edessa"),
+    ("Syre", "Estrangelo Edessa", "Estrangelo Edessa"),
+    ("Sora", "Nirmala UI", "Nirmala UI"),
+    ("Tale", "Microsoft Tai Le", "Microsoft Tai Le"),
+    ("Talu", "Microsoft New Tai Lue", "Microsoft New Tai Lue"),
+    ("Tfng", "Ebrima", "Ebrima"),
+];
 
 /// The toggle properties of ECMA-376 §17.7.3.
 const TOGGLES: [Toggle; 12] = [
@@ -49,17 +106,26 @@ const TOGGLES: [Toggle; 12] = [
 impl Formats<'_> {
     /// Combines the levels of the hierarchy for a run whose paragraph style has the index
     /// `paragraph_style` and whose own properties are `direct`, with `label`, what a list
-    /// level gives to its label, laid over them. A run without a `w:rStyle` gets no
-    /// character style: Word's default character style is DefaultParagraphFont, whose
-    /// children it ignores.
+    /// level gives to its label, laid over them; in a cell, `table`, what the table style
+    /// gives, lies between the document defaults and the paragraph style (ECMA-376 Part 1,
+    /// §17.7.2). A run without a `w:rStyle` gets no character style: Word's default
+    /// character style is DefaultParagraphFont, whose children it ignores.
     pub(super) fn resolve_run(
         &mut self,
         paragraph_style: Option<usize>,
         direct: &RunProperties,
+        table: Option<&TableText>,
         label: Option<&CharacterLevel>,
     ) -> CharacterFormat {
         let document = self.document;
         let defaults = self.run_defaults();
+        let table = table.map(|table| &table.character);
+        // A size of 11 or 12 pt the default paragraph style gives may give way to the
+        // table style's (`Formats::table_style_wins`).
+        let yields = table.is_some()
+            && paragraph_style.is_some()
+            && paragraph_style == self.paragraph_style(None)
+            && self.table_style_wins();
         let paragraph = paragraph_style.map(|index| {
             self.characters
                 .level(document, index, &CharacterLevel::default())
@@ -76,8 +142,23 @@ impl Formats<'_> {
 
         // Each level replaces what it gives.
         let mut effect = CharacterLevel::clone(&defaults);
-        for level in paragraph.iter().chain(character.iter()) {
-            effect.overlay(level);
+        if let Some(table) = table {
+            effect.overlay(table);
+        }
+        if let Some(paragraph) = &paragraph {
+            effect.overlay(paragraph);
+            if let Some(table) = table.filter(|_| yields) {
+                let small = |size: Option<Pt>| matches!(size, Some(Pt(11.0) | Pt(12.0)));
+                if small(paragraph.size) && table.size.is_some() {
+                    effect.size = table.size;
+                }
+                if small(paragraph.size_complex_script) && table.size_complex_script.is_some() {
+                    effect.size_complex_script = table.size_complex_script;
+                }
+            }
+        }
+        if let Some(character) = &character {
+            effect.overlay(character);
         }
         effect.overlay(&direct);
         if let Some(label) = label {
@@ -92,22 +173,21 @@ impl Formats<'_> {
         let mut toggles = [false; Toggle::COUNT];
         for (index, slot) in toggles.iter_mut().enumerate() {
             let is = |toggle: Toggle| toggle as usize == index;
-            let levels = (
-                value(Some(&defaults), index),
-                value(paragraph.as_deref(), index),
-                value(character.as_deref(), index),
-                value(Some(&direct), index),
-            );
+            let defaults = value(Some(&defaults), index);
+            let table = value(table, index);
+            let paragraph = value(paragraph.as_deref(), index);
+            let character = value(character.as_deref(), index);
+            let direct = value(Some(&direct), index);
             *slot = if TOGGLES.into_iter().any(is) {
-                toggle(levels.0, levels.1, levels.2, levels.3)
+                toggle(defaults, [table, paragraph, character], direct)
             } else {
                 // Word ignores webHidden in a character style (MS-OI29500 §17.3.2.44(a)).
-                let character = levels.2.filter(|_| !is(Toggle::WebHidden));
-                levels
-                    .3
+                let character = character.filter(|_| !is(Toggle::WebHidden));
+                direct
                     .or(character)
-                    .or(levels.1)
-                    .or(levels.0)
+                    .or(paragraph)
+                    .or(table)
+                    .or(defaults)
                     .unwrap_or(false)
             };
             // The list level's value, like direct formatting, sets it, as [MS-DOC] applies
@@ -160,6 +240,10 @@ impl Formats<'_> {
             language_bidi: effect.languages[2].clone(),
             ligatures: effect.ligatures.unwrap_or_default(),
             contextual_alternates: effect.contextual_alternates.unwrap_or(false),
+            emphasis_mark: effect.emphasis_mark.unwrap_or(false),
+            border: effect.border.unwrap_or(false),
+            text_effects: effect.text_effects,
+            font_choices: effect.font_choices,
         }
     }
 
@@ -241,27 +325,28 @@ fn word_run_defaults() -> CharacterLevel {
 }
 
 /// The value of a toggle property in effect, from the value each level of the hierarchy
-/// gives: the document defaults, the paragraph style and the character style, each the
-/// first value up its `w:basedOn` chain, and direct formatting.
+/// gives: the document defaults; the `styles`, in a cell the table style, then the
+/// paragraph style and the character style, each the first value up its `w:basedOn`
+/// chain; and direct formatting.
 ///
-/// Direct formatting sets the value (ECMA-376 §17.7.3). A paragraph style sets it rather
-/// than combining with what is below, as Word does (MS-OI29500 §17.7.8(a)). A character
-/// style flips the value when its own differs from the document defaults': with defaults
-/// of false that is the standard's XOR of the levels that give true; with defaults of
-/// true it is Word's rule that the value is true when an even number of levels give
-/// false, a level without a value taking the defaults' (MS-OI29500 §17.7.3(a), (b)).
-/// The reference renders of `word-rules/E-style-toggles.docx` and
-/// `E-style-toggles-defaults.docx` are to confirm it.
-fn toggle(
-    defaults: Option<bool>,
-    paragraph: Option<bool>,
-    character: Option<bool>,
-    direct: Option<bool>,
-) -> bool {
+/// Direct formatting sets the value (ECMA-376 §17.7.3). Each style flips the value when
+/// its own differs from the document defaults': with defaults of false that is the
+/// standard's XOR of the levels that give true; with defaults of true it is Word's rule
+/// that the value is true when an even number of levels give false, a level without a
+/// value taking the defaults' (MS-OI29500 §17.7.3(a), (b)). With the defaults alone below
+/// it, a paragraph style so sets the value rather than combining with what is below, as
+/// Word does (MS-OI29500 §17.7.8(a)). Word's renders of `word-rules/E-style-toggles.docx`
+/// and `E-style-toggles-defaults.docx` show this, and those of `E-table-style-toggles.docx`
+/// and `E-table-style-toggles-defaults.docx` show a table style flipping the value as one
+/// more such level: a bold table style and a bold paragraph or character style give text
+/// that is not bold.
+fn toggle(defaults: Option<bool>, styles: [Option<bool>; 3], direct: Option<bool>) -> bool {
     let default = defaults.unwrap_or(false);
-    let mut value = paragraph.unwrap_or(default);
-    if character.is_some_and(|character| character != default) {
-        value = !value;
+    let mut value = default;
+    for style in styles {
+        if style.is_some_and(|style| style != default) {
+            value = !value;
+        }
     }
     direct.unwrap_or(value)
 }
@@ -299,6 +384,32 @@ pub(super) struct CharacterLevel {
     languages: [Option<Arc<str>>; 3],
     ligatures: Option<Ligatures>,
     contextual_alternates: Option<bool>,
+    emphasis_mark: Option<bool>,
+    border: Option<bool>,
+    text_effects: TextEffects,
+    font_choices: FontChoices,
+}
+
+impl FontChoices {
+    /// Lays `above` over these choices, each on its own.
+    fn overlay(&mut self, above: &Self) {
+        overwrite(&mut self.number_form, above.number_form);
+        overwrite(&mut self.number_spacing, above.number_spacing);
+        overwrite(&mut self.stylistic_sets, above.stylistic_sets);
+    }
+}
+
+impl TextEffects {
+    /// Lays `above` over these effects, each on its own.
+    fn overlay(&mut self, above: &Self) {
+        overwrite(&mut self.glow, above.glow);
+        overwrite(&mut self.shadow, above.shadow);
+        overwrite(&mut self.reflection, above.reflection);
+        overwrite(&mut self.outline, above.outline);
+        overwrite(&mut self.fill, above.fill);
+        overwrite(&mut self.turned, above.turned);
+        overwrite(&mut self.depth, above.depth);
+    }
 }
 
 impl CharacterLevel {
@@ -337,6 +448,10 @@ impl CharacterLevel {
             languages,
             ligatures,
             contextual_alternates,
+            emphasis_mark,
+            border,
+            text_effects,
+            font_choices,
         } = self;
         fonts.iter().any(Option::is_some)
             || hint.is_some()
@@ -356,10 +471,14 @@ impl CharacterLevel {
             || languages.iter().any(Option::is_some)
             || ligatures.is_some()
             || contextual_alternates.is_some()
+            || emphasis_mark.is_some()
+            || border.is_some()
+            || text_effects.is_set()
+            || font_choices.is_set()
     }
 
     /// What one `w:rPr` gives.
-    fn of(properties: &RunProperties) -> Self {
+    pub(super) fn of(properties: &RunProperties) -> Self {
         let fonts = &properties.fonts;
         // In one w:rFonts the theme attribute wins over the font (§17.3.2.26).
         let slot = |name: &Option<String>, theme: Option<ThemeFont>| match theme {
@@ -401,20 +520,36 @@ impl CharacterLevel {
                 .map(|language| language.as_deref().map(Into::into)),
             ligatures: properties.ligatures,
             contextual_alternates: properties.contextual_alternates,
+            emphasis_mark: properties.emphasis_mark,
+            border: properties.border,
+            text_effects: properties.text_effects,
+            font_choices: properties.font_choices,
         }
     }
 }
 
 impl Layer for CharacterLevel {
     fn of_style(document: &Document, index: usize) -> Self {
-        document
+        let mut level = document
             .styles
             .styles
             .get(index)
             .map(|style| {
                 Self::of(&crate::model::Style::from_data(document, style).run_properties())
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if (level.size.is_some() || level.size_complex_script.is_some())
+            && super::drops_values_equal_to_defaults(document, index)
+        {
+            let defaults = crate::model::Styles::new(document).default_run_properties();
+            if level.size == defaults.size {
+                level.size = None;
+            }
+            if level.size_complex_script == defaults.size_complex_script {
+                level.size_complex_script = None;
+            }
+        }
+        level
     }
 
     /// Lays `above` over this level: what it gives replaces what this one gives. A font
@@ -444,6 +579,10 @@ impl Layer for CharacterLevel {
         }
         overwrite(&mut self.ligatures, above.ligatures);
         overwrite(&mut self.contextual_alternates, above.contextual_alternates);
+        overwrite(&mut self.emphasis_mark, above.emphasis_mark);
+        overwrite(&mut self.border, above.border);
+        self.text_effects.overlay(&above.text_effects);
+        self.font_choices.overlay(&above.font_choices);
     }
 }
 
@@ -451,40 +590,50 @@ impl Layer for CharacterLevel {
 /// the theme's font for the script of the language it gives for the slot (`w:val` for
 /// ascii and hAnsi, `w:eastAsia`, `w:bidi`); else, or when the theme has no font for
 /// that script, the theme's latin, ea or cs font. A document without a theme part has
-/// Word's default theme ([`OFFICE_THEME_LATIN`]).
+/// Word's default theme ([`OFFICE_THEME_LATIN`], [`OFFICE_THEME_SCRIPTS`]).
 fn theme_font(document: &Document, font: ThemeFont) -> Option<String> {
-    let Some(theme) = document.theme.as_ref() else {
-        let [major, minor] = OFFICE_THEME_LATIN;
-        return match font {
-            ThemeFont::MajorAscii | ThemeFont::MajorHAnsi => Some(major.into()),
-            ThemeFont::MinorAscii | ThemeFont::MinorHAnsi => Some(minor.into()),
-            _ => None,
-        };
-    };
-    let scheme = theme.fonts()?;
-    let (collection, slot) = match font {
-        ThemeFont::MajorAscii | ThemeFont::MajorHAnsi => (scheme.major(), Slot::Latin),
-        ThemeFont::MajorEastAsia => (scheme.major(), Slot::EastAsia),
-        ThemeFont::MajorBidi => (scheme.major(), Slot::ComplexScript),
-        ThemeFont::MinorAscii | ThemeFont::MinorHAnsi => (scheme.minor(), Slot::Latin),
-        ThemeFont::MinorEastAsia => (scheme.minor(), Slot::EastAsia),
-        ThemeFont::MinorBidi => (scheme.minor(), Slot::ComplexScript),
+    let (major, slot) = match font {
+        ThemeFont::MajorAscii | ThemeFont::MajorHAnsi => (true, Slot::Latin),
+        ThemeFont::MajorEastAsia => (true, Slot::EastAsia),
+        ThemeFont::MajorBidi => (true, Slot::ComplexScript),
+        ThemeFont::MinorAscii | ThemeFont::MinorHAnsi => (false, Slot::Latin),
+        ThemeFont::MinorEastAsia => (false, Slot::EastAsia),
+        ThemeFont::MinorBidi => (false, Slot::ComplexScript),
     };
     let languages = document.settings.theme_font_languages();
-    let (language, by_slot) = match slot {
-        Slot::Latin => (languages.and_then(|l| l.latin()), collection.latin()),
-        Slot::EastAsia => (
-            languages.and_then(|l| l.east_asia()),
-            collection.east_asian(),
-        ),
-        Slot::ComplexScript => (
-            languages.and_then(|l| l.bidi()),
-            collection.complex_script(),
-        ),
+    let language = match slot {
+        Slot::Latin => languages.and_then(|l| l.latin()),
+        Slot::EastAsia => languages.and_then(|l| l.east_asia()),
+        Slot::ComplexScript => languages.and_then(|l| l.bidi()),
     };
+    let script = language.and_then(script_of);
     let not_empty = |typeface: &&str| !typeface.is_empty();
-    let by_language = language
-        .and_then(script_of)
+    let Some(theme) = document.theme.as_ref() else {
+        let by_script = script.and_then(|script| {
+            OFFICE_THEME_SCRIPTS
+                .iter()
+                .find(|(of, _, _)| *of == script)
+                .map(|&(_, major_font, minor_font)| if major { major_font } else { minor_font })
+        });
+        let [major_latin, minor_latin] = OFFICE_THEME_LATIN;
+        let by_slot = match slot {
+            Slot::Latin => Some(if major { major_latin } else { minor_latin }),
+            Slot::EastAsia | Slot::ComplexScript => None,
+        };
+        return by_script.or(by_slot).map(Into::into);
+    };
+    let scheme = theme.fonts()?;
+    let collection = if major {
+        scheme.major()
+    } else {
+        scheme.minor()
+    };
+    let by_slot = match slot {
+        Slot::Latin => collection.latin(),
+        Slot::EastAsia => collection.east_asian(),
+        Slot::ComplexScript => collection.complex_script(),
+    };
+    let by_language = script
         .and_then(|script| collection.script(script))
         .filter(not_empty);
     by_language.or(by_slot.filter(not_empty)).map(Into::into)
@@ -499,10 +648,13 @@ enum Slot {
 
 /// The scripts themes give fonts for, by their ISO 15924 codes (Office's own `Uigh` and
 /// `Viet` among them), as a script subtag of a language tag names them.
-const THEME_SCRIPTS: [&str; 34] = [
+const THEME_SCRIPTS: [&str; 50] = [
     "Arab", "Armn", "Beng", "Cans", "Cher", "Cyrl", "Ethi", "Geor", "Grek", "Gujr", "Guru", "Hang",
     "Hans", "Hant", "Hebr", "Jpan", "Khmr", "Knda", "Laoo", "Latn", "Mlym", "Mong", "Orya", "Sinh",
     "Syrc", "Taml", "Telu", "Thaa", "Thai", "Tibt", "Uigh", "Viet", "Yiii", "Deva",
+    // The others Word's default theme names (OFFICE_THEME_SCRIPTS).
+    "Bugi", "Bopo", "Java", "Lisu", "Mymr", "Nkoo", "Olck", "Osma", "Phag", "Syrn", "Syrj", "Syre",
+    "Sora", "Tale", "Talu", "Tfng",
 ];
 
 /// The ISO 15924 code of the script of a language tag, as themes name scripts for their

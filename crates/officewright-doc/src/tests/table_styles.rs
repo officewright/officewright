@@ -817,7 +817,7 @@ fn takes_what_a_format_gives_whole_rows_and_leaves_out_what_a_style_may_not_give
 }
 
 #[test]
-fn takes_the_default_table_style_and_reports_text_a_style_gives_through_a_format_or_a_base() {
+fn takes_the_default_table_style_and_text_a_style_gives_through_a_format_or_a_base() {
     let styles = format!(
         r#"<w:style w:type="table" w:styleId="First"><w:name w:val="First"/>{}</w:style><w:style w:type="table" w:default="1" w:styleId="Chosen"><w:name w:val="Chosen"/>{}</w:style><w:style w:type="table" w:styleId="Bold"><w:name w:val="Bold"/><w:rPr><w:b/></w:rPr></w:style><w:style w:type="table" w:styleId="OnBold"><w:name w:val="OnBold"/><w:basedOn w:val="Bold"/></w:style><w:style w:type="table" w:styleId="Header"><w:name w:val="Header"/><w:tblStylePr w:type="firstRow"><w:rPr><w:b/></w:rPr></w:tblStylePr></w:style>"#,
         shading("111111"),
@@ -826,28 +826,21 @@ fn takes_the_default_table_style_and_reports_text_a_style_gives_through_a_format
     // Without w:tblStyle, the default table style.
     let document = open_with(&styles, &table("", 1, 1));
     assert_eq!(fills(&document), [["222222"]]);
-    let unapplied = "what the table's style gives paragraphs and runs is not applied yet";
     // Text in a whole-table format, which Word ignores with the rest of it, is no text
     // the style gives.
     let whole = r#"<w:style w:type="table" w:styleId="Whole"><w:name w:val="Whole"/><w:tblStylePr w:type="wholeTable"><w:rPr><w:b/></w:rPr></w:tblStylePr></w:style>"#;
     let document = open_with(whole, &table(r#"<w:tblStyle w:val="Whole"/>"#, 1, 1));
-    assert!(
-        document.to_layout_ir().left_out().is_empty(),
-        "{:?}",
-        document.to_layout_ir().left_out()
-    );
+    assert_eq!(marks(&document), [(11.0, false, ColorValue::Auto)]);
+    assert!(document.to_layout_ir().left_out().is_empty());
+    // Through the style it is based on, and through the first row's format.
     for id in ["OnBold", "Header"] {
         let document = open_with(
             &styles,
-            &table(&format!(r#"<w:tblStyle w:val="{id}"/>"#), 1, 1),
+            &table(&format!(r#"<w:tblStyle w:val="{id}"/>"#), 2, 1),
         );
-        let messages: Vec<String> = document
-            .to_layout_ir()
-            .left_out()
-            .iter()
-            .map(|entry| entry.message().to_owned())
-            .collect();
-        assert_eq!(messages, [unapplied], "{id}");
+        let bold: Vec<bool> = marks(&document).iter().map(|mark| mark.1).collect();
+        assert_eq!(bold, [true, id == "OnBold"], "{id}");
+        assert!(document.to_layout_ir().left_out().is_empty(), "{id}");
     }
 }
 
@@ -1053,4 +1046,764 @@ fn takes_the_last_table_style_marked_default() {
             .map(Style::id),
         Some("Second")
     );
+}
+
+#[test]
+fn lays_a_list_level_over_each_table_style_of_its_cell() {
+    // From the review of #360: a list item's level laid over a paragraph style is kept
+    // per table text, so a list item in a right-aligned table's cell does not take the
+    // centring of the list item before it, in a table whose style centres.
+    let styles = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="table" w:styleId="C"><w:name w:val="C"/><w:pPr><w:jc w:val="center"/></w:pPr></w:style><w:style w:type="table" w:styleId="R"><w:name w:val="R"/><w:pPr><w:jc w:val="right"/></w:pPr></w:style>"#;
+    let numbering = r#"<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#;
+    let item = r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>item</w:t></w:r></w:p>"#;
+    let table = |style: &str| {
+        format!(
+            r#"<w:tbl><w:tblPr><w:tblStyle w:val="{style}"/></w:tblPr><w:tblGrid/><w:tr><w:tc>{item}</w:tc></w:tr></w:tbl><w:p/>"#
+        )
+    };
+    let body = format!("{}{}", table("C"), table("R"));
+    let document = open_text(styles, "", numbering, &body);
+    let mut formats = document.formats();
+    let mut found = Vec::new();
+    for block in document.sections().next().unwrap().blocks() {
+        let Block::Table(table) = block else {
+            continue;
+        };
+        let cell = table.rows().next().unwrap().cells().next().unwrap();
+        let Some(Block::Paragraph(paragraph)) = cell.blocks().next() else {
+            panic!("no paragraph");
+        };
+        let format = formats.paragraph(paragraph);
+        assert!(format.list().is_some());
+        found.push(format.justification());
+    }
+    assert_eq!(found, [Justification::Center, Justification::Right]);
+}
+
+/// A document with these styles, the settings `settings` (none for an empty string), a
+/// numbering part when `numbering` is not empty, and this body.
+fn open_text(styles: &str, settings: &str, numbering: &str, body: &str) -> Document {
+    let mut parts = vec![(
+        "styles",
+        "styles.xml",
+        format!(r#"<w:styles xmlns:w="{W}">{styles}</w:styles>"#),
+    )];
+    if !settings.is_empty() {
+        parts.push((
+            "settings",
+            "settings.xml",
+            format!(r#"<w:settings xmlns:w="{W}">{settings}</w:settings>"#),
+        ));
+    }
+    if !numbering.is_empty() {
+        parts.push((
+            "numbering",
+            "numbering.xml",
+            format!(r#"<w:numbering xmlns:w="{W}">{numbering}</w:numbering>"#),
+        ));
+    }
+    with_parts(body, &parts)
+}
+
+/// The paragraphs of every cell of the document's first table, row by row, and of the
+/// tables in them.
+fn cell_paragraphs(document: &Document) -> Vec<Paragraph<'_>> {
+    fn walk<'a>(table: Table<'a>, out: &mut Vec<Paragraph<'a>>) {
+        for row in table.rows() {
+            for cell in row.cells() {
+                for block in cell.blocks() {
+                    match block {
+                        Block::Paragraph(paragraph) => out.push(paragraph),
+                        Block::Table(table) => walk(table, out),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(first_table(document), &mut out);
+    out
+}
+
+/// The size, boldness and colour of each cell paragraph's mark.
+fn marks(document: &Document) -> Vec<(f64, bool, ColorValue)> {
+    let mut formats = document.formats();
+    cell_paragraphs(document)
+        .into_iter()
+        .map(|paragraph| {
+            let mark = formats.paragraph_mark(paragraph);
+            (mark.size().0, mark.bold(), mark.color())
+        })
+        .collect()
+}
+
+fn rgb(hex: &str) -> ColorValue {
+    let [_, red, green, blue] = u32::from_str_radix(hex, 16).unwrap().to_be_bytes();
+    ColorValue::Rgb(red, green, blue)
+}
+
+#[test]
+fn gives_cells_what_the_table_style_and_its_conditional_formats_give_text() {
+    // ECMA-376 Part 1, §17.7.2: what a table style gives paragraphs and runs lies under
+    // the paragraph style. Each conditional format gives a colour, laid over the style's
+    // own size and centring in Word's order (MS-OI29500 §17.7.6.6(a)), as the cells of
+    // word-rules/E-table-style-look.docx show; a paragraph outside the table takes none.
+    let colours: String = [
+        ("band1Horz", "111111"),
+        ("band2Horz", "222222"),
+        ("firstCol", "CCCCCC"),
+        ("firstRow", "AAAAAA"),
+        ("nwCell", "EEEEEE"),
+    ]
+    .iter()
+    .map(|(kind, colour)| {
+        // The first row's format right-aligns its text too.
+        let p_pr = if *kind == "firstRow" {
+            r#"<w:pPr><w:jc w:val="right"/></w:pPr>"#
+        } else {
+            ""
+        };
+        format!(
+            r#"<w:tblStylePr w:type="{kind}">{p_pr}<w:rPr><w:color w:val="{colour}"/></w:rPr></w:tblStylePr>"#
+        )
+    })
+    .collect();
+    let styles = format!(
+        r#"<w:style w:type="table" w:styleId="Text"><w:name w:val="Text"/><w:pPr><w:jc w:val="center"/><w:spacing w:after="120"/></w:pPr><w:rPr><w:sz w:val="28"/></w:rPr><w:tblPr><w:tblStyleRowBandSize w:val="1"/></w:tblPr>{colours}</w:style>"#
+    );
+    let look = r#"<w:tblStyle w:val="Text"/><w:tblLook w:firstRow="1" w:lastRow="0" w:firstColumn="1" w:lastColumn="0" w:noHBand="0" w:noVBand="1"/>"#;
+    let body = format!(
+        "{}<w:p><w:r><w:t>after</w:t></w:r></w:p>",
+        table(look, 3, 2).trim_end_matches("<w:p/>")
+    );
+    let document = open_text(&styles, "", "", &body);
+    let found: Vec<ColorValue> = marks(&document).iter().map(|mark| mark.2).collect();
+    assert_eq!(
+        found,
+        [
+            // The first row; its first cell is the top left corner.
+            rgb("EEEEEE"),
+            rgb("AAAAAA"),
+            // The first column over the bands, then the bands.
+            rgb("CCCCCC"),
+            rgb("111111"),
+            rgb("CCCCCC"),
+            rgb("222222"),
+        ]
+    );
+    let mut formats = document.formats();
+    for (at, paragraph) in cell_paragraphs(&document).into_iter().enumerate() {
+        let format = formats.paragraph(paragraph);
+        let justification = if at < 2 {
+            Justification::Right
+        } else {
+            Justification::Center
+        };
+        assert_eq!(format.justification(), justification, "{at}");
+        assert_eq!(format.after_spacing(), Pt(6.0));
+        assert_eq!(formats.paragraph_mark(paragraph).size(), Pt(14.0));
+    }
+    let after = document
+        .sections()
+        .next()
+        .unwrap()
+        .blocks()
+        .find_map(|block| match block {
+            Block::Paragraph(paragraph) => Some(paragraph),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        formats.paragraph(after).justification(),
+        Justification::Start
+    );
+    let run = after.runs().next().unwrap();
+    // Word's own run defaults, without w:docDefaults.
+    assert_eq!(formats.run(run).size(), Pt(11.0));
+    assert_eq!(formats.run(run).color(), ColorValue::Auto);
+}
+
+#[test]
+fn puts_the_table_style_under_the_paragraph_style_the_character_style_and_direct_formatting() {
+    let styles = r#"<w:style w:type="table" w:styleId="Big"><w:name w:val="Big"/><w:pPr><w:jc w:val="center"/></w:pPr><w:rPr><w:sz w:val="28"/><w:color w:val="111111"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Huge"><w:name w:val="Huge"/><w:pPr><w:jc w:val="right"/></w:pPr><w:rPr><w:sz w:val="32"/></w:rPr></w:style><w:style w:type="character" w:styleId="Red"><w:name w:val="Red"/><w:rPr><w:color w:val="FF0000"/></w:rPr></w:style>"#;
+    let cells = [
+        "<w:p><w:r><w:t>x</w:t></w:r></w:p>",
+        r#"<w:p><w:pPr><w:pStyle w:val="Huge"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
+        r#"<w:p><w:pPr><w:rPr><w:rStyle w:val="Red"/><w:sz w:val="36"/></w:rPr></w:pPr><w:r><w:rPr><w:rStyle w:val="Red"/><w:sz w:val="36"/></w:rPr><w:t>x</w:t></w:r></w:p>"#,
+    ];
+    let row: String = cells
+        .iter()
+        .map(|cell| format!("<w:tc>{cell}</w:tc>"))
+        .collect();
+    let body = format!(
+        r#"<w:tbl><w:tblPr><w:tblStyle w:val="Big"/></w:tblPr><w:tblGrid/><w:tr>{row}</w:tr></w:tbl><w:p/>"#
+    );
+    let document = open_text(styles, "", "", &body);
+    assert_eq!(
+        marks(&document),
+        [
+            (14.0, false, rgb("111111")),
+            (16.0, false, rgb("111111")),
+            (18.0, false, rgb("FF0000")),
+        ]
+    );
+    let mut formats = document.formats();
+    // The runs take what their marks take.
+    let runs: Vec<(f64, ColorValue)> = cell_paragraphs(&document)
+        .into_iter()
+        .map(|paragraph| {
+            let run = formats.run(paragraph.runs().next().unwrap());
+            (run.size().0, run.color())
+        })
+        .collect();
+    assert_eq!(
+        runs,
+        [
+            (14.0, rgb("111111")),
+            (16.0, rgb("111111")),
+            (18.0, rgb("FF0000"))
+        ]
+    );
+    let alignments: Vec<Justification> = cell_paragraphs(&document)
+        .into_iter()
+        .map(|paragraph| formats.paragraph(paragraph).justification())
+        .collect();
+    assert_eq!(
+        alignments,
+        [
+            Justification::Center,
+            Justification::Right,
+            Justification::Center
+        ]
+    );
+}
+
+#[test]
+fn flips_toggles_with_the_table_style_as_one_more_level() {
+    // word-rules/E-table-style-toggles.docx and E-table-style-toggles-defaults.docx: a
+    // table style flips a toggle property as the paragraph and character styles do,
+    // each when its value differs from the document defaults'.
+    let toggles = |defaults: &str, table: &str| {
+        let styles = format!(
+            r#"<w:docDefaults><w:rPrDefault><w:rPr>{defaults}</w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="table" w:styleId="T"><w:name w:val="T"/><w:rPr>{table}</w:rPr></w:style><w:style w:type="paragraph" w:styleId="BoldPara"><w:name w:val="BoldPara"/><w:rPr><w:b/></w:rPr></w:style><w:style w:type="character" w:styleId="CharBold"><w:name w:val="CharBold"/><w:rPr><w:b/></w:rPr></w:style><w:style w:type="character" w:styleId="CharBoldOff"><w:name w:val="CharBoldOff"/><w:rPr><w:b w:val="0"/></w:rPr></w:style>"#
+        );
+        let cells = [
+            r#"<w:p><w:pPr><w:pStyle w:val="BoldPara"/></w:pPr></w:p>"#,
+            "<w:p/>",
+            r#"<w:p><w:pPr><w:rPr><w:rStyle w:val="CharBold"/></w:rPr></w:pPr></w:p>"#,
+            r#"<w:p><w:pPr><w:rPr><w:rStyle w:val="CharBoldOff"/></w:rPr></w:pPr></w:p>"#,
+        ];
+        let row: String = cells
+            .iter()
+            .map(|cell| format!("<w:tc>{cell}</w:tc>"))
+            .collect();
+        let body = format!(
+            r#"<w:tbl><w:tblPr><w:tblStyle w:val="T"/></w:tblPr><w:tblGrid/><w:tr>{row}</w:tr></w:tbl><w:p/>"#
+        );
+        let document = open_text(&styles, "", "", &body);
+        marks(&document)
+            .into_iter()
+            .map(|mark| mark.1)
+            .collect::<Vec<_>>()
+    };
+    // Defaults not bold, a bold table style: BoldPara, Normal, CharBold, CharBoldOff.
+    assert_eq!(toggles("", "<w:b/>"), [false, true, false, true]);
+    // Bold defaults, a table style that turns bold off.
+    assert_eq!(
+        toggles("<w:b/>", r#"<w:b w:val="0"/>"#),
+        [false, false, false, true]
+    );
+    // Without a table style's value, the paragraph style sets it, as before.
+    assert_eq!(toggles("", ""), [true, false, true, false]);
+    // An on/off property that does not toggle takes the last level that gives it: the
+    // table style's, unless the paragraph style gives one.
+    let styles = r#"<w:style w:type="table" w:styleId="T"><w:name w:val="T"/><w:rPr><w:dstrike/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Off"><w:name w:val="Off"/><w:rPr><w:dstrike w:val="0"/></w:rPr></w:style>"#;
+    let body = r#"<w:tbl><w:tblPr><w:tblStyle w:val="T"/></w:tblPr><w:tblGrid/><w:tr><w:tc><w:p/></w:tc><w:tc><w:p><w:pPr><w:pStyle w:val="Off"/></w:pPr></w:p></w:tc></w:tr></w:tbl><w:p/>"#;
+    let document = open_text(styles, "", "", body);
+    let mut formats = document.formats();
+    let struck: Vec<bool> = cell_paragraphs(&document)
+        .into_iter()
+        .map(|paragraph| formats.paragraph_mark(paragraph).double_strike())
+        .collect();
+    assert_eq!(struck, [true, false]);
+}
+
+#[test]
+fn lets_the_table_style_win_over_the_default_style_s_11_or_12_pt_and_left_when_the_setting_is_off()
+{
+    // [MS-DOCX] overrideTableStyleFontSizeAndJustification: off, a size of 11 or 12 pt
+    // and a left justification of the default paragraph style give way to the table
+    // style's (word-rules/E-table-style-size-12pt-14.docx); not written, it is off below
+    // compatibility mode 15 and on from it (E-table-style-size-12pt-none.docx). The
+    // document defaults give 11 pt, as in those documents.
+    let case = |normal: &str, mode: u32, setting: &[&str], style: &str| {
+        let styles = format!(
+            r#"<w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/>{normal}</w:style><w:style w:type="paragraph" w:styleId="Child"><w:name w:val="Child"/><w:basedOn w:val="Normal"/></w:style><w:style w:type="table" w:styleId="Big"><w:name w:val="Big"/><w:pPr><w:jc w:val="center"/></w:pPr><w:rPr><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr></w:style>"#
+        );
+        let setting: String = setting
+            .iter()
+            .map(|value| {
+                format!(
+                    r#"<w:compatSetting w:name="overrideTableStyleFontSizeAndJustification" w:uri="http://schemas.microsoft.com/office/word" w:val="{value}"/>"#
+                )
+            })
+            .collect();
+        let settings = format!(
+            r#"<w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="{mode}"/>{setting}</w:compat>"#
+        );
+        let paragraph = if style.is_empty() {
+            "<w:p/>".to_owned()
+        } else {
+            format!(r#"<w:p><w:pPr><w:pStyle w:val="{style}"/></w:pPr></w:p>"#)
+        };
+        let body = format!(
+            r#"<w:tbl><w:tblPr><w:tblStyle w:val="Big"/></w:tblPr><w:tblGrid/><w:tr><w:tc>{paragraph}</w:tc></w:tr></w:tbl><w:p/>"#
+        );
+        let document = open_text(&styles, &settings, "", &body);
+        let mut formats = document.formats();
+        let paragraph = cell_paragraphs(&document)[0];
+        let mark = formats.paragraph_mark(paragraph);
+        (
+            mark.size().0,
+            mark.size_complex_script().0,
+            formats.paragraph(paragraph).justification(),
+        )
+    };
+    let left_12 = r#"<w:pPr><w:jc w:val="left"/></w:pPr><w:rPr><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr>"#;
+    let left_13 = r#"<w:pPr><w:jc w:val="left"/></w:pPr><w:rPr><w:sz w:val="26"/><w:szCs w:val="26"/></w:rPr>"#;
+    let left_11 = r#"<w:rPr><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr>"#;
+    let table_wins = (14.0, 14.0, Justification::Center);
+    // Normal's 12 pt overrides the table style's 14 pt. Its `w:jc left` never does: it is
+    // the justification below Normal, which Word does not keep as Normal's own (the
+    // renders of E-table-style-size-12pt.docx and -13pt.docx, setting on, centre the
+    // cells), so the table style's centring shows through.
+    let normal_12 = (12.0, 12.0, Justification::Center);
+    // Mode 14, the setting not written: off.
+    assert_eq!(case(left_12, 14, &[], ""), table_wins);
+    assert_eq!(case(left_11, 14, &[], "").0, 14.0);
+    // The size and the justification each give way on their own.
+    assert_eq!(
+        case(left_13, 14, &[], ""),
+        (13.0, 13.0, Justification::Center)
+    );
+    // The paragraph names the default style.
+    assert_eq!(case(left_12, 14, &[], "Normal"), table_wins);
+    // Our choice, no render shows it yet: a style based on the default style keeps
+    // what it inherits, the size; the left justification is not Normal's to inherit.
+    assert_eq!(case(left_12, 14, &[], "Child"), normal_12);
+    // A size equal to the document defaults' (11 pt) is not Normal's own either: the
+    // table style's 14 pt shows through even with the setting on, as the render of
+    // E-table-style-size-11pt.docx shows.
+    assert_eq!(case(left_11, 15, &["1"], "").0, 14.0);
+    // Mode 15, not written: on, the plain hierarchy.
+    assert_eq!(case(left_12, 15, &[], ""), normal_12);
+    // Written, whatever the mode.
+    assert_eq!(case(left_12, 15, &["0"], ""), table_wins);
+    assert_eq!(case(left_12, 14, &["1"], ""), normal_12);
+    // Written twice, the last counts.
+    assert_eq!(case(left_12, 14, &["0", "1"], ""), normal_12);
+    assert_eq!(case(left_12, 15, &["1", "0"], ""), table_wins);
+    // Strict documents write `start` for `left`.
+    let start_12 = r#"<w:pPr><w:jc w:val="start"/></w:pPr><w:rPr><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr>"#;
+    assert_eq!(case(start_12, 14, &[], ""), table_wins);
+    // Only a left justification gives way.
+    let both_12 = r#"<w:pPr><w:jc w:val="both"/></w:pPr><w:rPr><w:sz w:val="24"/></w:rPr>"#;
+    assert_eq!(case(both_12, 14, &[], "").2, Justification::Both);
+    // A table style that gives no size or justification leaves the default style's.
+    let plain = |normal: &str| {
+        let styles = format!(
+            r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/>{normal}</w:style><w:style w:type="table" w:styleId="Plain"><w:name w:val="Plain"/><w:rPr><w:b/></w:rPr></w:style>"#
+        );
+        let body = r#"<w:tbl><w:tblPr><w:tblStyle w:val="Plain"/></w:tblPr><w:tblGrid/><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl><w:p/>"#;
+        let document = open_text(&styles, "", "", body);
+        let mut formats = document.formats();
+        let paragraph = cell_paragraphs(&document)[0];
+        (
+            formats.paragraph_mark(paragraph).size().0,
+            formats.paragraph(paragraph).justification(),
+        )
+    };
+    // Normal's `w:jc left` is not its own, so the defaults' justification, start, is in
+    // effect: the same alignment.
+    assert_eq!(plain(left_12), (12.0, Justification::Start));
+}
+
+#[test]
+fn drops_only_the_default_paragraph_style_s_values_equal_to_the_defaults() {
+    // From the re-check of #360: what Word drops is the default paragraph style's own
+    // values equal to what lies below it, no other style's, and a left justification only
+    // when the defaults give no other.
+    let case = |defaults: &str, normal: &str, style: &str| {
+        let styles = format!(
+            r#"<w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr></w:rPrDefault>{defaults}</w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/>{normal}</w:style><w:style w:type="paragraph" w:styleId="Own"><w:name w:val="Own"/><w:pPr><w:jc w:val="left"/></w:pPr><w:rPr><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr></w:style><w:style w:type="table" w:styleId="Big"><w:name w:val="Big"/><w:pPr><w:jc w:val="center"/></w:pPr><w:rPr><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr></w:style>"#
+        );
+        // Mode 15 with the setting on: the override rule lets nothing give way.
+        let settings = r#"<w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/><w:compatSetting w:name="overrideTableStyleFontSizeAndJustification" w:uri="http://schemas.microsoft.com/office/word" w:val="1"/></w:compat>"#;
+        let paragraph = if style.is_empty() {
+            "<w:p/>".to_owned()
+        } else {
+            format!(r#"<w:p><w:pPr><w:pStyle w:val="{style}"/></w:pPr></w:p>"#)
+        };
+        let body = format!(
+            r#"<w:tbl><w:tblPr><w:tblStyle w:val="Big"/></w:tblPr><w:tblGrid/><w:tr><w:tc>{paragraph}</w:tc></w:tr></w:tbl>{paragraph}"#
+        );
+        let document = open_text(&styles, settings, "", &body);
+        let mut formats = document.formats();
+        let inside = cell_paragraphs(&document)[0];
+        let outside = document
+            .sections()
+            .next()
+            .unwrap()
+            .blocks()
+            .find_map(|block| match block {
+                Block::Paragraph(paragraph) => Some(paragraph),
+                _ => None,
+            })
+            .unwrap();
+        let mark = formats.paragraph_mark(inside);
+        (
+            mark.size().0,
+            mark.size_complex_script().0,
+            formats.paragraph(inside).justification(),
+            formats.paragraph(outside).justification(),
+        )
+    };
+    let left_11 = r#"<w:pPr><w:jc w:val="left"/></w:pPr><w:rPr><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr>"#;
+    // Normal's: the table style's show through in the cell.
+    assert_eq!(
+        case("", left_11, ""),
+        (14.0, 14.0, Justification::Center, Justification::Start)
+    );
+    // Another style's equal values are its own.
+    assert_eq!(
+        case("", "", "Own"),
+        (11.0, 11.0, Justification::Left, Justification::Left)
+    );
+    // Over defaults that right-align, Normal's left is its own, in the cell and outside.
+    let right = r#"<w:pPrDefault><w:pPr><w:jc w:val="right"/></w:pPr></w:pPrDefault>"#;
+    assert_eq!(case(right, left_11, "").2, Justification::Left);
+    assert_eq!(case(right, left_11, "").3, Justification::Left);
+    // `start` is dropped as `left` is, and each size on its own.
+    let start = r#"<w:pPr><w:jc w:val="start"/></w:pPr><w:rPr><w:sz w:val="24"/><w:szCs w:val="22"/></w:rPr>"#;
+    assert_eq!(
+        case("", start, ""),
+        (12.0, 14.0, Justification::Center, Justification::Start)
+    );
+}
+
+#[test]
+fn keeps_at_most_4096_style_chains_laid_over_table_texts() {
+    // 250 tables in styles of their own, each cell with a paragraph in each of 17 styles:
+    // 4,250 chains laid over table texts, of which at most 4,096 are kept.
+    let mut styles: String = (0..250)
+        .map(|n| {
+            format!(
+                r#"<w:style w:type="table" w:styleId="S{n}"><w:name w:val="S{n}"/><w:rPr><w:sz w:val="{}"/></w:rPr></w:style>"#,
+                10 + n % 40
+            )
+        })
+        .collect();
+    for k in 0..17 {
+        styles.push_str(&format!(
+            r#"<w:style w:type="paragraph" w:styleId="P{k}"><w:name w:val="P{k}"/><w:pPr><w:ind w:left="{}"/></w:pPr></w:style>"#,
+            20 * k
+        ));
+    }
+    let paragraphs: String = (0..17)
+        .map(|k| format!(r#"<w:p><w:pPr><w:pStyle w:val="P{k}"/></w:pPr></w:p>"#))
+        .collect();
+    let body: String = (0..250)
+        .map(|n| {
+            format!(
+                r#"<w:tbl><w:tblPr><w:tblStyle w:val="S{n}"/></w:tblPr><w:tblGrid/><w:tr><w:tc>{paragraphs}</w:tc></w:tr></w:tbl><w:p/>"#
+            )
+        })
+        .collect();
+    let document = open_with(&styles, &body);
+    let mut formats = document.formats();
+    let mut most = 0;
+    for block in document.sections().next().unwrap().blocks() {
+        let Block::Table(table) = block else {
+            continue;
+        };
+        let cell = table.rows().next().unwrap().cells().next().unwrap();
+        for (k, block) in cell.blocks().enumerate() {
+            let Block::Paragraph(paragraph) = block else {
+                panic!("no paragraph");
+            };
+            let indent = formats.paragraph(paragraph).start_indent().0;
+            assert_eq!(indent, f64::from(u32::try_from(k).unwrap()));
+            most = most.max(formats.kept_table_texts().3);
+        }
+    }
+    assert_eq!(formats.work().cell_levels, 250 * 17);
+    assert_eq!(most, 4096);
+}
+
+#[test]
+fn takes_the_style_of_the_innermost_table_and_gives_list_labels_its_run_properties() {
+    let styles = r#"<w:style w:type="table" w:styleId="Outer"><w:name w:val="Outer"/><w:rPr><w:color w:val="111111"/></w:rPr></w:style><w:style w:type="table" w:styleId="Inner"><w:name w:val="Inner"/><w:rPr><w:color w:val="222222"/></w:rPr></w:style><w:style w:type="table" w:styleId="Listed"><w:name w:val="Listed"/><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr></w:style>"#;
+    let numbering = r#"<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#;
+    let inner = r#"<w:tbl><w:tblPr><w:tblStyle w:val="Inner"/></w:tblPr><w:tblGrid/><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>"#;
+    let item =
+        r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr></w:p>"#;
+    let body = format!(
+        r#"<w:tbl><w:tblPr><w:tblStyle w:val="Outer"/></w:tblPr><w:tblGrid/><w:tr><w:tc>{inner}{item}</w:tc></w:tr></w:tbl><w:p/>"#
+    );
+    let document = open_text(styles, "", numbering, &body);
+    let found: Vec<ColorValue> = marks(&document).iter().map(|mark| mark.2).collect();
+    assert_eq!(found, [rgb("222222"), rgb("111111")]);
+    let mut formats = document.formats();
+    let label = formats.list_label(cell_paragraphs(&document)[1]).unwrap();
+    assert_eq!(label.color(), rgb("111111"));
+    // The same list level in a cell of a table whose style centres its text, and outside
+    // the table: each takes what lies under it.
+    let centred = r#"<w:style w:type="table" w:styleId="Centred"><w:name w:val="Centred"/><w:pPr><w:jc w:val="center"/></w:pPr></w:style>"#;
+    let body = format!(
+        r#"<w:tbl><w:tblPr><w:tblStyle w:val="Centred"/></w:tblPr><w:tblGrid/><w:tr><w:tc>{item}</w:tc></w:tr></w:tbl>{item}"#
+    );
+    let document = open_text(centred, "", numbering, &body);
+    let mut formats = document.formats();
+    let inside = cell_paragraphs(&document)[0];
+    let outside = document
+        .sections()
+        .next()
+        .unwrap()
+        .blocks()
+        .find_map(|block| match block {
+            Block::Paragraph(paragraph) => Some(paragraph),
+            _ => None,
+        })
+        .unwrap();
+    assert!(formats.paragraph(inside).list().is_some());
+    assert_eq!(
+        formats.paragraph(inside).justification(),
+        Justification::Center
+    );
+    assert_eq!(
+        formats.paragraph(outside).justification(),
+        Justification::Start
+    );
+    // A table style's list is not taken, our choice (numbering lies above table styles).
+    let body = r#"<w:tbl><w:tblPr><w:tblStyle w:val="Listed"/></w:tblPr><w:tblGrid/><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl><w:p/>"#;
+    let document = open_text(styles, "", numbering, body);
+    let paragraph = cell_paragraphs(&document)[0];
+    assert!(document.formats().paragraph(paragraph).list().is_none());
+}
+
+#[test]
+fn clears_a_table_style_s_tab_stop_with_the_paragraph_style() {
+    // A paragraph style's cleared stop removes the one the table style sets, which lies
+    // below it.
+    let styles = r#"<w:style w:type="table" w:styleId="Tabs"><w:name w:val="Tabs"/><w:pPr><w:tabs><w:tab w:val="left" w:pos="1440"/><w:tab w:val="left" w:pos="2880"/></w:tabs></w:pPr></w:style><w:style w:type="paragraph" w:styleId="Clear"><w:name w:val="Clear"/><w:pPr><w:tabs><w:tab w:val="clear" w:pos="1440"/></w:tabs></w:pPr></w:style>"#;
+    let body = r#"<w:tbl><w:tblPr><w:tblStyle w:val="Tabs"/></w:tblPr><w:tblGrid/><w:tr><w:tc><w:p/></w:tc><w:tc><w:p><w:pPr><w:pStyle w:val="Clear"/></w:pPr></w:p></w:tc></w:tr></w:tbl><w:p/>"#;
+    let document = open_text(styles, "", "", body);
+    let mut formats = document.formats();
+    let stops: Vec<Vec<f64>> = cell_paragraphs(&document)
+        .into_iter()
+        .map(|paragraph| {
+            formats
+                .paragraph(paragraph)
+                .tabs()
+                .iter()
+                .map(|stop| stop.position().0)
+                .collect()
+        })
+        .collect();
+    assert_eq!(stops, [vec![72.0, 144.0], vec![144.0]]);
+}
+
+#[test]
+fn works_out_what_a_table_style_gives_text_once_per_set_of_conditions() {
+    // 2,000 cells of one table meet six sets of conditions; each is worked out once,
+    // however many paragraphs and runs ask.
+    let styles = parts_style();
+    let rows = format!(
+        "<w:tr>{}</w:tr>",
+        "<w:tc><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc>".repeat(20)
+    )
+    .repeat(100);
+    let body = format!(
+        r#"<w:tbl><w:tblPr><w:tblStyle w:val="Parts"/><w:tblLook w:firstRow="1" w:lastRow="1" w:firstColumn="1" w:lastColumn="1" w:noHBand="0" w:noVBand="1"/></w:tblPr><w:tblGrid/>{rows}</w:tbl><w:p/>"#
+    );
+    let document = open_with(&styles, &body);
+    let mut formats = document.formats();
+    for paragraph in cell_paragraphs(&document) {
+        formats.paragraph(paragraph);
+        formats.paragraph_mark(paragraph);
+        for run in paragraph.runs() {
+            formats.run(run);
+        }
+    }
+    assert!(
+        formats.work().table_texts <= 12,
+        "{}",
+        formats.work().table_texts
+    );
+    assert!(formats.style_reads() < 20, "{}", formats.style_reads());
+}
+
+#[test]
+fn keeps_at_most_256_table_texts() {
+    // 300 tables, each in a style of its own: the table texts are forgotten when there
+    // are 256, and what each cell gets stays right.
+    let styles: String = (0..300)
+        .map(|n| {
+            format!(
+                r#"<w:style w:type="table" w:styleId="S{n}"><w:name w:val="S{n}"/><w:pPr><w:jc w:val="{}"/></w:pPr><w:rPr><w:sz w:val="{}"/></w:rPr></w:style>"#,
+                if n % 2 == 0 { "center" } else { "right" },
+                10 + n % 40
+            )
+        })
+        .collect();
+    let body: String = (0..300)
+        .map(|n| {
+            format!(
+                r#"<w:tbl><w:tblPr><w:tblStyle w:val="S{n}"/></w:tblPr><w:tblGrid/><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl><w:p/>"#
+            )
+        })
+        .collect();
+    let document = open_with(&styles, &body);
+    let mut formats = document.formats();
+    let mut n = 0;
+    for block in document.sections().next().unwrap().blocks() {
+        let Block::Table(table) = block else {
+            continue;
+        };
+        let cell = table.rows().next().unwrap().cells().next().unwrap();
+        let Some(Block::Paragraph(paragraph)) = cell.blocks().next() else {
+            panic!("no paragraph");
+        };
+        let size = formats.paragraph_mark(paragraph).size().0;
+        assert_eq!(size, f64::from(10 + n % 40) / 2.0, "table {n}");
+        let justification = if n % 2 == 0 {
+            Justification::Center
+        } else {
+            Justification::Right
+        };
+        assert_eq!(
+            formats.paragraph(paragraph).justification(),
+            justification,
+            "table {n}"
+        );
+        let (texts, roots, _, _) = formats.kept_table_texts();
+        assert!(texts <= 256 && roots <= 256, "{texts} {roots}");
+        n += 1;
+    }
+    assert_eq!(n, 300);
+}
+
+#[test]
+fn works_out_a_long_style_chain_once_for_the_cells_of_every_table_style() {
+    // From the review of #360: each table text kept its own copy of every paragraph
+    // style chain, so 257 table styles in turn, each forgetting the oldest table text,
+    // over cells in the last of 3,000 styles based on one another, rebuilt the chain for
+    // every cell and kept up to 256 copies of it (2 GB). The chain is worked out once,
+    // and each cell lays it over its table text in one step.
+    let chain = 3000;
+    let mut styles: String = (0..257)
+        .map(|n| {
+            format!(
+                r#"<w:style w:type="table" w:styleId="S{n}"><w:name w:val="S{n}"/><w:rPr><w:sz w:val="{}"/></w:rPr><w:pPr><w:tabs><w:tab w:val="left" w:pos="{}"/></w:tabs></w:pPr></w:style>"#,
+                10 + n % 40,
+                100 + n
+            )
+        })
+        .collect();
+    for k in 0..chain {
+        let based = if k == 0 {
+            String::new()
+        } else {
+            format!(r#"<w:basedOn w:val="P{}"/>"#, k - 1)
+        };
+        // Each style sets one stop, and the last clears the table styles' stop at 100.
+        let tabs = if k == chain - 1 {
+            r#"<w:tab w:val="clear" w:pos="100"/>"#.to_owned()
+        } else {
+            format!(r#"<w:tab w:val="left" w:pos="{}"/>"#, 90_000 - 10 * k)
+        };
+        styles.push_str(&format!(
+            r#"<w:style w:type="paragraph" w:styleId="P{k}"><w:name w:val="P{k}"/>{based}<w:pPr><w:tabs>{tabs}</w:tabs></w:pPr></w:style>"#
+        ));
+    }
+    let tables = 600;
+    let body: String = (0..tables)
+        .map(|n| {
+            format!(
+                r#"<w:tbl><w:tblPr><w:tblStyle w:val="S{}"/></w:tblPr><w:tblGrid/><w:tr><w:tc><w:p><w:pPr><w:pStyle w:val="P{}"/></w:pPr></w:p></w:tc></w:tr></w:tbl><w:p/>"#,
+                n % 257,
+                chain - 1
+            )
+        })
+        .collect();
+    let document = open_with(&styles, &body);
+    let mut formats = document.formats();
+    let mut n = 0;
+    for block in document.sections().next().unwrap().blocks() {
+        let Block::Table(table) = block else {
+            continue;
+        };
+        let cell = table.rows().next().unwrap().cells().next().unwrap();
+        let Some(Block::Paragraph(paragraph)) = cell.blocks().next() else {
+            panic!("no paragraph");
+        };
+        let tabs = formats.paragraph(paragraph).tabs().to_vec();
+        // The table style's stop at 100 + n % 257 stays, but at 100, which the chain
+        // clears; the chain's stops are bounded to the lowest positions.
+        let table_stop = 100 + u32::try_from(n % 257).unwrap();
+        assert_eq!(
+            tabs.iter()
+                .any(|tab| tab.position().0 == f64::from(table_stop) / 20.0),
+            table_stop != 100,
+            "table {n}"
+        );
+        let (texts, roots, chains, cells) = formats.kept_table_texts();
+        assert!(texts <= 256 && roots <= 256, "{texts} {roots}");
+        assert!(chains <= chain && cells <= 4096, "{chains} {cells}");
+        n += 1;
+    }
+    assert_eq!(n, tables);
+    // Each style of the chain was read once, and each cell laid the chain over its table
+    // text once.
+    assert_eq!(formats.work().cell_style_reads, chain);
+    assert_eq!(formats.work().cell_levels, tables);
+}
+
+#[test]
+fn reads_a_paragraph_style_once_for_the_cells_of_every_table_style() {
+    // The style chains of cells are laid over each table text, but what a paragraph style
+    // writes itself is read once: 300 tables in styles of their own, each cell in one
+    // paragraph style based on another, read two styles.
+    let mut styles: String = (0..300)
+        .map(|n| {
+            format!(
+                r#"<w:style w:type="table" w:styleId="S{n}"><w:name w:val="S{n}"/><w:rPr><w:sz w:val="{}"/></w:rPr></w:style>"#,
+                10 + n % 40
+            )
+        })
+        .collect();
+    styles.push_str(r#"<w:style w:type="paragraph" w:styleId="Base"><w:name w:val="Base"/><w:pPr><w:tabs><w:tab w:val="left" w:pos="720"/></w:tabs></w:pPr></w:style><w:style w:type="paragraph" w:styleId="Cell"><w:name w:val="Cell"/><w:basedOn w:val="Base"/><w:pPr><w:jc w:val="center"/></w:pPr></w:style>"#);
+    let body: String = (0..300)
+        .map(|n| {
+            format!(
+                r#"<w:tbl><w:tblPr><w:tblStyle w:val="S{n}"/></w:tblPr><w:tblGrid/><w:tr><w:tc><w:p><w:pPr><w:pStyle w:val="Cell"/></w:pPr></w:p></w:tc></w:tr></w:tbl><w:p/>"#
+            )
+        })
+        .collect();
+    let document = open_with(&styles, &body);
+    let mut formats = document.formats();
+    for block in document.sections().next().unwrap().blocks() {
+        let Block::Table(table) = block else {
+            continue;
+        };
+        let cell = table.rows().next().unwrap().cells().next().unwrap();
+        let Some(Block::Paragraph(paragraph)) = cell.blocks().next() else {
+            panic!("no paragraph");
+        };
+        let format = formats.paragraph(paragraph);
+        assert_eq!(format.justification(), Justification::Center);
+        assert_eq!(format.tabs().len(), 1);
+    }
+    assert_eq!(formats.work().cell_style_reads, 2);
 }
