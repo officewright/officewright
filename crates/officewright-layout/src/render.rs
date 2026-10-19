@@ -1,7 +1,7 @@
 //! Rendering into PDF: a document of the layout IR laid out on pages, and every page
 //! painted with `officewright-pdf`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -262,7 +262,7 @@ fn render(
     )?;
     // Only the last pass's painting is reported, after what the layout reported, as when
     // the pages were painted once they were all laid out.
-    for (kind, location, message) in painted.notes {
+    for (kind, location, message) in painted.notes.entries {
         layout_fonts.report_once(kind, &location, message);
     }
     report.extend(layout_fonts.into_report());
@@ -284,7 +284,7 @@ struct PdfPages<'a> {
     images: HashMap<ImageId, Option<pdf::Image>>,
     pdf: pdf::Document,
     /// What painting reported, for the report of the layout pass whose PDF this is.
-    notes: Vec<Note>,
+    notes: Notes,
     /// The pages painted, and the most pages laid out and not yet painted at once.
     painted: usize,
     most_waiting: usize,
@@ -292,6 +292,14 @@ struct PdfPages<'a> {
 
 /// An entry of the report: its kind, where, and what.
 type Note = (ReportKind, Location, String);
+
+/// What painting reported, each message once (as the report takes it), in the order it
+/// came: a note can come once for every item drawn, such as every line too thick.
+#[derive(Default)]
+struct Notes {
+    entries: Vec<Note>,
+    messages: HashSet<String>,
+}
 
 impl<'a> PdfPages<'a> {
     fn new(document: &'a Document, compression: pdf::Compression) -> Self {
@@ -302,7 +310,7 @@ impl<'a> PdfPages<'a> {
             pdf_fonts: HashMap::new(),
             images: HashMap::new(),
             pdf,
-            notes: Vec::new(),
+            notes: Notes::default(),
             painted: 0,
             most_waiting: 0,
         }
@@ -340,14 +348,16 @@ struct Painter<'a, 'f, 'b> {
     images: HashMap<ImageId, Option<pdf::Image>>,
     pdf: pdf::Document,
     /// What painting reported.
-    notes: Vec<Note>,
+    notes: Notes,
 }
 
 impl Painter<'_, '_, '_> {
     /// Notes `message` for the report, kept with the PDF of its layout pass, so that a
     /// pass whose PDF is dropped leaves nothing in the report.
     fn note(&mut self, kind: ReportKind, location: &Location, message: String) {
-        self.notes.push((kind, location.clone(), message));
+        if self.notes.messages.insert(message.clone()) {
+            self.notes.entries.push((kind, location.clone(), message));
+        }
     }
 
     /// Adds a page of the size of `page`, at least [`MIN_PAGE_SIDE`] each way, and paints
@@ -878,6 +888,42 @@ mod tests {
     }
 
     #[test]
+    fn the_painter_notes_each_message_once() {
+        // A note can come once for every item drawn: 2,000 lines too thick are noted once,
+        // as the report lists them, not kept 2,000 times until the layout pass ends.
+        let thick = LineItem {
+            width: Pt(10_000.0),
+            ..line(LineStyle::Solid, (0.0, 50.0), (100.0, 50.0))
+        };
+        let book = crate::testing::book(vec![crate::testing::minimal()]);
+        let mut fonts = Fonts::new(&book);
+        let document = Document::default();
+        let mut painter = Painter {
+            document: &document,
+            fonts: &mut fonts,
+            pdf_fonts: HashMap::new(),
+            images: HashMap::new(),
+            pdf: pdf::Document::new(),
+            notes: Notes::default(),
+        };
+        let items = vec![DisplayItem::Line(thick); 2_000];
+        let drawn = painter.drawn(Pt(100.0), Pt(200.0), &items);
+        assert_eq!(drawn.len(), 2_000);
+        let messages: Vec<&str> = painter
+            .notes
+            .entries
+            .iter()
+            .map(|(_, _, message)| message.as_str())
+            .collect();
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.starts_with("lines thicker than"))
+        );
+    }
+
+    #[test]
     fn pages_are_painted_as_they_are_laid_out() {
         use crate::ir::{
             Inline, PageSetup, Paragraph, ParagraphProps, RunFonts, RunStyle, Section,
@@ -994,11 +1040,11 @@ mod tests {
             pdf_fonts: HashMap::new(),
             images: HashMap::new(),
             pdf: pdf::Document::new(),
-            notes: Vec::new(),
+            notes: Notes::default(),
         };
         let drawn = painter.drawn(Pt(100.0), Pt(200.0), items);
         // What the painter notes goes into the report, as render_pdf puts it.
-        for (kind, location, message) in painter.notes {
+        for (kind, location, message) in painter.notes.entries {
             fonts.report_once(kind, &location, message);
         }
         (drawn, fonts.into_report())
@@ -1364,7 +1410,7 @@ mod tests {
             pdf_fonts: HashMap::new(),
             images: HashMap::new(),
             pdf: pdf::Document::new(),
-            notes: Vec::new(),
+            notes: Notes::default(),
         };
         let drawn = painter.drawn(Pt(100.0), Pt(200.0), items);
         (drawn, painter.paint(Pt(100.0), Pt(200.0), items))
@@ -1753,7 +1799,7 @@ mod tests {
             pdf_fonts: HashMap::new(),
             images: HashMap::new(),
             pdf: pdf::Document::new(),
-            notes: Vec::new(),
+            notes: Notes::default(),
         };
         painter.pdf.set_compression(pdf::Compression::None);
         let page = Page {
