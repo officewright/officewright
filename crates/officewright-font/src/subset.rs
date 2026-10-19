@@ -157,6 +157,44 @@ impl FontFace {
         self.subset_within(glyphs, &mut SubsetBudget::new(u64::MAX))
     }
 
+    /// Checks that `glyph` can go into a subset of the face, without making one: what
+    /// [`subset`](Self::subset) of `glyph` alone would do, for a glyph the face's checks
+    /// have not reached yet. Text that a face cannot draw into a PDF this way can then be
+    /// drawn with another font.
+    ///
+    /// The face is subset once, with `.notdef` alone, at the first check; each glyph then
+    /// needs only what the subsetter reads for it, read as it reads it: its `glyf` entry,
+    /// with those of the components it uses, or its `CFF ` charstring and Font DICT; its
+    /// `hmtx` entry; and its name in a `post` table of version 2. What a check finds is
+    /// kept with the face and shared by its clones, so each glyph is read once.
+    ///
+    /// The glyphs a face's checks pass, subset together, fail only where they take more
+    /// together than one subset may: the checks of a face's CFF glyphs share that limit
+    /// (16,777,216 operands, operators and hint mask bytes to decompile), so a glyph
+    /// fails once those checked before it have read nearly all of it. The checks of one
+    /// face also follow at most 4,194,304 components of composite glyphs in all, which
+    /// only a crafted face comes near.
+    ///
+    /// ```
+    /// use officewright_font::{FontFace, GlyphId};
+    ///
+    /// let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/minimal.ttf"))?;
+    /// let font = FontFace::from_bytes(data, 0)?;
+    /// let a = font.glyph_id('A').expect("the font has A");
+    /// font.check_subset_glyph(a)?;
+    /// assert!(font.check_subset_glyph(GlyphId::new(font.glyph_count())).is_err());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Those of [`subset`](Self::subset) for the face or for `glyph`, and
+    /// [`Error::TableOverLimit`] once the glyphs checked before have read nearly all a
+    /// subset may, or the components followed reach the limit.
+    pub fn check_subset_glyph(&self, glyph: GlyphId) -> Result<()> {
+        self.subset_check().check(self, glyph)
+    }
+
     /// [`subset`](Self::subset) within `budget`: decompiling the CFF glyphs to keep may
     /// read no more than is left of it, nor than the limit of one subset, and what it
     /// reads is taken off the budget once the subset is made. A subset that fails takes
@@ -256,6 +294,15 @@ pub(crate) fn subsetter_table<'a>(
     data: &'a [u8],
     tag: &[u8; 4],
 ) -> Option<&'a [u8]> {
+    data.get(subsetter_table_range(font, data, tag)?)
+}
+
+/// Where in `data` the table [`subsetter_table`] finds is.
+pub(crate) fn subsetter_table_range(
+    font: &FontRef<'_>,
+    data: &[u8],
+    tag: &[u8; 4],
+) -> Option<Range<usize>> {
     let records = font.table_directory().table_records();
     let found = records
         .binary_search_by(|record| record.tag().to_be_bytes().cmp(tag))
@@ -263,7 +310,8 @@ pub(crate) fn subsetter_table<'a>(
     let record = records.get(found)?;
     let start = usize::try_from(record.offset()).ok()?;
     let end = start.checked_add(usize::try_from(record.length()).ok()?)?;
-    data.get(start..end)
+    data.get(start..end)?;
+    Some(start..end)
 }
 
 /// Runs the subsetter and turns a panic into [`Error::SubsetterPanicked`].

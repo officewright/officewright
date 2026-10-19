@@ -130,6 +130,78 @@ pub enum Error {
     },
 }
 
+impl Error {
+    /// A copy of the error, for one that is kept and returned again; a [`Read`](Self::Read)
+    /// error keeps the kind and message of its I/O error.
+    pub(crate) fn duplicate(&self) -> Self {
+        match self {
+            Self::NotAFont { source } => Self::NotAFont {
+                source: source.clone(),
+            },
+            Self::FaceIndexOutOfRange { index, count } => Self::FaceIndexOutOfRange {
+                index: *index,
+                count: *count,
+            },
+            Self::MalformedFace { face, source } => Self::MalformedFace {
+                face: *face,
+                source: source.clone(),
+            },
+            Self::MissingTable { face, table } => Self::MissingTable { face: *face, table },
+            Self::MalformedTable {
+                face,
+                table,
+                source,
+            } => Self::MalformedTable {
+                face: *face,
+                table,
+                source: source.clone(),
+            },
+            Self::TableOverLimit {
+                face,
+                table,
+                source,
+            } => Self::TableOverLimit {
+                face: *face,
+                table,
+                source: source.clone(),
+            },
+            Self::InvalidUnitsPerEm { face, units_per_em } => Self::InvalidUnitsPerEm {
+                face: *face,
+                units_per_em: *units_per_em,
+            },
+            Self::GlyphOutOfRange {
+                face,
+                glyph,
+                glyph_count,
+            } => Self::GlyphOutOfRange {
+                face: *face,
+                glyph: *glyph,
+                glyph_count: *glyph_count,
+            },
+            Self::UnsupportedOutlines { face, format } => Self::UnsupportedOutlines {
+                face: *face,
+                format: *format,
+            },
+            Self::Subset { face, source } => Self::Subset {
+                face: *face,
+                source: source.clone(),
+            },
+            Self::SubsetUnsupported { face, source } => Self::SubsetUnsupported {
+                face: *face,
+                source: source.clone(),
+            },
+            Self::SubsetterPanicked { face, message } => Self::SubsetterPanicked {
+                face: *face,
+                message: message.clone(),
+            },
+            Self::Read { path, source } => Self::Read {
+                path: path.clone(),
+                source: io::Error::new(source.kind(), source.to_string()),
+            },
+        }
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
