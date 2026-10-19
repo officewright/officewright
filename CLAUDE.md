@@ -39,7 +39,9 @@ crates/
                         officewright-font as `font` with the pdf feature
   officewright-core     units (Pt, twips, EMU), PageSize, Color (sRGB), Error/Result
   officewright-font     font loading (TrueType/OpenType, collections), metrics, cmap, subsetting for
-                        embedding, system font index and font substitution with a report
+                        embedding with a check of single glyphs against it (`FontFace::check_subset_glyph`,
+                        so that the layout can draw text a damaged face cannot embed with another font),
+                        system font index and font substitution with a report
   officewright-opc      ZIP, XML, OPC packages and Markup Compatibility (ECMA-376 Parts 2 and 3) shared
                         by the OOXML readers; ZIP and XML are our own code, DEFLATE is miniz_oxide
   officewright-layout   page layout engine (shaping, text flow, line breaking, tables) — the core of DOCX→PDF;
@@ -48,8 +50,10 @@ crates/
                         chooses each character's font by Word's rule (MS-OI29500 2.1.88 b) with fallback,
                         shapes with HarfRust, breaks lines first fit by UAX #14 (unicode-linebreak) with
                         Word's rules on top, and flows paragraphs onto the pages of each section with Word's
-                        keep and widow rules, headers, footers, page numbers and list labels (counted per
-                        list definition, as Word counts), behind private modules;
+                        keep and widow rules, headers, footers, page numbers, list labels (counted per
+                        list definition, as Word counts) and tables (the grid's widths, merged cells,
+                        borders by Word's conflict rules, shading, nesting; a row is not split across
+                        pages, nor are header rows repeated, yet), behind private modules;
                         feature `pdf` renders a document into PDF with officewright-pdf (`render_pdf`,
                         hidden in the docs like the IR it takes, and `RenderOptions`);
                         feature `fuzzing` opens entry points for the fuzz targets, examples and the tests
