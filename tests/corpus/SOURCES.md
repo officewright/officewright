@@ -269,12 +269,15 @@ used, without its name), the fonts Word did not have and substituted, the legacy
 settings Word dropped from the re-saved copy (those it does not apply in the document's
 mode), from #297 on how many style and numbering properties Word dropped from the re-saved
 copy, added to the document defaults and to the styles, levels and lists the input had, and
-changed, and how many body paragraphs it gave another style (`geometry.json` lists each one),
-how fields were rendered,
-the PDF's SHA-256 and the poppler version. Word sometimes
-writes a language tag or number format into the re-saved copy that the input did not have,
-which says where Word ran. Such a copy is imported only when the maintainer accepts it
-(`--allow-locale`), and its Notes then list each such change after "accepted with
+changed, and how many body paragraphs it gave another style, how fields were rendered, the
+PDF's SHA-256 and the poppler version. `geometry.json` lists each of those properties as
+`- ` (dropped), `+ ` (added) or `~ ` (changed, old `->` new), then `owner: path
+attribute=value`. The owner is a style id, `docDefaults`, `abstractNum N`, `abstractNum N
+level L` or `num N`, with the input's ids, since Word numbers lists again when it saves; a
+list or instance of the copy that has no counterpart in the input is `copy N`. Word
+sometimes writes a language tag or number format into the re-saved copy that the input did
+not have, which says where Word ran. Such a copy is imported only when the maintainer accepts
+it (`--allow-locale`), and its Notes then list each such change after "accepted with
 --allow-locale".
 
 From `make-reference.ps1` format 3 on, the folder also holds `formatting.json`: the

@@ -456,10 +456,12 @@ def numbering_ids(
     """How the re-saved copy's list definitions and instances map onto the input's: Word
     numbers the definitions (w:abstractNumId) and sometimes the instances (w:numId) again when
     it saves, so they are matched by what stays. A definition by its w:nsid, else through the
-    instances that use it, else by its id. An instance among the input's instances of the same
-    definition: first one with the same overrides, then the one with its id, then the first
-    in order, since Word keeps their order (contract-zh: 1, 2, 3, 4, 6 became 1 to 5); then an
-    instance left over by its id. Copy id -> input id; an id left out has no counterpart."""
+    instances that use it, else by its id. The instances of a definition by their ids when the
+    copy has the input's ids for it; else in order when it has as many, since Word keeps their
+    order when it numbers them again (contract-zh: 1, 2, 3, 4, 6 became 1 to 5); else each
+    among the input's left: first one with the same overrides, then the one with its id, then
+    the first in order. Then an instance left over by its id. Copy id -> input id; an id left
+    out has no counterpart."""
     if original is None or resaved is None:
         return {}, {}
 
@@ -505,13 +507,21 @@ def numbering_ids(
             abstract[copy_id] = copy_id
     num: dict[str, str] = {}
     set_before, set_after = overrides(original), overrides(resaved)
-    for copy_num, copy_id in uses_after.items():
-        wanted = abstract.get(copy_id)
-        candidates = [n for n, i in uses_before.items()
-                      if wanted is not None and i == wanted and n not in num.values()]
-        alike = [n for n in candidates if set_before[n] == set_after[copy_num]] or candidates
-        if alike:
-            num[copy_num] = copy_num if copy_num in alike else alike[0]
+    for wanted in dict.fromkeys(abstract.get(i) for i in uses_after.values()):
+        if wanted is None:
+            continue
+        copies = [n for n, i in uses_after.items() if abstract.get(i) == wanted]
+        inputs = [n for n, i in uses_before.items() if i == wanted]
+        if set(copies) == set(inputs):
+            num.update((n, n) for n in copies)
+        elif len(copies) == len(inputs):
+            num.update(zip(copies, inputs))
+        else:
+            for copy_num in copies:
+                left = [n for n in inputs if n not in num.values()]
+                alike = [n for n in left if set_before[n] == set_after[copy_num]] or left
+                if alike:
+                    num[copy_num] = copy_num if copy_num in alike else alike[0]
     for copy_num in uses_after:
         if copy_num not in num and copy_num in uses_before and copy_num not in num.values():
             num[copy_num] = copy_num
@@ -582,10 +592,13 @@ def style_changes(original: dict[str, bytes], resaved: dict[str, bytes]) -> list
     the input defines."""
     before_root, after_root = numbering_root(original), numbering_root(resaved)
     _, num = numbering_ids(before_root, after_root)
-    # w:numId 0 means no list, and stays 0; without numbering.xml on either side ids stay too.
-    mapped = before_root is not None and after_root is not None
+    # Only the ids of the copy's instances are mapped: w:numId 0 means no list, an id no
+    # instance has names nothing, and without numbering.xml on either side ids stay as written.
+    instance_ids = set()
+    if before_root is not None and after_root is not None:
+        instance_ids = {n.get(f"{W}numId", "") for n in after_root.iter(f"{W}num")}
     after = {
-        key: copy_id(num, value) if mapped and value != "0" and key[1].endswith("numPr/numId")
+        key: copy_id(num, value) if value in instance_ids and key[1].endswith("numPr/numId")
         else value
         for key, value in style_values(resaved).items()
     }
@@ -700,7 +713,10 @@ def paragraph_style_changes(original: dict[str, bytes], resaved: dict[str, bytes
     if len(before) == len(after):
         pairs = [(n, a[1], b[1]) for n, (a, b) in enumerate(zip(before, after), 1)]
     else:
-        out.append(f"the re-saved copy has {len(after)} paragraphs, the input {len(before)}")
+        def paragraphs(count: int) -> str:
+            return f"{count} paragraph{'s' if count != 1 else ''}"
+
+        out.append(f"the re-saved copy has {paragraphs(len(after))}, the input {len(before)}")
         matcher = difflib.SequenceMatcher(
             None, [t for t, _ in before], [t for t, _ in after], autojunk=False
         )
@@ -1712,7 +1728,7 @@ def reference_row(
     # tests/corpus-tools reads the notes back by splitting the cell at "; ".
     for note in notes:
         if "; " in note:
-            raise ValueError(f"the note {note!r} would read as two notes")
+            raise Refused(f"{record['file']}: the SOURCES.md note {note!r} would read as two notes")
     return (
         f"| reference/{group}/{base}/ "
         f"| {group}/{record['file']}, re-saved by Word as resaved/{group}/{base}.docx "

@@ -1053,10 +1053,12 @@ class Changes(unittest.TestCase):
             b'w:val="6"', b'w:val="5"')}
         self.assertEqual(importer.style_changes({**before, **styles_before},
                                                 {**after, **styles_after}), [])
-        # An instance id with no counterpart in the input is named as the copy's.
+        # An id no instance of the copy has names nothing, and stays as written.
         self.assertEqual(importer.style_changes({**before, **styles_before},
                                                 {**before, **styles_after}),
-                         ["~ L: pPr/numPr/numId val=6 -> copy 5"])
+                         ["~ L: pPr/numPr/numId val=6 -> 5"])
+        self.assertEqual(importer.style_changes({**before, **styles_after},
+                                                {**before, **styles_after}), [])
 
     def test_paragraph_style_changes_compare_paragraphs_in_order(self):
         def document(*paragraphs, wrap=lambda body: body):
@@ -1115,7 +1117,7 @@ class Changes(unittest.TestCase):
         self.assertEqual(importer.paragraph_style_changes(moved(transitional), document("B")),
                          ["paragraph 1: A -> B"])
         self.assertEqual(importer.paragraph_style_changes(moved(strict), document("B")),
-                         ["the re-saved copy has 1 paragraphs, the input 0"])
+                         ["the re-saved copy has 1 paragraph, the input 0"])
 
     def test_styles_and_numbering_are_the_parts_the_main_part_names(self):
         rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -1241,6 +1243,58 @@ class Changes(unittest.TestCase):
             "- num 2: lvlOverride[ilvl=0]/startOverride val=5",
         ])
 
+    def test_kept_ids_and_kept_counts_pair_instances_before_their_overrides(self):
+        d, i = self.definition, self.instance
+
+        def styles():
+            return {"word/styles.xml": (
+                f'<w:styles xmlns:w="{importer.W[1:-1]}">' + "".join(
+                    f'<w:style w:type="paragraph" w:styleId="List{n}"><w:pPr><w:numPr>'
+                    f'<w:numId w:val="{n}"/></w:numPr></w:pPr></w:style>' for n in (1, 2))
+                + "</w:styles>").encode()}
+
+        # Word keeps every id and restarts instance 1 at 9, like instance 2: still 1 and 2.
+        before = {**self.numbering(d(0, "00AA"), i(1, 0, 5), i(2, 0, 9)), **styles()}
+        after = {**self.numbering(d(0, "00AA"), i(1, 0, 9), i(2, 0, 9)), **styles()}
+        self.assertEqual(importer.numbering_changes(before, after),
+                         ["~ num 1: lvlOverride[ilvl=0]/startOverride val=5 -> 9"])
+        self.assertEqual(importer.style_changes(before, after), [])
+        # Word numbers 1, 3 and 4 as 1, 2 and 3 and drops the restart of 3: in order.
+        before = self.numbering(d(0, "00AA"), i(1, 0), i(3, 0, 5), i(4, 0, 9))
+        after = self.numbering(d(0, "00AA"), i(1, 0), i(2, 0), i(3, 0, 9))
+        self.assertEqual(importer.numbering_changes(before, after),
+                         ["- num 3: lvlOverride[ilvl=0]/startOverride val=5"])
+        # Fewer instances, the definition numbered again too: their overrides tell which.
+        before = self.numbering(d(1, "00AA"), i(1, 1), i(2, 1, 5), i(3, 1, 9))
+        after = self.numbering(d(0, "00AA"), i(1, 0, 5), i(2, 0, 9))
+        self.assertEqual(importer.numbering_changes(before, after),
+                         ["- num 1: abstractNumId val=1"])
+
+    def test_pairing_by_id_by_order_and_without_taking_an_instance_twice(self):
+        d, i = self.definition, self.instance
+        # The same ids, written in another order: by id.
+        before = self.numbering(d(0, "00AA"), i(2, 0, 9), i(1, 0, 5))
+        after = self.numbering(d(0, "00AA"), i(1, 0, 5), i(2, 0, 9))
+        self.assertEqual(importer.numbering_changes(before, after), [])
+        # Numbered again and the first restart changed to the second's: in order, so the
+        # style that names the first still names it.
+        before = {**self.numbering(d(0, "00AA"), i(2, 0, 5), i(3, 0, 9)), **self.style_naming(2)}
+        after = {**self.numbering(d(0, "00AA"), i(1, 0, 9), i(2, 0, 9)), **self.style_naming(1)}
+        self.assertEqual(importer.numbering_changes(before, after),
+                         ["~ num 2: lvlOverride[ilvl=0]/startOverride val=5 -> 9"])
+        self.assertEqual(importer.style_changes(before, after), [])
+        # Two alike instances of the copy take two of the input.
+        before = self.numbering(d(0, "00AA"), i(1, 0), i(2, 0, 5), i(3, 0, 5))
+        after = self.numbering(d(0, "00AA"), i(1, 0, 5), i(2, 0, 5))
+        self.assertEqual(importer.numbering_changes(before, after),
+                         ["- num 1: abstractNumId val=0"])
+
+    def test_list_ids_of_styles_stay_without_numbering_on_both_sides(self):
+        numbering = self.numbering(self.definition(0, "00AA"), self.instance(4, 0))
+        self.assertEqual(importer.style_changes(self.style_naming(4), self.style_naming(4)), [])
+        self.assertEqual(importer.style_changes(self.style_naming(4),
+                                                {**numbering, **self.style_naming(4)}), [])
+
     def test_definitions_without_their_nsid_are_matched_through_instances_or_ids(self):
         d, i = self.definition, self.instance
         # No nsid: the copy's definition 0 is the input's 3, which instance 1 uses on both sides.
@@ -1324,9 +1378,13 @@ class Changes(unittest.TestCase):
                   "pdf_sha256": "0" * 64, "word_version": "16.0", "word_build": "16.0.1",
                   "rendered": "2026-10-19"}
         importer.reference_row("word-rules", record, [], "24.02.0", [])
-        with self.assertRaisesRegex(ValueError, "would read as two notes"):
+        with self.assertRaisesRegex(importer.Refused, "x.docx: the SOURCES.md note 'a; b' would "
+                                    "read as two notes"):
             importer.reference_row("word-rules", record, [], "24.02.0", [],
                                    styles=["a; b"])
+        # Any note: the formatting note too.
+        with self.assertRaisesRegex(importer.Refused, "would read as two notes"):
+            importer.reference_row("word-rules", record, [], "24.02.0", [], formatting_note="a; b")
 
 class Pdffonts(unittest.TestCase):
     def test_lists_fonts_that_are_not_embedded_without_subset_tags(self):
