@@ -504,12 +504,17 @@ impl Painting<'_, '_, '_> {
     /// How far the box of a highlight or run shading in `style` reaches above and below
     /// the line's baseline: as far as the run's text does when the line's height is set
     /// (`lines::Breaker::set_height`), in `face` at `formatted`, the size its formatting
-    /// gives, with its leading above its ascent; further up or down by its position
-    /// (`w:position`), from the baseline as well, so a raised run's box keeps the room
-    /// below it. A superscript or subscript keeps its full size and the baseline, as its
-    /// line does. Word's references show it: `E-highlight.docx` the full line for
-    /// superscript, subscript and raised text, and `contract-usds-statement-of-objectives`
-    /// a 12 pt run's own height in a line its 20 pt paragraph mark makes taller.
+    /// gives: its ascent above and its descent below, further up by a raise of its
+    /// position (`w:position`), from the baseline as well, so that a raised run's box
+    /// keeps the room below it. A superscript or subscript keeps its full size and the
+    /// baseline, as its line does. In a line of one size that is the whole line, as
+    /// Word's reference of `E-highlight.docx` shows for superscript, subscript and raised
+    /// text, and the box stays the run's own where the layout makes a line taller than
+    /// Word does: the title of `contract-usds-statement-of-objectives`, whose 20 pt
+    /// paragraph mark the layout counts (#359), is shaded 13.7 pt high, as by Word.
+    /// Hypotheses until a Word reference (#346): the leading above the ascent, as a line
+    /// puts it; text lowered by its position, whose box takes the room below; runs of
+    /// another size than the rest of their line; at-least and multiple line spacing.
     fn reach(&self, face: Option<&ShapingFace>, formatted: Pt, style: &RunStyle) -> (f64, f64) {
         let metrics = face.map_or_else(
             || no_font(formatted),
@@ -1519,9 +1524,12 @@ mod tests {
     }
 
     #[test]
-    fn a_highlight_is_as_high_as_its_run_in_a_line_its_paragraph_mark_makes_taller() {
-        // contract-usds-statement-of-objectives: Word's shading of a 12 pt title run is
-        // the run's own height, in a line that its 20 pt paragraph mark makes taller.
+    fn a_highlight_is_as_high_as_its_run_in_a_taller_line() {
+        // A 6 pt highlighted run in a line its 10 pt paragraph mark makes taller, as the
+        // layout counts marks (#359): the box is the run's own. Word shades the 12 pt
+        // title of contract-usds-statement-of-objectives 13.7 pt high, its own height,
+        // which this keeps where the layout's line is taller than Word's; a hypothesis for
+        // runs of different sizes until #346.
         let (items, _) = painted(&[RunStyle::default()], |_, document| {
             let small = document.add_run_style(
                 RunStyle::default()
@@ -1704,9 +1712,10 @@ mod tests {
     }
 
     #[test]
-    fn the_box_of_lowered_text_is_cut_at_its_line_s_bottom() {
-        // A subscript drops a third of 10 pt: its box would end 2.5 pt below its baseline,
-        // past the line's bottom at 31.5 (ascent 9 and descent 2.5 from 20).
+    fn a_subscript_s_box_is_its_line_like_the_text_beside_it() {
+        // E-highlight case 03: a subscript keeps its full size and the baseline in its line,
+        // and so does its box, from the line's top at 20 to its bottom at 31.5 (ascent 9 and
+        // descent 2.5 of the test font at 10 pt), not lowered with its text.
         let lowered = RunStyle::default()
             .with_vertical(VerticalPosition::Subscript)
             .with_highlight(Some(Color::rgb(255, 255, 0)));
@@ -1718,7 +1727,80 @@ mod tests {
         let [(at, _, height, _)] = boxes.as_slice() else {
             panic!("{items:?}");
         };
-        assert!((at.y.0 + height.0 - 31.5).abs() < 1e-9, "{boxes:?}");
+        assert!((at.y.0 - 20.0).abs() < 1e-9, "{boxes:?}");
+        assert!((height.0 - 11.5).abs() < 1e-9, "{boxes:?}");
+    }
+
+    #[test]
+    fn text_lowered_by_its_position_takes_the_room_below_in_its_box() {
+        // Lowered 3 pt beside plain text: the line reaches 2.5 + 3 below the baseline at 29,
+        // and the lowered run's box from 9 above it to 5.5 below, the whole line. A
+        // hypothesis until a Word reference (#346).
+        let lowered = RunStyle::default()
+            .with_position(Pt(-3.0))
+            .with_highlight(Some(Color::rgb(255, 255, 0)));
+        let (items, _) = painted(&[RunStyle::default(), lowered], |ids, _| {
+            let inlines = vec![Inline::text("A", ids[0]), Inline::text("A", ids[1])];
+            (ParagraphProps::default(), inlines)
+        });
+        let boxes = rects(&items);
+        let [(at, _, height, _)] = boxes.as_slice() else {
+            panic!("{items:?}");
+        };
+        assert!((at.y.0 - 20.0).abs() < 1e-9, "{boxes:?}");
+        assert!((height.0 - 14.5).abs() < 1e-9, "{boxes:?}");
+    }
+
+    #[test]
+    fn a_highlighted_tab_s_box_is_placed_like_its_text_s() {
+        // A highlighted tab in a superscript keeps the baseline, as text does: from the
+        // line's top at 20 to 31.5. One raised 2 pt by its position, in a line that text
+        // raised 4 pt makes taller (top at 20, baseline at 33), reaches 9 + 2 above the
+        // baseline and 2.5 below: from 22 to 35.5.
+        let superscript = RunStyle::default()
+            .with_vertical(VerticalPosition::Superscript)
+            .with_highlight(Some(Color::rgb(255, 255, 0)));
+        let raised_tab = RunStyle::default()
+            .with_position(Pt(2.0))
+            .with_highlight(Some(Color::rgb(255, 255, 0)));
+        let raised_text = RunStyle::default().with_position(Pt(4.0));
+        let styles = [RunStyle::default(), superscript, raised_tab, raised_text];
+        let boxes_of = |tab: usize, before: usize| {
+            let (items, _) = painted(&styles, |ids, _| {
+                let inlines = vec![
+                    Inline::text("A", ids[before]),
+                    Inline::tab(ids[tab]),
+                    Inline::text("A", ids[0]),
+                ];
+                (ParagraphProps::default(), inlines)
+            });
+            rects(&items)
+                .iter()
+                .map(|(at, _, height, _)| (at.y.0, height.0))
+                .collect::<Vec<_>>()
+        };
+        let close = |boxes: &[(f64, f64)], (top, height): (f64, f64)| matches!(boxes, [(t, h)] if (t - top).abs() < 1e-9 && (h - height).abs() < 1e-9);
+        let superscript_tab = boxes_of(1, 0);
+        assert!(close(&superscript_tab, (20.0, 11.5)), "{superscript_tab:?}");
+        let positioned_tab = boxes_of(2, 3);
+        assert!(close(&positioned_tab, (22.0, 13.5)), "{positioned_tab:?}");
+    }
+
+    #[test]
+    fn a_highlighted_tab_without_a_font_reaches_as_far_as_its_line() {
+        // With no font at all there is no text, but a tab still takes its room: its line
+        // takes 0.8 of the size above the baseline and 0.2 below, and so does its box,
+        // from 20 to 30 at 10 pt.
+        let marked = RunStyle::default().with_highlight(Some(Color::rgb(255, 255, 0)));
+        let (items, _) = painted_with(Vec::new(), &[marked], |ids, _| {
+            (ParagraphProps::default(), vec![Inline::tab(ids[0])])
+        });
+        let boxes = rects(&items);
+        let [(at, _, height, _)] = boxes.as_slice() else {
+            panic!("{items:?}");
+        };
+        assert!((at.y.0 - 20.0).abs() < 1e-9, "{boxes:?}");
+        assert!((height.0 - 10.0).abs() < 1e-9, "{boxes:?}");
     }
 
     #[test]
