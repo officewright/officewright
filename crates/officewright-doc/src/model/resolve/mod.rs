@@ -79,11 +79,16 @@ pub struct Formats<'a> {
     /// The id the last table text got.
     next_table_text: u64,
     /// Over each table text, by its id: the paragraph defaults with it laid over them,
-    /// and what each paragraph style gives laid over that.
+    /// and the default paragraph style's level once its justification gave way.
     cell_paragraphs: HashMap<u64, CellParagraphs>,
-    /// What each paragraph style writes itself, for the style chains of
-    /// `cell_paragraphs`: read once, whatever the number of table texts.
-    paragraph_owns: HashMap<usize, Arc<ParagraphLevel>>,
+    /// What each paragraph style gives with the styles it is based on, before anything
+    /// lies below it: its cleared tab stops kept, to clear those of the table text a
+    /// cell's paragraph lies on. Worked out once per style, whatever the number of table
+    /// texts.
+    paragraph_chains: StyleLevels<ParagraphLevel>,
+    /// A paragraph style's chain laid over a table text, by the table text's id and the
+    /// style; at most [`MAX_CELL_LEVELS`] at a time.
+    cell_levels: HashMap<(u64, usize), Arc<ParagraphLevel>>,
     /// Whether a size of 11 or 12 pt and a left justification that the default paragraph
     /// style gives give way to a table style's ([MS-DOCX] 2.3.x
     /// `overrideTableStyleFontSizeAndJustification` off), once worked out.
@@ -94,13 +99,13 @@ pub struct Formats<'a> {
 }
 
 /// What lies under the paragraphs of cells of one table text: the paragraph defaults with
-/// it laid over them, what each paragraph style gives laid over that, and the default
-/// paragraph style's level once its justification gave way to the table style's.
-type CellParagraphs = (
-    Arc<ParagraphLevel>,
-    StyleLevels<ParagraphLevel>,
-    Option<Arc<ParagraphLevel>>,
-);
+/// it laid over them, and the default paragraph style's level once its justification gave
+/// way to the table style's.
+type CellParagraphs = (Arc<ParagraphLevel>, Option<Arc<ParagraphLevel>>);
+
+/// How many paragraph style chains laid over table texts are kept at a time: each is one
+/// level, so the bound keeps them small whatever the number of table texts and styles.
+const MAX_CELL_LEVELS: usize = 4096;
 
 /// How many times each kind of work was done, for tests that the caches are used.
 #[cfg(test)]
@@ -126,6 +131,8 @@ pub(crate) struct Work {
     pub(crate) table_texts: usize,
     /// What a paragraph style writes itself read for the style chains in cells.
     pub(crate) cell_style_reads: usize,
+    /// Paragraph style chains laid over a table text.
+    pub(crate) cell_levels: usize,
 }
 
 impl<'a> Formats<'a> {
@@ -149,7 +156,8 @@ impl<'a> Formats<'a> {
             table_texts: HashMap::new(),
             next_table_text: 0,
             cell_paragraphs: HashMap::new(),
-            paragraph_owns: HashMap::new(),
+            paragraph_chains: StyleLevels::unsettled(),
+            cell_levels: HashMap::new(),
             table_style_wins: None,
             table_styles: StyleLevels::default(),
             tables: HashMap::new(),
@@ -260,11 +268,16 @@ impl<'a> Formats<'a> {
         &self.work
     }
 
-    /// How many table texts, and paragraph defaults laid under styles in cells, are kept,
-    /// for tests of the bound.
+    /// How many table texts, paragraph defaults laid under styles in cells, style chains
+    /// and those chains laid over table texts are kept, for tests of the bounds.
     #[cfg(test)]
-    pub(crate) fn kept_table_texts(&self) -> (usize, usize) {
-        (self.table_texts.len(), self.cell_paragraphs.len())
+    pub(crate) fn kept_table_texts(&self) -> (usize, usize, usize, usize) {
+        (
+            self.table_texts.len(),
+            self.cell_paragraphs.len(),
+            self.paragraph_chains.levels.len(),
+            self.cell_levels.len(),
+        )
     }
 
     /// How many combinations of a style and a list level are kept, for tests of the
@@ -356,6 +369,9 @@ trait Layer: Clone + Default {
 #[derive(Debug)]
 struct StyleLevels<L> {
     levels: HashMap<usize, Arc<L>>,
+    /// Whether each level is settled, as it is once it lies over the root; not for chains
+    /// that are laid over another level later.
+    settles: bool,
     /// How many times a style's own properties were read.
     #[cfg(test)]
     reads: usize,
@@ -365,8 +381,19 @@ impl<L> Default for StyleLevels<L> {
     fn default() -> Self {
         Self {
             levels: HashMap::new(),
+            settles: true,
             #[cfg(test)]
             reads: 0,
+        }
+    }
+}
+
+impl<L> StyleLevels<L> {
+    /// Levels that are not settled, for chains laid over another level later.
+    fn unsettled() -> Self {
+        Self {
+            settles: false,
+            ..Self::default()
         }
     }
 }
@@ -382,20 +409,6 @@ impl<L: Layer> StyleLevels<L> {
     /// with its own properties only, so that the result does not depend on which style
     /// of the cycle is asked for first.
     fn level(&mut self, document: &Document, index: usize, root: &L) -> Arc<L> {
-        self.level_from(document, index, root, None)
-    }
-
-    /// As [`StyleLevels::level`], taking what each style writes itself from `owns` when
-    /// given, where it is read once for every cache that shares it: the caches of style
-    /// chains laid over the table texts of cells, one per table text, would otherwise read
-    /// a style once each.
-    fn level_from(
-        &mut self,
-        document: &Document,
-        index: usize,
-        root: &L,
-        mut owns: Option<&mut HashMap<usize, Arc<L>>>,
-    ) -> Arc<L> {
         if let Some(level) = self.levels.get(&index) {
             return Arc::clone(level);
         }
@@ -424,8 +437,10 @@ impl<L: Layer> StyleLevels<L> {
             .unwrap_or_default();
         for &style in cycle {
             let mut level = root.clone();
-            level.overlay(&self.own_from(document, style, owns.as_deref_mut()));
-            level.settle();
+            level.overlay(&self.own(document, style));
+            if self.settles {
+                level.settle();
+            }
             self.levels.insert(style, Arc::new(level));
         }
         let tail = path
@@ -437,8 +452,10 @@ impl<L: Layer> StyleLevels<L> {
         });
         for &style in tail.iter().rev() {
             let mut level = below.as_deref().unwrap_or(root).clone();
-            level.overlay(&self.own_from(document, style, owns.as_deref_mut()));
-            level.settle();
+            level.overlay(&self.own(document, style));
+            if self.settles {
+                level.settle();
+            }
             let level = Arc::new(level);
             self.levels.insert(style, Arc::clone(&level));
             below = Some(level);
@@ -446,26 +463,6 @@ impl<L: Layer> StyleLevels<L> {
         self.levels
             .get(&index)
             .map_or_else(Arc::default, Arc::clone)
-    }
-
-    /// What the style at `index` writes itself, from `owns` when given.
-    fn own_from(
-        &mut self,
-        document: &Document,
-        index: usize,
-        owns: Option<&mut HashMap<usize, Arc<L>>>,
-    ) -> Arc<L> {
-        match owns {
-            Some(owns) => {
-                if let Some(own) = owns.get(&index) {
-                    return Arc::clone(own);
-                }
-                let own = Arc::new(self.own(document, index));
-                owns.insert(index, Arc::clone(&own));
-                own
-            }
-            None => Arc::new(self.own(document, index)),
-        }
     }
 
     /// What the style at `index` writes itself.
@@ -500,6 +497,7 @@ impl Formats<'_> {
     fn forget_table_texts(&mut self) {
         self.table_texts.clear();
         self.cell_paragraphs.clear();
+        self.cell_levels.clear();
     }
 
     /// Whether, in a cell, the size of 11 or 12 pt and the left justification that the

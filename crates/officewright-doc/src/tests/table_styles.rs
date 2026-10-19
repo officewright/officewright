@@ -1518,11 +1518,87 @@ fn keeps_at_most_256_table_texts() {
             justification,
             "table {n}"
         );
-        let (texts, roots) = formats.kept_table_texts();
+        let (texts, roots, _, _) = formats.kept_table_texts();
         assert!(texts <= 256 && roots <= 256, "{texts} {roots}");
         n += 1;
     }
     assert_eq!(n, 300);
+}
+
+#[test]
+fn works_out_a_long_style_chain_once_for_the_cells_of_every_table_style() {
+    // From the review of #360: each table text kept its own copy of every paragraph
+    // style chain, so 257 table styles in turn, each forgetting the oldest table text,
+    // over cells in the last of 3,000 styles based on one another, rebuilt the chain for
+    // every cell and kept up to 256 copies of it (2 GB). The chain is worked out once,
+    // and each cell lays it over its table text in one step.
+    let chain = 3000;
+    let mut styles: String = (0..257)
+        .map(|n| {
+            format!(
+                r#"<w:style w:type="table" w:styleId="S{n}"><w:name w:val="S{n}"/><w:rPr><w:sz w:val="{}"/></w:rPr><w:pPr><w:tabs><w:tab w:val="left" w:pos="{}"/></w:tabs></w:pPr></w:style>"#,
+                10 + n % 40,
+                100 + n
+            )
+        })
+        .collect();
+    for k in 0..chain {
+        let based = if k == 0 {
+            String::new()
+        } else {
+            format!(r#"<w:basedOn w:val="P{}"/>"#, k - 1)
+        };
+        // Each style sets one stop, and the last clears the table styles' stop at 100.
+        let tabs = if k == chain - 1 {
+            r#"<w:tab w:val="clear" w:pos="100"/>"#.to_owned()
+        } else {
+            format!(r#"<w:tab w:val="left" w:pos="{}"/>"#, 90_000 - 10 * k)
+        };
+        styles.push_str(&format!(
+            r#"<w:style w:type="paragraph" w:styleId="P{k}"><w:name w:val="P{k}"/>{based}<w:pPr><w:tabs>{tabs}</w:tabs></w:pPr></w:style>"#
+        ));
+    }
+    let tables = 600;
+    let body: String = (0..tables)
+        .map(|n| {
+            format!(
+                r#"<w:tbl><w:tblPr><w:tblStyle w:val="S{}"/></w:tblPr><w:tblGrid/><w:tr><w:tc><w:p><w:pPr><w:pStyle w:val="P{}"/></w:pPr></w:p></w:tc></w:tr></w:tbl><w:p/>"#,
+                n % 257,
+                chain - 1
+            )
+        })
+        .collect();
+    let document = open_with(&styles, &body);
+    let mut formats = document.formats();
+    let mut n = 0;
+    for block in document.sections().next().unwrap().blocks() {
+        let Block::Table(table) = block else {
+            continue;
+        };
+        let cell = table.rows().next().unwrap().cells().next().unwrap();
+        let Some(Block::Paragraph(paragraph)) = cell.blocks().next() else {
+            panic!("no paragraph");
+        };
+        let tabs = formats.paragraph(paragraph).tabs().to_vec();
+        // The table style's stop at 100 + n % 257 stays, but at 100, which the chain
+        // clears; the chain's stops are bounded to the lowest positions.
+        let table_stop = 100 + u32::try_from(n % 257).unwrap();
+        assert_eq!(
+            tabs.iter()
+                .any(|tab| tab.position().0 == f64::from(table_stop) / 20.0),
+            table_stop != 100,
+            "table {n}"
+        );
+        let (texts, roots, chains, cells) = formats.kept_table_texts();
+        assert!(texts <= 256 && roots <= 256, "{texts} {roots}");
+        assert!(chains <= chain && cells <= 4096, "{chains} {cells}");
+        n += 1;
+    }
+    assert_eq!(n, tables);
+    // Each style of the chain was read once, and each cell laid the chain over its table
+    // text once.
+    assert_eq!(formats.work().cell_style_reads, chain);
+    assert_eq!(formats.work().cell_levels, tables);
 }
 
 #[test]

@@ -10,7 +10,7 @@ use officewright_core::Pt;
 use super::character::CharacterLevel;
 use super::table::TableText;
 use super::{
-    Formats, IGNORED_STYLES, Layer, MAX_COMBINATIONS, StyleLevels, overwrite, style_index,
+    Formats, IGNORED_STYLES, Layer, MAX_CELL_LEVELS, MAX_COMBINATIONS, overwrite, style_index,
 };
 use crate::model::Document;
 use crate::model::format::{ListFormat, ParagraphFlag, ParagraphFormat};
@@ -114,27 +114,53 @@ impl Formats<'_> {
             && style == self.paragraph_style(None)
             && table.paragraph.justification.is_some()
             && self.table_style_wins();
-        let (root, levels, yielded) = self.cell_paragraphs.entry(table.id).or_insert_with(|| {
+        let (root, _) = self.cell_paragraphs.entry(table.id).or_insert_with(|| {
             let mut root = ParagraphLevel::clone(&defaults);
             root.overlay(&table.paragraph);
             root.settle();
-            (Arc::new(root), StyleLevels::default(), None)
+            (Arc::new(root), None)
         });
+        let root = Arc::clone(root);
         let Some(index) = style else {
-            return Arc::clone(root);
+            return root;
         };
-        #[cfg(test)]
-        let known = self.paragraph_owns.len();
-        let level = levels.level_from(document, index, root, Some(&mut self.paragraph_owns));
-        #[cfg(test)]
-        {
-            self.work.cell_style_reads += self.paragraph_owns.len() - known;
-        }
+        let level = match self.cell_levels.get(&(table.id, index)) {
+            Some(level) => Arc::clone(level),
+            None => {
+                // The style's chain, worked out once for every table text, laid over this
+                // one: its cleared stops clear the table text's (#76). The same as laying
+                // the chain over the root style by style, except for a chain that clears
+                // more stops than a level keeps (MAX_TABS).
+                #[cfg(test)]
+                let reads = self.paragraph_chains.reads;
+                let chain =
+                    self.paragraph_chains
+                        .level(document, index, &ParagraphLevel::default());
+                #[cfg(test)]
+                {
+                    self.work.cell_style_reads += self.paragraph_chains.reads - reads;
+                    self.work.cell_levels += 1;
+                }
+                let mut level = ParagraphLevel::clone(&root);
+                level.overlay(&chain);
+                level.settle();
+                let level = Arc::new(level);
+                if self.cell_levels.len() >= MAX_CELL_LEVELS {
+                    self.cell_levels.clear();
+                }
+                self.cell_levels
+                    .insert((table.id, index), Arc::clone(&level));
+                level
+            }
+        };
         if !yields || level.justification != Some(Justification::Left) {
             return level;
         }
         // The default paragraph style's left justification gives way to the table
         // style's; the same for every paragraph of that style in such cells.
+        let Some((_, yielded)) = self.cell_paragraphs.get_mut(&table.id) else {
+            return level;
+        };
         Arc::clone(yielded.get_or_insert_with(|| {
             let mut level = ParagraphLevel::clone(&level);
             level.justification = table.paragraph.justification;
