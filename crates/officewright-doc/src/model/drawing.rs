@@ -353,11 +353,18 @@ impl<'a> Picture<'a> {
             .any(|part| match part.local_in(&names.a) {
                 // Word writes an empty a:effectLst for a picture without effects.
                 Some("effectLst") => part.children_through_alternates(names.mc).next().is_some(),
-                Some("effectDag") => true,
-                // A camera in front of the picture, not turned, shows it as it is.
+                Some("effectDag") => part.children_through_alternates(names.mc).next().is_some(),
+                // A camera in front of the picture, not turned, shows it as it is. Office
+                // writes one with a rotation of zeros into the effect styles of themes.
                 Some("scene3d") => child(part, names, &names.a, "camera").is_some_and(|camera| {
                     camera.attribute(&[None], "prst") != Some("orthographicFront")
-                        || child(camera, names, &names.a, "rot").is_some()
+                        || child(camera, names, &names.a, "rot").is_some_and(|rotation| {
+                            ["lat", "lon", "rev"].into_iter().any(|name| {
+                                rotation
+                                    .attribute(&[None], name)
+                                    .is_some_and(|angle| angle.trim() != "0")
+                            })
+                        })
                 }),
                 Some("sp3d") => {
                     child(part, names, &names.a, "bevelT").is_some()

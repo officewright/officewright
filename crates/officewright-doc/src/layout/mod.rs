@@ -110,9 +110,11 @@ impl Document {
     /// not hidden and shows text, a tab or a picture in the line); a picture's outline,
     /// its colour effects, its shadow, reflection, glow, soft edges and 3-D effects, and
     /// a shape it is cut to; and a paragraph mark, a table row or a table cell deleted as
-    /// a tracked change, which the IR keeps. A deleted mark is listed only where a
-    /// paragraph or a table follows, in the same cell or story or in the next section:
-    /// the last paragraph of a cell or a story is joined to nothing. Other tracked
+    /// a tracked change, which the IR keeps, and a paragraph mark moved away. A deleted
+    /// mark is listed only where a paragraph or a table follows, in the same cell or
+    /// story or in the next section: the last paragraph of a cell or a story is joined to
+    /// nothing. A row in which the last paragraph mark of every cell is deleted or moved
+    /// away is listed as a deleted row, since that is how Word writes a row it moves. Other tracked
     /// changes are taken as accepted and comments are left out, as Word's PDF of the
     /// document without markup shows them, so they are not listed.
     ///
@@ -212,9 +214,23 @@ struct Translator<'a> {
     missing_image: Option<ir::ImageId>,
     /// What has been reported once for the document, a bit per [`Once`].
     reported: u32,
-    /// The place of the last paragraph translated, while its mark is deleted as a tracked
-    /// change and that has not been listed yet: listed once a block follows it.
-    deleted_mark: Option<Location>,
+    /// The last paragraph translated, while its mark is deleted as a tracked change and
+    /// that has not been listed yet: listed once a block follows it.
+    deleted_mark: Option<PendingMark>,
+    /// Whether the blocks translated last end with a paragraph whose mark is deleted as a
+    /// tracked change: in a cell, Word marks so the last paragraph of every cell of a row
+    /// it deletes or moves away.
+    ends_deleted: bool,
+}
+
+/// A paragraph whose mark is deleted as a tracked change, until a block follows it. Its
+/// place is built only when it is listed: most such paragraphs end a cell, and the path
+/// to one in nested tables is long.
+enum PendingMark {
+    /// At this index among the blocks being translated.
+    At(usize),
+    /// The last paragraph of a section's body, at this place, carried into the next.
+    Carried(Location),
 }
 
 /// The entry of a paragraph mark deleted as a tracked change.
@@ -271,6 +287,7 @@ impl<'a> Translator<'a> {
             missing_image: None,
             reported: 0,
             deleted_mark: None,
+            ends_deleted: false,
         }
     }
 
@@ -314,11 +331,13 @@ impl<'a> Translator<'a> {
         self.blocks_in(Some("blocks"), blocks, true)
     }
 
-    /// A paragraph as a block; translated here, so that its temporaries take no room in
-    /// the frame of [`Translator::blocks_in`], which nested tables repeat (#187).
+    /// A paragraph as a block, and whether its mark is deleted as a tracked change;
+    /// translated here, so that its temporaries take no room in the frame of
+    /// [`Translator::blocks_in`], which nested tables repeat (#187).
     #[inline(never)]
-    fn paragraph_block(&mut self, paragraph: crate::model::Paragraph<'a>) -> ir::Block {
-        paragraph::paragraph(self, paragraph).into()
+    fn paragraph_block(&mut self, paragraph: crate::model::Paragraph<'a>) -> (ir::Block, bool) {
+        let (paragraph, deleted) = paragraph::paragraph(self, paragraph);
+        (paragraph.into(), deleted)
     }
 
     /// Blocks held in the field `field` of what is being translated, or, with none, in
@@ -341,6 +360,7 @@ impl<'a> Translator<'a> {
             self.deleted_mark.take()
         };
         let mut out = Vec::new();
+        let mut ends_deleted = false;
         let steps = if field.is_some() { 2 } else { 1 };
         // Content controls nest: walked with a stack of their blocks, never recursively.
         let mut pending: Vec<Box<dyn Iterator<Item = Block<'a>> + 'a>> = vec![Box::new(blocks)];
@@ -356,11 +376,17 @@ impl<'a> Translator<'a> {
             match block {
                 Block::Paragraph(paragraph) => {
                     self.joined();
-                    out.push(self.paragraph_block(paragraph));
+                    let (block, deleted) = self.paragraph_block(paragraph);
+                    if deleted && !self.reported(Once::DeletedMark) {
+                        self.deleted_mark = Some(PendingMark::At(out.len()));
+                    }
+                    ends_deleted = deleted;
+                    out.push(block);
                 }
                 Block::ContentControl(control) => pending.push(Box::new(control.blocks())),
                 Block::Table(table) => {
                     self.joined();
+                    ends_deleted = false;
                     if let Some(table) = self.table(table) {
                         out.push(table.into());
                     }
@@ -376,17 +402,30 @@ impl<'a> Translator<'a> {
             }
             self.path.truncate(self.path.len().saturating_sub(steps));
         }
-        if !continues {
+        if continues {
+            if let Some(PendingMark::At(index)) = self.deleted_mark {
+                let at = self.location_at(self.path.len(), field, index);
+                self.deleted_mark = Some(PendingMark::Carried(at));
+            }
+        } else {
             self.deleted_mark = outer;
         }
+        self.ends_deleted = ends_deleted;
         out
     }
 
-    /// Lists the paragraph whose deleted mark was pending, now that a block follows it.
+    /// Lists the paragraph whose deleted mark was pending, now that a block follows it,
+    /// at the place of the block in [`Translator::blocks_in`].
     fn joined(&mut self) {
-        if let Some(at) = self.deleted_mark.take() {
-            self.report_once_at(Once::DeletedMark, at, DELETED_MARK);
-        }
+        let at = match self.deleted_mark.take() {
+            None => return,
+            Some(PendingMark::Carried(at)) => at,
+            // Its index in place of the index of the block that follows it.
+            Some(PendingMark::At(index)) => {
+                self.location_at(self.path.len().saturating_sub(1), None, index)
+            }
+        };
+        self.report_once_at(Once::DeletedMark, at, DELETED_MARK);
     }
 
     /// The key of a paragraph's style, for contextual spacing: one per style, by its
@@ -453,12 +492,32 @@ impl<'a> Translator<'a> {
 
     /// The current place in the IR.
     fn location(&self) -> Location {
-        self.path
+        self.location_at(self.path.len(), None, None)
+    }
+
+    /// The place of the first `keep` steps of the current one, then the field `field`,
+    /// then the item at `index`.
+    fn location_at(
+        &self,
+        keep: usize,
+        field: Option<&'static str>,
+        index: impl Into<Option<usize>>,
+    ) -> Location {
+        let steps = self.path.get(..keep).unwrap_or(&self.path);
+        let location = steps
             .iter()
             .fold(Location::document(), |location, step| match *step {
                 Step::Field(name) => location.field(name),
                 Step::Index(index) => location.index(index),
-            })
+            });
+        let location = match field {
+            Some(name) => location.field(name),
+            None => location,
+        };
+        match index.into() {
+            Some(index) => location.index(index),
+            None => location,
+        }
     }
 }
 

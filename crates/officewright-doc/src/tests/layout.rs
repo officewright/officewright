@@ -437,7 +437,7 @@ fn lists_what_sections_paragraphs_and_runs_have_that_the_ir_leaves_out() {
             "sections[0].blocks[2]: a text frame (w:framePr) is laid out as an ordinary paragraph, here and wherever else the document has one",
             "sections[0].blocks[3]: a drop cap (w:framePr) is laid out as an ordinary paragraph, here and wherever else the document has one",
             "sections[0].blocks[4]: a paragraph mark deleted or moved away as a tracked change (w:del or w:moveFrom) is kept, so the paragraph is not joined to the next as in Word's PDF of the document without markup, here and wherever else the document has one",
-            "sections[0].blocks[5].rows[0]: a table row deleted as a tracked change (w:del) is kept, where Word's PDF of the document without markup leaves it out, here and wherever else the document has one",
+            "sections[0].blocks[5].rows[0]: a table row deleted or moved away as a tracked change (w:del, or w:moveFrom on the marks of its cells) is kept, where Word's PDF of the document without markup leaves it out, here and wherever else the document has one",
         ]
     );
 }
@@ -550,13 +550,27 @@ fn lists_a_border_around_a_run_of_a_tab_and_the_glyph_features_of_symbols_and_re
         entries("", "<w:emboss/>"),
         [format!("notes[0].blocks[0].inlines: {embossed}")]
     );
+    let endnotes =
+        format!(r#"<w:endnotes xmlns:w="{W}"><w:endnote w:id="1"><w:p/></w:endnote></w:endnotes>"#);
+    let body = r#"<w:p><w:r><w:rPr><w:emboss/></w:rPr><w:endnoteReference w:id="1"/></w:r></w:p>"#;
+    let left_out: Vec<String> =
+        translate(&with_parts(body, &[("endnotes", "endnotes.xml", endnotes)]))
+            .left_out()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+    assert_eq!(
+        left_out,
+        [format!("sections[0].blocks[0].inlines: {embossed}")]
+    );
 }
 
 #[test]
 fn lists_a_deleted_mark_only_where_a_block_follows_it() {
-    // From the re-check of #326: Word joins a paragraph whose mark is deleted to what
-    // follows it, but the last paragraph of a cell or a story has nothing after it; Word
-    // marks those of every cell of a row it deletes.
+    // From the re-checks of #326: Word joins a paragraph whose mark is deleted to what
+    // follows it, but the last paragraph of a cell or a story has nothing after it. Word
+    // marks those of every cell of a row it deletes or moves away, and such a row is
+    // listed as a row.
     let mark = |kind: &str, section: &str| {
         format!(
             r#"<w:p><w:pPr><w:rPr><w:{kind} w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z"/></w:rPr>{section}</w:pPr><w:r><w:t>text</w:t></w:r></w:p>"#
@@ -572,11 +586,14 @@ fn lists_a_deleted_mark_only_where_a_block_follows_it() {
     };
     let message = "a paragraph mark deleted or moved away as a tracked change (w:del or w:moveFrom) is kept, so the paragraph is not joined to the next as in Word's PDF of the document without markup, here and wherever else the document has one";
     let row = |cell: &str| format!("<w:tbl><w:tr><w:tc>{cell}</w:tc></w:tr></w:tbl>");
+    // A row of two cells, of which only the first's last mark is deleted.
+    let one_of_two =
+        |cell: &str| format!("<w:tbl><w:tr><w:tc>{cell}</w:tc><w:tc><w:p/></w:tc></w:tr></w:tbl>");
     for body in [
-        format!("{}<w:p/>", row(&deleted)),
+        format!("{}<w:p/>", one_of_two(&deleted)),
         format!(
             r#"{}<w:p/>"#,
-            row(&format!(r#"<w:p/>{deleted}<w:bookmarkEnd w:id="0"/>"#))
+            one_of_two(&format!(r#"<w:p/>{deleted}<w:bookmarkEnd w:id="0"/>"#))
         ),
         format!("<w:p/>{deleted}"),
     ] {
@@ -641,6 +658,48 @@ fn lists_a_deleted_mark_only_where_a_block_follows_it() {
         ))
         .is_empty()
     );
+    // The note separators, translated after the last body, do not join its last
+    // paragraph either.
+    let separators = format!(
+        r#"<w:footnotes xmlns:w="{W}"><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:id="1"><w:p/></w:footnote></w:footnotes>"#
+    );
+    let body = format!(r#"<w:p><w:r><w:footnoteReference w:id="1"/></w:r></w:p>{deleted}"#);
+    assert!(
+        entries(&with_parts(
+            &body,
+            &[("footnotes", "footnotes.xml", separators)]
+        ))
+        .is_empty()
+    );
+    // A row whose cells all end with a mark moved away (TC-table-rowDND.docx of
+    // LibreOffice's tests, written by Word) or deleted, with nothing in its w:trPr.
+    let row_message = "a table row deleted or moved away as a tracked change (w:del, or w:moveFrom on the marks of its cells) is kept, where Word's PDF of the document without markup leaves it out, here and wherever else the document has one";
+    for kind in ["moveFrom", "del"] {
+        let gone = mark(kind, "");
+        let body = format!(
+            "<w:tbl><w:tr><w:tc>{gone}</w:tc><w:tc><w:p/>{gone}</w:tc></w:tr></w:tbl><w:p/>"
+        );
+        assert_eq!(
+            entries(&open(&body)),
+            [format!("sections[0].blocks[0].rows[0]: {row_message}")],
+            "{kind}"
+        );
+    }
+    // Not when a cell ends with a table after the deleted mark, which is listed as a mark
+    // (a cell that ends with no paragraph gets one, which is listed too).
+    let nested = row("<w:p/>");
+    let body = format!("<w:tbl><w:tr><w:tc>{deleted}{nested}</w:tc></w:tr></w:tbl><w:p/>");
+    let found = entries(&open(&body));
+    assert_eq!(
+        found.first(),
+        Some(&format!(
+            "sections[0].blocks[0].rows[0].cells[0].blocks[0]: {message}"
+        ))
+    );
+    assert!(
+        !found.iter().any(|entry| entry.contains("table row")),
+        "{found:?}"
+    );
 }
 
 #[test]
@@ -672,7 +731,7 @@ fn lists_rows_and_cells_deleted_as_tracked_changes_but_not_from_a_table_style() 
     assert_eq!(
         entries(&table(&format!("<w:del {revision}/>"), "")),
         [
-            "sections[0].blocks[0].rows[0]: a table row deleted as a tracked change (w:del) is kept, where Word's PDF of the document without markup leaves it out, here and wherever else the document has one"
+            "sections[0].blocks[0].rows[0]: a table row deleted or moved away as a tracked change (w:del, or w:moveFrom on the marks of its cells) is kept, where Word's PDF of the document without markup leaves it out, here and wherever else the document has one"
         ]
     );
     assert_eq!(
@@ -728,6 +787,14 @@ fn lists_at_most_a_thousand_entries() {
     assert_eq!(left_out.len(), 1000);
     assert_eq!(left_out[999].message(), "201 more entries are not listed");
     assert_eq!(left_out[999].location().to_string(), "document");
+    // What is listed once is counted too, once the list is full.
+    let document = open(&format!(
+        "<w:p>{drawings}<w:r><w:rPr><w:emboss/></w:rPr><w:t>x</w:t></w:r><w:r><w:rPr><w:emboss/></w:rPr><w:t>y</w:t></w:r></w:p>"
+    ));
+    let translation = translate(&document);
+    let left_out = translation.left_out();
+    assert_eq!(left_out.len(), 1000);
+    assert_eq!(left_out[999].message(), "202 more entries are not listed");
 }
 
 #[test]

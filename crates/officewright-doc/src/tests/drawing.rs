@@ -806,6 +806,8 @@ fn lists_a_picture_s_effects_and_shape_once_but_no_value_that_changes_nothing() 
         r#"<a:effectDag><a:glow rad="63500"><a:srgbClr val="FF0000"/></a:glow></a:effectDag>"#,
         r#"<a:scene3d><a:camera prst="isometricRightUp"/><a:lightRig rig="threePt" dir="t"/></a:scene3d>"#,
         r#"<a:scene3d><a:camera prst="orthographicFront"><a:rot lat="0" lon="1200000" rev="0"/></a:camera><a:lightRig rig="threePt" dir="t"/></a:scene3d>"#,
+        r#"<a:scene3d><a:camera prst="orthographicFront"><a:rot lat="300000" lon="0" rev="0"/></a:camera><a:lightRig rig="threePt" dir="t"/></a:scene3d>"#,
+        r#"<a:scene3d><a:camera prst="orthographicFront"><a:rot lat="0" lon="0" rev="60000"/></a:camera><a:lightRig rig="threePt" dir="t"/></a:scene3d>"#,
         &format!("{front}<a:sp3d><a:bevelT/></a:sp3d>"),
         r#"<a:sp3d><a:bevelB w="12700" h="12700"/></a:sp3d>"#,
         r#"<a:sp3d extrusionH="76200"/>"#,
@@ -822,22 +824,26 @@ fn lists_a_picture_s_effects_and_shape_once_but_no_value_that_changes_nothing() 
     }
     let colour = "a picture's colour or transparency effects (a:blip, such as a:grayscl or a:lum) are not applied, here and wherever else the document has them";
     for blip in [
+        "<a:grayscl/>",
+        r#"<a:duotone><a:srgbClr val="000000"/><a:srgbClr val="FFFFFF"/></a:duotone>"#,
         r#"<a:alphaModFix amt="99000"/>"#,
         r#"<a:alphaModFix amt="50%"/>"#,
+        r#"<a:lum bright="20000"/>"#,
         r#"<a:lum contrast="-20000"/>"#,
         r#"<a:hsl hue="0" sat="50000" lum="0"/>"#,
+        r#"<a:hsl lum="10000"/>"#,
         r#"<a:hsl hue="5400000"/>"#,
     ] {
         assert_eq!(entries(rect, "", blip), [colour], "{blip}");
     }
+    // Office writes the camera with a rotation of zeros into the effect styles of themes.
     let nothing = entries(
         rect,
-        &format!(
-            r#"<a:effectLst/>{front}<a:sp3d extrusionH="0" contourW="0" prstMaterial="plastic"/>"#
-        ),
+        r#"<a:effectLst/><a:effectDag/><a:scene3d><a:camera prst="orthographicFront"><a:rot lat="0" lon="0" rev="0"/></a:camera><a:lightRig rig="threePt" dir="t"/></a:scene3d><a:sp3d extrusionH="0" contourW="0" prstMaterial="plastic"/>"#,
         r#"<a:lum/><a:lum bright="0" contrast="0"/><a:alphaModFix/><a:alphaModFix amt="100000"/><a:alphaModFix amt="100%"/><a:hsl hue="0" sat="0" lum="0"/>"#,
     );
     assert!(nothing.is_empty(), "{nothing:?}");
+    assert!(entries(rect, front, "").is_empty());
 }
 
 #[test]

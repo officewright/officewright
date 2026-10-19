@@ -10,8 +10,13 @@ use crate::model::{
     Border, BorderStyle, Justification, LineSpacing, Paragraph, ParagraphFormat, TabKind, TabLeader,
 };
 
-/// A paragraph: its formatting, its mark, its list and its content.
-pub(super) fn paragraph<'a>(t: &mut Translator<'a>, paragraph: Paragraph<'a>) -> ir::Paragraph {
+/// A paragraph: its formatting, its mark, its list and its content; and whether its mark
+/// is deleted or moved away as a tracked change, which the caller lists once a block
+/// follows it, as Word joins the paragraph to that block.
+pub(super) fn paragraph<'a>(
+    t: &mut Translator<'a>,
+    paragraph: Paragraph<'a>,
+) -> (ir::Paragraph, bool) {
     let format = t.formats.paragraph(paragraph);
     // The IR has no right-to-left paragraphs and no frames yet, so the PDF lays these out
     // as ordinary paragraphs, left to right (#303).
@@ -45,14 +50,11 @@ pub(super) fn paragraph<'a>(t: &mut Translator<'a>, paragraph: Paragraph<'a>) ->
     t.path.push(super::Step::Field("inlines"));
     let inlines = t.inlines(paragraph, mark);
     t.path.pop();
-    // Listed once a block follows, which Word joins this one to (`blocks_in`).
-    if format.mark_deleted && !t.reported(Once::DeletedMark) {
-        t.deleted_mark = Some(t.location());
-    }
-    ir::Paragraph::new(mark)
+    let paragraph = ir::Paragraph::new(mark)
         .with_props(props)
         .with_inlines(inlines)
-        .with_list(list)
+        .with_list(list);
+    (paragraph, format.mark_deleted)
 }
 
 fn props(t: &mut Translator<'_>, format: &ParagraphFormat) -> ir::ParagraphProps {
