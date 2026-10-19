@@ -311,6 +311,7 @@ The agent must not decide these alone:
 ```
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo clippy -p officewright-doc --all-targets -- -D warnings: the crate's tests also build without its features
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 cargo test --workspace --all-features
 cargo fmt --check and cargo clippy -D warnings on the fuzz/ workspace (Linux/macOS; cargo-fuzz does not run on Windows)
