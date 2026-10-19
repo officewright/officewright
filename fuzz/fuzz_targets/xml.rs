@@ -26,6 +26,7 @@ enum Node {
 }
 
 fuzz_target!(|data: &[u8]| {
+    check_utf16(data);
     let limits = Limits::new();
     let input = match Input::decode(data) {
         Ok(input) => input,
@@ -355,4 +356,52 @@ fn push_text(nodes: &mut Vec<Node>, text: &str) {
         Some(Node::Text(previous)) => previous.push_str(text),
         _ => nodes.push(Node::Text(text.to_owned())),
     }
+}
+
+/// UTF-16 has no oracle in roxmltree, which reads the text `Input::decode` gives (#259):
+/// for input that `Input::decode` takes as UTF-16 (a byte order mark, or `<?` in either
+/// order of bytes), decode it here with the standard library and XML 1.0's rules
+/// (section 2.11: CR LF and a lone CR become LF; section 2.2: the characters XML allows),
+/// and require the same text, or a failure exactly when this decoding fails.
+fn check_utf16(data: &[u8]) {
+    let (units, little) = match data {
+        [0xFF, 0xFE, rest @ ..] => (rest, true),
+        [0xFE, 0xFF, rest @ ..] => (rest, false),
+        [0x3C, 0x00, 0x3F, 0x00, ..] => (data, true),
+        [0x00, 0x3C, 0x00, 0x3F, ..] => (data, false),
+        _ => return,
+    };
+    let expected = (units.len() % 2 == 0)
+        .then(|| {
+            let units: Vec<u16> = units
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&pair| {
+                    if little {
+                        u16::from_le_bytes(pair)
+                    } else {
+                        u16::from_be_bytes(pair)
+                    }
+                })
+                .collect();
+            String::from_utf16(&units).ok()
+        })
+        .flatten()
+        .map(|text| text.replace("\r\n", "\n").replace('\r', "\n"))
+        .filter(|text| text.chars().all(is_xml_char));
+    match (Input::decode(data), expected) {
+        (Ok(input), Some(expected)) => assert_eq!(input.as_str(), expected),
+        (Err(_), None) => {}
+        (Ok(input), None) => panic!(
+            "officewright decodes {:?}, the standard library does not",
+            input.as_str()
+        ),
+        (Err(err), Some(expected)) => panic!("officewright refuses {expected:?}: {err}"),
+    }
+}
+
+/// XML 1.0, section 2.2, production 2.
+fn is_xml_char(c: char) -> bool {
+    matches!(c, '\t' | '\n' | '\r' | '\u{20}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..)
 }
