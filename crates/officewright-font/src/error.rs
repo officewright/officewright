@@ -352,6 +352,70 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_duplicate_is_the_same_error() {
+        let cause = || Cause::new("why");
+        let errors = [
+            Error::NotAFont { source: cause() },
+            Error::FaceIndexOutOfRange { index: 3, count: 2 },
+            Error::MalformedFace {
+                face: 1,
+                source: cause(),
+            },
+            Error::MissingTable {
+                face: 1,
+                table: "hmtx",
+            },
+            Error::MalformedTable {
+                face: 1,
+                table: "CFF ",
+                source: cause(),
+            },
+            Error::TableOverLimit {
+                face: 1,
+                table: "name",
+                source: cause(),
+            },
+            Error::InvalidUnitsPerEm {
+                face: 1,
+                units_per_em: 9,
+            },
+            Error::GlyphOutOfRange {
+                face: 1,
+                glyph: GlyphId::new(7),
+                glyph_count: 5,
+            },
+            Error::UnsupportedOutlines {
+                face: 1,
+                format: Some(OutlineFormat::Cff2),
+            },
+            Error::Subset {
+                face: 1,
+                source: cause(),
+            },
+            Error::SubsetUnsupported {
+                face: 1,
+                source: cause(),
+            },
+            Error::SubsetterPanicked {
+                face: 1,
+                message: "boom".to_owned(),
+            },
+            Error::Read {
+                path: Path::new("font.ttf").to_owned(),
+                source: io::Error::new(io::ErrorKind::NotFound, "gone"),
+            },
+        ];
+        for err in errors {
+            let copy = err.duplicate();
+            assert_eq!(std::mem::discriminant(&copy), std::mem::discriminant(&err));
+            assert_eq!(format!("{copy:?}"), format!("{err:?}"));
+            if let (Error::Read { source: a, .. }, Error::Read { source: b, .. }) = (&copy, &err) {
+                assert_eq!(a.kind(), b.kind());
+            }
+        }
+    }
+
+    #[test]
     fn messages_name_the_face_and_table() {
         let err = Error::MalformedTable {
             face: 2,

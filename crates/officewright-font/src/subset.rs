@@ -172,8 +172,11 @@ impl FontFace {
     /// together than one subset may: the checks of a face's CFF glyphs share that limit
     /// (16,777,216 operands, operators and hint mask bytes to decompile), so a glyph
     /// fails once those checked before it have read nearly all of it. The checks of one
-    /// face also follow at most 4,194,304 components of composite glyphs in all, which
-    /// only a crafted face comes near.
+    /// face also follow at most 4,194,304 components of composite glyphs in all, and read
+    /// at most four times the limit of one subset in CFF charstrings, those of glyphs that
+    /// fail included, which only a crafted face comes near. Several faces subset within one
+    /// [`SubsetBudget`], as the faces of one PDF are, can still take more together than it
+    /// has left: the checks bound each face alone.
     ///
     /// ```
     /// use officewright_font::{FontFace, GlyphId};
@@ -237,6 +240,18 @@ impl FontFace {
         } else {
             0
         };
+        // subsetter 0.2.6 panics when the glyphs to keep and the glyphs their components
+        // use take every glyph ID, which components past the glyph count can do
+        // (<https://github.com/typst/subsetter/issues/35>).
+        if crate::subset_check::subset_overflows(self, &ids) {
+            return Err(Error::SubsetUnsupported {
+                face,
+                source: Cause::new(
+                    "the glyphs to keep and the glyphs their components use take all 65536 \
+                     glyph IDs with .notdef, more than the subsetter can number",
+                ),
+            });
+        }
         let remapper = GlyphRemapper::new_from_glyphs_sorted(&ids);
         let data = self.data();
         let data = catch_subsetter_panic(face, || subsetter::subset(data, face, &remapper))?
@@ -319,9 +334,10 @@ pub(crate) fn subsetter_table_range(
 /// subsetter 0.2.6 still has `unwrap()`, `unreachable!()` and unchecked arithmetic on
 /// paths that malformed fonts can reach. A damaged font must give `Err`, never a panic,
 /// also inside a dependency, so the panic is caught here until upstream returns errors
-/// on those paths; panics that fuzzing finds are reported there. The four found so far
-/// are not left to this guard: the checks in `name_offsets.rs` and `cff.rs` refuse the
-/// faces before the subsetter runs, since the panic hook would still print them. They
+/// on those paths; panics that fuzzing or review finds are reported there. The five found
+/// so far are not left to this guard: the checks in `name_offsets.rs`, `cff.rs` and
+/// `subset_check.rs` refuse the faces before the subsetter runs, since the panic hook
+/// would still print them. They
 /// are an overflow in its `name` table code
 /// (<https://github.com/typst/subsetter/issues/30>), `unreachable!()` for a CFF real
 /// number too large for an `f32` (<https://github.com/typst/subsetter/issues/31>), an
@@ -329,7 +345,9 @@ pub(crate) fn subsetter_table_range(
 /// (<https://github.com/typst/subsetter/issues/33>), and a CID-keyed font with 256 Font
 /// DICTs or more, on which a `debug_assert!` fails and, when the kept glyphs use 256, a
 /// `u8` counter overflows in any build
-/// (<https://github.com/typst/subsetter/issues/34>).
+/// (<https://github.com/typst/subsetter/issues/34>), and composite glyphs whose
+/// components take all 65,536 glyph IDs, which overflow its `u16` glyph counter
+/// (<https://github.com/typst/subsetter/issues/35>).
 /// Catching relies on unwinding, like the C ABI: built with `-C panic=abort` the process
 /// aborts instead. The default panic hook still prints the message to stderr, since a
 /// library must not replace the process-wide hook.

@@ -38,10 +38,14 @@ struct State {
     /// How many operands, operators and hint mask bytes decompiling the CFF glyphs still
     /// to check may read: one subset may read no more for all its glyphs.
     steps: u32,
+    /// How many operands, operators and hint mask bytes the checks of CFF glyphs may
+    /// still read in all, those of glyphs that fail included.
+    work: u32,
     /// How many more components of composite glyphs the checks may follow.
     components: u32,
-    /// The numbers of CFF subroutines the checks have counted.
-    subroutines: crate::cff::SubroutineCounts,
+    /// Whether a check reached a glyph past the face's glyph count through components,
+    /// so that a glyph's components might take every glyph ID.
+    past_count: bool,
 }
 
 /// Where the tables are that the subsetter reads for each glyph it keeps, found as it
@@ -54,6 +58,9 @@ struct Tables {
     hmtx: Option<Hmtx>,
     /// The number of glyph name indexes of a `post` table of version 2.
     post: Option<u16>,
+    /// Where the `CFF ` table is, and what the checks of its glyphs need of it, if the
+    /// subsetter takes the CFF outlines.
+    cff: Option<(Range<usize>, crate::cff::CffGlyphs)>,
 }
 
 struct Glyf {
@@ -103,67 +110,74 @@ impl State {
             sound: vec![0; 1024],
             damaged: HashMap::new(),
             steps: u32::try_from(steps).unwrap_or(0),
+            work: crate::cff::MAX_CHECK_WORK,
             components,
-            subroutines: crate::cff::SubroutineCounts::default(),
+            past_count: false,
         }
     }
 
     fn check(&mut self, face: &FontFace, glyph: u16) -> Result<()> {
-        let tables = match &self.face {
+        let Self {
+            face: tables,
+            sound,
+            damaged,
+            steps,
+            work,
+            components,
+            past_count,
+        } = self;
+        let tables = match tables {
             Ok(tables) => tables,
             Err(err) => return Err(err.duplicate()),
         };
-        if glyph == 0 || is_marked(&self.sound, glyph) {
+        if glyph == 0 || is_marked(sound, glyph) {
             return Ok(());
         }
-        if let Some(err) = self.damaged.get(&glyph) {
+        if let Some(err) = damaged.get(&glyph) {
             return Err(err.duplicate());
         }
         let index = face.index();
         let data = face.data();
-        let checked = match &tables.glyf {
-            Some(glyf) => {
-                let checked = check_closure(
+        let checked = if let Some(glyf) = &tables.glyf {
+            let checked = check_closure(
+                &ClosureCheck {
                     tables,
                     glyf,
                     data,
-                    glyph,
-                    &mut self.sound,
-                    &self.damaged,
-                    &mut self.components,
-                );
-                // A damaged component is kept too, so that the glyphs that use it fail
-                // without reading it again.
-                if let Err(Failure::Glyph(component, reason)) = &checked {
-                    if *component != glyph {
-                        let failure = Failure::Glyph(*component, reason.clone());
-                        self.damaged
-                            .insert(*component, failure.error(index, *component));
-                    }
+                    glyph_count: face.glyph_count(),
+                },
+                glyph,
+                sound,
+                damaged,
+                components,
+                past_count,
+            );
+            // A damaged component is kept too, so that the glyphs that use it fail
+            // without reading it again.
+            if let Err(Failure::Glyph(component, reason)) = &checked {
+                if *component != glyph {
+                    let failure = Failure::Glyph(*component, reason.clone());
+                    damaged.insert(*component, failure.error(index, *component));
                 }
-                checked.map_err(|failure| failure.error(index, glyph))
             }
-            None => crate::font::font_ref(data, index)
-                .and_then(|font| {
-                    crate::cff::check_glyph(
-                        &font,
-                        data,
-                        index,
-                        glyph,
-                        &mut self.steps,
-                        &mut self.subroutines,
-                    )
-                })
-                .and_then(|()| {
-                    tables
-                        .metrics(data, glyph)
-                        .map_err(|reason| Failure::Glyph(glyph, reason).error(index, glyph))
-                }),
+            checked.map_err(|failure| failure.error(index, glyph))
+        } else if let Some((range, glyphs)) = &mut tables.cff {
+            let cff = data.get(range.clone()).unwrap_or_default();
+            crate::cff::check_glyph(cff, glyphs, index, glyph, steps, work).and_then(|()| {
+                tables
+                    .metrics(data, glyph)
+                    .map_err(|reason| Failure::Glyph(glyph, reason).error(index, glyph))
+            })
+        } else {
+            Err(Error::Subset {
+                face: index,
+                source: Cause::new("the tables the subsetter reads for each glyph cannot be read"),
+            })
         };
         match &checked {
-            Ok(()) => mark(&mut self.sound, glyph),
+            Ok(()) => mark(sound, glyph),
             Err(err) => {
-                self.damaged.insert(glyph, err.duplicate());
+                damaged.insert(glyph, err.duplicate());
             }
         }
         checked
@@ -183,6 +197,8 @@ fn mark(bits: &mut [u64], glyph: u16) {
 
 /// Why a TrueType glyph cannot go into a subset.
 enum Failure {
+    /// The glyph and the glyphs its components use take every glyph ID with `.notdef`.
+    AllIds,
     /// Glyph `.0`, the glyph checked or one of the components it uses, is damaged.
     Glyph(u16, String),
     /// Glyph `.0` was found damaged before.
@@ -206,6 +222,13 @@ impl Failure {
             Self::Known(at) => damaged(format!(
                 "glyph {glyph} uses glyph {at} as a component, which cannot go into a subset"
             )),
+            Self::AllIds => Error::SubsetUnsupported {
+                face,
+                source: Cause::new(format!(
+                    "glyph {glyph} and the glyphs its components use take all 65536 glyph \
+                     IDs with .notdef, more than the subsetter can number"
+                )),
+            },
             Self::Limit => Error::TableOverLimit {
                 face,
                 table: "glyf",
@@ -218,18 +241,59 @@ impl Failure {
     }
 }
 
+/// Whether subsetting the TrueType outlines of `face` to `glyphs` would make the subsetter
+/// number all 65,536 glyph IDs in its glyph closure, on which it panics
+/// ([`closure_overflows`]); false for a face whose `glyf` table it does not take.
+pub(crate) fn subset_overflows(face: &FontFace, glyphs: &[u16]) -> bool {
+    let data = face.data();
+    let Ok(font) = crate::font::font_ref(data, face.index()) else {
+        return false;
+    };
+    let table = |tag: &[u8; 4]| subsetter_table_range(&font, data, tag);
+    let (Some(glyf), Some(loca), Some(head)) = (table(b"glyf"), table(b"loca"), table(b"head"))
+    else {
+        return false;
+    };
+    let Some(long) = data.get(head).and_then(|head| i16_at(head, 50)) else {
+        return false;
+    };
+    let glyf = Glyf {
+        loca,
+        glyf,
+        long: long != 0,
+    };
+    // The subsetter keeps `.notdef` first, then the glyphs in order, once each.
+    let mut kept: Vec<u16> = glyphs.iter().copied().filter(|&glyph| glyph != 0).collect();
+    kept.sort_unstable();
+    kept.dedup();
+    kept.insert(0, 0);
+    closure_overflows(&glyf, data, &kept)
+}
+
+/// What [`check_closure`] reads a face's glyphs from.
+struct ClosureCheck<'a> {
+    tables: &'a Tables,
+    glyf: &'a Glyf,
+    data: &'a [u8],
+    glyph_count: u16,
+}
+
 /// Checks `glyph` and every glyph its components use, as the subsetter's glyph closure
 /// and its `glyf`, `hmtx` and `post` code read them, taking the glyphs marked in `sound`
 /// and those in `damaged` as found. Where the check succeeds, it marks every glyph it
 /// reached as sound: the glyphs their components use were all reached too.
+///
+/// Components may name glyphs past the face's glyph count, which the subsetter keeps
+/// where `loca` gives them an entry. Once a check has reached one (`past_count`), the
+/// glyphs a glyph's components use might take every glyph ID with `.notdef`, on which
+/// the subsetter panics, so that is checked as it numbers them ([`closure_overflows`]).
 fn check_closure(
-    tables: &Tables,
-    glyf: &Glyf,
-    data: &[u8],
+    face: &ClosureCheck<'_>,
     glyph: u16,
     sound: &mut [u64],
     damaged: &HashMap<u16, Error>,
     components: &mut u32,
+    past_count: &mut bool,
 ) -> std::result::Result<(), Failure> {
     let mut reached = vec![glyph];
     let mut seen = HashSet::from([glyph]);
@@ -242,21 +306,70 @@ fn check_closure(
         if next != glyph && damaged.contains_key(&next) {
             return Err(Failure::Known(next));
         }
-        let found = glyf
-            .components(data, next)
-            .and_then(|found| tables.metrics(data, next).map(|()| found))
+        let found = face
+            .glyf
+            .components(face.data, next)
+            .and_then(|found| face.tables.metrics(face.data, next).map(|()| found))
             .map_err(|reason| Failure::Glyph(next, reason))?;
         for component in found {
             *components = components.checked_sub(1).ok_or(Failure::Limit)?;
+            *past_count |= component >= face.glyph_count;
             if seen.insert(component) {
                 reached.push(component);
             }
         }
     }
+    if *past_count && closure_overflows(face.glyf, face.data, &[0, glyph]) {
+        return Err(Failure::AllIds);
+    }
     for glyph in reached {
         mark(sound, glyph);
     }
     Ok(())
+}
+
+/// Whether the subsetter numbers all 65,536 glyph IDs when it forms the glyph closure of
+/// `kept` (`glyf::closure` in its `src/glyf.rs`), on which it panics ("remapper was
+/// overflowed"): it takes the glyphs to keep, and each glyph's components as it reaches
+/// the glyph, reading them as its `component_glyphs` does, which stops at the first it
+/// cannot read; it stops at a glyph whose entry is too short for a header, with an error
+/// of its own.
+fn closure_overflows(glyf: &Glyf, data: &[u8], kept: &[u16]) -> bool {
+    let mut numbered = vec![0u64; 1024];
+    let mut count = 0usize;
+    let mut stack: Vec<u16> = kept.to_vec();
+    for &glyph in kept {
+        if !is_marked(&numbered, glyph) {
+            mark(&mut numbered, glyph);
+            count += 1;
+        }
+    }
+    while let Some(glyph) = stack.pop() {
+        if !is_marked(&numbered, glyph) {
+            mark(&mut numbered, glyph);
+            count += 1;
+        }
+        if count > usize::from(u16::MAX) {
+            return true;
+        }
+        let Some(entry) = glyf.entry(data, glyph) else {
+            continue;
+        };
+        if entry.is_empty() {
+            continue;
+        }
+        let Some(contours) = i16_at(entry, 0) else {
+            return false;
+        };
+        if contours >= 0 {
+            continue;
+        }
+        let Some(found) = closure_components(entry) else {
+            return false;
+        };
+        stack.extend(found.into_iter().filter(|&c| !is_marked(&numbered, c)));
+    }
+    false
 }
 
 impl Tables {
@@ -299,7 +412,17 @@ impl Tables {
             }
             _ => None,
         };
-        Ok(Self { glyf, hmtx, post })
+        // The subsetter reads `CFF ` only when it finds no `glyf` table.
+        let cff = match glyf {
+            Some(_) => None,
+            None => crate::cff::CffGlyphs::read(&font, data),
+        };
+        Ok(Self {
+            glyf,
+            hmtx,
+            post,
+            cff,
+        })
     }
 
     /// Fails where the subsetter cannot read the `hmtx` entry or the `post` glyph name
@@ -338,9 +461,9 @@ fn number_of_h_metrics(hhea: &[u8]) -> Option<u16> {
 }
 
 impl Glyf {
-    /// The components of `glyph` as the subsetter reads its `glyf` entry: none for an
-    /// empty or simple glyph; fails where the entry cannot be read, with the reason.
-    fn components(&self, data: &[u8], glyph: u16) -> std::result::Result<Vec<u16>, String> {
+    /// The `glyf` entry of `glyph`, as the subsetter's `Table::glyph_data` finds it from its
+    /// `loca` entries; `None` where they give no range of the table.
+    fn entry<'a>(&self, data: &'a [u8], glyph: u16) -> Option<&'a [u8]> {
         let loca = data.get(self.loca.clone()).unwrap_or_default();
         let glyf = data.get(self.glyf.clone()).unwrap_or_default();
         let offset = |n: usize| {
@@ -350,9 +473,15 @@ impl Glyf {
                 u16_at(loca, 2 * n).map(|offset| 2 * usize::from(offset))
             }
         };
-        let entry = offset(usize::from(glyph))
-            .zip(offset(usize::from(glyph) + 1))
-            .and_then(|(from, to)| glyf.get(from..to))
+        let (from, to) = offset(usize::from(glyph)).zip(offset(usize::from(glyph) + 1))?;
+        glyf.get(from..to)
+    }
+
+    /// The components of `glyph` as the subsetter reads its `glyf` entry: none for an
+    /// empty or simple glyph; fails where the entry cannot be read, with the reason.
+    fn components(&self, data: &[u8], glyph: u16) -> std::result::Result<Vec<u16>, String> {
+        let entry = self
+            .entry(data, glyph)
             .ok_or_else(|| "its loca entries do not give a range of the glyf table".to_owned())?;
         if entry.is_empty() {
             return Ok(Vec::new());
@@ -401,6 +530,53 @@ fn composite_components(entry: &[u8]) -> Option<Vec<u16>> {
         entry.get(..at)?;
         if flags & MORE_COMPONENTS == 0 {
             // The instructions after the last component are copied as they are.
+            return Some(components);
+        }
+    }
+}
+
+/// The components of a composite glyph description as the subsetter's closure reads them
+/// (`component_glyphs` in its `src/glyf.rs`): `None` where the header is cut off, and
+/// otherwise the components up to the first whose flags or glyph cannot be read.
+fn closure_components(entry: &[u8]) -> Option<Vec<u16>> {
+    const ARG_1_AND_2_ARE_WORDS: u16 = 0x0001;
+    const WE_HAVE_A_SCALE: u16 = 0x0008;
+    const MORE_COMPONENTS: u16 = 0x0020;
+    const WE_HAVE_AN_X_AND_Y_SCALE: u16 = 0x0040;
+    const WE_HAVE_A_TWO_BY_TWO: u16 = 0x0080;
+    entry.get(..10)?;
+    let mut at = 10;
+    let mut components = Vec::new();
+    // Each read that runs past the entry leaves the place unchanged, as the subsetter's
+    // reader does; only the flags and the glyph end the components.
+    let skip = |at: &mut usize, len: usize| {
+        if entry.get(*at..*at + len).is_some() {
+            *at += len;
+        }
+    };
+    loop {
+        let (Some(flags), Some(component)) = (u16_at(entry, at), u16_at(entry, at + 2)) else {
+            return Some(components);
+        };
+        at += 4;
+        components.push(component);
+        if flags & ARG_1_AND_2_ARE_WORDS != 0 {
+            skip(&mut at, 2);
+            skip(&mut at, 2);
+        } else {
+            skip(&mut at, 2);
+        }
+        if flags & WE_HAVE_A_SCALE != 0 {
+            skip(&mut at, 2);
+        } else if flags & WE_HAVE_AN_X_AND_Y_SCALE != 0 {
+            skip(&mut at, 2);
+            skip(&mut at, 2);
+        } else if flags & WE_HAVE_A_TWO_BY_TWO != 0 {
+            for _ in 0..4 {
+                skip(&mut at, 2);
+            }
+        }
+        if flags & MORE_COMPONENTS == 0 {
             return Some(components);
         }
     }
@@ -602,6 +778,209 @@ mod tests {
         assert!(matches!(
             face.check_subset_glyph(GlyphId::new(5)),
             Err(Error::GlyphOutOfRange { glyph_count: 5, .. })
+        ));
+    }
+
+    /// The table `tag` of the font `data`.
+    fn table_of(data: &[u8], tag: &[u8; 4]) -> Vec<u8> {
+        let count = usize::from(u16::from_be_bytes([data[4], data[5]]));
+        (0..count)
+            .map(|i| 12 + 16 * i)
+            .find(|&at| &data[at..at + 4] == tag)
+            .map(|at| {
+                let offset = u32::from_be_bytes(data[at + 8..at + 12].try_into().unwrap()) as usize;
+                let len = u32::from_be_bytes(data[at + 12..at + 16].try_into().unwrap()) as usize;
+                data[offset..offset + len].to_vec()
+            })
+            .unwrap()
+    }
+
+    /// A font of `entries` as its glyphs: `loca` with 16-bit offsets where `short` (every
+    /// entry then of even length), a full `hmtx` and `maxp` and `hhea` counting them.
+    fn font_of(entries: &[Vec<u8>], short: bool) -> TestFont {
+        let base = TestFont::new("Check Sans").build();
+        let count = u16::try_from(entries.len()).unwrap();
+        let mut glyf = Vec::new();
+        let mut loca = Vec::new();
+        let offset = |loca: &mut Vec<u8>, at: usize| {
+            if short {
+                loca.extend_from_slice(&u16::try_from(at / 2).unwrap().to_be_bytes());
+            } else {
+                loca.extend_from_slice(&u32::try_from(at).unwrap().to_be_bytes());
+            }
+        };
+        for entry in entries {
+            offset(&mut loca, glyf.len());
+            glyf.extend_from_slice(entry);
+        }
+        offset(&mut loca, glyf.len());
+        let mut head = table_of(&base, b"head");
+        head[50..52].copy_from_slice(&i16::from(!short).to_be_bytes());
+        let mut maxp = table_of(&base, b"maxp");
+        maxp[4..6].copy_from_slice(&count.to_be_bytes());
+        let mut hhea = hhea();
+        let at = hhea.len() - 2;
+        hhea[at..].copy_from_slice(&count.to_be_bytes());
+        TestFont::new("Check Sans")
+            .with_table(b"glyf", glyf)
+            .with_table(b"loca", loca)
+            .with_table(b"head", head)
+            .with_table(b"maxp", maxp)
+            .with_table(b"hhea", hhea)
+            .with_table(b"hmtx", [0x01, 0xF4, 0, 0].repeat(entries.len()))
+    }
+
+    /// The test font's glyphs, each padded to an even length.
+    fn even_entries() -> Vec<Vec<u8>> {
+        glyph_entries()
+            .into_iter()
+            .map(|mut entry| {
+                entry.resize(entry.len().next_multiple_of(2), 0);
+                entry
+            })
+            .collect()
+    }
+
+    #[test]
+    fn reads_loca_with_16_bit_offsets() {
+        assert_eq!(
+            subset_checks(&font_of(&even_entries(), true).build()),
+            vec![Ok(()); 5]
+        );
+        // The acute's entry ends before it starts: its offset and the next swapped.
+        let font = font_of(&even_entries(), true).build();
+        let mut loca = table_of(&font, b"loca");
+        loca.swap(6, 8);
+        loca.swap(7, 9);
+        let checks = subset_checks(
+            &font_of(&even_entries(), true)
+                .with_table(b"loca", loca)
+                .build(),
+        );
+        assert_eq!(
+            checks[3],
+            Err("glyph 3: its loca entries do not give a range of the glyf table".to_owned())
+        );
+    }
+
+    #[test]
+    fn keeps_what_it_found_of_glyphs_past_the_first_64() {
+        // Glyph 1 is damaged and glyph 65 empty: finding 65 sound marks no other glyph.
+        let mut entries = vec![Vec::new(); 70];
+        entries[0] = glyph_entries()[0].clone();
+        entries[1] = vec![0xFF];
+        let font = font_of(&entries, false).build();
+        let checks = subset_checks(&font);
+        assert!(checks[1].is_err() && checks[65].is_ok(), "{checks:?}");
+        let face = crate::FontFace::from_bytes(font, 0).unwrap();
+        face.check_subset_glyph(GlyphId::new(65)).unwrap();
+        assert!(face.check_subset_glyph(GlyphId::new(1)).is_err());
+    }
+
+    #[test]
+    fn reads_hmtx_entries_whole() {
+        // With 4 full metrics, glyph 4 has a side bearing alone, 2 bytes: one byte short
+        // fails it. (A table one byte short of its full metrics is not a face.)
+        let font = |metrics: u16, len: usize| {
+            let mut hhea = hhea();
+            let at = hhea.len() - 2;
+            hhea[at..].copy_from_slice(&metrics.to_be_bytes());
+            let mut hmtx = hmtx();
+            hmtx.truncate(len);
+            TestFont::new("Check Sans")
+                .with_table(b"hhea", hhea)
+                .with_table(b"hmtx", hmtx)
+                .build()
+        };
+        assert!(crate::FontFace::from_bytes(font(5, 19), 0).is_err());
+        assert_eq!(subset_checks(&font(5, 20)), vec![Ok(()); 5]);
+        assert_eq!(subset_checks(&font(4, 18)), vec![Ok(()); 5]);
+        assert_eq!(
+            subset_checks(&font(4, 17))[4],
+            Err("glyph 4: it has no entry in the hmtx table".to_owned())
+        );
+    }
+
+    #[test]
+    fn reads_composite_scales_by_their_size() {
+        // `Á` with a scale of each kind on its last component (flags 0x0008, 0x0040 and
+        // 0x0080 with their 2, 4 and 8 bytes), and cut one byte short.
+        for (flag, size) in [(0x0008u16, 2), (0x0040, 4), (0x0080, 8)] {
+            let mut aacute = glyph_entries()[4].clone();
+            let at = aacute.len() - 8;
+            aacute[at..at + 2].copy_from_slice(&(0x0003 | flag).to_be_bytes());
+            aacute.extend(vec![0x40; size]);
+            let mut entries = glyph_entries();
+            entries[4] = aacute.clone();
+            assert_eq!(
+                subset_checks(&with_glyphs(&entries).build())[4],
+                Ok(()),
+                "{flag:#06x}"
+            );
+            aacute.pop();
+            entries[4] = aacute;
+            assert_eq!(
+                subset_checks(&with_glyphs(&entries).build())[4],
+                Err("glyph 4: its composite glyph description is cut off".to_owned()),
+                "{flag:#06x}"
+            );
+        }
+        // numberOfContours 0 is a simple glyph, here of its header alone.
+        let mut entries = glyph_entries();
+        entries[3] = vec![0; 10];
+        assert_eq!(
+            subset_checks(&with_glyphs(&entries).build()),
+            vec![Ok(()); 5]
+        );
+    }
+
+    #[test]
+    fn fails_a_glyph_whose_components_take_every_glyph_id() {
+        // Glyph 1 is a composite of the empty glyphs 2 to `last`, past the glyph count
+        // `maxp` gives, which `loca` and `hmtx` still cover.
+        let font = |last: u16| {
+            let mut composite = vec![0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0];
+            for glyph in 2..=last {
+                let flags: u16 = if glyph == last { 0x0002 } else { 0x0022 };
+                composite.extend_from_slice(&flags.to_be_bytes());
+                composite.extend_from_slice(&glyph.to_be_bytes());
+                composite.extend_from_slice(&[0, 0]);
+            }
+            let mut entries = vec![Vec::new(); 65536];
+            entries[0] = glyph_entries()[0].clone();
+            entries[1] = composite;
+            let base = font_of(&entries[..2], false).build();
+            let mut glyf = Vec::new();
+            let mut loca = Vec::new();
+            for entry in &entries {
+                loca.extend_from_slice(&u32::try_from(glyf.len()).unwrap().to_be_bytes());
+                glyf.extend_from_slice(entry);
+            }
+            loca.extend_from_slice(&u32::try_from(glyf.len()).unwrap().to_be_bytes());
+            let mut hmtx = table_of(&base, b"hmtx");
+            hmtx.resize(hmtx.len() + 2 * 65534, 0);
+            font_of(&entries[..2], false)
+                .with_table(b"glyf", glyf)
+                .with_table(b"loca", loca)
+                .with_table(b"hmtx", hmtx)
+                .build()
+        };
+        // With .notdef, 65,535 glyph IDs subset; 65,536 do not, and are refused, not left
+        // to the subsetter's panic.
+        assert_eq!(subset_checks(&font(65534)), [Ok(()), Ok(())]);
+        let checks = subset_checks(&font(65535));
+        assert_eq!(
+            checks[1],
+            Err(
+                "glyph 1 and the glyphs its components use take all 65536 glyph IDs with \
+                 .notdef, more than the subsetter can number"
+                    .to_owned()
+            )
+        );
+        let face = crate::FontFace::from_bytes(font(65535), 0).unwrap();
+        assert!(matches!(
+            face.subset([GlyphId::new(1)]),
+            Err(Error::SubsetUnsupported { .. })
         ));
     }
 
