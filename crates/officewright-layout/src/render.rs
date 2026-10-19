@@ -1814,6 +1814,8 @@ mod tests {
                 bottom: Pt(2.0),
             },
             fragments: Vec::new(),
+            frame_items: 0,
+            floats: Vec::new(),
             items: vec![DisplayItem::Rect {
                 at: Point {
                     x: Pt(0.0),

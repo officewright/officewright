@@ -17,7 +17,7 @@ use crate::ir::{
     CompatMode, Document, Paragraph, PreferredWidth, RowHeight, Table, TableAlignment,
     TableBorders, TableLayout, TextDirection, VerticalMerge,
 };
-use crate::itemize::FieldValues;
+use crate::itemize::{FieldValues, Item};
 use crate::lists::Label;
 use crate::paragraph;
 use crate::report::{Location, ReportKind, Step};
@@ -805,6 +805,9 @@ fn stack<'d>(
                     location,
                     background,
                     leaders: context.leaders,
+                    // A cell does not place floating objects yet: reported below.
+                    page: None,
+                    floats: Vec::new(),
                     // Hypothesis: in a cell, as no reference shows it, a bar tab reaches only
                     // through the lines.
                     bar_reach: (0.0, 0.0),
@@ -812,6 +815,18 @@ fn stack<'d>(
                 let lines = 0..layout.lines.len();
                 painting.paint_shading(lines.clone(), origin, &mut items);
                 painting.paint(lines, origin, &mut items);
+                let floating = layout
+                    .itemized
+                    .items
+                    .iter()
+                    .any(|item| matches!(item, Item::Anchored(_)));
+                if floating {
+                    context.fonts.report_once(
+                        ReportKind::FeatureUnsupported,
+                        location,
+                        "floating pictures in table cells are not drawn yet".to_owned(),
+                    );
+                }
                 height += layout.height().0;
                 above = Some(paragraph);
             }
@@ -2059,6 +2074,43 @@ mod tests {
         let note = "the content of a cell merged into the cell above";
         assert!(has(&reported(&document, &merged(true), 400.0), note));
         assert!(!has(&reported(&document, &merged(false), 400.0), note));
+    }
+
+    #[test]
+    fn floating_pictures_in_cells_are_reported() {
+        use crate::ir::{
+            AnchoredObject, HorizontalAnchor, ImageData, ImageFormat, ObjectContent, Picture, Size,
+            VerticalAnchor,
+        };
+
+        // A cell does not place floating objects yet: a picture anchored in one is not
+        // drawn, and that is reported.
+        let (mut document, style) = document(CompatMode::Word2013);
+        let image = document.add_image(ImageData::new(ImageFormat::Png, &b"\x89PNG"[..]));
+        let picture = Inline::anchored(AnchoredObject::new(
+            ObjectContent::Picture(Picture::new(image)),
+            Size::new(Pt(30.0), Pt(10.0)),
+            HorizontalAnchor::default(),
+            VerticalAnchor::default(),
+        ));
+        let paragraph = Paragraph::new(style).with_inlines([picture, Inline::text("A", style)]);
+        let table = Table::default()
+            .with_grid([Pt(100.0)])
+            .with_rows(vec![row(vec![cell(vec![paragraph.into()])])]);
+        let messages = reported(&document, &table, 400.0);
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.starts_with("floating pictures in table cells")),
+            "{messages:?}"
+        );
+        let (_, bands) = laid(&document, &table, (400.0, &[]));
+        assert!(
+            !bands[0]
+                .items
+                .iter()
+                .any(|item| matches!(item, DisplayItem::Image(_)))
+        );
     }
 
     #[test]

@@ -11,7 +11,7 @@ use std::rc::Rc;
 
 use officewright_core::Pt;
 
-use crate::display::{DisplayItem, LeaderBudget, Painting, Point};
+use crate::display::{self, DisplayItem, Float, LeaderBudget, PageBox, Painting, Point};
 use crate::error::{Error, Result};
 use crate::fonts::Fonts;
 use crate::ir::{
@@ -43,8 +43,17 @@ pub(crate) struct Page {
     pub(crate) body: Body,
     /// The parts of paragraphs of the body on it, top to bottom.
     pub(crate) fragments: Vec<Fragment>,
-    /// What it draws: its header and footer, then its body.
+    /// What it draws: its header and footer with their floating objects behind or in
+    /// front of them, then its body; once it goes to the sink, the body's floating
+    /// objects too, behind or in front of the body's text. The header and footer are a
+    /// layer under the body, its floating objects behind the text included, as a public
+    /// description of Word's layers says (Microsoft Q&A, "the header/footer layer, which
+    /// will always be behind everything"). Hypothesis until a Word render (#314).
     pub(crate) items: Vec<DisplayItem>,
+    /// How many of `items` are the header's and footer's.
+    pub(crate) frame_items: usize,
+    /// The floating objects its body anchors, until they are stacked into `items`.
+    pub(crate) floats: Vec<Float>,
     /// Whether it is a blank page an odd- or even-page section start put in, which has
     /// no header or footer.
     pub(crate) blank: bool,
@@ -607,6 +616,7 @@ struct Checkpoint {
     pages: usize,
     items: usize,
     fragments: usize,
+    floats: usize,
     cursor: f64,
     above: Option<usize>,
     next_number: u32,
@@ -1269,6 +1279,11 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             x: left,
             y: Pt(top),
         };
+        let page = self.pages.last().map(|page| {
+            let section = self.document.sections().get(page.section);
+            let setup = section.map_or_else(PageSetup::default, |section| *section.page());
+            page_box(&setup, page.number)
+        });
         // Bar tabs run through the paragraph's own space before and after, as far as the page
         // lays them out: above, within the gap its lines are placed under, which is none for
         // those that go on after a page; below, within the body, after its last line; neither
@@ -1297,12 +1312,16 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             location: &flowed.location,
             background: None,
             leaders: &mut self.leaders,
+            page,
+            floats: Vec::new(),
             bar_reach: (above, below),
         };
         painting.paint_shading(lines.clone(), origin, &mut items);
         painting.paint(lines.clone(), origin, &mut items);
+        let floats = painting.floats;
         if let Some(page) = self.pages.last_mut() {
             page.items.extend(items);
+            page.floats.extend(floats);
             page.fragments.push(Fragment {
                 paragraph: index,
                 lines,
@@ -1469,6 +1488,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         let number = self.next_number;
         let mut body = body(setup);
         let mut items = Vec::new();
+        let mut floats = Vec::new();
         if let Some(ir) = self.document.sections().get(section).filter(|_| !blank) {
             // The section's first page is the first of its own: a continuous section starts
             // on a page that keeps the section before, so its title-page header is on its
@@ -1514,13 +1534,15 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                         .to_owned(),
                 );
             }
+            let page = page_box(setup, number);
             self.paint_frame(
                 &header,
                 Point {
                     x: body.left,
                     y: Pt(header_top),
                 },
-                &mut items,
+                (&mut items, &mut floats),
+                page,
             );
             let footer_top = footer_bottom - footer.height;
             self.paint_frame(
@@ -1529,9 +1551,13 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                     x: body.left,
                     y: Pt(footer_top),
                 },
-                &mut items,
+                (&mut items, &mut floats),
+                page,
             );
         }
+        // The header's and footer's floating objects are stacked at once with them: nothing
+        // adds to their layer.
+        let items = display::stack(items, floats);
         self.pages.push(Page {
             section,
             width: setup.size().width(),
@@ -1539,7 +1565,9 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             number,
             body,
             fragments: Vec::new(),
+            frame_items: items.len(),
             items,
+            floats: Vec::new(),
             blank,
         });
         self.most_held = self.most_held.max(self.pages.len());
@@ -1571,11 +1599,18 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
     fn hand_on(&mut self, upto: usize) -> Result<()> {
         let count = upto.saturating_sub(self.taken).min(self.pages.len());
         let made = self.page_count();
-        for page in self.pages.drain(..count) {
+        for mut page in self.pages.drain(..count) {
             if let Some(taken) = self.taken_by_section.get_mut(page.section) {
                 *taken = taken.saturating_add(1);
             }
             self.taken += 1;
+            // Its body's floating objects go behind or in front of the body's text, over the
+            // header and footer, now that nothing can add to them.
+            let mut items = std::mem::take(&mut page.items);
+            let body = items.split_off(page.frame_items.min(items.len()));
+            let floats = std::mem::take(&mut page.floats);
+            items.extend(display::stack(body, floats));
+            page.items = items;
             self.sink.take(page, made, self.fonts)?;
         }
         Ok(())
@@ -1851,7 +1886,13 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
     /// Adds to `items` what `frame` draws, its top left corner at `origin`, as far as the
     /// budget of what frames draw goes: a part that would take more than is left is not
     /// drawn, nor is anything of a frame after it.
-    fn paint_frame(&mut self, frame: &Frame<'d>, origin: Point, items: &mut Vec<DisplayItem>) {
+    fn paint_frame(
+        &mut self,
+        frame: &Frame<'d>,
+        origin: Point,
+        (items, floats): (&mut Vec<DisplayItem>, &mut Vec<Float>),
+        page: PageBox,
+    ) {
         for (index, laid, top) in &frame.parts {
             let Some((part, _)) = frame.candidates.parts.get(*index) else {
                 continue;
@@ -1862,6 +1903,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                     x: origin.x,
                     y: Pt(origin.y.0 + top),
                 };
+                let mut anchored = Vec::new();
                 match (laid.as_ref(), part.paragraph()) {
                     (FramePart::Paragraph(layout), Some(paragraph)) => {
                         tables::report_borders(paragraph, &part.location, self.fonts);
@@ -1873,6 +1915,8 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                             location: &part.location,
                             background: None,
                             leaders: &mut self.leaders,
+                            page: Some(page),
+                            floats: Vec::new(),
                             // Hypothesis: in headers and footers, as no reference shows them,
                             // bar tabs reach only through the lines.
                             bar_reach: (0.0, 0.0),
@@ -1880,6 +1924,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                         let lines = 0..layout.lines.len();
                         painting.paint_shading(lines.clone(), at, items);
                         painting.paint(lines, at, items);
+                        anchored = painting.floats;
                     }
                     (FramePart::Table(drawn), _) => {
                         let mut table = drawn.items.clone();
@@ -1888,9 +1933,15 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                     }
                     (FramePart::Paragraph(_), None) => {}
                 }
-                let cost: usize = items.iter().skip(start).map(drawn).sum();
+                let cost: usize = items
+                    .iter()
+                    .skip(start)
+                    .chain(anchored.iter().map(|float| &float.item))
+                    .map(drawn)
+                    .sum();
                 if cost <= self.frame_budget {
                     self.frame_budget -= cost;
+                    floats.extend(anchored);
                     continue;
                 }
                 items.truncate(start);
@@ -1933,6 +1984,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             pages: self.page_count(),
             items: page.map_or(0, |page| page.items.len()),
             fragments: page.map_or(0, |page| page.fragments.len()),
+            floats: page.map_or(0, |page| page.floats.len()),
             cursor: self.cursor,
             above: self.above,
             next_number: self.next_number,
@@ -1956,12 +2008,29 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         if let Some(page) = self.pages.last_mut() {
             page.items.truncate(checkpoint.items);
             page.fragments.truncate(checkpoint.fragments);
+            page.floats.truncate(checkpoint.floats);
         }
         self.cursor = checkpoint.cursor;
         self.above = checkpoint.above;
         self.frame_budget = checkpoint.frame_budget;
         self.next_number = checkpoint.next_number;
         self.leaders = checkpoint.leaders;
+    }
+}
+
+/// The page `setup` gives, numbered `number`, as floating objects are positioned on it.
+pub(crate) fn page_box(setup: &PageSetup, number: u32) -> PageBox {
+    let body = body(setup);
+    PageBox {
+        width: setup.size().width().0,
+        height: setup.size().height().0,
+        margins: [
+            body.left.0,
+            body.top.0,
+            body.left.0 + body.width.0,
+            body.bottom.0,
+        ],
+        odd: number % 2 == 1,
     }
 }
 
@@ -2389,8 +2458,9 @@ mod tests {
         ]));
         let (result, report) = laid(&document, 100);
         result.expect("pages");
+        // Floating pictures are drawn: no entry says they are not.
+        assert_eq!(at(&report, floating), [""; 0], "{:?}", messages(&report));
         for (what, place) in [
-            (floating, "sections[0].blocks[1]"),
             (notes, "sections[0].blocks[1]"),
             (right_to_left, "sections[0].blocks[2]"),
             (hyphenation, "sections[0].blocks[0]"),
@@ -2541,6 +2611,456 @@ mod tests {
             ["sections[0].blocks[1]"]
         );
         assert_eq!(laid_with(false, [(wraps, false); 3]), [""; 0]);
+    }
+
+    #[test]
+    fn a_page_s_box_has_its_section_s_margins_and_the_parity_of_its_number() {
+        // setup(): 300 x 200 with margins of 20; a gutter widens the left one.
+        let gutter = setup().with_margins(setup().margins().with_gutter(Pt(5.0)));
+        let odd = page_box(&gutter, 3);
+        assert_eq!(
+            (odd.width, odd.height, odd.margins, odd.odd),
+            (300.0, 200.0, [25.0, 20.0, 280.0, 180.0], true)
+        );
+        assert!(!page_box(&gutter, 4).odd);
+    }
+
+    #[test]
+    fn floating_objects_are_drawn_where_they_are_anchored_behind_or_in_front_of_the_text() {
+        use crate::ir::{
+            AnchoredObject, HorizontalAnchor, HorizontalPlacement, HorizontalReference, ImageData,
+            ImageFormat, ObjectContent, Picture, Size, VerticalAnchor, VerticalPlacement,
+            VerticalReference, Wrap,
+        };
+
+        let mut document = Document::default();
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        let image = document.add_image(ImageData::new(ImageFormat::Png, &b"\x89PNG"[..]));
+        let float = |across: HorizontalReference,
+                     x: f64,
+                     down: VerticalReference,
+                     y: f64,
+                     (behind, z_order): (bool, u32)| {
+            Inline::anchored(
+                AnchoredObject::new(
+                    ObjectContent::Picture(Picture::new(image)),
+                    Size::new(Pt(30.0), Pt(10.0)),
+                    HorizontalAnchor::default()
+                        .with_relative_to(across)
+                        .with_placement(HorizontalPlacement::Offset(Pt(x))),
+                    VerticalAnchor::default()
+                        .with_relative_to(down)
+                        .with_placement(VerticalPlacement::Offset(Pt(y))),
+                )
+                .with_behind_text(behind)
+                .with_z_order(z_order)
+                .with_wrap(if z_order == 5 {
+                    Wrap::Square
+                } else {
+                    Wrap::None
+                }),
+            )
+        };
+        // A logo in the header, from the page's corner, in front.
+        let logo = float(
+            HorizontalReference::Page,
+            10.0,
+            VerticalReference::Page,
+            5.0,
+            (false, 3),
+        );
+        let header = Paragraph::new(style)
+            .with_props(spacing(0.0, 0.0))
+            .with_inlines([logo, Inline::text("H", style)]);
+        // In the body: one behind the text at the margins' corner, one in front from the
+        // line's top, 50 pt from the margin, which text would wrap around in Word.
+        let body = Paragraph::new(style)
+            .with_props(spacing(0.0, 0.0))
+            .with_inlines([
+                float(
+                    HorizontalReference::Margin,
+                    0.0,
+                    VerticalReference::Margin,
+                    0.0,
+                    (true, 1),
+                ),
+                Inline::text("A", style),
+                float(
+                    HorizontalReference::Margin,
+                    50.0,
+                    VerticalReference::Line,
+                    0.0,
+                    (false, 5),
+                ),
+                Inline::page_break(style),
+                Inline::text("B", style),
+            ]);
+        document.add_section(
+            Section::new(close_frames())
+                .with_headers(HeaderFooterSet::default().with_primary([header.into()]))
+                .with_blocks(vec![body.into()]),
+        );
+        let (laid, report) = laid(&document, 100);
+        let pages = laid.expect("pages").pages;
+        let images = |page: &Page| -> Vec<(usize, f64, f64)> {
+            page.items
+                .iter()
+                .enumerate()
+                .filter_map(|(index, item)| match item {
+                    DisplayItem::Image(image) => Some((index, image.at.x.0, image.at.y.0)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let first = images(&pages[0]);
+        let frame = pages[0].frame_items;
+        let last = pages[0].items.len() - 1;
+        let line_top = pages[0].body.top.0;
+        // The header's layer first: its text, then its logo in front of it. Then the
+        // body's: the picture behind its text first, the one in front last.
+        assert_eq!(frame, 2);
+        assert_eq!(
+            first,
+            [
+                (frame - 1, 10.0, 5.0),
+                (frame, 20.0, 20.0),
+                (last, 70.0, line_top)
+            ]
+        );
+        // The header's logo is on every page, in front of the header's text and under
+        // the body's.
+        let frame = pages[1].frame_items;
+        assert_eq!(images(&pages[1]), [(frame - 1, 10.0, 5.0)]);
+        assert!(pages[1].items.len() > frame);
+        assert!(
+            messages(&report)
+                .iter()
+                .any(|message| message.contains("does not wrap around floating objects")),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn a_floating_object_moves_with_the_paragraph_that_anchors_it() {
+        use crate::ir::{
+            AnchoredObject, HorizontalAnchor, ImageData, ImageFormat, ObjectContent, Picture, Size,
+            VerticalAnchor,
+        };
+
+        // Eight lines fill page 1; the first and the eighth anchor a picture each, the
+        // eighth kept with the next paragraph. The next paragraph starts page 2, so the
+        // chain moves there, and its picture goes with it: page 1 keeps the first picture
+        // and no copy of the other.
+        let mut document = Document::default();
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        let image = document.add_image(ImageData::new(ImageFormat::Png, &b"\x89PNG"[..]));
+        let picture = Inline::anchored(AnchoredObject::new(
+            ObjectContent::Picture(Picture::new(image)),
+            Size::new(Pt(30.0), Pt(10.0)),
+            HorizontalAnchor::default(),
+            VerticalAnchor::default(),
+        ));
+        let mut blocks: Vec<Block> = vec![
+            Paragraph::new(style)
+                .with_props(spacing(0.0, 0.0))
+                .with_inlines([picture.clone(), Inline::text("A", style)])
+                .into(),
+        ];
+        blocks.extend((0..6).map(|_| lines(style, 1, spacing(0.0, 0.0))));
+        blocks.push(
+            Paragraph::new(style)
+                .with_props(spacing(0.0, 0.0).with_keep_next(true))
+                .with_inlines([picture, Inline::text("A", style)])
+                .into(),
+        );
+        blocks.push(lines(style, 2, spacing(0.0, 0.0)));
+        document.add_section(Section::new(setup()).with_blocks(blocks));
+        let (laid, _) = laid(&document, 100);
+        let pages = laid.expect("pages").pages;
+        let images = |page: &Page| {
+            page.items
+                .iter()
+                .filter(|item| matches!(item, DisplayItem::Image(_)))
+                .count()
+        };
+        assert_eq!(texts(&pages[1]).len(), 3);
+        assert_eq!(pages.iter().map(images).collect::<Vec<_>>(), [1, 1]);
+    }
+
+    /// A picture 30 x 10 of `document`, placed `across` and `down`, without wrapping.
+    fn anchored_picture(
+        document: &mut Document,
+        across: (
+            crate::ir::HorizontalReference,
+            crate::ir::HorizontalPlacement,
+        ),
+        down: (crate::ir::VerticalReference, crate::ir::VerticalPlacement),
+    ) -> Inline {
+        use crate::ir::{
+            AnchoredObject, HorizontalAnchor, ImageData, ImageFormat, ObjectContent, Picture, Size,
+            VerticalAnchor,
+        };
+        let image = document.add_image(ImageData::new(ImageFormat::Png, &b"\x89PNG"[..]));
+        Inline::anchored(AnchoredObject::new(
+            ObjectContent::Picture(Picture::new(image)),
+            Size::new(Pt(30.0), Pt(10.0)),
+            HorizontalAnchor::default()
+                .with_relative_to(across.0)
+                .with_placement(across.1),
+            VerticalAnchor::default()
+                .with_relative_to(down.0)
+                .with_placement(down.1),
+        ))
+    }
+
+    /// Where the pictures `page` draws are, in drawing order.
+    fn picture_places(page: &Page) -> Vec<(f64, f64)> {
+        page.items
+            .iter()
+            .filter_map(|item| match item {
+                DisplayItem::Image(image) => Some((image.at.x.0, image.at.y.0)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_floating_picture_is_placed_from_where_its_paragraph_line_and_character_are() {
+        use crate::ir::{HorizontalPlacement, HorizontalReference, VerticalPlacement};
+        use crate::ir::{VerticalReference as Y, Wrap};
+
+        // A paragraph of two exact 20 pt lines at the body's top (20): on its second line,
+        // after "A", one picture 5 pt right of its character and at its line's top (40),
+        // another at the margin and at its paragraph's top (20), a third, 10 pt high, at
+        // the bottom of its line (60, so at 50). None asks for wrapping, so the report says
+        // nothing of it.
+        let mut document = Document::default();
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        let at_line = anchored_picture(
+            &mut document,
+            (
+                HorizontalReference::Character,
+                HorizontalPlacement::Offset(Pt(5.0)),
+            ),
+            (Y::Line, VerticalPlacement::Offset(Pt(0.0))),
+        );
+        let at_paragraph = anchored_picture(
+            &mut document,
+            (
+                HorizontalReference::Margin,
+                HorizontalPlacement::Offset(Pt(0.0)),
+            ),
+            (Y::Paragraph, VerticalPlacement::Offset(Pt(0.0))),
+        );
+        let at_line_bottom = anchored_picture(
+            &mut document,
+            (
+                HorizontalReference::Margin,
+                HorizontalPlacement::Offset(Pt(0.0)),
+            ),
+            (
+                Y::Line,
+                VerticalPlacement::Align(crate::ir::AnchorVerticalAlign::Bottom),
+            ),
+        );
+        assert!(matches!(&at_line, Inline::Anchored(object) if object.wrap() == Wrap::None));
+        let paragraph = Paragraph::new(style)
+            .with_props(spacing(0.0, 0.0))
+            .with_inlines([
+                Inline::text("W", style),
+                Inline::line_break(BreakClear::None, style),
+                Inline::text("A", style),
+                at_line,
+                at_paragraph,
+                at_line_bottom,
+                Inline::text("B", style),
+            ]);
+        document.add_section(Section::new(setup()).with_blocks(vec![paragraph.into()]));
+        let (laid, report) = laid(&document, 100);
+        let pages = laid.expect("pages").pages;
+        // The run after the pictures starts where they are anchored.
+        let b = pages[0]
+            .items
+            .iter()
+            .find_map(|item| match item {
+                DisplayItem::Glyphs(run)
+                    if run.clusters.iter().any(|cluster| cluster.text == "B") =>
+                {
+                    Some(run.origin.x.0)
+                }
+                _ => None,
+            })
+            .expect("the run of B");
+        assert!(b > 20.0, "{b}");
+        assert_eq!(
+            picture_places(&pages[0]),
+            [(b + 5.0, 40.0), (20.0, 20.0), (20.0, 50.0)]
+        );
+        assert!(
+            !messages(&report)
+                .iter()
+                .any(|message| message.contains("does not wrap")),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn floating_pictures_take_the_inside_margin_of_their_page_s_parity() {
+        use crate::ir::{
+            AnchorHorizontalAlign, HorizontalPlacement, HorizontalReference, VerticalPlacement,
+            VerticalReference,
+        };
+
+        // At the left of the inside margin: the left margin area of odd pages (from 0),
+        // the right one of even pages (from 280), in the header and the body alike.
+        let mut document = Document::default();
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        let inside = |document: &mut Document| {
+            anchored_picture(
+                document,
+                (
+                    HorizontalReference::InsideMargin,
+                    HorizontalPlacement::Align(AnchorHorizontalAlign::Left),
+                ),
+                (VerticalReference::Page, VerticalPlacement::Offset(Pt(0.0))),
+            )
+        };
+        let header = Paragraph::new(style)
+            .with_props(spacing(0.0, 0.0))
+            .with_inlines([inside(&mut document), Inline::text("H", style)]);
+        let page = |document: &mut Document, break_before: bool| -> Block {
+            Paragraph::new(style)
+                .with_props(spacing(0.0, 0.0).with_page_break_before(break_before))
+                .with_inlines([inside(document), Inline::text("A", style)])
+                .into()
+        };
+        let blocks = vec![page(&mut document, false), page(&mut document, true)];
+        document.add_section(
+            Section::new(close_frames())
+                .with_headers(HeaderFooterSet::default().with_primary([header.into()]))
+                .with_blocks(blocks),
+        );
+        let (laid, _) = laid(&document, 100);
+        let pages = laid.expect("pages").pages;
+        let across = |page: &Page| -> Vec<f64> {
+            picture_places(page).into_iter().map(|(x, _)| x).collect()
+        };
+        assert_eq!(across(&pages[0]), [0.0, 0.0]);
+        assert_eq!(across(&pages[1]), [280.0, 280.0]);
+    }
+
+    #[test]
+    fn a_header_part_the_budget_cuts_leaves_out_its_pictures_too() {
+        // A header of a logo and "H" costs 3 (the picture, and a run and a glyph): with a
+        // budget of 4 it is drawn on page 1; on page 2 the 1 left does not draw it, its
+        // logo included.
+        use crate::ir::VerticalReference;
+        use crate::ir::{HorizontalPlacement, HorizontalReference, VerticalPlacement};
+
+        let mut document = Document::default();
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        let logo = anchored_picture(
+            &mut document,
+            (
+                HorizontalReference::Page,
+                HorizontalPlacement::Offset(Pt(10.0)),
+            ),
+            (VerticalReference::Page, VerticalPlacement::Offset(Pt(5.0))),
+        );
+        let header = Paragraph::new(style)
+            .with_props(spacing(0.0, 0.0))
+            .with_inlines([logo, Inline::text("H", style)]);
+        let blocks: Vec<Block> = (0..4)
+            .map(|n| lines(style, 1, spacing(0.0, 0.0).with_page_break_before(n > 0)))
+            .collect();
+        document.add_section(
+            Section::new(close_frames())
+                .with_headers(HeaderFooterSet::default().with_primary([header.into()]))
+                .with_blocks(blocks),
+        );
+        let book = book(vec![minimal()]);
+        let mut fonts = Fonts::new(&book);
+        let mut shaper = Shaper::new();
+        let laid =
+            paginate_with(&document, &mut fonts, &mut shaper, 100, 4, Vec::new).expect("pages");
+        let drawn: Vec<usize> = laid
+            .sink
+            .iter()
+            .map(|page| picture_places(page).len())
+            .collect();
+        assert_eq!(drawn, [1, 0, 0, 0]);
+    }
+
+    #[test]
+    fn a_header_s_pictures_count_towards_what_headers_draw_in_all() {
+        // A header holding only a picture, drawn with a budget of 3: on three of eight
+        // pages, then left out and reported.
+        use crate::ir::VerticalReference;
+        use crate::ir::{HorizontalPlacement, HorizontalReference, VerticalPlacement};
+
+        let mut document = Document::default();
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        let logo = anchored_picture(
+            &mut document,
+            (
+                HorizontalReference::Page,
+                HorizontalPlacement::Offset(Pt(10.0)),
+            ),
+            (VerticalReference::Page, VerticalPlacement::Offset(Pt(5.0))),
+        );
+        let header = Paragraph::new(style)
+            .with_props(spacing(0.0, 0.0))
+            .with_inlines([logo]);
+        let blocks: Vec<Block> = (0..8)
+            .map(|n| lines(style, 1, spacing(0.0, 0.0).with_page_break_before(n > 0)))
+            .collect();
+        document.add_section(
+            Section::new(close_frames())
+                .with_headers(HeaderFooterSet::default().with_primary([header.into()]))
+                .with_blocks(blocks),
+        );
+        let book = book(vec![minimal()]);
+        let mut fonts = Fonts::new(&book);
+        let mut shaper = Shaper::new();
+        let laid =
+            paginate_with(&document, &mut fonts, &mut shaper, 100, 3, Vec::new).expect("pages");
+        let drawn: Vec<usize> = laid
+            .sink
+            .iter()
+            .map(|page| picture_places(page).len())
+            .collect();
+        assert_eq!(drawn, [1, 1, 1, 0, 0, 0, 0, 0]);
+        let report = fonts.into_report();
+        assert!(
+            messages(&report)
+                .iter()
+                .any(|m| m.contains("left out past")),
+            "{report:?}"
+        );
     }
 
     /// The tops and bottoms of the lines `page` draws.

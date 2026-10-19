@@ -291,12 +291,15 @@ fn lays_the_rows_and_cells_own_properties_and_partial_looks_over_the_style() {
     assert_eq!(properties.no_wrap(), Some(true));
     // A band size in a conditional format, which Word does not allow (MS-OI29500
     // §17.7.6.3(a)), is no table property of it.
-    let translation = document.to_layout_ir();
-    assert!(
-        translation.left_out().is_empty(),
-        "{:?}",
-        translation.left_out()
-    );
+    #[cfg(feature = "pdf")]
+    {
+        let translation = document.to_layout_ir();
+        assert!(
+            translation.left_out().is_empty(),
+            "{:?}",
+            translation.left_out()
+        );
+    }
 }
 
 #[test]
@@ -657,6 +660,7 @@ fn leaves_out_the_row_properties_word_does_not_take_from_a_style() {
     let second = formats.row_properties(rows[1]);
     assert_eq!(second.height().and_then(RowHeight::height), Some(Pt(20.0)));
     assert_eq!(second.header(), None);
+    #[cfg(feature = "pdf")]
     assert!(
         document.to_layout_ir().left_out().is_empty(),
         "{:?}",
@@ -759,7 +763,9 @@ fn applies_the_formats_of_one_cell_in_word_s_order() {
         ),
         [["BBBBBB"]]
     );
-    // Column bands leave out the first and last column when those are on.
+    // Column bands leave out the first column when it is on, as Word does
+    // (word-rules/E-table-style-look.docx, case 01), and the last column when it is on
+    // (our choice; no render shows it yet, #298).
     let banded = style(&[("band1Vert", "111111"), ("band2Vert", "222222")]);
     assert_eq!(
         fill(
@@ -829,6 +835,7 @@ fn takes_the_default_table_style_and_text_a_style_gives_through_a_format_or_a_ba
     let whole = r#"<w:style w:type="table" w:styleId="Whole"><w:name w:val="Whole"/><w:tblStylePr w:type="wholeTable"><w:rPr><w:b/></w:rPr></w:tblStylePr></w:style>"#;
     let document = open_with(whole, &table(r#"<w:tblStyle w:val="Whole"/>"#, 1, 1));
     assert_eq!(marks(&document), [(11.0, false, ColorValue::Auto)]);
+    #[cfg(feature = "pdf")]
     assert!(document.to_layout_ir().left_out().is_empty());
     // Through the style it is based on, and through the first row's format.
     for id in ["OnBold", "Header"] {
@@ -838,6 +845,7 @@ fn takes_the_default_table_style_and_text_a_style_gives_through_a_format_or_a_ba
         );
         let bold: Vec<bool> = marks(&document).iter().map(|mark| mark.1).collect();
         assert_eq!(bold, [true, id == "OnBold"], "{id}");
+        #[cfg(feature = "pdf")]
         assert!(document.to_layout_ir().left_out().is_empty(), "{id}");
     }
 }
@@ -901,8 +909,9 @@ fn takes_the_options_a_partial_look_leaves_out_as_on() {
             ["BBBBBB", "BBBBBB", "BBBBBB"]
         ]
     );
-    // A w:tblLook with neither w:val nor an option: everything off, so both bands are
-    // on, and column bands over row bands (our choice; no render shows it yet).
+    // A w:tblLook with neither w:val nor an option: everything off (our choice; no render
+    // shows it yet), so both bands are on, and column bands over row bands, in the order
+    // of MS-OI29500 §17.7.6.6(a), which E-table-style-look case 01 shows.
     assert_eq!(
         fill(""),
         [
@@ -924,9 +933,10 @@ fn takes_the_options_a_partial_look_leaves_out_as_on() {
 
 #[test]
 fn takes_the_first_row_format_for_every_header_row() {
-    // word-rules/E-table-style-header-rows-on and -off.docx (#300): with the first row's
-    // format on, every header row (w:tblHeader) at the top takes it, and the row bands
-    // start after the last of them.
+    // word-rules/E-table-style-header-rows-on.docx (#300): with the first row's format on,
+    // every header row (w:tblHeader) at the top takes it, and the row bands start after
+    // the last of them. With differentiateMultirowTableHeaders off this is unverified: the
+    // render of E-table-style-header-rows-off.docx shows the setting absent (#343).
     let rows = |header: &[bool], look: &str| {
         let rows: String = header
             .iter()
@@ -1026,7 +1036,8 @@ fn gives_every_header_row_the_first_row_s_row_properties_and_both_top_corners() 
 #[test]
 fn takes_the_last_table_style_marked_default() {
     // Of several table styles marked w:default, the last, as the standard says
-    // ([MS-WPE376] Part 4 §2.7.3.17 quotes it) and Word shows for paragraph styles (#308).
+    // (ECMA-376 Part 1 §17.7.4.17) and Word shows for paragraph styles (#308); a render
+    // for table styles is asked in #298.
     let styles = format!(
         r#"<w:style w:type="table" w:default="1" w:styleId="First"><w:name w:val="First"/>{}</w:style><w:style w:type="table" w:default="1" w:styleId="Second"><w:name w:val="Second"/>{}</w:style>"#,
         shading("111111"),
