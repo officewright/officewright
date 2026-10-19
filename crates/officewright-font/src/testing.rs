@@ -28,6 +28,7 @@ pub(crate) struct TestFont {
     os2_version: u16,
     units_per_em: u16,
     symbol: bool,
+    postscript: Option<String>,
     removed: Vec<[u8; 4]>,
     replaced: Vec<([u8; 4], Vec<u8>)>,
 }
@@ -48,6 +49,7 @@ impl TestFont {
             os2_version: 4,
             units_per_em: 1000,
             symbol: false,
+            postscript: None,
             removed: Vec::new(),
             replaced: Vec::new(),
         }
@@ -102,6 +104,12 @@ impl TestFont {
 
     pub(crate) fn units_per_em(mut self, units_per_em: u16) -> Self {
         self.units_per_em = units_per_em;
+        self
+    }
+
+    /// Writes this PostScript name instead of the family and subfamily joined.
+    pub(crate) fn postscript(mut self, name: &str) -> Self {
+        self.postscript = Some(name.to_owned());
         self
     }
 
@@ -276,10 +284,12 @@ impl TestFont {
         } else {
             format!("{} {}", self.family, self.subfamily)
         };
-        let postscript: String = format!("{}-{}", self.family, self.subfamily)
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-            .collect();
+        let postscript: String = self.postscript.clone().unwrap_or_else(|| {
+            format!("{}-{}", self.family, self.subfamily)
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect()
+        });
         // (language, name ID, string), sorted as the name table requires.
         let mut records = vec![
             (0x0409, 1, self.family.clone()),
