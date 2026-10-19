@@ -133,6 +133,24 @@ fn rejected_on_purpose(text: &str, err: &Error) -> bool {
     }) {
         return true;
     }
+    // Namespaces in XML 1.0, section 5, Prefix Declared: the prefix of an attribute p:xmlns
+    // must be declared like any other; roxmltree takes such an attribute for a declaration
+    // of the default namespace and never looks its prefix up. The error points at the
+    // start tag that holds it.
+    let undeclared = message
+        .strip_prefix("undeclared namespace prefix ")
+        .and_then(|rest| rest.split_once(" in <"))
+        .map(|(prefix, _)| prefix);
+    if undeclared.is_some_and(|prefix| {
+        attribute_names(text, *line, *column)
+            .into_iter()
+            .any(|name| {
+                name.strip_suffix(":xmlns")
+                    .is_some_and(|own| short(own) == prefix)
+            })
+    }) {
+        return true;
+    }
     // Namespaces in XML 1.0, section 3: the prefix xmlns must not be declared;
     // roxmltree reads `xmlns:xmlns="urn:a"`.
     if message == "the prefix xmlns cannot be declared" {
@@ -165,11 +183,63 @@ fn rejected_on_purpose(text: &str, err: &Error) -> bool {
 }
 
 fn char_at(text: &str, line: u64, column: u64) -> Option<char> {
-    let line = text
+    text.get(offset(text, line, column)?..)?.chars().next()
+}
+
+/// The byte offset of a line and column as officewright counts them: lines end at `\n`,
+/// columns count characters, both from 1.
+fn offset(text: &str, line: u64, column: u64) -> Option<usize> {
+    let line_index = usize::try_from(line).ok()?.checked_sub(1)?;
+    let start: usize = text
         .split('\n')
-        .nth(usize::try_from(line).ok()?.checked_sub(1)?)?;
-    line.chars()
-        .nth(usize::try_from(column).ok()?.checked_sub(1)?)
+        .take(line_index)
+        .map(|line| line.len() + 1)
+        .sum();
+    let line = text.get(start..)?.split('\n').next()?;
+    let (within, _) = line
+        .char_indices()
+        .nth(usize::try_from(column).ok()?.checked_sub(1)?)?;
+    Some(start + within)
+}
+
+/// The names of the attributes of the start tag at a line and column of the text. Only
+/// called on text roxmltree read, so the tag is well formed.
+fn attribute_names(text: &str, line: u64, column: u64) -> Vec<&str> {
+    let mut names = Vec::new();
+    let Some(mut rest) = offset(text, line, column)
+        .and_then(|start| text.get(start..))
+        .and_then(|tag| tag.strip_prefix('<'))
+    else {
+        return names;
+    };
+    let space = |c: char| matches!(c, ' ' | '\t' | '\r' | '\n');
+    rest = rest.trim_start_matches(|c: char| !space(c) && c != '/' && c != '>');
+    loop {
+        rest = rest.trim_start_matches(space);
+        if rest.starts_with(['/', '>']) {
+            return names;
+        }
+        let Some((name, value)) = rest.split_once('=') else {
+            return names;
+        };
+        names.push(name.trim_end_matches(space));
+        let value = value.trim_start_matches(space);
+        let Some(quote) = value.chars().next() else {
+            return names;
+        };
+        let Some((_, after)) = value[quote.len_utf8()..].split_once(quote) else {
+            return names;
+        };
+        rest = after;
+    }
+}
+
+/// What officewright's messages keep of a name: at most 64 characters, then `…`.
+fn short(text: &str) -> String {
+    match text.char_indices().nth(64) {
+        Some((end, _)) => format!("{}…", &text[..end]),
+        None => text.to_owned(),
+    }
 }
 
 fn options<'a>() -> ParsingOptions<'a> {
