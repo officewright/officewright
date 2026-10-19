@@ -122,7 +122,7 @@ writes.
 | word-rules/E-table-float-align.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Floating tables (w:tblpPr) placed only by an alignment, bottom or centre, with both distances left out: whether Word floats them and where, or keeps them in the text |
 | word-rules/E-bold-italic-missing.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Bold italic text in a family without a Bold Italic face (#245): Garamond, installed with Regular, Italic and Bold only, and Liberation Sans, installed complete, at 11 and 20 pt in regular, italic, bold and bold italic |
 | word-rules/E-list-level-linked-no-level.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Which list level a paragraph takes whose style gives a list but no level, when level 2 of that list names the style (#293): level 2, as ECMA-376 says, or level 0; and when the style gives level 9, past the last level, or inherits level 0 from the style it is based on |
-| word-rules/E-list-level-linked-defaults.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Which list level a paragraph takes whose style gives a list but no level, when the document defaults give level 0 and level 2 of the list names the style (#293): the level of the defaults, or the level that names the style |
+| word-rules/E-list-level-linked-defaults.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Which list level a paragraph takes whose style gives a list but no level, when the document defaults give level 1 and level 2 of the list names the style (#293): the level of the defaults, the level that names the style, or level 0 |
 
 ## Apache POI test documents (`poi/`)
 

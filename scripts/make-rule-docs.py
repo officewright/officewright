@@ -3331,26 +3331,27 @@ def list_level_linked_no_level() -> Doc:
 
 
 def list_level_linked_defaults() -> Doc:
-    # #293's comments: the document defaults give level 0 to every paragraph, and a style
+    # #293's comments: the document defaults give a level to every paragraph, and a style
     # gives a list but no level, which level 2 of the list names. Word may take the level of
-    # the defaults, as a level the style hierarchy writes, or the level that names the
-    # style. A document of its own, since the defaults reach every paragraph.
+    # the defaults, as a level the style hierarchy writes, the level that names the style,
+    # or level 0. The defaults give level 1, not the comment's 0, so the label tells the
+    # three apart. A document of its own, since the defaults reach every paragraph.
     numbering = abstract_num(0, "5C3A0034", linked_levels(
         "lowerLetter", ["%1)", "(%2)", "[%3]"], "LinkedDefaults")) + num(1, 0)
     body = para(run("Case 01: the style LinkedDefaults gives instance 1 and no level, the "
-                    "document defaults give level 0; level 2 names the style"),
+                    "document defaults give level 1; level 2 names the style"),
                 p_style="LinkedDefaults")
-    body += para(run("Case 02: a paragraph in Normal, which has level 0 from the document "
+    body += para(run("Case 02: a paragraph in Normal, which has level 1 from the document "
                      "defaults but no list"))
     return Doc(
         "E-list-level-linked-defaults",
         "Which list level a paragraph takes whose style gives a list but no level, when the "
-        "document defaults give level 0 and level 2 of the list names the style (#293): the "
-        "level of the defaults, or the level that names the style",
+        "document defaults give level 1 and level 2 of the list names the style (#293): the "
+        "level of the defaults, the level that names the style, or level 0",
         body,
         numbering=numbering,
         styles=para_style("LinkedDefaults", '<w:numPr><w:numId w:val="1"/></w:numPr>'),
-        paragraph_defaults_list='<w:numPr><w:ilvl w:val="0"/></w:numPr>',
+        paragraph_defaults_list='<w:numPr><w:ilvl w:val="1"/></w:numPr>',
     )
 
 

@@ -2484,6 +2484,15 @@ class Packages(unittest.TestCase):
               "noHBand": "1", "noVBand": "1"}
         off = {key: "0" for key in on} | {"noHBand": "1", "noVBand": "1"}
 
+        # Every conditional format has a text colour and a grey of its own.
+        colours = {kind: (color, fill) for kind, color, fill in rules.CONDITIONS}
+        self.assertEqual(len(set(colours.values())), len(colours))
+
+        def format_colours(found):
+            color, fill = found.find(f"{W}rPr/{W}color"), found.find(f"{W}tcPr/{W}shd")
+            return (None if color is None else color.get(f"{W}val"),
+                    None if fill is None else fill.get(f"{W}fill"))
+
         # E-table-style-rows-cols: a style without corner formats, then band formats only,
         # with a first or a last row or column on; bands by one.
         _, parts, body = load("E-table-style-rows-cols")
@@ -2529,6 +2538,8 @@ class Packages(unittest.TestCase):
             style = table_styles(parts)["ThreeHeaders"]
             self.assertEqual(formats(style), ["firstRow", "band1Horz", "band2Horz"])
             self.assertEqual(band_size(style, "Row"), "1")
+            for found in style.findall(f"{W}tblStylePr"):
+                self.assertEqual(format_colours(found), colours[found.get(f"{W}type")], suffix)
             first = style.find(f"{W}tblStylePr")
             bottom = first.find(f"{W}tcPr/{W}tcBorders/{W}bottom")
             self.assertEqual((bottom.get(f"{W}val"), bottom.get(f"{W}sz")), ("single", "24"))
@@ -2547,13 +2558,9 @@ class Packages(unittest.TestCase):
                          ["firstRow", "firstCol", "lastCol", "neCell", "nwCell"])
         self.assertEqual(formats(styles["HeaderBands"]), ["firstRow", "band1Horz", "band2Horz"])
         self.assertEqual(band_size(styles["HeaderBands"], "Row"), "1")
-        colours = {kind: (color, fill) for kind, color, fill in rules.CONDITIONS}
-        self.assertEqual(len(set(colours.values())), len(colours))
         for style_id in ("HeaderBorders", "HeaderCorners", "HeaderBands"):
             for found in styles[style_id].findall(f"{W}tblStylePr"):
-                self.assertEqual((found.find(f"{W}rPr/{W}color").get(f"{W}val"),
-                                  found.find(f"{W}tcPr/{W}shd").get(f"{W}fill")),
-                                 colours[found.get(f"{W}type")], style_id)
+                self.assertEqual(format_colours(found), colours[found.get(f"{W}type")], style_id)
         # The first-row format's borders differ from the style's own, which are all single
         # and ½ pt, and from each other.
         own = styles["HeaderBorders"].find(f"{W}tblPr/{W}tblBorders")
@@ -2743,6 +2750,15 @@ class Packages(unittest.TestCase):
                 style_id = None if based is None else based.get(f"{W}val")
             return values
 
+        def first_label(levels, lvl):
+            """The label the level renders for the first item of each level: every %N its
+            template holds becomes 1 in the number format of level N - 1."""
+            ones = {"decimal": "1", "lowerLetter": "a", "upperLetter": "A", "lowerRoman": "i",
+                    "upperRoman": "I"}
+            formats = [ones[level.find(f"{W}numFmt").get(f"{W}val")] for level in levels]
+            return re.sub(r"%([1-9])", lambda m: formats[int(m.group(1)) - 1],
+                          lvl.find(f"{W}lvlText").get(f"{W}val"))
+
         def check_list_case(styles, instances, paragraph, style_id, label):
             self.assertEqual(props_of(paragraph, f"{W}pPr"), {"pStyle": {"val": style_id}})
             instance, level = re.search(r"gives instance (\d+) and (?:no level|level (\d+))",
@@ -2755,8 +2771,7 @@ class Packages(unittest.TestCase):
             self.assertEqual(naming, [("2", True)], label)
             self.assertRegex(label, rf"; level 2 names (the style|{style_id})$")
             levels = instances[instance].findall(f"{W}lvl")
-            self.assertEqual(len({lvl.find(f"{W}lvlText").get(f"{W}val") for lvl in levels}),
-                             len(levels), label)
+            self.assertEqual(len({first_label(levels, lvl) for lvl in levels}), len(levels), label)
             self.assertEqual(len({lvl.find(f"{W}pPr/{W}ind").get(f"{W}left") for lvl in levels}),
                              len(levels), label)
             return levels
@@ -2793,16 +2808,17 @@ class Packages(unittest.TestCase):
         # The three lists use definitions of their own.
         self.assertEqual(len({id(d) for d in instances.values()}), 3)
 
-        # E-list-level-linked-defaults: the document defaults give level 0 and no list.
+        # E-list-level-linked-defaults: the document defaults give level 1 and no list.
         parts, styles, _, instances, paragraphs = list_parts("E-list-level-linked-defaults")
         defaults = ElementTree.fromstring(parts["word/styles.xml"]).find(
             f"{W}docDefaults/{W}pPrDefault/{W}pPr")
-        self.assertEqual(num_pr_of(defaults, f"{W}numPr"), {"ilvl": "0"})
+        # Level 1: neither the level that names the style nor level 0.
+        self.assertEqual(num_pr_of(defaults, f"{W}numPr"), {"ilvl": "1"})
         labels = ["".join(t.text for t in p.iter(f"{W}t")) for p in paragraphs]
         self.assertEqual(len(paragraphs), 2)
-        self.assertIn("the document defaults give level 0", labels[0])
+        self.assertIn("the document defaults give level 1", labels[0])
         check_list_case(styles, instances, paragraphs[0], "LinkedDefaults", labels[0])
-        self.assertTrue(labels[1].startswith("Case 02: a paragraph in Normal, which has level 0 "
+        self.assertTrue(labels[1].startswith("Case 02: a paragraph in Normal, which has level 1 "
                                              "from the document defaults but no list"))
         self.assertIsNone(paragraphs[1].find(f"{W}pPr"))
 
