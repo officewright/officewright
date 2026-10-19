@@ -16,6 +16,7 @@ import struct
 import sys
 import unittest
 import unittest.mock
+import warnings
 import zipfile
 import zlib
 from pathlib import Path
@@ -174,6 +175,16 @@ DOC = public.PublicDoc(
 # What clean() and problems() say of a relationship to a local file, another scheme or a part
 # the package does not hold.
 LINK = "links to a local file, another scheme or a missing part"
+
+
+def with_entry(data, name, body):
+    """The package with one more entry, which zipfile writes even when its name is taken."""
+    buffer = io.BytesIO(data)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)  # zipfile's "Duplicate name"
+        with zipfile.ZipFile(buffer, "a") as archive:
+            archive.writestr(name, body)
+    return buffer.getvalue()
 
 
 def parts_of(data):
@@ -829,6 +840,28 @@ class Cleaning(unittest.TestCase):
         with self.assertRaises(public.Refused) as caught:
             public.clean(package(), lost)
         self.assertIn("no part word/missing.xml", str(caught.exception))
+
+    def test_entries_that_name_one_part_are_refused_and_reported(self):
+        # The checks read parts by name, which gives the last of two entries: here the first
+        # links to a local file and the second, read in its place, does not.
+        local = relationships(
+            (f"{REL}/hyperlink", "file:///J:/drafts/x.docx", ' TargetMode="External"'))
+        hidden = with_entry(package(**{"word/_rels/header1.xml.rels": local}),
+                            "word/_rels/header1.xml.rels",
+                            relationships((f"{REL}/image", "media/image2.png", "")))
+        # Part names compare without regard to case.
+        cased = with_entry(package(), "word/Document.xml", "<w:document xmlns:w='w'/>")
+        for data, names in ((hidden, "word/_rels/header1.xml.rels and "
+                                     "word/_rels/header1.xml.rels"),
+                            (cased, "word/document.xml and word/Document.xml")):
+            with self.subTest(names):
+                with self.assertRaises(public.Refused) as caught:
+                    public.clean(data, DOC)
+                self.assertIn(f"entries {names} name one part", str(caught.exception))
+        twin = with_entry(self.cleaned.data, "WORD/document.xml", "<w:document xmlns:w='w'/>")
+        self.assertIn("entries word/document.xml and WORD/document.xml name one part",
+                      public.problems(twin))
+        self.assertEqual(public.problems(self.cleaned.data), [])
 
     def test_a_placeholder_must_be_8_bit_grey_and_not_oversized(self):
         good = public.placeholder(4, 3)

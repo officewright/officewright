@@ -22,8 +22,8 @@ listed SHA-256. The script then writes tests/corpus/business/<name>.docx with
 
 and the document's row in the table of tests/corpus/SOURCES.md: URL, download date,
 licence statement and the changes. It refuses documents with tracked changes, comments,
-ActiveX controls, embedded fonts or objects, macros, mail merge sources and links to local
-files. With --check it writes nothing and fails if a committed file differs from what it
+ActiveX controls, embedded fonts or objects, macros, mail merge sources, links to local
+files and archives in which two entries name one part. With --check it writes nothing and fails if a committed file differs from what it
 would write. Python standard library only.
 """
 
@@ -898,12 +898,25 @@ class Cleaned:
     changes: list[str] = field(default_factory=list)
 
 
+def repeated_parts(names: list[str]) -> list[str]:
+    """The entry names that name one part, joined by "and" per part: the same name twice, or
+    names that differ only in case, since OPC compares part names without regard to case.
+    The checks read the parts by name, so they would see only one entry of each."""
+    by_part: dict[str, list[str]] = {}
+    for name in names:
+        by_part.setdefault(name.lower(), []).append(name)
+    return [" and ".join(group) for group in by_part.values() if len(group) > 1]
+
+
 def clean(original: bytes, doc: PublicDoc) -> Cleaned:
     """The document with people, pictures and private parts taken out (see the module
     docstring); refused when it holds something the corpus must not take."""
     with zipfile.ZipFile(io.BytesIO(original)) as archive:
         entries = [(info, archive.read(info)) for info in archive.infolist()]
     names = [info.filename for info, _ in entries]
+    repeated = repeated_parts(names)
+    if repeated:
+        raise Refused(f"{doc.name}: " + "; ".join(f"entries {r} name one part" for r in repeated))
     try:
         embedded = embedded_parts({info.filename: data for info, data in entries})
     except Unreadable as error:
@@ -1038,6 +1051,8 @@ def problems(
     """What a committed document must not hold; empty for a clean one."""
     found = []
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        found += [f"entries {repeated} name one part" for repeated in
+                  repeated_parts(archive.namelist())]
         parts = {name: archive.read(name) for name in archive.namelist()}
         try:
             embedded = embedded_parts(parts)
