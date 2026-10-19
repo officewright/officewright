@@ -214,10 +214,11 @@ struct Builder<'d, 'f, 'a> {
 /// This stands for the bidirectional classes R, AL, RLE, RLO and RLI of UAX #9, which the
 /// layout has no table of: the characters of every script that Unicode 17 writes from right
 /// to left (their marks and punctuation count with them, being part of such text), and the
-/// right-to-left controls and the Arabic punctuation of the Common script. The digits of the
-/// Arabic, Hanifi Rohingya and Garay scripts do not count: they are of class AN or EN and
-/// read in the order they are stored. Left out are the Siyaq numbers of the Common script
-/// (class AL), which Word documents hardly hold.
+/// right-to-left controls and the Arabic punctuation of the Common script. What reads in
+/// the order it is stored does not count: the digits of the Arabic, Hanifi Rohingya and
+/// Garay scripts, the Arabic number signs, separators and percent signs, and Hebrew's
+/// alternative plus sign, of classes AN, EN, ET and ES. Left out are the Siyaq numbers of
+/// the Common script (class AL), which Word documents hardly hold.
 fn right_to_left(ch: char) -> bool {
     match ch {
         // ARABIC SEMICOLON, QUESTION MARK and TATWEEL; RIGHT-TO-LEFT MARK, EMBEDDING,
@@ -226,12 +227,22 @@ fn right_to_left(ch: char) -> bool {
         | '\u{2067}' => true,
         _ => {
             let script = ch.script();
-            let digit = ch.is_numeric()
+            let number = (ch.is_numeric()
                 && matches!(
                     script,
                     Script::Arabic | Script::Hanifi_Rohingya | Script::Garay
+                ))
+                || matches!(
+                    ch,
+                    '\u{0600}'..='\u{0604}'
+                        | '\u{0609}'
+                        | '\u{060A}'
+                        | '\u{066A}'..='\u{066C}'
+                        | '\u{0890}'
+                        | '\u{0891}'
+                        | '\u{FB29}'
                 );
-            !digit
+            !number
                 && matches!(
                     script,
                     Script::Adlam

@@ -1639,8 +1639,9 @@ mod tests {
         };
         let paragraph =
             |inlines: Vec<Inline>| -> Block { Paragraph::new(style).with_inlines(inlines).into() };
+        let long = "A ".repeat(60);
         document.add_section(Section::new(setup()).with_blocks(vec![
-            paragraph(vec![Inline::text("A", style)]),
+            paragraph(vec![Inline::text(&long, style)]),
             paragraph(vec![
                 anchored(),
                 Inline::text("A", style),
@@ -1676,9 +1677,18 @@ mod tests {
             ("Latin", true, true),
             ("Latin", false, false),
             ("a\u{200F}b", false, true),
+            ("a\u{202B}b", false, true),
             ("\u{202E}abc", false, true),
+            ("a\u{2067}b", false, true),
+            ("\u{061B}", false, true),
+            ("\u{061F}", false, true),
+            ("\u{0640}", false, true),
             ("\u{0661}\u{0662}\u{0663}", false, false),
             ("\u{06F1}\u{06F2}\u{06F3}", false, false),
+            ("\u{0661}\u{066B}\u{0665}", false, false),
+            ("\u{0665}\u{0660}\u{066A}", false, false),
+            ("\u{0600}\u{0661}\u{0662}", false, false),
+            ("1\u{FB29}2", false, false),
             ("\u{10900}\u{10901}", false, true),
         ] {
             let mut only = Document::default();
@@ -1717,14 +1727,17 @@ mod tests {
     }
 
     #[test]
-    fn automatic_hyphenation_is_reported_only_where_a_paragraph_allows_it() {
+    fn automatic_hyphenation_is_reported_only_where_a_line_wraps_in_a_paragraph_allowing_it() {
         use crate::ir::{DocumentSettings, Hyphenation};
 
-        // Word hyphenates a paragraph only when the document asks for it and the paragraph
-        // does not suppress it (Part 1 §17.3.1.34): LibreOffice saves `w:autoHyphenation` on
-        // with `w:suppressAutoHyphens` in every paragraph's defaults (poi/unicode-path.docx).
+        // Word hyphenates only where a line wraps, in a paragraph that does not suppress
+        // hyphenation, in a document that turns it on (Part 1 §17.3.1.34, §17.15.1.10).
+        // LibreOffice saves `w:autoHyphenation` on with `w:suppressAutoHyphens` in every
+        // paragraph's defaults (poi/unicode-path.docx), and a paragraph that fits on its
+        // line, or ends its lines with breaks, has nothing to hyphenate.
         let what = "automatic hyphenation is not done";
-        let laid_with = |auto: bool, suppressed: [bool; 3]| {
+        let long = "A ".repeat(60);
+        let laid_with = |auto: bool, paragraphs: [(&str, bool); 3]| {
             let settings = DocumentSettings::default()
                 .with_hyphenation(Hyphenation::default().with_auto(auto));
             let mut document = Document::new(settings);
@@ -1733,14 +1746,18 @@ mod tests {
                     .with_fonts(RunFonts::new("Officewright Test"))
                     .with_size(Pt(10.0)),
             );
-            let blocks: Vec<Block> = suppressed
+            let blocks: Vec<Block> = paragraphs
                 .iter()
-                .map(|&suppress| {
-                    lines(
-                        style,
-                        1,
-                        spacing(0.0, 0.0).with_suppress_auto_hyphens(suppress),
-                    )
+                .map(|&(text, suppress)| {
+                    let props = spacing(0.0, 0.0).with_suppress_auto_hyphens(suppress);
+                    if text.is_empty() {
+                        lines(style, 3, props)
+                    } else {
+                        Paragraph::new(style)
+                            .with_props(props)
+                            .with_inlines([Inline::text(text, style)])
+                            .into()
+                    }
                 })
                 .collect();
             document.add_section(Section::new(setup()).with_blocks(blocks));
@@ -1748,12 +1765,23 @@ mod tests {
             result.expect("pages");
             entries_at(&report, ReportKind::FeatureUnsupported, what)
         };
-        assert_eq!(laid_with(true, [true; 3]), [""; 0]);
+        let (wraps, fits, broken) = (long.as_str(), "A", "");
+        assert_eq!(laid_with(true, [(wraps, true); 3]), [""; 0]);
         assert_eq!(
-            laid_with(true, [true, false, false]),
+            laid_with(true, [(wraps, true), (wraps, false), (wraps, false)]),
             ["sections[0].blocks[1]"]
         );
-        assert_eq!(laid_with(false, [false; 3]), [""; 0]);
+        // A paragraph allowing it whose text fits on its line, or whose lines end with
+        // line breaks, gets no entry; the first that wraps does.
+        assert_eq!(
+            laid_with(true, [(fits, false), (broken, false), (wraps, false)]),
+            ["sections[0].blocks[2]"]
+        );
+        assert_eq!(
+            laid_with(true, [(fits, false), (broken, false), (fits, false)]),
+            [""; 0]
+        );
+        assert_eq!(laid_with(false, [(wraps, false); 3]), [""; 0]);
     }
 
     /// Every page as the paragraphs, lines and tops of its fragments.
