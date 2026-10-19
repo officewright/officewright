@@ -235,10 +235,7 @@ impl Processor {
                 other => {
                     return Err(reader.error(
                         tag.offset(),
-                        format!(
-                            "unknown markup compatibility attribute {}",
-                            shorten(other, 64)
-                        ),
+                        format!("unknown markup compatibility attribute {}", shorten(other)),
                     ));
                 }
             }
@@ -253,7 +250,7 @@ impl Processor {
                     return Err(Error::Unsupported(format!(
                         "the document requires namespace {} (mc:MustUnderstand), which \
                          officewright does not implement",
-                        shorten(reader.namespace_uri(namespace), 64)
+                        shorten(reader.namespace_uri(namespace))
                     )));
                 }
             }
@@ -349,7 +346,7 @@ fn resolve(reader: &Reader<'_>, tag: &StartTag<'_>, attribute: &str, prefix: &st
             tag.offset(),
             format!(
                 "{attribute} names the undeclared prefix {}",
-                shorten(prefix, 64)
+                shorten(prefix)
             ),
         )
     })
@@ -391,7 +388,7 @@ fn qualified<'v>(
                 tag.offset(),
                 format!(
                     "{attribute} lists {}, which is not a qualified name",
-                    shorten(name, 64)
+                    shorten(name)
                 ),
             )
         })

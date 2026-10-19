@@ -556,9 +556,8 @@ fn keeps_one_copy_of_each_content_type() {
     };
     let error = xml_message(open(&parts(&format!("a/{}", "b".repeat(16 << 20)))));
     assert!(
-        error.ends_with(
-            "invalid content type \"a/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb…\""
-        ),
+        // Shortened to 64 characters, as every value quoted in a message (#26).
+        error.ends_with(&format!("invalid content type \"a/{}…\"", "b".repeat(62))),
         "{error}"
     );
     // ...and a long one that is valid, with a long parameter, is kept once and shared by
@@ -593,7 +592,7 @@ fn bounds_the_length_of_part_names() {
                 limit: Limit::PartNameLength,
                 maximum: 1024,
                 ref context,
-            }) if context == "part name aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa… (60013 bytes)"
+            }) if *context == format!("part name {}… (60013 bytes)", "a".repeat(64))
         ),
         "{}",
         describe(&result)

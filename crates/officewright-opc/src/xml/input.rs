@@ -7,6 +7,10 @@ use crate::{Limits, Result};
 #[cfg(test)]
 thread_local! {
     /// Copies of a part's text the decoder made on this thread, for tests of its memory.
+    /// It sees only the copies that call [`copied`]: every buffer this module allocates for
+    /// the text must call it next to the allocation, or a test of the copies passes
+    /// whatever that buffer costs (a counting allocator would see all, but needs `unsafe`
+    /// or a dependency).
     pub(super) static COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
