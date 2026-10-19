@@ -421,6 +421,8 @@ static void fonts_by_name(const char *fonts, const char *dir) {
     int32_t kind = -1;
     const char *message = NULL;
     double width = 0.0;
+    uint8_t *data = NULL;
+    size_t len = 0;
     FILE *file;
 
     EXPECT(ow_font_book_new(&book), OW_STATUS_OK, NULL);
@@ -493,6 +495,34 @@ static void fonts_by_name(const char *fonts, const char *dir) {
           strstr(message, ", in bold: the family has no regular face installed") != NULL);
     ow_font_resolver_free(resolver);
     ow_pdf_font_free(bold);
+
+    /* A font added from memory under another family name, as Word renames the subsets it
+     * embeds, answers to that name and keeps its own. */
+    EXPECT(ow_font_book_new(&book), OW_STATUS_OK, NULL);
+    snprintf(path, sizeof path, "%s/liberation/LiberationSans-Regular.ttf", fonts);
+    data = read_file(path, &len);
+    CHECK(data != NULL);
+    EXPECT(ow_font_book_add_bytes_as(book, data, len, "IBM Plex Serif Light", &added), OW_STATUS_OK,
+           NULL);
+    CHECK(added == 1);
+    EXPECT(ow_font_book_add_bytes_as(book, data, len, NULL, &added), OW_STATUS_NULL_ARGUMENT,
+           "family is null");
+    EXPECT(ow_font_book_add_bytes_as(book, NULL, 0, "Any", &added), OW_STATUS_NULL_ARGUMENT,
+           "data is null");
+    EXPECT(ow_font_book_add_bytes_as(book, (const uint8_t *)"junk", 4, "Any", &added),
+           OW_STATUS_MALFORMED, "not a TrueType");
+    CHECK(added == 0);
+    free(data);
+    EXPECT(ow_font_resolver_new(book, &resolver), OW_STATUS_OK, NULL);
+    ow_font_book_free(book);
+    EXPECT(ow_pdf_font_resolve(resolver, "IBM Plex Serif Light", 0, 0, &liberation), OW_STATUS_OK,
+           NULL);
+    EXPECT(ow_pdf_font_resolve(resolver, "Liberation Sans", 0, 0, &arial), OW_STATUS_OK, NULL);
+    EXPECT(ow_font_resolver_substitution_count(resolver, &count), OW_STATUS_OK, NULL);
+    CHECK(count == 0);
+    ow_font_resolver_free(resolver);
+    ow_pdf_font_free(liberation);
+    ow_pdf_font_free(arial);
 
     /* An empty book has nothing to stand in for a family. */
     EXPECT(ow_font_book_new(&empty), OW_STATUS_OK, NULL);

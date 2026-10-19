@@ -428,6 +428,54 @@ impl FontBook {
         self.add_faces(&Source::Memory(data), origin, faces)
     }
 
+    /// [`add_bytes`](Self::add_bytes), and the faces added also answer to `family`, as one
+    /// of their own family names: a [`FontResolver`](crate::FontResolver) finds them for a
+    /// request of that family as it finds a face by its family name. Their own names stay,
+    /// and so does the style each face's own tables give, which decides the requests of
+    /// the family it serves.
+    ///
+    /// For a font a document embeds under a name it does not carry itself: Word renames
+    /// the program of a font it embeds as a subset (`w:subsetted`) to `___WRD_EMBED_SUB_`
+    /// and a number, while the document's text keeps naming the font, such as "IBM Plex
+    /// Serif Light". A `family` that is empty or only white space adds no name.
+    ///
+    /// ```
+    /// use officewright_font::{FontBook, FontOrigin, FontRequest, FontResolver, ResolutionKind};
+    ///
+    /// let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/minimal.ttf"))?;
+    /// let mut book = FontBook::new();
+    /// book.add_bytes_as(data, FontOrigin::Document, "IBM Plex Serif Light")?;
+    /// let mut resolver = FontResolver::new(&book);
+    /// let resolution = resolver.resolve(&FontRequest::new("IBM Plex Serif Light"));
+    /// assert_eq!(resolution.kind(), ResolutionKind::Exact);
+    /// // The face keeps its own name too.
+    /// let resolution = resolver.resolve(&FontRequest::new("Officewright Test"));
+    /// assert_eq!(resolution.kind(), ResolutionKind::Exact);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Those of [`add_bytes`](Self::add_bytes).
+    pub fn add_bytes_as(
+        &mut self,
+        data: impl Into<Arc<[u8]>>,
+        origin: FontOrigin,
+        family: &str,
+    ) -> Result<usize> {
+        let first = self.faces.len();
+        let added = self.add_bytes(data, origin)?;
+        let key = name_key(family);
+        if !key.is_empty() {
+            for face in self.faces.get_mut(first..).unwrap_or_default() {
+                if !face.keys.families.contains(&key) {
+                    face.keys.families.push(key.clone());
+                }
+            }
+        }
+        Ok(added)
+    }
+
     /// The faces whose character map has a glyph for `ch`, in the order of
     /// [`faces`](Self::faces).
     ///
@@ -834,6 +882,107 @@ fn is_font_file(path: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::testing::{self, TestFont};
+    use crate::{FontRequest, FontResolver, ResolutionKind};
+
+    /// The family name of the face `resolver` resolves `request` to, and how.
+    fn resolved(book: &FontBook, request: FontRequest) -> (Option<String>, ResolutionKind) {
+        let resolution = FontResolver::new(book).resolve(&request).clone();
+        let family = resolution
+            .face()
+            .and_then(|id| book.face(id))
+            .and_then(|face| face.names().family().map(str::to_owned));
+        (family, resolution.kind())
+    }
+
+    #[test]
+    fn a_font_added_under_a_family_name_answers_to_it() {
+        // A subset as Word embeds it, renamed, for text in "IBM Plex Serif Light".
+        let renamed = TestFont::new("___WRD_EMBED_SUB_53").build();
+        let mut book = FontBook::new();
+        book.add_bytes(TestFont::new("Other Test").build(), FontOrigin::User)
+            .unwrap();
+        assert_eq!(
+            book.add_bytes_as(
+                renamed.clone(),
+                FontOrigin::Document,
+                "IBM Plex Serif Light"
+            )
+            .unwrap(),
+            1
+        );
+        let found = Some("___WRD_EMBED_SUB_53".to_owned());
+        for family in [
+            "IBM Plex Serif Light",
+            " ibm plex SERIF light ",
+            "___WRD_EMBED_SUB_53",
+        ] {
+            assert_eq!(
+                resolved(&book, FontRequest::new(family)),
+                (found.clone(), ResolutionKind::Exact),
+                "{family:?}"
+            );
+        }
+        // Only the faces added with it answer to it.
+        assert_eq!(book.faces[0].keys.families, ["other test"]);
+        let mut book = FontBook::new();
+        book.add_bytes(renamed.clone(), FontOrigin::Document)
+            .unwrap();
+        assert_eq!(
+            resolved(&book, FontRequest::new("IBM Plex Serif Light")).1,
+            ResolutionKind::Missing
+        );
+        // An empty name adds none, and the name is not added twice.
+        for family in ["", "  ", "___wrd_embed_sub_53"] {
+            let mut book = FontBook::new();
+            book.add_bytes_as(renamed.clone(), FontOrigin::Document, family)
+                .unwrap();
+            assert_eq!(
+                book.faces[0].keys.families,
+                ["___wrd_embed_sub_53"],
+                "{family:?}"
+            );
+        }
+        // An error is that of `add_bytes`, and adds nothing.
+        let mut book = FontBook::new();
+        assert!(matches!(
+            book.add_bytes_as(&b"not a font"[..], FontOrigin::Document, "Any"),
+            Err(Error::NotAFont { .. })
+        ));
+        assert!(book.is_empty());
+    }
+
+    #[test]
+    fn faces_added_under_a_family_name_keep_their_styles() {
+        // A collection of a regular and a bold face, both renamed, and the document's
+        // faces before a user's of the same family.
+        let ttc = testing::collection(&[
+            TestFont::new("___WRD_EMBED_SUB_1").build(),
+            TestFont::new("___WRD_EMBED_SUB_2")
+                .style("Bold", 700, false)
+                .build(),
+        ]);
+        let mut book = FontBook::new();
+        book.add_bytes(
+            TestFont::new("Plex Test").style("Bold", 700, false).build(),
+            FontOrigin::User,
+        )
+        .unwrap();
+        assert_eq!(
+            book.add_bytes_as(ttc, FontOrigin::Document, "Plex Test")
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            resolved(&book, FontRequest::new("Plex Test")).0.as_deref(),
+            Some("___WRD_EMBED_SUB_1")
+        );
+        assert_eq!(
+            resolved(&book, FontRequest::new("Plex Test").bold(true))
+                .0
+                .as_deref(),
+            Some("___WRD_EMBED_SUB_2")
+        );
+    }
 
     /// A fresh directory under the system temporary directory, removed on drop.
     struct TempDir(PathBuf);
