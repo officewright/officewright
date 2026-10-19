@@ -216,6 +216,8 @@ impl Formats<'_> {
             language_bidi: effect.languages[2].clone(),
             ligatures: effect.ligatures.unwrap_or_default(),
             contextual_alternates: effect.contextual_alternates.unwrap_or(false),
+            emphasis_mark: effect.emphasis_mark.unwrap_or(false),
+            border: effect.border.unwrap_or(false),
         }
     }
 
@@ -355,6 +357,8 @@ pub(super) struct CharacterLevel {
     languages: [Option<Arc<str>>; 3],
     ligatures: Option<Ligatures>,
     contextual_alternates: Option<bool>,
+    emphasis_mark: Option<bool>,
+    border: Option<bool>,
 }
 
 impl CharacterLevel {
@@ -393,6 +397,8 @@ impl CharacterLevel {
             languages,
             ligatures,
             contextual_alternates,
+            emphasis_mark,
+            border,
         } = self;
         fonts.iter().any(Option::is_some)
             || hint.is_some()
@@ -412,6 +418,8 @@ impl CharacterLevel {
             || languages.iter().any(Option::is_some)
             || ligatures.is_some()
             || contextual_alternates.is_some()
+            || emphasis_mark.is_some()
+            || border.is_some()
     }
 
     /// What one `w:rPr` gives.
@@ -457,6 +465,8 @@ impl CharacterLevel {
                 .map(|language| language.as_deref().map(Into::into)),
             ligatures: properties.ligatures,
             contextual_alternates: properties.contextual_alternates,
+            emphasis_mark: properties.emphasis_mark,
+            border: properties.border,
         }
     }
 }
@@ -500,6 +510,8 @@ impl Layer for CharacterLevel {
         }
         overwrite(&mut self.ligatures, above.ligatures);
         overwrite(&mut self.contextual_alternates, above.contextual_alternates);
+        overwrite(&mut self.emphasis_mark, above.emphasis_mark);
+        overwrite(&mut self.border, above.border);
     }
 }
 
