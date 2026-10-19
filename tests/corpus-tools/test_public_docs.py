@@ -10,6 +10,7 @@ import dataclasses
 import hashlib
 import importlib.util
 import io
+import re
 import shutil
 import tempfile
 import struct
@@ -823,7 +824,8 @@ class Cleaning(unittest.TestCase):
                               "word/_rels/document.xml.rels": relationships(*body),
                               # Read as extended properties too, so their people go as well.
                               "docProps/core.xml": "<cp:coreProperties xmlns:cp='c' "
-                              "xmlns:dc='d'><dc:creator>Jane Roe</dc:creator><cp:lastModifiedBy>"
+                              "xmlns:dc='d' xmlns:w='w'><dc:creator>Jane Roe</dc:creator>"
+                              "<cp:lastModifiedBy>"
                               "jroe</cp:lastModifiedBy><Company>Roe Consulting</Company>"
                               "<w:docVars><w:docVar w:val='Jane Roe'/></w:docVars>"
                               "</cp:coreProperties>",
@@ -901,6 +903,172 @@ class Cleaning(unittest.TestCase):
             "<Override PartName=' /docProps/custom.xml ' ")
         cleaned = parts_of(public.clean(package(**{"[Content_Types].xml": types}), DOC).data)
         self.assertNotIn("custom.xml", cleaned["[Content_Types].xml"].decode())
+        # An Override with an end tag before it, and a PartName with spaces around "=" (#380).
+        custom = "application/vnd.openxmlformats-officedocument.custom-properties+xml"
+        main = ("application/vnd.openxmlformats-officedocument.wordprocessingml.document.main"
+                "+xml")
+        for spelling in (
+            f'<Override PartName="/word/document.xml" ContentType="{main}"></Override>'
+            f'<Override PartName="/docProps/custom.xml" ContentType="{custom}"/>',
+            f'<Override PartName = "/docProps/custom.xml" ContentType="{custom}"></Override >',
+        ):
+            types = parts_of(package())["[Content_Types].xml"].decode()
+            types = re.sub(r'<Override PartName="/(docProps/custom|word/document)\.xml"[^>]*/>',
+                           "", types).replace("</Types>", spelling + "</Types>")
+            with self.subTest(spelling):
+                cleaned = parts_of(public.clean(package(**{"[Content_Types].xml": types}),
+                                                DOC).data)
+                self.assertNotIn("custom.xml", cleaned["[Content_Types].xml"].decode())
+                if "/word/document.xml" in spelling:
+                    self.assertIn("/word/document.xml", cleaned["[Content_Types].xml"].decode())
+
+    def test_overrides_of_dropped_parts_go_whatever_surrounds_them(self):
+        # Overrides with end tags around a dropped part's, an end tag on the next line, and a
+        # ">" in a quoted value (review of #382).
+        custom = "application/vnd.openxmlformats-officedocument.custom-properties+xml"
+        main = ("application/vnd.openxmlformats-officedocument.wordprocessingml.document.main"
+                "+xml")
+        styles = "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"
+        for label, overrides in (
+            ("end tags around it",
+             f'<Override PartName="/word/document.xml" ContentType="{main}"></Override>'
+             f'<Override PartName="/docProps/custom.xml" ContentType="{custom}"></Override>'
+             f'<Override PartName="/word/styles.xml" ContentType="{styles}"></Override>'),
+            ("an end tag on the next line",
+             f'<Override PartName="/word/document.xml" ContentType="{main}"/>'
+             f'<Override PartName="/docProps/custom.xml" ContentType="{custom}">\n'
+             f'</Override><Override PartName="/word/styles.xml" ContentType="{styles}"/>'),
+            ("a > in a value",
+             f"<Override PartName='/docProps/custom.xml' ContentType='{custom}; x=\"a>b\"'/>"
+             f'<Override PartName="/word/document.xml" ContentType="{main}"></Override>'
+             f'<Override PartName="/word/styles.xml" ContentType="{styles}"/>'),
+        ):
+            types = parts_of(package())["[Content_Types].xml"].decode()
+            types = re.sub(r'<Override PartName="/(docProps/custom|word/document)\.xml"[^>]*/>',
+                           "", types).replace("</Types>", overrides + "</Types>")
+            with self.subTest(label):
+                cleaned = parts_of(public.clean(package(**{"[Content_Types].xml": types}),
+                                                DOC).data)["[Content_Types].xml"].decode()
+                self.assertNotIn("custom.xml", cleaned)
+                self.assertIn("/word/document.xml", cleaned)
+                self.assertIn("/word/styles.xml", cleaned)
+
+    def test_a_png_default_in_single_quotes_is_not_added_again(self):
+        types = parts_of(package())["[Content_Types].xml"].decode().replace(
+            "</Types>", "<Default Extension='png' ContentType='image/png'/></Types>")
+        cleaned = parts_of(public.clean(package(**{"[Content_Types].xml": types}),
+                                        DOC).data)["[Content_Types].xml"].decode()
+        self.assertEqual(cleaned.lower().count("extension='png'")
+                         + cleaned.lower().count('extension="png"'), 1)
+
+    def test_the_content_types_stream_gets_no_role(self):
+        custom = "application/vnd.openxmlformats-officedocument.custom-properties+xml"
+        types = parts_of(package())["[Content_Types].xml"].decode().replace(
+            "</Types>", f'<Override PartName="/[Content_Types].xml" ContentType="{custom}"/>'
+            "</Types>")
+        cleaned = parts_of(public.clean(package(**{"[Content_Types].xml": types}), DOC).data)
+        self.assertIn("[Content_Types].xml", cleaned)
+        # Named in another case, the stream is still no part (review of #382).
+        lower = package(**{"[Content_Types].xml": None, "[content_types].xml": types})
+        self.assertIn("[content_types].xml", parts_of(public.clean(lower, DOC).data))
+
+    def test_people_in_properties_and_settings_are_found_in_any_spelling(self):
+        # The edits match the usual spelling; what is left is read as XML, and a part that
+        # still holds people or settings in another spelling is refused (#380).
+        dc = "http://purl.org/dc/elements/1.1/"
+        cp = "http://schemas.openxmlformats.org/package/2006/metadata/core-properties"
+        w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+        def core(inner):
+            return f"<cp:coreProperties xmlns:cp='{cp}' xmlns:dc='{dc}'>{inner}</cp:coreProperties>"
+
+        def settings(inner, root="w:settings", extra=f"xmlns:w='{w}'"):
+            return f"<{root} {extra}>{inner}</{root}>"
+
+        cases = {
+            "a space before >": ("docProps/core.xml", core("<dc:creator >Jane Roe</dc:creator>"),
+                                 "dc:creator is not empty"),
+            "cdata": ("docProps/core.xml", core("<dc:creator><![CDATA[Jane Roe]]></dc:creator>"),
+                      "dc:creator is not empty"),
+            "an attribute": ("docProps/core.xml",
+                             core("<cp:lastModifiedBy xml:lang='en'>jroe</cp:lastModifiedBy>"),
+                             "cp:lastModifiedBy is not empty"),
+            "another prefix": ("docProps/core.xml",
+                               core(f"<x:creator xmlns:x='{dc}'>Jane Roe</x:creator>"),
+                               "dc:creator is not empty"),
+            "a default namespace": ("docProps/core.xml",
+                                    core(f"<creator xmlns='{dc}'>Jane Roe</creator>"),
+                                    "dc:creator is not empty"),
+            "a child element": ("docProps/core.xml",
+                                core("<dc:creator><x:b xmlns:x='urn:x'>Jane</x:b></dc:creator>"),
+                                "dc:creator is not empty"),
+            # Attributes, comments and processing instructions keep a name in the file too.
+            "an attribute on the element": ("docProps/core.xml",
+                                            core("<dc:creator v='Jane Roe'/>"),
+                                            "dc:creator is not empty"),
+            "a comment": ("docProps/core.xml", core("<dc:creator><!--Jane Roe--></dc:creator>"),
+                          "dc:creator is not empty"),
+            "a processing instruction": ("docProps/core.xml",
+                                         core("<dc:creator><?who Jane Roe?></dc:creator>"),
+                                         "dc:creator is not empty"),
+            "a child element without text": (
+                "docProps/core.xml",
+                core("<dc:creator><x:b xmlns:x='urn:x' v='Jane Roe'/></dc:creator>"),
+                "dc:creator is not empty"),
+            "a company with spaces": ("docProps/app.xml",
+                                      "<Properties><Company >Roe Consulting</Company ></Properties>",
+                                      "Company is not empty"),
+            "a manager in cdata": ("docProps/app.xml",
+                                   "<Properties><Manager><![CDATA[R]]></Manager></Properties>",
+                                   "Manager is not empty"),
+            "a hyperlink base with spaces": (
+                "docProps/app.xml",
+                "<Properties><HyperlinkBase >http://intranet.example.com/roe/</HyperlinkBase >"
+                "</Properties>", "HyperlinkBase is not empty"),
+            "document variables with a space": (
+                "word/settings.xml", settings("<w:docVars ><w:docVar w:name='o' w:val='Jane'/>"
+                                              "</w:docVars >"), "w:docVars is still there"),
+            "document variables in a default namespace": (
+                "word/settings.xml",
+                settings("<docVars><docVar/></docVars>", "settings", f"xmlns='{w}'"),
+                "w:docVars is still there"),
+            "an attached template not self-closing": (
+                "word/settings.xml",
+                settings("<w:attachedTemplate w:val='x'></w:attachedTemplate>"),
+                "w:attachedTemplate is still there"),
+            "a mail merge with another prefix": (
+                "word/settings.xml", settings(f"<q:mailMerge xmlns:q='{w}'/>"),
+                "w:mailMerge is still there"),
+        }
+        for label, (part, xml, message) in cases.items():
+            data = package(**{part: xml})
+            with self.subTest(label):
+                self.assertIn(f"{part}: {message}", public.problems(data))
+                with self.assertRaises(public.Refused) as caught:
+                    public.clean(data, DOC)
+                self.assertIn(f"{part}: {message}", str(caught.exception))
+        # A part the check cannot read is refused.
+        for xml, message in (
+            ("<!DOCTYPE p><Properties><Pages>1</Pages></Properties>", "declares a document type"),
+            ("<Properties><x:Pages>1</x:Pages></Properties>", "is not well-formed XML"),
+        ):
+            data = package(**{"docProps/app.xml": xml})
+            with self.subTest(message):
+                self.assertIn(f"docProps/app.xml {message}", "; ".join(public.problems(data)))
+                with self.assertRaises(public.Refused) as caught:
+                    public.clean(data, DOC)
+                self.assertIn(f"docProps/app.xml {message}", str(caught.exception))
+        # A character reference in the usual spelling is reported, and emptied.
+        referenced = package(**{"docProps/core.xml": core(
+            "<cp:lastModifiedBy>&#74;roe</cp:lastModifiedBy>")})
+        self.assertIn("docProps/core.xml: cp:lastModifiedBy is not empty",
+                      public.problems(referenced))
+        self.assertIn("<cp:lastModifiedBy></cp:lastModifiedBy>", parts_of(
+            public.clean(referenced, DOC).data)["docProps/core.xml"].decode())
+        # Emptied elements, in any spelling, are no problem.
+        empty = core("<dc:creator></dc:creator><dc:creator /><x:creator xmlns:x='urn:x'> "
+                     "</x:creator>")
+        self.assertEqual(public.people_left("docProps/core.xml", empty.encode(), {"core"}), [])
 
     def test_an_external_relationship_gives_no_role(self):
         data = package(**{"word/_rels/header1.xml.rels": relationships(

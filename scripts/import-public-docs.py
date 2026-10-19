@@ -17,6 +17,8 @@ listed SHA-256. The script then writes tests/corpus/business/<name>.docx with
     PNG: agency seals, emblems and logos must not be reused, so no picture of the original
     is kept;
   - the attached template and the document variables removed from the settings;
+    the properties and settings are then read again as XML, and a document is refused if
+    they still hold any of these in another spelling of the markup;
   - the text replacements listed for the document, which put fictional names and addresses
     in place of a real person's. A replacement names the text by a pattern and the text's
     SHA-256, so the personal data it removes is never written into this repository;
@@ -698,7 +700,7 @@ EMBEDDED_RELATIONSHIPS = tuple(
 
 
 class Unreadable(Exception):
-    """A package part that embedded_parts must read cannot be read as OPC allows it."""
+    """A package part that a check must read cannot be read as OPC allows it."""
 
 
 class _Builder(ElementTree.TreeBuilder):
@@ -712,13 +714,10 @@ class _Builder(ElementTree.TreeBuilder):
         self.doctype_seen = True
 
 
-def package_xml(name: str, data: bytes, root: str) -> ElementTree.Element:
-    """[Content_Types].xml or a .rels part, read as XML: the parser resolves character
-    references and namespace prefixes, and reads UTF-16 (ECMA-376 Part 2 allows it), so
-    that no spelling of the markup hides a part. The part is refused when it is not
-    well-formed, declares a document type, or its root is not the element root names (with
-    its namespace), as officewright-opc refuses it."""
-    builder = _Builder()
+def read_xml(name: str, data: bytes, keep_comments: bool = False) -> ElementTree.Element:
+    """A part read as XML, with comments and processing instructions as elements when
+    keep_comments. Raises Unreadable when it is not well-formed or declares a document type."""
+    builder = _Builder(insert_comments=keep_comments, insert_pis=keep_comments)
     parser = ElementTree.XMLParser(target=builder)
     try:
         parser.feed(data)
@@ -727,6 +726,16 @@ def package_xml(name: str, data: bytes, root: str) -> ElementTree.Element:
         raise Unreadable(f"{name} is not well-formed XML ({error})") from error
     if builder.doctype_seen:
         raise Unreadable(f"{name} declares a document type, which OPC forbids")
+    return element
+
+
+def package_xml(name: str, data: bytes, root: str) -> ElementTree.Element:
+    """[Content_Types].xml or a .rels part, read as XML: the parser resolves character
+    references and namespace prefixes, and reads UTF-16 (ECMA-376 Part 2 allows it), so
+    that no spelling of the markup hides a part. The part is refused when it is not
+    well-formed, declares a document type, or its root is not the element root names (with
+    its namespace), as officewright-opc refuses it."""
+    element = read_xml(name, data)
     if element.tag != root:
         raise Unreadable(f"{name} has the root element {element.tag}, not {root}")
     return element
@@ -855,7 +864,9 @@ def part_roles(parts: dict[str, bytes]) -> dict[str, set[str]]:
     by_key = {part_key(name): name for name in parts}
 
     def add(name: str, role: str | None) -> None:
-        if role:
+        # The content types stream is no part (ECMA-376 Part 2, §10.1.2): nothing gives it
+        # a role, an Override that names it included.
+        if role and name.lower() != "[content_types].xml":
             roles.setdefault(name, set()).add(role)
 
     for name in parts:
@@ -970,16 +981,59 @@ def edit_relationships(rels_part: str, xml: str, dropped: set[str], renamed: dic
 
 def edit_content_types(xml: str, dropped: set[str], renamed: dict[str, str]) -> str:
     gone = {part_key(part) for part in dropped | set(renamed)}
-    xml = re.sub(
-        r"""<Override\b[^>]*PartName=(["'])(.*?)\1[^>]*/>""",
-        lambda m: "" if part_key(m.group(2).strip(URI_SPACE).lstrip("/")) in gone else m.group(0),
-        xml,
-    )
-    if not re.search(r'<Default\b[^>]*Extension="png"', xml, re.I):
+
+    def edit(match: re.Match) -> str:
+        part_name = attribute(match.group(1), "PartName")
+        if part_name and part_key(part_name.group(2).strip(URI_SPACE).lstrip("/")) in gone:
+            return ""
+        return match.group(0)
+
+    # Each Override, self-closing or with an end tag, its start tag read with its quoted
+    # values (which may hold ">"), and its PartName in either quote and with spaces around
+    # "=". (Other spellings, such as a prefix, leave a part name behind and nothing more.)
+    xml = re.sub(r"""(<Override\b(?:[^>"']|"[^"]*"|'[^']*')*?)(?:/>|>.*?</Override\s*>)""",
+                 edit, xml, flags=re.S)
+    if not re.search(r"""<Default\b[^>]*Extension=["']png["']""", xml, re.I):
         xml = xml.replace(
             "</Types>", '<Default Extension="png" ContentType="image/png"/></Types>'
         )
     return xml
+
+
+# What must be empty or gone after the cleaning, by role and local name in any namespace
+# (#380): the edits above match the usual spelling only, so the result is read again as XML,
+# with any prefix, spacing, CDATA or character references, and a part that still holds one
+# of these is refused rather than cleaned some other way.
+PEOPLE_ELEMENTS = {
+    "core": {"creator": "dc:creator", "lastModifiedBy": "cp:lastModifiedBy"},
+    "app": {"Company": "Company", "Manager": "Manager", "HyperlinkBase": "HyperlinkBase"},
+}
+SETTINGS_ELEMENTS = {"docVars": "w:docVars", "attachedTemplate": "w:attachedTemplate",
+                     "mailMerge": "w:mailMerge"}
+
+
+def people_left(name: str, data: bytes, roles: set[str]) -> list[str]:
+    """What a part with these roles still holds of PEOPLE_ELEMENTS (an element with text,
+    attributes, child elements, comments or processing instructions) and SETTINGS_ELEMENTS
+    (any such element), read as XML. Raises Unreadable when the part is not well-formed or
+    declares a document type."""
+    wanted = {local: label for role in roles & PEOPLE_ELEMENTS.keys()
+              for local, label in PEOPLE_ELEMENTS[role].items()}
+    settings = "settings" in roles
+    if not wanted and not settings:
+        return []
+    found = []
+    for element in read_xml(name, data, keep_comments=True).iter():
+        if not isinstance(element.tag, str):
+            continue  # a comment or processing instruction, counted in its parent
+        local = element.tag.rpartition("}")[2]
+        if local in wanted and (
+            len(element) or element.attrib or "".join(element.itertext()).strip()
+        ):
+            found.append(f"{name}: {wanted[local]} is not empty")
+        elif settings and local in SETTINGS_ELEMENTS:
+            found.append(f"{name}: {SETTINGS_ELEMENTS[local]} is still there")
+    return sorted(set(found), key=found.index)
 
 
 def empty_elements(xml: str, names: dict[str, str], emptied: list[str]) -> str:
@@ -1113,6 +1167,12 @@ def clean(original: bytes, doc: PublicDoc) -> Cleaned:
         for replacement in [r for r in pending if r.part == name]:
             data = replace(doc.name, name, data, replacement)
             pending.remove(replacement)
+        try:
+            left = people_left(name, data, held)
+        except Unreadable as error:
+            raise Refused(f"{doc.name}: {error}") from error
+        if left:
+            raise Refused(f"{doc.name}: {'; '.join(left)}")
         out.append((info, data))
     if pending:
         raise Refused(f"{doc.name}: no part {pending[0].part} for a replacement")
@@ -1215,14 +1275,10 @@ def problems(
                 text = address.decode("utf-8", "replace")
                 if text not in allowed_emails and not FICTIONAL.search(address):
                     found.append(f"{name} holds the address {text}")
-            if "core" in roles_of(name):
-                for element in ("dc:creator", "cp:lastModifiedBy"):
-                    if re.search(rf"<{element}>[^<]+</{element}>".encode(), body):
-                        found.append(f"{name}: {element} is not empty")
-            if "app" in roles_of(name):
-                for element in ("Company", "Manager"):
-                    if re.search(rf"<{element}>[^<]+</{element}>".encode(), body):
-                        found.append(f"{name}: {element} is not empty")
+            try:
+                found += people_left(name, body, roles_of(name))
+            except Unreadable as error:
+                found.append(str(error))
     return found
 
 
