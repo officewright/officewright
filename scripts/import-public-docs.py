@@ -982,6 +982,46 @@ def edit_content_types(xml: str, dropped: set[str], renamed: dict[str, str]) -> 
     return xml
 
 
+# What must be empty or gone after the cleaning, by role and local name in any namespace
+# (#380): the edits above match the usual spelling only, so the result is read again as XML,
+# with any prefix, spacing, CDATA or character references, and a part that still holds one
+# of these is refused rather than cleaned some other way.
+PEOPLE_ELEMENTS = {
+    "core": {"creator": "dc:creator", "lastModifiedBy": "cp:lastModifiedBy"},
+    "app": {"Company": "Company", "Manager": "Manager", "HyperlinkBase": "HyperlinkBase"},
+}
+SETTINGS_ELEMENTS = {"docVars": "w:docVars", "attachedTemplate": "w:attachedTemplate",
+                     "mailMerge": "w:mailMerge"}
+
+
+def people_left(name: str, data: bytes, roles: set[str]) -> list[str]:
+    """What a part with these roles still holds of PEOPLE_ELEMENTS (an element with text or
+    child elements) and SETTINGS_ELEMENTS (any such element), read as XML. Raises
+    Unreadable when the part is not well-formed or declares a document type."""
+    wanted = {local: label for role in roles & PEOPLE_ELEMENTS.keys()
+              for local, label in PEOPLE_ELEMENTS[role].items()}
+    settings = "settings" in roles
+    if not wanted and not settings:
+        return []
+    builder = _Builder()
+    parser = ElementTree.XMLParser(target=builder)
+    try:
+        parser.feed(data)
+        root = parser.close()
+    except (ElementTree.ParseError, ValueError, LookupError) as error:
+        raise Unreadable(f"{name} is not well-formed XML ({error})") from error
+    if builder.doctype_seen:
+        raise Unreadable(f"{name} declares a document type, which OPC forbids")
+    found = []
+    for element in root.iter():
+        local = element.tag.rpartition("}")[2]
+        if local in wanted and (len(element) or "".join(element.itertext()).strip()):
+            found.append(f"{name}: {wanted[local]} is not empty")
+        elif settings and local in SETTINGS_ELEMENTS:
+            found.append(f"{name}: {SETTINGS_ELEMENTS[local]} is still there")
+    return sorted(set(found), key=found.index)
+
+
 def empty_elements(xml: str, names: dict[str, str], emptied: list[str]) -> str:
     """The properties with these elements emptied; the labels of the ones that had a value
     go into emptied."""
@@ -1113,6 +1153,12 @@ def clean(original: bytes, doc: PublicDoc) -> Cleaned:
         for replacement in [r for r in pending if r.part == name]:
             data = replace(doc.name, name, data, replacement)
             pending.remove(replacement)
+        try:
+            left = people_left(name, data, held)
+        except Unreadable as error:
+            raise Refused(f"{doc.name}: {error}") from error
+        if left:
+            raise Refused(f"{doc.name}: {'; '.join(left)}")
         out.append((info, data))
     if pending:
         raise Refused(f"{doc.name}: no part {pending[0].part} for a replacement")
@@ -1215,14 +1261,10 @@ def problems(
                 text = address.decode("utf-8", "replace")
                 if text not in allowed_emails and not FICTIONAL.search(address):
                     found.append(f"{name} holds the address {text}")
-            if "core" in roles_of(name):
-                for element in ("dc:creator", "cp:lastModifiedBy"):
-                    if re.search(rf"<{element}>[^<]+</{element}>".encode(), body):
-                        found.append(f"{name}: {element} is not empty")
-            if "app" in roles_of(name):
-                for element in ("Company", "Manager"):
-                    if re.search(rf"<{element}>[^<]+</{element}>".encode(), body):
-                        found.append(f"{name}: {element} is not empty")
+            try:
+                found += people_left(name, body, roles_of(name))
+            except Unreadable as error:
+                found.append(str(error))
     return found
 
 

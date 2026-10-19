@@ -823,7 +823,8 @@ class Cleaning(unittest.TestCase):
                               "word/_rels/document.xml.rels": relationships(*body),
                               # Read as extended properties too, so their people go as well.
                               "docProps/core.xml": "<cp:coreProperties xmlns:cp='c' "
-                              "xmlns:dc='d'><dc:creator>Jane Roe</dc:creator><cp:lastModifiedBy>"
+                              "xmlns:dc='d' xmlns:w='w'><dc:creator>Jane Roe</dc:creator>"
+                              "<cp:lastModifiedBy>"
                               "jroe</cp:lastModifiedBy><Company>Roe Consulting</Company>"
                               "<w:docVars><w:docVar w:val='Jane Roe'/></w:docVars>"
                               "</cp:coreProperties>",
@@ -901,6 +902,95 @@ class Cleaning(unittest.TestCase):
             "<Override PartName=' /docProps/custom.xml ' ")
         cleaned = parts_of(public.clean(package(**{"[Content_Types].xml": types}), DOC).data)
         self.assertNotIn("custom.xml", cleaned["[Content_Types].xml"].decode())
+
+    def test_people_in_properties_and_settings_are_found_in_any_spelling(self):
+        # The edits match the usual spelling; what is left is read as XML, and a part that
+        # still holds people or settings in another spelling is refused (#380).
+        dc = "http://purl.org/dc/elements/1.1/"
+        cp = "http://schemas.openxmlformats.org/package/2006/metadata/core-properties"
+        w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+        def core(inner):
+            return f"<cp:coreProperties xmlns:cp='{cp}' xmlns:dc='{dc}'>{inner}</cp:coreProperties>"
+
+        def settings(inner, root="w:settings", extra=f"xmlns:w='{w}'"):
+            return f"<{root} {extra}>{inner}</{root}>"
+
+        cases = {
+            "a space before >": ("docProps/core.xml", core("<dc:creator >Jane Roe</dc:creator>"),
+                                 "dc:creator is not empty"),
+            "cdata": ("docProps/core.xml", core("<dc:creator><![CDATA[Jane Roe]]></dc:creator>"),
+                      "dc:creator is not empty"),
+            "an attribute": ("docProps/core.xml",
+                             core("<cp:lastModifiedBy xml:lang='en'>jroe</cp:lastModifiedBy>"),
+                             "cp:lastModifiedBy is not empty"),
+            "another prefix": ("docProps/core.xml",
+                               core(f"<x:creator xmlns:x='{dc}'>Jane Roe</x:creator>"),
+                               "dc:creator is not empty"),
+            "a default namespace": ("docProps/core.xml",
+                                    core(f"<creator xmlns='{dc}'>Jane Roe</creator>"),
+                                    "dc:creator is not empty"),
+            "a child element": ("docProps/core.xml",
+                                core("<dc:creator><x:b xmlns:x='urn:x'>Jane</x:b></dc:creator>"),
+                                "dc:creator is not empty"),
+            "a child element without text": (
+                "docProps/core.xml",
+                core("<dc:creator><x:b xmlns:x='urn:x' v='Jane Roe'/></dc:creator>"),
+                "dc:creator is not empty"),
+            "a company with spaces": ("docProps/app.xml",
+                                      "<Properties><Company >Roe Consulting</Company ></Properties>",
+                                      "Company is not empty"),
+            "a manager in cdata": ("docProps/app.xml",
+                                   "<Properties><Manager><![CDATA[R]]></Manager></Properties>",
+                                   "Manager is not empty"),
+            "a hyperlink base with spaces": (
+                "docProps/app.xml",
+                "<Properties><HyperlinkBase >http://intranet.example.com/roe/</HyperlinkBase >"
+                "</Properties>", "HyperlinkBase is not empty"),
+            "document variables with a space": (
+                "word/settings.xml", settings("<w:docVars ><w:docVar w:name='o' w:val='Jane'/>"
+                                              "</w:docVars >"), "w:docVars is still there"),
+            "document variables in a default namespace": (
+                "word/settings.xml",
+                settings("<docVars><docVar/></docVars>", "settings", f"xmlns='{w}'"),
+                "w:docVars is still there"),
+            "an attached template not self-closing": (
+                "word/settings.xml",
+                settings("<w:attachedTemplate w:val='x'></w:attachedTemplate>"),
+                "w:attachedTemplate is still there"),
+            "a mail merge with another prefix": (
+                "word/settings.xml", settings(f"<q:mailMerge xmlns:q='{w}'/>"),
+                "w:mailMerge is still there"),
+        }
+        for label, (part, xml, message) in cases.items():
+            data = package(**{part: xml})
+            with self.subTest(label):
+                self.assertIn(f"{part}: {message}", public.problems(data))
+                with self.assertRaises(public.Refused) as caught:
+                    public.clean(data, DOC)
+                self.assertIn(f"{part}: {message}", str(caught.exception))
+        # A part the check cannot read is refused.
+        for xml, message in (
+            ("<!DOCTYPE p><Properties><Pages>1</Pages></Properties>", "declares a document type"),
+            ("<Properties><x:Pages>1</x:Pages></Properties>", "is not well-formed XML"),
+        ):
+            data = package(**{"docProps/app.xml": xml})
+            with self.subTest(message):
+                self.assertIn(f"docProps/app.xml {message}", "; ".join(public.problems(data)))
+                with self.assertRaises(public.Refused) as caught:
+                    public.clean(data, DOC)
+                self.assertIn(f"docProps/app.xml {message}", str(caught.exception))
+        # A character reference in the usual spelling is reported, and emptied.
+        referenced = package(**{"docProps/core.xml": core(
+            "<cp:lastModifiedBy>&#74;roe</cp:lastModifiedBy>")})
+        self.assertIn("docProps/core.xml: cp:lastModifiedBy is not empty",
+                      public.problems(referenced))
+        self.assertIn("<cp:lastModifiedBy></cp:lastModifiedBy>", parts_of(
+            public.clean(referenced, DOC).data)["docProps/core.xml"].decode())
+        # Emptied elements, in any spelling, are no problem.
+        empty = core("<dc:creator></dc:creator><dc:creator /><x:creator xmlns:x='urn:x'> "
+                     "</x:creator>")
+        self.assertEqual(public.people_left("docProps/core.xml", empty.encode(), {"core"}), [])
 
     def test_an_external_relationship_gives_no_role(self):
         data = package(**{"word/_rels/header1.xml.rels": relationships(
