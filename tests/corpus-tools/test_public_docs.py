@@ -922,6 +922,45 @@ class Cleaning(unittest.TestCase):
                 if "/word/document.xml" in spelling:
                     self.assertIn("/word/document.xml", cleaned["[Content_Types].xml"].decode())
 
+    def test_overrides_of_dropped_parts_go_whatever_surrounds_them(self):
+        # Overrides with end tags around a dropped part's, an end tag on the next line, and a
+        # ">" in a quoted value (review of #382).
+        custom = "application/vnd.openxmlformats-officedocument.custom-properties+xml"
+        main = ("application/vnd.openxmlformats-officedocument.wordprocessingml.document.main"
+                "+xml")
+        styles = "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"
+        for label, overrides in (
+            ("end tags around it",
+             f'<Override PartName="/word/document.xml" ContentType="{main}"></Override>'
+             f'<Override PartName="/docProps/custom.xml" ContentType="{custom}"></Override>'
+             f'<Override PartName="/word/styles.xml" ContentType="{styles}"></Override>'),
+            ("an end tag on the next line",
+             f'<Override PartName="/word/document.xml" ContentType="{main}"/>'
+             f'<Override PartName="/docProps/custom.xml" ContentType="{custom}">\n'
+             f'</Override><Override PartName="/word/styles.xml" ContentType="{styles}"/>'),
+            ("a > in a value",
+             f"<Override PartName='/docProps/custom.xml' ContentType='{custom}; x=\"a>b\"'/>"
+             f'<Override PartName="/word/document.xml" ContentType="{main}"></Override>'
+             f'<Override PartName="/word/styles.xml" ContentType="{styles}"/>'),
+        ):
+            types = parts_of(package())["[Content_Types].xml"].decode()
+            types = re.sub(r'<Override PartName="/(docProps/custom|word/document)\.xml"[^>]*/>',
+                           "", types).replace("</Types>", overrides + "</Types>")
+            with self.subTest(label):
+                cleaned = parts_of(public.clean(package(**{"[Content_Types].xml": types}),
+                                                DOC).data)["[Content_Types].xml"].decode()
+                self.assertNotIn("custom.xml", cleaned)
+                self.assertIn("/word/document.xml", cleaned)
+                self.assertIn("/word/styles.xml", cleaned)
+
+    def test_a_png_default_in_single_quotes_is_not_added_again(self):
+        types = parts_of(package())["[Content_Types].xml"].decode().replace(
+            "</Types>", "<Default Extension='png' ContentType='image/png'/></Types>")
+        cleaned = parts_of(public.clean(package(**{"[Content_Types].xml": types}),
+                                        DOC).data)["[Content_Types].xml"].decode()
+        self.assertEqual(cleaned.lower().count("extension='png'")
+                         + cleaned.lower().count('extension="png"'), 1)
+
     def test_the_content_types_stream_gets_no_role(self):
         custom = "application/vnd.openxmlformats-officedocument.custom-properties+xml"
         types = parts_of(package())["[Content_Types].xml"].decode().replace(
@@ -960,6 +999,15 @@ class Cleaning(unittest.TestCase):
             "a child element": ("docProps/core.xml",
                                 core("<dc:creator><x:b xmlns:x='urn:x'>Jane</x:b></dc:creator>"),
                                 "dc:creator is not empty"),
+            # Attributes, comments and processing instructions keep a name in the file too.
+            "an attribute on the element": ("docProps/core.xml",
+                                            core("<dc:creator v='Jane Roe'/>"),
+                                            "dc:creator is not empty"),
+            "a comment": ("docProps/core.xml", core("<dc:creator><!--Jane Roe--></dc:creator>"),
+                          "dc:creator is not empty"),
+            "a processing instruction": ("docProps/core.xml",
+                                         core("<dc:creator><?who Jane Roe?></dc:creator>"),
+                                         "dc:creator is not empty"),
             "a child element without text": (
                 "docProps/core.xml",
                 core("<dc:creator><x:b xmlns:x='urn:x' v='Jane Roe'/></dc:creator>"),

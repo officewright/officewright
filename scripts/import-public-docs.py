@@ -698,7 +698,7 @@ EMBEDDED_RELATIONSHIPS = tuple(
 
 
 class Unreadable(Exception):
-    """A package part that embedded_parts must read cannot be read as OPC allows it."""
+    """A package part that a check must read cannot be read as OPC allows it."""
 
 
 class _Builder(ElementTree.TreeBuilder):
@@ -712,13 +712,10 @@ class _Builder(ElementTree.TreeBuilder):
         self.doctype_seen = True
 
 
-def package_xml(name: str, data: bytes, root: str) -> ElementTree.Element:
-    """[Content_Types].xml or a .rels part, read as XML: the parser resolves character
-    references and namespace prefixes, and reads UTF-16 (ECMA-376 Part 2 allows it), so
-    that no spelling of the markup hides a part. The part is refused when it is not
-    well-formed, declares a document type, or its root is not the element root names (with
-    its namespace), as officewright-opc refuses it."""
-    builder = _Builder()
+def read_xml(name: str, data: bytes, keep_comments: bool = False) -> ElementTree.Element:
+    """A part read as XML, with comments and processing instructions as elements when
+    keep_comments. Raises Unreadable when it is not well-formed or declares a document type."""
+    builder = _Builder(insert_comments=keep_comments, insert_pis=keep_comments)
     parser = ElementTree.XMLParser(target=builder)
     try:
         parser.feed(data)
@@ -727,6 +724,16 @@ def package_xml(name: str, data: bytes, root: str) -> ElementTree.Element:
         raise Unreadable(f"{name} is not well-formed XML ({error})") from error
     if builder.doctype_seen:
         raise Unreadable(f"{name} declares a document type, which OPC forbids")
+    return element
+
+
+def package_xml(name: str, data: bytes, root: str) -> ElementTree.Element:
+    """[Content_Types].xml or a .rels part, read as XML: the parser resolves character
+    references and namespace prefixes, and reads UTF-16 (ECMA-376 Part 2 allows it), so
+    that no spelling of the markup hides a part. The part is refused when it is not
+    well-formed, declares a document type, or its root is not the element root names (with
+    its namespace), as officewright-opc refuses it."""
+    element = read_xml(name, data)
     if element.tag != root:
         raise Unreadable(f"{name} has the root element {element.tag}, not {root}")
     return element
@@ -979,10 +986,12 @@ def edit_content_types(xml: str, dropped: set[str], renamed: dict[str, str]) -> 
             return ""
         return match.group(0)
 
-    # Each Override, self-closing or with an end tag, and its PartName in either quote and
-    # with spaces around "=".
-    xml = re.sub(r"(<Override\b[^>]*?)(?:/>|>.*?</Override\s*>)", edit, xml, flags=re.S)
-    if not re.search(r'<Default\b[^>]*Extension="png"', xml, re.I):
+    # Each Override, self-closing or with an end tag, its start tag read with its quoted
+    # values (which may hold ">"), and its PartName in either quote and with spaces around
+    # "=". (Other spellings, such as a prefix, leave a part name behind and nothing more.)
+    xml = re.sub(r"""(<Override\b(?:[^>"']|"[^"]*"|'[^']*')*?)(?:/>|>.*?</Override\s*>)""",
+                 edit, xml, flags=re.S)
+    if not re.search(r"""<Default\b[^>]*Extension=["']png["']""", xml, re.I):
         xml = xml.replace(
             "</Types>", '<Default Extension="png" ContentType="image/png"/></Types>'
         )
@@ -1002,27 +1011,23 @@ SETTINGS_ELEMENTS = {"docVars": "w:docVars", "attachedTemplate": "w:attachedTemp
 
 
 def people_left(name: str, data: bytes, roles: set[str]) -> list[str]:
-    """What a part with these roles still holds of PEOPLE_ELEMENTS (an element with text or
-    child elements) and SETTINGS_ELEMENTS (any such element), read as XML. Raises
-    Unreadable when the part is not well-formed or declares a document type."""
+    """What a part with these roles still holds of PEOPLE_ELEMENTS (an element with text,
+    attributes, child elements, comments or processing instructions) and SETTINGS_ELEMENTS
+    (any such element), read as XML. Raises Unreadable when the part is not well-formed or
+    declares a document type."""
     wanted = {local: label for role in roles & PEOPLE_ELEMENTS.keys()
               for local, label in PEOPLE_ELEMENTS[role].items()}
     settings = "settings" in roles
     if not wanted and not settings:
         return []
-    builder = _Builder()
-    parser = ElementTree.XMLParser(target=builder)
-    try:
-        parser.feed(data)
-        root = parser.close()
-    except (ElementTree.ParseError, ValueError, LookupError) as error:
-        raise Unreadable(f"{name} is not well-formed XML ({error})") from error
-    if builder.doctype_seen:
-        raise Unreadable(f"{name} declares a document type, which OPC forbids")
     found = []
-    for element in root.iter():
+    for element in read_xml(name, data, keep_comments=True).iter():
+        if not isinstance(element.tag, str):
+            continue  # a comment or processing instruction, counted in its parent
         local = element.tag.rpartition("}")[2]
-        if local in wanted and (len(element) or "".join(element.itertext()).strip()):
+        if local in wanted and (
+            len(element) or element.attrib or "".join(element.itertext()).strip()
+        ):
             found.append(f"{name}: {wanted[local]} is not empty")
         elif settings and local in SETTINGS_ELEMENTS:
             found.append(f"{name}: {SETTINGS_ELEMENTS[local]} is still there")
