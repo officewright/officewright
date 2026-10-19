@@ -790,8 +790,8 @@
     },
     "tests/corpus/word-rules/E-bar-tab.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9901,
-      "ssim_min": 0.9901,
+      "ssim_mean": 0.9904,
+      "ssim_min": 0.9904,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-default-paragraph-style-after-normal.docx": {
