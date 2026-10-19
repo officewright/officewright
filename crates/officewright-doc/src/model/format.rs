@@ -56,11 +56,9 @@ impl FontFamilies {
     }
 }
 
-/// The formatting of a run in effect, as Word shows it: the document defaults, the
-/// paragraph's style, the run's character style and its direct formatting combined.
-///
-/// Tables do not contribute yet: inside a table the formatting a table style gives is
-/// left out.
+/// The formatting of a run in effect, as Word shows it: the document defaults, in a cell
+/// what the table's style gives, the paragraph's style, the run's character style and its
+/// direct formatting combined.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct CharacterFormat {
@@ -278,10 +276,8 @@ impl ParagraphFlag {
 }
 
 /// The formatting of a paragraph in effect, as Word lays it out: the document defaults,
-/// the paragraph's style, its list level and its direct formatting combined.
-///
-/// Tables do not contribute yet: inside a table the formatting a table style gives is
-/// left out.
+/// in a cell what the table's style gives, the paragraph's style, its list level over
+/// that, and its direct formatting combined.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct ParagraphFormat {

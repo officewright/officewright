@@ -3543,11 +3543,16 @@ fn translates_tables_with_their_style() {
         .collect();
     assert_eq!(
         left_out,
-        [
-            "what the table's style gives paragraphs and runs is not applied yet",
-            "the table properties of the table style's conditional formats are not applied",
-        ]
+        ["the table properties of the table style's conditional formats are not applied"]
     );
+    // What the style gives the text of its cells: bold.
+    let ir = translation.document();
+    for row in rows {
+        let ir::Block::Paragraph(paragraph) = &row.cells()[0].blocks()[0] else {
+            panic!("no paragraph");
+        };
+        assert!(ir.run_style(paragraph.mark()).unwrap().bold());
+    }
 }
 
 #[test]
