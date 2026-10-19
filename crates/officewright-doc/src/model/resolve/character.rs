@@ -104,12 +104,11 @@ const TOGGLES: [Toggle; 12] = [
 ];
 
 impl Formats<'_> {
-    /// Combines the levels of the hierarchy for a run whose paragraph style has the index
-    /// `paragraph_style` and whose own properties are `direct`, for a run or, as
-    /// `resolving` says, a list label with what its level gives laid over them; in a cell,
-    /// `table`, what the table style
-    /// gives, lies between the document defaults and the paragraph style (ECMA-376 Part 1,
-    /// §17.7.2). A run without a `w:rStyle` gets no character style: Word's default
+    /// Combines the levels of the hierarchy for a run, or a list label as `resolving`
+    /// says, whose paragraph style has the index `paragraph_style` and whose own
+    /// properties are `direct`; a label has what its level gives laid over them. In a
+    /// cell, `table`, what the table style gives, lies between the document defaults and
+    /// the paragraph style (ECMA-376 Part 1, §17.7.2). A run without a `w:rStyle` gets no character style: Word's default
     /// character style is DefaultParagraphFont, whose children it ignores.
     pub(super) fn resolve_run(
         &mut self,

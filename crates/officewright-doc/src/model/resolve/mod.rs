@@ -223,8 +223,10 @@ impl<'a> Formats<'a> {
     /// paragraph mark's, with the run properties of the list level laid over it, whose
     /// on/off values set the value as direct formatting does. Word does not allow the
     /// level's `w:rStyle`, `w:highlight`, `w:oMath` and `w:rPrChange` there (MS-OI29500
-    /// §17.9.24(a)); a file that has them is read, and they are dropped. None when the
-    /// paragraph is not a list item.
+    /// §17.9.24(a)); a file that has them is read, and they are dropped, but for the
+    /// highlight, which Word keeps and draws behind the label
+    /// (word-rules/E-list-label-rstyle.docx, case 02, #308). None when the paragraph is
+    /// not a list item.
     ///
     /// Word's renders of word-rules/E-list-label-format.docx and E-list-label-rstyle.docx
     /// (#299) show this, as [MS-DOC] ("Determining List Formatting of a Paragraph", part
