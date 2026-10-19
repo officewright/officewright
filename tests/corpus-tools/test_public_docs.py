@@ -700,6 +700,194 @@ class Cleaning(unittest.TestCase):
                     public.clean(data, DOC)
                 self.assertIn("has comments", str(caught.exception))
 
+    def test_each_way_finds_each_part_with_people_s_data_alone(self):
+        # Every way part_roles finds a part, each with a part that only it finds (#375).
+        strict = "http://purl.oclc.org/ooxml/officeDocument/relationships"
+        ms = "http://schemas.microsoft.com/office"
+        ml = "application/vnd.openxmlformats-officedocument"
+        core = ("<cp:coreProperties xmlns:cp='c' xmlns:dc='d'><dc:creator>Jane Roe</dc:creator>"
+                "</cp:coreProperties>")
+        app = "<Properties><Company>Roe Consulting</Company></Properties>"
+        settings = ("<w:settings xmlns:w='w'><w:docVars><w:docVar w:name='owner' "
+                    "w:val='Jane Roe'/></w:docVars></w:settings>")
+        dropped = "<root><owner>Jane Roe</owner></root>"
+        comments = "<w:comments xmlns:w='w'/>"
+        roles = {"core": core, "app": app, "settings": settings, "custom": dropped,
+                 "thumbnail": dropped, "customxml": dropped, "people": dropped,
+                 "label": dropped, "comments": comments}
+        relationship_types = [
+            (f"{PKG}/metadata/core-properties", "core"),
+            (f"{REL}/extended-properties", "app"), (f"{strict}/extendedProperties", "app"),
+            (f"{REL}/custom-properties", "custom"), (f"{strict}/customProperties", "custom"),
+            (f"{PKG}/metadata/thumbnail", "thumbnail"),
+            (f"{REL}/customXml", "customxml"), (f"{REL}/customXmlProps", "customxml"),
+            (f"{ms}/2011/relationships/people", "people"),
+            (f"{ms}/2020/02/relationships/classificationlabels", "label"),
+            (f"{REL}/comments", "comments"), (f"{strict}/comments", "comments"),
+            (f"{REL}/settings", "settings"),
+        ]
+        content_types = [
+            ("application/vnd.openxmlformats-package.core-properties+xml", "core"),
+            (f"{ml}.extended-properties+xml", "app"),
+            (f"{ml}.custom-properties+xml", "custom"),
+            (f"{ml}.customXmlProperties+xml", "customxml"),
+            (f"{ml}.wordprocessingml.people+xml", "people"),
+            (f"{ml}.wordprocessingml.comments+xml", "comments"),
+            (f"{ml}.wordprocessingml.settings+xml", "settings"),
+            ("application/vnd.ms-office.classificationlabels+xml", "label"),
+        ]
+        names = [("DocProps/Core.xml", "core"), ("DOCPROPS/app.xml", "app"),
+                 ("docProps/Custom.xml", "custom"), ("word/People.xml", "people"),
+                 ("word/Settings.xml", "settings"), ("Word/comments.xml", "comments"),
+                 ("docProps/Thumbnail.jpeg", "thumbnail"), ("CustomXML/item1.xml", "customxml"),
+                 ("docMetaData/LabelInfo.xml", "label")]
+        types_start = ('<Types xmlns="http://schemas.openxmlformats.org/package/2006/'
+                       'content-types"><Default Extension="xml" ContentType="application/xml"/>'
+                       '<Default Extension="rels" ContentType="application/vnd.openxmlformats-'
+                       'package.relationships+xml"/>')
+        plain = public.PublicDoc("plain", "nara", "https://www.example.gov/p.docx",
+                                 "2026-10-19", "0" * 64)
+
+        def minimal(types="", rels=(), **more):
+            parts = {
+                "[Content_Types].xml": types_start + types + "</Types>",
+                "_rels/.rels": relationships((f"{REL}/officeDocument", "word/document.xml", ""),
+                                             *rels),
+                "word/document.xml": "<w:document xmlns:w='w'><w:body/></w:document>",
+            }
+            parts.update(more)
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w") as archive:
+                for name, data in parts.items():
+                    archive.writestr(name, data)
+            return buffer.getvalue()
+
+        cases = (
+            [(f"relationship {kind}", role, "meta/p.xml",
+              minimal(rels=[(kind, " meta/p.xml ", "")], **{"meta/p.xml": roles[role]}))
+             for kind, role in relationship_types]
+            + [(f"override {kind}", role, "meta/p.xml",
+                minimal(f'<Override PartName=" /meta/%70.xml " ContentType="{kind.upper()}"/>',
+                        **{"meta/p.xml": roles[role]}))
+               for kind, role in content_types]
+            + [(f"default {kind}", role, "meta/p.part",
+                minimal(f'<Default Extension="PART" ContentType="{kind}"/>',
+                        **{"meta/p.part": roles[role]}))
+               for kind, role in content_types]
+            + [(f"name {name}", role, name, minimal(**{name: roles[role]}))
+               for name, role in names]
+        )
+        for label, role, name, data in cases:
+            with self.subTest(label):
+                found = public.problems(data)
+                if role == "comments":
+                    self.assertIn(f"{name} holds comments", found)
+                    with self.assertRaises(public.Refused) as caught:
+                        public.clean(data, plain)
+                    self.assertIn("has comments", str(caught.exception))
+                    continue
+                cleaned = parts_of(public.clean(data, plain).data)
+                if role in ("core", "app"):
+                    if name.endswith(".xml"):
+                        self.assertIn(f"{name}: "
+                                      + ("dc:creator" if role == "core" else "Company")
+                                      + " is not empty", found)
+                    self.assertNotIn(b"Roe", cleaned[name])
+                elif role == "settings":
+                    self.assertNotIn(b"docVars", cleaned[name])
+                else:
+                    self.assertIn(f"{name} is still there", found)
+                    self.assertNotIn(name, cleaned)
+                self.assertEqual([p for p in public.problems(public.clean(data, plain).data)
+                                  if "binary part" not in p], [])
+
+    def test_a_part_with_several_roles_gets_the_cleaning_of_each(self):
+        # The core properties named a second time as extended properties or settings keep
+        # their core cleaning (review of #378).
+        for kind, rels in ((f"{REL}/extended-properties", "_rels/.rels"),
+                           (f"{REL}/settings", "word/_rels/document.xml.rels")):
+            target = "docProps/core.xml" if rels == "_rels/.rels" else "../docProps/core.xml"
+            root = [(f"{REL}/officeDocument", "word/document.xml", ""),
+                    (f"{PKG}/metadata/core-properties", "docProps/core.xml", ""),
+                    (f"{REL}/extended-properties", "docProps/app.xml", "")]
+            body = [(f"{REL}/image", "media/image1.emf", ""),
+                    (f"{REL}/image", "media/image2.png", ""),
+                    (f"{REL}/settings", "settings.xml", ""),
+                    (f"{REL}/header", "header1.xml", ""),
+                    (f"{REL}/hyperlink", "mailto:jane.roe@agency.gov", ' TargetMode="External"')]
+            (root if rels == "_rels/.rels" else body).append((kind, target, ""))
+            data = package(**{"_rels/.rels": relationships(*root),
+                              "word/_rels/document.xml.rels": relationships(*body),
+                              # Read as extended properties too, so their people go as well.
+                              "docProps/core.xml": "<cp:coreProperties xmlns:cp='c' "
+                              "xmlns:dc='d'><dc:creator>Jane Roe</dc:creator><cp:lastModifiedBy>"
+                              "jroe</cp:lastModifiedBy><Company>Roe Consulting</Company>"
+                              "</cp:coreProperties>",
+                              "docProps/custom.xml": None, "docProps/thumbnail.jpeg": None,
+                              "customXml/item1.xml": None, "customXml/itemProps1.xml": None,
+                              "customXml/_rels/item1.xml.rels": None})
+            with self.subTest(kind):
+                found = public.problems(data)
+                self.assertIn("docProps/core.xml: dc:creator is not empty", found)
+                self.assertIn("docProps/core.xml: cp:lastModifiedBy is not empty", found)
+                cleaned = public.clean(data, DOC)
+                core = parts_of(cleaned.data)["docProps/core.xml"].decode()
+                self.assertIn("<dc:creator></dc:creator>", core)
+                self.assertIn("<cp:lastModifiedBy></cp:lastModifiedBy>", core)
+                if kind.endswith("extended-properties"):
+                    self.assertIn("<Company></Company>", core)
+                self.assertEqual(public.problems(cleaned.data), [])
+
+    def test_relationships_to_dropped_and_renamed_parts_go_in_any_spelling(self):
+        data = package(**{
+            "word/_rels/document.xml.rels": relationships(
+                (f"{REL}/image", " media/IMAGE1.emf ", ""),
+                (f"{REL}/image", "media/%69mage2.png", ""),
+                (f"{REL}/image", "media/image3.jpeg", ""),
+                (f"{REL}/customXml", "../customXml/item1.xml", ""),
+                (f"{REL}/settings", "settings.xml", ""),
+                (f"{REL}/header", "header1.xml", ""),
+                (f"{REL}/hyperlink", "mailto:jane.roe@agency.gov", ' TargetMode="External"')),
+            # The .rels part of a dropped part, in another case.
+            "customXml/_rels/item1.xml.rels": None,
+            "word/media/Image3.jpeg": b"\xff\xd8\xff\xd9",
+            "data/_rels/Item1.xml.rels": relationships((f"{REL}/customXmlProps", "p.xml", "")),
+            "data/item1.xml": "<root>Jane Roe</root>",
+            "data/p.xml": "<x/>",
+            "_rels/.rels": relationships(
+                (f"{REL}/officeDocument", "word/document.xml", ""),
+                (f"{REL}/customXml", "data/item1.xml", ""),
+                (f"{PKG}/metadata/core-properties", "docProps/core.xml", ""),
+                (f"{REL}/extended-properties", "docProps/app.xml", ""))})
+        parts = parts_of(public.clean(data, DOC).data)
+        rels = parts["word/_rels/document.xml.rels"].decode()
+        # Each target names the renamed picture, which is the only part of its name.
+        self.assertIn('Target=" media/image1.png"', rels)
+        self.assertIn('Target="media/image2.png"', rels)
+        self.assertIn('Target="media/Image3.png"', rels)
+        self.assertNotIn(".emf", rels)
+        self.assertNotIn("%69", rels)
+        self.assertNotIn("customXml", rels)
+        for name in ("data/item1.xml", "data/p.xml", "data/_rels/Item1.xml.rels"):
+            self.assertNotIn(name, parts)
+
+    def test_an_external_relationship_gives_no_role(self):
+        data = package(**{"word/_rels/header1.xml.rels": relationships(
+            (f"{REL}/custom-properties", "../word/document.xml", ' TargetMode="External"'))})
+        self.assertNotIn("word/document.xml is still there", public.problems(data))
+
+    def test_a_picture_that_is_also_a_part_to_drop_is_not_counted_as_replaced(self):
+        data = package(**{"_rels/.rels": relationships(
+            (f"{REL}/officeDocument", "word/document.xml", ""),
+            (f"{PKG}/metadata/thumbnail", "word/media/image2.png", ""),
+            (f"{REL}/custom-properties", "docProps/custom.xml", ""),
+            (f"{PKG}/metadata/core-properties", "docProps/core.xml", ""),
+            (f"{REL}/extended-properties", "docProps/app.xml", "")),
+            "docProps/thumbnail.jpeg": None})
+        cleaned = public.clean(data, DOC)
+        self.assertNotIn("word/media/image2.png", parts_of(cleaned.data))
+        self.assertIn("2 pictures replaced", "; ".join(cleaned.changes))
+
     def test_embedded_parts_are_found_by_what_they_are_not_by_their_usual_name(self):
         ms = "http://schemas.microsoft.com/office/2006/relationships"
         types = (

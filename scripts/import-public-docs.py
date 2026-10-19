@@ -636,6 +636,9 @@ ROLE_TYPES = {
     "/metadata/core-properties": "core",
     "/extended-properties": "app",
     "/custom-properties": "custom",
+    # ISO/IEC 29500 Strict writes these two in camel case (purl.oclc.org/ooxml/...).
+    "/extendedProperties": "app",
+    "/customProperties": "custom",
     "/metadata/thumbnail": "thumbnail",
     "/customXml": "customxml",
     "/customXmlProps": "customxml",
@@ -645,7 +648,8 @@ ROLE_TYPES = {
     "/comments": "comments",
     "/settings": "settings",
 }
-# The same by content type (media_type), from the Override elements of [Content_Types].xml.
+# The same by content type (media_type), from the Override and Default elements of
+# [Content_Types].xml.
 ROLE_CONTENT_TYPES = {
     "application/vnd.openxmlformats-package.core-properties+xml": "core",
     "application/vnd.openxmlformats-officedocument.extended-properties+xml": "app",
@@ -840,34 +844,40 @@ def internal_part(index: dict[str, str], rels: str, target: str) -> str | None:
     return index.get(urllib.parse.unquote(part_target(rels, target)).lower())
 
 
-def part_roles(parts: dict[str, bytes]) -> dict[str, str]:
-    """The role (ROLE_TYPES) of each part that has one, by the relationships that name it or
-    its content type, whatever its name, else by its usual name or folder as part names
-    compare. A part that one of these makes comments or a part to drop keeps that role; the
-    .rels part of a part to drop is dropped with it. Raises Unreadable when
-    [Content_Types].xml or a .rels part cannot be read."""
-    roles: dict[str, str] = {}
+def part_roles(parts: dict[str, bytes]) -> dict[str, set[str]]:
+    """The roles (ROLE_TYPES) of each part that has any: by every relationship that names it
+    and by its content type, whatever its name, and by its usual name or folder as part names
+    compare. A part can have several, and the cleaning acts on each. The .rels part of a part
+    to drop is dropped with it. Raises Unreadable when [Content_Types].xml or a .rels part
+    cannot be read."""
+    roles: dict[str, set[str]] = {}
     index = part_index(parts)
     by_key = {part_key(name): name for name in parts}
 
-    def add(name: str, role: str) -> None:
-        if roles.get(name) not in (*DROPPED_ROLES, "comments"):
-            roles[name] = role
+    def add(name: str, role: str | None) -> None:
+        if role:
+            roles.setdefault(name, set()).add(role)
 
     for name in parts:
         key = part_key(name)
-        role = ROLE_NAMES.get(key) or next(
-            (role for folder, role in ROLE_FOLDERS.items() if key.startswith(folder)), None
-        )
-        if role:
-            add(name, role)
+        add(name, ROLE_NAMES.get(key))
+        add(name, next((r for folder, r in ROLE_FOLDERS.items() if key.startswith(folder)), None))
     for types_name in (name for name in parts if name.lower() == "[content_types].xml"):
         types = package_xml(types_name, parts[types_name], f"{CONTENT_TYPES_NS}Types")
         for element in types.iter(f"{CONTENT_TYPES_NS}Override"):
             role = ROLE_CONTENT_TYPES.get(media_type(element.get("ContentType", "")))
-            held = by_key.get(part_key(element.get("PartName", "").lstrip("/")))
-            if role and held:
+            part_name = element.get("PartName", "").strip(URI_SPACE).lstrip("/")
+            held = by_key.get(part_key(part_name))
+            if held:
                 add(held, role)
+        for element in types.iter(f"{CONTENT_TYPES_NS}Default"):
+            role = ROLE_CONTENT_TYPES.get(media_type(element.get("ContentType", "")))
+            # Extensions compare as part names do (part_key).
+            extension = part_key(element.get("Extension", ""))
+            if role and extension:
+                for key, name in by_key.items():
+                    if key.endswith("." + extension):
+                        add(name, role)
     for rels in (name for name in parts if name.lower().endswith(".rels")):
         root = package_xml(rels, parts[rels], f"{PACKAGE_RELS_NS}Relationships")
         for element in root.iter(f"{PACKAGE_RELS_NS}Relationship"):
@@ -878,12 +888,12 @@ def part_roles(parts: dict[str, bytes]) -> dict[str, str]:
             held = internal_part(index, rels, element.get("Target", "")) if role else None
             if held:
                 add(held, role)
-    for name, role in list(roles.items()):
-        if role in DROPPED_ROLES:
+    for name, held in list(roles.items()):
+        for role in held & DROPPED_ROLES.keys():
             folder, base = posixpath.split(name)
             rels = by_key.get(part_key(posixpath.join(folder, "_rels", base + ".rels")))
             if rels:
-                roles[rels] = role
+                add(rels, role)
     return roles
 
 
@@ -1031,7 +1041,7 @@ def clean(original: bytes, doc: PublicDoc) -> Cleaned:
         roles = part_roles({info.filename: data for info, data in entries})
     except Unreadable as error:
         raise Refused(f"{doc.name}: {error}") from error
-    if "comments" in roles.values():
+    if any("comments" in held for held in roles.values()):
         raise Refused(f"{doc.name}: has comments")
     for name in names:
         if "vbaproject" in name.lower():
@@ -1040,10 +1050,11 @@ def clean(original: bytes, doc: PublicDoc) -> Cleaned:
         # Tracked changes carry their authors, and Word could draw them as markup.
         if info.filename.endswith(".xml") and REVISION.search(data):
             raise Refused(f"{doc.name}: {info.filename} has tracked changes")
-    dropped = {name for name, role in roles.items() if role in DROPPED_ROLES}
+    dropped = {name for name, held in roles.items() if held & DROPPED_ROLES.keys()}
     renamed = {}
     for name in names:
-        if MEDIA.match(name):
+        # A picture that is also a part to drop is dropped, not replaced.
+        if MEDIA.match(name) and name not in dropped:
             stem = name.rsplit(".", 1)[0] if "." in posixpath.basename(name) else name
             renamed[name] = f"{stem}.png"
     # The entries the cleaning writes must not name one part either: a picture renamed to
@@ -1054,7 +1065,7 @@ def clean(original: bytes, doc: PublicDoc) -> Cleaned:
     changes = []
     people = []
     if dropped:
-        kinds = sorted({DROPPED_ROLES[roles[n]] for n in dropped})
+        kinds = sorted({DROPPED_ROLES[r] for n in dropped for r in roles[n] & DROPPED_ROLES.keys()})
         changes.append("removed: " + ", ".join(kinds))
     if renamed:
         changes.append(
@@ -1076,13 +1087,14 @@ def clean(original: bytes, doc: PublicDoc) -> Cleaned:
             data = edit_relationships(name, text_of(name, data), dropped, renamed).encode("utf-8")
         elif name == "[Content_Types].xml":
             data = edit_content_types(text_of(name, data), dropped, renamed).encode("utf-8")
-        elif roles.get(name) == "core":
+        held = roles.get(name, set()) if name not in renamed else set()
+        if "core" in held:
             names_ = {"dc:creator": "creator", "cp:lastModifiedBy": "last modified by"}
             data = empty_elements(text_of(name, data), names_, people).encode("utf-8")
-        elif roles.get(name) == "app":
+        if "app" in held:
             names_ = {"Company": "company", "Manager": "manager", "HyperlinkBase": "hyperlink base"}
             data = empty_elements(text_of(name, data), names_, people).encode("utf-8")
-        elif roles.get(name) == "settings":
+        if "settings" in held:
             text = text_of(name, data)
             if "<w:mailMerge" in text:
                 raise Refused(f"{doc.name}: has a mail merge data source")
@@ -1163,11 +1175,12 @@ def problems(
         except Unreadable as error:
             found.append(str(error))
             embedded, roles = [], {}
+        roles_of = lambda name: roles.get(name, set())
         found += [f"{name} is embedded" for name in embedded if name not in parts]
         for name, body in parts.items():
-            if roles.get(name) in DROPPED_ROLES:
+            if roles_of(name) & DROPPED_ROLES.keys():
                 found.append(f"{name} is still there")
-            if roles.get(name) == "comments":
+            if "comments" in roles_of(name):
                 found.append(f"{name} holds comments")
             if name in embedded or "vbaproject" in name.lower():
                 found.append(f"{name} is embedded")
@@ -1199,11 +1212,11 @@ def problems(
                 text = address.decode("utf-8", "replace")
                 if text not in allowed_emails and not FICTIONAL.search(address):
                     found.append(f"{name} holds the address {text}")
-            if roles.get(name) == "core":
+            if "core" in roles_of(name):
                 for element in ("dc:creator", "cp:lastModifiedBy"):
                     if re.search(rf"<{element}>[^<]+</{element}>".encode(), body):
                         found.append(f"{name}: {element} is not empty")
-            if roles.get(name) == "app":
+            if "app" in roles_of(name):
                 for element in ("Company", "Manager"):
                     if re.search(rf"<{element}>[^<]+</{element}>".encode(), body):
                         found.append(f"{name}: {element} is not empty")
