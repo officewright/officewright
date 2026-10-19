@@ -1,6 +1,6 @@
 //! Resolving the formatting in effect (ECMA-376 Part 1, §17.7.2): the document defaults,
-//! the paragraph's style, numbering, the run's character style and direct formatting,
-//! combined as Word combines them.
+//! in a cell what the table's style gives, numbering, the paragraph's style, the run's
+//! character style and direct formatting, combined as Word combines them.
 
 mod character;
 mod paragraph;
@@ -69,12 +69,35 @@ pub struct Formats<'a> {
     /// The index of the default table style, once looked up.
     default_table_style: Option<Option<usize>>,
     /// The defaults and a paragraph style with a list level laid over them, by the
-    /// style and where the level comes from; at most [`MAX_COMBINATIONS`] at a time.
-    combinations: HashMap<(Option<usize>, paragraph::LayerSource), Arc<ParagraphLevel>>,
+    /// style, where the level comes from and the table layer below the style, if any; at
+    /// most [`MAX_COMBINATIONS`] at a time.
+    combinations:
+        HashMap<(Option<usize>, paragraph::LayerSource, Option<u64>), Arc<ParagraphLevel>>,
+    /// What table styles give the paragraphs and runs of cells, by the table style and
+    /// the set of conditions of the cells.
+    table_texts: HashMap<(usize, u16), Arc<table::TableText>>,
+    /// The id the last table text got.
+    next_table_text: u64,
+    /// Over each table text, by its id: the paragraph defaults with it laid over them,
+    /// and what each paragraph style gives laid over that.
+    cell_paragraphs: HashMap<u64, CellParagraphs>,
+    /// Whether a size of 11 or 12 pt and a left justification that the default paragraph
+    /// style gives give way to a table style's ([MS-DOCX] 2.3.x
+    /// `overrideTableStyleFontSizeAndJustification` off), once worked out.
+    table_style_wins: Option<bool>,
     /// How much work the caches saved, for tests.
     #[cfg(test)]
     work: Work,
 }
+
+/// What lies under the paragraphs of cells of one table text: the paragraph defaults with
+/// it laid over them, what each paragraph style gives laid over that, and the default
+/// paragraph style's level once its justification gave way to the table style's.
+type CellParagraphs = (
+    Arc<ParagraphLevel>,
+    StyleLevels<ParagraphLevel>,
+    Option<Arc<ParagraphLevel>>,
+);
 
 /// How many times each kind of work was done, for tests that the caches are used.
 #[cfg(test)]
@@ -96,6 +119,8 @@ pub(crate) struct Work {
     pub(crate) tables: usize,
     /// Cells whose properties in effect were worked out.
     pub(crate) cells: usize,
+    /// What a table style gives paragraphs and runs worked out for a set of conditions.
+    pub(crate) table_texts: usize,
 }
 
 impl<'a> Formats<'a> {
@@ -116,6 +141,10 @@ impl<'a> Formats<'a> {
             level_layers: HashMap::new(),
             instance_levels: HashMap::new(),
             combinations: HashMap::new(),
+            table_texts: HashMap::new(),
+            next_table_text: 0,
+            cell_paragraphs: HashMap::new(),
+            table_style_wins: None,
             table_styles: StyleLevels::default(),
             tables: HashMap::new(),
             table_of: HashMap::new(),
@@ -132,7 +161,8 @@ impl<'a> Formats<'a> {
             return Formats::new(paragraph.document()).paragraph(paragraph);
         }
         let style = self.paragraph_style(Some(paragraph.node()));
-        self.resolve_paragraph(style, &paragraph.properties())
+        let table = self.table_text(paragraph.node());
+        self.resolve_paragraph(style, &paragraph.properties(), table.as_deref())
     }
 
     /// The formatting of a run in effect.
@@ -141,8 +171,10 @@ impl<'a> Formats<'a> {
             return Formats::new(run.document()).run(run);
         }
         let direct = run.properties();
-        let paragraph = self.paragraph_style(paragraph_of(self.document, run.node()));
-        self.resolve_run(paragraph, &direct, None)
+        let paragraph = paragraph_of(self.document, run.node());
+        let table = paragraph.and_then(|paragraph| self.table_text(paragraph));
+        let style = self.paragraph_style(paragraph);
+        self.resolve_run(style, &direct, table.as_deref(), None)
     }
 
     /// The formatting of a paragraph's mark in effect, which decides, among other
@@ -153,7 +185,8 @@ impl<'a> Formats<'a> {
         }
         let direct = paragraph.properties().mark;
         let style = self.paragraph_style(Some(paragraph.node()));
-        self.resolve_run(style, &direct, None)
+        let table = self.table_text(paragraph.node());
+        self.resolve_run(style, &direct, table.as_deref(), None)
     }
 
     /// The formatting in effect of the mark of a paragraph that has the default
@@ -163,7 +196,12 @@ impl<'a> Formats<'a> {
     #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
     pub(crate) fn default_mark(&mut self) -> CharacterFormat {
         let style = self.paragraph_style(None);
-        self.resolve_run(style, &super::properties::RunProperties::default(), None)
+        self.resolve_run(
+            style,
+            &super::properties::RunProperties::default(),
+            None,
+            None,
+        )
     }
 
     /// The formatting of a list item's label, its number or bullet, in effect: the
@@ -188,7 +226,8 @@ impl<'a> Formats<'a> {
         let properties = paragraph.properties();
         let style = self.paragraph_style(Some(paragraph.node()));
         let label = self.label_level(style, &properties)?;
-        Some(self.resolve_run(style, &properties.mark, label.as_deref()))
+        let table = self.table_text(paragraph.node());
+        Some(self.resolve_run(style, &properties.mark, table.as_deref(), label.as_deref()))
     }
 
     /// The place among the styles of a paragraph's style: its own, else the default
@@ -213,6 +252,12 @@ impl<'a> Formats<'a> {
     #[cfg(test)]
     pub(crate) fn work(&self) -> &Work {
         &self.work
+    }
+
+    /// How many table texts are kept, for tests of the bound.
+    #[cfg(test)]
+    pub(crate) fn kept_table_texts(&self) -> usize {
+        self.table_texts.len()
     }
 
     /// How many combinations of a style and a list level are kept, for tests of the
@@ -408,6 +453,41 @@ impl<L: Layer> StyleLevels<L> {
 /// document `fdo76101.docx` with 4,091. The bound keeps what the resolver keeps per style
 /// small.
 const MAX_STYLES: usize = 4093;
+
+impl Formats<'_> {
+    /// Forgets the table texts and what is laid over them, when there are too many.
+    fn forget_table_texts(&mut self) {
+        self.table_texts.clear();
+        self.cell_paragraphs.clear();
+    }
+
+    /// Whether, in a cell, the size of 11 or 12 pt and the left justification that the
+    /// default paragraph style gives give way to the table style's: when the setting
+    /// `overrideTableStyleFontSizeAndJustification` ([MS-DOCX] 2.3.x) is off. Not written,
+    /// it is off below compatibility mode 15, as word-rules/E-table-style-size-12pt-14.docx
+    /// shows (Word draws the cells in the table style's 14 pt over Normal's 12 pt), and on
+    /// from mode 15: Word writes it on when it saves such a document
+    /// (E-table-style-size-12pt-none.docx and the copy Word saved of it), and draws Normal's
+    /// 12 pt.
+    fn table_style_wins(&mut self) -> bool {
+        if let Some(wins) = self.table_style_wins {
+            return wins;
+        }
+        let settings = &self.document.settings;
+        let written = settings
+            .compatibility_settings()
+            .iter()
+            .rev()
+            .find(|setting| setting.name() == "overrideTableStyleFontSizeAndJustification")
+            .and_then(|setting| setting.value())
+            .map(|value| matches!(value.trim(), "1" | "true" | "on"));
+        let overrides = written.unwrap_or_else(|| {
+            settings.effective_compatibility_mode() >= super::CompatibilityMode::WORD_2013
+        });
+        self.table_style_wins = Some(!overrides);
+        !overrides
+    }
+}
 
 /// How many combinations of a paragraph style and a list level the resolver keeps at a
 /// time: each is a full set of paragraph properties, and the paragraphs of a document

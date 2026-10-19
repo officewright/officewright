@@ -8,7 +8,10 @@ use std::sync::Arc;
 use officewright_core::Pt;
 
 use super::character::CharacterLevel;
-use super::{Formats, IGNORED_STYLES, Layer, MAX_COMBINATIONS, overwrite, style_index};
+use super::table::TableText;
+use super::{
+    Formats, IGNORED_STYLES, Layer, MAX_COMBINATIONS, StyleLevels, overwrite, style_index,
+};
 use crate::model::Document;
 use crate::model::format::{ListFormat, ParagraphFlag, ParagraphFormat};
 use crate::model::numbering::ListLevel;
@@ -32,15 +35,10 @@ impl Formats<'_> {
         &mut self,
         style: Option<usize>,
         direct: &ParagraphProperties,
+        table: Option<&TableText>,
     ) -> ParagraphFormat {
         let document = self.document;
-        let defaults = self.paragraph_defaults();
-        // The defaults with the style and the styles it is based on laid over them,
-        // worked out once per style.
-        let base = match style {
-            Some(index) => self.paragraphs.level(document, index, &defaults),
-            None => defaults,
-        };
+        let base = self.paragraph_base(style, table);
         let mark_deleted = direct.mark.deleted == Some(true);
         let direct = ParagraphLevel::of(direct);
         let style_id = style
@@ -54,7 +52,7 @@ impl Formats<'_> {
                     layer: Some(layer), ..
                 },
             )) => {
-                let combined = self.combination(style, &base, &layer);
+                let combined = self.combination(style, &base, &layer, table);
                 (Some(list), combined)
             }
             Some((list, _)) => (Some(list), base),
@@ -94,6 +92,50 @@ impl Formats<'_> {
         self.instance(instance)?.definition
     }
 
+    /// The defaults, with what the table style gives a paragraph in a cell laid over them
+    /// (`table`), and the paragraph style at `style` with the styles it is based on laid
+    /// over that; worked out once per style and table text. In a cell, a left
+    /// justification of the default paragraph style may give way to the table style's
+    /// (`Formats::table_style_wins`).
+    fn paragraph_base(
+        &mut self,
+        style: Option<usize>,
+        table: Option<&TableText>,
+    ) -> Arc<ParagraphLevel> {
+        let document = self.document;
+        let defaults = self.paragraph_defaults();
+        let Some(table) = table else {
+            return match style {
+                Some(index) => self.paragraphs.level(document, index, &defaults),
+                None => defaults,
+            };
+        };
+        let yields = style.is_some()
+            && style == self.paragraph_style(None)
+            && table.paragraph.justification.is_some()
+            && self.table_style_wins();
+        let (root, levels, yielded) = self.cell_paragraphs.entry(table.id).or_insert_with(|| {
+            let mut root = ParagraphLevel::clone(&defaults);
+            root.overlay(&table.paragraph);
+            root.settle();
+            (Arc::new(root), StyleLevels::default(), None)
+        });
+        let Some(index) = style else {
+            return Arc::clone(root);
+        };
+        let level = levels.level(document, index, root);
+        if !yields || level.justification != Some(Justification::Left) {
+            return level;
+        }
+        // The default paragraph style's left justification gives way to the table
+        // style's; the same for every paragraph of that style in such cells.
+        Arc::clone(yielded.get_or_insert_with(|| {
+            let mut level = ParagraphLevel::clone(&level);
+            level.justification = table.paragraph.justification;
+            Arc::new(level)
+        }))
+    }
+
     /// What the document defaults give to paragraphs.
     fn paragraph_defaults(&mut self) -> Arc<ParagraphLevel> {
         let document = self.document;
@@ -115,8 +157,9 @@ impl Formats<'_> {
         style: Option<usize>,
         base: &ParagraphLevel,
         layer: &SourcedLayer,
+        table: Option<&TableText>,
     ) -> Arc<ParagraphLevel> {
-        let key = (style, layer.source);
+        let key = (style, layer.source, table.map(|table| table.id));
         if let Some(combined) = self.combinations.get(&key) {
             return Arc::clone(combined);
         }
@@ -600,8 +643,19 @@ pub(super) struct ParagraphLevel {
 }
 
 impl ParagraphLevel {
+    /// What a table style's `w:pPr` gives: all but a list, which only paragraphs and
+    /// their styles give in the hierarchy (ECMA-376 Part 1, §17.7.2, puts numbering above
+    /// table styles); taking none from a table style is our choice.
+    pub(super) fn of_table_style(properties: &ParagraphProperties) -> Self {
+        Self {
+            list_instance: None,
+            list_level: None,
+            ..Self::of(properties)
+        }
+    }
+
     /// What one `w:pPr` gives.
-    fn of(properties: &ParagraphProperties) -> Self {
+    pub(super) fn of(properties: &ParagraphProperties) -> Self {
         let flags = [
             properties.keep_next,
             properties.keep_lines,

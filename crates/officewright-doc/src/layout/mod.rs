@@ -91,8 +91,9 @@ impl Document {
     /// hold listed in [`Translation::left_out`]. The IR, and so this function, is exempt
     /// from semver until 1.0.
     ///
-    /// Not translated yet, and listed: table styles and a row's table property
-    /// exceptions, drawings that show no picture (shapes, charts, groups), VML drawings
+    /// Not translated yet, and listed: the table properties of a table style's conditional
+    /// formats and a row's table property exceptions, drawings that show no picture
+    /// (shapes, charts, groups), VML drawings
     /// (`w:pict`) and other objects, equations, and indents and spacing given in
     /// character or line units, which keep their value in points.
     ///
