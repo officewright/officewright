@@ -135,11 +135,14 @@ impl fmt::Debug for Inner {
 
 /// How an image goes into a PDF.
 enum Encoding {
-    /// The JPEG file as it is.
+    /// The JPEG file as it is, or up to `end` and then an end of image.
     Jpeg {
         components: u8,
         /// The file has Adobe's `APP14` marker, so its CMYK samples are inverted.
         adobe: bool,
+        /// Where the coded data of the only scan of a sequential file ends, if what
+        /// follows it is left out ([`read_jpeg`]).
+        end: Option<usize>,
     },
     /// The zlib stream of a PNG file's `IDAT` chunks, whose rows the PNG predictors undo.
     Png {
@@ -160,10 +163,15 @@ enum Encoding {
 impl fmt::Debug for Encoding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Jpeg { components, adobe } => f
+            Self::Jpeg {
+                components,
+                adobe,
+                end,
+            } => f
                 .debug_struct("Jpeg")
                 .field("components", components)
                 .field("adobe", adobe)
+                .field("end", end)
                 .finish(),
             Self::Png {
                 data,
@@ -315,7 +323,11 @@ impl Image {
             inner.width, inner.height
         );
         match &inner.encoding {
-            Encoding::Jpeg { components, adobe } => {
+            Encoding::Jpeg {
+                components,
+                adobe,
+                end,
+            } => {
                 let space = match components {
                     1 => ColorSpace::Gray,
                     3 => ColorSpace::Rgb,
@@ -332,7 +344,15 @@ impl Image {
                     " /Filter /DCTDecode{size} /ColorSpace {} /BitsPerComponent 8{decode}",
                     space.entry()
                 );
-                vec![stream_object(&entries, &inner.source, Compression::None)]
+                let cut;
+                let data = match end.and_then(|end| inner.source.get(..end)) {
+                    Some(scan) => {
+                        cut = [scan, b"\xFF\xD9"].concat();
+                        &cut[..]
+                    }
+                    None => &*inner.source,
+                };
+                vec![stream_object(&entries, data, Compression::None)]
             }
             Encoding::Png {
                 data,
@@ -418,12 +438,21 @@ fn u32_at(data: &[u8], at: usize) -> Option<u32> {
 /// reads them, so that a file whose headers a viewer cannot read is refused; after the
 /// first scan, so are a second frame header or start of image, the marker of a frame that
 /// cannot go into a PDF, and a second scan where libjpeg expects none, all of which
-/// libjpeg refuses too. Not checked: libjpeg's own limits, which T.81 does not set (widths
-/// and heights over 65500, sampling factors that do not divide the largest of the frame,
-/// more than 10 components, of which no PDF takes more than 4); whether the tables the
-/// headers name are defined; the coded data; what comes after the end of image, which
-/// libjpeg does not read; and what comes after the first scan once the file ends early or
-/// has a marker that T.81 reserves there, where the check stops.
+/// libjpeg refuses too ([`check_later_scans`]).
+///
+/// Not refused but cut: a sequential file whose first scan codes every component has no
+/// other scan, and libjpeg draws it from that scan whatever follows, as poppler shows; it
+/// fails on what follows only when it reads on to the end of image, as `qpdf --check`
+/// does. Where what follows is refused by those rules, the file goes in up to the end of
+/// its scan's coded data, followed by an end of image, which draws the same picture and
+/// passes `qpdf --check`.
+///
+/// Not checked: libjpeg's own limits, which T.81 does not set (widths and heights over
+/// 65500, sampling factors that do not divide the largest of the frame, more than 10
+/// components, of which no PDF takes more than 4); whether the tables the headers name
+/// are defined; the coded data; what comes after the end of image, which libjpeg does not
+/// read; and what comes after the first scan once the file ends early or has a marker that
+/// T.81 reserves there, where the check stops.
 fn read_jpeg(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> {
     let mut at = 2;
     let mut frame = None;
@@ -508,12 +537,43 @@ fn read_jpeg(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> 
             "a JPEG file with {components} components cannot go into a PDF"
         )));
     };
-    check_later_scans(data, coded, &frame, more_scans)?;
+    // libjpeg draws the only scan of a sequential file whatever follows it, as poppler
+    // shows, and fails on what follows only when it reads on to the end of image, as
+    // `qpdf --check` does: such a file goes in up to the end of that scan.
+    let end = match check_later_scans(data, coded, &frame, more_scans) {
+        Ok(()) => None,
+        Err(_) if !more_scans => Some(coded_data_end(data, coded)),
+        Err(problem) => return Err(problem),
+    };
     Ok((
         u32::from(frame.width),
         u32::from(frame.height),
-        Encoding::Jpeg { components, adobe },
+        Encoding::Jpeg {
+            components,
+            adobe,
+            end,
+        },
     ))
+}
+
+/// Where the coded data of a scan that starts at `coded` ends: at the first 0xFF, or run of
+/// them, before a marker that is not a stuffed zero or a restart marker, else at the end of
+/// `data`.
+fn coded_data_end(data: &[u8], coded: usize) -> usize {
+    let mut at = coded;
+    loop {
+        while data.get(at).is_some_and(|&byte| byte != 0xFF) {
+            at += 1;
+        }
+        let start = at;
+        while data.get(at) == Some(&0xFF) {
+            at += 1;
+        }
+        match data.get(at) {
+            Some(0x00 | 0xD0..=0xD7) => at += 1,
+            _ => return start.min(data.len()),
+        }
+    }
 }
 
 /// Fails for a marker of a frame that cannot go into a PDF: lossless, differential and
@@ -536,7 +596,8 @@ fn refuse_other_frame(code: u8) -> std::result::Result<(), Problem> {
 /// whose first scan codes only some of its components; otherwise it stops at the next
 /// scan header with "Didn't expect more than one scan". That rule matched libjpeg-turbo,
 /// through `qpdf --check`, on all of 642 generated sequential files (`SOF0` and `SOF1`, 1,
-/// 3 and 4 components, every first and second scan, and a third).
+/// 3 and 4 components, every first and second scan, and a third). Without `more_scans`,
+/// [`read_jpeg`] cuts the file after its scan where this fails, rather than refusing it.
 ///
 /// The coded data of a scan runs to the next marker, a 0xFF that is not a stuffed zero
 /// (0xFF 0x00), fill (more 0xFF) or a restart marker (B.1.1.2, B.1.1.5). The check ends at
@@ -2263,7 +2324,8 @@ pub(crate) mod tests {
                     assert_eq!((image.width(), image.height()), (640, 480));
                     assert!(matches!(
                         image.inner.encoding,
-                        Encoding::Jpeg { components: c, adobe: a } if c == components && a == adobe
+                        Encoding::Jpeg { components: c, adobe: a, end: None }
+                            if c == components && a == adobe
                     ));
                     assert!(!image.needs_pdf_15());
                 }
@@ -2285,7 +2347,8 @@ pub(crate) mod tests {
             image.inner.encoding,
             Encoding::Jpeg {
                 components: 4,
-                adobe: false
+                adobe: false,
+                end: None
             }
         ));
         let object = String::from_utf8_lossy(&image.objects(1, Compression::Flate)[0]).into_owned();
@@ -2814,6 +2877,19 @@ pub(crate) mod tests {
             ),
             // After TEM, and after an APP1 segment holding an end of image.
             ([&b"\xFF\x01"[..], &bad].concat(), "gives Ss 1 and Se 64"),
+            // After DQT, DRI and DNL.
+            (
+                [&b"\xFF\xDB\x00\x03\x01"[..], &bad].concat(),
+                "gives Ss 1 and Se 64",
+            ),
+            (
+                [&b"\xFF\xDD\x00\x04\x00\x00"[..], &bad].concat(),
+                "gives Ss 1 and Se 64",
+            ),
+            (
+                [&b"\xFF\xDC\x00\x04\x00\x10"[..], &bad].concat(),
+                "gives Ss 1 and Se 64",
+            ),
             (
                 [&b"\xFF\xE1\x00\x04\xFF\xD9"[..], &bad].concat(),
                 "gives Ss 1 and Se 64",
@@ -2865,12 +2941,14 @@ pub(crate) mod tests {
         );
 
         // A sequential frame whose first scan codes every component, grey or interleaved,
-        // has no other scan; a progressive one may.
-        let second_scan = |at: usize| {
-            format!(
-                "image data is damaged: the JPEG file has a second scan at byte {at}, after a \
-                 first scan that codes every component of its sequential frame"
-            )
+        // has no other scan: what libjpeg fails on after it is left out, and the file goes in
+        // up to the end of the scan's coded data, with an end of image. A progressive frame
+        // may have more scans.
+        let written = |data: Vec<u8>| {
+            let image = Image::from_bytes(data).unwrap();
+            let object = image.objects(1, Compression::None).concat();
+            let start = object.windows(7).position(|w| w == b"stream\n").unwrap() + 7;
+            object[start..object.len() - b"\nendstream".len()].to_vec()
         };
         let first = b"\xFF\xDA\x00\x08\x01\x01\x00\x00\x3F\x00";
         let at = sequential
@@ -2888,23 +2966,56 @@ pub(crate) mod tests {
             jpeg(0xC1, 8, 4, 4, 1, false),
             interleaved,
         ] {
+            // The helper's coded data ends right before its end of image.
             let end = single.len() - 2;
-            assert_eq!(error(with_more(&single, &scan(&[1]))), second_scan(end));
+            for after in [
+                scan(&[1]),
+                [&b"\xFF\xFE\x00\x03x"[..], &scan(&[1])].concat(),
+                scan_with(&[1, 1, 0x11, 0, 63]),
+                b"\xFF\xC0\x00\x0B\x08\x00\x04\x00\x04\x01\x01\x11\x00".to_vec(),
+                b"\xFF\xC3\x00\x0B\x08\x00\x04\x00\x04\x01\x01\x11\x00".to_vec(),
+                b"\xFF\xD8".to_vec(),
+            ] {
+                assert_eq!(written(with_more(&single, &after)), single, "{after:02X?}");
+            }
+            // Restart markers and fill are coded data, and stay.
             assert_eq!(
-                error(with_more(
+                written(with_more(
                     &single,
-                    &[&b"\xFF\xFE\x00\x03x"[..], &scan(&[1])].concat()
+                    &[&b"\xFF\xD3\xFF\xFF"[..], &scan(&[1])].concat()
                 )),
-                second_scan(end + 5),
+                [&single[..end], b"\xFF\xD3\xFF\xD9"].concat()
             );
-            // Segments other than scans may follow, and the header of the scan is read
-            // before the scan is found unexpected.
-            Image::from_bytes(with_more(&single, b"\xFF\xFE\x00\x03x")).unwrap();
-            assert!(
-                error(with_more(&single, &scan_with(&[1, 1, 0x11, 0, 63])))
-                    .contains("the JPEG scan header is 7 bytes long, not 8 for 1 component")
-            );
+            // What libjpeg reads without failing stays: a COM segment, a segment cut off by
+            // the end of the file, and a marker T.81 reserves.
+            for after in [
+                &b"\xFF\xFE\x00\x03x"[..],
+                b"\xFF\xDA\x00",
+                b"\xFF\x02\x00\x04ab",
+            ] {
+                let data = with_more(&single, after);
+                assert_eq!(written(data.clone()), data, "{after:02X?}");
+            }
         }
+        // The coded data starts after the first scan header, which may hold marker bytes:
+        // a sequential frame takes any Ss, Se, Ah and Al.
+        let grey = jpeg(0xC0, 8, 4, 4, 1, false);
+        let header = grey.windows(first.len()).position(|w| w == first).unwrap();
+        let odd = [
+            &grey[..header],
+            b"\xFF\xDA\x00\x08\x01\x01\x00\x00\xFF\xD8",
+            &grey[header + first.len()..],
+        ]
+        .concat();
+        assert_eq!(written(odd.clone()), odd);
+        // A sequential frame whose first scan leaves out a component is refused as before.
+        assert!(
+            error(with_more(
+                &sequential,
+                &[scan(&[2]), b"\xFF\xD8".to_vec()].concat()
+            ))
+            .contains("the JPEG file has a second start of image")
+        );
         let progressive_grey = jpeg(0xC2, 8, 4, 4, 1, false);
         Image::from_bytes(with_more(
             &progressive_grey,
