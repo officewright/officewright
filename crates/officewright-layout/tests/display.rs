@@ -325,45 +325,60 @@ fn automatic_text_is_white_on_dark_shading() -> TestResult {
 }
 
 /// The first leader glyph's x and the number of glyphs of each case of
-/// `E-tab-leader.docx` in Word's reference, by case number: the first text after the
-/// case's title that starts with a leader character, and the run of that character it
-/// starts with (pdftotext joins the dots of case 22 and the "x" after them into one word).
+/// `E-tab-leader.docx` in Word's reference, by case number: the topmost text below the
+/// case's title, and above the next case's, that starts with a leader character, and the
+/// run of that character it starts with. pdftotext lists the dots of case 21 last, out of
+/// reading order, and joins the dots of case 22 and the "x" after them into one word.
 fn word_leaders() -> TestResult<Vec<(u32, f64, usize)>> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/corpus/reference/word-rules/E-tab-leader/geometry.json");
     let json = std::fs::read_to_string(path)?;
-    // Every text of the file, a line's or a word's, with the left edge of its box.
-    let mut texts: Vec<(String, f64)> = Vec::new();
+    // Every text of the file, a line's or a word's, with the left and top edges of its
+    // box (the reference has one page).
+    let mut texts: Vec<(String, f64, f64)> = Vec::new();
     let mut lines = json.lines();
     while let Some(line) = lines.next() {
         let Some(text) = line.trim().strip_prefix("\"text\": \"") else {
             continue;
         };
-        // "box": [ then the left edge.
+        // "box": [ then the left and top edges.
         let _ = lines.next();
-        let left: f64 = lines
-            .next()
-            .ok_or("no box")?
-            .trim()
-            .trim_end_matches(',')
-            .parse()?;
-        texts.push((text.trim_end_matches(['"', ',']).to_owned(), left));
-    }
-    let mut cases = Vec::new();
-    for (index, (text, _)) in texts.iter().enumerate() {
-        let Some(number) = text
-            .strip_prefix("Case ")
-            .and_then(|rest| rest.split_once(':'))
-            .and_then(|(number, _)| number.parse::<u32>().ok())
-        else {
-            continue;
+        let mut edge = || -> TestResult<f64> {
+            Ok(lines
+                .next()
+                .ok_or("no box")?
+                .trim()
+                .trim_end_matches(',')
+                .parse()?)
         };
-        let leader = texts.iter().skip(index + 1).find_map(|(text, left)| {
-            let first = text.chars().next()?;
-            let count = text.chars().take_while(|&ch| ch == first).count();
-            (['.', '-', '\u{00B7}', '_'].contains(&first) && count > 1).then_some((*left, count))
-        });
-        if let Some((left, count)) = leader {
+        let (left, top) = (edge()?, edge()?);
+        texts.push((text.trim_end_matches(['"', ',']).to_owned(), left, top));
+    }
+    let mut titles: Vec<(u32, f64)> = texts
+        .iter()
+        .filter_map(|(text, _, top)| {
+            text.strip_prefix("Case ")
+                .and_then(|rest| rest.split_once(':'))
+                .and_then(|(number, _)| number.parse::<u32>().ok())
+                .map(|number| (number, *top))
+        })
+        .collect();
+    titles.sort_by(|a, b| a.1.total_cmp(&b.1));
+    titles.dedup_by_key(|title| title.0);
+    let mut cases = Vec::new();
+    for (index, &(number, top)) in titles.iter().enumerate() {
+        let below = titles.get(index + 1).map_or(f64::INFINITY, |next| next.1);
+        let leader = texts
+            .iter()
+            .filter(|(_, _, at)| *at > top && *at < below)
+            .filter_map(|(text, left, at)| {
+                let first = text.chars().next()?;
+                let count = text.chars().take_while(|&ch| ch == first).count();
+                (['.', '-', '\u{00B7}', '_'].contains(&first) && count > 1)
+                    .then_some((*at, *left, count))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some((_, left, count)) = leader {
             cases.push((number, left, count));
         }
     }
@@ -373,12 +388,14 @@ fn word_leaders() -> TestResult<Vec<(u32, f64, usize)>> {
 #[test]
 fn leaders_stand_on_word_s_grid_from_the_page_edge() -> TestResult {
     // E-tab-leader.docx in Carlito, Calibri's metric twin, at 11 pt: a tab from the
-    // margin at 72 pt to a stop 216 pt further, then "x". Word puts whole glyphs on a
-    // grid from the page's left edge whose pitch is the glyph's advance rounded to
-    // 1/600 in (2.76 pt for the period), one in every cell wholly within the tab: the
-    // first at 74.52, not at 72, and none ending past where "x" starts. At a character
-    // scale of 50 % (case 22) the advance is scaled before it is rounded: a pitch of 1.44,
-    // which puts the first at 72 and draws 150 glyphs, where 1.38 would draw 155.
+    // margin at 72 pt to a stop 216 pt further, then "x" ("12.34" for a decimal stop).
+    // Word puts whole glyphs on a grid from the page's left edge whose pitch is the
+    // glyph's advance rounded to 1/600 in (2.76 pt for the period), one in every cell
+    // wholly within the tab: the first at 74.52, not at 72, and none ending past where
+    // the text after it starts. At a character scale of 50 % (case 22) the advance is
+    // scaled before it is rounded: a pitch of 1.44, which puts the first at 72 and draws
+    // 150 glyphs, where 1.38 would draw 155. At 1 pt (case 21) the pitch is 0.24: 900
+    // glyphs from 72.
     let word = word_leaders()?;
     let book = book()?;
     let mut document = Document::default();
@@ -386,26 +403,48 @@ fn leaders_stand_on_word_s_grid_from_the_page_edge() -> TestResult {
         .with_fonts(RunFonts::new("Carlito"))
         .with_size(Pt(11.0));
     let plain = document.add_run_style(carlito.clone());
-    let narrow = document.add_run_style(carlito.with_scale(50));
-    let cases = [
-        (22, TabLeader::Dot, TabKind::Start),
-        (1, TabLeader::Dot, TabKind::Start),
-        (2, TabLeader::Dot, TabKind::End),
-        (5, TabLeader::Hyphen, TabKind::Start),
-        (6, TabLeader::Hyphen, TabKind::End),
-        (9, TabLeader::MiddleDot, TabKind::Start),
-        (13, TabLeader::Underscore, TabKind::Start),
-        (14, TabLeader::Underscore, TabKind::End),
-        (17, TabLeader::Heavy, TabKind::Start),
-        (18, TabLeader::Heavy, TabKind::End),
+    let narrow = document.add_run_style(carlito.clone().with_scale(50));
+    let tiny = document.add_run_style(carlito.clone().with_size(Pt(1.0)));
+    let underlined = document.add_run_style(carlito.with_underline(Some(Underline::default())));
+    let leaders = [
+        TabLeader::Dot,
+        TabLeader::Hyphen,
+        TabLeader::MiddleDot,
+        TabLeader::Underscore,
+        TabLeader::Heavy,
     ];
-    for (case, leader, kind) in cases {
-        let style = if case == 22 { narrow } else { plain };
+    let kinds = [
+        TabKind::Start,
+        TabKind::End,
+        TabKind::Center,
+        TabKind::Decimal,
+    ];
+    // Cases 1 to 20: each leader to each kind of stop, in the rule document's order; then
+    // the tab at 1 pt, at a character scale of 50 % and underlined.
+    let mut cases: Vec<(u32, TabLeader, TabKind, RunStyleId)> = Vec::new();
+    for (n, (leader, kind)) in leaders
+        .iter()
+        .flat_map(|leader| kinds.iter().map(move |kind| (*leader, *kind)))
+        .enumerate()
+    {
+        cases.push((u32::try_from(n)? + 1, leader, kind, plain));
+    }
+    cases.push((21, TabLeader::Dot, TabKind::Start, tiny));
+    cases.push((22, TabLeader::Dot, TabKind::Start, narrow));
+    cases.push((23, TabLeader::Dot, TabKind::Start, underlined));
+    for (case, leader, kind, tab_style) in cases {
         let (_, left, count) = word
             .iter()
             .find(|(number, _, _)| *number == case)
             .copied()
             .ok_or(format!("no case {case} in the reference"))?;
+        let after = if kind == TabKind::Decimal {
+            "12.34"
+        } else {
+            "x"
+        };
+        // The scaled tab's text is scaled too in the rule document; the others' is plain.
+        let text_style = if case == 22 { narrow } else { plain };
         // The column starts at the page's edge here, so the paragraph is indented by the
         // margin and the stop is 72 pt further out.
         let props = ParagraphProps::default()
@@ -414,10 +453,12 @@ fn leaders_stand_on_word_s_grid_from_the_page_edge() -> TestResult {
                 .with_position(Pt(288.0))
                 .with_kind(kind)
                 .with_leader(leader)]);
-        let paragraph = Paragraph::new(style)
+        let paragraph = Paragraph::new(text_style)
             .with_props(props)
-            .with_inlines([Inline::tab(style), Inline::text("x", style)]);
-        let painted = paint(&book, &document, &[paragraph]);
+            .with_inlines([Inline::tab(tab_style), Inline::text(after, text_style)]);
+        // As wide as the rule document's lines reach from the page's edge: A4 less its
+        // right margin, so that "12.34" on the decimal stop (to 301.9 pt) fits.
+        let painted = fuzzing::paint(&book, &document, &[paragraph], 523.3);
         let runs = items(&painted, "glyphs");
         let ours = runs
             .iter()
@@ -432,9 +473,12 @@ fn leaders_stand_on_word_s_grid_from_the_page_edge() -> TestResult {
             "case {case}: first glyph at {first} twips, Word's at {left} pt"
         );
         assert_eq!(xs.len(), count, "case {case}: {ours}");
-        // The heavy leader is the underscore's glyphs, no line.
-        assert!(
-            items(&painted, "line").is_empty(),
+        // The heavy leader is the underscore's glyphs, no line; only the underlined tab
+        // has one, its underline.
+        let lines = items(&painted, "line").len();
+        assert_eq!(
+            lines,
+            usize::from(case == 23),
             "case {case}: {}",
             painted.text()
         );
