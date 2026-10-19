@@ -9,8 +9,9 @@ use officewright_core::Pt;
 use crate::fonts::Fonts;
 use crate::ir::{CompatFlag, Document, Paragraph, ParagraphProps};
 use crate::itemize::{FieldValues, Itemized, itemize_with, shape_runs};
-use crate::lines::{Breaker, Input, Line};
-use crate::report::Location;
+use crate::lines::{Breaker, Input, Line, LineEnd};
+use crate::lists::Label;
+use crate::report::{Location, ReportKind};
 use crate::shape::Shaper;
 
 /// The space automatic spacing (`w:beforeAutospacing`, `w:afterAutospacing`) puts
@@ -35,8 +36,10 @@ impl ParagraphLayout {
     }
 }
 
-/// Lays out `paragraph` of `document` in a column `width` wide; `location` is its place,
-/// for the report. Its fields show the results the document stores.
+/// Lays out `paragraph` of `document` in a column `width` wide, without a list label;
+/// `location` is its place, for the report. Its fields show the results the document
+/// stores. For the unit tests.
+#[cfg(test)]
 pub(crate) fn lay_out(
     document: &Document,
     paragraph: &Paragraph,
@@ -45,19 +48,34 @@ pub(crate) fn lay_out(
     shaper: &mut Shaper,
     location: &Location,
 ) -> ParagraphLayout {
-    lay_out_with(document, paragraph, width, (fonts, shaper), location, None)
+    lay_out_with(
+        document,
+        (paragraph, None),
+        width,
+        (fonts, shaper),
+        location,
+        None,
+    )
 }
 
-/// [`lay_out`], with `fields` the values of the fields the layout computes.
+/// Lays out `paragraph` of `document` in a column `width` wide, starting with `label` when
+/// it is a list item; `location` is its place, for the report. Its fields show the values
+/// `fields` gives for those the layout computes, else the results the document stores.
 pub(crate) fn lay_out_with(
     document: &Document,
-    paragraph: &Paragraph,
+    (paragraph, label): (&Paragraph, Option<&Label>),
     width: Pt,
     (fonts, shaper): (&mut Fonts<'_>, &mut Shaper),
     location: &Location,
     fields: Option<&FieldValues>,
 ) -> ParagraphLayout {
-    let itemized = itemize_with(document, paragraph.inlines(), fonts, location, fields);
+    let itemized = itemize_with(
+        document,
+        (label, paragraph.inlines()),
+        fonts,
+        location,
+        fields,
+    );
     let shaped = shape_runs(document, &itemized, fonts, shaper, location);
     let input = Input {
         document,
@@ -66,6 +84,21 @@ pub(crate) fn lay_out_with(
         location,
     };
     let lines = Breaker::new(input, &itemized, &shaped, fonts, shaper).lines();
+    // Word hyphenates only where a line wraps, in a paragraph that does not suppress it, in a
+    // document that asks for it (Part 1 §17.3.1.34, §17.15.1.10), so the entry names the
+    // first paragraph with such a line: a document whose paragraphs all suppress it, or
+    // whose lines all end otherwise, gets none.
+    if document.settings().hyphenation().auto()
+        && !paragraph.props().suppress_auto_hyphens()
+        && lines.iter().any(|line| line.end == LineEnd::Wrap)
+    {
+        fonts.report_once(
+            ReportKind::FeatureUnsupported,
+            location,
+            "automatic hyphenation is not done: words are not hyphenated at the ends of lines"
+                .to_owned(),
+        );
+    }
     ParagraphLayout {
         width,
         itemized,
