@@ -573,9 +573,10 @@ class AbiTest(unittest.TestCase):
         resolver = c_void_p()
         self.check(lib.ow_font_resolver_new(book, byref(resolver)))
         self.addCleanup(lib.ow_font_resolver_free, resolver)
-        for family in (b"IBM Plex Serif Light", b"Liberation Sans", b"Plex File"):
+        # The face added under "Plex File" is a bold one.
+        for family, bold in ((b"IBM Plex Serif Light", 0), (b"Liberation Sans", 0), (b"Plex File", 1)):
             font = c_void_p()
-            self.check(lib.ow_pdf_font_resolve(resolver, family, 0, 0, byref(font)))
+            self.check(lib.ow_pdf_font_resolve(resolver, family, bold, 0, byref(font)))
             lib.ow_pdf_font_free(font)
         count = c_size_t(7)
         self.check(lib.ow_font_resolver_substitution_count(resolver, byref(count)))
