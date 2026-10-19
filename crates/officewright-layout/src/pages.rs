@@ -2966,6 +2966,52 @@ mod tests {
     }
 
     #[test]
+    fn a_header_part_the_budget_cuts_leaves_out_its_pictures_too() {
+        // A header of a logo and "H" costs 3 (the picture, and a run and a glyph): with a
+        // budget of 4 it is drawn on page 1; on page 2 the 1 left does not draw it, its
+        // logo included.
+        use crate::ir::VerticalReference;
+        use crate::ir::{HorizontalPlacement, HorizontalReference, VerticalPlacement};
+
+        let mut document = Document::default();
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        let logo = anchored_picture(
+            &mut document,
+            (
+                HorizontalReference::Page,
+                HorizontalPlacement::Offset(Pt(10.0)),
+            ),
+            (VerticalReference::Page, VerticalPlacement::Offset(Pt(5.0))),
+        );
+        let header = Paragraph::new(style)
+            .with_props(spacing(0.0, 0.0))
+            .with_inlines([logo, Inline::text("H", style)]);
+        let blocks: Vec<Block> = (0..4)
+            .map(|n| lines(style, 1, spacing(0.0, 0.0).with_page_break_before(n > 0)))
+            .collect();
+        document.add_section(
+            Section::new(close_frames())
+                .with_headers(HeaderFooterSet::default().with_primary([header.into()]))
+                .with_blocks(blocks),
+        );
+        let book = book(vec![minimal()]);
+        let mut fonts = Fonts::new(&book);
+        let mut shaper = Shaper::new();
+        let laid =
+            paginate_with(&document, &mut fonts, &mut shaper, 100, 4, Vec::new).expect("pages");
+        let drawn: Vec<usize> = laid
+            .sink
+            .iter()
+            .map(|page| picture_places(page).len())
+            .collect();
+        assert_eq!(drawn, [1, 0, 0, 0]);
+    }
+
+    #[test]
     fn a_header_s_pictures_count_towards_what_headers_draw_in_all() {
         // A header holding only a picture, drawn with a budget of 3: on three of eight
         // pages, then left out and reported.

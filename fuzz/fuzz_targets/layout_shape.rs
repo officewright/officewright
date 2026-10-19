@@ -4,8 +4,9 @@
 //! capitals, small capitals, complex script, right to left, the East Asian hint, kerning;
 //! size), the rest are pieces of text, floating pictures (anchored to any reference, by
 //! any offset or alignment, behind or in front, in any place of the stack), symbols, tabs,
-//! soft hyphens, and page and column breaks in those styles. The paragraph must keep what the layout relies on
-//! (`check_paragraph`), and break into lines that hold its text in order, in a column, with
+//! soft hyphens, and page and column breaks in those styles. The paragraph must keep what
+//! the layout relies on (`check_paragraph`), and break into lines that hold its text in
+//! order, in a column, with
 //! a line spacing, an alignment, a hanging indent and tab stops the first bytes give too,
 //! and a list label when they say so (`check_lines`). Up to four copies of it, kept with
 //! the next, kept together, with or without widow control and a page break before as the
