@@ -221,13 +221,14 @@ pub(crate) struct Paginated {
 /// Where laid-out pages go, one at a time and in order, as soon as nothing can change them
 /// any more, so that a document's pages are not all held at once (#332).
 pub(crate) trait PageSink {
-    /// Takes `page`, the next one; `fonts` are those of the layout.
-    fn take(&mut self, page: Page, fonts: &mut Fonts<'_>) -> Result<()>;
+    /// Takes `page`, the next one, when the layout has made `made` pages so far; `fonts`
+    /// are those of the layout.
+    fn take(&mut self, page: Page, made: usize, fonts: &mut Fonts<'_>) -> Result<()>;
 }
 
 /// Every page, kept.
 impl PageSink for Vec<Page> {
-    fn take(&mut self, page: Page, _: &mut Fonts<'_>) -> Result<()> {
+    fn take(&mut self, page: Page, _: usize, _: &mut Fonts<'_>) -> Result<()> {
         self.push(page);
         Ok(())
     }
@@ -363,11 +364,11 @@ struct Totals {
 }
 
 impl Totals {
-    /// The counts of `pages` of `document`: all of them, but one less when the first
-    /// section has a title page and numbers its pages from 0 (MS-OI29500 2.1.489 a). A
-    /// section counts the blank page of its odd or even start, and not the page it starts
-    /// on when it is continuous: hypotheses until Word shows them (#298,
-    /// `E-section-continuous-headers.docx`).
+    /// The counts of a document of `pages` pages, `by_section` of them in each section of
+    /// `document`: all of them, but one less when the first section has a title page and
+    /// numbers its pages from 0 (MS-OI29500 2.1.489 a). A section counts the blank page of
+    /// its odd or even start, and not the page it starts on when it is continuous:
+    /// hypotheses until Word shows them (#298, `E-section-continuous-headers.docx`).
     fn of(pages: usize, by_section: &[u32], document: &Document) -> Self {
         let count = |section: usize| by_section.get(section).copied().unwrap_or(0);
         let all = u32::try_from(pages).unwrap_or(u32::MAX);
@@ -679,9 +680,10 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             let checkpoint = self.checkpoint(index);
             // Placing goes back here when the paragraph's `PAGE` fields land on another page
             // than the one they were laid out for, and moving a chain it starts goes back
-            // here later: its first page stays until then.
+            // here later, unless it starts at the top of a page, from where a chain does not
+            // move: its first page stays until then.
             let page_field = has_page_field(flowed);
-            let starts_chain = props.keep_next() && !flowed.in_cell;
+            let starts_chain = props.keep_next() && !flowed.in_cell && !checkpoint.at_top;
             if page_field || starts_chain {
                 self.keep_from = self.keep_from.min(checkpoint.pages.saturating_sub(1));
             }
@@ -815,10 +817,13 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 Some(start) if !boundary => Some(start),
                 _ => Some(checkpoint),
             };
-            // Only a chain can still go back past the next paragraph's start.
-            self.keep_from = chain.map_or(usize::MAX, |start| start.pages.saturating_sub(1));
+            // Only a chain that can still move goes back past the next paragraph's start:
+            // one that does not start at the top of a page. A chain moved once starts again
+            // at the top of the page it moved to, so it cannot move twice.
+            let movable = chain.filter(|start| !start.at_top);
+            self.keep_from = movable.map_or(usize::MAX, |start| start.pages.saturating_sub(1));
             self.release()?;
-            let placed_again = chain.map_or(index + 1, |start| start.index);
+            let placed_again = movable.map_or(index + 1, |start| start.index);
             for slot in layouts.iter_mut().take(placed_again).skip(dropped) {
                 if slot.take().is_some() {
                     self.layouts_held -= 1;
@@ -837,6 +842,12 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             }
             next += 1;
         }
+        // The count the bound is measured by is the layouts really held.
+        debug_assert_eq!(
+            self.layouts_held,
+            layouts.iter().flatten().count(),
+            "paragraph layouts held"
+        );
         Ok(line_counts)
     }
 
@@ -1289,12 +1300,13 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
     /// Hands the pages before page `upto` on to the sink.
     fn hand_on(&mut self, upto: usize) -> Result<()> {
         let count = upto.saturating_sub(self.taken).min(self.pages.len());
+        let made = self.page_count();
         for page in self.pages.drain(..count) {
             if let Some(taken) = self.taken_by_section.get_mut(page.section) {
                 *taken = taken.saturating_add(1);
             }
             self.taken += 1;
-            self.sink.take(page, self.fonts)?;
+            self.sink.take(page, made, self.fonts)?;
         }
         Ok(())
     }
@@ -1807,12 +1819,12 @@ mod tests {
         assert_eq!(held(&paragraphs), (fifty.clone(), (2, 1)));
         let paragraph = document(|style| one_section(vec![lines(style, 400, spacing(0.0, 0.0))]));
         assert_eq!(held(&paragraph), (fifty, (2, 1)));
-        // A chain of paragraphs kept with the next one holds its pages back until it ends,
-        // since moving it goes back to where it starts: 20 one-line paragraphs kept with
-        // the next after 7 others start on page 1, move to page 2 when they reach page 2,
-        // and are split there over pages 2 to 4, all held until the chain ends, with the
-        // layouts of its paragraphs and of the one it is kept with. The 100 paragraphs
-        // after it fill 12 more pages, again held two at a time.
+        // A chain of paragraphs kept with the next one holds its pages back while it can
+        // still move, since moving it goes back to where it starts: 20 one-line paragraphs
+        // kept with the next after 7 others start on page 1 and hold it, with the layouts
+        // of the two placed there, until they reach page 2 and move there. Moved once and
+        // at the top of a page, the chain cannot move again, so its pages over 2 to 4 go on
+        // as they fill, and the 100 paragraphs after it fill 12 more pages, two at a time.
         let chain = document(|style| {
             let mut blocks: Vec<Block> =
                 (0..7).map(|_| lines(style, 1, spacing(0.0, 0.0))).collect();
@@ -1820,7 +1832,18 @@ mod tests {
             blocks.extend((0..100).map(|_| lines(style, 1, spacing(0.0, 0.0))));
             one_section(blocks)
         });
-        assert_eq!(held(&chain), ((1..=16).collect(), (3, 21)));
+        assert_eq!(held(&chain), ((1..=16).collect(), (2, 2)));
+        // A chain from the top of the first page cannot move at all: 400 paragraphs, every
+        // one kept with the next, go on two pages at a time (#332's document with keepNext
+        // everywhere, which held every page until the chain ended).
+        let all_kept = document(|style| {
+            one_section(
+                (0..400)
+                    .map(|_| lines(style, 1, spacing(0.0, 0.0).with_keep_next(true)))
+                    .collect(),
+            )
+        });
+        assert_eq!(held(&all_kept), ((1..=50).collect(), (2, 1)));
     }
 
     /// The entries of `kind` in `report` whose message starts with `what`, as their locations.
