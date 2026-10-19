@@ -243,7 +243,23 @@ class Cleaning(unittest.TestCase):
             "a character reference in TargetMode": f'<Relationship Id="rId9" Type="{REL}/'
             'hyperlink" Target="D:/private/report.docx" TargetMode="&#69;xternal"/>',
             "spaces around the equals signs": f"<Relationship Id = 'rId9' Type = '{REL}/"
-            "hyperlink' Target = '\\\\server\\share\\x.docx' TargetMode = 'External'/>",
+            "hyperlink' Target = '\\\\server\\private\\x.docx' TargetMode = 'External'/>",
+            # Not a hyperlink: a picture linked from a local file.
+            "an image": f'<Relationship Id="rId9" Type="{REL}/image" '
+            'Target="file:///D:/private/logo.png" TargetMode="External"/>',
+            # Internal relationships name parts, so a target with a scheme, a drive or a
+            # server names a local file however the mode is left out.
+            "no TargetMode": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="file:///D:/private/report.docx"/>',
+            "Internal and a drive": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="D:\\private\\report.docx" TargetMode="Internal"/>',
+            "Internal and a server": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="\\\\server\\private\\x.docx" TargetMode="Internal"/>',
+            "no TargetMode and two slashes": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="//server/private/x.docx"/>',
+            # A web address further on does not make the target one.
+            "a web address after a local file": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="file:///D:/private/x.html?u=https://example.gov/" TargetMode="External"/>',
         }
         for label, element in spellings.items():
             rels = f'<?xml version="1.0"?><Relationships xmlns="{PKG}">{element}</Relationships>'
@@ -256,6 +272,27 @@ class Cleaning(unittest.TestCase):
                 self.assertNotIn("private", str(caught.exception))
                 self.assertIn("word/_rels/header1.xml.rels links to a local file or another scheme",
                               public.problems(data))
+        # A target mode OPC does not allow is refused, whatever the target: officewright-opc
+        # refuses the package.
+        for mode in ("external", "EXTERNAL", " External ", "External&#9;"):
+            rels = (f'<?xml version="1.0"?><Relationships xmlns="{PKG}"><Relationship Id="rId9" '
+                    f'Type="{REL}/hyperlink" Target="file:///D:/private/x.docx" '
+                    f'TargetMode="{mode}"/></Relationships>')
+            data = package(**{"word/_rels/header1.xml.rels": rels})
+            with self.subTest(mode=mode):
+                with self.assertRaises(public.Refused) as caught:
+                    public.clean(data, DOC)
+                self.assertIn("header1.xml.rels has a target mode other than Internal or External",
+                              str(caught.exception))
+                self.assertNotIn("private", str(caught.exception))
+                self.assertIn("word/_rels/header1.xml.rels has a target mode other than Internal "
+                              "or External", public.problems(data))
+        # A relationships part named in capitals is read too.
+        rels = (f'<?xml version="1.0"?><Relationships xmlns="{PKG}"><Relationship Id="rId9" '
+                f'Type="{REL}/hyperlink" Target="file:///D:/private/x.docx" '
+                'TargetMode="External"/></Relationships>')
+        self.assertIn("word/_rels/footer1.xml.RELS links to a local file or another scheme",
+                      public.problems(package(**{"word/_rels/footer1.xml.RELS": rels})))
         # A web address in single quotes stays, and so does an internal target.
         rels = (f'<?xml version="1.0"?><Relationships xmlns="{PKG}">'
                 f"<Relationship Id='rId8' Type='{REL}/hyperlink' Target='https://example.gov/'"
@@ -264,6 +301,10 @@ class Cleaning(unittest.TestCase):
         with zipfile.ZipFile(io.BytesIO(cleaned.data)) as archive:
             self.assertIn("Target='https://example.gov/'",
                           archive.read("word/_rels/header1.xml.rels").decode())
+        # The scheme in capitals is a web address too.
+        rels = rels.replace("https://example.gov/", "HTTPS://example.gov/")
+        cleaned = public.clean(package(**{"word/_rels/header1.xml.rels": rels}), DOC)
+        self.assertEqual(public.problems(cleaned.data), [])
 
     def test_a_picture_target_in_single_quotes_is_renamed_too(self):
         rels = (f'<?xml version="1.0"?><Relationships xmlns="{PKG}">'
