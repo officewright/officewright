@@ -47,13 +47,15 @@ const MAX_RUN_LEADER_GLYPHS: usize = 1 << 18;
 /// The most bar tabs a paragraph draws; more are reported.
 const MAX_BAR_TABS: usize = 256;
 
-/// The luminance (0 to 1) below which a background is dark, so that text in the
-/// automatic colour is white on it rather than black. Word's reference of
-/// `E-auto-color.docx` (#309) turns it white on 80 % grey (333333, 0.200) and darker and
-/// on blue (0000FF, 002060), and keeps it black on 70 % grey (4D4D4D) and lighter, on
-/// 75 % grey (404040, 0.251, in `E-bar-tab.docx`), red (FF0000, 0.299) and green
-/// (00B050): the threshold lies in (0.200, 0.251], and 0.25 is darker than 75 % grey.
-const DARK_BACKGROUND: f64 = 0.25;
+/// The luma below which a background is dark, so that text in the automatic colour is
+/// white on it rather than black, in the units of [`luma`]: 0.25 of white's. Word's
+/// reference of `E-auto-color.docx` (#309) turns it white on 80 % grey (333333, 0.200)
+/// and darker and on blue (0000FF, 002060), and keeps it black on 70 % grey (4D4D4D) and
+/// lighter, on 75 % grey (404040, 0.251, in `E-bar-tab.docx`), red (FF0000, 0.299) and
+/// green (00B050): the threshold lies in (0.200, 0.251], and 0.25 is darker than 75 %
+/// grey. Whether a luma of exactly 0.25 (0B6700, for one) is dark is open: no reference
+/// has such a colour.
+const DARK_BACKGROUND: u32 = 63_750;
 
 /// How far a paragraph's shading reaches past its outermost indent and its end indent,
 /// each side: Word's reference of `E-para-shading.docx` (#309) shades 1.42 to 1.56 pt
@@ -249,6 +251,9 @@ pub(crate) struct Painting<'a, 'f, 'b> {
     pub(crate) background: Option<Color>,
     /// The leader glyphs the layout run may still draw.
     pub(crate) leaders: &'a mut LeaderBudget,
+    /// How far bar tabs reach above the first line painted and below the last: through
+    /// the paragraph's space before and after, as far as its page lays them out.
+    pub(crate) bar_reach: (f64, f64),
 }
 
 impl Painting<'_, '_, '_> {
@@ -340,7 +345,9 @@ impl Painting<'_, '_, '_> {
     /// `origin.y`, in a column whose start edge is at `origin.x`: from
     /// [`SHADING_OUTSET`] before its start indent, or its first line's where that hangs
     /// further out, to as far past its end indent, over the lines only, as Word's
-    /// reference of `E-para-shading.docx` shows it.
+    /// reference of `E-para-shading.docx` shows it. Open until Word renders
+    /// `E-para-shading-borders.docx`: whether two shaded paragraphs with space between them
+    /// are joined across it, and how shading meets the paragraph's borders.
     pub(crate) fn paint_shading(
         &mut self,
         lines: Range<usize>,
@@ -436,11 +443,12 @@ impl Painting<'_, '_, '_> {
     }
 
     /// The bar tabs of the paragraph, each a vertical line through `lines`, the first of
-    /// them with its top at `origin.y`: from the top of the first line to the bottom of
-    /// the last, its spacing included, as Word's reference of `E-bar-tab.docx` shows,
-    /// [`BAR_TAB_WIDTH`] wide. In the automatic colour on what is behind the paragraph:
-    /// a hypothesis, since the reference shades it 404040, on which that colour is black
-    /// anyway.
+    /// them with its top at `origin.y`, [`BAR_TAB_WIDTH`] wide: from the top of the first
+    /// line to the bottom of the last, and through the paragraph's space before and after
+    /// as far as [`Painting::bar_reach`] says, as Word's reference of `E-bar-tab.docx`
+    /// shows (case 04, 12 pt before and after, unbroken). In the automatic colour on what
+    /// is behind the paragraph: a hypothesis, since the reference shades it 404040, on
+    /// which that colour is black anyway.
     fn bars(&mut self, lines: &[crate::lines::Line], origin: Point, out: &mut Vec<DisplayItem>) {
         let mut bars: Vec<f64> = self
             .paragraph
@@ -465,13 +473,17 @@ impl Painting<'_, '_, '_> {
         }
         let height: f64 = lines.iter().map(|line| line.height.0).sum();
         let color = text_color(ColorValue::Auto, self.paragraph_background());
+        let (above, below) = self.bar_reach;
         for bar in bars {
             let x = Pt(origin.x.0 + bar);
             out.push(DisplayItem::Line(LineItem {
-                from: Point { x, y: origin.y },
+                from: Point {
+                    x,
+                    y: Pt(origin.y.0 - above),
+                },
                 to: Point {
                     x,
-                    y: Pt(origin.y.0 + height),
+                    y: Pt(origin.y.0 + height + below),
                 },
                 width: BAR_TAB_WIDTH,
                 style: LineStyle::Solid,
@@ -1138,18 +1150,17 @@ fn text_color(value: ColorValue, background: Option<Color>) -> Color {
     match value {
         ColorValue::Rgb(color) => color,
         ColorValue::Auto => match background {
-            Some(background) if luminance(background) < DARK_BACKGROUND => Color::WHITE,
+            Some(background) if luma(background) < DARK_BACKGROUND => Color::WHITE,
             _ => Color::BLACK,
         },
     }
 }
 
-/// The luminance of `color`, 0 for black to 1 for white (ITU-R BT.601 weights).
-fn luminance(color: Color) -> f64 {
-    (0.299 * f64::from(color.red())
-        + 0.587 * f64::from(color.green())
-        + 0.114 * f64::from(color.blue()))
-        / 255.0
+/// The luma of `color` with the weights of ITU-R BT.601 in thousandths, from 0 for black
+/// to 255,000 for white: in whole numbers, so that a colour on the threshold compares
+/// exactly (333333 is 0.2 of white's, which floating point makes a little less).
+fn luma(color: Color) -> u32 {
+    299 * u32::from(color.red()) + 587 * u32::from(color.green()) + 114 * u32::from(color.blue())
 }
 
 /// `share` of `top` over `under`.
@@ -1277,6 +1288,7 @@ mod tests {
             location: &location,
             background: None,
             leaders: &mut leaders,
+            bar_reach: (0.0, 0.0),
         };
         let mut items = Vec::new();
         let origin = Point {
@@ -1825,7 +1837,7 @@ mod tests {
             pattern_share(ShadingPattern::DiagonalStripe),
             Share::Approximate(_)
         ));
-        assert!(luminance(Color::WHITE) > 0.99 && luminance(Color::BLACK) < 0.01);
+        assert_eq!((luma(Color::WHITE), luma(Color::BLACK)), (255_000, 0));
     }
 
     #[test]

@@ -991,7 +991,7 @@ impl<'d> Pager<'d, '_, '_> {
         let Some(page) = self.pages.last() else {
             return;
         };
-        let left = page.body.left;
+        let (left, bottom) = (page.body.left, page.body.bottom.0);
         let height: f64 = layout
             .lines
             .get(lines.clone())
@@ -1005,6 +1005,23 @@ impl<'d> Pager<'d, '_, '_> {
             x: left,
             y: Pt(top),
         };
+        // Bar tabs run through the paragraph's own space before and after (Word's render
+        // of `E-bar-tab.docx`, case 04), as far as the page lays them out: above, within
+        // the gap its lines are placed under, which is none for those that go on after a
+        // page; below, within the body, after its last line. Whether the space after is
+        // left out next to a paragraph of the same style with contextual spacing is not
+        // known here: the bar reaches through it all the same.
+        let props = flowed.paragraph.props();
+        let above = paragraph::space_before(self.document, props)
+            .0
+            .min((top - self.cursor).max(0.0));
+        let below = if lines.end >= layout.lines.len() {
+            paragraph::space_after(self.document, props)
+                .0
+                .min((bottom - top - height).max(0.0))
+        } else {
+            0.0
+        };
         let mut painting = Painting {
             document: self.document,
             paragraph: flowed.paragraph,
@@ -1013,6 +1030,7 @@ impl<'d> Pager<'d, '_, '_> {
             location: &flowed.location,
             background: None,
             leaders: &mut self.leaders,
+            bar_reach: (above, below),
         };
         painting.paint_shading(lines.clone(), origin, &mut items);
         painting.paint(lines.clone(), origin, &mut items);
@@ -1408,6 +1426,9 @@ impl<'d> Pager<'d, '_, '_> {
                     location: &part.location,
                     background: None,
                     leaders: &mut self.leaders,
+                    // Hypothesis: in headers and footers, as no reference shows them, bar
+                    // tabs reach only through the lines.
+                    bar_reach: (0.0, 0.0),
                 };
                 let lines = 0..layout.lines.len();
                 painting.paint_shading(lines.clone(), at, items);
@@ -1808,6 +1829,72 @@ mod tests {
             ["sections[0].blocks[1]"]
         );
         assert_eq!(laid_with(false, [(wraps, false); 3]), [""; 0]);
+    }
+
+    /// The tops and bottoms of the lines `page` draws.
+    fn drawn_lines(page: &Page) -> Vec<(f64, f64)> {
+        page.items
+            .iter()
+            .filter_map(|item| match item {
+                DisplayItem::Line(line) => Some((line.from.y.0, line.to.y.0)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn bar_tabs_run_through_the_paragraph_s_space_before_and_after() {
+        use crate::ir::{TabKind, TabStop};
+
+        // E-bar-tab case 04: 12 pt before and after, and the bar unbroken through both. The
+        // paragraph's line is at 52 to 72, 12 pt under the line above it, and the paragraph
+        // after it starts 12 pt lower: the bar runs from 40 to 84.
+        let bar = TabStop::default()
+            .with_position(Pt(30.0))
+            .with_kind(TabKind::Bar);
+        let between = document(|style| {
+            one_section(vec![
+                lines(style, 1, spacing(0.0, 0.0)),
+                lines(style, 1, spacing(12.0, 12.0).with_tabs([bar])),
+                lines(style, 1, spacing(0.0, 0.0)),
+            ])
+        });
+        let (between, _) = laid(&between, 100);
+        assert_eq!(
+            drawn_lines(&between.expect("pages").pages[0]),
+            [(40.0, 84.0)]
+        );
+        // Split over two pages, the first part reaches through the space before, kept at
+        // the top of the document (from 20, its first line at 32, seven lines to 172), the
+        // second through the space after (three lines from 20 to 80, then 12 pt).
+        let split = document(|style| {
+            one_section(vec![lines(style, 10, spacing(12.0, 12.0).with_tabs([bar]))])
+        });
+        let (split, _) = laid(&split, 100);
+        let split = split.expect("pages");
+        assert_eq!(drawn_lines(&split.pages[0]), [(20.0, 172.0)]);
+        assert_eq!(drawn_lines(&split.pages[1]), [(20.0, 92.0)]);
+        // At the top of a page the space before is dropped, and the bar with it; at the
+        // bottom of the body the space after is cut, and the bar with it.
+        let at_top = document(|style| {
+            one_section(vec![
+                lines(style, 8, spacing(0.0, 0.0)),
+                lines(style, 1, spacing(12.0, 12.0).with_tabs([bar])),
+            ])
+        });
+        let (at_top, _) = laid(&at_top, 100);
+        assert_eq!(
+            drawn_lines(&at_top.expect("pages").pages[1]),
+            [(20.0, 52.0)]
+        );
+        let at_bottom = document(|style| {
+            one_section(vec![lines(style, 7, spacing(12.0, 12.0).with_tabs([bar]))])
+        });
+        let (at_bottom, _) = laid(&at_bottom, 100);
+        assert_eq!(
+            drawn_lines(&at_bottom.expect("pages").pages[0]),
+            [(20.0, 180.0)]
+        );
     }
 
     /// Every page as the paragraphs, lines and tops of its fragments.
