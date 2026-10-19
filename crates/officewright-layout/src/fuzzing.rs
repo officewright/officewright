@@ -1195,6 +1195,7 @@ pub fn paint(
             leaders: &mut leaders,
             page: None,
             floats: Vec::new(),
+            bar_reach: (0.0, 0.0),
         };
         let origin = Point {
             x: Pt(0.0),

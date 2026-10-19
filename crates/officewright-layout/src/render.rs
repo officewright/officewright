@@ -14,7 +14,7 @@ use crate::display::{DisplayItem, DrawnGlyph, GlyphItem, ImageItem, LineItem, Li
 use crate::error::{Error, Result};
 use crate::fonts::Fonts;
 use crate::ir::{Document, ImageFormat, ImageId};
-use crate::pages::{self, Page};
+use crate::pages::{self, Page, PageSink};
 use crate::report::{LayoutReport, Location, ReportKind};
 use crate::shape::Shaper;
 
@@ -238,26 +238,96 @@ pub fn render_pdf(
     fonts: &FontBook,
     options: &RenderOptions,
 ) -> Result<Rendered> {
+    render(document, fonts, options).map(|(rendered, _)| rendered)
+}
+
+/// [`render_pdf`], with the most pages that were laid out and not yet painted at once.
+fn render(
+    document: &Document,
+    fonts: &FontBook,
+    options: &RenderOptions,
+) -> Result<(Rendered, usize)> {
     document.validate()?;
     let mut document = document.clone();
     let mut report = document.clamp();
     let mut layout_fonts = Fonts::new(fonts);
     let mut shaper = Shaper::new();
-    let laid = pages::paginate(&document, &mut layout_fonts, &mut shaper, options.max_pages)?;
-    let mut painter = Painter {
-        document: &document,
-        fonts: &mut layout_fonts,
-        pdf_fonts: HashMap::new(),
-        images: HashMap::new(),
-        pdf: pdf::Document::new(),
-    };
-    painter.pdf.set_compression(options.compression);
-    for page in &laid.pages {
-        painter.page(page)?;
+    // Each page is painted as soon as it is laid out, and dropped (#332).
+    let painted = pages::paginate_into(
+        &document,
+        &mut layout_fonts,
+        &mut shaper,
+        options.max_pages,
+        || PdfPages::new(&document, options.compression),
+    )?;
+    // Only the last pass's painting is reported, after what the layout reported, as when
+    // the pages were painted once they were all laid out.
+    for (kind, location, message) in painted.notes {
+        layout_fonts.report_once(kind, &location, message);
     }
-    let pdf = painter.pdf;
     report.extend(layout_fonts.into_report());
-    Ok(Rendered { pdf, report })
+    let waiting = painted.most_waiting;
+    Ok((
+        Rendered {
+            pdf: painted.pdf,
+            report,
+        },
+        waiting,
+    ))
+}
+
+/// A PDF that pages are painted into as they are laid out: what a [`Painter`] keeps from
+/// page to page.
+struct PdfPages<'a> {
+    document: &'a Document,
+    pdf_fonts: HashMap<FaceId, Option<pdf::Font>>,
+    images: HashMap<ImageId, Option<pdf::Image>>,
+    pdf: pdf::Document,
+    /// What painting reported, for the report of the layout pass whose PDF this is.
+    notes: Vec<Note>,
+    /// The pages painted, and the most pages laid out and not yet painted at once.
+    painted: usize,
+    most_waiting: usize,
+}
+
+/// An entry of the report: its kind, where, and what.
+type Note = (ReportKind, Location, String);
+
+impl<'a> PdfPages<'a> {
+    fn new(document: &'a Document, compression: pdf::Compression) -> Self {
+        let mut pdf = pdf::Document::new();
+        pdf.set_compression(compression);
+        Self {
+            document,
+            pdf_fonts: HashMap::new(),
+            images: HashMap::new(),
+            pdf,
+            notes: Vec::new(),
+            painted: 0,
+            most_waiting: 0,
+        }
+    }
+}
+
+impl PageSink for PdfPages<'_> {
+    fn take(&mut self, page: Page, made: usize, fonts: &mut Fonts<'_>) -> Result<()> {
+        self.most_waiting = self.most_waiting.max(made.saturating_sub(self.painted));
+        self.painted += 1;
+        let mut painter = Painter {
+            document: self.document,
+            fonts,
+            pdf_fonts: std::mem::take(&mut self.pdf_fonts),
+            images: std::mem::take(&mut self.images),
+            pdf: std::mem::take(&mut self.pdf),
+            notes: std::mem::take(&mut self.notes),
+        };
+        let painted = painter.page(&page);
+        self.pdf_fonts = painter.pdf_fonts;
+        self.images = painter.images;
+        self.pdf = painter.pdf;
+        self.notes = painter.notes;
+        painted
+    }
 }
 
 /// Paints pages of display items into a PDF.
@@ -269,16 +339,24 @@ struct Painter<'a, 'f, 'b> {
     /// The PDF image of every picture drawn so far; `None` for one that cannot be drawn.
     images: HashMap<ImageId, Option<pdf::Image>>,
     pdf: pdf::Document,
+    /// What painting reported.
+    notes: Vec<Note>,
 }
 
 impl Painter<'_, '_, '_> {
+    /// Notes `message` for the report, kept with the PDF of its layout pass, so that a
+    /// pass whose PDF is dropped leaves nothing in the report.
+    fn note(&mut self, kind: ReportKind, location: &Location, message: String) {
+        self.notes.push((kind, location.clone(), message));
+    }
+
     /// Adds a page of the size of `page`, at least [`MIN_PAGE_SIDE`] each way, and paints
     /// what it draws.
     fn page(&mut self, page: &Page) -> Result<()> {
         let width = Pt(page.width.0.max(MIN_PAGE_SIDE));
         let height = Pt(page.height.0.max(MIN_PAGE_SIDE));
         if (width, height) != (page.width, page.height) {
-            self.fonts.report_once(
+            self.note(
                 ReportKind::ValueClamped,
                 &Location::default(),
                 format!(
@@ -354,7 +432,7 @@ impl Painter<'_, '_, '_> {
         if line.width.0 <= MAX_LINE_WIDTH {
             return *line;
         }
-        self.fonts.report_once(
+        self.note(
             ReportKind::ValueClamped,
             &Location::default(),
             format!(
@@ -478,7 +556,7 @@ impl Painter<'_, '_, '_> {
             match pdf::Font::from_face(face.face().clone()) {
                 Ok(font) => {
                     for note in font.embedding_notes() {
-                        self.fonts.report_once(
+                        self.note(
                             ReportKind::FontEmbedding,
                             &Location::default(),
                             format!("{name}: {note}"),
@@ -494,7 +572,7 @@ impl Painter<'_, '_, '_> {
                         why = format!("{why}: {inner}");
                         cause = inner.source();
                     }
-                    self.fonts.report_once(
+                    self.note(
                         ReportKind::FontEmbedding,
                         &Location::default(),
                         format!("the text in {name} is not drawn: {why}"),
@@ -521,7 +599,7 @@ impl Painter<'_, '_, '_> {
         }
         if item.crop.is_some() || item.rotation != 0.0 || item.flip_horizontal || item.flip_vertical
         {
-            self.fonts.report_once(
+            self.note(
                 ReportKind::FeatureUnsupported,
                 &Location::default(),
                 "cropped, turned or mirrored pictures are drawn whole and upright".to_owned(),
@@ -547,7 +625,7 @@ impl Painter<'_, '_, '_> {
             )),
             image => {
                 if image.is_some() {
-                    self.fonts.report_once(
+                    self.note(
                         ReportKind::FeatureUnsupported,
                         &Location::default(),
                         format!(
@@ -574,7 +652,7 @@ impl Painter<'_, '_, '_> {
                 match pdf::Image::from_bytes(data.bytes().clone()) {
                     Ok(image) => Some(image),
                     Err(err) => {
-                        self.fonts.report_once(
+                        self.note(
                             ReportKind::FeatureUnsupported,
                             &Location::default(),
                             format!("a picture is drawn as a grey box: {err}"),
@@ -584,7 +662,7 @@ impl Painter<'_, '_, '_> {
                 }
             }
             ImageFormat::Other(name) => {
-                self.fonts.report_once(
+                self.note(
                     ReportKind::FeatureUnsupported,
                     &Location::default(),
                     format!("pictures in {name} format are drawn as grey boxes"),
@@ -770,6 +848,116 @@ mod tests {
     use super::*;
     use crate::display::Cluster;
 
+    #[test]
+    fn a_layout_pass_that_numpages_makes_necessary_paints_a_pdf_of_its_own() {
+        use crate::ir::{
+            Block, Field, FieldKind, Inline, PageSetup, Paragraph, ParagraphProps, RunFonts,
+            RunStyle, Section,
+        };
+
+        // Issue #332: pages are painted as they are laid out, so the PDF of a pass whose
+        // page counts change is dropped. A `NUMPAGES` field on the first of three pages
+        // lays them out twice (the first time for one page), and the PDF has three.
+        let book = crate::testing::book(vec![crate::testing::minimal()]);
+        let mut document = Document::default();
+        let style = document
+            .add_run_style(RunStyle::default().with_fonts(RunFonts::new("Officewright Test")));
+        let page = |break_before: bool, inline: Inline| -> Block {
+            Paragraph::new(style)
+                .with_props(ParagraphProps::default().with_page_break_before(break_before))
+                .with_inlines([inline])
+                .into()
+        };
+        document.add_section(Section::new(PageSetup::new(PageSize::A4)).with_blocks([
+            page(false, Inline::Field(Field::new(FieldKind::NumPages, style))),
+            page(true, Inline::text("A", style)),
+            page(true, Inline::text("A", style)),
+        ]));
+        let rendered = render_pdf(&document, &book, &RenderOptions::new()).expect("a PDF");
+        assert_eq!(rendered.pdf().page_count(), 3);
+    }
+
+    #[test]
+    fn pages_are_painted_as_they_are_laid_out() {
+        use crate::ir::{
+            Inline, PageSetup, Paragraph, ParagraphProps, RunFonts, RunStyle, Section,
+        };
+
+        // Issue #332: render_pdf paints each page as soon as it is laid out. 50 paragraphs,
+        // each on a page of its own, never wait more than two at a time: the page handed on
+        // and the one just made.
+        let book = crate::testing::book(vec![crate::testing::minimal()]);
+        let mut document = Document::default();
+        let style = document
+            .add_run_style(RunStyle::default().with_fonts(RunFonts::new("Officewright Test")));
+        document.add_section(
+            Section::new(PageSetup::new(PageSize::A4)).with_blocks((0..50).map(|n| {
+                Paragraph::new(style)
+                    .with_props(ParagraphProps::default().with_page_break_before(n > 0))
+                    .with_inlines([Inline::text("A", style)])
+                    .into()
+            })),
+        );
+        let (rendered, waiting) = render(&document, &book, &RenderOptions::new()).expect("a PDF");
+        assert_eq!(rendered.pdf().page_count(), 50);
+        assert_eq!(waiting, 2);
+    }
+
+    #[test]
+    fn what_painting_reports_comes_after_what_the_layout_reports() {
+        use crate::ir::{
+            Block, Border, ImageData, ImageFormat, Inline, InlineObject, ObjectContent, PageSetup,
+            Paragraph, ParagraphBorders, ParagraphProps, Picture, RunFonts, RunStyle, Section,
+            Size,
+        };
+
+        // Issue #332: pages are painted as they are laid out, but what painting reports is
+        // kept with the PDF of its layout pass and added once the last pass is done, after
+        // what the layout reports, as when every page was painted at the end. A picture
+        // that cannot be decoded on page 1 is painted (and reported) while page 2 is laid
+        // out, and the layout reports the borders of page 2's paragraph after that.
+        let book = crate::testing::book(vec![crate::testing::minimal()]);
+        let mut document = Document::default();
+        let style = document
+            .add_run_style(RunStyle::default().with_fonts(RunFonts::new("Officewright Test")));
+        let image = document.add_image(ImageData::new(ImageFormat::Png, &b"\x89PNG"[..]));
+        let picture = Inline::Object(InlineObject::new(
+            ObjectContent::Picture(Picture::new(image)),
+            Size::new(Pt(10.0), Pt(10.0)),
+        ));
+        let bordered = ParagraphProps::default()
+            .with_page_break_before(true)
+            .with_borders(ParagraphBorders::default().with_top(Some(Border::default())));
+        document.add_section(
+            Section::new(PageSetup::new(PageSize::A4)).with_blocks([
+                Block::from(Paragraph::new(style).with_inlines([picture])),
+                Paragraph::new(style)
+                    .with_props(bordered)
+                    .with_inlines([Inline::text("A", style)])
+                    .into(),
+            ]),
+        );
+        let rendered = render_pdf(&document, &book, &RenderOptions::new()).expect("a PDF");
+        let messages: Vec<&str> = rendered
+            .report()
+            .entries()
+            .iter()
+            .map(|entry| entry.message())
+            .collect();
+        let at = |what: &str| {
+            messages
+                .iter()
+                .position(|message| message.starts_with(what))
+        };
+        let (Some(borders), Some(picture)) = (
+            at("paragraph borders are not drawn yet"),
+            at("a picture is drawn as a grey box"),
+        ) else {
+            panic!("{messages:?}");
+        };
+        assert!(borders < picture, "{messages:?}");
+    }
+
     fn line(style: LineStyle, from: (f64, f64), to: (f64, f64)) -> LineItem {
         LineItem {
             from: Point {
@@ -806,8 +994,13 @@ mod tests {
             pdf_fonts: HashMap::new(),
             images: HashMap::new(),
             pdf: pdf::Document::new(),
+            notes: Vec::new(),
         };
         let drawn = painter.drawn(Pt(100.0), Pt(200.0), items);
+        // What the painter notes goes into the report, as render_pdf puts it.
+        for (kind, location, message) in painter.notes {
+            fonts.report_once(kind, &location, message);
+        }
         (drawn, fonts.into_report())
     }
 
@@ -1171,6 +1364,7 @@ mod tests {
             pdf_fonts: HashMap::new(),
             images: HashMap::new(),
             pdf: pdf::Document::new(),
+            notes: Vec::new(),
         };
         let drawn = painter.drawn(Pt(100.0), Pt(200.0), items);
         (drawn, painter.paint(Pt(100.0), Pt(200.0), items))
@@ -1559,6 +1753,7 @@ mod tests {
             pdf_fonts: HashMap::new(),
             images: HashMap::new(),
             pdf: pdf::Document::new(),
+            notes: Vec::new(),
         };
         painter.pdf.set_compression(pdf::Compression::None);
         let page = Page {
