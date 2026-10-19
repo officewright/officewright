@@ -2,9 +2,11 @@
 //! tests/fonts, as the layout does: the first bytes describe up to four run styles (fonts,
 //! among them missing ones and the symbol fonts Symbol and Wingdings; bold, italic,
 //! capitals, small capitals, complex script, right to left, the East Asian hint, kerning;
-//! size), the rest are pieces of text, symbols, tabs, soft hyphens, and page and column
-//! breaks in those styles. The paragraph must keep what the layout relies on
-//! (`check_paragraph`), and break into lines that hold its text in order, in a column, with
+//! size), the rest are pieces of text, floating pictures (anchored to any reference, by
+//! any offset or alignment, behind or in front, in any place of the stack), symbols, tabs,
+//! soft hyphens, and page and column breaks in those styles. The paragraph must keep what
+//! the layout relies on (`check_paragraph`), and break into lines that hold its text in
+//! order, in a column, with
 //! a line spacing, an alignment, a hanging indent and tab stops the first bytes give too,
 //! and a list label when they say so (`check_lines`). Up to four copies of it, kept with
 //! the next, kept together, with or without widow control and a page break before as the
@@ -24,10 +26,13 @@ use officewright_core::Pt;
 use officewright_font::{FontBook, FontOrigin};
 use officewright_layout::fuzzing::{check_lines, check_pages, check_paragraph};
 use officewright_layout::ir::{
-    Alignment, Document, DocumentSettings, Field, FieldKind, FontHint, HeaderFooterSet, Indent,
-    Inline, Level, LevelAlignment, LevelTextPart, LineSpacing, ListDefinition, ListInstance,
-    ListItem, Margins, NumberFormat, PageSetup, Paragraph, ParagraphProps, RunFonts, RunStyle,
-    Section, SectionStart, Spacing, Suffix, TabKind, TabStop,
+    Alignment, AnchorHorizontalAlign, AnchorVerticalAlign, AnchoredObject, Document,
+    DocumentSettings, Field, FieldKind, FontHint, HeaderFooterSet, HorizontalAnchor,
+    HorizontalPlacement, HorizontalReference, ImageData, ImageFormat, ImageId, Indent, Inline,
+    Level, LevelAlignment, LevelTextPart, LineSpacing, ListDefinition, ListInstance, ListItem,
+    Margins, NumberFormat, ObjectContent, PageSetup, Paragraph, ParagraphProps, Picture, RunFonts,
+    RunStyle, Section, SectionStart, Size, Spacing, Suffix, TabKind, TabStop, VerticalAnchor,
+    VerticalPlacement, VerticalReference, Wrap,
 };
 
 const FAMILIES: [&str; 8] = [
@@ -40,6 +45,78 @@ const FAMILIES: [&str; 8] = [
     "No Such Font",
     "",
 ];
+
+/// A floating picture of `image` whose place, size, layer and wrapping `bytes` give.
+fn floating(image: ImageId, bytes: &[u8]) -> Inline {
+    let byte = |index: usize| bytes.get(index).copied().unwrap_or(0);
+    let offset = |index: usize| f64::from(i16::from_le_bytes([byte(index), byte(index + 1)])) / 4.0;
+    let across = [
+        HorizontalReference::Character,
+        HorizontalReference::Column,
+        HorizontalReference::InsideMargin,
+        HorizontalReference::LeftMargin,
+        HorizontalReference::Margin,
+        HorizontalReference::OutsideMargin,
+        HorizontalReference::Page,
+        HorizontalReference::RightMargin,
+    ][usize::from(byte(0)) % 8];
+    let down = [
+        VerticalReference::BottomMargin,
+        VerticalReference::InsideMargin,
+        VerticalReference::Line,
+        VerticalReference::Margin,
+        VerticalReference::OutsideMargin,
+        VerticalReference::Page,
+        VerticalReference::Paragraph,
+        VerticalReference::TopMargin,
+    ][usize::from(byte(1)) % 8];
+    let horizontal = if byte(6) & 1 != 0 {
+        HorizontalPlacement::Align(
+            [
+                AnchorHorizontalAlign::Left,
+                AnchorHorizontalAlign::Center,
+                AnchorHorizontalAlign::Right,
+                AnchorHorizontalAlign::Inside,
+                AnchorHorizontalAlign::Outside,
+            ][usize::from(byte(2)) % 5],
+        )
+    } else {
+        HorizontalPlacement::Offset(Pt(offset(2)))
+    };
+    let vertical = if byte(6) & 2 != 0 {
+        VerticalPlacement::Align(
+            [
+                AnchorVerticalAlign::Top,
+                AnchorVerticalAlign::Center,
+                AnchorVerticalAlign::Bottom,
+                AnchorVerticalAlign::Inside,
+                AnchorVerticalAlign::Outside,
+            ][usize::from(byte(4)) % 5],
+        )
+    } else {
+        VerticalPlacement::Offset(Pt(offset(4)))
+    };
+    let wrap = if byte(6) & 4 != 0 {
+        Wrap::Square
+    } else {
+        Wrap::None
+    };
+    Inline::anchored(
+        AnchoredObject::new(
+            ObjectContent::Picture(Picture::new(image)),
+            Size::new(Pt(f64::from(byte(7))), Pt(f64::from(byte(8)))),
+            HorizontalAnchor::default()
+                .with_relative_to(across)
+                .with_placement(horizontal),
+            VerticalAnchor::default()
+                .with_relative_to(down)
+                .with_placement(vertical),
+        )
+        .with_behind_text(byte(6) & 8 != 0)
+        .with_z_order(u32::from(byte(9)))
+        .with_wrap(wrap),
+    )
+}
 
 fn book() -> &'static FontBook {
     static BOOK: OnceLock<FontBook> = OnceLock::new();
@@ -105,6 +182,7 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     let rest = data.get(16..).unwrap_or_default();
+    let image = document.add_image(ImageData::new(ImageFormat::Png, &b"\x89PNG"[..]));
     let mut inlines = Vec::new();
     for piece in rest.split(|&byte| byte == 0xFF) {
         let Some((&head, body)) = piece.split_first() else {
@@ -113,6 +191,7 @@ fuzz_target!(|data: &[u8]| {
         let style = styles.get(usize::from(head & 3)).copied().unwrap_or(first);
         let text = String::from_utf8_lossy(body);
         inlines.push(match head >> 2 & 3 {
+            1 if head & 0x80 != 0 => floating(image, body),
             0 | 1 => Inline::text(text, style),
             2 => Inline::symbol(
                 FAMILIES[usize::from(head >> 4) % FAMILIES.len()],
