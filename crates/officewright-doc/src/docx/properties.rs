@@ -3,7 +3,7 @@
 
 use crate::model::Names;
 use crate::model::properties::{
-    ArtBorder, Border, BorderStyle, Color, ColorValue, FontHint, Highlight, Indentation,
+    ArtBorder, Border, BorderStyle, Color, ColorValue, FontHint, Frame, Highlight, Indentation,
     Justification, Language, Ligatures, LineSpacing, NumberingReference, ParagraphBorders,
     ParagraphProperties, RunFonts, RunProperties, Shading, ShadingPattern, Spacing, TabKind,
     TabLeader, TabStop, ThemeColor, ThemeFont, Toggle, Underline, UnderlineStyle, VerticalPosition,
@@ -102,6 +102,16 @@ pub(crate) fn run_properties(
                 properties.highlight = value(child, names, "val", Highlight::from_xml, report)
             }
             "shd" => properties.shading = Some(shading(child, names, report)),
+            // Only whether there is one, so that the layout's report can say that it is
+            // not drawn (#303).
+            "em" => properties.emphasis_mark = child.attribute(w, "val").map(|v| v != "none"),
+            // Only in a paragraph mark's properties.
+            "del" | "moveFrom" => properties.deleted = Some(true),
+            "bdr" => {
+                properties.border = child
+                    .attribute(w, "val")
+                    .map(|v| !matches!(v, "none" | "nil"));
+            }
             "lang" => {
                 properties.language = Language {
                     latin: child.attribute(w, "val").map(Into::into),
@@ -269,6 +279,14 @@ pub(crate) fn paragraph_properties(
             "pStyle" => properties.style = child.attribute(w, "val").map(Into::into),
             "numPr" => properties.numbering = Some(numbering(child, names, report)),
             "pBdr" => properties.borders = Some(borders(child, names, report)),
+            // Only what kind of frame, so that the layout's report can say that it is
+            // not placed (#303).
+            "framePr" => {
+                properties.frame = Some(match child.attribute(w, "dropCap") {
+                    Some("drop" | "margin") => Frame::DropCap,
+                    _ => Frame::Frame,
+                });
+            }
             "shd" => properties.shading = Some(shading(child, names, report)),
             "tabs" => properties.tabs = tabs(child, names, report),
             "spacing" => properties.spacing = Some(spacing(child, names, report)),
