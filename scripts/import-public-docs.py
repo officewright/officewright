@@ -17,6 +17,8 @@ listed SHA-256. The script then writes tests/corpus/business/<name>.docx with
     PNG: agency seals, emblems and logos must not be reused, so no picture of the original
     is kept;
   - the attached template and the document variables removed from the settings;
+    the properties and settings are then read again as XML, and a document is refused if
+    they still hold any of these in another spelling of the markup;
   - the text replacements listed for the document, which put fictional names and addresses
     in place of a real person's. A replacement names the text by a pattern and the text's
     SHA-256, so the personal data it removes is never written into this repository;
