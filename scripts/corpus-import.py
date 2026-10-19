@@ -456,12 +456,12 @@ def numbering_ids(
     """How the re-saved copy's list definitions and instances map onto the input's: Word
     numbers the definitions (w:abstractNumId) and sometimes the instances (w:numId) again when
     it saves, so they are matched by what stays. A definition by its w:nsid, else through the
-    instances that use it, else by its id. The instances of a definition by their ids when the
-    copy has the input's ids for it; else in order when it has as many, since Word keeps their
-    order when it numbers them again (contract-zh: 1, 2, 3, 4, 6 became 1 to 5); else each
-    among the input's left: first one with the same overrides, then the one with its id, then
-    the first in order. Then an instance left over by its id. Copy id -> input id; an id left
-    out has no counterpart."""
+    instances that use it, else by its id. The instances of a definition in the order of their
+    ids when the copy has as many (so by id when it kept them), since Word keeps that order
+    when it numbers them again (contract-zh: 1, 2, 3, 4, 6 became 1 to 5). Else first those
+    with the same overrides as one of the input's left, then the others, each taking the one
+    with its id, else the first in order. Then an instance left over by its id. Copy id ->
+    input id; an id left out has no counterpart."""
     if original is None or resaved is None:
         return {}, {}
 
@@ -510,22 +510,31 @@ def numbering_ids(
     for wanted in dict.fromkeys(abstract.get(i) for i in uses_after.values()):
         if wanted is None:
             continue
-        copies = [n for n, i in uses_after.items() if abstract.get(i) == wanted]
-        inputs = [n for n, i in uses_before.items() if i == wanted]
-        if set(copies) == set(inputs):
-            num.update((n, n) for n in copies)
-        elif len(copies) == len(inputs):
+        # In the order of their ids, which is the order Word numbers them again in.
+        copies = sorted((n for n, i in uses_after.items() if abstract.get(i) == wanted),
+                        key=id_order)
+        inputs = sorted((n for n, i in uses_before.items() if i == wanted), key=id_order)
+        if len(copies) == len(inputs):
             num.update(zip(copies, inputs))
         else:
-            for copy_num in copies:
-                left = [n for n in inputs if n not in num.values()]
-                alike = [n for n in left if set_before[n] == set_after[copy_num]] or left
-                if alike:
-                    num[copy_num] = copy_num if copy_num in alike else alike[0]
+            # Those with the same overrides first, so that another cannot take their match.
+            for exact in (True, False):
+                for copy_num in (n for n in copies if n not in num):
+                    left = [n for n in inputs if n not in num.values()]
+                    alike = [n for n in left if set_before[n] == set_after[copy_num]]
+                    if not exact:
+                        alike = alike or left
+                    if alike:
+                        num[copy_num] = copy_num if copy_num in alike else alike[0]
     for copy_num in uses_after:
         if copy_num not in num and copy_num in uses_before and copy_num not in num.values():
             num[copy_num] = copy_num
     return abstract, num
+
+
+def id_order(number: str) -> tuple[int, int | str]:
+    """A list id as a number where it is one, so that 10 comes after 9."""
+    return (0, int(number)) if number.isdigit() else (1, number)
 
 
 def copy_id(ids: dict[str, str] | None, number: str) -> str:
@@ -592,11 +601,13 @@ def style_changes(original: dict[str, bytes], resaved: dict[str, bytes]) -> list
     the input defines."""
     before_root, after_root = numbering_root(original), numbering_root(resaved)
     _, num = numbering_ids(before_root, after_root)
-    # Only the ids of the copy's instances are mapped: w:numId 0 means no list, an id no
-    # instance has names nothing, and without numbering.xml on either side ids stay as written.
+    # Only ids an instance of the copy or of the input has are mapped: w:numId 0 means no
+    # list, an id no instance has on either side names nothing, and without numbering.xml on
+    # both sides ids stay as written. An id only the input's instances have becomes "copy N".
     instance_ids = set()
     if before_root is not None and after_root is not None:
-        instance_ids = {n.get(f"{W}numId", "") for n in after_root.iter(f"{W}num")}
+        instance_ids = {n.get(f"{W}numId", "") for root in (before_root, after_root)
+                        for n in root.iter(f"{W}num")}
     after = {
         key: copy_id(num, value) if value in instance_ids and key[1].endswith("numPr/numId")
         else value
