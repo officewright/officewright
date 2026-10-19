@@ -2839,8 +2839,9 @@ mod tests {
 
         // A paragraph of two exact 20 pt lines at the body's top (20): on its second line,
         // after "A", one picture 5 pt right of its character and at its line's top (40),
-        // another at the margin and at its paragraph's top (20). Neither asks for
-        // wrapping, so the report says nothing of it.
+        // another at the margin and at its paragraph's top (20), a third, 10 pt high, at
+        // the bottom of its line (60, so at 50). None asks for wrapping, so the report says
+        // nothing of it.
         let mut document = Document::default();
         let style = document.add_run_style(
             RunStyle::default()
@@ -2863,6 +2864,17 @@ mod tests {
             ),
             (Y::Paragraph, VerticalPlacement::Offset(Pt(0.0))),
         );
+        let at_line_bottom = anchored_picture(
+            &mut document,
+            (
+                HorizontalReference::Margin,
+                HorizontalPlacement::Offset(Pt(0.0)),
+            ),
+            (
+                Y::Line,
+                VerticalPlacement::Align(crate::ir::AnchorVerticalAlign::Bottom),
+            ),
+        );
         assert!(matches!(&at_line, Inline::Anchored(object) if object.wrap() == Wrap::None));
         let paragraph = Paragraph::new(style)
             .with_props(spacing(0.0, 0.0))
@@ -2872,6 +2884,7 @@ mod tests {
                 Inline::text("A", style),
                 at_line,
                 at_paragraph,
+                at_line_bottom,
                 Inline::text("B", style),
             ]);
         document.add_section(Section::new(setup()).with_blocks(vec![paragraph.into()]));
@@ -2891,7 +2904,10 @@ mod tests {
             })
             .expect("the run of B");
         assert!(b > 20.0, "{b}");
-        assert_eq!(picture_places(&pages[0]), [(b + 5.0, 40.0), (20.0, 20.0)]);
+        assert_eq!(
+            picture_places(&pages[0]),
+            [(b + 5.0, 40.0), (20.0, 20.0), (20.0, 50.0)]
+        );
         assert!(
             !messages(&report)
                 .iter()
