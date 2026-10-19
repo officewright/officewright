@@ -670,7 +670,9 @@ enum OwStatus ow_font_book_add_bytes(struct OwFontBook *book,
  * of their own: `ow_pdf_font_resolve` finds them for a request of that family. Their own
  * names stay, and their own tables give their style. For a font a document embeds under a
  * name it does not carry itself, such as a subset Word embedded and renamed
- * `___WRD_EMBED_SUB_` and a number. An empty `family` adds no name.
+ * `___WRD_EMBED_SUB_` and a number. No face gets the name where one of the faces added has
+ * that family already, as a face of a collection may; a `family` that is empty or only
+ * white space, or longer than 512 bytes, adds no name.
  *
  * Fails with `OW_STATUS_MALFORMED` if the data is not a font or every face in it is
  * damaged, and with `OW_STATUS_INVALID_UTF8` if `family` is not UTF-8.
@@ -686,6 +688,27 @@ enum OwStatus ow_font_book_add_bytes_as(struct OwFontBook *book,
                                         size_t len,
                                         const char *family,
                                         size_t *out_added);
+
+/**
+ * Adds the font faces of the file at `path` (UTF-8, NUL-terminated) as
+ * `ow_font_book_add_file` does, and the faces added also answer to the family name
+ * `family`, as `ow_font_book_add_bytes_as` has them. A file the book has read already
+ * adds no faces, and so no name.
+ *
+ * Fails with `OW_STATUS_IO` if the file cannot be read, `OW_STATUS_MALFORMED` if it is
+ * not a font or every face in it is damaged, and `OW_STATUS_INVALID_UTF8` if `path` or
+ * `family` is not UTF-8.
+ *
+ * # Safety
+ *
+ * `book` must be NULL or a live handle not used by another thread during the call;
+ * `path` and `family` must be NULL or NUL-terminated strings; `out_added` must be NULL or
+ * valid for writing a `size_t`.
+ */
+enum OwStatus ow_font_book_add_file_as(struct OwFontBook *book,
+                                       const char *path,
+                                       const char *family,
+                                       size_t *out_added);
 
 /**
  * Returns in `*out_count` the number of font faces in the book.

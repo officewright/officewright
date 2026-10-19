@@ -890,7 +890,9 @@ pub unsafe extern "C" fn ow_font_book_add_bytes(
 /// of their own: `ow_pdf_font_resolve` finds them for a request of that family. Their own
 /// names stay, and their own tables give their style. For a font a document embeds under a
 /// name it does not carry itself, such as a subset Word embedded and renamed
-/// `___WRD_EMBED_SUB_` and a number. An empty `family` adds no name.
+/// `___WRD_EMBED_SUB_` and a number. No face gets the name where one of the faces added has
+/// that family already, as a face of a collection may; a `family` that is empty or only
+/// white space, or longer than 512 bytes, adds no name.
 ///
 /// Fails with `OW_STATUS_MALFORMED` if the data is not a font or every face in it is
 /// damaged, and with `OW_STATUS_INVALID_UTF8` if `family` is not UTF-8.
@@ -921,6 +923,43 @@ pub unsafe extern "C" fn ow_font_book_add_bytes_as(
         // SAFETY: not NULL, and the caller guarantees `len` readable bytes.
         let bytes = unsafe { std::slice::from_raw_parts(data, len) };
         let added = book.book.add_bytes_as(bytes, FontOrigin::User, family);
+        book.refresh();
+        // SAFETY: as above.
+        unsafe { put(out_added, "out_added", added?) }
+    })
+}
+
+/// Adds the font faces of the file at `path` (UTF-8, NUL-terminated) as
+/// `ow_font_book_add_file` does, and the faces added also answer to the family name
+/// `family`, as `ow_font_book_add_bytes_as` has them. A file the book has read already
+/// adds no faces, and so no name.
+///
+/// Fails with `OW_STATUS_IO` if the file cannot be read, `OW_STATUS_MALFORMED` if it is
+/// not a font or every face in it is damaged, and `OW_STATUS_INVALID_UTF8` if `path` or
+/// `family` is not UTF-8.
+///
+/// # Safety
+///
+/// `book` must be NULL or a live handle not used by another thread during the call;
+/// `path` and `family` must be NULL or NUL-terminated strings; `out_added` must be NULL or
+/// valid for writing a `size_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ow_font_book_add_file_as(
+    book: *mut OwFontBook,
+    path: *const c_char,
+    family: *const c_char,
+    out_added: *mut usize,
+) -> OwStatus {
+    guard(|| {
+        // SAFETY: the caller passes NULL or a pointer valid for writes.
+        unsafe { put(out_added, "out_added", 0) }?;
+        // SAFETY: the caller passes NULL or a live handle it does not share.
+        let book = unsafe { book_mut(book) }?;
+        // SAFETY: the caller passes NULL or NUL-terminated strings.
+        let path = unsafe { str_arg(path, "path") }?;
+        // SAFETY: as above.
+        let family = unsafe { str_arg(family, "family") }?;
+        let added = book.book.add_file_as(path, family);
         book.refresh();
         // SAFETY: as above.
         unsafe { put(out_added, "out_added", added?) }
@@ -3267,6 +3306,55 @@ mod tests {
         }
     }
 
+    /// A font collection of the single font `font`, its table offsets moved to where it
+    /// lies in the collection, and of a face whose offset is past the end of the data.
+    fn collection_with_a_damaged_face(font: &[u8]) -> Vec<u8> {
+        let at = 20u32;
+        let mut moved = font.to_vec();
+        let tables = usize::from(u16::from_be_bytes([font[4], font[5]]));
+        for i in 0..tables {
+            let field = 12 + 16 * i + 8;
+            let offset = u32::from_be_bytes(font[field..field + 4].try_into().unwrap());
+            moved[field..field + 4].copy_from_slice(&(offset + at).to_be_bytes());
+        }
+        let past = at + u32::try_from(moved.len()).unwrap() + 100;
+        let mut ttc = b"ttcf\x00\x01\x00\x00\x00\x00\x00\x02".to_vec();
+        ttc.extend_from_slice(&at.to_be_bytes());
+        ttc.extend_from_slice(&past.to_be_bytes());
+        ttc.extend_from_slice(&moved);
+        ttc
+    }
+
+    #[test]
+    fn lists_what_a_font_added_under_a_family_name_skipped() {
+        let book = new_book();
+        let ttc = collection_with_a_damaged_face(&fs::read(minimal_font_path()).unwrap());
+        let (mut added, mut count) = (7, 7);
+        let mut message = ptr::null();
+        // SAFETY: a live handle, a buffer of its length, a NUL-terminated string and valid
+        // out-pointers; the handle is freed once.
+        unsafe {
+            assert_eq!(
+                ow_font_book_add_bytes_as(
+                    book,
+                    ttc.as_ptr(),
+                    ttc.len(),
+                    c("Any").as_ptr(),
+                    &mut added
+                ),
+                OwStatus::Ok,
+                "{}",
+                last_error()
+            );
+            assert_eq!(added, 1);
+            assert_eq!(ow_font_book_skipped_count(book, &mut count), OwStatus::Ok);
+            assert_eq!(count, 1);
+            assert_eq!(ow_font_book_skipped(book, 0, &mut message), OwStatus::Ok);
+            assert!(!message.is_null());
+            ow_font_book_free(book);
+        }
+    }
+
     #[test]
     fn adds_a_font_under_another_family_name() {
         let book = new_book();
@@ -3312,10 +3400,32 @@ mod tests {
             );
             assert_eq!(added, 0);
         }
+        let path = c(minimal_font_path().to_str().unwrap());
+        // SAFETY: as above.
+        unsafe {
+            assert_eq!(
+                ow_font_book_add_file_as(book, path.as_ptr(), c("Plex File").as_ptr(), &mut added),
+                OwStatus::Ok
+            );
+            assert_eq!(added, 1);
+            assert_eq!(
+                ow_font_book_add_file_as(book, path.as_ptr(), ptr::null(), &mut added),
+                OwStatus::NullArgument
+            );
+            assert_eq!(
+                ow_font_book_add_file_as(
+                    book,
+                    c("no-such-font.ttf").as_ptr(),
+                    c("Any").as_ptr(),
+                    &mut added
+                ),
+                OwStatus::Io
+            );
+        }
         let resolver = new_resolver(book);
         // SAFETY: a live handle, freed once.
         unsafe { ow_font_book_free(book) };
-        for family in ["IBM Plex Serif Light", "Officewright Test"] {
+        for family in ["IBM Plex Serif Light", "Officewright Test", "Plex File"] {
             let (status, font) = resolve(resolver, family, 0);
             assert_eq!(status, OwStatus::Ok, "{family}: {}", last_error());
             // SAFETY: a live handle, freed once.

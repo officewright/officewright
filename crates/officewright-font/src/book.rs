@@ -437,7 +437,10 @@ impl FontBook {
     /// For a font a document embeds under a name it does not carry itself: Word renames
     /// the program of a font it embeds as a subset (`w:subsetted`) to `___WRD_EMBED_SUB_`
     /// and a number, while the document's text keeps naming the font, such as "IBM Plex
-    /// Serif Light". A `family` that is empty or only white space adds no name.
+    /// Serif Light". No face gets the name where one of the faces added has that family
+    /// already, as a face of a collection may: that face serves it, as with `add_bytes`.
+    /// A `family` that is empty or only white space, or longer than the 512 bytes the book
+    /// keeps of a name, adds no name.
     ///
     /// ```
     /// use officewright_font::{FontBook, FontOrigin, FontRequest, FontResolver, ResolutionKind};
@@ -465,15 +468,38 @@ impl FontBook {
     ) -> Result<usize> {
         let first = self.faces.len();
         let added = self.add_bytes(data, origin)?;
-        let key = name_key(family);
-        if !key.is_empty() {
-            for face in self.faces.get_mut(first..).unwrap_or_default() {
-                if !face.keys.families.contains(&key) {
-                    face.keys.families.push(key.clone());
-                }
-            }
-        }
+        self.add_family(first, family);
         Ok(added)
+    }
+
+    /// [`add_file`](Self::add_file), and the faces added also answer to `family`, as
+    /// [`add_bytes_as`](Self::add_bytes_as) has them. A file the book has already read adds
+    /// no faces, and so no name.
+    ///
+    /// # Errors
+    ///
+    /// Those of [`add_file`](Self::add_file).
+    pub fn add_file_as(&mut self, path: impl AsRef<Path>, family: &str) -> Result<usize> {
+        let first = self.faces.len();
+        let added = self.add_file(path)?;
+        self.add_family(first, family);
+        Ok(added)
+    }
+
+    /// Gives the faces from `first` on the family name `family`, unless one of them has it
+    /// already or the name is empty or too long to keep.
+    fn add_family(&mut self, first: usize, family: &str) {
+        let key = name_key(family);
+        if key.is_empty() || key.len() > crate::face::MAX_NAME_BYTES {
+            return;
+        }
+        let faces = self.faces.get_mut(first..).unwrap_or_default();
+        if faces.iter().any(|face| face.keys.families.contains(&key)) {
+            return;
+        }
+        for face in faces {
+            face.keys.families.push(key.clone());
+        }
     }
 
     /// The faces whose character map has a glyph for `ch`, in the order of
@@ -949,6 +975,59 @@ mod tests {
             Err(Error::NotAFont { .. })
         ));
         assert!(book.is_empty());
+    }
+
+    #[test]
+    fn a_family_name_too_long_to_keep_or_one_a_face_has_adds_none() {
+        let renamed = TestFont::new("___WRD_EMBED_SUB_7").build();
+        // 512 bytes is the most the book keeps of a name.
+        for (len, kept) in [(512, true), (513, false)] {
+            let mut book = FontBook::new();
+            book.add_bytes_as(renamed.clone(), FontOrigin::Document, &"a".repeat(len))
+                .unwrap();
+            assert_eq!(
+                book.faces[0].keys.families.len(),
+                1 + usize::from(kept),
+                "{len}"
+            );
+        }
+        // A collection of Alpha and Beta added under "Beta Test": Beta serves it, as it
+        // would added plainly, and Alpha gets no name.
+        let ttc = testing::collection(&[
+            TestFont::new("Alpha Test").build(),
+            TestFont::new("Beta Test").build(),
+        ]);
+        let mut book = FontBook::new();
+        book.add_bytes_as(ttc, FontOrigin::Document, "Beta Test")
+            .unwrap();
+        assert_eq!(
+            resolved(&book, FontRequest::new("Beta Test")).0.as_deref(),
+            Some("Beta Test")
+        );
+        assert_eq!(book.faces[0].keys.families, ["alpha test"]);
+    }
+
+    #[test]
+    fn a_font_file_added_under_a_family_name_answers_to_it() {
+        let dir = TempDir::new("add-file-as");
+        let path = dir.0.join("renamed.ttf");
+        fs::write(&path, TestFont::new("___WRD_EMBED_SUB_9").build()).unwrap();
+        let mut book = FontBook::new();
+        assert_eq!(book.add_file_as(&path, "Plex Test").unwrap(), 1);
+        assert_eq!(
+            resolved(&book, FontRequest::new("Plex Test")),
+            (Some("___WRD_EMBED_SUB_9".to_owned()), ResolutionKind::Exact)
+        );
+        // A file the book has read already adds no faces, and so no name.
+        assert_eq!(book.add_file_as(&path, "Other Test").unwrap(), 0);
+        assert_eq!(
+            resolved(&book, FontRequest::new("Other Test")).1,
+            ResolutionKind::Missing
+        );
+        assert!(matches!(
+            book.add_file_as(dir.0.join("missing.ttf"), "Any"),
+            Err(Error::Read { .. })
+        ));
     }
 
     #[test]
