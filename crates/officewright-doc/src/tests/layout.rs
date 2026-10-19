@@ -746,6 +746,51 @@ fn lists_word_s_text_effects_once_but_no_value_that_changes_nothing() {
     };
     assert!(themed("accent1").is_empty());
     assert_eq!(themed("accent2"), [fill]);
+    // Each colour of the scheme is its theme colour, text and background through the
+    // document's mapping, which here swaps them: a fill of each over text of its own theme
+    // colour changes nothing, and one over another does.
+    let mapping = (
+        "settings",
+        "settings.xml",
+        format!(
+            r#"<w:settings xmlns:w="{W}"><w:clrSchemeMapping w:bg1="dark1" w:t1="light1" w:bg2="dark2" w:t2="light2" w:accent1="accent1" w:accent2="accent2" w:accent3="accent3" w:accent4="accent4" w:accent5="accent5" w:accent6="accent6" w:hyperlink="hyperlink" w:followedHyperlink="followedHyperlink"/></w:settings>"#
+        ),
+    );
+    let mapped = |text: &str, scheme: &str| -> Vec<String> {
+        let body = format!(
+            r#"<w:p><w:r><w:rPr xmlns:w14="{W14}"><w:color w:val="000000" w:themeColor="{text}"/><w14:textFill><w14:solidFill><w14:schemeClr w14:val="{scheme}"/></w14:solidFill></w14:textFill></w:rPr><w:t>x</w:t></w:r></w:p>"#
+        );
+        translate(&with_parts(&body, &[theme.clone(), mapping.clone()]))
+            .left_out()
+            .iter()
+            .map(|entry| entry.message().to_owned())
+            .collect()
+    };
+    let pairs = [
+        ("background1", "bg1"),
+        ("text1", "tx1"),
+        ("background2", "bg2"),
+        ("text2", "tx2"),
+        ("dark1", "dk1"),
+        ("light1", "lt1"),
+        ("dark2", "dk2"),
+        ("light2", "lt2"),
+        ("accent3", "accent3"),
+        ("accent4", "accent4"),
+        ("accent5", "accent5"),
+        ("accent6", "accent6"),
+        ("hyperlink", "hlink"),
+        ("followedHyperlink", "folHlink"),
+    ];
+    for (text, scheme) in pairs {
+        assert!(mapped(text, scheme).is_empty(), "{scheme} over {text}");
+    }
+    // tx1 is light 1 through the mapping, dk1 dark 1 whatever the mapping says.
+    assert_eq!(mapped("text1", "dk1"), [fill]);
+    assert_eq!(mapped("dark1", "tx1"), [fill]);
+    // A gradient is listed over text of any colour, black too.
+    let gradient = r#"<w:color w:val="000000"/><w14:textFill><w14:gradFill><w14:gsLst><w14:gs w14:pos="0"><w14:srgbClr w14:val="000000"/></w14:gs></w14:gsLst></w14:gradFill></w14:textFill>"#;
+    assert_eq!(messages(gradient, "<w:t>x</w:t>"), [fill]);
 }
 
 #[test]
