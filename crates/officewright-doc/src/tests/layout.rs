@@ -848,6 +848,8 @@ fn lists_word_s_figure_forms_and_stylistic_sets_with_open_type_features_on() {
         r#"<w14:numSpacing w14:val="default"/>"#,
         "<w14:stylisticSets/>",
         r#"<w14:stylisticSets><w14:styleSet w14:id="3" w14:val="0"/></w14:stylisticSets>"#,
+        // Only a w14:styleSet names a set.
+        r#"<w14:stylisticSets><w14:other w14:id="5"/></w14:stylisticSets>"#,
     ] {
         assert!(messages(r_pr, true).is_empty(), "{r_pr}");
     }
