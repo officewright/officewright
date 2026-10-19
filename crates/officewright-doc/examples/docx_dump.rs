@@ -105,10 +105,16 @@ fn dump(document: &Document, runs: bool) {
         } else {
             "none written, Word 2007's"
         },
-        settings
-            .compatibility_options()
-            .filter(|&(_, on)| on)
-            .count()
+        // Each option once, as the last time it is written sets it (#118).
+        {
+            let mut on = Vec::new();
+            for (option, _) in settings.compatibility_options() {
+                if !on.contains(&option) && settings.compatibility_option(option) == Some(true) {
+                    on.push(option);
+                }
+            }
+            on.len()
+        }
     );
     for (n, section) in document.sections().enumerate() {
         let properties = section.properties();
