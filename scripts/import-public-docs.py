@@ -864,19 +864,22 @@ def part_roles(parts: dict[str, bytes]) -> dict[str, set[str]]:
         add(name, next((r for folder, r in ROLE_FOLDERS.items() if key.startswith(folder)), None))
     for types_name in (name for name in parts if name.lower() == "[content_types].xml"):
         types = package_xml(types_name, parts[types_name], f"{CONTENT_TYPES_NS}Types")
+        overridden = {types_name}  # the content types stream is no part (Part 2, §10.1.2)
         for element in types.iter(f"{CONTENT_TYPES_NS}Override"):
             role = ROLE_CONTENT_TYPES.get(media_type(element.get("ContentType", "")))
             part_name = element.get("PartName", "").strip(URI_SPACE).lstrip("/")
             held = by_key.get(part_key(part_name))
             if held:
+                overridden.add(held)
                 add(held, role)
+        # A Default gives its type only to the parts no Override types.
         for element in types.iter(f"{CONTENT_TYPES_NS}Default"):
             role = ROLE_CONTENT_TYPES.get(media_type(element.get("ContentType", "")))
             # Extensions compare as part names do (part_key).
             extension = part_key(element.get("Extension", ""))
             if role and extension:
                 for key, name in by_key.items():
-                    if key.endswith("." + extension):
+                    if key.endswith("." + extension) and name not in overridden:
                         add(name, role)
     for rels in (name for name in parts if name.lower().endswith(".rels")):
         root = package_xml(rels, parts[rels], f"{PACKAGE_RELS_NS}Relationships")
@@ -968,8 +971,8 @@ def edit_relationships(rels_part: str, xml: str, dropped: set[str], renamed: dic
 def edit_content_types(xml: str, dropped: set[str], renamed: dict[str, str]) -> str:
     gone = {part_key(part) for part in dropped | set(renamed)}
     xml = re.sub(
-        r'<Override\b[^>]*PartName="([^"]*)"[^>]*/>',
-        lambda m: "" if part_key(m.group(1).lstrip("/")) in gone else m.group(0),
+        r"""<Override\b[^>]*PartName=(["'])(.*?)\1[^>]*/>""",
+        lambda m: "" if part_key(m.group(2).strip(URI_SPACE).lstrip("/")) in gone else m.group(0),
         xml,
     )
     if not re.search(r'<Default\b[^>]*Extension="png"', xml, re.I):

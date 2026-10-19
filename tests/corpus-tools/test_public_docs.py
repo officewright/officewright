@@ -802,11 +802,13 @@ class Cleaning(unittest.TestCase):
                                   if "binary part" not in p], [])
 
     def test_a_part_with_several_roles_gets_the_cleaning_of_each(self):
-        # The core properties named a second time as extended properties or settings keep
-        # their core cleaning (review of #378).
-        for kind, rels in ((f"{REL}/extended-properties", "_rels/.rels"),
-                           (f"{REL}/settings", "word/_rels/document.xml.rels")):
-            target = "docProps/core.xml" if rels == "_rels/.rels" else "../docProps/core.xml"
+        # The core properties named a second time as extended properties, settings or both
+        # get the cleaning of each role (review of #378).
+        extended = (f"{REL}/extended-properties", "docProps/core.xml", "")
+        settings = (f"{REL}/settings", "../docProps/core.xml", "")
+        for kind, more_root, more_body in (("extended", [extended], []),
+                                           ("settings", [], [settings]),
+                                           ("both", [extended], [settings])):
             root = [(f"{REL}/officeDocument", "word/document.xml", ""),
                     (f"{PKG}/metadata/core-properties", "docProps/core.xml", ""),
                     (f"{REL}/extended-properties", "docProps/app.xml", "")]
@@ -815,13 +817,15 @@ class Cleaning(unittest.TestCase):
                     (f"{REL}/settings", "settings.xml", ""),
                     (f"{REL}/header", "header1.xml", ""),
                     (f"{REL}/hyperlink", "mailto:jane.roe@agency.gov", ' TargetMode="External"')]
-            (root if rels == "_rels/.rels" else body).append((kind, target, ""))
+            root += more_root
+            body += more_body
             data = package(**{"_rels/.rels": relationships(*root),
                               "word/_rels/document.xml.rels": relationships(*body),
                               # Read as extended properties too, so their people go as well.
                               "docProps/core.xml": "<cp:coreProperties xmlns:cp='c' "
                               "xmlns:dc='d'><dc:creator>Jane Roe</dc:creator><cp:lastModifiedBy>"
                               "jroe</cp:lastModifiedBy><Company>Roe Consulting</Company>"
+                              "<w:docVars><w:docVar w:val='Jane Roe'/></w:docVars>"
                               "</cp:coreProperties>",
                               "docProps/custom.xml": None, "docProps/thumbnail.jpeg": None,
                               "customXml/item1.xml": None, "customXml/itemProps1.xml": None,
@@ -830,12 +834,16 @@ class Cleaning(unittest.TestCase):
                 found = public.problems(data)
                 self.assertIn("docProps/core.xml: dc:creator is not empty", found)
                 self.assertIn("docProps/core.xml: cp:lastModifiedBy is not empty", found)
+                if more_root:
+                    self.assertIn("docProps/core.xml: Company is not empty", found)
                 cleaned = public.clean(data, DOC)
                 core = parts_of(cleaned.data)["docProps/core.xml"].decode()
                 self.assertIn("<dc:creator></dc:creator>", core)
                 self.assertIn("<cp:lastModifiedBy></cp:lastModifiedBy>", core)
-                if kind.endswith("extended-properties"):
+                if more_root:
                     self.assertIn("<Company></Company>", core)
+                if more_body:
+                    self.assertNotIn("docVars", core)
                 self.assertEqual(public.problems(cleaned.data), [])
 
     def test_relationships_to_dropped_and_renamed_parts_go_in_any_spelling(self):
@@ -870,6 +878,25 @@ class Cleaning(unittest.TestCase):
         self.assertNotIn("customXml", rels)
         for name in ("data/item1.xml", "data/p.xml", "data/_rels/Item1.xml.rels"):
             self.assertNotIn(name, parts)
+
+    def test_a_default_content_type_gives_no_role_to_overridden_parts(self):
+        # A Default types only the parts no Override types, and the content types stream is
+        # no part (ECMA-376 Part 2, §10.1.2).
+        custom = "application/vnd.openxmlformats-officedocument.custom-properties+xml"
+        types = parts_of(package())["[Content_Types].xml"].decode().replace(
+            '<Default Extension="xml" ContentType="application/xml"/>',
+            f'<Default Extension="xml" ContentType="{custom}"/>')
+        parts = parts_of(public.clean(package(**{"[Content_Types].xml": types}), DOC).data)
+        self.assertIn("word/document.xml", parts)
+        self.assertIn("[Content_Types].xml", parts)
+        self.assertNotIn("docProps/core.xml", parts)
+
+    def test_overrides_of_dropped_parts_go_in_any_quoting(self):
+        types = parts_of(package())["[Content_Types].xml"].decode().replace(
+            '<Override PartName="/docProps/custom.xml" ',
+            "<Override PartName=' /docProps/custom.xml ' ")
+        cleaned = parts_of(public.clean(package(**{"[Content_Types].xml": types}), DOC).data)
+        self.assertNotIn("custom.xml", cleaned["[Content_Types].xml"].decode())
 
     def test_an_external_relationship_gives_no_role(self):
         data = package(**{"word/_rels/header1.xml.rels": relationships(
