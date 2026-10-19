@@ -731,10 +731,11 @@ def embedded_parts(parts: dict[str, bytes]) -> list[str]:
                 continue
             # A part the package lacks is named only when its name is plainly a part name; any
             # other target is refused by external_link_problems, which does not name it.
-            target = element.get("Target", "")
+            target = element.get("Target", "").strip(URI_SPACE)
             held = internal_part(index, rels, target)
-            name = held or part_target(rels, target.strip(URI_SPACE))
-            if held or PLAIN_PART_NAME.match(name):
+            name = held or part_target(rels, target)
+            if held or (part_reference(urllib.parse.unquote(target))
+                        and PLAIN_PART_NAME.match(name)):
                 add(name)
     return sorted(found)
 

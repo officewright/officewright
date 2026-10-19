@@ -302,7 +302,7 @@ class Cleaning(unittest.TestCase):
             "file: climbing back": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
             'Target="file:///D:/private/../../../settings.xml" TargetMode="Internal"/>',
             "a server climbing back": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
-            'Target="file://fs01/private/../../../../settings.xml"/>',
+            'Target="file://fs01/private/../../../settings.xml" TargetMode="Internal"/>',
             "backslashes climbing back": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
             'Target="\\\\fs01\\private\\memo.docx/../settings.xml"/>',
             "a fragment climbing back": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
@@ -315,8 +315,6 @@ class Cleaning(unittest.TestCase):
             # user's, a server named like a folder, an empty segment.
             "folders climbed back from": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
             'Target="Users/private/../../settings.xml"/>',
-            "a server named like a folder": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
-            'Target="//word/settings.xml?private"/>',
             "two slashes before a part": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
             'Target="//word/settings.xml"/>',
             "an empty segment": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
@@ -387,7 +385,8 @@ class Cleaning(unittest.TestCase):
                 self.assertIn(f"word/_rels/header1.xml.rels {message.strip()}",
                               public.problems(data))
         # An embedded object at a local path is refused as a link, without its path.
-        for target in ("D:/private/x.bin", "/D:/private/x.bin", "%5C%5Cserver%5Cprivate.bin"):
+        for target in ("D:/private/x.bin", "/D:/private/x.bin", "%5C%5Cserver%5Cprivate.bin",
+                       "C:/../private/x.bin"):
             rels = (f'<?xml version="1.0"?><Relationships xmlns="{PKG}"><Relationship Id="rId9" '
                     f'Type="{REL}/oleObject" Target="{target}"/></Relationships>')
             with self.subTest(target), self.assertRaises(public.Refused) as caught:
@@ -421,6 +420,17 @@ class Cleaning(unittest.TestCase):
         rels = (f'<?xml version="1.0"?><Relationships xmlns="{PKG}">'
                 f"<Relationship Id='rId8' Type='{REL}/hyperlink' Target='HTTPS://example.gov/'"
                 " TargetMode='External'/></Relationships>")
+        # Each character a part reference may not have is refused even where the package
+        # holds a part of that name, so the path is refused, not kept.
+        for name in ("D:/private/report.xml", "private\\report.xml", "report.xml?private",
+                     "report.xml#private"):
+            target = name.replace("?", "%3F").replace("#", "%23")
+            held = (f'<?xml version="1.0"?><Relationships xmlns="{PKG}"><Relationship Id="rId9" '
+                    f'Type="{REL}/footer" Target="{target}"/></Relationships>')
+            data = package(**{"word/_rels/header1.xml.rels": held,
+                              f"word/{name}": "<w:ftr xmlns:w='w'/>"})
+            with self.subTest(name):
+                self.assertIn(f"word/_rels/header1.xml.rels {LINK}", public.problems(data))
         # A part whose name the package percent-encodes, named decoded.
         footer = (f'<?xml version="1.0"?><Relationships xmlns="{PKG}"><Relationship Id="rId1" '
                   f'Type="{REL}/footer" Target="my part.xml"/></Relationships>')
