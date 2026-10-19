@@ -945,28 +945,28 @@ REFUSED_FIELDS = {"DATABASE", "DDE", "DDEAUTO", "FILENAME", "TEMPLATE", "AUTHOR"
 # hyperlink base or a custom property: only these, which hold none, are kept.
 SAFE_PROPERTIES = {"title", "subject", "category", "pages", "words", "characters",
                    "characterswithspaces", "lines", "paragraphs", "createdate", "createtime",
-                   "savedate", "printdate", "revisionnumber", "editingtime", "totaleditingtime",
-                   "numpages", "numwords", "numchars", "bytes"}
+                   "savedate", "printdate", "revisionnumber", "revnum", "editingtime",
+                   "edittime", "totaleditingtime", "numpages", "numwords", "numchars", "bytes",
+                   "filesize", "lastsavedtime", "lastprinted"}
 PROPERTY_FIELDS = {"DOCPROPERTY", "INFO"}
 # The names a refusal may give: a field's name, never letters a path begins with.
 KNOWN_FIELDS = FILE_FIELDS | REFUSED_FIELDS | PROPERTY_FIELDS | {"QUOTE", "IF", "MERGEFIELD"}
 WEB_ADDRESS = re.compile(r"(?i)(https?://|mailto:)")
 SCHEME = re.compile(r"(?i)[a-z][a-z0-9+.-]*:")
-# A drive, a server path (two slashes or backslashes in any mix) or a file URL, anywhere in
-# an instruction, inside a web address too. Backslashes are matched as written, single or
-# doubled, so no escaping hides a path. "//" is a server path too (or another scheme's),
-# unless it follows an http: or https: that begins a word (names_place).
-LOCAL_PLACE = re.compile(r"(?i)(?<![a-z0-9])[a-z]:[\\/]|\\\\|\\/|/\\|(?<![a-z0-9])file:")
-WEB_SCHEME_BEFORE = re.compile(r"(?i)(?:^|[^a-z0-9+._-])https?:$")
+# A drive, a server path (two slashes or backslashes in any mix, "//" unless it follows an
+# http: or https: that begins a word, which also catches another scheme's "//") or a file
+# URL, anywhere in an instruction, inside a web address too. Backslashes are matched as
+# written, single or doubled, so no escaping hides a path. One pass, in time linear in the
+# instruction's length.
+LOCAL_PLACE = re.compile(
+    r"(?i)(?<![a-z0-9])[a-z]:[\\/]|\\\\|\\/|/\\|(?<![a-z0-9])file:"
+    r"|(?<!(?<![a-z0-9+._-])https:)(?<!(?<![a-z0-9+._-])http:)//"
+)
 
 
 def names_place(text: str) -> bool:
-    """Whether text names a local or network place or another scheme (LOCAL_PLACE, or a
-    "//" that does not follow an http: or https: beginning a word)."""
-    return bool(LOCAL_PLACE.search(text)) or any(
-        not WEB_SCHEME_BEFORE.search(text[: match.start()])
-        for match in re.finditer("//", text)
-    )
+    """Whether text names a local or network place or another scheme (LOCAL_PLACE)."""
+    return bool(LOCAL_PLACE.search(text))
 
 
 WORDML_NAMESPACES = ("http://schemas.openxmlformats.org/wordprocessingml/2006/main",
@@ -1037,19 +1037,34 @@ class FieldMarkup(Exception):
     """A field that crosses the edge of a Markup Compatibility branch or of foreign markup."""
 
 
+class _FieldScope:
+    """The fields open in one part of a part's tree: the part itself, or one mc:Choice,
+    mc:Fallback or foreign element. fields holds each open field's instruction while it is
+    being read and None after its separate or end; open_instructions the instructions not
+    yet complete, innermost last, so that a nested result finds its own in constant time."""
+
+    def __init__(self) -> None:
+        self.fields: list[list[str] | None] = []
+        self.open_instructions: list[list[str]] = []
+
+
 def field_instructions(name: str, data: bytes) -> list[str]:
     """The instructions of the fields of an XML part, read as XML: the text of w:instrText
-    and w:delInstrText joined across runs from each field's
-    begin to its separate or end, nested fields apart, w:fldSimple's w:instr, and as an
-    instruction of its own any instruction text outside a field's instruction.
+    and w:delInstrText joined across runs from each field's begin to its separate or end,
+    nested fields apart, with the result of a field nested in an instruction (a complex
+    field or w:fldSimple, its w:t and w:delText) read into that instruction, as Word reads
+    {INCLUDEPICTURE "{MERGEFIELD Photo}"}; w:fldSimple's w:instr; and as an instruction of
+    its own any instruction text outside a field's instruction, and any w:t written straight
+    into an instruction.
 
     Word takes one branch of mc:AlternateContent and drops elements of ignorable namespaces,
     so a field mark there could end a field for this reading that Word goes on reading. So
     the fields inside an mc:Choice, an mc:Fallback or any element outside WordprocessingML
-    must begin and end inside it, as Word's own text boxes hold them; a part with a field
-    across such an edge, with an element inside an instruction, or with w:fldData (custom
-    field data), is refused. Raises Unreadable
-    when the part is not well-formed or declares a document type, and FieldMarkup."""
+    must begin and end inside it, as Word's own text boxes hold them, and no text inside one
+    may go on an instruction begun outside it. A part with a field across such an edge,
+    with such text, with an element inside an instruction, or with w:fldData (custom field
+    data), is refused. Raises Unreadable when the part is not well-formed or declares a
+    document type, or nests too deeply, and FieldMarkup."""
     builder = _Builder()
     parser = ElementTree.XMLParser(target=builder)
     try:
@@ -1061,34 +1076,43 @@ def field_instructions(name: str, data: bytes) -> list[str]:
         raise Unreadable(f"{name} declares a document type, which OPC forbids")
     found: list[str] = []
 
-    def walk(element: ElementTree.Element, fields: list[list[str] | None],
-             isolated: bool) -> None:
+    def walk(element: ElementTree.Element, scope: _FieldScope, isolated: bool,
+             outer_open: bool, in_simple: bool) -> None:
+        # isolated: inside an mc:Choice, mc:Fallback or foreign element; outer_open: an
+        # instruction was open outside the innermost such element; in_simple: inside a
+        # w:fldSimple, whose text is a nested result.
         namespace, _, local = element.tag.rpartition("}")
         namespace = namespace.lstrip("{")
+        fields = scope.fields
         if namespace == MC_NAMESPACE and local in ("Choice", "Fallback") or (
             namespace not in (*WORDML_NAMESPACES, MC_NAMESPACE) and element is not root
         ):
-            inner: list[list[str] | None] = []
+            inner = _FieldScope()
+            opened = outer_open or bool(scope.open_instructions)
             for child in element:
-                walk(child, inner, True)
-            if inner:
+                walk(child, inner, True, opened, in_simple)
+            if inner.fields:
                 raise FieldMarkup(name)
             return
         w = "{" + namespace + "}" if namespace else ""
         if local == "fldSimple":
             found.append(element.get(f"{w}instr", ""))
+            in_simple = True
         elif local == "fldData":
             raise FieldMarkup(name)
         elif local == "fldChar":
             kind = element.get(f"{w}fldCharType", "")
             if kind == "begin":
-                fields.append([])
+                instruction: list[str] = []
+                fields.append(instruction)
+                scope.open_instructions.append(instruction)
             elif kind in ("separate", "end"):
                 if not fields:
                     raise FieldMarkup(name)
                 if fields[-1] is not None:
                     found.append("".join(fields[-1]))
                     fields[-1] = None
+                    scope.open_instructions.pop()
                 if kind == "end":
                     fields.pop()
         elif local in ("instrText", "delInstrText"):
@@ -1106,22 +1130,27 @@ def field_instructions(name: str, data: bytes) -> list[str]:
                 found.append(text)
             return
         elif local in ("t", "delText"):
-            # Text while an instruction is open is the result of a field nested in it (a
-            # complex field or w:fldSimple), which Word reads as part of that instruction:
-            # {INCLUDEPICTURE "{MERGEFIELD Photo}"}.
-            open_instructions = [text for text in fields if text is not None]
-            if open_instructions:
-                open_instructions[-1].append(element.text or "")
+            text = element.text or ""
+            if not in_simple and fields and fields[-1] is not None:
+                # Text written straight into an instruction: read on its own, so that it
+                # can change no field's name.
+                found.append(text)
+            elif scope.open_instructions:
+                # The result of a field nested in an open instruction.
+                scope.open_instructions[-1].append(text)
+            elif outer_open:
+                # Text in a branch, read by Word into an instruction begun outside it.
+                raise FieldMarkup(name)
         for child in element:
-            walk(child, fields, isolated)
+            walk(child, scope, isolated, outer_open, in_simple)
 
-    fields: list[list[str] | None] = []
+    scope = _FieldScope()
     try:
-        walk(root, fields, False)
+        walk(root, scope, False, False, False)
     except RecursionError as error:
         raise Unreadable(f"{name} nests its elements too deeply to be read") from error
     # A field left open at the end of the part still has an instruction.
-    found += ["".join(text) for text in fields if text is not None]
+    found += ["".join(text) for text in scope.fields if text is not None]
     return found
 
 

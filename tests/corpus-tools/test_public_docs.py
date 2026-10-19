@@ -1282,6 +1282,27 @@ class Cleaning(unittest.TestCase):
             # The result of a field nested in an instruction is part of that instruction.
             "a nested result with a drive": nested_result("D:\\photos\\x.jpg"),
             "a nested relative result": nested_result("photos/x.jpg"),
+            "a nested deleted result": nested_result("photos/x.jpg").replace(
+                "<w:t>photos", "<w:delText>photos").replace("x.jpg</w:t>", "x.jpg</w:delText>"),
+            # The innermost open instruction takes the result: a QUOTE around it loads nothing.
+            "a nested result in the innermost instruction": (
+                f"<w:document xmlns:w='{w}'><w:body><w:p>"
+                "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                '<w:r><w:instrText>QUOTE "</w:instrText></w:r>'
+                + nested_result("photos/x.jpg").split("<w:p>", 1)[1].split("</w:p>", 1)[0]
+                + '<w:r><w:instrText>"</w:instrText></w:r>'
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:p></w:body></w:document>"),
+            # Text written straight into an instruction is read on its own, so that it can
+            # change no field's name.
+            "text inside an instruction": (
+                f"<w:document xmlns:w='{w}'><w:body><w:p>"
+                "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                "<w:r><w:instrText>INC</w:instrText></w:r><w:r><w:t>X</w:t></w:r>"
+                '<w:r><w:instrText>LUDETEXT "..\\drafts\\x.docx"</w:instrText></w:r>'
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:p></w:body></w:document>"),
+            "docproperty with an allowed second argument": field("DOCPROPERTY Author Title"),
+            "a bare info": field("INFO"),
+            **{f"a web scheme after {c}": field(f'QUOTE "a{c}https://srv/x"') for c in "+.-"},
             "a nested fldSimple result": (
                 f"<w:document xmlns:w='{w}'><w:body><w:p>"
                 "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
@@ -1344,6 +1365,15 @@ class Cleaning(unittest.TestCase):
         separate = "<w:fldChar w:fldCharType='separate'/>"
         end = "<w:fldChar w:fldCharType='end'/>"
 
+        def nested_in_branch(middle):
+            return (f"<w:document xmlns:w='{w}' xmlns:mc='{mc}' xmlns:zz='urn:zz' "
+                    "xmlns:w14='urn:w14' mc:Ignorable='zz'><w:body><w:p>"
+                    "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                    '<w:r><w:instrText>INCLUDEPICTURE "</w:instrText></w:r>' + middle
+                    + '<w:r><w:instrText>" \\d</w:instrText></w:r>'
+                    "<w:r><w:fldChar w:fldCharType='separate'/></w:r>"
+                    "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:p></w:body></w:document>")
+
         def piece(middle):
             return (f"<w:document xmlns:w='{w}' xmlns:mc='{mc}' xmlns:zz='urn:zz' "
                     "xmlns:w14='urn:w14' mc:Ignorable='zz'><w:body><w:p>"
@@ -1371,6 +1401,56 @@ class Cleaning(unittest.TestCase):
                 "</mc:AlternateContent></w:r>"),
             "an instruction piece in foreign markup": piece(
                 "<w:r><zz:x><w:instrText>:\\private\\x.docx</w:instrText></zz:x></w:r>"),
+            # The same with a run between the branch and the text, as a branch around runs
+            # has it.
+            "a run with an instruction piece in a Fallback": piece(
+                "<mc:AlternateContent><mc:Choice Requires='zz'/><mc:Fallback><w:r><w:instrText>"
+                ":\\private\\x.docx</w:instrText></w:r></mc:Fallback></mc:AlternateContent>"),
+            "a run with an instruction piece in a w14 Choice": piece(
+                "<mc:AlternateContent><mc:Choice Requires='w14'><w:r><w:instrText>"
+                ":\\private\\x.docx</w:instrText></w:r></mc:Choice><mc:Fallback/>"
+                "</mc:AlternateContent>"),
+            "a run with an instruction piece in foreign markup": piece(
+                "<zz:x><w:r><w:instrText>:\\private\\x.docx</w:instrText></w:r></zz:x>"),
+            # Text in a branch that Word reads into an instruction begun outside it.
+            "a text piece in foreign markup in a Fallback": piece(
+                "<mc:AlternateContent><mc:Choice Requires='zz'/><mc:Fallback><zz:x><w:r><w:t>"
+                ":\\private\\x.docx</w:t></w:r></zz:x></mc:Fallback></mc:AlternateContent>"),
+            "a plain text piece in a Fallback": piece(
+                "<mc:AlternateContent><mc:Choice Requires='zz'/><mc:Fallback><w:r><w:t>"
+                ":\\private\\x.docx</w:t></w:r></mc:Fallback></mc:AlternateContent>"),
+            "a nested result in a Fallback": nested_in_branch(
+                "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                "<w:r><w:instrText>MERGEFIELD Photo</w:instrText></w:r>"
+                "<w:r><w:fldChar w:fldCharType='separate'/></w:r>"
+                "<mc:AlternateContent><mc:Choice Requires='zz'/><mc:Fallback><w:r><w:t>"
+                "D:\\photos\\x.jpg</w:t></w:r></mc:Fallback></mc:AlternateContent>"
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r>"),
+            "a nested result in a w14 Choice": nested_in_branch(
+                "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                "<w:r><w:instrText>MERGEFIELD Photo</w:instrText></w:r>"
+                "<w:r><w:fldChar w:fldCharType='separate'/></w:r>"
+                "<mc:AlternateContent><mc:Choice Requires='w14'><w:r><w:t>D:\\photos\\x.jpg"
+                "</w:t></w:r></mc:Choice><mc:Fallback/></mc:AlternateContent>"
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r>"),
+            "a nested result in foreign markup": nested_in_branch(
+                "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                "<w:r><w:instrText>MERGEFIELD Photo</w:instrText></w:r>"
+                "<w:r><w:fldChar w:fldCharType='separate'/></w:r>"
+                "<zz:x><w:r><w:t>D:\\photos\\x.jpg</w:t></w:r></zz:x>"
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r>"),
+            "a whole nested field in a Fallback": nested_in_branch(
+                "<mc:AlternateContent><mc:Choice Requires='zz'/><mc:Fallback>"
+                "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                "<w:r><w:instrText>MERGEFIELD Photo</w:instrText></w:r>"
+                "<w:r><w:fldChar w:fldCharType='separate'/></w:r>"
+                "<w:r><w:t>D:\\photos\\x.jpg</w:t></w:r>"
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r>"
+                "</mc:Fallback></mc:AlternateContent>"),
+            "a nested fldSimple in a Fallback": nested_in_branch(
+                "<mc:AlternateContent><mc:Choice Requires='zz'/><mc:Fallback>"
+                "<w:fldSimple w:instr='MERGEFIELD f'><w:r><w:t>drafts/x.docx</w:t></w:r>"
+                "</w:fldSimple></mc:Fallback></mc:AlternateContent>"),
         }
         # Custom field data in a field without an instruction.
         cases["custom field data alone"] = (
@@ -1402,7 +1482,9 @@ class Cleaning(unittest.TestCase):
                             'HYPERLINK \\l "_Toc1"', 'HYPERLINK "mailto:help@example.gov"',
                             'INCLUDEPICTURE "https://www.example.gov/a.png" \\d',
                             'HYPERLINK "x.docx"', 'HYPERLINK "HTTPS://WWW.EXAMPLE.GOV/A"',
-                            'DOCPROPERTY "Title"', "INFO NumPages", "DOCPROPERTY Pages"):
+                            'DOCPROPERTY "Title"', "INFO NumPages", "DOCPROPERTY Pages",
+                            'HYPERLINK "http://www.example.gov/a"', "INFO RevNum", "INFO EditTime", "DOCPROPERTY FileSize",
+                            "DOCPROPERTY LastSavedTime", "INFO LastPrinted"):
             document = (f"<w:document xmlns:w='{w}'><w:body><w:p><w:fldSimple "
                         f"w:instr='{instruction}'/><w:r><w:fldChar w:fldCharType='begin'/></w:r>"
                         f"<w:r><w:instrText>{instruction}</w:instrText></w:r><w:r>"
