@@ -498,14 +498,26 @@ impl CharacterLevel {
 
 impl Layer for CharacterLevel {
     fn of_style(document: &Document, index: usize) -> Self {
-        document
+        let mut level = document
             .styles
             .styles
             .get(index)
             .map(|style| {
                 Self::of(&crate::model::Style::from_data(document, style).run_properties())
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if (level.size.is_some() || level.size_complex_script.is_some())
+            && super::drops_values_equal_to_defaults(document, index)
+        {
+            let defaults = crate::model::Styles::new(document).default_run_properties();
+            if level.size == defaults.size {
+                level.size = None;
+            }
+            if level.size_complex_script == defaults.size_complex_script {
+                level.size_complex_script = None;
+            }
+        }
+        level
     }
 
     /// Lays `above` over this level: what it gives replaces what this one gives. A font

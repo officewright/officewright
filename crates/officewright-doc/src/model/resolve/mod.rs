@@ -300,16 +300,37 @@ impl<'a> Formats<'a> {
         written
             .and_then(|index| usize::try_from(index).ok())
             .or_else(|| {
-                *self.default_paragraph_style.get_or_insert_with(|| {
-                    document
-                        .styles
-                        .styles
-                        .iter()
-                        .take(MAX_STYLES)
-                        .rposition(|style| style.kind == StyleKind::Paragraph && style.is_default)
-                })
+                *self
+                    .default_paragraph_style
+                    .get_or_insert_with(|| default_paragraph_style(document))
             })
     }
+}
+
+/// The default paragraph style: the last paragraph style marked default.
+fn default_paragraph_style(document: &Document) -> Option<usize> {
+    document
+        .styles
+        .styles
+        .iter()
+        .take(MAX_STYLES)
+        .rposition(|style| style.kind == StyleKind::Paragraph && style.is_default)
+}
+
+/// Whether the style at `index` is the default paragraph style, whose values equal to
+/// the document defaults' Word does not keep as its own: it drops them from the copy it
+/// saves, and draws the cells of word-rules/E-table-style-size-*.docx as if the style did
+/// not give them, in the table style's size and justification whatever the setting
+/// `overrideTableStyleFontSizeAndJustification` says (Normal's `w:sz` equal to the
+/// defaults' and its `w:jc left`, #297). Outside tables nothing changes: the defaults give
+/// the same value.
+fn drops_values_equal_to_defaults(document: &Document, index: usize) -> bool {
+    document
+        .styles
+        .styles
+        .get(index)
+        .is_some_and(|style| style.kind == StyleKind::Paragraph && style.is_default)
+        && default_paragraph_style(document) == Some(index)
 }
 
 /// Works out once, after the styles are read, the paragraph style of every paragraph

@@ -10,7 +10,8 @@ use officewright_core::Pt;
 use super::character::CharacterLevel;
 use super::table::TableText;
 use super::{
-    Formats, IGNORED_STYLES, Layer, MAX_CELL_LEVELS, MAX_COMBINATIONS, overwrite, style_index,
+    Formats, IGNORED_STYLES, Layer, MAX_CELL_LEVELS, MAX_COMBINATIONS,
+    drops_values_equal_to_defaults, overwrite, style_index,
 };
 use crate::model::Document;
 use crate::model::format::{ListFormat, ParagraphFlag, ParagraphFormat};
@@ -153,7 +154,12 @@ impl Formats<'_> {
                 level
             }
         };
-        if !yields || level.justification != Some(Justification::Left) {
+        // Strict documents write `start` where Transitional ones write `left`.
+        let left = matches!(
+            level.justification,
+            Some(Justification::Left | Justification::Start)
+        );
+        if !yields || !left {
             return level;
         }
         // The default paragraph style's left justification gives way to the table
@@ -811,14 +817,29 @@ impl ParagraphLevel {
 
 impl Layer for ParagraphLevel {
     fn of_style(document: &Document, index: usize) -> Self {
-        document
+        let mut level = document
             .styles
             .styles
             .get(index)
             .map(|style| {
                 Self::of(&crate::model::Style::from_data(document, style).paragraph_properties())
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let left = |justification: Option<Justification>| {
+            matches!(
+                justification,
+                Some(Justification::Left | Justification::Start)
+            )
+        };
+        if left(level.justification) && drops_values_equal_to_defaults(document, index) {
+            // Left is the justification when the defaults give none.
+            let defaults = crate::model::Styles::new(document).default_paragraph_properties();
+            let below = Self::of(&defaults).justification;
+            if below.is_none() || left(below) {
+                level.justification = None;
+            }
+        }
+        level
     }
 
     fn overlay(&mut self, above: &Self) {

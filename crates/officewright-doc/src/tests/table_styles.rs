@@ -1298,16 +1298,20 @@ fn lets_the_table_style_win_over_the_default_style_s_11_or_12_pt_and_left_when_t
     // [MS-DOCX] overrideTableStyleFontSizeAndJustification: off, a size of 11 or 12 pt
     // and a left justification of the default paragraph style give way to the table
     // style's (word-rules/E-table-style-size-12pt-14.docx); not written, it is off below
-    // compatibility mode 15 and on from it (E-table-style-size-12pt-none.docx).
-    let case = |normal: &str, mode: u32, setting: Option<&str>, style: &str| {
+    // compatibility mode 15 and on from it (E-table-style-size-12pt-none.docx). The
+    // document defaults give 11 pt, as in those documents.
+    let case = |normal: &str, mode: u32, setting: &[&str], style: &str| {
         let styles = format!(
-            r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/>{normal}</w:style><w:style w:type="paragraph" w:styleId="Child"><w:name w:val="Child"/><w:basedOn w:val="Normal"/></w:style><w:style w:type="table" w:styleId="Big"><w:name w:val="Big"/><w:pPr><w:jc w:val="center"/></w:pPr><w:rPr><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr></w:style>"#
+            r#"<w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/>{normal}</w:style><w:style w:type="paragraph" w:styleId="Child"><w:name w:val="Child"/><w:basedOn w:val="Normal"/></w:style><w:style w:type="table" w:styleId="Big"><w:name w:val="Big"/><w:pPr><w:jc w:val="center"/></w:pPr><w:rPr><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr></w:style>"#
         );
-        let setting = setting.map_or_else(String::new, |value| {
-            format!(
-                r#"<w:compatSetting w:name="overrideTableStyleFontSizeAndJustification" w:uri="http://schemas.microsoft.com/office/word" w:val="{value}"/>"#
-            )
-        });
+        let setting: String = setting
+            .iter()
+            .map(|value| {
+                format!(
+                    r#"<w:compatSetting w:name="overrideTableStyleFontSizeAndJustification" w:uri="http://schemas.microsoft.com/office/word" w:val="{value}"/>"#
+                )
+            })
+            .collect();
         let settings = format!(
             r#"<w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="{mode}"/>{setting}</w:compat>"#
         );
@@ -1333,28 +1337,42 @@ fn lets_the_table_style_win_over_the_default_style_s_11_or_12_pt_and_left_when_t
     let left_13 = r#"<w:pPr><w:jc w:val="left"/></w:pPr><w:rPr><w:sz w:val="26"/><w:szCs w:val="26"/></w:rPr>"#;
     let left_11 = r#"<w:rPr><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr>"#;
     let table_wins = (14.0, 14.0, Justification::Center);
-    let normal_12 = (12.0, 12.0, Justification::Left);
+    // Normal's 12 pt overrides the table style's 14 pt. Its `w:jc left` never does: it is
+    // the justification below Normal, which Word does not keep as Normal's own (the
+    // renders of E-table-style-size-12pt.docx and -13pt.docx, setting on, centre the
+    // cells), so the table style's centring shows through.
+    let normal_12 = (12.0, 12.0, Justification::Center);
     // Mode 14, the setting not written: off.
-    assert_eq!(case(left_12, 14, None, ""), table_wins);
-    assert_eq!(case(left_11, 14, None, "").0, 14.0);
+    assert_eq!(case(left_12, 14, &[], ""), table_wins);
+    assert_eq!(case(left_11, 14, &[], "").0, 14.0);
     // The size and the justification each give way on their own.
     assert_eq!(
-        case(left_13, 14, None, ""),
+        case(left_13, 14, &[], ""),
         (13.0, 13.0, Justification::Center)
     );
     // The paragraph names the default style.
-    assert_eq!(case(left_12, 14, None, "Normal"), table_wins);
+    assert_eq!(case(left_12, 14, &[], "Normal"), table_wins);
     // Our choice, no render shows it yet: a style based on the default style keeps
-    // what it inherits.
-    assert_eq!(case(left_12, 14, None, "Child"), normal_12);
+    // what it inherits, the size; the left justification is not Normal's to inherit.
+    assert_eq!(case(left_12, 14, &[], "Child"), normal_12);
+    // A size equal to the document defaults' (11 pt) is not Normal's own either: the
+    // table style's 14 pt shows through even with the setting on, as the render of
+    // E-table-style-size-11pt.docx shows.
+    assert_eq!(case(left_11, 15, &["1"], "").0, 14.0);
     // Mode 15, not written: on, the plain hierarchy.
-    assert_eq!(case(left_12, 15, None, ""), normal_12);
+    assert_eq!(case(left_12, 15, &[], ""), normal_12);
     // Written, whatever the mode.
-    assert_eq!(case(left_12, 15, Some("0"), ""), table_wins);
-    assert_eq!(case(left_12, 14, Some("1"), ""), normal_12);
+    assert_eq!(case(left_12, 15, &["0"], ""), table_wins);
+    assert_eq!(case(left_12, 14, &["1"], ""), normal_12);
+    // Written twice, the last counts.
+    assert_eq!(case(left_12, 14, &["0", "1"], ""), normal_12);
+    assert_eq!(case(left_12, 15, &["1", "0"], ""), table_wins);
+    // Strict documents write `start` for `left`.
+    let start_12 = r#"<w:pPr><w:jc w:val="start"/></w:pPr><w:rPr><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr>"#;
+    assert_eq!(case(start_12, 14, &[], ""), table_wins);
     // Only a left justification gives way.
     let both_12 = r#"<w:pPr><w:jc w:val="both"/></w:pPr><w:rPr><w:sz w:val="24"/></w:rPr>"#;
-    assert_eq!(case(both_12, 14, None, "").2, Justification::Both);
+    assert_eq!(case(both_12, 14, &[], "").2, Justification::Both);
     // A table style that gives no size or justification leaves the default style's.
     let plain = |normal: &str| {
         let styles = format!(
@@ -1369,7 +1387,9 @@ fn lets_the_table_style_win_over_the_default_style_s_11_or_12_pt_and_left_when_t
             formats.paragraph(paragraph).justification(),
         )
     };
-    assert_eq!(plain(left_12), (12.0, Justification::Left));
+    // Normal's `w:jc left` is not its own, so the defaults' justification, start, is in
+    // effect: the same alignment.
+    assert_eq!(plain(left_12), (12.0, Justification::Start));
 }
 
 #[test]
