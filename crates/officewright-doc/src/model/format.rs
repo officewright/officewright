@@ -10,8 +10,8 @@ use std::sync::Arc;
 use super::Document;
 use super::numbering::ListLevel;
 use super::properties::{
-    ColorValue, FontHint, Highlight, Justification, Ligatures, LineSpacing, ParagraphBorders,
-    Shading, TabStop, Toggle, UnderlineStyle, VerticalPosition,
+    ColorValue, FontHint, Frame, Highlight, Justification, Ligatures, LineSpacing,
+    ParagraphBorders, Shading, TabStop, Toggle, UnderlineStyle, VerticalPosition,
 };
 
 /// The font families of a run in effect, by the kind of character, with theme fonts
@@ -84,6 +84,10 @@ pub struct CharacterFormat {
     pub(crate) language_bidi: Option<Arc<str>>,
     pub(crate) ligatures: Ligatures,
     pub(crate) contextual_alternates: bool,
+    /// Whether the text has an emphasis mark (`w:em`), which the layout does not draw.
+    pub(crate) emphasis_mark: bool,
+    /// Whether the text has a border around it (`w:bdr`), which the layout does not draw.
+    pub(crate) border: bool,
 }
 
 macro_rules! flags {
@@ -298,6 +302,12 @@ pub struct ParagraphFormat {
     pub(crate) tabs: Arc<[TabStop]>,
     pub(crate) outline_level: Option<u8>,
     pub(crate) list: Option<ListFormat>,
+    /// Whether the paragraph is a text frame or a drop cap (`w:framePr`), which the layout
+    /// does not place.
+    pub(crate) frame: Option<Frame>,
+    /// Whether the paragraph's mark is deleted as a tracked change, written on the
+    /// paragraph itself.
+    pub(crate) mark_deleted: bool,
 }
 
 macro_rules! paragraph_flags {

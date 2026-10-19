@@ -324,67 +324,165 @@ fn automatic_text_is_white_on_dark_shading() -> TestResult {
     Ok(())
 }
 
+/// The first leader glyph's x and the number of glyphs of each case of
+/// `E-tab-leader.docx` in Word's reference, by case number: the topmost text below the
+/// case's title, and above the next case's, that starts with a leader character, and the
+/// run of that character it starts with. pdftotext lists the dots of case 21 last, out of
+/// reading order, and joins the dots of case 22 and the "x" after them into one word.
+fn word_leaders() -> TestResult<Vec<(u32, f64, usize)>> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/corpus/reference/word-rules/E-tab-leader/geometry.json");
+    let json = std::fs::read_to_string(path)?;
+    // Every text of the file, a line's or a word's, with the left and top edges of its
+    // box (the reference has one page).
+    let mut texts: Vec<(String, f64, f64)> = Vec::new();
+    let mut lines = json.lines();
+    while let Some(line) = lines.next() {
+        let Some(text) = line.trim().strip_prefix("\"text\": \"") else {
+            continue;
+        };
+        // "box": [ then the left and top edges.
+        let _ = lines.next();
+        let mut edge = || -> TestResult<f64> {
+            Ok(lines
+                .next()
+                .ok_or("no box")?
+                .trim()
+                .trim_end_matches(',')
+                .parse()?)
+        };
+        let (left, top) = (edge()?, edge()?);
+        texts.push((text.trim_end_matches(['"', ',']).to_owned(), left, top));
+    }
+    let mut titles: Vec<(u32, f64)> = texts
+        .iter()
+        .filter_map(|(text, _, top)| {
+            text.strip_prefix("Case ")
+                .and_then(|rest| rest.split_once(':'))
+                .and_then(|(number, _)| number.parse::<u32>().ok())
+                .map(|number| (number, *top))
+        })
+        .collect();
+    titles.sort_by(|a, b| a.1.total_cmp(&b.1));
+    titles.dedup_by_key(|title| title.0);
+    let mut cases = Vec::new();
+    for (index, &(number, top)) in titles.iter().enumerate() {
+        let below = titles.get(index + 1).map_or(f64::INFINITY, |next| next.1);
+        let leader = texts
+            .iter()
+            .filter(|(_, _, at)| *at > top && *at < below)
+            .filter_map(|(text, left, at)| {
+                let first = text.chars().next()?;
+                let count = text.chars().take_while(|&ch| ch == first).count();
+                (['.', '-', '\u{00B7}', '_'].contains(&first) && count > 1)
+                    .then_some((*at, *left, count))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some((_, left, count)) = leader {
+            cases.push((number, left, count));
+        }
+    }
+    Ok(cases)
+}
+
 #[test]
-fn dot_leaders_fill_a_tab_and_end_at_its_stop() -> TestResult {
+fn leaders_stand_on_word_s_grid_from_the_page_edge() -> TestResult {
+    // E-tab-leader.docx in Carlito, Calibri's metric twin, at 11 pt: a tab from the
+    // margin at 72 pt to a stop 216 pt further, then "x" ("12.34" for a decimal stop).
+    // Word puts whole glyphs on a grid from the page's left edge whose pitch is the
+    // glyph's advance rounded to 1/600 in (2.76 pt for the period), one in every cell
+    // wholly within the tab: the first at 74.52, not at 72, and none ending past where
+    // the text after it starts. At a character scale of 50 % (case 22) the advance is
+    // scaled before it is rounded: a pitch of 1.44, which puts the first at 72 and draws
+    // 150 glyphs, where 1.38 would draw 155. At 1 pt (case 21) the pitch is 0.24: 900
+    // glyphs from 72.
+    let word = word_leaders()?;
     let book = book()?;
     let mut document = Document::default();
-    let style = document.add_run_style(base());
-    let props = ParagraphProps::default().with_tabs([TabStop::default()
-        .with_position(Pt(200.0))
-        .with_kind(TabKind::End)
-        .with_leader(TabLeader::Dot)]);
-    let paragraph = Paragraph::new(style).with_props(props).with_inlines([
-        Inline::text("Chapter", style),
-        Inline::tab(style),
-        Inline::text("12", style),
-    ]);
-    let painted = paint(&book, &document, &[paragraph]);
-    let runs = items(&painted, "glyphs");
-    assert_eq!(runs.len(), 3, "{}", painted.text());
-    let leader = runs.get(1).copied().unwrap_or_default();
-    assert!(leader.contains("\"\\t\""), "{leader}");
-    // The dots: the period of Liberation Sans, 569 units, 3.06 pt at 11 pt.
-    let dots = glyph_xs(leader);
-    assert!(dots.len() > 30);
-    // Evenly spaced.
-    let dot = (569.0 / 2048.0 * 11.0 * 20.0_f64).round() as i64;
-    for pair in dots.windows(2) {
-        let step = pair
-            .get(1)
-            .zip(pair.first())
-            .map(|(b, a)| b - a)
-            .unwrap_or_default();
-        assert!((step - dot).abs() <= 1, "{dots:?}");
+    let carlito = RunStyle::default()
+        .with_fonts(RunFonts::new("Carlito"))
+        .with_size(Pt(11.0));
+    let plain = document.add_run_style(carlito.clone());
+    let narrow = document.add_run_style(carlito.clone().with_scale(50));
+    let tiny = document.add_run_style(carlito.clone().with_size(Pt(1.0)));
+    let underlined = document.add_run_style(carlito.with_underline(Some(Underline::default())));
+    let leaders = [
+        TabLeader::Dot,
+        TabLeader::Hyphen,
+        TabLeader::MiddleDot,
+        TabLeader::Underscore,
+        TabLeader::Heavy,
+    ];
+    let kinds = [
+        TabKind::Start,
+        TabKind::End,
+        TabKind::Center,
+        TabKind::Decimal,
+    ];
+    // Cases 1 to 20: each leader to each kind of stop, in the rule document's order; then
+    // the tab at 1 pt, at a character scale of 50 % and underlined.
+    let mut cases: Vec<(u32, TabLeader, TabKind, RunStyleId)> = Vec::new();
+    for (n, (leader, kind)) in leaders
+        .iter()
+        .flat_map(|leader| kinds.iter().map(move |kind| (*leader, *kind)))
+        .enumerate()
+    {
+        cases.push((u32::try_from(n)? + 1, leader, kind, plain));
     }
-    let laid = fuzzing::lay_out(
-        &book,
-        &document,
-        &Paragraph::new(style)
-            .with_props(
-                ParagraphProps::default().with_tabs([TabStop::default()
-                    .with_position(Pt(200.0))
-                    .with_kind(TabKind::End)]),
-            )
-            .with_inlines([
-                Inline::text("Chapter", style),
-                Inline::tab(style),
-                Inline::text("12", style),
-            ]),
-        300.0,
-    );
-    let tab = laid
-        .lines()
-        .first()
-        .and_then(|line| line.tabs().first())
-        .copied()
-        .ok_or("no tab")?;
-    let origin = at(leader).0;
-    let last = dots.last().copied().unwrap_or_default();
-    // The last dot ends where the tab ends, within rounding to twips.
-    assert!(
-        (origin + last + dot - (tab.1 * 20.0).round() as i64).abs() <= 1,
-        "{leader}"
-    );
+    cases.push((21, TabLeader::Dot, TabKind::Start, tiny));
+    cases.push((22, TabLeader::Dot, TabKind::Start, narrow));
+    cases.push((23, TabLeader::Dot, TabKind::Start, underlined));
+    for (case, leader, kind, tab_style) in cases {
+        let (_, left, count) = word
+            .iter()
+            .find(|(number, _, _)| *number == case)
+            .copied()
+            .ok_or(format!("no case {case} in the reference"))?;
+        let after = if kind == TabKind::Decimal {
+            "12.34"
+        } else {
+            "x"
+        };
+        // The scaled tab's text is scaled too in the rule document; the others' is plain.
+        let text_style = if case == 22 { narrow } else { plain };
+        // The column starts at the page's edge here, so the paragraph is indented by the
+        // margin and the stop is 72 pt further out.
+        let props = ParagraphProps::default()
+            .with_indent(officewright_layout::ir::Indent::default().with_start(Pt(72.0)))
+            .with_tabs([TabStop::default()
+                .with_position(Pt(288.0))
+                .with_kind(kind)
+                .with_leader(leader)]);
+        let paragraph = Paragraph::new(text_style)
+            .with_props(props)
+            .with_inlines([Inline::tab(tab_style), Inline::text(after, text_style)]);
+        // As wide as the rule document's lines reach from the page's edge: A4 less its
+        // right margin, so that "12.34" on the decimal stop (to 301.9 pt) fits.
+        let painted = fuzzing::paint(&book, &document, &[paragraph], 523.3);
+        let runs = items(&painted, "glyphs");
+        let ours = runs
+            .iter()
+            .find(|run| run.contains("\"\\t\""))
+            .ok_or(format!("case {case}: no leader in {}", painted.text()))?;
+        let xs = glyph_xs(ours);
+        // In twips: Word's PDF places text 0.024 pt right of where it lays it out (its
+        // margin text starts at 72.024), and both are within 0.1 pt.
+        let first = at(ours).0 + xs.first().copied().unwrap_or_default();
+        assert!(
+            (first as f64 - (left - 0.024) * 20.0).abs() <= 2.0,
+            "case {case}: first glyph at {first} twips, Word's at {left} pt"
+        );
+        assert_eq!(xs.len(), count, "case {case}: {ours}");
+        // The heavy leader is the underscore's glyphs, no line; only the underlined tab
+        // has one, its underline.
+        let lines = items(&painted, "line").len();
+        assert_eq!(
+            lines,
+            usize::from(case == 23),
+            "case {case}: {}",
+            painted.text()
+        );
+    }
     Ok(())
 }
 
@@ -625,13 +723,14 @@ fn a_words_only_underline_covers_the_hyphen_at_a_soft_hyphen() -> TestResult {
 
 #[test]
 fn the_leaders_of_a_document_take_a_bounded_number_of_glyphs() -> TestResult {
-    // 1 pt at 1 %, stops every 11 pt with dot leaders: each of 143 tabs a line holds
-    // stays under the bound of one leader, but together the leaders of three such lines
-    // would take 1.7 million glyphs.
+    // 1 pt at 43 %, whose period stands on Word's smallest grid pitch of 0.12 pt, stops
+    // every 11 pt with dot leaders: each of the 143 tabs a line holds stays under the
+    // bound of one leader, but together the leaders of 25 such lines would take 325,000
+    // glyphs.
     let book = book()?;
     let mut document = Document::default();
     let tiny = styled(&mut document, |style| {
-        style.with_size(Pt(1.0)).with_scale(1)
+        style.with_size(Pt(1.0)).with_scale(43)
     });
     let stops = (1..=143).map(|stop| {
         TabStop::default()
@@ -640,7 +739,7 @@ fn the_leaders_of_a_document_take_a_bounded_number_of_glyphs() -> TestResult {
     });
     let props = ParagraphProps::default().with_tabs(stops);
     let mut inlines = Vec::new();
-    for line in 0..3 {
+    for line in 0..25 {
         if line > 0 {
             inlines.push(Inline::line_break(
                 officewright_layout::ir::BreakClear::None,
@@ -677,40 +776,49 @@ fn the_leaders_of_a_document_take_a_bounded_number_of_glyphs() -> TestResult {
 }
 
 #[test]
-fn line_leaders_are_dashed_for_hyphens_and_heavy_ones_twice_as_thick() -> TestResult {
+fn leaders_past_the_bound_are_lines_of_their_kind() -> TestResult {
+    // In a tab of 1,500 pt at 1 pt and 43 %, every leader would take 12,000 glyphs: a
+    // dotted line for the dots, dashed for the hyphens, solid and no thicker for the
+    // underscore and the heavy leader.
     let book = book()?;
     let mut document = Document::default();
-    let style = document.add_run_style(base());
     let tiny = styled(&mut document, |style| {
-        style.with_size(Pt(1.0)).with_scale(1)
+        style.with_size(Pt(1.0)).with_scale(43)
     });
-    let leader_line = |leader: TabLeader, style: RunStyleId| {
+    let leader_line = |leader: TabLeader| {
         let props = ParagraphProps::default().with_tabs([TabStop::default()
             .with_position(Pt(1500.0))
             .with_leader(leader)]);
-        let paragraph = Paragraph::new(style)
+        let paragraph = Paragraph::new(tiny)
             .with_props(props)
-            .with_inlines([Inline::text("A", style), Inline::tab(style)]);
+            .with_inlines([Inline::text("A", tiny), Inline::tab(tiny)]);
         let painted = fuzzing::paint(&book, &document, &[paragraph], 1584.0);
         items(&painted, "line")
             .first()
             .map(|line| (*line).to_owned())
             .unwrap_or_default()
     };
-    // Too long in a tiny font: a hyphen leader is a dashed line.
-    assert!(leader_line(TabLeader::Hyphen, tiny).contains(" dashed "));
-    // The heavy leader is twice as thick as the underscore leader.
-    let width = |line: String| -> i64 {
+    let width = |line: &str| -> i64 {
         line.split(' ')
             .nth(3)
             .and_then(|width| width.parse().ok())
             .unwrap_or(-1)
     };
+    assert!(leader_line(TabLeader::Dot).contains(" dotted "));
+    assert!(leader_line(TabLeader::MiddleDot).contains(" dotted "));
+    assert!(leader_line(TabLeader::Hyphen).contains(" dashed "));
     let (thin, heavy) = (
-        width(leader_line(TabLeader::Underscore, style)),
-        width(leader_line(TabLeader::Heavy, style)),
+        leader_line(TabLeader::Underscore),
+        leader_line(TabLeader::Heavy),
     );
-    assert!(thin > 0 && (heavy - 2 * thin).abs() <= 1, "{thin} {heavy}");
+    assert!(
+        thin.contains(" solid ") && heavy.contains(" solid "),
+        "{thin} {heavy}"
+    );
+    assert!(
+        width(&thin) >= 0 && width(&thin) == width(&heavy),
+        "{thin} {heavy}"
+    );
     Ok(())
 }
 
@@ -774,14 +882,14 @@ fn text_whose_drawn_and_source_bytes_differ_keeps_its_text() -> TestResult {
 
 #[test]
 fn the_leader_bound_is_shared_by_the_paragraphs_of_a_document() -> TestResult {
-    // Three paragraphs of 50 dot-leader tabs at 1 pt and 1 %: each alone stays under the
-    // bound, together they would pass it.
+    // Three paragraphs of eight lines of 143 dot-leader tabs at 1 pt and 43 %, on the
+    // smallest grid pitch: each alone stays under the bound, together they would pass it.
     let book = book()?;
     let mut document = Document::default();
     let tiny = styled(&mut document, |style| {
-        style.with_size(Pt(1.0)).with_scale(1)
+        style.with_size(Pt(1.0)).with_scale(43)
     });
-    let stops: Vec<TabStop> = (1..=50)
+    let stops: Vec<TabStop> = (1..=143)
         .map(|stop| {
             TabStop::default()
                 .with_position(Pt(f64::from(stop) * 11.0))
@@ -789,8 +897,17 @@ fn the_leader_bound_is_shared_by_the_paragraphs_of_a_document() -> TestResult {
         })
         .collect();
     let paragraph = || {
-        let mut inlines = vec![Inline::text("A", tiny)];
-        inlines.extend((0..50).map(|_| Inline::tab(tiny)));
+        let mut inlines = Vec::new();
+        for line in 0..8 {
+            if line > 0 {
+                inlines.push(Inline::line_break(
+                    officewright_layout::ir::BreakClear::None,
+                    tiny,
+                ));
+            }
+            inlines.push(Inline::text("A", tiny));
+            inlines.extend((0..143).map(|_| Inline::tab(tiny)));
+        }
         Paragraph::new(tiny)
             .with_props(ParagraphProps::default().with_tabs(stops.clone()))
             .with_inlines(inlines)

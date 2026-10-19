@@ -3,15 +3,40 @@
 use officewright_layout::ReportKind;
 use officewright_layout::ir;
 
-use super::Translator;
 use super::style::color;
+use super::{Once, Translator};
+use crate::model::properties::Frame;
 use crate::model::{
     Border, BorderStyle, Justification, LineSpacing, Paragraph, ParagraphFormat, TabKind, TabLeader,
 };
 
-/// A paragraph: its formatting, its mark, its list and its content.
-pub(super) fn paragraph<'a>(t: &mut Translator<'a>, paragraph: Paragraph<'a>) -> ir::Paragraph {
+/// A paragraph: its formatting, its mark, its list and its content; and whether its mark
+/// is deleted or moved away as a tracked change, which the caller lists once a block
+/// follows it, as Word joins the paragraph to that block.
+pub(super) fn paragraph<'a>(
+    t: &mut Translator<'a>,
+    paragraph: Paragraph<'a>,
+) -> (ir::Paragraph, bool) {
     let format = t.formats.paragraph(paragraph);
+    // The IR has no right-to-left paragraphs and no frames yet, so the PDF lays these out
+    // as ordinary paragraphs, left to right (#303).
+    if format.right_to_left() {
+        t.report_once(
+            Once::RightToLeft,
+            "a right-to-left paragraph (w:bidi) is laid out left to right, here and wherever else the document has one",
+        );
+    }
+    match format.frame {
+        Some(Frame::Frame) => t.report_once(
+            Once::Frame,
+            "a text frame (w:framePr) is laid out as an ordinary paragraph, here and wherever else the document has one",
+        ),
+        Some(Frame::DropCap) => t.report_once(
+            Once::DropCap,
+            "a drop cap (w:framePr) is laid out as an ordinary paragraph, here and wherever else the document has one",
+        ),
+        None => {}
+    }
     let mark = t.formats.paragraph_mark(paragraph);
     let mark = t.run_style(&mark);
     let list = format.list().and_then(|list| {
@@ -25,10 +50,11 @@ pub(super) fn paragraph<'a>(t: &mut Translator<'a>, paragraph: Paragraph<'a>) ->
     t.path.push(super::Step::Field("inlines"));
     let inlines = t.inlines(paragraph, mark);
     t.path.pop();
-    ir::Paragraph::new(mark)
+    let paragraph = ir::Paragraph::new(mark)
         .with_props(props)
         .with_inlines(inlines)
-        .with_list(list)
+        .with_list(list);
+    (paragraph, format.mark_deleted)
 }
 
 fn props(t: &mut Translator<'_>, format: &ParagraphFormat) -> ir::ParagraphProps {
