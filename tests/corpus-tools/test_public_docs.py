@@ -1180,6 +1180,19 @@ class Cleaning(unittest.TestCase):
             return (f"<w:document xmlns:w='{w}'><w:body><w:p><w:fldSimple w:instr='{instruction}'>"
                     "<w:r><w:t>x</w:t></w:r></w:fldSimple></w:p></w:body></w:document>")
 
+        def nested_result(result):
+            return (f"<w:document xmlns:w='{w}'><w:body><w:p>"
+                    "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                    '<w:r><w:instrText>INCLUDEPICTURE "</w:instrText></w:r>'
+                    "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                    "<w:r><w:instrText>MERGEFIELD Photo</w:instrText></w:r>"
+                    "<w:r><w:fldChar w:fldCharType='separate'/></w:r>"
+                    f"<w:r><w:t>{result}</w:t></w:r>"
+                    "<w:r><w:fldChar w:fldCharType='end'/></w:r>"
+                    '<w:r><w:instrText>" \\d</w:instrText></w:r>'
+                    "<w:r><w:fldChar w:fldCharType='separate'/></w:r>"
+                    "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:p></w:body></w:document>")
+
         nested = (f"<w:document xmlns:w='{w}'><w:body><w:p>"
                   "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
                   "<w:r><w:instrText>IF 1 = 1 </w:instrText></w:r>"
@@ -1252,6 +1265,30 @@ class Cleaning(unittest.TestCase):
                 f"<w:document xmlns:w='{w}'><w:body><w:p><w:r><w:instrText>"
                 'HYPERLINK "file:///D:/x.docx"</w:instrText></w:r></w:p></w:body></w:document>'),
             "an instruction that begins with the path": simple('"D:\\drafts\\x.docx"'),
+            "an unquoted path first": simple("D:\\drafts\\x"),
+            # INFO and DOCPROPERTY show a property: only an allowed one is kept.
+            **{f"info {p}": field(f"INFO {p}") for p in (
+                "Author", "LastSavedBy", "FileName", "Template")},
+            "docproperty hyperlink base": field("DOCPROPERTY HyperlinkBase"),
+            "a custom docproperty": field('DOCPROPERTY "Owner"'),
+            "docvariable": field("DOCVARIABLE owner"),
+            # Two separators in any mix, and "//" after a scheme that does not begin a word.
+            "a backslash and a slash": field('QUOTE "\\/srv\\x"'),
+            "a slash and a backslash": field('QUOTE "/\\srv\\x"'),
+            "a scheme after an underscore": field(
+                'QUOTE "https://www.example.gov/?r=_smb://srv/x"'),
+            "a scheme after a digit": field('QUOTE "1smb://srv/x"'),
+            "a web scheme that does not begin a word": field('QUOTE "x_https://srv/x"'),
+            # The result of a field nested in an instruction is part of that instruction.
+            "a nested result with a drive": nested_result("D:\\photos\\x.jpg"),
+            "a nested relative result": nested_result("photos/x.jpg"),
+            "a nested fldSimple result": (
+                f"<w:document xmlns:w='{w}'><w:body><w:p>"
+                "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                '<w:r><w:instrText>INCLUDETEXT "</w:instrText></w:r>'
+                "<w:fldSimple w:instr='MERGEFIELD f'><w:r><w:t>drafts/x.docx</w:t></w:r>"
+                '</w:fldSimple><w:r><w:instrText>"</w:instrText></w:r>'
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:p></w:body></w:document>"),
         }
         plain = public.PublicDoc("plain", "nara", "https://www.example.gov/p.docx",
                                  "2026-10-19", "0" * 64)
@@ -1265,6 +1302,8 @@ class Cleaning(unittest.TestCase):
                     with self.assertRaises(public.Refused) as caught:
                         public.clean(data, plain)
                     self.assertIn(expected, str(caught.exception))
+                    if label.startswith(("an instruction that begins", "an unquoted path")):
+                        self.assertIn(f"{part} has a field that names", str(caught.exception))
                     # The part is named, never the path.
                     for path in ("drafts", "D:", "C:", "server", "srv", "pics", "jroe", "orders",
                                  "private", "DRAFTS"):
@@ -1304,6 +1343,15 @@ class Cleaning(unittest.TestCase):
 
         separate = "<w:fldChar w:fldCharType='separate'/>"
         end = "<w:fldChar w:fldCharType='end'/>"
+
+        def piece(middle):
+            return (f"<w:document xmlns:w='{w}' xmlns:mc='{mc}' xmlns:zz='urn:zz' "
+                    "xmlns:w14='urn:w14' mc:Ignorable='zz'><w:body><w:p>"
+                    "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                    '<w:r><w:instrText>INCLUDETEXT "D</w:instrText></w:r>' + middle
+                    + '<w:r><w:instrText>"</w:instrText></w:r>'
+                    "<w:r><w:fldChar w:fldCharType='separate'/></w:r>"
+                    "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:p></w:body></w:document>")
         cases = {
             "a separate in a Choice": document(branch(separate, "")),
             "an end in a Choice": document(branch(end, "")),
@@ -1313,6 +1361,16 @@ class Cleaning(unittest.TestCase):
                 "", 'HYPERLINK "fi<zz:x/>le:///D:/x.docx"'),
             "custom field data": document("<w:r><w:fldData>AAAA</w:fldData></w:r>"),
             "a begin in a Choice": document(branch("<w:fldChar w:fldCharType='begin'/>", "")),
+            # Instruction text in a branch goes on the instruction begun outside it, in the
+            # branch Word takes (review of #381).
+            "an instruction piece in a Fallback": piece(branch(
+                "", "<w:instrText>:\\private\\x.docx</w:instrText>")),
+            "an instruction piece in a w14 Choice": piece(
+                "<w:r><mc:AlternateContent><mc:Choice Requires='w14'><w:instrText>"
+                ":\\private\\x.docx</w:instrText></mc:Choice><mc:Fallback/>"
+                "</mc:AlternateContent></w:r>"),
+            "an instruction piece in foreign markup": piece(
+                "<w:r><zz:x><w:instrText>:\\private\\x.docx</w:instrText></zz:x></w:r>"),
         }
         # Custom field data in a field without an instruction.
         cases["custom field data alone"] = (
@@ -1344,7 +1402,7 @@ class Cleaning(unittest.TestCase):
                             'HYPERLINK \\l "_Toc1"', 'HYPERLINK "mailto:help@example.gov"',
                             'INCLUDEPICTURE "https://www.example.gov/a.png" \\d',
                             'HYPERLINK "x.docx"', 'HYPERLINK "HTTPS://WWW.EXAMPLE.GOV/A"',
-                            'DOCPROPERTY "Title"'):
+                            'DOCPROPERTY "Title"', "INFO NumPages", "DOCPROPERTY Pages"):
             document = (f"<w:document xmlns:w='{w}'><w:body><w:p><w:fldSimple "
                         f"w:instr='{instruction}'/><w:r><w:fldChar w:fldCharType='begin'/></w:r>"
                         f"<w:r><w:instrText>{instruction}</w:instrText></w:r><w:r>"
@@ -1362,6 +1420,23 @@ class Cleaning(unittest.TestCase):
         self.assertEqual(public.field_arguments('includetext"a b"\\c x'),
                          ("INCLUDETEXT", ["a b", "x"]))
         self.assertEqual(public.field_arguments('"D:\\x"'), ("", ["D:\\x"]))
+
+    def test_a_part_with_fields_that_cannot_be_read_hides_no_other_problem(self):
+        # The field check stands apart from the others in problems() (#381's merge of #378).
+        data = package(**{"word/header1.xml": "<w:hdr xmlns:w='w'><w:instrText>",
+                          "word/comments.xml": "<w:comments xmlns:w='w'/>"})
+        found = "; ".join(public.problems(data))
+        self.assertIn("word/header1.xml is not well-formed XML", found)
+        self.assertIn("word/comments.xml holds comments", found)
+        self.assertIn("docProps/custom.xml is still there", found)
+
+    def test_a_part_nested_too_deeply_is_refused_with_a_message(self):
+        w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        deep = (f"<w:document xmlns:w='{w}'>" + "<w:sdt>" * 1200
+                + "<w:instrText>PAGE</w:instrText>" + "</w:sdt>" * 1200 + "</w:document>")
+        with self.assertRaises(public.Unreadable) as caught:
+            public.field_problems({"word/document.xml": deep.encode()})
+        self.assertIn("word/document.xml nests its elements too deeply", str(caught.exception))
 
     def test_a_part_with_fields_must_be_well_formed(self):
         broken = package(**{"word/header1.xml": "<w:hdr xmlns:w='w'><w:instrText>"})

@@ -940,17 +940,35 @@ FILE_FIELDS = {"HYPERLINK", "INCLUDEPICTURE", "INCLUDETEXT", "INCLUDE", "IMPORT"
 # result shows the path of the file or its template, or the author's or user's name and
 # address, as the author's machine computed it.
 REFUSED_FIELDS = {"DATABASE", "DDE", "DDEAUTO", "FILENAME", "TEMPLATE", "AUTHOR",
-                  "LASTSAVEDBY", "USERNAME", "USERINITIALS", "USERADDRESS"}
-# DOCPROPERTY shows these document properties, which hold people.
-PEOPLE_PROPERTIES = {"author", "creator", "lastsavedby", "lastmodifiedby", "manager",
-                     "company"}
+                  "LASTSAVEDBY", "USERNAME", "USERINITIALS", "USERADDRESS", "DOCVARIABLE"}
+# DOCPROPERTY and INFO show a document property, which can be a person, a path, the
+# hyperlink base or a custom property: only these, which hold none, are kept.
+SAFE_PROPERTIES = {"title", "subject", "category", "pages", "words", "characters",
+                   "characterswithspaces", "lines", "paragraphs", "createdate", "createtime",
+                   "savedate", "printdate", "revisionnumber", "editingtime", "totaleditingtime",
+                   "numpages", "numwords", "numchars", "bytes"}
+PROPERTY_FIELDS = {"DOCPROPERTY", "INFO"}
+# The names a refusal may give: a field's name, never letters a path begins with.
+KNOWN_FIELDS = FILE_FIELDS | REFUSED_FIELDS | PROPERTY_FIELDS | {"QUOTE", "IF", "MERGEFIELD"}
 WEB_ADDRESS = re.compile(r"(?i)(https?://|mailto:)")
 SCHEME = re.compile(r"(?i)[a-z][a-z0-9+.-]*:")
-# A drive, a server path (\\server or //server), a file URL or another scheme with "//",
-# anywhere in an instruction, inside a web address too. Backslashes are matched as
-# written, single or doubled, so no escaping hides a path.
-LOCAL_PLACE = re.compile(r"(?i)(?<![a-z0-9])[a-z]:[\\/]|\\\\|(?<![:/])//|\bfile:"
-                         r"|\b(?!https?://)[a-z][a-z0-9+.-]*://")
+# A drive, a server path (two slashes or backslashes in any mix) or a file URL, anywhere in
+# an instruction, inside a web address too. Backslashes are matched as written, single or
+# doubled, so no escaping hides a path. "//" is a server path too (or another scheme's),
+# unless it follows an http: or https: that begins a word (names_place).
+LOCAL_PLACE = re.compile(r"(?i)(?<![a-z0-9])[a-z]:[\\/]|\\\\|\\/|/\\|(?<![a-z0-9])file:")
+WEB_SCHEME_BEFORE = re.compile(r"(?i)(?:^|[^a-z0-9+._-])https?:$")
+
+
+def names_place(text: str) -> bool:
+    """Whether text names a local or network place or another scheme (LOCAL_PLACE, or a
+    "//" that does not follow an http: or https: beginning a word)."""
+    return bool(LOCAL_PLACE.search(text)) or any(
+        not WEB_SCHEME_BEFORE.search(text[: match.start()])
+        for match in re.finditer("//", text)
+    )
+
+
 WORDML_NAMESPACES = ("http://schemas.openxmlformats.org/wordprocessingml/2006/main",
                      "http://purl.oclc.org/ooxml/wordprocessingml/main")
 MC_NAMESPACE = "http://schemas.openxmlformats.org/markup-compatibility/2006"
@@ -998,14 +1016,16 @@ def field_arguments(instruction: str) -> tuple[str, list[str]]:
 
 def names_local_place(instruction: str) -> bool:
     """Whether a field instruction names a local or network place or another scheme, or
-    shows people's data: LOCAL_PLACE anywhere in it; a field of REFUSED_FIELDS, or a
-    DOCPROPERTY of PEOPLE_PROPERTIES; and, for a field that loads or opens a file
-    (FILE_FIELDS), an argument with a slash, a backslash or a scheme that is not a web or
-    mail address."""
+    shows people's data: names_place anywhere in it; a field of REFUSED_FIELDS, or one of
+    PROPERTY_FIELDS that shows a property outside SAFE_PROPERTIES; and, for a field that
+    loads or opens a file (FILE_FIELDS), an argument with a slash, a backslash or a scheme
+    that is not a web or mail address."""
     field, arguments = field_arguments(instruction)
-    if field in REFUSED_FIELDS or LOCAL_PLACE.search(instruction):
+    if field in REFUSED_FIELDS or names_place(instruction):
         return True
-    if field == "DOCPROPERTY" and any(a.lower() in PEOPLE_PROPERTIES for a in arguments):
+    if field in PROPERTY_FIELDS and not (
+        arguments and arguments[0].strip().lower() in SAFE_PROPERTIES
+    ):
         return True
     return field in FILE_FIELDS and any(
         not WEB_ADDRESS.match(a) and ("/" in a or "\\" in a or SCHEME.match(a))
@@ -1041,7 +1061,8 @@ def field_instructions(name: str, data: bytes) -> list[str]:
         raise Unreadable(f"{name} declares a document type, which OPC forbids")
     found: list[str] = []
 
-    def walk(element: ElementTree.Element, fields: list[list[str] | None]) -> None:
+    def walk(element: ElementTree.Element, fields: list[list[str] | None],
+             isolated: bool) -> None:
         namespace, _, local = element.tag.rpartition("}")
         namespace = namespace.lstrip("{")
         if namespace == MC_NAMESPACE and local in ("Choice", "Fallback") or (
@@ -1049,7 +1070,7 @@ def field_instructions(name: str, data: bytes) -> list[str]:
         ):
             inner: list[list[str] | None] = []
             for child in element:
-                walk(child, inner)
+                walk(child, inner, True)
             if inner:
                 raise FieldMarkup(name)
             return
@@ -1077,14 +1098,28 @@ def field_instructions(name: str, data: bytes) -> list[str]:
             text = element.text or ""
             if fields and fields[-1] is not None:
                 fields[-1].append(text)
+            elif isolated:
+                # Word puts the branch it takes in the place of mc:AlternateContent, so
+                # this text could go on an instruction begun outside.
+                raise FieldMarkup(name)
             else:
                 found.append(text)
             return
+        elif local in ("t", "delText"):
+            # Text while an instruction is open is the result of a field nested in it (a
+            # complex field or w:fldSimple), which Word reads as part of that instruction:
+            # {INCLUDEPICTURE "{MERGEFIELD Photo}"}.
+            open_instructions = [text for text in fields if text is not None]
+            if open_instructions:
+                open_instructions[-1].append(element.text or "")
         for child in element:
-            walk(child, fields)
+            walk(child, fields, isolated)
 
     fields: list[list[str] | None] = []
-    walk(root, fields)
+    try:
+        walk(root, fields, False)
+    except RecursionError as error:
+        raise Unreadable(f"{name} nests its elements too deeply to be read") from error
     # A field left open at the end of the part still has an instruction.
     found += ["".join(text) for text in fields if text is not None]
     return found
@@ -1116,6 +1151,7 @@ def field_problems(parts: dict[str, bytes]) -> list[str]:
         for instruction in instructions:
             if names_local_place(instruction):
                 field = field_arguments(instruction)[0]
+                field = field if field in KNOWN_FIELDS else ""
                 found.append(f"{name} has a field{f' ({field})' if field else ''} that "
                              "names a local file, another scheme or another program, or "
                              "people's data")
