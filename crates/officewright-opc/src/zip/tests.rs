@@ -223,7 +223,11 @@ fn rejects_data_before_the_first_entry_with_its_offsets_shifted() {
     // for an archive without entries, whose central directory comes first.
     let mut stub = b"MZ".to_vec();
     stub.resize(1002, 0);
-    for entries in [vec![TestEntry::stored("a", b"a")], Vec::new()] {
+    for (entries, what) in [
+        (vec![TestEntry::stored("a", b"a")], "the first entry"),
+        // An archive without entries has its central directory first.
+        (Vec::new(), "the central directory"),
+    ] {
         let layout = build(&entries, b"");
         let mut bytes = stub.clone();
         bytes.extend(&layout.bytes);
@@ -238,7 +242,7 @@ fn rejects_data_before_the_first_entry_with_its_offsets_shifted() {
         shift(&mut bytes, layout.end + 16);
         assert_eq!(
             zip_message(open(&bytes)),
-            "1002 bytes come before the first entry",
+            format!("1002 bytes come before {what}"),
             "{} entries",
             entries.len()
         );

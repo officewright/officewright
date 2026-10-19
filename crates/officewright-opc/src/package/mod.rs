@@ -294,14 +294,7 @@ const _: () = {
     assert_send_sync::<Package>();
 };
 
-/// At most `max` characters of `text`, with `…` when there are more, so that error
-/// messages stay short whatever a file holds.
-pub(crate) fn shorten(text: &str) -> String {
-    match text.char_indices().nth(crate::error::MESSAGE_VALUE) {
-        Some((end, _)) => format!("{}…", text.get(..end).unwrap_or_default()),
-        None => text.to_owned(),
-    }
-}
+pub(crate) use crate::error::shorten;
 
 /// Refuses a part name longer than [`Limits::max_part_name_length`] bytes, not counting
 /// the leading `/` of a ZIP item name.

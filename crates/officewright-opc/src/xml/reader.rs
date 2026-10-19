@@ -240,7 +240,10 @@ impl<'a> Reader<'a> {
                 .map_or("", |open| open.name.qname().as_str());
             return Err(self.error(
                 self.pos,
-                format!("unexpected end of input inside <{}>", short(name)),
+                format!(
+                    "unexpected end of input inside <{}>",
+                    crate::error::shorten(name)
+                ),
             ));
         }
         if rest.starts_with("</") {
@@ -279,7 +282,10 @@ impl<'a> Reader<'a> {
                 None => {
                     return Err(self.error(
                         self.pos,
-                        format!("unexpected end of input in <{}>", short(qname.as_str())),
+                        format!(
+                            "unexpected end of input in <{}>",
+                            crate::error::shorten(qname.as_str())
+                        ),
                     ));
                 }
                 Some(_) if !spaced => {
@@ -287,7 +293,7 @@ impl<'a> Reader<'a> {
                         self.pos,
                         format!(
                             "expected whitespace, '>' or '/>' in <{}>",
-                            short(qname.as_str())
+                            crate::error::shorten(qname.as_str())
                         ),
                     ));
                 }
@@ -312,8 +318,8 @@ impl<'a> Reader<'a> {
                 offset,
                 format!(
                     "duplicate attribute {} in <{}>",
-                    short(name.as_str()),
-                    short(qname.as_str())
+                    crate::error::shorten(name.as_str()),
+                    crate::error::shorten(qname.as_str())
                 ),
             ));
         }
@@ -365,8 +371,8 @@ impl<'a> Reader<'a> {
                 offset,
                 format!(
                     "duplicate attribute {} in <{}>",
-                    short(attribute.name.qname().as_str()),
-                    short(qname.as_str())
+                    crate::error::shorten(attribute.name.qname().as_str()),
+                    crate::error::shorten(qname.as_str())
                 ),
             ));
         }
@@ -400,8 +406,8 @@ impl<'a> Reader<'a> {
                 offset,
                 format!(
                     "end tag </{}> does not match start tag <{}>",
-                    short(qname.as_str()),
-                    short(open)
+                    crate::error::shorten(qname.as_str()),
+                    crate::error::shorten(open)
                 ),
             ));
         }
@@ -515,7 +521,7 @@ impl<'a> Reader<'a> {
         if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
             return Err(self.error(
                 offset,
-                format!("unsupported xml version {}", short(version)),
+                format!("unsupported xml version {}", crate::error::shorten(version)),
             ));
         }
         let mut spaced = self.skip_whitespace();
@@ -529,9 +535,10 @@ impl<'a> Reader<'a> {
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
             if !valid {
-                return Err(
-                    self.error(offset, format!("invalid encoding name {}", short(encoding)))
-                );
+                return Err(self.error(
+                    offset,
+                    format!("invalid encoding name {}", crate::error::shorten(encoding)),
+                ));
             }
             // The bytes were decoded before reading, as UTF-8 or UTF-16, and the label
             // is accepted whichever of the two they turned out to be. ECMA-376 Part 2
@@ -546,7 +553,7 @@ impl<'a> Reader<'a> {
             {
                 return Err(Error::Unsupported(format!(
                     "xml encoding {}; OOXML parts are UTF-8 or UTF-16",
-                    short(encoding)
+                    crate::error::shorten(encoding)
                 )));
             }
             spaced = self.skip_whitespace();
@@ -556,7 +563,10 @@ impl<'a> Reader<'a> {
             if standalone != "yes" && standalone != "no" {
                 return Err(self.error(
                     offset,
-                    format!("standalone must be yes or no, not {}", short(standalone)),
+                    format!(
+                        "standalone must be yes or no, not {}",
+                        crate::error::shorten(standalone)
+                    ),
                 ));
             }
             self.skip_whitespace();
@@ -657,14 +667,20 @@ impl<'a> Reader<'a> {
                 } else if let Some(decimal) = name.strip_prefix('#') {
                     parse_number(decimal, 10)
                 } else {
-                    return Err(self.error(at, format!("undeclared entity &{};", short(name))));
+                    return Err(self.error(
+                        at,
+                        format!("undeclared entity &{};", crate::error::shorten(name)),
+                    ));
                 };
                 code.and_then(char::from_u32)
                     .filter(|&c| is_char(c))
                     .ok_or_else(|| {
                         self.error(
                             at,
-                            format!("&{}; is not a character XML allows", short(name)),
+                            format!(
+                                "&{}; is not a character XML allows",
+                                crate::error::shorten(name)
+                            ),
                         )
                     })?
             }
@@ -729,7 +745,7 @@ impl<'a> Reader<'a> {
                     offset,
                     format!(
                         "the namespace prefix {} cannot be undeclared",
-                        short(prefix)
+                        crate::error::shorten(prefix)
                     ),
                 ));
             }
@@ -740,7 +756,7 @@ impl<'a> Reader<'a> {
             _ if reserved => {
                 return Err(self.error(
                     offset,
-                    format!("{} cannot be bound to a prefix", short(uri)),
+                    format!("{} cannot be bound to a prefix", crate::error::shorten(uri)),
                 ));
             }
             _ => {}
@@ -784,8 +800,8 @@ impl<'a> Reader<'a> {
                 offset,
                 format!(
                     "undeclared namespace prefix {} in <{}>",
-                    short(prefix),
-                    short(element.as_str())
+                    crate::error::shorten(prefix),
+                    crate::error::shorten(element.as_str())
                 ),
             )
         })
@@ -858,15 +874,6 @@ pub(super) fn error_at(text: &str, offset: usize, message: impl Into<String>) ->
         line,
         column,
         message: message.into(),
-    }
-}
-
-/// At most 64 characters of a name or value from the document, with `…` when there are
-/// more, so that an error message names it without copying all of it.
-fn short(text: &str) -> std::borrow::Cow<'_, str> {
-    match text.char_indices().nth(crate::error::MESSAGE_VALUE) {
-        Some((end, _)) => format!("{}…", text.get(..end).unwrap_or_default()).into(),
-        None => text.into(),
     }
 }
 

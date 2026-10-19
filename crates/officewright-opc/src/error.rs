@@ -79,8 +79,19 @@ pub enum Limit {
 }
 
 /// How many characters of a value from the document an error message quotes, so that a
-/// value of megabytes makes no message of megabytes.
+/// value of megabytes makes no message of megabytes: names and values of XML, content
+/// types and relationships. The ZIP layer quotes entry names whole, as their length is
+/// bounded by the format.
 pub(crate) const MESSAGE_VALUE: usize = 64;
+
+/// At most [`MESSAGE_VALUE`] characters of a name or value from the document, with `…`
+/// when there are more, so that an error message names it without copying all of it.
+pub(crate) fn shorten(text: &str) -> std::borrow::Cow<'_, str> {
+    match text.char_indices().nth(MESSAGE_VALUE) {
+        Some((end, _)) => format!("{}…", text.get(..end).unwrap_or_default()).into(),
+        None => text.into(),
+    }
+}
 
 impl Error {
     /// Names the part an XML error or an XML limit (depth, attributes, namespaces,
