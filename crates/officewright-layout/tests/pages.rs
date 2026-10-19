@@ -350,9 +350,10 @@ fn every_document_on_pages_keeps_what_the_painter_relies_on() -> TestResult {
 fn a_chain_that_moves_draws_its_leaders_once() -> TestResult {
     use officewright_layout::ir::{TabLeader, TabStop};
 
-    // A line of 50 dot-leader tabs at 1 pt and 1 % (about 198,000 glyphs, under the
-    // document's bound of 262,144), kept with a paragraph that does not fit: both move to
-    // the next page, and the leaders drawn on the first try are not counted against the
+    // 14 lines of 130 dot-leader tabs at 1 pt and 43 %, whose period stands on Word's
+    // smallest grid pitch of 0.12 pt (about 165,000 glyphs, under the document's bound of
+    // 262,144), kept together and with a paragraph that does not fit: both move to the
+    // next page, and the leaders drawn on the first try are not counted against the
     // bound again.
     let book = book()?;
     let mut document = Document::default();
@@ -360,21 +361,30 @@ fn a_chain_that_moves_draws_its_leaders_once() -> TestResult {
         RunStyle::default()
             .with_fonts(RunFonts::new("Liberation Sans"))
             .with_size(Pt(1.0))
-            .with_scale(1),
+            .with_scale(43),
     );
-    let stops = (1..=50).map(|stop| {
+    let stops = (1..=130).map(|stop| {
         TabStop::default()
             .with_position(Pt(f64::from(stop) * 11.0))
             .with_leader(TabLeader::Dot)
     });
-    let mut leaders = vec![Inline::text("A", style)];
-    leaders.extend((0..50).map(|_| Inline::tab(style)));
-    let mut blocks: Vec<Block> = (0..6)
+    let mut leaders = Vec::new();
+    for line in 0..14 {
+        if line > 0 {
+            leaders.push(Inline::line_break(BreakClear::None, style));
+        }
+        leaders.push(Inline::text("A", style));
+        leaders.extend((0..130).map(|_| Inline::tab(style)));
+    }
+    let mut blocks: Vec<Block> = (0..57)
         .map(|_| paragraph(style, exact(0.0), vec![Inline::text("A", style)]))
         .collect();
     blocks.push(paragraph(
         style,
-        exact(0.0).with_keep_next(true).with_tabs(stops),
+        exact(0.0)
+            .with_keep_next(true)
+            .with_keep_lines(true)
+            .with_tabs(stops),
         leaders,
     ));
     let three = vec![
@@ -385,12 +395,13 @@ fn a_chain_that_moves_draws_its_leaders_once() -> TestResult {
         Inline::text("A", style),
     ];
     blocks.push(paragraph(style, exact(0.0).with_keep_lines(true), three));
-    // A body 160 pt high and 600 pt wide: eight lines of 20 pt.
-    let setup = PageSetup::new(PageSize::new(Pt(744.0), Pt(304.0)));
+    // A body 1440 pt high and wide: 72 lines of 20 pt. The 57 lines and the 14 fit, the
+    // three after them do not.
+    let setup = PageSetup::new(PageSize::new(Pt(1584.0), Pt(1584.0)));
     document.add_section(Section::new(setup).with_blocks(blocks));
     let laid = fuzzing::paginate(&book, &document, 100)?;
     let second = laid.pages().get(1).ok_or("no second page")?;
-    assert_eq!(second.fragments().first().map(|f| f.paragraph()), Some(6));
+    assert_eq!(second.fragments().first().map(|f| f.paragraph()), Some(57));
     let glyphs: usize = second
         .text()
         .lines()
