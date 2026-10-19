@@ -42,8 +42,8 @@ pub(crate) struct Page {
     pub(crate) body: Body,
     /// The parts of paragraphs of the body on it, top to bottom.
     pub(crate) fragments: Vec<Fragment>,
-    /// What it draws: its header and footer, then its body; once laid out, its floating
-    /// objects too, behind or in front of the rest.
+    /// What it draws: its header and footer, then its body; once it goes to the sink, its
+    /// floating objects too, behind or in front of the rest.
     pub(crate) items: Vec<DisplayItem>,
     /// The floating objects its header, footer and body anchor, until they are stacked
     /// into `items`.
@@ -553,6 +553,7 @@ struct Checkpoint {
     pages: usize,
     items: usize,
     fragments: usize,
+    floats: usize,
     cursor: f64,
     above: Option<usize>,
     next_number: u32,
@@ -1684,6 +1685,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             pages: self.page_count(),
             items: page.map_or(0, |page| page.items.len()),
             fragments: page.map_or(0, |page| page.fragments.len()),
+            floats: page.map_or(0, |page| page.floats.len()),
             cursor: self.cursor,
             above: self.above,
             next_number: self.next_number,
@@ -1707,6 +1709,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         if let Some(page) = self.pages.last_mut() {
             page.items.truncate(checkpoint.items);
             page.fragments.truncate(checkpoint.fragments);
+            page.floats.truncate(checkpoint.floats);
         }
         self.cursor = checkpoint.cursor;
         self.above = checkpoint.above;
@@ -2258,6 +2261,50 @@ mod tests {
                 .any(|message| message.contains("does not wrap around floating objects")),
             "{report:?}"
         );
+    }
+
+    #[test]
+    fn a_floating_object_moves_with_the_paragraph_that_anchors_it() {
+        use crate::ir::{
+            AnchoredObject, HorizontalAnchor, ImageData, ImageFormat, ObjectContent, Picture, Size,
+            VerticalAnchor,
+        };
+
+        // Eight lines fill page 1; the eighth, kept with the next paragraph, anchors a
+        // picture. The next paragraph starts page 2, so the chain moves there, and the
+        // picture goes with it: page 1 keeps no copy of it.
+        let mut document = Document::default();
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        let image = document.add_image(ImageData::new(ImageFormat::Png, &b"\x89PNG"[..]));
+        let picture = Inline::anchored(AnchoredObject::new(
+            ObjectContent::Picture(Picture::new(image)),
+            Size::new(Pt(30.0), Pt(10.0)),
+            HorizontalAnchor::default(),
+            VerticalAnchor::default(),
+        ));
+        let mut blocks: Vec<Block> = (0..7).map(|_| lines(style, 1, spacing(0.0, 0.0))).collect();
+        blocks.push(
+            Paragraph::new(style)
+                .with_props(spacing(0.0, 0.0).with_keep_next(true))
+                .with_inlines([picture, Inline::text("A", style)])
+                .into(),
+        );
+        blocks.push(lines(style, 2, spacing(0.0, 0.0)));
+        document.add_section(Section::new(setup()).with_blocks(blocks));
+        let (laid, _) = laid(&document, 100);
+        let pages = laid.expect("pages").pages;
+        let images = |page: &Page| {
+            page.items
+                .iter()
+                .filter(|item| matches!(item, DisplayItem::Image(_)))
+                .count()
+        };
+        assert_eq!(texts(&pages[1]).len(), 3);
+        assert_eq!(pages.iter().map(images).collect::<Vec<_>>(), [0, 1]);
     }
 
     /// The tops and bottoms of the lines `page` draws.
