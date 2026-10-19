@@ -109,6 +109,10 @@ pub struct Document {
     /// Where the first declaration of each font name is, by the name in lower case.
     pub(crate) font_index: HashMap<String, u32>,
     pub(crate) sections: Vec<SectionData>,
+    /// The elements of the main part's `w:document` other than `w:body`, such as
+    /// `w:background` and unknown extensions, kept for writing, each with whether it comes
+    /// after the body (#111).
+    pub(crate) root_elements: Vec<(xml::Span, bool)>,
     /// The headers, footers, footnotes and endnotes.
     pub(crate) stories: Vec<StoryData>,
     /// The header or footer each relationship of the main part leads to, by its id.
@@ -214,6 +218,7 @@ impl Document {
             fonts: Vec::new(),
             font_index: HashMap::new(),
             sections: Vec::new(),
+            root_elements: Vec::new(),
             stories: Vec::new(),
             header_footers: HashMap::new(),
             footnotes: HashMap::new(),

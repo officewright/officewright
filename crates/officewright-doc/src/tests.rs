@@ -446,6 +446,32 @@ fn kept_xml(document: &Document) -> Vec<String> {
 }
 
 #[test]
+fn keeps_the_elements_of_the_document_around_its_body() {
+    // Issue #111: w:background and unknown elements under w:document were kept without
+    // anything that led to them.
+    let xml = format!(
+        r#"<w:document xmlns:w="{W}" xmlns:x="urn:x"><w:background w:color="FF0000"/><w:body><w:p/></w:body><x:after x:a="1"/></w:document>"#
+    );
+    let document = Document::from_bytes(package(DOCUMENT, &xml, &[])).unwrap();
+    let kept: Vec<(String, bool)> = document
+        .root_elements
+        .iter()
+        .map(|&(span, after)| (document.element(span).to_xml(), after))
+        .collect();
+    assert_eq!(kept.len(), 2, "{kept:?}");
+    assert!(
+        kept[0].0.contains("background") && kept[0].0.contains("FF0000"),
+        "{kept:?}"
+    );
+    assert!(!kept[0].1);
+    assert!(
+        kept[1].0.contains("after") && kept[1].0.contains("urn:x"),
+        "{kept:?}"
+    );
+    assert!(kept[1].1);
+}
+
+#[test]
 fn keeps_the_namespaces_that_values_in_kept_xml_name() {
     // Prefixes named only in values (#110): by every Markup Compatibility attribute, by
     // Requires and by xsi:type. Each case names a prefix of its own, bound on the
