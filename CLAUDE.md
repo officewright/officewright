@@ -48,10 +48,12 @@ crates/
                         chooses each character's font by Word's rule (MS-OI29500 2.1.88 b) with fallback,
                         shapes with HarfRust, breaks lines first fit by UAX #14 (unicode-linebreak) with
                         Word's rules on top, and flows paragraphs onto the pages of each section with Word's
-                        keep and widow rules, headers, footers, page numbers and list labels (counted per
-                        list definition, as Word counts), and draws floating pictures where they are
-                        anchored (stacked behind or in front of the text, which does not wrap around them
-                        yet), behind private modules;
+                        keep and widow rules, headers, footers, page numbers, list labels (counted per
+                        list definition, as Word counts) and tables (the grid's widths, merged cells,
+                        borders by Word's conflict rules, shading, nesting; a row is not split across
+                        pages, nor are header rows repeated, yet), and draws floating pictures where
+                        they are anchored (stacked behind or in front of the text, which does not wrap
+                        around them yet), behind private modules;
                         feature `pdf` renders a document into PDF with officewright-pdf (`render_pdf`,
                         hidden in the docs like the IR it takes, and `RenderOptions`);
                         feature `fuzzing` opens entry points for the fuzz targets, examples and the tests

@@ -1229,7 +1229,7 @@ pub struct PageDump {
     text: String,
 }
 
-/// Lines of a paragraph on a [`PageDump`].
+/// Lines of a paragraph, or bands of a table, on a [`PageDump`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct FragmentDump {
     paragraph: usize,
@@ -1285,13 +1285,13 @@ impl PageDump {
 }
 
 impl FragmentDump {
-    /// The paragraph, by its place among every paragraph of the body in reading order,
-    /// those of table cells included.
+    /// The paragraph or table, by its place among the paragraphs and tables of the body
+    /// in reading order, a table counting as one, whatever its cells hold.
     pub fn paragraph(&self) -> usize {
         self.paragraph
     }
 
-    /// Its lines of the paragraph.
+    /// Its lines of the paragraph, or bands of the table.
     pub fn lines(&self) -> std::ops::Range<usize> {
         self.lines.clone()
     }
@@ -1381,15 +1381,29 @@ pub fn check_pages(book: &FontBook, document: &Document, max_pages: usize) -> Re
             for flowed in &flow {
                 let setup = setup_of(flowed.section).unwrap_or_default();
                 let width = crate::pages::body(&setup).width;
-                let layout = crate::paragraph::lay_out_with(
-                    document,
-                    (flowed.paragraph, flowed.label.as_ref()),
-                    width,
-                    (&mut fonts, &mut shaper),
-                    &flowed.location,
-                    None,
-                );
-                lines += layout.lines.len();
+                lines += match &flowed.content {
+                    crate::pages::Content::Paragraph(paragraph, label) => {
+                        crate::paragraph::lay_out_with(
+                            document,
+                            (paragraph, label.as_ref()),
+                            width,
+                            (&mut fonts, &mut shaper),
+                            &flowed.location,
+                            None,
+                        )
+                        .lines
+                        .len()
+                    }
+                    crate::pages::Content::Table(table, labels) => crate::tables::Prepared::new(
+                        document,
+                        table,
+                        labels,
+                        width,
+                        &flowed.location,
+                        &mut fonts,
+                    )
+                    .band_count(),
+                };
             }
             if bound(2 * lines) > max_pages {
                 return Ok(());

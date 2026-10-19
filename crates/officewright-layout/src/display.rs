@@ -631,34 +631,9 @@ impl Painting<'_, '_, '_> {
         }
     }
 
-    /// The colour a shading fills with: the fill, the pattern colour, or a mix of the
-    /// two for a percentage. Other patterns are drawn as an even mix with the share of
-    /// the pattern colour they cover, and reported.
+    /// The colour a shading fills with: see [`fill_color`].
     fn shading_color(&mut self, shading: &Shading) -> Option<Color> {
-        let color = match shading.color() {
-            ColorValue::Rgb(color) => color,
-            ColorValue::Auto => Color::BLACK,
-        };
-        let fill = match shading.fill() {
-            ColorValue::Rgb(fill) => Some(fill),
-            ColorValue::Auto => None,
-        };
-        let share = match pattern_share(shading.pattern()) {
-            Share::Exact(share) => share,
-            Share::Approximate(share) => {
-                self.fonts.report_once(
-                    ReportKind::FeatureUnsupported,
-                    self.location,
-                    "a shading pattern of stripes or crosses is drawn as an even tint".to_owned(),
-                );
-                share
-            }
-        };
-        if share <= 0.0 {
-            return fill;
-        }
-        let under = fill.unwrap_or(Color::WHITE);
-        Some(mix(color, under, share))
+        fill_color(shading, self.fonts, self.location)
     }
 
     /// How far the box of a highlight or run shading in `style` reaches above and below
@@ -1339,6 +1314,40 @@ fn push_lines(
             color,
         }));
     }
+}
+
+/// The colour `shading` fills with: the fill, the pattern colour, or a mix of the two
+/// for a percentage. Other patterns are drawn as an even mix with the share of
+/// the pattern colour they cover, and reported.
+pub(crate) fn fill_color(
+    shading: &Shading,
+    fonts: &mut Fonts<'_>,
+    location: &Location,
+) -> Option<Color> {
+    let color = match shading.color() {
+        ColorValue::Rgb(color) => color,
+        ColorValue::Auto => Color::BLACK,
+    };
+    let fill = match shading.fill() {
+        ColorValue::Rgb(fill) => Some(fill),
+        ColorValue::Auto => None,
+    };
+    let share = match pattern_share(shading.pattern()) {
+        Share::Exact(share) => share,
+        Share::Approximate(share) => {
+            fonts.report_once(
+                ReportKind::FeatureUnsupported,
+                location,
+                "a shading pattern of stripes or crosses is drawn as an even tint".to_owned(),
+            );
+            share
+        }
+    };
+    if share <= 0.0 {
+        return fill;
+    }
+    let under = fill.unwrap_or(Color::WHITE);
+    Some(mix(color, under, share))
 }
 
 /// The colour of text whose formatting gives `value`, on `background`: automatic text
