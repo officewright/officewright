@@ -1,9 +1,5 @@
 //! Numbers as text, in the formats of page numbers, fields and list labels.
 
-// reason: page numbers (plan PR 8b) use this first, and list labels (PR 11) after; until
-// then only the tests and the `fuzzing` module do.
-#![cfg_attr(not(any(test, feature = "fuzzing")), allow(dead_code))]
-
 use crate::ir::NumberFormat;
 
 /// The marks of [`NumberFormat::Chicago`], in order; after the last they start again,

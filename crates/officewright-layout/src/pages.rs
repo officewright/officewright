@@ -20,6 +20,7 @@ use crate::ir::{
 };
 use crate::itemize::FieldValues;
 use crate::lines::{LineEnd, PieceKind};
+use crate::lists::{Counters, Label};
 use crate::paragraph::{self, ParagraphLayout};
 use crate::report::{Location, ReportKind, Step};
 use crate::shape::Shaper;
@@ -84,6 +85,8 @@ pub(crate) struct Flowed<'a> {
     /// Whether it is the first paragraph of a table cell, which keeps the space above it
     /// at the top of a page.
     pub(crate) first_in_cell: bool,
+    /// Its list label, when it is a list item, as the counters of its story make it.
+    pub(crate) label: Option<Label>,
 }
 
 /// The paragraphs of the body of every section of `document`, in reading order. Tables
@@ -93,20 +96,25 @@ pub(crate) fn flow<'a>(document: &'a Document, fonts: &mut Fonts<'_>) -> Result<
     let mut out = Vec::new();
     let mut table = None;
     let mut location = Location::default();
+    // The lists of the body count on from section to section.
+    let mut counters = Counters::default();
     location.push(Step::Field("sections"));
     for (index, section) in document.sections().iter().enumerate() {
         location.push(Step::Index(index));
         location.push(Step::Field("blocks"));
         let mut walk = Walk {
+            document,
             section: index,
             location: &mut location,
             table: &mut table,
+            counters: &mut counters,
             out: &mut out,
         };
         walk.blocks(section.blocks(), false, 0)?;
         location.pop();
         location.pop();
     }
+    report_list_formats(&counters, fonts);
     if let Some(location) = table {
         fonts.report_once(
             ReportKind::FeatureUnsupported,
@@ -121,11 +129,37 @@ pub(crate) fn flow<'a>(document: &'a Document, fonts: &mut Fonts<'_>) -> Result<
 
 /// A walk over the blocks of a section for [`flow`].
 struct Walk<'a, 'w> {
+    document: &'a Document,
     section: usize,
     location: &'w mut Location,
     /// The place of the first table.
     table: &'w mut Option<Location>,
+    /// The counters of the lists of the story walked.
+    counters: &'w mut Counters,
     out: &'w mut Vec<Flowed<'a>>,
+}
+
+/// Reports, once, at the first of them, labels with a number written in decimal because
+/// its format is one the layout does not write.
+fn report_list_formats(counters: &Counters, fonts: &mut Fonts<'_>) {
+    if let Some(location) = &counters.unsupported_format {
+        fonts.report_once(
+            ReportKind::FeatureUnsupported,
+            location,
+            "list numbers in a format the layout does not write are written in decimal".to_owned(),
+        );
+    }
+    if let Some(location) = &counters.long_label {
+        fonts.report_once(
+            ReportKind::ValueClamped,
+            location,
+            format!(
+                "list labels, and the templates they are written from, longer than {} \
+                 characters are cut there",
+                crate::lists::MAX_LABEL_CHARS
+            ),
+        );
+    }
 }
 
 impl<'a> Walk<'a, '_> {
@@ -141,6 +175,9 @@ impl<'a> Walk<'a, '_> {
                     location: self.location.clone(),
                     in_cell,
                     first_in_cell: in_cell && index == 0,
+                    label: paragraph
+                        .list()
+                        .and_then(|item| self.counters.label(self.document, &item, self.location)),
                 }),
                 Block::Table(table) => {
                     if depth >= MAX_TABLE_DEPTH {
@@ -565,7 +602,7 @@ impl<'d> Pager<'d, '_, '_> {
                 Some(slot) => {
                     let layout = paragraph::lay_out_with(
                         self.document,
-                        flowed.paragraph,
+                        (flowed.paragraph, flowed.label.as_ref()),
                         self.body()?.width,
                         (&mut *self.fonts, &mut *self.shaper),
                         &flowed.location,
@@ -594,7 +631,7 @@ impl<'d> Pager<'d, '_, '_> {
                 *laid_for = landed;
                 *layout = paragraph::lay_out_with(
                     self.document,
-                    flowed.paragraph,
+                    (flowed.paragraph, flowed.label.as_ref()),
                     self.body()?.width,
                     (&mut *self.fonts, &mut *self.shaper),
                     &flowed.location,
@@ -1183,13 +1220,19 @@ impl<'d> Pager<'d, '_, '_> {
         location.push(Step::Field(name));
         let mut table = None;
         let mut flowed = Vec::new();
+        // The lists of each header and footer count from their start: a hypothesis until a
+        // Word render, since no reference document has a list in a header or footer.
+        let mut counters = Counters::default();
         let mut walk = Walk {
+            document: self.document,
             section,
             location: &mut location,
             table: &mut table,
+            counters: &mut counters,
             out: &mut flowed,
         };
         walk.blocks(blocks, false, 0)?;
+        report_list_formats(&counters, self.fonts);
         if let Some(location) = table {
             self.fonts.report_once(
                 ReportKind::FeatureUnsupported,
@@ -1302,7 +1345,7 @@ impl<'d> Pager<'d, '_, '_> {
                 Some(layout) => Rc::clone(layout),
                 None => Rc::new(paragraph::lay_out_with(
                     self.document,
-                    part.paragraph,
+                    (part.paragraph, part.label.as_ref()),
                     width,
                     (&mut *self.fonts, &mut *self.shaper),
                     &part.location,
@@ -1542,6 +1585,229 @@ mod tests {
         let mut shaper = Shaper::new();
         let laid = paginate(document, &mut fonts, &mut shaper, max_pages);
         (laid, fonts.into_report())
+    }
+
+    /// The entries of `kind` in `report` whose message starts with `what`, as their locations.
+    fn entries_at(report: &LayoutReport, kind: ReportKind, what: &str) -> Vec<String> {
+        report
+            .entries()
+            .iter()
+            .filter(|entry| entry.kind() == kind && entry.message().starts_with(what))
+            .map(|entry| entry.location().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn what_the_pdf_leaves_out_is_reported() {
+        use crate::ir::{
+            AnchoredObject, DocumentSettings, HorizontalAnchor, Hyphenation, ImageData,
+            ImageFormat, Note, NoteKind, ObjectContent, Picture, Size, VerticalAnchor,
+        };
+
+        // Issue #303: each feature left out has its entry, once, however often it occurs,
+        // at the first place it occurs.
+        let floating = "floating pictures are not drawn yet";
+        let notes = "footnotes and endnotes are not laid out yet";
+        let right_to_left = "right-to-left text is laid out from left to right";
+        let hyphenation = "automatic hyphenation is not done";
+        let all = [floating, notes, right_to_left, hyphenation];
+        let at = |report: &LayoutReport, what: &str| {
+            entries_at(report, ReportKind::FeatureUnsupported, what)
+        };
+        let settings =
+            DocumentSettings::default().with_hyphenation(Hyphenation::default().with_auto(true));
+        let mut document = Document::new(settings);
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        let rtl = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_rtl(true),
+        );
+        let image = document.add_image(ImageData::new(ImageFormat::Png, &b"\x89PNG"[..]));
+        let note = document.add_note(Note::new(NoteKind::Footnote, []));
+        let anchored = || {
+            Inline::anchored(AnchoredObject::new(
+                ObjectContent::Picture(Picture::new(image)),
+                Size::new(Pt(10.0), Pt(10.0)),
+                HorizontalAnchor::default(),
+                VerticalAnchor::default(),
+            ))
+        };
+        let paragraph =
+            |inlines: Vec<Inline>| -> Block { Paragraph::new(style).with_inlines(inlines).into() };
+        let long = "A ".repeat(60);
+        document.add_section(Section::new(setup()).with_blocks(vec![
+            paragraph(vec![Inline::text(&long, style)]),
+            paragraph(vec![
+                anchored(),
+                Inline::text("A", style),
+                Inline::note_reference(note, false, style),
+            ]),
+            paragraph(vec![
+                anchored(),
+                Inline::text("\u{0645}\u{0631}\u{062D}\u{0628}\u{0627}", style),
+                Inline::note_reference(note, false, style),
+            ]),
+            paragraph(vec![Inline::text("Latin", rtl)]),
+        ]));
+        let (result, report) = laid(&document, 100);
+        result.expect("pages");
+        for (what, place) in [
+            (floating, "sections[0].blocks[1]"),
+            (notes, "sections[0].blocks[1]"),
+            (right_to_left, "sections[0].blocks[2]"),
+            (hyphenation, "sections[0].blocks[0]"),
+        ] {
+            assert_eq!(
+                at(&report, what),
+                [place],
+                "{what}: {:?}",
+                messages(&report)
+            );
+        }
+        // Right-to-left text is told by its characters, wherever they are in a run, and by
+        // the run's `w:rtl` on its own; digits that keep their stored order are not.
+        for (text, run_rtl, reported) in [
+            ("\u{05E9}\u{05DC}\u{05D5}\u{05DD}", false, true),
+            ("Hello \u{05E9}\u{05DC}\u{05D5}\u{05DD}", false, true),
+            ("Latin", true, true),
+            ("Latin", false, false),
+            ("a\u{200F}b", false, true),
+            ("a\u{202B}b", false, true),
+            ("\u{202E}abc", false, true),
+            ("a\u{2067}b", false, true),
+            ("\u{061B}", false, true),
+            ("\u{061F}", false, true),
+            ("\u{0640}", false, true),
+            ("\u{0661}\u{0662}\u{0663}", false, false),
+            ("\u{06F1}\u{06F2}\u{06F3}", false, false),
+            ("\u{0661}\u{066B}\u{0665}", false, false),
+            ("\u{0665}\u{0660}\u{066A}", false, false),
+            ("\u{0600}\u{0661}\u{0662}", false, false),
+            ("1\u{FB29}2", false, false),
+            ("\u{0601}", false, false),
+            ("\u{0604}", false, false),
+            ("\u{0609}", false, false),
+            ("\u{060A}", false, false),
+            ("\u{066C}", false, false),
+            ("\u{0890}", false, false),
+            ("\u{0891}", false, false),
+            ("\u{10D30}\u{10D31}", false, false),
+            ("\u{10D40}\u{10D41}", false, false),
+            ("\u{0710}", false, true),
+            ("\u{0780}", false, true),
+            ("\u{07CA}", false, true),
+            ("\u{10900}\u{10901}", false, true),
+        ] {
+            let mut only = Document::default();
+            let style = only.add_run_style(
+                RunStyle::default()
+                    .with_fonts(RunFonts::new("Officewright Test"))
+                    .with_rtl(run_rtl),
+            );
+            only.add_section(Section::new(setup()).with_blocks(vec![
+                Paragraph::new(style)
+                    .with_inlines([Inline::text(text, style)])
+                    .into(),
+            ]));
+            let (_, report) = laid(&only, 100);
+            assert_eq!(
+                at(&report, right_to_left).len(),
+                usize::from(reported),
+                "{text:?}: {:?}",
+                messages(&report)
+            );
+        }
+        // Text from left to right, with nothing floating, no notes and no automatic
+        // hyphenation, reports none of them.
+        let plain = self::document(|style| {
+            vec![Section::new(setup()).with_blocks(vec![lines(style, 2, spacing(0.0, 0.0))])]
+        });
+        let (_, report) = laid(&plain, 100);
+        for what in all {
+            assert_eq!(
+                at(&report, what),
+                [""; 0],
+                "{what}: {:?}",
+                messages(&report)
+            );
+        }
+    }
+
+    #[test]
+    fn automatic_hyphenation_is_reported_only_where_a_line_wraps_in_a_paragraph_allowing_it() {
+        use crate::ir::{DocumentSettings, Hyphenation};
+
+        // Word hyphenates only where a line wraps, in a paragraph that does not suppress
+        // hyphenation, in a document that turns it on (Part 1 §17.3.1.34, §17.15.1.10).
+        // LibreOffice saves `w:autoHyphenation` on with `w:suppressAutoHyphens` in every
+        // paragraph's defaults (poi/unicode-path.docx), and a paragraph that fits on its
+        // line, or ends its lines with breaks, has nothing to hyphenate.
+        let what = "automatic hyphenation is not done";
+        let long = "A ".repeat(60);
+        let laid_with = |auto: bool, paragraphs: [(&str, bool); 3]| {
+            let settings = DocumentSettings::default()
+                .with_hyphenation(Hyphenation::default().with_auto(auto));
+            let mut document = Document::new(settings);
+            let style = document.add_run_style(
+                RunStyle::default()
+                    .with_fonts(RunFonts::new("Officewright Test"))
+                    .with_size(Pt(10.0)),
+            );
+            let blocks: Vec<Block> = paragraphs
+                .iter()
+                .map(|&(text, suppress)| {
+                    let props = spacing(0.0, 0.0).with_suppress_auto_hyphens(suppress);
+                    if text.is_empty() {
+                        lines(style, 3, props)
+                    } else {
+                        // A line break where the text has a newline.
+                        let mut inlines = Vec::new();
+                        for (n, part) in text.split('\n').enumerate() {
+                            if n > 0 {
+                                inlines.push(Inline::line_break(BreakClear::None, style));
+                            }
+                            inlines.push(Inline::text(part, style));
+                        }
+                        Paragraph::new(style)
+                            .with_props(props)
+                            .with_inlines(inlines)
+                            .into()
+                    }
+                })
+                .collect();
+            document.add_section(Section::new(setup()).with_blocks(blocks));
+            let (result, report) = laid(&document, 100);
+            result.expect("pages");
+            entries_at(&report, ReportKind::FeatureUnsupported, what)
+        };
+        let (wraps, fits, broken) = (long.as_str(), "A", "");
+        // Only the lines in its middle wrap: a line break before them and after them.
+        let middle = format!("A\n{long}\nA");
+        assert_eq!(laid_with(true, [(wraps, true); 3]), [""; 0]);
+        assert_eq!(
+            laid_with(true, [(wraps, true), (wraps, false), (wraps, false)]),
+            ["sections[0].blocks[1]"]
+        );
+        // A paragraph allowing it whose text fits on its line, or whose lines end with
+        // line breaks, gets no entry; the first that wraps does.
+        assert_eq!(
+            laid_with(true, [(fits, false), (broken, false), (wraps, false)]),
+            ["sections[0].blocks[2]"]
+        );
+        assert_eq!(
+            laid_with(true, [(fits, false), (broken, false), (fits, false)]),
+            [""; 0]
+        );
+        assert_eq!(
+            laid_with(true, [(fits, false), (&middle, false), (fits, false)]),
+            ["sections[0].blocks[1]"]
+        );
+        assert_eq!(laid_with(false, [(wraps, false); 3]), [""; 0]);
     }
 
     /// Every page as the paragraphs, lines and tops of its fragments.
@@ -3492,5 +3758,133 @@ mod tests {
         let laid = laid.expect("pages");
         assert_eq!(laid.pages.len(), 1);
         assert!(laid.pages[0].fragments.is_empty());
+    }
+
+    #[test]
+    fn lists_count_on_through_the_body_and_afresh_in_each_header() {
+        use crate::ir::{
+            Level, LevelTextPart, ListDefinition, ListInstance, ListItem, NumberFormat,
+        };
+
+        let mut document = Document::default();
+        let style = document
+            .add_run_style(RunStyle::default().with_fonts(RunFonts::new("Officewright Test")));
+        let level = Level::default()
+            .with_text([
+                LevelTextPart::Placeholder(0),
+                LevelTextPart::Literal(".".into()),
+            ])
+            .with_start(1);
+        let other = Level::default()
+            .with_text([LevelTextPart::Placeholder(0)])
+            .with_format(NumberFormat::Other("hebrew1".into()));
+        let list = document.add_list(ListDefinition::default().with_levels([level]));
+        let hebrew = document.add_list(ListDefinition::default().with_levels([other]));
+        let instance = document.add_list_instance(ListInstance::new(list));
+        let hebrew = document.add_list_instance(ListInstance::new(hebrew));
+        let item = |instance| -> Block {
+            Paragraph::new(style)
+                .with_list(Some(ListItem::new(instance, 0, style)))
+                .with_inlines([Inline::text("A", style)])
+                .into()
+        };
+        let header = HeaderFooterSet::default().with_primary(vec![item(instance)]);
+        document.add_section(
+            Section::new(close_frames())
+                .with_headers(header.clone())
+                .with_blocks(vec![item(instance), item(instance)]),
+        );
+        document.add_section(
+            Section::new(close_frames())
+                .with_headers(header)
+                .with_blocks(vec![item(instance), item(hebrew)]),
+        );
+        let (laid, report) = laid(&document, 10);
+        let labels: Vec<Vec<String>> = laid
+            .expect("pages")
+            .pages
+            .iter()
+            .map(|page| texts(page).into_iter().filter(|text| text != "A").collect())
+            .collect();
+        // The header of each page counts from its start; the body counts on from section
+        // to section; a format the layout does not write is decimal, and reported.
+        assert_eq!(labels, [vec!["1.", "1.", "2."], vec!["1.", "3.", "0"]]);
+        // The report names the first paragraph whose label it wrote in decimal.
+        let places: Vec<String> = report
+            .iter()
+            .filter(|entry| {
+                entry.kind() == ReportKind::FeatureUnsupported
+                    && entry.message().contains("list numbers")
+            })
+            .map(|entry| entry.location().to_string())
+            .collect();
+        assert_eq!(places, ["sections[1].blocks[1]"], "{report:?}");
+        // A header's list in such a format is reported too, at the header's paragraph.
+        let mut in_header = Document::default();
+        let style = in_header
+            .add_run_style(RunStyle::default().with_fonts(RunFonts::new("Officewright Test")));
+        let other = Level::default()
+            .with_text([LevelTextPart::Placeholder(0)])
+            .with_format(NumberFormat::Other("hebrew1".into()));
+        let hebrew = in_header.add_list(ListDefinition::default().with_levels([other]));
+        let hebrew = in_header.add_list_instance(ListInstance::new(hebrew));
+        let header = HeaderFooterSet::default().with_primary(vec![
+            Paragraph::new(style)
+                .with_list(Some(ListItem::new(hebrew, 0, style)))
+                .with_inlines([Inline::text("A", style)])
+                .into(),
+        ]);
+        in_header.add_section(
+            Section::new(close_frames())
+                .with_headers(header)
+                .with_blocks(vec![Paragraph::new(style).into()]),
+        );
+        let (_, report) = self::laid(&in_header, 10);
+        let places: Vec<String> = report
+            .iter()
+            .filter(|entry| entry.message().contains("list numbers"))
+            .map(|entry| entry.location().to_string())
+            .collect();
+        assert_eq!(places.len(), 1, "{report:?}");
+        assert!(places[0].contains("headers"), "{places:?}");
+    }
+
+    #[test]
+    fn a_cut_label_is_reported_once_at_the_first_paragraph_it_is_cut_in() {
+        use crate::ir::{Level, LevelTextPart, ListDefinition, ListInstance, ListItem};
+
+        let mut document = Document::default();
+        let style = document
+            .add_run_style(RunStyle::default().with_fonts(RunFonts::new("Officewright Test")));
+        let level = |text: String| {
+            Level::default()
+                .with_text([LevelTextPart::Literal(text), LevelTextPart::Placeholder(0)])
+        };
+        let short = document.add_list(ListDefinition::default().with_levels([level("a".into())]));
+        let long = document.add_list(
+            ListDefinition::default()
+                .with_levels([level("a".repeat(crate::lists::MAX_LABEL_CHARS + 1))]),
+        );
+        let short = document.add_list_instance(ListInstance::new(short));
+        let long = document.add_list_instance(ListInstance::new(long));
+        let item = |instance| -> Block {
+            Paragraph::new(style)
+                .with_list(Some(ListItem::new(instance, 0, style)))
+                .into()
+        };
+        document.add_section(Section::new(close_frames()).with_blocks(vec![
+            item(short),
+            item(long),
+            item(long),
+        ]));
+        let (_, report) = laid(&document, 100);
+        let places: Vec<String> = report
+            .iter()
+            .filter(|entry| {
+                entry.kind() == ReportKind::ValueClamped && entry.message().contains("list labels")
+            })
+            .map(|entry| entry.location().to_string())
+            .collect();
+        assert_eq!(places, ["sections[0].blocks[1]"], "{report:?}");
     }
 }

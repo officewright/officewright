@@ -123,12 +123,12 @@ const MAX_CALL_DEPTH: u8 = 64;
 const MAX_STEPS: u32 = 1 << 24;
 
 /// How much decompiling the glyphs one subset keeps may read: [`MAX_STEPS`], or less
-/// where a budget that several subsets share has less left.
+/// where the budget the subset is made within has less left.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Limit {
     steps: u32,
     /// Whether the budget, not [`MAX_STEPS`], sets `steps`.
-    shared: bool,
+    budget: bool,
 }
 
 impl Limit {
@@ -137,11 +137,11 @@ impl Limit {
         match u32::try_from(left) {
             Ok(steps) if steps < MAX_STEPS => Self {
                 steps,
-                shared: true,
+                budget: true,
             },
             _ => Self {
                 steps: MAX_STEPS,
-                shared: false,
+                budget: false,
             },
         }
     }
@@ -552,7 +552,7 @@ pub(crate) fn check(
                 let limit = match limit {
                     Limit {
                         steps,
-                        shared: true,
+                        budget: true,
                     } => format!(
                         "the {steps} operands, operators and hint mask bytes left of its \
                          budget"
@@ -2307,7 +2307,7 @@ mod tests {
         let font_ref = FontRef::new(&font).unwrap();
         let limit = Limit {
             steps: limit,
-            shared: false,
+            budget: false,
         };
         check(&font_ref, &font, 0, glyphs, limit).map(|_| ())
     }
@@ -2513,7 +2513,7 @@ mod tests {
     fn the_limit_of_a_subset_is_the_budget_left_below_its_own() {
         let limit = |left: u64| {
             let limit = Limit::within(left);
-            (limit.steps, limit.shared)
+            (limit.steps, limit.budget)
         };
         assert_eq!(limit(0), (0, true));
         assert_eq!(limit(u64::from(MAX_STEPS) - 1), (MAX_STEPS - 1, true));

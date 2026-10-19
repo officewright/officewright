@@ -38,6 +38,7 @@ pub mod ir;
 mod itemize;
 mod layout_tables;
 mod lines;
+mod lists;
 mod metrics;
 mod numbers;
 mod pages;
