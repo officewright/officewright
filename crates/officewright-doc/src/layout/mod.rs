@@ -105,9 +105,11 @@ impl Document {
     /// And, once per document at the first place each is met, what the IR has no place
     /// for yet in sections, paragraphs, runs and pictures: page borders, line numbers,
     /// the document grid and vertical text; right-to-left paragraphs, text frames and
-    /// drop caps; embossed, engraved, outlined and shadowed text and emphasis marks (of a
-    /// run that shows text and is not hidden), and borders around text (of a run that is
-    /// not hidden and shows text, a tab or a picture in the line); a picture's outline,
+    /// drop caps; in a run that shows text and is not hidden, embossed, engraved,
+    /// outlined and shadowed text, emphasis marks, and Word 2010's effects of text (glow,
+    /// shadow, reflection, outline, fill and 3-D) unless their values change nothing;
+    /// borders around text, in a run that is not hidden and shows text, a tab or a
+    /// picture in the line; a picture's outline,
     /// its colour effects, its shadow, reflection, glow, soft edges and 3-D effects, and
     /// a shape it is cut to; and a paragraph mark, a table row or a table cell deleted as
     /// a tracked change, which the IR keeps, and a paragraph mark moved away. A deleted
@@ -262,6 +264,12 @@ enum Once {
     PictureEffects = 1 << 17,
     PictureShape = 1 << 18,
     DeletedCell = 1 << 19,
+    Glow = 1 << 20,
+    TextShadow = 1 << 21,
+    Reflection = 1 << 22,
+    TextOutline = 1 << 23,
+    TextFill = 1 << 24,
+    Text3d = 1 << 25,
 }
 
 impl<'a> Translator<'a> {
