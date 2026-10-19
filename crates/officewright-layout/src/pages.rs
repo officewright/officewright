@@ -1712,8 +1712,9 @@ mod tests {
         ]));
         let (result, report) = laid(&document, 100);
         result.expect("pages");
+        // Floating pictures are drawn: no entry says they are not.
+        assert_eq!(at(&report, floating), [""; 0], "{:?}", messages(&report));
         for (what, place) in [
-            (floating, "sections[0].blocks[1]"),
             (notes, "sections[0].blocks[1]"),
             (right_to_left, "sections[0].blocks[2]"),
             (hyphenation, "sections[0].blocks[0]"),
