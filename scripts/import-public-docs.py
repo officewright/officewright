@@ -1054,16 +1054,17 @@ def field_instructions(name: str, data: bytes) -> list[str]:
     nested fields apart, with the result of a field nested in an instruction (a complex
     field or w:fldSimple, its w:t and w:delText) read into that instruction, as Word reads
     {INCLUDEPICTURE "{MERGEFIELD Photo}"}; w:fldSimple's w:instr; and as an instruction of
-    its own any instruction text outside a field's instruction, and any w:t written straight
-    into an instruction.
+    its own any instruction text outside a field's instruction and its results. A text box
+    (w:txbxContent) is a story of its own.
 
     Word takes one branch of mc:AlternateContent and drops elements of ignorable namespaces,
     so a field mark there could end a field for this reading that Word goes on reading. So
     the fields inside an mc:Choice, an mc:Fallback or any element outside WordprocessingML
     must begin and end inside it, as Word's own text boxes hold them, and no text inside one
     may go on an instruction begun outside it. A part with a field across such an edge,
-    with such text, with an element inside an instruction, or with w:fldData (custom field
-    data), is refused. Raises Unreadable when the part is not well-formed or declares a
+    with such text, with an element inside an instruction, with text (w:t) written straight
+    into an instruction or instruction text in a nested result, which Word may read either
+    way, or with w:fldData (custom field data), is refused. Raises Unreadable when the part is not well-formed or declares a
     document type, or nests too deeply, and FieldMarkup."""
     builder = _Builder()
     parser = ElementTree.XMLParser(target=builder)
@@ -1077,10 +1078,11 @@ def field_instructions(name: str, data: bytes) -> list[str]:
     found: list[str] = []
 
     def walk(element: ElementTree.Element, scope: _FieldScope, isolated: bool,
-             outer_open: bool, in_simple: bool) -> None:
+             outer_open: bool, simple_at: int) -> None:
         # isolated: inside an mc:Choice, mc:Fallback or foreign element; outer_open: an
-        # instruction was open outside the innermost such element; in_simple: inside a
-        # w:fldSimple, whose text is a nested result.
+        # instruction was open outside the innermost such element; simple_at: the number
+        # of fields open where the innermost w:fldSimple began (-1 outside one), so that
+        # its text counts as a nested result only for an instruction begun outside it.
         namespace, _, local = element.tag.rpartition("}")
         namespace = namespace.lstrip("{")
         fields = scope.fields
@@ -1090,14 +1092,24 @@ def field_instructions(name: str, data: bytes) -> list[str]:
             inner = _FieldScope()
             opened = outer_open or bool(scope.open_instructions)
             for child in element:
-                walk(child, inner, True, opened, in_simple)
+                # Inside, the fields counted are the branch's own; no w:fldSimple is open.
+                walk(child, inner, True, opened, -1)
+            if inner.fields:
+                raise FieldMarkup(name)
+            return
+        if local == "txbxContent":
+            # A text box's text is a story of its own ([MS-DOC] counts it apart, ccpTxbx):
+            # it goes on no instruction around it, and its own fields begin and end in it.
+            inner = _FieldScope()
+            for child in element:
+                walk(child, inner, isolated, False, -1)
             if inner.fields:
                 raise FieldMarkup(name)
             return
         w = "{" + namespace + "}" if namespace else ""
         if local == "fldSimple":
             found.append(element.get(f"{w}instr", ""))
-            in_simple = True
+            simple_at = len(fields)
         elif local == "fldData":
             raise FieldMarkup(name)
         elif local == "fldChar":
@@ -1122,19 +1134,20 @@ def field_instructions(name: str, data: bytes) -> list[str]:
             text = element.text or ""
             if fields and fields[-1] is not None:
                 fields[-1].append(text)
-            elif isolated:
+            elif isolated or scope.open_instructions:
                 # Word puts the branch it takes in the place of mc:AlternateContent, so
-                # this text could go on an instruction begun outside.
+                # this text could go on an instruction begun outside; and instruction text
+                # in a nested result could go on the instruction around it.
                 raise FieldMarkup(name)
             else:
                 found.append(text)
             return
         elif local in ("t", "delText"):
             text = element.text or ""
-            if not in_simple and fields and fields[-1] is not None:
-                # Text written straight into an instruction: read on its own, so that it
-                # can change no field's name.
-                found.append(text)
+            if fields and fields[-1] is not None and len(fields) > simple_at:
+                # Text written straight into an instruction: nothing shows whether Word
+                # reads it in or skips it, so it is refused, safe either way.
+                raise FieldMarkup(name)
             elif scope.open_instructions:
                 # The result of a field nested in an open instruction.
                 scope.open_instructions[-1].append(text)
@@ -1142,11 +1155,11 @@ def field_instructions(name: str, data: bytes) -> list[str]:
                 # Text in a branch, read by Word into an instruction begun outside it.
                 raise FieldMarkup(name)
         for child in element:
-            walk(child, scope, isolated, outer_open, in_simple)
+            walk(child, scope, isolated, outer_open, simple_at)
 
     scope = _FieldScope()
     try:
-        walk(root, scope, False, False, False)
+        walk(root, scope, False, False, -1)
     except RecursionError as error:
         raise Unreadable(f"{name} nests its elements too deeply to be read") from error
     # A field left open at the end of the part still has an instruction.
@@ -1175,7 +1188,7 @@ def field_problems(parts: dict[str, bytes]) -> list[str]:
             instructions = field_instructions(name, data)
         except FieldMarkup:
             found.append(f"{name} has a field across Markup Compatibility branches, foreign "
-                         "markup or custom field data")
+                         "markup, text written into an instruction or custom field data")
             continue
         for instruction in instructions:
             if names_local_place(instruction):

@@ -1180,6 +1180,13 @@ class Cleaning(unittest.TestCase):
             return (f"<w:document xmlns:w='{w}'><w:body><w:p><w:fldSimple w:instr='{instruction}'>"
                     "<w:r><w:t>x</w:t></w:r></w:fldSimple></w:p></w:body></w:document>")
 
+        def text_in(before, text, after):
+            return (f"<w:document xmlns:w='{w}'><w:body><w:p>"
+                    "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                    f"<w:r><w:instrText>{before}</w:instrText></w:r><w:r><w:t>{text}</w:t></w:r>"
+                    f"<w:r><w:instrText>{after}</w:instrText></w:r>"
+                    "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:p></w:body></w:document>")
+
         def nested_result(result):
             return (f"<w:document xmlns:w='{w}'><w:body><w:p>"
                     "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
@@ -1300,9 +1307,26 @@ class Cleaning(unittest.TestCase):
                 "<w:r><w:instrText>INC</w:instrText></w:r><w:r><w:t>X</w:t></w:r>"
                 '<w:r><w:instrText>LUDETEXT "..\\drafts\\x.docx"</w:instrText></w:r>'
                 "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:p></w:body></w:document>"),
+            # Text written straight into an instruction is refused, whether Word reads it in
+            # or skips it (re-check of #381).
+            "a quote written into an instruction": text_in(
+                'LINK Excel.Sheet.8 "http://srv/a', '" "', '..\\x.xls"'),
+            "a colon written into an instruction": text_in('INCLUDETEXT "http://x/D', ":", '\\y"'),
+            "a path written into an instruction": text_in(
+                'INCLUDETEXT "', "D:\\private\\x.docx", '"'),
+            "text in a field begun inside a fldSimple": (
+                f"<w:document xmlns:w='{w}'><w:body><w:p><w:fldSimple w:instr='QUOTE x'>"
+                "<w:r><w:fldChar w:fldCharType='begin'/></w:r><w:r><w:t>QUOTE </w:t></w:r>"
+                '<w:r><w:instrText>INCLUDETEXT "drafts/x.docx"</w:instrText></w:r>'
+                "<w:r><w:fldChar w:fldCharType='separate'/></w:r>"
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:fldSimple></w:p></w:body>"
+                "</w:document>"),
+            "a nested result in instruction text": nested_result("photos/x.jpg").replace(
+                "<w:t>photos/x.jpg</w:t>", "<w:instrText>photos/x.jpg</w:instrText>"),
             "docproperty with an allowed second argument": field("DOCPROPERTY Author Title"),
             "a bare info": field("INFO"),
-            **{f"a web scheme after {c}": field(f'QUOTE "a{c}https://srv/x"') for c in "+.-"},
+            **{f"a web scheme after {c}": field(f'QUOTE "a{c}https://srv/x"') for c in "+.-1x"},
+            **{f"an http scheme after {c}": field(f'QUOTE "a{c}http://srv/x"') for c in "+.-1x"},
             "a nested fldSimple result": (
                 f"<w:document xmlns:w='{w}'><w:body><w:p>"
                 "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
@@ -1391,6 +1415,9 @@ class Cleaning(unittest.TestCase):
                 "", 'HYPERLINK "fi<zz:x/>le:///D:/x.docx"'),
             "custom field data": document("<w:r><w:fldData>AAAA</w:fldData></w:r>"),
             "a begin in a Choice": document(branch("<w:fldChar w:fldCharType='begin'/>", "")),
+            "a begin in a text box": document(
+                "<w:r><w:txbxContent><w:p><w:r><w:fldChar w:fldCharType='begin'/></w:r></w:p>"
+                "</w:txbxContent></w:r>"),
             # Instruction text in a branch goes on the instruction begun outside it, in the
             # branch Word takes (review of #381).
             "an instruction piece in a Fallback": piece(branch(
@@ -1473,6 +1500,38 @@ class Cleaning(unittest.TestCase):
                 f"<mc:Fallback>{whole}</mc:Fallback></mc:AlternateContent></w:r></w:p></w:body>"
                 "</w:document>")
         self.assertEqual(public.field_problems({"word/header1.xml": kept.encode()}), [])
+        # A text box in an IF argument is a story of its own, as Word keeps it: its text goes
+        # on no instruction, and its own fields are read.
+        box = ("<w:txbxContent><w:p><w:r><w:t>{text}</w:t></w:r>{field}</w:p></w:txbxContent>")
+        page = ("<w:r><w:fldChar w:fldCharType='begin'/></w:r><w:r><w:instrText>{instr}"
+                "</w:instrText></w:r><w:r><w:fldChar w:fldCharType='end'/></w:r>")
+
+        def text_box_in_if(text, instr):
+            inner = box.format(text=text, field=page.format(instr=instr))
+            return (f"<w:document xmlns:w='{w}' xmlns:mc='{mc}' xmlns:wps='urn:wps' "
+                    "xmlns:v='urn:v'><w:body><w:p>"
+                    "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                    '<w:r><w:instrText>IF 1 = 1 "</w:instrText></w:r><w:r><mc:AlternateContent>'
+                    "<mc:Choice Requires='wps'><w:drawing><wps:txbx>" + inner
+                    + "</wps:txbx></w:drawing></mc:Choice><mc:Fallback><w:pict><v:textbox>"
+                    + inner + "</v:textbox></w:pict></mc:Fallback></mc:AlternateContent></w:r>"
+                    '<w:r><w:instrText>" ""</w:instrText></w:r>'
+                    "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:p></w:body></w:document>")
+
+        self.assertEqual(public.field_problems({"word/document.xml": text_box_in_if(
+            "Due D:", "PAGE").encode()}), [])
+        # A w:fldSimple nested in an instruction gives it its result.
+        simple = (f"<w:document xmlns:w='{w}'><w:body><w:p>"
+                  "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                  '<w:r><w:instrText>HYPERLINK "</w:instrText></w:r>'
+                  "<w:fldSimple w:instr='MERGEFIELD url'><w:r><w:t>https://www.example.gov/a"
+                  "</w:t></w:r></w:fldSimple><w:r><w:instrText>\"</w:instrText></w:r>"
+                  "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:p></w:body></w:document>")
+        self.assertEqual(public.field_problems({"word/document.xml": simple.encode()}), [])
+        self.assertEqual(public.field_problems({"word/document.xml": text_box_in_if(
+            "Due", 'INCLUDETEXT "D:\\x"').encode()}),
+            ["word/document.xml has a field (INCLUDETEXT) that names a local file, another "
+             "scheme or another program, or people's data"])
 
     def test_fields_that_name_no_local_file_are_kept(self):
         w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -1481,9 +1540,11 @@ class Cleaning(unittest.TestCase):
                             'DATE \\@ "M/d/yyyy"', 'HYPERLINK "https://www.example.gov/a/b"',
                             'HYPERLINK \\l "_Toc1"', 'HYPERLINK "mailto:help@example.gov"',
                             'INCLUDEPICTURE "https://www.example.gov/a.png" \\d',
-                            'HYPERLINK "x.docx"', 'HYPERLINK "HTTPS://WWW.EXAMPLE.GOV/A"',
+                            'HYPERLINK "x.docx"',
+                            'HYPERLINK "HTTPS://WWW.EXAMPLE.GOV/A"',
                             'DOCPROPERTY "Title"', "INFO NumPages", "DOCPROPERTY Pages",
-                            'HYPERLINK "http://www.example.gov/a"', "INFO RevNum", "INFO EditTime", "DOCPROPERTY FileSize",
+                            'HYPERLINK "http://www.example.gov/a"', "INFO RevNum",
+                            "INFO EditTime", "DOCPROPERTY FileSize",
                             "DOCPROPERTY LastSavedTime", "INFO LastPrinted"):
             document = (f"<w:document xmlns:w='{w}'><w:body><w:p><w:fldSimple "
                         f"w:instr='{instruction}'/><w:r><w:fldChar w:fldCharType='begin'/></w:r>"
