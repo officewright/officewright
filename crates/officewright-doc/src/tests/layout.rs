@@ -887,6 +887,89 @@ fn lists_what_a_list_label_asks_for_as_a_run_s() {
 }
 
 #[test]
+fn lists_a_label_by_its_instance_s_levels_overrides_included() {
+    // From the last re-check of #362. The mark asks for emboss, so every label does; an
+    // entry means the label draws something. `levels` are the definition's w:lvl, `num`
+    // what the w:num holds besides its definition, `items` the levels of the items.
+    let listed = |levels: &str, num: &str, items: &[u8]| -> bool {
+        let body: String = items
+            .iter()
+            .map(|level| {
+                format!(
+                    r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="{level}"/><w:numId w:val="1"/></w:numPr><w:rPr><w:emboss/></w:rPr></w:pPr><w:r><w:t>text</w:t></w:r></w:p>"#
+                )
+            })
+            .collect();
+        let numbering = format!(
+            r#"<w:numbering xmlns:w="{W}"><w:abstractNum w:abstractNumId="0">{levels}</w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/>{num}</w:num></w:numbering>"#
+        );
+        !translate(&with_parts(
+            &body,
+            &[("numbering", "numbering.xml", numbering)],
+        ))
+        .left_out()
+        .is_empty()
+    };
+    let level = |at: u8, format: &str, text: &str| {
+        format!(
+            r#"<w:lvl w:ilvl="{at}"><w:numFmt w:val="{format}"/><w:lvlText w:val="{text}"/></w:lvl>"#
+        )
+    };
+    let replace = |at: u8, format: &str, text: &str| {
+        format!(
+            r#"<w:lvlOverride w:ilvl="{at}">{}</w:lvlOverride>"#,
+            level(at, format, text)
+        )
+    };
+    // An override's level replaces the definition's, both ways.
+    assert!(listed(&level(0, "decimal", "%1."), "", &[0]));
+    assert!(!listed(
+        &level(0, "decimal", "%1."),
+        &replace(0, "decimal", ""),
+        &[0]
+    ));
+    assert!(listed(
+        &level(0, "decimal", ""),
+        &replace(0, "decimal", "%1."),
+        &[0]
+    ));
+    // Each level of an instance has its own answer: items of a level that draws nothing,
+    // then of one that draws its number.
+    let two = format!("{}{}", level(0, "decimal", ""), level(1, "decimal", "%2."));
+    assert!(listed(&two, "", &[0, 1]));
+    assert!(!listed(&two, "", &[0, 0]));
+    // A level the definition does not have draws nothing; a placeholder of a missing
+    // level writes its number in decimal.
+    assert!(!listed(&level(0, "decimal", "%1."), "", &[2]));
+    let gap = format!(
+        "{}{}",
+        level(0, "decimal", "%1."),
+        level(2, "decimal", "%2")
+    );
+    assert!(listed(&gap, "", &[2]));
+    // Past the definition's last level, through an override's replacement, too.
+    assert!(listed(
+        &level(0, "decimal", "%1."),
+        &replace(2, "decimal", "%2"),
+        &[2]
+    ));
+    // U+007F is drawn as a bullet; the line and paragraph separators draw nothing; an odd
+    // count leaves no room for a placeholder at the end of the 256.
+    assert!(listed(&level(0, "decimal", "&#127;"), "", &[0]));
+    assert!(!listed(&level(0, "decimal", "&#8232;&#8233;"), "", &[0]));
+    assert!(!listed(
+        &level(0, "decimal", &format!("{}%1", "&#9;".repeat(255))),
+        "",
+        &[0]
+    ));
+    assert!(listed(
+        &level(0, "decimal", &format!("{}%1", "&#9;".repeat(254))),
+        "",
+        &[0]
+    ));
+}
+
+#[test]
 fn lists_a_label_by_the_number_formats_of_the_levels_it_names_once_per_level() {
     // A number of a bullet level writes nothing, unless the level naming it is legal; the
     // answer is worked out once for every item of a level of an instance.
