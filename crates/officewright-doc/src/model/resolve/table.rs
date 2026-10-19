@@ -574,9 +574,10 @@ impl<'a> Formats<'a> {
         // word-rules/E-table-style-header-rows-on.docx, with differentiateMultirowTableHeaders
         // on (#300). With the setting off this is unverified: Word dropped the setting from
         // the copy it rendered E-table-style-header-rows-off.docx from, so that render shows
-        // it absent, not off (#343), until Word renders E-table-style-header-rows-3-off of
-        // #321. The header rows make one group for the format's borders, and each takes the
-        // corner formats; no render shows those yet (#298).
+        // it absent, not off (#343). E-table-style-header-rows-3-off of #321 asks again, but
+        // Word may drop the setting there too. The header rows make one group for the
+        // format's borders, and each takes the corner formats; no render shows those yet
+        // (#298).
         let header_rows = if first_row {
             rows.iter()
                 .take_while(|row| row.properties().header() == Some(true))

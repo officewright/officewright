@@ -83,9 +83,9 @@ impl<'a> Styles<'a> {
 
     /// The default style of a kind (`w:default`): for paragraph and table styles, the
     /// one that paragraphs and tables naming no style of their own get from
-    /// [`Formats`](crate::Formats). It applies no default character style to runs: Word's
-    /// own, Default Paragraph Font, gives nothing, and what Word does with one that does
-    /// is not known.
+    /// [`Formats`](crate::Formats). [`Formats`](crate::Formats) gives runs no default
+    /// character style: Word's own, Default Paragraph Font, gives nothing, and no render
+    /// shows yet what Word does with one that gives something.
     ///
     /// Of several of a kind marked `w:default`, the last, as ECMA-376 Part 1 §17.7.4.17
     /// says and Word's renders of word-rules/E-default-paragraph-style.docx and
@@ -186,7 +186,8 @@ impl<'a> Style<'a> {
     }
 
     /// Whether the style is marked as the default of its kind (`w:default`). Of several
-    /// so marked, the last is the default ([`Styles::default_style`]).
+    /// so marked among the styles [`Formats`](crate::Formats) uses, the last is the
+    /// default ([`Styles::default_style`]); one past those is not.
     pub fn is_default(self) -> bool {
         self.data.is_default
     }
