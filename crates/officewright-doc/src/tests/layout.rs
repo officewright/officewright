@@ -801,7 +801,8 @@ fn lists_what_a_list_label_asks_for_as_a_run_s() {
     // its format asks for and the PDF leaves out is listed; before, only runs were looked
     // at. The label's level asks for old-style figures and emboss, the text for nothing.
     const W14: &str = "http://schemas.microsoft.com/office/word/2010/wordml";
-    let messages = |r_pr: &str, hidden: bool| -> Vec<String> {
+    let decimal = r#"<w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/>"#;
+    let labelled = |r_pr: &str, hidden: bool, level: &str| -> Vec<String> {
         let mark = if hidden {
             "<w:rPr><w:vanish/></w:rPr>"
         } else {
@@ -811,7 +812,7 @@ fn lists_what_a_list_label_asks_for_as_a_run_s() {
             r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>{mark}</w:pPr><w:r><w:t>text</w:t></w:r></w:p>"#
         );
         let numbering = format!(
-            r#"<w:numbering xmlns:w="{W}" xmlns:w14="{W14}"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:rPr>{r_pr}</w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#
+            r#"<w:numbering xmlns:w="{W}" xmlns:w14="{W14}"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0">{level}<w:rPr>{r_pr}</w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#
         );
         let settings = format!(
             r#"<w:settings xmlns:w="{W}"><w:compat><w:compatSetting w:name="enableOpenTypeFeatures" w:uri="http://schemas.microsoft.com/office/word" w:val="1"/></w:compat></w:settings>"#
@@ -828,6 +829,7 @@ fn lists_what_a_list_label_asks_for_as_a_run_s() {
         .map(|entry| entry.message().to_owned())
         .collect()
     };
+    let messages = |r_pr: &str, hidden: bool| labelled(r_pr, hidden, decimal);
     let found = messages(r#"<w14:numForm w14:val="oldStyle"/><w:emboss/>"#, false);
     assert_eq!(found.len(), 2, "{found:?}");
     assert!(found.iter().any(|m| m.contains("w14:numForm")), "{found:?}");
@@ -836,6 +838,23 @@ fn lists_what_a_list_label_asks_for_as_a_run_s() {
     assert!(messages(r#"<w14:numForm w14:val="oldStyle"/>"#, true).is_empty());
     // A label that asks for nothing lists nothing.
     assert!(messages("", false).is_empty());
+    // From the re-check of #362: a label that draws nothing lists nothing, as Word and
+    // the PDF draw no label: an empty text, the number of a level of format none alone,
+    // an empty bullet. A character outside the placeholders draws something.
+    let emboss = "<w:emboss/>";
+    for level in [
+        r#"<w:numFmt w:val="decimal"/><w:lvlText w:val=""/>"#,
+        r#"<w:numFmt w:val="none"/><w:lvlText w:val="%1"/>"#,
+        r#"<w:numFmt w:val="bullet"/><w:lvlText w:val=""/>"#,
+    ] {
+        assert!(labelled(emboss, false, level).is_empty(), "{level}");
+    }
+    for level in [
+        r#"<w:numFmt w:val="none"/><w:lvlText w:val="%1."/>"#,
+        r#"<w:numFmt w:val="bullet"/><w:lvlText w:val="-"/>"#,
+    ] {
+        assert_eq!(labelled(emboss, false, level).len(), 1, "{level}");
+    }
 }
 
 #[test]
