@@ -17,10 +17,11 @@ use crate::ir::{
     ShadingPattern, TabKind, TabLeader, UnderlineKind, VerticalPosition,
 };
 use crate::itemize::{Item, Itemized, TextRun, drawn_size};
-use crate::lines::{Piece, PieceKind, PlacedGlyph, inline_at};
+use crate::lines::{Piece, PieceKind, PlacedGlyph, inline_at, no_font};
 use crate::metrics::{TypoRule, line_metrics};
 use crate::paragraph::ParagraphLayout;
 use crate::report::{Location, ReportKind};
+use crate::shape::ShapingFace;
 
 /// How far the baseline of a superscript rises, as a fraction of the size its
 /// formatting gives. Hypothesis, like the size superscripts are drawn at, until a Word
@@ -275,17 +276,16 @@ impl Painting<'_, '_, '_> {
                             .run_style(run.style)
                             .cloned()
                             .unwrap_or_default();
-                        let reach = self.metrics(run);
-                        let raised = baseline - rise(run, &style);
                         // Spaces that hang past the end of the line have no box: like
                         // their underline, it would reach into the margin.
                         let width = if piece.hanging { Pt(0.0) } else { piece.width };
+                        let face = run.face.and_then(|id| self.fonts.face(id));
+                        let reach = self.reach(face.as_deref(), run.formatted_size, &style);
                         let background = self.background_of(
                             &style,
                             &mut behind,
-                            reach,
                             (x, width),
-                            raised,
+                            (baseline, reach),
                             bounds,
                         );
                         let color = text_color(style.color(), background);
@@ -374,31 +374,29 @@ impl Painting<'_, '_, '_> {
     }
 
     /// The background of a piece of text or a tab in `style`, `span` its start and width,
-    /// on `baseline` (raised for a superscript), whose font reaches `reach` above and
-    /// below it, on a line from `bounds.0` to `bounds.1`: the run's highlight or shading,
-    /// whose rectangle goes to `behind`, else the paragraph's shading, else what is
-    /// behind the paragraph.
+    /// on the line's baseline `at.0`, reaching `at.1` above and below it (`reach`), on a
+    /// line from `bounds.0` to `bounds.1`: the run's highlight or shading, whose rectangle
+    /// goes to `behind`, else the paragraph's shading, else what is behind the paragraph.
     fn background_of(
         &mut self,
         style: &RunStyle,
         behind: &mut Vec<DisplayItem>,
-        reach: (f64, f64),
         span: (f64, Pt),
-        baseline: f64,
+        at: (f64, (f64, f64)),
         bounds: (f64, f64),
     ) -> Option<Color> {
         let shading = style
             .shading()
             .and_then(|shading| self.shading_color(&shading));
-        // A highlight hides the run's shading. Hypothesis until a Word reference
-        // (`E-highlight.docx`), like the box: as high as the run's font reaches at the
-        // size its formatting gives, raised or lowered with its text, but within its
-        // line, which a superscript or subscript would otherwise leave.
+        // A highlight hides the run's shading, which is then not painted at all; either
+        // is one rectangle over the room the run takes in its line (`reach`), cut to the
+        // line (#309).
         let own = style.highlight().or(shading);
         if let Some(color) = own {
             let (x, width) = span;
-            let top = (baseline - reach.0).max(bounds.0);
-            let bottom = (baseline + reach.1).min(bounds.1);
+            let (baseline, (above, below)) = at;
+            let top = (baseline - above).max(bounds.0);
+            let bottom = (baseline + below).min(bounds.1);
             if width.0 > 0.0 && bottom > top {
                 behind.push(DisplayItem::Rect {
                     at: Point {
@@ -499,17 +497,34 @@ impl Painting<'_, '_, '_> {
         Some(mix(color, under, share))
     }
 
-    /// How far the font of `run` reaches above and below its baseline, at the size its
-    /// formatting gives.
-    fn metrics(&mut self, run: &TextRun) -> (f64, f64) {
-        let face = run.face.and_then(|id| self.fonts.face(id));
-        match face {
-            Some(face) => {
-                let metrics = line_metrics(face.face(), run.formatted_size, TypoRule::default());
-                (metrics.ascent.0, metrics.descent.0)
-            }
-            None => (run.formatted_size.0 * 0.8, run.formatted_size.0 * 0.2),
-        }
+    /// How far the box of a highlight or run shading in `style` reaches above and below
+    /// the line's baseline: as far as the run's text does when the line's height is set
+    /// (`lines::Breaker::set_height`), in `face` at `formatted`, the size its formatting
+    /// gives, with its leading above its ascent; further up or down by its position
+    /// (`w:position`), from the baseline as well, so a raised run's box keeps the room
+    /// below it. A superscript or subscript keeps its full size and the baseline, as its
+    /// line does. Word's references show it: `E-highlight.docx` the full line for
+    /// superscript, subscript and raised text, and `contract-usds-statement-of-objectives`
+    /// a 12 pt run's own height in a line its 20 pt paragraph mark makes taller.
+    fn reach(&self, face: Option<&ShapingFace>, formatted: Pt, style: &RunStyle) -> (f64, f64) {
+        let metrics = face.map_or_else(
+            || no_font(formatted),
+            |face| line_metrics(face.face(), formatted, TypoRule::default()),
+        );
+        let leading = if self
+            .document
+            .settings()
+            .has_compat_flag(&CompatFlag::NoLeading)
+        {
+            0.0
+        } else {
+            metrics.leading.0
+        };
+        let position = style.position().0;
+        (
+            leading + metrics.ascent.0 + position.max(0.0),
+            metrics.descent.0 + (-position).max(0.0),
+        )
     }
 
     /// The glyph run of a piece of text.
@@ -710,14 +725,9 @@ impl Painting<'_, '_, '_> {
         let size = drawn_size(&style, formatted, false);
         let choice = self.fonts.choose(&family, bold, italic);
         let face = choice.face.and_then(|id| self.fonts.face(id));
-        let reach = face
-            .as_ref()
-            .map_or((formatted.0 * 0.8, formatted.0 * 0.2), |face| {
-                let metrics = line_metrics(face.face(), formatted, TypoRule::default());
-                (metrics.ascent.0, metrics.descent.0)
-            });
         let raised = baseline - rise_at(&style, formatted.0);
-        let background = self.background_of(&style, behind, reach, span, raised, bounds);
+        let reach = self.reach(face.as_deref(), formatted, &style);
+        let background = self.background_of(&style, behind, span, (baseline, reach), bounds);
         let color = text_color(style.color(), background);
         let (x, width) = span;
         if width.0 <= 0.0 {
@@ -1211,7 +1221,7 @@ mod tests {
     use crate::paragraph::lay_out;
     use crate::report::LayoutReport;
     use crate::shape::Shaper;
-    use crate::testing::{book, minimal, renamed, with_period};
+    use crate::testing::{book, minimal, patched, renamed, with_period};
 
     /// The display list of a paragraph of the inlines `make` gives for run styles made
     /// from the test font at 10 pt by `styles`, laid out 100 pt wide at the page's
@@ -1230,8 +1240,18 @@ mod tests {
         styles: &[RunStyle],
         make: impl Fn(&[crate::ir::RunStyleId], &mut Document) -> (ParagraphProps, Vec<Inline>),
     ) -> (Vec<DisplayItem>, LayoutReport) {
+        painted_in(crate::ir::DocumentSettings::default(), fonts, styles, make)
+    }
+
+    /// [`painted_with`] in a document with `settings`.
+    fn painted_in(
+        settings: crate::ir::DocumentSettings,
+        fonts: Vec<Vec<u8>>,
+        styles: &[RunStyle],
+        make: impl Fn(&[crate::ir::RunStyleId], &mut Document) -> (ParagraphProps, Vec<Inline>),
+    ) -> (Vec<DisplayItem>, LayoutReport) {
         let book = book(fonts);
-        let mut document = Document::default();
+        let mut document = Document::new(settings);
         let ids: Vec<_> = styles
             .iter()
             .map(|style| {
@@ -1428,7 +1448,10 @@ mod tests {
     }
 
     #[test]
-    fn the_highlight_of_raised_text_rises_with_it() {
+    fn a_highlight_covers_the_room_its_run_takes_in_its_line() {
+        // E-highlight: a superscript keeps its full size and the baseline, so its box is
+        // the plain run's; text raised by its position takes the room above it as well,
+        // and keeps the room below.
         let marked = RunStyle::default().with_highlight(Some(Color::rgb(255, 255, 0)));
         let raised = marked
             .clone()
@@ -1447,25 +1470,133 @@ mod tests {
         let runs = glyph_runs(&items);
         let boxes = rects(&items);
         assert_eq!((runs.len(), boxes.len()), (2, 2), "{items:?}");
-        // Each box reaches the font's ascent (900 units of 1000 at 10 pt) above its own
-        // run's baseline and its descent (250) below, but stays within the line, from
-        // 20 to 31.5: the raised one is cut at the line's top.
-        let (Some(low), Some(high)) = (runs.first(), runs.get(1)) else {
-            panic!("runs");
-        };
+        // The test font reaches 9 pt above the baseline and 2.5 below at 10 pt. The
+        // raised run puts the line's top 2 pt higher, at 20, and the baseline at 31: its
+        // box is the whole line, from 20 to 33.5, and the plain run's starts 2 pt lower.
         let ((plain_at, _, plain_height, _), (raised_at, _, raised_height, _)) =
             (boxes[0], boxes[1]);
-        assert!(
-            (plain_at.y.0 - (low.origin.y.0 - 9.0)).abs() < 1e-9,
-            "{boxes:?}"
-        );
-        assert!((plain_at.y.0 + plain_height.0 - (low.origin.y.0 + 2.5)).abs() < 1e-9);
         assert!((raised_at.y.0 - 20.0).abs() < 1e-9, "{boxes:?}");
-        assert!((raised_at.y.0 + raised_height.0 - (high.origin.y.0 + 2.5)).abs() < 1e-9);
+        assert!((raised_height.0 - 13.5).abs() < 1e-9, "{boxes:?}");
+        assert!((plain_at.y.0 - 22.0).abs() < 1e-9, "{boxes:?}");
+        assert!((plain_height.0 - 11.5).abs() < 1e-9, "{boxes:?}");
         let (Some(low), Some(high)) = (runs.first(), runs.get(1)) else {
             panic!("runs");
         };
+        assert!((low.origin.y.0 - 31.0).abs() < 1e-9, "{runs:?}");
         assert!((low.origin.y.0 - high.origin.y.0 - (2.0 + 10.0 / 3.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_superscript_s_box_stays_on_the_baseline_in_a_taller_line() {
+        // A superscript keeps its full size and the baseline in its line, and so does its
+        // box: beside a 14 pt run the line's top is 12.6 pt above the baseline (at 32.6),
+        // and the 10 pt superscript's box reaches 9 above it and 2.5 below, not raised
+        // with its text.
+        let superscript = RunStyle::default()
+            .with_highlight(Some(Color::rgb(255, 255, 0)))
+            .with_vertical(VerticalPosition::Superscript);
+        let (items, _) = painted(&[RunStyle::default(), superscript], |ids, document| {
+            let large = document.add_run_style(
+                RunStyle::default()
+                    .with_fonts(RunFonts::new("Officewright Test"))
+                    .with_size(Pt(14.0)),
+            );
+            let up = ids.get(1).copied().expect("a style");
+            (
+                ParagraphProps::default(),
+                vec![Inline::text("A", large), Inline::text("A", up)],
+            )
+        });
+        let boxes = rects(&items);
+        assert_eq!(boxes.len(), 1, "{items:?}");
+        let (at, _, height, _) = boxes[0];
+        assert!((at.y.0 - 23.6).abs() < 1e-9, "{boxes:?}");
+        assert!((height.0 - 11.5).abs() < 1e-9, "{boxes:?}");
+    }
+
+    #[test]
+    fn a_highlight_is_as_high_as_its_run_in_a_line_its_paragraph_mark_makes_taller() {
+        // contract-usds-statement-of-objectives: Word's shading of a 12 pt title run is
+        // the run's own height, in a line that its 20 pt paragraph mark makes taller.
+        let (items, _) = painted(&[RunStyle::default()], |_, document| {
+            let small = document.add_run_style(
+                RunStyle::default()
+                    .with_fonts(RunFonts::new("Officewright Test"))
+                    .with_size(Pt(6.0))
+                    .with_highlight(Some(Color::rgb(255, 255, 0))),
+            );
+            (ParagraphProps::default(), vec![Inline::text("A", small)])
+        });
+        let boxes = rects(&items);
+        assert_eq!(boxes.len(), 1, "{items:?}");
+        // The 10 pt mark sets the line, from 20 to 31.5, with its baseline at 29; the 6 pt
+        // run reaches 5.4 pt above it and 1.5 below.
+        let (at, _, height, _) = boxes[0];
+        assert!((at.y.0 - 23.6).abs() < 1e-9, "{boxes:?}");
+        assert!((height.0 - 6.9).abs() < 1e-9, "{boxes:?}");
+    }
+
+    #[test]
+    fn a_highlight_takes_the_leading_its_font_puts_above_its_text() {
+        // The test font with a `hhea` line gap of 300 has a line taller than its Windows
+        // one: external leading of 0.15 em, which a line puts above its text, and so does
+        // a run's box. A 6 pt highlighted run in the line of a 10 pt paragraph mark: with
+        // leading the line's baseline is at 20 + 1.5 + 9 = 30.5 and the box reaches
+        // 0.9 + 5.4 above it and 1.5 below; without (`w:noLeading`) the baseline is at
+        // 29 and the box reaches 5.4 above it.
+        let tall = patched(minimal(), b"hhea", 8, &300i16.to_be_bytes());
+        for (flags, top, height) in [
+            (vec![], 24.2, 7.8),
+            (vec![CompatFlag::NoLeading], 23.6, 6.9),
+        ] {
+            let settings = crate::ir::DocumentSettings::default().with_compat_flags(flags);
+            let (items, _) = painted_in(
+                settings,
+                vec![tall.clone()],
+                &[RunStyle::default()],
+                |_, document| {
+                    let small = document.add_run_style(
+                        RunStyle::default()
+                            .with_fonts(RunFonts::new("Officewright Test"))
+                            .with_size(Pt(6.0))
+                            .with_highlight(Some(Color::rgb(255, 255, 0))),
+                    );
+                    (ParagraphProps::default(), vec![Inline::text("A", small)])
+                },
+            );
+            let boxes = rects(&items);
+            assert_eq!(boxes.len(), 1, "{items:?}");
+            let (at, _, box_height, _) = boxes[0];
+            assert!((at.y.0 - top).abs() < 1e-9, "{top}: {boxes:?}");
+            assert!((box_height.0 - height).abs() < 1e-9, "{height}: {boxes:?}");
+        }
+    }
+
+    #[test]
+    fn highlight_and_run_shading_are_cut_to_an_exact_line() {
+        // E-highlight case 05: under exact 9 pt line spacing the highlight is cut to the
+        // 9 pt line; run shading without a highlight is cut the same way.
+        let marked = RunStyle::default().with_highlight(Some(Color::rgb(255, 255, 0)));
+        let shaded = RunStyle::default().with_shading(Some(
+            Shading::default().with_fill(ColorValue::Rgb(Color::rgb(0, 0, 255))),
+        ));
+        for style in [marked, shaded] {
+            let (items, _) = painted(&[style], |ids, _| {
+                let id = ids.first().copied().expect("a style");
+                (
+                    ParagraphProps::default().with_spacing(
+                        crate::ir::Spacing::default()
+                            .with_line(crate::ir::LineSpacing::Exact(Pt(9.0))),
+                    ),
+                    vec![Inline::text("A", id)],
+                )
+            });
+            let boxes = rects(&items);
+            assert_eq!(boxes.len(), 1, "{items:?}");
+            let (at, _, height, _) = boxes[0];
+            assert!((at.y.0 - 20.0).abs() < 1e-9, "{boxes:?}");
+            assert!((height.0 - 9.0).abs() < 1e-9, "{boxes:?}");
+        }
     }
 
     /// The lines of `items`.
