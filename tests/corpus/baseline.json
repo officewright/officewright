@@ -240,15 +240,21 @@
     "tests/corpus/word-rules/E-autospacing-nohtml.docx": "opened",
     "tests/corpus/word-rules/E-autospacing.docx": "opened",
     "tests/corpus/word-rules/E-bar-tab.docx": "opened",
+    "tests/corpus/word-rules/E-bold-missing.docx": "opened",
     "tests/corpus/word-rules/E-default-paragraph-style-after-normal.docx": "opened",
     "tests/corpus/word-rules/E-default-paragraph-style.docx": "opened",
     "tests/corpus/word-rules/E-defaults-empty.docx": "opened",
+    "tests/corpus/word-rules/E-footer-tall-bottom.docx": "opened",
     "tests/corpus/word-rules/E-header-negative-margin.docx": "opened",
+    "tests/corpus/word-rules/E-header-no-room.docx": "opened",
     "tests/corpus/word-rules/E-header-space-after.docx": "opened",
+    "tests/corpus/word-rules/E-header-space-before.docx": "opened",
     "tests/corpus/word-rules/E-header-tall.docx": "opened",
+    "tests/corpus/word-rules/E-header-taller-than-page.docx": "opened",
     "tests/corpus/word-rules/E-highlight.docx": "opened",
     "tests/corpus/word-rules/E-italic-missing.docx": "opened",
     "tests/corpus/word-rules/E-keeplines-long.docx": "opened",
+    "tests/corpus/word-rules/E-keepnext-break.docx": "opened",
     "tests/corpus/word-rules/E-keepnext-chain.docx": "opened",
     "tests/corpus/word-rules/E-line-at-least.docx": "opened",
     "tests/corpus/word-rules/E-line-exact.docx": "opened",
@@ -259,20 +265,25 @@
     "tests/corpus/word-rules/E-list-label-rstyle.docx": "opened",
     "tests/corpus/word-rules/E-list-level-inherit.docx": "opened",
     "tests/corpus/word-rules/E-list-shared-abstract.docx": "opened",
+    "tests/corpus/word-rules/E-number-formats.docx": "opened",
     "tests/corpus/word-rules/E-opentype-12.docx": "opened",
     "tests/corpus/word-rules/E-opentype-none.docx": "opened",
     "tests/corpus/word-rules/E-opentype-off.docx": "opened",
     "tests/corpus/word-rules/E-opentype-on.docx": "opened",
     "tests/corpus/word-rules/E-page-break-before-top.docx": "opened",
+    "tests/corpus/word-rules/E-para-shading-borders.docx": "opened",
     "tests/corpus/word-rules/E-para-shading.docx": "opened",
     "tests/corpus/word-rules/E-paragraph-units.docx": "opened",
     "tests/corpus/word-rules/E-section-continuous-headers.docx": "opened",
+    "tests/corpus/word-rules/E-section-continuous-title.docx": "opened",
     "tests/corpus/word-rules/E-section-next-column.docx": "opened",
     "tests/corpus/word-rules/E-section-odd-first.docx": "opened",
     "tests/corpus/word-rules/E-section-odd.docx": "opened",
+    "tests/corpus/word-rules/E-section-restart-parity.docx": "opened",
     "tests/corpus/word-rules/E-smallcaps-12.docx": "opened",
     "tests/corpus/word-rules/E-smallcaps-14.docx": "opened",
     "tests/corpus/word-rules/E-smallcaps-15.docx": "opened",
+    "tests/corpus/word-rules/E-soft-hyphen-font.docx": "opened",
     "tests/corpus/word-rules/E-space-before-top.docx": "opened",
     "tests/corpus/word-rules/E-spacing-condensed.docx": "opened",
     "tests/corpus/word-rules/E-strike.docx": "opened",
@@ -311,11 +322,11 @@
   },
   "scores": {
     "tests/corpus/business/contract-ec-data-processing-clauses-bg.docx": {
-      "line_agreement": 0.9566,
-      "page_break_agreement": 0.8571,
-      "ssim_mean": 0.9211,
+      "line_agreement": 0.9928,
+      "page_break_agreement": 1.0,
+      "ssim_mean": 0.9256,
       "ssim_min": 0.6543,
-      "text_score": 0.9965
+      "text_score": 0.9999
     },
     "tests/corpus/business/contract-ec-data-processing-clauses-de.docx": {
       "line_agreement": 0.9821,
@@ -332,10 +343,10 @@
       "text_score": 0.9236
     },
     "tests/corpus/business/contract-gsa-user-agreement.docx": {
-      "line_agreement": 0.6286,
-      "ssim_mean": 0.8858,
-      "ssim_min": 0.8858,
-      "text_score": 0.9865
+      "line_agreement": 1.0,
+      "ssim_mean": 0.9773,
+      "ssim_min": 0.9773,
+      "text_score": 1.0
     },
     "tests/corpus/business/contract-hhs-performance-work-statement.docx": {
       "line_agreement": 0.4302,
@@ -345,25 +356,25 @@
       "text_score": 0.7426
     },
     "tests/corpus/business/contract-hhs-sow-usability-testing.docx": {
-      "line_agreement": 0.7311,
+      "line_agreement": 0.8022,
       "page_break_agreement": 0.0,
-      "ssim_mean": 0.5396,
+      "ssim_mean": 0.5409,
       "ssim_min": 0.0,
-      "text_score": 0.3629
+      "text_score": 0.3628
     },
     "tests/corpus/business/contract-hhs-teaming-agreement.docx": {
-      "line_agreement": 0.5442,
+      "line_agreement": 0.5578,
       "page_break_agreement": 0.1667,
-      "ssim_mean": 0.5975,
+      "ssim_mean": 0.5959,
       "ssim_min": 0.0,
-      "text_score": 0.4005
+      "text_score": 0.4222
     },
     "tests/corpus/business/contract-usds-statement-of-objectives.docx": {
-      "line_agreement": 0.3747,
+      "line_agreement": 0.8496,
       "page_break_agreement": 0.0769,
-      "ssim_mean": 0.7236,
-      "ssim_min": 0.6398,
-      "text_score": 0.8447
+      "ssim_mean": 0.7144,
+      "ssim_min": 0.618,
+      "text_score": 0.6788
     },
     "tests/corpus/business/form-cfpb-credit-form-c1.docx": {
       "line_agreement": 0.7162,
@@ -375,30 +386,30 @@
     "tests/corpus/business/form-cfpb-credit-form-c3-es.docx": {
       "line_agreement": 0.4746,
       "page_break_agreement": 0.0,
-      "ssim_mean": 0.6198,
-      "ssim_min": 0.5633,
-      "text_score": 0.9755
+      "ssim_mean": 0.6197,
+      "ssim_min": 0.563,
+      "text_score": 0.9764
     },
     "tests/corpus/business/form-ec-state-aid-notification-bg.docx": {
-      "line_agreement": 0.579,
+      "line_agreement": 0.6134,
       "page_break_agreement": 0.0556,
-      "ssim_mean": 0.6519,
+      "ssim_mean": 0.6518,
       "ssim_min": 0.525,
-      "text_score": 0.3346
+      "text_score": 0.3355
     },
     "tests/corpus/business/form-ec-state-aid-notification-de.docx": {
-      "line_agreement": 0.571,
+      "line_agreement": 0.6133,
       "page_break_agreement": 0.0526,
-      "ssim_mean": 0.6116,
+      "ssim_mean": 0.6114,
       "ssim_min": 0.0,
-      "text_score": 0.3167
+      "text_score": 0.3196
     },
     "tests/corpus/business/form-ec-state-aid-notification-el.docx": {
-      "line_agreement": 0.5957,
+      "line_agreement": 0.6318,
       "page_break_agreement": 0.0526,
-      "ssim_mean": 0.5807,
+      "ssim_mean": 0.5803,
       "ssim_min": 0.0,
-      "text_score": 0.2978
+      "text_score": 0.298
     },
     "tests/corpus/business/form-gsa-dira-dias-template.docx": {
       "line_agreement": 0.2664,
@@ -408,14 +419,14 @@
       "text_score": 0.1631
     },
     "tests/corpus/business/form-gsa-pacs-series-form.docx": {
-      "line_agreement": 0.5188,
-      "page_break_agreement": 0.25,
-      "ssim_mean": 0.5406,
+      "line_agreement": 0.5806,
+      "page_break_agreement": 0.375,
+      "ssim_mean": 0.5446,
       "ssim_min": 0.0,
-      "text_score": 0.3149
+      "text_score": 0.3158
     },
     "tests/corpus/business/form-gsa-reseller-form.docx": {
-      "line_agreement": 0.8356,
+      "line_agreement": 0.9589,
       "page_break_agreement": 1.0,
       "ssim_mean": 0.5982,
       "ssim_min": 0.0,
@@ -429,7 +440,7 @@
       "text_score": 0.9981
     },
     "tests/corpus/business/letter-cfpb-validation-notice-es.docx": {
-      "line_agreement": 0.3125,
+      "line_agreement": 0.325,
       "ssim_mean": 0.1166,
       "ssim_min": 0.0,
       "text_score": 0.0075
@@ -441,18 +452,18 @@
       "text_score": 0.0084
     },
     "tests/corpus/business/letter-dol-cobra-election-notice.docx": {
-      "line_agreement": 0.8377,
+      "line_agreement": 0.8669,
       "page_break_agreement": 0.625,
-      "ssim_mean": 0.8497,
-      "ssim_min": 0.5122,
-      "text_score": 0.8488
+      "ssim_mean": 0.8507,
+      "ssim_min": 0.511,
+      "text_score": 0.8491
     },
     "tests/corpus/business/letter-dol-cobra-general-notice.docx": {
-      "line_agreement": 0.8306,
+      "line_agreement": 0.8415,
       "page_break_agreement": 0.75,
-      "ssim_mean": 0.8059,
-      "ssim_min": 0.5812,
-      "text_score": 0.9486
+      "ssim_mean": 0.8098,
+      "ssim_min": 0.5835,
+      "text_score": 0.9498
     },
     "tests/corpus/business/letter-nara-ibr-request.docx": {
       "line_agreement": 1.0,
@@ -470,104 +481,104 @@
     "tests/corpus/business/report-hhs-usability-test-plan.docx": {
       "line_agreement": 0.1468,
       "page_break_agreement": 0.2222,
-      "ssim_mean": 0.5489,
+      "ssim_mean": 0.5431,
       "ssim_min": 0.0,
-      "text_score": 0.5197
+      "text_score": 0.55
     },
     "tests/corpus/business/report-hhs-usability-test-report.docx": {
-      "line_agreement": 0.554,
+      "line_agreement": 0.5749,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.6776,
+      "ssim_mean": 0.6798,
       "ssim_min": 0.0,
-      "text_score": 0.3421
+      "text_score": 0.3414
     },
     "tests/corpus/business/report-usds-tech-challenge-playbook.docx": {
-      "line_agreement": 0.462,
+      "line_agreement": 0.4676,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.7569,
-      "ssim_min": 0.6023,
-      "text_score": 0.9898
+      "ssim_mean": 0.7547,
+      "ssim_min": 0.6006,
+      "text_score": 0.9916
     },
     "tests/corpus/generated/contract-de-open.docx": {
-      "line_agreement": 0.38,
+      "line_agreement": 0.74,
       "page_break_agreement": 0.0,
-      "ssim_mean": 0.8792,
-      "ssim_min": 0.7654,
-      "text_score": 0.5837
+      "ssim_mean": 0.9799,
+      "ssim_min": 0.9669,
+      "text_score": 0.5895
     },
     "tests/corpus/generated/contract-de.docx": {
-      "line_agreement": 0.38,
+      "line_agreement": 0.74,
       "page_break_agreement": 0.0,
-      "ssim_mean": 0.8777,
-      "ssim_min": 0.7624,
-      "text_score": 0.5837
+      "ssim_mean": 0.9752,
+      "ssim_min": 0.9574,
+      "text_score": 0.5895
     },
     "tests/corpus/generated/contract-ru-open.docx": {
-      "line_agreement": 0.44,
-      "ssim_mean": 0.3579,
+      "line_agreement": 0.62,
+      "ssim_mean": 0.4365,
       "ssim_min": 0.0,
-      "text_score": 0.4481
+      "text_score": 0.4615
     },
     "tests/corpus/generated/contract-ru.docx": {
-      "line_agreement": 0.44,
-      "ssim_mean": 0.3582,
+      "line_agreement": 0.62,
+      "ssim_mean": 0.4305,
       "ssim_min": 0.0,
-      "text_score": 0.4481
+      "text_score": 0.4615
     },
     "tests/corpus/generated/contract-uk-open.docx": {
-      "line_agreement": 0.3333,
-      "ssim_mean": 0.3644,
+      "line_agreement": 0.7708,
+      "ssim_mean": 0.4643,
       "ssim_min": 0.0,
-      "text_score": 0.466
+      "text_score": 0.4832
     },
     "tests/corpus/generated/contract-uk.docx": {
-      "line_agreement": 0.3333,
-      "ssim_mean": 0.3633,
+      "line_agreement": 0.7708,
+      "ssim_mean": 0.4552,
       "ssim_min": 0.0,
-      "text_score": 0.466
+      "text_score": 0.4832
     },
     "tests/corpus/generated/contract-zh.docx": {
       "line_agreement": 0.2162,
       "page_break_agreement": 0.0,
-      "ssim_mean": 0.8496,
-      "ssim_min": 0.737,
-      "text_score": 0.6041
+      "ssim_mean": 0.8485,
+      "ssim_min": 0.7348,
+      "text_score": 0.6213
     },
     "tests/corpus/generated/cv-en-academic-open.docx": {
-      "line_agreement": 0.5185,
-      "ssim_mean": 0.4116,
+      "line_agreement": 0.7407,
+      "ssim_mean": 0.4432,
       "ssim_min": 0.0,
-      "text_score": 0.4274
+      "text_score": 0.4333
     },
     "tests/corpus/generated/cv-en-academic.docx": {
-      "line_agreement": 0.5185,
-      "ssim_mean": 0.4063,
+      "line_agreement": 0.7407,
+      "ssim_mean": 0.4352,
       "ssim_min": 0.0,
-      "text_score": 0.4274
+      "text_score": 0.4333
     },
     "tests/corpus/generated/cv-en-classic-open.docx": {
-      "line_agreement": 0.5135,
-      "ssim_mean": 0.8038,
-      "ssim_min": 0.8038,
-      "text_score": 0.8815
+      "line_agreement": 0.7838,
+      "ssim_mean": 0.8023,
+      "ssim_min": 0.8023,
+      "text_score": 0.9178
     },
     "tests/corpus/generated/cv-en-classic.docx": {
-      "line_agreement": 0.5135,
-      "ssim_mean": 0.8019,
-      "ssim_min": 0.8019,
-      "text_score": 0.8815
+      "line_agreement": 0.7838,
+      "ssim_mean": 0.8004,
+      "ssim_min": 0.8004,
+      "text_score": 0.9178
     },
     "tests/corpus/generated/cv-en-compact-open.docx": {
-      "line_agreement": 0.5161,
-      "ssim_mean": 0.8742,
-      "ssim_min": 0.8742,
-      "text_score": 0.7983
+      "line_agreement": 0.9032,
+      "ssim_mean": 0.8807,
+      "ssim_min": 0.8807,
+      "text_score": 0.9653
     },
     "tests/corpus/generated/cv-en-compact.docx": {
-      "line_agreement": 0.5161,
-      "ssim_mean": 0.8731,
-      "ssim_min": 0.8731,
-      "text_score": 0.7983
+      "line_agreement": 0.9032,
+      "ssim_mean": 0.8794,
+      "ssim_min": 0.8794,
+      "text_score": 0.9653
     },
     "tests/corpus/generated/cv-en-leaders-open.docx": {
       "line_agreement": 0.4419,
@@ -584,16 +595,16 @@
       "text_score": 0.404
     },
     "tests/corpus/generated/cv-en-sidebar-open.docx": {
-      "line_agreement": 0.3243,
-      "ssim_mean": 0.76,
-      "ssim_min": 0.76,
-      "text_score": 0.6266
+      "line_agreement": 0.5946,
+      "ssim_mean": 0.7602,
+      "ssim_min": 0.7602,
+      "text_score": 0.623
     },
     "tests/corpus/generated/cv-en-sidebar.docx": {
-      "line_agreement": 0.3243,
-      "ssim_mean": 0.7599,
-      "ssim_min": 0.7599,
-      "text_score": 0.6266
+      "line_agreement": 0.5946,
+      "ssim_mean": 0.76,
+      "ssim_min": 0.76,
+      "text_score": 0.623
     },
     "tests/corpus/generated/invoice-de-open.docx": {
       "line_agreement": 0.7193,
@@ -718,16 +729,16 @@
       "text_score": 0.9295
     },
     "tests/corpus/generated/memo-ru-open.docx": {
-      "line_agreement": 0.7391,
-      "ssim_mean": 0.8449,
-      "ssim_min": 0.8449,
-      "text_score": 0.9347
+      "line_agreement": 0.8696,
+      "ssim_mean": 0.8445,
+      "ssim_min": 0.8445,
+      "text_score": 0.9429
     },
     "tests/corpus/generated/memo-ru.docx": {
-      "line_agreement": 0.7391,
-      "ssim_mean": 0.8454,
-      "ssim_min": 0.8454,
-      "text_score": 0.9347
+      "line_agreement": 0.8696,
+      "ssim_mean": 0.8449,
+      "ssim_min": 0.8449,
+      "text_score": 0.9429
     },
     "tests/corpus/generated/notice-zh.docx": {
       "line_agreement": 0.2857,
@@ -736,10 +747,10 @@
       "text_score": 0.9044
     },
     "tests/corpus/generated/quote-zh.docx": {
-      "line_agreement": 0.6977,
-      "ssim_mean": 0.8339,
-      "ssim_min": 0.8339,
-      "text_score": 0.7273
+      "line_agreement": 0.7674,
+      "ssim_mean": 0.8331,
+      "ssim_min": 0.8331,
+      "text_score": 0.7513
     },
     "tests/corpus/word-rules/E-advance-rounding-12.docx": {
       "line_agreement": 1.0,
@@ -785,14 +796,14 @@
     },
     "tests/corpus/word-rules/E-default-paragraph-style-after-normal.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9641,
-      "ssim_min": 0.9641,
+      "ssim_mean": 0.9967,
+      "ssim_min": 0.9967,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-default-paragraph-style.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9553,
-      "ssim_min": 0.9553,
+      "ssim_mean": 0.9962,
+      "ssim_min": 0.9962,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-defaults-empty.docx": {
@@ -882,28 +893,28 @@
       "text_score": 0.7911
     },
     "tests/corpus/word-rules/E-list-label-format.docx": {
-      "line_agreement": 0.3333,
-      "ssim_mean": 0.9526,
-      "ssim_min": 0.9526,
-      "text_score": 0.945
+      "line_agreement": 1.0,
+      "ssim_mean": 0.9751,
+      "ssim_min": 0.9751,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-list-label-rstyle.docx": {
-      "line_agreement": 0.0,
-      "ssim_mean": 0.9907,
-      "ssim_min": 0.9907,
-      "text_score": 0.9341
+      "line_agreement": 1.0,
+      "ssim_mean": 0.9967,
+      "ssim_min": 0.9967,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-list-level-inherit.docx": {
-      "line_agreement": 0.2222,
-      "ssim_mean": 0.9586,
-      "ssim_min": 0.9586,
-      "text_score": 0.9383
+      "line_agreement": 1.0,
+      "ssim_mean": 0.9899,
+      "ssim_min": 0.9899,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-list-shared-abstract.docx": {
-      "line_agreement": 0.125,
-      "ssim_mean": 0.9558,
-      "ssim_min": 0.9558,
-      "text_score": 0.891
+      "line_agreement": 1.0,
+      "ssim_mean": 0.9929,
+      "ssim_min": 0.9929,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-opentype-12.docx": {
       "line_agreement": 1.0,
@@ -1036,28 +1047,28 @@
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-tab-hanging-14.docx": {
-      "line_agreement": 0.625,
-      "ssim_mean": 0.9178,
-      "ssim_min": 0.9178,
-      "text_score": 0.9885
+      "line_agreement": 1.0,
+      "ssim_mean": 0.9716,
+      "ssim_min": 0.9716,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-tab-hanging-noindenttab-14.docx": {
-      "line_agreement": 0.625,
-      "ssim_mean": 0.9154,
-      "ssim_min": 0.9154,
-      "text_score": 0.9885
+      "line_agreement": 1.0,
+      "ssim_mean": 0.9721,
+      "ssim_min": 0.9721,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-tab-hanging-noindenttab.docx": {
-      "line_agreement": 0.625,
-      "ssim_mean": 0.9178,
-      "ssim_min": 0.9178,
-      "text_score": 0.9885
+      "line_agreement": 1.0,
+      "ssim_mean": 0.9716,
+      "ssim_min": 0.9716,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-tab-hanging.docx": {
-      "line_agreement": 0.625,
-      "ssim_mean": 0.9178,
-      "ssim_min": 0.9178,
-      "text_score": 0.9885
+      "line_agreement": 1.0,
+      "ssim_mean": 0.9716,
+      "ssim_min": 0.9716,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-tab-leader.docx": {
       "line_agreement": 0.5106,

@@ -198,9 +198,11 @@ fn default_look() -> TableLook {
 /// and whether the item is the band's first and its last; with the first `skip_first`
 /// items and, with `skip_last`, the last one out of the bands. None for an item outside
 /// the bands or when the size is 0, which Word takes for no bands (MS-OI29500
-/// §17.7.6.5(c), §17.7.6.7(b)). Word leaves the first and last row or column out of the
-/// bands when they are formatted on their own, and every header row (#300):
-/// word-rules/E-table-style-bands.docx and E-table-style-header-rows-on.docx.
+/// §17.7.6.5(c), §17.7.6.7(b)). Word leaves the first row and the first column out of
+/// the bands when they are formatted on their own (word-rules/E-table-style-look.docx,
+/// cases 01 and 04), and every header row (E-table-style-header-rows-on.docx, #300).
+/// Leaving the last row and column out too is our choice: where they are formatted on
+/// their own, their format hides whether they count, and no render shows it yet.
 fn band(
     at: usize,
     count: usize,
@@ -635,7 +637,8 @@ impl<'a> Formats<'a> {
         Some(context)
     }
 
-    /// The index of the default table style, once looked up.
+    /// The index of the default table style, once looked up: the last, as
+    /// [`Styles::default_style`](crate::Styles::default_style) gives it.
     fn default_table_style(&mut self) -> Option<usize> {
         let document = self.document;
         *self.default_table_style.get_or_insert_with(|| {
@@ -644,7 +647,7 @@ impl<'a> Formats<'a> {
                 .styles
                 .iter()
                 .take(super::MAX_STYLES)
-                .position(|style| style.kind == StyleKind::Table && style.is_default)
+                .rposition(|style| style.kind == StyleKind::Table && style.is_default)
         })
     }
 }
