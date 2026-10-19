@@ -460,8 +460,9 @@ enum Numbering {
 /// components each time, so it reads no more than this; and the bound grows with the
 /// glyphs kept, whatever order the subsetter takes them in, so that a glyph whose subset
 /// it refuses refuses every subset that keeps it, and one it takes, every subset of its
-/// own glyphs. Each component read takes one off `components`, if given; `None` where
-/// none are left.
+/// own glyphs. Each component read takes one off `components`, if given; `None` where a
+/// composite has more than are left, which uses them up, and with none left a composite
+/// is not read at all.
 fn closure_cost(
     glyf: &Glyf,
     data: &[u8],
@@ -477,11 +478,15 @@ fn closure_cost(
         }
     }
     while let Some(glyph) = stack.pop() {
-        let found = glyf
+        let entry = glyf
             .entry(data, glyph)
-            .filter(|entry| i16_at(entry, 0).is_some_and(|contours| contours < 0))
-            .and_then(closure_components)
-            .unwrap_or_default();
+            .filter(|entry| i16_at(entry, 0).is_some_and(|contours| contours < 0));
+        // None left: the composite is not read at all, so that the next checks do not
+        // read it again either.
+        if entry.is_some() && components.as_deref() == Some(&0) {
+            return None;
+        }
+        let found = entry.and_then(closure_components).unwrap_or_default();
         if let Some(components) = components.as_deref_mut() {
             let len = u32::try_from(found.len()).unwrap_or(u32::MAX);
             let Some(left) = components.checked_sub(len) else {
@@ -1432,6 +1437,25 @@ mod tests {
             None
         );
         assert_eq!(components, 0);
+        // With none left, a composite is not read at all: here one whose header is cut off,
+        // which reads as no components when it is read.
+        let mut entries = vec![Vec::new(); 2];
+        entries[0] = glyph_entries()[0].clone();
+        entries[1] = vec![0xFF, 0xFF, 0, 0];
+        let face = crate::FontFace::from_bytes(font_of(&entries, false).build(), 0).unwrap();
+        let glyf = Tables::read(&face).unwrap().glyf.unwrap();
+        assert_eq!(
+            closure_cost(&glyf, face.data(), &[0, 1], Some(&mut 0)),
+            None
+        );
+        // A simple glyph of no contours, with an instruction length and instructions after
+        // its header, has no components.
+        let mut entries = vec![Vec::new(); 2];
+        entries[0] = glyph_entries()[0].clone();
+        entries[1] = [vec![0; 10], vec![0, 4, 0xB0, 0x01, 0xB0, 0x02]].concat();
+        let face = crate::FontFace::from_bytes(font_of(&entries, false).build(), 0).unwrap();
+        let glyf = Tables::read(&face).unwrap().glyf.unwrap();
+        assert_eq!(closure_cost(&glyf, face.data(), &[0, 1], None), Some(2));
     }
 
     #[test]
@@ -1482,6 +1506,21 @@ mod tests {
         let face = crate::FontFace::from_bytes(font(4094), 0).unwrap();
         face.check_subset_glyph(GlyphId::new(3)).unwrap();
         check_subset_closure(&face, &[3]).unwrap();
+        // The check of glyph 3 follows its 4,094 components, and glyph 1's 4,094 (8,188),
+        // and the count of its closure reads them again (16,376): within what the checks
+        // may follow, or not.
+        let mut state = State::new(&face, 10_000);
+        let err = state.check(&face, 3).unwrap_err();
+        assert!(
+            std::error::Error::source(&err)
+                .unwrap()
+                .to_string()
+                .contains("follows more than"),
+            "{err}"
+        );
+        let mut state = State::new(&face, 20_000);
+        state.check(&face, 3).unwrap();
+        assert_eq!(20_000 - state.components, 16_376);
         // A face is heavy where (2 × components in all + 2) × (most in one + 1) is past the
         // limit: one composite of 2,896 components is, of 2,895 not; 128 composites of 255
         // and one of 128 (32,768 in all, 255 the most) are just past it, so neither the 2
