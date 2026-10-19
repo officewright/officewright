@@ -11,7 +11,7 @@ use crate::ir::{CompatFlag, Document, Paragraph, ParagraphProps};
 use crate::itemize::{FieldValues, Itemized, itemize_with, shape_runs};
 use crate::lines::{Breaker, Input, Line};
 use crate::lists::Label;
-use crate::report::Location;
+use crate::report::{Location, ReportKind};
 use crate::shape::Shaper;
 
 /// The space automatic spacing (`w:beforeAutospacing`, `w:afterAutospacing`) puts
@@ -69,6 +69,17 @@ pub(crate) fn lay_out_with(
     location: &Location,
     fields: Option<&FieldValues>,
 ) -> ParagraphLayout {
+    // Word hyphenates a paragraph only where the document asks for it and the paragraph does
+    // not suppress it (Part 1 §17.3.1.34, §17.15.1.10), so the entry names the first such
+    // paragraph, and a document whose paragraphs all suppress it gets none.
+    if document.settings().hyphenation().auto() && !paragraph.props().suppress_auto_hyphens() {
+        fonts.report_once(
+            ReportKind::FeatureUnsupported,
+            location,
+            "automatic hyphenation is not done: words are not hyphenated at the ends of lines"
+                .to_owned(),
+        );
+    }
     let itemized = itemize_with(
         document,
         (label, paragraph.inlines()),

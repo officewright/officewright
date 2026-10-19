@@ -238,17 +238,6 @@ fn paginate_with(
     max_pages: usize,
     max_frame_drawn: usize,
 ) -> Result<Paginated> {
-    if document.settings().hyphenation().auto() {
-        let mut location = Location::default();
-        location.push(Step::Field("settings"));
-        location.push(Step::Field("hyphenation"));
-        fonts.report_once(
-            ReportKind::FeatureUnsupported,
-            &location,
-            "automatic hyphenation is not done: words are not hyphenated at the ends of lines"
-                .to_owned(),
-        );
-    }
     let flow = flow(document, fonts)?;
     // `NUMPAGES` and `SECTIONPAGES` depend on the layout they are part of: each pass lays
     // out with the counts the one before found, until they agree.
@@ -1598,6 +1587,16 @@ mod tests {
         (laid, fonts.into_report())
     }
 
+    /// The entries of `kind` in `report` whose message starts with `what`, as their locations.
+    fn entries_at(report: &LayoutReport, kind: ReportKind, what: &str) -> Vec<String> {
+        report
+            .entries()
+            .iter()
+            .filter(|entry| entry.kind() == kind && entry.message().starts_with(what))
+            .map(|entry| entry.location().to_string())
+            .collect()
+    }
+
     #[test]
     fn what_the_pdf_leaves_out_is_reported() {
         use crate::ir::{
@@ -1605,21 +1604,15 @@ mod tests {
             ImageFormat, Note, NoteKind, ObjectContent, Picture, Size, VerticalAnchor,
         };
 
-        // Issue #303: each feature left out has its entry, once, however often it occurs.
-        let floating = "floating pictures, shapes and text boxes are not drawn yet";
+        // Issue #303: each feature left out has its entry, once, however often it occurs,
+        // at the first place it occurs.
+        let floating = "floating pictures are not drawn yet";
         let notes = "footnotes and endnotes are not laid out yet";
         let right_to_left = "right-to-left text is laid out from left to right";
         let hyphenation = "automatic hyphenation is not done";
         let all = [floating, notes, right_to_left, hyphenation];
-        let count = |report: &LayoutReport, what: &str| {
-            report
-                .entries()
-                .iter()
-                .filter(|entry| {
-                    entry.kind() == ReportKind::FeatureUnsupported
-                        && entry.message().starts_with(what)
-                })
-                .count()
+        let at = |report: &LayoutReport, what: &str| {
+            entries_at(report, ReportKind::FeatureUnsupported, what)
         };
         let settings =
             DocumentSettings::default().with_hyphenation(Hyphenation::default().with_auto(true));
@@ -1647,6 +1640,7 @@ mod tests {
         let paragraph =
             |inlines: Vec<Inline>| -> Block { Paragraph::new(style).with_inlines(inlines).into() };
         document.add_section(Section::new(setup()).with_blocks(vec![
+            paragraph(vec![Inline::text("A", style)]),
             paragraph(vec![
                 anchored(),
                 Inline::text("A", style),
@@ -1661,32 +1655,48 @@ mod tests {
         ]));
         let (result, report) = laid(&document, 100);
         result.expect("pages");
-        for what in all {
-            assert_eq!(count(&report, what), 1, "{what}: {:?}", messages(&report));
+        for (what, place) in [
+            (floating, "sections[0].blocks[1]"),
+            (notes, "sections[0].blocks[1]"),
+            (right_to_left, "sections[0].blocks[2]"),
+            (hyphenation, "sections[0].blocks[0]"),
+        ] {
+            assert_eq!(
+                at(&report, what),
+                [place],
+                "{what}: {:?}",
+                messages(&report)
+            );
         }
-        // Right-to-left text is told by its script, and by the run's `w:rtl` on its own.
-        for (text, flagged) in [("\u{05E9}\u{05DC}\u{05D5}\u{05DD}", false), ("Latin", true)] {
-            let only = self::document(|style| {
-                vec![Section::new(setup()).with_blocks(vec![
-                    Paragraph::new(style)
-                        .with_inlines([Inline::text(text, style)])
-                        .into(),
-                ])]
-            });
-            let mut only = only;
-            if flagged {
-                let rtl = only.add_run_style(RunStyle::default().with_rtl(true));
-                only.add_section(Section::new(setup()).with_blocks(vec![
-                    Paragraph::new(rtl)
-                        .with_inlines([Inline::text(text, rtl)])
-                        .into(),
-                ]));
-            }
+        // Right-to-left text is told by its characters, wherever they are in a run, and by
+        // the run's `w:rtl` on its own; digits that keep their stored order are not.
+        for (text, run_rtl, reported) in [
+            ("\u{05E9}\u{05DC}\u{05D5}\u{05DD}", false, true),
+            ("Hello \u{05E9}\u{05DC}\u{05D5}\u{05DD}", false, true),
+            ("Latin", true, true),
+            ("Latin", false, false),
+            ("a\u{200F}b", false, true),
+            ("\u{202E}abc", false, true),
+            ("\u{0661}\u{0662}\u{0663}", false, false),
+            ("\u{06F1}\u{06F2}\u{06F3}", false, false),
+            ("\u{10900}\u{10901}", false, true),
+        ] {
+            let mut only = Document::default();
+            let style = only.add_run_style(
+                RunStyle::default()
+                    .with_fonts(RunFonts::new("Officewright Test"))
+                    .with_rtl(run_rtl),
+            );
+            only.add_section(Section::new(setup()).with_blocks(vec![
+                Paragraph::new(style)
+                    .with_inlines([Inline::text(text, style)])
+                    .into(),
+            ]));
             let (_, report) = laid(&only, 100);
             assert_eq!(
-                count(&report, right_to_left),
-                1,
-                "{text}: {:?}",
+                at(&report, right_to_left).len(),
+                usize::from(reported),
+                "{text:?}: {:?}",
                 messages(&report)
             );
         }
@@ -1697,8 +1707,53 @@ mod tests {
         });
         let (_, report) = laid(&plain, 100);
         for what in all {
-            assert_eq!(count(&report, what), 0, "{what}: {:?}", messages(&report));
+            assert_eq!(
+                at(&report, what),
+                [""; 0],
+                "{what}: {:?}",
+                messages(&report)
+            );
         }
+    }
+
+    #[test]
+    fn automatic_hyphenation_is_reported_only_where_a_paragraph_allows_it() {
+        use crate::ir::{DocumentSettings, Hyphenation};
+
+        // Word hyphenates a paragraph only when the document asks for it and the paragraph
+        // does not suppress it (Part 1 §17.3.1.34): LibreOffice saves `w:autoHyphenation` on
+        // with `w:suppressAutoHyphens` in every paragraph's defaults (poi/unicode-path.docx).
+        let what = "automatic hyphenation is not done";
+        let laid_with = |auto: bool, suppressed: [bool; 3]| {
+            let settings = DocumentSettings::default()
+                .with_hyphenation(Hyphenation::default().with_auto(auto));
+            let mut document = Document::new(settings);
+            let style = document.add_run_style(
+                RunStyle::default()
+                    .with_fonts(RunFonts::new("Officewright Test"))
+                    .with_size(Pt(10.0)),
+            );
+            let blocks: Vec<Block> = suppressed
+                .iter()
+                .map(|&suppress| {
+                    lines(
+                        style,
+                        1,
+                        spacing(0.0, 0.0).with_suppress_auto_hyphens(suppress),
+                    )
+                })
+                .collect();
+            document.add_section(Section::new(setup()).with_blocks(blocks));
+            let (result, report) = laid(&document, 100);
+            result.expect("pages");
+            entries_at(&report, ReportKind::FeatureUnsupported, what)
+        };
+        assert_eq!(laid_with(true, [true; 3]), [""; 0]);
+        assert_eq!(
+            laid_with(true, [true, false, false]),
+            ["sections[0].blocks[1]"]
+        );
+        assert_eq!(laid_with(false, [false; 3]), [""; 0]);
     }
 
     /// Every page as the paragraphs, lines and tops of its fragments.

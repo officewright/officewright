@@ -208,23 +208,72 @@ struct Builder<'d, 'f, 'a> {
     shaper: Shaper,
 }
 
-/// Whether `script` is written from right to left. The layout shapes every run from left
-/// to right and does not reorder bidirectional text yet, so such text is reported.
-fn right_to_left(script: Script) -> bool {
-    matches!(
-        script,
-        Script::Arabic
-            | Script::Hebrew
-            | Script::Syriac
-            | Script::Thaana
-            | Script::Nko
-            | Script::Samaritan
-            | Script::Mandaic
-            | Script::Adlam
-            | Script::Hanifi_Rohingya
-            | Script::Mende_Kikakui
-            | Script::Yezidi
-    )
+/// Whether `ch` is written from right to left. The layout shapes every run from left to right
+/// and does not reorder bidirectional text yet, so such text is reported.
+///
+/// This stands for the bidirectional classes R, AL, RLE, RLO and RLI of UAX #9, which the
+/// layout has no table of: the characters of every script that Unicode 17 writes from right
+/// to left (their marks and punctuation count with them, being part of such text), and the
+/// right-to-left controls and the Arabic punctuation of the Common script. The digits of the
+/// Arabic, Hanifi Rohingya and Garay scripts do not count: they are of class AN or EN and
+/// read in the order they are stored. Left out are the Siyaq numbers of the Common script
+/// (class AL), which Word documents hardly hold.
+fn right_to_left(ch: char) -> bool {
+    match ch {
+        // ARABIC SEMICOLON, QUESTION MARK and TATWEEL; RIGHT-TO-LEFT MARK, EMBEDDING,
+        // OVERRIDE and ISOLATE.
+        '\u{061B}' | '\u{061F}' | '\u{0640}' | '\u{200F}' | '\u{202B}' | '\u{202E}'
+        | '\u{2067}' => true,
+        _ => {
+            let script = ch.script();
+            let digit = ch.is_numeric()
+                && matches!(
+                    script,
+                    Script::Arabic | Script::Hanifi_Rohingya | Script::Garay
+                );
+            !digit
+                && matches!(
+                    script,
+                    Script::Adlam
+                        | Script::Arabic
+                        | Script::Avestan
+                        | Script::Chorasmian
+                        | Script::Cypriot
+                        | Script::Elymaic
+                        | Script::Garay
+                        | Script::Hanifi_Rohingya
+                        | Script::Hatran
+                        | Script::Hebrew
+                        | Script::Imperial_Aramaic
+                        | Script::Inscriptional_Pahlavi
+                        | Script::Inscriptional_Parthian
+                        | Script::Kharoshthi
+                        | Script::Lydian
+                        | Script::Mandaic
+                        | Script::Manichaean
+                        | Script::Mende_Kikakui
+                        | Script::Meroitic_Cursive
+                        | Script::Meroitic_Hieroglyphs
+                        | Script::Nabataean
+                        | Script::Nko
+                        | Script::Old_Hungarian
+                        | Script::Old_North_Arabian
+                        | Script::Old_Sogdian
+                        | Script::Old_South_Arabian
+                        | Script::Old_Turkic
+                        | Script::Old_Uyghur
+                        | Script::Palmyrene
+                        | Script::Phoenician
+                        | Script::Psalter_Pahlavi
+                        | Script::Samaritan
+                        | Script::Sidetic
+                        | Script::Sogdian
+                        | Script::Syriac
+                        | Script::Thaana
+                        | Script::Yezidi
+                )
+        }
+    }
 }
 
 /// Characters that stay with the character before them, in its run and face: joiners,
@@ -275,13 +324,13 @@ impl Builder<'_, '_, '_> {
             Inline::Break { kind, style, .. } => self.item(Item::Break(*kind, *style)),
             Inline::Object(_) => self.item(Item::Object(path)),
             Inline::Anchored(_) => {
-                self.unsupported("floating pictures, shapes and text boxes are not drawn yet");
+                self.unsupported("floating pictures are not drawn yet");
                 self.item(Item::Anchored(path));
             }
             Inline::NoteReference { style, .. } => {
                 self.unsupported(
-                    "footnotes and endnotes are not laid out yet: their reference marks and \
-                     their texts are left out",
+                    "footnotes and endnotes are not laid out yet: their texts are left out, \
+                     and so are the numbers of their reference marks",
                 );
                 self.item(Item::NoteReference(path, *style));
             }
@@ -341,7 +390,7 @@ impl Builder<'_, '_, '_> {
 
     /// Adds `text` in style `id`, with the formatting `style`.
     fn text_in(&mut self, text: &str, id: RunStyleId, style: &RunStyle) {
-        if style.rtl() || text.chars().any(|ch| right_to_left(ch.script())) {
+        if style.rtl() || text.chars().any(right_to_left) {
             self.unsupported(
                 "right-to-left text is laid out from left to right, its characters in the \
                  order they are stored",
