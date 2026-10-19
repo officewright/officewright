@@ -92,7 +92,9 @@ seeds() {
 	package) echo fuzz/seeds/package ;;
 	png_decode) echo fuzz/seeds/png tests/corpus/reference ;;
 	xml) echo fuzz/seeds/xml ;;
-	zip_archive) echo crates/officewright-opc/tests/data ;;
+	# Word's re-saved copies, POI's files and the business documents hold DEFLATE streams;
+	# hello.docx and the rule documents are stored (#10).
+	zip_archive) echo crates/officewright-opc/tests/data tests/corpus/resaved tests/corpus/poi tests/corpus/business ;;
 	*)
 		echo "nightly.sh: no seed directories for fuzz target $1; add them to seeds()" >&2
 		return 1
