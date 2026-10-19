@@ -721,6 +721,7 @@ def embedded_parts(parts: dict[str, bytes]) -> list[str]:
                     name for name in parts
                     if urllib.parse.unquote(name).lower().endswith("." + extension)
                 )
+    index = part_index(parts)
     for rels in (name for name in parts if name.lower().endswith(".rels")):
         relationships = package_xml(rels, parts[rels], f"{PACKAGE_RELS_NS}Relationships")
         for element in relationships.iter(f"{PACKAGE_RELS_NS}Relationship"):
@@ -731,7 +732,7 @@ def embedded_parts(parts: dict[str, bytes]) -> list[str]:
             # A part the package lacks is named only when its name is plainly a part name; any
             # other target is refused by external_link_problems, which does not name it.
             target = element.get("Target", "")
-            held = internal_part(parts, rels, target)
+            held = internal_part(index, rels, target)
             name = held or part_target(rels, target.strip(URI_SPACE))
             if held or PLAIN_PART_NAME.match(name):
                 add(name)
@@ -759,14 +760,40 @@ PLAIN_PART_NAME = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*(?:/[A-Za-z0-9_-][A-Z
 URI_SPACE = " \t\r\n"
 
 
-def internal_part(parts: dict[str, bytes], rels: str, target: str) -> str | None:
-    """The part of the package that an internal relationship's target names, compared as part
-    names are (percent-decoded, without regard to case), or None. A scheme or a drive (file:,
-    D:, D%3A), a server or a backslash (\\\\server, //server, %5C), a query, a way out of the
-    package or a part the package does not hold all name none, however they are spelled."""
-    name = part_target(rels, target.strip(URI_SPACE))
-    by_name = {urllib.parse.unquote(part).lower(): part for part in parts}
-    return by_name.get(urllib.parse.unquote(name).lower())
+def part_index(parts: dict[str, bytes]) -> dict[str, str]:
+    """The package's part names as part names compare (percent-decoded, without regard to
+    case), to their names as the package spells them."""
+    return {urllib.parse.unquote(part).lower(): part for part in parts}
+
+
+def part_reference(target: str) -> bool:
+    """Whether a target, percent-decoded, is written as a part name: named segments, "." and
+    ".." only before the first of them, and no backslash, colon, query or fragment. Anything
+    else could climb back from a local path to a part ("D:/x/../../a.xml") or name no part."""
+    if not target or target.startswith("//") or any(c in target for c in "\\:?#"):
+        return False
+    named = False
+    for segment in target.lstrip("/").split("/"):
+        if segment in (".", ".."):
+            if named:
+                return False
+        elif not segment:
+            return False
+        else:
+            named = True
+    return named
+
+
+def internal_part(index: dict[str, str], rels: str, target: str) -> str | None:
+    """The part of the package (index: part_index) that an internal relationship's target
+    names, or None: the target, without the whitespace xsd:anyURI collapses and
+    percent-decoded, must be written as a part name (part_reference) and name a part the
+    package holds. A scheme, a drive, a server, a backslash, a query, a way out of the package
+    or a missing part all name none, however they are spelled."""
+    target = target.strip(URI_SPACE)
+    if not part_reference(urllib.parse.unquote(target)):
+        return None
+    return index.get(urllib.parse.unquote(part_target(rels, target)).lower())
 
 
 def external_link_problems(parts: dict[str, bytes]) -> list[str]:
@@ -778,6 +805,7 @@ def external_link_problems(parts: dict[str, bytes]) -> list[str]:
     can name a person (a personal site). The target itself is not named, since it may name a
     person's folder."""
     found = []
+    index = part_index(parts)
     for rels in sorted(name for name in parts if name.lower().endswith(".rels")):
         root = package_xml(rels, parts[rels], f"{PACKAGE_RELS_NS}Relationships")
         for element in root.iter(f"{PACKAGE_RELS_NS}Relationship"):
@@ -792,9 +820,9 @@ def external_link_problems(parts: dict[str, bytes]) -> list[str]:
                 found.append(f"{rels} keeps an attached template")
                 break
             if (mode == "External" and not LINK_SCHEMES.match(target.strip(URI_SPACE))) or (
-                mode != "External" and internal_part(parts, rels, target) is None
+                mode != "External" and internal_part(index, rels, target) is None
             ):
-                found.append(f"{rels} links to a local file or another scheme")
+                found.append(f"{rels} links to a local file, another scheme or a missing part")
                 break
     return found
 

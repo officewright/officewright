@@ -171,6 +171,11 @@ DOC = public.PublicDoc(
 )
 
 
+# What clean() and problems() say of a relationship to a local file, another scheme or a part
+# the package does not hold.
+LINK = "links to a local file, another scheme or a missing part"
+
+
 def parts_of(data):
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         return {name: archive.read(name) for name in archive.namelist()}
@@ -291,6 +296,31 @@ class Cleaning(unittest.TestCase):
             'Target="document.xml?private"/>',
             "a no-break space": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
             'Target="&#160;D:/private/report.docx"/>',
+            # A local path that climbs back to a part the package holds is still a local path.
+            "a drive climbing back": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="D:/private/../../settings.xml"/>',
+            "file: climbing back": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="file:///D:/private/../../../settings.xml" TargetMode="Internal"/>',
+            "a server climbing back": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="file://fs01/private/../../../../settings.xml"/>',
+            "backslashes climbing back": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="\\\\fs01\\private\\memo.docx/../settings.xml"/>',
+            "a fragment climbing back": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="x#D:/private/report.docx/../../../settings.xml"/>',
+            "a linked picture climbing back": f'<Relationship Id="rId9" Type="{REL}/image" '
+            'Target="file:///D:/private/../../../media/image2.png"/>',
+            "an encoded path climbing back": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="private%2F..%2F..%2Fsettings.xml"/>',
+            # Each rule of a part reference alone: a folder climbed back from, which can be a
+            # user's, a server named like a folder, an empty segment.
+            "folders climbed back from": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="Users/private/../../settings.xml"/>',
+            "a server named like a folder": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="//word/settings.xml?private"/>',
+            "two slashes before a part": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="//word/settings.xml"/>',
+            "an empty segment": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="settings.xml/"/>',
             # A part the package does not hold.
             "a part that is not there": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
             'Target="private/report.docx"/>',
@@ -310,9 +340,9 @@ class Cleaning(unittest.TestCase):
                 with self.assertRaises(public.Refused) as caught:
                     public.clean(data, DOC)
                 self.assertIn("header1.xml.rels", str(caught.exception))
-                self.assertIn("links to a local file or another scheme", str(caught.exception))
+                self.assertIn(LINK, str(caught.exception))
                 self.assertNotIn("private", str(caught.exception))
-                self.assertIn("word/_rels/header1.xml.rels links to a local file or another scheme",
+                self.assertIn(f"word/_rels/header1.xml.rels {LINK}",
                               public.problems(data))
         # A target mode OPC does not allow is refused, whatever the target: officewright-opc
         # refuses the package.
@@ -362,13 +392,13 @@ class Cleaning(unittest.TestCase):
                     f'Type="{REL}/oleObject" Target="{target}"/></Relationships>')
             with self.subTest(target), self.assertRaises(public.Refused) as caught:
                 public.clean(package(**{"word/_rels/header1.xml.rels": rels}), DOC)
-            self.assertIn("links to a local file or another scheme", str(caught.exception))
+            self.assertIn(LINK, str(caught.exception))
             self.assertNotIn("private", str(caught.exception))
         # A relationships part named in capitals is read too.
         rels = (f'<?xml version="1.0"?><Relationships xmlns="{PKG}"><Relationship Id="rId9" '
                 f'Type="{REL}/hyperlink" Target="file:///D:/private/x.docx" '
                 'TargetMode="External"/></Relationships>')
-        self.assertIn("word/_rels/footer1.xml.RELS links to a local file or another scheme",
+        self.assertIn(f"word/_rels/footer1.xml.RELS {LINK}",
                       public.problems(package(**{"word/_rels/footer1.xml.RELS": rels})))
         # A web address in single quotes stays, and so does an internal target.
         rels = (f'<?xml version="1.0"?><Relationships xmlns="{PKG}">'
@@ -381,7 +411,8 @@ class Cleaning(unittest.TestCase):
         # A part named as part names compare (percent-decoded, without regard to case), and
         # with the whitespace xsd:anyURI collapses, is a part.
         for target in ("Settings.XML", "setting%73.xml", "&#9;settings.xml ",
-                       "&#13;&#10;settings.xml"):
+                       "&#13;&#10;settings.xml", "./settings.xml", "../word/settings.xml",
+                       "/word/settings.xml"):
             rels = (f'<?xml version="1.0"?><Relationships xmlns="{PKG}"><Relationship Id="rId1" '
                     f'Type="{REL}/settings" Target="{target}"/></Relationships>')
             data = package(**{"word/_rels/header1.xml.rels": rels})
@@ -390,6 +421,28 @@ class Cleaning(unittest.TestCase):
         rels = (f'<?xml version="1.0"?><Relationships xmlns="{PKG}">'
                 f"<Relationship Id='rId8' Type='{REL}/hyperlink' Target='HTTPS://example.gov/'"
                 " TargetMode='External'/></Relationships>")
+        # A part whose name the package percent-encodes, named decoded.
+        footer = (f'<?xml version="1.0"?><Relationships xmlns="{PKG}"><Relationship Id="rId1" '
+                  f'Type="{REL}/footer" Target="my part.xml"/></Relationships>')
+        data = package(**{"word/_rels/header1.xml.rels": footer,
+                          "word/my%20part.xml": "<w:ftr xmlns:w='w'/>"})
+        self.assertEqual(public.problems(public.clean(data, DOC).data), [])
+        # An embedded object the package holds is refused by its relationship, whatever its
+        # name or the whitespace around its type.
+        for name, kind in (("ole%20object.bin", f"{REL}/oleObject"),
+                           ("data.bin", f"{REL}/oleObject&#9;")):
+            embedded = (f'<?xml version="1.0"?><Relationships xmlns="{PKG}"><Relationship '
+                        f'Id="rId9" Type="{kind}" Target="{name}"/></Relationships>')
+            data = package(**{"word/_rels/header1.xml.rels": embedded, f"word/{name}": b"\x00"})
+            with self.subTest(name), self.assertRaises(public.Refused) as caught:
+                public.clean(data, DOC)
+            self.assertIn(f"embeds word/{name}", str(caught.exception))
+        # The edit removes an attached template whose type ends in a space.
+        settings = parts_of(package())["word/_rels/settings.xml.rels"].replace(
+            b'/attachedTemplate"', b'/attachedTemplate "')
+        cleaned = public.clean(package(**{"word/_rels/settings.xml.rels": settings}), DOC)
+        self.assertNotIn(b"attachedTemplate",
+                         parts_of(cleaned.data)["word/_rels/settings.xml.rels"])
         # The scheme in capitals is a web address too.
         cleaned = public.clean(package(**{"word/_rels/header1.xml.rels": rels}), DOC)
         self.assertEqual(public.problems(cleaned.data), [])
@@ -503,7 +556,7 @@ class Cleaning(unittest.TestCase):
                 "</w:footnotes>"}),
             "embeds word/activeX/activeX1.xml": package(**{
                 "word/activeX/activeX1.xml": "<ax:ocx xmlns:ax='a'/>"}),
-            "links to a local file or another scheme": package(**{
+            "links to a local file, another scheme or a missing part": package(**{
                 "word/_rels/header1.xml.rels": relationships(
                     (f"{REL}/hyperlink", "../drafts/x.docx", ' TargetMode="External"'))}),
             "is not UTF-8": package(**{"word/settings.xml": b"<w:settings>\xff</w:settings>"}),
