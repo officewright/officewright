@@ -44,7 +44,7 @@ impl ContentTypes {
                     tag.attribute(None, name).ok_or_else(|| {
                         error(format!(
                             "<{}> lacks the {name} attribute",
-                            shorten(tag.name().qname().as_str(), 64)
+                            shorten(tag.name().qname().as_str())
                         ))
                     })
                 };
@@ -56,7 +56,7 @@ impl ContentTypes {
                                 !extension.is_empty() && !extension.contains(['.', '/', '\\'])
                             })
                             .ok_or_else(|| {
-                                error(format!("invalid extension {:?}", shorten(written, 64)))
+                                error(format!("invalid extension {:?}", shorten(written)))
                             })?;
                         (
                             extension.to_ascii_lowercase(),
@@ -75,22 +75,19 @@ impl ContentTypes {
                         )
                     }
                     other => {
-                        return Err(error(format!(
-                            "unexpected element <{}>",
-                            shorten(other, 64)
-                        )));
+                        return Err(error(format!("unexpected element <{}>", shorten(other))));
                     }
                 };
                 if tag.attributes().len() != 2 {
                     return Err(error(format!(
                         "unexpected attributes on <{}>",
-                        shorten(tag.name().qname().as_str(), 64)
+                        shorten(tag.name().qname().as_str())
                     )));
                 }
                 if !is_media_type(content_type) {
                     return Err(error(format!(
                         "invalid content type {:?}",
-                        shorten(content_type, 60)
+                        shorten(content_type)
                     )));
                 }
                 let shared = match interned.get(content_type) {

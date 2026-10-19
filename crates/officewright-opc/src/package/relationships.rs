@@ -87,7 +87,7 @@ impl Relationships {
                 if tag.name().local() != "Relationship" {
                     return Err(error(format!(
                         "unexpected element <{}>",
-                        shorten(tag.name().qname().as_str(), 64)
+                        shorten(tag.name().qname().as_str())
                     )));
                 }
                 let mut id = None;
@@ -107,7 +107,7 @@ impl Relationships {
                                 _ => {
                                     return Err(error(format!(
                                         "invalid TargetMode {:?}",
-                                        shorten(value, 64)
+                                        shorten(value)
                                     )));
                                 }
                             };
@@ -115,7 +115,7 @@ impl Relationships {
                         _ => {
                             return Err(error(format!(
                                 "unexpected attribute {} on <Relationship>",
-                                shorten(attribute.name().qname().as_str(), 64)
+                                shorten(attribute.name().qname().as_str())
                             )));
                         }
                     }
@@ -133,7 +133,7 @@ impl Relationships {
                 if !id.is_empty() && by_id.insert(id.into(), items.len()).is_some() {
                     return Err(error(format!(
                         "a second relationship with Id {}",
-                        shorten(id, 64)
+                        shorten(id)
                     )));
                 }
                 let relationship_type = match types.get(relationship_type) {
