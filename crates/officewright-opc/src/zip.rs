@@ -150,6 +150,19 @@ impl Archive {
             ));
         }
         check_overlaps(&mut spans, &records)?;
+        // Offsets are taken as written, so nothing may come before the first entry, or
+        // before the central directory of an archive without entries: a self-extracting
+        // stub or a concatenated file in front is refused also when its writer shifted
+        // the offsets to fit, as `zip -A` and Python's `zipfile` in append mode do (#98).
+        let first = spans
+            .first()
+            .map_or(end.directory_offset, |span| span.start);
+        if first != 0 {
+            return Err(zip_error(
+                0,
+                format!("{first} bytes come before the first entry"),
+            ));
+        }
         Ok(Self {
             data,
             records,

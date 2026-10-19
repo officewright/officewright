@@ -217,6 +217,35 @@ fn rejects_data_before_the_first_entry() {
 }
 
 #[test]
+fn rejects_data_before_the_first_entry_with_its_offsets_shifted() {
+    // As `zip -A` and Python's zipfile in append mode write a self-extracting archive or
+    // a concatenated file: every offset is right for the bytes in front (#98). The same
+    // for an archive without entries, whose central directory comes first.
+    let mut stub = b"MZ".to_vec();
+    stub.resize(1002, 0);
+    for entries in [vec![TestEntry::stored("a", b"a")], Vec::new()] {
+        let layout = build(&entries, b"");
+        let mut bytes = stub.clone();
+        bytes.extend(&layout.bytes);
+        let shift = |bytes: &mut Vec<u8>, at: usize| {
+            let at = stub.len() + at;
+            let offset = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+            set32(bytes, at, offset + stub.len() as u32);
+        };
+        for &central in &layout.central {
+            shift(&mut bytes, central + 42);
+        }
+        shift(&mut bytes, layout.end + 16);
+        assert_eq!(
+            zip_message(open(&bytes)),
+            "1002 bytes come before the first entry",
+            "{} entries",
+            entries.len()
+        );
+    }
+}
+
+#[test]
 fn rejects_more_entries_than_the_directory_holds() {
     let mut layout = build(&[TestEntry::stored("a", b"a")], b"");
     set16(&mut layout.bytes, layout.end + 8, 2);
