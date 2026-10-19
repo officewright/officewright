@@ -1,4 +1,5 @@
-//! Raster images: JPEG files passed through with the DCTDecode filter, and PNG files passed
+//! Raster images: JPEG files passed through with the DCTDecode filter (some damaged ones
+//! cut after their only scan), and PNG files passed
 //! through with the PNG predictors of the FlateDecode filter where PDF can show them as
 //! they are, decoded otherwise (ISO 32000-1, 8.9 and 7.4.4.4).
 
@@ -24,7 +25,9 @@ const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 /// A raster image to draw on pages with [`Page::draw_image`](crate::Page::draw_image): a
 /// JPEG or PNG file.
 ///
-/// A JPEG file goes into the PDF as it is. So does a PNG file whenever PDF can show it
+/// A JPEG file goes into the PDF as it is, except a sequential one whose only scan is
+/// followed by what libjpeg fails on: that goes in up to the end of the scan, with an end of
+/// image, which draws the same picture. So does a PNG file whenever PDF can show it
 /// unchanged: greyscale, colour or palette images without interlacing, with no
 /// transparency or with fully transparent palette entries that form one range. Other PNG
 /// files, with an alpha channel, other transparency or interlacing, are decoded, and
@@ -660,6 +663,8 @@ fn check_later_scans(
         if code == 0xDA {
             // libjpeg reads the scan header before it finds the scan unexpected.
             check_scan(segment, length, frame)?;
+            // `read_jpeg` cuts the file before such a scan rather than refusing it, so this
+            // error, like any other here without `more_scans`, never reaches a caller.
             if !more_scans {
                 return Err(malformed(format!(
                     "the JPEG file has a second scan at byte {}, after a first scan that codes \
@@ -2978,7 +2983,8 @@ pub(crate) mod tests {
             ] {
                 assert_eq!(written(with_more(&single, &after)), single, "{after:02X?}");
             }
-            // Restart markers and fill are coded data, and stay.
+            // A restart marker after the coded data stays, and the fill before the next
+            // marker goes; fill before a restart marker or a stuffed zero is coded data.
             assert_eq!(
                 written(with_more(
                     &single,
@@ -2986,8 +2992,14 @@ pub(crate) mod tests {
                 )),
                 [&single[..end], b"\xFF\xD3\xFF\xD9"].concat()
             );
-            // What libjpeg reads without failing stays: a COM segment, a segment cut off by
-            // the end of the file, and a marker T.81 reserves.
+            let fill = b"\xFF\xFF\xD3\x56\xFF\xFF\x00\x78";
+            assert_eq!(
+                written(with_more(&single, &[&fill[..], &scan(&[1])].concat())),
+                [&single[..end], fill, b"\xFF\xD9"].concat()
+            );
+            // What the check does not refuse stays as it is: a COM segment, a segment cut off
+            // by the end of the file, and a marker T.81 reserves (libjpeg fails on the last
+            // two, #335).
             for after in [
                 &b"\xFF\xFE\x00\x03x"[..],
                 b"\xFF\xDA\x00",
@@ -3017,11 +3029,15 @@ pub(crate) mod tests {
             .contains("the JPEG file has a second start of image")
         );
         let progressive_grey = jpeg(0xC2, 8, 4, 4, 1, false);
-        Image::from_bytes(with_more(
-            &progressive_grey,
-            &scan_with(&[1, 1, 0x11, 1, 63, 0]),
-        ))
-        .unwrap();
+        let data = with_more(&progressive_grey, &scan_with(&[1, 1, 0x11, 1, 63, 0]));
+        assert_eq!(written(data.clone()), data);
+        assert!(
+            error(with_more(
+                &progressive_grey,
+                &scan_with(&[1, 1, 0x11, 1, 64, 0])
+            ))
+            .contains("gives Ss 1 and Se 64")
+        );
 
         // A file main refused keeps its refusal: the later scans are checked last.
         let twelve_bit = jpeg(0xC2, 12, 4, 4, 3, false);
