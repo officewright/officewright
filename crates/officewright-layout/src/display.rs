@@ -205,16 +205,27 @@ pub(crate) fn stack(items: Vec<DisplayItem>, mut floats: Vec<Float>) -> Vec<Disp
 }
 
 /// Where `object` goes on `page`: the top left corner of its frame. `anchor` is where the
-/// object is anchored: its x in its line, the top of its line and the top of its
-/// paragraph on this page. The references follow ECMA-376 Part 1, ST_RelFromH and
-/// ST_RelFromV: the inside margin is the left (top) one on odd pages and the right
-/// (bottom) one on even pages; a column is the area inside the margins, as every section
-/// is laid out in one column. Hypothesis until Word renders (`E-anchor-*.docx`): the
-/// frame, not the box its effects reach, is what is positioned.
+/// object is anchored: its x in its line, the top and bottom of its line, and the top of
+/// its paragraph on this page.
+///
+/// Across, the references follow ECMA-376 Part 1, ST_RelFromH and ST_AlignH: the inside
+/// margin is the left one on odd pages and the right one on even pages; a column is the
+/// area inside the margins, as every section is laid out in one column. Word's renders
+/// confirm the page down and the column across, with a negative offset
+/// (`letter-cfpb-validation-notice`), and that the offset positions the frame, not the box
+/// its effects reach (the header logo of `report-hhs-usability-test-plan`).
+///
+/// Hypotheses until Word renders the rule documents of #314: down, the inside margin is
+/// the top one on odd pages and the bottom one on even pages, as across (ST_RelFromV and
+/// ST_AlignV do not say); a line is aligned to from its top to its bottom, a paragraph
+/// and a character are points; a paragraph's top is that of its first line on this page,
+/// below its space before, and in the later part of a paragraph split over pages that
+/// part's top; the gutter counts into the left margin, and mirrored margins
+/// (`w:mirrorMargins`, not laid out yet) do not swap the left and right ones.
 pub(crate) fn float_position(
     object: &AnchoredObject,
     page: &PageBox,
-    (x, line_top, paragraph_top): (f64, f64, f64),
+    (x, (line_top, line_bottom), paragraph_top): (f64, (f64, f64), f64),
 ) -> (f64, f64) {
     let [left, top, right, bottom] = page.margins;
     let (width, height) = (object.size().width().0, object.size().height().0);
@@ -228,7 +239,7 @@ pub(crate) fn float_position(
         HorizontalReference::InsideMargin => (right, page.width),
         HorizontalReference::OutsideMargin if page.odd => (right, page.width),
         HorizontalReference::OutsideMargin => (0.0, left),
-        _ => (left, right),
+        HorizontalReference::Margin | HorizontalReference::Column => (left, right),
     };
     let across = match horizontal.placement() {
         HorizontalPlacement::Offset(offset) => start + offset.0,
@@ -243,7 +254,9 @@ pub(crate) fn float_position(
             match align {
                 AnchorHorizontalAlign::Center => (start + end - width) / 2.0,
                 AnchorHorizontalAlign::Right => end - width,
-                _ => start,
+                AnchorHorizontalAlign::Left
+                | AnchorHorizontalAlign::Inside
+                | AnchorHorizontalAlign::Outside => start,
             }
         }
     };
@@ -257,8 +270,8 @@ pub(crate) fn float_position(
         VerticalReference::OutsideMargin if page.odd => (bottom, page.height),
         VerticalReference::OutsideMargin => (0.0, top),
         VerticalReference::Paragraph => (paragraph_top, paragraph_top),
-        VerticalReference::Line => (line_top, line_top),
-        _ => (top, bottom),
+        VerticalReference::Line => (line_top, line_bottom),
+        VerticalReference::Margin => (top, bottom),
     };
     let down = match vertical.placement() {
         VerticalPlacement::Offset(offset) => start + offset.0,
@@ -273,7 +286,9 @@ pub(crate) fn float_position(
             match align {
                 AnchorVerticalAlign::Center => (start + end - height) / 2.0,
                 AnchorVerticalAlign::Bottom => end - height,
-                _ => start,
+                AnchorVerticalAlign::Top
+                | AnchorVerticalAlign::Inside
+                | AnchorVerticalAlign::Outside => start,
             }
         }
     };
@@ -459,7 +474,7 @@ impl Painting<'_, '_, '_> {
                         }
                     }
                     PieceKind::Object { item, height: None } => {
-                        self.float(*item, (x, top, origin.y.0));
+                        self.float(*item, (x, (top, top + line.height.0), origin.y.0));
                     }
                     PieceKind::Break { .. } => {}
                 }
@@ -1038,7 +1053,7 @@ impl Painting<'_, '_, '_> {
     /// Adds the floating object of item `item`, if it is one, to the page's floats,
     /// positioned from its anchor (`float_position`). Text does not wrap around it yet,
     /// and that is reported.
-    fn float(&mut self, item: usize, anchor: (f64, f64, f64)) {
+    fn float(&mut self, item: usize, anchor: (f64, (f64, f64), f64)) {
         let Some(page) = self.page else {
             return;
         };
@@ -1446,8 +1461,8 @@ mod tests {
         use crate::ir::{HorizontalAnchor, ImageId, Picture, VerticalAnchor};
 
         // A page 600 x 800 with margins 72 left and top, 72 right, 72 bottom; the object is
-        // 100 x 50, anchored at x 150 in a line whose top is 300, in a paragraph whose top
-        // is 280.
+        // 100 x 50, anchored at x 150 in a line from 300 to 320, in a paragraph whose top is
+        // 280.
         let mut document = Document::default();
         let image: ImageId = document.add_image(ImageData::new(ImageFormat::Png, &b"\x89PNG"[..]));
         let page = |odd| PageBox {
@@ -1469,7 +1484,7 @@ mod tests {
                     .with_relative_to(down.0)
                     .with_placement(down.1),
             );
-            float_position(&object, &page(odd), (150.0, 300.0, 280.0))
+            float_position(&object, &page(odd), (150.0, (300.0, 320.0), 280.0))
         };
         let offset = |d: f64| HorizontalPlacement::Offset(Pt(d));
         let down = |d: f64| VerticalPlacement::Offset(Pt(d));
@@ -1536,6 +1551,31 @@ mod tests {
                 (X::Character, align(H::Center)),
                 (Y::Line, valign(V::Top)),
                 (100.0, 300.0),
+            ),
+            // Within the margin areas: right in the right margin (528 to 600), centred in
+            // the left one (0 to 72); at the bottom of the top margin (0 to 72), centred in
+            // the bottom one (728 to 800).
+            (
+                (X::RightMargin, align(H::Right)),
+                (Y::TopMargin, valign(V::Bottom)),
+                (500.0, 22.0),
+            ),
+            (
+                (X::LeftMargin, align(H::Center)),
+                (Y::BottomMargin, valign(V::Center)),
+                (-14.0, 739.0),
+            ),
+            // A line is aligned to from its top to its bottom (300 to 320): its bottom and
+            // its centre.
+            (
+                (X::Column, align(H::Right)),
+                (Y::Line, valign(V::Bottom)),
+                (428.0, 270.0),
+            ),
+            (
+                (X::Column, align(H::Center)),
+                (Y::Line, valign(V::Center)),
+                (250.0, 285.0),
             ),
         ];
         for (across, vertical, expected) in cases {
