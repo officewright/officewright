@@ -7,6 +7,7 @@ use skrifa::raw::{FileRef, FontRef, ReadError, TableProvider};
 
 use crate::error::{Cause, Error, Result};
 use crate::face::{EmbeddingPermissions, FaceProperties, FontNames, OutlineFormat};
+use crate::subset_check::SubsetCheck;
 
 /// The index of a glyph in a face.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -205,6 +206,8 @@ struct Inner {
     data: Arc<[u8]>,
     index: u32,
     face: Face,
+    /// What [`FontFace::check_subset_glyph`] found so far.
+    subset_check: SubsetCheck,
 }
 
 /// What `FontFace` reads once, when it is created.
@@ -243,7 +246,12 @@ impl FontFace {
     pub fn from_bytes(data: impl Into<Arc<[u8]>>, index: u32) -> Result<Self> {
         let data = data.into();
         let face = Face::read(&font_ref(&data, index)?, index)?;
-        Ok(Self(Arc::new(Inner { data, index, face })))
+        Ok(Self(Arc::new(Inner {
+            data,
+            index,
+            face,
+            subset_check: SubsetCheck::default(),
+        })))
     }
 
     /// The number of faces in a font file: the number of fonts in a collection, 1 for
@@ -262,6 +270,12 @@ impl FontFace {
     /// The data the face was read from: the whole file, so for a collection all of it.
     pub fn data(&self) -> &[u8] {
         &self.0.data
+    }
+
+    /// What [`check_subset_glyph`](Self::check_subset_glyph) found so far, shared by the
+    /// clones of the face.
+    pub(crate) fn subset_check(&self) -> &SubsetCheck {
+        &self.0.subset_check
     }
 
     /// The index of the face in its file.

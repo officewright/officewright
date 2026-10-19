@@ -91,6 +91,8 @@ declare("ow_font_book_add_system_fonts", c_int, c_void_p, POINTER(c_size_t))
 declare("ow_font_book_add_dir", c_int, c_void_p, c_char_p, POINTER(c_size_t))
 declare("ow_font_book_add_file", c_int, c_void_p, c_char_p, POINTER(c_size_t))
 declare("ow_font_book_add_bytes", c_int, c_void_p, c_char_p, c_size_t, POINTER(c_size_t))
+declare("ow_font_book_add_bytes_as", c_int, c_void_p, c_char_p, c_size_t, c_char_p, POINTER(c_size_t))
+declare("ow_font_book_add_file_as", c_int, c_void_p, c_char_p, c_char_p, POINTER(c_size_t))
 declare("ow_font_book_face_count", c_int, c_void_p, POINTER(c_size_t))
 declare("ow_font_book_skipped_count", c_int, c_void_p, POINTER(c_size_t))
 declare("ow_font_book_skipped", c_int, c_void_p, c_size_t, POINTER(c_char_p))
@@ -554,6 +556,31 @@ class AbiTest(unittest.TestCase):
             faces = c_size_t()
             self.check(lib.ow_font_book_face_count(book, byref(faces)))
             self.assertEqual(faces.value, 1)
+
+    def test_adds_a_font_under_another_family_name(self):
+        # As Word renames the subsets it embeds: the face answers to the name given and to
+        # its own, and the report has no substitution.
+        book = self.new_book()
+        data = LIBERATION_SANS.read_bytes()
+        added = c_size_t(7)
+        self.check(lib.ow_font_book_add_bytes_as(book, data, len(data), "IBM Plex Serif Light".encode(), byref(added)))
+        self.assertEqual(added.value, 1)
+        self.check(lib.ow_font_book_add_bytes_as(book, data, len(data), b"\xff", byref(added)), INVALID_UTF8)
+        self.assertEqual(added.value, 0)
+        bold = str(LIBERATION_SANS).replace("Regular", "Bold").encode()
+        self.check(lib.ow_font_book_add_file_as(book, bold, b"Plex File", byref(added)))
+        self.assertEqual(added.value, 1)
+        resolver = c_void_p()
+        self.check(lib.ow_font_resolver_new(book, byref(resolver)))
+        self.addCleanup(lib.ow_font_resolver_free, resolver)
+        # The face added under "Plex File" is a bold one.
+        for family, bold in ((b"IBM Plex Serif Light", 0), (b"Liberation Sans", 0), (b"Plex File", 1)):
+            font = c_void_p()
+            self.check(lib.ow_pdf_font_resolve(resolver, family, bold, 0, byref(font)))
+            lib.ow_pdf_font_free(font)
+        count = c_size_t(7)
+        self.check(lib.ow_font_resolver_substitution_count(resolver, byref(count)))
+        self.assertEqual(count.value, 0)
 
 
     def render_options(self):

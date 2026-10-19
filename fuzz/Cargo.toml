@@ -42,6 +42,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "font_check_glyph"
+path = "fuzz_targets/font_check_glyph.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "font_subset"
 path = "fuzz_targets/font_subset.rs"
 test = false
