@@ -347,7 +347,7 @@ pub(crate) fn hhea() -> Vec<u8> {
     t
 }
 
-fn hmtx() -> Vec<u8> {
+pub(crate) fn hmtx() -> Vec<u8> {
     let left_side_bearings = [50i16, 0, 0, 100, 0];
     let mut t = Vec::new();
     for (advance, lsb) in ADVANCES.iter().zip(left_side_bearings) {
@@ -397,6 +397,11 @@ fn simple_glyph(points: &[(i16, i16)]) -> Vec<u8> {
 }
 
 fn glyf_and_loca() -> (Vec<u8>, Vec<u8>) {
+    glyf_and_loca_of(&glyph_entries())
+}
+
+/// The `glyf` entries of the five glyphs.
+pub(crate) fn glyph_entries() -> [Vec<u8>; 5] {
     let notdef = simple_glyph(&[(50, 0), (50, 700), (450, 700), (450, 0)]);
     let space = Vec::new();
     let a = simple_glyph(&[(0, 0), (300, 700), (600, 0)]);
@@ -416,11 +421,17 @@ fn glyf_and_loca() -> (Vec<u8>, Vec<u8>) {
     put_u16(&mut aacute, 3);
     put_i16(&mut aacute, 100);
     put_i16(&mut aacute, 100);
+    [notdef, space, a, acute, aacute]
+}
+
+/// A `glyf` table of `entries`, each padded to 4 bytes, and its `loca` with 32-bit
+/// offsets, as `head` declares.
+pub(crate) fn glyf_and_loca_of(entries: &[Vec<u8>]) -> (Vec<u8>, Vec<u8>) {
     let mut glyf = Vec::new();
     let mut loca = Vec::new();
-    for glyph in [notdef, space, a, acute, aacute] {
+    for glyph in entries {
         put_u32(&mut loca, glyf.len() as u32);
-        glyf.extend_from_slice(&glyph);
+        glyf.extend_from_slice(glyph);
         while glyf.len() % 4 != 0 {
             glyf.push(0);
         }
@@ -656,4 +667,45 @@ fn put_i16(out: &mut Vec<u8>, v: i16) {
 
 fn put_u32(out: &mut Vec<u8>, v: u32) {
     out.extend_from_slice(&v.to_be_bytes());
+}
+
+/// What [`FontFace::check_subset_glyph`](crate::FontFace::check_subset_glyph) gives for
+/// each glyph of the font `data`, each on a face of its own, with the reason of each
+/// failure. Every check must agree with subsetting its glyph alone.
+pub(crate) fn subset_checks(data: &[u8]) -> Vec<Result<(), String>> {
+    use crate::{FontFace, GlyphId};
+    let count = FontFace::from_bytes(data.to_vec(), 0)
+        .unwrap()
+        .glyph_count();
+    (0..count)
+        .map(|glyph| {
+            let face = FontFace::from_bytes(data.to_vec(), 0).unwrap();
+            let glyph = GlyphId::new(glyph);
+            let checked = face.check_subset_glyph(glyph);
+            let subset = face.subset([glyph]);
+            assert_eq!(
+                checked.is_ok(),
+                subset.is_ok(),
+                "glyph {glyph}: checked {checked:?}, subset {:?}",
+                subset.err()
+            );
+            checked.map_err(|err| match std::error::Error::source(&err) {
+                Some(source) => source.to_string(),
+                None => err.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// A `post` table of version 2 that names `count` glyphs, all by the standard name
+/// `.notdef`.
+pub(crate) fn post_naming(count: u16) -> Vec<u8> {
+    let mut t = Vec::new();
+    put_u32(&mut t, 0x0002_0000);
+    t.extend_from_slice(&[0; 28]);
+    put_u16(&mut t, count);
+    for _ in 0..count {
+        put_u16(&mut t, 0);
+    }
+    t
 }
