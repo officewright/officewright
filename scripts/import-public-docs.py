@@ -949,9 +949,11 @@ def clean(original: bytes, doc: PublicDoc) -> Cleaned:
         if MEDIA.match(name):
             stem = name.rsplit(".", 1)[0] if "." in posixpath.basename(name) else name
             renamed[name] = f"{stem}.png"
-    # Renamed pictures must not name one part either (a.png and A.png).
-    if len({part_key(new) for new in renamed.values()}) != len(renamed):
-        raise Refused(f"{doc.name}: two pictures differ only in their extension or case")
+    # The entries the cleaning writes must not name one part either: a picture renamed to
+    # .png next to another picture or entry of that name, in any case (a.jpeg and A.png).
+    kept = [renamed.get(name, name) for name in names if name not in dropped]
+    if len({part_key(name) for name in kept}) != len(kept):
+        raise Refused(f"{doc.name}: a picture's new name would name one part with another entry")
     changes = []
     people = []
     if dropped:

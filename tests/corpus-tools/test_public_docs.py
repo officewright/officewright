@@ -862,7 +862,7 @@ class Cleaning(unittest.TestCase):
         # a slash. A twin of the core properties would keep a person's name.
         core = "<cp:coreProperties xmlns:cp='c' xmlns:dc='d'><dc:creator>Jane Roe</dc:creator>"
         for name, twin_name in (("docProps/core.xml", "docProps/%63ore.xml"),
-                                ("word/document.xml", "word\\document.xml")):
+                                ("word/document.xml", "word/DOCUMENT.xml")):
             data = with_entry(package(), twin_name, core + "</cp:coreProperties>")
             with self.subTest(twin_name):
                 with self.assertRaises(public.Refused) as caught:
@@ -881,12 +881,38 @@ class Cleaning(unittest.TestCase):
              "entries word/document.xml and word/document.xml name one part"],
         )
         self.assertEqual(public.problems(self.cleaned.data), [])
-        # The cleaning itself must not write two pictures that name one part.
-        pictures = package(**{"word/media/a.emf": b"\x01\x00\x00\x00 EMF",
-                              "word/media/A.png": public.placeholder(3, 2)})
+        # The cleaning itself must not write two entries that name one part.
+        for first, second in (("word/media/a.emf", "word/media/A.png"),
+                              ("word/media/a.jpeg", "word/Media/a.png")):
+            pictures = package(**{first: b"\x01\x00\x00\x00 EMF",
+                                  second: public.placeholder(3, 2)})
+            with self.subTest(first), self.assertRaises(public.Refused) as caught:
+                public.clean(pictures, DOC)
+            self.assertIn("a picture's new name would name one part with another entry",
+                          str(caught.exception))
+        # clean() names every group of twins.
+        both = with_entry(with_entry(package(), "word/Document.xml", "<w:document/>"),
+                          "docProps/%61pp.xml", "<Properties/>")
         with self.assertRaises(public.Refused) as caught:
-            public.clean(pictures, DOC)
-        self.assertIn("two pictures differ only in their extension or case", str(caught.exception))
+            public.clean(both, DOC)
+        self.assertIn("entries word/document.xml and word/Document.xml name one part",
+                      str(caught.exception))
+        self.assertIn("entries docProps/app.xml and docProps/%61pp.xml name one part",
+                      str(caught.exception))
+
+    def test_entry_names_compare_as_part_names(self):
+        # Written as names, not into an archive: zipfile on Windows reads a backslash as a
+        # slash already, which would hide the rule this checks.
+        self.assertEqual(public.repeated_parts(["word/document.xml", "word\\document.xml"]),
+                         ["word/document.xml and word\\document.xml"])
+        self.assertEqual(public.repeated_parts(["a/%41.xml", "a/a.xml", "a/A.XML"]),
+                         ["a/%41.xml and a/a.xml and a/A.XML"])
+        # Only ASCII letters fold, and percent-decoding is not form decoding: these are all
+        # different parts.
+        for pair in (["Ä.xml", "ä.xml"], ["ß.xml", "ss.xml"], ["a+b.xml", "a b.xml"],
+                     ["%2541.xml", "%41.xml"]):
+            with self.subTest(pair):
+                self.assertEqual(public.repeated_parts(pair), [])
 
     def test_a_placeholder_must_be_8_bit_grey_and_not_oversized(self):
         good = public.placeholder(4, 3)
