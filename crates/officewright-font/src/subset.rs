@@ -147,8 +147,10 @@ impl FontFace {
     /// [`Error::TableOverLimit`] for a `name` table whose records to keep point at more
     /// than 1 MiB of strings, `CFF ` Font DICTs that point at more than 1 MiB of Private
     /// DICTs or have more than 262,144 local subroutines in all, an FDSelect of more than
-    /// 2,048 ranges, or glyphs whose `CFF ` charstrings take more than 16,777,216
-    /// operands, operators and hint mask bytes to decompile,
+    /// 2,048 ranges, glyphs whose `CFF ` charstrings take more than 16,777,216
+    /// operands, operators and hint mask bytes to decompile, or `glyf` glyphs whose
+    /// components the subsetter would read more than 67,108,864 times, reading a glyph
+    /// again each time a composite names it (as a crafted face can make it do),
     /// [`Error::SubsetUnsupported`] if the face uses
     /// something the subsetter does not implement yet, and [`Error::Subset`] or
     /// [`Error::SubsetterPanicked`] if the face is damaged in a way that only subsetting
@@ -246,16 +248,10 @@ impl FontFace {
         };
         // subsetter 0.2.6 panics when the glyphs to keep and the glyphs their components
         // use take every glyph ID, which components past the glyph count can do
-        // (<https://github.com/typst/subsetter/issues/35>).
-        if crate::subset_check::subset_overflows(self, &ids) {
-            return Err(Error::SubsetUnsupported {
-                face,
-                source: Cause::new(
-                    "the glyphs to keep and the glyphs their components use take all 65536 \
-                     glyph IDs with .notdef, more than the subsetter can number",
-                ),
-            });
-        }
+        // (<https://github.com/typst/subsetter/issues/35>), and its glyph closure reads a
+        // glyph again each time it reaches it, quadratic in a composite that names one
+        // glyph many times (<https://github.com/typst/subsetter/issues/36>).
+        crate::subset_check::check_subset_closure(self, &ids)?;
         let remapper = GlyphRemapper::new_from_glyphs_sorted(&ids);
         let data = self.data();
         let data = catch_subsetter_panic(face, || subsetter::subset(data, face, &remapper))?

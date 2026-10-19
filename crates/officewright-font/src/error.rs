@@ -56,7 +56,9 @@ pub enum Error {
     /// than 2,048 ranges, which no real font comes near; or glyphs to keep whose `CFF `
     /// charstrings take more than 16,777,216 operands, operators and hint mask bytes to
     /// decompile, which only the largest CJK fonts reach, kept whole, or more than is left
-    /// of the [`SubsetBudget`](crate::SubsetBudget) the subset is made within.
+    /// of the [`SubsetBudget`](crate::SubsetBudget) the subset is made within; or
+    /// `glyf` glyphs to keep whose components the subsetter would read more than
+    /// 67,108,864 times, which only a crafted face makes it do.
     #[non_exhaustive]
     TableOverLimit {
         /// The face.
