@@ -829,6 +829,116 @@ class Cleaning(unittest.TestCase):
         found = "; ".join(public.problems(package(**{"word/document.xml": authored})))
         self.assertIn("document.xml has tracked changes or an author", found)
 
+    def test_fields_that_name_local_files_are_refused_and_reported(self):
+        # A field instruction can name a file to open or load, in w:instrText split across
+        # runs or in w:fldSimple (#372).
+        w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+        def field(*pieces, prefix="w", namespace=w):
+            runs = "".join(f"<{prefix}:r><{prefix}:instrText xml:space='preserve'>{piece}"
+                           f"</{prefix}:instrText></{prefix}:r>" for piece in pieces)
+            return (f"<{prefix}:document xmlns:{prefix}='{namespace}'><{prefix}:body><{prefix}:p>"
+                    f"<{prefix}:r><{prefix}:fldChar {prefix}:fldCharType='begin'/></{prefix}:r>"
+                    f"{runs}<{prefix}:r><{prefix}:fldChar {prefix}:fldCharType='separate'/>"
+                    f"</{prefix}:r><{prefix}:r><{prefix}:t>x</{prefix}:t></{prefix}:r>"
+                    f"<{prefix}:r><{prefix}:fldChar {prefix}:fldCharType='end'/></{prefix}:r>"
+                    f"</{prefix}:p></{prefix}:body></{prefix}:document>")
+
+        def simple(instruction):
+            return (f"<w:document xmlns:w='{w}'><w:body><w:p><w:fldSimple w:instr='{instruction}'>"
+                    "<w:r><w:t>x</w:t></w:r></w:fldSimple></w:p></w:body></w:document>")
+
+        nested = (f"<w:document xmlns:w='{w}'><w:body><w:p>"
+                  "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                  "<w:r><w:instrText>IF 1 = 1 </w:instrText></w:r>"
+                  "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                  '<w:r><w:instrText>INCLUDETEXT "D:\\\\drafts\\\\x.docx"</w:instrText></w:r>'
+                  "<w:r><w:fldChar w:fldCharType='end'/></w:r>"
+                  "<w:r><w:instrText> yes</w:instrText></w:r>"
+                  "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:p></w:body></w:document>")
+        cases = {
+            "a file URL": field('HYPERLINK "file:///D:/drafts/x.docx"'),
+            # No piece names a place alone.
+            "split across runs": field('HYPERLINK "fi', "le:/", "/D", ':/x.docx"'),
+            "a drive with single backslashes": field('INCLUDETEXT "C:\\drafts\\x.docx"'),
+            "an unquoted drive": field("INCLUDEPICTURE C:\\\\pics\\\\a.png \\d"),
+            "a server by slashes": field('HYPERLINK "//server/share/x.docx"'),
+            "a relative path": field('INCLUDEPICTURE "../pics/a.png"'),
+            "another scheme": field('HYPERLINK "notes://server/db"'),
+            "a scheme without slashes": field('HYPERLINK "callto:jroe"'),
+            "a local path in a web address": field(
+                'HYPERLINK "https://www.example.gov/?r=file:///C:/x"'),
+            "a link to a server file": field('LINK Excel.Sheet.8 "\\\\\\\\srv\\\\x.xls" ""'),
+            "a database": field('DATABASE \\d "orders.mdb" \\s "SELECT *"'),
+            "a dde topic": field('DDEAUTO Excel "budget.xls"'),
+            "fldSimple": simple('INCLUDEPICTURE "C:\\\\pics\\\\a.png"'),
+            "a nested field": nested,
+            "an unclosed field": field('HYPERLINK "file:///D:/x.docx"').replace(
+                "<w:r><w:fldChar w:fldCharType='separate'/></w:r>", "").replace(
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r>", ""),
+            "a deleted instruction": field('HYPERLINK "file:///D:/x.docx"').replace(
+                "instrText", "delInstrText"),
+            "another prefix": field('HYPERLINK "file:///D:/x.docx"', prefix="q"),
+            "strict": field('HYPERLINK "file:///D:/x.docx"',
+                            namespace="http://purl.oclc.org/ooxml/wordprocessingml/main"),
+            "character references": field('HYPERLINK "&#x66;ile:///D:/x.docx"'),
+            "cdata": field('HYPERLINK "<![CDATA[file:///D:/x.docx]]>"'),
+            # A field that loads nothing still writes its instruction into the document.
+            "a drive in any field": field('QUOTE "D:/drafts"'),
+            "a server in any field": field('QUOTE "\\\\srv\\x"'),
+            "a server by slashes in any field": field('QUOTE "//srv/x"'),
+            "a file URL in any field": field('QUOTE "file:x"'),
+            "another scheme in any field": field('QUOTE "smb://srv/x"'),
+        }
+        plain = public.PublicDoc("plain", "nara", "https://www.example.gov/p.docx",
+                                 "2026-10-19", "0" * 64)
+        for label, document in cases.items():
+            for part in ("word/document.xml", "word/header1.xml"):
+                data = package(**{part: document})
+                with self.subTest(label, part=part):
+                    expected = f"{part} has a field ("
+                    self.assertTrue(any(p.startswith(expected) for p in public.problems(data)),
+                                    public.problems(data))
+                    with self.assertRaises(public.Refused) as caught:
+                        public.clean(data, plain)
+                    self.assertIn(expected, str(caught.exception))
+                    # The part is named, never the path.
+                    for path in ("drafts", "D:", "C:", "server", "srv", "pics", "jroe", "orders"):
+                        self.assertNotIn(path, str(caught.exception))
+        utf16 = field('HYPERLINK "file:///D:/x.docx"').replace(
+            "<w:document", "<?xml version='1.0' encoding='UTF-16'?><w:document", 1)
+        self.assertIn("word/footnotes.xml has a field (HYPERLINK)",
+                      "; ".join(public.problems(package(**{
+                          "word/footnotes.xml": utf16.encode("utf-16")}))))
+
+    def test_fields_that_name_no_local_file_are_kept(self):
+        w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        for instruction in ("PAGE  \\* MERGEFORMAT", 'TOC \\o "1-3" \\h \\z \\u',
+                            "PAGEREF _Toc198565444 \\h", "SEQ Table \\* ARABIC",
+                            'DATE \\@ "M/d/yyyy"', 'HYPERLINK "https://www.example.gov/a/b"',
+                            'HYPERLINK \\l "_Toc1"', 'HYPERLINK "mailto:help@example.gov"',
+                            'INCLUDEPICTURE "https://www.example.gov/a.png" \\d',
+                            'HYPERLINK "x.docx"'):
+            document = (f"<w:document xmlns:w='{w}'><w:body><w:p><w:fldSimple "
+                        f"w:instr='{instruction}'/><w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                        f"<w:r><w:instrText>{instruction}</w:instrText></w:r><w:r>"
+                        "<w:fldChar w:fldCharType='end'/></w:r></w:p></w:body></w:document>")
+            with self.subTest(instruction):
+                self.assertEqual(public.field_problems({"word/header1.xml":
+                                                        document.encode()}), [])
+
+    def test_a_part_with_fields_must_be_well_formed(self):
+        broken = package(**{"word/header1.xml": "<w:hdr xmlns:w='w'><w:instrText>"})
+        typed = package(**{"word/header1.xml": "<!DOCTYPE hdr><w:hdr xmlns:w='w'>"
+                           "<w:instrText>PAGE</w:instrText></w:hdr>"})
+        for data, message in ((broken, "word/header1.xml is not well-formed XML"),
+                              (typed, "word/header1.xml declares a document type")):
+            with self.subTest(message):
+                self.assertIn(message, "; ".join(public.problems(data)))
+                with self.assertRaises(public.Refused) as caught:
+                    public.clean(data, DOC)
+                self.assertIn(message, str(caught.exception))
+
     def test_more_refusals(self):
         with self.assertRaises(public.Refused) as caught:
             public.clean(package(**{"word/vbaProject.bin": b"macro"}), DOC)

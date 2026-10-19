@@ -23,7 +23,7 @@ listed SHA-256. The script then writes tests/corpus/business/<name>.docx with
 and the document's row in the table of tests/corpus/SOURCES.md: URL, download date,
 licence statement and the changes. It refuses documents with tracked changes, comments,
 ActiveX controls, embedded fonts or objects, macros, mail merge sources, links to local
-files and archives in which two entries name one part. With --check it writes nothing and
+files (by relationship or field) and archives in which two entries name one part. With --check it writes nothing and
 fails if a committed file differs from what it would write. Python standard library only.
 """
 
@@ -829,6 +829,139 @@ def external_link_problems(parts: dict[str, bytes]) -> list[str]:
     return found
 
 
+# Fields whose arguments name a file or an address to load or open (ECMA-376 Part 1,
+# §17.16.5): an argument with a slash or backslash must be a web or mail address.
+FILE_FIELDS = {"HYPERLINK", "INCLUDEPICTURE", "INCLUDETEXT", "INCLUDE", "IMPORT", "LINK", "RD"}
+# Fields that read another file or program by their nature, whatever their arguments: a
+# database connection can name a user and a server, a DDE topic a file.
+REFUSED_FIELDS = {"DATABASE", "DDE", "DDEAUTO"}
+WEB_ADDRESS = re.compile(r"(?i)(https?://|mailto:)")
+WEB_ADDRESSES = re.compile(r'(?i)(https?://|mailto:)[^\s"]*')
+SCHEME = re.compile(r"(?i)[a-z][a-z0-9+.-]*:")
+# A drive, a server path (\\server or //server), a file URL or another scheme with "//".
+# Backslashes are matched as written, single or doubled, so no escaping hides a path.
+LOCAL_PLACE = re.compile(r"(?i)(?<![a-z0-9])[a-z]:[\\/]|\\\\|(?<![:/])//|\bfile:"
+                         r"|\b(?!https?://)[a-z][a-z0-9+.-]*://")
+
+
+def field_arguments(instruction: str) -> tuple[str, list[str]]:
+    """A field instruction's name, upper case, and its arguments, switches left out (ECMA-376
+    Part 1, §17.16.1): quoted text, or text up to the next space. Backslashes are kept as
+    written, but for one before a quote inside quotes. A switch is a backslash and one
+    character outside quotes; two backslashes opening a word are an argument."""
+    tokens: list[str] = []
+    i, n = 0, len(instruction)
+    while i < n:
+        c = instruction[i]
+        if c.isspace():
+            i += 1
+        elif c == '"':
+            i += 1
+            text = []
+            while i < n and instruction[i] != '"':
+                if instruction.startswith('\\"', i):
+                    i += 1
+                text.append(instruction[i])
+                i += 1
+            tokens.append("".join(text))
+            i += 1
+        elif c == "\\" and not instruction.startswith("\\\\", i):
+            i += 2  # a switch; an argument of it is read as an argument
+        else:
+            start = i
+            while i < n and not instruction[i].isspace():
+                i += 1
+            tokens.append(instruction[start:i])
+    if not tokens:
+        return "", []
+    return tokens[0].upper(), tokens[1:]
+
+
+def names_local_place(instruction: str) -> bool:
+    """Whether a field instruction names a local or network place or another scheme: in its
+    text with the web and mail addresses left out, in what follows the scheme of each web or
+    mail address argument, and, for a field that loads or opens a file (FILE_FIELDS), in an
+    argument with a slash, a backslash or a scheme that is not a web or mail address."""
+    field, arguments = field_arguments(instruction)
+    if field in REFUSED_FIELDS or LOCAL_PLACE.search(WEB_ADDRESSES.sub(" ", instruction)):
+        return True
+    for argument in arguments:
+        web = WEB_ADDRESS.match(argument)
+        if web and LOCAL_PLACE.search(argument[web.end():]):
+            return True
+        if field in FILE_FIELDS and not web and (
+            "/" in argument or "\\" in argument or SCHEME.match(argument)
+        ):
+            return True
+    return False
+
+
+def field_instructions(name: str, data: bytes) -> list[str]:
+    """The instructions of the fields of an XML part, read as XML: the text of
+    w:instrText (and w:delInstrText) joined across runs from each field's begin to its
+    separate or end, nested fields apart, and w:fldSimple's w:instr. Raises Unreadable when
+    the part is not well-formed or declares a document type."""
+    builder = _Builder()
+    parser = ElementTree.XMLParser(target=builder)
+    try:
+        parser.feed(data)
+        root = parser.close()
+    except (ElementTree.ParseError, ValueError, LookupError) as error:
+        raise Unreadable(f"{name} is not well-formed XML ({error})") from error
+    if builder.doctype_seen:
+        raise Unreadable(f"{name} declares a document type, which OPC forbids")
+    found: list[str] = []
+    open_fields: list[list[str] | None] = []  # None once the field's instruction is complete
+    for element in root.iter():
+        # By local name in any namespace (transitional, Strict or another): stricter than
+        # Word, which reads only WordprocessingML's.
+        namespace, _, local = element.tag.rpartition("}")
+        w = namespace + "}" if namespace else ""
+        if local == "fldSimple":
+            found.append(element.get(f"{w}instr", ""))
+        elif local == "fldChar":
+            kind = element.get(f"{w}fldCharType", "")
+            if kind == "begin":
+                open_fields.append([])
+            elif kind in ("separate", "end") and open_fields:
+                text = open_fields[-1]
+                if text is not None:
+                    found.append("".join(text))
+                    open_fields[-1] = None
+                if kind == "end":
+                    open_fields.pop()
+        elif local in ("instrText", "delInstrText") and open_fields:
+            if open_fields[-1] is not None:
+                open_fields[-1].append(element.text or "")
+    # A field left open at the end of the part still has an instruction.
+    found += ["".join(text) for text in open_fields if text is not None]
+    return found
+
+
+def field_problems(parts: dict[str, bytes]) -> list[str]:
+    """The XML parts with a field whose instruction names a local or network file, another
+    scheme, or reads another file or program: a drive, a server path, a file URL or a scheme
+    other than http, https and mailto anywhere in an argument; a path in an argument of a
+    field that loads or opens it (FILE_FIELDS) that is not a web or mail address; or a field
+    of REFUSED_FIELDS (#372). Each part is named once, never the path. Raises Unreadable
+    when such a part cannot be read."""
+    found = []
+    for name, data in parts.items():
+        if not name.lower().endswith(".xml"):
+            continue
+        # Element and attribute names cannot be written with character references, so a
+        # part with fields holds "instr" or is UTF-16, which the parser reads.
+        if b"instr" not in data.lower() and not data.startswith((b"\xff\xfe", b"\xfe\xff")):
+            continue
+        for instruction in field_instructions(name, data):
+            if names_local_place(instruction):
+                field = field_arguments(instruction)[0] or "no name"
+                found.append(f"{name} has a field ({field}) that names a local file, another "
+                             "scheme or another program")
+                break
+    return found
+
+
 def attribute(element: str, name: str) -> re.Match | None:
     """An attribute of an XML start tag, in double or single quotes: group 2 is its value."""
     return re.search(rf"""\b{name}\s*=\s*(["'])(.*?)\1""", element)
@@ -1022,6 +1155,13 @@ def clean(original: bytes, doc: PublicDoc) -> Cleaned:
         raise Refused(f"{doc.name}: {error}") from error
     if links:
         raise Refused(f"{doc.name}: {'; '.join(links)}")
+    # And a field instruction that names a local file (#372).
+    try:
+        fields = field_problems({info.filename: data for info, data in out})
+    except Unreadable as error:
+        raise Refused(f"{doc.name}: {error}") from error
+    if fields:
+        raise Refused(f"{doc.name}: {'; '.join(fields)}")
     if people:
         changes.insert(0, "document properties emptied: " + ", ".join(people))
     if settings_removed:
@@ -1071,6 +1211,7 @@ def problems(
         try:
             embedded = embedded_parts(parts)
             found += external_link_problems(parts)
+            found += field_problems(parts)
         except Unreadable as error:
             found.append(str(error))
             embedded = []
