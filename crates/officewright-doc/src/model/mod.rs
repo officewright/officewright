@@ -361,7 +361,9 @@ impl Document {
 
     /// The font table's declaration of a font, by the name runs give it, compared
     /// without regard to case as Word does (MS-OI29500 §17.8.3.10(b); LibreOffice's
-    /// `tdf140137.docx` names `times new roman` against a declared `Times New Roman`).
+    /// `tdf140137.docx` names `times new roman` against a declared `Times New Roman`):
+    /// both names are folded by Unicode's lower-case mapping ([`char::to_lowercase`]), so
+    /// Cyrillic and Greek names match in any case too.
     /// A table may declare one name several times, once per face of a family with its
     /// own PANOSE and signature (`fdo77727.docx` declares five Noto Sans); this gives
     /// the first, and [`fonts`](Self::fonts) all of them.

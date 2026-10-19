@@ -11,6 +11,9 @@ mod styles;
 pub(crate) mod table_properties;
 mod theme;
 
+#[cfg(test)]
+pub(crate) use capture::NOTES_BUILT;
+
 use std::collections::HashMap;
 
 use officewright_opc::{Package, Part, PartName};

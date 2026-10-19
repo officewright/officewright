@@ -3371,6 +3371,43 @@ fn reads_the_font_table() {
 }
 
 #[test]
+fn keeps_a_thousand_notes_on_one_element_and_counts_the_rest() {
+    // Issue #56: the bound of the notes on one element's structure was untested.
+    let fonts = format!(
+        r#"<w:fonts xmlns:w="{W}"><w:font w:name="A">{}</w:font></w:fonts>"#,
+        r#"<w:charset w:val="00"/>"#.repeat(1501)
+    );
+    crate::docx::NOTES_BUILT.set(0);
+    let document = with_part("fontTable", "fontTable.xml", &fonts).unwrap();
+    // The messages of notes beyond the room left are counted, not built.
+    assert_eq!(crate::docx::NOTES_BUILT.get(), 1000);
+    let messages = messages(&document);
+    assert_eq!(messages.len(), 1001);
+    assert!(
+        messages[..1000]
+            .iter()
+            .all(|m| m.ends_with(": a second w:charset in a w:font is ignored")),
+        "{:?}",
+        &messages[..2]
+    );
+    assert_eq!(messages[1000], "500 more diagnostics are not kept");
+}
+
+#[test]
+fn finds_a_font_by_a_name_in_any_case_beyond_ascii() {
+    // Issue #56: an ASCII-only folding passed the test above.
+    let fonts = format!(r#"<w:fonts xmlns:w="{W}"><w:font w:name="Шрифт Ελληνικά"/></w:fonts>"#);
+    let document = with_part("fontTable", "fontTable.xml", &fonts).unwrap();
+    for name in ["шрифт ελληνικά", "ШРИФТ ΕΛΛΗΝΙΚΆ"] {
+        assert_eq!(
+            document.font(name).map(FontDeclaration::name),
+            Some("Шрифт Ελληνικά"),
+            "{name}"
+        );
+    }
+}
+
+#[test]
 fn repairs_a_damaged_font_table() {
     let fonts = format!(
         r#"<w:fonts xmlns:w="{W}"><w:font><w:family w:val="swiss"/></w:font><w:font w:name="A"><w:charset w:val="0"/><w:family w:val="sans"/><w:panose1 w:val="020F05"/><w:sig w:usb0="XYZ" w:usb1="00000000" w:usb2="0" w:usb3="00000000" w:csb0="00000001" w:csb1="00000000"/></w:font><w:font w:name="A"><w:pitch w:val="fixed"/></w:font></w:fonts>"#

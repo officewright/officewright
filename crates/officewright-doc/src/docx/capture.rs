@@ -411,6 +411,9 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
     /// Runs `read` over the element of `span` and reports the values it finds not valid
     /// as diagnostics at `offset`. Values are collected only while diagnostics have room
     /// for them; the rest are counted, so damage that is not reported costs no memory.
+    /// They are reported together when `read` returns, so within one element they come
+    /// before the [`notes`](Self::notes) on its structure, whatever the order of both in
+    /// the document.
     pub(super) fn check(
         &mut self,
         span: Span,
@@ -455,7 +458,8 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
     }
 
     /// A collector of notes on structure (repeated or incomplete elements) for one
-    /// element, to give to [`diagnose_notes`](Self::diagnose_notes) after reading it.
+    /// element, to give to [`diagnose_notes`](Self::diagnose_notes) after reading it: they
+    /// come after the values [`check`](Self::check) reports for the element.
     pub(super) fn notes(&self) -> Notes {
         Notes {
             room: self.diagnostics.room(),
@@ -538,9 +542,17 @@ impl Notes {
     /// Adds a note.
     pub(super) fn add(&mut self, message: impl FnOnce() -> String) {
         if self.messages.len() < self.room {
+            #[cfg(test)]
+            NOTES_BUILT.set(NOTES_BUILT.get() + 1);
             self.messages.push(message());
         } else {
             self.omitted += 1;
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The messages of notes built on this thread, for tests of the bound on them.
+    pub(crate) static NOTES_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
