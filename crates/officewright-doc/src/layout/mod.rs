@@ -106,8 +106,10 @@ impl Document {
     /// for yet in sections, paragraphs, runs and pictures: page borders, line numbers,
     /// the document grid and vertical text; right-to-left paragraphs, text frames and
     /// drop caps; in a run that shows text and is not hidden, embossed, engraved,
-    /// outlined and shadowed text, emphasis marks, and Word 2010's effects of text (glow,
-    /// shadow, reflection, outline, fill and 3-D) unless their values change nothing;
+    /// outlined and shadowed text, emphasis marks, Word 2010's effects of text (glow,
+    /// shadow, reflection, outline, fill and 3-D) unless their values change nothing, and,
+    /// with `enableOpenTypeFeatures` on, its forms and spacing of figures and stylistic
+    /// sets other than the font's default;
     /// borders around text, in a run that is not hidden and shows text, a tab or a
     /// picture in the line; a picture's outline,
     /// its colour effects, its shadow, reflection, glow, soft edges and 3-D effects, and
@@ -270,6 +272,9 @@ enum Once {
     TextOutline = 1 << 23,
     TextFill = 1 << 24,
     Text3d = 1 << 25,
+    NumberForm = 1 << 26,
+    NumberSpacing = 1 << 27,
+    StylisticSets = 1 << 28,
 }
 
 impl<'a> Translator<'a> {

@@ -155,6 +155,15 @@ fn has_depth(props: Element<'_>, names: &Names) -> bool {
     }) || effect_value(props, names, "contourW", 0) > 0
 }
 
+/// Whether a `w14:stylisticSets` turns a set on: a `w14:styleSet` whose `w14:val` is not
+/// false ([MS-DOCX] CT_StyleSet: one that is false is ignored, and it is on when not
+/// written).
+fn stylistic_set_on(sets: Element<'_>, names: &Names) -> bool {
+    sets.children_through_alternates(names.mc)
+        .filter(|set| set.local_in(&[names.w14]) == Some("styleSet"))
+        .any(|set| !matches!(set.attribute(&[names.w14], "val"), Some("false" | "0")))
+}
+
 /// The properties a `w:rPr` sets.
 pub(crate) fn run_properties(
     r_pr: Element<'_>,
@@ -182,6 +191,17 @@ pub(crate) fn run_properties(
                 "textFill" => properties.text_effects.fill = Some(text_fill(child, names)),
                 "scene3d" => properties.text_effects.turned = Some(turns(child, names)),
                 "props3d" => properties.text_effects.depth = Some(has_depth(child, names)),
+                // Only whether each asks for other than the font's default, so that the
+                // layout's report can say that it is not applied (#361).
+                "numForm" => {
+                    properties.font_choices.number_form = value.map(|value| value != "default");
+                }
+                "numSpacing" => {
+                    properties.font_choices.number_spacing = value.map(|value| value != "default");
+                }
+                "stylisticSets" => {
+                    properties.font_choices.stylistic_sets = Some(stylistic_set_on(child, names));
+                }
                 "cntxtAlts" => {
                     // w14's ST_OnOff has no on and off ([MS-DOCX] 2.6.4.9).
                     properties.contextual_alternates = match value {

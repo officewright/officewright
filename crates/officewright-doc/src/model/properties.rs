@@ -432,6 +432,29 @@ pub struct RunProperties {
     /// Word 2010's effects of text; kept as written, not typed yet, and the layout draws
     /// none of them.
     pub(crate) text_effects: TextEffects,
+    /// Word 2010's choices of the font's forms of figures and stylistic sets; kept as
+    /// written, not typed yet, and the layout applies none of them.
+    pub(crate) font_choices: FontChoices,
+}
+
+/// Whether each of Word 2010's choices of the font's glyphs ([MS-DOCX] 2.6.1:
+/// `w14:numForm`, `w14:numSpacing`, `w14:stylisticSets`) asks for other than the font's
+/// default, or none where it is not set; laid over the levels below one by one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FontChoices {
+    /// Lining or old-style figures.
+    pub(crate) number_form: Option<bool>,
+    /// Proportional or tabular figures.
+    pub(crate) number_spacing: Option<bool>,
+    /// A stylistic set turned on.
+    pub(crate) stylistic_sets: Option<bool>,
+}
+
+impl FontChoices {
+    /// Whether any is set.
+    pub(crate) fn is_set(&self) -> bool {
+        *self != Self::default()
+    }
 }
 
 /// Whether each of Word 2010's effects of text ([MS-DOCX] 2.6.1: `w14:glow`,

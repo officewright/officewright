@@ -794,6 +794,93 @@ fn lists_word_s_text_effects_once_but_no_value_that_changes_nothing() {
 }
 
 #[test]
+fn lists_word_s_figure_forms_and_stylistic_sets_with_open_type_features_on() {
+    // Issue #361: Word 2010's choices of a font's figures and stylistic sets ([MS-DOCX]
+    // 2.6.1) have no place in the IR's run style. Word applies the font's features only
+    // with enableOpenTypeFeatures on, as it does ligatures; a choice of the font's
+    // default changes nothing.
+    const W14: &str = "http://schemas.microsoft.com/office/word/2010/wordml";
+    let messages = |r_pr: &str, open_type: bool| -> Vec<String> {
+        let body = format!(
+            r#"<w:p><w:r><w:rPr xmlns:w14="{W14}">{r_pr}</w:rPr><w:t>1234</w:t></w:r></w:p>"#
+        );
+        let setting = if open_type {
+            r#"<w:compat><w:compatSetting w:name="enableOpenTypeFeatures" w:uri="http://schemas.microsoft.com/office/word" w:val="1"/></w:compat>"#
+        } else {
+            ""
+        };
+        let settings = (
+            "settings",
+            "settings.xml",
+            format!(r#"<w:settings xmlns:w="{W}">{setting}</w:settings>"#),
+        );
+        translate(&with_parts(&body, &[settings]))
+            .left_out()
+            .iter()
+            .map(|entry| entry.message().to_owned())
+            .collect()
+    };
+    let form = "lining or old-style figures (w14:numForm) are drawn in the font's default form, here and wherever else the document asks for them";
+    let spacing = "proportional or tabular figures (w14:numSpacing) are drawn in the font's default spacing, here and wherever else the document asks for them";
+    let sets = "stylistic sets (w14:stylisticSets) are not applied, here and wherever else the document has them";
+    for (r_pr, message) in [
+        (r#"<w14:numForm w14:val="oldStyle"/>"#, form),
+        (r#"<w14:numForm w14:val="lining"/>"#, form),
+        (r#"<w14:numSpacing w14:val="tabular"/>"#, spacing),
+        (r#"<w14:numSpacing w14:val="proportional"/>"#, spacing),
+        (
+            r#"<w14:stylisticSets><w14:styleSet w14:id="1"/></w14:stylisticSets>"#,
+            sets,
+        ),
+        (
+            r#"<w14:stylisticSets><w14:styleSet w14:id="1" w14:val="false"/><w14:styleSet w14:id="2" w14:val="true"/></w14:stylisticSets>"#,
+            sets,
+        ),
+    ] {
+        assert_eq!(messages(r_pr, true), [message], "{r_pr}");
+        assert!(
+            messages(r_pr, false).is_empty(),
+            "{r_pr} without the setting"
+        );
+    }
+    for r_pr in [
+        r#"<w14:numForm w14:val="default"/>"#,
+        r#"<w14:numSpacing w14:val="default"/>"#,
+        "<w14:stylisticSets/>",
+        r#"<w14:stylisticSets><w14:styleSet w14:id="3" w14:val="0"/></w14:stylisticSets>"#,
+    ] {
+        assert!(messages(r_pr, true).is_empty(), "{r_pr}");
+    }
+    // Through a style, and turned off by a run's own default.
+    let styles = (
+        "styles",
+        "styles.xml",
+        format!(
+            r#"<w:styles xmlns:w="{W}" xmlns:w14="{W14}"><w:style w:type="character" w:styleId="Old"><w:name w:val="Old"/><w:rPr><w14:numForm w14:val="oldStyle"/><w14:numSpacing w14:val="tabular"/><w14:stylisticSets><w14:styleSet w14:id="4"/></w14:stylisticSets></w:rPr></w:style></w:styles>"#
+        ),
+    );
+    let settings = (
+        "settings",
+        "settings.xml",
+        format!(
+            r#"<w:settings xmlns:w="{W}"><w:compat><w:compatSetting w:name="enableOpenTypeFeatures" w:uri="http://schemas.microsoft.com/office/word" w:val="1"/></w:compat></w:settings>"#
+        ),
+    );
+    let entries = |own: &str| -> Vec<String> {
+        let body = format!(
+            r#"<w:p><w:r><w:rPr xmlns:w14="{W14}"><w:rStyle w:val="Old"/>{own}</w:rPr><w:t>1234</w:t></w:r></w:p>"#
+        );
+        translate(&with_parts(&body, &[styles.clone(), settings.clone()]))
+            .left_out()
+            .iter()
+            .map(|entry| entry.message().to_owned())
+            .collect()
+    };
+    assert_eq!(entries(""), [form, spacing, sets]);
+    assert!(entries(r#"<w14:numForm w14:val="default"/><w14:numSpacing w14:val="default"/><w14:stylisticSets/>"#).is_empty());
+}
+
+#[test]
 fn lists_a_deleted_mark_only_where_a_block_follows_it() {
     // From the re-checks of #326: Word joins a paragraph whose mark is deleted to what
     // follows it, but the last paragraph of a cell or a story has nothing after it. Word

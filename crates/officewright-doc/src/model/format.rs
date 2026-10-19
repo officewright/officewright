@@ -10,7 +10,7 @@ use std::sync::Arc;
 use super::Document;
 use super::numbering::ListLevel;
 use super::properties::{
-    ColorValue, FontHint, Frame, Highlight, Justification, Ligatures, LineSpacing,
+    ColorValue, FontChoices, FontHint, Frame, Highlight, Justification, Ligatures, LineSpacing,
     ParagraphBorders, Shading, TabStop, TextEffects, Toggle, UnderlineStyle, VerticalPosition,
 };
 
@@ -90,6 +90,8 @@ pub struct CharacterFormat {
     pub(crate) border: bool,
     /// Word 2010's effects of the text, which the layout does not draw.
     pub(crate) text_effects: TextEffects,
+    /// Word 2010's choices of the font's glyphs, which the layout does not apply.
+    pub(crate) font_choices: FontChoices,
 }
 
 macro_rules! flags {
