@@ -257,6 +257,25 @@ class Cleaning(unittest.TestCase):
             'Target="\\\\server\\private\\x.docx" TargetMode="Internal"/>',
             "no TargetMode and two slashes": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
             'Target="//server/private/x.docx"/>',
+            # xsd:anyURI collapses whitespace, so a target is read without it at its ends.
+            "a space before a drive": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target=" D:/private/report.docx"/>',
+            "a tab before file:": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="&#9;file:///D:/private/report.docx"/>',
+            "a line feed before a server": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="&#10;\\\\server\\private\\x.docx"/>',
+            # No part name has a backslash.
+            "backslashes after the start": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="..\\..\\private\\report.docx"/>',
+            "one leading backslash": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="\\private\\report.docx"/>',
+            "a slash and a backslash": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="/\\server\\private\\x.docx"/>',
+            # One good relationship before it does not hide it.
+            "after a web link": f'<Relationship Id="rId8" Type="{REL}/hyperlink" '
+            'Target="https://example.gov/" TargetMode="External"/>'
+            f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="file:///D:/private/report.docx" TargetMode="External"/>',
             # A web address further on does not make the target one.
             "a web address after a local file": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
             'Target="file:///D:/private/x.html?u=https://example.gov/" TargetMode="External"/>',
@@ -287,6 +306,37 @@ class Cleaning(unittest.TestCase):
                 self.assertNotIn("private", str(caught.exception))
                 self.assertIn("word/_rels/header1.xml.rels has a target mode other than Internal "
                               "or External", public.problems(data))
+        # What the cleaning leaves of an attached template is refused, whatever its address:
+        # a personal site names the person. So is an attribute in a namespace, which OPC
+        # does not allow.
+        others = {
+            "keeps an attached template": f'<Relationship Id="rId9" Type="{REL}/attached&#84;'
+            'emplate" Target="https://agency-my.example.gov/personal/private/T.dotx" '
+            'TargetMode="External"/>',
+            "keeps an attached template ": f'<Relationship Id="rId9" Type="{REL}/'
+            'attachedTemplate" Target="https://agency-my.example.gov/personal/private/T.dotx" '
+            'TargetMode="External"></Relationship>',
+            "has a relationship attribute in a namespace": f'<Relationship xmlns:p="{PKG}" '
+            f'Id="rId9" Type="{REL}/hyperlink" Target="../private/x.docx" '
+            'p:TargetMode="External"/>',
+        }
+        for message, element in others.items():
+            rels = f'<?xml version="1.0"?><Relationships xmlns="{PKG}">{element}</Relationships>'
+            data = package(**{"word/_rels/header1.xml.rels": rels})
+            with self.subTest(message):
+                with self.assertRaises(public.Refused) as caught:
+                    public.clean(data, DOC)
+                self.assertIn(f"header1.xml.rels {message.strip()}", str(caught.exception))
+                self.assertNotIn("private", str(caught.exception))
+                self.assertIn(f"word/_rels/header1.xml.rels {message.strip()}",
+                              public.problems(data))
+        # An embedded object at a local path is refused as a link, without its path.
+        rels = (f'<?xml version="1.0"?><Relationships xmlns="{PKG}"><Relationship Id="rId9" '
+                f'Type="{REL}/oleObject" Target="D:/private/x.bin"/></Relationships>')
+        with self.assertRaises(public.Refused) as caught:
+            public.clean(package(**{"word/_rels/header1.xml.rels": rels}), DOC)
+        self.assertIn("links to a local file or another scheme", str(caught.exception))
+        self.assertNotIn("private", str(caught.exception))
         # A relationships part named in capitals is read too.
         rels = (f'<?xml version="1.0"?><Relationships xmlns="{PKG}"><Relationship Id="rId9" '
                 f'Type="{REL}/hyperlink" Target="file:///D:/private/x.docx" '
@@ -303,6 +353,10 @@ class Cleaning(unittest.TestCase):
                           archive.read("word/_rels/header1.xml.rels").decode())
         # The scheme in capitals is a web address too.
         rels = rels.replace("https://example.gov/", "HTTPS://example.gov/")
+        cleaned = public.clean(package(**{"word/_rels/header1.xml.rels": rels}), DOC)
+        self.assertEqual(public.problems(cleaned.data), [])
+        # And with the whitespace xsd:anyURI collapses before it.
+        rels = rels.replace("HTTPS://example.gov/", "&#9; https://example.gov/")
         cleaned = public.clean(package(**{"word/_rels/header1.xml.rels": rels}), DOC)
         self.assertEqual(public.problems(cleaned.data), [])
 

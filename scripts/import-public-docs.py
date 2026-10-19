@@ -724,7 +724,9 @@ def embedded_parts(parts: dict[str, bytes]) -> list[str]:
     for rels in (name for name in parts if name.lower().endswith(".rels")):
         relationships = package_xml(rels, parts[rels], f"{PACKAGE_RELS_NS}Relationships")
         for element in relationships.iter(f"{PACKAGE_RELS_NS}Relationship"):
-            if element.get("TargetMode") == "External":
+            # A target that names no part is not embedded; external_link_problems refuses it
+            # without naming it.
+            if element.get("TargetMode") == "External" or names_no_part(element.get("Target", "")):
                 continue
             if element.get("Type") in EMBEDDED_RELATIONSHIPS:
                 add(part_target(rels, element.get("Target", "")))
@@ -745,26 +747,43 @@ LINK_SCHEMES = re.compile(r"(?i)(https?|mailto):")
 
 
 # An internal target is a part name: one with a scheme (file:, a drive letter as in D:) or
-# one that starts with a backslash (\\server, \\path) or two slashes (//server) names none.
-NOT_A_PART = re.compile(r"(?i)^(?:[a-z][a-z0-9+.-]*:|//|\\)")
+# one that starts with two slashes (//server) names none, and neither does one with a
+# backslash anywhere (\\server, ..\\folder), which no part name has.
+NOT_A_PART = re.compile(r"(?i)^(?:[a-z][a-z0-9+.-]*:|//)")
+# xsd:anyURI, the type of Target, collapses whitespace: a target is read without it at its ends.
+URI_SPACE = " \t\r\n"
+
+
+def names_no_part(target: str) -> bool:
+    """Whether an internal relationship's target cannot be the name of a part."""
+    target = target.strip(URI_SPACE)
+    return bool(NOT_A_PART.match(target)) or "\\" in target
 
 
 def external_link_problems(parts: dict[str, bytes]) -> list[str]:
     """The .rels parts with a relationship to anything but a web or mail address or a part of
     the package, read as XML whatever the quoting, prefixes or character references (#331):
     an external one to another scheme, an internal one (no TargetMode, or Internal) whose
-    target names no part, or one whose TargetMode is neither, which OPC does not allow. The
-    target itself is not named, since it may name a person's folder."""
+    target names no part, or one whose TargetMode is neither, or an attribute in a namespace,
+    which OPC does not allow. Also an attached template the cleaning left, since its address
+    can name a person (a personal site). The target itself is not named, since it may name a
+    person's folder."""
     found = []
     for rels in sorted(name for name in parts if name.lower().endswith(".rels")):
         root = package_xml(rels, parts[rels], f"{PACKAGE_RELS_NS}Relationships")
         for element in root.iter(f"{PACKAGE_RELS_NS}Relationship"):
             mode, target = element.get("TargetMode"), element.get("Target", "")
+            if any(name.startswith("{") for name in element.attrib):
+                found.append(f"{rels} has a relationship attribute in a namespace")
+                break
             if mode not in (None, "Internal", "External"):
                 found.append(f"{rels} has a target mode other than Internal or External")
                 break
-            if (mode == "External" and not LINK_SCHEMES.match(target)) or (
-                mode != "External" and NOT_A_PART.match(target)
+            if element.get("Type", "").endswith("/attachedTemplate"):
+                found.append(f"{rels} keeps an attached template")
+                break
+            if (mode == "External" and not LINK_SCHEMES.match(target.strip(URI_SPACE))) or (
+                mode != "External" and names_no_part(target)
             ):
                 found.append(f"{rels} links to a local file or another scheme")
                 break
