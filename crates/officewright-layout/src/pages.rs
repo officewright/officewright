@@ -20,6 +20,7 @@ use crate::ir::{
 };
 use crate::itemize::FieldValues;
 use crate::lines::{LineEnd, PieceKind};
+use crate::lists::{Counters, Label};
 use crate::paragraph::{self, ParagraphLayout};
 use crate::report::{Location, ReportKind, Step};
 use crate::shape::Shaper;
@@ -84,6 +85,8 @@ pub(crate) struct Flowed<'a> {
     /// Whether it is the first paragraph of a table cell, which keeps the space above it
     /// at the top of a page.
     pub(crate) first_in_cell: bool,
+    /// Its list label, when it is a list item, as the counters of its story make it.
+    pub(crate) label: Option<Label>,
 }
 
 /// The paragraphs of the body of every section of `document`, in reading order. Tables
@@ -93,20 +96,25 @@ pub(crate) fn flow<'a>(document: &'a Document, fonts: &mut Fonts<'_>) -> Result<
     let mut out = Vec::new();
     let mut table = None;
     let mut location = Location::default();
+    // The lists of the body count on from section to section.
+    let mut counters = Counters::default();
     location.push(Step::Field("sections"));
     for (index, section) in document.sections().iter().enumerate() {
         location.push(Step::Index(index));
         location.push(Step::Field("blocks"));
         let mut walk = Walk {
+            document,
             section: index,
             location: &mut location,
             table: &mut table,
+            counters: &mut counters,
             out: &mut out,
         };
         walk.blocks(section.blocks(), false, 0)?;
         location.pop();
         location.pop();
     }
+    report_list_formats(&counters, fonts);
     if let Some(location) = table {
         fonts.report_once(
             ReportKind::FeatureUnsupported,
@@ -121,11 +129,37 @@ pub(crate) fn flow<'a>(document: &'a Document, fonts: &mut Fonts<'_>) -> Result<
 
 /// A walk over the blocks of a section for [`flow`].
 struct Walk<'a, 'w> {
+    document: &'a Document,
     section: usize,
     location: &'w mut Location,
     /// The place of the first table.
     table: &'w mut Option<Location>,
+    /// The counters of the lists of the story walked.
+    counters: &'w mut Counters,
     out: &'w mut Vec<Flowed<'a>>,
+}
+
+/// Reports, once, at the first of them, labels with a number written in decimal because
+/// its format is one the layout does not write.
+fn report_list_formats(counters: &Counters, fonts: &mut Fonts<'_>) {
+    if let Some(location) = &counters.unsupported_format {
+        fonts.report_once(
+            ReportKind::FeatureUnsupported,
+            location,
+            "list numbers in a format the layout does not write are written in decimal".to_owned(),
+        );
+    }
+    if let Some(location) = &counters.long_label {
+        fonts.report_once(
+            ReportKind::ValueClamped,
+            location,
+            format!(
+                "list labels, and the templates they are written from, longer than {} \
+                 characters are cut there",
+                crate::lists::MAX_LABEL_CHARS
+            ),
+        );
+    }
 }
 
 impl<'a> Walk<'a, '_> {
@@ -141,6 +175,9 @@ impl<'a> Walk<'a, '_> {
                     location: self.location.clone(),
                     in_cell,
                     first_in_cell: in_cell && index == 0,
+                    label: paragraph
+                        .list()
+                        .and_then(|item| self.counters.label(self.document, &item, self.location)),
                 }),
                 Block::Table(table) => {
                     if depth >= MAX_TABLE_DEPTH {
@@ -565,7 +602,7 @@ impl<'d> Pager<'d, '_, '_> {
                 Some(slot) => {
                     let layout = paragraph::lay_out_with(
                         self.document,
-                        flowed.paragraph,
+                        (flowed.paragraph, flowed.label.as_ref()),
                         self.body()?.width,
                         (&mut *self.fonts, &mut *self.shaper),
                         &flowed.location,
@@ -594,7 +631,7 @@ impl<'d> Pager<'d, '_, '_> {
                 *laid_for = landed;
                 *layout = paragraph::lay_out_with(
                     self.document,
-                    flowed.paragraph,
+                    (flowed.paragraph, flowed.label.as_ref()),
                     self.body()?.width,
                     (&mut *self.fonts, &mut *self.shaper),
                     &flowed.location,
@@ -1183,13 +1220,19 @@ impl<'d> Pager<'d, '_, '_> {
         location.push(Step::Field(name));
         let mut table = None;
         let mut flowed = Vec::new();
+        // The lists of each header and footer count from their start: a hypothesis until a
+        // Word render, since no reference document has a list in a header or footer.
+        let mut counters = Counters::default();
         let mut walk = Walk {
+            document: self.document,
             section,
             location: &mut location,
             table: &mut table,
+            counters: &mut counters,
             out: &mut flowed,
         };
         walk.blocks(blocks, false, 0)?;
+        report_list_formats(&counters, self.fonts);
         if let Some(location) = table {
             self.fonts.report_once(
                 ReportKind::FeatureUnsupported,
@@ -1302,7 +1345,7 @@ impl<'d> Pager<'d, '_, '_> {
                 Some(layout) => Rc::clone(layout),
                 None => Rc::new(paragraph::lay_out_with(
                     self.document,
-                    part.paragraph,
+                    (part.paragraph, part.label.as_ref()),
                     width,
                     (&mut *self.fonts, &mut *self.shaper),
                     &part.location,
@@ -3492,5 +3535,133 @@ mod tests {
         let laid = laid.expect("pages");
         assert_eq!(laid.pages.len(), 1);
         assert!(laid.pages[0].fragments.is_empty());
+    }
+
+    #[test]
+    fn lists_count_on_through_the_body_and_afresh_in_each_header() {
+        use crate::ir::{
+            Level, LevelTextPart, ListDefinition, ListInstance, ListItem, NumberFormat,
+        };
+
+        let mut document = Document::default();
+        let style = document
+            .add_run_style(RunStyle::default().with_fonts(RunFonts::new("Officewright Test")));
+        let level = Level::default()
+            .with_text([
+                LevelTextPart::Placeholder(0),
+                LevelTextPart::Literal(".".into()),
+            ])
+            .with_start(1);
+        let other = Level::default()
+            .with_text([LevelTextPart::Placeholder(0)])
+            .with_format(NumberFormat::Other("hebrew1".into()));
+        let list = document.add_list(ListDefinition::default().with_levels([level]));
+        let hebrew = document.add_list(ListDefinition::default().with_levels([other]));
+        let instance = document.add_list_instance(ListInstance::new(list));
+        let hebrew = document.add_list_instance(ListInstance::new(hebrew));
+        let item = |instance| -> Block {
+            Paragraph::new(style)
+                .with_list(Some(ListItem::new(instance, 0, style)))
+                .with_inlines([Inline::text("A", style)])
+                .into()
+        };
+        let header = HeaderFooterSet::default().with_primary(vec![item(instance)]);
+        document.add_section(
+            Section::new(close_frames())
+                .with_headers(header.clone())
+                .with_blocks(vec![item(instance), item(instance)]),
+        );
+        document.add_section(
+            Section::new(close_frames())
+                .with_headers(header)
+                .with_blocks(vec![item(instance), item(hebrew)]),
+        );
+        let (laid, report) = laid(&document, 10);
+        let labels: Vec<Vec<String>> = laid
+            .expect("pages")
+            .pages
+            .iter()
+            .map(|page| texts(page).into_iter().filter(|text| text != "A").collect())
+            .collect();
+        // The header of each page counts from its start; the body counts on from section
+        // to section; a format the layout does not write is decimal, and reported.
+        assert_eq!(labels, [vec!["1.", "1.", "2."], vec!["1.", "3.", "0"]]);
+        // The report names the first paragraph whose label it wrote in decimal.
+        let places: Vec<String> = report
+            .iter()
+            .filter(|entry| {
+                entry.kind() == ReportKind::FeatureUnsupported
+                    && entry.message().contains("list numbers")
+            })
+            .map(|entry| entry.location().to_string())
+            .collect();
+        assert_eq!(places, ["sections[1].blocks[1]"], "{report:?}");
+        // A header's list in such a format is reported too, at the header's paragraph.
+        let mut in_header = Document::default();
+        let style = in_header
+            .add_run_style(RunStyle::default().with_fonts(RunFonts::new("Officewright Test")));
+        let other = Level::default()
+            .with_text([LevelTextPart::Placeholder(0)])
+            .with_format(NumberFormat::Other("hebrew1".into()));
+        let hebrew = in_header.add_list(ListDefinition::default().with_levels([other]));
+        let hebrew = in_header.add_list_instance(ListInstance::new(hebrew));
+        let header = HeaderFooterSet::default().with_primary(vec![
+            Paragraph::new(style)
+                .with_list(Some(ListItem::new(hebrew, 0, style)))
+                .with_inlines([Inline::text("A", style)])
+                .into(),
+        ]);
+        in_header.add_section(
+            Section::new(close_frames())
+                .with_headers(header)
+                .with_blocks(vec![Paragraph::new(style).into()]),
+        );
+        let (_, report) = self::laid(&in_header, 10);
+        let places: Vec<String> = report
+            .iter()
+            .filter(|entry| entry.message().contains("list numbers"))
+            .map(|entry| entry.location().to_string())
+            .collect();
+        assert_eq!(places.len(), 1, "{report:?}");
+        assert!(places[0].contains("headers"), "{places:?}");
+    }
+
+    #[test]
+    fn a_cut_label_is_reported_once_at_the_first_paragraph_it_is_cut_in() {
+        use crate::ir::{Level, LevelTextPart, ListDefinition, ListInstance, ListItem};
+
+        let mut document = Document::default();
+        let style = document
+            .add_run_style(RunStyle::default().with_fonts(RunFonts::new("Officewright Test")));
+        let level = |text: String| {
+            Level::default()
+                .with_text([LevelTextPart::Literal(text), LevelTextPart::Placeholder(0)])
+        };
+        let short = document.add_list(ListDefinition::default().with_levels([level("a".into())]));
+        let long = document.add_list(
+            ListDefinition::default()
+                .with_levels([level("a".repeat(crate::lists::MAX_LABEL_CHARS + 1))]),
+        );
+        let short = document.add_list_instance(ListInstance::new(short));
+        let long = document.add_list_instance(ListInstance::new(long));
+        let item = |instance| -> Block {
+            Paragraph::new(style)
+                .with_list(Some(ListItem::new(instance, 0, style)))
+                .into()
+        };
+        document.add_section(Section::new(close_frames()).with_blocks(vec![
+            item(short),
+            item(long),
+            item(long),
+        ]));
+        let (_, report) = laid(&document, 100);
+        let places: Vec<String> = report
+            .iter()
+            .filter(|entry| {
+                entry.kind() == ReportKind::ValueClamped && entry.message().contains("list labels")
+            })
+            .map(|entry| entry.location().to_string())
+            .collect();
+        assert_eq!(places, ["sections[0].blocks[1]"], "{report:?}");
     }
 }
