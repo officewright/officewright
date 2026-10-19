@@ -104,6 +104,11 @@ impl<'f> StyleKey<'f> {
             language_bidi,
             ligatures,
             contextual_alternates,
+            // Not drawn, so not in the IR; reported (#303, #339, #361).
+            emphasis_mark: _,
+            border: _,
+            text_effects: _,
+            font_choices: _,
         } = format;
         let FontFamilies {
             ascii,
@@ -296,9 +301,9 @@ impl Translator<'_> {
             _ => ir::EastAsiaCharset::Other,
         });
         let language = ir::Language::default()
-            .with_latin(cut_language(format.language()))
-            .with_east_asia(cut_language(format.language_east_asia()))
-            .with_bidi(cut_language(format.language_bidi()));
+            .with_latin(cut_language(format.language()).map(Into::into))
+            .with_east_asia(cut_language(format.language_east_asia()).map(Into::into))
+            .with_bidi(cut_language(format.language_bidi()).map(Into::into));
         ir::RunStyle::default()
             .with_fonts(fonts)
             .with_size(format.size())

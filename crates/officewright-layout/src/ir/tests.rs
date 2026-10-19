@@ -2561,3 +2561,120 @@ fn drawing_defaults_are_neutral() {
     );
     assert!(NoteSeparators::default().separator().is_empty());
 }
+
+#[test]
+fn paragraphs_styles_and_symbols_can_share_what_they_repeat() {
+    // Issue #175: one copy of what many items repeat.
+    use std::sync::Arc;
+
+    let mut document = Document::default();
+    let style = document.add_run_style(RunStyle::default());
+    let props =
+        Arc::new(ParagraphProps::default().with_tabs([TabStop::default().with_position(Pt(36.0))]));
+    let a = Paragraph::new(style).with_props(Arc::clone(&props));
+    let b = Paragraph::new(style).with_props(Arc::clone(&props));
+    assert!(std::ptr::eq(a.props(), b.props()));
+    // Paragraphs given no properties share the defaults.
+    assert!(std::ptr::eq(
+        Paragraph::new(style).props(),
+        Paragraph::new(style).props()
+    ));
+    // One family name for the four fonts of a style, and for every style given it.
+    let name: Arc<str> = Arc::from("Calibri");
+    for fonts in [
+        RunFonts::new(Arc::clone(&name)),
+        RunFonts::new(Arc::clone(&name)),
+    ] {
+        for family in [
+            fonts.ascii(),
+            fonts.high_ansi(),
+            fonts.east_asia(),
+            fonts.complex_script(),
+        ] {
+            assert_eq!(family.as_ptr(), name.as_ptr());
+        }
+    }
+    let defaults = RunFonts::default();
+    assert_eq!(
+        defaults.ascii().as_ptr(),
+        RunFonts::default().complex_script().as_ptr()
+    );
+    // The font of a symbol too.
+    let Inline::Symbol { font, .. } = Inline::symbol(Arc::clone(&name), 0xF0B7, style) else {
+        panic!("a symbol");
+    };
+    assert!(Arc::ptr_eq(&font, &name));
+}
+
+#[test]
+fn shared_properties_the_producer_no_longer_holds_are_clamped_once_too() {
+    use std::sync::Arc;
+
+    // A translator drops its own copy once the document is built: the paragraphs are then
+    // the only holders. Clamping the first must not leave the last one alone holding the
+    // original, which it would then clamp again in place.
+    let beyond = Arc::new(
+        ParagraphProps::default().with_tabs([TabStop::default().with_position(Pt(3_600.0))]),
+    );
+    let mut document = document_with(|style| {
+        (0..3)
+            .map(|_| Paragraph::new(style).with_props(Arc::clone(&beyond)).into())
+            .collect()
+    });
+    drop(beyond);
+    let report = document.clamp();
+    assert_eq!(entries(&report).len(), 1, "{:?}", entries(&report));
+    let props: Vec<&ParagraphProps> = document.sections()[0]
+        .blocks()
+        .iter()
+        .map(|block| match block {
+            Block::Paragraph(paragraph) => paragraph.props(),
+            _ => panic!("a paragraph"),
+        })
+        .collect();
+    assert!(std::ptr::eq(props[0], props[1]) && std::ptr::eq(props[1], props[2]));
+    assert_eq!(props[2].tabs()[0].position(), Pt(1584.0));
+}
+
+#[test]
+fn shared_properties_are_clamped_once_and_stay_shared() {
+    use std::sync::Arc;
+
+    let within =
+        Arc::new(ParagraphProps::default().with_tabs([TabStop::default().with_position(Pt(36.0))]));
+    let beyond = Arc::new(
+        ParagraphProps::default().with_tabs([TabStop::default().with_position(Pt(3_600.0))]),
+    );
+    let mut document = document_with(|style| {
+        [&within, &within, &beyond, &beyond]
+            .into_iter()
+            .map(|props| Paragraph::new(style).with_props(Arc::clone(props)).into())
+            .collect()
+    });
+    let report = document.clamp();
+    // Shared properties out of range are clamped once, where they are first met.
+    assert_eq!(
+        entries(&report),
+        [
+            "sections[0].blocks[2].props.tabs[0].position: tab stop position 3600 pt is outside \
+          Word's range of -1584 to 1584 pt and becomes 1584 pt"
+        ]
+    );
+    let props: Vec<&ParagraphProps> = document.sections()[0]
+        .blocks()
+        .iter()
+        .map(|block| match block {
+            Block::Paragraph(paragraph) => paragraph.props(),
+            _ => panic!("a paragraph"),
+        })
+        .collect();
+    // Those within range still share the producer's copy; the others share one clamped
+    // copy of theirs.
+    assert!(std::ptr::eq(props[0], &*within) && std::ptr::eq(props[1], &*within));
+    assert!(!std::ptr::eq(props[2], &*beyond));
+    assert!(std::ptr::eq(props[2], props[3]));
+    assert_eq!(props[2].tabs()[0].position(), Pt(1584.0));
+    assert_eq!(props[3].tabs()[0].position(), Pt(1584.0));
+    // The producer's copy is as it was.
+    assert_eq!(beyond.tabs()[0].position(), Pt(3_600.0));
+}

@@ -727,12 +727,11 @@ pub fn lay_out(
     let mut fonts = Fonts::new(book);
     let mut shaper = Shaper::new();
     let location = Location::default();
-    let layout = crate::paragraph::lay_out(
+    let layout = laid_out(
         document,
         paragraph,
         Pt(width),
-        &mut fonts,
-        &mut shaper,
+        (&mut fonts, &mut shaper),
         &location,
     );
     let itemized = &layout.itemized;
@@ -829,6 +828,28 @@ pub fn lay_out(
     }
 }
 
+/// `paragraph` laid out as the layout does; a list item with its label as the first item
+/// of its list.
+fn laid_out(
+    document: &Document,
+    paragraph: &crate::ir::Paragraph,
+    width: Pt,
+    (fonts, shaper): (&mut Fonts<'_>, &mut Shaper),
+    location: &Location,
+) -> crate::paragraph::ParagraphLayout {
+    let label = paragraph
+        .list()
+        .and_then(|item| crate::lists::Counters::default().label(document, &item, location));
+    crate::paragraph::lay_out_with(
+        document,
+        (paragraph, label.as_ref()),
+        width,
+        (fonts, shaper),
+        location,
+        None,
+    )
+}
+
 /// The space between a paragraph with `above` of `document` and the one with `below`
 /// that follows it.
 pub fn space_between(
@@ -847,6 +868,18 @@ fn piece_text_end(kind: &crate::lines::PieceKind) -> usize {
     }
 }
 
+/// The item of the paragraph `piece` draws.
+fn piece_item(piece: &crate::lines::Piece) -> usize {
+    use crate::lines::PieceKind;
+    match &piece.kind {
+        PieceKind::Text { item, .. }
+        | PieceKind::Hyphen { item, .. }
+        | PieceKind::Tab { item, .. }
+        | PieceKind::Break { item }
+        | PieceKind::Object { item, .. } => *item,
+    }
+}
+
 /// Lays out `paragraph` of `document` in a column `width` points wide with the fonts of
 /// `book`, and checks what pagination relies on: the lines hold the paragraph's text in
 /// order, all of it, each byte once; a line wider than its room is one the breaker
@@ -862,12 +895,11 @@ pub fn check_lines(
     let mut fonts = Fonts::new(book);
     let mut shaper = Shaper::new();
     let location = Location::default();
-    let layout = crate::paragraph::lay_out(
+    let layout = laid_out(
         document,
         paragraph,
         Pt(width),
-        &mut fonts,
-        &mut shaper,
+        (&mut fonts, &mut shaper),
         &location,
     );
     let report = fonts.into_report();
@@ -877,6 +909,26 @@ pub fn check_lines(
     let indent = paragraph.props().indent();
     let (text, _) = crate::lines::break_text(&layout.itemized);
     let breaks = crate::breaks::BreakMap::new(&text, paragraph.props().word_wrap());
+    // A list label aligned at the centre or the end gives the first line the room it
+    // moves back by: half its width, or all of it, measured on the pieces of every line,
+    // since a label wider than the line wraps and the first line moves back by all of it.
+    let label_room = match layout.itemized.label {
+        Some(label) => {
+            let width: f64 = layout
+                .lines
+                .iter()
+                .flat_map(|line| &line.pieces)
+                .filter(|piece| piece_item(piece) < label.text)
+                .map(|piece| piece.width.0)
+                .sum();
+            match label.alignment {
+                crate::ir::LevelAlignment::Center => width / 2.0,
+                crate::ir::LevelAlignment::End => width,
+                _ => 0.0,
+            }
+        }
+        None => 0.0,
+    };
     let mut end = 0;
     for (index, line) in layout.lines.iter().enumerate() {
         if line.range.start != end {
@@ -886,6 +938,7 @@ pub fn check_lines(
             ));
         }
         end = line.range.end;
+        let label_room = if index == 0 { label_room } else { 0.0 };
         let room = width
             - indent.start().0
             - indent.end().0
@@ -893,7 +946,8 @@ pub fn check_lines(
                 indent.first_line().0
             } else {
                 0.0
-            };
+            }
+            + label_room;
         let wide = line.width.0 > room.max(0.0) + 1e-6 && line.width.0 > 0.0;
         if wide && !(line.overflow && reported) {
             return Err(format!(
@@ -1124,12 +1178,11 @@ pub fn paint(
             None => crate::paragraph::space_before(document, paragraph.props()),
         }
         .0;
-        let layout = crate::paragraph::lay_out(
+        let layout = laid_out(
             document,
             paragraph,
             Pt(width),
-            &mut fonts,
-            &mut shaper,
+            (&mut fonts, &mut shaper),
             &location,
         );
         let mut painting = Painting {
@@ -1140,6 +1193,7 @@ pub fn paint(
             location: &location,
             background: None,
             leaders: &mut leaders,
+            bar_reach: (0.0, 0.0),
         };
         let origin = Point {
             x: Pt(0.0),
@@ -1173,7 +1227,7 @@ pub struct PageDump {
     text: String,
 }
 
-/// Lines of a paragraph on a [`PageDump`].
+/// Lines of a paragraph, or bands of a table, on a [`PageDump`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct FragmentDump {
     paragraph: usize,
@@ -1229,13 +1283,13 @@ impl PageDump {
 }
 
 impl FragmentDump {
-    /// The paragraph, by its place among every paragraph of the body in reading order,
-    /// those of table cells included.
+    /// The paragraph or table, by its place among the paragraphs and tables of the body
+    /// in reading order, a table counting as one, whatever its cells hold.
     pub fn paragraph(&self) -> usize {
         self.paragraph
     }
 
-    /// Its lines of the paragraph.
+    /// Its lines of the paragraph, or bands of the table.
     pub fn lines(&self) -> std::ops::Range<usize> {
         self.lines.clone()
     }
@@ -1325,15 +1379,29 @@ pub fn check_pages(book: &FontBook, document: &Document, max_pages: usize) -> Re
             for flowed in &flow {
                 let setup = setup_of(flowed.section).unwrap_or_default();
                 let width = crate::pages::body(&setup).width;
-                let layout = crate::paragraph::lay_out(
-                    document,
-                    flowed.paragraph,
-                    width,
-                    &mut fonts,
-                    &mut shaper,
-                    &flowed.location,
-                );
-                lines += layout.lines.len();
+                lines += match &flowed.content {
+                    crate::pages::Content::Paragraph(paragraph, label) => {
+                        crate::paragraph::lay_out_with(
+                            document,
+                            (paragraph, label.as_ref()),
+                            width,
+                            (&mut fonts, &mut shaper),
+                            &flowed.location,
+                            None,
+                        )
+                        .lines
+                        .len()
+                    }
+                    crate::pages::Content::Table(table, labels) => crate::tables::Prepared::new(
+                        document,
+                        table,
+                        labels,
+                        width,
+                        &flowed.location,
+                        &mut fonts,
+                    )
+                    .band_count(),
+                };
             }
             if bound(2 * lines) > max_pages {
                 return Ok(());

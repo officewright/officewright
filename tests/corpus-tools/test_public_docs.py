@@ -16,6 +16,7 @@ import struct
 import sys
 import unittest
 import unittest.mock
+import warnings
 import zipfile
 import zlib
 from pathlib import Path
@@ -171,6 +172,21 @@ DOC = public.PublicDoc(
 )
 
 
+# What clean() and problems() say of a relationship to a local file, another scheme or a part
+# the package does not hold.
+LINK = "links to a local file, another scheme or a missing part"
+
+
+def with_entry(data, name, body):
+    """The package with one more entry, which zipfile writes even when its name is taken."""
+    buffer = io.BytesIO(data)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)  # zipfile's "Duplicate name"
+        with zipfile.ZipFile(buffer, "a") as archive:
+            archive.writestr(name, body)
+    return buffer.getvalue()
+
+
 def parts_of(data):
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         return {name: archive.read(name) for name in archive.namelist()}
@@ -233,6 +249,238 @@ class Cleaning(unittest.TestCase):
         self.assertIn('Target="media/image2.png"', rels)
         header = self.parts["word/_rels/header1.xml.rels"].decode()
         self.assertIn('Target="media/image2.png"', header)
+
+    def test_external_links_to_local_files_are_refused_however_they_are_written(self):
+        # #331: relationships in single quotes, or with a character reference in TargetMode,
+        # escaped the regular expressions of edit_relationships, which kept the link.
+        spellings = {
+            "single quotes": f"<Relationship Id='rId9' Type='{REL}/hyperlink' "
+            "Target='file:///D:/private/report.docx' TargetMode='External'/>",
+            "a character reference in TargetMode": f'<Relationship Id="rId9" Type="{REL}/'
+            'hyperlink" Target="D:/private/report.docx" TargetMode="&#69;xternal"/>',
+            "spaces around the equals signs": f"<Relationship Id = 'rId9' Type = '{REL}/"
+            "hyperlink' Target = '\\\\server\\private\\x.docx' TargetMode = 'External'/>",
+            # Not a hyperlink: a picture linked from a local file.
+            "an image": f'<Relationship Id="rId9" Type="{REL}/image" '
+            'Target="file:///D:/private/logo.png" TargetMode="External"/>',
+            # Internal relationships name parts, so a target with a scheme, a drive or a
+            # server names a local file however the mode is left out.
+            "no TargetMode": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="file:///D:/private/report.docx"/>',
+            "Internal and a drive": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="D:\\private\\report.docx" TargetMode="Internal"/>',
+            "Internal and a server": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="\\\\server\\private\\x.docx" TargetMode="Internal"/>',
+            "no TargetMode and two slashes": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="//server/private/x.docx"/>',
+            # xsd:anyURI collapses whitespace, so a target is read without it at its ends.
+            "a space before a drive": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target=" D:/private/report.docx"/>',
+            "a tab before file:": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="&#9;file:///D:/private/report.docx"/>',
+            "a line feed before a server": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="&#10;\\\\server\\private\\x.docx"/>',
+            # No part name has a backslash.
+            "backslashes after the start": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="..\\..\\private\\report.docx"/>',
+            "one leading backslash": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="\\private\\report.docx"/>',
+            "a slash and a backslash": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="/\\server\\private\\x.docx"/>',
+            "a carriage return before a drive": f'<Relationship Id="rId9" Type="{REL}/'
+            'hyperlink" Target="&#13;D:/private/report.docx"/>',
+            "one leading backslash alone": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="\\private/report.docx"/>',
+            # Percent-encoded, as urllib.parse.quote writes a Windows path: still no part.
+            "a percent-encoded profile path": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="C%3A%5CUsers%5Cprivate%5Cmemo.docx"/>',
+            "a percent-encoded server": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="%5C%5Cfs01%5Cprivate%5Cx.docx"/>',
+            "percent-encoded slashes": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="%2F%2Fserver/private/x.docx"/>',
+            "a percent-encoded drive letter": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="%44:/private/x.docx"/>',
+            # Out of the package, with a query, or led by a no-break space: no part.
+            "a way out of the package": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="../../private/report.docx"/>',
+            "a query": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="document.xml?private"/>',
+            "a no-break space": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="&#160;D:/private/report.docx"/>',
+            # A local path that climbs back to a part the package holds is still a local path.
+            "a drive climbing back": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="D:/private/../../settings.xml"/>',
+            "file: climbing back": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="file:///D:/private/../../../settings.xml" TargetMode="Internal"/>',
+            "a server climbing back": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="file://fs01/private/../../../settings.xml" TargetMode="Internal"/>',
+            "backslashes climbing back": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="\\\\fs01\\private\\memo.docx/../settings.xml"/>',
+            "a fragment climbing back": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="x#D:/private/report.docx/../../../settings.xml"/>',
+            "a linked picture climbing back": f'<Relationship Id="rId9" Type="{REL}/image" '
+            'Target="file:///D:/private/../../../media/image2.png"/>',
+            "an encoded path climbing back": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="private%2F..%2F..%2Fsettings.xml"/>',
+            # Each rule of a part reference alone: a folder climbed back from, which can be a
+            # user's, a server named like a folder, an empty segment.
+            "folders climbed back from": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="Users/private/../../settings.xml"/>',
+            "two slashes before a part": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="//word/settings.xml"/>',
+            "an empty segment": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="settings.xml/"/>',
+            # A part the package does not hold.
+            "a part that is not there": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="private/report.docx"/>',
+            # One good relationship before it does not hide it.
+            "after a web link": f'<Relationship Id="rId8" Type="{REL}/hyperlink" '
+            'Target="https://example.gov/" TargetMode="External"/>'
+            f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="file:///D:/private/report.docx" TargetMode="External"/>',
+            # A web address further on does not make the target one.
+            "a web address after a local file": f'<Relationship Id="rId9" Type="{REL}/hyperlink" '
+            'Target="file:///D:/private/x.html?u=https://example.gov/" TargetMode="External"/>',
+        }
+        for label, element in spellings.items():
+            rels = f'<?xml version="1.0"?><Relationships xmlns="{PKG}">{element}</Relationships>'
+            data = package(**{"word/_rels/header1.xml.rels": rels})
+            with self.subTest(label):
+                with self.assertRaises(public.Refused) as caught:
+                    public.clean(data, DOC)
+                self.assertIn("header1.xml.rels", str(caught.exception))
+                self.assertIn(LINK, str(caught.exception))
+                self.assertNotIn("private", str(caught.exception))
+                self.assertIn(f"word/_rels/header1.xml.rels {LINK}",
+                              public.problems(data))
+        # A target mode OPC does not allow is refused, whatever the target: officewright-opc
+        # refuses the package.
+        for mode in ("external", "EXTERNAL", " External ", "External&#9;"):
+            rels = (f'<?xml version="1.0"?><Relationships xmlns="{PKG}"><Relationship Id="rId9" '
+                    f'Type="{REL}/hyperlink" Target="file:///D:/private/x.docx" '
+                    f'TargetMode="{mode}"/></Relationships>')
+            data = package(**{"word/_rels/header1.xml.rels": rels})
+            with self.subTest(mode=mode):
+                with self.assertRaises(public.Refused) as caught:
+                    public.clean(data, DOC)
+                self.assertIn("header1.xml.rels has a target mode other than Internal or External",
+                              str(caught.exception))
+                self.assertNotIn("private", str(caught.exception))
+                self.assertIn("word/_rels/header1.xml.rels has a target mode other than Internal "
+                              "or External", public.problems(data))
+        # What the cleaning leaves of an attached template is refused, whatever its address:
+        # a personal site names the person. So is an attribute in a namespace, which OPC
+        # does not allow.
+        others = {
+            "keeps an attached template": f'<Relationship Id="rId9" Type="{REL}/attached&#84;'
+            'emplate" Target="https://agency-my.example.gov/personal/private/T.dotx" '
+            'TargetMode="External"/>',
+            "keeps an attached template ": f'<Relationship Id="rId9" Type="{REL}/'
+            'attachedTemplate" Target="https://agency-my.example.gov/personal/private/T.dotx" '
+            'TargetMode="External"></Relationship>',
+            "keeps an attached template  ": f'<Relationship Id="rId9" Type="{REL}/'
+            'attachedTemplate&#9;" Target="https://agency-my.example.gov/personal/private/T.dotx" '
+            'TargetMode="External"/>',
+            "has a relationship attribute in a namespace": f'<Relationship xmlns:p="{PKG}" '
+            f'Id="rId9" Type="{REL}/hyperlink" Target="../private/x.docx" '
+            'p:TargetMode="External"/>',
+        }
+        for message, element in others.items():
+            rels = f'<?xml version="1.0"?><Relationships xmlns="{PKG}">{element}</Relationships>'
+            data = package(**{"word/_rels/header1.xml.rels": rels})
+            with self.subTest(message):
+                with self.assertRaises(public.Refused) as caught:
+                    public.clean(data, DOC)
+                self.assertIn(f"header1.xml.rels {message.strip()}", str(caught.exception))
+                self.assertNotIn("private", str(caught.exception))
+                self.assertIn(f"word/_rels/header1.xml.rels {message.strip()}",
+                              public.problems(data))
+        # An embedded object at a local path is refused as a link, without its path.
+        for target in ("D:/private/x.bin", "/D:/private/x.bin", "%5C%5Cserver%5Cprivate.bin",
+                       "C:/../private/x.bin"):
+            rels = (f'<?xml version="1.0"?><Relationships xmlns="{PKG}"><Relationship Id="rId9" '
+                    f'Type="{REL}/oleObject" Target="{target}"/></Relationships>')
+            with self.subTest(target), self.assertRaises(public.Refused) as caught:
+                public.clean(package(**{"word/_rels/header1.xml.rels": rels}), DOC)
+            self.assertIn(LINK, str(caught.exception))
+            self.assertNotIn("private", str(caught.exception))
+        # A relationships part named in capitals is read too.
+        rels = (f'<?xml version="1.0"?><Relationships xmlns="{PKG}"><Relationship Id="rId9" '
+                f'Type="{REL}/hyperlink" Target="file:///D:/private/x.docx" '
+                'TargetMode="External"/></Relationships>')
+        self.assertIn(f"word/_rels/footer1.xml.RELS {LINK}",
+                      public.problems(package(**{"word/_rels/footer1.xml.RELS": rels})))
+        # A web address in single quotes stays, and so does an internal target.
+        rels = (f'<?xml version="1.0"?><Relationships xmlns="{PKG}">'
+                f"<Relationship Id='rId8' Type='{REL}/hyperlink' Target='https://example.gov/'"
+                " TargetMode='External'/></Relationships>")
+        cleaned = public.clean(package(**{"word/_rels/header1.xml.rels": rels}), DOC)
+        with zipfile.ZipFile(io.BytesIO(cleaned.data)) as archive:
+            self.assertIn("Target='https://example.gov/'",
+                          archive.read("word/_rels/header1.xml.rels").decode())
+        # A part named as part names compare (percent-decoded, without regard to case), and
+        # with the whitespace xsd:anyURI collapses, is a part.
+        for target in ("Settings.XML", "setting%73.xml", "&#9;settings.xml ",
+                       "&#13;&#10;settings.xml", "./settings.xml", "../word/settings.xml",
+                       "/word/settings.xml"):
+            rels = (f'<?xml version="1.0"?><Relationships xmlns="{PKG}"><Relationship Id="rId1" '
+                    f'Type="{REL}/settings" Target="{target}"/></Relationships>')
+            data = package(**{"word/_rels/header1.xml.rels": rels})
+            with self.subTest(target):
+                self.assertEqual(public.problems(public.clean(data, DOC).data), [])
+        rels = (f'<?xml version="1.0"?><Relationships xmlns="{PKG}">'
+                f"<Relationship Id='rId8' Type='{REL}/hyperlink' Target='HTTPS://example.gov/'"
+                " TargetMode='External'/></Relationships>")
+        # Each character a part reference may not have is refused even where the package
+        # holds a part of that name, so the path is refused, not kept.
+        for name in ("D:/private/report.xml", "private\\report.xml", "report.xml?private",
+                     "report.xml#private"):
+            target = name.replace("?", "%3F").replace("#", "%23")
+            held = (f'<?xml version="1.0"?><Relationships xmlns="{PKG}"><Relationship Id="rId9" '
+                    f'Type="{REL}/footer" Target="{target}"/></Relationships>')
+            data = package(**{"word/_rels/header1.xml.rels": held,
+                              f"word/{name}": "<w:ftr xmlns:w='w'/>"})
+            with self.subTest(name):
+                self.assertIn(f"word/_rels/header1.xml.rels {LINK}", public.problems(data))
+        # A part whose name the package percent-encodes, named decoded.
+        footer = (f'<?xml version="1.0"?><Relationships xmlns="{PKG}"><Relationship Id="rId1" '
+                  f'Type="{REL}/footer" Target="my part.xml"/></Relationships>')
+        data = package(**{"word/_rels/header1.xml.rels": footer,
+                          "word/my%20part.xml": "<w:ftr xmlns:w='w'/>"})
+        self.assertEqual(public.problems(public.clean(data, DOC).data), [])
+        # An embedded object the package holds is refused by its relationship, whatever its
+        # name or the whitespace around its type.
+        for name, kind in (("ole%20object.bin", f"{REL}/oleObject"),
+                           ("data.bin", f"{REL}/oleObject&#9;")):
+            embedded = (f'<?xml version="1.0"?><Relationships xmlns="{PKG}"><Relationship '
+                        f'Id="rId9" Type="{kind}" Target="{name}"/></Relationships>')
+            data = package(**{"word/_rels/header1.xml.rels": embedded, f"word/{name}": b"\x00"})
+            with self.subTest(name), self.assertRaises(public.Refused) as caught:
+                public.clean(data, DOC)
+            self.assertIn(f"embeds word/{name}", str(caught.exception))
+        # The edit removes an attached template whose type ends in a space.
+        settings = parts_of(package())["word/_rels/settings.xml.rels"].replace(
+            b'/attachedTemplate"', b'/attachedTemplate "')
+        cleaned = public.clean(package(**{"word/_rels/settings.xml.rels": settings}), DOC)
+        self.assertNotIn(b"attachedTemplate",
+                         parts_of(cleaned.data)["word/_rels/settings.xml.rels"])
+        # The scheme in capitals is a web address too.
+        cleaned = public.clean(package(**{"word/_rels/header1.xml.rels": rels}), DOC)
+        self.assertEqual(public.problems(cleaned.data), [])
+        # And with the whitespace xsd:anyURI collapses before it.
+        rels = rels.replace("HTTPS://example.gov/", "&#9; https://example.gov/")
+        cleaned = public.clean(package(**{"word/_rels/header1.xml.rels": rels}), DOC)
+        self.assertEqual(public.problems(cleaned.data), [])
+
+    def test_a_picture_target_in_single_quotes_is_renamed_too(self):
+        rels = (f'<?xml version="1.0"?><Relationships xmlns="{PKG}">'
+                f"<Relationship Id='rId1' Type='{REL}/image' Target='media/image1.emf'/>"
+                "</Relationships>")
+        cleaned = public.clean(package(**{"word/_rels/header1.xml.rels": rels}), DOC)
+        with zipfile.ZipFile(io.BytesIO(cleaned.data)) as archive:
+            header = archive.read("word/_rels/header1.xml.rels").decode()
+        self.assertIn("Target='media/image1.png'", header)
+        self.assertNotIn("image1.emf", header)
 
     def test_the_placeholder_is_a_grey_frame_with_diagonals(self):
         data = public.placeholder(20, 10)
@@ -329,7 +577,7 @@ class Cleaning(unittest.TestCase):
                 "</w:footnotes>"}),
             "embeds word/activeX/activeX1.xml": package(**{
                 "word/activeX/activeX1.xml": "<ax:ocx xmlns:ax='a'/>"}),
-            "links to a local file or another scheme": package(**{
+            "links to a local file, another scheme or a missing part": package(**{
                 "word/_rels/header1.xml.rels": relationships(
                     (f"{REL}/hyperlink", "../drafts/x.docx", ' TargetMode="External"'))}),
             "is not UTF-8": package(**{"word/settings.xml": b"<w:settings>\xff</w:settings>"}),
@@ -442,6 +690,128 @@ class Cleaning(unittest.TestCase):
             with self.subTest(name):
                 self.assertIn(f"{name} is embedded", problems)
 
+    def test_embedded_parts_are_found_whatever_the_xml_spelling(self):
+        # #294: a control part stored as XML only, which no folder rule catches, named by a
+        # content type or a relationship spelled as XML and OPC allow but Word does not
+        # write. Each package has only one way to find it.
+        ct_ns = "http://schemas.openxmlformats.org/package/2006/content-types"
+        control = b"<ax:ocx xmlns:ax='a' ax:persistence='persistPropertyBag'/>"
+
+        def types(overrides, name="[Content_Types].xml", encoding="utf-8"):
+            xml = (f'<?xml version="1.0" encoding="{encoding}"?><Types xmlns="{ct_ns}">'
+                   '<Default Extension="xml" ContentType="application/xml"/>'
+                   f"{overrides}</Types>")
+            return {name: xml.encode(encoding)}
+
+        def rels(xml, encoding="utf-8"):
+            text = f'<?xml version="1.0" encoding="{encoding}"?>{xml}'
+            return {"word/_rels/document.xml.rels": text.encode(encoding)}
+
+        override = ('<Override PartName="/word/controls/c1.xml" '
+                    'ContentType="application/vnd.ms-office.activeX{}xml"/>')
+        relationship = '<Relationship Id="rId1" Type="{}" Target="controls/c1.xml"/>'
+        spellings = {
+            "a character reference in the content type": types(override.format("&#43;")),
+            "a prefixed content types element": {"[Content_Types].xml": (
+                f'<ct:Types xmlns:ct="{ct_ns}"><ct:Override PartName="/word/controls/c1.xml" '
+                'ContentType="application/vnd.ms-office.activeX+xml"/></ct:Types>').encode()},
+            "content types in UTF-16": types(override.format("+"), encoding="utf-16"),
+            "the content types stream in lower case": types(override.format("+"),
+                                                            name="[content_types].xml"),
+            "a content type with a parameter": types(
+                override.format("+").replace('+xml"', '+xml;v=1"')),
+            "a character reference in the relationship type": rels(
+                f'<Relationships xmlns="{PKG}">'
+                + relationship.format(f"{REL}/contr&#111;l") + "</Relationships>"),
+            "prefixed relationship elements": rels(
+                f'<r:Relationships xmlns:r="{PKG}">'
+                + relationship.format(f"{REL}/control").replace("<Relationship", "<r:Relationship")
+                + "</r:Relationships>"),
+            "relationships in UTF-16": rels(
+                f'<Relationships xmlns="{PKG}">' + relationship.format(f"{REL}/control")
+                + "</Relationships>", encoding="utf-16"),
+            "a Default content type with a parameter": types(
+                '<Default Extension="ocx" ContentType="application/vnd.ms-office.activeX;v=1"/>'),
+            "a percent-encoded Default extension": types(
+                '<Default Extension="%6Fcx" ContentType="application/vnd.ms-office.activeX"/>'),
+            "a Default extension that the part name percent-encodes": types(
+                '<Default Extension="ocx" ContentType="application/vnd.ms-office.activeX"/>'),
+        }
+        for kind in ("control", "font", "oleObject", "package"):
+            spellings[f"the Strict relationship type {kind}"] = rels(
+                f'<Relationships xmlns="{PKG}">'
+                + relationship.format(f"http://purl.oclc.org/ooxml/officeDocument/relationships"
+                                      f"/{kind}") + "</Relationships>")
+        for label, package_parts in spellings.items():
+            with self.subTest(label):
+                parts = {**package_parts, "word/controls/c1.xml": control,
+                         "word/document.xml": b"<w:document xmlns:w='w'/>"}
+                if "Default" in label:
+                    # Found by its extension, not by a relationship or an Override.
+                    name = ("word/controls/c1.%6Fcx" if "part name" in label
+                            else "word/controls/c1.ocx")
+                    parts = {**package_parts, name: b"\x00",
+                             "word/document.xml": b"<w:document xmlns:w='w'/>"}
+                    self.assertEqual(public.embedded_parts(parts), [name])
+                    continue
+                self.assertEqual(public.embedded_parts(parts), ["word/controls/c1.xml"])
+        # Without any of them, the part is not found: the spellings above are what find it.
+        plain = {**types(""), "word/controls/c1.xml": control}
+        self.assertEqual(public.embedded_parts(plain), [])
+
+    def test_package_parts_opc_does_not_allow_are_refused_and_reported(self):
+        # Spellings officewright-opc refuses, which would otherwise hide a part from
+        # embedded_parts: a root in no or another namespace, a document type that gives
+        # TargetMode the default External, two content types streams, an unknown encoding.
+        control_rel = f'<Relationship Id="rId1" Type="{REL}/control" Target="controls/c1.xml"/>'
+        cases = {
+            "a .rels root without a namespace": (
+                {"word/_rels/document.xml.rels":
+                 f"<Relationships>{control_rel}</Relationships>"},
+                "word/_rels/document.xml.rels has the root element Relationships"),
+            "a content types root in another namespace": (
+                {"[Content_Types].xml": "<Types xmlns='urn:other'><Override "
+                 "PartName='/word/controls/c1.xml' ContentType='application/vnd.ms-office."
+                 "activeX+xml'/></Types>"},
+                "[Content_Types].xml has the root element {urn:other}Types"),
+            "a document type giving TargetMode a default": (
+                {"word/_rels/document.xml.rels":
+                 '<!DOCTYPE Relationships [<!ATTLIST Relationship TargetMode CDATA "External">]>'
+                 f'<Relationships xmlns="{PKG}">{control_rel}</Relationships>'},
+                "word/_rels/document.xml.rels declares a document type"),
+            "an encoding the parser does not know": (
+                {"word/_rels/document.xml.rels":
+                 f'<?xml version="1.0" encoding="x-unknown"?><Relationships xmlns="{PKG}"/>'},
+                "word/_rels/document.xml.rels is not well-formed XML"),
+            "a multi-byte encoding the parser cannot read": (
+                {"word/_rels/document.xml.rels":
+                 f'<?xml version="1.0" encoding="UTF-32"?><Relationships xmlns="{PKG}"/>'},
+                "word/_rels/document.xml.rels is not well-formed XML"),
+        }
+        for label, (parts, said) in cases.items():
+            with self.subTest(label):
+                with self.assertRaises(public.Refused) as caught:
+                    public.clean(package(**parts), DOC)
+                self.assertIn(said, str(caught.exception))
+                self.assertTrue(any(p.startswith(said) for p in public.problems(package(**parts))),
+                                public.problems(package(**parts)))
+        # Two content types streams whose names differ only in case.
+        twice = {"[Content_Types].xml": b"<Types/>", "[content_types].xml": b"<Types/>"}
+        with self.assertRaises(public.Unreadable) as caught:
+            public.embedded_parts(twice)
+        self.assertIn("2 content types streams", str(caught.exception))
+
+    def test_a_package_part_that_is_not_xml_is_refused_and_reported(self):
+        for name in ("[Content_Types].xml", "word/_rels/document.xml.rels"):
+            with self.subTest(name):
+                broken = {name: "<Types><Override PartName='/word/x.xml'"}
+                with self.assertRaises(public.Refused) as caught:
+                    public.clean(package(**broken), DOC)
+                self.assertIn(f"{name} is not well-formed XML", str(caught.exception))
+                self.assertTrue(
+                    any(p.startswith(f"{name} is not well-formed XML")
+                        for p in public.problems(package(**broken))))
+
     def test_text_after_a_nested_text_box_and_split_addresses_are_read(self):
         nested = (
             "<w:document xmlns:w='w'><w:body><w:p><w:r><w:t>See </w:t></w:r><w:r><w:pict>"
@@ -470,6 +840,81 @@ class Cleaning(unittest.TestCase):
         with self.assertRaises(public.Refused) as caught:
             public.clean(package(), lost)
         self.assertIn("no part word/missing.xml", str(caught.exception))
+
+    def test_entries_that_name_one_part_are_refused_and_reported(self):
+        # The checks read parts by name, which gives the last of two entries: here the first
+        # links to a local file and the second, read in its place, does not.
+        local = relationships(
+            (f"{REL}/hyperlink", "file:///J:/drafts/x.docx", ' TargetMode="External"'))
+        hidden = with_entry(package(**{"word/_rels/header1.xml.rels": local}),
+                            "word/_rels/header1.xml.rels",
+                            relationships((f"{REL}/image", "media/image2.png", "")))
+        # Part names compare without regard to case.
+        cased = with_entry(package(), "word/Document.xml", "<w:document xmlns:w='w'/>")
+        for data, names in ((hidden, "word/_rels/header1.xml.rels and "
+                                     "word/_rels/header1.xml.rels"),
+                            (cased, "word/document.xml and word/Document.xml")):
+            with self.subTest(names):
+                with self.assertRaises(public.Refused) as caught:
+                    public.clean(data, DOC)
+                self.assertIn(f"entries {names} name one part", str(caught.exception))
+        # And a percent-encoded spelling, which OPC reads as the same part: a twin of the core
+        # properties would keep a person's name. (The backslash spelling is checked on names in
+        # test_entry_names_compare_as_part_names: zipfile on Windows rewrites it.)
+        core = "<cp:coreProperties xmlns:cp='c' xmlns:dc='d'><dc:creator>Jane Roe</dc:creator>"
+        for name, twin_name in (("docProps/core.xml", "docProps/%63ore.xml"),):
+            data = with_entry(package(), twin_name, core + "</cp:coreProperties>")
+            with self.subTest(twin_name):
+                with self.assertRaises(public.Refused) as caught:
+                    public.clean(data, DOC)
+                self.assertIn(f"entries {name} and {twin_name} name one part",
+                              str(caught.exception))
+        # problems() reports exact, case and percent twins, each group of them.
+        twin = with_entry(self.cleaned.data, "WORD/document.xml", "<w:document xmlns:w='w'/>")
+        self.assertIn("entries word/document.xml and WORD/document.xml name one part",
+                      public.problems(twin))
+        twins = with_entry(with_entry(self.cleaned.data, "word/document.xml", "<w:document/>"),
+                           "docProps/%61pp.xml", "<Properties/>")
+        self.assertEqual(
+            [found for found in public.problems(twins) if "name one part" in found],
+            ["entries docProps/app.xml and docProps/%61pp.xml name one part",
+             "entries word/document.xml and word/document.xml name one part"],
+        )
+        self.assertEqual(public.problems(self.cleaned.data), [])
+        # The cleaning itself must not write two entries that name one part.
+        for first, second in (("word/media/a.emf", "word/media/A.png"),
+                              ("word/media/a.jpeg", "word/Media/a.png"),
+                              ("word/media/%61.jpeg", "word/media/a.png")):
+            pictures = package(**{first: b"\x01\x00\x00\x00 EMF",
+                                  second: public.placeholder(3, 2)})
+            with self.subTest(first):
+                with self.assertRaises(public.Refused) as caught:
+                    public.clean(pictures, DOC)
+                self.assertIn("a picture's new name would name one part with another entry",
+                              str(caught.exception))
+        # clean() names every group of twins.
+        both = with_entry(with_entry(package(), "word/Document.xml", "<w:document/>"),
+                          "docProps/%61pp.xml", "<Properties/>")
+        with self.assertRaises(public.Refused) as caught:
+            public.clean(both, DOC)
+        self.assertIn("entries word/document.xml and word/Document.xml name one part",
+                      str(caught.exception))
+        self.assertIn("entries docProps/app.xml and docProps/%61pp.xml name one part",
+                      str(caught.exception))
+
+    def test_entry_names_compare_as_part_names(self):
+        # Written as names, not into an archive: zipfile on Windows reads a backslash as a
+        # slash already, which would hide the rule this checks.
+        self.assertEqual(public.repeated_parts(["word/document.xml", "word\\document.xml"]),
+                         ["word/document.xml and word\\document.xml"])
+        self.assertEqual(public.repeated_parts(["a/%41.xml", "a/a.xml", "a/A.XML"]),
+                         ["a/%41.xml and a/a.xml and a/A.XML"])
+        # Only ASCII letters fold, and percent-decoding is not form decoding: these are all
+        # different parts.
+        for pair in (["Ä.xml", "ä.xml"], ["ß.xml", "ss.xml"], ["a+b.xml", "a b.xml"],
+                     ["%2541.xml", "%41.xml"]):
+            with self.subTest(pair):
+                self.assertEqual(public.repeated_parts(pair), [])
 
     def test_a_placeholder_must_be_8_bit_grey_and_not_oversized(self):
         good = public.placeholder(4, 3)

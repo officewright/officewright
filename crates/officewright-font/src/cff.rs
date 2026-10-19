@@ -38,6 +38,13 @@
 //! (<https://github.com/officewright/officewright/issues/278>); the face is refused past
 //! [`MAX_FD_SELECT_RANGES`], a limit of the library, after the Font DICTs are counted.
 //!
+//! Before it decompiles a glyph, the subsetter also copies the local subroutines of every
+//! Font DICT into a list of its own, also where Font DICTs share one Subrs INDEX, so a
+//! small table could make it allocate hundreds of megabytes
+//! (<https://github.com/officewright/officewright/issues/284>). The check counts them as
+//! the subsetter collects them and refuses the face past [`MAX_LOCAL_SUBRS`], a limit of
+//! the library, before it walks a glyph.
+//!
 //! subsetter 0.2.6 also counts the stem hints of each glyph it keeps in a `u16`
 //! (`count_hints` in `src/cff/charstring.rs`), as it decompiles the glyph's charstring
 //! and the subroutines it calls. A glyph that declares more than 65,535 hints overflows
@@ -88,6 +95,13 @@ const FONT_MATRIX: u16 = 12 << 8 | 7;
 /// The CharStrings operator: the offset of the CharStrings INDEX.
 const CHAR_STRINGS: u16 = 17;
 
+/// The FontName operator (12 38) of a Font DICT.
+const FONT_NAME: u16 = 12 << 8 | 38;
+
+/// The number of standard strings (CFF specification, Appendix A); a string ID past them
+/// names a string of the String INDEX.
+const STANDARD_STRINGS: u16 = 391;
+
 /// The FDSelect operator (12 37).
 const FD_SELECT: u16 = 12 << 8 | 37;
 
@@ -113,28 +127,28 @@ const MAX_CALL_DEPTH: u8 = 64;
 /// or more, but such a font kept whole, as one that forbids subsetting is, can be refused.
 /// A limit that admitted it would let a crafted font cost the subsetter well over 1 GiB:
 /// it spends about 25 to 30 bytes for each unit counted.
-const MAX_STEPS: u32 = 1 << 24;
+pub(crate) const MAX_STEPS: u32 = 1 << 24;
 
 /// How much decompiling the glyphs one subset keeps may read: [`MAX_STEPS`], or less
-/// where a budget that several subsets share has less left.
+/// where the budget the subset is made within has less left.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Limit {
     steps: u32,
     /// Whether the budget, not [`MAX_STEPS`], sets `steps`.
-    shared: bool,
+    budget: bool,
 }
 
 impl Limit {
-    /// The limit of a subset made with `left` units left of the budget it shares.
+    /// The limit of a subset made with `left` units left of its budget.
     pub(crate) fn within(left: u64) -> Self {
         match u32::try_from(left) {
             Ok(steps) if steps < MAX_STEPS => Self {
                 steps,
-                shared: true,
+                budget: true,
             },
             _ => Self {
                 steps: MAX_STEPS,
-                shared: false,
+                budget: false,
             },
         }
     }
@@ -285,21 +299,25 @@ enum Operand {
 }
 
 impl Operand {
-    /// The operand as an offset or size, as the subsetter's `as_u32` takes it: an integer,
-    /// or a real without a fraction.
-    fn as_usize(&self) -> Option<usize> {
-        let value = match self {
-            Self::Integer(value) => *value,
+    /// The operand as the subsetter's `as_i32` takes it: an integer, or a real without a
+    /// fraction.
+    fn as_i32(&self) -> Option<i32> {
+        match self {
+            Self::Integer(value) => Some(*value),
             Self::Real(text) => {
                 let value: f32 = text.parse().ok()?;
                 if value.fract() != 0.0 {
                     return None;
                 }
                 // The subsetter converts the same way, saturating.
-                value as i32
+                Some(value as i32)
             }
-        };
-        usize::try_from(value).ok()
+        }
+    }
+
+    /// The operand as an offset or size, as the subsetter's `as_u32` takes it.
+    fn as_usize(&self) -> Option<usize> {
+        usize::try_from(self.as_i32()?).ok()
     }
 }
 
@@ -446,6 +464,16 @@ const MAX_FONT_DICTS: usize = 255;
 /// Noto Sans CJK SC and Noto Serif CJK SC have 18 Font DICTs and 526 to 605 bytes.
 const MAX_PRIVATE_BYTES: usize = 1 << 20;
 
+/// The most local subroutines the subsetter may collect for the Font DICTs of a face, counted
+/// once for each Font DICT, also where several share one Subrs INDEX. subsetter 0.2.6
+/// collects the subroutines of every Font DICT into a list of its own, 16 bytes for each,
+/// before it decompiles a glyph (`subset_charstrings` in its `src/cff/mod.rs`), so 255 Font
+/// DICTs that share an INDEX of 65,535 would take 267 MB of a table of under 100 KB
+/// (<https://github.com/officewright/officewright/issues/284>); this is 4 MiB. Real fonts
+/// come to tens of thousands: Noto Sans CJK SC 45,206 over 18 Font DICTs, its Black weight
+/// 47,857, Noto Serif CJK SC 54,004.
+const MAX_LOCAL_SUBRS: usize = 1 << 18;
+
 /// The most ranges an FDSelect of format 3 may declare. subsetter 0.2.6 finds the Font
 /// DICT of each glyph it keeps by going through the ranges in order, twice, and the walk
 /// does it once, so a font kept whole costs up to 65,535 times this. Real fonts declare a
@@ -456,9 +484,10 @@ const MAX_FD_SELECT_RANGES: usize = 2048;
 /// `data`) when it keeps `glyphs`, or would spend more on it than the library allows:
 /// when the table is CID-keyed with more Font DICTs than it takes, Private DICTs past
 /// [`MAX_PRIVATE_BYTES`] or an FDSelect of more than [`MAX_FD_SELECT_RANGES`] ranges;
-/// when a DICT it writes back has a real number too large for it; when a glyph it
-/// decompiles declares more stem hints than it can count; or if decompiling the glyphs
-/// takes more than `limit`. Where the subsetter fails on the table before it writes or
+/// when a DICT it writes back has a real number too large for it; when its Font DICTs have
+/// more than [`MAX_LOCAL_SUBRS`] local subroutines in all; when a glyph it decompiles
+/// declares more stem hints than it can count; or if decompiling the glyphs takes more
+/// than `limit`. Where the subsetter fails on the table before it writes or
 /// decompiles anything, the table is left to it. The subsetter decompiles `.notdef` and
 /// then the kept glyphs in order, and stops at the first it cannot read; so does this
 /// check, leaving that error to the subsetter.
@@ -512,6 +541,17 @@ pub(crate) fn check(
         None => return Ok(0),
     };
     check_reals(&programs, face)?;
+    let subrs = programs.collected_local_subrs();
+    if subrs > MAX_LOCAL_SUBRS {
+        return Err(Error::TableOverLimit {
+            face,
+            table: "CFF ",
+            source: Cause::new(format!(
+                "the Font DICTs have {subrs} local subroutines in all, more than the \
+                 {MAX_LOCAL_SUBRS} the subsetter may collect"
+            )),
+        });
+    }
     let mut kept = glyphs.to_vec();
     kept.sort_unstable();
     kept.dedup();
@@ -523,10 +563,10 @@ pub(crate) fn check(
                 let limit = match limit {
                     Limit {
                         steps,
-                        shared: true,
+                        budget: true,
                     } => format!(
-                        "the {steps} operands, operators and hint mask bytes left of the \
-                         budget it shares with other subsets"
+                        "the {steps} operands, operators and hint mask bytes left of its \
+                         budget"
                     ),
                     Limit { steps, .. } => {
                         format!("{steps} operands, operators and hint mask bytes")
@@ -551,15 +591,232 @@ pub(crate) fn check(
                     )),
                 });
             }
-            Err(Stop::Unreadable) => break,
+            Err(Stop::Unreadable | Stop::Unsupported) => break,
         }
     }
     Ok(limit.steps.saturating_sub(steps))
 }
 
+/// The most operands, operators and hint mask bytes that the checks of one face's glyphs
+/// ([`check_glyph`]) may read in all, those of glyphs that fail included: four times what
+/// one subset may read.
+pub(crate) const MAX_CHECK_WORK: u32 = 4 * MAX_STEPS;
+
+/// What checking a face's CFF glyphs one at a time needs of its `CFF ` table, read once:
+/// where its INDEXes are in the table, the font names of its Font DICTs, and the numbers
+/// of subroutines checks have counted, since counting them takes as long as there are
+/// subroutines.
+#[derive(Debug)]
+pub(crate) struct CffGlyphs {
+    charstrings: Place,
+    strings: Place,
+    global: Subrs,
+    /// The local subroutines of a SID-keyed font, or of each Font DICT of a CID-keyed one.
+    local: Vec<Subrs>,
+    /// Where a CID-keyed font's FDSelect starts in the table.
+    fd_select: Option<usize>,
+    /// The string ID of the font name each Font DICT of a CID-keyed font gives, if any.
+    font_names: Vec<Option<u16>>,
+}
+
+/// Where an INDEX is in the table: its offsets and its data.
+#[derive(Debug)]
+struct Place {
+    offsets: Range<usize>,
+    offset_size: usize,
+    data: Range<usize>,
+}
+
+/// The place of an INDEX of subroutines, and how many the subsetter collects, once counted.
+#[derive(Debug)]
+struct Subrs {
+    place: Place,
+    count: Option<usize>,
+}
+
+impl Place {
+    /// Where `index`, read from `cff`, is in it.
+    fn of(cff: &[u8], index: &Index<'_>) -> Self {
+        Self {
+            offsets: within(cff, index.offsets),
+            offset_size: index.offset_size,
+            data: within(cff, index.data),
+        }
+    }
+
+    fn index<'a>(&self, cff: &'a [u8]) -> Index<'a> {
+        Index {
+            offsets: cff.get(self.offsets.clone()).unwrap_or_default(),
+            offset_size: self.offset_size,
+            data: cff.get(self.data.clone()).unwrap_or_default(),
+        }
+    }
+}
+
+/// Where `part`, a slice of `table` or an empty one, is in `table`.
+fn within(table: &[u8], part: &[u8]) -> Range<usize> {
+    let start = part.as_ptr().addr().wrapping_sub(table.as_ptr().addr());
+    match start.checked_add(part.len()) {
+        Some(end) if !part.is_empty() && end <= table.len() => start..end,
+        _ => 0..0,
+    }
+}
+
+impl CffGlyphs {
+    /// Reads them from the `CFF ` table the subsetter takes from `font` (its file `data`),
+    /// `None` without one or where the subsetter would not take it.
+    pub(crate) fn read(font: &FontRef<'_>, data: &[u8]) -> Option<(Range<usize>, Self)> {
+        let range = crate::subset::subsetter_table_range(font, data, b"CFF ")?;
+        let cff = data.get(range.clone())?;
+        let Read::Programs(programs) = Programs::read(cff)? else {
+            return None;
+        };
+        let subrs = |subrs: &Subroutines<'_>| Subrs {
+            place: Place::of(cff, &subrs.index),
+            count: None,
+        };
+        let glyphs = Self {
+            charstrings: Place::of(cff, &programs.charstrings),
+            strings: Place::of(cff, &programs.strings),
+            global: subrs(&programs.global),
+            local: programs.local.iter().map(subrs).collect(),
+            fd_select: programs
+                .fd_select
+                .map(|fd_select| within(cff, fd_select).start),
+            font_names: programs.font_names,
+        };
+        Some((range, glyphs))
+    }
+}
+
+/// Fails if the subsetter, which takes `cff`, the `CFF ` table of face `face`, when it
+/// keeps `.notdef` alone, would fail on it when it also keeps `glyph`: where it cannot
+/// decompile the glyph, the glyph declares more stem hints than it can count, or, in a
+/// CID-keyed font, the glyph's Font DICT names its font by a string the String INDEX does
+/// not have (`get_sid_remapper` in the subsetter's `src/cff/mod.rs`). Only those are left
+/// to check: everything else the subsetter reads of the table it reads for `.notdef`
+/// alone, or for every glyph it keeps alike. `glyphs` is what [`CffGlyphs::read`] read of
+/// the table.
+///
+/// Decompiling the glyph may read no more than `steps`, nor than is left of `work`,
+/// which every glyph checked takes what it read off. Returns what it read, which a glyph
+/// that passes every check takes off the steps of the next.
+pub(crate) fn check_glyph(
+    cff: &[u8],
+    glyphs: &mut CffGlyphs,
+    face: u32,
+    glyph: u16,
+    steps: u32,
+    work: &mut u32,
+) -> Result<u32> {
+    let damaged = |reason: &str| Error::Subset {
+        face,
+        source: Cause::new(format!("glyph {glyph}: {reason}")),
+    };
+    let font_dict = match glyphs.fd_select {
+        Some(at) => font_dict(cff.get(at..).unwrap_or_default(), glyph),
+        None => Some(0),
+    };
+    // The work left bounds the walk where it is less than the steps left.
+    let by_work = *work < steps;
+    let limit = steps.min(*work);
+    let mut left = limit;
+    let walked = match font_dict.and_then(|font_dict| glyphs.local.get_mut(usize::from(font_dict)))
+    {
+        Some(local) => {
+            let global = glyphs.global.subroutines(cff);
+            let local_subrs = local.subroutines(cff);
+            let charstrings = glyphs.charstrings.index(cff);
+            let walked = walk_glyph(&charstrings, &global, &local_subrs, glyph, &mut left);
+            glyphs.global.count = global.count.get().copied();
+            local.count = local_subrs.count.get().copied();
+            walked
+        }
+        None => Err(Stop::Unreadable),
+    };
+    let read = limit - left;
+    *work -= read;
+    match walked {
+        Ok(()) => {}
+        Err(Stop::Limit) if by_work => {
+            return Err(Error::TableOverLimit {
+                face,
+                table: "CFF ",
+                source: Cause::new(format!(
+                    "checking glyph {glyph} reads more than the {limit} operands, operators \
+                     and hint mask bytes left of the {MAX_CHECK_WORK} the checks of one face \
+                     may read"
+                )),
+            });
+        }
+        Err(Stop::Limit) => {
+            return Err(Error::TableOverLimit {
+                face,
+                table: "CFF ",
+                source: Cause::new(format!(
+                    "decompiling glyph {glyph} reads more than the {limit} operands, \
+                     operators and hint mask bytes left of what one subset may read, after \
+                     the glyphs checked before it"
+                )),
+            });
+        }
+        Err(Stop::Overflow) => {
+            return Err(Error::MalformedTable {
+                face,
+                table: "CFF ",
+                source: Cause::new(format!(
+                    "glyph {glyph} declares more than 65535 stem hints, more than the \
+                     subsetter can count"
+                )),
+            });
+        }
+        Err(Stop::Unsupported) => {
+            return Err(Error::SubsetUnsupported {
+                face,
+                source: Cause::new(format!(
+                    "glyph {glyph} composes an accented character with endchar, which the \
+                     subsetter does not implement"
+                )),
+            });
+        }
+        Err(Stop::Unreadable) => {
+            return Err(damaged(
+                "its charstring cannot be decompiled as the subsetter decompiles it",
+            ));
+        }
+    }
+    let sid = font_dict
+        .filter(|_| glyphs.fd_select.is_some())
+        .and_then(|font_dict| *glyphs.font_names.get(usize::from(font_dict))?);
+    if let Some(sid) = sid {
+        let strings = glyphs.strings.index(cff);
+        let string = sid
+            .checked_sub(STANDARD_STRINGS)
+            .map(|at| strings.get(usize::from(at)));
+        if let Some(None) = string {
+            return Err(damaged(&format!(
+                "its Font DICT names its font by string {sid}, which the String INDEX does \
+                 not have"
+            )));
+        }
+    }
+    Ok(read)
+}
+
+impl Subrs {
+    /// The subroutines, with their number if it was counted.
+    fn subroutines<'a>(&self, cff: &'a [u8]) -> Subroutines<'a> {
+        let subrs = Subroutines::new(self.place.index(cff));
+        if let Some(count) = self.count {
+            let _ = subrs.count.set(count);
+        }
+        subrs
+    }
+}
+
 /// What [`Programs::read`] found.
 enum Read<'a> {
-    Programs(Programs<'a>),
+    Programs(Box<Programs<'a>>),
     /// A CID-keyed font with this many Font DICTs, more than [`MAX_FONT_DICTS`].
     FontDicts(usize),
     /// Font DICTs whose Private operators point at this many bytes of Private DICTs in
@@ -574,6 +831,10 @@ enum Read<'a> {
 /// `src/cff/mod.rs` reads it.
 struct Programs<'a> {
     charstrings: Index<'a>,
+    /// The String INDEX.
+    strings: Index<'a>,
+    /// The string ID of the font name each Font DICT of a CID-keyed font gives, if any.
+    font_names: Vec<Option<u16>>,
     global: Subroutines<'a>,
     /// The local subroutines of a SID-keyed font, or of each Font DICT of a CID-keyed one.
     local: Vec<Subroutines<'a>>,
@@ -617,13 +878,14 @@ impl<'a> Programs<'a> {
                 .find(|(found, _)| *found == operator)
                 .map(|(_, operands)| operands.as_slice())
         };
-        let (_, after_strings) = parsed_index(cff, after_top_dicts)?;
+        let (strings, after_strings) = parsed_index(cff, after_top_dicts)?;
         let (global, _) = parsed_index(cff, after_strings)?;
         let (charstrings, _) = parsed_index(cff, offset(last(CHAR_STRINGS)?)?)?;
         let glyph_count = charstrings.len();
         if glyph_count == 0 || glyph_count > usize::from(u16::MAX) {
             return None;
         }
+        let mut font_names = Vec::new();
         let (local, fd_select) = if top.iter().any(|(operator, _)| *operator == ROS) {
             let (font_dicts, _) = parsed_index(cff, offset(last(FD_ARRAY)?)?)?;
             let fd_select = cff.get(offset(last(FD_SELECT)?)?..)?;
@@ -695,6 +957,10 @@ impl<'a> Programs<'a> {
                 written.extend(private);
                 local.push(subrs);
             }
+            font_names = font_dicts
+                .iter()
+                .map(|font_dict| font_name(font_dict))
+                .collect();
             if last(FONT_MATRIX).is_none() {
                 scaled = font_dicts;
             }
@@ -716,14 +982,45 @@ impl<'a> Programs<'a> {
             };
             (vec![subrs], None)
         };
-        Some(Read::Programs(Self {
+        Some(Read::Programs(Box::new(Self {
             charstrings,
+            strings,
+            font_names,
             global: Subroutines::new(global),
             local,
             fd_select,
             written,
             scaled,
-        }))
+        })))
+    }
+
+    /// How many local subroutines the subsetter collects for all Font DICTs: those it can
+    /// read of each one's Subrs INDEX, counted again for each Font DICT that shares it.
+    /// Where the INDEXes declare no more than [`MAX_LOCAL_SUBRS`] in all, that is all
+    /// that is counted; otherwise each INDEX is read once.
+    fn collected_local_subrs(&self) -> usize {
+        let declared = self
+            .local
+            .iter()
+            .fold(0usize, |sum, subrs| sum.saturating_add(subrs.index.len()));
+        if declared <= MAX_LOCAL_SUBRS {
+            return declared;
+        }
+        // Each INDEX is read once, by the first Font DICT that has it: 255 Font DICTs that
+        // share an INDEX of 65,535 would otherwise read it 255 times, the work the bound is
+        // there to spare the subsetter.
+        self.local
+            .iter()
+            .enumerate()
+            .fold(0usize, |sum, (i, subrs)| {
+                let first = self
+                    .local
+                    .iter()
+                    .take(i)
+                    .find(|other| std::ptr::eq(other.index.offsets, subrs.index.offsets))
+                    .unwrap_or(subrs);
+                sum.saturating_add(first.len())
+            })
     }
 
     /// Walks the charstring of `glyph` as the subsetter decompiles it, reading at most
@@ -738,22 +1035,34 @@ impl<'a> Programs<'a> {
             .local
             .get(usize::from(font_dict))
             .ok_or(Stop::Unreadable)?;
-        let charstring = self
-            .charstrings
-            .get(usize::from(glyph))
-            .ok_or(Stop::Unreadable)?;
-        let mut walk = Walk {
-            global: &self.global,
-            local,
-            stack: Vec::new(),
-            hints: 0,
-            mask_bytes: 0,
-            steps: *steps,
-        };
-        let walked = walk.run(charstring, 1);
-        *steps = walk.steps;
-        walked.map(|_| ())
+        walk_glyph(&self.charstrings, &self.global, local, glyph, steps)
     }
+}
+
+/// Walks the charstring of `glyph` among `charstrings`, with the `global` and `local`
+/// subroutines it may call, as the subsetter decompiles it, reading at most `steps`
+/// operands, operators and hint mask bytes, and takes those it read off `steps`.
+fn walk_glyph<'a>(
+    charstrings: &Index<'a>,
+    global: &'a Subroutines<'a>,
+    local: &'a Subroutines<'a>,
+    glyph: u16,
+    steps: &mut u32,
+) -> std::result::Result<(), Stop> {
+    let charstring = charstrings
+        .get(usize::from(glyph))
+        .ok_or(Stop::Unreadable)?;
+    let mut walk = Walk {
+        global,
+        local,
+        stack: Vec::new(),
+        hints: 0,
+        mask_bytes: 0,
+        steps: *steps,
+    };
+    let walked = walk.run(charstring, 1);
+    *steps = walk.steps;
+    walked.map(|_| ())
 }
 
 /// The subroutines of the Private DICT at `private`, which the subsetter finds by the
@@ -772,6 +1081,22 @@ fn local_subrs(cff: &[u8], private: Range<usize>) -> Option<Subroutines<'_>> {
     };
     let (subrs, _) = parsed_index(cff, start.checked_add(offset)?)?;
     Some(Subroutines::new(subrs))
+}
+
+/// The string ID that the last FontName operator of a Font DICT gives, as the subsetter's
+/// `parse_font_dict` keeps it (`parse_sid`: one operand, a whole number from 0 to 65535);
+/// `None` without one. A Font DICT whose last FontName is no string ID makes the
+/// subsetter fail on the table whatever it keeps.
+fn font_name(font_dict: &[u8]) -> Option<u16> {
+    let operators = operators(font_dict);
+    let (_, operands) = operators
+        .iter()
+        .rev()
+        .find(|(operator, _)| *operator == FONT_NAME)?;
+    let [sid] = operands.as_slice() else {
+        return None;
+    };
+    u16::try_from(sid.as_i32()?).ok()
 }
 
 /// The Font DICT of `glyph` in an FDSelect, as the subsetter's `font_dict_index` finds it.
@@ -882,6 +1207,9 @@ enum Stop {
     Overflow,
     /// The subsetter fails on the glyph with an error of its own.
     Unreadable,
+    /// The glyph uses what the subsetter does not implement: `endchar` with the four
+    /// operands of an accented character.
+    Unsupported,
     /// The glyphs walked so far take more operands, operators and hint mask bytes than
     /// the walk may read.
     Limit,
@@ -975,7 +1303,7 @@ impl Walk<'_> {
                 }
                 // endchar; with four operands it would be an accented character, which
                 // the subsetter does not implement.
-                14 if self.stack.len() >= 4 => return Err(Stop::Unreadable),
+                14 if self.stack.len() >= 4 => return Err(Stop::Unsupported),
                 14 => return Ok(End::EndChar),
                 _ => return Err(Stop::Unreadable),
             }
@@ -1620,6 +1948,117 @@ mod tests {
         }
     }
 
+    /// A CID-keyed table of `font_dicts` Font DICTs whose local subroutines are
+    /// `local`, the first `local.len()` Font DICTs' each, and none for the others.
+    fn with_local_subrs(local: Vec<Vec<Vec<u8>>>, font_dicts: usize) -> Vec<u8> {
+        let mut all = local;
+        all.resize(font_dicts, vec![]);
+        Spec {
+            glyphs: glyphs_with(4, vec![14]),
+            local: all,
+            fd_select: Some(vec![3, 0, 2, 0, 0, 0, 0, 3, 1, 0, 5]),
+            ..Spec::default()
+        }
+        .build()
+    }
+
+    /// Points the Private operator of every Font DICT of `cff` from Font DICT `from` on,
+    /// made by [`Spec`] with one Private operator each, at Font DICT `from`'s Private
+    /// DICT, and returns where that is.
+    fn sharing_a_private(cff: &mut [u8], from: usize) -> usize {
+        // Each Font DICT ends in the size of its Private DICT, 6, its offset and 18.
+        let size = int5(6);
+        let at: Vec<usize> = (0..cff.len().saturating_sub(10))
+            .filter(|&i| cff[i..i + 5] == size[..] && cff[i + 5] == 29 && cff[i + 10] == 18)
+            .map(|i| i + 5)
+            .collect();
+        let shared = cff[at[from]..at[from] + 5].to_vec();
+        for &i in &at[from..] {
+            cff[i..i + 5].copy_from_slice(&shared);
+        }
+        usize::try_from(i32::from_be_bytes(shared[1..].try_into().unwrap())).unwrap()
+    }
+
+    #[test]
+    fn bounds_the_local_subroutines_the_subsetter_collects() {
+        let message = |count: usize| {
+            format!(
+                "the Font DICTs have {count} local subroutines in all, more than the 262144 \
+                 the subsetter may collect"
+            )
+        };
+        // Eight Font DICTs of 32,768 each come to the limit; one more subroutine is past it.
+        let subrs = vec![vec![11]; 32768];
+        let at_limit = with_local_subrs(vec![subrs.clone(); 8], 8);
+        check_with_limit(at_limit.clone(), &[4], 1 << 20).unwrap();
+        subset_glyphs(at_limit, &[4]).unwrap();
+        let mut local = vec![subrs; 8];
+        local.push(vec![vec![11]]);
+        let past = with_local_subrs(local, 9);
+        assert_eq!(
+            over_limit(check_with_limit(past, &[4], 1 << 20)),
+            message(262_145)
+        );
+
+        // Font DICTs that share one Subrs INDEX make the subsetter collect it for each.
+        let mut shared = with_local_subrs(vec![vec![vec![11]; 65535]], 4);
+        sharing_a_private(&mut shared, 0);
+        check_with_limit(shared, &[4], 1 << 20).unwrap();
+        let mut shared = with_local_subrs(vec![vec![vec![11]; 65535]], 5);
+        sharing_a_private(&mut shared, 0);
+        assert_eq!(
+            over_limit(check_with_limit(shared.clone(), &[4], 1 << 20)),
+            message(327_675)
+        );
+        // The INDEX is read once, by the first Font DICT, however many share it.
+        let Some(Read::Programs(programs)) = Programs::read(&shared) else {
+            panic!("the table is not read");
+        };
+        assert_eq!(programs.collected_local_subrs(), 327_675);
+        assert!(programs.local[0].count.get().is_some());
+        assert!(
+            programs.local[1..]
+                .iter()
+                .all(|subrs| subrs.count.get().is_none())
+        );
+        // Also where the Font DICTs that share an INDEX come after one with its own.
+        let mut after = with_local_subrs(vec![vec![vec![11]; 10], vec![vec![11]; 65535]], 5);
+        sharing_a_private(&mut after, 1);
+        let Some(Read::Programs(programs)) = Programs::read(&after) else {
+            panic!("the table is not read");
+        };
+        assert_eq!(programs.collected_local_subrs(), 262_150);
+        assert!(
+            programs.local[..2]
+                .iter()
+                .all(|subrs| subrs.count.get().is_some())
+        );
+        assert!(
+            programs.local[2..]
+                .iter()
+                .all(|subrs| subrs.count.get().is_none())
+        );
+        // The count comes before any glyph is walked.
+        assert_eq!(
+            over_limit(check_with_limit(shared, &[4], 0)),
+            message(327_675)
+        );
+
+        // The subsetter collects only up to the first subroutine it cannot read: a shared
+        // INDEX that declares 65,535 but holds 10 is no count past the limit.
+        let mut damaged = with_local_subrs(vec![vec![]], 5);
+        let private = sharing_a_private(&mut damaged, 0);
+        let subrs_at = damaged.len() - private;
+        let mut index = vec![0xFF, 0xFF, 1];
+        index.extend(1..=11);
+        index.resize(3 + 65535, 0);
+        index.push(11);
+        index.extend([11; 10]);
+        damaged.extend(index);
+        damaged[private..private + 5].copy_from_slice(&int5(subrs_at));
+        check_with_limit(damaged, &[4], 1 << 20).unwrap();
+    }
+
     #[test]
     fn bounds_the_private_dicts_the_font_dicts_point_at() {
         // 128 Font DICTs, each with a first Private operator pointing at one Private DICT
@@ -1738,6 +2177,8 @@ mod tests {
         second_top: Vec<u8>,
         /// Written first in each Font DICT.
         font_dict_prefix: Vec<u8>,
+        /// Written first in the last Font DICT instead, when not empty.
+        last_font_dict_prefix: Vec<u8>,
     }
 
     impl Spec {
@@ -1775,8 +2216,13 @@ mod tests {
                     }
                     dict
                 };
-            let font_dict = |first_at: usize, private_at: usize| {
-                let mut dict = self.font_dict_prefix.clone();
+            let last = self.local.len().saturating_sub(1);
+            let font_dict = |i: usize, first_at: usize, private_at: usize| {
+                let mut dict = if i == last && !self.last_font_dict_prefix.is_empty() {
+                    self.last_font_dict_prefix.clone()
+                } else {
+                    self.font_dict_prefix.clone()
+                };
                 if self.two_private {
                     dict.extend([int5(private_len), int5(first_at), vec![18]].concat());
                 }
@@ -1809,7 +2255,9 @@ mod tests {
             let fd_select = self.fd_select.clone().unwrap_or_default();
             let fd_array_at = fd_select_at + fd_select.len();
             let fd_array_len = if cid {
-                index_of(&vec![font_dict(0, 0); self.local.len()]).len()
+                let dicts: Vec<Vec<u8>> =
+                    (0..self.local.len()).map(|i| font_dict(i, 0, 0)).collect();
+                index_of(&dicts).len()
             } else {
                 0
             };
@@ -1834,7 +2282,8 @@ mod tests {
                 cff.extend_from_slice(&fd_select);
                 let dicts: Vec<Vec<u8>> = private_at
                     .iter()
-                    .map(|&at| font_dict(private_at[0], at))
+                    .enumerate()
+                    .map(|(i, &at)| font_dict(i, private_at[0], at))
                     .collect();
                 cff.extend(index_of(&dicts));
             }
@@ -2138,7 +2587,7 @@ mod tests {
         let font_ref = FontRef::new(&font).unwrap();
         let limit = Limit {
             steps: limit,
-            shared: false,
+            budget: false,
         };
         check(&font_ref, &font, 0, glyphs, limit).map(|_| ())
     }
@@ -2282,7 +2731,7 @@ mod tests {
         assert_eq!(
             std::error::Error::source(&err).unwrap().to_string(),
             "decompiling the glyphs to keep, up to glyph 1, reads more than the 13 operands, \
-             operators and hint mask bytes left of the budget it shares with other subsets"
+             operators and hint mask bytes left of its budget"
         );
         assert_eq!(budget.left(), 13);
         let mut budget = SubsetBudget::new(0);
@@ -2344,7 +2793,7 @@ mod tests {
     fn the_limit_of_a_subset_is_the_budget_left_below_its_own() {
         let limit = |left: u64| {
             let limit = Limit::within(left);
-            (limit.steps, limit.shared)
+            (limit.steps, limit.budget)
         };
         assert_eq!(limit(0), (0, true));
         assert_eq!(limit(u64::from(MAX_STEPS) - 1), (MAX_STEPS - 1, true));
@@ -2384,6 +2833,309 @@ mod tests {
             "{err}"
         );
         std::error::Error::source(&err).unwrap().to_string()
+    }
+
+    /// What checking each glyph of the test font with `cff` as its outlines gives, each
+    /// on a face of its own; see [`crate::testing::subset_checks`].
+    fn glyph_checks(cff: Vec<u8>) -> Vec<std::result::Result<(), String>> {
+        let font = crate::testing::TestFont::new("Test Sans")
+            .with_table(b"CFF ", cff)
+            .without_table(b"glyf")
+            .without_table(b"loca")
+            .build();
+        crate::testing::subset_checks(&font)
+    }
+
+    #[test]
+    fn checks_each_glyph_as_the_subsetter_decompiles_it() {
+        let cff = |at, glyph| programs(&glyphs_with(at, glyph), &hint_subrs(29), &[vec![]], None);
+        assert_eq!(glyph_checks(cff(1, vec![14])), vec![Ok(()); 5]);
+        // An operator the subsetter does not know.
+        assert_eq!(
+            glyph_checks(cff(2, vec![12, 0, 14]))[1..],
+            [
+                Ok(()),
+                Err(
+                    "glyph 2: its charstring cannot be decompiled as the subsetter \
+                     decompiles it"
+                        .to_owned()
+                ),
+                Ok(()),
+                Ok(()),
+            ]
+        );
+        // An accented character composed with endchar, which it does not implement.
+        assert_eq!(
+            glyph_checks(cff(3, vec![139, 139, 139, 139, 14]))[3],
+            Err(
+                "glyph 3 composes an accented character with endchar, which the subsetter \
+                 does not implement"
+                    .to_owned()
+            )
+        );
+        // More stem hints than it counts.
+        assert_eq!(
+            glyph_checks(cff(4, hinted_glyph(65_536, 29, false)))[4],
+            Err(
+                "glyph 4 declares more than 65535 stem hints, more than the subsetter can \
+                 count"
+                    .to_owned()
+            )
+        );
+        // .notdef is checked for the face, and fails every glyph.
+        let checks = glyph_checks(cff(0, vec![12, 0, 14]));
+        assert!(checks.iter().all(|check| check.is_err()), "{checks:?}");
+        // The hmtx and post entries are read as for TrueType outlines.
+        let font = crate::testing::TestFont::new("Test Sans")
+            .with_table(b"CFF ", cff(1, vec![14]))
+            .with_table(b"post", crate::testing::post_naming(4))
+            .without_table(b"glyf")
+            .without_table(b"loca")
+            .build();
+        assert_eq!(
+            crate::testing::subset_checks(&font)[3..],
+            [
+                Ok(()),
+                Err(
+                    "glyph 4: the post table names 4 glyphs, so it has no name for this one"
+                        .to_owned()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn checks_the_font_name_of_each_glyphs_font_dict() {
+        // Glyphs 0 to 2 in Font DICT 0, 3 and 4 in Font DICT 1, which names its font by
+        // `sid` (12 38). The String INDEX has "Adobe" (391) and "Identity" (392).
+        let format3 = [3, 0, 2, 0, 0, 0, 0, 3, 1, 0, 5];
+        let cff = |sid: u16| {
+            Spec {
+                glyphs: glyphs_with(1, vec![14]),
+                local: vec![vec![], vec![]],
+                fd_select: Some(format3.to_vec()),
+                last_font_dict_prefix: [vec![28], sid.to_be_bytes().to_vec(), vec![12, 38]]
+                    .concat(),
+                ..Spec::default()
+            }
+            .build()
+        };
+        for sid in [0, 390, 391, 392] {
+            assert_eq!(glyph_checks(cff(sid)), vec![Ok(()); 5], "string {sid}");
+        }
+        // Of two FontName operators, the subsetter keeps the last.
+        let named = |first: u16, last: u16| {
+            Spec {
+                glyphs: glyphs_with(1, vec![14]),
+                local: vec![vec![], vec![]],
+                fd_select: Some(format3.to_vec()),
+                last_font_dict_prefix: [
+                    vec![28],
+                    first.to_be_bytes().to_vec(),
+                    vec![12, 38, 28],
+                    last.to_be_bytes().to_vec(),
+                    vec![12, 38],
+                ]
+                .concat(),
+                ..Spec::default()
+            }
+            .build()
+        };
+        assert_eq!(glyph_checks(named(393, 391)), vec![Ok(()); 5]);
+        assert!(glyph_checks(named(391, 393))[3].is_err());
+        let unnamed = |glyph| {
+            Err(format!(
+                "glyph {glyph}: its Font DICT names its font by string 393, which the String \
+                 INDEX does not have"
+            ))
+        };
+        assert_eq!(
+            glyph_checks(cff(393)),
+            [Ok(()), Ok(()), Ok(()), unnamed(3), unnamed(4)]
+        );
+    }
+
+    #[test]
+    fn keeps_the_subroutine_counts_for_the_next_checks() {
+        // Glyph 1 calls global subroutine 0 (operand -107, bias 107), glyph 2 local
+        // subroutine 0.
+        let mut glyphs = glyphs_with(1, vec![32, 29, 14]);
+        glyphs[2] = vec![32, 10, 14];
+        let cff = programs(
+            &glyphs,
+            &[vec![139, 139, 21, 11]],
+            &[vec![vec![139, 139, 21, 11]]],
+            None,
+        );
+        let font = crate::testing::TestFont::new("Test Sans")
+            .with_table(b"CFF ", cff)
+            .without_table(b"glyf")
+            .without_table(b"loca")
+            .build();
+        let font_ref = FontRef::new(&font).unwrap();
+        let (range, mut glyphs) = CffGlyphs::read(&font_ref, &font).unwrap();
+        let cff = &font[range];
+        let mut work = MAX_CHECK_WORK;
+        check_glyph(cff, &mut glyphs, 0, 1, MAX_STEPS, &mut work).unwrap();
+        assert_eq!(glyphs.global.count, Some(1));
+        assert_eq!(glyphs.local[0].count, None);
+        // Glyph 2 calls local subroutine 0, of one.
+        check_glyph(cff, &mut glyphs, 0, 2, MAX_STEPS, &mut work).unwrap();
+        assert_eq!(glyphs.local[0].count, Some(1));
+        // The next checks take the numbers kept rather than counting again.
+        glyphs.global.count = Some(0);
+        glyphs.local[0].count = Some(0);
+        assert!(check_glyph(cff, &mut glyphs, 0, 1, MAX_STEPS, &mut work).is_err());
+        assert!(check_glyph(cff, &mut glyphs, 0, 2, MAX_STEPS, &mut work).is_err());
+    }
+
+    #[test]
+    fn a_glyph_that_fails_takes_nothing_off_the_steps_of_the_others() {
+        // Global subroutine 0 is two operands, rmoveto and return; glyphs 1 and 2 call it
+        // twice (13 each), glyph 3 is rmoveto and endchar (4).
+        let twice = vec![32, 29, 32, 29, 14];
+        let mut glyphs = glyphs_with(1, twice.clone());
+        glyphs[2] = twice;
+        glyphs[3] = vec![139, 139, 21, 14];
+        let cff = programs(&glyphs, &[vec![139, 139, 21, 11]], &[vec![]], None);
+        let font = crate::testing::TestFont::new("Test Sans")
+            .with_table(b"CFF ", cff)
+            .without_table(b"glyf")
+            .without_table(b"loca")
+            .build();
+        let font_ref = FontRef::new(&font).unwrap();
+        let (range, mut read) = CffGlyphs::read(&font_ref, &font).unwrap();
+        let cff = &font[range];
+        let reason = |result: Result<()>| {
+            let err = result.unwrap_err();
+            assert!(matches!(err, Error::TableOverLimit { .. }), "{err}");
+            std::error::Error::source(&err).unwrap().to_string()
+        };
+        // Glyph 1 reads 13 within 20 steps; glyph 2 does not within 7, and glyph 3 reads 4.
+        // Work counts what every glyph checked read.
+        let reason = |result: Result<u32>| reason(result.map(|_| ()));
+        let mut work = 100;
+        assert_eq!(
+            check_glyph(cff, &mut read, 0, 1, 20, &mut work).unwrap(),
+            13
+        );
+        assert_eq!(work, 87);
+        assert!(
+            reason(check_glyph(cff, &mut read, 0, 2, 7, &mut work))
+                .starts_with("decompiling glyph 2 reads more than the 7 operands,")
+        );
+        assert_eq!(work, 80);
+        assert_eq!(check_glyph(cff, &mut read, 0, 3, 7, &mut work).unwrap(), 4);
+        assert_eq!(work, 76);
+        // Where the work left is less than the steps, it bounds the walk.
+        let mut work = 10;
+        assert_eq!(
+            reason(check_glyph(cff, &mut read, 0, 1, 100, &mut work)),
+            format!(
+                "checking glyph 1 reads more than the 10 operands, operators and hint mask \
+                 bytes left of the {MAX_CHECK_WORK} the checks of one face may read"
+            )
+        );
+        assert_eq!(work, 0);
+        assert!(check_glyph(cff, &mut read, 0, 3, 100, &mut work).is_err());
+    }
+
+    #[test]
+    fn a_glyph_that_fails_after_its_walk_takes_no_steps_either() {
+        // Global subroutine 2 reads 12,006,001 operands and operators; glyphs 1, 3 and 4
+        // call it once, so two of them together pass the limit of one subset.
+        let calls = |subr: u8, times: usize| {
+            let mut program = [subr + 32, 29].repeat(times);
+            program.push(11);
+            program
+        };
+        let global = [vec![11], calls(0, 2000), calls(1, 2000)];
+        let mut glyphs = glyphs_with(1, vec![34, 29, 14]);
+        glyphs[3] = vec![34, 29, 14];
+        glyphs[4] = vec![34, 29, 14];
+        let face = |cff: Vec<u8>, post: Option<Vec<u8>>| {
+            let mut font = crate::testing::TestFont::new("Test Sans")
+                .with_table(b"CFF ", cff)
+                .without_table(b"glyf")
+                .without_table(b"loca");
+            if let Some(post) = post {
+                font = font.with_table(b"post", post);
+            }
+            crate::font::FontFace::from_bytes(font.build(), 0).unwrap()
+        };
+        let glyph = crate::font::GlyphId::new;
+        // Glyph 3, in Font DICT 1, fails on the font name of its Font DICT, string 393.
+        let cid = Spec {
+            glyphs: glyphs.clone(),
+            global: index_of(&global),
+            local: vec![vec![], vec![]],
+            fd_select: Some(vec![3, 0, 2, 0, 0, 0, 0, 3, 1, 0, 5]),
+            last_font_dict_prefix: vec![28, 1, 137, 12, 38],
+            ..Spec::default()
+        }
+        .build();
+        let font = face(cid, None);
+        assert!(font.check_subset_glyph(glyph(3)).is_err());
+        font.check_subset_glyph(glyph(1)).unwrap();
+        // Glyph 4 fails on its name in a post table that names four glyphs.
+        let sid = programs(&glyphs, &global, &[vec![]], None);
+        let font = face(sid, Some(crate::testing::post_naming(4)));
+        assert!(font.check_subset_glyph(glyph(4)).is_err());
+        font.check_subset_glyph(glyph(1)).unwrap();
+    }
+
+    #[test]
+    fn checks_of_a_face_share_the_limit_of_a_subset() {
+        // Global subroutine 2 reads 12,006,001 operands and operators (see
+        // `checks_the_limit_on_the_way_subset_checks`); glyphs 1 and 2 each call it once.
+        let calls = |subr: u8, times: usize| {
+            let mut program = [subr + 32, 29].repeat(times);
+            program.push(11);
+            program
+        };
+        let global = [vec![11], calls(0, 2000), calls(1, 2000)];
+        let mut glyphs = glyphs_with(1, vec![34, 29, 14]);
+        glyphs[2] = vec![34, 29, 14];
+        glyphs[3] = vec![139, 139, 21, 14];
+        let cff = programs(&glyphs, &global, &[vec![]], None);
+        let font = crate::testing::TestFont::new("Test Sans")
+            .with_table(b"CFF ", cff)
+            .without_table(b"glyf")
+            .without_table(b"loca")
+            .build();
+        let face = |font: &[u8]| crate::font::FontFace::from_bytes(font.to_vec(), 0).unwrap();
+        // Each passes alone. (The subsetter is not run on them: it would take hundreds of
+        // megabytes.)
+        face(&font)
+            .check_subset_glyph(crate::font::GlyphId::new(2))
+            .unwrap();
+        let face = face(&font);
+        face.check_subset_glyph(crate::font::GlyphId::new(1))
+            .unwrap();
+        // Together they read more than one subset may.
+        let err = face
+            .check_subset_glyph(crate::font::GlyphId::new(2))
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::TableOverLimit { table: "CFF ", .. }),
+            "{err}"
+        );
+        assert!(
+            std::error::Error::source(&err)
+                .unwrap()
+                .to_string()
+                .starts_with("decompiling glyph 2 reads more than the 4771211 operands,"),
+            "{err:?}"
+        );
+        assert!(face.subset([1, 2].map(crate::font::GlyphId::new)).is_err());
+        // Glyph 2 failed and took nothing off: glyph 3 passes. Glyph 1 still passes, and so
+        // does .notdef.
+        face.check_subset_glyph(crate::font::GlyphId::new(3))
+            .unwrap();
+        face.check_subset_glyph(crate::font::GlyphId::new(1))
+            .unwrap();
+        face.check_subset_glyph(crate::font::GlyphId::new(0))
+            .unwrap();
     }
 
     #[test]

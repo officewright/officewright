@@ -8,13 +8,17 @@ use std::sync::Arc;
 use officewright_core::Pt;
 
 use super::character::CharacterLevel;
-use super::{Formats, IGNORED_STYLES, Layer, MAX_COMBINATIONS, overwrite, style_index};
+use super::table::TableText;
+use super::{
+    Formats, IGNORED_STYLES, Layer, MAX_CELL_LEVELS, MAX_COMBINATIONS,
+    drops_values_equal_to_defaults, overwrite, style_index,
+};
 use crate::model::Document;
 use crate::model::format::{ListFormat, ParagraphFlag, ParagraphFormat};
 use crate::model::numbering::ListLevel;
 use crate::model::properties::{
-    Border, Justification, LineSpacing, ParagraphBorders, ParagraphProperties, Shading, TabKind,
-    TabStop,
+    Border, Frame, Justification, LineSpacing, ParagraphBorders, ParagraphProperties, Shading,
+    TabKind, TabStop,
 };
 use crate::model::styles::StyleKind;
 
@@ -32,15 +36,11 @@ impl Formats<'_> {
         &mut self,
         style: Option<usize>,
         direct: &ParagraphProperties,
+        table: Option<&TableText>,
     ) -> ParagraphFormat {
         let document = self.document;
-        let defaults = self.paragraph_defaults();
-        // The defaults with the style and the styles it is based on laid over them,
-        // worked out once per style.
-        let base = match style {
-            Some(index) => self.paragraphs.level(document, index, &defaults),
-            None => defaults,
-        };
+        let base = self.paragraph_base(style, table);
+        let mark_deleted = direct.mark.deleted == Some(true);
         let direct = ParagraphLevel::of(direct);
         let style_id = style
             .and_then(|index| document.styles.styles.get(index))
@@ -53,7 +53,7 @@ impl Formats<'_> {
                     layer: Some(layer), ..
                 },
             )) => {
-                let combined = self.combination(style, &base, &layer);
+                let combined = self.combination(style, &base, &layer, table);
                 (Some(list), combined)
             }
             Some((list, _)) => (Some(list), base),
@@ -61,7 +61,9 @@ impl Formats<'_> {
         };
         let mut effect = ParagraphLevel::clone(&below_direct);
         effect.overlay(&direct);
-        effect.format(style_id, list)
+        let mut format = effect.format(style_id, list);
+        format.mark_deleted = mark_deleted;
+        format
     }
 
     /// What the list level of a paragraph whose style has the index `style` and whose
@@ -91,6 +93,89 @@ impl Formats<'_> {
         self.instance(instance)?.definition
     }
 
+    /// The defaults, with what the table style gives a paragraph in a cell laid over them
+    /// (`table`), and the paragraph style at `style` with the styles it is based on laid
+    /// over that; worked out once per style and table text. In a cell, a left
+    /// justification of the default paragraph style may give way to the table style's
+    /// (`Formats::table_style_wins`).
+    fn paragraph_base(
+        &mut self,
+        style: Option<usize>,
+        table: Option<&TableText>,
+    ) -> Arc<ParagraphLevel> {
+        let document = self.document;
+        let defaults = self.paragraph_defaults();
+        let Some(table) = table else {
+            return match style {
+                Some(index) => self.paragraphs.level(document, index, &defaults),
+                None => defaults,
+            };
+        };
+        let yields = style.is_some()
+            && style == self.paragraph_style(None)
+            && table.paragraph.justification.is_some()
+            && self.table_style_wins();
+        let (root, _) = self.cell_paragraphs.entry(table.id).or_insert_with(|| {
+            let mut root = ParagraphLevel::clone(&defaults);
+            root.overlay(&table.paragraph);
+            root.settle();
+            (Arc::new(root), None)
+        });
+        let root = Arc::clone(root);
+        let Some(index) = style else {
+            return root;
+        };
+        let level = match self.cell_levels.get(&(table.id, index)) {
+            Some(level) => Arc::clone(level),
+            None => {
+                // The style's chain, worked out once for every table text, laid over this
+                // one: its cleared stops clear the table text's (#76). The same as laying
+                // the chain over the root style by style, except where a level would keep
+                // only some of the stops (MAX_TABS set and as many cleared): when the chain
+                // clears more than that, or the table text's stops and the chain's
+                // together set more, the stops kept may differ.
+                #[cfg(test)]
+                let reads = self.paragraph_chains.reads;
+                let chain =
+                    self.paragraph_chains
+                        .level(document, index, &ParagraphLevel::default());
+                #[cfg(test)]
+                {
+                    self.work.cell_style_reads += self.paragraph_chains.reads - reads;
+                    self.work.cell_levels += 1;
+                }
+                let mut level = ParagraphLevel::clone(&root);
+                level.overlay(&chain);
+                level.settle();
+                let level = Arc::new(level);
+                if self.cell_levels.len() >= MAX_CELL_LEVELS {
+                    self.cell_levels.clear();
+                }
+                self.cell_levels
+                    .insert((table.id, index), Arc::clone(&level));
+                level
+            }
+        };
+        // Strict documents write `start` where Transitional ones write `left`.
+        let left = matches!(
+            level.justification,
+            Some(Justification::Left | Justification::Start)
+        );
+        if !yields || !left {
+            return level;
+        }
+        // The default paragraph style's left justification gives way to the table
+        // style's; the same for every paragraph of that style in such cells.
+        let Some((_, yielded)) = self.cell_paragraphs.get_mut(&table.id) else {
+            return level;
+        };
+        Arc::clone(yielded.get_or_insert_with(|| {
+            let mut level = ParagraphLevel::clone(&level);
+            level.justification = table.paragraph.justification;
+            Arc::new(level)
+        }))
+    }
+
     /// What the document defaults give to paragraphs.
     fn paragraph_defaults(&mut self) -> Arc<ParagraphLevel> {
         let document = self.document;
@@ -112,8 +197,9 @@ impl Formats<'_> {
         style: Option<usize>,
         base: &ParagraphLevel,
         layer: &SourcedLayer,
+        table: Option<&TableText>,
     ) -> Arc<ParagraphLevel> {
-        let key = (style, layer.source);
+        let key = (style, layer.source, table.map(|table| table.id));
         if let Some(combined) = self.combinations.get(&key) {
             return Arc::clone(combined);
         }
@@ -593,11 +679,23 @@ pub(super) struct ParagraphLevel {
     outline_level: Option<i64>,
     list_instance: Option<i64>,
     list_level: Option<i64>,
+    frame: Option<Frame>,
 }
 
 impl ParagraphLevel {
+    /// What a table style's `w:pPr` gives: all but a list, which only paragraphs and
+    /// their styles give in the hierarchy (ECMA-376 Part 1, §17.7.2, puts numbering above
+    /// table styles); taking none from a table style is our choice.
+    pub(super) fn of_table_style(properties: &ParagraphProperties) -> Self {
+        Self {
+            list_instance: None,
+            list_level: None,
+            ..Self::of(properties)
+        }
+    }
+
     /// What one `w:pPr` gives.
-    fn of(properties: &ParagraphProperties) -> Self {
+    pub(super) fn of(properties: &ParagraphProperties) -> Self {
         let flags = [
             properties.keep_next,
             properties.keep_lines,
@@ -622,6 +720,7 @@ impl ParagraphLevel {
                 .numbering
                 .and_then(|numbering| numbering.instance),
             list_level: properties.numbering.and_then(|numbering| numbering.level),
+            frame: properties.frame,
             ..Self::default()
         };
         if let Some(spacing) = &properties.spacing {
@@ -712,20 +811,37 @@ impl ParagraphLevel {
             tabs,
             outline_level,
             list,
+            frame: self.frame,
+            mark_deleted: false,
         }
     }
 }
 
 impl Layer for ParagraphLevel {
     fn of_style(document: &Document, index: usize) -> Self {
-        document
+        let mut level = document
             .styles
             .styles
             .get(index)
             .map(|style| {
                 Self::of(&crate::model::Style::from_data(document, style).paragraph_properties())
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let left = |justification: Option<Justification>| {
+            matches!(
+                justification,
+                Some(Justification::Left | Justification::Start)
+            )
+        };
+        if left(level.justification) && drops_values_equal_to_defaults(document, index) {
+            // Left is the justification when the defaults give none.
+            let defaults = crate::model::Styles::new(document).default_paragraph_properties();
+            let below = Self::of(&defaults).justification;
+            if below.is_none() || left(below) {
+                level.justification = None;
+            }
+        }
+        level
     }
 
     fn overlay(&mut self, above: &Self) {
@@ -749,6 +865,7 @@ impl Layer for ParagraphLevel {
         overwrite(&mut self.outline_level, above.outline_level);
         overwrite(&mut self.list_instance, above.list_instance);
         overwrite(&mut self.list_level, above.list_level);
+        overwrite(&mut self.frame, above.frame);
     }
 
     /// Once nothing lies below, a cleared stop has nothing left to remove.

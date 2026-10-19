@@ -22,9 +22,9 @@ listed SHA-256. The script then writes tests/corpus/business/<name>.docx with
 
 and the document's row in the table of tests/corpus/SOURCES.md: URL, download date,
 licence statement and the changes. It refuses documents with tracked changes, comments,
-ActiveX controls, embedded fonts or objects, macros, mail merge sources and links to local
-files. With --check it writes nothing and fails if a committed file differs from what it
-would write. Python standard library only.
+ActiveX controls, embedded fonts or objects, macros, mail merge sources, links to local
+files and archives in which two entries name one part. With --check it writes nothing and
+fails if a committed file differs from what it would write. Python standard library only.
 """
 
 from __future__ import annotations
@@ -34,13 +34,16 @@ import hashlib
 import io
 import posixpath
 import re
+import string
 import struct
 import sys
+import urllib.parse
 import urllib.request
 import zipfile
 import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
+from xml.etree import ElementTree
 
 ROOT = Path(__file__).resolve().parent.parent
 CORPUS = ROOT / "tests" / "corpus"
@@ -58,6 +61,11 @@ PROFILE_PATH = re.compile(rb"(?i)(\\|/)(users|documents and settings)(\\|/)")
 FICTIONAL = re.compile(rb"@example\.(com|gov|org)$")
 
 RELS_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+# The same relationship types in ISO/IEC 29500 Strict (Part 1, §8.1).
+STRICT_RELS_NS = "http://purl.oclc.org/ooxml/officeDocument/relationships"
+# The namespaces of [Content_Types].xml and of .rels parts (ECMA-376 Part 2).
+CONTENT_TYPES_NS = "{http://schemas.openxmlformats.org/package/2006/content-types}"
+PACKAGE_RELS_NS = "{http://schemas.openxmlformats.org/package/2006/relationships}"
 
 
 @dataclass(frozen=True)
@@ -636,45 +644,100 @@ class Refused(Exception):
 # point to it.
 EMBEDDED_FOLDERS = ("word/fonts/", "word/embeddings/", "word/activex/")
 ACTIVEX_TYPES = ("application/vnd.ms-office.activex+xml", "application/vnd.ms-office.activex")
-EMBEDDED_RELATIONSHIPS = (
-    f"{RELS_NS}/control",
-    f"{RELS_NS}/font",
-    f"{RELS_NS}/oleObject",
-    f"{RELS_NS}/package",
-    "http://schemas.microsoft.com/office/2006/relationships/activeXControlBinary",
-)
+EMBEDDED_RELATIONSHIPS = tuple(
+    f"{namespace}/{kind}"
+    for namespace in (RELS_NS, STRICT_RELS_NS)
+    for kind in ("control", "font", "oleObject", "package")
+) + ("http://schemas.microsoft.com/office/2006/relationships/activeXControlBinary",)
 
 
-def attribute(element: str, name: str) -> str:
-    """The value of an attribute of an XML start tag, "" when it has none."""
-    match = re.search(rf"""\b{name}\s*=\s*(?:"([^"]*)"|'([^']*)')""", element)
-    return (match.group(1) if match.group(1) is not None else match.group(2)) if match else ""
+class Unreadable(Exception):
+    """A package part that embedded_parts must read cannot be read as OPC allows it."""
+
+
+class _Builder(ElementTree.TreeBuilder):
+    """A tree builder that notes a document type declaration, which OPC forbids in package
+    parts (ECMA-376 Part 2, §8.1.4) and which could give attributes defaults, such as a
+    TargetMode of External, that the markup does not show."""
+
+    doctype_seen = False
+
+    def doctype(self, name, pubid, system):
+        self.doctype_seen = True
+
+
+def package_xml(name: str, data: bytes, root: str) -> ElementTree.Element:
+    """[Content_Types].xml or a .rels part, read as XML: the parser resolves character
+    references and namespace prefixes, and reads UTF-16 (ECMA-376 Part 2 allows it), so
+    that no spelling of the markup hides a part. The part is refused when it is not
+    well-formed, declares a document type, or its root is not the element root names (with
+    its namespace), as officewright-opc refuses it."""
+    builder = _Builder()
+    parser = ElementTree.XMLParser(target=builder)
+    try:
+        parser.feed(data)
+        element = parser.close()
+    except (ElementTree.ParseError, ValueError, LookupError) as error:
+        raise Unreadable(f"{name} is not well-formed XML ({error})") from error
+    if builder.doctype_seen:
+        raise Unreadable(f"{name} declares a document type, which OPC forbids")
+    if element.tag != root:
+        raise Unreadable(f"{name} has the root element {element.tag}, not {root}")
+    return element
+
+
+def media_type(value: str) -> str:
+    """A content type without its parameters, in lower case: types, subtypes and parameter
+    names compare without regard to case (RFC 2045, §5.1)."""
+    return value.split(";", 1)[0].strip().lower()
 
 
 def embedded_parts(parts: dict[str, bytes]) -> list[str]:
     """The names of the parts that are embedded fonts or objects or ActiveX controls, as the
-    package spells them: by folder, by content type and by relationship type."""
+    package spells them: by folder, by content type and by relationship type. Raises
+    Unreadable when [Content_Types].xml or a .rels part cannot be read (package_xml), or the
+    package has two content types streams whose names differ only in case."""
     by_lower = {name.lower(): name for name in parts}
     found = {name for name in parts if name.lower().startswith(EMBEDDED_FOLDERS)}
 
     def add(name: str) -> None:
         found.add(by_lower.get(name.lower(), name))
 
-    types = parts.get("[Content_Types].xml", b"").decode("utf-8", "replace")
-    for element in re.findall(r"<Override\b[^>]*>", types):
-        if attribute(element, "ContentType").lower() in ACTIVEX_TYPES:
-            add(attribute(element, "PartName").lstrip("/"))
-    for element in re.findall(r"<Default\b[^>]*>", types):
-        if attribute(element, "ContentType").lower() in ACTIVEX_TYPES:
-            extension = "." + attribute(element, "Extension").lower()
-            found.update(name for name in parts if name.lower().endswith(extension))
+    # Part names compare without regard to case, that of the content types stream too, so
+    # two streams whose names differ only in case are one name twice.
+    streams = [name for name in parts if name.lower() == "[content_types].xml"]
+    if len(streams) > 1:
+        raise Unreadable(f"the package has {len(streams)} content types streams: "
+                         + ", ".join(sorted(streams)))
+    for types_name in streams:
+        types = package_xml(types_name, parts[types_name], f"{CONTENT_TYPES_NS}Types")
+        for element in types.iter(f"{CONTENT_TYPES_NS}Override"):
+            if media_type(element.get("ContentType", "")) in ACTIVEX_TYPES:
+                add(element.get("PartName", "").lstrip("/"))
+        for element in types.iter(f"{CONTENT_TYPES_NS}Default"):
+            # Extensions compare as part names do: percent-decoded, without regard to case.
+            extension = urllib.parse.unquote(element.get("Extension", "")).lower()
+            if extension and media_type(element.get("ContentType", "")) in ACTIVEX_TYPES:
+                found.update(
+                    name for name in parts
+                    if urllib.parse.unquote(name).lower().endswith("." + extension)
+                )
+    index = part_index(parts)
     for rels in (name for name in parts if name.lower().endswith(".rels")):
-        xml = parts[rels].decode("utf-8", "replace")
-        for element in re.findall(r"<Relationship\b[^>]*>", xml):
-            if attribute(element, "TargetMode") == "External":
+        relationships = package_xml(rels, parts[rels], f"{PACKAGE_RELS_NS}Relationships")
+        for element in relationships.iter(f"{PACKAGE_RELS_NS}Relationship"):
+            if element.get("TargetMode") == "External":
                 continue
-            if attribute(element, "Type") in EMBEDDED_RELATIONSHIPS:
-                add(part_target(rels, attribute(element, "Target")))
+            if element.get("Type", "").strip(URI_SPACE) not in EMBEDDED_RELATIONSHIPS:
+                continue
+            # A part the package lacks is named only when its name is plainly a part name; any
+            # other target is refused by external_link_problems, which does not name it.
+            target = element.get("Target", "").strip(URI_SPACE)
+            held = internal_part(index, rels, target)
+            name = held or part_target(rels, target)
+            if held or (part_reference(urllib.parse.unquote(target))
+                        and PLAIN_PART_NAME.match(name)):
+                add(name)
     return sorted(found)
 
 
@@ -686,29 +749,114 @@ def part_target(rels_part: str, target: str) -> str:
     return posixpath.normpath(posixpath.join(source_dir, target))
 
 
+# The schemes an external relationship may link to: a link anywhere else (file:, a UNC or
+# drive path, a relative path) names a place on someone's machine or network.
+LINK_SCHEMES = re.compile(r"(?i)(https?|mailto):")
+
+
+# A part name made only of letters, digits, ".", "_" and "-" in segments, which names no
+# place outside the package and is safe to name in a message.
+PLAIN_PART_NAME = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*(?:/[A-Za-z0-9_-][A-Za-z0-9._-]*)*$")
+# xsd:anyURI, the type of Target and Type, collapses whitespace: they are read without it
+# at their ends.
+URI_SPACE = " \t\r\n"
+
+
+def part_index(parts: dict[str, bytes]) -> dict[str, str]:
+    """The package's part names as part names compare (percent-decoded, without regard to
+    case), to their names as the package spells them."""
+    return {urllib.parse.unquote(part).lower(): part for part in parts}
+
+
+def part_reference(target: str) -> bool:
+    """Whether a target, percent-decoded, is written as a part name: named segments, "." and
+    ".." only before the first of them, and no backslash, colon, query or fragment. Anything
+    else could climb back from a local path to a part ("D:/x/../../a.xml") or name no part."""
+    if not target or target.startswith("//") or any(c in target for c in "\\:?#"):
+        return False
+    named = False
+    for segment in target.lstrip("/").split("/"):
+        if segment in (".", ".."):
+            if named:
+                return False
+        elif not segment:
+            return False
+        else:
+            named = True
+    return named
+
+
+def internal_part(index: dict[str, str], rels: str, target: str) -> str | None:
+    """The part of the package (index: part_index) that an internal relationship's target
+    names, or None: the target, without the whitespace xsd:anyURI collapses and
+    percent-decoded, must be written as a part name (part_reference) and name a part the
+    package holds. A scheme, a drive, a server, a backslash, a query, a way out of the package
+    or a missing part all name none, however they are spelled."""
+    target = target.strip(URI_SPACE)
+    if not part_reference(urllib.parse.unquote(target)):
+        return None
+    return index.get(urllib.parse.unquote(part_target(rels, target)).lower())
+
+
+def external_link_problems(parts: dict[str, bytes]) -> list[str]:
+    """The .rels parts with a relationship to anything but a web or mail address or a part of
+    the package, read as XML whatever the quoting, prefixes or character references (#331):
+    an external one to another scheme, an internal one (no TargetMode, or Internal) whose
+    target names no part, or one whose TargetMode is neither, or an attribute in a namespace,
+    which OPC does not allow. Also an attached template the cleaning left, since its address
+    can name a person (a personal site). The target itself is not named, since it may name a
+    person's folder."""
+    found = []
+    index = part_index(parts)
+    for rels in sorted(name for name in parts if name.lower().endswith(".rels")):
+        root = package_xml(rels, parts[rels], f"{PACKAGE_RELS_NS}Relationships")
+        for element in root.iter(f"{PACKAGE_RELS_NS}Relationship"):
+            mode, target = element.get("TargetMode"), element.get("Target", "")
+            if any(name.startswith("{") for name in element.attrib):
+                found.append(f"{rels} has a relationship attribute in a namespace")
+                break
+            if mode not in (None, "Internal", "External"):
+                found.append(f"{rels} has a target mode other than Internal or External")
+                break
+            if element.get("Type", "").strip(URI_SPACE).endswith("/attachedTemplate"):
+                found.append(f"{rels} keeps an attached template")
+                break
+            if (mode == "External" and not LINK_SCHEMES.match(target.strip(URI_SPACE))) or (
+                mode != "External" and internal_part(index, rels, target) is None
+            ):
+                found.append(f"{rels} links to a local file, another scheme or a missing part")
+                break
+    return found
+
+
+def attribute(element: str, name: str) -> re.Match | None:
+    """An attribute of an XML start tag, in double or single quotes: group 2 is its value."""
+    return re.search(rf"""\b{name}\s*=\s*(["'])(.*?)\1""", element)
+
+
 def edit_relationships(rels_part: str, xml: str, dropped: set[str], renamed: dict[str, str]) -> str:
     """Removes relationships to dropped parts and to attached templates; renames picture
-    targets."""
+    targets. External links are kept as they are: clean() refuses those to anything but web
+    and mail addresses afterwards (external_link_problems), whatever their spelling."""
 
     def edit(match: re.Match) -> str:
         element = match.group(0)
-        kind = re.search(r'Type="([^"]*)"', element)
-        target = re.search(r'Target="([^"]*)"', element)
+        kind = attribute(element, "Type")
+        target = attribute(element, "Target")
         if not kind or not target:
             return element
-        if kind.group(1).endswith("/attachedTemplate"):
+        if kind.group(2).strip(URI_SPACE).endswith("/attachedTemplate"):
             return ""
-        if 'TargetMode="External"' in element:
-            if not re.match(r"(?i)(https?|mailto):", target.group(1)):
-                raise Refused(f"{rels_part}: links to a local file or another scheme")
+        mode = attribute(element, "TargetMode")
+        if mode and mode.group(2) == "External":
             return element
-        part = part_target(rels_part, target.group(1))
+        part = part_target(rels_part, target.group(2))
         if part in dropped:
             return ""
         if part in renamed:
-            old = target.group(1)
+            old = target.group(2)
             new = old[: len(old) - len(posixpath.basename(old))] + posixpath.basename(renamed[part])
-            return element.replace(f'Target="{old}"', f'Target="{new}"')
+            return element.replace(target.group(0), f"Target={target.group(1)}{new}{target.group(1)}")
         return element
 
     return re.sub(r"<Relationship\b[^>]*/>", edit, xml)
@@ -751,13 +899,39 @@ class Cleaned:
     changes: list[str] = field(default_factory=list)
 
 
+ASCII_LOWER = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
+
+
+def part_key(name: str) -> str:
+    """An entry name as OPC compares part names: a backslash read as a slash (as ZIP tools
+    on Windows read it), percent-decoded, and without regard to ASCII case."""
+    return urllib.parse.unquote(name.replace("\\", "/")).translate(ASCII_LOWER)
+
+
+def repeated_parts(names: list[str]) -> list[str]:
+    """The entry names that name one part, joined by "and" per part: the same name twice, or
+    names that differ only as part names compare (part_key: case, percent-encoding, a
+    backslash for a slash). The checks read the parts by name, so they would see only one
+    entry of each."""
+    by_part: dict[str, list[str]] = {}
+    for name in names:
+        by_part.setdefault(part_key(name), []).append(name)
+    return [" and ".join(group) for group in by_part.values() if len(group) > 1]
+
+
 def clean(original: bytes, doc: PublicDoc) -> Cleaned:
     """The document with people, pictures and private parts taken out (see the module
     docstring); refused when it holds something the corpus must not take."""
     with zipfile.ZipFile(io.BytesIO(original)) as archive:
         entries = [(info, archive.read(info)) for info in archive.infolist()]
     names = [info.filename for info, _ in entries]
-    embedded = embedded_parts({info.filename: data for info, data in entries})
+    repeated = repeated_parts(names)
+    if repeated:
+        raise Refused(f"{doc.name}: " + "; ".join(f"entries {r} name one part" for r in repeated))
+    try:
+        embedded = embedded_parts({info.filename: data for info, data in entries})
+    except Unreadable as error:
+        raise Refused(f"{doc.name}: {error}") from error
     if embedded:
         raise Refused(f"{doc.name}: embeds {', '.join(embedded)}")
     for name in names:
@@ -775,8 +949,11 @@ def clean(original: bytes, doc: PublicDoc) -> Cleaned:
         if MEDIA.match(name):
             stem = name.rsplit(".", 1)[0] if "." in posixpath.basename(name) else name
             renamed[name] = f"{stem}.png"
-    if len(set(renamed.values())) != len(renamed):
-        raise Refused(f"{doc.name}: two pictures differ only in their extension")
+    # The entries the cleaning writes must not name one part either: a picture renamed to
+    # .png next to another picture or entry of that name, in any case (a.jpeg and A.png).
+    kept = [renamed.get(name, name) for name in names if name not in dropped]
+    if len({part_key(name) for name in kept}) != len(kept):
+        raise Refused(f"{doc.name}: a picture's new name would name one part with another entry")
     changes = []
     people = []
     if dropped:
@@ -836,6 +1013,15 @@ def clean(original: bytes, doc: PublicDoc) -> Cleaned:
         out.append((info, data))
     if pending:
         raise Refused(f"{doc.name}: no part {pending[0].part} for a replacement")
+    # What the cleaning keeps, read as XML: an external link it did not see in some spelling
+    # of the markup is refused here (#331). An attached template is removed above, so the
+    # check comes after the edits.
+    try:
+        links = external_link_problems({info.filename: data for info, data in out})
+    except Unreadable as error:
+        raise Refused(f"{doc.name}: {error}") from error
+    if links:
+        raise Refused(f"{doc.name}: {'; '.join(links)}")
     if people:
         changes.insert(0, "document properties emptied: " + ", ".join(people))
     if settings_removed:
@@ -879,8 +1065,15 @@ def problems(
     """What a committed document must not hold; empty for a clean one."""
     found = []
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        found += [f"entries {repeated} name one part" for repeated in
+                  repeated_parts(archive.namelist())]
         parts = {name: archive.read(name) for name in archive.namelist()}
-        embedded = embedded_parts(parts)
+        try:
+            embedded = embedded_parts(parts)
+            found += external_link_problems(parts)
+        except Unreadable as error:
+            found.append(str(error))
+            embedded = []
         found += [f"{name} is embedded" for name in embedded if name not in parts]
         for name, body in parts.items():
             if DROPPED.match(name):

@@ -82,10 +82,14 @@ impl<'a> Styles<'a> {
     }
 
     /// The default style of a kind: what paragraphs, runs or tables that name no style
-    /// of their own get.
+    /// of their own get. Of several of a kind marked `w:default`, the last, as the
+    /// standard says ([MS-WPE376] Part 4 §2.7.3.17 quotes it) and Word's render of
+    /// word-rules/E-default-paragraph-style-after-normal.docx shows for paragraph styles,
+    /// even when Normal is one of them (#308).
     pub fn default_style(self, kind: StyleKind) -> Option<Style<'a>> {
         self.iter()
-            .find(|style| style.kind() == kind && style.is_default())
+            .filter(|style| style.kind() == kind && style.is_default())
+            .last()
     }
 
     /// The run properties of the document defaults (`w:docDefaults/w:rPrDefault`), the

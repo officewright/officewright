@@ -6,7 +6,7 @@ use officewright_core::Pt;
 use officewright_layout::ReportKind;
 use officewright_layout::ir;
 
-use super::Translator;
+use super::{Once, Translator};
 use crate::model::{
     Anchor, AnchorHorizontalAlign, AnchorVerticalAlign, Drawing, HorizontalReference, Image,
     Offsets, VerticalReference, WrapKind,
@@ -43,6 +43,32 @@ impl<'a> Translator<'a> {
                 self.missing_image()
             }
         };
+        // The IR's picture has no outline, colour effects, other effects or shape yet
+        // (#303). Each is looked for until it is listed.
+        if !self.reported(Once::PictureOutline) && picture.has_outline() {
+            self.report_once(
+                Once::PictureOutline,
+                "a picture's outline (a:ln) is not drawn, here and wherever else the document has one",
+            );
+        }
+        if !self.reported(Once::PictureColor) && picture.has_color_effects() {
+            self.report_once(
+                Once::PictureColor,
+                "a picture's colour or transparency effects (a:blip, such as a:grayscl or a:lum) are not applied, here and wherever else the document has them",
+            );
+        }
+        if !self.reported(Once::PictureEffects) && picture.has_effects() {
+            self.report_once(
+                Once::PictureEffects,
+                "a picture's shadow, reflection, glow, soft edges or 3-D effect (a:effectLst, a:scene3d, a:sp3d) is not drawn, here and wherever else the document has one",
+            );
+        }
+        if !self.reported(Once::PictureShape) && picture.is_shaped() {
+            self.report_once(
+                Once::PictureShape,
+                "a picture cut to a shape (a:prstGeom other than rect, or a:custGeom) is drawn whole as a rectangle, here and wherever else the document has one",
+            );
+        }
         let crop = picture.crop().map(|crop| {
             ir::Crop::default()
                 .with_left(crop.left())

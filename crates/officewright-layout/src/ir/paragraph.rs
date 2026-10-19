@@ -1,5 +1,7 @@
 //! Blocks and paragraphs, with the properties that shape them.
 
+use std::sync::{Arc, OnceLock};
+
 use officewright_core::Pt;
 
 use super::RunStyleId;
@@ -67,7 +69,7 @@ ir_struct! {
     #[derive(Clone, Debug, PartialEq)]
     pub struct Paragraph {
         /// How the paragraph is laid out.
-        ref props: ParagraphProps => with_props;
+        shared props: ParagraphProps => with_props;
         /// The text and objects, in reading order.
         vec inlines: Inline => with_inlines;
         /// The formatting of the paragraph mark. It gives an empty paragraph its height,
@@ -79,10 +81,12 @@ ir_struct! {
 }
 
 impl Paragraph {
-    /// An empty paragraph with default properties, whose mark has this style.
+    /// An empty paragraph with default properties, whose mark has this style. Every such
+    /// paragraph shares one copy of the defaults.
     pub fn new(mark: RunStyleId) -> Self {
+        static DEFAULT: OnceLock<Arc<ParagraphProps>> = OnceLock::new();
         Self {
-            props: ParagraphProps::default(),
+            props: Arc::clone(DEFAULT.get_or_init(|| Arc::new(ParagraphProps::default()))),
             inlines: Vec::new(),
             mark,
             list: None,
@@ -260,9 +264,10 @@ pub enum TabLeader {
     Dot,
     /// Hyphens.
     Hyphen,
-    /// A line, as of underscores.
+    /// Underscores (`w:leader="underscore"`).
     Underscore,
-    /// A thick line.
+    /// The heavy leader (`w:leader="heavy"`), which Word draws with underscores too, no
+    /// thicker (`E-tab-leader.docx`).
     Heavy,
     /// Dots at the middle of the line.
     MiddleDot,

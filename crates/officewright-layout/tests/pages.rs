@@ -11,8 +11,9 @@ use common::{TestResult, book, random_paragraph, word_lines};
 use officewright_core::{PageSize, Pt};
 use officewright_layout::fuzzing;
 use officewright_layout::ir::{
-    Block, BreakClear, Cell, Document, Inline, LineSpacing, Margins, PageSetup, Paragraph,
-    ParagraphProps, Row, RunFonts, RunStyle, RunStyleId, Section, Spacing, Table,
+    Block, Border, BorderSide, BreakClear, Cell, Document, Inline, LineSpacing, Margins, PageSetup,
+    Paragraph, ParagraphProps, PreferredWidth, Row, RunFonts, RunStyle, RunStyleId, Section,
+    Spacing, Table, TableBorders, TableLayout, TableProps,
 };
 
 /// How far Word's lines may be from ours: the printer's grid of 600 dots per inch and
@@ -46,9 +47,25 @@ fn paragraph(style: RunStyleId, props: ParagraphProps, inlines: Vec<Inline>) -> 
         .into()
 }
 
-/// A table of one cell holding `block`.
+/// A table of one cell holding `block`, as `E-space-before-top` has them: as wide as the
+/// text, with single borders of 0.5 pt.
 fn in_table(block: Block) -> Block {
+    let line = BorderSide::Line(Border::default().with_width(Pt(0.5)));
+    let borders = TableBorders::default()
+        .with_top(line)
+        .with_start(line)
+        .with_bottom(line)
+        .with_end(line)
+        .with_inside_horizontal(line)
+        .with_inside_vertical(line);
     Table::default()
+        .with_grid([Pt(451.3)])
+        .with_props(
+            TableProps::default()
+                .with_width(PreferredWidth::Points(Pt(451.3)))
+                .with_layout(TableLayout::Fixed)
+                .with_borders(borders),
+        )
         .with_rows(vec![
             Row::default().with_cells(vec![Cell::default().with_blocks([block])]),
         ])
@@ -147,6 +164,18 @@ fn space_before_top() -> (Document, Vec<Option<&'static str>>) {
     (document, words)
 }
 
+/// The baseline of the first glyph run `page` draws, in points from the page's top.
+fn first_baseline(page: &fuzzing::PageDump) -> Option<f64> {
+    page.text()
+        .lines()
+        .filter(|line| line.starts_with("glyphs "))
+        .find_map(|line| {
+            let at = line.split_whitespace().find(|word| word.starts_with('@'))?;
+            let (_, y) = at.trim_start_matches('@').split_once(',')?;
+            y.parse::<f64>().ok().map(|twips| twips / 20.0)
+        })
+}
+
 #[test]
 fn space_above_at_the_top_of_a_page_is_where_word_keeps_it() -> TestResult {
     let book = book()?;
@@ -163,6 +192,19 @@ fn space_above_at_the_top_of_a_page_is_where_word_keeps_it() -> TestResult {
         .find(|line| line.text.starts_with("Control"))
         .ok_or("no control line")?;
     let offset = control.top - 72.0;
+    // Our baselines are below the line's top by what the test font reaches above it in the
+    // same line: the control paragraph's line top is its fragment's.
+    let ours_control = laid
+        .pages()
+        .iter()
+        .find_map(|page| {
+            let fragment = page.fragments().first()?;
+            let starts = words
+                .get(fragment.paragraph())?
+                .is_some_and(|w| w == "Control:");
+            starts.then(|| Some(first_baseline(page)? - fragment.top()))?
+        })
+        .ok_or("no control page of ours")?;
     for (number, page) in laid.pages().iter().enumerate() {
         let first = word
             .iter()
@@ -179,19 +221,19 @@ fn space_above_at_the_top_of_a_page_is_where_word_keeps_it() -> TestResult {
             number + 1,
             first.text
         );
-        // The table's top border, 0.5 pt, is above the cell on page 8; tables are not
-        // laid out yet.
-        let border = if label.starts_with("Case 7") {
-            0.5
+        // Page 8 starts with a table: its fragment is the band, whose top is the table's;
+        // the cell's first line is found by its text, below the top border and the space
+        // before the paragraph, which a cell keeps at the top of a page.
+        let ours = if label.starts_with("Case 7") {
+            first_baseline(page).ok_or("no text on the table's page")? - ours_control
         } else {
-            0.0
+            fragment.top()
         };
         let theirs = first.top - offset;
         assert!(
-            (fragment.top() - theirs).abs() <= GRID + border,
-            "page {}: {label} at {} where Word has {theirs}",
+            (ours - theirs).abs() <= GRID,
+            "page {}: {label} at {ours} where Word has {theirs}",
             number + 1,
-            fragment.top()
         );
     }
     Ok(())
@@ -350,9 +392,10 @@ fn every_document_on_pages_keeps_what_the_painter_relies_on() -> TestResult {
 fn a_chain_that_moves_draws_its_leaders_once() -> TestResult {
     use officewright_layout::ir::{TabLeader, TabStop};
 
-    // A line of 50 dot-leader tabs at 1 pt and 1 % (about 198,000 glyphs, under the
-    // document's bound of 262,144), kept with a paragraph that does not fit: both move to
-    // the next page, and the leaders drawn on the first try are not counted against the
+    // 14 lines of 130 dot-leader tabs at 1 pt and 43 %, whose period stands on Word's
+    // smallest grid pitch of 0.12 pt (about 165,000 glyphs, under the document's bound of
+    // 262,144), kept together and with a paragraph that does not fit: both move to the
+    // next page, and the leaders drawn on the first try are not counted against the
     // bound again.
     let book = book()?;
     let mut document = Document::default();
@@ -360,21 +403,30 @@ fn a_chain_that_moves_draws_its_leaders_once() -> TestResult {
         RunStyle::default()
             .with_fonts(RunFonts::new("Liberation Sans"))
             .with_size(Pt(1.0))
-            .with_scale(1),
+            .with_scale(43),
     );
-    let stops = (1..=50).map(|stop| {
+    let stops = (1..=130).map(|stop| {
         TabStop::default()
             .with_position(Pt(f64::from(stop) * 11.0))
             .with_leader(TabLeader::Dot)
     });
-    let mut leaders = vec![Inline::text("A", style)];
-    leaders.extend((0..50).map(|_| Inline::tab(style)));
-    let mut blocks: Vec<Block> = (0..6)
+    let mut leaders = Vec::new();
+    for line in 0..14 {
+        if line > 0 {
+            leaders.push(Inline::line_break(BreakClear::None, style));
+        }
+        leaders.push(Inline::text("A", style));
+        leaders.extend((0..130).map(|_| Inline::tab(style)));
+    }
+    let mut blocks: Vec<Block> = (0..57)
         .map(|_| paragraph(style, exact(0.0), vec![Inline::text("A", style)]))
         .collect();
     blocks.push(paragraph(
         style,
-        exact(0.0).with_keep_next(true).with_tabs(stops),
+        exact(0.0)
+            .with_keep_next(true)
+            .with_keep_lines(true)
+            .with_tabs(stops),
         leaders,
     ));
     let three = vec![
@@ -385,12 +437,13 @@ fn a_chain_that_moves_draws_its_leaders_once() -> TestResult {
         Inline::text("A", style),
     ];
     blocks.push(paragraph(style, exact(0.0).with_keep_lines(true), three));
-    // A body 160 pt high and 600 pt wide: eight lines of 20 pt.
-    let setup = PageSetup::new(PageSize::new(Pt(744.0), Pt(304.0)));
+    // A body 1440 pt high and wide: 72 lines of 20 pt. The 57 lines and the 14 fit, the
+    // three after them do not.
+    let setup = PageSetup::new(PageSize::new(Pt(1584.0), Pt(1584.0)));
     document.add_section(Section::new(setup).with_blocks(blocks));
     let laid = fuzzing::paginate(&book, &document, 100)?;
     let second = laid.pages().get(1).ok_or("no second page")?;
-    assert_eq!(second.fragments().first().map(|f| f.paragraph()), Some(6));
+    assert_eq!(second.fragments().first().map(|f| f.paragraph()), Some(57));
     let glyphs: usize = second
         .text()
         .lines()

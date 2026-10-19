@@ -38,6 +38,7 @@ pub mod ir;
 mod itemize;
 mod layout_tables;
 mod lines;
+mod lists;
 mod metrics;
 mod numbers;
 mod pages;
@@ -48,6 +49,7 @@ mod report;
 mod shape;
 mod slot;
 mod symbol;
+mod tables;
 mod tabs;
 #[cfg(test)]
 mod testing;

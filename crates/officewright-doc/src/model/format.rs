@@ -10,8 +10,8 @@ use std::sync::Arc;
 use super::Document;
 use super::numbering::ListLevel;
 use super::properties::{
-    ColorValue, FontHint, Highlight, Justification, Ligatures, LineSpacing, ParagraphBorders,
-    Shading, TabStop, Toggle, UnderlineStyle, VerticalPosition,
+    ColorValue, FontChoices, FontHint, Frame, Highlight, Justification, Ligatures, LineSpacing,
+    ParagraphBorders, Shading, TabStop, TextEffects, Toggle, UnderlineStyle, VerticalPosition,
 };
 
 /// The font families of a run in effect, by the kind of character, with theme fonts
@@ -56,11 +56,9 @@ impl FontFamilies {
     }
 }
 
-/// The formatting of a run in effect, as Word shows it: the document defaults, the
-/// paragraph's style, the run's character style and its direct formatting combined.
-///
-/// Tables do not contribute yet: inside a table the formatting a table style gives is
-/// left out.
+/// The formatting of a run in effect, as Word shows it: the document defaults, in a cell
+/// what the table's style gives, the paragraph's style, the run's character style and its
+/// direct formatting combined.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct CharacterFormat {
@@ -84,6 +82,14 @@ pub struct CharacterFormat {
     pub(crate) language_bidi: Option<Arc<str>>,
     pub(crate) ligatures: Ligatures,
     pub(crate) contextual_alternates: bool,
+    /// Whether the text has an emphasis mark (`w:em`), which the layout does not draw.
+    pub(crate) emphasis_mark: bool,
+    /// Whether the text has a border around it (`w:bdr`), which the layout does not draw.
+    pub(crate) border: bool,
+    /// Word 2010's effects of the text, which the layout does not draw.
+    pub(crate) text_effects: TextEffects,
+    /// Word 2010's choices of the font's glyphs, which the layout does not apply.
+    pub(crate) font_choices: FontChoices,
 }
 
 macro_rules! flags {
@@ -270,10 +276,8 @@ impl ParagraphFlag {
 }
 
 /// The formatting of a paragraph in effect, as Word lays it out: the document defaults,
-/// the paragraph's style, its list level and its direct formatting combined.
-///
-/// Tables do not contribute yet: inside a table the formatting a table style gives is
-/// left out.
+/// in a cell what the table's style gives, the paragraph's style, its list level over
+/// that, and its direct formatting combined.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct ParagraphFormat {
@@ -298,6 +302,12 @@ pub struct ParagraphFormat {
     pub(crate) tabs: Arc<[TabStop]>,
     pub(crate) outline_level: Option<u8>,
     pub(crate) list: Option<ListFormat>,
+    /// Whether the paragraph is a text frame or a drop cap (`w:framePr`), which the layout
+    /// does not place.
+    pub(crate) frame: Option<Frame>,
+    /// Whether the paragraph's mark is deleted as a tracked change, written on the
+    /// paragraph itself.
+    pub(crate) mark_deleted: bool,
 }
 
 macro_rules! paragraph_flags {
