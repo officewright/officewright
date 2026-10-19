@@ -273,7 +273,7 @@ changed, and how many body paragraphs it gave another style, how fields were ren
 PDF's SHA-256 and the poppler version. `geometry.json` lists each of those properties as
 `- ` (dropped), `+ ` (added) or `~ ` (changed, old `->` new), then `owner: path
 attribute=value`, or `owner: path` for an element that sets something by being there
-(`w:b`, a style's `w:default`). The owner is a style id, `docDefaults`, `abstractNum N`, `abstractNum N
+(`w:b`) and `owner: default` for a style marked default. The owner is a style id, `docDefaults`, `abstractNum N`, `abstractNum N
 level L` or `num N`, with the input's ids, since Word numbers lists again when it saves; a
 list or instance of the copy that has no counterpart in the input is `copy N`. Word
 sometimes writes a language tag or number format into the re-saved copy that the input did

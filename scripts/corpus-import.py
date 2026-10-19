@@ -458,10 +458,10 @@ def numbering_ids(
     it saves, so they are matched by what stays. A definition by its w:nsid, else through the
     instances that use it, else by its id. The instances of a definition in the order of their
     ids when the copy has as many (so by id when it kept them), since Word keeps that order
-    when it numbers them again (contract-zh: 1, 2, 3, 4, 6 became 1 to 5). Else first those
-    with the same overrides as one of the input's left, then the others, each taking the one
-    with its id, else the first in order. Then an instance left over by its id. Copy id ->
-    input id; an id left out has no counterpart."""
+    when it numbers them again (contract-zh: 1, 2, 3, 4, 6 became 1 to 5). Else each in turn
+    among the input's left: those with the same overrides if any, else all, the one with its
+    id, else the first. Then an instance left over by its id. Copy id -> input id; an id left
+    out has no counterpart."""
     if original is None or resaved is None:
         return {}, {}
 
@@ -517,15 +517,14 @@ def numbering_ids(
         if len(copies) == len(inputs):
             num.update(zip(copies, inputs))
         else:
-            # Those with the same overrides first, so that another cannot take their match.
-            for exact in (True, False):
-                for copy_num in (n for n in copies if n not in num):
-                    left = [n for n in inputs if n not in num.values()]
-                    alike = [n for n in left if set_before[n] == set_after[copy_num]]
-                    if not exact:
-                        alike = alike or left
-                    if alike:
-                        num[copy_num] = copy_num if copy_num in alike else alike[0]
+            # Word drops instances nothing uses and adds new ones after the others, so the
+            # copy's instances are taken in order, each by its overrides if one of the
+            # input's left has the same, else from all those left.
+            for copy_num in copies:
+                left = [n for n in inputs if n not in num.values()]
+                alike = [n for n in left if set_before[n] == set_after[copy_num]] or left
+                if alike:
+                    num[copy_num] = copy_num if copy_num in alike else alike[0]
     for copy_num in uses_after:
         if copy_num not in num and copy_num in uses_before and copy_num not in num.values():
             num[copy_num] = copy_num
@@ -534,7 +533,7 @@ def numbering_ids(
 
 def id_order(number: str) -> tuple[int, int | str]:
     """A list id as a number where it is one, so that 10 comes after 9."""
-    return (0, int(number)) if number.isdigit() else (1, number)
+    return (0, int(number)) if number.isdecimal() else (1, number)
 
 
 def copy_id(ids: dict[str, str] | None, number: str) -> str:

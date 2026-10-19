@@ -1289,7 +1289,7 @@ class Changes(unittest.TestCase):
         self.assertEqual(importer.numbering_changes(before, after),
                          ["- num 1: abstractNumId val=0"])
 
-    def test_pairing_follows_ids_and_lets_no_instance_take_another_s_match(self):
+    def test_pairing_follows_ids_and_word_adds_instances_after_the_others(self):
         d, i = self.definition, self.instance
         # numbering.xml written out of id order: in order means in the order of the ids.
         before = self.numbering(d(0, "00AA"), i(3, 0, 9), i(2, 0, 5))
@@ -1299,10 +1299,23 @@ class Changes(unittest.TestCase):
         before = self.numbering(d(0, "00AA"), i(9, 0, 5), i(10, 0, 9))
         after = self.numbering(d(0, "00AA"), i(1, 0, 5), i(2, 0, 9))
         self.assertEqual(importer.numbering_changes(before, after), [])
-        # An instance the copy adds comes first: the other keeps its match by overrides.
-        before = self.numbering(d(0, "00AA"), i(2, 0, 5))
-        after = self.numbering(d(0, "00AA"), i(1, 0), i(2, 0, 5))
-        self.assertEqual(importer.numbering_changes(before, after), [])
+        # Word adds an instance after the others: here with instance 1's old restart, while
+        # instance 1 now restarts at 9. Its own id still pairs instance 1.
+        before = {**self.numbering(d(0, "00AA"), i(1, 0, 5), i(2, 0)), **self.style_naming(1)}
+        after = {**self.numbering(d(0, "00AA"), i(1, 0, 9), i(2, 0), i(3, 0, 5)),
+                 **self.style_naming(1)}
+        self.assertEqual(importer.numbering_changes(before, after),
+                         ["~ num 1: lvlOverride[ilvl=0]/startOverride val=5 -> 9"])
+        self.assertEqual(importer.style_changes(before, after), [])
+        # Fewer instances and none with the same overrides: the first left.
+        before = self.numbering(d(0, "00AA"), i(2, 0, 5), i(3, 0))
+        after = self.numbering(d(0, "00AA"), i(1, 0, 9))
+        self.assertEqual(importer.numbering_changes(before, after), [
+            "~ num 2: lvlOverride[ilvl=0]/startOverride val=5 -> 9",
+            "- num 3: abstractNumId val=0",
+        ])
+        # An id that is not a number, from a damaged input, is ordered too.
+        self.assertEqual(importer.id_order("²"), (1, "²"))
         # A style that names an instance only the input has now names none.
         before = {**self.numbering(d(0, "00AA"), i(1, 0), i(6, 0, 5)), **self.style_naming(6)}
         after = {**self.numbering(d(0, "00AA"), i(1, 0)), **self.style_naming(6)}
