@@ -436,7 +436,7 @@ fn lists_what_sections_paragraphs_and_runs_have_that_the_ir_leaves_out() {
             "sections[0].blocks[1]: a right-to-left paragraph (w:bidi) is laid out left to right, here and wherever else the document has one",
             "sections[0].blocks[2]: a text frame (w:framePr) is laid out as an ordinary paragraph, here and wherever else the document has one",
             "sections[0].blocks[3]: a drop cap (w:framePr) is laid out as an ordinary paragraph, here and wherever else the document has one",
-            "sections[0].blocks[4]: a paragraph mark deleted as a tracked change (w:del) is kept, so the paragraph is not joined to the next as in Word's PDF of the document without markup, here and wherever else the document has one",
+            "sections[0].blocks[4]: a paragraph mark deleted or moved away as a tracked change (w:del or w:moveFrom) is kept, so the paragraph is not joined to the next as in Word's PDF of the document without markup, here and wherever else the document has one",
             "sections[0].blocks[5].rows[0]: a table row deleted as a tracked change (w:del) is kept, where Word's PDF of the document without markup leaves it out, here and wherever else the document has one",
         ]
     );
@@ -482,6 +482,204 @@ fn lists_no_feature_of_a_run_that_shows_no_text() {
         translation.left_out().is_empty(),
         "{:?}",
         translation.left_out()
+    );
+}
+
+#[test]
+fn lists_a_border_around_a_run_of_a_tab_and_the_glyph_features_of_symbols_and_references() {
+    // From the re-check of #326: a border is drawn around a tab too (a picture in the
+    // line: `tests::drawing`), but the features of glyphs only around what shows text:
+    // a symbol, a non-breaking hyphen, a note's reference mark, a legacy page number.
+    let messages = |document: &Document| -> Vec<String> {
+        translate(document)
+            .left_out()
+            .iter()
+            .map(|entry| entry.message().to_owned())
+            .collect()
+    };
+    let run = |r_pr: &str, content: &str| {
+        open(&format!(
+            "<w:p><w:r><w:rPr>{r_pr}</w:rPr>{content}</w:r></w:p>"
+        ))
+    };
+    let border = r#"<w:bdr w:val="single" w:sz="4"/>"#;
+    let bordered =
+        "borders around text (w:bdr) are not drawn, here and wherever else the document has them";
+    let embossed =
+        "embossed text (w:emboss) is drawn plain, here and wherever else the document has it";
+    assert_eq!(messages(&run(border, "<w:tab/>")), [bordered]);
+    assert_eq!(
+        messages(&run(&format!("{border}<w:emboss/>"), "<w:tab/>")),
+        [bordered]
+    );
+    assert!(messages(&run(&format!("{border}<w:vanish/>"), "<w:tab/>")).is_empty());
+    for content in [
+        r#"<w:sym w:font="Symbol" w:char="F041"/>"#,
+        "<w:noBreakHyphen/>",
+        "<w:pgNum/>",
+    ] {
+        assert_eq!(
+            messages(&run("<w:emboss/>", content)),
+            [embossed],
+            "{content}"
+        );
+    }
+    // A note's reference in the text and the note's own reference mark; the note is
+    // translated where it is referred to.
+    let footnotes = |r_pr: &str| {
+        let footnotes = format!(
+            r#"<w:footnotes xmlns:w="{W}"><w:footnote w:id="1"><w:p><w:r><w:rPr>{r_pr}</w:rPr><w:footnoteRef/></w:r></w:p></w:footnote></w:footnotes>"#
+        );
+        [("footnotes", "footnotes.xml", footnotes)]
+    };
+    let entries = |reference: &str, mark: &str| -> Vec<String> {
+        let body = format!(
+            r#"<w:p><w:r><w:rPr>{reference}</w:rPr><w:footnoteReference w:id="1"/></w:r></w:p>"#
+        );
+        translate(&with_parts(&body, &footnotes(mark)))
+            .left_out()
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    };
+    assert_eq!(
+        entries("<w:emboss/>", ""),
+        [format!("sections[0].blocks[0].inlines: {embossed}")]
+    );
+    assert_eq!(
+        entries("", "<w:emboss/>"),
+        [format!("notes[0].blocks[0].inlines: {embossed}")]
+    );
+}
+
+#[test]
+fn lists_a_deleted_mark_only_where_a_block_follows_it() {
+    // From the re-check of #326: Word joins a paragraph whose mark is deleted to what
+    // follows it, but the last paragraph of a cell or a story has nothing after it; Word
+    // marks those of every cell of a row it deletes.
+    let mark = |kind: &str, section: &str| {
+        format!(
+            r#"<w:p><w:pPr><w:rPr><w:{kind} w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z"/></w:rPr>{section}</w:pPr><w:r><w:t>text</w:t></w:r></w:p>"#
+        )
+    };
+    let deleted = mark("del", "");
+    let entries = |document: &Document| -> Vec<String> {
+        translate(document)
+            .left_out()
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    };
+    let message = "a paragraph mark deleted or moved away as a tracked change (w:del or w:moveFrom) is kept, so the paragraph is not joined to the next as in Word's PDF of the document without markup, here and wherever else the document has one";
+    let row = |cell: &str| format!("<w:tbl><w:tr><w:tc>{cell}</w:tc></w:tr></w:tbl>");
+    for body in [
+        format!("{}<w:p/>", row(&deleted)),
+        format!(
+            r#"{}<w:p/>"#,
+            row(&format!(r#"<w:p/>{deleted}<w:bookmarkEnd w:id="0"/>"#))
+        ),
+        format!("<w:p/>{deleted}"),
+    ] {
+        assert!(entries(&open(&body)).is_empty(), "{body}");
+    }
+    for (body, at) in [
+        (
+            format!("{}<w:p/>", row(&format!("{deleted}<w:p/>"))),
+            "sections[0].blocks[0].rows[0].cells[0].blocks[0]",
+        ),
+        (
+            format!("<w:p/>{}<w:p/>", mark("moveFrom", "")),
+            "sections[0].blocks[1]",
+        ),
+        (
+            format!("{deleted}{}<w:p/>", row("<w:p/>")),
+            "sections[0].blocks[0]",
+        ),
+        (
+            format!("{deleted}<w:sdt><w:sdtContent><w:p/></w:sdtContent></w:sdt>"),
+            "sections[0].blocks[0]",
+        ),
+        // Word removes the section break with the mark that holds it.
+        (
+            format!("{}<w:p/>", mark("del", "<w:sectPr/>")),
+            "sections[0].blocks[0]",
+        ),
+    ] {
+        assert_eq!(
+            entries(&open(&body)),
+            [format!("{at}: {message}")],
+            "{body}"
+        );
+    }
+    // A header's last paragraph, translated between two bodies, joins neither, and does
+    // not stop the end of the first from joining the second.
+    let header = (
+        "header",
+        "header1.xml",
+        format!(r#"<w:hdr xmlns:w="{W}"><w:p/>{deleted}</w:hdr>"#),
+    );
+    let reference = r#"<w:headerReference w:type="default" r:id="rId0"/>"#;
+    let body = format!("<w:p/><w:p/><w:sectPr>{reference}</w:sectPr>");
+    assert!(entries(&with_parts(&body, std::slice::from_ref(&header))).is_empty());
+    let body = format!(
+        "{}<w:p/><w:sectPr>{reference}</w:sectPr>",
+        mark("del", "<w:sectPr/>")
+    );
+    assert_eq!(
+        entries(&with_parts(&body, &[header])),
+        [format!("sections[0].blocks[0]: {message}")]
+    );
+    // So does a note's.
+    let footnotes = format!(
+        r#"<w:footnotes xmlns:w="{W}"><w:footnote w:id="1">{deleted}</w:footnote></w:footnotes>"#
+    );
+    let body = r#"<w:p><w:r><w:footnoteReference w:id="1"/></w:r></w:p><w:p/>"#;
+    assert!(
+        entries(&with_parts(
+            body,
+            &[("footnotes", "footnotes.xml", footnotes)]
+        ))
+        .is_empty()
+    );
+}
+
+#[test]
+fn lists_rows_and_cells_deleted_as_tracked_changes_but_not_from_a_table_style() {
+    // From the re-check of #326: a deleted row of a table with a style, whose row
+    // properties the style's are laid under, and a cell deleted with w:cellDel; a table
+    // style records no tracked change, so one written in it deletes nothing.
+    let revision = r#"w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z""#;
+    let styles = (
+        "styles",
+        "styles.xml",
+        format!(
+            r#"<w:styles xmlns:w="{W}"><w:style w:type="table" w:styleId="Grid"><w:name w:val="Grid"/><w:trPr><w:del {revision}/></w:trPr><w:tcPr><w:cellDel {revision}/></w:tcPr><w:tblStylePr w:type="firstRow"><w:trPr><w:del {revision}/></w:trPr><w:tcPr><w:cellDel {revision}/></w:tcPr></w:tblStylePr></w:style></w:styles>"#
+        ),
+    );
+    let table = |tr_pr: &str, tc_pr: &str| {
+        format!(
+            r#"<w:tbl><w:tblPr><w:tblStyle w:val="Grid"/></w:tblPr><w:tblGrid><w:gridCol w:w="1000"/><w:gridCol w:w="1000"/></w:tblGrid><w:tr><w:trPr>{tr_pr}</w:trPr><w:tc><w:p/></w:tc><w:tc><w:tcPr>{tc_pr}</w:tcPr><w:p/></w:tc></w:tr></w:tbl><w:p/>"#
+        )
+    };
+    let entries = |body: &str| -> Vec<String> {
+        translate(&with_parts(body, std::slice::from_ref(&styles)))
+            .left_out()
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    };
+    assert!(entries(&table("", "")).is_empty());
+    assert_eq!(
+        entries(&table(&format!("<w:del {revision}/>"), "")),
+        [
+            "sections[0].blocks[0].rows[0]: a table row deleted as a tracked change (w:del) is kept, where Word's PDF of the document without markup leaves it out, here and wherever else the document has one"
+        ]
+    );
+    assert_eq!(
+        entries(&table("", &format!("<w:cellDel {revision}/>"))),
+        [
+            "sections[0].blocks[0].rows[0].cells[1]: a table cell deleted as a tracked change (w:cellDel) is kept, where Word's PDF of the document without markup leaves it out, here and wherever else the document has one"
+        ]
     );
 }
 

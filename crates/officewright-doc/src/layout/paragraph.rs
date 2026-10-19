@@ -32,12 +32,6 @@ pub(super) fn paragraph<'a>(t: &mut Translator<'a>, paragraph: Paragraph<'a>) ->
         ),
         None => {}
     }
-    if format.mark_deleted {
-        t.report_once(
-            Once::DeletedMark,
-            "a paragraph mark deleted as a tracked change (w:del) is kept, so the paragraph is not joined to the next as in Word's PDF of the document without markup, here and wherever else the document has one",
-        );
-    }
     let mark = t.formats.paragraph_mark(paragraph);
     let mark = t.run_style(&mark);
     let list = format.list().and_then(|list| {
@@ -51,6 +45,10 @@ pub(super) fn paragraph<'a>(t: &mut Translator<'a>, paragraph: Paragraph<'a>) ->
     t.path.push(super::Step::Field("inlines"));
     let inlines = t.inlines(paragraph, mark);
     t.path.pop();
+    // Listed once a block follows, which Word joins this one to (`blocks_in`).
+    if format.mark_deleted && !t.reported(Once::DeletedMark) {
+        t.deleted_mark = Some(t.location());
+    }
     ir::Paragraph::new(mark)
         .with_props(props)
         .with_inlines(inlines)

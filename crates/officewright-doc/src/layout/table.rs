@@ -257,6 +257,12 @@ impl<'a> Translator<'a> {
         span: u16,
         margins: &ir::CellMargins,
     ) -> ir::Cell {
+        if properties.deleted == Some(true) {
+            self.report_once(
+                Once::DeletedCell,
+                "a table cell deleted as a tracked change (w:cellDel) is kept, where Word's PDF of the document without markup leaves it out, here and wherever else the document has one",
+            );
+        }
         if properties.fit_text() == Some(true) {
             self.leave_out(ReportKind::FeatureUnsupported, || {
                 "the cell's text fitting (w:tcFitText) is not applied".into()

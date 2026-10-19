@@ -608,6 +608,9 @@ pub struct TableCellProperties {
     pub(crate) fit_text: Option<bool>,
     pub(crate) vertical_justification: Option<VerticalJustification>,
     pub(crate) hide_mark: Option<bool>,
+    /// Whether the cell is deleted as a tracked change (`w:cellDel`); the translation into
+    /// the layout IR keeps the cell, which it lists.
+    pub(crate) deleted: Option<bool>,
 }
 
 impl TableCellProperties {
@@ -786,7 +789,8 @@ impl TableRowProperties {
     /// Drops what Word does not allow in the `w:trPr` of a table style or of its
     /// conditional formats: the grid and widths before and after the cells and the
     /// height (MS-OI29500 §17.7.6.10(b), §17.7.6.11(a)); and `w:hidden`, which Word
-    /// ignores there (§17.7.6.10(a), §17.7.6.11(b)).
+    /// ignores there (§17.7.6.10(a), §17.7.6.11(b)). A deletion, which only a row of the
+    /// document records, is dropped too.
     pub(crate) fn of_table_style(mut self) -> Self {
         self.grid_before = None;
         self.grid_after = None;
@@ -794,6 +798,7 @@ impl TableRowProperties {
         self.width_after = None;
         self.height = None;
         self.hidden = None;
+        self.deleted = None;
         self
     }
 
@@ -817,8 +822,10 @@ impl TableCellProperties {
     /// Drops what Word does not allow in the `w:tcPr` of a table style or of its
     /// conditional formats: the width, span, merges, fitting, hidden mark and text
     /// direction (MS-OI29500 §17.7.6.8(b), §17.7.6.9(a)), and in the style's own, the
-    /// borders (§17.7.6.9(b)). As for `w:tblPr`, leaving them out is our choice (#172).
+    /// borders (§17.7.6.9(b)). As for `w:tblPr`, leaving them out is our choice (#172). A
+    /// deletion, which only a cell of the document records, is dropped too.
     pub(crate) fn of_table_style(mut self, conditional: bool) -> Self {
+        self.deleted = None;
         self.width = None;
         self.grid_span = None;
         self.horizontal_merge = None;
@@ -910,6 +917,7 @@ impl TableCellProperties {
             &above.vertical_justification,
         );
         overwrite(&mut self.hide_mark, &above.hide_mark);
+        overwrite(&mut self.deleted, &above.deleted);
     }
 }
 

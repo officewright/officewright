@@ -43,7 +43,8 @@ impl<'a> Translator<'a> {
                 self.missing_image()
             }
         };
-        // The IR's picture has no outline and no colour effects yet (#303).
+        // The IR's picture has no outline, colour effects, other effects or shape yet
+        // (#303).
         if picture.has_outline() {
             self.report_once(
                 Once::PictureOutline,
@@ -54,6 +55,18 @@ impl<'a> Translator<'a> {
             self.report_once(
                 Once::PictureColor,
                 "a picture's colour or transparency effects (a:blip, such as a:grayscl or a:lum) are not applied, here and wherever else the document has them",
+            );
+        }
+        if picture.has_effects() {
+            self.report_once(
+                Once::PictureEffects,
+                "a picture's shadow, reflection, glow, soft edges or 3-D effect (a:effectLst, a:scene3d, a:sp3d) is not drawn, here and wherever else the document has one",
+            );
+        }
+        if picture.is_shaped() {
+            self.report_once(
+                Once::PictureShape,
+                "a picture cut to a shape (a:prstGeom other than rect, or a:custGeom) is drawn whole as a rectangle, here and wherever else the document has one",
             );
         }
         let crop = picture.crop().map(|crop| {

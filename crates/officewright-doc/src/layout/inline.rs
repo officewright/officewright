@@ -80,8 +80,9 @@ impl<'a> Translator<'a> {
     fn run(&mut self, run: Run<'a>, content: &mut Content) {
         let format = self.formats.run(run);
         let style = self.run_style(&format);
-        // Whether the run shows text, which its features would change.
-        let mut shows = false;
+        // Whether the run shows text, which its features would change, and whether it
+        // holds a tab or a picture in the line, which a border around it would surround.
+        let (mut shows, mut boxed) = (false, false);
         for item in run.content() {
             match item {
                 RunContent::Text(text) => {
@@ -94,7 +95,10 @@ impl<'a> Translator<'a> {
                 // neither is listed (#303).
                 RunContent::DeletedText(_) | RunContent::DeletedFieldCode(_) => {}
                 RunContent::FieldCode(text) => content.instruction(text),
-                RunContent::Tab => content.push(ir::Inline::tab(style)),
+                RunContent::Tab => {
+                    boxed = true;
+                    content.push(ir::Inline::tab(style));
+                }
                 RunContent::Break(brk) => content.push(match brk.kind() {
                     BreakKind::Line => ir::Inline::line_break(clear(brk.clear()), style),
                     BreakKind::Page => ir::Inline::page_break(style),
@@ -125,21 +129,27 @@ impl<'a> Translator<'a> {
                 RunContent::SoftHyphen => content.push(ir::Inline::soft_hyphen(style)),
                 RunContent::FootnoteReference(id) => {
                     if let Some(note) = self.note_reference(false, id) {
+                        shows = true;
                         content.push(ir::Inline::note_reference(note, false, style));
                     }
                 }
                 RunContent::EndnoteReference(id) => {
                     if let Some(note) = self.note_reference(true, id) {
+                        shows = true;
                         content.push(ir::Inline::note_reference(note, false, style));
                     }
                 }
-                RunContent::NoteNumber => content.push(ir::Inline::note_number(style)),
+                RunContent::NoteNumber => {
+                    shows = true;
+                    content.push(ir::Inline::note_number(style));
+                }
                 RunContent::Separator => content.push(ir::Inline::separator(style)),
                 RunContent::ContinuationSeparator => {
                     content.push(ir::Inline::continuation_separator(style));
                 }
                 RunContent::Drawing(drawing) => {
                     if let Some(object) = self.drawing(drawing) {
+                        boxed |= drawing.is_inline();
                         content.push(object);
                     }
                 }
@@ -147,6 +157,7 @@ impl<'a> Translator<'a> {
                 // The legacy page number: a PAGE field (ECMA-376 Part 1, §17.3.3.22).
                 RunContent::Other(other) if other.local_name() == "pgNum" => {
                     if content.fields.is_empty() {
+                        shows = true;
                         content.push(ir::Inline::Field(ir::Field::new(
                             ir::FieldKind::Page,
                             style,
@@ -174,16 +185,26 @@ impl<'a> Translator<'a> {
                 }
             }
         }
-        if shows && !format.hidden() {
-            self.report_run_features(&format);
+        if !format.hidden() && (shows || boxed) {
+            self.report_run_features(&format, shows);
         }
     }
 
     /// Lists the features of a run's formatting that the IR's run style has no place
-    /// for, so that the PDF shows its text without them (#303). Only a run that shows
-    /// text and is not hidden counts: a hidden run, or one that holds only a field's
-    /// instruction, shows nothing they could change.
-    fn report_run_features(&mut self, format: &CharacterFormat) {
+    /// for, so that the PDF shows the run without them (#303). Only a run that is not
+    /// hidden counts, and one that `shows` text for the features of its glyphs: a hidden
+    /// run, or one that holds only a field's instruction, shows nothing they could
+    /// change. A border surrounds a tab or a picture in the line too.
+    fn report_run_features(&mut self, format: &CharacterFormat, shows: bool) {
+        if format.border {
+            self.report_once(
+                Once::RunBorder,
+                "borders around text (w:bdr) are not drawn, here and wherever else the document has them",
+            );
+        }
+        if !shows {
+            return;
+        }
         for (on, once, message) in [
             (
                 format.emboss(),
@@ -209,11 +230,6 @@ impl<'a> Translator<'a> {
                 format.emphasis_mark,
                 Once::EmphasisMark,
                 "emphasis marks (w:em) are not drawn, here and wherever else the document has them",
-            ),
-            (
-                format.border,
-                Once::RunBorder,
-                "borders around text (w:bdr) are not drawn, here and wherever else the document has them",
             ),
         ] {
             if on {

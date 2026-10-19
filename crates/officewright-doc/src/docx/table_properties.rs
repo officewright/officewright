@@ -117,6 +117,7 @@ pub(crate) fn cell_properties(
                     value(child, names, "val", VerticalJustification::from_xml, report);
             }
             "hideMark" => properties.hide_mark = on_off(child, names, report),
+            "cellDel" => properties.deleted = Some(true),
             _ => {}
         }
     }

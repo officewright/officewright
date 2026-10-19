@@ -241,7 +241,7 @@ pub(super) fn section<'a>(t: &mut Translator<'a>, section: Section<'a>) -> ir::S
     );
     let headers = t.header_footer_set(section, true);
     let footers = t.header_footer_set(section, false);
-    let blocks = t.blocks(section.blocks());
+    let blocks = t.body_blocks(section.blocks());
     ir::Section::new(page)
         .with_columns(columns)
         .with_start(start)
@@ -278,7 +278,7 @@ impl<'a> Translator<'a> {
             };
             self.path.extend([Step::Field(place), Step::Field(field)]);
             if !self.header_footers.contains_key(&story.index()) {
-                let blocks = self.blocks_in(None, story.blocks());
+                let blocks = self.blocks_in(None, story.blocks(), false);
                 let weight = weight(&blocks);
                 self.header_footers.insert(story.index(), (blocks, weight));
             }
