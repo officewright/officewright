@@ -1689,6 +1689,18 @@ mod tests {
             ("\u{0665}\u{0660}\u{066A}", false, false),
             ("\u{0600}\u{0661}\u{0662}", false, false),
             ("1\u{FB29}2", false, false),
+            ("\u{0601}", false, false),
+            ("\u{0604}", false, false),
+            ("\u{0609}", false, false),
+            ("\u{060A}", false, false),
+            ("\u{066C}", false, false),
+            ("\u{0890}", false, false),
+            ("\u{0891}", false, false),
+            ("\u{10D30}\u{10D31}", false, false),
+            ("\u{10D40}\u{10D41}", false, false),
+            ("\u{0710}", false, true),
+            ("\u{0780}", false, true),
+            ("\u{07CA}", false, true),
             ("\u{10900}\u{10901}", false, true),
         ] {
             let mut only = Document::default();
@@ -1753,9 +1765,17 @@ mod tests {
                     if text.is_empty() {
                         lines(style, 3, props)
                     } else {
+                        // A line break where the text has a newline.
+                        let mut inlines = Vec::new();
+                        for (n, part) in text.split('\n').enumerate() {
+                            if n > 0 {
+                                inlines.push(Inline::line_break(BreakClear::None, style));
+                            }
+                            inlines.push(Inline::text(part, style));
+                        }
                         Paragraph::new(style)
                             .with_props(props)
-                            .with_inlines([Inline::text(text, style)])
+                            .with_inlines(inlines)
                             .into()
                     }
                 })
@@ -1766,6 +1786,8 @@ mod tests {
             entries_at(&report, ReportKind::FeatureUnsupported, what)
         };
         let (wraps, fits, broken) = (long.as_str(), "A", "");
+        // Only the lines in its middle wrap: a line break before them and after them.
+        let middle = format!("A\n{long}\nA");
         assert_eq!(laid_with(true, [(wraps, true); 3]), [""; 0]);
         assert_eq!(
             laid_with(true, [(wraps, true), (wraps, false), (wraps, false)]),
@@ -1780,6 +1802,10 @@ mod tests {
         assert_eq!(
             laid_with(true, [(fits, false), (broken, false), (fits, false)]),
             [""; 0]
+        );
+        assert_eq!(
+            laid_with(true, [(fits, false), (&middle, false), (fits, false)]),
+            ["sections[0].blocks[1]"]
         );
         assert_eq!(laid_with(false, [(wraps, false); 3]), [""; 0]);
     }
