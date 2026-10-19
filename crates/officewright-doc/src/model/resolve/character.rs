@@ -10,8 +10,8 @@ use super::{Formats, Layer, overwrite, style_index};
 use crate::model::Document;
 use crate::model::format::{CharacterFormat, FontFamilies};
 use crate::model::properties::{
-    Color, ColorValue, FontHint, Highlight, Ligatures, RunProperties, Shading, TextEffects,
-    ThemeColor, ThemeFont, Toggle, UnderlineStyle, VerticalPosition,
+    Color, ColorValue, FontChoices, FontHint, Highlight, Ligatures, RunProperties, Shading,
+    TextEffects, ThemeColor, ThemeFont, Toggle, UnderlineStyle, VerticalPosition,
 };
 use crate::model::settings::{ColorSchemeIndex, ColorSchemeMapping};
 use crate::model::styles::StyleKind;
@@ -104,19 +104,23 @@ const TOGGLES: [Toggle; 12] = [
 ];
 
 impl Formats<'_> {
-    /// Combines the levels of the hierarchy for a run whose paragraph style has the index
-    /// `paragraph_style` and whose own properties are `direct`, with `label`, what a list
-    /// level gives to its label, laid over them; in a cell, `table`, what the table style
-    /// gives, lies between the document defaults and the paragraph style (ECMA-376 Part 1,
-    /// §17.7.2). A run without a `w:rStyle` gets no character style: Word's default
+    /// Combines the levels of the hierarchy for a run, or a list label as `resolving`
+    /// says, whose paragraph style has the index `paragraph_style` and whose own
+    /// properties are `direct`; a label has what its level gives laid over them. In a
+    /// cell, `table`, what the table style gives, lies between the document defaults and
+    /// the paragraph style (ECMA-376 Part 1, §17.7.2). A run without a `w:rStyle` gets no character style: Word's default
     /// character style is DefaultParagraphFont, whose children it ignores.
     pub(super) fn resolve_run(
         &mut self,
         paragraph_style: Option<usize>,
         direct: &RunProperties,
         table: Option<&TableText>,
-        label: Option<&CharacterLevel>,
+        resolving: Resolving<'_>,
     ) -> CharacterFormat {
+        let label = match resolving {
+            Resolving::Run => None,
+            Resolving::Label(level) => level,
+        };
         let document = self.document;
         let defaults = self.run_defaults();
         let table = table.map(|table| &table.character);
@@ -158,7 +162,13 @@ impl Formats<'_> {
             }
         }
         if let Some(character) = &character {
+            let underline = (effect.underline_style, effect.underline_color);
             effect.overlay(character);
+            // Word gives a list label the size of the mark's character style but not its
+            // underline: word-rules/E-list-label-format.docx, case 05 (#330).
+            if matches!(resolving, Resolving::Label(_)) {
+                (effect.underline_style, effect.underline_color) = underline;
+            }
         }
         effect.overlay(&direct);
         if let Some(label) = label {
@@ -192,7 +202,8 @@ impl Formats<'_> {
             };
             // The list level's value, like direct formatting, sets it, as [MS-DOC] applies
             // the level's properties to the number text ("Determining List Formatting of
-            // a Paragraph", part 3, step 2); not confirmed against Word yet (#162).
+            // a Paragraph", part 3, step 2) and Word's render of
+            // word-rules/E-list-label-format.docx shows (cases 01 to 03).
             if let Some(value) = value(label, index) {
                 *slot = value;
             }
@@ -243,6 +254,7 @@ impl Formats<'_> {
             emphasis_mark: effect.emphasis_mark.unwrap_or(false),
             border: effect.border.unwrap_or(false),
             text_effects: effect.text_effects,
+            font_choices: effect.font_choices,
         }
     }
 
@@ -386,6 +398,16 @@ pub(super) struct CharacterLevel {
     emphasis_mark: Option<bool>,
     border: Option<bool>,
     text_effects: TextEffects,
+    font_choices: FontChoices,
+}
+
+impl FontChoices {
+    /// Lays `above` over these choices, each on its own.
+    fn overlay(&mut self, above: &Self) {
+        overwrite(&mut self.number_form, above.number_form);
+        overwrite(&mut self.number_spacing, above.number_spacing);
+        overwrite(&mut self.stylistic_sets, above.stylistic_sets);
+    }
 }
 
 impl TextEffects {
@@ -399,6 +421,15 @@ impl TextEffects {
         overwrite(&mut self.turned, above.turned);
         overwrite(&mut self.depth, above.depth);
     }
+}
+
+/// What [`Formats::resolve_run`] resolves.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Resolving<'l> {
+    /// A run or a paragraph mark.
+    Run,
+    /// A list label, with what its level gives, if anything.
+    Label(Option<&'l CharacterLevel>),
 }
 
 impl CharacterLevel {
@@ -440,6 +471,7 @@ impl CharacterLevel {
             emphasis_mark,
             border,
             text_effects,
+            font_choices,
         } = self;
         fonts.iter().any(Option::is_some)
             || hint.is_some()
@@ -462,6 +494,7 @@ impl CharacterLevel {
             || emphasis_mark.is_some()
             || border.is_some()
             || text_effects.is_set()
+            || font_choices.is_set()
     }
 
     /// What one `w:rPr` gives.
@@ -510,6 +543,7 @@ impl CharacterLevel {
             emphasis_mark: properties.emphasis_mark,
             border: properties.border,
             text_effects: properties.text_effects,
+            font_choices: properties.font_choices,
         }
     }
 }
@@ -568,6 +602,7 @@ impl Layer for CharacterLevel {
         overwrite(&mut self.emphasis_mark, above.emphasis_mark);
         overwrite(&mut self.border, above.border);
         self.text_effects.overlay(&above.text_effects);
+        self.font_choices.overlay(&above.font_choices);
     }
 }
 

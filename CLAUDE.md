@@ -39,7 +39,9 @@ crates/
                         officewright-font as `font` with the pdf feature
   officewright-core     units (Pt, twips, EMU), PageSize, Color (sRGB), Error/Result
   officewright-font     font loading (TrueType/OpenType, collections), metrics, cmap, subsetting for
-                        embedding, system font index and font substitution with a report
+                        embedding with a check of single glyphs against it (`FontFace::check_subset_glyph`,
+                        so that the layout can draw text a damaged face cannot embed with another font),
+                        system font index and font substitution with a report
   officewright-opc      ZIP, XML, OPC packages and Markup Compatibility (ECMA-376 Parts 2 and 3) shared
                         by the OOXML readers; ZIP and XML are our own code, DEFLATE is miniz_oxide
   officewright-layout   page layout engine (shaping, text flow, line breaking, tables) — the core of DOCX→PDF;
@@ -48,8 +50,12 @@ crates/
                         chooses each character's font by Word's rule (MS-OI29500 2.1.88 b) with fallback,
                         shapes with HarfRust, breaks lines first fit by UAX #14 (unicode-linebreak) with
                         Word's rules on top, and flows paragraphs onto the pages of each section with Word's
-                        keep and widow rules, headers, footers, page numbers and list labels (counted per
-                        list definition, as Word counts), behind private modules;
+                        keep and widow rules, headers, footers, page numbers, list labels (counted per
+                        list definition, as Word counts) and tables (the grid's widths, merged cells,
+                        borders by Word's conflict rules, shading, nesting; a row is not split across
+                        pages, nor are header rows repeated, yet), and draws floating pictures where
+                        they are anchored (stacked behind or in front of the text, which does not wrap
+                        around them yet), behind private modules;
                         feature `pdf` renders a document into PDF with officewright-pdf (`render_pdf`,
                         hidden in the docs like the IR it takes, and `RenderOptions`);
                         feature `fuzzing` opens entry points for the fuzz targets, examples and the tests
@@ -311,6 +317,8 @@ The agent must not decide these alone:
 ```
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo clippy -p officewright-doc --all-targets -- -D warnings and cargo test -p officewright-doc --doc: the crate's tests and doc
+  examples also build without its features
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 cargo test --workspace --all-features
 cargo fmt --check and cargo clippy -D warnings on the fuzz/ workspace (Linux/macOS; cargo-fuzz does not run on Windows)
@@ -348,7 +356,7 @@ corpus-runner over tests/corpus (committed corpus), every document rendered with
 
 `scripts/nightly.sh` (scheduled CI; under an hour in parallel jobs, about six hours as one run): Miri on `officewright-ffi`, `fetch-corpus.sh --check all` (every pinned commit is still fetchable and every archive still has its pinned size; downloads nothing), the files of `tests/fonts` and `tests/fonts-word` compared byte for byte with the upstream sources THIRD-PARTY-NOTICES.md names (`scripts/check-test-fonts.sh`), fuzzing (30 min per target, each seeded with files of the format it reads, listed in `seeds()` in nightly.sh; 30 s per input, an allocation of 1 GiB or more fails the input, and the fuzzer may grow to 2.5 GiB, since it also holds its corpus and AddressSanitizer's quarantine and overhead; each target's crashing inputs uploaded as a CI artifact of its job; from Milestone 3), corpus-runner over the Word documents of `corpus-ext/` (Apache POI and LibreOffice, fetched by the run; each child under the 1 GiB limit; compared with `tools/corpus-runner/baseline-ext.json`), report uploaded as a CI artifact. `nightly.yml` runs `nightly.sh checks` (all but the fuzzing) in one job and `nightly.sh fuzz <target>` in a job of its own for each target that `nightly.sh fuzz-targets` lists, so no job nears GitHub's limit of 6 hours; with no arguments the script runs all of it, the targets one after another. The full `fetch-corpus.sh all` from scratch, which downloads every source and verifies every SHA-256, runs weekly.
 
-`.githooks/pre-commit` runs `scripts/check-added-files.sh --staged`, fmt, clippy and test. Enable once per clone: `git config core.hooksPath .githooks`. CI (`.github/workflows/ci.yml`) runs `check.sh` on Linux, Windows (Git Bash with the MSVC environment from `ilammy/msvc-dev-cmd`) and macOS plus an MSRV job on Rust 1.85 (`cargo test`, with poppler and qpdf for the corpus runner's tests); `nightly.yml` runs `nightly.sh` on Linux, its checks and each fuzz target in parallel jobs; `weekly.yml` runs the full corpus fetch on Linux. Actions are pinned by commit SHA and tools by version, except qpdf and poppler for the PDF output check and the MSRV job's corpus runner tests: they come from the runner's package manager (apt on `ubuntu-latest`, Homebrew on macOS), which keeps no installable old versions across runner image updates, so each CI step that installs them prints the versions it got.
+`.githooks/pre-commit` runs `scripts/check-added-files.sh --staged`, fmt, clippy and test. Enable once per clone: `git config core.hooksPath .githooks`. CI (`.github/workflows/ci.yml`, on pull requests, pushes to main and the merge queue's `merge_group` runs, which save no Rust cache) runs `check.sh` on Linux, Windows (Git Bash with the MSVC environment from `ilammy/msvc-dev-cmd`) and macOS plus an MSRV job on Rust 1.85 (`cargo test`, with poppler and qpdf for the corpus runner's tests); `nightly.yml` runs `nightly.sh` on Linux, its checks and each fuzz target in parallel jobs; `weekly.yml` runs the full corpus fetch on Linux. Actions are pinned by commit SHA and tools by version, except qpdf and poppler for the PDF output check and the MSRV job's corpus runner tests: they come from the runner's package manager (apt on `ubuntu-latest`, Homebrew on macOS), which keeps no installable old versions across runner image updates, so each CI step that installs them prints the versions it got.
 
 Required local tools: `qpdf poppler-utils mupdf-tools libreoffice-writer-nogui shellcheck python3` (apt), `cargo-deny cargo-machete cargo-c typos-cli taplo-cli cargo-fuzz` (cargo install, or their prebuilt release binaries), `actionlint`, nightly toolchain with `miri`; on Windows, MSVC and Git Bash. `check.sh` must print a clear install hint for any missing tool instead of skipping the check.
 

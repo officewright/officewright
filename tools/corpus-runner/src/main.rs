@@ -13,8 +13,9 @@
 //! Every Word document under the paths (`.docx`, `.docm`, `.dotx`, `.dotm`) is opened in a
 //! child process of its own (this program with `open FILE`), so a panic, a hang or a memory
 //! blow-up in one file is a result for that file, not the end of the run. A path named here
-//! is followed if it is a symbolic link; inside a directory, links to documents are followed
-//! and links to directories are not. A child that
+//! is followed if it is a symbolic link, after its "." and ".." are resolved by name, so that
+//! `dir/link/..` is `dir`, not the folder above the link's target; inside a directory, links
+//! to documents are followed and links to directories are not. A child that
 //! takes longer than the time-out (30 s) is stopped. Paths in the report, the baseline and
 //! the expected-errors file are relative to the root (by default the current directory)
 //! with forward slashes. Each file ends as

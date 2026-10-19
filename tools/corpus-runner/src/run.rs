@@ -54,8 +54,9 @@ fn run(options: &Options) -> Result<bool, String> {
     let launcher = Launcher::new(options)?;
     let index = reference_index(options)?;
     let mut scoring = BTreeMap::new();
+    // The files are absolute already, their "." and ".." resolved by collect's caller.
     for (name, file) in &files {
-        if let Some(pair) = index.get(&lexical_absolute(file)?) {
+        if let Some(pair) = index.get(file) {
             scoring.insert(name.clone(), pair.clone());
         }
     }
@@ -256,10 +257,10 @@ fn on_disk(path: &Path) -> Result<PathBuf, String> {
     lexical_absolute(path)
 }
 
-/// The file's path under the root, with forward slashes, the same on every system.
+/// The file's path under the root, with forward slashes, the same on every system; both
+/// are absolute, their "." and ".." already resolved by lexical_absolute.
 fn relative(root: &Path, file: &Path) -> Result<String, String> {
-    let full = lexical_absolute(file)?;
-    let rest = full.strip_prefix(root).map_err(|_| {
+    let rest = file.strip_prefix(root).map_err(|_| {
         format!(
             "{} is not under the root {}; pass --root",
             file.display(),

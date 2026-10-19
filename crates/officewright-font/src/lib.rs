@@ -26,6 +26,7 @@ mod index;
 mod name_offsets;
 mod resolve;
 mod subset;
+mod subset_check;
 mod system;
 #[cfg(test)]
 mod testing;
