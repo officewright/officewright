@@ -859,8 +859,8 @@
     },
     "tests/corpus/word-rules/E-highlight.docx": {
       "line_agreement": 0.7692,
-      "ssim_mean": 0.954,
-      "ssim_min": 0.954,
+      "ssim_mean": 0.9546,
+      "ssim_min": 0.9546,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-italic-missing.docx": {
