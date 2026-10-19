@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use officewright_core::Pt;
 
+use super::table::TableText;
 use super::{Formats, Layer, overwrite, style_index};
 use crate::model::Document;
 use crate::model::format::{CharacterFormat, FontFamilies};
@@ -105,17 +106,26 @@ const TOGGLES: [Toggle; 12] = [
 impl Formats<'_> {
     /// Combines the levels of the hierarchy for a run whose paragraph style has the index
     /// `paragraph_style` and whose own properties are `direct`, with `label`, what a list
-    /// level gives to its label, laid over them. A run without a `w:rStyle` gets no
-    /// character style: Word's default character style is DefaultParagraphFont, whose
-    /// children it ignores.
+    /// level gives to its label, laid over them; in a cell, `table`, what the table style
+    /// gives, lies between the document defaults and the paragraph style (ECMA-376 Part 1,
+    /// §17.7.2). A run without a `w:rStyle` gets no character style: Word's default
+    /// character style is DefaultParagraphFont, whose children it ignores.
     pub(super) fn resolve_run(
         &mut self,
         paragraph_style: Option<usize>,
         direct: &RunProperties,
+        table: Option<&TableText>,
         label: Option<&CharacterLevel>,
     ) -> CharacterFormat {
         let document = self.document;
         let defaults = self.run_defaults();
+        let table = table.map(|table| &table.character);
+        // A size of 11 or 12 pt the default paragraph style gives may give way to the
+        // table style's (`Formats::table_style_wins`).
+        let yields = table.is_some()
+            && paragraph_style.is_some()
+            && paragraph_style == self.paragraph_style(None)
+            && self.table_style_wins();
         let paragraph = paragraph_style.map(|index| {
             self.characters
                 .level(document, index, &CharacterLevel::default())
@@ -132,8 +142,23 @@ impl Formats<'_> {
 
         // Each level replaces what it gives.
         let mut effect = CharacterLevel::clone(&defaults);
-        for level in paragraph.iter().chain(character.iter()) {
-            effect.overlay(level);
+        if let Some(table) = table {
+            effect.overlay(table);
+        }
+        if let Some(paragraph) = &paragraph {
+            effect.overlay(paragraph);
+            if let Some(table) = table.filter(|_| yields) {
+                let small = |size: Option<Pt>| matches!(size, Some(Pt(11.0) | Pt(12.0)));
+                if small(paragraph.size) && table.size.is_some() {
+                    effect.size = table.size;
+                }
+                if small(paragraph.size_complex_script) && table.size_complex_script.is_some() {
+                    effect.size_complex_script = table.size_complex_script;
+                }
+            }
+        }
+        if let Some(character) = &character {
+            effect.overlay(character);
         }
         effect.overlay(&direct);
         if let Some(label) = label {
@@ -148,22 +173,21 @@ impl Formats<'_> {
         let mut toggles = [false; Toggle::COUNT];
         for (index, slot) in toggles.iter_mut().enumerate() {
             let is = |toggle: Toggle| toggle as usize == index;
-            let levels = (
-                value(Some(&defaults), index),
-                value(paragraph.as_deref(), index),
-                value(character.as_deref(), index),
-                value(Some(&direct), index),
-            );
+            let defaults = value(Some(&defaults), index);
+            let table = value(table, index);
+            let paragraph = value(paragraph.as_deref(), index);
+            let character = value(character.as_deref(), index);
+            let direct = value(Some(&direct), index);
             *slot = if TOGGLES.into_iter().any(is) {
-                toggle(levels.0, levels.1, levels.2, levels.3)
+                toggle(defaults, [table, paragraph, character], direct)
             } else {
                 // Word ignores webHidden in a character style (MS-OI29500 §17.3.2.44(a)).
-                let character = levels.2.filter(|_| !is(Toggle::WebHidden));
-                levels
-                    .3
+                let character = character.filter(|_| !is(Toggle::WebHidden));
+                direct
                     .or(character)
-                    .or(levels.1)
-                    .or(levels.0)
+                    .or(paragraph)
+                    .or(table)
+                    .or(defaults)
                     .unwrap_or(false)
             };
             // The list level's value, like direct formatting, sets it, as [MS-DOC] applies
@@ -300,27 +324,28 @@ fn word_run_defaults() -> CharacterLevel {
 }
 
 /// The value of a toggle property in effect, from the value each level of the hierarchy
-/// gives: the document defaults, the paragraph style and the character style, each the
-/// first value up its `w:basedOn` chain, and direct formatting.
+/// gives: the document defaults; the `styles`, in a cell the table style, then the
+/// paragraph style and the character style, each the first value up its `w:basedOn`
+/// chain; and direct formatting.
 ///
-/// Direct formatting sets the value (ECMA-376 §17.7.3). A paragraph style sets it rather
-/// than combining with what is below, as Word does (MS-OI29500 §17.7.8(a)). A character
-/// style flips the value when its own differs from the document defaults': with defaults
-/// of false that is the standard's XOR of the levels that give true; with defaults of
-/// true it is Word's rule that the value is true when an even number of levels give
-/// false, a level without a value taking the defaults' (MS-OI29500 §17.7.3(a), (b)).
-/// The reference renders of `word-rules/E-style-toggles.docx` and
-/// `E-style-toggles-defaults.docx` are to confirm it.
-fn toggle(
-    defaults: Option<bool>,
-    paragraph: Option<bool>,
-    character: Option<bool>,
-    direct: Option<bool>,
-) -> bool {
+/// Direct formatting sets the value (ECMA-376 §17.7.3). Each style flips the value when
+/// its own differs from the document defaults': with defaults of false that is the
+/// standard's XOR of the levels that give true; with defaults of true it is Word's rule
+/// that the value is true when an even number of levels give false, a level without a
+/// value taking the defaults' (MS-OI29500 §17.7.3(a), (b)). With the defaults alone below
+/// it, a paragraph style so sets the value rather than combining with what is below, as
+/// Word does (MS-OI29500 §17.7.8(a)). Word's renders of `word-rules/E-style-toggles.docx`
+/// and `E-style-toggles-defaults.docx` show this, and those of `E-table-style-toggles.docx`
+/// and `E-table-style-toggles-defaults.docx` show a table style flipping the value as one
+/// more such level: a bold table style and a bold paragraph or character style give text
+/// that is not bold.
+fn toggle(defaults: Option<bool>, styles: [Option<bool>; 3], direct: Option<bool>) -> bool {
     let default = defaults.unwrap_or(false);
-    let mut value = paragraph.unwrap_or(default);
-    if character.is_some_and(|character| character != default) {
-        value = !value;
+    let mut value = default;
+    for style in styles {
+        if style.is_some_and(|style| style != default) {
+            value = !value;
+        }
     }
     direct.unwrap_or(value)
 }
@@ -440,7 +465,7 @@ impl CharacterLevel {
     }
 
     /// What one `w:rPr` gives.
-    fn of(properties: &RunProperties) -> Self {
+    pub(super) fn of(properties: &RunProperties) -> Self {
         let fonts = &properties.fonts;
         // In one w:rFonts the theme attribute wins over the font (§17.3.2.26).
         let slot = |name: &Option<String>, theme: Option<ThemeFont>| match theme {
@@ -491,14 +516,26 @@ impl CharacterLevel {
 
 impl Layer for CharacterLevel {
     fn of_style(document: &Document, index: usize) -> Self {
-        document
+        let mut level = document
             .styles
             .styles
             .get(index)
             .map(|style| {
                 Self::of(&crate::model::Style::from_data(document, style).run_properties())
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if (level.size.is_some() || level.size_complex_script.is_some())
+            && super::drops_values_equal_to_defaults(document, index)
+        {
+            let defaults = crate::model::Styles::new(document).default_run_properties();
+            if level.size == defaults.size {
+                level.size = None;
+            }
+            if level.size_complex_script == defaults.size_complex_script {
+                level.size_complex_script = None;
+            }
+        }
+        level
     }
 
     /// Lays `above` over this level: what it gives replaces what this one gives. A font
