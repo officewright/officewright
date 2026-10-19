@@ -190,11 +190,12 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
         self.push_start(reader, &tag, read == Some(Disposition::ProcessContent))?;
         let mut depth = 1usize;
         while depth > 0 {
-            self.spend(1)?;
-            self.at = reader.offset();
             let event = reader
                 .read_event()
                 .map_err(|err| Error::from(err.in_part(self.part)))?;
+            // Where the event just read starts, so that an error names it (#34).
+            self.at = reader.offset();
+            self.spend(1)?;
             match event {
                 Some(Event::Start(tag)) => {
                     let name = tag.name();

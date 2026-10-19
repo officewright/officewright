@@ -799,6 +799,43 @@ fn bounds_the_number_of_nodes() {
 }
 
 #[test]
+fn names_the_event_that_crosses_the_node_limit_inside_a_kept_element() {
+    // Issue #34: inside an element kept without being read, the error gave the position
+    // of the event before the one that crossed the limit.
+    let body = format!(
+        "<w:p><w14:a>{}</w14:a></w:p>",
+        (0..4)
+            .map(|n| format!(r#"<w14:b w14:n="{n}"/>"#))
+            .collect::<String>()
+    );
+    let xml = document_xml(&body);
+    let column = |marker: &str| xml.find(marker).unwrap() + 1;
+    let mut columns = Vec::new();
+    for max in 1.. {
+        let options = LoadOptions::new().with_limits(Limits::new().with_max_nodes(max));
+        let Err(err) = options.open_bytes(docx(&body)) else {
+            break;
+        };
+        let message = err.to_string();
+        let at = message
+            .split("column ")
+            .nth(1)
+            .and_then(|rest| rest.split(':').next())
+            .unwrap();
+        columns.push(at.parse::<usize>().unwrap());
+    }
+    // The four children cost the same, so each is named as often: before the fix the
+    // first node of each was charged at the event before it, and the last child was named
+    // once less.
+    let count = |marker: &str| columns.iter().filter(|&&c| c == column(marker)).count();
+    let children: Vec<usize> = (0..4)
+        .map(|n| count(&format!(r#"<w14:b w14:n="{n}"/>"#)))
+        .collect();
+    assert!(children[0] > 0, "{columns:?}");
+    assert!(children.iter().all(|&n| n == children[0]), "{columns:?}");
+}
+
+#[test]
 fn bounds_the_namespaces_of_a_part() {
     // The main part declares five namespaces, and its body two more, one of them twice
     // (#100).
