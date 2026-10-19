@@ -589,10 +589,13 @@ fn keeps_a_long_namespace_once_however_many_kept_elements_name_it() {
 fn looks_at_each_prefix_a_kept_value_names_once() {
     // A reviewer of #222 found every prefix of a value compared with each one before:
     // 200,000 prefixes nobody declared, in one mc:Ignorable of a kept element, took 50 s.
-    let prefixes: String = (0..300_000).map(|n| format!(" u{n}")).collect();
-    let document = open_in_linear_time(&format!(
-        r#"<w:p><w14:a><w14:b mc:Ignorable="{prefixes}"/></w14:a></w:p>"#
-    ));
+    let document = open_in_linear_time(
+        |n| {
+            let prefixes: String = (0..n).map(|n| format!(" u{n}")).collect();
+            format!(r#"<w:p><w14:a><w14:b mc:Ignorable="{prefixes}"/></w14:a></w:p>"#)
+        },
+        300_000,
+    );
     assert_eq!(kept_xml(&document).len(), 1);
 }
 
@@ -1181,14 +1184,30 @@ fn reads_hyperlink_targets_from_external_relationships_only() {
     assert!(messages[1].ends_with("w:fldSimple has no w:instr; its instruction is empty"));
 }
 
-/// Opens `body` with a raised XML depth limit and fails if it takes more than 20 s, far
-/// above the second or so it takes when the work is linear.
-fn open_in_linear_time(body: &str) -> Document {
+/// Opens the body `make(n)` with a raised XML depth limit, and fails unless the time it
+/// takes grows in proportion to `n`: it may take at most 24 times as long as the body
+/// `make(n / 8)` takes just before and just after it, where linear work takes about 8
+/// times and work that grows with the square of `n` about 64 times. The bound is
+/// relative to the reader's speed on the same machine at the same moment, so a slow or
+/// busy runner does not fail it (#154); a floor of 50 ms keeps the timer's resolution
+/// out of it.
+fn open_in_linear_time(make: impl Fn(usize) -> String, n: usize) -> Document {
     let options = LoadOptions::new().with_limits(Limits::new().with_max_xml_depth(1 << 20));
-    let start = std::time::Instant::now();
-    let document = options.open_bytes(docx(body)).unwrap();
-    let elapsed = start.elapsed();
-    assert!(elapsed < std::time::Duration::from_secs(20), "{elapsed:?}");
+    let time = |n: usize| {
+        let bytes = docx(&make(n));
+        let start = std::time::Instant::now();
+        let document = options.clone().open_bytes(bytes).unwrap();
+        (start.elapsed(), document)
+    };
+    let (before, _) = time(n / 8);
+    let (elapsed, document) = time(n);
+    let (after, _) = time(n / 8);
+    let small = before.max(after).max(std::time::Duration::from_millis(50));
+    assert!(
+        elapsed < small * 24,
+        "{elapsed:?} for {n}, {before:?} and {after:?} for {}",
+        n / 8
+    );
     document
 }
 
@@ -1197,12 +1216,16 @@ fn closes_content_controls_after_section_breaks_in_linear_time() {
     // A reviewer of #32 found each content control that closed searched every copy made
     // for a section break: 500,000 breaks and 500,000 controls took 45 s.
     let n = 100_000;
-    let body = format!(
-        "<w:sdt><w:sdtContent>{}</w:sdtContent></w:sdt><w:p>{}</w:p>",
-        "<w:p><w:pPr><w:sectPr/></w:pPr></w:p>".repeat(n),
-        "<w:sdt><w:sdtContent><w:r><w:t>x</w:t></w:r></w:sdtContent></w:sdt>".repeat(n)
+    let document = open_in_linear_time(
+        |n| {
+            format!(
+                "<w:sdt><w:sdtContent>{}</w:sdtContent></w:sdt><w:p>{}</w:p>",
+                "<w:p><w:pPr><w:sectPr/></w:pPr></w:p>".repeat(n),
+                "<w:sdt><w:sdtContent><w:r><w:t>x</w:t></w:r></w:sdtContent></w:sdt>".repeat(n)
+            )
+        },
+        n,
     );
-    let document = open_in_linear_time(&body);
     assert_eq!(document.sections().len(), n + 1);
 }
 
@@ -1210,14 +1233,19 @@ fn closes_content_controls_after_section_breaks_in_linear_time() {
 fn breaks_sections_under_nested_content_controls_in_linear_time() {
     // ...and each break looked through every frame open around it and every copy made
     // for it so far: 100 breaks under 20,000 nested controls took 15 s.
-    let depth = 10_000;
-    let body = format!(
-        "{}{}{}",
-        "<w:sdt><w:sdtContent>".repeat(depth),
-        "<w:p><w:pPr><w:sectPr/></w:pPr></w:p>".repeat(100),
-        "</w:sdtContent></w:sdt>".repeat(depth)
+    // Each break copies every control open around it, so the work grows with the depth
+    // times the breaks; at a fixed number of breaks, it grows with the depth.
+    let document = open_in_linear_time(
+        |depth| {
+            format!(
+                "{}{}{}",
+                "<w:sdt><w:sdtContent>".repeat(depth),
+                "<w:p><w:pPr><w:sectPr/></w:pPr></w:p>".repeat(100),
+                "</w:sdtContent></w:sdt>".repeat(depth)
+            )
+        },
+        10_000,
     );
-    let document = open_in_linear_time(&body);
     assert_eq!(document.sections().len(), 101);
 }
 
@@ -1227,13 +1255,17 @@ fn reads_under_nested_alternate_content_in_linear_time() {
     // children go: 100,000 paragraphs under 100,000 of them took about a minute in a
     // debug build, and take about a second now.
     let n = 100_000;
-    let body = format!(
-        "{}{}{}",
-        "<mc:AlternateContent><mc:Fallback>".repeat(n),
-        "<w:p><w:pPr><w:sectPr/></w:pPr></w:p>".repeat(n),
-        "</mc:Fallback></mc:AlternateContent>".repeat(n)
+    let document = open_in_linear_time(
+        |n| {
+            format!(
+                "{}{}{}",
+                "<mc:AlternateContent><mc:Fallback>".repeat(n),
+                "<w:p><w:pPr><w:sectPr/></w:pPr></w:p>".repeat(n),
+                "</mc:Fallback></mc:AlternateContent>".repeat(n)
+            )
+        },
+        n,
     );
-    let document = open_in_linear_time(&body);
     assert_eq!(document.sections().len(), n + 1);
 }
 
@@ -1467,15 +1499,18 @@ fn reads_properties_under_nested_alternate_content_in_linear_time() {
     // Issue #113: each mc:AlternateContent in a property element made every element
     // below it be walked again, so 10,000 nested ones around 100,000 elements cost a
     // billion steps. Each token is now looked at a bounded number of times.
+    // The depth grows with the number of elements, a tenth of it.
     let (depth, n) = (10_000, 100_000);
-    let body = format!(
-        "<w:p><w:r><w:rPr>{}{}<w:b/>{}</w:rPr><w:t>x</w:t></w:r></w:p>",
-        r#"<mc:AlternateContent><mc:Choice Requires="w14"><w:i/></mc:Choice><mc:Fallback>"#
-            .repeat(depth),
-        "<w:x/>".repeat(n),
-        "</mc:Fallback></mc:AlternateContent>".repeat(depth)
-    );
-    let document = open_in_linear_time(&body);
+    let body = |n: usize| {
+        format!(
+            "<w:p><w:r><w:rPr>{}{}<w:b/>{}</w:rPr><w:t>x</w:t></w:r></w:p>",
+            r#"<mc:AlternateContent><mc:Choice Requires="w14"><w:i/></mc:Choice><mc:Fallback>"#
+                .repeat(n / 10),
+            "<w:x/>".repeat(n),
+            "</mc:Fallback></mc:AlternateContent>".repeat(n / 10)
+        )
+    };
+    let document = open_in_linear_time(body, n);
     let run = first_run(&document);
     model::xml::STEPS.set(0);
     let properties = run.properties();
