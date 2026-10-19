@@ -38,28 +38,28 @@ fn glows(glow: Element<'_>, names: &Names) -> bool {
     effect_value(glow, names, "rad", 0) > 0
 }
 
-/// Whether a `w14:shadow` shows. One scaled to nothing does not (Word writes one with
-/// `w14:sx` and `w14:sy` 0 into list levels), nor one right under the text: no blur, no
-/// distance, its full size, no skew. The defaults are those of [MS-DOCX] 2.6.2.33.
+/// Whether a `w14:shadow` shows. One scaled to nothing does not, nor one right under the
+/// text: no blur, no distance, its full size, no skew. The defaults are those of
+/// [MS-DOCX] 2.6.3.30 (CT_Shadow), all 0: a shadow that writes no `w14:sx` and `w14:sy`
+/// is scaled to nothing, as is the one Word writes into list levels with them 0.
 fn casts_shadow(shadow: Element<'_>, names: &Names) -> bool {
-    let value = |name, default| effect_value(shadow, names, name, default);
-    let (sx, sy) = (value("sx", 100_000), value("sy", 100_000));
-    let under = value("blurRad", 0) == 0
-        && value("dist", 0) == 0
+    let value = |name| effect_value(shadow, names, name, 0);
+    let (sx, sy) = (value("sx"), value("sy"));
+    let under = value("blurRad") == 0
+        && value("dist") == 0
         && (sx, sy) == (100_000, 100_000)
-        && value("kx", 0) == 0
-        && value("ky", 0) == 0;
+        && value("kx") == 0
+        && value("ky") == 0;
     sx != 0 && sy != 0 && !under
 }
 
 /// Whether a `w14:reflection` shows: one whose start and end are both fully transparent
-/// does not (Word writes one of zeros into list levels), nor one scaled to nothing. The
-/// defaults are those of [MS-DOCX] 2.6.2.29.
+/// does not, nor one scaled to nothing. The defaults are those of [MS-DOCX] 2.6.3.24
+/// (CT_Reflection), all 0, so the reflection Word writes into list levels, all zeros,
+/// shows nothing either.
 fn reflects(reflection: Element<'_>, names: &Names) -> bool {
-    let value = |name, default| effect_value(reflection, names, name, default);
-    (value("stA", 100_000) != 0 || value("endA", 0) != 0)
-        && value("sx", 100_000) != 0
-        && value("sy", 100_000) != 0
+    let value = |name| effect_value(reflection, names, name, 0);
+    (value("stA") != 0 || value("endA") != 0) && value("sx") != 0 && value("sy") != 0
 }
 
 /// Whether a `w14:textOutline` draws a line: one filled other than with `w14:noFill`.
@@ -69,51 +69,90 @@ fn outlines(outline: Element<'_>, names: &Names) -> bool {
         .any(|child| matches!(child.local_in(&[names.w14]), Some("solidFill" | "gradFill")))
 }
 
-/// What a `w14:textFill` fills text with; none when it has no fill.
-fn text_fill(fill: Element<'_>, names: &Names) -> Option<TextFill> {
+/// What a `w14:textFill` fills text with. Without a fill it is solid black ([MS-DOCX]
+/// 2.6.3.5, CT_FillTextEffect), and so is a `w14:solidFill` without a colour (2.6.3.31,
+/// CT_SolidColorFillProperties).
+fn text_fill(fill: Element<'_>, names: &Names) -> TextFill {
+    const BLACK: TextFill = TextFill::Solid(0, 0, 0);
     let kind = fill.children_through_alternates(names.mc).find(|child| {
         matches!(
             child.local_in(&[names.w14]),
             Some("noFill" | "solidFill" | "gradFill")
         )
-    })?;
-    if kind.local_in(&[names.w14]) == Some("solidFill") {
-        // One colour as written, with nothing that changes it (w14:alpha, w14:lumMod, …).
-        let colour = effect_child(kind, names, "srgbClr")
-            .filter(|colour| {
-                colour
-                    .children_through_alternates(names.mc)
-                    .next()
-                    .is_none()
-            })
-            .and_then(|colour| colour.attribute(&[names.w14], "val"))
-            .and_then(hex_color);
-        if let Some(ColorValue::Rgb(red, green, blue)) = colour {
-            return Some(TextFill::Solid(red, green, blue));
-        }
+    });
+    let Some(kind) = kind else {
+        return BLACK;
+    };
+    if kind.local_in(&[names.w14]) != Some("solidFill") {
+        return TextFill::Other;
     }
-    Some(TextFill::Other)
+    let colour = kind
+        .children_through_alternates(names.mc)
+        .find(|child| matches!(child.local_in(&[names.w14]), Some("srgbClr" | "schemeClr")));
+    let Some(colour) = colour else {
+        return BLACK;
+    };
+    // One colour as written, with nothing that changes it (w14:alpha, w14:lumMod, …).
+    if colour
+        .children_through_alternates(names.mc)
+        .next()
+        .is_some()
+    {
+        return TextFill::Other;
+    }
+    let value = colour.attribute(&[names.w14], "val");
+    let solid = if colour.local_in(&[names.w14]) == Some("srgbClr") {
+        value.and_then(hex_color).and_then(|colour| match colour {
+            ColorValue::Rgb(red, green, blue) => Some(TextFill::Solid(red, green, blue)),
+            ColorValue::Auto => None,
+        })
+    } else {
+        value.and_then(scheme_color).map(TextFill::Scheme)
+    };
+    solid.unwrap_or(TextFill::Other)
 }
 
-/// Whether a `w14:scene3d`'s camera turns the text: one in front of it, not turned (or
-/// turned by zeros, as Word writes it into list levels), shows it as it is.
-fn turns(scene: Element<'_>, names: &Names) -> bool {
-    effect_child(scene, names, "camera").is_some_and(|camera| {
-        camera.attribute(&[names.w14], "prst") != Some("orthographicFront")
-            || effect_child(camera, names, "rot").is_some_and(|rotation| {
-                ["lat", "lon", "rev"]
-                    .into_iter()
-                    .any(|name| effect_value(rotation, names, name, 0) != 0)
-            })
+/// The theme colour a colour of the theme's scheme names (ST_SchemeColorVal of [MS-DOCX]
+/// 2.6.3.28, CT_SchemeColor); none for the placeholder colour, which has none.
+fn scheme_color(value: &str) -> Option<ThemeColor> {
+    Some(match value {
+        "bg1" => ThemeColor::Background1,
+        "tx1" => ThemeColor::Text1,
+        "bg2" => ThemeColor::Background2,
+        "tx2" => ThemeColor::Text2,
+        "dk1" => ThemeColor::Dark1,
+        "lt1" => ThemeColor::Light1,
+        "dk2" => ThemeColor::Dark2,
+        "lt2" => ThemeColor::Light2,
+        "accent1" => ThemeColor::Accent1,
+        "accent2" => ThemeColor::Accent2,
+        "accent3" => ThemeColor::Accent3,
+        "accent4" => ThemeColor::Accent4,
+        "accent5" => ThemeColor::Accent5,
+        "accent6" => ThemeColor::Accent6,
+        "hlink" => ThemeColor::Hyperlink,
+        "folHlink" => ThemeColor::FollowedHyperlink,
+        _ => return None,
     })
 }
 
-/// Whether a `w14:props3d` gives the text a bevel, depth or contour.
+/// Whether a `w14:scene3d`'s camera turns the text: one in front of it shows it as it is.
+/// The w14 camera has no rotation of its own ([MS-DOCX] 2.6.3.2, CT_Camera); the rotation
+/// of zeros Word writes into list levels is the light rig's.
+fn turns(scene: Element<'_>, names: &Names) -> bool {
+    effect_child(scene, names, "camera")
+        .is_some_and(|camera| camera.attribute(&[names.w14], "prst") != Some("orthographicFront"))
+}
+
+/// Whether a `w14:props3d` shows on text seen from the front: a bevel at the top, of a
+/// width and a height ([MS-DOCX] 2.6.3.1, CT_Bevel, whose defaults are 0), or a contour.
+/// Depth and a bevel at the bottom face away from a camera in front, which is our
+/// reading, no render shows it yet; with a camera that turns the text, `w14:scene3d` is
+/// listed anyway.
 fn has_depth(props: Element<'_>, names: &Names) -> bool {
-    effect_child(props, names, "bevelT").is_some()
-        || effect_child(props, names, "bevelB").is_some()
-        || effect_value(props, names, "extrusionH", 0) > 0
-        || effect_value(props, names, "contourW", 0) > 0
+    effect_child(props, names, "bevelT").is_some_and(|bevel| {
+        effect_value(bevel, names, "w", 0) > 0 && effect_value(bevel, names, "h", 0) > 0
+    }) || effect_value(props, names, "contourW", 0) > 0
 }
 
 /// The properties a `w:rPr` sets.
@@ -140,7 +179,7 @@ pub(crate) fn run_properties(
                     properties.text_effects.reflection = Some(reflects(child, names));
                 }
                 "textOutline" => properties.text_effects.outline = Some(outlines(child, names)),
-                "textFill" => properties.text_effects.fill = text_fill(child, names),
+                "textFill" => properties.text_effects.fill = Some(text_fill(child, names)),
                 "scene3d" => properties.text_effects.turned = Some(turns(child, names)),
                 "props3d" => properties.text_effects.depth = Some(has_depth(child, names)),
                 "cntxtAlts" => {

@@ -456,8 +456,10 @@ pub(crate) struct TextEffects {
 pub(crate) enum TextFill {
     /// One colour, as written, which changes nothing when it is the text's own.
     Solid(u8, u8, u8),
-    /// Anything else: no fill, a gradient, a theme colour or a colour changed by
-    /// transparency or luminance.
+    /// One colour of the theme, likewise.
+    Scheme(ThemeColor),
+    /// Anything else: no fill, a gradient, or a colour changed by transparency or
+    /// luminance.
     Other,
 }
 

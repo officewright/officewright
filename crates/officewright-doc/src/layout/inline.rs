@@ -8,7 +8,7 @@ use officewright_layout::ReportKind;
 use officewright_layout::ir;
 
 use super::{Once, Translator, is_marker};
-use crate::model::properties::TextFill;
+use crate::model::properties::{Color, TextFill};
 use crate::model::{
     BreakClear, BreakKind, CharacterFormat, ColorValue, FieldCharKind, Inline, Paragraph,
     RevisionKind, Run, RunContent,
@@ -212,6 +212,15 @@ impl<'a> Translator<'a> {
             None => false,
             Some(TextFill::Solid(red, green, blue)) => {
                 format.color() != ColorValue::Rgb(red, green, blue)
+            }
+            // One the theme does not resolve, without a theme part, counts as a change.
+            Some(TextFill::Scheme(theme)) => {
+                let theme = Color {
+                    theme: Some(theme),
+                    ..Color::default()
+                };
+                let filled = self.document.resolve_color(&theme);
+                filled == ColorValue::Auto || format.color() != filled
             }
             Some(TextFill::Other) => true,
         };
