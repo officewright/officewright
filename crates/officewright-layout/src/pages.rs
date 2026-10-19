@@ -18,7 +18,7 @@ use crate::ir::{
     Block, CompatFlag, CompatMode, Document, FieldKind, Inline, MAX_TABLE_DEPTH, PageSetup,
     PageVerticalAlign, Paragraph, ParagraphProps, Section, SectionStart, Table,
 };
-use crate::itemize::FieldValues;
+use crate::itemize::{self, FieldValues};
 use crate::lines::{LineEnd, PieceKind};
 use crate::lists::{Counters, Label};
 use crate::paragraph::{self, ParagraphLayout};
@@ -1894,8 +1894,8 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 Some(laid) => Rc::clone(laid),
                 None => {
                     let cost = match &part.content {
-                        Content::Paragraph(paragraph, _) => paragraph_cost(paragraph),
-                        Content::Table(table, _) => table_cost(table),
+                        Content::Paragraph(paragraph, _) => paragraph_cost(document, paragraph),
+                        Content::Table(table, _) => table_cost(document, table),
                     };
                     self.frame_laid_budget = self.frame_laid_budget.saturating_sub(cost);
                     Rc::new(self.frame_part(part, values, width))
@@ -2120,49 +2120,54 @@ fn frame_blocks(section: &Section, header: bool, kind: Kind) -> &[Block] {
     }
 }
 
-/// What laying out `blocks` again costs, as [`MAX_FRAME_LAID`] counts it: one for each
-/// paragraph and each inline, the bytes of their text, and a table's rows, cells and grid
-/// columns, nested tables' included.
-fn layout_cost(blocks: &[Block]) -> usize {
+/// What laying out `blocks` of `document` again costs, as [`MAX_FRAME_LAID`] counts it:
+/// one for each paragraph and each inline, the bytes of their text, the stored results of
+/// fields the layout does not compute, and a table's rows, cells and grid columns, nested
+/// tables' included. A hidden inline, which is not laid out, costs one.
+fn layout_cost(document: &Document, blocks: &[Block]) -> usize {
     blocks
         .iter()
         .map(|block| match block {
-            Block::Paragraph(paragraph) => paragraph_cost(paragraph),
-            Block::Table(table) => table_cost(table),
+            Block::Paragraph(paragraph) => paragraph_cost(document, paragraph),
+            Block::Table(table) => table_cost(document, table),
         })
         .fold(0, usize::saturating_add)
 }
 
 /// [`layout_cost`] of `paragraph`.
-fn paragraph_cost(paragraph: &Paragraph) -> usize {
+fn paragraph_cost(document: &Document, paragraph: &Paragraph) -> usize {
     paragraph
         .inlines()
         .iter()
-        .map(inline_cost)
+        .map(|inline| inline_cost(document, inline))
         .fold(1, usize::saturating_add)
 }
 
-/// [`layout_cost`] of `inline`: a field's result, which is laid out for every field the
-/// layout does not compute, counts too (a result holds no fields).
-fn inline_cost(inline: &Inline) -> usize {
+/// [`layout_cost`] of `inline`. Headers and footers are laid out with field values, so a
+/// field the layout computes shows its number, not its stored result; the result of any
+/// other field is laid out, and counts (a result holds no fields).
+fn inline_cost(document: &Document, inline: &Inline) -> usize {
+    if itemize::hidden(document, inline) {
+        return 1;
+    }
     match inline {
         Inline::Text { text, .. } => text.len().max(1),
-        Inline::Field(field) => field
+        Inline::Field(field) if !itemize::computed(field.kind()) => field
             .result()
             .iter()
-            .map(inline_cost)
+            .map(|inline| inline_cost(document, inline))
             .fold(1, usize::saturating_add),
         _ => 1,
     }
 }
 
 /// [`layout_cost`] of `table`.
-fn table_cost(table: &Table) -> usize {
+fn table_cost(document: &Document, table: &Table) -> usize {
     table
         .rows()
         .iter()
         .flat_map(|row| row.cells())
-        .map(|cell| layout_cost(cell.blocks()).saturating_add(1))
+        .map(|cell| layout_cost(document, cell.blocks()).saturating_add(1))
         .fold(0, usize::saturating_add)
         .saturating_add(table.rows().len())
         .saturating_add(table.grid().len())
@@ -5248,6 +5253,63 @@ mod tests {
             report.iter().any(|m| m.contains("left out past")),
             "{report:?}"
         );
+    }
+
+    #[test]
+    fn what_a_header_does_not_lay_out_costs_it_nothing_of_the_bound() {
+        use crate::ir::{Field, FieldKind};
+
+        // Second re-check of #379: a header's `PAGE` field shows the page's number, not
+        // its stored result, and hidden text is not laid out, so neither counts towards
+        // what headers lay out. A stored result of 1,000 tabs, or 10,000 hidden
+        // characters, beside the field, with 5,000 to lay out: drawn on all 100 pages.
+        let numbered = |hidden_text: bool| {
+            let mut document = Document::default();
+            let style = document.add_run_style(
+                RunStyle::default()
+                    .with_fonts(RunFonts::new("Officewright Test"))
+                    .with_size(Pt(10.0)),
+            );
+            let hidden = document.add_run_style(
+                RunStyle::default()
+                    .with_fonts(RunFonts::new("Officewright Test"))
+                    .with_size(Pt(10.0))
+                    .with_hidden(true),
+            );
+            let inlines = if hidden_text {
+                vec![
+                    Inline::Field(Field::new(FieldKind::Page, style)),
+                    Inline::text("x".repeat(10_000), hidden),
+                ]
+            } else {
+                vec![Inline::Field(
+                    Field::new(FieldKind::Page, style)
+                        .with_result((0..1000).map(|_| Inline::tab(style)).collect::<Vec<_>>()),
+                )]
+            };
+            let header = Paragraph::new(style)
+                .with_props(spacing(0.0, 0.0))
+                .with_inlines(inlines);
+            let blocks: Vec<Block> = (0..100)
+                .map(|n| lines(style, 1, spacing(0.0, 0.0).with_page_break_before(n > 0)))
+                .collect();
+            document.add_section(
+                Section::new(close_frames())
+                    .with_headers(HeaderFooterSet::default().with_primary([header.into()]))
+                    .with_blocks(blocks),
+            );
+            let (laid, report) = laid_within(&document, (MAX_FRAME_DRAWN, 5000));
+            assert!(
+                !report.iter().any(|m| m.contains("left out past")),
+                "{report:?}"
+            );
+            laid.sink
+                .iter()
+                .filter(|page| texts(page).iter().any(|text| text != "A"))
+                .count()
+        };
+        assert_eq!(numbered(false), 100);
+        assert_eq!(numbered(true), 100);
     }
 
     #[test]
