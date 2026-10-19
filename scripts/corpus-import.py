@@ -29,7 +29,7 @@ tests/corpus/reference/<group>/<name>/ go instead
     breaks (the w:lastRenderedPageBreak marks of the re-saved copy), the fonts the PDF
     references without embedding them, and what Word changed when it saved the copy: the
     w:compat settings it dropped and added, the style and numbering properties it dropped,
-    and the paragraphs whose style it changed;
+    added and changed, and the paragraphs whose style it changed;
   - formatting.json, from make-reference.ps1 format 3 on: the formatting Word computes for
     every paragraph of every story, with its runs of formatting when Word gave them, and the
     body paragraphs' style ids and names taken from the re-saved copy.
@@ -387,7 +387,9 @@ def property_values(
     element by itself, so that what Word keeps of an element is not reported with what it
     drops, and an element with no attribute by its presence (empty containers set nothing).
     A repeated element's path names the attribute that tells it apart
-    (tblStylePr[type=firstRow], lvlOverride[ilvl=1]); one that has none is numbered."""
+    (tblStylePr[type=firstRow], lvlOverride[ilvl=1]); one that has none is numbered.
+    Attributes in other namespaces are not read, so an element of another namespace counts by
+    its presence alone: a change of w14:ligatures' w14:val is not seen."""
     out: dict[Property, str] = {}
     children = [child for child in element if local_name(child.tag) not in skipped]
     segments = []
@@ -419,7 +421,7 @@ def property_values(
 def style_values(parts: dict[str, bytes]) -> dict[Property, str]:
     """What styles.xml sets, owned by "docDefaults" or by the style's id; a style marked
     default has the property (id, "default", None)."""
-    data = parts.get("word/styles.xml")
+    data = document_part(parts, "styles")
     if not data:
         return {}
     root = ElementTree.fromstring(data)
@@ -437,14 +439,14 @@ def style_values(parts: dict[str, bytes]) -> dict[Property, str]:
 
 def style_ids(parts: dict[str, bytes]) -> set[str]:
     """The ids of the styles styles.xml defines."""
-    data = parts.get("word/styles.xml")
+    data = document_part(parts, "styles")
     if not data:
         return set()
     return {style.get(f"{W}styleId", "") for style in ElementTree.fromstring(data).iter(f"{W}style")}
 
 
 def numbering_root(parts: dict[str, bytes]) -> ElementTree.Element | None:
-    data = parts.get("word/numbering.xml")
+    data = document_part(parts, "numbering")
     return ElementTree.fromstring(data) if data else None
 
 
@@ -453,8 +455,11 @@ def numbering_ids(
 ) -> tuple[dict[str, str], dict[str, str]]:
     """How the re-saved copy's list definitions and instances map onto the input's: Word
     numbers the definitions (w:abstractNumId) and sometimes the instances (w:numId) again when
-    it saves, so they are matched by what stays: a definition by its w:nsid, else through the
-    instances that use it; an instance by the definition it uses. Copy id -> input id."""
+    it saves, so they are matched by what stays. A definition by its w:nsid, else through the
+    instances that use it, else by its id. An instance among the input's instances of the same
+    definition: first one with the same overrides, then the one with its id, then the first
+    in order, since Word keeps their order (contract-zh: 1, 2, 3, 4, 6 became 1 to 5); then an
+    instance left over by its id. Copy id -> input id; an id left out has no counterpart."""
     if original is None or resaved is None:
         return {}, {}
 
@@ -468,11 +473,22 @@ def numbering_ids(
         return out
 
     def instances(root: ElementTree.Element) -> dict[str, str]:
+        """Instance id -> definition id, in the order of numbering.xml."""
         out = {}
         for instance in root.iter(f"{W}num"):
             used = instance.find(f"{W}abstractNumId")
             out[instance.get(f"{W}numId", "")] = used.get(f"{W}val", "") if used is not None else ""
         return out
+
+    def overrides(root: ElementTree.Element) -> dict[str, dict[Property, str]]:
+        """Instance id -> what it sets besides its definition."""
+        return {
+            instance.get(f"{W}numId", ""): {
+                key: value for key, value in property_values(instance, "").items()
+                if key[1] != "abstractNumId"
+            }
+            for instance in root.iter(f"{W}num")
+        }
 
     before, after = definitions(original), definitions(resaved)
     uses_before, uses_after = instances(original), instances(resaved)
@@ -488,17 +504,26 @@ def numbering_ids(
         if copy_id not in abstract and copy_id in before and copy_id not in abstract.values():
             abstract[copy_id] = copy_id
     num: dict[str, str] = {}
+    set_before, set_after = overrides(original), overrides(resaved)
     for copy_num, copy_id in uses_after.items():
         wanted = abstract.get(copy_id)
-        if copy_num in uses_before and uses_before[copy_num] == wanted:
-            num[copy_num] = copy_num
-            continue
-        same = [n for n, i in uses_before.items() if i == wanted and n not in uses_after]
-        if wanted is not None and len(same) == 1:
-            num[copy_num] = same[0]
-        elif copy_num in uses_before and copy_num not in num.values():
+        candidates = [n for n, i in uses_before.items()
+                      if wanted is not None and i == wanted and n not in num.values()]
+        alike = [n for n in candidates if set_before[n] == set_after[copy_num]] or candidates
+        if alike:
+            num[copy_num] = copy_num if copy_num in alike else alike[0]
+    for copy_num in uses_after:
+        if copy_num not in num and copy_num in uses_before and copy_num not in num.values():
             num[copy_num] = copy_num
     return abstract, num
+
+
+def copy_id(ids: dict[str, str] | None, number: str) -> str:
+    """The input's id for a copy's id; one with no counterpart is named as the copy's, so that
+    it cannot fall together with an input id another copy id was mapped onto."""
+    if ids is None:
+        return number
+    return ids.get(number, f"copy {number}")
 
 
 def numbering_values(
@@ -506,24 +531,24 @@ def numbering_values(
     num: dict[str, str] | None = None,
 ) -> dict[Property, str]:
     """What numbering.xml sets, owned by "abstractNum N" (its type and links), "abstractNum N
-    level L" and "num N" (the definition it uses and its overrides), with the ids mapped by
-    abstract and num."""
+    level L" and "num N" (the definition it uses and its overrides). For the re-saved copy,
+    abstract and num map its ids onto the input's (numbering_ids), and an id with no
+    counterpart becomes "copy N"; for the input they are None."""
     if root is None:
         return {}
-    abstract, num = abstract or {}, num or {}
     out: dict[Property, str] = {}
     for definition in root.iter(f"{W}abstractNum"):
         number = definition.get(f"{W}abstractNumId", "")
-        owner = f"abstractNum {abstract.get(number, number)}"
+        owner = f"abstractNum {copy_id(abstract, number)}"
         out.update(property_values(definition, owner, NUMBERING_IDENTITY | {"lvl"}))
         for level in definition.findall(f"{W}lvl"):
             ilvl = level.get(f"{W}ilvl", "")
             out.update(property_values(level, f"{owner} level {ilvl}"))
     for instance in root.iter(f"{W}num"):
         number = instance.get(f"{W}numId", "")
-        for key, value in property_values(instance, f"num {num.get(number, number)}").items():
+        for key, value in property_values(instance, f"num {copy_id(num, number)}").items():
             if key[1:] == ("abstractNumId", "val"):
-                value = abstract.get(value, value)
+                value = copy_id(abstract, value)
             out[key] = value
     return out
 
@@ -555,9 +580,13 @@ def style_changes(original: dict[str, bytes], resaved: dict[str, bytes]) -> list
     """property_changes over styles.xml, with the copy's list instances in w:numPr mapped
     onto the input's; additions to docDefaults (which every document has) and to the styles
     the input defines."""
-    _, num = numbering_ids(numbering_root(original), numbering_root(resaved))
+    before_root, after_root = numbering_root(original), numbering_root(resaved)
+    _, num = numbering_ids(before_root, after_root)
+    # w:numId 0 means no list, and stays 0; without numbering.xml on either side ids stay too.
+    mapped = before_root is not None and after_root is not None
     after = {
-        key: num.get(value, value) if key[1].endswith("numPr/numId") else value
+        key: copy_id(num, value) if mapped and value != "0" and key[1].endswith("numPr/numId")
+        else value
         for key, value in style_values(resaved).items()
     }
     return property_changes(style_values(original), after, style_ids(original) | {"docDefaults"})
@@ -584,19 +613,53 @@ def numbering_changes(original: dict[str, bytes], resaved: dict[str, bytes]) -> 
 
 
 PACKAGE_RELATIONSHIPS = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+# The transitional relationships, whose parts are read in the transitional namespace W: a
+# strict package would need both read in its own.
+RELATIONSHIPS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
+
+def related(parts: dict[str, bytes], source: str, kind: str) -> str | None:
+    """The part an internal relationship of this kind (Type RELATIONSHIPS/kind) of the
+    source part names; the package's own relationships when source is ""."""
+    folder, base = posixpath.split(source)
+    data = parts.get(posixpath.join(folder, "_rels", f"{base}.rels"))
+    if not data:
+        return None
+    for relationship in ElementTree.fromstring(data).iter(f"{PACKAGE_RELATIONSHIPS}Relationship"):
+        if (relationship.get("Type") != f"{RELATIONSHIPS}/{kind}"
+                or relationship.get("TargetMode") == "External"):
+            continue
+        target = relationship.get("Target", "")
+        name = posixpath.normpath(
+            target.lstrip("/") if target.startswith("/") else posixpath.join(folder, target)
+        )
+        if name in parts:
+            return name
+    return None
+
+
+def main_name(parts: dict[str, bytes]) -> str | None:
+    """The main part's name, as _rels/.rels names it, else word/document.xml."""
+    if "_rels/.rels" in parts:
+        return related(parts, "", "officeDocument")
+    return "word/document.xml" if "word/document.xml" in parts else None
 
 
 def main_document(parts: dict[str, bytes]) -> bytes | None:
-    """The main part of a WordprocessingML package, as _rels/.rels names it (transitional
-    or strict officeDocument relationship), else word/document.xml."""
-    rels = parts.get("_rels/.rels")
-    if rels:
-        for relationship in ElementTree.fromstring(rels).iter(f"{PACKAGE_RELATIONSHIPS}Relationship"):
-            if relationship.get("Type", "").endswith("/officeDocument"):
-                target = posixpath.normpath(relationship.get("Target", "").lstrip("/"))
-                if target in parts:
-                    return parts[target]
-    return parts.get("word/document.xml")
+    """The main part of a WordprocessingML package (main_name)."""
+    name = main_name(parts)
+    return parts.get(name) if name else None
+
+
+def document_part(parts: dict[str, bytes], kind: str) -> bytes | None:
+    """The part of this kind (styles, numbering) the main part's relationships name; a
+    package without them, such as a test's few parts, by its usual name word/<kind>.xml."""
+    main = main_name(parts)
+    folder, base = posixpath.split(main or "word/document.xml")
+    if main is None or posixpath.join(folder, "_rels", f"{base}.rels") not in parts:
+        return parts.get(f"word/{kind}.xml")
+    name = related(parts, main, kind)
+    return parts.get(name) if name else None
 
 
 def body_paragraphs(parts: dict[str, bytes]) -> list[tuple[str, str | None]]:
@@ -1597,17 +1660,19 @@ def rasterized_note(entries: list[dict]) -> str:
     )
 
 
-def style_note(geometry: dict) -> str:
-    """The SOURCES.md note on what Word changed in the styles, numbering and paragraph styles
-    of the re-saved copy, which geometry.json lists (#297)."""
+def style_notes(geometry: dict) -> list[str]:
+    """The SOURCES.md notes on what Word changed in the styles and numbering and in the
+    paragraph styles of the re-saved copy, which geometry.json lists (#297). Two notes, since
+    "; " separates the notes of a row. The paragraphs counted are those whose style changed,
+    not the line that says the copy has another number of paragraphs."""
     entries = geometry["styles_changed"] + geometry["numbering_changed"]
     counts = {mark: sum(entry.startswith(mark) for entry in entries) for mark in "-+~"}
-    paragraphs = len(geometry["paragraph_styles_changed"])
-    return (
+    paragraphs = sum(entry.startswith("paragraph ") for entry in geometry["paragraph_styles_changed"])
+    return [
         f"style and numbering properties of the re-saved copy: {counts['-']} dropped, "
-        f"{counts['+']} added, {counts['~']} changed; paragraph styles changed: {paragraphs} "
-        "(geometry.json lists them)"
-    )
+        f"{counts['+']} added, {counts['~']} changed (listed in geometry.json)",
+        f"paragraph styles of the re-saved copy changed: {paragraphs} (listed in geometry.json)",
+    ]
 
 
 def reference_row(
@@ -1618,7 +1683,7 @@ def reference_row(
     dropped: list[str],
     formatting_note: str = "",
     locale_accepted: list[str] | None = None,
-    styles: str = "",
+    styles: list[str] | None = None,
 ) -> str:
     base = Path(record["file"]).stem
     windows = record["windows_version"]
@@ -1634,7 +1699,7 @@ def reference_row(
         printer,
         "fonts Word substituted: " + (", ".join(record["fonts_missing"]) or "none"),
         "w:compat settings Word dropped from the re-saved copy: " + (", ".join(dropped) or "none"),
-        *([styles] if styles else []),
+        *(styles or []),
         "fields as saved",
         f"PDF not committed, SHA-256 {record['pdf_sha256']}",
         f"rasters and geometry by poppler {poppler} at {RASTER_DPI} dpi, grey",
@@ -1644,6 +1709,10 @@ def reference_row(
         notes.append(locale_note(locale_accepted))
     if formatting_note:
         notes.append(formatting_note)
+    # tests/corpus-tools reads the notes back by splitting the cell at "; ".
+    for note in notes:
+        if "; " in note:
+            raise ValueError(f"the note {note!r} would read as two notes")
     return (
         f"| reference/{group}/{base}/ "
         f"| {group}/{record['file']}, re-saved by Word as resaved/{group}/{base}.docx "
@@ -1789,7 +1858,7 @@ def check_result(
     if record["script_version"] >= 3:
         formatting, formatting_note = checked_formatting(record, results, resaved_parts, group)
     row = reference_row(
-        group, record, drawn, poppler, dropped, formatting_note, accepted, style_note(geometry)
+        group, record, drawn, poppler, dropped, formatting_note, accepted, style_notes(geometry)
     )
     return Checked(record, pdf, resaved, row, geometry, drawn, formatting, formatting_note)
 
@@ -1949,7 +2018,10 @@ def summary(checked: list[Checked], verb: str) -> list[str]:
             for entry in item.geometry.get(kind, []):
                 lines.append(f"  note: {what} of the re-saved copy: {entry}")
         for entry in item.geometry.get("paragraph_styles_changed", []):
-            lines.append(f"  note: Word changed the paragraph style of {entry}")
+            if entry.startswith("paragraph "):
+                lines.append(f"  note: Word changed the paragraph style of {entry}")
+            else:
+                lines.append(f"  note: {entry}")
         if item.formatting_note:
             lines.append(f"  {item.formatting_note}")
         for font in item.drawn:

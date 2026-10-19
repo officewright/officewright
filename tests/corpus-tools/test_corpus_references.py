@@ -17,8 +17,7 @@ w:compat settings Word dropped from the re-saved copy, the fonts the rasters wer
 with, the formatting export and, from #297 on, how many style and numbering properties Word
 dropped, added and changed and how many paragraph styles it changed; geometry.json names the
 settings Word dropped and added and lists those properties and paragraph styles; and the body
-paragraphs of
-formatting.json carry the style ids of the re-saved copy.
+paragraphs of formatting.json carry the style ids of the re-saved copy.
 """
 
 import importlib.util
@@ -224,7 +223,8 @@ class References(unittest.TestCase):
             with self.subTest(document=f"{folder.parent.name}/{folder.name}"):
                 geometry = json.loads((folder / "geometry.json").read_text(encoding="utf-8"))
                 said = [note for note in self.notes(folder)
-                        if note.startswith("style and numbering properties ")]
+                        if note.startswith(("style and numbering properties ",
+                                            "paragraph styles of the re-saved copy "))]
                 present = [key in geometry for key in keys]
                 if not any(present):
                     # Imported before #297: neither the lists nor the note.
@@ -238,7 +238,7 @@ class References(unittest.TestCase):
                                  importer.numbering_changes(before, after))
                 self.assertEqual(geometry["paragraph_styles_changed"],
                                  importer.paragraph_style_changes(before, after))
-                self.assertEqual(said, [importer.style_note(geometry)])
+                self.assertEqual(said, importer.style_notes(geometry))
 
     def test_the_notes_name_exactly_the_fonts_the_rasters_draw_with(self):
         for folder in folders():

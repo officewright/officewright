@@ -244,8 +244,9 @@ the page count, Word's printer (Microsoft Print to PDF, or a note that another p
 used, without its name), the fonts Word did not have and substituted, the legacy `w:compat`
 settings Word dropped from the re-saved copy (those it does not apply in the document's
 mode), from #297 on how many style and numbering properties Word dropped from the re-saved
-copy, added to the styles, levels and lists the input had, and changed, and how many body
-paragraphs it gave another style (`geometry.json` lists each one), how fields were rendered,
+copy, added to the document defaults and to the styles, levels and lists the input had, and
+changed, and how many body paragraphs it gave another style (`geometry.json` lists each one),
+how fields were rendered,
 the PDF's SHA-256 and the poppler version. Word sometimes
 writes a language tag or number format into the re-saved copy that the input did not have,
 which says where Word ran. Such a copy is imported only when the maintainer accepts it
