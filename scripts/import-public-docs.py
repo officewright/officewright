@@ -23,8 +23,9 @@ listed SHA-256. The script then writes tests/corpus/business/<name>.docx with
 and the document's row in the table of tests/corpus/SOURCES.md: URL, download date,
 licence statement and the changes. It refuses documents with tracked changes, comments,
 ActiveX controls, embedded fonts or objects, macros, mail merge sources, links to local
-files (by relationship or field) and archives in which two entries name one part. With --check it writes nothing and
-fails if a committed file differs from what it would write. Python standard library only.
+files (by relationship or field instruction), fields that show people's data and archives
+in which two entries name one part. With --check it writes nothing and fails if a
+committed file differs from what it would write. Python standard library only.
 """
 
 from __future__ import annotations
@@ -830,77 +831,103 @@ def external_link_problems(parts: dict[str, bytes]) -> list[str]:
 
 
 # Fields whose arguments name a file or an address to load or open (ECMA-376 Part 1,
-# §17.16.5): an argument with a slash or backslash must be a web or mail address.
+# §17.16.5): an argument with a slash, a backslash or a scheme must be a web or mail address.
 FILE_FIELDS = {"HYPERLINK", "INCLUDEPICTURE", "INCLUDETEXT", "INCLUDE", "IMPORT", "LINK", "RD"}
-# Fields that read another file or program by their nature, whatever their arguments: a
-# database connection can name a user and a server, a DDE topic a file.
-REFUSED_FIELDS = {"DATABASE", "DDE", "DDEAUTO"}
+# Fields that read another file or program by their nature, whatever their arguments (a
+# database connection can name a user and a server, a DDE topic a file), and fields whose
+# result shows the path of the file or its template, or the author's or user's name and
+# address, as the author's machine computed it.
+REFUSED_FIELDS = {"DATABASE", "DDE", "DDEAUTO", "FILENAME", "TEMPLATE", "AUTHOR",
+                  "LASTSAVEDBY", "USERNAME", "USERINITIALS", "USERADDRESS"}
+# DOCPROPERTY shows these document properties, which hold people.
+PEOPLE_PROPERTIES = {"author", "creator", "lastsavedby", "lastmodifiedby", "manager",
+                     "company"}
 WEB_ADDRESS = re.compile(r"(?i)(https?://|mailto:)")
-WEB_ADDRESSES = re.compile(r'(?i)(https?://|mailto:)[^\s"]*')
 SCHEME = re.compile(r"(?i)[a-z][a-z0-9+.-]*:")
-# A drive, a server path (\\server or //server), a file URL or another scheme with "//".
-# Backslashes are matched as written, single or doubled, so no escaping hides a path.
+# A drive, a server path (\\server or //server), a file URL or another scheme with "//",
+# anywhere in an instruction, inside a web address too. Backslashes are matched as
+# written, single or doubled, so no escaping hides a path.
 LOCAL_PLACE = re.compile(r"(?i)(?<![a-z0-9])[a-z]:[\\/]|\\\\|(?<![:/])//|\bfile:"
                          r"|\b(?!https?://)[a-z][a-z0-9+.-]*://")
+WORDML_NAMESPACES = ("http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+                     "http://purl.oclc.org/ooxml/wordprocessingml/main")
+MC_NAMESPACE = "http://schemas.openxmlformats.org/markup-compatibility/2006"
 
 
 def field_arguments(instruction: str) -> tuple[str, list[str]]:
     """A field instruction's name, upper case, and its arguments, switches left out (ECMA-376
-    Part 1, §17.16.1): quoted text, or text up to the next space. Backslashes are kept as
-    written, but for one before a quote inside quotes. A switch is a backslash and one
-    character outside quotes; two backslashes opening a word are an argument."""
+    Part 1, §17.16.1). The name is the letters the instruction begins with, ended by
+    anything else ("INCLUDETEXT\\c" or 'INCLUDETEXT"x"'); an instruction that begins
+    otherwise has no name. An argument is quoted text, in which a backslash escapes a quote
+    or a backslash, or text up to the next space. Backslashes are kept as written. A switch
+    is a backslash and one character outside quotes; two backslashes opening a word are an
+    argument."""
+    name = re.match(r"\s*([A-Za-z]+)", instruction)
+    rest = instruction[name.end():] if name else instruction
     tokens: list[str] = []
-    i, n = 0, len(instruction)
+    i, n = 0, len(rest)
     while i < n:
-        c = instruction[i]
+        c = rest[i]
         if c.isspace():
             i += 1
         elif c == '"':
             i += 1
             text = []
-            while i < n and instruction[i] != '"':
-                if instruction.startswith('\\"', i):
+            while i < n and rest[i] != '"':
+                if rest.startswith("\\\\", i):
+                    text.append("\\\\")
+                    i += 2
+                    continue
+                if rest.startswith('\\"', i):
                     i += 1
-                text.append(instruction[i])
+                text.append(rest[i])
                 i += 1
             tokens.append("".join(text))
             i += 1
-        elif c == "\\" and not instruction.startswith("\\\\", i):
+        elif c == "\\" and not rest.startswith("\\\\", i):
             i += 2  # a switch; an argument of it is read as an argument
         else:
             start = i
-            while i < n and not instruction[i].isspace():
+            while i < n and not rest[i].isspace():
                 i += 1
-            tokens.append(instruction[start:i])
-    if not tokens:
-        return "", []
-    return tokens[0].upper(), tokens[1:]
+            tokens.append(rest[start:i])
+    return (name.group(1).upper() if name else ""), tokens
 
 
 def names_local_place(instruction: str) -> bool:
-    """Whether a field instruction names a local or network place or another scheme: in its
-    text with the web and mail addresses left out, in what follows the scheme of each web or
-    mail address argument, and, for a field that loads or opens a file (FILE_FIELDS), in an
-    argument with a slash, a backslash or a scheme that is not a web or mail address."""
+    """Whether a field instruction names a local or network place or another scheme, or
+    shows people's data: LOCAL_PLACE anywhere in it; a field of REFUSED_FIELDS, or a
+    DOCPROPERTY of PEOPLE_PROPERTIES; and, for a field that loads or opens a file
+    (FILE_FIELDS), an argument with a slash, a backslash or a scheme that is not a web or
+    mail address."""
     field, arguments = field_arguments(instruction)
-    if field in REFUSED_FIELDS or LOCAL_PLACE.search(WEB_ADDRESSES.sub(" ", instruction)):
+    if field in REFUSED_FIELDS or LOCAL_PLACE.search(instruction):
         return True
-    for argument in arguments:
-        web = WEB_ADDRESS.match(argument)
-        if web and LOCAL_PLACE.search(argument[web.end():]):
-            return True
-        if field in FILE_FIELDS and not web and (
-            "/" in argument or "\\" in argument or SCHEME.match(argument)
-        ):
-            return True
-    return False
+    if field == "DOCPROPERTY" and any(a.lower() in PEOPLE_PROPERTIES for a in arguments):
+        return True
+    return field in FILE_FIELDS and any(
+        not WEB_ADDRESS.match(a) and ("/" in a or "\\" in a or SCHEME.match(a))
+        for a in arguments
+    )
+
+
+class FieldMarkup(Exception):
+    """A field that crosses the edge of a Markup Compatibility branch or of foreign markup."""
 
 
 def field_instructions(name: str, data: bytes) -> list[str]:
-    """The instructions of the fields of an XML part, read as XML: the text of
-    w:instrText (and w:delInstrText) joined across runs from each field's begin to its
-    separate or end, nested fields apart, and w:fldSimple's w:instr. Raises Unreadable when
-    the part is not well-formed or declares a document type."""
+    """The instructions of the fields of an XML part, read as XML: the text of w:instrText
+    and w:delInstrText joined across runs from each field's
+    begin to its separate or end, nested fields apart, w:fldSimple's w:instr, and as an
+    instruction of its own any instruction text outside a field's instruction.
+
+    Word takes one branch of mc:AlternateContent and drops elements of ignorable namespaces,
+    so a field mark there could end a field for this reading that Word goes on reading. So
+    the fields inside an mc:Choice, an mc:Fallback or any element outside WordprocessingML
+    must begin and end inside it, as Word's own text boxes hold them; a part with a field
+    across such an edge, with an element inside an instruction, or with w:fldData (custom
+    field data), is refused. Raises Unreadable
+    when the part is not well-formed or declares a document type, and FieldMarkup."""
     builder = _Builder()
     parser = ElementTree.XMLParser(target=builder)
     try:
@@ -911,53 +938,85 @@ def field_instructions(name: str, data: bytes) -> list[str]:
     if builder.doctype_seen:
         raise Unreadable(f"{name} declares a document type, which OPC forbids")
     found: list[str] = []
-    open_fields: list[list[str] | None] = []  # None once the field's instruction is complete
-    for element in root.iter():
-        # By local name in any namespace (transitional, Strict or another): stricter than
-        # Word, which reads only WordprocessingML's.
+
+    def walk(element: ElementTree.Element, fields: list[list[str] | None]) -> None:
         namespace, _, local = element.tag.rpartition("}")
-        w = namespace + "}" if namespace else ""
+        namespace = namespace.lstrip("{")
+        if namespace == MC_NAMESPACE and local in ("Choice", "Fallback") or (
+            namespace not in (*WORDML_NAMESPACES, MC_NAMESPACE) and element is not root
+        ):
+            inner: list[list[str] | None] = []
+            for child in element:
+                walk(child, inner)
+            if inner:
+                raise FieldMarkup(name)
+            return
+        w = "{" + namespace + "}" if namespace else ""
         if local == "fldSimple":
             found.append(element.get(f"{w}instr", ""))
+        elif local == "fldData":
+            raise FieldMarkup(name)
         elif local == "fldChar":
             kind = element.get(f"{w}fldCharType", "")
             if kind == "begin":
-                open_fields.append([])
-            elif kind in ("separate", "end") and open_fields:
-                text = open_fields[-1]
-                if text is not None:
-                    found.append("".join(text))
-                    open_fields[-1] = None
+                fields.append([])
+            elif kind in ("separate", "end"):
+                if not fields:
+                    raise FieldMarkup(name)
+                if fields[-1] is not None:
+                    found.append("".join(fields[-1]))
+                    fields[-1] = None
                 if kind == "end":
-                    open_fields.pop()
-        elif local in ("instrText", "delInstrText") and open_fields:
-            if open_fields[-1] is not None:
-                open_fields[-1].append(element.text or "")
+                    fields.pop()
+        elif local in ("instrText", "delInstrText"):
+            # Markup inside an instruction would split its text where Word may not.
+            if len(element):
+                raise FieldMarkup(name)
+            text = element.text or ""
+            if fields and fields[-1] is not None:
+                fields[-1].append(text)
+            else:
+                found.append(text)
+            return
+        for child in element:
+            walk(child, fields)
+
+    fields: list[list[str] | None] = []
+    walk(root, fields)
     # A field left open at the end of the part still has an instruction.
-    found += ["".join(text) for text in open_fields if text is not None]
+    found += ["".join(text) for text in fields if text is not None]
     return found
 
 
 def field_problems(parts: dict[str, bytes]) -> list[str]:
-    """The XML parts with a field whose instruction names a local or network file, another
-    scheme, or reads another file or program: a drive, a server path, a file URL or a scheme
-    other than http, https and mailto anywhere in an argument; a path in an argument of a
-    field that loads or opens it (FILE_FIELDS) that is not a web or mail address; or a field
-    of REFUSED_FIELDS (#372). Each part is named once, never the path. Raises Unreadable
-    when such a part cannot be read."""
+    """The XML parts with a field whose instruction names a local or network file or
+    another scheme, reads another file or program, or shows people's data
+    (names_local_place), or with field markup this check cannot read as Word does
+    (field_instructions) (#372). Each part is named once, with the field's name when it has
+    one, never the path. Raises Unreadable when such a part cannot be read."""
     found = []
     for name, data in parts.items():
         if not name.lower().endswith(".xml"):
             continue
         # Element and attribute names cannot be written with character references, so a
-        # part with fields holds "instr" or is UTF-16, which the parser reads.
-        if b"instr" not in data.lower() and not data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        # part with fields holds "instr" (or "fldData") or is UTF-16, which the parser reads:
+        # it begins with a byte order mark, or without one has a NUL in its first two bytes.
+        lower = data.lower()
+        utf16 = data.startswith((b"\xff\xfe", b"\xfe\xff")) or b"\x00" in data[:2]
+        if b"instr" not in lower and b"flddata" not in lower and not utf16:
             continue
-        for instruction in field_instructions(name, data):
+        try:
+            instructions = field_instructions(name, data)
+        except FieldMarkup:
+            found.append(f"{name} has a field across Markup Compatibility branches, foreign "
+                         "markup or custom field data")
+            continue
+        for instruction in instructions:
             if names_local_place(instruction):
-                field = field_arguments(instruction)[0] or "no name"
-                found.append(f"{name} has a field ({field}) that names a local file, another "
-                             "scheme or another program")
+                field = field_arguments(instruction)[0]
+                found.append(f"{name} has a field{f' ({field})' if field else ''} that "
+                             "names a local file, another scheme or another program, or "
+                             "people's data")
                 break
     return found
 

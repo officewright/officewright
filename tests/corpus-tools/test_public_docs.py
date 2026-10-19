@@ -889,6 +889,37 @@ class Cleaning(unittest.TestCase):
             "a server by slashes in any field": field('QUOTE "//srv/x"'),
             "a file URL in any field": field('QUOTE "file:x"'),
             "another scheme in any field": field('QUOTE "smb://srv/x"'),
+            # A place inside a web or mail address that does not begin an argument.
+            "a file URL inside an address": field(
+                'QUOTE "(https://www.example.gov/?r=file:///D:/private/x.docx)"'),
+            "a server inside an address": field(
+                'QUOTE "see https://www.example.gov/?r=\\\\srv\\private"'),
+            "a drive inside a mail address": field(
+                'QUOTE "a mailto:x@example.gov?body=C:\\private"'),
+            # Each field that loads or opens a file, with a relative path.
+            "a relative path with backslashes": field('INCLUDETEXT "..\\drafts\\x.docx"'),
+            "a relative link": field('LINK Excel.Sheet.8 "drafts/x.xls" ""'),
+            "a relative rd": field('RD "drafts/x.docx"'),
+            "a relative include": field('INCLUDE "drafts/x.docx"'),
+            "a relative import": field('IMPORT "drafts/x.wmf"'),
+            "a relative hyperlink": field('HYPERLINK "drafts/x.docx"'),
+            "a field name in lower case": field('includepicture "../pics/a.png"'),
+            "a name ended by a switch": field('INCLUDEPICTURE\\d "..\\pics\\a.png"'),
+            "a name ended by a quote": field('INCLUDETEXT"..\\drafts\\x.docx"'),
+            "dde": field('DDE Excel "budget.xls"'),
+            # Fields whose result shows a path or a person.
+            "filename": field("FILENAME \\p"), "template": field("TEMPLATE \\p"),
+            "author": field("AUTHOR"), "last saved by": field("LASTSAVEDBY"),
+            "user name": field("USERNAME"), "user initials": field("USERINITIALS"),
+            "user address": field("USERADDRESS"),
+            **{f"docproperty {p}": field(f'DOCPROPERTY "{p}"') for p in (
+                "Author", "Creator", "LastSavedBy", "LastModifiedBy", "Manager")},
+            "docproperty company": field("DOCPROPERTY Company"),
+            # Instruction text outside a field's instruction is read as one of its own.
+            "an instruction outside a field": (
+                f"<w:document xmlns:w='{w}'><w:body><w:p><w:r><w:instrText>"
+                'HYPERLINK "file:///D:/x.docx"</w:instrText></w:r></w:p></w:body></w:document>'),
+            "an instruction that begins with the path": simple('"D:\\drafts\\x.docx"'),
         }
         plain = public.PublicDoc("plain", "nara", "https://www.example.gov/p.docx",
                                  "2026-10-19", "0" * 64)
@@ -896,20 +927,82 @@ class Cleaning(unittest.TestCase):
             for part in ("word/document.xml", "word/header1.xml"):
                 data = package(**{part: document})
                 with self.subTest(label, part=part):
-                    expected = f"{part} has a field ("
+                    expected = f"{part} has a field"
                     self.assertTrue(any(p.startswith(expected) for p in public.problems(data)),
                                     public.problems(data))
                     with self.assertRaises(public.Refused) as caught:
                         public.clean(data, plain)
                     self.assertIn(expected, str(caught.exception))
                     # The part is named, never the path.
-                    for path in ("drafts", "D:", "C:", "server", "srv", "pics", "jroe", "orders"):
+                    for path in ("drafts", "D:", "C:", "server", "srv", "pics", "jroe", "orders",
+                                 "private", "DRAFTS"):
                         self.assertNotIn(path, str(caught.exception))
         utf16 = field('HYPERLINK "file:///D:/x.docx"').replace(
             "<w:document", "<?xml version='1.0' encoding='UTF-16'?><w:document", 1)
-        self.assertIn("word/footnotes.xml has a field (HYPERLINK)",
-                      "; ".join(public.problems(package(**{
-                          "word/footnotes.xml": utf16.encode("utf-16")}))))
+        # UTF-16 with a byte order mark, and without one in either byte order.
+        for encoding in ("utf-16", "utf-16-le", "utf-16-be"):
+            with self.subTest(encoding):
+                self.assertIn("word/footnotes.xml has a field (HYPERLINK)",
+                              "; ".join(public.problems(package(**{
+                                  "word/footnotes.xml": utf16.encode(encoding)}))))
+        # A part name in upper case is read too, and each part is named once.
+        twice = field('HYPERLINK "file:///D:/x.docx"').replace(
+            "</w:p>", "<w:fldSimple w:instr='INCLUDETEXT \"D:/x\"'/></w:p>")
+        found = public.field_problems({"word/header1.XML": twice.encode()})
+        self.assertEqual(found, ["word/header1.XML has a field (HYPERLINK) that names a local "
+                                 "file, another scheme or another program, or people's data"])
+
+    def test_fields_across_markup_compatibility_or_foreign_markup_are_refused(self):
+        # Word takes one branch of mc:AlternateContent and drops ignorable markup, so a field
+        # mark there could end a field this check reads while Word reads on (review of #381).
+        w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        mc = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+
+        def document(middle, instruction='INCLUDETEXT "x.docx"'):
+            return (f"<w:document xmlns:w='{w}' xmlns:mc='{mc}' xmlns:zz='urn:zz' "
+                    "mc:Ignorable='zz'><w:body><w:p>"
+                    "<w:r><w:fldChar w:fldCharType='begin'/></w:r>" + middle +
+                    f"<w:r><w:instrText>{instruction}</w:instrText></w:r>"
+                    "<w:r><w:fldChar w:fldCharType='separate'/></w:r>"
+                    "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:p></w:body></w:document>")
+
+        def branch(choice, fallback):
+            return (f"<w:r><mc:AlternateContent><mc:Choice Requires='zz'>{choice}</mc:Choice>"
+                    f"<mc:Fallback>{fallback}</mc:Fallback></mc:AlternateContent></w:r>")
+
+        separate = "<w:fldChar w:fldCharType='separate'/>"
+        end = "<w:fldChar w:fldCharType='end'/>"
+        cases = {
+            "a separate in a Choice": document(branch(separate, "")),
+            "an end in a Choice": document(branch(end, "")),
+            "a separate in a Fallback": document(branch("", separate)),
+            "a separate in ignorable markup": document(f"<zz:x><w:r>{separate}</w:r></zz:x>"),
+            "markup inside an instruction": document(
+                "", 'HYPERLINK "fi<zz:x/>le:///D:/x.docx"'),
+            "custom field data": document("<w:r><w:fldData>AAAA</w:fldData></w:r>"),
+            "a begin in a Choice": document(branch("<w:fldChar w:fldCharType='begin'/>", "")),
+        }
+        # Custom field data in a field without an instruction.
+        cases["custom field data alone"] = (
+            f"<w:document xmlns:w='{w}'><w:body><w:p><w:r><w:fldChar w:fldCharType='begin'>"
+            "<w:fldData>AAAA</w:fldData></w:fldChar></w:r><w:r>"
+            "<w:fldChar w:fldCharType='end'/></w:r></w:p></w:body></w:document>")
+        for label, xml in cases.items():
+            data = package(**{"word/header1.xml": xml})
+            with self.subTest(label):
+                message = "word/header1.xml has a field across Markup Compatibility branches"
+                self.assertIn(message, "; ".join(public.problems(data)))
+                with self.assertRaises(public.Refused) as caught:
+                    public.clean(data, DOC)
+                self.assertIn(message, str(caught.exception))
+        # A whole field in each branch, as Word writes text boxes, is read and kept.
+        whole = ("<w:r><w:fldChar w:fldCharType='begin'/></w:r><w:r><w:instrText>PAGE"
+                 "</w:instrText></w:r><w:r><w:fldChar w:fldCharType='end'/></w:r>")
+        kept = (f"<w:document xmlns:w='{w}' xmlns:mc='{mc}'><w:body><w:p><w:r>"
+                f"<mc:AlternateContent><mc:Choice Requires='w14'>{whole}</mc:Choice>"
+                f"<mc:Fallback>{whole}</mc:Fallback></mc:AlternateContent></w:r></w:p></w:body>"
+                "</w:document>")
+        self.assertEqual(public.field_problems({"word/header1.xml": kept.encode()}), [])
 
     def test_fields_that_name_no_local_file_are_kept(self):
         w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -918,7 +1011,8 @@ class Cleaning(unittest.TestCase):
                             'DATE \\@ "M/d/yyyy"', 'HYPERLINK "https://www.example.gov/a/b"',
                             'HYPERLINK \\l "_Toc1"', 'HYPERLINK "mailto:help@example.gov"',
                             'INCLUDEPICTURE "https://www.example.gov/a.png" \\d',
-                            'HYPERLINK "x.docx"'):
+                            'HYPERLINK "x.docx"', 'HYPERLINK "HTTPS://WWW.EXAMPLE.GOV/A"',
+                            'DOCPROPERTY "Title"'):
             document = (f"<w:document xmlns:w='{w}'><w:body><w:p><w:fldSimple "
                         f"w:instr='{instruction}'/><w:r><w:fldChar w:fldCharType='begin'/></w:r>"
                         f"<w:r><w:instrText>{instruction}</w:instrText></w:r><w:r>"
@@ -926,6 +1020,16 @@ class Cleaning(unittest.TestCase):
             with self.subTest(instruction):
                 self.assertEqual(public.field_problems({"word/header1.xml":
                                                         document.encode()}), [])
+
+    def test_field_instructions_are_read_as_field_syntax_reads_them(self):
+        # ECMA-376 Part 1 §17.16.1: in quotes, a backslash escapes a quote or a backslash, so
+        # "\\" before a quote ends the argument; the name ends at anything but a letter.
+        self.assertEqual(public.field_arguments('QUOTE "x\\\\" "y z"'),
+                         ("QUOTE", ["x\\\\", "y z"]))
+        self.assertEqual(public.field_arguments('QUOTE "say \\"hi\\""'), ("QUOTE", ['say "hi"']))
+        self.assertEqual(public.field_arguments('includetext"a b"\\c x'),
+                         ("INCLUDETEXT", ["a b", "x"]))
+        self.assertEqual(public.field_arguments('"D:\\x"'), ("", ["D:\\x"]))
 
     def test_a_part_with_fields_must_be_well_formed(self):
         broken = package(**{"word/header1.xml": "<w:hdr xmlns:w='w'><w:instrText>"})
