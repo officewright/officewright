@@ -858,10 +858,35 @@ class Cleaning(unittest.TestCase):
                 with self.assertRaises(public.Refused) as caught:
                     public.clean(data, DOC)
                 self.assertIn(f"entries {names} name one part", str(caught.exception))
+        # And the other spellings OPC reads as one part: percent-encoded, and a backslash for
+        # a slash. A twin of the core properties would keep a person's name.
+        core = "<cp:coreProperties xmlns:cp='c' xmlns:dc='d'><dc:creator>Jane Roe</dc:creator>"
+        for name, twin_name in (("docProps/core.xml", "docProps/%63ore.xml"),
+                                ("word/document.xml", "word\\document.xml")):
+            data = with_entry(package(), twin_name, core + "</cp:coreProperties>")
+            with self.subTest(twin_name):
+                with self.assertRaises(public.Refused) as caught:
+                    public.clean(data, DOC)
+                self.assertIn(f"entries {name} and {twin_name} name one part",
+                              str(caught.exception))
+        # problems() reports exact, case and percent twins, each group of them.
         twin = with_entry(self.cleaned.data, "WORD/document.xml", "<w:document xmlns:w='w'/>")
         self.assertIn("entries word/document.xml and WORD/document.xml name one part",
                       public.problems(twin))
+        twins = with_entry(with_entry(self.cleaned.data, "word/document.xml", "<w:document/>"),
+                           "docProps/%61pp.xml", "<Properties/>")
+        self.assertEqual(
+            [found for found in public.problems(twins) if "name one part" in found],
+            ["entries docProps/app.xml and docProps/%61pp.xml name one part",
+             "entries word/document.xml and word/document.xml name one part"],
+        )
         self.assertEqual(public.problems(self.cleaned.data), [])
+        # The cleaning itself must not write two pictures that name one part.
+        pictures = package(**{"word/media/a.emf": b"\x01\x00\x00\x00 EMF",
+                              "word/media/A.png": public.placeholder(3, 2)})
+        with self.assertRaises(public.Refused) as caught:
+            public.clean(pictures, DOC)
+        self.assertIn("two pictures differ only in their extension or case", str(caught.exception))
 
     def test_a_placeholder_must_be_8_bit_grey_and_not_oversized(self):
         good = public.placeholder(4, 3)

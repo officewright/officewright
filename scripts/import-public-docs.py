@@ -23,8 +23,8 @@ listed SHA-256. The script then writes tests/corpus/business/<name>.docx with
 and the document's row in the table of tests/corpus/SOURCES.md: URL, download date,
 licence statement and the changes. It refuses documents with tracked changes, comments,
 ActiveX controls, embedded fonts or objects, macros, mail merge sources, links to local
-files and archives in which two entries name one part. With --check it writes nothing and fails if a committed file differs from what it
-would write. Python standard library only.
+files and archives in which two entries name one part. With --check it writes nothing and
+fails if a committed file differs from what it would write. Python standard library only.
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ import hashlib
 import io
 import posixpath
 import re
+import string
 import struct
 import sys
 import urllib.parse
@@ -898,13 +899,23 @@ class Cleaned:
     changes: list[str] = field(default_factory=list)
 
 
+ASCII_LOWER = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
+
+
+def part_key(name: str) -> str:
+    """An entry name as OPC compares part names: a backslash read as a slash (as ZIP tools
+    on Windows read it), percent-decoded, and without regard to ASCII case."""
+    return urllib.parse.unquote(name.replace("\\", "/")).translate(ASCII_LOWER)
+
+
 def repeated_parts(names: list[str]) -> list[str]:
     """The entry names that name one part, joined by "and" per part: the same name twice, or
-    names that differ only in case, since OPC compares part names without regard to case.
-    The checks read the parts by name, so they would see only one entry of each."""
+    names that differ only as part names compare (part_key: case, percent-encoding, a
+    backslash for a slash). The checks read the parts by name, so they would see only one
+    entry of each."""
     by_part: dict[str, list[str]] = {}
     for name in names:
-        by_part.setdefault(name.lower(), []).append(name)
+        by_part.setdefault(part_key(name), []).append(name)
     return [" and ".join(group) for group in by_part.values() if len(group) > 1]
 
 
@@ -938,8 +949,9 @@ def clean(original: bytes, doc: PublicDoc) -> Cleaned:
         if MEDIA.match(name):
             stem = name.rsplit(".", 1)[0] if "." in posixpath.basename(name) else name
             renamed[name] = f"{stem}.png"
-    if len(set(renamed.values())) != len(renamed):
-        raise Refused(f"{doc.name}: two pictures differ only in their extension")
+    # Renamed pictures must not name one part either (a.png and A.png).
+    if len({part_key(new) for new in renamed.values()}) != len(renamed):
+        raise Refused(f"{doc.name}: two pictures differ only in their extension or case")
     changes = []
     people = []
     if dropped:
