@@ -54,12 +54,17 @@ fn casts_shadow(shadow: Element<'_>, names: &Names) -> bool {
 }
 
 /// Whether a `w14:reflection` shows: one whose start and end are both fully transparent
-/// does not, nor one scaled to nothing. The defaults are those of [MS-DOCX] 2.6.3.24
+/// does not, nor one of size 0 or scaled to nothing. The defaults are those of [MS-DOCX] 2.6.3.24
 /// (CT_Reflection), all 0, so the reflection Word writes into list levels, all zeros,
 /// shows nothing either.
 fn reflects(reflection: Element<'_>, names: &Names) -> bool {
     let value = |name| effect_value(reflection, names, name, 0);
-    (value("stA") != 0 || value("endA") != 0) && value("sx") != 0 && value("sy") != 0
+    // The reflection fades along a ramp that ends at endPos, the reflection's size in
+    // Word's dialog; at its default of 0 nothing of it is drawn ([MS-DOCX] 2.6.3.24).
+    (value("stA") != 0 || value("endA") != 0)
+        && value("endPos") != 0
+        && value("sx") != 0
+        && value("sy") != 0
 }
 
 /// Whether a `w14:textOutline` draws a line: one filled other than with `w14:noFill`.
@@ -112,8 +117,9 @@ fn text_fill(fill: Element<'_>, names: &Names) -> TextFill {
     solid.unwrap_or(TextFill::Other)
 }
 
-/// The theme colour a colour of the theme's scheme names (ST_SchemeColorVal of [MS-DOCX]
-/// 2.6.3.28, CT_SchemeColor); none for the placeholder colour, which has none.
+/// The theme colour a colour of the theme's scheme names (the `w14:val` of a
+/// `w14:schemeClr`, [MS-DOCX] 2.6.3.27, CT_SchemeColor, of type ST_SchemeColorVal,
+/// 2.6.4.16); none for the placeholder colour, which has none.
 fn scheme_color(value: &str) -> Option<ThemeColor> {
     Some(match value {
         "bg1" => ThemeColor::Background1,

@@ -612,8 +612,8 @@ fn lists_word_s_text_effects_once_but_no_value_that_changes_nothing() {
             reflection,
         ),
         // Only an end opacity, or only a start one, the other at its default of 0.
-        (format!(r#"<w14:reflection w14:endA="300" {full}/>"#), reflection),
-        (format!(r#"<w14:reflection w14:stA="47000" {full}/>"#), reflection),
+        (format!(r#"<w14:reflection w14:endA="300" w14:endPos="50000" {full}/>"#), reflection),
+        (format!(r#"<w14:reflection w14:stA="47000" w14:endPos="50000" {full}/>"#), reflection),
         (
             format!(r#"<w14:textOutline w14:w="9525"><w14:solidFill>{red}</w14:solidFill></w14:textOutline>"#),
             outline,
@@ -672,6 +672,8 @@ fn lists_word_s_text_effects_once_but_no_value_that_changes_nothing() {
         format!(r#"<w14:shadow {full}>{red}</w14:shadow>"#),
         "<w14:reflection/>".to_owned(),
         format!("<w14:reflection {full}/>"),
+        // Opaque, but of size 0: endPos at its default.
+        format!(r#"<w14:reflection w14:stA="50000" w14:endA="300" {full}/>"#),
         r#"<w14:reflection w14:stA="50000" w14:sx="0" w14:sy="-100000"/>"#.to_owned(),
         r#"<w14:reflection w14:stA="50000" w14:sx="100000" w14:sy="0"/>"#.to_owned(),
         r#"<w14:textOutline w14:w="9525"/>"#.to_owned(),
