@@ -254,10 +254,11 @@ impl<'a> Formats<'a> {
         &self.work
     }
 
-    /// How many table texts are kept, for tests of the bound.
+    /// How many table texts, and paragraph defaults laid under styles in cells, are kept,
+    /// for tests of the bound.
     #[cfg(test)]
-    pub(crate) fn kept_table_texts(&self) -> usize {
-        self.table_texts.len()
+    pub(crate) fn kept_table_texts(&self) -> (usize, usize) {
+        (self.table_texts.len(), self.cell_paragraphs.len())
     }
 
     /// How many combinations of a style and a list level are kept, for tests of the

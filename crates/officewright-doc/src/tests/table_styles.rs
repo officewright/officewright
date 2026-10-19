@@ -1121,8 +1121,14 @@ fn gives_cells_what_the_table_style_and_its_conditional_formats_give_text() {
     ]
     .iter()
     .map(|(kind, colour)| {
+        // The first row's format right-aligns its text too.
+        let p_pr = if *kind == "firstRow" {
+            r#"<w:pPr><w:jc w:val="right"/></w:pPr>"#
+        } else {
+            ""
+        };
         format!(
-            r#"<w:tblStylePr w:type="{kind}"><w:rPr><w:color w:val="{colour}"/></w:rPr></w:tblStylePr>"#
+            r#"<w:tblStylePr w:type="{kind}">{p_pr}<w:rPr><w:color w:val="{colour}"/></w:rPr></w:tblStylePr>"#
         )
     })
     .collect();
@@ -1150,9 +1156,14 @@ fn gives_cells_what_the_table_style_and_its_conditional_formats_give_text() {
         ]
     );
     let mut formats = document.formats();
-    for paragraph in cell_paragraphs(&document) {
+    for (at, paragraph) in cell_paragraphs(&document).into_iter().enumerate() {
         let format = formats.paragraph(paragraph);
-        assert_eq!(format.justification(), Justification::Center);
+        let justification = if at < 2 {
+            Justification::Right
+        } else {
+            Justification::Center
+        };
+        assert_eq!(format.justification(), justification, "{at}");
         assert_eq!(format.after_spacing(), Pt(6.0));
         assert_eq!(formats.paragraph_mark(paragraph).size(), Pt(14.0));
     }
@@ -1180,9 +1191,9 @@ fn gives_cells_what_the_table_style_and_its_conditional_formats_give_text() {
 fn puts_the_table_style_under_the_paragraph_style_the_character_style_and_direct_formatting() {
     let styles = r#"<w:style w:type="table" w:styleId="Big"><w:name w:val="Big"/><w:pPr><w:jc w:val="center"/></w:pPr><w:rPr><w:sz w:val="28"/><w:color w:val="111111"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Huge"><w:name w:val="Huge"/><w:pPr><w:jc w:val="right"/></w:pPr><w:rPr><w:sz w:val="32"/></w:rPr></w:style><w:style w:type="character" w:styleId="Red"><w:name w:val="Red"/><w:rPr><w:color w:val="FF0000"/></w:rPr></w:style>"#;
     let cells = [
-        "<w:p/>",
-        r#"<w:p><w:pPr><w:pStyle w:val="Huge"/></w:pPr></w:p>"#,
-        r#"<w:p><w:pPr><w:rPr><w:rStyle w:val="Red"/><w:sz w:val="36"/></w:rPr></w:pPr></w:p>"#,
+        "<w:p><w:r><w:t>x</w:t></w:r></w:p>",
+        r#"<w:p><w:pPr><w:pStyle w:val="Huge"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
+        r#"<w:p><w:pPr><w:rPr><w:rStyle w:val="Red"/><w:sz w:val="36"/></w:rPr></w:pPr><w:r><w:rPr><w:rStyle w:val="Red"/><w:sz w:val="36"/></w:rPr><w:t>x</w:t></w:r></w:p>"#,
     ];
     let row: String = cells
         .iter()
@@ -1201,6 +1212,22 @@ fn puts_the_table_style_under_the_paragraph_style_the_character_style_and_direct
         ]
     );
     let mut formats = document.formats();
+    // The runs take what their marks take.
+    let runs: Vec<(f64, ColorValue)> = cell_paragraphs(&document)
+        .into_iter()
+        .map(|paragraph| {
+            let run = formats.run(paragraph.runs().next().unwrap());
+            (run.size().0, run.color())
+        })
+        .collect();
+    assert_eq!(
+        runs,
+        [
+            (14.0, rgb("111111")),
+            (16.0, rgb("111111")),
+            (18.0, rgb("FF0000"))
+        ]
+    );
     let alignments: Vec<Justification> = cell_paragraphs(&document)
         .into_iter()
         .map(|paragraph| formats.paragraph(paragraph).justification())
@@ -1325,6 +1352,9 @@ fn lets_the_table_style_win_over_the_default_style_s_11_or_12_pt_and_left_when_t
     // Written, whatever the mode.
     assert_eq!(case(left_12, 15, Some("0"), ""), table_wins);
     assert_eq!(case(left_12, 14, Some("1"), ""), normal_12);
+    // Only a left justification gives way.
+    let both_12 = r#"<w:pPr><w:jc w:val="both"/></w:pPr><w:rPr><w:sz w:val="24"/></w:rPr>"#;
+    assert_eq!(case(both_12, 14, None, "").2, Justification::Both);
     // A table style that gives no size or justification leaves the default style's.
     let plain = |normal: &str| {
         let styles = format!(
@@ -1345,7 +1375,7 @@ fn lets_the_table_style_win_over_the_default_style_s_11_or_12_pt_and_left_when_t
 #[test]
 fn takes_the_style_of_the_innermost_table_and_gives_list_labels_its_run_properties() {
     let styles = r#"<w:style w:type="table" w:styleId="Outer"><w:name w:val="Outer"/><w:rPr><w:color w:val="111111"/></w:rPr></w:style><w:style w:type="table" w:styleId="Inner"><w:name w:val="Inner"/><w:rPr><w:color w:val="222222"/></w:rPr></w:style><w:style w:type="table" w:styleId="Listed"><w:name w:val="Listed"/><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr></w:style>"#;
-    let numbering = r#"<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#;
+    let numbering = r#"<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#;
     let inner = r#"<w:tbl><w:tblPr><w:tblStyle w:val="Inner"/></w:tblPr><w:tblGrid/><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>"#;
     let item =
         r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr></w:p>"#;
@@ -1488,7 +1518,8 @@ fn keeps_at_most_256_table_texts() {
             justification,
             "table {n}"
         );
-        assert!(formats.kept_table_texts() <= 256);
+        let (texts, roots) = formats.kept_table_texts();
+        assert!(texts <= 256 && roots <= 256, "{texts} {roots}");
         n += 1;
     }
     assert_eq!(n, 300);
