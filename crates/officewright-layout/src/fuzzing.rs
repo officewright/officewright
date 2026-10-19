@@ -1193,6 +1193,7 @@ pub fn paint(
             location: &location,
             background: None,
             leaders: &mut leaders,
+            bar_reach: (0.0, 0.0),
         };
         let origin = Point {
             x: Pt(0.0),
