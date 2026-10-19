@@ -120,18 +120,41 @@ pub(crate) fn space_between(
     above: &ParagraphProps,
     below: &ParagraphProps,
 ) -> Pt {
-    let same_style = above.style_key() == below.style_key();
-    let after = if above.contextual_spacing() && same_style {
-        Pt(0.0)
-    } else {
-        space_after(document, above)
-    };
-    let before = if below.contextual_spacing() && same_style {
-        Pt(0.0)
-    } else {
-        space_before(document, below)
-    };
+    let after = own_space_after(document, above, Some(below));
+    let before = own_space_before(document, below, Some(above));
     Pt(after.0.max(before.0))
+}
+
+/// The space a paragraph with `props` keeps below it before the paragraph `below` it:
+/// none when contextual spacing leaves it out next to a paragraph of the same style.
+pub(crate) fn own_space_after(
+    document: &Document,
+    props: &ParagraphProps,
+    below: Option<&ParagraphProps>,
+) -> Pt {
+    if props.contextual_spacing()
+        && below.is_some_and(|below| below.style_key() == props.style_key())
+    {
+        Pt(0.0)
+    } else {
+        space_after(document, props)
+    }
+}
+
+/// The space a paragraph with `props` keeps above it after the paragraph `above` it:
+/// none when contextual spacing leaves it out next to a paragraph of the same style.
+pub(crate) fn own_space_before(
+    document: &Document,
+    props: &ParagraphProps,
+    above: Option<&ParagraphProps>,
+) -> Pt {
+    if props.contextual_spacing()
+        && above.is_some_and(|above| above.style_key() == props.style_key())
+    {
+        Pt(0.0)
+    } else {
+        space_before(document, props)
+    }
 }
 
 /// The space above a paragraph with `props`, with no paragraph above it to share it.
@@ -250,7 +273,11 @@ mod tests {
         assert_eq!(between(&document, &style(1, false), &style(1, true)), 10.0);
         // Only the first: its space below goes.
         assert_eq!(between(&document, &style(1, true), &style(1, false)), 6.0);
-        // Different styles: both stay, and the larger counts.
+        // Different styles: both stay, and the larger counts, whichever side it is on.
         assert_eq!(between(&document, &style(1, true), &style(2, true)), 10.0);
+        let before_larger =
+            |key| style(key, true).with_spacing(Spacing::default().with_before(Pt(12.0)));
+        assert_eq!(between(&document, &style(1, true), &before_larger(2)), 12.0);
+        assert_eq!(between(&document, &style(1, true), &before_larger(1)), 0.0);
     }
 }

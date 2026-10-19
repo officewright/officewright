@@ -8,9 +8,10 @@ use officewright_layout::ReportKind;
 use officewright_layout::ir;
 
 use super::{Once, Translator, is_marker};
+use crate::model::properties::{Color, TextFill};
 use crate::model::{
-    BreakClear, BreakKind, CharacterFormat, FieldCharKind, Inline, Paragraph, RevisionKind, Run,
-    RunContent,
+    BreakClear, BreakKind, CharacterFormat, ColorValue, FieldCharKind, Inline, Paragraph,
+    RevisionKind, Run, RunContent,
 };
 
 /// The longest part of a field's instruction read: far more than the name and switches
@@ -195,7 +196,7 @@ impl<'a> Translator<'a> {
     /// hidden counts, and one that `shows` text for the features of its glyphs: a hidden
     /// run, or one that holds only a field's instruction, shows nothing they could
     /// change. A border surrounds a tab or a picture in the line too.
-    fn report_run_features(&mut self, format: &CharacterFormat, shows: bool) {
+    pub(super) fn report_run_features(&mut self, format: &CharacterFormat, shows: bool) {
         if format.border {
             self.report_once(
                 Once::RunBorder,
@@ -205,6 +206,25 @@ impl<'a> Translator<'a> {
         if !shows {
             return;
         }
+        let effects = &format.text_effects;
+        let choices = &format.font_choices;
+        // A fill of one colour changes nothing when it is the text's own.
+        let fill_changes = match effects.fill {
+            None => false,
+            Some(TextFill::Solid(red, green, blue)) => {
+                format.color() != ColorValue::Rgb(red, green, blue)
+            }
+            // One the theme does not resolve, without a theme part, counts as a change.
+            Some(TextFill::Scheme(theme)) => {
+                let theme = Color {
+                    theme: Some(theme),
+                    ..Color::default()
+                };
+                let filled = self.document.resolve_color(&theme);
+                filled == ColorValue::Auto || format.color() != filled
+            }
+            Some(TextFill::Other) => true,
+        };
         for (on, once, message) in [
             (
                 format.emboss(),
@@ -230,6 +250,53 @@ impl<'a> Translator<'a> {
                 format.emphasis_mark,
                 Once::EmphasisMark,
                 "emphasis marks (w:em) are not drawn, here and wherever else the document has them",
+            ),
+            (
+                effects.glow == Some(true),
+                Once::Glow,
+                "glowing text (w14:glow) is drawn without its glow, here and wherever else the document has it",
+            ),
+            (
+                effects.shadow == Some(true),
+                Once::TextShadow,
+                "text with a shadow effect (w14:shadow) is drawn without its shadow, here and wherever else the document has it",
+            ),
+            (
+                effects.reflection == Some(true),
+                Once::Reflection,
+                "a reflection of text (w14:reflection) is not drawn, here and wherever else the document has one",
+            ),
+            (
+                effects.outline == Some(true),
+                Once::TextOutline,
+                "an outline of text (w14:textOutline) is not drawn, here and wherever else the document has one",
+            ),
+            (
+                fill_changes,
+                Once::TextFill,
+                "a fill of text (w14:textFill) is not applied, so the text is drawn in its colour, here and wherever else the document has one",
+            ),
+            (
+                effects.turned == Some(true) || effects.depth == Some(true),
+                Once::Text3d,
+                "3-D text (w14:scene3d, w14:props3d) is drawn flat, here and wherever else the document has it",
+            ),
+            // Word applies the font's features only with enableOpenTypeFeatures on, as it
+            // does ligatures.
+            (
+                self.open_type_features && choices.number_form == Some(true),
+                Once::NumberForm,
+                "lining or old-style figures (w14:numForm) are drawn in the font's default form, here and wherever else the document asks for them",
+            ),
+            (
+                self.open_type_features && choices.number_spacing == Some(true),
+                Once::NumberSpacing,
+                "proportional or tabular figures (w14:numSpacing) are drawn in the font's default spacing, here and wherever else the document asks for them",
+            ),
+            (
+                self.open_type_features && choices.stylistic_sets == Some(true),
+                Once::StylisticSets,
+                "stylistic sets (w14:stylisticSets) are not applied, here and wherever else the document has them",
             ),
         ] {
             if on {

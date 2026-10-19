@@ -78,9 +78,24 @@ pub enum Limit {
     XmlNamespaces,
 }
 
+/// How many characters of a value from the document an error message quotes, so that a
+/// value of megabytes makes no message of megabytes: names and values of XML, content
+/// types and relationships. The ZIP layer quotes entry names whole, as their length is
+/// bounded by the format.
+pub(crate) const MESSAGE_VALUE: usize = 64;
+
+/// At most [`MESSAGE_VALUE`] characters of a name or value from the document, with `…`
+/// when there are more, so that an error message names it without copying all of it.
+pub(crate) fn shorten(text: &str) -> std::borrow::Cow<'_, str> {
+    match text.char_indices().nth(MESSAGE_VALUE) {
+        Some((end, _)) => format!("{}…", text.get(..end).unwrap_or_default()).into(),
+        None => text.into(),
+    }
+}
+
 impl Error {
-    /// Names the part an XML error or a size limit refers to, when the error does not
-    /// name one yet.
+    /// Names the part an XML error or an XML limit (depth, attributes, namespaces,
+    /// Markup Compatibility names) refers to, when the error does not name one yet.
     #[must_use]
     pub fn in_part(self, part: &str) -> Self {
         match self {
@@ -95,6 +110,9 @@ impl Error {
                 column,
                 message,
             },
+            // The reader writes an XML limit's context as its line and column
+            // (`Reader::limit`); once a part is named it no longer begins so, whatever
+            // the part's name is (the crate names `[Content_Types].xml` without a slash).
             Self::LimitExceeded {
                 limit,
                 maximum,
@@ -102,7 +120,7 @@ impl Error {
             } if matches!(
                 limit,
                 Limit::XmlDepth | Limit::XmlAttributes | Limit::XmlNamespaces | Limit::MceNames
-            ) =>
+            ) && context.starts_with("line ") =>
             {
                 Self::LimitExceeded {
                     limit,
@@ -192,6 +210,33 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "/word/document.xml, line 2, column 7: unexpected end of input"
+        );
+        // So does an XML limit (#101).
+        let depth = Error::LimitExceeded {
+            limit: Limit::XmlDepth,
+            maximum: 256,
+            context: "line 9, column 1".into(),
+        };
+        assert_eq!(
+            depth
+                .in_part("/word/document.xml")
+                .in_part("/other.xml")
+                .to_string(),
+            "/word/document.xml, line 9, column 1: xml element nesting depth exceeds the limit of 256"
+        );
+        // A part the crate names without a slash too, as it names the content types
+        // (from the review of #364).
+        let depth = Error::LimitExceeded {
+            limit: Limit::XmlDepth,
+            maximum: 256,
+            context: "line 9, column 1".into(),
+        };
+        assert_eq!(
+            depth
+                .in_part("[Content_Types].xml")
+                .in_part("/word/document.xml")
+                .to_string(),
+            "[Content_Types].xml, line 9, column 1: xml element nesting depth exceeds the limit of 256"
         );
     }
 

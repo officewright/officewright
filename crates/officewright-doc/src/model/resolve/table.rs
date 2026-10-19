@@ -9,10 +9,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use super::character::CharacterLevel;
+use super::paragraph::ParagraphLevel;
 use super::{Formats, Layer, style_index};
 use crate::model::table_properties::GroupEdges;
 use crate::model::{
-    Document, Kind, Style, StyleKind, Table, TableCell, TableCellProperties, TableLook,
+    Document, Kind, Node, Style, StyleKind, Table, TableCell, TableCellProperties, TableLook,
     TableProperties, TableRow, TableRowProperties, TableStyleCondition,
 };
 
@@ -41,12 +43,15 @@ fn bit(condition: TableStyleCondition) -> u16 {
         .map_or(0, |place| 1 << place)
 }
 
-/// The table, row and cell properties one part of a table style gives.
+/// The table, row and cell properties one part of a table style gives, and what it
+/// gives the paragraphs and runs of its cells.
 #[derive(Clone, Debug, Default)]
 struct TablePart {
     table: TableProperties,
     row: TableRowProperties,
     cell: TableCellProperties,
+    paragraph: ParagraphLevel,
+    character: CharacterLevel,
 }
 
 impl TablePart {
@@ -54,7 +59,21 @@ impl TablePart {
         self.table.overlay(&above.table);
         self.row.overlay(&above.row);
         self.cell.overlay(&above.cell);
+        self.paragraph.overlay(&above.paragraph);
+        self.character.overlay(&above.character);
     }
+}
+
+/// What a table style gives the paragraphs and runs of the cells that meet a set of its
+/// conditions: the style's own, then its conditional formats', in Word's order
+/// ([`ORDER`]). In the hierarchy of a paragraph in a cell it lies between the document
+/// defaults and the paragraph's list level and style (ECMA-376 Part 1, §17.7.2).
+#[derive(Debug)]
+pub(super) struct TableText {
+    /// Tells the layers apart, for the caches of what lies over them.
+    pub(super) id: u64,
+    pub(super) paragraph: ParagraphLevel,
+    pub(super) character: CharacterLevel,
 }
 
 /// What a table style gives with the styles it is based on: its own properties, and each
@@ -64,8 +83,6 @@ impl TablePart {
 pub(super) struct TableStyleLevel {
     whole: TablePart,
     conditions: [Option<Box<TablePart>>; 12],
-    /// Whether the style gives paragraph or run properties, which are not applied yet.
-    gives_text: bool,
     /// Whether a conditional format gives table properties, which are not applied.
     gives_conditional_table: bool,
 }
@@ -84,9 +101,9 @@ impl Layer for TableStyleLevel {
                 table: style.table_properties().of_table_style(false),
                 row: style.row_properties().of_table_style(),
                 cell: style.cell_properties().of_table_style(false),
+                paragraph: ParagraphLevel::of_table_style(&style.paragraph_properties()),
+                character: CharacterLevel::of(&style.run_properties()),
             },
-            gives_text: style.paragraph_properties() != Default::default()
-                || style.run_properties() != Default::default(),
             ..Self::default()
         };
         // Of two conditional formats of one type, the first counts, as for elements
@@ -107,9 +124,9 @@ impl Layer for TableStyleLevel {
                 table: format.table_properties().of_table_style(true),
                 row: format.row_properties().of_table_style(),
                 cell: format.cell_properties().of_table_style(true),
+                paragraph: ParagraphLevel::of_table_style(&format.paragraph_properties()),
+                character: CharacterLevel::of(&format.run_properties()),
             };
-            level.gives_text |= format.paragraph_properties() != Default::default()
-                || format.run_properties() != Default::default();
             level.gives_conditional_table |= part.table != TableProperties::default();
             if let Some(slot) = ORDER
                 .iter()
@@ -129,7 +146,6 @@ impl Layer for TableStyleLevel {
                 below.get_or_insert_with(Box::default).overlay(above);
             }
         }
-        self.gives_text |= above.gives_text;
         self.gives_conditional_table |= above.gives_conditional_table;
     }
 }
@@ -139,6 +155,8 @@ impl Layer for TableStyleLevel {
 #[derive(Debug)]
 pub(super) struct TableContext {
     style: Option<Arc<TableStyleLevel>>,
+    /// The place of the table's style among the styles.
+    style_index: Option<usize>,
     properties: TableProperties,
     look: TableLook,
     rows: HashMap<u32, u16>,
@@ -181,6 +199,25 @@ impl CellPlace {
     }
 }
 
+/// How many [`TableText`]s the resolver keeps at a time, with the style chains laid over
+/// them: one per table style and set of conditions that cells use, so a few per table
+/// style in practice.
+const MAX_TABLE_TEXTS: usize = 256;
+
+/// The cell a paragraph is in, the innermost; none for one in no cell.
+fn cell_of(document: &Document, node: &Node) -> Option<u32> {
+    let mut current = node;
+    for _ in 0..document.nodes.len() {
+        let parent = document.node(current.parent)?;
+        match parent.kind {
+            Kind::Cell => return Some(current.parent),
+            Kind::Table { .. } | Kind::Row => return None,
+            _ => current = parent,
+        }
+    }
+    None
+}
+
 /// Word's options when a table has no `w:tblLook`: 0x04A0, the first row and the first
 /// column, no vertical bands (MS-OI29500 §17.4.55(a)).
 fn default_look() -> TableLook {
@@ -201,8 +238,8 @@ fn default_look() -> TableLook {
 /// §17.7.6.5(c), §17.7.6.7(b)). Word leaves the first row and the first column out of
 /// the bands when they are formatted on their own (word-rules/E-table-style-look.docx,
 /// cases 01 and 04), and every header row (E-table-style-header-rows-on.docx, #300).
-/// Leaving the last row and column out too is our choice: where they are formatted on
-/// their own, their format hides whether they count, and no render shows it yet.
+/// Leaving the last row and column out too is our choice: in E-table-style-look their
+/// own format covers the band's colour and fill, so no render shows it yet (#298).
 fn band(
     at: usize,
     count: usize,
@@ -396,17 +433,54 @@ impl<'a> Formats<'a> {
             .collect()
     }
 
-    /// Whether the table's style gives paragraph or run properties, or conditional table
-    /// properties, which the formatting in effect does not take yet.
+    /// Whether the table's style gives conditional table properties, which the
+    /// formatting in effect does not take yet.
     // reason: only the translation into the layout IR asks for it.
     #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
-    pub(crate) fn table_style_gives_unapplied(&mut self, table: Table<'a>) -> (bool, bool) {
+    pub(crate) fn table_style_gives_conditional_table(&mut self, table: Table<'a>) -> bool {
         let (_, index) = table.place();
         self.table_context(index)
             .and_then(|context| context.style.clone())
-            .map_or((false, false), |style| {
-                (style.gives_text, style.gives_conditional_table)
-            })
+            .is_some_and(|style| style.gives_conditional_table)
+    }
+
+    /// What the style of the table around the paragraph `node` gives it and its runs: none
+    /// for a paragraph in no cell, or in a table without a style. The innermost cell
+    /// counts. Worked out once per style and set of conditions; looking it up costs a walk
+    /// up to the cell and a few lookups.
+    pub(super) fn table_text(&mut self, node: &Node) -> Option<Arc<TableText>> {
+        let cell = cell_of(self.document, node)?;
+        let context = self.context_of(cell)?;
+        let style = context.style.as_ref()?;
+        let index = context.style_index?;
+        let conditions = context.cells.get(&cell).map_or(0, |place| place.conditions);
+        if let Some(text) = self.table_texts.get(&(index, conditions)) {
+            return Some(Arc::clone(text));
+        }
+        #[cfg(test)]
+        {
+            self.work.table_texts += 1;
+        }
+        let mut paragraph = style.whole.paragraph.clone();
+        let mut character = style.whole.character.clone();
+        for (place, part) in style.conditions.iter().enumerate() {
+            if let Some(part) = part.as_deref().filter(|_| conditions & (1 << place) != 0) {
+                paragraph.overlay(&part.paragraph);
+                character.overlay(&part.character);
+            }
+        }
+        if self.table_texts.len() >= MAX_TABLE_TEXTS {
+            self.forget_table_texts();
+        }
+        self.next_table_text += 1;
+        let text = Arc::new(TableText {
+            id: self.next_table_text,
+            paragraph,
+            character,
+        });
+        self.table_texts
+            .insert((index, conditions), Arc::clone(&text));
+        Some(text)
     }
 
     /// The context of the table a row or cell belongs to.
@@ -444,14 +518,14 @@ impl<'a> Formats<'a> {
             self.work.tables += 1;
         }
         let own = table.properties();
-        let style = own
+        let style_index = own
             .style()
             .and_then(|id| style_index(document, id, StyleKind::Table))
-            .or_else(|| self.default_table_style())
-            .map(|style| {
-                self.table_styles
-                    .level(document, style, &TableStyleLevel::default())
-            });
+            .or_else(|| self.default_table_style());
+        let style = style_index.map(|style| {
+            self.table_styles
+                .level(document, style, &TableStyleLevel::default())
+        });
         let mut properties = style
             .as_ref()
             .map(|style| style.whole.table.clone())
@@ -496,10 +570,14 @@ impl<'a> Formats<'a> {
         let column_band = band_size(look.no_vertical_bands, properties.column_band_size);
         let rows: Vec<TableRow<'a>> = table.rows().collect();
         // With the first row's format on, every header row (w:tblHeader) at the top of
-        // the table takes it, and the row bands start after the last of them, whatever
-        // differentiateMultirowTableHeaders says: word-rules/E-table-style-header-rows-on
-        // and -off.docx (#300). The header rows make one group for the format's borders,
-        // and each takes the corner formats; no render shows those yet (#298).
+        // the table takes it, and the row bands start after the last of them:
+        // word-rules/E-table-style-header-rows-on.docx, with differentiateMultirowTableHeaders
+        // on (#300). With the setting off this is unverified: Word dropped the setting from
+        // the copy it rendered E-table-style-header-rows-off.docx from, so that render shows
+        // it absent, not off (#343). E-table-style-header-rows-3-off of #321 asks again, but
+        // Word may drop the setting there too. The header rows make one group for the
+        // format's borders, and each takes the corner formats; no render shows those yet
+        // (#298).
         let header_rows = if first_row {
             rows.iter()
                 .take_while(|row| row.properties().header() == Some(true))
@@ -628,6 +706,7 @@ impl<'a> Formats<'a> {
         }
         let context = Arc::new(TableContext {
             style,
+            style_index,
             properties,
             look,
             rows: row_conditions,
