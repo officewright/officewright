@@ -419,6 +419,64 @@ pub struct RunProperties {
     pub(crate) language: Language,
     pub(crate) ligatures: Option<Ligatures>,
     pub(crate) contextual_alternates: Option<bool>,
+    /// Whether `w:em` gives an emphasis mark (any but `none`); the mark itself is kept as
+    /// written, not typed yet, and the layout does not draw it.
+    pub(crate) emphasis_mark: Option<bool>,
+    /// Whether `w:bdr` gives a border around the run (any but `none` and `nil`); kept as
+    /// written, not typed yet, and the layout does not draw it.
+    pub(crate) border: Option<bool>,
+    /// In a paragraph mark's properties: whether the mark is deleted as a tracked change
+    /// (`w:del`, or `w:moveFrom`); the translation into the layout IR keeps the
+    /// paragraph whole, which it lists.
+    pub(crate) deleted: Option<bool>,
+    /// Word 2010's effects of text; kept as written, not typed yet, and the layout draws
+    /// none of them.
+    pub(crate) text_effects: TextEffects,
+}
+
+/// Whether each of Word 2010's effects of text ([MS-DOCX] 2.6.1: `w14:glow`,
+/// `w14:shadow`, `w14:reflection`, `w14:textOutline`, `w14:textFill`, `w14:scene3d` and
+/// `w14:props3d`) changes what is drawn, or none where it is not set. Each is laid over
+/// the levels below it on its own, as the other run properties are.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TextEffects {
+    pub(crate) glow: Option<bool>,
+    pub(crate) shadow: Option<bool>,
+    pub(crate) reflection: Option<bool>,
+    pub(crate) outline: Option<bool>,
+    pub(crate) fill: Option<TextFill>,
+    /// A camera that turns the text (`w14:scene3d`).
+    pub(crate) turned: Option<bool>,
+    /// A bevel, depth or contour (`w14:props3d`).
+    pub(crate) depth: Option<bool>,
+}
+
+/// What a `w14:textFill` fills text with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TextFill {
+    /// One colour, as written, which changes nothing when it is the text's own.
+    Solid(u8, u8, u8),
+    /// One colour of the theme, likewise.
+    Scheme(ThemeColor),
+    /// Anything else: no fill, a gradient, or a colour changed by transparency or
+    /// luminance.
+    Other,
+}
+
+impl TextEffects {
+    /// Whether any is set.
+    pub(crate) fn is_set(&self) -> bool {
+        *self != Self::default()
+    }
+}
+
+/// What a paragraph's `w:framePr` makes of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Frame {
+    /// A text frame.
+    Frame,
+    /// A drop cap (`w:dropCap` `drop` or `margin`).
+    DropCap,
 }
 
 /// The kinds of ligatures text asks for (`w14:ligatures`, [MS-DOCX] 2.6.1.17, of type
@@ -1070,6 +1128,9 @@ pub struct ParagraphProperties {
     pub(crate) indentation: Option<Indentation>,
     pub(crate) justification: Option<Justification>,
     pub(crate) outline_level: Option<i64>,
+    /// Whether `w:framePr` makes the paragraph a text frame or a drop cap; the frame
+    /// itself is kept as written, not typed yet, and the layout does not place it.
+    pub(crate) frame: Option<Frame>,
     pub(crate) mark: RunProperties,
 }
 

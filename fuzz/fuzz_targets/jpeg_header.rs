@@ -1,7 +1,8 @@
-//! Reads JPEG files as `Image::from_bytes` does, up to the first scan: the markers, the
-//! segments and their lengths, the frame header, Adobe's APP14 segment and the scan
-//! header with its components and, in a progressive frame, the coefficients and bits it
-//! codes; then writes a PDF that draws them.
+//! Reads JPEG files as `Image::from_bytes` does: the markers, the segments and their
+//! lengths, the frame header, Adobe's APP14 segment and every scan header with its
+//! components and, in a progressive frame, the coefficients and bits it codes, walking
+//! the coded data between the scans; then writes a PDF that draws them, cut after the
+//! only scan of a sequential file where what follows is left out.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;

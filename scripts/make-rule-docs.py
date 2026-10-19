@@ -385,10 +385,16 @@ class Doc:
     # Whether Normal is marked w:default, and the w:pPr and w:rPr of Normal.
     normal_default: bool = True
     normal_props: str = ""
-    # Whether the document defaults give run properties (Calibri 11 pt), and properties
-    # added to them.
+    # Whether the document defaults give run properties (the fonts of run_default_fonts at
+    # run_default_size), and properties added to them.
     run_defaults: bool = True
     run_defaults_extra: str = ""
+    # Properties added to the document defaults' w:pPr after their w:spacing, such as a w:jc,
+    # and a w:numPr for them, which goes after their w:widowControl.
+    paragraph_defaults_extra: str = ""
+    paragraph_defaults_list: str = ""
+    # The size of the document defaults' runs, in points.
+    run_default_size: float = 11
     # The attributes of the document defaults' w:rFonts.
     run_default_fonts: str = (
         'w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="Calibri" w:cs="Calibri"'
@@ -1401,10 +1407,15 @@ def table_style(
     width: str = "",
     layout: str = "",
     whole: str = "",
+    cell_margins: str = "",
+    cell: str = "",
+    default: bool = False,
 ) -> str:
     """A table style with single borders whose conditional formats give a text colour and a
-    cell fill each. width and layout go into its w:tblPr in their places (w:tblW before
-    the borders, w:tblLayout after them); whole is the w:pPr and w:rPr of the whole table."""
+    cell fill each. width, layout and cell_margins go into its w:tblPr in their places
+    (w:tblW before the borders, w:tblLayout and then w:tblCellMar after them); whole is the
+    w:pPr and w:rPr of the whole table, and cell its w:tcPr. default marks the style
+    w:default."""
     bands = ""
     if row_band is not None:
         bands += f'<w:tblStyleRowBandSize w:val="{row_band}"/>'
@@ -1418,30 +1429,37 @@ def table_style(
         "</w:tblStylePr>"
         for kind, color, fill in conditions
     )
+    marked = ' w:default="1"' if default else ""
     return (
-        f'<w:style w:type="table" w:customStyle="1" w:styleId="{style_id}">'
+        f'<w:style w:type="table"{marked} w:customStyle="1" w:styleId="{style_id}">'
         f'<w:name w:val="{style_id}"/><w:basedOn w:val="TableNormal"/>{whole}'
-        f"<w:tblPr>{bands}{width}{borders}{layout}</w:tblPr>{overrides}</w:style>"
+        f"<w:tblPr>{bands}{width}{borders}{layout}{cell_margins}</w:tblPr>{cell}{overrides}"
+        "</w:style>"
     )
 
 
 def styled_table(
-    style_id: str,
+    style_id: str | None,
     cells: list[list[str]],
     *,
     look_attributes: str | None = None,
     widths: list[int] | None = None,
     grid: list[int] | None = None,
-    header_rows: int = 0,
+    header_rows: int | tuple[int, ...] = 0,
 ) -> str:
-    """A table in the table style; cells holds the paragraphs of each cell, row by row.
-    look_attributes None leaves w:tblLook out. widths gives the grid and each cell's
-    width; None leaves the table and cell widths out, which leaves them to the table style
-    or to Word, over the given grid (an even one by default). The first header_rows rows
-    repeat as header rows (w:tblHeader)."""
+    """A table in the table style, or in none when style_id is None; cells holds the
+    paragraphs of each cell, row by row. look_attributes None leaves w:tblLook out. widths
+    gives the grid and each cell's width; None leaves the table and cell widths out, which
+    leaves them to the table style or to Word, over the given grid (an even one by
+    default). The first header_rows rows, or the rows a tuple numbers from 1, repeat as
+    header rows (w:tblHeader)."""
     cols = len(cells[0])
     grid = widths or grid or [TEXT_W // cols] * cols
-    tbl_pr = f'<w:tblStyle w:val="{style_id}"/>'
+    if len(grid) != cols:
+        raise ValueError("the grid has a column for every cell of a row")
+    if isinstance(header_rows, int):
+        header_rows = tuple(range(1, header_rows + 1))
+    tbl_pr = f'<w:tblStyle w:val="{style_id}"/>' if style_id is not None else ""
     if widths:
         tbl_pr += f'<w:tblW w:w="{sum(widths)}" w:type="dxa"/>'
     if look_attributes is not None:
@@ -1455,7 +1473,7 @@ def styled_table(
         for content, width in zip(row, grid):
             tc_pr = f'<w:tcPr><w:tcW w:w="{width}" w:type="dxa"/></w:tcPr>' if widths else ""
             tcs.append(f"<w:tc>{tc_pr}{content}</w:tc>")
-        tr_pr = "<w:trPr><w:tblHeader/></w:trPr>" if number < header_rows else ""
+        tr_pr = "<w:trPr><w:tblHeader/></w:trPr>" if number + 1 in header_rows else ""
         rows.append(f"<w:tr>{tr_pr}{''.join(tcs)}</w:tr>")
     return (
         f"<w:tbl><w:tblPr>{tbl_pr}</w:tblPr><w:tblGrid>{grid_xml}</w:tblGrid>"
@@ -2688,6 +2706,655 @@ def soft_hyphen_font() -> Doc:
     )
 
 
+# Lines and drawing, second batch (#298): what the references of E-underline, E-superscript,
+# E-auto-color, E-highlight, E-underline-trailspace and E-tab-margin left open.
+SIZE_24 = '<w:sz w:val="48"/><w:szCs w:val="48"/>'
+SUPERSCRIPT = '<w:vertAlign w:val="superscript"/>'
+
+
+def underline_24() -> Doc:
+    # E-underline measured every kind at 11 pt only: do the dash lengths, the thick and
+    # double geometry and the wave scale with the size? It also showed one line under a
+    # superscript in a word; here runs of two sizes, and a superscript with no underlined
+    # text next to it.
+    single = underline_props("single")
+    body = "".join(
+        labelled(n, f"underline {kind} at 24 pt",
+                 styled_run("underlined", SIZE_24 + underline_props(kind)))
+        for n, kind in enumerate(UNDERLINES, 1)
+    )
+    n = len(UNDERLINES)
+    body += labelled(n + 1, "single across runs of 11, 24 and 11 pt",
+                     styled_run("small ", single), styled_run("LARGE", SIZE_24 + single),
+                     styled_run(" small", single))
+    body += labelled(n + 2, "single under a superscript whose neighbours are not underlined",
+                     styled_run("base ", ""), styled_run("123", single + SUPERSCRIPT),
+                     styled_run(" base", ""))
+    body += labelled(n + 3, "double across runs of 11 and 24 pt",
+                     styled_run("small ", underline_props("double")),
+                     styled_run("LARGE", SIZE_24 + underline_props("double")))
+    return Doc(
+        "E-underline-24",
+        "Every kind of underline at 24 pt, a single and a double underline across runs of "
+        "11 and 24 pt, and an underlined superscript whose neighbours are not underlined",
+        body,
+    )
+
+
+SCRIPT_SIZES = [8, 9, 10, 12, 16, 20, 36, 48]
+
+
+def superscript_sizes() -> Doc:
+    # E-superscript gave the size (65 % rounded to a half point) and the shifts at 11 and
+    # 24 pt only; the subscript's drop fits no simple rule yet.
+    cases = []
+    for size in SCRIPT_SIZES:
+        hp = half_points(size)
+        size_props = f'<w:sz w:val="{hp}"/><w:szCs w:val="{hp}"/>'
+        for kind in ("superscript", "subscript"):
+            cases.append((f"{kind} at {size} pt", size_props, kind))
+    body = "".join(
+        labelled(n, label, styled_run("Base", props),
+                 styled_run("123", props + f'<w:vertAlign w:val="{kind}"/>'))
+        for n, (label, props, kind) in enumerate(cases, 1)
+    )
+    return Doc(
+        "E-superscript-sizes",
+        "The size and the baseline shift of superscript and subscript text at 8, 9, 10, 12, "
+        "16, 20, 36 and 48 pt",
+        body,
+    )
+
+
+# Run shading between the colours where E-auto-color's text stayed black (404040, 4D4D4D)
+# and turned white (333333): greys from 343434 to 3F3F3F, and a dark red that the two luma
+# formulas the reference left (Rec. 601 and Rec. 709) put on either side.
+AUTO_COLOR_THRESHOLD_FILLS = [f"{v:02X}" * 3 for v in range(0x34, 0x40)] + ["E00000"]
+
+
+def auto_color_threshold() -> Doc:
+    body, n = "", 0
+    for fill in AUTO_COLOR_THRESHOLD_FILLS:
+        n += 1
+        shade = f'<w:shd w:val="clear" w:color="auto" w:fill="{fill}"/>'
+        body += labelled(n, f"run shading {fill}", styled_run("automatic colour", shade))
+    # E-bar-tab's bar was black on 404040, where text stays black too.
+    two_lines = "two lines of text in one paragraph with a bar tab at 144 pt, " * 2
+    for fill in ("333333", "000000"):
+        n += 1
+        body += labelled(n, f"a bar tab on paragraph shading {fill}", styled_run(two_lines, ""),
+                         tabs=[("bar", 2880)], shading=fill)
+    return Doc(
+        "E-auto-color-threshold",
+        "Text in the automatic colour on run shading of greys from 343434 to 3F3F3F and of "
+        "E00000, and bar tabs on paragraph shading of 333333 and 000000: where Word turns "
+        "text white, and whether the bar follows",
+        body,
+    )
+
+
+def highlight_tall() -> Doc:
+    # E-highlight showed the highlight filling the line box of single spacing, of a raised
+    # run and of an exact line; here lines taller than the font.
+    cases = [
+        ("highlighted, 1.5 lines spacing", {"space": spacing(line=("auto", 360))}),
+        ("highlighted, double spacing", {"space": spacing(line=("auto", 480))}),
+        ("highlighted, at least 24 pt spacing", {"space": spacing(line=("atLeast", 24))}),
+        ("highlighted, exact 24 pt spacing", {"space": spacing(line=("exact", 24))}),
+    ]
+    body = "".join(
+        labelled(n, label, styled_run("highlighted text", HIGHLIGHT), **props)
+        for n, (label, props) in enumerate(cases, 1)
+    )
+    body += labelled(len(cases) + 1, "highlighted 11 pt text on a line with a 24 pt run",
+                     styled_run("highlighted text", HIGHLIGHT), styled_run(" LARGE", SIZE_24))
+    return Doc(
+        "E-highlight-tall",
+        "Highlighted text in lines taller than its font: 1.5 lines, double, at least 24 pt "
+        "and exact 24 pt spacing, and next to a 24 pt run",
+        body,
+    )
+
+
+# The number of spaces after five underlined words, and where they end in Calibri 11 pt
+# (the test measures it with Carlito, its metric twin).
+TRAILING_SPACES = [
+    (75, "11 pt before the right margin"),
+    (84, "11 pt past the right margin"),
+    (96, "41 pt past the right margin"),
+    (120, "101 pt past the right margin, 29 pt past the edge of the page"),
+]
+
+
+def underline_trailspace_margin() -> Doc:
+    # E-underline-trailspace showed underlined trailing spaces up to the paragraph mark on
+    # left-aligned lines, and not past the margin on justified ones. Here left-aligned
+    # lines whose trailing spaces end before the margin, past it and past the edge of the
+    # page: five words of 10 letters, the spaces, and a word too wide to follow them on
+    # the line. The label has a paragraph of its own, so the sample starts its line.
+    single = underline_props("single")
+    body = ""
+    for n, (count, where) in enumerate(TRAILING_SPACES, 1):
+        body += para(run(f"Case {n:02d}: 5 underlined words, {count} spaces and an underlined "
+                         f"word, left aligned; in Calibri 11 pt the spaces end {where}:"))
+        body += para(styled_run(" ".join(["underlined"] * 5) + " " * count + "underlined",
+                                single))
+    return Doc(
+        "E-underline-trailspace-margin",
+        "Underlined trailing spaces that end before the right margin, past it and past the "
+        "edge of the page on left-aligned lines, with the w:compat setting ulTrailSpace: "
+        "whether the underline stops at the margin or the edge of the page",
+        body,
+        compat_flags=("ulTrailSpace",),
+    )
+
+
+def tab_margin_alone(mode: int) -> Doc:
+    # E-tab-margin showed that Word puts a tab whose left stop lies past the margin on a
+    # line of its own. Where does that tab end? An underline and a leader show its extent.
+    in_margin, past_edge = TEXT_W + 360, PAGE_W - MARGIN + 360
+    single = underline_props("single")
+    cases = [
+        ("a left stop 18 pt into the right margin, the tab underlined", in_margin, single, None),
+        ("a left stop 18 pt past the right edge of the page, the tab underlined", past_edge,
+         single, None),
+        ("a left stop 18 pt into the right margin, with a dot leader", in_margin, "", "dot"),
+    ]
+    body = ""
+    for n, (label, pos, props, leader) in enumerate(cases, 1):
+        stop = ("left", pos, leader) if leader else ("left", pos)
+        body += para(run(f"Case {n:02d}: {label}:"))
+        body += para(styled_run("before", "") + tab_run(props) + styled_run("after", ""),
+                     tabs=[stop])
+    suffix = "" if mode == 15 else f"-{mode}"
+    return Doc(
+        f"E-tab-margin-alone{suffix}",
+        "A tab whose left stop lies in the right margin or past the edge of the page, which "
+        f"Word puts on a line of its own, in compatibility mode {mode}: where that tab ends, "
+        "shown by its underline and by a dot leader",
+        body,
+        mode=mode,
+    )
+
+
+def list_label_height() -> Doc:
+    # E-list-label-format showed a 20 pt label on 11 pt text raising the line by its ascent
+    # only, and a mark's character style giving the label its size but not its underline.
+    underline = '<w:u w:val="single"/>'
+    cases = [
+        ("level 20 pt, mark 11 pt", {}, label_level(SIZE_20), ""),
+        ("level 20 pt, mark 20 pt", {"mark": SIZE_20}, label_level(SIZE_20), ""),
+        ("level without a size, mark 20 pt", {"mark": SIZE_20}, label_level(), ""),
+        ("level without an underline, mark underlined", {"mark": underline}, label_level(), ""),
+    ]
+    numbering, body = label_lists(cases)
+    n = len(cases)
+    body += para(run(f"Case {n + 1:02d}: no list, mark 20 pt"), mark=SIZE_20)
+    body += para(run(f"Case {n + 2:02d}: no list, mark 11 pt"))
+    return Doc(
+        "E-list-label-height",
+        "The line height of list items whose label is larger than their text: a 20 pt label "
+        "with an 11 pt and with a 20 pt mark, a label sized by the mark alone, and a 20 pt "
+        "mark without a list; and whether a mark's direct underline reaches the label",
+        body,
+        numbering=numbering,
+    )
+
+
+# Table styles, second batch (#298 and #172's comments).
+def table_style_size_defaults(mode: int, normal_jc: str = "left") -> Doc:
+    # E-table-style-size-11pt* could not test [MS-DOCX] 2.3.1: Word treats Normal's 11 pt,
+    # equal to the document defaults, and its w:jc left, equal to the default, as not set.
+    # Here the defaults are 12 pt and right-aligned, and Normal sets the two values the
+    # setting is about, 11 pt and left: off, they leave the table style's 14 pt and its
+    # centring alone; on, they override them. With Normal right-aligned instead, over
+    # defaults that leave the alignment out, the control: off, right is not left, so it
+    # overrides the centring.
+    big = table_style(
+        "Big", [],
+        whole='<w:pPr><w:jc w:val="center"/></w:pPr>'
+        '<w:rPr><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr>',
+    )
+    said = "on" if mode == 15 else f"not written, in compatibility mode {mode}"
+    defaults_jc = "right" if normal_jc == "left" else None
+    defaults_said = " and right-aligned" if defaults_jc else ""
+    body = table_case(
+        1, f"a table in the style Big (14 pt, centred); document defaults 12 pt{defaults_said}, "
+        f"Normal 11 pt and {normal_jc}-aligned",
+        styled_table("Big", named_cells(2, 2), widths=[TEXT_W // 2] * 2),
+    ) + para(run("Case 02: a paragraph after the table, in Normal"))
+    suffix = ("" if normal_jc == "left" else f"-{normal_jc}") + ("" if mode == 15 else f"-{mode}")
+    return Doc(
+        f"E-table-style-defaults-size{suffix}",
+        f"Whether a Normal style of 11 pt, aligned {normal_jc}, overrides the 14 pt and the "
+        "centring of a table style when the document defaults are 12 pt"
+        + (" and aligned right" if defaults_jc else "")
+        + f", with the setting overrideTableStyleFontSizeAndJustification {said}",
+        body,
+        styles=big,
+        normal_props=f'<w:pPr><w:jc w:val="{normal_jc}"/></w:pPr>'
+        '<w:rPr><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr>',
+        run_default_size=12,
+        paragraph_defaults_extra=f'<w:jc w:val="{defaults_jc}"/>' if defaults_jc else "",
+        mode=mode,
+    )
+
+
+def table_style_rows_cols() -> Doc:
+    # E-table-style-look could not show whether first and last rows or first and last
+    # columns win in the corners: its style has corner formats. Nor whether a first row or
+    # column whose flag is on but whose format the style lacks still starts the bands after
+    # it.
+    edges = [c for c in CONDITIONS if c[0] in ("firstRow", "lastRow", "firstCol", "lastCol")]
+    styles = "".join([
+        table_style("NoCorners", edges),
+        table_style("RowBandsOnly", ROW_BANDS, row_band=1),
+        table_style("ColBandsOnly", COL_BANDS, col_band=1),
+    ])
+    even = [TEXT_W // 5] * 5
+    body = table_case(
+        1, "a style with first and last row and column formats but no corner formats, every "
+        "flag on, no bands",
+        styled_table("NoCorners", named_cells(5, 5), look_attributes=look(1, 1, 1, 1, 0, 0),
+                     widths=even),
+    ) + table_case(
+        2, "a style with row band formats only; first row flag on, row bands on",
+        styled_table("RowBandsOnly", named_cells(6, 3), look_attributes=look(1, 0, 0, 0, 1, 0),
+                     widths=[TEXT_W // 3] * 3),
+    ) + table_case(
+        3, "a style with column band formats only; first column flag on, column bands on",
+        styled_table("ColBandsOnly", named_cells(3, 6), look_attributes=look(0, 0, 1, 0, 0, 1),
+                     widths=[TEXT_W // 6] * 6),
+    ) + table_case(
+        # #298: the last row (column) is band 2 if the bands count it, and plain if not.
+        4, "a style with row band formats only; last row flag on, row bands on",
+        styled_table("RowBandsOnly", named_cells(4, 3), look_attributes=look(0, 1, 0, 0, 1, 0),
+                     widths=[TEXT_W // 3] * 3),
+    ) + table_case(
+        5, "a style with column band formats only; last column flag on, column bands on",
+        styled_table("ColBandsOnly", named_cells(3, 4), look_attributes=look(0, 0, 0, 1, 0, 1),
+                     widths=[TEXT_W // 4] * 4),
+    )
+    return Doc(
+        "E-table-style-rows-cols",
+        "Which format a corner cell takes when the table style has first and last row and "
+        "column formats but no corner formats, and whether bands start after a first row or "
+        "column, or count a last row or column, whose flag is on but whose format the style "
+        "lacks; each format gives a text colour and a grey",
+        body,
+        styles=styles,
+    )
+
+
+def table_style_header_rows_3(setting: int | None, mode: int = 15) -> Doc:
+    # E-table-style-header-rows-on and -off rendered alike: two header rows, both with the
+    # first-row format. Here three header rows, a first-row format with a thick bottom
+    # border, and a table long enough to repeat its header rows on a second page. Word
+    # dropped the 0 from the copy of E-table-style-header-rows-off it exported (#344), so
+    # -off may again show the setting on; mode 14, where Word writes no such setting,
+    # shows the layout of Word 2010 instead.
+    first = [c for c in CONDITIONS if c[0] == "firstRow"][0]
+    kind, color, fill = first
+    first_row = (
+        f'<w:tblStylePr w:type="{kind}"><w:rPr><w:color w:val="{color}"/></w:rPr>'
+        '<w:tcPr><w:tcBorders><w:bottom w:val="single" w:sz="24" w:space="0" '
+        'w:color="000000"/></w:tcBorders>'
+        f'<w:shd w:val="clear" w:color="auto" w:fill="{fill}"/></w:tcPr></w:tblStylePr>'
+    )
+    # The first-row format goes before the bands, in the order of ST_TblStyleOverrideType.
+    head, tail = table_style("ThreeHeaders", ROW_BANDS, row_band=1).split("<w:tblStylePr", 1)
+    style_xml = head + first_row + "<w:tblStylePr" + tail
+    body = table_case(
+        1, "rows 1 to 3 are header rows (w:tblHeader); the style formats its first row with a "
+        "3 pt bottom border and bands rows by one; 70 rows, over two pages",
+        styled_table("ThreeHeaders", named_cells(70, 3), look_attributes=look(1, 0, 0, 0, 1, 0),
+                     widths=[TEXT_W // 3] * 3, header_rows=3),
+    )
+    if mode == 15:
+        said = {1: "on", 0: "off"}[setting]
+        name = f"E-table-style-header-rows-3-{said}"
+        setting_said = f"with the setting differentiateMultirowTableHeaders {said}"
+        values = (("differentiateMultirowTableHeaders", setting),)
+    else:
+        name = f"E-table-style-header-rows-3-{mode}"
+        setting_said = (f"in compatibility mode {mode}, which has no setting "
+                        "differentiateMultirowTableHeaders")
+        values = ()
+    return Doc(
+        name,
+        "Which of three header rows take the first-row format of their table style, with its "
+        "bottom border, on the first page and where they repeat on the second, "
+        f"{setting_said}; each format gives a text colour and a grey",
+        body,
+        styles=style_xml,
+        compat_values=values,
+        mode=mode,
+    )
+
+
+def format_with_borders(kind: str, borders: str) -> str:
+    """A conditional format of CONDITIONS' colours for kind, with these w:tcBorders."""
+    color, fill = next((c, f) for k, c, f in CONDITIONS if k == kind)
+    return (
+        f'<w:tblStylePr w:type="{kind}"><w:rPr><w:color w:val="{color}"/></w:rPr>'
+        f"<w:tcPr><w:tcBorders>{borders}</w:tcBorders>"
+        f'<w:shd w:val="clear" w:color="auto" w:fill="{fill}"/></w:tcPr></w:tblStylePr>'
+    )
+
+
+def table_style_header_rows_format() -> Doc:
+    # #298's comments on #317's choices for header rows that no render shows: whether the
+    # header rows make one group for the first-row format's borders, whether each takes the
+    # corner formats, whether a header row after a body row takes the first-row format and
+    # leaves the bands, and whether header rows are banded when the first-row flag is off.
+    borders = (
+        '<w:top w:val="double" w:sz="4" w:space="0" w:color="000000"/>'
+        '<w:bottom w:val="single" w:sz="24" w:space="0" w:color="000000"/>'
+        '<w:insideH w:val="dotted" w:sz="8" w:space="0" w:color="000000"/>'
+    )
+    # The styles' own borders are single, ½ pt, so double and dotted lines and the 3 pt line
+    # can only come from the first-row format.
+    head, tail = table_style("HeaderBorders", []).split("</w:style>", 1)
+    header_borders = head + format_with_borders("firstRow", borders) + "</w:style>" + tail
+    corners = [c for c in CONDITIONS if c[0] in ("firstRow", "firstCol", "lastCol", "neCell",
+                                                 "nwCell")]
+    first_row = [c for c in CONDITIONS if c[0] == "firstRow"]
+    styles = "".join([
+        header_borders,
+        table_style("HeaderCorners", corners),
+        table_style("HeaderBands", first_row + ROW_BANDS, row_band=1),
+    ])
+    body = table_case(
+        1, "rows 1 and 2 are header rows; the style's first-row format has a double top "
+        "border, a 3 pt bottom border and a dotted inside border; first row flag on, no bands",
+        styled_table("HeaderBorders", named_cells(4, 3), look_attributes=look(1, 0, 0, 0, 0, 0),
+                     widths=[TEXT_W // 3] * 3, header_rows=2),
+    ) + table_case(
+        2, "rows 1 and 2 are header rows; the style has first row, first column, last column "
+        "and top corner formats; those three flags on, no bands",
+        styled_table("HeaderCorners", named_cells(4, 4), look_attributes=look(1, 0, 1, 1, 0, 0),
+                     widths=[TEXT_W // 4] * 4, header_rows=2),
+    ) + table_case(
+        3, "rows 1 and 3 are header rows, row 2 is not; the style has a first-row format and "
+        "bands rows by one; first row flag on, row bands on",
+        styled_table("HeaderBands", named_cells(6, 3), look_attributes=look(1, 0, 0, 0, 1, 0),
+                     widths=[TEXT_W // 3] * 3, header_rows=(1, 3)),
+    ) + table_case(
+        4, "rows 1 and 2 are header rows; the style has a first-row format and bands rows by "
+        "one; first row flag off, row bands on",
+        styled_table("HeaderBands", named_cells(6, 3), look_attributes=look(0, 0, 0, 0, 1, 0),
+                     widths=[TEXT_W // 3] * 3, header_rows=2),
+    )
+    return Doc(
+        "E-table-style-header-rows-format",
+        "How header rows take the first-row format of their table style: its borders as one "
+        "group or row by row, the top corner formats, a header row after a body row, and "
+        "header rows with the first row flag off; each format gives a text colour and a grey",
+        body,
+        styles=styles,
+    )
+
+
+def table_style_two_defaults() -> Doc:
+    # #298, from the review of #319: officewright-doc takes the last table style marked
+    # w:default, as ECMA-376 Part 1 §17.7.4.17 says and as Word does for paragraph styles
+    # (E-default-paragraph-style, -after-normal). Normal Table is marked too, first, as in
+    # every document here. Each of the two gives the table a colour and a grey of its own.
+    defaults = [("FirstDefault", "C00000", "D9D9D9"), ("SecondDefault", "0070C0", "A6A6A6")]
+    styles = "".join(
+        table_style(
+            style_id, [], whole=f'<w:rPr><w:color w:val="{color}"/></w:rPr>',
+            cell=f'<w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="{fill}"/></w:tcPr>',
+            default=True,
+        )
+        for style_id, color, fill in defaults
+    )
+    body = table_case(
+        1, "a table without w:tblStyle; Normal Table, FirstDefault (red text, light grey) and "
+        "SecondDefault (blue text, dark grey) are all marked w:default",
+        styled_table(None, named_cells(2, 3), widths=[TEXT_W // 3] * 3),
+    )
+    return Doc(
+        "E-table-style-two-defaults",
+        "Which table style a table without w:tblStyle takes when three table styles are "
+        "marked w:default: Normal Table, then two styles that each give the table a text "
+        "colour and a grey",
+        body,
+        styles=styles,
+    )
+
+
+def cell_margin(side: str, width: int, kind: str) -> str:
+    return f'<w:{side} w:w="{width}" w:type="{kind}"/>'
+
+
+WRAPPING = "text long enough to wrap inside its cell, to show where its lines start and end"
+
+
+def margined_table(
+    tbl_cell_mar: str, cells: list[tuple[str, str]], grid: list[int], style: str = ""
+) -> str:
+    """A one-row table with fixed layout and single borders, in the table style style (or in
+    none), the table's cell margins tbl_cell_mar (a w:tblCellMar, or ""), and per cell its
+    text and w:tcMar (or "")."""
+    sides = ("top", "left", "bottom", "right", "insideH", "insideV")
+    tbl_pr = (
+        (f'<w:tblStyle w:val="{style}"/>' if style else "")
+        + f'<w:tblW w:w="{sum(grid)}" w:type="dxa"/><w:tblInd w:w="0" w:type="dxa"/>'
+        "<w:tblBorders>" + "".join(border(s) for s in sides) + "</w:tblBorders>"
+        '<w:tblLayout w:type="fixed"/>' + tbl_cell_mar
+    )
+    tcs = "".join(
+        f'<w:tc><w:tcPr><w:tcW w:w="{width}" w:type="dxa"/>{tc_mar}</w:tcPr>'
+        f"{para(run(value))}</w:tc>"
+        for (value, tc_mar), width in zip(cells, grid)
+    )
+    grid_xml = "".join(f'<w:gridCol w:w="{w}"/>' for w in grid)
+    return (f"<w:tbl><w:tblPr>{tbl_pr}</w:tblPr><w:tblGrid>{grid_xml}</w:tblGrid>"
+            f"<w:tr>{tcs}</w:tr></w:tbl>")
+
+
+SIDES = ("top", "left", "bottom", "right")
+
+
+def table_cell_margins() -> Doc:
+    # #172, case 9: a cell's own margins of type pct and auto, which no note settles, and
+    # of type nil, which Word ignores (MS-OI29500 §17.4.77(a)), against the table's
+    # margins of 5 pt on every side.
+    table_mar = "<w:tblCellMar>" + "".join(cell_margin(s, 100, "dxa") for s in SIDES) + (
+        "</w:tblCellMar>")
+    kinds = [("pct", 500), ("auto", 200), ("nil", 0)]
+    cells = [
+        (f"cell margins of type {kind}: " + WRAPPING,
+         "<w:tcMar>" + "".join(cell_margin(s, width, kind) for s in SIDES) + "</w:tcMar>")
+        for kind, width in kinds
+    ] + [("no cell margins of its own: " + WRAPPING, "")]
+    body = table_case(
+        1, "the table's cell margins 5 pt on every side; a cell's own margins of type pct "
+        "(w:w 500, 10 %), auto (w:w 200) and nil, and one without",
+        margined_table(table_mar, cells, [TEXT_W // 4] * 4),
+    )
+    return Doc(
+        "E-table-cell-margins",
+        "A cell's own margins (w:tcMar) of type pct, auto and nil, against the table's margins "
+        "of 5 pt: where the text of each cell starts and ends",
+        body,
+    )
+
+
+def table_cell_margins_nil() -> Doc:
+    # #172, case 10: a table's own margins of type nil, one side per table; the notes on
+    # the top and bottom point to Word ignoring nil, those on the start and end do not
+    # say. The tables are in a style whose margins are 10 pt on every side, unlike Normal
+    # Table's (0 at the top and bottom, 5.4 pt at the start and end), so a side shows 0
+    # if Word takes nil as written, and 10 pt if it ignores it.
+    margins = "<w:tblCellMar>" + "".join(cell_margin(s, 200, "dxa") for s in SIDES) + (
+        "</w:tblCellMar>")
+    body = ""
+    for n, side in enumerate(SIDES, 1):
+        table_mar = f"<w:tblCellMar>{cell_margin(side, 0, 'nil')}</w:tblCellMar>"
+        body += table_case(
+            n, f"the table's {side} cell margin of type nil; the style Margins10 has 10 pt "
+            "on every side",
+            margined_table(table_mar, [(WRAPPING, ""), (WRAPPING, "")], [TEXT_W // 2] * 2,
+                           style="Margins10"),
+        )
+    return Doc(
+        "E-table-cell-margins-nil",
+        "A table's own cell margins (w:tblCellMar) of type nil, one side per table, in a table "
+        "style with margins of 10 pt: whether Word ignores them, so that the table style's "
+        "margins apply",
+        body,
+        styles=table_style("Margins10", [], cell_margins=margins),
+    )
+
+
+def floating_table(spec: str) -> str:
+    """A one-row table of 200 pt floated by w:tblpPr with only the alignment spec."""
+    sides = ("top", "left", "bottom", "right", "insideH", "insideV")
+    tbl_pr = (
+        f"<w:tblpPr {spec}/>"
+        '<w:tblW w:w="4000" w:type="dxa"/>'
+        "<w:tblBorders>" + "".join(border(s) for s in sides) + "</w:tblBorders>"
+        '<w:tblLayout w:type="fixed"/>'
+    )
+    return (f"<w:tbl><w:tblPr>{tbl_pr}</w:tblPr><w:tblGrid><w:gridCol w:w=\"4000\"/>"
+            "</w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w=\"4000\" w:type=\"dxa\"/></w:tcPr>"
+            f"{para(run('the floating table'))}</w:tc></w:tr></w:tbl>")
+
+
+def table_float_align() -> Doc:
+    # #172, case 11: a floating table placed only by an alignment, both distances left
+    # out. MS-OI29500 §17.4.57(b) says Word ignores a w:tblpPr whose distances are 0, whose
+    # horizontal anchor is the text and whose vertical anchor is not.
+    text = "Text around the floating table. " * 30
+    body = ""
+    for n, (label, spec) in enumerate([
+        ("a table with only w:tblpYSpec bottom", 'w:tblpYSpec="bottom"'),
+        ("a table with only w:tblpXSpec center", 'w:tblpXSpec="center"'),
+    ], 1):
+        body += para(run(f"Case {n:02d}: {label}, then text around it"),
+                     page_break_before=n > 1)
+        body += floating_table(spec) + para(run(text))
+    return Doc(
+        "E-table-float-align",
+        "Floating tables (w:tblpPr) placed only by an alignment, bottom or centre, with both "
+        "distances left out: whether Word floats them and where, or keeps them in the text",
+        body,
+    )
+
+
+def bold_italic_missing() -> Doc:
+    # #245: E-italic-missing showed italic text in a family without an Italic face drawn
+    # with Regular, slanted. Bold italic in a family without a Bold Italic face could take
+    # Bold, slanted, or Italic, emboldened. Garamond, which comes with Office, has Regular,
+    # Italic and Bold faces only; Liberation Sans, installed complete, shows each face as it
+    # is. The label is in Calibri, the sample in a run of its own.
+    bold, italic = "<w:b/><w:bCs/>", "<w:i/><w:iCs/>"
+    body, n = "", 0
+    for font in ("Garamond", "Liberation Sans"):
+        for size in (11, 20):
+            for label, toggles in (("regular", ""), ("italic", italic), ("bold", bold),
+                                   ("bold italic", bold + italic)):
+                n += 1
+                body += para(run(f"Case {n:02d}: {font} {size} pt {label}: ")
+                             + run("Hamburgefonts gjpqy", font, size, toggles))
+    return Doc(
+        "E-bold-italic-missing",
+        "Bold italic text in a family without a Bold Italic face (#245): Garamond, installed "
+        "with Regular, Italic and Bold only, and Liberation Sans, installed complete, at 11 "
+        "and 20 pt in regular, italic, bold and bold italic",
+        body,
+    )
+
+
+def linked_levels(
+    fmt: str, templates: list[str], style_id: str, named_by: int = 2
+) -> list[str]:
+    """Levels of a list with these templates, each indented further than the one before, so
+    the label and the indent show the level; level named_by names the paragraph style."""
+    return [
+        level(ilvl, fmt, template, left=720 * (ilvl + 1), hanging=360,
+              p_style=style_id if ilvl == named_by else None)
+        for ilvl, template in enumerate(templates)
+    ]
+
+
+def list_level_linked_no_level() -> Doc:
+    # #293: a paragraph style that writes a list but no level, which level 2 of that list
+    # names with its w:pStyle. ECMA-376 §17.9.23 gives the paragraph the level that names
+    # its style; E-list-level-inherit's case 04 showed that a level the style writes comes
+    # first, and its case 05 a style without a level that no level names. Its comments add
+    # a style that writes level 9, past the last level (MS-OI29500 §17.9.3(a) lets Word
+    # read up to 255), and a style that inherits level 0 from the style it is based on.
+    # Each list has a style of its own; the labels of the levels differ, so the label
+    # shows the level.
+    numbering = (
+        abstract_num(0, "5C3A0031", linked_levels("lowerLetter", ["%1)", "(%2)", "[%3]"],
+                                                  "LinkedNoLevel"))
+        + abstract_num(1, "5C3A0032", linked_levels(
+            "lowerRoman", [f"L{ilvl}-%{ilvl + 1}" for ilvl in range(9)], "LinkedLevel9"))
+        + abstract_num(2, "5C3A0033", linked_levels("upperLetter", ["%1)", "(%2)", "[%3]"],
+                                                  "LinkedBasedOn"))
+        + num(1, 0) + num(2, 1) + num(3, 2)
+    )
+    styles = "".join([
+        para_style("LinkedNoLevel", '<w:numPr><w:numId w:val="1"/></w:numPr>'),
+        para_style("LinkedLevel9", '<w:numPr><w:ilvl w:val="9"/><w:numId w:val="2"/></w:numPr>'),
+        para_style("LinkedBase", '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="3"/></w:numPr>'),
+        # Based on LinkedBase, and nothing of its own.
+        '<w:style w:type="paragraph" w:customStyle="1" w:styleId="LinkedBasedOn">'
+        '<w:name w:val="LinkedBasedOn"/><w:basedOn w:val="LinkedBase"/></w:style>',
+    ])
+    body = "".join(
+        para(run(f"Case {n:02d}: {label}"), p_style=style)
+        for n, (style, label) in enumerate([
+            ("LinkedNoLevel",
+             "the style LinkedNoLevel gives instance 1 and no level; level 2 names the style"),
+            ("LinkedNoLevel", "a second paragraph in the same style"),
+            ("LinkedLevel9", "the style LinkedLevel9 gives instance 2 and level 9, past the "
+             "last of its nine levels; level 2 names the style"),
+            ("LinkedBasedOn", "the style LinkedBasedOn writes nothing and is based on "
+             "LinkedBase, which gives instance 3 and level 0; level 2 names LinkedBasedOn"),
+        ], 1)
+    )
+    return Doc(
+        "E-list-level-linked-no-level",
+        "Which list level a paragraph takes whose style gives a list but no level, when "
+        "level 2 of that list names the style (#293): level 2, as ECMA-376 says, or level 0; "
+        "and when the style gives level 9, past the last level, or inherits level 0 from the "
+        "style it is based on",
+        body,
+        numbering=numbering,
+        styles=styles,
+    )
+
+
+def list_level_linked_defaults() -> Doc:
+    # #293's comments: the document defaults give a level to every paragraph, and a style
+    # gives a list but no level, which level 2 of the list names. Word may take the level of
+    # the defaults, as a level the style hierarchy writes, the level that names the style,
+    # or level 0. The defaults give level 1, not the comment's 0, so the label tells the
+    # three apart. A document of its own, since the defaults reach every paragraph.
+    numbering = abstract_num(0, "5C3A0034", linked_levels(
+        "lowerLetter", ["%1)", "(%2)", "[%3]"], "LinkedDefaults")) + num(1, 0)
+    body = para(run("Case 01: the style LinkedDefaults gives instance 1 and no level, the "
+                    "document defaults give level 1; level 2 names the style"),
+                p_style="LinkedDefaults")
+    body += para(run("Case 02: a paragraph in Normal, which has level 1 from the document "
+                     "defaults but no list"))
+    return Doc(
+        "E-list-level-linked-defaults",
+        "Which list level a paragraph takes whose style gives a list but no level, when the "
+        "document defaults give level 1 and level 2 of the list names the style (#293): the "
+        "level of the defaults, the level that names the style, or level 0",
+        body,
+        numbering=numbering,
+        styles=para_style("LinkedDefaults", '<w:numPr><w:numId w:val="1"/></w:numPr>'),
+        paragraph_defaults_list='<w:numPr><w:ilvl w:val="1"/></w:numPr>',
+    )
+
+
 def documents() -> list[Doc]:
     return [
         line_fonts(),
@@ -2772,6 +3439,30 @@ def documents() -> list[Doc]:
         number_formats(),
         bold_missing(),
         soft_hyphen_font(),
+        underline_24(),
+        superscript_sizes(),
+        auto_color_threshold(),
+        highlight_tall(),
+        underline_trailspace_margin(),
+        tab_margin_alone(15),
+        tab_margin_alone(14),
+        tab_margin_alone(12),
+        list_label_height(),
+        table_style_size_defaults(15),
+        table_style_size_defaults(14),
+        table_style_size_defaults(14, "right"),
+        table_style_rows_cols(),
+        table_style_header_rows_3(1),
+        table_style_header_rows_3(0),
+        table_style_header_rows_3(None, 14),
+        table_style_header_rows_format(),
+        table_style_two_defaults(),
+        table_cell_margins(),
+        table_cell_margins_nil(),
+        table_float_align(),
+        bold_italic_missing(),
+        list_level_linked_no_level(),
+        list_level_linked_defaults(),
     ]
 
 
@@ -2790,7 +3481,8 @@ def styles_xml(doc: Doc) -> str:
         run_defaults = (
             "<w:rPrDefault><w:rPr>"
             f"<w:rFonts {doc.run_default_fonts}/>{doc.run_defaults_extra}"
-            '<w:sz w:val="22"/><w:szCs w:val="22"/>'
+            f'<w:sz w:val="{half_points(doc.run_default_size)}"/>'
+            f'<w:szCs w:val="{half_points(doc.run_default_size)}"/>'
             '<w:lang w:val="en-US" w:eastAsia="en-US" w:bidi="ar-SA"/>'
             "</w:rPr></w:rPrDefault>"
         )
@@ -2799,9 +3491,9 @@ def styles_xml(doc: Doc) -> str:
         f'<w:styles xmlns:w="{W_NS}">'
         "<w:docDefaults>"
         f"{run_defaults}"
-        "<w:pPrDefault><w:pPr><w:widowControl/>"
+        f"<w:pPrDefault><w:pPr><w:widowControl/>{doc.paragraph_defaults_list}"
         '<w:spacing w:after="0" w:line="240" w:lineRule="auto"/>'
-        "</w:pPr></w:pPrDefault>"
+        f"{doc.paragraph_defaults_extra}</w:pPr></w:pPrDefault>"
         "</w:docDefaults>"
         f"{doc.styles_before_normal}"
         f'<w:style w:type="paragraph"{normal_default} w:styleId="Normal">'

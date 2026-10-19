@@ -3,10 +3,11 @@
 
 use crate::model::Names;
 use crate::model::properties::{
-    ArtBorder, Border, BorderStyle, Color, ColorValue, FontHint, Highlight, Indentation,
+    ArtBorder, Border, BorderStyle, Color, ColorValue, FontHint, Frame, Highlight, Indentation,
     Justification, Language, Ligatures, LineSpacing, NumberingReference, ParagraphBorders,
     ParagraphProperties, RunFonts, RunProperties, Shading, ShadingPattern, Spacing, TabKind,
-    TabLeader, TabStop, ThemeColor, ThemeFont, Toggle, Underline, UnderlineStyle, VerticalPosition,
+    TabLeader, TabStop, TextFill, ThemeColor, ThemeFont, Toggle, Underline, UnderlineStyle,
+    VerticalPosition,
 };
 use crate::model::xml::Element;
 use crate::units::{half_points_measure, twips_measure};
@@ -14,6 +15,145 @@ use crate::units::{half_points_measure, twips_measure};
 /// Called for each attribute whose value is not valid: the element's local name, the
 /// attribute's, and the value. The property is read as not set.
 pub(crate) type Report<'r> = &'r mut dyn FnMut(&str, &str, &str);
+
+/// An integer attribute of a text effect, or `default` when it is not written or not an
+/// integer (they are ST_PositiveCoordinate, ST_FixedPercentage and the like, [MS-DOCX]
+/// 2.6.3).
+fn effect_value(effect: Element<'_>, names: &Names, name: &str, default: i64) -> i64 {
+    effect
+        .attribute(&[names.w14], name)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
+/// The first child of a text effect of this name.
+fn effect_child<'a>(effect: Element<'a>, names: &Names, name: &str) -> Option<Element<'a>> {
+    effect
+        .children_through_alternates(names.mc)
+        .find(|child| child.local_in(&[names.w14]) == Some(name))
+}
+
+/// Whether a `w14:glow` shows: one of radius 0 does not.
+fn glows(glow: Element<'_>, names: &Names) -> bool {
+    effect_value(glow, names, "rad", 0) > 0
+}
+
+/// Whether a `w14:shadow` shows. One scaled to nothing does not, nor one right under the
+/// text: no blur, no distance, its full size, no skew. The defaults are those of
+/// [MS-DOCX] 2.6.3.30 (CT_Shadow), all 0: a shadow that writes no `w14:sx` and `w14:sy`
+/// is scaled to nothing, as is the one Word writes into list levels with them 0.
+fn casts_shadow(shadow: Element<'_>, names: &Names) -> bool {
+    let value = |name| effect_value(shadow, names, name, 0);
+    let (sx, sy) = (value("sx"), value("sy"));
+    let under = value("blurRad") == 0
+        && value("dist") == 0
+        && (sx, sy) == (100_000, 100_000)
+        && value("kx") == 0
+        && value("ky") == 0;
+    sx != 0 && sy != 0 && !under
+}
+
+/// Whether a `w14:reflection` shows: one whose start and end are both fully transparent
+/// does not, nor one scaled to nothing. The defaults are those of [MS-DOCX] 2.6.3.24
+/// (CT_Reflection), all 0, so the reflection Word writes into list levels, all zeros,
+/// shows nothing either.
+fn reflects(reflection: Element<'_>, names: &Names) -> bool {
+    let value = |name| effect_value(reflection, names, name, 0);
+    (value("stA") != 0 || value("endA") != 0) && value("sx") != 0 && value("sy") != 0
+}
+
+/// Whether a `w14:textOutline` draws a line: one filled other than with `w14:noFill`.
+fn outlines(outline: Element<'_>, names: &Names) -> bool {
+    outline
+        .children_through_alternates(names.mc)
+        .any(|child| matches!(child.local_in(&[names.w14]), Some("solidFill" | "gradFill")))
+}
+
+/// What a `w14:textFill` fills text with. Without a fill it is solid black ([MS-DOCX]
+/// 2.6.3.5, CT_FillTextEffect), and so is a `w14:solidFill` without a colour (2.6.3.31,
+/// CT_SolidColorFillProperties).
+fn text_fill(fill: Element<'_>, names: &Names) -> TextFill {
+    const BLACK: TextFill = TextFill::Solid(0, 0, 0);
+    let kind = fill.children_through_alternates(names.mc).find(|child| {
+        matches!(
+            child.local_in(&[names.w14]),
+            Some("noFill" | "solidFill" | "gradFill")
+        )
+    });
+    let Some(kind) = kind else {
+        return BLACK;
+    };
+    if kind.local_in(&[names.w14]) != Some("solidFill") {
+        return TextFill::Other;
+    }
+    let colour = kind
+        .children_through_alternates(names.mc)
+        .find(|child| matches!(child.local_in(&[names.w14]), Some("srgbClr" | "schemeClr")));
+    let Some(colour) = colour else {
+        return BLACK;
+    };
+    // One colour as written, with nothing that changes it (w14:alpha, w14:lumMod, …).
+    if colour
+        .children_through_alternates(names.mc)
+        .next()
+        .is_some()
+    {
+        return TextFill::Other;
+    }
+    let value = colour.attribute(&[names.w14], "val");
+    let solid = if colour.local_in(&[names.w14]) == Some("srgbClr") {
+        value.and_then(hex_color).and_then(|colour| match colour {
+            ColorValue::Rgb(red, green, blue) => Some(TextFill::Solid(red, green, blue)),
+            ColorValue::Auto => None,
+        })
+    } else {
+        value.and_then(scheme_color).map(TextFill::Scheme)
+    };
+    solid.unwrap_or(TextFill::Other)
+}
+
+/// The theme colour a colour of the theme's scheme names (ST_SchemeColorVal of [MS-DOCX]
+/// 2.6.3.28, CT_SchemeColor); none for the placeholder colour, which has none.
+fn scheme_color(value: &str) -> Option<ThemeColor> {
+    Some(match value {
+        "bg1" => ThemeColor::Background1,
+        "tx1" => ThemeColor::Text1,
+        "bg2" => ThemeColor::Background2,
+        "tx2" => ThemeColor::Text2,
+        "dk1" => ThemeColor::Dark1,
+        "lt1" => ThemeColor::Light1,
+        "dk2" => ThemeColor::Dark2,
+        "lt2" => ThemeColor::Light2,
+        "accent1" => ThemeColor::Accent1,
+        "accent2" => ThemeColor::Accent2,
+        "accent3" => ThemeColor::Accent3,
+        "accent4" => ThemeColor::Accent4,
+        "accent5" => ThemeColor::Accent5,
+        "accent6" => ThemeColor::Accent6,
+        "hlink" => ThemeColor::Hyperlink,
+        "folHlink" => ThemeColor::FollowedHyperlink,
+        _ => return None,
+    })
+}
+
+/// Whether a `w14:scene3d`'s camera turns the text: one in front of it shows it as it is.
+/// The w14 camera has no rotation of its own ([MS-DOCX] 2.6.3.2, CT_Camera); the rotation
+/// of zeros Word writes into list levels is the light rig's.
+fn turns(scene: Element<'_>, names: &Names) -> bool {
+    effect_child(scene, names, "camera")
+        .is_some_and(|camera| camera.attribute(&[names.w14], "prst") != Some("orthographicFront"))
+}
+
+/// Whether a `w14:props3d` shows on text seen from the front: a bevel at the top, of a
+/// width and a height ([MS-DOCX] 2.6.3.1, CT_Bevel, whose defaults are 0), or a contour.
+/// Depth and a bevel at the bottom face away from a camera in front, which is our
+/// reading, no render shows it yet; with a camera that turns the text, `w14:scene3d` is
+/// listed anyway.
+fn has_depth(props: Element<'_>, names: &Names) -> bool {
+    effect_child(props, names, "bevelT").is_some_and(|bevel| {
+        effect_value(bevel, names, "w", 0) > 0 && effect_value(bevel, names, "h", 0) > 0
+    }) || effect_value(props, names, "contourW", 0) > 0
+}
 
 /// The properties a `w:rPr` sets.
 pub(crate) fn run_properties(
@@ -31,6 +171,17 @@ pub(crate) fn run_properties(
             let value = child.attribute(&[names.w14], "val");
             match local {
                 "ligatures" => properties.ligatures = value.and_then(Ligatures::from_xml),
+                // Text effects ([MS-DOCX] 2.6.1): only whether each changes what is drawn,
+                // so that the layout's report can say that it is not drawn (#339).
+                "glow" => properties.text_effects.glow = Some(glows(child, names)),
+                "shadow" => properties.text_effects.shadow = Some(casts_shadow(child, names)),
+                "reflection" => {
+                    properties.text_effects.reflection = Some(reflects(child, names));
+                }
+                "textOutline" => properties.text_effects.outline = Some(outlines(child, names)),
+                "textFill" => properties.text_effects.fill = Some(text_fill(child, names)),
+                "scene3d" => properties.text_effects.turned = Some(turns(child, names)),
+                "props3d" => properties.text_effects.depth = Some(has_depth(child, names)),
                 "cntxtAlts" => {
                     // w14's ST_OnOff has no on and off ([MS-DOCX] 2.6.4.9).
                     properties.contextual_alternates = match value {
@@ -102,6 +253,16 @@ pub(crate) fn run_properties(
                 properties.highlight = value(child, names, "val", Highlight::from_xml, report)
             }
             "shd" => properties.shading = Some(shading(child, names, report)),
+            // Only whether there is one, so that the layout's report can say that it is
+            // not drawn (#303).
+            "em" => properties.emphasis_mark = child.attribute(w, "val").map(|v| v != "none"),
+            // Only in a paragraph mark's properties.
+            "del" | "moveFrom" => properties.deleted = Some(true),
+            "bdr" => {
+                properties.border = child
+                    .attribute(w, "val")
+                    .map(|v| !matches!(v, "none" | "nil"));
+            }
             "lang" => {
                 properties.language = Language {
                     latin: child.attribute(w, "val").map(Into::into),
@@ -269,6 +430,14 @@ pub(crate) fn paragraph_properties(
             "pStyle" => properties.style = child.attribute(w, "val").map(Into::into),
             "numPr" => properties.numbering = Some(numbering(child, names, report)),
             "pBdr" => properties.borders = Some(borders(child, names, report)),
+            // Only what kind of frame, so that the layout's report can say that it is
+            // not placed (#303).
+            "framePr" => {
+                properties.frame = Some(match child.attribute(w, "dropCap") {
+                    Some("drop" | "margin") => Frame::DropCap,
+                    _ => Frame::Frame,
+                });
+            }
             "shd" => properties.shading = Some(shading(child, names, report)),
             "tabs" => properties.tabs = tabs(child, names, report),
             "spacing" => properties.spacing = Some(spacing(child, names, report)),
