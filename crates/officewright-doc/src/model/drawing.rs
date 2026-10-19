@@ -299,6 +299,101 @@ impl<'a> Picture<'a> {
         child(self.element, &self.document.names, namespaces, name)
     }
 
+    /// Whether its outline (`a:ln` of `pic:spPr`) draws a line: one filled other than
+    /// with `a:noFill`. The layout does not draw it yet.
+    // reason: only the translation into the layout IR asks for it.
+    #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
+    pub(crate) fn has_outline(self) -> bool {
+        let names = &self.document.names;
+        self.child(&names.pic, "spPr")
+            .and_then(|shape| child(shape, names, &names.a, "ln"))
+            .is_some_and(|line| {
+                line.children_through_alternates(names.mc).any(|fill| {
+                    matches!(
+                        fill.local_in(&names.a),
+                        Some("solidFill" | "gradFill" | "pattFill")
+                    )
+                })
+            })
+    }
+
+    /// Whether its image is changed in colour or transparency: an effect of `a:blip`, such
+    /// as `a:grayscl` or `a:lum`, but not its `a:extLst` and not an effect whose values
+    /// change nothing. The layout does not apply them yet.
+    // reason: only the translation into the layout IR asks for it.
+    #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
+    pub(crate) fn has_color_effects(self) -> bool {
+        let names = &self.document.names;
+        self.child(&names.pic, "blipFill")
+            .and_then(|fill| child(fill, names, &names.a, "blip"))
+            .is_some_and(|blip| {
+                blip.children_through_alternates(names.mc)
+                    .any(|effect| changes_image(effect, names))
+            })
+    }
+
+    /// Whether it has a shadow, a reflection, a glow, soft edges or a 3-D effect (an
+    /// `a:effectLst` or `a:effectDag` that lists one, an `a:scene3d` that turns it, an
+    /// `a:sp3d` that gives it a bevel, depth or contour, all of `pic:spPr`). The layout
+    /// does not draw them yet.
+    // reason: only the translation into the layout IR asks for it.
+    #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
+    pub(crate) fn has_effects(self) -> bool {
+        let names = &self.document.names;
+        let Some(shape) = self.child(&names.pic, "spPr") else {
+            return false;
+        };
+        let nonzero = |element: Element<'_>, name| {
+            element
+                .attribute(&[None], name)
+                .is_some_and(|value| coordinate(value).is_some_and(|length| length.0 != 0.0))
+        };
+        shape
+            .children_through_alternates(names.mc)
+            .any(|part| match part.local_in(&names.a) {
+                // Word writes an empty a:effectLst for a picture without effects.
+                Some("effectLst") => part.children_through_alternates(names.mc).next().is_some(),
+                Some("effectDag") => part.children_through_alternates(names.mc).next().is_some(),
+                // A camera in front of the picture, not turned, shows it as it is. Office
+                // writes one with a rotation of zeros into the effect styles of themes.
+                Some("scene3d") => child(part, names, &names.a, "camera").is_some_and(|camera| {
+                    camera.attribute(&[None], "prst") != Some("orthographicFront")
+                        || child(camera, names, &names.a, "rot").is_some_and(|rotation| {
+                            ["lat", "lon", "rev"].into_iter().any(|name| {
+                                rotation
+                                    .attribute(&[None], name)
+                                    .is_some_and(|angle| angle.trim() != "0")
+                            })
+                        })
+                }),
+                Some("sp3d") => {
+                    child(part, names, &names.a, "bevelT").is_some()
+                        || child(part, names, &names.a, "bevelB").is_some()
+                        || nonzero(part, "extrusionH")
+                        || nonzero(part, "contourW")
+                }
+                _ => false,
+            })
+    }
+
+    /// Whether it is cut to a shape other than its rectangle: an `a:prstGeom` of
+    /// `pic:spPr` other than `rect`, such as an oval or a rounded rectangle, or an
+    /// `a:custGeom`. The layout does not cut it yet.
+    // reason: only the translation into the layout IR asks for it.
+    #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
+    pub(crate) fn is_shaped(self) -> bool {
+        let names = &self.document.names;
+        self.child(&names.pic, "spPr").is_some_and(|shape| {
+            shape
+                .children_through_alternates(names.mc)
+                .any(|part| match part.local_in(&names.a) {
+                    Some("prstGeom") => part.attribute(&[None], "prst") != Some("rect"),
+                    Some("custGeom") => true,
+                    _ => false,
+                })
+        })
+    }
+
     fn transform(self) -> Option<Element<'a>> {
         let names = &self.document.names;
         child(self.child(&names.pic, "spPr")?, names, &names.a, "xfrm")
@@ -659,6 +754,30 @@ fn percentage(value: &str) -> Option<f64> {
         .parse::<i32>()
         .ok()
         .map(|value| f64::from(value) / 100_000.0)
+}
+
+/// Whether an effect of `a:blip` changes the image: not its `a:extLst`, and not an
+/// effect whose values change nothing: `a:lum` without brightness or contrast,
+/// `a:alphaModFix` at 100 % and `a:hsl` without a change of hue, saturation or
+/// luminance, as Word writes some of them (fdo43573-2-min.docx of LibreOffice's tests
+/// has `<a:lum/>`).
+fn changes_image(effect: Element<'_>, names: &Names) -> bool {
+    let value = |name, default| {
+        effect
+            .attribute(&[None], name)
+            .and_then(percentage)
+            .unwrap_or(default)
+    };
+    match effect.local_in(&names.a) {
+        None | Some("extLst") => false,
+        Some("lum") => value("bright", 0.0) != 0.0 || value("contrast", 0.0) != 0.0,
+        Some("alphaModFix") => value("amt", 1.0) != 1.0,
+        // The hue is an angle, not a share; only whether it is 0 counts here.
+        Some("hsl") => ["hue", "sat", "lum"]
+            .into_iter()
+            .any(|name| value(name, 0.0) != 0.0),
+        Some(_) => true,
+    }
 }
 
 /// A boolean attribute of DrawingML (`xsd:boolean`).

@@ -9,7 +9,7 @@ use officewright_layout::ReportKind;
 use officewright_layout::ir;
 
 use super::paragraph::border;
-use super::{Step, Translator};
+use super::{Once, Step, Translator};
 use crate::model::{
     Block, Border, BorderStyle, CellMerge, HeightRule, PositionAnchor, Table, TableBorders,
     TableCell, TableCellProperties, TableJustification, TableLayout, TablePosition, TableRow,
@@ -114,6 +114,11 @@ impl<'a> Translator<'a> {
     /// A row, or none when it has no cells; that is listed.
     fn row(&mut self, row: TableRow<'a>, table: &ir::TableProps) -> Option<ir::Row> {
         let head = self.row_head(row, table);
+        // Whether the last paragraph mark of every cell is deleted or moved away as a
+        // tracked change. Word marks them so in a row it deletes, and nothing else marks
+        // a row it moves away: its w:trPr has no w:moveFrom (ECMA-376 Part 1, §17.13.5),
+        // as LibreOffice's TC-table-rowDND.docx, written by Word, shows.
+        let mut gone = true;
         let mut cells: Vec<ir::Cell> = Vec::new();
         // The last cell, kept out of `cells` while the cells after it may widen it.
         let mut open: Option<ir::Cell> = None;
@@ -153,6 +158,7 @@ impl<'a> Translator<'a> {
             self.path
                 .extend([Step::Field("cells"), Step::Index(cells.len())]);
             let built = self.cell(cell, &properties, span, &table.cell_margins());
+            gone &= self.ends_deleted;
             #[cfg(test)]
             {
                 built_at = built.blocks().as_ptr().addr();
@@ -168,6 +174,9 @@ impl<'a> Translator<'a> {
             });
             return None;
         }
+        if gone {
+            self.report_once(Once::DeletedRow, DELETED_ROW);
+        }
         Some(head.with_cells(cells))
     }
 
@@ -176,6 +185,9 @@ impl<'a> Translator<'a> {
     #[inline(never)]
     fn row_head(&mut self, row: TableRow<'a>, table: &ir::TableProps) -> ir::Row {
         let properties = self.formats.row_properties(row);
+        if properties.deleted == Some(true) {
+            self.report_once(Once::DeletedRow, DELETED_ROW);
+        }
         if row.table_property_exceptions() != Default::default() {
             self.leave_out(ReportKind::FeatureUnsupported, || {
                 "the row's table property exceptions are not applied".into()
@@ -251,6 +263,12 @@ impl<'a> Translator<'a> {
         span: u16,
         margins: &ir::CellMargins,
     ) -> ir::Cell {
+        if properties.deleted == Some(true) {
+            self.report_once(
+                Once::DeletedCell,
+                "a table cell deleted as a tracked change (w:cellDel) is kept, where Word's PDF of the document without markup leaves it out, here and wherever else the document has one",
+            );
+        }
         if properties.fit_text() == Some(true) {
             self.leave_out(ReportKind::FeatureUnsupported, || {
                 "the cell's text fitting (w:tcFitText) is not applied".into()
@@ -370,6 +388,9 @@ impl<'a> Translator<'a> {
         }
     }
 }
+
+/// The entry of a table row deleted or moved away as a tracked change.
+const DELETED_ROW: &str = "a table row deleted or moved away as a tracked change (w:del, or w:moveFrom on the marks of its cells) is kept, where Word's PDF of the document without markup leaves it out, here and wherever else the document has one";
 
 /// A table of these parts; built here, so that its temporaries take no room in the
 /// frame of [`Translator::table`], which recurses.

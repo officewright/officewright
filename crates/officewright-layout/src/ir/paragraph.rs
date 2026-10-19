@@ -264,9 +264,10 @@ pub enum TabLeader {
     Dot,
     /// Hyphens.
     Hyphen,
-    /// A line, as of underscores.
+    /// Underscores (`w:leader="underscore"`).
     Underscore,
-    /// A thick line.
+    /// The heavy leader (`w:leader="heavy"`), which Word draws with underscores too, no
+    /// thicker (`E-tab-leader.docx`).
     Heavy,
     /// Dots at the middle of the line.
     MiddleDot,
