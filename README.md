@@ -94,13 +94,13 @@ The main things not laid out yet:
   document.
 
 Of this list, the report names everything but links
-([#303](https://github.com/officewright/officewright/issues/303)) and table rows that move
-whole to the next page. It also
-names smaller differences that the list leaves out, such as absolute position tabs.
-Comments are left out and tracked changes are shown as accepted, as in Word's PDF of a
-document without markup, except that deleted paragraph marks, table rows and table cells
-stay, so a deleted paragraph leaves an empty line; the report names those. DOC and RTF files,
-and files that need a password to open, cannot be opened yet.
+([#303](https://github.com/officewright/officewright/issues/303)) and table rows that
+move whole to the next page. It also names smaller differences that the list leaves out,
+such as absolute position tabs. Comments are left out and tracked changes are shown as
+accepted, as in Word's PDF of a document without markup, except that deleted paragraph
+marks, table rows and table cells stay, so a deleted paragraph leaves an empty line; the
+report names those. DOC and RTF files, and files that need a password to open, cannot be
+opened yet.
 
 From the command line:
 
