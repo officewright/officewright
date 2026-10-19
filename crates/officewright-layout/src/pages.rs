@@ -16,7 +16,7 @@ use crate::error::{Error, Result};
 use crate::fonts::Fonts;
 use crate::ir::{
     Block, CompatFlag, CompatMode, Document, FieldKind, Inline, MAX_TABLE_DEPTH, PageSetup,
-    PageVerticalAlign, Paragraph, Section, SectionStart,
+    PageVerticalAlign, Paragraph, ParagraphProps, Section, SectionStart,
 };
 use crate::itemize::FieldValues;
 use crate::lines::{LineEnd, PieceKind};
@@ -536,6 +536,9 @@ struct Pager<'d, 'f, 'b> {
 /// Which header or footer: its section, whether it is the header, and its kind.
 type FrameKey = (usize, bool, Kind);
 
+/// The paragraph above a paragraph on its page and the one after it, by their properties.
+type Neighbours<'a> = (Option<&'a ParagraphProps>, Option<&'a ParagraphProps>);
+
 impl<'d> Pager<'d, '_, '_> {
     /// Places every paragraph of `flow`, section by section. Returns the number of lines
     /// of each.
@@ -899,9 +902,18 @@ impl<'d> Pager<'d, '_, '_> {
                 _ => gap,
             };
             let top = self.cursor + gap;
+            // The paragraphs it meets, whose styles decide whether contextual spacing leaves
+            // its own spacing out: the one above it on the page, and the next.
+            let neighbours = (
+                self.above
+                    .filter(|_| !empty)
+                    .and_then(|i| flow.get(i))
+                    .map(|above| above.paragraph.props()),
+                flow.get(index + 1).map(|below| below.paragraph.props()),
+            );
             let (fit, breaks) = fitting(lines, first, top, body.bottom.0);
             if fit == rest || (breaks && fit > 0) {
-                self.put(index, flowed, layout, first..first + fit, top);
+                self.put(index, (flowed, neighbours), layout, first..first + fit, top);
                 first_page.get_or_insert(here);
                 first += fit;
                 if first == count {
@@ -950,7 +962,13 @@ impl<'d> Pager<'d, '_, '_> {
                     );
                 }
             }
-            self.put(index, flowed, layout, first..first + take, top);
+            self.put(
+                index,
+                (flowed, neighbours),
+                layout,
+                first..first + take,
+                top,
+            );
             first_page.get_or_insert(here);
             first += take;
             if first == count {
@@ -983,7 +1001,7 @@ impl<'d> Pager<'d, '_, '_> {
     fn put(
         &mut self,
         index: usize,
-        flowed: &Flowed<'_>,
+        (flowed, neighbours): (&Flowed<'_>, Neighbours<'_>),
         layout: &ParagraphLayout,
         lines: Range<usize>,
         top: f64,
@@ -1005,18 +1023,20 @@ impl<'d> Pager<'d, '_, '_> {
             x: left,
             y: Pt(top),
         };
-        // Bar tabs run through the paragraph's own space before and after (Word's render
-        // of `E-bar-tab.docx`, case 04), as far as the page lays them out: above, within
-        // the gap its lines are placed under, which is none for those that go on after a
-        // page; below, within the body, after its last line. Whether the space after is
-        // left out next to a paragraph of the same style with contextual spacing is not
-        // known here: the bar reaches through it all the same.
+        // Bar tabs run through the paragraph's own space before and after, as Word's render
+        // of `E-bar-tab.docx` shows for case 04 (12 pt each, between paragraphs without a
+        // bar), as far as the page lays them out: above, within the gap its lines are placed
+        // under, which is none for those that go on after a page; below, within the body,
+        // after its last line; neither where contextual spacing leaves it out. Hypotheses
+        // until a Word reference: a neighbour with a bar of its own, a gap larger than the
+        // paragraph's own space, the cut at the body's bottom and a paragraph split over
+        // pages, each reaching through the paragraph's own space only.
         let props = flowed.paragraph.props();
-        let above = paragraph::space_before(self.document, props)
+        let above = paragraph::own_space_before(self.document, props, neighbours.0)
             .0
             .min((top - self.cursor).max(0.0));
         let below = if lines.end >= layout.lines.len() {
-            paragraph::space_after(self.document, props)
+            paragraph::own_space_after(self.document, props, neighbours.1)
                 .0
                 .min((bottom - top - height).max(0.0))
         } else {
@@ -1894,6 +1914,89 @@ mod tests {
         assert_eq!(
             drawn_lines(&at_bottom.expect("pages").pages[0]),
             [(20.0, 180.0)]
+        );
+        // Where contextual spacing leaves the paragraph's own space out next to one of the
+        // same style, the bar does not reach through it: not into the next paragraph's
+        // line after a space after left out (the first line at 32 to 52, under its space
+        // before kept at the top of the document, and the next at 52 to 72), nor through a
+        // space before left out under a paragraph whose own 20 pt after stays (its line at
+        // 60 to 80, then its own 12 pt after).
+        let contextual = spacing(12.0, 12.0).with_contextual_spacing(true);
+        let after_left_out = document(|style| {
+            one_section(vec![
+                lines(style, 1, contextual.clone().with_tabs([bar])),
+                lines(style, 1, spacing(0.0, 0.0).with_contextual_spacing(true)),
+            ])
+        });
+        let (after_left_out, _) = laid(&after_left_out, 100);
+        assert_eq!(
+            drawn_lines(&after_left_out.expect("pages").pages[0]),
+            [(20.0, 52.0)]
+        );
+        let before_left_out = document(|style| {
+            one_section(vec![
+                lines(style, 1, spacing(0.0, 20.0)),
+                lines(style, 1, contextual.clone().with_tabs([bar])),
+            ])
+        });
+        let (before_left_out, _) = laid(&before_left_out, 100);
+        assert_eq!(
+            drawn_lines(&before_left_out.expect("pages").pages[0]),
+            [(60.0, 92.0)]
+        );
+        // Under a gap larger than its own space before, the bar reaches through its own 6 pt
+        // only: the gap is the 24 pt after of the paragraph above, its line at 64 to 84.
+        let larger_gap = document(|style| {
+            one_section(vec![
+                lines(style, 1, spacing(0.0, 24.0)),
+                lines(style, 1, spacing(6.0, 0.0).with_tabs([bar])),
+            ])
+        });
+        let (larger_gap, _) = laid(&larger_gap, 100);
+        assert_eq!(
+            drawn_lines(&larger_gap.expect("pages").pages[0]),
+            [(58.0, 84.0)]
+        );
+    }
+
+    #[test]
+    fn a_bar_tab_over_unshaded_spacing_takes_the_colour_on_the_page() {
+        use crate::ir::{ColorValue, Shading, TabKind, TabStop};
+        use officewright_core::Color;
+
+        // A paragraph shaded black, with 12 pt before and after: its shading covers its
+        // line only, so the bar is white over the line (52 to 72) and black over the
+        // spacing above and below it.
+        let bar = TabStop::default()
+            .with_position(Pt(30.0))
+            .with_kind(TabKind::Bar);
+        let shaded = spacing(12.0, 12.0).with_tabs([bar]).with_shading(Some(
+            Shading::default().with_fill(ColorValue::Rgb(Color::BLACK)),
+        ));
+        let document = document(|style| {
+            one_section(vec![
+                lines(style, 1, spacing(0.0, 0.0)),
+                lines(style, 1, shaded.clone()),
+                lines(style, 1, spacing(0.0, 0.0)),
+            ])
+        });
+        let (laid, _) = laid(&document, 100);
+        let laid = laid.expect("pages");
+        let segments: Vec<(f64, f64, Color)> = laid.pages[0]
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                DisplayItem::Line(line) => Some((line.from.y.0, line.to.y.0, line.color)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            segments,
+            [
+                (40.0, 52.0, Color::BLACK),
+                (52.0, 72.0, Color::WHITE),
+                (72.0, 84.0, Color::BLACK),
+            ]
         );
     }
 

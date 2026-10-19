@@ -476,23 +476,34 @@ impl Painting<'_, '_, '_> {
             );
         }
         let height: f64 = lines.iter().map(|line| line.height.0).sum();
-        let color = text_color(ColorValue::Auto, self.paragraph_background());
+        // The paragraph's shading covers its lines only (`E-para-shading.docx`), so over
+        // its spacing a bar takes the colour on what is behind the paragraph.
+        let on_lines = text_color(ColorValue::Auto, self.paragraph_background());
+        let on_space = text_color(ColorValue::Auto, self.background);
         let (above, below) = self.bar_reach;
+        let (top, bottom) = (origin.y.0, origin.y.0 + height);
+        let segments = if on_lines == on_space {
+            vec![(top - above, bottom + below, on_lines)]
+        } else {
+            vec![
+                (top - above, top, on_space),
+                (top, bottom, on_lines),
+                (bottom, bottom + below, on_space),
+            ]
+        };
         for bar in bars {
             let x = Pt(origin.x.0 + bar);
-            out.push(DisplayItem::Line(LineItem {
-                from: Point {
-                    x,
-                    y: Pt(origin.y.0 - above),
-                },
-                to: Point {
-                    x,
-                    y: Pt(origin.y.0 + height + below),
-                },
-                width: BAR_TAB_WIDTH,
-                style: LineStyle::Solid,
-                color,
-            }));
+            for &(from, to, color) in &segments {
+                if to > from {
+                    out.push(DisplayItem::Line(LineItem {
+                        from: Point { x, y: Pt(from) },
+                        to: Point { x, y: Pt(to) },
+                        width: BAR_TAB_WIDTH,
+                        style: LineStyle::Solid,
+                        color,
+                    }));
+                }
+            }
         }
     }
 
@@ -1658,6 +1669,7 @@ mod tests {
         assert_eq!((bar.from.x, bar.to.x), (Pt(80.0), Pt(80.0)));
         assert_eq!(bar.color, Color::WHITE);
         assert_eq!(bar.from.y, Pt(20.0));
+        assert_eq!(bar.width, Pt(0.14));
     }
 
     #[test]
