@@ -1,4 +1,5 @@
-//! Raster images: JPEG files passed through with the DCTDecode filter, and PNG files passed
+//! Raster images: JPEG files passed through with the DCTDecode filter (some damaged ones
+//! cut after their only scan), and PNG files passed
 //! through with the PNG predictors of the FlateDecode filter where PDF can show them as
 //! they are, decoded otherwise (ISO 32000-1, 8.9 and 7.4.4.4).
 
@@ -24,7 +25,9 @@ const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 /// A raster image to draw on pages with [`Page::draw_image`](crate::Page::draw_image): a
 /// JPEG or PNG file.
 ///
-/// A JPEG file goes into the PDF as it is. So does a PNG file whenever PDF can show it
+/// A JPEG file goes into the PDF as it is, except a sequential one whose only scan is
+/// followed by what libjpeg fails on: that goes in up to the end of the scan, with an end of
+/// image, which draws the same picture. So does a PNG file whenever PDF can show it
 /// unchanged: greyscale, colour or palette images without interlacing, with no
 /// transparency or with fully transparent palette entries that form one range. Other PNG
 /// files, with an alpha channel, other transparency or interlacing, are decoded, and
@@ -135,11 +138,14 @@ impl fmt::Debug for Inner {
 
 /// How an image goes into a PDF.
 enum Encoding {
-    /// The JPEG file as it is.
+    /// The JPEG file as it is, or up to `end` and then an end of image.
     Jpeg {
         components: u8,
         /// The file has Adobe's `APP14` marker, so its CMYK samples are inverted.
         adobe: bool,
+        /// Where the coded data of the only scan of a sequential file ends, if what
+        /// follows it is left out ([`read_jpeg`]).
+        end: Option<usize>,
     },
     /// The zlib stream of a PNG file's `IDAT` chunks, whose rows the PNG predictors undo.
     Png {
@@ -160,10 +166,15 @@ enum Encoding {
 impl fmt::Debug for Encoding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Jpeg { components, adobe } => f
+            Self::Jpeg {
+                components,
+                adobe,
+                end,
+            } => f
                 .debug_struct("Jpeg")
                 .field("components", components)
                 .field("adobe", adobe)
+                .field("end", end)
                 .finish(),
             Self::Png {
                 data,
@@ -315,7 +326,11 @@ impl Image {
             inner.width, inner.height
         );
         match &inner.encoding {
-            Encoding::Jpeg { components, adobe } => {
+            Encoding::Jpeg {
+                components,
+                adobe,
+                end,
+            } => {
                 let space = match components {
                     1 => ColorSpace::Gray,
                     3 => ColorSpace::Rgb,
@@ -332,7 +347,15 @@ impl Image {
                     " /Filter /DCTDecode{size} /ColorSpace {} /BitsPerComponent 8{decode}",
                     space.entry()
                 );
-                vec![stream_object(&entries, &inner.source, Compression::None)]
+                let cut;
+                let data = match end.and_then(|end| inner.source.get(..end)) {
+                    Some(scan) => {
+                        cut = [scan, b"\xFF\xD9"].concat();
+                        &cut[..]
+                    }
+                    None => &*inner.source,
+                };
+                vec![stream_object(&entries, data, Compression::None)]
             }
             Encoding::Png {
                 data,
@@ -413,18 +436,31 @@ fn u32_at(data: &[u8], at: usize) -> Option<u32> {
 }
 
 /// Reads the size and components of a JPEG file from its frame header (ITU T.81, B.2),
-/// and whether it has Adobe's `APP14` segment. The frame header and the first scan
-/// header are checked by the rules of T.81 that libjpeg enforces when it reads them, so
-/// that a file whose headers a viewer cannot read is refused. Not checked: libjpeg's own
-/// limits, which T.81 does not set (widths and heights over 65500, sampling factors that
-/// do not divide the largest of the frame, more than 10 components, of which no PDF
-/// takes more than 4); whether the tables the headers name are defined; the scans after
-/// the first; and the coded data.
+/// and whether it has Adobe's `APP14` segment. The frame header and every scan header
+/// before the end of image are checked by the rules of T.81 that libjpeg enforces when it
+/// reads them, so that a file whose headers a viewer cannot read is refused; after the
+/// first scan, so are a second frame header or start of image, the marker of a frame that
+/// cannot go into a PDF, and a second scan where libjpeg expects none, all of which
+/// libjpeg refuses too ([`check_later_scans`]).
+///
+/// Not refused but cut: a sequential file whose first scan codes every component has no
+/// other scan, and libjpeg draws it from that scan whatever follows, as poppler shows; it
+/// fails on what follows only when it reads on to the end of image, as `qpdf --check`
+/// does. Where what follows is refused by those rules, the file goes in up to the end of
+/// its scan's coded data, followed by an end of image, which draws the same picture and
+/// passes `qpdf --check`.
+///
+/// Not checked: libjpeg's own limits, which T.81 does not set (widths and heights over
+/// 65500, sampling factors that do not divide the largest of the frame, more than 10
+/// components, of which no PDF takes more than 4); whether the tables the headers name
+/// are defined; the coded data; what comes after the end of image, which libjpeg does not
+/// read; and what comes after the first scan once the file ends early or has a marker that
+/// T.81 reserves there, where the check stops.
 fn read_jpeg(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> {
     let mut at = 2;
     let mut frame = None;
     let mut adobe = false;
-    let frame = loop {
+    let (frame, coded, more_scans) = loop {
         // A marker is 0xFF and a code; more 0xFF bytes may pad it (B.1.1.2). Other bytes
         // before a marker are skipped, as libjpeg skips them.
         while data.get(at).is_some_and(|&byte| byte != 0xFF) {
@@ -463,7 +499,11 @@ fn read_jpeg(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> 
         // The scan header is the last before the coded data: every header has been read.
         if let Some(frame) = scan_frame {
             check_scan(segment, length, &frame)?;
-            break frame;
+            // libjpeg decides at the first scan whether more can follow: in a progressive
+            // frame, or in a sequential one whose first scan codes only some components.
+            let count = usize::from(segment.first().copied().unwrap_or(0));
+            let more_scans = frame.progressive || count < frame.components.len();
+            break (frame, at + length, more_scans);
         }
         match code {
             // Baseline, extended sequential and progressive Huffman coding, one frame
@@ -475,17 +515,8 @@ fn read_jpeg(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> 
                 )));
             }
             0xC0..=0xC2 => frame = Some(read_frame(segment, code == 0xC2)?),
-            // DHT, JPG and DAC are not frame headers.
-            0xC4 | 0xC8 | 0xCC => {}
-            // Lossless, differential and arithmetic-coded frames, and the DHP and EXP
-            // markers of hierarchical files (B.3, Annex J).
-            0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF | 0xDE | 0xDF => {
-                return Err(unsupported(
-                    "lossless, hierarchical and arithmetic-coded JPEG cannot go into a PDF",
-                ));
-            }
             0xEE => adobe |= segment.starts_with(b"Adobe"),
-            _ => {}
+            _ => refuse_other_frame(code)?,
         }
         at += length;
     };
@@ -509,11 +540,141 @@ fn read_jpeg(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> 
             "a JPEG file with {components} components cannot go into a PDF"
         )));
     };
+    // libjpeg draws the only scan of a sequential file whatever follows it, as poppler
+    // shows, and fails on what follows only when it reads on to the end of image, as
+    // `qpdf --check` does: such a file goes in up to the end of that scan.
+    let end = match check_later_scans(data, coded, &frame, more_scans) {
+        Ok(()) => None,
+        Err(_) if !more_scans => Some(coded_data_end(data, coded)),
+        Err(problem) => return Err(problem),
+    };
     Ok((
         u32::from(frame.width),
         u32::from(frame.height),
-        Encoding::Jpeg { components, adobe },
+        Encoding::Jpeg {
+            components,
+            adobe,
+            end,
+        },
     ))
+}
+
+/// Where the coded data of a scan that starts at `coded` ends: at the first 0xFF, or run of
+/// them, before a marker that is not a stuffed zero or a restart marker, else at the end of
+/// `data`.
+fn coded_data_end(data: &[u8], coded: usize) -> usize {
+    let mut at = coded;
+    loop {
+        while data.get(at).is_some_and(|&byte| byte != 0xFF) {
+            at += 1;
+        }
+        let start = at;
+        while data.get(at) == Some(&0xFF) {
+            at += 1;
+        }
+        match data.get(at) {
+            Some(0x00 | 0xD0..=0xD7) => at += 1,
+            _ => return start.min(data.len()),
+        }
+    }
+}
+
+/// Fails for a marker of a frame that cannot go into a PDF: lossless, differential and
+/// arithmetic-coded frames, and the DHP and EXP markers of hierarchical files (B.3,
+/// Annex J). DHT, JPG and DAC are not frame headers.
+fn refuse_other_frame(code: u8) -> std::result::Result<(), Problem> {
+    match code {
+        0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF | 0xDE | 0xDF => Err(unsupported(
+            "lossless, hierarchical and arithmetic-coded JPEG cannot go into a PDF",
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Checks the scan headers after the first, whose coded data starts at `coded`, against
+/// their `frame`, as libjpeg does when it reaches them, and refuses what libjpeg refuses
+/// there too: a second frame header or start of image, the marker of a frame that cannot
+/// go into a PDF ([`refuse_other_frame`]), and any scan at all unless `more_scans`. libjpeg
+/// expects more scans after the first only in a progressive frame, or in a sequential one
+/// whose first scan codes only some of its components; otherwise it stops at the next
+/// scan header with "Didn't expect more than one scan". That rule matched libjpeg-turbo,
+/// through `qpdf --check`, on all of 642 generated sequential files (`SOF0` and `SOF1`, 1,
+/// 3 and 4 components, every first and second scan, and a third). Without `more_scans`,
+/// [`read_jpeg`] cuts the file after its scan where this fails, rather than refusing it.
+///
+/// The coded data of a scan runs to the next marker, a 0xFF that is not a stuffed zero
+/// (0xFF 0x00), fill (more 0xFF) or a restart marker (B.1.1.2, B.1.1.5). The check ends at
+/// the end of image, after which libjpeg reads nothing; it also ends, refusing nothing,
+/// where the file ends early, or at a marker T.81 reserves, which it cannot follow.
+fn check_later_scans(
+    data: &[u8],
+    coded: usize,
+    frame: &Frame,
+    more_scans: bool,
+) -> std::result::Result<(), Problem> {
+    let mut at = coded;
+    loop {
+        // Coded data, or bytes between segments, up to the next marker.
+        let code = loop {
+            while data.get(at).is_some_and(|&byte| byte != 0xFF) {
+                at += 1;
+            }
+            while data.get(at) == Some(&0xFF) {
+                at += 1;
+            }
+            let Some(&code) = data.get(at) else {
+                return Ok(());
+            };
+            at += 1;
+            if !matches!(code, 0x00 | 0xD0..=0xD7) {
+                break code;
+            }
+        };
+        match code {
+            0xD9 => return Ok(()),
+            0xD8 => {
+                return Err(malformed(format!(
+                    "the JPEG file has a second start of image, at byte {}",
+                    at - 2
+                )));
+            }
+            // TEM has no segment.
+            0x01 => continue,
+            0xC0..=0xC2 => {
+                return Err(malformed(format!(
+                    "the JPEG file has a second frame header, at byte {}",
+                    at - 2
+                )));
+            }
+            // Segments, skipped by their length as before the first scan: 0xC3 to 0xCF
+            // (the other frame markers, DHT, JPG and DAC), SOS, DQT, DNL, DRI, DHP, EXP,
+            // APP0 to APP15 and COM. Any other marker is one T.81 reserves (0x02 to 0xBF,
+            // JPGn 0xF0 to 0xFD) and is not followed.
+            0xC3..=0xCF | 0xDA..=0xDF | 0xE0..=0xEF | 0xFE => {}
+            _ => return Ok(()),
+        }
+        refuse_other_frame(code)?;
+        let Some(length) = u16_at(data, at).map(usize::from) else {
+            return Ok(());
+        };
+        let Some(segment) = data.get(at + 2..at + length.max(2)) else {
+            return Ok(());
+        };
+        if code == 0xDA {
+            // libjpeg reads the scan header before it finds the scan unexpected.
+            check_scan(segment, length, frame)?;
+            // `read_jpeg` cuts the file before such a scan rather than refusing it, so this
+            // error, like any other here without `more_scans`, never reaches a caller.
+            if !more_scans {
+                return Err(malformed(format!(
+                    "the JPEG file has a second scan at byte {}, after a first scan that codes \
+                     every component of its sequential frame",
+                    at - 2
+                )));
+            }
+        }
+        at += length.max(2);
+    }
 }
 
 /// A JPEG frame header (ITU T.81, B.2.2).
@@ -2168,7 +2329,8 @@ pub(crate) mod tests {
                     assert_eq!((image.width(), image.height()), (640, 480));
                     assert!(matches!(
                         image.inner.encoding,
-                        Encoding::Jpeg { components: c, adobe: a } if c == components && a == adobe
+                        Encoding::Jpeg { components: c, adobe: a, end: None }
+                            if c == components && a == adobe
                     ));
                     assert!(!image.needs_pdf_15());
                 }
@@ -2190,7 +2352,8 @@ pub(crate) mod tests {
             image.inner.encoding,
             Encoding::Jpeg {
                 components: 4,
-                adobe: false
+                adobe: false,
+                end: None
             }
         ));
         let object = String::from_utf8_lossy(&image.objects(1, Compression::Flate)[0]).into_owned();
@@ -2614,6 +2777,274 @@ pub(crate) mod tests {
                 });
             }
         }
+    }
+
+    /// The JPEG file `data`, made by [`jpeg`], with `more` (segments and scans) before its
+    /// end of image.
+    fn with_more(data: &[u8], more: &[u8]) -> Vec<u8> {
+        let end = data.len() - 2;
+        assert_eq!(data[end..], [0xFF, 0xD9]);
+        [&data[..end], more, &data[end..]].concat()
+    }
+
+    /// A scan with the header `scan`, after its length, and a little coded data: a stuffed
+    /// zero, a restart marker and fill bytes, all part of it.
+    fn scan_with(scan: &[u8]) -> Vec<u8> {
+        let length = u16::try_from(scan.len() + 2).unwrap().to_be_bytes();
+        [
+            &[0xFF, 0xDA][..],
+            &length,
+            scan,
+            b"\x56\xFF\x00\x78\xFF\xD3\x9A\xFF\xFF",
+        ]
+        .concat()
+    }
+
+    #[test]
+    fn checks_the_scans_after_the_first() {
+        // After the progressive DC scan of the first of three components, a scan of the AC
+        // coefficients of one component, Ss to Se with Ah and Al.
+        let progressive = jpeg(0xC2, 8, 4, 4, 3, false);
+        let ac = |id: u8, start: u8, end: u8, high: u8, low: u8| {
+            scan_with(&[1, id, 0x11, start, end, high << 4 | low])
+        };
+        let sound = ac(2, 1, 63, 0, 0);
+        let bad = ac(2, 1, 64, 0, 0);
+        let accepted = [
+            sound.clone(),
+            [ac(1, 1, 5, 0, 13), ac(1, 6, 63, 0, 0), ac(1, 1, 63, 14, 13)].concat(),
+            // Segments and markers between scans: DHT, DQT, DRI, DNL, COM, APP1, TEM, a
+            // restart marker and fill.
+            [
+                &b"\xFF\xC4\x00\x03\x10\xFF\xDB\x00\x03\x01\xFF\xDD\x00\x04\x00\x01"[..],
+                &sound,
+            ]
+            .concat(),
+            [
+                &b"\xFF\xDC\x00\x04\x00\x04\xFF\xFE\x00\x03x\xFF\xE1\x00\x02"[..],
+                &sound,
+            ]
+            .concat(),
+            [&b"\xFF\x01\xFF\xD5\xFF\xFF"[..], &sound].concat(),
+            // The body of a segment is skipped: a COM holding a start of image and a frame
+            // header.
+            [&b"\xFF\xFE\x00\x08\xFF\xD8\xFF\xC0\x00\x02"[..], &sound].concat(),
+            // libjpeg reads nothing after the end of image.
+            [&sound[..], b"\xFF\xD9", &bad].concat(),
+        ];
+        for more in accepted {
+            Image::from_bytes(with_more(&progressive, &more)).unwrap_or_else(|err| {
+                panic!("{more:02X?}: {err}");
+            });
+        }
+        // A file that ends early, or a marker T.81 reserves between scans, ends the
+        // check: what follows is not read.
+        let cut = [&progressive[..progressive.len() - 2], &sound].concat();
+        Image::from_bytes(cut.clone()).unwrap();
+        Image::from_bytes([&cut[..], &bad[..7]].concat()).unwrap();
+        Image::from_bytes([&cut[..], &bad[..3]].concat()).unwrap();
+        Image::from_bytes(with_more(
+            &progressive,
+            &[&b"\xFF\x02\x00\x04ab"[..], &bad].concat(),
+        ))
+        .unwrap();
+
+        let refused = [
+            (
+                bad.clone(),
+                "the progressive JPEG scan header gives Ss 1 and Se 64, not 0 and 0 for the DC \
+                 coefficients or 1 <= Ss <= Se <= 63 for AC coefficients",
+            ),
+            (
+                [&sound[..], &ac(3, 1, 63, 0, 14)].concat(),
+                "the progressive JPEG scan header gives Al 14, not 0 to 13",
+            ),
+            (
+                scan_with(&[3, 1, 0x11, 2, 0x11, 3, 0x11, 1, 63, 0]),
+                "names 3 components in a scan of AC coefficients, not 1",
+            ),
+            (
+                ac(4, 1, 63, 0, 0),
+                "the JPEG scan header names component 4, which the frame header does not have",
+            ),
+            (
+                scan_with(&[1, 2, 0x11, 1, 63]),
+                "the JPEG scan header is 7 bytes long, not 8 for 1 component",
+            ),
+            // After DHT, COM, a restart marker and fill.
+            (
+                [
+                    &b"\xFF\xC4\x00\x03\x10\xFF\xFE\x00\x03x\xFF\xD0\xFF\xFF"[..],
+                    &bad,
+                ]
+                .concat(),
+                "gives Ss 1 and Se 64",
+            ),
+            // After TEM, and after an APP1 segment holding an end of image.
+            ([&b"\xFF\x01"[..], &bad].concat(), "gives Ss 1 and Se 64"),
+            // After DQT, DRI and DNL.
+            (
+                [&b"\xFF\xDB\x00\x03\x01"[..], &bad].concat(),
+                "gives Ss 1 and Se 64",
+            ),
+            (
+                [&b"\xFF\xDD\x00\x04\x00\x00"[..], &bad].concat(),
+                "gives Ss 1 and Se 64",
+            ),
+            (
+                [&b"\xFF\xDC\x00\x04\x00\x10"[..], &bad].concat(),
+                "gives Ss 1 and Se 64",
+            ),
+            (
+                [&b"\xFF\xE1\x00\x04\xFF\xD9"[..], &bad].concat(),
+                "gives Ss 1 and Se 64",
+            ),
+            (
+                [
+                    &b"\xFF\xC2\x00\x0B\x08\x00\x04\x00\x04\x01\x01\x11\x00"[..],
+                    &sound,
+                ]
+                .concat(),
+                "the JPEG file has a second frame header, at byte",
+            ),
+            (
+                b"\xFF\xC0\x00\x0B\x08\x00\x04\x00\x04\x01\x01\x11\x00".to_vec(),
+                "the JPEG file has a second frame header, at byte",
+            ),
+            (
+                b"\xFF\xC3\x00\x0B\x08\x00\x04\x00\x04\x01\x01\x11\x00".to_vec(),
+                "lossless, hierarchical and arithmetic-coded JPEG cannot go into a PDF",
+            ),
+            (
+                b"\xFF\xD8".to_vec(),
+                "the JPEG file has a second start of image, at byte",
+            ),
+        ];
+        for (more, message) in refused {
+            let err = error(with_more(&progressive, &more));
+            assert!(err.contains(message), "{more:02X?}: {err}");
+        }
+
+        // Sequential frames: each component in a scan of its own.
+        let sequential = jpeg(0xC0, 8, 4, 4, 3, false);
+        let scan = |ids: &[u8]| {
+            let mut header = vec![u8::try_from(ids.len()).unwrap()];
+            for &id in ids {
+                header.extend_from_slice(&[id, 0x11]);
+            }
+            header.extend_from_slice(&[0, 63, 0]);
+            scan_with(&header)
+        };
+        Image::from_bytes(with_more(&sequential, &[scan(&[2]), scan(&[3])].concat())).unwrap();
+        Image::from_bytes(with_more(&sequential, &scan(&[2, 3]))).unwrap();
+        assert!(
+            error(with_more(
+                &sequential,
+                &[scan(&[2]), scan(&[2, 2])].concat()
+            ))
+            .contains("names component 2 more often than the frame header has it")
+        );
+
+        // A sequential frame whose first scan codes every component, grey or interleaved,
+        // has no other scan: what libjpeg fails on after it is left out, and the file goes in
+        // up to the end of the scan's coded data, with an end of image. A progressive frame
+        // may have more scans.
+        let written = |data: Vec<u8>| {
+            let image = Image::from_bytes(data).unwrap();
+            let object = image.objects(1, Compression::None).concat();
+            let start = object.windows(7).position(|w| w == b"stream\n").unwrap() + 7;
+            object[start..object.len() - b"\nendstream".len()].to_vec()
+        };
+        let first = b"\xFF\xDA\x00\x08\x01\x01\x00\x00\x3F\x00";
+        let at = sequential
+            .windows(first.len())
+            .position(|w| w == first)
+            .unwrap();
+        let interleaved = [
+            &sequential[..at],
+            b"\xFF\xDA\x00\x0C\x03\x01\x00\x02\x00\x03\x00\x00\x3F\x00",
+            &sequential[at + first.len()..],
+        ]
+        .concat();
+        for single in [
+            jpeg(0xC0, 8, 4, 4, 1, false),
+            jpeg(0xC1, 8, 4, 4, 1, false),
+            interleaved,
+        ] {
+            // The helper's coded data ends right before its end of image.
+            let end = single.len() - 2;
+            for after in [
+                scan(&[1]),
+                [&b"\xFF\xFE\x00\x03x"[..], &scan(&[1])].concat(),
+                scan_with(&[1, 1, 0x11, 0, 63]),
+                b"\xFF\xC0\x00\x0B\x08\x00\x04\x00\x04\x01\x01\x11\x00".to_vec(),
+                b"\xFF\xC3\x00\x0B\x08\x00\x04\x00\x04\x01\x01\x11\x00".to_vec(),
+                b"\xFF\xD8".to_vec(),
+            ] {
+                assert_eq!(written(with_more(&single, &after)), single, "{after:02X?}");
+            }
+            // A restart marker after the coded data stays, and the fill before the next
+            // marker goes; fill before a restart marker or a stuffed zero is coded data.
+            assert_eq!(
+                written(with_more(
+                    &single,
+                    &[&b"\xFF\xD3\xFF\xFF"[..], &scan(&[1])].concat()
+                )),
+                [&single[..end], b"\xFF\xD3\xFF\xD9"].concat()
+            );
+            let fill = b"\xFF\xFF\xD3\x56\xFF\xFF\x00\x78";
+            assert_eq!(
+                written(with_more(&single, &[&fill[..], &scan(&[1])].concat())),
+                [&single[..end], fill, b"\xFF\xD9"].concat()
+            );
+            // What the check does not refuse stays as it is: a COM segment, a segment cut off
+            // by the end of the file, and a marker T.81 reserves (libjpeg fails on the last
+            // two, #335).
+            for after in [
+                &b"\xFF\xFE\x00\x03x"[..],
+                b"\xFF\xDA\x00",
+                b"\xFF\x02\x00\x04ab",
+            ] {
+                let data = with_more(&single, after);
+                assert_eq!(written(data.clone()), data, "{after:02X?}");
+            }
+        }
+        // The coded data starts after the first scan header, which may hold marker bytes:
+        // a sequential frame takes any Ss, Se, Ah and Al.
+        let grey = jpeg(0xC0, 8, 4, 4, 1, false);
+        let header = grey.windows(first.len()).position(|w| w == first).unwrap();
+        let odd = [
+            &grey[..header],
+            b"\xFF\xDA\x00\x08\x01\x01\x00\x00\xFF\xD8",
+            &grey[header + first.len()..],
+        ]
+        .concat();
+        assert_eq!(written(odd.clone()), odd);
+        // A sequential frame whose first scan leaves out a component is refused as before.
+        assert!(
+            error(with_more(
+                &sequential,
+                &[scan(&[2]), b"\xFF\xD8".to_vec()].concat()
+            ))
+            .contains("the JPEG file has a second start of image")
+        );
+        let progressive_grey = jpeg(0xC2, 8, 4, 4, 1, false);
+        let data = with_more(&progressive_grey, &scan_with(&[1, 1, 0x11, 1, 63, 0]));
+        assert_eq!(written(data.clone()), data);
+        assert!(
+            error(with_more(
+                &progressive_grey,
+                &scan_with(&[1, 1, 0x11, 1, 64, 0])
+            ))
+            .contains("gives Ss 1 and Se 64")
+        );
+
+        // A file main refused keeps its refusal: the later scans are checked last.
+        let twelve_bit = jpeg(0xC2, 12, 4, 4, 3, false);
+        assert_eq!(
+            error(with_more(&twelve_bit, &bad)),
+            error(twelve_bit.clone()),
+        );
     }
 
     #[test]

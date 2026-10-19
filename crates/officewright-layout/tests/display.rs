@@ -250,21 +250,16 @@ fn underlines_strikes_and_highlights_follow_the_text() -> TestResult {
     let strike = items(&painted, "line").first().map(|line| ends(line).0.1);
     let middle = BASELINE - ((530.0 - 51.0) / 2048.0 * 11.0 * 20.0_f64).round() as i64;
     assert_eq!(strike, Some(middle));
-    // A highlight is a rectangle behind the text, as high as the font reaches.
+    // A highlight is a rectangle behind the text, from its line's top to its bottom: the
+    // whole line in a line of one size, as Word's E-highlight shows in Calibri. Liberation
+    // Sans has external leading, which the box takes above the ascent, as the line does: a
+    // hypothesis until a Word reference (#346), since Calibri has none.
     let painted = paint(&book, &document, &[paragraph(highlighted)]);
     let text = painted.text();
-    assert!(text.starts_with("rect @0,"), "{text}");
+    assert!(text.starts_with("rect @0,0 "), "{text}");
     let rect = items(&painted, "rect").first().copied().unwrap_or_default();
-    // From the ascent above the baseline (usWinAscent 1854 of 2048) to the descent below
-    // it (usWinDescent 434).
-    assert_eq!(
-        at(rect).1,
-        BASELINE - (1854.0 / 2048.0 * 11.0 * 20.0_f64).round() as i64
-    );
-    assert_eq!(
-        dims(rect).1,
-        (2288.0 / 2048.0 * 11.0 * 20.0_f64).round() as i64
-    );
+    let height = fuzzing::lay_out(&book, &document, &paragraph(highlighted), 300.0).height();
+    assert_eq!(dims(rect).1, (height * 20.0).round() as i64, "{rect}");
     assert!(text.contains("#FFFF00"));
     Ok(())
 }
@@ -566,6 +561,12 @@ fn a_bar_tab_draws_a_line_through_every_line() -> TestResult {
     // One line through both lines: Liberation Sans 11 pt lines are 12.65 pt, 253 twips,
     // high.
     assert_eq!(bars, [((400, 0), (400, 506))], "{}", painted.text());
+    // 0.14 pt wide, as Word draws it (E-bar-tab): 3 twips in the dump.
+    let widths: Vec<&str> = items(&painted, "line")
+        .iter()
+        .filter_map(|line| line.split(' ').nth(3))
+        .collect();
+    assert_eq!(widths, ["3"], "{}", painted.text());
     Ok(())
 }
 
