@@ -1,8 +1,8 @@
 //! Tables as IR tables: the grid, rows and cells with their properties in effect, table
-//! styles and their conditional formats applied. What a table style gives paragraphs and
-//! runs, the table properties of its conditional formats, a row's table property
-//! exceptions, and the properties the IR has no place for yet are not applied; each is
-//! listed.
+//! styles and their conditional formats applied, also to the paragraphs and runs of the
+//! cells (through the formatting in effect). The table properties of a style's
+//! conditional formats, a row's table property exceptions, and the properties the IR has
+//! no place for yet are not applied; each is listed.
 
 use officewright_core::Pt;
 use officewright_layout::ReportKind;
@@ -64,13 +64,7 @@ impl<'a> Translator<'a> {
     #[inline(never)]
     fn table_props(&mut self, table: Table<'a>) -> ir::TableProps {
         let properties = self.formats.table_properties(table);
-        let (text, conditional_table) = self.formats.table_style_gives_unapplied(table);
-        if text {
-            self.leave_out(ReportKind::FeatureUnsupported, || {
-                "what the table's style gives paragraphs and runs is not applied yet".into()
-            });
-        }
-        if conditional_table {
+        if self.formats.table_style_gives_conditional_table(table) {
             self.leave_out(ReportKind::FeatureUnsupported, || {
                 "the table properties of the table style's conditional formats are not applied"
                     .into()

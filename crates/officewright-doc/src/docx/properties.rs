@@ -54,12 +54,17 @@ fn casts_shadow(shadow: Element<'_>, names: &Names) -> bool {
 }
 
 /// Whether a `w14:reflection` shows: one whose start and end are both fully transparent
-/// does not, nor one scaled to nothing. The defaults are those of [MS-DOCX] 2.6.3.24
+/// does not, nor one of size 0 or scaled to nothing. The defaults are those of [MS-DOCX] 2.6.3.24
 /// (CT_Reflection), all 0, so the reflection Word writes into list levels, all zeros,
 /// shows nothing either.
 fn reflects(reflection: Element<'_>, names: &Names) -> bool {
     let value = |name| effect_value(reflection, names, name, 0);
-    (value("stA") != 0 || value("endA") != 0) && value("sx") != 0 && value("sy") != 0
+    // The reflection fades along a ramp that ends at endPos, the reflection's size in
+    // Word's dialog; at its default of 0 nothing of it is drawn ([MS-DOCX] 2.6.3.24).
+    (value("stA") != 0 || value("endA") != 0)
+        && value("endPos") != 0
+        && value("sx") != 0
+        && value("sy") != 0
 }
 
 /// Whether a `w14:textOutline` draws a line: one filled other than with `w14:noFill`.
@@ -112,8 +117,9 @@ fn text_fill(fill: Element<'_>, names: &Names) -> TextFill {
     solid.unwrap_or(TextFill::Other)
 }
 
-/// The theme colour a colour of the theme's scheme names (ST_SchemeColorVal of [MS-DOCX]
-/// 2.6.3.28, CT_SchemeColor); none for the placeholder colour, which has none.
+/// The theme colour a colour of the theme's scheme names (the `w14:val` of a
+/// `w14:schemeClr`, [MS-DOCX] 2.6.3.27, CT_SchemeColor, of type ST_SchemeColorVal,
+/// 2.6.4.16); none for the placeholder colour, which has none.
 fn scheme_color(value: &str) -> Option<ThemeColor> {
     Some(match value {
         "bg1" => ThemeColor::Background1,
@@ -155,6 +161,25 @@ fn has_depth(props: Element<'_>, names: &Names) -> bool {
     }) || effect_value(props, names, "contourW", 0) > 0
 }
 
+/// Whether a `w14:stylisticSets` turns a set on: a `w14:styleSet` of a set 1 to 20 whose
+/// `w14:val` is on, as it is when not written ([MS-DOCX] 2.6.3.34, CT_StyleSet; w14's
+/// ST_OnOff, 2.6.4.9, is true, false, 1 or 0). A set off, or one with a value not valid,
+/// turns nothing on, as invalid values of the neighbouring choices set nothing.
+fn stylistic_set_on(sets: Element<'_>, names: &Names) -> bool {
+    sets.children_through_alternates(names.mc)
+        .filter(|set| set.local_in(&[names.w14]) == Some("styleSet"))
+        .any(|set| {
+            let id = set
+                .attribute(&[names.w14], "id")
+                .and_then(|id| id.parse::<u8>().ok());
+            let on = matches!(
+                set.attribute(&[names.w14], "val"),
+                None | Some("true" | "1")
+            );
+            on && id.is_some_and(|id| (1..=20).contains(&id))
+        })
+}
+
 /// The properties a `w:rPr` sets.
 pub(crate) fn run_properties(
     r_pr: Element<'_>,
@@ -182,6 +207,27 @@ pub(crate) fn run_properties(
                 "textFill" => properties.text_effects.fill = Some(text_fill(child, names)),
                 "scene3d" => properties.text_effects.turned = Some(turns(child, names)),
                 "props3d" => properties.text_effects.depth = Some(has_depth(child, names)),
+                // Only whether each asks for other than the font's default, so that the
+                // layout's report can say that it is not applied (#361).
+                // ST_NumForm and ST_NumSpacing ([MS-DOCX] 2.6.4.7, 2.6.4.8): another value
+                // sets nothing.
+                "numForm" => {
+                    properties.font_choices.number_form = match value {
+                        Some("default") => Some(false),
+                        Some("lining" | "oldStyle") => Some(true),
+                        _ => None,
+                    };
+                }
+                "numSpacing" => {
+                    properties.font_choices.number_spacing = match value {
+                        Some("default") => Some(false),
+                        Some("proportional" | "tabular") => Some(true),
+                        _ => None,
+                    };
+                }
+                "stylisticSets" => {
+                    properties.font_choices.stylistic_sets = Some(stylistic_set_on(child, names));
+                }
                 "cntxtAlts" => {
                     // w14's ST_OnOff has no on and off ([MS-DOCX] 2.6.4.9).
                     properties.contextual_alternates = match value {

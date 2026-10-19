@@ -631,16 +631,7 @@ impl FontBook {
         request: &FontRequest,
     ) -> Option<((FaceId, &FaceInfo), &str)> {
         self.best(request, |face| {
-            let keys = face.keys();
-            let families = keys.families.iter().chain(&keys.typographic_families);
-            let instance = families.into_iter().find_map(|family| {
-                let rest = key.strip_prefix(family.as_str())?.strip_prefix(' ')?;
-                let mut words: Vec<&str> = rest.split_whitespace().collect();
-                words.sort_unstable();
-                keys.instances
-                    .iter()
-                    .find(|instance| instance.words == words)
-            })?;
+            let instance = face.keys().instance(key)?;
             Some((instance.weight, instance.italic, instance.name.as_str()))
         })
     }
