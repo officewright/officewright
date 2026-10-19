@@ -236,8 +236,10 @@ impl Document {
 /// add to the font book, a collection counting each of its faces and a variable font
 /// each of the instances the font book reads. Word embeds at most four programs a font;
 /// the limit is our choice, far above what documents embed (24 programs in all in the
-/// corpora), and with names of at most [`MAX_NAME_BYTES`] it bounds what they keep to
-/// a few tens of megabytes.
+/// corpora), and with name records of at most [`MAX_NAME_BYTES`] it bounds what they
+/// keep to about 150 MiB at worst: the font book keeps the decoded text, and a Mac Roman
+/// byte can take three bytes of UTF-8 (one collection of 256 faces, each with 198 names
+/// of 512 bytes, took 155 MiB; #226 is to bound the decoded text).
 const MAX_EMBEDDED_FACES: usize = 256;
 
 /// The longest name, in bytes, that an embedded program may have among those the font
@@ -248,8 +250,8 @@ const MAX_NAME_BYTES: u16 = 512;
 /// What the font book would keep of a program, read from its tables without reading its
 /// names: [`scan`].
 struct Scan {
-    /// The named instances of its variable faces the font book reads: the first 256 of
-    /// each face's `fvar` table.
+    /// At most the named instances of its variable faces the font book reads: what each
+    /// face's `fvar` table declares, up to 256 a face.
     instances: usize,
     /// Whether a name the font book keeps is longer than [`MAX_NAME_BYTES`].
     long_name: bool,
