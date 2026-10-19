@@ -42,6 +42,11 @@ pub(super) fn paragraph<'a>(
     let list = format.list().and_then(|list| {
         let instance = t.list_instance(list.instance())?;
         let label = t.formats.list_label(paragraph)?;
+        // The label is drawn with its run style as runs are, so what its format asks for
+        // and the PDF leaves out is listed as a run's is: its number or bullet shows.
+        if !label.hidden() {
+            t.report_run_features(&label, true);
+        }
         let label = t.run_style(&label);
         let level = u8::try_from(list.level_number()).ok()?;
         Some(ir::ListItem::new(instance, level, label))

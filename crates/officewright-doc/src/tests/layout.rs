@@ -796,6 +796,49 @@ fn lists_word_s_text_effects_once_but_no_value_that_changes_nothing() {
 }
 
 #[test]
+fn lists_what_a_list_label_asks_for_as_a_run_s() {
+    // From the review of #362: a label is drawn with its run style as runs are, so what
+    // its format asks for and the PDF leaves out is listed; before, only runs were looked
+    // at. The label's level asks for old-style figures and emboss, the text for nothing.
+    const W14: &str = "http://schemas.microsoft.com/office/word/2010/wordml";
+    let messages = |r_pr: &str, hidden: bool| -> Vec<String> {
+        let mark = if hidden {
+            "<w:rPr><w:vanish/></w:rPr>"
+        } else {
+            ""
+        };
+        let body = format!(
+            r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>{mark}</w:pPr><w:r><w:t>text</w:t></w:r></w:p>"#
+        );
+        let numbering = format!(
+            r#"<w:numbering xmlns:w="{W}" xmlns:w14="{W14}"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:rPr>{r_pr}</w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#
+        );
+        let settings = format!(
+            r#"<w:settings xmlns:w="{W}"><w:compat><w:compatSetting w:name="enableOpenTypeFeatures" w:uri="http://schemas.microsoft.com/office/word" w:val="1"/></w:compat></w:settings>"#
+        );
+        translate(&with_parts(
+            &body,
+            &[
+                ("numbering", "numbering.xml", numbering),
+                ("settings", "settings.xml", settings),
+            ],
+        ))
+        .left_out()
+        .iter()
+        .map(|entry| entry.message().to_owned())
+        .collect()
+    };
+    let found = messages(r#"<w14:numForm w14:val="oldStyle"/><w:emboss/>"#, false);
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(found.iter().any(|m| m.contains("w14:numForm")), "{found:?}");
+    assert!(found.iter().any(|m| m.contains("w:emboss")), "{found:?}");
+    // A label hidden with its paragraph mark shows nothing.
+    assert!(messages(r#"<w14:numForm w14:val="oldStyle"/>"#, true).is_empty());
+    // A label that asks for nothing lists nothing.
+    assert!(messages("", false).is_empty());
+}
+
+#[test]
 fn lists_word_s_figure_forms_and_stylistic_sets_with_open_type_features_on() {
     // Issue #361: Word 2010's choices of a font's figures and stylistic sets ([MS-DOCX]
     // 2.6.1) have no place in the IR's run style. Word applies the font's features only

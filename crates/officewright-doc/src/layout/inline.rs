@@ -196,7 +196,7 @@ impl<'a> Translator<'a> {
     /// hidden counts, and one that `shows` text for the features of its glyphs: a hidden
     /// run, or one that holds only a field's instruction, shows nothing they could
     /// change. A border surrounds a tab or a picture in the line too.
-    fn report_run_features(&mut self, format: &CharacterFormat, shows: bool) {
+    pub(super) fn report_run_features(&mut self, format: &CharacterFormat, shows: bool) {
         if format.border {
             self.report_once(
                 Once::RunBorder,
