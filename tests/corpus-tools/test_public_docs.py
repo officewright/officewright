@@ -587,6 +587,119 @@ class Cleaning(unittest.TestCase):
                 public.clean(data, DOC)
             self.assertIn(message.strip(), str(caught.exception))
 
+    def test_private_parts_are_found_by_what_they_are_not_by_their_usual_name(self):
+        # Parts that hold people's data, named only by the relationships to them or by their
+        # content type, as OPC finds them (#375).
+        ms = "http://schemas.microsoft.com/office"
+        custom_type = "application/vnd.openxmlformats-officedocument.custom-properties+xml"
+        core = ("<cp:coreProperties xmlns:cp='c' xmlns:dc='d'><dc:title>Plan</dc:title>"
+                "<dc:creator>Jane Roe</dc:creator></cp:coreProperties>")
+        unusual = {
+            "_rels/.rels": relationships(
+                (f"{REL}/officeDocument", "word/document.xml", ""),
+                (f"{PKG}/metadata/thumbnail", "look.jpeg", ""),
+                (f"{REL}/custom-properties", "meta/more.xml", ""),
+                (f"{PKG}/metadata/core-properties", "meta/props1.xml", ""),
+                (f"{REL}/extended-properties", "meta/app2.xml", ""),
+                # A part whose usual name says it is dropped stays dropped, whatever the
+                # relationship to it says.
+                (f"{PKG}/metadata/core-properties", "docProps/custom.xml", ""),
+                (f"{ms}/2020/02/relationships/classificationlabels", "meta/labels.xml", ""),
+            ),
+            "[Content_Types].xml": (
+                '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                '<Default Extension="xml" ContentType="application/xml"/>'
+                '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.'
+                'relationships+xml"/><Default Extension="jpeg" ContentType="image/jpeg"/>'
+                f'<Override PartName="/meta/more.xml" ContentType="{custom_type}"/>'
+                # Found by its content type alone: no relationship names it.
+                f'<Override PartName="/meta/%41ttributes.xml" ContentType="{custom_type.upper()}"/>'
+                '<Override PartName="/meta/sens.xml" '
+                'ContentType="application/vnd.ms-office.classificationlabels+xml"/></Types>'
+            ),
+            "docProps/core.xml": None, "docProps/app.xml": None, "docProps/thumbnail.jpeg": None,
+            "customXml/item1.xml": None, "customXml/itemProps1.xml": None,
+            "customXml/_rels/item1.xml.rels": None, "word/settings.xml": None,
+            "word/_rels/settings.xml.rels": None,
+            "meta/props1.xml": core,
+            "meta/app2.xml": "<Properties><Company>Roe Consulting</Company></Properties>",
+            "meta/more.xml": "<Properties><property>Jane Roe</property></Properties>",
+            "meta/Attributes.xml": "<Properties><property>Jane Roe</property></Properties>",
+            "meta/labels.xml": "<labelList/>",
+            "meta/sens.xml": "<labelList/>",
+            "look.jpeg": b"\xff\xd8\xff\xd9",
+            "data/item1.xml": "<root><owner>Jane Roe</owner></root>",
+            "data/props1.xml": "<ds:datastoreItem xmlns:ds='x'/>",
+            "data/_rels/item1.xml.rels": relationships(
+                (f"{REL}/customXmlProps", "props1.xml", "")),
+            "word/persons.xml": "<w15:people xmlns:w15='w'><w15:person w15:author='Jane Roe'/>"
+            "</w15:people>",
+            "word/prefs.xml": "<w:settings xmlns:w='w'><w:docVars><w:docVar w:name='owner' "
+            "w:val='Jane Roe'/></w:docVars><w:zoom/></w:settings>",
+            # The usual names in another case.
+            "DocProps/Thumbnail.png": b"\x89PNG",
+            "CustomXml/item2.xml": "<root><owner>Jane Roe</owner></root>",
+            "word/_rels/document.xml.rels": relationships(
+                (f"{REL}/image", "media/image1.emf", ""),
+                (f"{REL}/image", "media/image2.png", ""),
+                # Removed in any spelling of the part's name.
+                (f"{REL}/customXml", "../Data/%69tem1.xml", ""),
+                (f"{REL}/settings", "prefs.xml", ""),
+                (f"{REL}/header", "header1.xml", ""),
+                (f"{ms}/2011/relationships/people", "persons.xml", ""),
+                (f"{REL}/hyperlink", "mailto:jane.roe@agency.gov", ' TargetMode="External"'),
+            ),
+        }
+        found = "; ".join(public.problems(package(**unusual)))
+        for expected in ("meta/props1.xml: dc:creator is not empty",
+                         "meta/app2.xml: Company is not empty", "meta/more.xml is still there",
+                         "meta/Attributes.xml is still there", "meta/labels.xml is still there",
+                         "meta/sens.xml is still there",
+                         "look.jpeg is still there", "data/item1.xml is still there",
+                         "data/props1.xml is still there", "data/_rels/item1.xml.rels is still "
+                         "there", "word/persons.xml is still there", "DocProps/Thumbnail.png "
+                         "is still there", "CustomXml/item2.xml is still there",
+                         "docProps/custom.xml is still there"):
+            self.assertIn(expected, found)
+        cleaned = public.clean(package(**unusual), DOC)
+        parts = parts_of(cleaned.data)
+        for name in ("meta/more.xml", "meta/Attributes.xml", "meta/labels.xml", "meta/sens.xml",
+                     "look.jpeg",
+                     "data/item1.xml", "data/props1.xml", "data/_rels/item1.xml.rels",
+                     "word/persons.xml", "DocProps/Thumbnail.png", "CustomXml/item2.xml",
+                     "docProps/custom.xml"):
+            with self.subTest(name):
+                self.assertNotIn(name, parts)
+        self.assertIn("<dc:creator></dc:creator>", parts["meta/props1.xml"].decode())
+        self.assertIn("<Company></Company>", parts["meta/app2.xml"].decode())
+        self.assertNotIn("docVars", parts["word/prefs.xml"].decode())
+        rels = parts["_rels/.rels"].decode() + parts["word/_rels/document.xml.rels"].decode()
+        for target in ("look.jpeg", "more.xml", "labels.xml", "tem1.xml", "persons.xml",
+                       "docProps/custom.xml"):
+            self.assertNotIn(target, rels)
+        self.assertNotIn("ttributes.xml", parts["[Content_Types].xml"].decode())
+        self.assertNotIn("more.xml", parts["[Content_Types].xml"].decode())
+        self.assertIn("removed: comment authors, custom XML parts, custom properties, "
+                      "sensitivity label, thumbnail", cleaned.changes)
+        self.assertEqual(public.problems(cleaned.data), [])
+
+        # Comments, by the relationship to them or by their content type alone.
+        comments = "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"
+        by_type = package(**{
+            "word/remarks.xml": "<w:comments xmlns:w='w'/>",
+            "[Content_Types].xml": unusual["[Content_Types].xml"].replace(
+                "</Types>", f'<Override PartName="/word/remarks.xml" ContentType="{comments}"/>'
+                "</Types>")})
+        by_relationship = package(**{
+            "word/remarks.xml": "<w:comments xmlns:w='w'/>",
+            "word/_rels/header1.xml.rels": relationships((f"{REL}/comments", "remarks.xml", ""))})
+        for name, data in (("content type", by_type), ("relationship", by_relationship)):
+            with self.subTest(name):
+                self.assertIn("word/remarks.xml holds comments", public.problems(data))
+                with self.assertRaises(public.Refused) as caught:
+                    public.clean(data, DOC)
+                self.assertIn("has comments", str(caught.exception))
+
     def test_embedded_parts_are_found_by_what_they_are_not_by_their_usual_name(self):
         ms = "http://schemas.microsoft.com/office/2006/relationships"
         types = (
