@@ -157,6 +157,51 @@ impl FontFace {
         self.subset_within(glyphs, &mut SubsetBudget::new(u64::MAX))
     }
 
+    /// Checks that `glyph` can go into a subset of the face, without making one: what
+    /// [`subset`](Self::subset) of `glyph` alone would do, for a glyph the face's checks
+    /// have not reached yet. Text that a face cannot draw into a PDF this way can then be
+    /// drawn with another font.
+    ///
+    /// The face is subset once, with `.notdef` alone, at the first check; each glyph then
+    /// needs only what the subsetter reads for it, read as it reads it: its `glyf` entry,
+    /// with those of the components it uses, or its `CFF ` charstring and Font DICT; its
+    /// `hmtx` entry; and its name in a `post` table of version 2. What a check finds is
+    /// kept with the face and shared by its clones, so each glyph is read once.
+    ///
+    /// The glyphs a face's checks pass, subset together, fail only where they take more
+    /// together than one subset may: the checks of a face's CFF glyphs share that limit
+    /// (16,777,216 operands, operators and hint mask bytes to decompile), so a glyph
+    /// fails once those checked before it have read nearly all of it. The checks of one
+    /// face also follow at most 4,194,304 components of composite glyphs in all, and read
+    /// at most four times the limit of one subset in CFF charstrings, those of glyphs that
+    /// fail included, which only a crafted face comes near. Several faces subset within one
+    /// [`SubsetBudget`], as the faces of one PDF are, can still take more together than it
+    /// has left: the checks bound each face alone. And TrueType glyphs whose components
+    /// name glyph IDs past the face's glyph count, which only a crafted face does, can each
+    /// pass and still take all 65,536 glyph IDs together, which `subset` refuses as
+    /// [`Error::SubsetUnsupported`].
+    ///
+    /// ```
+    /// use officewright_font::{FontFace, GlyphId};
+    ///
+    /// let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/minimal.ttf"))?;
+    /// let font = FontFace::from_bytes(data, 0)?;
+    /// let a = font.glyph_id('A').expect("the font has A");
+    /// font.check_subset_glyph(a)?;
+    /// assert!(font.check_subset_glyph(GlyphId::new(font.glyph_count())).is_err());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Those of [`subset`](Self::subset) for the face or for `glyph`, and
+    /// [`Error::TableOverLimit`] once the glyphs that passed before have read nearly all a
+    /// subset may, the checks of the face have read four times that, or the components
+    /// followed reach their limit.
+    pub fn check_subset_glyph(&self, glyph: GlyphId) -> Result<()> {
+        self.subset_check().check(self, glyph)
+    }
+
     /// [`subset`](Self::subset) within `budget`: decompiling the CFF glyphs to keep may
     /// read no more than is left of it, nor than the limit of one subset, and what it
     /// reads is taken off the budget once the subset is made. A subset that fails takes
@@ -199,6 +244,18 @@ impl FontFace {
         } else {
             0
         };
+        // subsetter 0.2.6 panics when the glyphs to keep and the glyphs their components
+        // use take every glyph ID, which components past the glyph count can do
+        // (<https://github.com/typst/subsetter/issues/35>).
+        if crate::subset_check::subset_overflows(self, &ids) {
+            return Err(Error::SubsetUnsupported {
+                face,
+                source: Cause::new(
+                    "the glyphs to keep and the glyphs their components use take all 65536 \
+                     glyph IDs with .notdef, more than the subsetter can number",
+                ),
+            });
+        }
         let remapper = GlyphRemapper::new_from_glyphs_sorted(&ids);
         let data = self.data();
         let data = catch_subsetter_panic(face, || subsetter::subset(data, face, &remapper))?
@@ -256,6 +313,15 @@ pub(crate) fn subsetter_table<'a>(
     data: &'a [u8],
     tag: &[u8; 4],
 ) -> Option<&'a [u8]> {
+    data.get(subsetter_table_range(font, data, tag)?)
+}
+
+/// Where in `data` the table [`subsetter_table`] finds is.
+pub(crate) fn subsetter_table_range(
+    font: &FontRef<'_>,
+    data: &[u8],
+    tag: &[u8; 4],
+) -> Option<Range<usize>> {
     let records = font.table_directory().table_records();
     let found = records
         .binary_search_by(|record| record.tag().to_be_bytes().cmp(tag))
@@ -263,7 +329,8 @@ pub(crate) fn subsetter_table<'a>(
     let record = records.get(found)?;
     let start = usize::try_from(record.offset()).ok()?;
     let end = start.checked_add(usize::try_from(record.length()).ok()?)?;
-    data.get(start..end)
+    data.get(start..end)?;
+    Some(start..end)
 }
 
 /// Runs the subsetter and turns a panic into [`Error::SubsetterPanicked`].
@@ -271,9 +338,10 @@ pub(crate) fn subsetter_table<'a>(
 /// subsetter 0.2.6 still has `unwrap()`, `unreachable!()` and unchecked arithmetic on
 /// paths that malformed fonts can reach. A damaged font must give `Err`, never a panic,
 /// also inside a dependency, so the panic is caught here until upstream returns errors
-/// on those paths; panics that fuzzing finds are reported there. The four found so far
-/// are not left to this guard: the checks in `name_offsets.rs` and `cff.rs` refuse the
-/// faces before the subsetter runs, since the panic hook would still print them. They
+/// on those paths; panics that fuzzing or review finds are reported there. The five found
+/// so far are not left to this guard: the checks in `name_offsets.rs`, `cff.rs` and
+/// `subset_check.rs` refuse the faces before the subsetter runs, since the panic hook
+/// would still print them. They
 /// are an overflow in its `name` table code
 /// (<https://github.com/typst/subsetter/issues/30>), `unreachable!()` for a CFF real
 /// number too large for an `f32` (<https://github.com/typst/subsetter/issues/31>), an
@@ -281,7 +349,9 @@ pub(crate) fn subsetter_table<'a>(
 /// (<https://github.com/typst/subsetter/issues/33>), and a CID-keyed font with 256 Font
 /// DICTs or more, on which a `debug_assert!` fails and, when the kept glyphs use 256, a
 /// `u8` counter overflows in any build
-/// (<https://github.com/typst/subsetter/issues/34>).
+/// (<https://github.com/typst/subsetter/issues/34>), and composite glyphs whose
+/// components take all 65,536 glyph IDs, which overflow its `u16` glyph counter
+/// (<https://github.com/typst/subsetter/issues/35>).
 /// Catching relies on unwinding, like the C ABI: built with `-C panic=abort` the process
 /// aborts instead. The default panic hook still prints the message to stderr, since a
 /// library must not replace the process-wide hook.

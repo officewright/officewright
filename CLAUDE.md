@@ -39,7 +39,9 @@ crates/
                         officewright-font as `font` with the pdf feature
   officewright-core     units (Pt, twips, EMU), PageSize, Color (sRGB), Error/Result
   officewright-font     font loading (TrueType/OpenType, collections), metrics, cmap, subsetting for
-                        embedding, system font index and font substitution with a report
+                        embedding with a check of single glyphs against it (`FontFace::check_subset_glyph`,
+                        so that the layout can draw text a damaged face cannot embed with another font),
+                        system font index and font substitution with a report
   officewright-opc      ZIP, XML, OPC packages and Markup Compatibility (ECMA-376 Parts 2 and 3) shared
                         by the OOXML readers; ZIP and XML are our own code, DEFLATE is miniz_oxide
   officewright-layout   page layout engine (shaping, text flow, line breaking, tables) — the core of DOCX→PDF;

@@ -130,6 +130,78 @@ pub enum Error {
     },
 }
 
+impl Error {
+    /// A copy of the error, for one that is kept and returned again; a [`Read`](Self::Read)
+    /// error keeps the kind and message of its I/O error.
+    pub(crate) fn duplicate(&self) -> Self {
+        match self {
+            Self::NotAFont { source } => Self::NotAFont {
+                source: source.clone(),
+            },
+            Self::FaceIndexOutOfRange { index, count } => Self::FaceIndexOutOfRange {
+                index: *index,
+                count: *count,
+            },
+            Self::MalformedFace { face, source } => Self::MalformedFace {
+                face: *face,
+                source: source.clone(),
+            },
+            Self::MissingTable { face, table } => Self::MissingTable { face: *face, table },
+            Self::MalformedTable {
+                face,
+                table,
+                source,
+            } => Self::MalformedTable {
+                face: *face,
+                table,
+                source: source.clone(),
+            },
+            Self::TableOverLimit {
+                face,
+                table,
+                source,
+            } => Self::TableOverLimit {
+                face: *face,
+                table,
+                source: source.clone(),
+            },
+            Self::InvalidUnitsPerEm { face, units_per_em } => Self::InvalidUnitsPerEm {
+                face: *face,
+                units_per_em: *units_per_em,
+            },
+            Self::GlyphOutOfRange {
+                face,
+                glyph,
+                glyph_count,
+            } => Self::GlyphOutOfRange {
+                face: *face,
+                glyph: *glyph,
+                glyph_count: *glyph_count,
+            },
+            Self::UnsupportedOutlines { face, format } => Self::UnsupportedOutlines {
+                face: *face,
+                format: *format,
+            },
+            Self::Subset { face, source } => Self::Subset {
+                face: *face,
+                source: source.clone(),
+            },
+            Self::SubsetUnsupported { face, source } => Self::SubsetUnsupported {
+                face: *face,
+                source: source.clone(),
+            },
+            Self::SubsetterPanicked { face, message } => Self::SubsetterPanicked {
+                face: *face,
+                message: message.clone(),
+            },
+            Self::Read { path, source } => Self::Read {
+                path: path.clone(),
+                source: io::Error::new(source.kind(), source.to_string()),
+            },
+        }
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -278,6 +350,70 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+
+    #[test]
+    fn a_duplicate_is_the_same_error() {
+        let cause = || Cause::new("why");
+        let errors = [
+            Error::NotAFont { source: cause() },
+            Error::FaceIndexOutOfRange { index: 3, count: 2 },
+            Error::MalformedFace {
+                face: 1,
+                source: cause(),
+            },
+            Error::MissingTable {
+                face: 1,
+                table: "hmtx",
+            },
+            Error::MalformedTable {
+                face: 1,
+                table: "CFF ",
+                source: cause(),
+            },
+            Error::TableOverLimit {
+                face: 1,
+                table: "name",
+                source: cause(),
+            },
+            Error::InvalidUnitsPerEm {
+                face: 1,
+                units_per_em: 9,
+            },
+            Error::GlyphOutOfRange {
+                face: 1,
+                glyph: GlyphId::new(7),
+                glyph_count: 5,
+            },
+            Error::UnsupportedOutlines {
+                face: 1,
+                format: Some(OutlineFormat::Cff2),
+            },
+            Error::Subset {
+                face: 1,
+                source: cause(),
+            },
+            Error::SubsetUnsupported {
+                face: 1,
+                source: cause(),
+            },
+            Error::SubsetterPanicked {
+                face: 1,
+                message: "boom".to_owned(),
+            },
+            Error::Read {
+                path: Path::new("font.ttf").to_owned(),
+                source: io::Error::new(io::ErrorKind::NotFound, "gone"),
+            },
+        ];
+        for err in errors {
+            let copy = err.duplicate();
+            assert_eq!(std::mem::discriminant(&copy), std::mem::discriminant(&err));
+            assert_eq!(format!("{copy:?}"), format!("{err:?}"));
+            if let (Error::Read { source: a, .. }, Error::Read { source: b, .. }) = (&copy, &err) {
+                assert_eq!(a.kind(), b.kind());
+            }
+        }
+    }
 
     #[test]
     fn messages_name_the_face_and_table() {
