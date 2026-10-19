@@ -864,7 +864,7 @@ pub(super) fn error_at(text: &str, offset: usize, message: impl Into<String>) ->
 /// At most 64 characters of a name or value from the document, with `…` when there are
 /// more, so that an error message names it without copying all of it.
 fn short(text: &str) -> std::borrow::Cow<'_, str> {
-    match text.char_indices().nth(64) {
+    match text.char_indices().nth(crate::error::MESSAGE_VALUE) {
         Some((end, _)) => format!("{}…", text.get(..end).unwrap_or_default()).into(),
         None => text.into(),
     }

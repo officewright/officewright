@@ -78,6 +78,10 @@ pub enum Limit {
     XmlNamespaces,
 }
 
+/// How many characters of a value from the document an error message quotes, so that a
+/// value of megabytes makes no message of megabytes.
+pub(crate) const MESSAGE_VALUE: usize = 64;
+
 impl Error {
     /// Names the part an XML error or a size limit refers to, when the error does not
     /// name one yet.
