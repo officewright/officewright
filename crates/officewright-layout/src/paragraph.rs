@@ -273,7 +273,11 @@ mod tests {
         assert_eq!(between(&document, &style(1, false), &style(1, true)), 10.0);
         // Only the first: its space below goes.
         assert_eq!(between(&document, &style(1, true), &style(1, false)), 6.0);
-        // Different styles: both stay, and the larger counts.
+        // Different styles: both stay, and the larger counts, whichever side it is on.
         assert_eq!(between(&document, &style(1, true), &style(2, true)), 10.0);
+        let before_larger =
+            |key| style(key, true).with_spacing(Spacing::default().with_before(Pt(12.0)));
+        assert_eq!(between(&document, &style(1, true), &before_larger(2)), 12.0);
+        assert_eq!(between(&document, &style(1, true), &before_larger(1)), 0.0);
     }
 }

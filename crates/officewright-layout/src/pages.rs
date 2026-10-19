@@ -1023,14 +1023,15 @@ impl<'d> Pager<'d, '_, '_> {
             x: left,
             y: Pt(top),
         };
-        // Bar tabs run through the paragraph's own space before and after, as Word's render
-        // of `E-bar-tab.docx` shows for case 04 (12 pt each, between paragraphs without a
-        // bar), as far as the page lays them out: above, within the gap its lines are placed
-        // under, which is none for those that go on after a page; below, within the body,
-        // after its last line; neither where contextual spacing leaves it out. Hypotheses
-        // until a Word reference: a neighbour with a bar of its own, a gap larger than the
-        // paragraph's own space, the cut at the body's bottom and a paragraph split over
-        // pages, each reaching through the paragraph's own space only.
+        // Bar tabs run through the paragraph's own space before and after, as far as the page
+        // lays them out: above, within the gap its lines are placed under, which is none for
+        // those that go on after a page; below, within the body, after its last line; neither
+        // where contextual spacing leaves it out. Word's render of `E-bar-tab.docx` shows the
+        // bar unbroken through case 04's 12 pt before and after, between paragraphs that have
+        // the same bar, where this rule and one joining bars across the gaps give the same.
+        // Hypotheses until a Word reference: a neighbour without a bar (each bar reaching
+        // through its own paragraph's space only), a gap larger than the paragraph's own
+        // space, the cut at the body's bottom and a paragraph split over pages.
         let props = flowed.paragraph.props();
         let above = paragraph::own_space_before(self.document, props, neighbours.0)
             .0
@@ -1866,9 +1867,10 @@ mod tests {
     fn bar_tabs_run_through_the_paragraph_s_space_before_and_after() {
         use crate::ir::{TabKind, TabStop};
 
-        // E-bar-tab case 04: 12 pt before and after, and the bar unbroken through both. The
-        // paragraph's line is at 52 to 72, 12 pt under the line above it, and the paragraph
-        // after it starts 12 pt lower: the bar runs from 40 to 84.
+        // 12 pt before and after, as in E-bar-tab case 04, but between paragraphs without a
+        // bar, which no reference shows (there every paragraph has the bar): the bar reaches
+        // through the paragraph's own spacing only. Its line is at 52 to 72, 12 pt under the
+        // line above it, and the paragraph after it starts 12 pt lower: from 40 to 84.
         let bar = TabStop::default()
             .with_position(Pt(30.0))
             .with_kind(TabKind::Bar);

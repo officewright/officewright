@@ -450,9 +450,10 @@ impl Painting<'_, '_, '_> {
     /// them with its top at `origin.y`, [`BAR_TAB_WIDTH`] wide: from the top of the first
     /// line to the bottom of the last, and through the paragraph's space before and after
     /// as far as [`Painting::bar_reach`] says, as Word's reference of `E-bar-tab.docx`
-    /// shows (case 04, 12 pt before and after, unbroken). In the automatic colour on what
-    /// is behind the paragraph: a hypothesis, since the reference shades it 404040, on
-    /// which that colour is black anyway.
+    /// shows (case 04, 12 pt before and after, unbroken). In the automatic colour: on the
+    /// paragraph's shading over its lines, and on what is behind the paragraph over its
+    /// spacing, which the shading does not cover; a hypothesis, since the reference shades
+    /// it 404040, on which that colour is black anyway.
     fn bars(&mut self, lines: &[crate::lines::Line], origin: Point, out: &mut Vec<DisplayItem>) {
         let mut bars: Vec<f64> = self
             .paragraph
