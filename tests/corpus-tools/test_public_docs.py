@@ -16,6 +16,7 @@ import struct
 import sys
 import unittest
 import unittest.mock
+import warnings
 import zipfile
 import zlib
 from pathlib import Path
@@ -174,6 +175,16 @@ DOC = public.PublicDoc(
 # What clean() and problems() say of a relationship to a local file, another scheme or a part
 # the package does not hold.
 LINK = "links to a local file, another scheme or a missing part"
+
+
+def with_entry(data, name, body):
+    """The package with one more entry, which zipfile writes even when its name is taken."""
+    buffer = io.BytesIO(data)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)  # zipfile's "Duplicate name"
+        with zipfile.ZipFile(buffer, "a") as archive:
+            archive.writestr(name, body)
+    return buffer.getvalue()
 
 
 def parts_of(data):
@@ -829,6 +840,81 @@ class Cleaning(unittest.TestCase):
         with self.assertRaises(public.Refused) as caught:
             public.clean(package(), lost)
         self.assertIn("no part word/missing.xml", str(caught.exception))
+
+    def test_entries_that_name_one_part_are_refused_and_reported(self):
+        # The checks read parts by name, which gives the last of two entries: here the first
+        # links to a local file and the second, read in its place, does not.
+        local = relationships(
+            (f"{REL}/hyperlink", "file:///J:/drafts/x.docx", ' TargetMode="External"'))
+        hidden = with_entry(package(**{"word/_rels/header1.xml.rels": local}),
+                            "word/_rels/header1.xml.rels",
+                            relationships((f"{REL}/image", "media/image2.png", "")))
+        # Part names compare without regard to case.
+        cased = with_entry(package(), "word/Document.xml", "<w:document xmlns:w='w'/>")
+        for data, names in ((hidden, "word/_rels/header1.xml.rels and "
+                                     "word/_rels/header1.xml.rels"),
+                            (cased, "word/document.xml and word/Document.xml")):
+            with self.subTest(names):
+                with self.assertRaises(public.Refused) as caught:
+                    public.clean(data, DOC)
+                self.assertIn(f"entries {names} name one part", str(caught.exception))
+        # And a percent-encoded spelling, which OPC reads as the same part: a twin of the core
+        # properties would keep a person's name. (The backslash spelling is checked on names in
+        # test_entry_names_compare_as_part_names: zipfile on Windows rewrites it.)
+        core = "<cp:coreProperties xmlns:cp='c' xmlns:dc='d'><dc:creator>Jane Roe</dc:creator>"
+        for name, twin_name in (("docProps/core.xml", "docProps/%63ore.xml"),):
+            data = with_entry(package(), twin_name, core + "</cp:coreProperties>")
+            with self.subTest(twin_name):
+                with self.assertRaises(public.Refused) as caught:
+                    public.clean(data, DOC)
+                self.assertIn(f"entries {name} and {twin_name} name one part",
+                              str(caught.exception))
+        # problems() reports exact, case and percent twins, each group of them.
+        twin = with_entry(self.cleaned.data, "WORD/document.xml", "<w:document xmlns:w='w'/>")
+        self.assertIn("entries word/document.xml and WORD/document.xml name one part",
+                      public.problems(twin))
+        twins = with_entry(with_entry(self.cleaned.data, "word/document.xml", "<w:document/>"),
+                           "docProps/%61pp.xml", "<Properties/>")
+        self.assertEqual(
+            [found for found in public.problems(twins) if "name one part" in found],
+            ["entries docProps/app.xml and docProps/%61pp.xml name one part",
+             "entries word/document.xml and word/document.xml name one part"],
+        )
+        self.assertEqual(public.problems(self.cleaned.data), [])
+        # The cleaning itself must not write two entries that name one part.
+        for first, second in (("word/media/a.emf", "word/media/A.png"),
+                              ("word/media/a.jpeg", "word/Media/a.png"),
+                              ("word/media/%61.jpeg", "word/media/a.png")):
+            pictures = package(**{first: b"\x01\x00\x00\x00 EMF",
+                                  second: public.placeholder(3, 2)})
+            with self.subTest(first):
+                with self.assertRaises(public.Refused) as caught:
+                    public.clean(pictures, DOC)
+                self.assertIn("a picture's new name would name one part with another entry",
+                              str(caught.exception))
+        # clean() names every group of twins.
+        both = with_entry(with_entry(package(), "word/Document.xml", "<w:document/>"),
+                          "docProps/%61pp.xml", "<Properties/>")
+        with self.assertRaises(public.Refused) as caught:
+            public.clean(both, DOC)
+        self.assertIn("entries word/document.xml and word/Document.xml name one part",
+                      str(caught.exception))
+        self.assertIn("entries docProps/app.xml and docProps/%61pp.xml name one part",
+                      str(caught.exception))
+
+    def test_entry_names_compare_as_part_names(self):
+        # Written as names, not into an archive: zipfile on Windows reads a backslash as a
+        # slash already, which would hide the rule this checks.
+        self.assertEqual(public.repeated_parts(["word/document.xml", "word\\document.xml"]),
+                         ["word/document.xml and word\\document.xml"])
+        self.assertEqual(public.repeated_parts(["a/%41.xml", "a/a.xml", "a/A.XML"]),
+                         ["a/%41.xml and a/a.xml and a/A.XML"])
+        # Only ASCII letters fold, and percent-decoding is not form decoding: these are all
+        # different parts.
+        for pair in (["Ä.xml", "ä.xml"], ["ß.xml", "ss.xml"], ["a+b.xml", "a b.xml"],
+                     ["%2541.xml", "%41.xml"]):
+            with self.subTest(pair):
+                self.assertEqual(public.repeated_parts(pair), [])
 
     def test_a_placeholder_must_be_8_bit_grey_and_not_oversized(self):
         good = public.placeholder(4, 3)

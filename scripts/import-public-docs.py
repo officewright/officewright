@@ -22,9 +22,9 @@ listed SHA-256. The script then writes tests/corpus/business/<name>.docx with
 
 and the document's row in the table of tests/corpus/SOURCES.md: URL, download date,
 licence statement and the changes. It refuses documents with tracked changes, comments,
-ActiveX controls, embedded fonts or objects, macros, mail merge sources and links to local
-files. With --check it writes nothing and fails if a committed file differs from what it
-would write. Python standard library only.
+ActiveX controls, embedded fonts or objects, macros, mail merge sources, links to local
+files and archives in which two entries name one part. With --check it writes nothing and
+fails if a committed file differs from what it would write. Python standard library only.
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ import hashlib
 import io
 import posixpath
 import re
+import string
 import struct
 import sys
 import urllib.parse
@@ -898,12 +899,35 @@ class Cleaned:
     changes: list[str] = field(default_factory=list)
 
 
+ASCII_LOWER = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
+
+
+def part_key(name: str) -> str:
+    """An entry name as OPC compares part names: a backslash read as a slash (as ZIP tools
+    on Windows read it), percent-decoded, and without regard to ASCII case."""
+    return urllib.parse.unquote(name.replace("\\", "/")).translate(ASCII_LOWER)
+
+
+def repeated_parts(names: list[str]) -> list[str]:
+    """The entry names that name one part, joined by "and" per part: the same name twice, or
+    names that differ only as part names compare (part_key: case, percent-encoding, a
+    backslash for a slash). The checks read the parts by name, so they would see only one
+    entry of each."""
+    by_part: dict[str, list[str]] = {}
+    for name in names:
+        by_part.setdefault(part_key(name), []).append(name)
+    return [" and ".join(group) for group in by_part.values() if len(group) > 1]
+
+
 def clean(original: bytes, doc: PublicDoc) -> Cleaned:
     """The document with people, pictures and private parts taken out (see the module
     docstring); refused when it holds something the corpus must not take."""
     with zipfile.ZipFile(io.BytesIO(original)) as archive:
         entries = [(info, archive.read(info)) for info in archive.infolist()]
     names = [info.filename for info, _ in entries]
+    repeated = repeated_parts(names)
+    if repeated:
+        raise Refused(f"{doc.name}: " + "; ".join(f"entries {r} name one part" for r in repeated))
     try:
         embedded = embedded_parts({info.filename: data for info, data in entries})
     except Unreadable as error:
@@ -925,8 +949,11 @@ def clean(original: bytes, doc: PublicDoc) -> Cleaned:
         if MEDIA.match(name):
             stem = name.rsplit(".", 1)[0] if "." in posixpath.basename(name) else name
             renamed[name] = f"{stem}.png"
-    if len(set(renamed.values())) != len(renamed):
-        raise Refused(f"{doc.name}: two pictures differ only in their extension")
+    # The entries the cleaning writes must not name one part either: a picture renamed to
+    # .png next to another picture or entry of that name, in any case (a.jpeg and A.png).
+    kept = [renamed.get(name, name) for name in names if name not in dropped]
+    if len({part_key(name) for name in kept}) != len(kept):
+        raise Refused(f"{doc.name}: a picture's new name would name one part with another entry")
     changes = []
     people = []
     if dropped:
@@ -1038,6 +1065,8 @@ def problems(
     """What a committed document must not hold; empty for a clean one."""
     found = []
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        found += [f"entries {repeated} name one part" for repeated in
+                  repeated_parts(archive.namelist())]
         parts = {name: archive.read(name) for name in archive.namelist()}
         try:
             embedded = embedded_parts(parts)
