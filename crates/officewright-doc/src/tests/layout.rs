@@ -26,6 +26,70 @@ fn paragraphs(translation: &Translation) -> Vec<&ir::Paragraph> {
         .collect()
 }
 
+#[test]
+fn shares_paragraph_properties_and_font_names_between_items_that_repeat_them() {
+    // Issue #275: equal properties of many paragraphs, and the font name of many symbols
+    // and run styles, are one value each in the IR.
+    let tabs: String = (1..=64)
+        .map(|n| format!(r#"<w:tab w:val="left" w:pos="{}"/>"#, 100 * n))
+        .collect();
+    let styles = (
+        "styles",
+        "styles.xml",
+        format!(
+            r#"<w:styles xmlns:w="{W}"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:pPr><w:tabs>{tabs}</w:tabs></w:pPr></w:style></w:styles>"#
+        ),
+    );
+    let body = format!(
+        "{}{}",
+        r#"<w:p><w:r><w:sym w:font="Wingdings" w:char="F04A"/></w:r></w:p>"#.repeat(500),
+        r#"<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Wingdings"/><w:b/></w:rPr><w:t>x</w:t></w:r></w:p>"#
+    );
+    super::super::layout::WORK.set(super::super::layout::Work::default());
+    let translation = translate(&with_parts(&body, &[styles]));
+    let found = paragraphs(&translation);
+    assert_eq!(found.len(), 501);
+    // Two sets of properties: the 500 plain paragraphs share one.
+    assert!(
+        found[..500]
+            .iter()
+            .all(|p| std::ptr::eq(p.props(), found[0].props()))
+    );
+    assert!(!std::ptr::eq(found[500].props(), found[0].props()));
+    assert_eq!(found[0].props().tabs().len(), 64);
+    assert_eq!(super::super::layout::WORK.get().paragraph_props, 2);
+    // Every symbol's font, and the run style's, is one name.
+    let mut names: Vec<&std::sync::Arc<str>> = Vec::new();
+    for paragraph in &found[..500] {
+        for inline in paragraph.inlines() {
+            if let ir::Inline::Symbol { font, .. } = inline {
+                names.push(font);
+            }
+        }
+    }
+    assert_eq!(names.len(), 500);
+    assert!(
+        names
+            .iter()
+            .all(|name| std::sync::Arc::ptr_eq(name, names[0]))
+    );
+    let style = found[500]
+        .inlines()
+        .iter()
+        .find_map(|inline| match inline {
+            ir::Inline::Text { style, .. } => Some(*style),
+            _ => None,
+        })
+        .unwrap();
+    let ascii = translation
+        .document()
+        .run_style(style)
+        .unwrap()
+        .fonts()
+        .ascii();
+    assert!(std::ptr::eq(ascii, &**names[0]));
+}
+
 /// An inline, briefly; fields with their results.
 fn describe(inline: &ir::Inline) -> String {
     match inline {

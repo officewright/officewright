@@ -1,5 +1,7 @@
 //! Paragraphs and their formatting in effect as IR paragraphs.
 
+use std::sync::Arc;
+
 use officewright_layout::ReportKind;
 use officewright_layout::ir;
 
@@ -55,6 +57,7 @@ pub(super) fn paragraph<'a>(
         Some(ir::ListItem::new(instance, level, label))
     });
     let props = props(t, &format).with_style_key(t.style_key(paragraph));
+    let props = t.shared_props(props);
     t.path.push(super::Step::Field("inlines"));
     let inlines = t.inlines(paragraph, mark);
     t.path.pop();
@@ -63,6 +66,54 @@ pub(super) fn paragraph<'a>(
         .with_inlines(inlines)
         .with_list(list);
     (paragraph, format.mark_deleted)
+}
+
+/// How many paragraph properties are kept for one fingerprint: others with that
+/// fingerprint get properties of their own, so the comparisons stay bounded.
+pub(super) const SHARED_PER_FINGERPRINT: usize = 4;
+
+impl Translator<'_> {
+    /// `props`, or equal properties given to an earlier paragraph: 500,000 paragraphs of
+    /// one style with 64 tab stops hold the stops once (#275). Found by a fingerprint,
+    /// then at most [`SHARED_PER_FINGERPRINT`] comparisons.
+    fn shared_props(&mut self, props: ir::ParagraphProps) -> Arc<ir::ParagraphProps> {
+        let kept = self.paragraph_props.entry(fingerprint(&props)).or_default();
+        if let Some(found) = kept.iter().find(|kept| ***kept == props) {
+            return Arc::clone(found);
+        }
+        #[cfg(test)]
+        super::work(|work| work.paragraph_props += 1);
+        let shared = Arc::new(props);
+        if kept.len() < SHARED_PER_FINGERPRINT {
+            kept.push(Arc::clone(&shared));
+        }
+        shared
+    }
+}
+
+/// A hash of what most often tells paragraph properties apart.
+fn fingerprint(props: &ir::ParagraphProps) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    props.alignment().hash(&mut hasher);
+    props.style_key().hash(&mut hasher);
+    props.outline_level().hash(&mut hasher);
+    let indent = props.indent();
+    let spacing = props.spacing();
+    for length in [
+        indent.start(),
+        indent.end(),
+        indent.first_line(),
+        spacing.before(),
+        spacing.after(),
+    ] {
+        length.0.to_bits().hash(&mut hasher);
+    }
+    props.tabs().len().hash(&mut hasher);
+    for tab in props.tabs() {
+        tab.position().0.to_bits().hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 fn props(t: &mut Translator<'_>, format: &ParagraphFormat) -> ir::ParagraphProps {

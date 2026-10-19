@@ -1,6 +1,7 @@
 //! Run formatting in effect as the IR's run styles, one per distinct format.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use officewright_core::Color;
 use officewright_layout::ReportKind;
@@ -29,6 +30,9 @@ pub(super) struct RunStyles {
     by_key: HashMap<OwnedKey, ir::RunStyleId>,
     /// The cut font names and language tags of the keys so far, each once, by its id.
     strings: HashMap<Box<str>, u32>,
+    /// The cut font names given to the IR so far, each once, shared by every run style and
+    /// symbol that names it (#275).
+    fonts: HashSet<Arc<str>>,
 }
 
 /// What decides the IR run style of a format, as kept for each style: its names and tags
@@ -273,11 +277,11 @@ impl Translator<'_> {
         }
     }
 
-    fn translate_run_style(&self, format: &CharacterFormat) -> ir::RunStyle {
+    fn translate_run_style(&mut self, format: &CharacterFormat) -> ir::RunStyle {
         #[cfg(test)]
         super::work(|work| work.built += 1);
         let families = format.fonts();
-        let east_asia = cut_font_name(families.east_asia());
+        let east_asia = self.shared_font(families.east_asia());
         // Some characters take the East Asian font only for Chinese ones, by the font
         // table's character set of that font (MS-OI29500 2.1.88 b). The name looked up is
         // the one cut, so the work stays bounded per run style.
@@ -286,10 +290,10 @@ impl Translator<'_> {
             .font(&east_asia)
             .and_then(|font| font.charset());
         let mut fonts = ir::RunFonts::default()
-            .with_ascii(cut_font_name(families.ascii()))
-            .with_high_ansi(cut_font_name(families.high_ansi()))
+            .with_ascii(self.shared_font(families.ascii()))
+            .with_high_ansi(self.shared_font(families.high_ansi()))
             .with_east_asia(east_asia)
-            .with_complex_script(cut_font_name(families.complex_script()))
+            .with_complex_script(self.shared_font(families.complex_script()))
             .with_hint(match families.hint() {
                 None | Some(FontHint::Default) => ir::FontHint::Default,
                 Some(FontHint::EastAsia) => ir::FontHint::EastAsia,
@@ -356,14 +360,26 @@ impl Translator<'_> {
             .with_contextual_alternates(self.open_type_features && format.contextual_alternates())
     }
 
-    /// A font name as the IR gets it, cut as [`cut_font_name`] does; a cut is listed.
-    pub(super) fn font_name(&mut self, name: &str) -> String {
+    /// A font name as the IR gets it, cut as [`cut_name`] does; a cut is listed.
+    pub(super) fn font_name(&mut self, name: &str) -> Arc<str> {
         if name.len() > MAX_FONT_NAME {
             self.leave_out(ReportKind::FeatureUnsupported, || {
                 format!("a font name of more than {MAX_FONT_NAME} bytes is cut")
             });
         }
-        cut_font_name(name)
+        self.shared_font(name)
+    }
+
+    /// A font name cut as the IR keeps it, one `Arc<str>` for every run style and symbol
+    /// that names it: 500,000 symbols in one font hold its name once (#275).
+    fn shared_font(&mut self, name: &str) -> Arc<str> {
+        let name = cut_name(name);
+        if let Some(shared) = self.run_styles.fonts.get(name) {
+            return Arc::clone(shared);
+        }
+        let shared: Arc<str> = name.into();
+        self.run_styles.fonts.insert(Arc::clone(&shared));
+        shared
     }
 
     /// A shading as written, with its theme colours resolved; none for `nil`, which is
@@ -432,11 +448,6 @@ fn cut_name(name: &str) -> &str {
         })
         .unwrap_or(0);
     name.get(..end).unwrap_or_default()
-}
-
-/// A font name as the IR keeps it, cut as [`cut_name`] does.
-fn cut_font_name(name: &str) -> String {
-    cut_name(name).to_owned()
 }
 
 /// A language tag as the IR gets it: none past [`MAX_LANGUAGE`] bytes.
