@@ -42,6 +42,45 @@ fn a_document_without_a_theme_takes_the_script_fonts_of_words_default_theme() {
     }
 }
 
+#[test]
+fn a_document_without_a_theme_resolves_its_fonts_as_the_copy_word_saved_with_its_theme() {
+    // From the review of #357: word-rules/E-defaults-empty.docx has no theme part and the
+    // theme font language ar-SA; the copy Word re-saved holds Word's theme. Every run and
+    // paragraph mark resolves the same fonts in both, the complex script one included
+    // (Arial, the default theme's minor Arab font).
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/corpus");
+    let fonts = |path: &Path| -> Vec<[String; 4]> {
+        let document = Document::open(path).unwrap();
+        let mut formats = document.formats();
+        let mut found = Vec::new();
+        for section in document.sections() {
+            for block in section.blocks() {
+                let officewright_doc::Block::Paragraph(paragraph) = block else {
+                    continue;
+                };
+                let formats = std::iter::once(formats.paragraph_mark(paragraph))
+                    .chain(paragraph.runs().map(|run| formats.run(run)))
+                    .collect::<Vec<_>>();
+                for format in formats {
+                    let fonts = format.fonts();
+                    found.push([
+                        fonts.ascii().to_owned(),
+                        fonts.high_ansi().to_owned(),
+                        fonts.east_asia().to_owned(),
+                        fonts.complex_script().to_owned(),
+                    ]);
+                }
+            }
+        }
+        found
+    };
+    let original = fonts(&root.join("word-rules/E-defaults-empty.docx"));
+    let resaved = fonts(&root.join("resaved/word-rules/E-defaults-empty.docx"));
+    assert!(!original.is_empty());
+    assert_eq!(original, resaved);
+    assert!(original.iter().any(|fonts| fonts[3] == "Arial"));
+}
+
 /// A document without a theme part whose one run takes the theme font `theme_font` for
 /// East Asian text, with `language` as the theme font language of East Asian text.
 fn without_theme(language: &str, theme_font: &str) -> officewright_doc::Result<Document> {
