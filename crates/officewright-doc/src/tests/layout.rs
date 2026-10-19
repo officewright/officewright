@@ -893,6 +893,14 @@ fn lists_word_s_figure_forms_and_stylistic_sets_with_open_type_features_on() {
         r#"<w14:numSpacing w14:val="default"/>"#,
         "<w14:stylisticSets/>",
         r#"<w14:stylisticSets><w14:styleSet w14:id="3" w14:val="0"/></w14:stylisticSets>"#,
+        r#"<w14:stylisticSets><w14:styleSet w14:id="3" w14:val="false"/></w14:stylisticSets>"#,
+        // Values not valid set nothing, as for ligatures: a form or spacing [MS-DOCX] does
+        // not name, a set's value not of w14's ST_OnOff, a set outside 1 to 20 or none.
+        r#"<w14:numForm w14:val="Lining"/>"#,
+        r#"<w14:numSpacing w14:val=""/>"#,
+        r#"<w14:stylisticSets><w14:styleSet w14:id="3" w14:val="off"/></w14:stylisticSets>"#,
+        r#"<w14:stylisticSets><w14:styleSet w14:id="3" w14:val=" true"/></w14:stylisticSets>"#,
+        r#"<w14:stylisticSets><w14:styleSet w14:id="21"/><w14:styleSet w14:id="0"/><w14:styleSet/></w14:stylisticSets>"#,
         // Only a w14:styleSet names a set.
         r#"<w14:stylisticSets><w14:other w14:id="5"/></w14:stylisticSets>"#,
     ] {

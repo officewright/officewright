@@ -161,13 +161,23 @@ fn has_depth(props: Element<'_>, names: &Names) -> bool {
     }) || effect_value(props, names, "contourW", 0) > 0
 }
 
-/// Whether a `w14:stylisticSets` turns a set on: a `w14:styleSet` whose `w14:val` is not
-/// false ([MS-DOCX] CT_StyleSet: one that is false is ignored, and it is on when not
-/// written).
+/// Whether a `w14:stylisticSets` turns a set on: a `w14:styleSet` of a set 1 to 20 whose
+/// `w14:val` is on, as it is when not written ([MS-DOCX] 2.6.3.34, CT_StyleSet; w14's
+/// ST_OnOff, 2.6.4.9, is true, false, 1 or 0). A set off, or one with a value not valid,
+/// turns nothing on, as invalid values of the neighbouring choices set nothing.
 fn stylistic_set_on(sets: Element<'_>, names: &Names) -> bool {
     sets.children_through_alternates(names.mc)
         .filter(|set| set.local_in(&[names.w14]) == Some("styleSet"))
-        .any(|set| !matches!(set.attribute(&[names.w14], "val"), Some("false" | "0")))
+        .any(|set| {
+            let id = set
+                .attribute(&[names.w14], "id")
+                .and_then(|id| id.parse::<u8>().ok());
+            let on = matches!(
+                set.attribute(&[names.w14], "val"),
+                None | Some("true" | "1")
+            );
+            on && id.is_some_and(|id| (1..=20).contains(&id))
+        })
 }
 
 /// The properties a `w:rPr` sets.
@@ -199,11 +209,21 @@ pub(crate) fn run_properties(
                 "props3d" => properties.text_effects.depth = Some(has_depth(child, names)),
                 // Only whether each asks for other than the font's default, so that the
                 // layout's report can say that it is not applied (#361).
+                // ST_NumForm and ST_NumSpacing ([MS-DOCX] 2.6.4.7, 2.6.4.8): another value
+                // sets nothing.
                 "numForm" => {
-                    properties.font_choices.number_form = value.map(|value| value != "default");
+                    properties.font_choices.number_form = match value {
+                        Some("default") => Some(false),
+                        Some("lining" | "oldStyle") => Some(true),
+                        _ => None,
+                    };
                 }
                 "numSpacing" => {
-                    properties.font_choices.number_spacing = value.map(|value| value != "default");
+                    properties.font_choices.number_spacing = match value {
+                        Some("default") => Some(false),
+                        Some("proportional" | "tabular") => Some(true),
+                        _ => None,
+                    };
                 }
                 "stylisticSets" => {
                     properties.font_choices.stylistic_sets = Some(stylistic_set_on(child, names));
