@@ -114,6 +114,31 @@ pub(crate) fn name_key(name: &str) -> String {
 }
 
 impl NameKeys {
+    /// Whether a request of the family with the normalized name `key` finds the face by a
+    /// name of its own, as [`FontResolver`](crate::FontResolver) finds faces: a family,
+    /// typographic family, full or PostScript name, or a named instance.
+    pub(crate) fn answers_to(&self, key: &str) -> bool {
+        self.families.iter().any(|name| name == key)
+            || self.typographic_families.iter().any(|name| name == key)
+            || self.full_names.iter().any(|name| name == key)
+            || self.postscript_name.as_deref() == Some(key)
+            || self.instance(key).is_some()
+    }
+
+    /// The named instance the normalized name `key` names: one of the face's family names
+    /// followed by the instance's words other than Regular, Bold and Italic, in any order.
+    pub(crate) fn instance(&self, key: &str) -> Option<&InstanceKey> {
+        let families = self.families.iter().chain(&self.typographic_families);
+        families.into_iter().find_map(|family| {
+            let rest = key.strip_prefix(family.as_str())?.strip_prefix(' ')?;
+            let mut words: Vec<&str> = rest.split_whitespace().collect();
+            words.sort_unstable();
+            self.instances
+                .iter()
+                .find(|instance| instance.words == words)
+        })
+    }
+
     fn new(face: &IndexedFace) -> Self {
         let names = &face.properties.names;
         let instances = face
@@ -486,15 +511,19 @@ impl FontBook {
         Ok(added)
     }
 
-    /// Gives the faces from `first` on the family name `family`, unless one of them has it
-    /// already or the name is empty or too long to keep.
+    /// Gives the faces from `first` on the family name `family`, unless one of them answers
+    /// to it already ([`NameKeys::answers_to`]) or the name, without the white space around
+    /// it, is empty or too long to keep.
     fn add_family(&mut self, first: usize, family: &str) {
+        if family.trim().len() > crate::face::MAX_NAME_BYTES {
+            return;
+        }
         let key = name_key(family);
-        if key.is_empty() || key.len() > crate::face::MAX_NAME_BYTES {
+        if key.is_empty() {
             return;
         }
         let faces = self.faces.get_mut(first..).unwrap_or_default();
-        if faces.iter().any(|face| face.keys.families.contains(&key)) {
+        if faces.iter().any(|face| face.keys.answers_to(&key)) {
             return;
         }
         for face in faces {
@@ -1005,6 +1034,57 @@ mod tests {
             Some("Beta Test")
         );
         assert_eq!(book.faces[0].keys.families, ["alpha test"]);
+    }
+
+    #[test]
+    fn a_family_name_a_face_answers_to_by_any_name_adds_none() {
+        // A face of a collection that answers to the name by its typographic family, full
+        // or PostScript name keeps serving it: the other face gets no name.
+        let answering = TestFont::new("Gamma Test")
+            .style("Bold", 700, false)
+            .typographic("Plex Family", "Bold");
+        for name in ["Plex Family", "Gamma Test Bold", "GammaTest-Bold"] {
+            let ttc =
+                testing::collection(&[answering.build(), TestFont::new("Delta Test").build()]);
+            let mut book = FontBook::new();
+            book.add_bytes_as(ttc, FontOrigin::Document, name).unwrap();
+            assert_eq!(book.faces[1].keys.families, ["delta test"], "{name}");
+            assert_eq!(
+                resolved(&book, FontRequest::new(name)).0.as_deref(),
+                Some("Gamma Test"),
+                "{name}"
+            );
+        }
+        // A variable font added under the name of one of its instances keeps it as one.
+        let axes = [(b"wght", 300.0, 400.0, 700.0)];
+        let instances: [(u16, &[f64]); 2] = [(256, &[400.0]), (257, &[600.0])];
+        let variable = TestFont::new("Test Var")
+            .name_record(256, "Regular")
+            .name_record(257, "SemiBold")
+            .with_table(b"fvar", testing::fvar(&axes, &instances))
+            .build();
+        let mut book = FontBook::new();
+        book.add_bytes_as(variable, FontOrigin::Document, "Test Var SemiBold")
+            .unwrap();
+        assert_eq!(
+            resolved(&book, FontRequest::new("Test Var SemiBold")).1,
+            ResolutionKind::VariableInstance
+        );
+        // The bound is on the name as given: 200 characters of two bytes, which lowercase
+        // to three, are kept; 300 of three bytes, which lowercase to one, are not.
+        for (name, kept) in [
+            ("\u{23A}".repeat(200), true),
+            ("\u{212A}".repeat(300), false),
+        ] {
+            let mut book = FontBook::new();
+            book.add_bytes_as(
+                TestFont::new("Epsilon Test").build(),
+                FontOrigin::Document,
+                &name,
+            )
+            .unwrap();
+            assert_eq!(book.faces[0].keys.families.len(), 1 + usize::from(kept));
+        }
     }
 
     #[test]

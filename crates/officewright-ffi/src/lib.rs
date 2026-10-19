@@ -3353,6 +3353,26 @@ mod tests {
             assert!(!message.is_null());
             ow_font_book_free(book);
         }
+        // The same from a file.
+        let path = std::env::temp_dir().join(format!("ow-add-file-as-{}.ttc", std::process::id()));
+        fs::write(&path, &ttc).unwrap();
+        let book = new_book();
+        let c_path = c(path.to_str().unwrap());
+        // SAFETY: as above.
+        unsafe {
+            assert_eq!(
+                ow_font_book_add_file_as(book, c_path.as_ptr(), c("Any").as_ptr(), &mut added),
+                OwStatus::Ok,
+                "{}",
+                last_error()
+            );
+            assert_eq!(ow_font_book_skipped_count(book, &mut count), OwStatus::Ok);
+            assert_eq!(count, 1);
+            assert_eq!(ow_font_book_skipped(book, 0, &mut message), OwStatus::Ok);
+            assert!(!message.is_null());
+            ow_font_book_free(book);
+        }
+        let _ = fs::remove_file(&path);
     }
 
     #[test]
@@ -3412,6 +3432,7 @@ mod tests {
                 ow_font_book_add_file_as(book, path.as_ptr(), ptr::null(), &mut added),
                 OwStatus::NullArgument
             );
+            added = 7;
             assert_eq!(
                 ow_font_book_add_file_as(
                     book,
@@ -3420,6 +3441,12 @@ mod tests {
                     &mut added
                 ),
                 OwStatus::Io
+            );
+            assert_eq!(added, 0);
+            let invalid = [0xFFu8, 0];
+            assert_eq!(
+                ow_font_book_add_file_as(book, path.as_ptr(), invalid.as_ptr().cast(), &mut added),
+                OwStatus::InvalidUtf8
             );
         }
         let resolver = new_resolver(book);
