@@ -149,8 +149,8 @@ impl FontFace {
     /// DICTs or have more than 262,144 local subroutines in all, an FDSelect of more than
     /// 2,048 ranges, glyphs whose `CFF ` charstrings take more than 16,777,216
     /// operands, operators and hint mask bytes to decompile, or `glyf` glyphs whose
-    /// components the subsetter would read more than 67,108,864 times, reading a glyph
-    /// again each time a composite names it (as a crafted face can make it do),
+    /// components the subsetter may read more than 16,777,216 times, reading a glyph again
+    /// each time a composite names it (as only a crafted face makes it do),
     /// [`Error::SubsetUnsupported`] if the face uses
     /// something the subsetter does not implement yet, and [`Error::Subset`] or
     /// [`Error::SubsetterPanicked`] if the face is damaged in a way that only subsetting
