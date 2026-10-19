@@ -3173,6 +3173,24 @@ fn repairs_damaged_list_instances() {
     assert!(messages[7].ends_with(": a w:num without a w:abstractNumId names no definition"));
 }
 
+#[test]
+fn reads_the_level_of_an_override_one_way_for_the_model_and_its_diagnostics() {
+    // Issue #55: the diagnostics read w:ilvl as an unsigned number and the model as a
+    // decimal number, so they disagreed on "-0" and on negative levels.
+    let numbering = format!(
+        r#"<w:numbering xmlns:w="{W}"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"/></w:abstractNum><w:num w:numId="1"><w:abstractNumId/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="5"/></w:lvlOverride><w:lvlOverride w:ilvl="-0"><w:startOverride w:val="7"/></w:lvlOverride><w:lvlOverride w:ilvl="-1"><w:startOverride w:val="2"/></w:lvlOverride><w:lvlOverride w:ilvl="-1"><w:startOverride w:val="3"/></w:lvlOverride></w:num></w:numbering>"#
+    );
+    let document = with_numbering("<w:p/>", &numbering);
+    let overrides = document.numbering().instance(1).unwrap().overrides();
+    // "-0" is level 0 again, so it is a repeat; a level outside 0 to 8 is never one.
+    let read: Vec<_> = overrides.iter().map(|o| (o.level(), o.start())).collect();
+    assert_eq!(read, [(0, Some(5)), (-1, Some(2)), (-1, Some(3))]);
+    let messages = messages(&document);
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert!(messages[0].ends_with(": a second w:lvlOverride of level 0 is ignored"));
+    assert!(messages[1].ends_with(": a w:num without a valid w:abstractNumId names no definition"));
+}
+
 /// A document with one part related to the main part by `relationship` (the last
 /// segment of its type), at `target` under `word/`.
 fn with_part(relationship: &str, target: &str, xml: &str) -> Result<Document> {

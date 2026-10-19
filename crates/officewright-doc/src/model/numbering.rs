@@ -45,7 +45,8 @@ xml_enum! {
     MultiLevelType {
         SingleLevel = "singleLevel",
         Multilevel = "multilevel",
-        /// Levels that each have their own template code.
+        /// Several levels, each of a potentially different type (bullets or level text),
+        /// as §17.18.58 puts it; Word gives each level its own template code.
         HybridMultilevel = "hybridMultilevel",
     }
 }
@@ -103,7 +104,9 @@ impl<'a> Numbering<'a> {
         Self { document }
     }
 
-    /// Every list definition (`w:abstractNum`), in the order of `numbering.xml`.
+    /// The list definitions (`w:abstractNum`) with a valid `w:abstractNumId`, in the order
+    /// of `numbering.xml`. One without a valid id (missing, not a number or negative) is
+    /// left out: nothing can name it, though the document keeps its XML.
     pub fn definitions(self) -> impl ExactSizeIterator<Item = ListDefinition<'a>> + 'a {
         let document = self.document;
         document
@@ -123,7 +126,9 @@ impl<'a> Numbering<'a> {
         })
     }
 
-    /// Every list instance (`w:num`), in the order of `numbering.xml`.
+    /// The list instances (`w:num`) with a valid `w:numId`, in the order of
+    /// `numbering.xml`. One without a valid id (missing or not a number) is left out:
+    /// nothing can name it, though the document keeps its XML.
     pub fn instances(self) -> impl ExactSizeIterator<Item = ListInstance<'a>> + 'a {
         let document = self.document;
         document
@@ -407,7 +412,8 @@ impl ListLevel {
         self.level
     }
 
-    /// The first number (`w:start`); 0 when it is not written (§17.9.25).
+    /// The first number (`w:start`); `None` when it is not written, in which case the
+    /// standard's default is 0 (§17.9.25).
     pub fn start(&self) -> Option<i64> {
         self.start
     }

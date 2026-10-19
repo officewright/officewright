@@ -156,10 +156,10 @@ fn instance(c: &mut Capture<'_, '_, '_>, names: &Names, span: Span, offset: usiz
     let element = c.document.element(span);
     let w = &names.w;
     let id = element.attribute(w, "numId").and_then(integer);
-    let reference = element
+    let reference_element = element
         .children_through_alternates(names.mc)
-        .find(|child| child.is(w, "abstractNumId"))
-        .and_then(|reference| reference.attribute(w, "val"));
+        .find(|child| child.is(w, "abstractNumId"));
+    let reference = reference_element.and_then(|reference| reference.attribute(w, "val"));
     let definition = reference.and_then(integer);
     // Overrides of one level after the first, and levels in one override after the
     // first: both are ignored, as a definition's repeated levels are.
@@ -179,13 +179,15 @@ fn instance(c: &mut Capture<'_, '_, '_>, names: &Names, span: Span, offset: usiz
         .children_through_alternates(names.mc)
         .filter(|child| child.is(w, "lvlOverride"));
     for child in overrides {
-        let Some(level) = child
-            .attribute(w, "ilvl")
-            .and_then(|v| v.parse::<usize>().ok())
-        else {
+        // Read as ListInstance::overrides reads it, so that both agree on which override
+        // is a repeat (#55).
+        let Some(level) = override_level(child, names) else {
             continue;
         };
-        if let Some(seen) = seen.get_mut(level) {
+        if let Some(seen) = usize::try_from(level)
+            .ok()
+            .and_then(|index| seen.get_mut(index))
+        {
             if *seen {
                 note(&|| format!("a second w:lvlOverride of level {level} is ignored"));
                 continue;
@@ -205,8 +207,10 @@ fn instance(c: &mut Capture<'_, '_, '_>, names: &Names, span: Span, offset: usiz
             }
         }
     }
-    if reference.is_none() {
+    if reference_element.is_none() {
         note(&|| "a w:num without a w:abstractNumId names no definition".into());
+    } else if reference.is_none() {
+        note(&|| "a w:num without a valid w:abstractNumId names no definition".into());
     }
     c.diagnostics.omit(omitted);
     for message in repeated {
