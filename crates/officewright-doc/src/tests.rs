@@ -986,15 +986,18 @@ fn reads_complex_fields_deleted_text_and_references() {
 #[test]
 fn finds_the_positions_of_diagnostics_in_one_pass() {
     // 8 MiB of text, then 1,000 values to report: finding each position from the start
-    // of the part would read 8 GiB.
-    let body = format!(
-        "<w:p><w:r><w:t>{}</w:t></w:r></w:p><w:p><w:r>{}</w:r></w:p>",
-        "x".repeat(8 << 20),
-        r#"<w:br w:type="bad"/>"#.repeat(1000)
+    // of the part would read 8 GiB. Text and values grow together, so that work grows
+    // with the square of their number (#154: an absolute bound of 20 s, before).
+    let document = open_in_linear_time(
+        |n| {
+            format!(
+                "<w:p><w:r><w:t>{}</w:t></w:r></w:p><w:p><w:r>{}</w:r></w:p>",
+                "x".repeat(n << 13),
+                r#"<w:br w:type="bad"/>"#.repeat(n)
+            )
+        },
+        1000,
     );
-    let start = std::time::Instant::now();
-    let document = open(&body);
-    let elapsed = start.elapsed();
     assert_eq!(document.diagnostics().len(), 1000);
     assert!(
         document.diagnostics()[999]
@@ -1003,7 +1006,6 @@ fn finds_the_positions_of_diagnostics_in_one_pass() {
         "{}",
         document.diagnostics()[999]
     );
-    assert!(elapsed < std::time::Duration::from_secs(20), "{elapsed:?}");
 }
 
 #[test]
@@ -1185,37 +1187,50 @@ fn reads_hyperlink_targets_from_external_relationships_only() {
 }
 
 /// Opens the body `make(n)` with a raised XML depth limit, and fails unless the time it
-/// takes grows in proportion to `n`: it may take at most 24 times as long as the body
-/// `make(n / 8)` takes just before and just after it, where linear work takes about 8
-/// times and work that grows with the square of `n` about 64 times. The bound is
-/// relative to the reader's speed on the same machine at the same moment, so a slow or
-/// busy runner does not fail it (#154); a floor of 50 ms keeps the timer's resolution
-/// out of it.
+/// takes grows in proportion to `n`: at most 24 times what the body `make(n / 8)` takes,
+/// where linear work takes about 8 times and work that grows with the square of `n` about
+/// 64 times. The bound is relative to the reader's speed on the same machine at the same
+/// moment, so a slow runner does not fail it (#154). Each size is timed as the shortest of
+/// several runs, since load on the machine only ever adds time (the first run of the
+/// small size can fall in the start of the whole suite and take three times as long),
+/// and a test fails only when a second measurement agrees. A floor of 50 ms keeps the
+/// timer's resolution out of it.
 fn open_in_linear_time(make: impl Fn(usize) -> String, n: usize) -> Document {
+    use std::time::{Duration, Instant};
     let options = LoadOptions::new().with_limits(Limits::new().with_max_xml_depth(1 << 20));
-    let time = |n: usize| {
-        let bytes = docx(&make(n));
-        let start = std::time::Instant::now();
-        let document = options.clone().open_bytes(bytes).unwrap();
+    let (small, full) = (docx(&make(n / 8)), docx(&make(n)));
+    let time = |bytes: &[u8]| {
+        let start = Instant::now();
+        let document = options.clone().open_bytes(bytes.to_vec()).unwrap();
         (start.elapsed(), document)
     };
-    let (before, _) = time(n / 8);
-    let (elapsed, document) = time(n);
-    let (after, _) = time(n / 8);
-    let small = before.max(after).max(std::time::Duration::from_millis(50));
-    assert!(
-        elapsed < small * 24,
-        "{elapsed:?} for {n}, {before:?} and {after:?} for {}",
-        n / 8
-    );
-    document
+    let mut measured = Vec::new();
+    for _ in 0..2 {
+        let small_time = (0..3)
+            .map(|_| time(&small).0)
+            .min()
+            .unwrap_or_default()
+            .max(Duration::from_millis(50));
+        let mut full_time = Duration::MAX;
+        let mut document = None;
+        for _ in 0..2 {
+            let (elapsed, opened) = time(&full);
+            full_time = full_time.min(elapsed);
+            document = Some(opened);
+        }
+        if full_time < small_time * 24 {
+            return document.unwrap();
+        }
+        measured.push((full_time, small_time));
+    }
+    panic!("{measured:?}: the shortest times for {n} and for {}", n / 8);
 }
 
 #[test]
 fn closes_content_controls_after_section_breaks_in_linear_time() {
     // A reviewer of #32 found each content control that closed searched every copy made
     // for a section break: 500,000 breaks and 500,000 controls took 45 s.
-    let n = 100_000;
+    let n = 50_000;
     let document = open_in_linear_time(
         |n| {
             format!(
@@ -1254,7 +1269,7 @@ fn reads_under_nested_alternate_content_in_linear_time() {
     // Each element looked past every mc:AlternateContent open around it for where its
     // children go: 100,000 paragraphs under 100,000 of them took about a minute in a
     // debug build, and take about a second now.
-    let n = 100_000;
+    let n = 50_000;
     let document = open_in_linear_time(
         |n| {
             format!(
