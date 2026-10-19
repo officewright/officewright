@@ -858,11 +858,11 @@ class Cleaning(unittest.TestCase):
                 with self.assertRaises(public.Refused) as caught:
                     public.clean(data, DOC)
                 self.assertIn(f"entries {names} name one part", str(caught.exception))
-        # And the other spellings OPC reads as one part: percent-encoded, and a backslash for
-        # a slash. A twin of the core properties would keep a person's name.
+        # And a percent-encoded spelling, which OPC reads as the same part: a twin of the core
+        # properties would keep a person's name. (The backslash spelling is checked on names in
+        # test_entry_names_compare_as_part_names: zipfile on Windows rewrites it.)
         core = "<cp:coreProperties xmlns:cp='c' xmlns:dc='d'><dc:creator>Jane Roe</dc:creator>"
-        for name, twin_name in (("docProps/core.xml", "docProps/%63ore.xml"),
-                                ("word/document.xml", "word/DOCUMENT.xml")):
+        for name, twin_name in (("docProps/core.xml", "docProps/%63ore.xml"),):
             data = with_entry(package(), twin_name, core + "</cp:coreProperties>")
             with self.subTest(twin_name):
                 with self.assertRaises(public.Refused) as caught:
@@ -883,13 +883,15 @@ class Cleaning(unittest.TestCase):
         self.assertEqual(public.problems(self.cleaned.data), [])
         # The cleaning itself must not write two entries that name one part.
         for first, second in (("word/media/a.emf", "word/media/A.png"),
-                              ("word/media/a.jpeg", "word/Media/a.png")):
+                              ("word/media/a.jpeg", "word/Media/a.png"),
+                              ("word/media/%61.jpeg", "word/media/a.png")):
             pictures = package(**{first: b"\x01\x00\x00\x00 EMF",
                                   second: public.placeholder(3, 2)})
-            with self.subTest(first), self.assertRaises(public.Refused) as caught:
-                public.clean(pictures, DOC)
-            self.assertIn("a picture's new name would name one part with another entry",
-                          str(caught.exception))
+            with self.subTest(first):
+                with self.assertRaises(public.Refused) as caught:
+                    public.clean(pictures, DOC)
+                self.assertIn("a picture's new name would name one part with another entry",
+                              str(caught.exception))
         # clean() names every group of twins.
         both = with_entry(with_entry(package(), "word/Document.xml", "<w:document/>"),
                           "docProps/%61pp.xml", "<Properties/>")
