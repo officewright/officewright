@@ -952,6 +952,27 @@ fn lists_word_s_figure_forms_and_stylistic_sets_with_open_type_features_on() {
     };
     assert_eq!(entries(""), [form, spacing, sets]);
     assert!(entries(r#"<w14:numForm w14:val="default"/><w14:numSpacing w14:val="default"/><w14:stylisticSets/>"#).is_empty());
+    // From the re-check of #362: a value not valid sets nothing, so the style's choice
+    // stays, where the default would turn it off.
+    assert_eq!(
+        entries(r#"<w14:numForm w14:val="Lining"/><w14:numSpacing w14:val="Tabular"/>"#),
+        [form, spacing, sets]
+    );
+    // The edges of a style set: 20 is the last set, and 1 is on.
+    assert_eq!(
+        messages(
+            r#"<w14:stylisticSets><w14:styleSet w14:id="20"/></w14:stylisticSets>"#,
+            true
+        ),
+        [sets]
+    );
+    assert_eq!(
+        messages(
+            r#"<w14:stylisticSets><w14:styleSet w14:id="2" w14:val="1"/></w14:stylisticSets>"#,
+            true
+        ),
+        [sets]
+    );
 }
 
 #[test]
