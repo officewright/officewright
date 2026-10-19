@@ -1252,6 +1252,17 @@ fn flips_toggles_with_the_table_style_as_one_more_level() {
     );
     // Without a table style's value, the paragraph style sets it, as before.
     assert_eq!(toggles("", ""), [true, false, true, false]);
+    // An on/off property that does not toggle takes the last level that gives it: the
+    // table style's, unless the paragraph style gives one.
+    let styles = r#"<w:style w:type="table" w:styleId="T"><w:name w:val="T"/><w:rPr><w:dstrike/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Off"><w:name w:val="Off"/><w:rPr><w:dstrike w:val="0"/></w:rPr></w:style>"#;
+    let body = r#"<w:tbl><w:tblPr><w:tblStyle w:val="T"/></w:tblPr><w:tblGrid/><w:tr><w:tc><w:p/></w:tc><w:tc><w:p><w:pPr><w:pStyle w:val="Off"/></w:pPr></w:p></w:tc></w:tr></w:tbl><w:p/>"#;
+    let document = open_text(styles, "", "", body);
+    let mut formats = document.formats();
+    let struck: Vec<bool> = cell_paragraphs(&document)
+        .into_iter()
+        .map(|paragraph| formats.paragraph_mark(paragraph).double_strike())
+        .collect();
+    assert_eq!(struck, [true, false]);
 }
 
 #[test]
@@ -1347,6 +1358,34 @@ fn takes_the_style_of_the_innermost_table_and_gives_list_labels_its_run_properti
     let mut formats = document.formats();
     let label = formats.list_label(cell_paragraphs(&document)[1]).unwrap();
     assert_eq!(label.color(), rgb("111111"));
+    // The same list level in a cell of a table whose style centres its text, and outside
+    // the table: each takes what lies under it.
+    let centred = r#"<w:style w:type="table" w:styleId="Centred"><w:name w:val="Centred"/><w:pPr><w:jc w:val="center"/></w:pPr></w:style>"#;
+    let body = format!(
+        r#"<w:tbl><w:tblPr><w:tblStyle w:val="Centred"/></w:tblPr><w:tblGrid/><w:tr><w:tc>{item}</w:tc></w:tr></w:tbl>{item}"#
+    );
+    let document = open_text(centred, "", numbering, &body);
+    let mut formats = document.formats();
+    let inside = cell_paragraphs(&document)[0];
+    let outside = document
+        .sections()
+        .next()
+        .unwrap()
+        .blocks()
+        .find_map(|block| match block {
+            Block::Paragraph(paragraph) => Some(paragraph),
+            _ => None,
+        })
+        .unwrap();
+    assert!(formats.paragraph(inside).list().is_some());
+    assert_eq!(
+        formats.paragraph(inside).justification(),
+        Justification::Center
+    );
+    assert_eq!(
+        formats.paragraph(outside).justification(),
+        Justification::Start
+    );
     // A table style's list is not taken, our choice (numbering lies above table styles).
     let body = r#"<w:tbl><w:tblPr><w:tblStyle w:val="Listed"/></w:tblPr><w:tblGrid/><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl><w:p/>"#;
     let document = open_text(styles, "", numbering, body);
@@ -1413,7 +1452,8 @@ fn keeps_at_most_256_table_texts() {
     let styles: String = (0..300)
         .map(|n| {
             format!(
-                r#"<w:style w:type="table" w:styleId="S{n}"><w:name w:val="S{n}"/><w:rPr><w:sz w:val="{}"/></w:rPr></w:style>"#,
+                r#"<w:style w:type="table" w:styleId="S{n}"><w:name w:val="S{n}"/><w:pPr><w:jc w:val="{}"/></w:pPr><w:rPr><w:sz w:val="{}"/></w:rPr></w:style>"#,
+                if n % 2 == 0 { "center" } else { "right" },
                 10 + n % 40
             )
         })
@@ -1438,6 +1478,16 @@ fn keeps_at_most_256_table_texts() {
         };
         let size = formats.paragraph_mark(paragraph).size().0;
         assert_eq!(size, f64::from(10 + n % 40) / 2.0, "table {n}");
+        let justification = if n % 2 == 0 {
+            Justification::Center
+        } else {
+            Justification::Right
+        };
+        assert_eq!(
+            formats.paragraph(paragraph).justification(),
+            justification,
+            "table {n}"
+        );
         assert!(formats.kept_table_texts() <= 256);
         n += 1;
     }
