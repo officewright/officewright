@@ -18,7 +18,7 @@ use super::styles::StyleKind;
 use super::views::{Paragraph, Run};
 use super::{Document, Kind, Node};
 
-use character::CharacterLevel;
+use character::{CharacterLevel, Resolving};
 use paragraph::ParagraphLevel;
 
 /// Styles whose child elements Word ignores, `w:basedOn`, `w:pPr` and `w:rPr` among
@@ -189,7 +189,7 @@ impl<'a> Formats<'a> {
         let paragraph = paragraph_of(self.document, run.node());
         let table = paragraph.and_then(|paragraph| self.table_text(paragraph));
         let style = self.paragraph_style(paragraph);
-        self.resolve_run(style, &direct, table.as_deref(), None)
+        self.resolve_run(style, &direct, table.as_deref(), Resolving::Run)
     }
 
     /// The formatting of a paragraph's mark in effect, which decides, among other
@@ -201,7 +201,7 @@ impl<'a> Formats<'a> {
         let direct = paragraph.properties().mark;
         let style = self.paragraph_style(Some(paragraph.node()));
         let table = self.table_text(paragraph.node());
-        self.resolve_run(style, &direct, table.as_deref(), None)
+        self.resolve_run(style, &direct, table.as_deref(), Resolving::Run)
     }
 
     /// The formatting in effect of the mark of a paragraph that has the default
@@ -215,7 +215,7 @@ impl<'a> Formats<'a> {
             style,
             &super::properties::RunProperties::default(),
             None,
-            None,
+            Resolving::Run,
         )
     }
 
@@ -223,17 +223,18 @@ impl<'a> Formats<'a> {
     /// paragraph mark's, with the run properties of the list level laid over it, whose
     /// on/off values set the value as direct formatting does. Word does not allow the
     /// level's `w:rStyle`, `w:highlight`, `w:oMath` and `w:rPrChange` there (MS-OI29500
-    /// §17.9.24(a)); a file that has them is read, the level's highlight is taken, as
-    /// Word draws it, and the others are dropped. None when the paragraph is not a list
-    /// item.
+    /// §17.9.24(a)); a file that has them is read, and they are dropped, but for the
+    /// highlight, which Word keeps and draws behind the label
+    /// (word-rules/E-list-label-rstyle.docx, case 02, #308). None when the paragraph is
+    /// not a list item.
     ///
     /// Word's renders of word-rules/E-list-label-format.docx and E-list-label-rstyle.docx
     /// (#299) show this, as [MS-DOC] ("Determining List Formatting of a Paragraph", part
     /// 3) lays it out: the level's values set over the mark's, an override's level in
     /// place of the definition's, and the level's linked paragraph style, which [MS-DOC]
-    /// applies too, not reaching the label. One difference is left (#330): Word gives
-    /// the label the size of the mark's character style but not its underline, which
-    /// this takes.
+    /// applies too, not reaching the label. Word gives the label the size of the mark's
+    /// character style but not its underline (E-list-label-format.docx, case 05, #330),
+    /// and so does this.
     ///
     /// What a level gives to labels is read once per level, however many paragraphs
     /// use it.
@@ -245,7 +246,12 @@ impl<'a> Formats<'a> {
         let style = self.paragraph_style(Some(paragraph.node()));
         let label = self.label_level(style, &properties)?;
         let table = self.table_text(paragraph.node());
-        Some(self.resolve_run(style, &properties.mark, table.as_deref(), label.as_deref()))
+        Some(self.resolve_run(
+            style,
+            &properties.mark,
+            table.as_deref(),
+            Resolving::Label(label.as_deref()),
+        ))
     }
 
     /// The place among the styles of a paragraph's style: its own, else the default
