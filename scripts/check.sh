@@ -84,6 +84,12 @@ cargo fmt --all --check
 step "clippy"
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+step "officewright-doc without its features (clippy, doc tests)"
+# The crate's tests and doc examples also build without the feature pdf, as
+# `cargo test -p officewright-doc` builds them (#354); clippy does not build doc examples.
+cargo clippy -p officewright-doc --all-targets -- -D warnings
+cargo test -p officewright-doc --doc
+
 step "rustdoc"
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 
