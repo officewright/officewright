@@ -729,3 +729,145 @@ fn reads_drawings_through_markup_compatibility_everywhere_they_are() {
         );
     }
 }
+
+#[test]
+fn lists_a_picture_s_outline_and_colour_effects_once() {
+    // Issue #303: the IR's picture has no outline and no colour effects yet, so the
+    // report says so, once per document; an outline of no fill and a blip with only
+    // its extensions are nothing to list.
+    let entries = |body: &str| -> Vec<String> {
+        with_images(body)
+            .to_layout_ir()
+            .left_out()
+            .iter()
+            .map(|entry| entry.message().to_owned())
+            .filter(|message| message.starts_with("a picture's"))
+            .collect()
+    };
+    let picture = |line: &str, blip: &str| {
+        inline_picture("rIdPng")
+            .replace(
+                r#"<a:blip r:embed="rIdPng"/>"#,
+                &format!(r#"<a:blip r:embed="rIdPng">{blip}</a:blip>"#),
+            )
+            .replace(
+                r#"<a:prstGeom prst="rect"/>"#,
+                &format!(r#"<a:prstGeom prst="rect"/>{line}"#),
+            )
+    };
+    let red = r#"<a:ln w="76200"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:ln>"#;
+    let body = format!(
+        "<w:p>{}{}</w:p>",
+        picture(red, "<a:grayscl/>"),
+        picture(red, r#"<a:lum bright="20000"/>"#)
+    );
+    assert_eq!(
+        entries(&body),
+        [
+            "a picture's outline (a:ln) is not drawn, here and wherever else the document has one",
+            "a picture's colour or transparency effects (a:blip, such as a:grayscl or a:lum) are not applied, here and wherever else the document has them",
+        ]
+    );
+    let plain = picture("<a:ln><a:noFill/></a:ln>", "<a:extLst/>");
+    assert!(entries(&format!("<w:p>{plain}</w:p>")).is_empty());
+}
+
+#[test]
+fn lists_a_picture_s_effects_and_shape_once_but_no_value_that_changes_nothing() {
+    // From the re-check of #326: the shadows, reflections, glows, soft edges, 3-D effects
+    // and shapes Word's picture styles write have no place in the IR's picture yet. An
+    // empty a:effectLst, a camera in front of the picture, 3-D without depth and colour
+    // effects whose values change nothing (LibreOffice's fdo43573-2-min.docx has
+    // <a:lum/>) are nothing to list.
+    let entries = |geometry: &str, effects: &str, blip: &str| -> Vec<String> {
+        let picture = inline_picture("rIdPng")
+            .replace(
+                r#"<a:blip r:embed="rIdPng"/>"#,
+                &format!(r#"<a:blip r:embed="rIdPng">{blip}</a:blip>"#),
+            )
+            .replace(
+                r#"<a:prstGeom prst="rect"/>"#,
+                &format!("{geometry}{effects}"),
+            );
+        with_images(&format!("<w:p>{picture}</w:p>"))
+            .to_layout_ir()
+            .left_out()
+            .iter()
+            .map(|entry| entry.message().to_owned())
+            .filter(|message| message.starts_with("a picture"))
+            .collect()
+    };
+    let rect = r#"<a:prstGeom prst="rect"/>"#;
+    let front = r#"<a:scene3d><a:camera prst="orthographicFront"/><a:lightRig rig="threePt" dir="t"/></a:scene3d>"#;
+    let effects = "a picture's shadow, reflection, glow, soft edges or 3-D effect (a:effectLst, a:scene3d, a:sp3d) is not drawn, here and wherever else the document has one";
+    for listed in [
+        r#"<a:effectLst><a:outerShdw blurRad="50800" dist="38100" dir="2700000"><a:srgbClr val="000000"/></a:outerShdw></a:effectLst>"#,
+        r#"<a:effectLst><a:softEdge rad="112500"/></a:effectLst>"#,
+        r#"<a:effectDag><a:glow rad="63500"><a:srgbClr val="FF0000"/></a:glow></a:effectDag>"#,
+        r#"<a:scene3d><a:camera prst="isometricRightUp"/><a:lightRig rig="threePt" dir="t"/></a:scene3d>"#,
+        r#"<a:scene3d><a:camera prst="orthographicFront"><a:rot lat="0" lon="1200000" rev="0"/></a:camera><a:lightRig rig="threePt" dir="t"/></a:scene3d>"#,
+        r#"<a:scene3d><a:camera prst="orthographicFront"><a:rot lat="300000" lon="0" rev="0"/></a:camera><a:lightRig rig="threePt" dir="t"/></a:scene3d>"#,
+        r#"<a:scene3d><a:camera prst="orthographicFront"><a:rot lat="0" lon="0" rev="60000"/></a:camera><a:lightRig rig="threePt" dir="t"/></a:scene3d>"#,
+        &format!("{front}<a:sp3d><a:bevelT/></a:sp3d>"),
+        r#"<a:sp3d><a:bevelB w="12700" h="12700"/></a:sp3d>"#,
+        r#"<a:sp3d extrusionH="76200"/>"#,
+        r#"<a:sp3d contourW="12700"/>"#,
+    ] {
+        assert_eq!(entries(rect, listed, ""), [effects], "{listed}");
+    }
+    let shape = "a picture cut to a shape (a:prstGeom other than rect, or a:custGeom) is drawn whole as a rectangle, here and wherever else the document has one";
+    for geometry in [
+        r#"<a:prstGeom prst="ellipse"/>"#,
+        r#"<a:custGeom><a:pathLst/></a:custGeom>"#,
+    ] {
+        assert_eq!(entries(geometry, "", ""), [shape], "{geometry}");
+    }
+    let colour = "a picture's colour or transparency effects (a:blip, such as a:grayscl or a:lum) are not applied, here and wherever else the document has them";
+    for blip in [
+        "<a:grayscl/>",
+        r#"<a:duotone><a:srgbClr val="000000"/><a:srgbClr val="FFFFFF"/></a:duotone>"#,
+        r#"<a:alphaModFix amt="99000"/>"#,
+        r#"<a:alphaModFix amt="50%"/>"#,
+        r#"<a:lum bright="20000"/>"#,
+        r#"<a:lum contrast="-20000"/>"#,
+        r#"<a:hsl hue="0" sat="50000" lum="0"/>"#,
+        r#"<a:hsl lum="10000"/>"#,
+        r#"<a:hsl hue="5400000"/>"#,
+    ] {
+        assert_eq!(entries(rect, "", blip), [colour], "{blip}");
+    }
+    // Office writes the camera with a rotation of zeros into the effect styles of themes.
+    let nothing = entries(
+        rect,
+        r#"<a:effectLst/><a:effectDag/><a:scene3d><a:camera prst="orthographicFront"><a:rot lat="0" lon="0" rev="0"/></a:camera><a:lightRig rig="threePt" dir="t"/></a:scene3d><a:sp3d extrusionH="0" contourW="0" prstMaterial="plastic"/>"#,
+        r#"<a:lum/><a:lum bright="0" contrast="0"/><a:alphaModFix/><a:alphaModFix amt="100000"/><a:alphaModFix amt="100%"/><a:hsl hue="0" sat="0" lum="0"/>"#,
+    );
+    assert!(nothing.is_empty(), "{nothing:?}");
+    assert!(entries(rect, front, "").is_empty());
+}
+
+#[test]
+fn lists_a_border_around_a_picture_in_the_line_only() {
+    // From the re-check of #326 (POI's bug59058.docx has a border around each of its
+    // pictures, alone in their runs): a border around a run surrounds a picture in the
+    // line, but not one that floats.
+    let entries = |picture: String| -> Vec<String> {
+        let run = picture.replacen(
+            "<w:r>",
+            r#"<w:r><w:rPr><w:bdr w:val="single" w:sz="6" w:color="CCCCCC"/></w:rPr>"#,
+            1,
+        );
+        with_images(&format!("<w:p>{run}</w:p>"))
+            .to_layout_ir()
+            .left_out()
+            .iter()
+            .map(|entry| entry.message().to_owned())
+            .filter(|message| message.starts_with("borders"))
+            .collect()
+    };
+    assert_eq!(
+        entries(inline_picture("rIdPng")),
+        ["borders around text (w:bdr) are not drawn, here and wherever else the document has them"]
+    );
+    assert!(entries(floating_picture("rIdPng")).is_empty());
+}

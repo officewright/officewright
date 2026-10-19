@@ -93,7 +93,7 @@ impl Translator<'_> {
                 let path =
                     std::mem::replace(&mut self.path, vec![Step::Field(place), Step::Field(field)]);
                 self.in_note = true;
-                let blocks = self.blocks_in(None, note.blocks());
+                let blocks = self.blocks_in(None, note.blocks(), false);
                 self.in_note = false;
                 self.path = path;
                 if let Some(part) = parts.get_mut(slot) {

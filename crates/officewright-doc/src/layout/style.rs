@@ -104,6 +104,9 @@ impl<'f> StyleKey<'f> {
             language_bidi,
             ligatures,
             contextual_alternates,
+            // Not drawn, so not in the IR; reported (#303).
+            emphasis_mark: _,
+            border: _,
         } = format;
         let FontFamilies {
             ascii,
