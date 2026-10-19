@@ -724,12 +724,17 @@ def embedded_parts(parts: dict[str, bytes]) -> list[str]:
     for rels in (name for name in parts if name.lower().endswith(".rels")):
         relationships = package_xml(rels, parts[rels], f"{PACKAGE_RELS_NS}Relationships")
         for element in relationships.iter(f"{PACKAGE_RELS_NS}Relationship"):
-            # A target that names no part is not embedded; external_link_problems refuses it
-            # without naming it.
-            if element.get("TargetMode") == "External" or names_no_part(element.get("Target", "")):
+            if element.get("TargetMode") == "External":
                 continue
-            if element.get("Type") in EMBEDDED_RELATIONSHIPS:
-                add(part_target(rels, element.get("Target", "")))
+            if element.get("Type", "").strip(URI_SPACE) not in EMBEDDED_RELATIONSHIPS:
+                continue
+            # A part the package lacks is named only when its name is plainly a part name; any
+            # other target is refused by external_link_problems, which does not name it.
+            target = element.get("Target", "")
+            held = internal_part(parts, rels, target)
+            name = held or part_target(rels, target.strip(URI_SPACE))
+            if held or PLAIN_PART_NAME.match(name):
+                add(name)
     return sorted(found)
 
 
@@ -746,18 +751,22 @@ def part_target(rels_part: str, target: str) -> str:
 LINK_SCHEMES = re.compile(r"(?i)(https?|mailto):")
 
 
-# An internal target is a part name: one with a scheme (file:, a drive letter as in D:) or
-# one that starts with two slashes (//server) names none, and neither does one with a
-# backslash anywhere (\\server, ..\\folder), which no part name has.
-NOT_A_PART = re.compile(r"(?i)^(?:[a-z][a-z0-9+.-]*:|//)")
-# xsd:anyURI, the type of Target, collapses whitespace: a target is read without it at its ends.
+# A part name made only of letters, digits, ".", "_" and "-" in segments, which names no
+# place outside the package and is safe to name in a message.
+PLAIN_PART_NAME = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*(?:/[A-Za-z0-9_-][A-Za-z0-9._-]*)*$")
+# xsd:anyURI, the type of Target and Type, collapses whitespace: they are read without it
+# at their ends.
 URI_SPACE = " \t\r\n"
 
 
-def names_no_part(target: str) -> bool:
-    """Whether an internal relationship's target cannot be the name of a part."""
-    target = target.strip(URI_SPACE)
-    return bool(NOT_A_PART.match(target)) or "\\" in target
+def internal_part(parts: dict[str, bytes], rels: str, target: str) -> str | None:
+    """The part of the package that an internal relationship's target names, compared as part
+    names are (percent-decoded, without regard to case), or None. A scheme or a drive (file:,
+    D:, D%3A), a server or a backslash (\\\\server, //server, %5C), a query, a way out of the
+    package or a part the package does not hold all name none, however they are spelled."""
+    name = part_target(rels, target.strip(URI_SPACE))
+    by_name = {urllib.parse.unquote(part).lower(): part for part in parts}
+    return by_name.get(urllib.parse.unquote(name).lower())
 
 
 def external_link_problems(parts: dict[str, bytes]) -> list[str]:
@@ -779,11 +788,11 @@ def external_link_problems(parts: dict[str, bytes]) -> list[str]:
             if mode not in (None, "Internal", "External"):
                 found.append(f"{rels} has a target mode other than Internal or External")
                 break
-            if element.get("Type", "").endswith("/attachedTemplate"):
+            if element.get("Type", "").strip(URI_SPACE).endswith("/attachedTemplate"):
                 found.append(f"{rels} keeps an attached template")
                 break
             if (mode == "External" and not LINK_SCHEMES.match(target.strip(URI_SPACE))) or (
-                mode != "External" and names_no_part(target)
+                mode != "External" and internal_part(parts, rels, target) is None
             ):
                 found.append(f"{rels} links to a local file or another scheme")
                 break
@@ -806,7 +815,7 @@ def edit_relationships(rels_part: str, xml: str, dropped: set[str], renamed: dic
         target = attribute(element, "Target")
         if not kind or not target:
             return element
-        if kind.group(2).endswith("/attachedTemplate"):
+        if kind.group(2).strip(URI_SPACE).endswith("/attachedTemplate"):
             return ""
         mode = attribute(element, "TargetMode")
         if mode and mode.group(2) == "External":
