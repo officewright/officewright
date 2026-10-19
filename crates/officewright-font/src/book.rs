@@ -512,11 +512,12 @@ impl FontBook {
         Ok(added)
     }
 
-    /// Gives the faces from `first` on the family name `family`, as the resolver finds them:
-    /// none where one of them has it as a family name or names a named instance by it, which
-    /// the resolver finds first; else those that answer to it by another name of their own
-    /// ([`NameKeys::has_other_name`]), as the regular face of a subset Word renamed often
-    /// does by its PostScript name; else all. Nor where the name, without the white space
+    /// Gives the faces from `first` on the family name `family`: none where one of them has
+    /// it as a family name or names a named instance by it, since the resolver finds that
+    /// face by it as it is; else those that answer to it by another name of their own
+    /// ([`NameKeys::has_other_name`]: a typographic family, full or PostScript name, taken
+    /// together, though the resolver tries them one after another), as the regular face of
+    /// a subset Word renamed often does by its PostScript name; else all. Nor where the name, without the white space
     /// around it, is empty or too long to keep.
     fn add_family(&mut self, first: usize, family: &str) {
         if family.trim().len() > crate::face::MAX_NAME_BYTES {
@@ -1111,6 +1112,13 @@ mod tests {
         book.add_bytes_as(ttc, FontOrigin::Document, "Beta Test")
             .unwrap();
         assert_eq!(book.faces[0].keys.families, ["alpha test"]);
+        // Whichever face of the collection comes first.
+        let ttc = testing::collection(&[TestFont::new("Delta Test").build(), answering.build()]);
+        let mut book = FontBook::new();
+        book.add_bytes_as(ttc, FontOrigin::Document, "GammaTest-Bold")
+            .unwrap();
+        assert_eq!(book.faces[0].keys.families, ["delta test"]);
+        assert_eq!(book.faces[1].keys.families.len(), 2);
         // A variable font added under the name of one of its instances keeps it as one.
         let axes = [(b"wght", 300.0, 400.0, 700.0)];
         let instances: [(u16, &[f64]); 2] = [(256, &[400.0]), (257, &[600.0])];
