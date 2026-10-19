@@ -14,7 +14,7 @@ use crate::display::{DisplayItem, DrawnGlyph, GlyphItem, ImageItem, LineItem, Li
 use crate::error::{Error, Result};
 use crate::fonts::Fonts;
 use crate::ir::{Document, ImageFormat, ImageId};
-use crate::pages::{self, Page};
+use crate::pages::{self, Page, PageSink};
 use crate::report::{LayoutReport, Location, ReportKind};
 use crate::shape::Shaper;
 
@@ -243,21 +243,58 @@ pub fn render_pdf(
     let mut report = document.clamp();
     let mut layout_fonts = Fonts::new(fonts);
     let mut shaper = Shaper::new();
-    let laid = pages::paginate(&document, &mut layout_fonts, &mut shaper, options.max_pages)?;
-    let mut painter = Painter {
-        document: &document,
-        fonts: &mut layout_fonts,
-        pdf_fonts: HashMap::new(),
-        images: HashMap::new(),
-        pdf: pdf::Document::new(),
-    };
-    painter.pdf.set_compression(options.compression);
-    for page in &laid.pages {
-        painter.page(page)?;
-    }
-    let pdf = painter.pdf;
+    // Each page is painted as soon as it is laid out, and dropped (#332).
+    let painted = pages::paginate_into(
+        &document,
+        &mut layout_fonts,
+        &mut shaper,
+        options.max_pages,
+        || PdfPages::new(&document, options.compression),
+    )?;
     report.extend(layout_fonts.into_report());
-    Ok(Rendered { pdf, report })
+    Ok(Rendered {
+        pdf: painted.pdf,
+        report,
+    })
+}
+
+/// A PDF that pages are painted into as they are laid out: what a [`Painter`] keeps from
+/// page to page.
+struct PdfPages<'a> {
+    document: &'a Document,
+    pdf_fonts: HashMap<FaceId, Option<pdf::Font>>,
+    images: HashMap<ImageId, Option<pdf::Image>>,
+    pdf: pdf::Document,
+}
+
+impl<'a> PdfPages<'a> {
+    fn new(document: &'a Document, compression: pdf::Compression) -> Self {
+        let mut pdf = pdf::Document::new();
+        pdf.set_compression(compression);
+        Self {
+            document,
+            pdf_fonts: HashMap::new(),
+            images: HashMap::new(),
+            pdf,
+        }
+    }
+}
+
+impl PageSink for PdfPages<'_> {
+    fn take(&mut self, page: Page, fonts: &mut Fonts<'_>) -> Result<()> {
+        let mut painter = Painter {
+            document: self.document,
+            fonts,
+            pdf_fonts: std::mem::take(&mut self.pdf_fonts),
+            images: std::mem::take(&mut self.images),
+            pdf: std::mem::take(&mut self.pdf),
+        };
+        let painted = painter.page(&page);
+        self.pdf_fonts = painter.pdf_fonts;
+        self.images = painter.images;
+        self.pdf = painter.pdf;
+        painted
+    }
 }
 
 /// Paints pages of display items into a PDF.
@@ -769,6 +806,35 @@ impl From<pdf::Error> for Error {
 mod tests {
     use super::*;
     use crate::display::Cluster;
+
+    #[test]
+    fn a_layout_pass_that_numpages_makes_necessary_paints_a_pdf_of_its_own() {
+        use crate::ir::{
+            Block, Field, FieldKind, Inline, PageSetup, Paragraph, ParagraphProps, RunFonts,
+            RunStyle, Section,
+        };
+
+        // Issue #332: pages are painted as they are laid out, so the PDF of a pass whose
+        // page counts change is dropped. A `NUMPAGES` field on the first of three pages
+        // lays them out twice (the first time for one page), and the PDF has three.
+        let book = crate::testing::book(vec![crate::testing::minimal()]);
+        let mut document = Document::default();
+        let style = document
+            .add_run_style(RunStyle::default().with_fonts(RunFonts::new("Officewright Test")));
+        let page = |break_before: bool, inline: Inline| -> Block {
+            Paragraph::new(style)
+                .with_props(ParagraphProps::default().with_page_break_before(break_before))
+                .with_inlines([inline])
+                .into()
+        };
+        document.add_section(Section::new(PageSetup::new(PageSize::A4)).with_blocks([
+            page(false, Inline::Field(Field::new(FieldKind::NumPages, style))),
+            page(true, Inline::text("A", style)),
+            page(true, Inline::text("A", style)),
+        ]));
+        let rendered = render_pdf(&document, &book, &RenderOptions::new()).expect("a PDF");
+        assert_eq!(rendered.pdf().page_count(), 3);
+    }
 
     fn line(style: LineStyle, from: (f64, f64), to: (f64, f64)) -> LineItem {
         LineItem {

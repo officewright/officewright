@@ -218,6 +218,33 @@ pub(crate) struct Paginated {
     pub(crate) lines: Vec<usize>,
 }
 
+/// Where laid-out pages go, one at a time and in order, as soon as nothing can change them
+/// any more, so that a document's pages are not all held at once (#332).
+pub(crate) trait PageSink {
+    /// Takes `page`, the next one; `fonts` are those of the layout.
+    fn take(&mut self, page: Page, fonts: &mut Fonts<'_>) -> Result<()>;
+}
+
+/// Every page, kept.
+impl PageSink for Vec<Page> {
+    fn take(&mut self, page: Page, _: &mut Fonts<'_>) -> Result<()> {
+        self.push(page);
+        Ok(())
+    }
+}
+
+/// What a layout of the pages hands on.
+struct Laid<S> {
+    /// The sink of the last layout pass, which has taken every page.
+    sink: S,
+    /// The number of lines of every paragraph of the flow.
+    lines: Vec<usize>,
+    /// The most pages held at once before they went to the sink, and the most paragraph
+    /// layouts.
+    #[cfg_attr(not(test), allow(dead_code))] // reason: read by the tests of that bound only
+    most_held: (usize, usize),
+}
+
 /// Lays out the body of every section of `document` on pages, at most `max_pages` of
 /// them. A document without sections has one empty page of the default setup.
 pub(crate) fn paginate(
@@ -226,18 +253,44 @@ pub(crate) fn paginate(
     shaper: &mut Shaper,
     max_pages: usize,
 ) -> Result<Paginated> {
-    paginate_with(document, fonts, shaper, max_pages, MAX_FRAME_DRAWN)
+    let laid = paginate_with(
+        document,
+        fonts,
+        shaper,
+        max_pages,
+        MAX_FRAME_DRAWN,
+        Vec::new,
+    )?;
+    Ok(Paginated {
+        pages: laid.sink,
+        lines: laid.lines,
+    })
 }
 
-/// [`paginate`], with headers and footers drawing at most `max_frame_drawn` glyphs and
-/// shapes in all.
-fn paginate_with(
+/// [`paginate`], handing every page on to a sink as soon as nothing can change it any more:
+/// a sink that `sink` makes for each layout pass, of which that of the last pass, which
+/// has taken every page, is returned. A pass that `NUMPAGES` or `SECTIONPAGES` makes
+/// necessary drops the sink of the one before.
+pub(crate) fn paginate_into<S: PageSink>(
+    document: &Document,
+    fonts: &mut Fonts<'_>,
+    shaper: &mut Shaper,
+    max_pages: usize,
+    sink: impl FnMut() -> S,
+) -> Result<S> {
+    paginate_with(document, fonts, shaper, max_pages, MAX_FRAME_DRAWN, sink).map(|laid| laid.sink)
+}
+
+/// [`paginate_into`], with headers and footers drawing at most `max_frame_drawn` glyphs
+/// and shapes in all.
+fn paginate_with<S: PageSink>(
     document: &Document,
     fonts: &mut Fonts<'_>,
     shaper: &mut Shaper,
     max_pages: usize,
     max_frame_drawn: usize,
-) -> Result<Paginated> {
+    mut sink: impl FnMut() -> S,
+) -> Result<Laid<S>> {
     let flow = flow(document, fonts)?;
     // `NUMPAGES` and `SECTIONPAGES` depend on the layout they are part of: each pass lays
     // out with the counts the one before found, until they agree.
@@ -254,6 +307,13 @@ fn paginate_with(
             shaper: &mut *shaper,
             max_pages,
             pages: Vec::new(),
+            sink: sink(),
+            taken: 0,
+            taken_by_section: vec![0; document.sections().len()],
+            keep_from: usize::MAX,
+            most_held: 0,
+            layouts_held: 0,
+            most_layouts: 0,
             cursor: 0.0,
             above: None,
             next_number: 1,
@@ -263,10 +323,11 @@ fn paginate_with(
             frames: HashMap::new(),
         };
         let lines = pager.run(&flow)?;
-        if pager.pages.is_empty() {
+        if pager.page_count() == 0 {
             pager.new_page(0, &PageSetup::default())?;
         }
-        let found = Totals::of(&pager.pages, document);
+        pager.hand_on(usize::MAX)?;
+        let found = Totals::of(pager.taken, &pager.taken_by_section, document);
         if !counted || found == totals || pass == MAX_PASSES {
             if counted && found != totals {
                 pager.fonts.report_once(
@@ -278,9 +339,10 @@ fn paginate_with(
                     ),
                 );
             }
-            return Ok(Paginated {
-                pages: pager.pages,
+            return Ok(Laid {
+                sink: pager.sink,
                 lines,
+                most_held: (pager.most_held, pager.most_layouts),
             });
         }
         totals = found;
@@ -306,12 +368,9 @@ impl Totals {
     /// section counts the blank page of its odd or even start, and not the page it starts
     /// on when it is continuous: hypotheses until Word shows them (#298,
     /// `E-section-continuous-headers.docx`).
-    fn of(pages: &[Page], document: &Document) -> Self {
-        let count = |section: usize| {
-            u32::try_from(pages.iter().filter(|page| page.section == section).count())
-                .unwrap_or(u32::MAX)
-        };
-        let all = u32::try_from(pages.len()).unwrap_or(u32::MAX);
+    fn of(pages: usize, by_section: &[u32], document: &Document) -> Self {
+        let count = |section: usize| by_section.get(section).copied().unwrap_or(0);
+        let all = u32::try_from(pages).unwrap_or(u32::MAX);
         let less = document.sections().first().is_some_and(|section| {
             section.title_page() && section.page_numbering().start() == Some(0)
         });
@@ -507,12 +566,28 @@ struct Placed {
     last_page: usize,
 }
 
-struct Pager<'d, 'f, 'b> {
+struct Pager<'d, 'f, 'b, S> {
     document: &'d Document,
     fonts: &'f mut Fonts<'b>,
     shaper: &'f mut Shaper,
     max_pages: usize,
+    /// The pages made and not yet handed on to the sink: the last ones.
     pages: Vec<Page>,
+    /// Where pages go once nothing can change them.
+    sink: S,
+    /// How many pages went to the sink, of each section.
+    taken: usize,
+    taken_by_section: Vec<u32>,
+    /// The first page that going back to a checkpoint could still change: where a chain
+    /// of paragraphs kept with the next one starts, or where the paragraph being placed
+    /// starts when its `PAGE` fields may lay it out again. The pages before it, and before
+    /// the last, can go to the sink.
+    keep_from: usize,
+    /// The most pages held at once.
+    most_held: usize,
+    /// The paragraph layouts held, and the most at once.
+    layouts_held: usize,
+    most_layouts: usize,
     /// The top of what comes next on the current page: under the last line placed,
     /// without the space below it.
     cursor: f64,
@@ -536,14 +611,19 @@ struct Pager<'d, 'f, 'b> {
 /// Which header or footer: its section, whether it is the header, and its kind.
 type FrameKey = (usize, bool, Kind);
 
-impl<'d> Pager<'d, '_, '_> {
+impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
     /// Places every paragraph of `flow`, section by section. Returns the number of lines
     /// of each.
     fn run(&mut self, flow: &[Flowed<'d>]) -> Result<Vec<usize>> {
         let sections = self.document.sections();
-        // Each paragraph's layout, with the page number its `PAGE` fields show.
+        // Each paragraph's layout, with the page number its `PAGE` fields show, while it
+        // may be placed again: from where a chain kept with the next paragraph starts, or
+        // from the paragraph placed next. Those before are dropped (`dropped` of them),
+        // their number of lines kept.
         let mut layouts: Vec<Option<(ParagraphLayout, u32)>> = Vec::new();
         layouts.resize_with(flow.len(), || None);
+        let mut dropped = 0;
+        let mut line_counts = vec![0; flow.len()];
         let mut placed: Vec<Option<Placed>> = vec![None; flow.len()];
         // The start of the chain of paragraphs kept with the next one that the
         // paragraph placed next would end, and the chains moved to a page of their own
@@ -594,6 +674,14 @@ impl<'d> Pager<'d, '_, '_> {
                 broke_page = true;
             }
             let checkpoint = self.checkpoint(index);
+            // Placing goes back here when the paragraph's `PAGE` fields land on another page
+            // than the one they were laid out for, and moving a chain it starts goes back
+            // here later: its first page stays until then.
+            let page_field = has_page_field(flowed);
+            let starts_chain = props.keep_next() && !flowed.in_cell;
+            if page_field || starts_chain {
+                self.keep_from = self.keep_from.min(checkpoint.pages.saturating_sub(1));
+            }
             let values = self.field_values(flowed.section);
             let (layout, laid_for) = match layouts.get_mut(index) {
                 Some(Some((layout, laid_for))) => (layout, laid_for),
@@ -608,6 +696,8 @@ impl<'d> Pager<'d, '_, '_> {
                         &flowed.location,
                         Some(&values),
                     );
+                    self.layouts_held += 1;
+                    self.most_layouts = self.most_layouts.max(self.layouts_held);
                     let (layout, laid_for) = slot.insert((layout, values.page));
                     (layout, laid_for)
                 }
@@ -620,8 +710,7 @@ impl<'d> Pager<'d, '_, '_> {
             // for the page it began on (or, kept from before a keep chain moved, the page it
             // was first placed on), a paragraph that lands on another page is laid out again
             // for that page, and placed again.
-            let landed = self.pages.get(first_page).map(|page| page.number);
-            let page_field = has_page_field(flowed);
+            let landed = self.page_at(first_page).map(|page| page.number);
             if let Some(landed) = landed.filter(|&n| n != *laid_for && page_field) {
                 self.restore(checkpoint);
                 let values = FieldValues {
@@ -638,7 +727,7 @@ impl<'d> Pager<'d, '_, '_> {
                     Some(&values),
                 );
                 (first_page, ends_with_break) = self.place(flow, index, layout, keeps_space)?;
-                if self.pages.get(first_page).map(|page| page.number) != Some(landed) {
+                if self.page_at(first_page).map(|page| page.number) != Some(landed) {
                     self.fonts.report_once(
                         ReportKind::FieldCached,
                         &flowed.location,
@@ -651,7 +740,7 @@ impl<'d> Pager<'d, '_, '_> {
             // A paragraph split over pages is laid out once, for its first: a `PAGE` field
             // in its later lines shows that page's number, where Word shows the number of
             // the page the field is on.
-            if page_field && field_past_first_page(layout, self.pages.get(first_page), index) {
+            if page_field && field_past_first_page(layout, self.page_at(first_page), index) {
                 self.fonts.report_once(
                     ReportKind::FieldCached,
                     &flowed.location,
@@ -659,6 +748,9 @@ impl<'d> Pager<'d, '_, '_> {
                      the paragraph starts on"
                         .to_owned(),
                 );
+            }
+            if let Some(count) = line_counts.get_mut(index) {
+                *count = layout.lines.len();
             }
             // A page or column break before its last line: its last lines start a page
             // whatever comes before them.
@@ -670,7 +762,7 @@ impl<'d> Pager<'d, '_, '_> {
                 .any(|line| matches!(line.end, LineEnd::PageBreak | LineEnd::ColumnBreak));
             let here = Placed {
                 first_page,
-                last_page: self.pages.len().saturating_sub(1),
+                last_page: self.page_count().saturating_sub(1),
             };
             if let Some(slot) = placed.get_mut(index) {
                 *slot = Some(here);
@@ -720,6 +812,16 @@ impl<'d> Pager<'d, '_, '_> {
                 Some(start) if !boundary => Some(start),
                 _ => Some(checkpoint),
             };
+            // Only a chain can still go back past the next paragraph's start.
+            self.keep_from = chain.map_or(usize::MAX, |start| start.pages.saturating_sub(1));
+            self.release()?;
+            let placed_again = chain.map_or(index + 1, |start| start.index);
+            for slot in layouts.iter_mut().take(placed_again).skip(dropped) {
+                if slot.take().is_some() {
+                    self.layouts_held -= 1;
+                }
+            }
+            dropped = dropped.max(placed_again);
             broke_page = ends_with_break;
             pending_break = ends_with_break;
             index += 1;
@@ -732,10 +834,7 @@ impl<'d> Pager<'d, '_, '_> {
             }
             next += 1;
         }
-        Ok(layouts
-            .iter()
-            .map(|layout| layout.as_ref().map_or(0, |(layout, _)| layout.lines.len()))
-            .collect())
+        Ok(line_counts)
     }
 
     /// Starts section `index`: on a new page, or on the current one for a continuous
@@ -855,7 +954,7 @@ impl<'d> Pager<'d, '_, '_> {
         keeps_space: bool,
     ) -> Result<(usize, bool)> {
         let Some(flowed) = flow.get(index) else {
-            return Ok((self.pages.len().saturating_sub(1), false));
+            return Ok((self.page_count().saturating_sub(1), false));
         };
         let props = flowed.paragraph.props();
         let lines = &layout.lines;
@@ -885,7 +984,7 @@ impl<'d> Pager<'d, '_, '_> {
             } else {
                 0.0
             };
-            let here = self.pages.len().saturating_sub(1);
+            let here = self.page_count().saturating_sub(1);
             let rest = count - first;
             if rest == 0 {
                 return Ok((first_page.unwrap_or(here), false));
@@ -1042,7 +1141,7 @@ impl<'d> Pager<'d, '_, '_> {
     /// (`E-header-tall.docx`, `E-header-space-after.docx`): no gap is added between them,
     /// and the space after the last paragraph of a header or footer is part of its height.
     fn add_page(&mut self, section: usize, setup: &PageSetup, blank: bool) -> Result<()> {
-        if self.pages.len() >= self.max_pages {
+        if self.page_count() >= self.max_pages {
             return Err(Error::TooManyPages {
                 limit: self.max_pages,
             });
@@ -1054,6 +1153,9 @@ impl<'d> Pager<'d, '_, '_> {
             // The section's first page is the first of its own: a continuous section starts
             // on a page that keeps the section before, so its title-page header is on its
             // second. Hypothesis until a Word render (`E-section-continuous-headers.docx`).
+            // The sink takes no page before a later one is made, so the last page is held:
+            // a page that is not blank, or a blank one that an odd or even section start put
+            // before that section's first page, after a page of another section.
             let first = self
                 .pages
                 .iter()
@@ -1120,9 +1222,41 @@ impl<'d> Pager<'d, '_, '_> {
             items,
             blank,
         });
+        self.most_held = self.most_held.max(self.pages.len());
         self.next_number = self.next_number.saturating_add(1);
         self.cursor = body.top.0;
         self.above = None;
+        self.release()
+    }
+
+    /// Hands on to the sink the pages that nothing can change any more: those before the
+    /// last and before [`Pager::keep_from`].
+    fn release(&mut self) -> Result<()> {
+        self.hand_on(self.keep_from.min(self.page_count().saturating_sub(1)))
+    }
+
+    /// The number of pages made, those handed on to the sink included.
+    fn page_count(&self) -> usize {
+        self.taken + self.pages.len()
+    }
+
+    /// Page `index` of those made, unless it went to the sink.
+    fn page_at(&self, index: usize) -> Option<&Page> {
+        index
+            .checked_sub(self.taken)
+            .and_then(|index| self.pages.get(index))
+    }
+
+    /// Hands the pages before page `upto` on to the sink.
+    fn hand_on(&mut self, upto: usize) -> Result<()> {
+        let count = upto.saturating_sub(self.taken).min(self.pages.len());
+        for page in self.pages.drain(..count) {
+            if let Some(taken) = self.taken_by_section.get_mut(page.section) {
+                *taken = taken.saturating_add(1);
+            }
+            self.taken += 1;
+            self.sink.take(page, self.fonts)?;
+        }
         Ok(())
     }
 
@@ -1454,7 +1588,7 @@ impl<'d> Pager<'d, '_, '_> {
         let page = self.pages.last();
         Checkpoint {
             index,
-            pages: self.pages.len(),
+            pages: self.page_count(),
             items: page.map_or(0, |page| page.items.len()),
             fragments: page.map_or(0, |page| page.fragments.len()),
             cursor: self.cursor,
@@ -1468,7 +1602,15 @@ impl<'d> Pager<'d, '_, '_> {
 
     /// Goes back to what was laid out at `checkpoint`.
     fn restore(&mut self, checkpoint: Checkpoint) {
-        self.pages.truncate(checkpoint.pages);
+        // `keep_from` holds the checkpoint's last page back from the sink.
+        debug_assert!(
+            checkpoint.pages > self.taken,
+            "a checkpoint at page {} goes back past the {} pages handed on",
+            checkpoint.pages,
+            self.taken
+        );
+        self.pages
+            .truncate(checkpoint.pages.saturating_sub(self.taken));
         if let Some(page) = self.pages.last_mut() {
             page.items.truncate(checkpoint.items);
             page.fragments.truncate(checkpoint.fragments);
@@ -1585,6 +1727,58 @@ mod tests {
         let mut shaper = Shaper::new();
         let laid = paginate(document, &mut fonts, &mut shaper, max_pages);
         (laid, fonts.into_report())
+    }
+
+    /// The number of every page the sink took, in order, and the most pages and paragraph
+    /// layouts held at once.
+    fn held(document: &Document) -> (Vec<u32>, (usize, usize)) {
+        let book = book(vec![minimal()]);
+        let mut fonts = Fonts::new(&book);
+        let mut shaper = Shaper::new();
+        let laid = paginate_with(
+            document,
+            &mut fonts,
+            &mut shaper,
+            1000,
+            MAX_FRAME_DRAWN,
+            Vec::new,
+        )
+        .expect("pages");
+        let numbers = laid.sink.iter().map(|page| page.number).collect();
+        (numbers, laid.most_held)
+    }
+
+    #[test]
+    fn pages_go_to_the_sink_as_soon_as_nothing_can_change_them() {
+        // Issue #332: a document's pages are not all held at once, nor the layouts of its
+        // paragraphs. Eight 20 pt lines fill a page: 400 paragraphs of a line, and one
+        // paragraph of 400 lines, make 50 pages each, held two at a time: the new page and
+        // the one before it. A paragraph's layout goes once it is placed.
+        let fifty: Vec<u32> = (1..=50).collect();
+        let paragraphs = document(|style| {
+            one_section(
+                (0..400)
+                    .map(|_| lines(style, 1, spacing(0.0, 0.0)))
+                    .collect(),
+            )
+        });
+        assert_eq!(held(&paragraphs), (fifty.clone(), (2, 1)));
+        let paragraph = document(|style| one_section(vec![lines(style, 400, spacing(0.0, 0.0))]));
+        assert_eq!(held(&paragraph), (fifty, (2, 1)));
+        // A chain of paragraphs kept with the next one holds its pages back until it ends,
+        // since moving it goes back to where it starts: 20 one-line paragraphs kept with
+        // the next after 7 others start on page 1, move to page 2 when they reach page 2,
+        // and are split there over pages 2 to 4, all held until the chain ends, with the
+        // layouts of its paragraphs and of the one it is kept with. The 100 paragraphs
+        // after it fill 12 more pages, again held two at a time.
+        let chain = document(|style| {
+            let mut blocks: Vec<Block> =
+                (0..7).map(|_| lines(style, 1, spacing(0.0, 0.0))).collect();
+            blocks.extend((0..20).map(|_| lines(style, 1, spacing(0.0, 0.0).with_keep_next(true))));
+            blocks.extend((0..100).map(|_| lines(style, 1, spacing(0.0, 0.0))));
+            one_section(blocks)
+        });
+        assert_eq!(held(&chain), ((1..=16).collect(), (3, 21)));
     }
 
     /// Every page as the paragraphs, lines and tops of its fragments.
@@ -3197,9 +3391,9 @@ mod tests {
         let book = book(vec![minimal()]);
         let mut fonts = Fonts::new(&book);
         let mut shaper = Shaper::new();
-        let laid =
-            paginate_with(&pages_of_breaks, &mut fonts, &mut shaper, 100, 11).expect("pages");
-        let counts: Vec<usize> = laid.pages.iter().map(|page| texts(page).len()).collect();
+        let laid = paginate_with(&pages_of_breaks, &mut fonts, &mut shaper, 100, 11, Vec::new)
+            .expect("pages");
+        let counts: Vec<usize> = laid.sink.iter().map(|page| texts(page).len()).collect();
         assert_eq!(counts, [2, 2, 2, 2, 2, 1, 1, 1]);
         let report = fonts.into_report();
         assert!(
@@ -3222,14 +3416,14 @@ mod tests {
             ]
         });
         let mut fonts = Fonts::new(&book);
-        let laid = paginate_with(&moved, &mut fonts, &mut shaper, 100, 4).expect("pages");
+        let laid = paginate_with(&moved, &mut fonts, &mut shaper, 100, 4, Vec::new).expect("pages");
         let headers: Vec<String> = laid
-            .pages
+            .sink
             .iter()
             .filter_map(|page| texts(page).first().cloned())
             .collect();
         assert_eq!(headers, ["A", "A"]);
-        assert_eq!(texts(&laid.pages[1]), ["A", "2"]);
+        assert_eq!(texts(&laid.sink[1]), ["A", "2"]);
     }
 
     #[test]
