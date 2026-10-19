@@ -731,6 +731,7 @@ fn reads_drawings_through_markup_compatibility_everywhere_they_are() {
 }
 
 #[test]
+#[cfg(feature = "pdf")]
 fn lists_a_picture_s_outline_and_colour_effects_once() {
     // Issue #303: the IR's picture has no outline and no colour effects yet, so the
     // report says so, once per document; an outline of no fill and a blip with only
@@ -773,6 +774,7 @@ fn lists_a_picture_s_outline_and_colour_effects_once() {
 }
 
 #[test]
+#[cfg(feature = "pdf")]
 fn lists_a_picture_s_effects_and_shape_once_but_no_value_that_changes_nothing() {
     // From the re-check of #326: the shadows, reflections, glows, soft edges, 3-D effects
     // and shapes Word's picture styles write have no place in the IR's picture yet. An
@@ -847,6 +849,7 @@ fn lists_a_picture_s_effects_and_shape_once_but_no_value_that_changes_nothing() 
 }
 
 #[test]
+#[cfg(feature = "pdf")]
 fn lists_a_border_around_a_picture_in_the_line_only() {
     // From the re-check of #326 (POI's bug59058.docx has a border around each of its
     // pictures, alone in their runs): a border around a run surrounds a picture in the
