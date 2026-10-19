@@ -1459,6 +1459,29 @@ mod tests {
     }
 
     #[test]
+    fn reads_no_composite_once_the_components_are_used_up() {
+        // With none left, the count reads no composite: once the components run out,
+        // checking every glyph takes time in proportion to the face, not glyphs times
+        // .notdef's components.
+        let mut entries = vec![Vec::new(); 30_000];
+        entries[0] = composite_of(&vec![1; 30_000]);
+        let face = crate::FontFace::from_bytes(font_of(&entries, false).build(), 0).unwrap();
+        // Following .notdef's 30,000 components when the face is first checked leaves one.
+        let mut state = State::new(&face, 30_001);
+        let started = std::time::Instant::now();
+        for glyph in 1..30_000 {
+            assert!(state.check(&face, glyph).is_err());
+        }
+        assert_eq!(state.components, 0);
+        // Reading .notdef's components for each glyph took over a minute in a debug build.
+        assert!(
+            started.elapsed().as_secs_f64() < 1.0,
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
     fn refuses_a_closure_that_reads_more_than_the_subsetter_may() {
         // Glyph 3 uses glyph 1 `n` times, glyph 1 glyph 2 `n` times: the closure of glyph 3
         // and .notdef costs 1 + (n + 1) + (n + 1)² + (n + 1) = (n + 2)², 2²⁴ at n = 4094.
