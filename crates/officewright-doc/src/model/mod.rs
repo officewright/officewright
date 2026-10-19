@@ -153,11 +153,12 @@ pub(crate) struct Names {
 pub enum DocumentKind {
     /// A document, `.docx`.
     Document,
-    /// A document with macros, `.docm`. The macros are kept and never run.
+    /// A document with macros, `.docm`. The macros (`vbaProject.bin` and the parts with
+    /// it) are neither read nor run, and the [`Document`] does not keep them.
     MacroEnabledDocument,
     /// A template, `.dotx`.
     Template,
-    /// A template with macros, `.dotm`.
+    /// A template with macros, `.dotm`; its macros are treated as a `.docm`'s.
     MacroEnabledTemplate,
 }
 
