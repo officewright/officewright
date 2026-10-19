@@ -968,6 +968,9 @@ class Cleaning(unittest.TestCase):
             "</Types>")
         cleaned = parts_of(public.clean(package(**{"[Content_Types].xml": types}), DOC).data)
         self.assertIn("[Content_Types].xml", cleaned)
+        # Named in another case, the stream is still no part (review of #382).
+        lower = package(**{"[Content_Types].xml": None, "[content_types].xml": types})
+        self.assertIn("[content_types].xml", parts_of(public.clean(lower, DOC).data))
 
     def test_people_in_properties_and_settings_are_found_in_any_spelling(self):
         # The edits match the usual spelling; what is left is read as XML, and a part that
