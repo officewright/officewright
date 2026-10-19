@@ -1227,7 +1227,7 @@ pub struct PageDump {
     text: String,
 }
 
-/// Lines of a paragraph on a [`PageDump`].
+/// Lines of a paragraph, or bands of a table, on a [`PageDump`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct FragmentDump {
     paragraph: usize,
@@ -1283,13 +1283,13 @@ impl PageDump {
 }
 
 impl FragmentDump {
-    /// The paragraph, by its place among every paragraph of the body in reading order,
-    /// those of table cells included.
+    /// The paragraph or table, by its place among the paragraphs and tables of the body
+    /// in reading order, a table counting as one, whatever its cells hold.
     pub fn paragraph(&self) -> usize {
         self.paragraph
     }
 
-    /// Its lines of the paragraph.
+    /// Its lines of the paragraph, or bands of the table.
     pub fn lines(&self) -> std::ops::Range<usize> {
         self.lines.clone()
     }

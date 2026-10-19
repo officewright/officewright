@@ -164,6 +164,18 @@ fn space_before_top() -> (Document, Vec<Option<&'static str>>) {
     (document, words)
 }
 
+/// The baseline of the first glyph run `page` draws, in points from the page's top.
+fn first_baseline(page: &fuzzing::PageDump) -> Option<f64> {
+    page.text()
+        .lines()
+        .filter(|line| line.starts_with("glyphs "))
+        .find_map(|line| {
+            let at = line.split_whitespace().find(|word| word.starts_with('@'))?;
+            let (_, y) = at.trim_start_matches('@').split_once(',')?;
+            y.parse::<f64>().ok().map(|twips| twips / 20.0)
+        })
+}
+
 #[test]
 fn space_above_at_the_top_of_a_page_is_where_word_keeps_it() -> TestResult {
     let book = book()?;
@@ -180,6 +192,19 @@ fn space_above_at_the_top_of_a_page_is_where_word_keeps_it() -> TestResult {
         .find(|line| line.text.starts_with("Control"))
         .ok_or("no control line")?;
     let offset = control.top - 72.0;
+    // Our baselines are below the line's top by what the test font reaches above it in the
+    // same line: the control paragraph's line top is its fragment's.
+    let ours_control = laid
+        .pages()
+        .iter()
+        .find_map(|page| {
+            let fragment = page.fragments().first()?;
+            let starts = words
+                .get(fragment.paragraph())?
+                .is_some_and(|w| w == "Control:");
+            starts.then(|| Some(first_baseline(page)? - fragment.top()))?
+        })
+        .ok_or("no control page of ours")?;
     for (number, page) in laid.pages().iter().enumerate() {
         let first = word
             .iter()
@@ -196,11 +221,11 @@ fn space_above_at_the_top_of_a_page_is_where_word_keeps_it() -> TestResult {
             number + 1,
             first.text
         );
-        // Page 8 starts with a table: the cell's first line is below the table's top
-        // border, 0.5 pt, and the space before it, which a cell keeps at the top of a
-        // page.
+        // Page 8 starts with a table: its fragment is the band, whose top is the table's;
+        // the cell's first line is found by its text, below the top border and the space
+        // before the paragraph, which a cell keeps at the top of a page.
         let ours = if label.starts_with("Case 7") {
-            fragment.top() + 0.5 + 24.0
+            first_baseline(page).ok_or("no text on the table's page")? - ours_control
         } else {
             fragment.top()
         };

@@ -93,6 +93,8 @@ pub(crate) struct Prepared<'d, 'l> {
     /// The borders drawn along the grid line above each row, and last below the last
     /// row: in order, each over the columns it runs along.
     horizontal: Vec<Vec<Segment>>,
+    /// The room the borders along each of those grid lines take: the thickest of them.
+    thickness: Vec<f64>,
     /// The borders drawn beside each row: in order, each with the grid line it is on.
     vertical: Vec<Vec<(usize, Border)>>,
     /// The labels of the table's paragraphs in reading order, and where each row's start.
@@ -121,6 +123,7 @@ impl<'d, 'l> Prepared<'d, 'l> {
             lines: Vec::new(),
             borders_inside: document.settings().compat_mode() >= CompatMode::Word2013,
             horizontal: Vec::new(),
+            thickness: Vec::new(),
             vertical: Vec::new(),
             row_labels: row_labels(table),
             rows,
@@ -150,15 +153,7 @@ impl<'d, 'l> Prepared<'d, 'l> {
             return Drawn::default();
         };
         let last = rows.end == self.rows.len();
-        // The room each row's top border takes, and below the table its bottom border's.
-        let thickness = |line: usize| -> f64 {
-            self.horizontal
-                .get(line)
-                .into_iter()
-                .flatten()
-                .map(|segment| segment.border.width().0)
-                .fold(0.0, f64::max)
-        };
+        let thickness = |line: usize| self.thickness(line);
         // Each cell's content, laid out at its width, by row and place in the row.
         let mut labels = Labels {
             list: self.labels,
@@ -205,7 +200,18 @@ impl<'d, 'l> Prepared<'d, 'l> {
                     }
                     (Some(cell), Merge::Continues) => {
                         // A cell merged into the one above draws nothing of its own, but
-                        // its paragraphs keep their labels.
+                        // its paragraphs keep their labels. Hypothesis until a Word render
+                        // (`E-table-merged-content.docx`): what Word does with content in
+                        // such a cell, which Word itself never writes; reported.
+                        if !hidden_content(cell) {
+                            context.fonts.report_once(
+                                ReportKind::FeatureUnsupported,
+                                &self.location,
+                                "the content of a cell merged into the cell above it is not \
+                                 drawn"
+                                    .to_owned(),
+                            );
+                        }
                         skip_labels(cell.blocks(), &mut labels);
                         None
                     }
@@ -233,12 +239,24 @@ impl<'d, 'l> Prepared<'d, 'l> {
                 Some(RowHeight::AtLeast(least)) => content.max(least.0),
                 // Word adds the row's largest bottom margin to an exact height
                 // (MS-OI29500 2.1.180 d).
-                Some(RowHeight::Exact(exact)) => exact.0 + self.largest_bottom_margin(row),
+                Some(RowHeight::Exact(exact)) => {
+                    let height = exact.0 + self.largest_bottom_margin(row);
+                    if content > height + 1e-6 {
+                        context.fonts.report_once(
+                            ReportKind::FeatureUnsupported,
+                            &self.location,
+                            "content taller than an exact row height is not cut off".to_owned(),
+                        );
+                    }
+                    height
+                }
                 _ => content,
             };
             heights.push(height);
         }
-        // A merged cell taller than its rows makes the last of them taller (design 8.3).
+        // A merged cell taller than its rows makes the last of them taller (design 8.3),
+        // of an exact height too: a hypothesis until a Word render
+        // (`E-table-merged-exact.docx`).
         for (offset, row) in rows.clone().enumerate() {
             let row_cells = self.rows.get(row).into_iter().flatten();
             for (placed, laid) in row_cells.zip(contents.get(offset).into_iter().flatten()) {
@@ -351,6 +369,12 @@ impl<'d, 'l> Prepared<'d, 'l> {
         drawn
     }
 
+    /// The room the borders along grid line `line` take: above row `line`, or below the
+    /// table after its last row.
+    fn thickness(&self, line: usize) -> f64 {
+        self.thickness.get(line).copied().unwrap_or(0.0)
+    }
+
     /// Cell `index` of row `row`.
     fn cell(&self, row: usize, index: usize) -> Option<&'d Cell> {
         self.table.rows().get(row)?.cells().get(index)
@@ -423,9 +447,12 @@ impl<'d, 'l> Prepared<'d, 'l> {
             }
         }
         let total: f64 = widths.iter().sum();
-        // An explicit width scales the grid to it: in points for a table of fixed
-        // layout, in points or as a share of the column for one that fits its content,
-        // whose grid holds Word's own last fitting.
+        // An explicit width scales the grid to it: in points for a table of fixed layout
+        // only, since the grid of one that fits its content holds Word's own last fitting
+        // (plan PR 13); as a share of the column less the table's indent for either.
+        // Hypotheses until a Word render (`E-table-width-scale.docx`): no reference has a
+        // table of fixed layout whose width differs from its grid, nor one with a width in
+        // percent and an indent.
         let target = match (props.width(), props.layout()) {
             (PreferredWidth::Points(points), TableLayout::Fixed) => Some(points.0),
             (PreferredWidth::Percent(percent), _) => {
@@ -540,11 +567,7 @@ impl<'d, 'l> Prepared<'d, 'l> {
         let x = |line: usize| self.lines.get(line).copied().unwrap_or(0.0);
         let horizontal = |line: usize, top: f64, items: &mut Vec<DisplayItem>| {
             let segments = self.horizontal.get(line).map_or(&[][..], Vec::as_slice);
-            let thickest = segments
-                .iter()
-                .map(|segment| segment.border.width().0)
-                .fold(0.0, f64::max);
-            let y = top + thickest / 2.0;
+            let y = top + self.thickness(line) / 2.0;
             for segment in segments {
                 let (from, to) = (x(segment.columns.start), x(segment.columns.end));
                 border_line(&segment.border, (from, y), (to, y), items);
@@ -600,6 +623,15 @@ impl<'d, 'l> Prepared<'d, 'l> {
         }
         let vertical = (0..count)
             .map(|row| vertical_lines(&covering(row), &table))
+            .collect();
+        self.thickness = horizontal
+            .iter()
+            .map(|segments: &Vec<Segment>| {
+                segments
+                    .iter()
+                    .map(|segment| segment.border.width().0)
+                    .fold(0.0, f64::max)
+            })
             .collect();
         self.horizontal = horizontal;
         self.vertical = vertical;
@@ -848,18 +880,25 @@ fn row_labels(table: &Table) -> Vec<usize> {
 /// Whether `cell` hides its end mark and has no content: it takes no height
 /// (`w:hideMark`, design 8.3).
 fn hidden_mark(cell: &Cell) -> bool {
-    cell.hide_mark()
-        && cell.blocks().iter().all(|block| match block {
-            Block::Paragraph(paragraph) => paragraph.inlines().is_empty(),
-            Block::Table(_) => false,
-        })
+    cell.hide_mark() && hidden_content(cell)
+}
+
+/// Whether `cell` has no content: only paragraphs without inlines.
+fn hidden_content(cell: &Cell) -> bool {
+    cell.blocks().iter().all(|block| match block {
+        Block::Paragraph(paragraph) => paragraph.inlines().is_empty(),
+        Block::Table(_) => false,
+    })
 }
 
 /// The cells of each row of `table` in their grid columns, with how they merge
 /// vertically: a cell that continues a merge joins the cell above it whose columns are
 /// the same, and one that has none above starts a merge of its own. Columns past the
 /// grid are laid out with no width, so a cell's columns end at the grid's end: however
-/// many columns cells span, a table takes room for its grid and its cells only.
+/// many columns cells span, a table takes room for its grid and its cells only. A cell
+/// with no columns (past the grid, or in a table without one) merges with nothing: the
+/// columns of the other cells of a row do not overlap, so each continuing cell joins one
+/// merge, and finding them takes work in proportion to the cells.
 fn placements(table: &Table, location: &Location, fonts: &mut Fonts<'_>) -> Vec<Vec<Placed>> {
     let grid = table.grid().len();
     let mut past = false;
@@ -904,7 +943,9 @@ fn placements(table: &Table, location: &Location, fonts: &mut Fonts<'_>) -> Vec<
             continue;
         };
         for placed in cells.iter_mut() {
-            if placed.merge == Merge::Continues && same(above, &placed.columns).is_none() {
+            if placed.merge == Merge::Continues
+                && (placed.columns.is_empty() || same(above, &placed.columns).is_none())
+            {
                 placed.merge = Merge::Single;
             }
         }
@@ -953,6 +994,38 @@ fn placements(table: &Table, location: &Location, fonts: &mut Fonts<'_>) -> Vec<
     rows
 }
 
+/// Whether `table` starts with header rows, which Word repeats at the top of every page
+/// the table continues on (`w:tblHeader`).
+pub(crate) fn has_header_rows(table: &Table) -> bool {
+    table.rows().first().is_some_and(|row| row.header())
+}
+
+/// The work laying out `blocks` again takes: one for each paragraph, and for each table
+/// its rows, cells and grid columns too, nested tables' included. A header or footer
+/// with a field is laid out again on every page, so this is what bounds it.
+pub(crate) fn work(blocks: &[Block]) -> usize {
+    blocks
+        .iter()
+        .map(|block| match block {
+            Block::Paragraph(_) => 1,
+            Block::Table(table) => table_work(table),
+        })
+        .fold(0, usize::saturating_add)
+}
+
+/// [`work`] of `table`.
+pub(crate) fn table_work(table: &Table) -> usize {
+    let cells = table
+        .rows()
+        .iter()
+        .flat_map(|row| row.cells())
+        .map(|cell| work(cell.blocks()).saturating_add(1))
+        .fold(0, usize::saturating_add);
+    cells
+        .saturating_add(table.rows().len())
+        .saturating_add(table.grid().len())
+}
+
 /// The bands of `rows`: rows that a merged cell ties together.
 fn bands(rows: &[Vec<Placed>]) -> Vec<Range<usize>> {
     let mut bands = Vec::new();
@@ -999,13 +1072,6 @@ fn report_unsupported(table: &Table, location: &Location, fonts: &mut Fonts<'_>)
         .any(|cell| cell.text_direction() != TextDirection::LeftToRightTopToBottom);
     if vertical {
         notes.push("vertical text in table cells is laid out horizontally");
-    }
-    let exact = table
-        .rows()
-        .iter()
-        .any(|row| matches!(row.height(), RowHeight::Exact(_)));
-    if exact {
-        notes.push("content taller than an exact row height is not cut off");
     }
     for note in notes {
         fonts.report_once(ReportKind::FeatureUnsupported, location, note.to_owned());
@@ -1069,7 +1135,7 @@ fn wins(a: &Border, b: &Border) -> bool {
     if weight_a != weight_b {
         return weight_a > weight_b;
     }
-    let (rank_a, rank_b) = (a.style() as usize, b.style() as usize);
+    let (rank_a, rank_b) = (rank(a.style()), rank(b.style()));
     if rank_a != rank_b {
         return rank_a < rank_b;
     }
@@ -1087,6 +1153,38 @@ fn wins(a: &Border, b: &Border) -> bool {
     };
     // The darker; the first in reading order, `b`, when they are the same.
     shade(a) < shade(b)
+}
+
+/// A border style's place in Word's precedence list, the earlier drawn over the later
+/// where two borders of the same weight meet (MS-OI29500 2.1.169 a).
+fn rank(style: BorderStyle) -> u8 {
+    match style {
+        BorderStyle::Single => 0,
+        BorderStyle::Thick => 1,
+        BorderStyle::Double => 2,
+        BorderStyle::Dotted => 3,
+        BorderStyle::Dashed => 4,
+        BorderStyle::DotDash => 5,
+        BorderStyle::DotDotDash => 6,
+        BorderStyle::Triple => 7,
+        BorderStyle::ThinThickSmallGap => 8,
+        BorderStyle::ThickThinSmallGap => 9,
+        BorderStyle::ThinThickThinSmallGap => 10,
+        BorderStyle::ThinThickMediumGap => 11,
+        BorderStyle::ThickThinMediumGap => 12,
+        BorderStyle::ThinThickThinMediumGap => 13,
+        BorderStyle::ThinThickLargeGap => 14,
+        BorderStyle::ThickThinLargeGap => 15,
+        BorderStyle::ThinThickThinLargeGap => 16,
+        BorderStyle::Wave => 17,
+        BorderStyle::DoubleWave => 18,
+        BorderStyle::DashSmallGap => 19,
+        BorderStyle::DashDotStroked => 20,
+        BorderStyle::ThreeDEmboss => 21,
+        BorderStyle::ThreeDEngrave => 22,
+        BorderStyle::Outset => 23,
+        BorderStyle::Inset => 24,
+    }
 }
 
 /// A border's weight: its width in eighths of a point times its style's number; dotted
@@ -1757,5 +1855,320 @@ mod tests {
         let heights: Vec<f64> = bands.iter().map(|band| band.height.0).collect();
         assert_eq!(heights[0], 0.0);
         assert!(heights[1] > 0.0);
+    }
+
+    /// What laying out every band of `table` of `document` in a column `width` wide
+    /// reports, by message.
+    fn reported(document: &Document, table: &Table, width: f64) -> Vec<String> {
+        let book = book(vec![minimal()]);
+        let mut fonts = Fonts::new(&book);
+        let mut shaper = Shaper::new();
+        let mut leaders = LeaderBudget::default();
+        let prepared = Prepared::new(
+            document,
+            table,
+            &[],
+            Pt(width),
+            &Location::default(),
+            &mut fonts,
+        );
+        let mut context = Context {
+            document,
+            fonts: &mut fonts,
+            shaper: &mut shaper,
+            leaders: &mut leaders,
+            values: None,
+        };
+        for band in 0..prepared.band_count() {
+            prepared.band(band, &mut context);
+        }
+        fonts
+            .into_report()
+            .entries()
+            .iter()
+            .map(|entry| entry.message().to_owned())
+            .collect()
+    }
+
+    /// How many bands `table` of `document` has.
+    fn band_count(document: &Document, table: &Table) -> usize {
+        let book = book(vec![minimal()]);
+        let mut fonts = Fonts::new(&book);
+        Prepared::new(
+            document,
+            table,
+            &[],
+            Pt(500.0),
+            &Location::default(),
+            &mut fonts,
+        )
+        .band_count()
+    }
+
+    #[test]
+    fn cells_without_columns_merge_with_nothing() {
+        // Each continuing cell joins at most one merge, so the work is in proportion to the
+        // cells. A row of 2,001 cells over a grid of one column, then 2,000 rows whose
+        // second cell, past the grid, continues a merge: every row is a band of its own.
+        let (document, _) = document(CompatMode::Word2013);
+        let continuing = || {
+            row(vec![
+                Cell::default(),
+                Cell::default().with_vertical_merge(VerticalMerge::Continue),
+            ])
+        };
+        let mut rows = vec![row(vec![Cell::default(); 2001])];
+        rows.extend((0..2000).map(|_| continuing()));
+        let table = Table::default().with_grid([Pt(100.0)]).with_rows(rows);
+        assert_eq!(band_count(&document, &table), 2001);
+        // Without a grid no cell has columns: 2,000 rows of one continuing cell under a
+        // row of 2,000 cells.
+        let mut rows = vec![row(vec![Cell::default(); 2000])];
+        rows.extend((0..2000).map(|_| {
+            row(vec![
+                Cell::default().with_vertical_merge(VerticalMerge::Continue),
+            ])
+        }));
+        assert_eq!(
+            band_count(&document, &Table::default().with_rows(rows)),
+            2001
+        );
+        // Cells with columns still merge.
+        let table = Table::default().with_grid([Pt(100.0)]).with_rows(vec![
+            row(vec![
+                Cell::default().with_vertical_merge(VerticalMerge::Restart),
+            ]),
+            row(vec![
+                Cell::default().with_vertical_merge(VerticalMerge::Continue),
+            ]),
+        ]);
+        assert_eq!(band_count(&document, &table), 1);
+    }
+
+    #[test]
+    fn a_row_of_many_cells_takes_time_in_proportion_to_them() {
+        // The room the borders along a grid line take is found once for the line, not
+        // once for each cell: one row of 20,000 cells, whose top borders are 0.5 and 1 pt
+        // in turn, over a grid of 20,000 columns, is 1 pt high.
+        let (document, _) = document(CompatMode::Word2013);
+        let top = |width: f64| {
+            CellBorders::default()
+                .with_top(BorderSide::Line(Border::default().with_width(Pt(width))))
+        };
+        let cells: Vec<Cell> = (0..20_000)
+            .map(|n| Cell::default().with_borders(top(if n % 2 == 0 { 0.5 } else { 1.0 })))
+            .collect();
+        let table = Table::default()
+            .with_grid(vec![Pt(0.01); 20_000])
+            .with_rows(vec![row(cells)]);
+        let (_, bands) = laid(&document, &table, (400.0, &[]));
+        assert_eq!(bands.len(), 1);
+        assert!(
+            (bands[0].height.0 - 1.0).abs() < 1e-9,
+            "{}",
+            bands[0].height.0
+        );
+    }
+
+    #[test]
+    fn a_merged_cell_s_room_takes_in_the_borders_between_its_rows() {
+        // Borders of 6 pt everywhere: a merged cell of three lines (60 pt) over two rows
+        // of one line has 20 + 6 + 20 pt; the last row grows by 14 pt, not by 20.
+        let (document, style) = document(CompatMode::Word2013);
+        let table = Table::default()
+            .with_grid([Pt(100.0), Pt(100.0)])
+            .with_props(TableProps::default().with_borders(borders(6.0)))
+            .with_rows(vec![
+                row(vec![
+                    cell(vec![lines(style, 3, "A")]).with_vertical_merge(VerticalMerge::Restart),
+                    cell(vec![lines(style, 1, "A")]),
+                ]),
+                row(vec![
+                    cell(vec![]).with_vertical_merge(VerticalMerge::Continue),
+                    cell(vec![lines(style, 1, "A")]),
+                ]),
+            ]);
+        let (_, bands) = laid(&document, &table, (400.0, &[]));
+        let heights: Vec<f64> = bands.iter().map(|band| band.height.0).collect();
+        assert_eq!(heights, [6.0 + 20.0 + 6.0 + 34.0 + 6.0]);
+    }
+
+    #[test]
+    fn what_tables_lay_out_otherwise_than_word_is_reported() {
+        let (document, style) = document(CompatMode::Word2013);
+        let has = |messages: &[String], start: &str| {
+            messages.iter().any(|message| message.starts_with(start))
+        };
+        // A column wider than 22 inches is laid out that wide.
+        let wide = Table::default()
+            .with_grid([Pt(2000.0)])
+            .with_rows(vec![row(vec![cell(vec![lines(style, 1, "A")])])]);
+        let (lines_x, _) = laid(&document, &wide, (400.0, &[]));
+        assert_eq!(lines_x, [0.0, MAX_COLUMN]);
+        assert!(has(
+            &reported(&document, &wide, 400.0),
+            "table columns wider than"
+        ));
+        // Cells past the grid.
+        let past = Table::default()
+            .with_grid([Pt(100.0)])
+            .with_rows(vec![row(vec![
+                cell(vec![lines(style, 1, "A")]),
+                cell(vec![lines(style, 1, "B")]),
+            ])]);
+        assert!(has(
+            &reported(&document, &past, 400.0),
+            "cells past the columns of their table's grid"
+        ));
+        // Spacing between cells.
+        let spaced = Table::default()
+            .with_grid([Pt(100.0)])
+            .with_props(TableProps::default().with_cell_spacing(Pt(2.0)))
+            .with_rows(vec![row(vec![cell(vec![lines(style, 1, "A")])])]);
+        assert!(has(
+            &reported(&document, &spaced, 400.0),
+            "spacing between table cells"
+        ));
+        // An exact row height: reported only where the content is taller.
+        let exact = |height: f64| {
+            Table::default().with_grid([Pt(100.0)]).with_rows(vec![
+                row(vec![cell(vec![lines(style, 2, "A")])])
+                    .with_height(RowHeight::Exact(Pt(height))),
+            ])
+        };
+        let note = "content taller than an exact row height";
+        assert!(has(&reported(&document, &exact(30.0), 400.0), note));
+        assert!(!has(&reported(&document, &exact(40.0), 400.0), note));
+        // A continuing cell with content draws none of it.
+        let merged = |text: bool| {
+            let blocks = if text {
+                vec![lines(style, 1, "B")]
+            } else {
+                vec![Paragraph::new(style).into()]
+            };
+            Table::default().with_grid([Pt(100.0)]).with_rows(vec![
+                row(vec![
+                    cell(vec![lines(style, 1, "A")]).with_vertical_merge(VerticalMerge::Restart),
+                ]),
+                row(vec![
+                    cell(blocks).with_vertical_merge(VerticalMerge::Continue),
+                ]),
+            ])
+        };
+        let note = "the content of a cell merged into the cell above";
+        assert!(has(&reported(&document, &merged(true), 400.0), note));
+        assert!(!has(&reported(&document, &merged(false), 400.0), note));
+    }
+
+    #[test]
+    fn a_hidden_mark_hides_only_a_cell_without_content() {
+        // A cell hiding its mark whose content is a nested table still draws the table.
+        let (document, style) = document(CompatMode::Word2013);
+        let nested = Table::default()
+            .with_grid([Pt(80.0)])
+            .with_rows(vec![row(vec![cell(vec![lines(style, 1, "N")])])]);
+        let table = Table::default()
+            .with_grid([Pt(100.0)])
+            .with_rows(vec![row(vec![
+                cell(vec![nested.into()]).with_hide_mark(true),
+            ])]);
+        let (_, bands) = laid(&document, &table, (400.0, &[]));
+        let texts: Vec<String> = glyphs(&bands[0]).into_iter().map(|(_, _, t)| t).collect();
+        assert_eq!(texts, ["N"]);
+        assert!((bands[0].height.0 - 20.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_last_row_s_lines_reach_through_the_bottom_border() {
+        // Borders of 2 pt: one row of one line is 24 pt high with its top and bottom
+        // borders, and its vertical lines run all of it.
+        let (document, style) = document(CompatMode::Word2013);
+        let table = Table::default()
+            .with_grid([Pt(100.0)])
+            .with_props(TableProps::default().with_borders(borders(2.0)))
+            .with_rows(vec![row(vec![cell(vec![lines(style, 1, "A")])])]);
+        let (_, bands) = laid(&document, &table, (400.0, &[]));
+        let verticals: Vec<(f64, f64)> = drawn_lines(&bands[0])
+            .into_iter()
+            .filter(|(x0, _, x1, _, _)| (x0 - x1).abs() < 1e-9)
+            .map(|(_, y0, _, y1, _)| (y0, y1))
+            .collect();
+        assert_eq!(verticals, [(0.0, 24.0), (0.0, 24.0)]);
+    }
+
+    #[test]
+    fn a_cell_s_text_ends_at_its_end_margin() {
+        // Text at the end of a cell 100 pt wide ends 50 pt before its right edge with an
+        // end margin of 50 pt, where it ends at the edge with none.
+        use crate::ir::Alignment;
+        let (document, style) = document(CompatMode::Word2010);
+        let end = |margin: f64| {
+            let paragraph = Paragraph::new(style)
+                .with_props(ParagraphProps::default().with_alignment(Alignment::End))
+                .with_inlines([Inline::text("A", style)]);
+            let table = Table::default()
+                .with_grid([Pt(100.0)])
+                .with_rows(vec![row(vec![
+                    Cell::default()
+                        .with_margins(Some(CellMargins::default().with_end(Pt(margin))))
+                        .with_blocks([paragraph.into()]),
+                ])]);
+            let (_, bands) = laid(&document, &table, (400.0, &[]));
+            glyphs(&bands[0])[0].0
+        };
+        assert!((end(0.0) - end(50.0) - 50.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn table_shading_fills_the_table_and_is_the_background_of_its_text() {
+        // Borders of 2 pt, black shading: the fill runs from the top border through the
+        // bottom one, 24 pt, and automatic text on it is white.
+        let (document, style) = document(CompatMode::Word2013);
+        let black = Shading::default().with_fill(ColorValue::Rgb(Color::BLACK));
+        let table = Table::default()
+            .with_grid([Pt(100.0)])
+            .with_props(
+                TableProps::default()
+                    .with_borders(borders(2.0))
+                    .with_shading(Some(black)),
+            )
+            .with_rows(vec![row(vec![cell(vec![lines(style, 1, "A")])])]);
+        let (_, bands) = laid(&document, &table, (400.0, &[]));
+        let fills: Vec<(f64, f64, Color)> = bands[0]
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                DisplayItem::Rect {
+                    at, height, color, ..
+                } => Some((at.y.0, height.0, *color)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fills, [(0.0, 24.0, Color::BLACK)]);
+        let colors: Vec<Color> = bands[0]
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                DisplayItem::Glyphs(run) => Some(run.color),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(colors, [Color::WHITE]);
+    }
+
+    #[test]
+    fn word_2010_pulls_a_table_out_by_its_first_cell_s_own_margin() {
+        // Word's render of E-table-indent-14 (table H): the first cell's own start margin,
+        // not the table's, pulls the table out.
+        let (document, style) = document(CompatMode::Word2010);
+        let table = Table::default()
+            .with_grid([Pt(100.0)])
+            .with_props(TableProps::default().with_indent(Pt(36.0)))
+            .with_rows(vec![row(vec![
+                cell(vec![lines(style, 1, "A")])
+                    .with_margins(Some(CellMargins::default().with_start(Pt(10.0)))),
+            ])]);
+        let (lines_x, _) = laid(&document, &table, (400.0, &[]));
+        assert_eq!(lines_x, [26.0, 126.0]);
     }
 }
