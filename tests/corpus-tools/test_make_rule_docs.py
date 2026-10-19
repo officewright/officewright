@@ -2814,6 +2814,9 @@ class Packages(unittest.TestCase):
             f"{W}docDefaults/{W}pPrDefault/{W}pPr")
         # Level 1: neither the level that names the style nor level 0.
         self.assertEqual(num_pr_of(defaults, f"{W}numPr"), {"ilvl": "1"})
+        doc = next(doc for doc in self.docs if doc.name == "E-list-level-linked-defaults")
+        self.assertIn("the document defaults give level 1 and level 2 of the list names the style",
+                      doc.purpose)
         labels = ["".join(t.text for t in p.iter(f"{W}t")) for p in paragraphs]
         self.assertEqual(len(paragraphs), 2)
         self.assertIn("the document defaults give level 1", labels[0])
