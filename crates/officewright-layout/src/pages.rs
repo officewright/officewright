@@ -18,7 +18,7 @@ use crate::ir::{
     Block, CompatFlag, CompatMode, Document, FieldKind, Inline, MAX_TABLE_DEPTH, PageSetup,
     PageVerticalAlign, Paragraph, ParagraphProps, Section, SectionStart, Table,
 };
-use crate::itemize::FieldValues;
+use crate::itemize::{self, FieldValues};
 use crate::lines::{LineEnd, PieceKind};
 use crate::lists::{Counters, Label};
 use crate::paragraph::{self, ParagraphLayout};
@@ -275,6 +275,9 @@ struct Laid<S> {
     /// layouts.
     #[cfg_attr(not(test), allow(dead_code))] // reason: read by the tests of that bound only
     most_held: (usize, usize),
+    /// How many times a header or footer was laid out in the last pass.
+    #[cfg_attr(not(test), allow(dead_code))] // reason: read by the tests of that bound only
+    frames_laid: usize,
 }
 
 /// Lays out the body of every section of `document` on pages, at most `max_pages` of
@@ -290,7 +293,7 @@ pub(crate) fn paginate(
         fonts,
         shaper,
         max_pages,
-        MAX_FRAME_DRAWN,
+        (MAX_FRAME_DRAWN, MAX_FRAME_LAID),
         Vec::new,
     )?;
     Ok(Paginated {
@@ -310,17 +313,26 @@ pub(crate) fn paginate_into<S: PageSink>(
     max_pages: usize,
     sink: impl FnMut() -> S,
 ) -> Result<S> {
-    paginate_with(document, fonts, shaper, max_pages, MAX_FRAME_DRAWN, sink).map(|laid| laid.sink)
+    paginate_with(
+        document,
+        fonts,
+        shaper,
+        max_pages,
+        (MAX_FRAME_DRAWN, MAX_FRAME_LAID),
+        sink,
+    )
+    .map(|laid| laid.sink)
 }
 
 /// [`paginate_into`], with headers and footers drawing at most `max_frame_drawn` glyphs
-/// and shapes in all.
+/// and shapes in all, and laying out at most `max_frame_laid` in a pass, by
+/// [`layout_cost`].
 fn paginate_with<S: PageSink>(
     document: &Document,
     fonts: &mut Fonts<'_>,
     shaper: &mut Shaper,
     max_pages: usize,
-    max_frame_drawn: usize,
+    (max_frame_drawn, max_frame_laid): (usize, usize),
     mut sink: impl FnMut() -> S,
 ) -> Result<Laid<S>> {
     let flow = flow(document, fonts)?;
@@ -346,11 +358,13 @@ fn paginate_with<S: PageSink>(
             most_held: 0,
             layouts_held: 0,
             most_layouts: 0,
+            frames_laid: 0,
             cursor: 0.0,
             above: None,
             next_number: 1,
             leaders: LeaderBudget::default(),
             frame_budget: max_frame_drawn,
+            frame_laid_budget: max_frame_laid,
             totals: totals.clone(),
             frames: HashMap::new(),
         };
@@ -375,6 +389,7 @@ fn paginate_with<S: PageSink>(
                 sink: pager.sink,
                 lines,
                 most_held: (pager.most_held, pager.most_layouts),
+                frames_laid: pager.frames_laid,
             });
         }
         totals = found;
@@ -552,6 +567,13 @@ const MAX_FRAME_WORK: usize = 256;
 /// so without it a short document of many pages could draw without bound.
 const MAX_FRAME_DRAWN: usize = 1 << 20;
 
+/// The most the headers and footers of a document lay out in a pass, on every page
+/// together, by [`layout_cost`]; past it they are left out as past [`MAX_FRAME_DRAWN`]. A
+/// frame with a `PAGE` field is laid out again for every page, so without it one that lays
+/// out much and draws little, such as one of many tabs or breaks, would cost the whole of
+/// it on every page (#374).
+const MAX_FRAME_LAID: usize = 1 << 20;
+
 /// A header or footer as each pass prepares it once: the paragraphs that may be drawn,
 /// in order (the first [`MAX_FRAME_WORK`] of a header, the last of a footer), each
 /// with whether it has a field the layout computes; whether any of them has a `PAGE`
@@ -622,8 +644,10 @@ struct Checkpoint {
     next_number: u32,
     /// The leader glyphs the run could still draw.
     leaders: LeaderBudget,
-    /// The glyphs and shapes headers and footers could still draw.
+    /// The glyphs and shapes headers and footers could still draw, and what they could
+    /// still lay out.
     frame_budget: usize,
+    frame_laid_budget: usize,
     /// Whether nothing was on the page yet.
     at_top: bool,
 }
@@ -658,6 +682,8 @@ struct Pager<'d, 'f, 'b, S> {
     /// The paragraph layouts held, and the most at once.
     layouts_held: usize,
     most_layouts: usize,
+    /// How many times a header or footer was laid out.
+    frames_laid: usize,
     /// The top of what comes next on the current page: under the last line placed,
     /// without the space below it.
     cursor: f64,
@@ -668,9 +694,10 @@ struct Pager<'d, 'f, 'b, S> {
     next_number: u32,
     /// The leader glyphs the run may still draw.
     leaders: LeaderBudget,
-    /// The glyphs and shapes headers and footers may still draw, what
-    /// [`paginate_with`] is given at first.
+    /// The glyphs and shapes headers and footers may still draw, and what they may still
+    /// lay out by [`layout_cost`], what [`paginate_with`] is given at first.
     frame_budget: usize,
+    frame_laid_budget: usize,
     /// The page counts of the pass before, for `NUMPAGES` and `SECTIONPAGES`.
     totals: Totals,
     /// The last layout of each header and footer, by section, side and kind: kept while
@@ -1639,7 +1666,10 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
     /// field values are `values`, `room.0` wide on a page `room.1` high: the last layout of
     /// it while its `PAGE` fields show the same; otherwise laid out again, its paragraphs
     /// without fields the layout computes taken from the last layout. A page touches at
-    /// most [`MAX_FRAME_WORK`] of its work: the rest is walked once a pass.
+    /// most [`MAX_FRAME_WORK`] of its work: the rest is walked once a pass. Past what
+    /// headers and footers may draw or lay out, nothing of them is laid out: the last
+    /// layout stands in for the room it takes, or an empty one for a frame never laid out,
+    /// which is then reported.
     fn cached_frame(
         &mut self,
         ir: &'d Section,
@@ -1651,6 +1681,11 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
     ) -> Result<Rc<Frame<'d>>> {
         let key = (section, header, kind);
         let last = self.frames.get(&key).cloned();
+        // Past the budget of what headers and footers draw, nothing more of them is
+        // drawn, so none is laid out (#374).
+        if self.frame_budget == 0 {
+            return Ok(self.stand_in(last, ir, header, kind));
+        }
         let candidates = match &last {
             Some(frame) => Rc::clone(&frame.candidates),
             None => Rc::new(self.candidates(ir, section, header, kind)?),
@@ -1661,9 +1696,47 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         if let Some(frame) = last.as_ref().filter(|frame| frame.values == shown) {
             return Ok(Rc::clone(frame));
         }
+        // Past what they may lay out, none is laid out either, and none is drawn any more,
+        // since the layouts that stand in show the numbers of other pages.
+        if self.frame_laid_budget == 0 {
+            self.frame_budget = 0;
+            return Ok(self.stand_in(last, ir, header, kind));
+        }
         let frame = Rc::new(self.frame(candidates, (values, shown), room, last)?);
+        self.frames_laid += 1;
         self.frames.insert(key, Rc::clone(&frame));
         Ok(frame)
+    }
+
+    /// What stands in for the header (`header`) or footer of `kind` of `section` past what
+    /// headers and footers may draw or lay out: its `last` layout, for the room it takes,
+    /// or, for one never laid out, an empty one, which takes none and is reported when the
+    /// frame has content (painting reports the others). The empty one is not kept as the
+    /// frame's last layout, which it must never be taken for.
+    fn stand_in(
+        &mut self,
+        last: Option<Rc<Frame<'d>>>,
+        ir: &Section,
+        header: bool,
+        kind: Kind,
+    ) -> Rc<Frame<'d>> {
+        if let Some(last) = last {
+            return last;
+        }
+        if !frame_blocks(ir, header, kind).is_empty() {
+            self.report_frames_left_out();
+        }
+        Rc::new(Frame {
+            candidates: Rc::new(Candidates {
+                parts: Vec::new(),
+                page_field: false,
+                header,
+                location: Location::default(),
+            }),
+            parts: Vec::new(),
+            height: 0.0,
+            values: None,
+        })
     }
 
     /// The [`Candidates`] of the header (`header`) or footer of `kind` of section
@@ -1675,11 +1748,11 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         header: bool,
         kind: Kind,
     ) -> Result<Candidates<'d>> {
-        let set = if header { ir.headers() } else { ir.footers() };
-        let (blocks, name) = match kind {
-            Kind::First => (set.first(), "first"),
-            Kind::Even => (set.even(), "even"),
-            Kind::Primary => (set.primary(), "primary"),
+        let blocks = frame_blocks(ir, header, kind);
+        let name = match kind {
+            Kind::First => "first",
+            Kind::Even => "even",
+            Kind::Primary => "primary",
         };
         let mut location = Location::default();
         location.push(Step::Field("sections"));
@@ -1819,7 +1892,14 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             }
             let laid = match reusable.get(&index) {
                 Some(laid) => Rc::clone(laid),
-                None => Rc::new(self.frame_part(part, values, width)),
+                None => {
+                    let cost = match &part.content {
+                        Content::Paragraph(paragraph, _) => paragraph_cost(document, paragraph),
+                        Content::Table(table, _) => table_cost(document, table),
+                    };
+                    self.frame_laid_budget = self.frame_laid_budget.saturating_sub(cost);
+                    Rc::new(self.frame_part(part, values, width))
+                }
             };
             taken += gap + laid.height();
             before = Some(part);
@@ -1947,16 +2027,22 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 items.truncate(start);
                 self.frame_budget = 0;
             }
-            self.fonts.report_once(
-                ReportKind::Overflow,
-                &Location::default(),
-                format!(
-                    "headers and footers are left out past {MAX_FRAME_DRAWN} glyphs and shapes \
-                     drawn on all pages together"
-                ),
-            );
+            self.report_frames_left_out();
             break;
         }
+    }
+
+    /// Reports, once, that headers and footers are left out past what they may draw or lay
+    /// out on all pages together.
+    fn report_frames_left_out(&mut self) {
+        self.fonts.report_once(
+            ReportKind::Overflow,
+            &Location::default(),
+            format!(
+                "headers and footers are left out past {MAX_FRAME_DRAWN} glyphs and shapes \
+                 drawn, or {MAX_FRAME_LAID} characters and pieces laid out, on all pages together"
+            ),
+        );
     }
 
     /// The body of the current page.
@@ -1990,6 +2076,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             next_number: self.next_number,
             leaders: self.leaders,
             frame_budget: self.frame_budget,
+            frame_laid_budget: self.frame_laid_budget,
             at_top: self.page_is_empty(),
         }
     }
@@ -2013,9 +2100,77 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         self.cursor = checkpoint.cursor;
         self.above = checkpoint.above;
         self.frame_budget = checkpoint.frame_budget;
+        self.frame_laid_budget = checkpoint.frame_laid_budget;
         self.next_number = checkpoint.next_number;
         self.leaders = checkpoint.leaders;
     }
+}
+
+/// The blocks of the header (`header`) or footer of `kind` of `section`.
+fn frame_blocks(section: &Section, header: bool, kind: Kind) -> &[Block] {
+    let set = if header {
+        section.headers()
+    } else {
+        section.footers()
+    };
+    match kind {
+        Kind::First => set.first(),
+        Kind::Even => set.even(),
+        Kind::Primary => set.primary(),
+    }
+}
+
+/// What laying out `blocks` of `document` again costs, as [`MAX_FRAME_LAID`] counts it:
+/// one for each paragraph and each inline, the bytes of their text, the stored results of
+/// fields the layout does not compute, and a table's rows, cells and grid columns, nested
+/// tables' included. A hidden inline, which is not laid out, costs one.
+fn layout_cost(document: &Document, blocks: &[Block]) -> usize {
+    blocks
+        .iter()
+        .map(|block| match block {
+            Block::Paragraph(paragraph) => paragraph_cost(document, paragraph),
+            Block::Table(table) => table_cost(document, table),
+        })
+        .fold(0, usize::saturating_add)
+}
+
+/// [`layout_cost`] of `paragraph`.
+fn paragraph_cost(document: &Document, paragraph: &Paragraph) -> usize {
+    paragraph
+        .inlines()
+        .iter()
+        .map(|inline| inline_cost(document, inline))
+        .fold(1, usize::saturating_add)
+}
+
+/// [`layout_cost`] of `inline`. Headers and footers are laid out with field values, so a
+/// field the layout computes shows its number, not its stored result; the result of any
+/// other field is laid out, and counts (a result holds no fields).
+fn inline_cost(document: &Document, inline: &Inline) -> usize {
+    if itemize::hidden(document, inline) {
+        return 1;
+    }
+    match inline {
+        Inline::Text { text, .. } => text.len().max(1),
+        Inline::Field(field) if !itemize::computed(field.kind()) => field
+            .result()
+            .iter()
+            .map(|inline| inline_cost(document, inline))
+            .fold(1, usize::saturating_add),
+        _ => 1,
+    }
+}
+
+/// [`layout_cost`] of `table`.
+fn table_cost(document: &Document, table: &Table) -> usize {
+    table
+        .rows()
+        .iter()
+        .flat_map(|row| row.cells())
+        .map(|cell| layout_cost(document, cell.blocks()).saturating_add(1))
+        .fold(0, usize::saturating_add)
+        .saturating_add(table.rows().len())
+        .saturating_add(table.grid().len())
 }
 
 /// The page `setup` gives, numbered `number`, as floating objects are positioned on it.
@@ -2151,7 +2306,7 @@ mod tests {
             &mut fonts,
             &mut shaper,
             1000,
-            MAX_FRAME_DRAWN,
+            (MAX_FRAME_DRAWN, MAX_FRAME_LAID),
             Vec::new,
         )
         .expect("pages");
@@ -3001,8 +3156,15 @@ mod tests {
         let book = book(vec![minimal()]);
         let mut fonts = Fonts::new(&book);
         let mut shaper = Shaper::new();
-        let laid =
-            paginate_with(&document, &mut fonts, &mut shaper, 100, 4, Vec::new).expect("pages");
+        let laid = paginate_with(
+            &document,
+            &mut fonts,
+            &mut shaper,
+            100,
+            (4, MAX_FRAME_LAID),
+            Vec::new,
+        )
+        .expect("pages");
         let drawn: Vec<usize> = laid
             .sink
             .iter()
@@ -3046,8 +3208,15 @@ mod tests {
         let book = book(vec![minimal()]);
         let mut fonts = Fonts::new(&book);
         let mut shaper = Shaper::new();
-        let laid =
-            paginate_with(&document, &mut fonts, &mut shaper, 100, 3, Vec::new).expect("pages");
+        let laid = paginate_with(
+            &document,
+            &mut fonts,
+            &mut shaper,
+            100,
+            (3, MAX_FRAME_LAID),
+            Vec::new,
+        )
+        .expect("pages");
         let drawn: Vec<usize> = laid
             .sink
             .iter()
@@ -4939,6 +5108,435 @@ mod tests {
     }
 
     #[test]
+    fn no_header_is_laid_out_past_the_budget_of_what_headers_draw() {
+        use crate::ir::FieldKind;
+
+        // Issue #374: a header with a `PAGE` field is laid out again for each page, but
+        // past the budget of what headers and footers draw nothing more of it is drawn, so
+        // it is not laid out either. A budget of 11 draws the page number on a few of 100
+        // pages; the rest keep the room the header takes and lay out none.
+        let section = |style, pages: usize| {
+            let blocks: Vec<Block> = (0..pages)
+                .map(|n| lines(style, 1, spacing(0.0, 0.0).with_page_break_before(n > 0)))
+                .collect();
+            Section::new(close_frames())
+                .with_headers(
+                    HeaderFooterSet::default().with_primary([fields(style, vec![FieldKind::Page])]),
+                )
+                .with_blocks(blocks)
+        };
+        let lay = |document: &Document| {
+            let book = book(vec![minimal()]);
+            let mut fonts = Fonts::new(&book);
+            let mut shaper = Shaper::new();
+            let laid = paginate_with(
+                document,
+                &mut fonts,
+                &mut shaper,
+                1000,
+                (11, MAX_FRAME_LAID),
+                Vec::new,
+            )
+            .expect("pages");
+            (laid, messages(&fonts.into_report()))
+        };
+        // The pages whose header is drawn: the body's text is "A", the header's a number.
+        let numbered = |page: &Page| texts(page).iter().any(|text| text != "A");
+        let (laid, report) = lay(&document(|style| vec![section(style, 100)]));
+        assert_eq!(laid.sink.len(), 100);
+        let drawn = laid.sink.iter().filter(|page| numbered(page)).count();
+        assert!(drawn > 0 && drawn < 10, "{drawn}");
+        // Laid out: the header of each page that draws it, of the next, whose drawing
+        // spends the budget, and the empty footer once.
+        assert_eq!(laid.frames_laid, drawn + 2, "{drawn}");
+        let tops: Vec<f64> = laid.sink.iter().map(|page| page.body.top.0).collect();
+        assert!(tops.iter().all(|&top| top == tops[0]), "{tops:?}");
+        assert!(
+            report.iter().any(|m| m.contains("left out past")),
+            "{report:?}"
+        );
+        // A section whose header was never laid out before the budget was spent lays out
+        // none of its own either.
+        let (two, _) = lay(&document(|style| {
+            vec![section(style, 50), section(style, 50)]
+        }));
+        assert_eq!(two.sink.len(), 100);
+        assert_eq!(two.frames_laid, laid.frames_laid);
+        assert!(!two.sink[50..].iter().any(numbered));
+    }
+
+    /// `document` laid out with budgets of `bounds` for what headers and footers draw and
+    /// lay out, and the messages of the report.
+    fn laid_within(document: &Document, bounds: (usize, usize)) -> (Laid<Vec<Page>>, Vec<String>) {
+        let book = book(vec![minimal()]);
+        let mut fonts = Fonts::new(&book);
+        let mut shaper = Shaper::new();
+        let laid = paginate_with(document, &mut fonts, &mut shaper, 1000, bounds, Vec::new)
+            .expect("pages");
+        (laid, messages(&fonts.into_report()))
+    }
+
+    #[test]
+    fn a_header_never_laid_out_past_the_budget_is_reported() {
+        // Review of #379: section 1 of 5 pages with a header costing 2 a page; a budget of
+        // 10 is spent by its headers exactly. A section 2 with a header and a footer of its
+        // own has neither laid out nor drawn, and that is reported; one with neither leaves
+        // nothing out, and nothing is reported.
+        let document = |frames: bool| {
+            document(|style| {
+                let frame = |text: &str| [text_paragraph(style, text, spacing(0.0, 0.0))];
+                let pages = |count: usize| -> Vec<Block> {
+                    (0..count)
+                        .map(|n| lines(style, 1, spacing(0.0, 0.0).with_page_break_before(n > 0)))
+                        .collect()
+                };
+                let first = Section::new(close_frames())
+                    .with_headers(HeaderFooterSet::default().with_primary(frame("H")))
+                    .with_blocks(pages(5));
+                let second = Section::new(close_frames()).with_blocks(pages(3));
+                let second = if frames {
+                    second
+                        .with_headers(HeaderFooterSet::default().with_primary(frame("S")))
+                        .with_footers(HeaderFooterSet::default().with_primary(frame("T")))
+                } else {
+                    second
+                };
+                vec![first, second]
+            })
+        };
+        let left_out = |report: &[String]| report.iter().any(|m| m.contains("left out past"));
+        let (laid, report) = laid_within(&document(true), (10, MAX_FRAME_LAID));
+        let framed = laid
+            .sink
+            .iter()
+            .filter(|page| texts(page).iter().any(|text| text != "A"))
+            .count();
+        assert_eq!(framed, 5);
+        assert!(left_out(&report), "{report:?}");
+        let (_, report) = laid_within(&document(false), (10, MAX_FRAME_LAID));
+        assert!(!left_out(&report), "{report:?}");
+    }
+
+    #[test]
+    fn a_header_field_whose_result_lays_out_much_is_bounded_too() {
+        use crate::ir::{Field, FieldKind};
+
+        // Re-check of #379: a header of a `PAGE` field and a `DATE` field whose stored
+        // result is 1,000 tabs: with 5,000 to lay out, it is laid out and drawn on five
+        // pages, then reported.
+        let document = document(|style| {
+            let date = Field::new(FieldKind::Other("DATE".into()), style)
+                .with_result((0..1000).map(|_| Inline::tab(style)).collect::<Vec<_>>());
+            let header = Paragraph::new(style)
+                .with_props(spacing(0.0, 0.0))
+                .with_inlines(vec![
+                    Inline::Field(Field::new(FieldKind::Page, style)),
+                    Inline::Field(date),
+                ]);
+            let blocks: Vec<Block> = (0..100)
+                .map(|n| lines(style, 1, spacing(0.0, 0.0).with_page_break_before(n > 0)))
+                .collect();
+            vec![
+                Section::new(close_frames())
+                    .with_headers(HeaderFooterSet::default().with_primary([header.into()]))
+                    .with_blocks(blocks),
+            ]
+        });
+        let (laid, report) = laid_within(&document, (MAX_FRAME_DRAWN, 5000));
+        let numbered = laid
+            .sink
+            .iter()
+            .filter(|page| texts(page).iter().any(|text| text != "A"))
+            .count();
+        assert_eq!(numbered, 5);
+        assert!(
+            report.iter().any(|m| m.contains("left out past")),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn what_a_header_does_not_lay_out_costs_it_nothing_of_the_bound() {
+        use crate::ir::{Field, FieldKind};
+
+        // Second re-check of #379: a header's `PAGE` field shows the page's number, not
+        // its stored result, and hidden text is not laid out, so neither counts towards
+        // what headers lay out. A stored result of 1,000 tabs, or 10,000 hidden
+        // characters, beside the field, with 5,000 to lay out: drawn on all 100 pages.
+        let numbered = |hidden_text: bool| {
+            let mut document = Document::default();
+            let style = document.add_run_style(
+                RunStyle::default()
+                    .with_fonts(RunFonts::new("Officewright Test"))
+                    .with_size(Pt(10.0)),
+            );
+            let hidden = document.add_run_style(
+                RunStyle::default()
+                    .with_fonts(RunFonts::new("Officewright Test"))
+                    .with_size(Pt(10.0))
+                    .with_hidden(true),
+            );
+            let inlines = if hidden_text {
+                vec![
+                    Inline::Field(Field::new(FieldKind::Page, style)),
+                    Inline::text("x".repeat(10_000), hidden),
+                ]
+            } else {
+                vec![Inline::Field(
+                    Field::new(FieldKind::Page, style)
+                        .with_result((0..1000).map(|_| Inline::tab(style)).collect::<Vec<_>>()),
+                )]
+            };
+            let header = Paragraph::new(style)
+                .with_props(spacing(0.0, 0.0))
+                .with_inlines(inlines);
+            let blocks: Vec<Block> = (0..100)
+                .map(|n| lines(style, 1, spacing(0.0, 0.0).with_page_break_before(n > 0)))
+                .collect();
+            document.add_section(
+                Section::new(close_frames())
+                    .with_headers(HeaderFooterSet::default().with_primary([header.into()]))
+                    .with_blocks(blocks),
+            );
+            let (laid, report) = laid_within(&document, (MAX_FRAME_DRAWN, 5000));
+            assert!(
+                !report.iter().any(|m| m.contains("left out past")),
+                "{report:?}"
+            );
+            laid.sink
+                .iter()
+                .filter(|page| texts(page).iter().any(|text| text != "A"))
+                .count()
+        };
+        assert_eq!(numbered(false), 100);
+        assert_eq!(numbered(true), 100);
+    }
+
+    #[test]
+    fn results_a_header_does_not_lay_out_cost_it_nothing_of_the_bound() {
+        use crate::ir::{Field, FieldKind};
+
+        // Third re-check of #379. Beside a header's `PAGE` field: a `NUMPAGES` or `SECTIONPAGES` field whose stored
+        // result is 1,000 tabs, or a `DATE` field whose stored result is 10,000 hidden
+        // characters. None of them is laid out, so with 5,000 to lay out the header is drawn
+        // on all 100 pages, and nothing is reported.
+        let numbered = |case: u8| {
+            let mut document = Document::default();
+            let style = document.add_run_style(
+                RunStyle::default()
+                    .with_fonts(RunFonts::new("Officewright Test"))
+                    .with_size(Pt(10.0)),
+            );
+            let hidden = document.add_run_style(
+                RunStyle::default()
+                    .with_fonts(RunFonts::new("Officewright Test"))
+                    .with_size(Pt(10.0))
+                    .with_hidden(true),
+            );
+            let tabs = || (0..1000).map(|_| Inline::tab(style)).collect::<Vec<_>>();
+            let other = match case {
+                0 => Field::new(FieldKind::NumPages, style).with_result(tabs()),
+                1 => Field::new(FieldKind::SectionPages, style).with_result(tabs()),
+                _ => Field::new(FieldKind::Other("DATE".into()), style)
+                    .with_result([Inline::text("x".repeat(10_000), hidden)]),
+            };
+            let header = Paragraph::new(style)
+                .with_props(spacing(0.0, 0.0))
+                .with_inlines(vec![
+                    Inline::Field(Field::new(FieldKind::Page, style)),
+                    Inline::Field(other),
+                ]);
+            let blocks: Vec<Block> = (0..100)
+                .map(|n| lines(style, 1, spacing(0.0, 0.0).with_page_break_before(n > 0)))
+                .collect();
+            document.add_section(
+                Section::new(close_frames())
+                    .with_headers(HeaderFooterSet::default().with_primary([header.into()]))
+                    .with_blocks(blocks),
+            );
+            let (laid, report) = laid_within(&document, (MAX_FRAME_DRAWN, 5000));
+            let count = laid
+                .sink
+                .iter()
+                .filter(|page| texts(page).iter().any(|text| text != "A"))
+                .count();
+            (count, report.iter().any(|m| m.contains("left out past")))
+        };
+        assert_eq!(numbered(0), (100, false));
+        assert_eq!(numbered(1), (100, false));
+        assert_eq!(numbered(2), (100, false));
+    }
+
+    #[test]
+    fn a_header_table_that_lays_out_much_and_draws_little_is_bounded_too() {
+        use crate::ir::FieldKind;
+
+        // Re-check of #379: a header table of a `PAGE` field in one cell and 1,000 tabs in
+        // the other costs 1,008 (cells 3 and 1,002, a row, two columns): with 5,000 to lay
+        // out, it is laid out and drawn on five pages, then left out and reported.
+        let document = document(|style| {
+            let tabs = Paragraph::new(style)
+                .with_props(spacing(0.0, 0.0))
+                .with_inlines((0..1000).map(|_| Inline::tab(style)).collect::<Vec<_>>());
+            let table: Block = Table::default()
+                .with_grid([Pt(100.0), Pt(100.0)])
+                .with_rows(vec![Row::default().with_cells(vec![
+                    Cell::default().with_blocks([fields(style, vec![FieldKind::Page])]),
+                    Cell::default().with_blocks([tabs.into()]),
+                ])])
+                .into();
+            let blocks: Vec<Block> = (0..100)
+                .map(|n| lines(style, 1, spacing(0.0, 0.0).with_page_break_before(n > 0)))
+                .collect();
+            vec![
+                Section::new(close_frames())
+                    .with_headers(HeaderFooterSet::default().with_primary([table]))
+                    .with_blocks(blocks),
+            ]
+        });
+        let (laid, report) = laid_within(&document, (MAX_FRAME_DRAWN, 5000));
+        let numbered = laid
+            .sink
+            .iter()
+            .filter(|page| texts(page).iter().any(|text| text != "A"))
+            .count();
+        assert_eq!(numbered, 5);
+        assert!(
+            report.iter().any(|m| m.contains("left out past")),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn a_frame_left_out_past_the_layout_bound_is_laid_out_on_a_page_made_again() {
+        use crate::ir::FieldKind;
+
+        // Re-check of #379: even and odd headers of a `PAGE` field, footers "F" and "E",
+        // and 6 to lay out. Page 1 spends 4. A paragraph of a `PAGE` field laid out for
+        // page 1 lands on page 2: placing it first, page 2's header spends the last 2, so
+        // its footer, never laid out, gets an empty stand-in. Page 2 made again gets 2 back
+        // and lays out its footer.
+        let mut document =
+            Document::new(crate::ir::DocumentSettings::default().with_even_and_odd_headers(true));
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        let mut blocks: Vec<Block> = (0..7).map(|_| lines(style, 1, spacing(0.0, 0.0))).collect();
+        let mut inlines = vec![Inline::Field(crate::ir::Field::new(FieldKind::Page, style))];
+        for _ in 0..14 {
+            inlines.push(Inline::line_break(BreakClear::None, style));
+            inlines.push(Inline::text("A", style));
+        }
+        blocks.push(
+            Paragraph::new(style)
+                .with_props(spacing(0.0, 0.0))
+                .with_inlines(inlines)
+                .into(),
+        );
+        let page = || [fields(style, vec![FieldKind::Page])];
+        document.add_section(
+            Section::new(close_frames())
+                .with_headers(
+                    HeaderFooterSet::default()
+                        .with_primary(page())
+                        .with_even(page()),
+                )
+                .with_footers(
+                    HeaderFooterSet::default()
+                        .with_primary([text_paragraph(style, "F", spacing(0.0, 0.0))])
+                        .with_even([text_paragraph(style, "E", spacing(0.0, 0.0))]),
+                )
+                .with_blocks(blocks),
+        );
+        let (laid, _) = laid_within(&document, (MAX_FRAME_DRAWN, 6));
+        assert!(texts(&laid.sink[1]).iter().any(|text| text == "E"));
+    }
+
+    #[test]
+    fn a_header_that_lays_out_much_and_draws_little_is_bounded_too() {
+        use crate::ir::FieldKind;
+
+        // Review of #379: a header of a `PAGE` field and 1,000 tabs draws one number but
+        // lays out a thousand tabs on every page. With 5,000 to lay out, it is laid out for
+        // five pages; after that neither laid out nor drawn, and reported.
+        let document = document(|style| {
+            let mut inlines = vec![Inline::Field(crate::ir::Field::new(FieldKind::Page, style))];
+            inlines.extend((0..1000).map(|_| Inline::tab(style)));
+            let header = Paragraph::new(style)
+                .with_props(spacing(0.0, 0.0))
+                .with_inlines(inlines);
+            let blocks: Vec<Block> = (0..100)
+                .map(|n| lines(style, 1, spacing(0.0, 0.0).with_page_break_before(n > 0)))
+                .collect();
+            vec![
+                Section::new(close_frames())
+                    .with_headers(HeaderFooterSet::default().with_primary([header.into()]))
+                    .with_blocks(blocks),
+            ]
+        });
+        let (laid, report) = laid_within(&document, (MAX_FRAME_DRAWN, 5000));
+        assert_eq!(laid.sink.len(), 100);
+        let numbered = laid
+            .sink
+            .iter()
+            .filter(|page| texts(page).iter().any(|text| text != "A"))
+            .count();
+        assert_eq!(numbered, 5);
+        // The five headers, and the empty footer once.
+        assert_eq!(laid.frames_laid, 6);
+        assert!(
+            report.iter().any(|m| m.contains("left out past")),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn a_page_laid_out_again_lays_out_its_header_again() {
+        use crate::ir::FieldKind;
+
+        // Review of #379: a header of a `PAGE` field, with a budget of 6 (three headers).
+        // Seven lines fill page 1 under it; a paragraph of a `PAGE` field and 14 more lines,
+        // laid out for page 1, lands on page 2, so pages 2 to 4 are made again: each shows
+        // its own number in its header, and page 4, past the budget, none.
+        let document = document(|style| {
+            let mut blocks: Vec<Block> =
+                (0..7).map(|_| lines(style, 1, spacing(0.0, 0.0))).collect();
+            let mut inlines = vec![Inline::Field(crate::ir::Field::new(FieldKind::Page, style))];
+            for _ in 0..14 {
+                inlines.push(Inline::line_break(BreakClear::None, style));
+                inlines.push(Inline::text("A", style));
+            }
+            blocks.push(
+                Paragraph::new(style)
+                    .with_props(spacing(0.0, 0.0))
+                    .with_inlines(inlines)
+                    .into(),
+            );
+            vec![
+                Section::new(close_frames())
+                    .with_headers(
+                        HeaderFooterSet::default()
+                            .with_primary([fields(style, vec![FieldKind::Page])]),
+                    )
+                    .with_blocks(blocks),
+            ]
+        });
+        let first = |bounds| -> Vec<String> {
+            let (laid, _) = laid_within(&document, bounds);
+            laid.sink
+                .iter()
+                .filter_map(|page| texts(page).first().cloned())
+                .collect()
+        };
+        assert_eq!(first((6, MAX_FRAME_LAID)), ["1", "2", "3", "A"]);
+        // The same with what headers may lay out as the bound: three layouts of the
+        // header's paragraph and field (2 each). The page made again gets that back too.
+        assert_eq!(first((MAX_FRAME_DRAWN, 6)), ["1", "2", "3", "A"]);
+    }
+
+    #[test]
     fn what_headers_and_footers_draw_in_all_is_bounded() {
         // A budget of 11 glyphs and shapes: a header of one "A" (a run and a glyph, 2)
         // is drawn on five pages; the 1 left does not draw the sixth, nor the rest, which
@@ -4956,8 +5554,15 @@ mod tests {
         let book = book(vec![minimal()]);
         let mut fonts = Fonts::new(&book);
         let mut shaper = Shaper::new();
-        let laid = paginate_with(&pages_of_breaks, &mut fonts, &mut shaper, 100, 11, Vec::new)
-            .expect("pages");
+        let laid = paginate_with(
+            &pages_of_breaks,
+            &mut fonts,
+            &mut shaper,
+            100,
+            (11, MAX_FRAME_LAID),
+            Vec::new,
+        )
+        .expect("pages");
         let counts: Vec<usize> = laid.sink.iter().map(|page| texts(page).len()).collect();
         assert_eq!(counts, [2, 2, 2, 2, 2, 1, 1, 1]);
         let report = fonts.into_report();
@@ -4981,7 +5586,15 @@ mod tests {
             ]
         });
         let mut fonts = Fonts::new(&book);
-        let laid = paginate_with(&moved, &mut fonts, &mut shaper, 100, 4, Vec::new).expect("pages");
+        let laid = paginate_with(
+            &moved,
+            &mut fonts,
+            &mut shaper,
+            100,
+            (4, MAX_FRAME_LAID),
+            Vec::new,
+        )
+        .expect("pages");
         let headers: Vec<String> = laid
             .sink
             .iter()

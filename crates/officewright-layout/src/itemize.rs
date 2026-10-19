@@ -319,7 +319,7 @@ impl Builder<'_, '_, '_> {
     fn inline(&mut self, inline: &Inline) {
         // Hidden text is not drawn (`w:vanish`), nor are the tabs, breaks and marks of
         // a hidden run.
-        if inline_style(inline).is_some_and(|id| self.style(id).hidden()) {
+        if hidden(self.document, inline) {
             return;
         }
         let path = self.path.clone();
@@ -664,21 +664,22 @@ impl Builder<'_, '_, '_> {
             self.inlines(field.result());
             return;
         };
+        if !computed(field.kind()) {
+            self.fonts.report_once(
+                ReportKind::FieldCached,
+                self.location,
+                "fields other than PAGE, NUMPAGES and SECTIONPAGES show the result the \
+                 document stores"
+                    .to_owned(),
+            );
+            self.inlines(field.result());
+            return;
+        }
         let (number, default) = match field.kind() {
-            FieldKind::Page => (values.page, &values.format),
             FieldKind::NumPages => (values.pages, &NumberFormat::Decimal),
             FieldKind::SectionPages => (values.section_pages, &NumberFormat::Decimal),
-            _ => {
-                self.fonts.report_once(
-                    ReportKind::FieldCached,
-                    self.location,
-                    "fields other than PAGE, NUMPAGES and SECTIONPAGES show the result the \
-                     document stores"
-                        .to_owned(),
-                );
-                self.inlines(field.result());
-                return;
-            }
+            // `PAGE`, the other kind the layout computes.
+            _ => (values.page, &values.format),
         };
         let format = field.format().as_ref().unwrap_or(default);
         let (text, decimal) = number_text(number, format);
@@ -841,6 +842,23 @@ pub(crate) fn drawn_size(style: &RunStyle, formatted: Pt, small: bool) -> Pt {
         size *= SUPERSCRIPT_SCALE;
     }
     Pt(size)
+}
+
+/// Whether the layout computes the value of a field of `kind` when it is given field
+/// values, as for headers, footers and the body: then the field's stored result is not
+/// laid out.
+pub(crate) fn computed(kind: &FieldKind) -> bool {
+    matches!(
+        kind,
+        FieldKind::Page | FieldKind::NumPages | FieldKind::SectionPages
+    )
+}
+
+/// Whether `inline` of `document` is hidden (`w:vanish`), and so not laid out.
+pub(crate) fn hidden(document: &Document, inline: &Inline) -> bool {
+    inline_style(inline)
+        .and_then(|id| document.run_style(id))
+        .is_some_and(RunStyle::hidden)
 }
 
 /// The run style of an inline that has one.
