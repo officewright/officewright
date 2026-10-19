@@ -2721,6 +2721,26 @@ fn reports_repeated_section_properties() {
     assert!(messages[2].ends_with(": a second w:type is ignored"));
 }
 
+#[test]
+fn counts_only_the_references_that_are_kept_as_repeated() {
+    // Issue #117: a reference without r:id, which is dropped, made the one with an id a
+    // second reference of its type, in either order.
+    for body in [
+        r#"<w:p/><w:sectPr><w:headerReference w:type="default" r:id="rId1"/><w:headerReference w:type="default"/></w:sectPr>"#,
+        r#"<w:p/><w:sectPr><w:headerReference w:type="default"/><w:headerReference w:type="default" r:id="rId1"/></w:sectPr>"#,
+    ] {
+        let document = open(body);
+        let properties = document.sections().next().unwrap().properties();
+        assert_eq!(properties.headers().len(), 1);
+        let messages = messages(&document);
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert!(
+            messages[0].ends_with(": 1 header or footer references without r:id are ignored"),
+            "{messages:?}"
+        );
+    }
+}
+
 fn with_settings(settings_xml: &str) -> Document {
     Document::from_bytes(package(
         DOCUMENT,

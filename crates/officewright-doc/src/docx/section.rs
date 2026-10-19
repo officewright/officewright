@@ -44,7 +44,11 @@ pub(super) fn read(
             }
             seen.push(local);
         }
-        if matches!(local, "headerReference" | "footerReference") {
+        // Only a reference that enters the model counts: one without r:id is dropped
+        // below (#117).
+        if matches!(local, "headerReference" | "footerReference")
+            && child.attribute(&names.r, "id").is_some()
+        {
             // Two of one kind are not conformant (§17.10.5); both are kept, and which
             // one Word uses is not measured.
             let kind = child
