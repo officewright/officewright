@@ -580,9 +580,10 @@ struct Pager<'d, 'f, 'b, S> {
     taken: usize,
     taken_by_section: Vec<u32>,
     /// The first page that going back to a checkpoint could still change: where a chain
-    /// of paragraphs kept with the next one starts, or where the paragraph being placed
-    /// starts when its `PAGE` fields may lay it out again. The pages before it, and before
-    /// the last, can go to the sink.
+    /// of paragraphs kept with the next one starts while the chain can still move (it
+    /// does not start at the top of a page), or where the paragraph being placed starts
+    /// when its `PAGE` fields may lay it out again or it may start such a chain. The pages
+    /// before it, and before the last, can go to the sink.
     keep_from: usize,
     /// The most pages held at once.
     most_held: usize,
@@ -621,9 +622,9 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
     fn run(&mut self, flow: &[Flowed<'d>]) -> Result<Vec<usize>> {
         let sections = self.document.sections();
         // Each paragraph's layout, with the page number its `PAGE` fields show, while it
-        // may be placed again: from where a chain kept with the next paragraph starts, or
-        // from the paragraph placed next. Those before are dropped (`dropped` of them),
-        // their number of lines kept.
+        // may be placed again: from where a chain kept with the next paragraph starts while
+        // the chain can still move, or from the paragraph placed next. Those before are
+        // dropped (`dropped` of them), their number of lines kept.
         let mut layouts: Vec<Option<(ParagraphLayout, u32)>> = Vec::new();
         layouts.resize_with(flow.len(), || None);
         let mut dropped = 0;
@@ -1844,6 +1845,16 @@ mod tests {
             )
         });
         assert_eq!(held(&all_kept), ((1..=50).collect(), (2, 1)));
+        // Nor can one paragraph of 400 lines kept with the next at the top of page 1: it
+        // holds none of its pages while it is placed.
+        let one_kept = document(|style| {
+            one_section(vec![lines(
+                style,
+                400,
+                spacing(0.0, 0.0).with_keep_next(true),
+            )])
+        });
+        assert_eq!(held(&one_kept), ((1..=50).collect(), (2, 1)));
     }
 
     /// The entries of `kind` in `report` whose message starts with `what`, as their locations.
