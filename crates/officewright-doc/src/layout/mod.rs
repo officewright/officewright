@@ -39,6 +39,7 @@ thread_local! {
         flags: 0,
         cell_copies: 0,
         cell_reads: 0,
+        label_checks: 0,
     }) };
 }
 
@@ -56,6 +57,8 @@ pub(crate) struct Work {
     pub(crate) cell_copies: usize,
     /// Cells whose properties in effect the formatting worked out.
     pub(crate) cell_reads: usize,
+    /// Levels of list instances whose labels were looked at for what they draw.
+    pub(crate) label_checks: usize,
 }
 
 /// Counts work for [`WORK`].

@@ -855,6 +855,60 @@ fn lists_what_a_list_label_asks_for_as_a_run_s() {
     ] {
         assert_eq!(labelled(emboss, false, level).len(), 1, "{level}");
     }
+    // From the next re-check: a placeholder of a deeper level makes Word ignore the whole
+    // text (MS-OI29500 2.1.283 c), a control character alone draws nothing, and the layout
+    // reads only the first 256 characters of a text, counting a placeholder as two.
+    let none_then_x = format!(
+        r#"<w:numFmt w:val="none"/><w:lvlText w:val="{}x"/>"#,
+        "%1".repeat(128)
+    );
+    for level in [
+        r#"<w:numFmt w:val="decimal"/><w:lvlText w:val="%2."/>"#,
+        r#"<w:numFmt w:val="decimal"/><w:lvlText w:val="Article %1.%2"/>"#,
+        r#"<w:numFmt w:val="decimal"/><w:lvlText w:val="&#9;"/>"#,
+        &none_then_x,
+    ] {
+        assert!(labelled(emboss, false, level).is_empty(), "{level}");
+    }
+    let none_then_x = format!(
+        r#"<w:numFmt w:val="none"/><w:lvlText w:val="{}x"/>"#,
+        "%1".repeat(127)
+    );
+    assert_eq!(labelled(emboss, false, &none_then_x).len(), 1);
+    // Characters count one each against the bound.
+    let tabs_then_x = |tabs: usize| {
+        format!(
+            r#"<w:numFmt w:val="decimal"/><w:lvlText w:val="{}x"/>"#,
+            "&#9;".repeat(tabs)
+        )
+    };
+    assert!(labelled(emboss, false, &tabs_then_x(256)).is_empty());
+    assert_eq!(labelled(emboss, false, &tabs_then_x(255)).len(), 1);
+}
+
+#[test]
+fn lists_a_label_by_the_number_formats_of_the_levels_it_names_once_per_level() {
+    // A number of a bullet level writes nothing, unless the level naming it is legal; the
+    // answer is worked out once for every item of a level of an instance.
+    let labelled = |legal: &str, items: usize| -> Vec<String> {
+        let item = r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="1"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>text</w:t></w:r></w:p>"#;
+        let numbering = format!(
+            r#"<w:numbering xmlns:w="{W}"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="-"/></w:lvl><w:lvl w:ilvl="1"><w:numFmt w:val="decimal"/>{legal}<w:lvlText w:val="%1"/><w:rPr><w:emboss/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#
+        );
+        translate(&with_parts(
+            &item.repeat(items),
+            &[("numbering", "numbering.xml", numbering)],
+        ))
+        .left_out()
+        .iter()
+        .map(|entry| entry.message().to_owned())
+        .collect()
+    };
+    assert!(labelled("", 1).is_empty());
+    assert_eq!(labelled("<w:isLgl/>", 1).len(), 1);
+    super::super::layout::WORK.set(super::super::layout::Work::default());
+    assert!(labelled("", 200).is_empty());
+    assert_eq!(super::super::layout::WORK.get().label_checks, 1);
 }
 
 #[test]

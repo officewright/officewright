@@ -18,6 +18,9 @@ pub(super) struct Lists {
     definitions: HashMap<i64, ir::ListId>,
     /// By `w:numId`; none for an instance whose definition does not exist.
     instances: HashMap<i64, Option<ir::ListInstanceId>>,
+    /// Whether the label of a level of an instance draws something, by `w:numId` and the
+    /// level: worked out once each.
+    draws: HashMap<(i64, u8), bool>,
 }
 
 impl Translator<'_> {
@@ -57,6 +60,26 @@ impl Translator<'_> {
         });
         self.lists.instances.insert(id, found);
         found
+    }
+
+    /// Whether the label of an item at `level` of the document's list instance `id`
+    /// draws something, as the layout writes it: whether the first [`MAX_LABEL_CHARS`]
+    /// counted of its level's text hold a character it draws, or a placeholder of a level
+    /// that writes its number, and no placeholder of a deeper level, which makes Word
+    /// ignore the whole text (MS-OI29500 2.1.283 c). Worked out once for each instance
+    /// and level, from the IR's levels, so that the cost does not grow with the items or
+    /// the length of a text.
+    pub(super) fn label_draws(&mut self, id: i64, level: u8) -> bool {
+        if let Some(&draws) = self.lists.draws.get(&(id, level)) {
+            return draws;
+        }
+        #[cfg(test)]
+        super::work(|work| work.label_checks += 1);
+        let draws = self
+            .list_instance(id)
+            .is_some_and(|instance| draws(&self.ir, instance, level));
+        self.lists.draws.insert((id, level), draws);
+        draws
     }
 
     /// The IR definition of the document's definition `id`, added the first time.
@@ -124,6 +147,75 @@ impl Translator<'_> {
                 _ => ir::LevelAlignment::Start,
             })
     }
+}
+
+/// The layout's bound on what it reads of a level's text, counted as it counts: a
+/// character one, a placeholder two, a piece of text with no characters one.
+const MAX_LABEL_CHARS: usize = 256;
+
+/// Whether the label of an item at `index` of `instance` draws something; see
+/// [`Translator::label_draws`].
+fn draws(ir: &ir::Document, instance: ir::ListInstanceId, index: u8) -> bool {
+    let Some(instance) = ir.list_instance(instance) else {
+        return false;
+    };
+    let levels = ir
+        .list(instance.definition())
+        .map(ir::ListDefinition::levels)
+        .unwrap_or_default();
+    let level_at = |at: u8| {
+        instance
+            .overrides()
+            .iter()
+            .find(|over| over.level() == at)
+            .and_then(|over| over.replacement().as_ref())
+            .or_else(|| levels.get(usize::from(at)))
+    };
+    let Some(level) = level_at(index) else {
+        return false;
+    };
+    let mut left = MAX_LABEL_CHARS;
+    let mut draws = false;
+    'text: for part in level.text() {
+        match part {
+            ir::LevelTextPart::Literal(text) if text.is_empty() => {
+                if left == 0 {
+                    break;
+                }
+                left -= 1;
+            }
+            ir::LevelTextPart::Literal(text) => {
+                for ch in text.chars() {
+                    if left == 0 {
+                        break 'text;
+                    }
+                    left -= 1;
+                    // The layout draws U+007F as a bullet, and no other control character
+                    // or line or paragraph separator.
+                    draws |= ch == '\u{7F}'
+                        || !(ch.is_control() || matches!(ch, '\u{2028}' | '\u{2029}'));
+                }
+            }
+            ir::LevelTextPart::Placeholder(of) => {
+                if left < 2 {
+                    break;
+                }
+                left -= 2;
+                if *of > index {
+                    return false;
+                }
+                // A missing level is written in decimal; a legal level writes every
+                // number in decimal but that of a level without numbers.
+                let format = level_at(*of).map_or(&ir::NumberFormat::Decimal, ir::Level::format);
+                let silent = matches!(format, ir::NumberFormat::None)
+                    || (!level.legal() && matches!(format, ir::NumberFormat::Bullet));
+                draws |= !silent;
+            }
+            // A part of a later version of the IR draws nothing this one knows of.
+            _ => {}
+        }
+    }
+    draws
 }
 
 /// A start number; Word does not count below 0.

@@ -7,8 +7,7 @@ use super::style::color;
 use super::{Once, Translator};
 use crate::model::properties::Frame;
 use crate::model::{
-    Border, BorderStyle, Justification, LineSpacing, ListFormat, NumberFormat, Paragraph,
-    ParagraphFormat, TabKind, TabLeader,
+    Border, BorderStyle, Justification, LineSpacing, Paragraph, ParagraphFormat, TabKind, TabLeader,
 };
 
 /// A paragraph: its formatting, its mark, its list and its content; and whether its mark
@@ -47,7 +46,8 @@ pub(super) fn paragraph<'a>(
         // and the PDF leaves out is listed as a run's is, when it shows: it is not hidden
         // and its text draws something.
         if !label.hidden() {
-            let shows = label_shows(t.document, list);
+            let shows = u8::try_from(list.level_number())
+                .is_ok_and(|level| t.label_draws(list.instance(), level));
             t.report_run_features(&label, shows);
         }
         let label = t.run_style(&label);
@@ -63,44 +63,6 @@ pub(super) fn paragraph<'a>(
         .with_inlines(inlines)
         .with_list(list);
     (paragraph, format.mark_deleted)
-}
-
-/// Whether a list item's label draws something: its level exists and its text
-/// (`w:lvlText`) has a character outside the placeholders `%1` to `%9`, or a placeholder
-/// of a level whose number is not of format `none`. A bullet's text is drawn as written.
-/// An empty text, or the number of a level of format `none` alone, draws nothing.
-fn label_shows(document: &crate::model::Document, list: &ListFormat) -> bool {
-    let Some(level) = list.level(document) else {
-        return false;
-    };
-    let Some(text) = level.text() else {
-        return false;
-    };
-    if level.number_format() == Some(NumberFormat::Bullet) {
-        return !text.is_empty();
-    }
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        let placeholder = chars
-            .peek()
-            .and_then(|next| next.to_digit(10))
-            .filter(|digit| c == '%' && (1..=9).contains(digit));
-        let Some(digit) = placeholder else {
-            return true;
-        };
-        chars.next();
-        let named = ListFormat {
-            level_number: digit as usize - 1,
-            ..list.clone()
-        };
-        let format = named
-            .level(document)
-            .and_then(|level| level.number_format());
-        if format != Some(NumberFormat::None) {
-            return true;
-        }
-    }
-    false
 }
 
 fn props(t: &mut Translator<'_>, format: &ParagraphFormat) -> ir::ParagraphProps {
