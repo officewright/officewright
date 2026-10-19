@@ -273,13 +273,15 @@ changed, and how many body paragraphs it gave another style, how fields were ren
 PDF's SHA-256 and the poppler version. `geometry.json` lists each of those properties as
 `- ` (dropped), `+ ` (added) or `~ ` (changed, old `->` new), then `owner: path
 attribute=value`, or `owner: path` for an element that sets something by being there
-(`w:b`) and `owner: default` for a style marked default. The owner is a style id, `docDefaults`, `abstractNum N`, `abstractNum N
-level L` or `num N`, with the input's ids, since Word numbers lists again when it saves; a
-list or instance of the copy that has no counterpart in the input is `copy N`. Word
-sometimes writes a language tag or number format into the re-saved copy that the input did
-not have, which says where Word ran. Such a copy is imported only when the maintainer accepts
-it (`--allow-locale`), and its Notes then list each such change after "accepted with
---allow-locale".
+(`w:b`), and `owner: default` for a style marked default. The owner is a style id,
+`docDefaults`, `abstractNum N`, `abstractNum N level L` or `num N`, with the input's ids,
+since Word numbers lists again when it saves; a list or instance of the copy that has no
+counterpart in the input is `copy N`. When the copy has another number of instances of a
+list than the input, nothing tells which is which, so their instances are not compared and
+the entry is `~ abstractNum N: num count=I -> C`. Word sometimes writes a language tag or
+number format into the re-saved copy that the input did not have, which says where Word ran.
+Such a copy is imported only when the maintainer accepts it (`--allow-locale`), and its Notes
+then list each such change after "accepted with --allow-locale".
 
 From `make-reference.ps1` format 3 on, the folder also holds `formatting.json`: the
 formatting Word computes for every paragraph of every story (whether its style is built in,

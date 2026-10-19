@@ -1217,30 +1217,35 @@ class Changes(unittest.TestCase):
         self.assertEqual(importer.numbering_changes(before, after),
                          ["- num 2: abstractNumId val=1"])
 
-    def test_instances_are_paired_by_overrides_then_id_then_order(self):
+    def test_another_number_of_instances_is_recorded_not_guessed(self):
+        # When the copy has another number of instances of a definition, nothing tells a
+        # dropped instance from a changed one or an added one, so only the count is recorded.
         d, i = self.definition, self.instance
-        # Word drops instance 1, which nothing used, and numbers 2 and 3 as 1 and 2: their
-        # overrides tell which is which.
+        # Word drops instance 1 and numbers 2 and 3 as 1 and 2.
         before = self.numbering(d(0, "00AA"), i(1, 0), i(2, 0, 5), i(3, 0, 9))
         after = self.numbering(d(0, "00AA"), i(1, 0, 5), i(2, 0, 9))
         self.assertEqual(importer.numbering_changes(before, after),
-                         ["- num 1: abstractNumId val=0"])
-        # Alike instances: the one with the same id.
-        before = self.numbering(d(0, "00AA"), i(1, 0), i(2, 0))
-        after = self.numbering(d(0, "00AA"), i(2, 0))
+                         ["~ abstractNum 0: num count=3 -> 2"])
+        # Word adds an instance after the others; a style naming instance 1 is no change.
+        before = {**self.numbering(d(0, "00AA"), i(1, 0, 5), i(2, 0)), **self.style_naming(1)}
+        after = {**self.numbering(d(0, "00AA"), i(1, 0, 9), i(2, 0), i(3, 0, 5)),
+                 **self.style_naming(1)}
         self.assertEqual(importer.numbering_changes(before, after),
-                         ["- num 1: abstractNumId val=0"])
-        # Else the first, since Word keeps their order.
-        before = self.numbering(d(0, "00AA"), i(1, 0), i(3, 0), i(4, 0))
-        after = self.numbering(d(0, "00AA"), i(2, 0))
+                         ["~ abstractNum 0: num count=2 -> 3"])
+        self.assertEqual(importer.style_changes(before, after), [])
+        # The definition numbered again too: the count is the input's definition's.
+        before = self.numbering(d(1, "00AA"), i(1, 1), i(2, 1, 5), i(3, 1, 9))
+        after = self.numbering(d(0, "00AA"), i(1, 0, 5), i(2, 0, 9))
         self.assertEqual(importer.numbering_changes(before, after),
-                         ["- num 3: abstractNumId val=0", "- num 4: abstractNumId val=0"])
-        # An instance whose definition the input does not have keeps its id's counterpart.
-        before = self.numbering(d(0, "00AA"), i(1, 0), i(2, 0, 5))
-        after = self.numbering(d(0, "00AA"), d(1, "00CC"), i(1, 0), i(2, 1))
+                         ["~ abstractNum 1: num count=3 -> 2"])
+        # The other definitions keep their pairs; an instance of a definition the input does
+        # not have takes no instance of an unpaired one.
+        before = self.numbering(d(0, "00AA"), d(1, "00BB"), i(1, 0), i(2, 0, 5), i(3, 1, 7))
+        after = self.numbering(d(0, "00AA"), d(1, "00BB"), d(2, "00CC"), i(1, 0), i(2, 2),
+                               i(3, 1, 8))
         self.assertEqual(importer.numbering_changes(before, after), [
-            "~ num 2: abstractNumId val=0 -> copy 1",
-            "- num 2: lvlOverride[ilvl=0]/startOverride val=5",
+            "~ abstractNum 0: num count=2 -> 1",
+            "~ num 3: lvlOverride[ilvl=0]/startOverride val=7 -> 8",
         ])
 
     def test_kept_ids_and_kept_counts_pair_instances_before_their_overrides(self):
@@ -1264,13 +1269,8 @@ class Changes(unittest.TestCase):
         after = self.numbering(d(0, "00AA"), i(1, 0), i(2, 0), i(3, 0, 9))
         self.assertEqual(importer.numbering_changes(before, after),
                          ["- num 3: lvlOverride[ilvl=0]/startOverride val=5"])
-        # Fewer instances, the definition numbered again too: their overrides tell which.
-        before = self.numbering(d(1, "00AA"), i(1, 1), i(2, 1, 5), i(3, 1, 9))
-        after = self.numbering(d(0, "00AA"), i(1, 0, 5), i(2, 0, 9))
-        self.assertEqual(importer.numbering_changes(before, after),
-                         ["- num 1: abstractNumId val=1"])
 
-    def test_pairing_by_id_by_order_and_without_taking_an_instance_twice(self):
+    def test_pairing_by_id_and_in_order(self):
         d, i = self.definition, self.instance
         # The same ids, written in another order: by id.
         before = self.numbering(d(0, "00AA"), i(2, 0, 9), i(1, 0, 5))
@@ -1283,37 +1283,21 @@ class Changes(unittest.TestCase):
         self.assertEqual(importer.numbering_changes(before, after),
                          ["~ num 2: lvlOverride[ilvl=0]/startOverride val=5 -> 9"])
         self.assertEqual(importer.style_changes(before, after), [])
-        # Two alike instances of the copy take two of the input.
-        before = self.numbering(d(0, "00AA"), i(1, 0), i(2, 0, 5), i(3, 0, 5))
-        after = self.numbering(d(0, "00AA"), i(1, 0, 5), i(2, 0, 5))
-        self.assertEqual(importer.numbering_changes(before, after),
-                         ["- num 1: abstractNumId val=0"])
 
-    def test_pairing_follows_ids_and_word_adds_instances_after_the_others(self):
+    def test_pairing_follows_the_order_of_the_ids(self):
         d, i = self.definition, self.instance
         # numbering.xml written out of id order: in order means in the order of the ids.
         before = self.numbering(d(0, "00AA"), i(3, 0, 9), i(2, 0, 5))
         after = self.numbering(d(0, "00AA"), i(1, 0, 5), i(2, 0, 9))
         self.assertEqual(importer.numbering_changes(before, after), [])
+        # And the copy's: written 2 then 1.
+        before = self.numbering(d(0, "00AA"), i(1, 0, 5), i(2, 0, 9))
+        after = self.numbering(d(0, "00AA"), i(2, 0, 9), i(1, 0, 5))
+        self.assertEqual(importer.numbering_changes(before, after), [])
         # The order of the ids is that of their numbers: 9 comes before 10.
         before = self.numbering(d(0, "00AA"), i(9, 0, 5), i(10, 0, 9))
         after = self.numbering(d(0, "00AA"), i(1, 0, 5), i(2, 0, 9))
         self.assertEqual(importer.numbering_changes(before, after), [])
-        # Word adds an instance after the others: here with instance 1's old restart, while
-        # instance 1 now restarts at 9. Its own id still pairs instance 1.
-        before = {**self.numbering(d(0, "00AA"), i(1, 0, 5), i(2, 0)), **self.style_naming(1)}
-        after = {**self.numbering(d(0, "00AA"), i(1, 0, 9), i(2, 0), i(3, 0, 5)),
-                 **self.style_naming(1)}
-        self.assertEqual(importer.numbering_changes(before, after),
-                         ["~ num 1: lvlOverride[ilvl=0]/startOverride val=5 -> 9"])
-        self.assertEqual(importer.style_changes(before, after), [])
-        # Fewer instances and none with the same overrides: the first left.
-        before = self.numbering(d(0, "00AA"), i(2, 0, 5), i(3, 0))
-        after = self.numbering(d(0, "00AA"), i(1, 0, 9))
-        self.assertEqual(importer.numbering_changes(before, after), [
-            "~ num 2: lvlOverride[ilvl=0]/startOverride val=5 -> 9",
-            "- num 3: abstractNumId val=0",
-        ])
         # An id that is not a number, from a damaged input, is ordered too.
         self.assertEqual(importer.id_order("²"), (1, "²"))
         # A style that names an instance only the input has now names none.

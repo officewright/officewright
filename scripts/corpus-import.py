@@ -452,18 +452,19 @@ def numbering_root(parts: dict[str, bytes]) -> ElementTree.Element | None:
 
 def numbering_ids(
     original: ElementTree.Element | None, resaved: ElementTree.Element | None
-) -> tuple[dict[str, str], dict[str, str]]:
+) -> tuple[dict[str, str], dict[str, str], dict[str, tuple[list[str], list[str]]]]:
     """How the re-saved copy's list definitions and instances map onto the input's: Word
     numbers the definitions (w:abstractNumId) and sometimes the instances (w:numId) again when
     it saves, so they are matched by what stays. A definition by its w:nsid, else through the
     instances that use it, else by its id. The instances of a definition in the order of their
     ids when the copy has as many (so by id when it kept them), since Word keeps that order
-    when it numbers them again (contract-zh: 1, 2, 3, 4, 6 became 1 to 5). Else each in turn
-    among the input's left: those with the same overrides if any, else all, the one with its
-    id, else the first. Then an instance left over by its id. Copy id -> input id; an id left
-    out has no counterpart."""
+    when it numbers them again (contract-zh: 1, 2, 3, 4, 6 became 1 to 5). When it has another
+    number of them, nothing tells which is which (a dropped, an added or a changed one), so
+    they are not paired, and the third result names those definitions, with their instances
+    in the input and in the copy. Then an instance of no definition the input has, by its id.
+    Copy id -> input id; an id left out has no counterpart."""
     if original is None or resaved is None:
-        return {}, {}
+        return {}, {}, {}
 
     def definitions(root: ElementTree.Element) -> dict[str, str | None]:
         out = {}
@@ -482,16 +483,6 @@ def numbering_ids(
             out[instance.get(f"{W}numId", "")] = used.get(f"{W}val", "") if used is not None else ""
         return out
 
-    def overrides(root: ElementTree.Element) -> dict[str, dict[Property, str]]:
-        """Instance id -> what it sets besides its definition."""
-        return {
-            instance.get(f"{W}numId", ""): {
-                key: value for key, value in property_values(instance, "").items()
-                if key[1] != "abstractNumId"
-            }
-            for instance in root.iter(f"{W}num")
-        }
-
     before, after = definitions(original), definitions(resaved)
     uses_before, uses_after = instances(original), instances(resaved)
     abstract: dict[str, str] = {}
@@ -506,7 +497,7 @@ def numbering_ids(
         if copy_id not in abstract and copy_id in before and copy_id not in abstract.values():
             abstract[copy_id] = copy_id
     num: dict[str, str] = {}
-    set_before, set_after = overrides(original), overrides(resaved)
+    unpaired: dict[str, tuple[list[str], list[str]]] = {}
     for wanted in dict.fromkeys(abstract.get(i) for i in uses_after.values()):
         if wanted is None:
             continue
@@ -516,19 +507,14 @@ def numbering_ids(
         inputs = sorted((n for n, i in uses_before.items() if i == wanted), key=id_order)
         if len(copies) == len(inputs):
             num.update(zip(copies, inputs))
-        else:
-            # Word drops instances nothing uses and adds new ones after the others, so the
-            # copy's instances are taken in order, each by its overrides if one of the
-            # input's left has the same, else from all those left.
-            for copy_num in copies:
-                left = [n for n in inputs if n not in num.values()]
-                alike = [n for n in left if set_before[n] == set_after[copy_num]] or left
-                if alike:
-                    num[copy_num] = copy_num if copy_num in alike else alike[0]
-    for copy_num in uses_after:
-        if copy_num not in num and copy_num in uses_before and copy_num not in num.values():
+        elif inputs:
+            unpaired[wanted] = (inputs, copies)
+    for copy_num, copy_def in uses_after.items():
+        if (copy_num not in num and abstract.get(copy_def) not in unpaired
+                and copy_num in uses_before and uses_before[copy_num] not in unpaired
+                and copy_num not in num.values()):
             num[copy_num] = copy_num
-    return abstract, num
+    return abstract, num, unpaired
 
 
 def id_order(number: str) -> tuple[int, int | str]:
@@ -599,7 +585,11 @@ def style_changes(original: dict[str, bytes], resaved: dict[str, bytes]) -> list
     onto the input's; additions to docDefaults (which every document has) and to the styles
     the input defines."""
     before_root, after_root = numbering_root(original), numbering_root(resaved)
-    _, num = numbering_ids(before_root, after_root)
+    _, num, unpaired = numbering_ids(before_root, after_root)
+    # A style that names an instance of a definition whose instances are not paired names
+    # one of them on both sides: that is no change found.
+    unpaired_pairs = {(i, c) for inputs, copies in unpaired.values() for i in inputs for c in copies}
+    before_values = style_values(original)
     # Only ids an instance of the copy or of the input has are mapped: w:numId 0 means no
     # list, an id no instance has on either side names nothing, and without numbering.xml on
     # both sides ids stay as written. An id only the input's instances have becomes "copy N".
@@ -607,19 +597,21 @@ def style_changes(original: dict[str, bytes], resaved: dict[str, bytes]) -> list
     if before_root is not None and after_root is not None:
         instance_ids = {n.get(f"{W}numId", "") for root in (before_root, after_root)
                         for n in root.iter(f"{W}num")}
-    after = {
-        key: copy_id(num, value) if value in instance_ids and key[1].endswith("numPr/numId")
-        else value
-        for key, value in style_values(resaved).items()
-    }
-    return property_changes(style_values(original), after, style_ids(original) | {"docDefaults"})
+    after = {}
+    for key, value in style_values(resaved).items():
+        if key[1].endswith("numPr/numId") and (before_values.get(key), value) in unpaired_pairs:
+            value = before_values[key]
+        elif key[1].endswith("numPr/numId") and value in instance_ids:
+            value = copy_id(num, value)
+        after[key] = value
+    return property_changes(before_values, after, style_ids(original) | {"docDefaults"})
 
 
 def numbering_changes(original: dict[str, bytes], resaved: dict[str, bytes]) -> list[str]:
     """property_changes over numbering.xml, the copy's ids mapped onto the input's;
     additions to the definitions, levels and instances the input had."""
     before_root, after_root = numbering_root(original), numbering_root(resaved)
-    abstract, num = numbering_ids(before_root, after_root)
+    abstract, num, unpaired = numbering_ids(before_root, after_root)
     # Additions count only for the definitions, levels and instances the input had: Word
     # writes out every level of a definition the input gave one or two.
     owners = set()
@@ -630,9 +622,16 @@ def numbering_changes(original: dict[str, bytes], resaved: dict[str, bytes]) -> 
             owners |= {f"{owner} level {level.get(f'{W}ilvl', '')}"
                        for level in definition.findall(f"{W}lvl")}
         owners |= {f"num {n.get(f'{W}numId', '')}" for n in before_root.iter(f"{W}num")}
-    return property_changes(
-        numbering_values(before_root), numbering_values(after_root, abstract, num), owners
-    )
+    before = numbering_values(before_root)
+    after = numbering_values(after_root, abstract, num)
+    # The instances of a definition with another number of them are not compared; the count
+    # is the change.
+    for definition, (inputs, copies) in unpaired.items():
+        before = {key: value for key, value in before.items()
+                  if key[0] not in {f"num {n}" for n in inputs}}
+        before[(f"abstractNum {definition}", "num", "count")] = str(len(inputs))
+        after[(f"abstractNum {definition}", "num", "count")] = str(len(copies))
+    return property_changes(before, after, owners)
 
 
 PACKAGE_RELATIONSHIPS = "{http://schemas.openxmlformats.org/package/2006/relationships}"
