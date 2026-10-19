@@ -520,8 +520,8 @@ impl<L: Layer> StyleLevels<L> {
 /// Stshif.cstd), some of which may be empty. MS-OI29500 §17.7.4.17(c) says that Word
 /// does not open a document with more than 4,079, yet Word 2010 saved LibreOffice's test
 /// document `fdo76101.docx` with 4,091. The bound keeps what the resolver keeps per style
-/// small.
-const MAX_STYLES: usize = 4093;
+/// small. [`Styles::default_style`](super::Styles::default_style) looks among them too.
+pub(crate) const MAX_STYLES: usize = 4093;
 
 impl Formats<'_> {
     /// Forgets the table texts and what is laid over them, when there are too many.
