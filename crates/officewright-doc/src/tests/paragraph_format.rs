@@ -1699,6 +1699,19 @@ fn a_list_level_that_gives_only_a_text_effect_gives_it_to_its_label() {
 }
 
 #[test]
+fn a_list_level_that_gives_only_a_choice_of_figures_gives_it_to_its_label() {
+    // #361: a level that gives only w14:numForm still gives its label that.
+    let numbering = r#"<w:abstractNum w:abstractNumId="10"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:rPr><w14:numForm xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" w14:val="oldStyle"/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num>"#;
+    let item = r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>"#;
+    let document = build(&paragraph("", item), &defaults(""), Some(numbering));
+    let label = document
+        .formats()
+        .list_label(paragraphs(&document)[0])
+        .unwrap();
+    assert_eq!(label.font_choices.number_form, Some(true));
+}
+
+#[test]
 fn a_list_level_that_gives_only_ligatures_gives_them_to_its_label() {
     let numbering = r#"<w:abstractNum w:abstractNumId="10"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:rPr><w14:ligatures xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" w14:val="all"/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num>"#;
     let item = r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>"#;
