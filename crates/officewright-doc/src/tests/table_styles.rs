@@ -291,12 +291,15 @@ fn lays_the_rows_and_cells_own_properties_and_partial_looks_over_the_style() {
     assert_eq!(properties.no_wrap(), Some(true));
     // A band size in a conditional format, which Word does not allow (MS-OI29500
     // §17.7.6.3(a)), is no table property of it.
-    let translation = document.to_layout_ir();
-    assert!(
-        translation.left_out().is_empty(),
-        "{:?}",
-        translation.left_out()
-    );
+    #[cfg(feature = "pdf")]
+    {
+        let translation = document.to_layout_ir();
+        assert!(
+            translation.left_out().is_empty(),
+            "{:?}",
+            translation.left_out()
+        );
+    }
 }
 
 #[test]
@@ -657,6 +660,7 @@ fn leaves_out_the_row_properties_word_does_not_take_from_a_style() {
     let second = formats.row_properties(rows[1]);
     assert_eq!(second.height().and_then(RowHeight::height), Some(Pt(20.0)));
     assert_eq!(second.header(), None);
+    #[cfg(feature = "pdf")]
     assert!(
         document.to_layout_ir().left_out().is_empty(),
         "{:?}",
@@ -831,6 +835,7 @@ fn takes_the_default_table_style_and_text_a_style_gives_through_a_format_or_a_ba
     let whole = r#"<w:style w:type="table" w:styleId="Whole"><w:name w:val="Whole"/><w:tblStylePr w:type="wholeTable"><w:rPr><w:b/></w:rPr></w:tblStylePr></w:style>"#;
     let document = open_with(whole, &table(r#"<w:tblStyle w:val="Whole"/>"#, 1, 1));
     assert_eq!(marks(&document), [(11.0, false, ColorValue::Auto)]);
+    #[cfg(feature = "pdf")]
     assert!(document.to_layout_ir().left_out().is_empty());
     // Through the style it is based on, and through the first row's format.
     for id in ["OnBold", "Header"] {
@@ -840,6 +845,7 @@ fn takes_the_default_table_style_and_text_a_style_gives_through_a_format_or_a_ba
         );
         let bold: Vec<bool> = marks(&document).iter().map(|mark| mark.1).collect();
         assert_eq!(bold, [true, id == "OnBold"], "{id}");
+        #[cfg(feature = "pdf")]
         assert!(document.to_layout_ir().left_out().is_empty(), "{id}");
     }
 }
