@@ -1587,6 +1587,229 @@ mod tests {
         (laid, fonts.into_report())
     }
 
+    /// The entries of `kind` in `report` whose message starts with `what`, as their locations.
+    fn entries_at(report: &LayoutReport, kind: ReportKind, what: &str) -> Vec<String> {
+        report
+            .entries()
+            .iter()
+            .filter(|entry| entry.kind() == kind && entry.message().starts_with(what))
+            .map(|entry| entry.location().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn what_the_pdf_leaves_out_is_reported() {
+        use crate::ir::{
+            AnchoredObject, DocumentSettings, HorizontalAnchor, Hyphenation, ImageData,
+            ImageFormat, Note, NoteKind, ObjectContent, Picture, Size, VerticalAnchor,
+        };
+
+        // Issue #303: each feature left out has its entry, once, however often it occurs,
+        // at the first place it occurs.
+        let floating = "floating pictures are not drawn yet";
+        let notes = "footnotes and endnotes are not laid out yet";
+        let right_to_left = "right-to-left text is laid out from left to right";
+        let hyphenation = "automatic hyphenation is not done";
+        let all = [floating, notes, right_to_left, hyphenation];
+        let at = |report: &LayoutReport, what: &str| {
+            entries_at(report, ReportKind::FeatureUnsupported, what)
+        };
+        let settings =
+            DocumentSettings::default().with_hyphenation(Hyphenation::default().with_auto(true));
+        let mut document = Document::new(settings);
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        let rtl = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_rtl(true),
+        );
+        let image = document.add_image(ImageData::new(ImageFormat::Png, &b"\x89PNG"[..]));
+        let note = document.add_note(Note::new(NoteKind::Footnote, []));
+        let anchored = || {
+            Inline::anchored(AnchoredObject::new(
+                ObjectContent::Picture(Picture::new(image)),
+                Size::new(Pt(10.0), Pt(10.0)),
+                HorizontalAnchor::default(),
+                VerticalAnchor::default(),
+            ))
+        };
+        let paragraph =
+            |inlines: Vec<Inline>| -> Block { Paragraph::new(style).with_inlines(inlines).into() };
+        let long = "A ".repeat(60);
+        document.add_section(Section::new(setup()).with_blocks(vec![
+            paragraph(vec![Inline::text(&long, style)]),
+            paragraph(vec![
+                anchored(),
+                Inline::text("A", style),
+                Inline::note_reference(note, false, style),
+            ]),
+            paragraph(vec![
+                anchored(),
+                Inline::text("\u{0645}\u{0631}\u{062D}\u{0628}\u{0627}", style),
+                Inline::note_reference(note, false, style),
+            ]),
+            paragraph(vec![Inline::text("Latin", rtl)]),
+        ]));
+        let (result, report) = laid(&document, 100);
+        result.expect("pages");
+        for (what, place) in [
+            (floating, "sections[0].blocks[1]"),
+            (notes, "sections[0].blocks[1]"),
+            (right_to_left, "sections[0].blocks[2]"),
+            (hyphenation, "sections[0].blocks[0]"),
+        ] {
+            assert_eq!(
+                at(&report, what),
+                [place],
+                "{what}: {:?}",
+                messages(&report)
+            );
+        }
+        // Right-to-left text is told by its characters, wherever they are in a run, and by
+        // the run's `w:rtl` on its own; digits that keep their stored order are not.
+        for (text, run_rtl, reported) in [
+            ("\u{05E9}\u{05DC}\u{05D5}\u{05DD}", false, true),
+            ("Hello \u{05E9}\u{05DC}\u{05D5}\u{05DD}", false, true),
+            ("Latin", true, true),
+            ("Latin", false, false),
+            ("a\u{200F}b", false, true),
+            ("a\u{202B}b", false, true),
+            ("\u{202E}abc", false, true),
+            ("a\u{2067}b", false, true),
+            ("\u{061B}", false, true),
+            ("\u{061F}", false, true),
+            ("\u{0640}", false, true),
+            ("\u{0661}\u{0662}\u{0663}", false, false),
+            ("\u{06F1}\u{06F2}\u{06F3}", false, false),
+            ("\u{0661}\u{066B}\u{0665}", false, false),
+            ("\u{0665}\u{0660}\u{066A}", false, false),
+            ("\u{0600}\u{0661}\u{0662}", false, false),
+            ("1\u{FB29}2", false, false),
+            ("\u{0601}", false, false),
+            ("\u{0604}", false, false),
+            ("\u{0609}", false, false),
+            ("\u{060A}", false, false),
+            ("\u{066C}", false, false),
+            ("\u{0890}", false, false),
+            ("\u{0891}", false, false),
+            ("\u{10D30}\u{10D31}", false, false),
+            ("\u{10D40}\u{10D41}", false, false),
+            ("\u{0710}", false, true),
+            ("\u{0780}", false, true),
+            ("\u{07CA}", false, true),
+            ("\u{10900}\u{10901}", false, true),
+        ] {
+            let mut only = Document::default();
+            let style = only.add_run_style(
+                RunStyle::default()
+                    .with_fonts(RunFonts::new("Officewright Test"))
+                    .with_rtl(run_rtl),
+            );
+            only.add_section(Section::new(setup()).with_blocks(vec![
+                Paragraph::new(style)
+                    .with_inlines([Inline::text(text, style)])
+                    .into(),
+            ]));
+            let (_, report) = laid(&only, 100);
+            assert_eq!(
+                at(&report, right_to_left).len(),
+                usize::from(reported),
+                "{text:?}: {:?}",
+                messages(&report)
+            );
+        }
+        // Text from left to right, with nothing floating, no notes and no automatic
+        // hyphenation, reports none of them.
+        let plain = self::document(|style| {
+            vec![Section::new(setup()).with_blocks(vec![lines(style, 2, spacing(0.0, 0.0))])]
+        });
+        let (_, report) = laid(&plain, 100);
+        for what in all {
+            assert_eq!(
+                at(&report, what),
+                [""; 0],
+                "{what}: {:?}",
+                messages(&report)
+            );
+        }
+    }
+
+    #[test]
+    fn automatic_hyphenation_is_reported_only_where_a_line_wraps_in_a_paragraph_allowing_it() {
+        use crate::ir::{DocumentSettings, Hyphenation};
+
+        // Word hyphenates only where a line wraps, in a paragraph that does not suppress
+        // hyphenation, in a document that turns it on (Part 1 §17.3.1.34, §17.15.1.10).
+        // LibreOffice saves `w:autoHyphenation` on with `w:suppressAutoHyphens` in every
+        // paragraph's defaults (poi/unicode-path.docx), and a paragraph that fits on its
+        // line, or ends its lines with breaks, has nothing to hyphenate.
+        let what = "automatic hyphenation is not done";
+        let long = "A ".repeat(60);
+        let laid_with = |auto: bool, paragraphs: [(&str, bool); 3]| {
+            let settings = DocumentSettings::default()
+                .with_hyphenation(Hyphenation::default().with_auto(auto));
+            let mut document = Document::new(settings);
+            let style = document.add_run_style(
+                RunStyle::default()
+                    .with_fonts(RunFonts::new("Officewright Test"))
+                    .with_size(Pt(10.0)),
+            );
+            let blocks: Vec<Block> = paragraphs
+                .iter()
+                .map(|&(text, suppress)| {
+                    let props = spacing(0.0, 0.0).with_suppress_auto_hyphens(suppress);
+                    if text.is_empty() {
+                        lines(style, 3, props)
+                    } else {
+                        // A line break where the text has a newline.
+                        let mut inlines = Vec::new();
+                        for (n, part) in text.split('\n').enumerate() {
+                            if n > 0 {
+                                inlines.push(Inline::line_break(BreakClear::None, style));
+                            }
+                            inlines.push(Inline::text(part, style));
+                        }
+                        Paragraph::new(style)
+                            .with_props(props)
+                            .with_inlines(inlines)
+                            .into()
+                    }
+                })
+                .collect();
+            document.add_section(Section::new(setup()).with_blocks(blocks));
+            let (result, report) = laid(&document, 100);
+            result.expect("pages");
+            entries_at(&report, ReportKind::FeatureUnsupported, what)
+        };
+        let (wraps, fits, broken) = (long.as_str(), "A", "");
+        // Only the lines in its middle wrap: a line break before them and after them.
+        let middle = format!("A\n{long}\nA");
+        assert_eq!(laid_with(true, [(wraps, true); 3]), [""; 0]);
+        assert_eq!(
+            laid_with(true, [(wraps, true), (wraps, false), (wraps, false)]),
+            ["sections[0].blocks[1]"]
+        );
+        // A paragraph allowing it whose text fits on its line, or whose lines end with
+        // line breaks, gets no entry; the first that wraps does.
+        assert_eq!(
+            laid_with(true, [(fits, false), (broken, false), (wraps, false)]),
+            ["sections[0].blocks[2]"]
+        );
+        assert_eq!(
+            laid_with(true, [(fits, false), (broken, false), (fits, false)]),
+            [""; 0]
+        );
+        assert_eq!(
+            laid_with(true, [(fits, false), (&middle, false), (fits, false)]),
+            ["sections[0].blocks[1]"]
+        );
+        assert_eq!(laid_with(false, [(wraps, false); 3]), [""; 0]);
+    }
+
     /// Every page as the paragraphs, lines and tops of its fragments.
     fn pages(document: &Document) -> Vec<Vec<(usize, Range<usize>, f64)>> {
         let (laid, _) = laid(document, 100);
