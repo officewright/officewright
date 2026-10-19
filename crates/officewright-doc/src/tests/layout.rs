@@ -586,11 +586,15 @@ fn lists_a_deleted_mark_only_where_a_block_follows_it() {
     };
     let message = "a paragraph mark deleted or moved away as a tracked change (w:del or w:moveFrom) is kept, so the paragraph is not joined to the next as in Word's PDF of the document without markup, here and wherever else the document has one";
     let row = |cell: &str| format!("<w:tbl><w:tr><w:tc>{cell}</w:tc></w:tr></w:tbl>");
-    // A row of two cells, of which only the first's last mark is deleted.
+    // A row of two cells, of which only the first's last mark is deleted, and one of
+    // which only the last's is (LibreOffice's tdf157011_ins_del_empty_cols.docx).
     let one_of_two =
         |cell: &str| format!("<w:tbl><w:tr><w:tc>{cell}</w:tc><w:tc><w:p/></w:tc></w:tr></w:tbl>");
+    let last_of_two =
+        |cell: &str| format!("<w:tbl><w:tr><w:tc><w:p/></w:tc><w:tc>{cell}</w:tc></w:tr></w:tbl>");
     for body in [
         format!("{}<w:p/>", one_of_two(&deleted)),
+        format!("{}<w:p/>", last_of_two(&deleted)),
         format!(
             r#"{}<w:p/>"#,
             one_of_two(&format!(r#"<w:p/>{deleted}<w:bookmarkEnd w:id="0"/>"#))
