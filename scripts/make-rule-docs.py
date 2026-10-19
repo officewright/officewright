@@ -389,8 +389,10 @@ class Doc:
     # run_default_size), and properties added to them.
     run_defaults: bool = True
     run_defaults_extra: str = ""
-    # Properties added to the document defaults' w:pPr after their w:spacing, such as a w:jc.
+    # Properties added to the document defaults' w:pPr after their w:spacing, such as a w:jc,
+    # and a w:numPr for them, which goes after their w:widowControl.
     paragraph_defaults_extra: str = ""
+    paragraph_defaults_list: str = ""
     # The size of the document defaults' runs, in points.
     run_default_size: float = 11
     # The attributes of the document defaults' w:rFonts.
@@ -2900,35 +2902,40 @@ def list_label_height() -> Doc:
 
 
 # Table styles, second batch (#298 and #172's comments).
-def table_style_size_defaults(mode: int) -> Doc:
+def table_style_size_defaults(mode: int, normal_jc: str = "left") -> Doc:
     # E-table-style-size-11pt* could not test [MS-DOCX] 2.3.1: Word treats Normal's 11 pt,
     # equal to the document defaults, and its w:jc left, equal to the default, as not set.
     # Here the defaults are 12 pt and right-aligned, and Normal sets the two values the
     # setting is about, 11 pt and left: off, they leave the table style's 14 pt and its
-    # centring alone; on, they override them.
+    # centring alone; on, they override them. With Normal right-aligned instead, over
+    # defaults that leave the alignment out, the control: off, right is not left, so it
+    # overrides the centring.
     big = table_style(
         "Big", [],
         whole='<w:pPr><w:jc w:val="center"/></w:pPr>'
         '<w:rPr><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr>',
     )
     said = "on" if mode == 15 else f"not written, in compatibility mode {mode}"
+    defaults_jc = "right" if normal_jc == "left" else None
+    defaults_said = " and right-aligned" if defaults_jc else ""
     body = table_case(
-        1, "a table in the style Big (14 pt, centred); document defaults 12 pt and right-"
-        "aligned, Normal 11 pt and left-aligned",
+        1, f"a table in the style Big (14 pt, centred); document defaults 12 pt{defaults_said}, "
+        f"Normal 11 pt and {normal_jc}-aligned",
         styled_table("Big", named_cells(2, 2), widths=[TEXT_W // 2] * 2),
     ) + para(run("Case 02: a paragraph after the table, in Normal"))
-    suffix = "" if mode == 15 else f"-{mode}"
+    suffix = ("" if normal_jc == "left" else f"-{normal_jc}") + ("" if mode == 15 else f"-{mode}")
     return Doc(
         f"E-table-style-defaults-size{suffix}",
-        "Whether a Normal style of 11 pt, aligned left, overrides the 14 pt and the centring "
-        "of a table style when the document defaults are 12 pt and aligned right, with the "
-        f"setting overrideTableStyleFontSizeAndJustification {said}",
+        f"Whether a Normal style of 11 pt, aligned {normal_jc}, overrides the 14 pt and the "
+        "centring of a table style when the document defaults are 12 pt"
+        + (" and aligned right" if defaults_jc else "")
+        + f", with the setting overrideTableStyleFontSizeAndJustification {said}",
         body,
         styles=big,
-        normal_props='<w:pPr><w:jc w:val="left"/></w:pPr>'
+        normal_props=f'<w:pPr><w:jc w:val="{normal_jc}"/></w:pPr>'
         '<w:rPr><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr>',
         run_default_size=12,
-        paragraph_defaults_extra='<w:jc w:val="right"/>',
+        paragraph_defaults_extra=f'<w:jc w:val="{defaults_jc}"/>' if defaults_jc else "",
         mode=mode,
     )
 
@@ -3261,33 +3268,89 @@ def bold_italic_missing() -> Doc:
     )
 
 
+def linked_levels(
+    fmt: str, templates: list[str], style_id: str, named_by: int = 2
+) -> list[str]:
+    """Levels of a list with these templates, each indented further than the one before, so
+    the label and the indent show the level; level named_by names the paragraph style."""
+    return [
+        level(ilvl, fmt, template, left=720 * (ilvl + 1), hanging=360,
+              p_style=style_id if ilvl == named_by else None)
+        for ilvl, template in enumerate(templates)
+    ]
+
+
 def list_level_linked_no_level() -> Doc:
     # #293: a paragraph style that writes a list but no level, which level 2 of that list
     # names with its w:pStyle. ECMA-376 §17.9.23 gives the paragraph the level that names
     # its style; E-list-level-inherit's case 04 showed that a level the style writes comes
-    # first, and its case 05 a style without a level that no level names. The labels of
-    # the three levels differ, so the label shows the level.
-    levels = [
-        level(ilvl, "lowerLetter", template, left=720 * (ilvl + 1), hanging=360,
-              p_style="LinkedNoLevel" if ilvl == 2 else None)
-        for ilvl, template in enumerate(["%1)", "(%2)", "[%3]"])
-    ]
-    numbering = abstract_num(0, "5C3A0031", levels) + num(1, 0)
-    styles = para_style("LinkedNoLevel", '<w:numPr><w:numId w:val="1"/></w:numPr>')
+    # first, and its case 05 a style without a level that no level names. Its comments add
+    # a style that writes level 9, past the last level (MS-OI29500 §17.9.3(a) lets Word
+    # read up to 255), and a style that inherits level 0 from the style it is based on.
+    # Each list has a style of its own; the labels of the levels differ, so the label
+    # shows the level.
+    numbering = (
+        abstract_num(0, "5C3A0031", linked_levels("lowerLetter", ["%1)", "(%2)", "[%3]"],
+                                                  "LinkedNoLevel"))
+        + abstract_num(1, "5C3A0032", linked_levels(
+            "lowerRoman", [f"L{ilvl}-%{ilvl + 1}" for ilvl in range(9)], "LinkedLevel9"))
+        + abstract_num(2, "5C3A0033", linked_levels("upperLetter", ["%1)", "(%2)", "[%3]"],
+                                                  "LinkedBasedOn"))
+        + num(1, 0) + num(2, 1) + num(3, 2)
+    )
+    styles = "".join([
+        para_style("LinkedNoLevel", '<w:numPr><w:numId w:val="1"/></w:numPr>'),
+        para_style("LinkedLevel9", '<w:numPr><w:ilvl w:val="9"/><w:numId w:val="2"/></w:numPr>'),
+        para_style("LinkedBase", '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="3"/></w:numPr>'),
+        # Based on LinkedBase, and nothing of its own.
+        '<w:style w:type="paragraph" w:customStyle="1" w:styleId="LinkedBasedOn">'
+        '<w:name w:val="LinkedBasedOn"/><w:basedOn w:val="LinkedBase"/></w:style>',
+    ])
     body = "".join(
-        para(run(f"Case {n:02d}: {label}"), p_style="LinkedNoLevel")
-        for n, label in enumerate([
-            "the style LinkedNoLevel gives instance 1 and no level; level 2 names the style",
-            "a second paragraph in the same style",
+        para(run(f"Case {n:02d}: {label}"), p_style=style)
+        for n, (style, label) in enumerate([
+            ("LinkedNoLevel",
+             "the style LinkedNoLevel gives instance 1 and no level; level 2 names the style"),
+            ("LinkedNoLevel", "a second paragraph in the same style"),
+            ("LinkedLevel9", "the style LinkedLevel9 gives instance 2 and level 9, past the "
+             "last of its nine levels; level 2 names the style"),
+            ("LinkedBasedOn", "the style LinkedBasedOn writes nothing and is based on "
+             "LinkedBase, which gives instance 3 and level 0; level 2 names LinkedBasedOn"),
         ], 1)
     )
     return Doc(
         "E-list-level-linked-no-level",
         "Which list level a paragraph takes whose style gives a list but no level, when "
-        "level 2 of that list names the style (#293): level 2, as ECMA-376 says, or level 0",
+        "level 2 of that list names the style (#293): level 2, as ECMA-376 says, or level 0; "
+        "and when the style gives level 9, past the last level, or inherits level 0 from the "
+        "style it is based on",
         body,
         numbering=numbering,
         styles=styles,
+    )
+
+
+def list_level_linked_defaults() -> Doc:
+    # #293's comments: the document defaults give level 0 to every paragraph, and a style
+    # gives a list but no level, which level 2 of the list names. Word may take the level of
+    # the defaults, as a level the style hierarchy writes, or the level that names the
+    # style. A document of its own, since the defaults reach every paragraph.
+    numbering = abstract_num(0, "5C3A0034", linked_levels(
+        "lowerLetter", ["%1)", "(%2)", "[%3]"], "LinkedDefaults")) + num(1, 0)
+    body = para(run("Case 01: the style LinkedDefaults gives instance 1 and no level, the "
+                    "document defaults give level 0; level 2 names the style"),
+                p_style="LinkedDefaults")
+    body += para(run("Case 02: a paragraph in Normal, which has level 0 from the document "
+                     "defaults but no list"))
+    return Doc(
+        "E-list-level-linked-defaults",
+        "Which list level a paragraph takes whose style gives a list but no level, when the "
+        "document defaults give level 0 and level 2 of the list names the style (#293): the "
+        "level of the defaults, or the level that names the style",
+        body,
+        numbering=numbering,
+        styles=para_style("LinkedDefaults", '<w:numPr><w:numId w:val="1"/></w:numPr>'),
+        paragraph_defaults_list='<w:numPr><w:ilvl w:val="0"/></w:numPr>',
     )
 
 
@@ -3386,6 +3449,7 @@ def documents() -> list[Doc]:
         list_label_height(),
         table_style_size_defaults(15),
         table_style_size_defaults(14),
+        table_style_size_defaults(14, "right"),
         table_style_rows_cols(),
         table_style_header_rows_3(1),
         table_style_header_rows_3(0),
@@ -3397,6 +3461,7 @@ def documents() -> list[Doc]:
         table_float_align(),
         bold_italic_missing(),
         list_level_linked_no_level(),
+        list_level_linked_defaults(),
     ]
 
 
@@ -3425,7 +3490,7 @@ def styles_xml(doc: Doc) -> str:
         f'<w:styles xmlns:w="{W_NS}">'
         "<w:docDefaults>"
         f"{run_defaults}"
-        "<w:pPrDefault><w:pPr><w:widowControl/>"
+        f"<w:pPrDefault><w:pPr><w:widowControl/>{doc.paragraph_defaults_list}"
         '<w:spacing w:after="0" w:line="240" w:lineRule="auto"/>'
         f"{doc.paragraph_defaults_extra}</w:pPr></w:pPrDefault>"
         "</w:docDefaults>"

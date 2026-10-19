@@ -419,6 +419,17 @@ class Packages(unittest.TestCase):
                 "noWrap", "tcMar", "textDirection", "tcFitText", "vAlign", "hideMark",
             ],
             "tblStylePr": ["pPr", "rPr", "tblPr", "trPr", "tcPr"],
+            # CT_TblBorders, CT_TcBorders, CT_TblCellMar and CT_TcMar; left and right are the
+            # transitional names of start and end, in their places.
+            "tblBorders": [
+                "top", "start", "left", "bottom", "end", "right", "insideH", "insideV",
+            ],
+            "tcBorders": [
+                "top", "start", "left", "bottom", "end", "right", "insideH", "insideV",
+                "tl2br", "tr2bl",
+            ],
+            "tblCellMar": ["top", "start", "left", "bottom", "end", "right"],
+            "tcMar": ["top", "start", "left", "bottom", "end", "right"],
             # CT_Tbl 17.4.38 and CT_Row 17.4.79.
             "tbl": ["bookmarkStart", "bookmarkEnd", "tblPr", "tblGrid", "tr"],
             "tr": ["tblPrEx", "trPr", "tc"],
@@ -2402,30 +2413,37 @@ class Packages(unittest.TestCase):
                 expected = single
             self.assertEqual(mark, expected, label)
         self.assertEqual(len(set(instances.values())), 4)
+        self.assertEqual(list(numbering.iter(f"{W}lvlOverride")), [])
 
         # E-table-style-defaults-size: document defaults 12 pt and right-aligned, Normal 11 pt
         # and left-aligned, the table style Big 14 pt and centred; mode 15 with the setting
         # on, and mode 14.
-        for name, mode in (("E-table-style-defaults-size", 15),
-                           ("E-table-style-defaults-size-14", 14)):
+        # The control: Normal right-aligned over defaults that leave the alignment out.
+        for name, mode, normal_jc in (("E-table-style-defaults-size", 15, "left"),
+                                      ("E-table-style-defaults-size-14", 14, "left"),
+                                      ("E-table-style-defaults-size-right-14", 14, "right")):
             doc, parts, body = load(name)
             styles = ElementTree.fromstring(parts["word/styles.xml"])
             defaults = props_of(styles, f"{W}docDefaults/{W}rPrDefault/{W}rPr")
             self.assertEqual((defaults["sz"], defaults["szCs"]), ({"val": "24"}, {"val": "24"}))
             defaults = props_of(styles, f"{W}docDefaults/{W}pPrDefault/{W}pPr")
-            self.assertEqual(defaults["jc"], {"val": "right"}, name)
+            self.assertEqual(defaults.get("jc"), {"val": "right"} if normal_jc == "left" else None,
+                             name)
             normal = next(s for s in styles.iter(f"{W}style") if s.get(f"{W}styleId") == "Normal")
             self.assertEqual(props_of(normal, f"{W}rPr"), {"sz": {"val": "22"},
                                                            "szCs": {"val": "22"}}, name)
-            self.assertEqual(props_of(normal, f"{W}pPr"), {"jc": {"val": "left"}}, name)
+            self.assertEqual(props_of(normal, f"{W}pPr"), {"jc": {"val": normal_jc}}, name)
             big = next(s for s in styles.iter(f"{W}style") if s.get(f"{W}styleId") == "Big")
             self.assertEqual(props_of(big, f"{W}rPr"), {"sz": {"val": "28"},
                                                         "szCs": {"val": "28"}}, name)
             self.assertEqual(props_of(big, f"{W}pPr"), {"jc": {"val": "center"}}, name)
             self.assertEqual(doc.mode, mode)
             label = "".join(t.text for t in body.find(f"{W}p").iter(f"{W}t"))
-            self.assertIn("document defaults 12 pt and right-aligned, Normal 11 pt and "
-                          "left-aligned", label)
+            if normal_jc == "left":
+                self.assertIn("document defaults 12 pt and right-aligned, Normal 11 pt and "
+                              "left-aligned", label)
+            else:
+                self.assertIn("document defaults 12 pt, Normal 11 pt and right-aligned", label)
             # The table is in Big, and its cells' text is short enough that left, centre and
             # right put it in different places.
             (table,) = body.findall(f"{W}tbl")
@@ -2434,6 +2452,9 @@ class Packages(unittest.TestCase):
                 width = int(cell.find(f"{W}tcPr/{W}tcW").get(f"{W}w")) / 20
                 value = "".join(t.text for t in cell.iter(f"{W}t"))
                 self.assertLess(carlito_width(value, 14), width / 3, value)
+                # Nothing but the styles sizes and aligns the cells' text.
+                self.assertIsNone(cell.find(f"{W}p/{W}pPr"), value)
+                self.assertIsNone(cell.find(f"{W}p/{W}r/{W}rPr"), value)
 
         def table_styles(parts):
             styles = ElementTree.fromstring(parts["word/styles.xml"])
@@ -2526,6 +2547,13 @@ class Packages(unittest.TestCase):
                          ["firstRow", "firstCol", "lastCol", "neCell", "nwCell"])
         self.assertEqual(formats(styles["HeaderBands"]), ["firstRow", "band1Horz", "band2Horz"])
         self.assertEqual(band_size(styles["HeaderBands"], "Row"), "1")
+        colours = {kind: (color, fill) for kind, color, fill in rules.CONDITIONS}
+        self.assertEqual(len(set(colours.values())), len(colours))
+        for style_id in ("HeaderBorders", "HeaderCorners", "HeaderBands"):
+            for found in styles[style_id].findall(f"{W}tblStylePr"):
+                self.assertEqual((found.find(f"{W}rPr/{W}color").get(f"{W}val"),
+                                  found.find(f"{W}tcPr/{W}shd").get(f"{W}fill")),
+                                 colours[found.get(f"{W}type")], style_id)
         # The first-row format's borders differ from the style's own, which are all single
         # and ½ pt, and from each other.
         own = styles["HeaderBorders"].find(f"{W}tblPr/{W}tblBorders")
@@ -2642,6 +2670,9 @@ class Packages(unittest.TestCase):
         for (label, _, p_pr), table in zip(found, tables):
             attribute, value = re.search(r"only w:(tblp[XY]Spec) (\w+)", label).groups()
             attributes = table.find(f"{W}tblPr/{W}tblpPr").attrib
+            width = table.find(f"{W}tblPr/{W}tblW")
+            self.assertEqual((width.get(f"{W}w"), width.get(f"{W}type")), ("4000", "dxa"))
+            self.assertLess(4000, rules.TEXT_W / 2)
             self.assertEqual({k.replace(W, ""): v for k, v in attributes.items()},
                              {attribute: value}, label)
             placed.append((attribute, value))
@@ -2681,32 +2712,99 @@ class Packages(unittest.TestCase):
             self.assertEqual("i" in props, "italic" in style, label)
         self.assertEqual(len(styles_seen), 16)
 
-        # E-list-level-linked-no-level: the style gives instance 1 and no level; only level 2
-        # of its definition names the style; the paragraphs have the style and nothing else.
-        _, parts, body = load("E-list-level-linked-no-level")
-        styles = ElementTree.fromstring(parts["word/styles.xml"])
-        linked = next(s for s in styles.iter(f"{W}style")
-                      if s.get(f"{W}styleId") == "LinkedNoLevel")
-        num_pr = linked.find(f"{W}pPr/{W}numPr")
-        self.assertEqual([c.tag.replace(W, "") for c in num_pr], ["numId"])
-        self.assertEqual(num_pr.find(f"{W}numId").get(f"{W}val"), "1")
-        numbering = ElementTree.fromstring(parts["word/numbering.xml"])
-        naming = [lvl.get(f"{W}ilvl") for lvl in numbering.iter(f"{W}lvl")
-                  if lvl.find(f"{W}pStyle") is not None
-                  and lvl.find(f"{W}pStyle").get(f"{W}val") == "LinkedNoLevel"]
-        self.assertEqual(naming, ["2"])
-        # Each level renders a label of its own, at an indent of its own.
-        levels = list(numbering.iter(f"{W}lvl"))
+        # E-list-level-linked-no-level and -defaults: each case's paragraph is in the style
+        # its label names and nothing else; the style and the styles it is based on give the
+        # instance and the level the label says; level 2 of that instance's definition, and
+        # no other level, names the style; each level renders a label and an indent of its
+        # own.
+        def list_parts(name):
+            _, parts, body = load(name)
+            styles = {s.get(f"{W}styleId"): s for s in
+                      ElementTree.fromstring(parts["word/styles.xml"]).iter(f"{W}style")}
+            numbering = ElementTree.fromstring(parts["word/numbering.xml"])
+            definitions = {a.get(f"{W}abstractNumId"): a
+                           for a in numbering.iter(f"{W}abstractNum")}
+            instances = {n.get(f"{W}numId"): definitions[n.find(f"{W}abstractNumId").get(
+                f"{W}val")] for n in numbering.iter(f"{W}num")}
+            return parts, styles, numbering, instances, body.findall(f"{W}p")
+
+        def num_pr_of(element, path):
+            found = element.find(path)
+            return {} if found is None else {
+                c.tag.replace(W, ""): c.get(f"{W}val") for c in found}
+
+        def inherited(styles, style_id):
+            """The w:numPr values the style gives, itself or through w:basedOn."""
+            values = {}
+            while style_id is not None:
+                for key, value in num_pr_of(styles[style_id], f"{W}pPr/{W}numPr").items():
+                    values.setdefault(key, value)
+                based = styles[style_id].find(f"{W}basedOn")
+                style_id = None if based is None else based.get(f"{W}val")
+            return values
+
+        def check_list_case(styles, instances, paragraph, style_id, label):
+            self.assertEqual(props_of(paragraph, f"{W}pPr"), {"pStyle": {"val": style_id}})
+            instance, level = re.search(r"gives instance (\d+) and (?:no level|level (\d+))",
+                                        label).groups()
+            given = {"numId": instance} | ({"ilvl": level} if level is not None else {})
+            self.assertEqual(inherited(styles, style_id), given, label)
+            naming = [(lvl.get(f"{W}ilvl"), definition is instances[instance])
+                      for definition in instances.values() for lvl in definition.iter(f"{W}lvl")
+                      if num_pr_of(lvl, ".").get("pStyle") == style_id]
+            self.assertEqual(naming, [("2", True)], label)
+            self.assertRegex(label, rf"; level 2 names (the style|{style_id})$")
+            levels = instances[instance].findall(f"{W}lvl")
+            self.assertEqual(len({lvl.find(f"{W}lvlText").get(f"{W}val") for lvl in levels}),
+                             len(levels), label)
+            self.assertEqual(len({lvl.find(f"{W}pPr/{W}ind").get(f"{W}left") for lvl in levels}),
+                             len(levels), label)
+            return levels
+
+        _, styles, _, instances, paragraphs = list_parts("E-list-level-linked-no-level")
+        self.assertEqual(len(paragraphs), 4)
+        labels = ["".join(t.text for t in p.iter(f"{W}t")) for p in paragraphs]
+        for n, label in enumerate(labels, 1):
+            self.assertTrue(label.startswith(f"Case {n:02d}: "), label)
+        # Case 01 and its second paragraph, in the first list: lower-case letters.
+        levels = check_list_case(styles, instances, paragraphs[0], "LinkedNoLevel",
+                                 labels[0])
         self.assertEqual([(lvl.find(f"{W}numFmt").get(f"{W}val"),
                            lvl.find(f"{W}lvlText").get(f"{W}val")) for lvl in levels],
                          [("lowerLetter", "%1)"), ("lowerLetter", "(%2)"),
                           ("lowerLetter", "[%3]")])
-        indents = [lvl.find(f"{W}pPr/{W}ind").get(f"{W}left") for lvl in levels]
-        self.assertEqual(len(set(indents)), len(indents))
-        paragraphs = body.findall(f"{W}p")
+        self.assertTrue(labels[1].endswith("a second paragraph in the same style"))
+        self.assertEqual(props_of(paragraphs[1], f"{W}pPr"), {"pStyle": {"val": "LinkedNoLevel"}})
+        # Case 03: level 9, past the last of nine levels.
+        levels = check_list_case(styles, instances, paragraphs[2], "LinkedLevel9",
+                                 labels[2])
+        self.assertIn("level 9, past the last of its nine levels", labels[2])
+        self.assertEqual([lvl.get(f"{W}ilvl") for lvl in levels], [str(i) for i in range(9)])
+        # Case 04: a style of nothing of its own, based on one that gives level 0.
+        levels = check_list_case(styles, instances, paragraphs[3], "LinkedBasedOn",
+                                 labels[3])
+        self.assertIn("LinkedBasedOn writes nothing and is based on LinkedBase", labels[3])
+        based_on = styles["LinkedBasedOn"]
+        self.assertEqual([c.tag.replace(W, "") for c in based_on], ["name", "basedOn"])
+        self.assertEqual(based_on.find(f"{W}basedOn").get(f"{W}val"), "LinkedBase")
+        self.assertEqual(num_pr_of(styles["LinkedBase"], f"{W}pPr/{W}numPr"),
+                         {"ilvl": "0", "numId": "3"})
+        self.assertEqual(len(levels), 3)
+        # The three lists use definitions of their own.
+        self.assertEqual(len({id(d) for d in instances.values()}), 3)
+
+        # E-list-level-linked-defaults: the document defaults give level 0 and no list.
+        parts, styles, _, instances, paragraphs = list_parts("E-list-level-linked-defaults")
+        defaults = ElementTree.fromstring(parts["word/styles.xml"]).find(
+            f"{W}docDefaults/{W}pPrDefault/{W}pPr")
+        self.assertEqual(num_pr_of(defaults, f"{W}numPr"), {"ilvl": "0"})
+        labels = ["".join(t.text for t in p.iter(f"{W}t")) for p in paragraphs]
         self.assertEqual(len(paragraphs), 2)
-        for paragraph in paragraphs:
-            self.assertEqual(props_of(paragraph, f"{W}pPr"), {"pStyle": {"val": "LinkedNoLevel"}})
+        self.assertIn("the document defaults give level 0", labels[0])
+        check_list_case(styles, instances, paragraphs[0], "LinkedDefaults", labels[0])
+        self.assertTrue(labels[1].startswith("Case 02: a paragraph in Normal, which has level 0 "
+                                             "from the document defaults but no list"))
+        self.assertIsNone(paragraphs[1].find(f"{W}pPr"))
 
     def test_refuses_a_setting_word_does_not_write_in_the_mode(self):
         doc = next(doc for doc in self.docs if doc.name == "E-opentype-on")
