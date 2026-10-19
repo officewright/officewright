@@ -883,11 +883,15 @@ class Cleaning(unittest.TestCase):
         # A Default types only the parts no Override types, and the content types stream is
         # no part (ECMA-376 Part 2, §10.1.2).
         custom = "application/vnd.openxmlformats-officedocument.custom-properties+xml"
+        app = "application/vnd.openxmlformats-officedocument.extended-properties+xml"
         types = parts_of(package())["[Content_Types].xml"].decode().replace(
             '<Default Extension="xml" ContentType="application/xml"/>',
-            f'<Default Extension="xml" ContentType="{custom}"/>')
+            f'<Default Extension="xml" ContentType="{custom}"/>'
+            # An Override whose type is a role of its own keeps the Default off the part too.
+            f'<Override PartName="/docProps/app.xml" ContentType="{app}"/>')
         parts = parts_of(public.clean(package(**{"[Content_Types].xml": types}), DOC).data)
         self.assertIn("word/document.xml", parts)
+        self.assertIn("<Company></Company>", parts["docProps/app.xml"].decode())
         self.assertIn("[Content_Types].xml", parts)
         self.assertNotIn("docProps/core.xml", parts)
 
