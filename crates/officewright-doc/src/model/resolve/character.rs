@@ -9,8 +9,8 @@ use super::{Formats, Layer, overwrite, style_index};
 use crate::model::Document;
 use crate::model::format::{CharacterFormat, FontFamilies};
 use crate::model::properties::{
-    Color, ColorValue, FontHint, Highlight, Ligatures, RunProperties, Shading, ThemeColor,
-    ThemeFont, Toggle, UnderlineStyle, VerticalPosition,
+    Color, ColorValue, FontHint, Highlight, Ligatures, RunProperties, Shading, TextEffects,
+    ThemeColor, ThemeFont, Toggle, UnderlineStyle, VerticalPosition,
 };
 use crate::model::settings::{ColorSchemeIndex, ColorSchemeMapping};
 use crate::model::styles::StyleKind;
@@ -162,6 +162,7 @@ impl Formats<'_> {
             contextual_alternates: effect.contextual_alternates.unwrap_or(false),
             emphasis_mark: effect.emphasis_mark.unwrap_or(false),
             border: effect.border.unwrap_or(false),
+            text_effects: effect.text_effects,
         }
     }
 
@@ -303,6 +304,20 @@ pub(super) struct CharacterLevel {
     contextual_alternates: Option<bool>,
     emphasis_mark: Option<bool>,
     border: Option<bool>,
+    text_effects: TextEffects,
+}
+
+impl TextEffects {
+    /// Lays `above` over these effects, each on its own.
+    fn overlay(&mut self, above: &Self) {
+        overwrite(&mut self.glow, above.glow);
+        overwrite(&mut self.shadow, above.shadow);
+        overwrite(&mut self.reflection, above.reflection);
+        overwrite(&mut self.outline, above.outline);
+        overwrite(&mut self.fill, above.fill);
+        overwrite(&mut self.turned, above.turned);
+        overwrite(&mut self.depth, above.depth);
+    }
 }
 
 impl CharacterLevel {
@@ -343,6 +358,7 @@ impl CharacterLevel {
             contextual_alternates,
             emphasis_mark,
             border,
+            text_effects,
         } = self;
         fonts.iter().any(Option::is_some)
             || hint.is_some()
@@ -364,6 +380,7 @@ impl CharacterLevel {
             || contextual_alternates.is_some()
             || emphasis_mark.is_some()
             || border.is_some()
+            || text_effects.is_set()
     }
 
     /// What one `w:rPr` gives.
@@ -411,6 +428,7 @@ impl CharacterLevel {
             contextual_alternates: properties.contextual_alternates,
             emphasis_mark: properties.emphasis_mark,
             border: properties.border,
+            text_effects: properties.text_effects,
         }
     }
 }
@@ -456,6 +474,7 @@ impl Layer for CharacterLevel {
         overwrite(&mut self.contextual_alternates, above.contextual_alternates);
         overwrite(&mut self.emphasis_mark, above.emphasis_mark);
         overwrite(&mut self.border, above.border);
+        self.text_effects.overlay(&above.text_effects);
     }
 }
 

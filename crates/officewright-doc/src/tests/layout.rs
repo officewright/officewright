@@ -566,6 +566,148 @@ fn lists_a_border_around_a_run_of_a_tab_and_the_glyph_features_of_symbols_and_re
 }
 
 #[test]
+fn lists_word_s_text_effects_once_but_no_value_that_changes_nothing() {
+    // Issue #339: Word 2010's effects of text ([MS-DOCX] 2.6.1) have no place in the
+    // IR's run style, so the PDF draws the text plain. Word writes some with values that
+    // change nothing, as in the list levels of LibreOffice's
+    // tdf166205_first_page_header_footer_visible.docx: those are no entry.
+    const W14: &str = "http://schemas.microsoft.com/office/word/2010/wordml";
+    let messages = |r_pr: &str, content: &str| -> Vec<String> {
+        let body =
+            format!(r#"<w:p><w:r><w:rPr xmlns:w14="{W14}">{r_pr}</w:rPr>{content}</w:r></w:p>"#);
+        translate(&open(&body))
+            .left_out()
+            .iter()
+            .map(|entry| entry.message().to_owned())
+            .collect()
+    };
+    let glow = "glowing text (w14:glow) is drawn without its glow, here and wherever else the document has it";
+    let shadow = "text with a shadow effect (w14:shadow) is drawn without its shadow, here and wherever else the document has it";
+    let reflection = "a reflection of text (w14:reflection) is not drawn, here and wherever else the document has one";
+    let outline = "an outline of text (w14:textOutline) is not drawn, here and wherever else the document has one";
+    let fill = "a fill of text (w14:textFill) is not applied, so the text is drawn in its colour, here and wherever else the document has one";
+    let depth = "3-D text (w14:scene3d, w14:props3d) is drawn flat, here and wherever else the document has it";
+    let red = r#"<w14:srgbClr w14:val="FF0000"/>"#;
+    let front = r#"<w14:camera w14:prst="orthographicFront"/>"#;
+    for (r_pr, message) in [
+        (format!(r#"<w14:glow w14:rad="63500">{red}</w14:glow>"#), glow),
+        (
+            format!(
+                r#"<w14:shadow w14:blurRad="50800" w14:dist="38100" w14:dir="2700000" w14:sx="100000" w14:sy="100000" w14:kx="0" w14:ky="0" w14:algn="tl">{red}</w14:shadow>"#
+            ),
+            shadow,
+        ),
+        // A blurred shadow right under the text shows as a halo.
+        (format!(r#"<w14:shadow w14:blurRad="25400">{red}</w14:shadow>"#), shadow),
+        (format!(r#"<w14:shadow w14:dist="38100">{red}</w14:shadow>"#), shadow),
+        (format!(r#"<w14:shadow w14:sx="90000">{red}</w14:shadow>"#), shadow),
+        (format!(r#"<w14:shadow w14:sy="90000">{red}</w14:shadow>"#), shadow),
+        (format!(r#"<w14:shadow w14:kx="-800400">{red}</w14:shadow>"#), shadow),
+        (format!(r#"<w14:shadow w14:ky="800400">{red}</w14:shadow>"#), shadow),
+        (
+            r#"<w14:reflection w14:blurRad="6350" w14:stA="50000" w14:stPos="0" w14:endA="300" w14:endPos="50000" w14:dist="29997" w14:dir="5400000" w14:fadeDir="5400000" w14:sx="100000" w14:sy="-100000" w14:kx="0" w14:ky="0" w14:algn="bl"/>"#.to_owned(),
+            reflection,
+        ),
+        (r#"<w14:reflection w14:stA="0" w14:endA="300"/>"#.to_owned(), reflection),
+        (r#"<w14:reflection w14:stA="47000" w14:endA="0"/>"#.to_owned(), reflection),
+        (
+            format!(r#"<w14:textOutline w14:w="9525"><w14:solidFill>{red}</w14:solidFill></w14:textOutline>"#),
+            outline,
+        ),
+        (
+            format!(r#"<w14:textOutline w14:w="0"><w14:gradFill><w14:gsLst><w14:gs w14:pos="0">{red}</w14:gs></w14:gsLst></w14:gradFill></w14:textOutline>"#),
+            outline,
+        ),
+        ("<w14:textFill><w14:noFill/></w14:textFill>".to_owned(), fill),
+        (
+            format!(r#"<w14:textFill><w14:gradFill><w14:gsLst><w14:gs w14:pos="0">{red}</w14:gs></w14:gsLst></w14:gradFill></w14:textFill>"#),
+            fill,
+        ),
+        // Another colour than the text's (black), one changed by transparency, and a
+        // theme colour.
+        (format!("<w14:textFill><w14:solidFill>{red}</w14:solidFill></w14:textFill>"), fill),
+        (
+            r#"<w:color w:val="FF0000"/><w14:textFill><w14:solidFill><w14:srgbClr w14:val="FF0000"><w14:alpha w14:val="74000"/></w14:srgbClr></w14:solidFill></w14:textFill>"#.to_owned(),
+            fill,
+        ),
+        (
+            r#"<w14:textFill><w14:solidFill><w14:schemeClr w14:val="tx1"/></w14:solidFill></w14:textFill>"#.to_owned(),
+            fill,
+        ),
+        (
+            r#"<w14:scene3d><w14:camera w14:prst="isometricRightUp"/><w14:lightRig w14:rig="threePt" w14:dir="t"/></w14:scene3d>"#.to_owned(),
+            depth,
+        ),
+        (
+            r#"<w14:scene3d><w14:camera w14:prst="orthographicFront"><w14:rot w14:lat="0" w14:lon="1200000" w14:rev="0"/></w14:camera></w14:scene3d>"#.to_owned(),
+            depth,
+        ),
+        (
+            r#"<w14:scene3d><w14:camera w14:prst="orthographicFront"><w14:rot w14:lat="300000"/></w14:camera></w14:scene3d>"#.to_owned(),
+            depth,
+        ),
+        (
+            r#"<w14:scene3d><w14:camera w14:prst="orthographicFront"><w14:rot w14:rev="60000"/></w14:camera></w14:scene3d>"#.to_owned(),
+            depth,
+        ),
+        (
+            r#"<w14:props3d w14:extrusionH="0" w14:contourW="0" w14:prstMaterial="warmMatte"><w14:bevelT w14:w="27940" w14:h="12700" w14:prst="circle"/></w14:props3d>"#.to_owned(),
+            depth,
+        ),
+        (
+            r#"<w14:props3d><w14:bevelB w14:w="38100" w14:h="38100" w14:prst="cross"/></w14:props3d>"#.to_owned(),
+            depth,
+        ),
+        (r#"<w14:props3d w14:extrusionH="57150"/>"#.to_owned(), depth),
+        (r#"<w14:props3d w14:contourW="8890"/>"#.to_owned(), depth),
+    ] {
+        assert_eq!(messages(&r_pr, "<w:t>x</w:t>"), [message], "{r_pr}");
+    }
+    // Values that change nothing, all in one run; the text's own colour as a fill.
+    let nothing = format!(
+        r#"<w:color w:val="FF0000"/><w14:glow w14:rad="0">{red}</w14:glow><w14:shadow w14:blurRad="0" w14:dist="0" w14:dir="0" w14:sx="0" w14:sy="0" w14:kx="0" w14:ky="0" w14:algn="none">{red}</w14:shadow><w14:reflection w14:blurRad="0" w14:stA="0" w14:stPos="0" w14:endA="0" w14:endPos="0" w14:dist="0" w14:dir="0" w14:fadeDir="0" w14:sx="0" w14:sy="0" w14:kx="0" w14:ky="0" w14:algn="none"/><w14:textOutline w14:w="0" w14:cap="rnd" w14:cmpd="sng" w14:algn="ctr"><w14:noFill/><w14:prstDash w14:val="solid"/><w14:bevel/></w14:textOutline><w14:textFill><w14:solidFill>{red}</w14:solidFill></w14:textFill><w14:scene3d><w14:camera w14:prst="orthographicFront"><w14:rot w14:lat="0" w14:lon="0" w14:rev="0"/></w14:camera><w14:lightRig w14:rig="threePt" w14:dir="t"><w14:rot w14:lat="0" w14:lon="0" w14:rev="0"/></w14:lightRig></w14:scene3d><w14:props3d w14:extrusionH="0" w14:contourW="0" w14:prstMaterial="none"/>"#
+    );
+    assert!(messages(&nothing, "<w:t>x</w:t>").is_empty());
+    for r_pr in [
+        "<w14:glow/>".to_owned(),
+        format!("<w14:shadow>{red}</w14:shadow>"),
+        r#"<w14:shadow w14:sx="0"/>"#.to_owned(),
+        r#"<w14:shadow w14:blurRad="25400" w14:sy="0"/>"#.to_owned(),
+        r#"<w14:reflection w14:stA="50000" w14:sx="0"/>"#.to_owned(),
+        r#"<w14:reflection w14:stA="50000" w14:sy="0"/>"#.to_owned(),
+        r#"<w14:textOutline w14:w="9525"/>"#.to_owned(),
+        "<w14:textFill/>".to_owned(),
+        format!("<w14:scene3d>{front}</w14:scene3d>"),
+    ] {
+        assert!(messages(&r_pr, "<w:t>x</w:t>").is_empty(), "{r_pr}");
+    }
+    // A hidden run, or one with no text, shows nothing they could change.
+    let glowing = format!(r#"<w14:glow w14:rad="63500">{red}</w14:glow>"#);
+    assert!(messages(&format!("<w:vanish/>{glowing}"), "<w:t>x</w:t>").is_empty());
+    assert!(messages(&glowing, "<w:tab/>").is_empty());
+    // What a style gives counts, and a run's own value that changes nothing wins.
+    let styles = (
+        "styles",
+        "styles.xml",
+        format!(
+            r#"<w:styles xmlns:w="{W}" xmlns:w14="{W14}"><w:style w:type="character" w:styleId="Glowing"><w:name w:val="Glowing"/><w:rPr>{glowing}</w:rPr></w:style></w:styles>"#
+        ),
+    );
+    let entries = |r_pr: &str| -> Vec<String> {
+        let body = format!(
+            r#"<w:p><w:r><w:rPr xmlns:w14="{W14}"><w:rStyle w:val="Glowing"/>{r_pr}</w:rPr><w:t>x</w:t></w:r></w:p>"#
+        );
+        translate(&with_parts(&body, std::slice::from_ref(&styles)))
+            .left_out()
+            .iter()
+            .map(|entry| entry.message().to_owned())
+            .collect()
+    };
+    assert_eq!(entries(""), [glow]);
+    assert!(entries(r#"<w14:glow w14:rad="0"/>"#).is_empty());
+}
+
+#[test]
 fn lists_a_deleted_mark_only_where_a_block_follows_it() {
     // From the re-checks of #326: Word joins a paragraph whose mark is deleted to what
     // follows it, but the last paragraph of a cell or a story has nothing after it. Word
