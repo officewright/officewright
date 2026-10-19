@@ -59,23 +59,32 @@ kind; text is shaped with
 HarfRust, or without kerning and ligatures from a font whose layout tables it cannot
 use; lines break and paragraphs are spaced, kept together and kept from widows as in
 Word; each section gets its page size and margins, headers, footers and page numbers.
-It draws inline PNG and JPEG pictures, underlines, strikethrough, highlight and shading.
+List items get their numbers and bullets, counted as Word counts them, and tables are laid
+out on the grid of column widths the document stores, with merged cells, borders and
+shading. It draws inline PNG and JPEG pictures and floating ones where they are anchored,
+and underlines, strikethrough, highlight and shading.
 Much of what it shows otherwise than Word would, such as a substituted font or something
 not laid out yet, it reports: the command line prints it as notes, and the C library and
 Rust return it as a report.
 
 The main things not laid out yet:
 
-- tables: the paragraphs of their cells follow one another at the full width;
-- the bullets and numbers of lists;
+- in tables: fitting the columns to their content (the widths the document stores stand
+  in), splitting a row across pages, repeating header rows on the next page, spacing
+  between cells, floating tables (laid out in the text where they are anchored),
+  right-to-left tables, vertical text in cells, the content of a cell merged into the one
+  above, and cutting off content taller than an exact row height;
+- list numbers in formats such as Hebrew letters or Chinese counting, which are written in
+  decimal, and picture bullets, for which the level's text stands in;
 - footnotes and endnotes, and the marks that refer to them;
-- floating (anchored) pictures and shapes, text boxes, charts, SmartArt, VML drawings,
-  embedded objects and equations;
+- text wrapping around floating pictures (it runs over or under them), floating pictures
+  in table cells, and shapes, text boxes, charts, SmartArt, VML drawings, embedded objects
+  and equations;
 - text in several columns (laid out in one column), paragraph and page borders, and line
   numbers;
 - the document grid, which sets the line height of many Chinese and Japanese documents;
 - frames and drop caps, and character borders and effects such as emboss, outline,
-  shadow and emphasis marks;
+  shadow, glow, reflection and emphasis marks;
 - right-to-left text (Arabic, Hebrew) in its reading order, and vertical text;
 - links, which keep their look but cannot be clicked, and automatic hyphenation;
 - cropped, rotated or mirrored pictures, which are drawn whole and upright, pictures in
@@ -84,15 +93,14 @@ The main things not laid out yet:
 - fields other than page numbers and page counts, which show the result stored in the
   document.
 
-Comments are left out. Tracked changes are shown as accepted, except that deleted
-paragraph marks and table rows stay, so a deleted paragraph leaves an empty line. Of all
-this, the report names tables, columns, paragraph borders, shapes, text boxes, charts,
-SmartArt, VML drawings, embedded objects and equations, pictures that are cropped, turned
-or mirrored or in a format other than PNG and JPEG, and fields; the rest, floating
-pictures included, is not in the report yet
-([#303](https://github.com/officewright/officewright/issues/303)). It also names smaller
-differences that this list leaves out, such as absolute position tabs. DOC and RTF files,
-and files that need a password to open, cannot be opened yet.
+Of this list, the report names everything but links
+([#303](https://github.com/officewright/officewright/issues/303)) and table rows that
+move whole to the next page. It also names smaller differences that the list leaves out,
+such as absolute position tabs. Comments are left out and tracked changes are shown as
+accepted, as in Word's PDF of a document without markup, except that deleted paragraph
+marks, table rows and table cells stay, so a deleted paragraph leaves an empty line; the
+report names those. DOC and RTF files, and files that need a password to open, cannot be
+opened yet.
 
 From the command line:
 
@@ -105,7 +113,7 @@ target/release/officewright docx-to-pdf --font-dir ./fonts --report notes.json c
 It prints notes such as these:
 
 ```text
-note: sections[0].blocks[18]: tables are not laid out yet: the paragraphs of their cells follow one another at the full width
+note: sections[0].headers.primary[0]: tables that fit their columns to their content are laid out with the column widths the document stores
 note: document: "Calibri" → "Carlito" (metric-compatible substitute)
 ```
 
