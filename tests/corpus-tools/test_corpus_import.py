@@ -1248,6 +1248,50 @@ class Changes(unittest.TestCase):
             "~ num 3: lvlOverride[ilvl=0]/startOverride val=7 -> 8",
         ])
 
+    def test_unpaired_instances_in_styles_and_across_definitions(self):
+        d, i, named = self.definition, self.instance, self.style_naming
+        # A style that moves from list 1 to an instance of an unpaired list 0 is a change: it
+        # names an unpaired instance in the copy only.
+        before = {**self.numbering(d(0, "00AA"), d(1, "00BB"), i(1, 0), i(2, 0), i(3, 1)),
+                  **named(3)}
+        after = {**self.numbering(d(0, "00AA"), d(1, "00BB"), i(1, 0), i(4, 0), i(5, 0), i(2, 1)),
+                 **named(4)}
+        self.assertEqual(importer.numbering_changes(before, after),
+                         ["~ abstractNum 0: num count=2 -> 3"])
+        self.assertEqual(importer.style_changes(before, after),
+                         ["~ L: pPr/numPr/numId val=3 -> copy 4"])
+        # Two unpaired lists in one save: each one's instances stay with their own list.
+        before = {**self.numbering(d(0, "00AA"), d(1, "00BB"), i(1, 0), i(2, 0, 5), i(3, 1, 9)),
+                  **named(1)}
+        after = {**self.numbering(d(0, "00AA"), d(1, "00BB"), i(1, 0), i(2, 1), i(3, 1, 9)),
+                 **named(3)}
+        self.assertEqual(importer.numbering_changes(before, after), [
+            "~ abstractNum 0: num count=2 -> 1",
+            "~ abstractNum 1: num count=1 -> 2",
+        ])
+        self.assertEqual(importer.style_changes(before, after),
+                         ["~ L: pPr/numPr/numId val=1 -> copy 3"])
+        # The second pass pairs no instance of an unpaired list by its id: list 1 kept no
+        # instance, and the copy's 3 belongs to the unpaired list 0.
+        before = {**self.numbering(d(0, "00AA"), d(1, "00BB"), i(1, 0), i(2, 0), i(3, 1, 7)),
+                  **named(3)}
+        after = {**self.numbering(d(0, "00AA"), d(1, "00BB"), i(1, 0), i(2, 0), i(3, 0, 7)),
+                 **named(3)}
+        self.assertEqual(importer.numbering_changes(before, after), [
+            "~ abstractNum 0: num count=2 -> 3",
+            "- num 3: abstractNumId val=1",
+            "- num 3: lvlOverride[ilvl=0]/startOverride val=7",
+        ])
+        self.assertEqual(importer.style_changes(before, after),
+                         ["~ L: pPr/numPr/numId val=3 -> copy 3"])
+        # A list the input has without instances is not unpaired: the copy's instance of it
+        # is paired by its id with the input's instance of the list the copy kept none of.
+        before = {**self.numbering(d(0, "00AA"), d(1, "00BB"), i(1, 1)), **named(1)}
+        after = {**self.numbering(d(0, "00AA"), d(1, "00BB"), i(1, 0)), **named(1)}
+        self.assertEqual(importer.numbering_changes(before, after),
+                         ["~ num 1: abstractNumId val=1 -> 0"])
+        self.assertEqual(importer.style_changes(before, after), [])
+
     def test_kept_ids_and_kept_counts_pair_instances_before_their_overrides(self):
         d, i = self.definition, self.instance
 

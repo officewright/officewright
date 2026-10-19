@@ -278,7 +278,9 @@ attribute=value`, or `owner: path` for an element that sets something by being t
 since Word numbers lists again when it saves; a list or instance of the copy that has no
 counterpart in the input is `copy N`. When the copy has another number of instances of a
 list than the input, nothing tells which is which, so their instances are not compared and
-the entry is `~ abstractNum N: num count=I -> C`. Word sometimes writes a language tag or
+the entry is `~ abstractNum N: num count=I -> C`. A list with instances on one side only gets
+no count: the input's instances are dropped, and the copy's are paired by their ids with
+input instances of a list the copy kept none of. Word sometimes writes a language tag or
 number format into the re-saved copy that the input did not have, which says where Word ran.
 Such a copy is imported only when the maintainer accepts it (`--allow-locale`), and its Notes
 then list each such change after "accepted with --allow-locale".

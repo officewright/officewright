@@ -461,8 +461,10 @@ def numbering_ids(
     when it numbers them again (contract-zh: 1, 2, 3, 4, 6 became 1 to 5). When it has another
     number of them, nothing tells which is which (a dropped, an added or a changed one), so
     they are not paired, and the third result names those definitions, with their instances
-    in the input and in the copy. Then an instance of no definition the input has, by its id.
-    Copy id -> input id; an id left out has no counterpart."""
+    in the input and in the copy. A list with instances on one side only is not counted: the
+    input's are dropped, and the copy's, like those of a list the input lacks, are paired by
+    their ids with an instance of the input whose list the copy kept none of, the one guess
+    left. Copy id -> input id; an id left out has no counterpart."""
     if original is None or resaved is None:
         return {}, {}, {}
 
