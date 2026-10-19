@@ -900,8 +900,8 @@
     },
     "tests/corpus/word-rules/E-list-label-rstyle.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9967,
-      "ssim_min": 0.9967,
+      "ssim_mean": 0.9969,
+      "ssim_min": 0.9969,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-list-level-inherit.docx": {
