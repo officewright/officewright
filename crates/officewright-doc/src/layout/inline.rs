@@ -196,7 +196,7 @@ impl<'a> Translator<'a> {
     /// hidden counts, and one that `shows` text for the features of its glyphs: a hidden
     /// run, or one that holds only a field's instruction, shows nothing they could
     /// change. A border surrounds a tab or a picture in the line too.
-    fn report_run_features(&mut self, format: &CharacterFormat, shows: bool) {
+    pub(super) fn report_run_features(&mut self, format: &CharacterFormat, shows: bool) {
         if format.border {
             self.report_once(
                 Once::RunBorder,
@@ -207,6 +207,7 @@ impl<'a> Translator<'a> {
             return;
         }
         let effects = &format.text_effects;
+        let choices = &format.font_choices;
         // A fill of one colour changes nothing when it is the text's own.
         let fill_changes = match effects.fill {
             None => false,
@@ -279,6 +280,23 @@ impl<'a> Translator<'a> {
                 effects.turned == Some(true) || effects.depth == Some(true),
                 Once::Text3d,
                 "3-D text (w14:scene3d, w14:props3d) is drawn flat, here and wherever else the document has it",
+            ),
+            // Word applies the font's features only with enableOpenTypeFeatures on, as it
+            // does ligatures.
+            (
+                self.open_type_features && choices.number_form == Some(true),
+                Once::NumberForm,
+                "lining or old-style figures (w14:numForm) are drawn in the font's default form, here and wherever else the document asks for them",
+            ),
+            (
+                self.open_type_features && choices.number_spacing == Some(true),
+                Once::NumberSpacing,
+                "proportional or tabular figures (w14:numSpacing) are drawn in the font's default spacing, here and wherever else the document asks for them",
+            ),
+            (
+                self.open_type_features && choices.stylistic_sets == Some(true),
+                Once::StylisticSets,
+                "stylistic sets (w14:stylisticSets) are not applied, here and wherever else the document has them",
             ),
         ] {
             if on {
