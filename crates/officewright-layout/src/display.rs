@@ -17,7 +17,7 @@ use crate::ir::{
     ShadingPattern, TabKind, TabLeader, UnderlineKind, VerticalPosition,
 };
 use crate::itemize::{Item, Itemized, TextRun, drawn_size};
-use crate::lines::{Piece, PieceKind, PlacedGlyph, inline_at};
+use crate::lines::{EPSILON, Piece, PieceKind, PlacedGlyph, inline_at};
 use crate::metrics::{TypoRule, line_metrics};
 use crate::paragraph::ParagraphLayout;
 use crate::report::{Location, ReportKind};
@@ -36,8 +36,12 @@ const SUBSCRIPT_DROP: f64 = 1.0 / 3.0;
 const BAR_TAB_WIDTH: Pt = Pt(0.75);
 
 /// The most glyphs a tab leader is drawn with. A longer one, which only a tiny font in a
-/// wide tab makes, is drawn as a dotted or dashed line instead, and reported.
+/// wide tab makes, is drawn as a dotted, dashed or solid line instead, and reported.
 const MAX_LEADER_GLYPHS: usize = 4096;
+
+/// The grid Word puts the glyphs of a tab leader on, in points: 1/600 in, the unit of
+/// its PDFs. The pitch of a leader is its glyph's advance rounded to it.
+const LEADER_GRID: f64 = 72.0 / 600.0;
 
 /// The most glyphs the leaders of one layout run are drawn with together, so that no
 /// number of tabs, lines or pages makes them unbounded: far more than the leaders of a
@@ -757,12 +761,16 @@ impl Painting<'_, '_, '_> {
     }
 
     /// The leader of a tab drawn in `look`, whose font is `choice`, from `x` over
-    /// `width`: repeated glyphs, as many whole ones as fit, the last ending where the
-    /// tab does, of that font or, when it lacks the character, of a font that has it;
-    /// or a line at the underline's place for the line leaders, twice as thick for the
-    /// heavy one. Hypothesis until a Word reference (`E-tab-leader.docx`), as is a
-    /// leader that would take more than [`MAX_LEADER_GLYPHS`] glyphs being a dotted or
-    /// dashed line instead.
+    /// `width`, as Word's references of `E-tab-leader.docx` show it (#309): whole glyphs
+    /// of that font or, when it lacks the character, of a font that has it, also for the
+    /// underscore and the heavy leader, which are both '_' (the heavy one is no thicker).
+    /// The glyphs stand on a grid that starts at the left edge of the page, its pitch the
+    /// glyph's advance at the tab's size and character scale rounded to 1/600 in, one in
+    /// every cell wholly between the start of the tab and the text after it: so the
+    /// leader ends up to a pitch before the stop. A leader that would take more than
+    /// [`MAX_LEADER_GLYPHS`] glyphs, or whose pitch rounds to nothing, is a dotted,
+    /// dashed or solid line instead, and reported; what Word draws there is a
+    /// hypothesis.
     #[allow(clippy::too_many_arguments)] // reason: the tab's look, font, place and layer
     fn leader(
         &mut self,
@@ -774,16 +782,15 @@ impl Painting<'_, '_, '_> {
         baseline: f64,
         out: &mut Vec<DisplayItem>,
     ) {
-        let character = match leader {
+        let (character, fallback) = match leader {
             TabLeader::None => return,
-            TabLeader::Dot => '.',
-            TabLeader::Hyphen => '-',
-            TabLeader::MiddleDot => '\u{00B7}',
-            TabLeader::Underscore | TabLeader::Heavy => '_',
+            TabLeader::Dot => ('.', LineStyle::Dotted),
+            TabLeader::Hyphen => ('-', LineStyle::Dashed),
+            TabLeader::MiddleDot => ('\u{00B7}', LineStyle::Dotted),
+            TabLeader::Underscore | TabLeader::Heavy => ('_', LineStyle::Solid),
         };
-        let lines = matches!(leader, TabLeader::Underscore | TabLeader::Heavy);
         let choice = match choice.face {
-            Some(id) if lines || self.fonts.has_glyph(id, character) => choice,
+            Some(id) if self.fonts.has_glyph(id, character) => choice,
             _ => match self
                 .fonts
                 .covering(character, look.family, look.bold, look.italic)
@@ -809,32 +816,26 @@ impl Painting<'_, '_, '_> {
         };
         let face = face.face();
         let scale = look.size.0 / f64::from(face.units_per_em().max(1));
-        let (position, thickness) = decoration(face, Decoration::Underline, scale);
-        let line = |style: LineStyle, thickness: f64, out: &mut Vec<DisplayItem>| {
-            push_lines(
-                out,
-                vec![(style, 1.0, 0.0)],
-                x,
-                x + width,
-                baseline - position,
-                thickness,
-                look.color,
-            );
-        };
-        if lines {
-            let heavy = if leader == TabLeader::Heavy { 2.0 } else { 1.0 };
-            line(LineStyle::Solid, thickness * heavy, out);
-            return;
-        }
         let Some(glyph) = face.glyph_id(character) else {
             return;
         };
         // The character scale (`w:w`) of the tab's style widens or narrows each glyph.
         let advance = f64::from(face.advance_width(glyph).unwrap_or(0)) * scale * look.scale;
-        if advance <= 0.0 || width < advance {
+        if advance <= 0.0 || width <= 0.0 {
             return;
         }
-        let fit = (width / advance).floor();
+        let pitch = (advance / LEADER_GRID).round() * LEADER_GRID;
+        // The cells from `first` to before `end`, each wholly within the tab.
+        let (first, fit) = if pitch > 0.0 {
+            let first = ((x - EPSILON) / pitch).ceil();
+            let end = ((x + width + EPSILON) / pitch).floor();
+            (first, end - first)
+        } else {
+            (0.0, f64::INFINITY)
+        };
+        if fit < 1.0 {
+            return;
+        }
         if fit > MAX_LEADER_GLYPHS as f64 || fit > self.leaders.left as f64 {
             self.fonts.report_once(
                 ReportKind::FeatureUnsupported,
@@ -845,22 +846,24 @@ impl Painting<'_, '_, '_> {
                      is drawn as a line"
                 ),
             );
-            let style = if leader == TabLeader::Hyphen {
-                LineStyle::Dashed
-            } else {
-                LineStyle::Dotted
-            };
-            line(style, thickness, out);
+            let (position, thickness) = decoration(face, Decoration::Underline, scale);
+            push_lines(
+                out,
+                vec![(fallback, 1.0, 0.0)],
+                x,
+                x + width,
+                baseline - position,
+                thickness,
+                look.color,
+            );
             return;
         }
-        // As many as fit, the last ending where the tab ends.
         let count = fit as usize;
         self.leaders.left -= count;
-        let start = x + width - count as f64 * advance;
         let glyphs = (0..count)
             .map(|index| DrawnGlyph {
                 glyph,
-                x: Pt(index as f64 * advance),
+                x: Pt(index as f64 * pitch),
                 y: Pt(0.0),
             })
             .collect();
@@ -872,7 +875,7 @@ impl Painting<'_, '_, '_> {
             synthetic_bold: choice.synthetic_bold,
             synthetic_italic: choice.synthetic_italic,
             origin: Point {
-                x: Pt(start),
+                x: Pt(first * pitch),
                 y: Pt(baseline),
             },
             clusters: vec![Cluster {
@@ -1365,7 +1368,8 @@ mod tests {
         assert_eq!((full.h_scale, half.h_scale), (1.0, 0.5));
         assert!(step(&full) > 0.0);
         assert!((step(&half) - step(&full) / 2.0).abs() < 1e-9);
-        // The last ends at the stop, 40 pt from the column's start at 50.
+        // The glyphs stand on the page's grid of their pitch, 3 pt here, of which the stop,
+        // 40 pt from the column's start at 50, is a multiple: so the last ends at it.
         let last = half
             .clusters
             .iter()

@@ -27,8 +27,64 @@ const DEFAULT_SIZE: Pt = Pt(10.0);
 /// The Latin typefaces of the theme Word uses when a document has no theme part, its
 /// default Office theme: major and minor (the theme Word writes into the re-saved copy of
 /// the corpus file `word-rules/E-defaults-empty.docx`, Word 16.0.17932). Its East Asian
-/// and complex script typefaces are empty, so those slots fall back as with a theme.
+/// and complex script typefaces are empty, so those slots fall back as with a theme,
+/// unless a theme font language names a script of [`OFFICE_THEME_SCRIPTS`].
 const OFFICE_THEME_LATIN: [&str; 2] = ["Calibri Light", "Calibri"];
+
+/// The typefaces the same theme gives scripts, by their ISO 15924 codes, major and minor,
+/// in the order Word writes them (`a:font` of `a:majorFont` and `a:minorFont` in
+/// `word/theme/theme1.xml` of `tests/corpus/resaved/word-rules/E-defaults-empty.docx`,
+/// the copy Word 16.0.17932 re-saved). The maintainer allowed keeping them as data with
+/// that source named (#155).
+const OFFICE_THEME_SCRIPTS: [(&str, &str, &str); 47] = [
+    ("Jpan", "游ゴシック Light", "游明朝"),
+    ("Hang", "맑은 고딕", "맑은 고딕"),
+    ("Hans", "等线 Light", "等线"),
+    ("Hant", "新細明體", "新細明體"),
+    ("Arab", "Times New Roman", "Arial"),
+    ("Hebr", "Times New Roman", "Arial"),
+    ("Thai", "Angsana New", "Cordia New"),
+    ("Ethi", "Nyala", "Nyala"),
+    ("Beng", "Vrinda", "Vrinda"),
+    ("Gujr", "Shruti", "Shruti"),
+    ("Khmr", "MoolBoran", "DaunPenh"),
+    ("Knda", "Tunga", "Tunga"),
+    ("Guru", "Raavi", "Raavi"),
+    ("Cans", "Euphemia", "Euphemia"),
+    ("Cher", "Plantagenet Cherokee", "Plantagenet Cherokee"),
+    ("Yiii", "Microsoft Yi Baiti", "Microsoft Yi Baiti"),
+    ("Tibt", "Microsoft Himalaya", "Microsoft Himalaya"),
+    ("Thaa", "MV Boli", "MV Boli"),
+    ("Deva", "Mangal", "Mangal"),
+    ("Telu", "Gautami", "Gautami"),
+    ("Taml", "Latha", "Latha"),
+    ("Syrc", "Estrangelo Edessa", "Estrangelo Edessa"),
+    ("Orya", "Kalinga", "Kalinga"),
+    ("Mlym", "Kartika", "Kartika"),
+    ("Laoo", "DokChampa", "DokChampa"),
+    ("Sinh", "Iskoola Pota", "Iskoola Pota"),
+    ("Mong", "Mongolian Baiti", "Mongolian Baiti"),
+    ("Viet", "Times New Roman", "Arial"),
+    ("Uigh", "Microsoft Uighur", "Microsoft Uighur"),
+    ("Geor", "Sylfaen", "Sylfaen"),
+    ("Armn", "Arial", "Arial"),
+    ("Bugi", "Leelawadee UI", "Leelawadee UI"),
+    ("Bopo", "Microsoft JhengHei", "Microsoft JhengHei"),
+    ("Java", "Javanese Text", "Javanese Text"),
+    ("Lisu", "Segoe UI", "Segoe UI"),
+    ("Mymr", "Myanmar Text", "Myanmar Text"),
+    ("Nkoo", "Ebrima", "Ebrima"),
+    ("Olck", "Nirmala UI", "Nirmala UI"),
+    ("Osma", "Ebrima", "Ebrima"),
+    ("Phag", "Phagspa", "Phagspa"),
+    ("Syrn", "Estrangelo Edessa", "Estrangelo Edessa"),
+    ("Syrj", "Estrangelo Edessa", "Estrangelo Edessa"),
+    ("Syre", "Estrangelo Edessa", "Estrangelo Edessa"),
+    ("Sora", "Nirmala UI", "Nirmala UI"),
+    ("Tale", "Microsoft Tai Le", "Microsoft Tai Le"),
+    ("Talu", "Microsoft New Tai Lue", "Microsoft New Tai Lue"),
+    ("Tfng", "Ebrima", "Ebrima"),
+];
 
 /// The toggle properties of ECMA-376 §17.7.3.
 const TOGGLES: [Toggle; 12] = [
@@ -160,6 +216,8 @@ impl Formats<'_> {
             language_bidi: effect.languages[2].clone(),
             ligatures: effect.ligatures.unwrap_or_default(),
             contextual_alternates: effect.contextual_alternates.unwrap_or(false),
+            emphasis_mark: effect.emphasis_mark.unwrap_or(false),
+            border: effect.border.unwrap_or(false),
         }
     }
 
@@ -299,6 +357,8 @@ pub(super) struct CharacterLevel {
     languages: [Option<Arc<str>>; 3],
     ligatures: Option<Ligatures>,
     contextual_alternates: Option<bool>,
+    emphasis_mark: Option<bool>,
+    border: Option<bool>,
 }
 
 impl CharacterLevel {
@@ -337,6 +397,8 @@ impl CharacterLevel {
             languages,
             ligatures,
             contextual_alternates,
+            emphasis_mark,
+            border,
         } = self;
         fonts.iter().any(Option::is_some)
             || hint.is_some()
@@ -356,6 +418,8 @@ impl CharacterLevel {
             || languages.iter().any(Option::is_some)
             || ligatures.is_some()
             || contextual_alternates.is_some()
+            || emphasis_mark.is_some()
+            || border.is_some()
     }
 
     /// What one `w:rPr` gives.
@@ -401,6 +465,8 @@ impl CharacterLevel {
                 .map(|language| language.as_deref().map(Into::into)),
             ligatures: properties.ligatures,
             contextual_alternates: properties.contextual_alternates,
+            emphasis_mark: properties.emphasis_mark,
+            border: properties.border,
         }
     }
 }
@@ -444,6 +510,8 @@ impl Layer for CharacterLevel {
         }
         overwrite(&mut self.ligatures, above.ligatures);
         overwrite(&mut self.contextual_alternates, above.contextual_alternates);
+        overwrite(&mut self.emphasis_mark, above.emphasis_mark);
+        overwrite(&mut self.border, above.border);
     }
 }
 
@@ -451,40 +519,50 @@ impl Layer for CharacterLevel {
 /// the theme's font for the script of the language it gives for the slot (`w:val` for
 /// ascii and hAnsi, `w:eastAsia`, `w:bidi`); else, or when the theme has no font for
 /// that script, the theme's latin, ea or cs font. A document without a theme part has
-/// Word's default theme ([`OFFICE_THEME_LATIN`]).
+/// Word's default theme ([`OFFICE_THEME_LATIN`], [`OFFICE_THEME_SCRIPTS`]).
 fn theme_font(document: &Document, font: ThemeFont) -> Option<String> {
-    let Some(theme) = document.theme.as_ref() else {
-        let [major, minor] = OFFICE_THEME_LATIN;
-        return match font {
-            ThemeFont::MajorAscii | ThemeFont::MajorHAnsi => Some(major.into()),
-            ThemeFont::MinorAscii | ThemeFont::MinorHAnsi => Some(minor.into()),
-            _ => None,
-        };
-    };
-    let scheme = theme.fonts()?;
-    let (collection, slot) = match font {
-        ThemeFont::MajorAscii | ThemeFont::MajorHAnsi => (scheme.major(), Slot::Latin),
-        ThemeFont::MajorEastAsia => (scheme.major(), Slot::EastAsia),
-        ThemeFont::MajorBidi => (scheme.major(), Slot::ComplexScript),
-        ThemeFont::MinorAscii | ThemeFont::MinorHAnsi => (scheme.minor(), Slot::Latin),
-        ThemeFont::MinorEastAsia => (scheme.minor(), Slot::EastAsia),
-        ThemeFont::MinorBidi => (scheme.minor(), Slot::ComplexScript),
+    let (major, slot) = match font {
+        ThemeFont::MajorAscii | ThemeFont::MajorHAnsi => (true, Slot::Latin),
+        ThemeFont::MajorEastAsia => (true, Slot::EastAsia),
+        ThemeFont::MajorBidi => (true, Slot::ComplexScript),
+        ThemeFont::MinorAscii | ThemeFont::MinorHAnsi => (false, Slot::Latin),
+        ThemeFont::MinorEastAsia => (false, Slot::EastAsia),
+        ThemeFont::MinorBidi => (false, Slot::ComplexScript),
     };
     let languages = document.settings.theme_font_languages();
-    let (language, by_slot) = match slot {
-        Slot::Latin => (languages.and_then(|l| l.latin()), collection.latin()),
-        Slot::EastAsia => (
-            languages.and_then(|l| l.east_asia()),
-            collection.east_asian(),
-        ),
-        Slot::ComplexScript => (
-            languages.and_then(|l| l.bidi()),
-            collection.complex_script(),
-        ),
+    let language = match slot {
+        Slot::Latin => languages.and_then(|l| l.latin()),
+        Slot::EastAsia => languages.and_then(|l| l.east_asia()),
+        Slot::ComplexScript => languages.and_then(|l| l.bidi()),
     };
+    let script = language.and_then(script_of);
     let not_empty = |typeface: &&str| !typeface.is_empty();
-    let by_language = language
-        .and_then(script_of)
+    let Some(theme) = document.theme.as_ref() else {
+        let by_script = script.and_then(|script| {
+            OFFICE_THEME_SCRIPTS
+                .iter()
+                .find(|(of, _, _)| *of == script)
+                .map(|&(_, major_font, minor_font)| if major { major_font } else { minor_font })
+        });
+        let [major_latin, minor_latin] = OFFICE_THEME_LATIN;
+        let by_slot = match slot {
+            Slot::Latin => Some(if major { major_latin } else { minor_latin }),
+            Slot::EastAsia | Slot::ComplexScript => None,
+        };
+        return by_script.or(by_slot).map(Into::into);
+    };
+    let scheme = theme.fonts()?;
+    let collection = if major {
+        scheme.major()
+    } else {
+        scheme.minor()
+    };
+    let by_slot = match slot {
+        Slot::Latin => collection.latin(),
+        Slot::EastAsia => collection.east_asian(),
+        Slot::ComplexScript => collection.complex_script(),
+    };
+    let by_language = script
         .and_then(|script| collection.script(script))
         .filter(not_empty);
     by_language.or(by_slot.filter(not_empty)).map(Into::into)
@@ -499,10 +577,13 @@ enum Slot {
 
 /// The scripts themes give fonts for, by their ISO 15924 codes (Office's own `Uigh` and
 /// `Viet` among them), as a script subtag of a language tag names them.
-const THEME_SCRIPTS: [&str; 34] = [
+const THEME_SCRIPTS: [&str; 50] = [
     "Arab", "Armn", "Beng", "Cans", "Cher", "Cyrl", "Ethi", "Geor", "Grek", "Gujr", "Guru", "Hang",
     "Hans", "Hant", "Hebr", "Jpan", "Khmr", "Knda", "Laoo", "Latn", "Mlym", "Mong", "Orya", "Sinh",
     "Syrc", "Taml", "Telu", "Thaa", "Thai", "Tibt", "Uigh", "Viet", "Yiii", "Deva",
+    // The others Word's default theme names (OFFICE_THEME_SCRIPTS).
+    "Bugi", "Bopo", "Java", "Lisu", "Mymr", "Nkoo", "Olck", "Osma", "Phag", "Syrn", "Syrj", "Syre",
+    "Sora", "Tale", "Talu", "Tfng",
 ];
 
 /// The ISO 15924 code of the script of a language tag, as themes name scripts for their
