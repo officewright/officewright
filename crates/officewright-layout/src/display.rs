@@ -1787,6 +1787,27 @@ mod tests {
     }
 
     #[test]
+    fn a_smaller_highlighted_tab_without_a_font_reaches_as_far_as_its_own_text() {
+        // With no font, a 6 pt tab under a 10 pt paragraph mark: the line takes the mark's
+        // 8 pt above its baseline (at 28) and 2 below, and the tab's box its own 0.8 and
+        // 0.2 of 6 pt, from 23.2 to 29.2.
+        let (items, _) = painted_with(Vec::new(), &[RunStyle::default()], |_, document| {
+            let small = document.add_run_style(
+                RunStyle::default()
+                    .with_size(Pt(6.0))
+                    .with_highlight(Some(Color::rgb(255, 255, 0))),
+            );
+            (ParagraphProps::default(), vec![Inline::tab(small)])
+        });
+        let boxes = rects(&items);
+        let [(at, _, height, _)] = boxes.as_slice() else {
+            panic!("{items:?}");
+        };
+        assert!((at.y.0 - 23.2).abs() < 1e-9, "{boxes:?}");
+        assert!((height.0 - 6.0).abs() < 1e-9, "{boxes:?}");
+    }
+
+    #[test]
     fn a_highlighted_tab_without_a_font_reaches_as_far_as_its_line() {
         // With no font at all there is no text, but a tab still takes its room: its line
         // takes 0.8 of the size above the baseline and 0.2 below, and so does its box,
