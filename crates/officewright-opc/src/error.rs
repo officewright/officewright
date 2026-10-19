@@ -199,6 +199,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn lists_every_limit_so_that_a_new_one_stops_the_build() {
+        // officewright-doc gives each limit of this crate its own (`impl
+        // From<officewright_opc::Error>` in its error.rs), and can only report a limit it
+        // does not name as a damaged document (#52). This match has no wildcard, so a new
+        // limit stops this test compiling until it is listed here, after its counterpart
+        // was added there.
+        let listed = |limit: Limit| match limit {
+            Limit::Entries
+            | Limit::PartSize
+            | Limit::TotalSize
+            | Limit::PartNameLength
+            | Limit::Relationships
+            | Limit::ContentTypes
+            | Limit::XmlDepth
+            | Limit::XmlAttributes
+            | Limit::MceNames
+            | Limit::XmlNamespaces => true,
+        };
+        assert!(listed(Limit::Entries));
+    }
+
+    #[test]
     fn in_part_names_the_part_once() {
         let err = Error::Xml {
             part: None,

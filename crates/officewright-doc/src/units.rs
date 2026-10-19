@@ -18,7 +18,8 @@ pub(crate) fn half_points_measure(value: &str, signed: bool) -> Option<Pt> {
 
 /// A length given as a number of `1 / per_point` points, or as a number with a unit.
 fn measure(value: &str, per_point: f64, signed: bool) -> Option<Pt> {
-    let value = value.trim();
+    // Not trimmed: Office takes atomic values only with their whitespace already
+    // normalized, so " 720 " is no length to Word (MS-OI29500 2.1.1(a), #243).
     let number_end = value
         .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+'))
         .unwrap_or(value.len());
@@ -69,6 +70,14 @@ mod tests {
         assert_eq!(half_points_measure("-6", true), Some(Pt(-3.0)));
         assert_eq!(half_points_measure("-6", false), None);
         assert_eq!(half_points_measure("11pt", false), Some(Pt(11.0)));
+    }
+
+    #[test]
+    fn refuses_a_length_with_whitespace_around_it_as_word_does() {
+        for value in [" 720", "720 ", "\t1in", "1in\n", "\u{a0}720"] {
+            assert_eq!(twips_measure(value, false), None, "{value:?}");
+            assert_eq!(half_points_measure(value, false), None, "{value:?}");
+        }
     }
 
     #[test]

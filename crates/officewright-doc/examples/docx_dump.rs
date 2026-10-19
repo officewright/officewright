@@ -105,10 +105,21 @@ fn dump(document: &Document, runs: bool) {
         } else {
             "none written, Word 2007's"
         },
-        settings
-            .compatibility_options()
-            .filter(|&(_, on)| on)
-            .count()
+        // Each option once, as the last time it is written sets it (#118): going back
+        // from the end, an option's first value is its last. The options seen are at
+        // most the kinds there are, so the count is linear in what is written.
+        {
+            let options: Vec<_> = settings.compatibility_options().collect();
+            let mut seen = Vec::new();
+            let mut on = 0;
+            for (option, value) in options.into_iter().rev() {
+                if !seen.contains(&option) {
+                    seen.push(option);
+                    on += usize::from(value);
+                }
+            }
+            on
+        }
     );
     for (n, section) in document.sections().enumerate() {
         let properties = section.properties();

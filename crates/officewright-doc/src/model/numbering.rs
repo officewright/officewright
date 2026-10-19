@@ -11,6 +11,7 @@ use super::properties::{
     Justification, NumberFormat, ParagraphProperties, RunProperties, xml_enum,
 };
 use super::xml::{Element, Span};
+use crate::docx::properties::long_hex;
 
 /// The numbering part as stored: each definition and instance kept whole, with the ids
 /// they are looked up by.
@@ -45,7 +46,8 @@ xml_enum! {
     MultiLevelType {
         SingleLevel = "singleLevel",
         Multilevel = "multilevel",
-        /// Levels that each have their own template code.
+        /// Several levels, each of a potentially different type (bullets or level text),
+        /// as §17.18.58 puts it; Word gives each level its own template code.
         HybridMultilevel = "hybridMultilevel",
     }
 }
@@ -103,7 +105,9 @@ impl<'a> Numbering<'a> {
         Self { document }
     }
 
-    /// Every list definition (`w:abstractNum`), in the order of `numbering.xml`.
+    /// The list definitions (`w:abstractNum`) with a valid `w:abstractNumId`, in the order
+    /// of `numbering.xml`. One without a valid id (missing, not a number or negative) is
+    /// left out: nothing can name it, though the document keeps its XML.
     pub fn definitions(self) -> impl ExactSizeIterator<Item = ListDefinition<'a>> + 'a {
         let document = self.document;
         document
@@ -123,7 +127,9 @@ impl<'a> Numbering<'a> {
         })
     }
 
-    /// Every list instance (`w:num`), in the order of `numbering.xml`.
+    /// The list instances (`w:num`) with a valid `w:numId`, in the order of
+    /// `numbering.xml`. One without a valid id (missing or not a number) is left out:
+    /// nothing can name it, though the document keeps its XML.
     pub fn instances(self) -> impl ExactSizeIterator<Item = ListInstance<'a>> + 'a {
         let document = self.document;
         document
@@ -407,7 +413,8 @@ impl ListLevel {
         self.level
     }
 
-    /// The first number (`w:start`); 0 when it is not written (§17.9.25).
+    /// The first number (`w:start`); `None` when it is not written, in which case the
+    /// standard's default is 0 (§17.9.25).
     pub fn start(&self) -> Option<i64> {
         self.start
     }
@@ -502,11 +509,4 @@ impl ListLevel {
 /// The level of a `w:lvl`; the reader of the level refuses one past 8.
 fn level_index(lvl: Element<'_>, document: &Document) -> Option<usize> {
     lvl.attribute(&document.names.w, "ilvl")?.parse().ok()
-}
-
-/// ST_LongHexNumber: four bytes, eight hexadecimal digits.
-pub(crate) fn long_hex(value: &str) -> Option<u32> {
-    (value.len() == 8 && value.bytes().all(|b| b.is_ascii_hexdigit()))
-        .then(|| u32::from_str_radix(value, 16).ok())
-        .flatten()
 }

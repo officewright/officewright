@@ -159,6 +159,9 @@ struct Reading<'d, 'p, 't> {
     link_targets: HashMap<Box<str>, Option<Sym>>,
     /// The image each relationship a picture named so far leads to.
     images: HashMap<Box<str>, Option<u32>>,
+    /// Whether the main part's `w:body` has started: elements kept under `w:document` from
+    /// then on come after it.
+    body_read: bool,
 }
 
 pub(super) fn read(
@@ -206,6 +209,7 @@ pub(super) fn read(
         continued: HashMap::new(),
         link_targets: HashMap::new(),
         images: HashMap::new(),
+        body_read: false,
     };
     reading
         .run(&mut reader, &mut mce)
@@ -339,6 +343,7 @@ impl Reading<'_, '_, '_> {
         match frame {
             Context::Root => match (self.story, local) {
                 (Story::Document, "body") => {
+                    self.body_read = true;
                     self.push(Frame::Container {
                         parent: Parent::Body,
                         level: Level::Block,
@@ -349,7 +354,11 @@ impl Reading<'_, '_, '_> {
                     self.open_note(reader, mce, tag)
                 }
                 // w:background and the like: kept for writing in a later version.
-                _ => self.c.capture(reader, mce, tag, None).map(drop),
+                _ => {
+                    let span = self.c.capture(reader, mce, tag, None)?;
+                    self.keep_at_root(span);
+                    Ok(())
+                }
             },
             Context::Text => {
                 let offset = tag.offset();
@@ -1082,7 +1091,20 @@ impl Reading<'_, '_, '_> {
             Context::ContentControl { node, .. } => {
                 self.add(Parent::Node(node), Kind::Other(span)).map(drop)
             }
-            Context::Root | Context::Text => Ok(()),
+            Context::Root => {
+                self.keep_at_root(span);
+                Ok(())
+            }
+            Context::Text => Ok(()),
+        }
+    }
+
+    /// Notes an element kept under the main part's `w:document`, before or after its
+    /// body; the other stories' roots keep none.
+    fn keep_at_root(&mut self, span: Span) {
+        if self.story == Story::Document {
+            let after_body = self.body_read;
+            self.c.document.root_elements.push((span, after_body));
         }
     }
 

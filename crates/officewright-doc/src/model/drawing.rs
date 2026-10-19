@@ -174,7 +174,7 @@ impl<'a> Drawing<'a> {
             allow_overlap: flag("allowOverlap").unwrap_or(true),
             z_order: frame
                 .attribute(&[None], "relativeHeight")
-                .and_then(|value| value.trim().parse().ok())
+                .and_then(|value| value.parse().ok())
                 .unwrap_or(0),
             distances: Offsets {
                 left: distance("distL"),
@@ -193,7 +193,11 @@ impl<'a> Drawing<'a> {
                 .map(|align| align.text().trim().to_owned());
             let offset = self
                 .child(child, &names.wp, "posOffset")
-                .and_then(|offset| coordinate(&offset.text()));
+                // Element text, unlike the attributes, is still read with its whitespace
+                // trimmed: tdf123163-1.docx of LibreOffice's tests writes a line feed
+                // before its offsets, and whether Word places those pictures is not known
+                // yet (#243).
+                .and_then(|offset| coordinate(offset.text().trim()));
             match local {
                 "positionH" => {
                     anchor.horizontal_reference = relative.and_then(HorizontalReference::from_xml);
@@ -362,7 +366,8 @@ impl<'a> Picture<'a> {
                             ["lat", "lon", "rev"].into_iter().any(|name| {
                                 rotation
                                     .attribute(&[None], name)
-                                    .is_some_and(|angle| angle.trim() != "0")
+                                    .and_then(|angle| angle.parse::<i64>().ok())
+                                    .is_some_and(|angle| angle != 0)
                             })
                         })
                 }),
@@ -403,7 +408,7 @@ impl<'a> Picture<'a> {
     pub fn rotation(self) -> f64 {
         self.transform()
             .and_then(|xfrm| xfrm.attribute(&[None], "rot"))
-            .and_then(|value| value.trim().parse::<i32>().ok())
+            .and_then(|value| value.parse::<i32>().ok())
             .map_or(0.0, |value| f64::from(value) / 60_000.0)
     }
 
@@ -705,8 +710,11 @@ pub(crate) fn embedded_image<'a>(picture: Element<'a>, names: &Names) -> Option<
 /// Strict a number with a unit (ST_UniversalMeasure: `mm`, `cm`, `in`, `pt`, `pc`,
 /// `pi`). None for one beyond ST_Coordinate's range, such as a number of hundreds of
 /// digits, which `f64` reads as infinity.
+///
+/// Attribute values are not trimmed: Office takes atomic values only with their
+/// whitespace already normalized (MS-OI29500 2.1.1(a), #243). So for [`percentage`] and
+/// [`boolean`].
 fn coordinate(value: &str) -> Option<Pt> {
-    let value = value.trim();
     let emus = match value.parse::<i64>() {
         Ok(emus) => emus as f64,
         Err(_) => {
@@ -746,7 +754,6 @@ fn measure_number(value: &str) -> Option<f64> {
 /// A share of DrawingML (ST_Percentage): thousandths of a percent, or in Strict a number
 /// of percent with `%`; 0.5 for a half.
 fn percentage(value: &str) -> Option<f64> {
-    let value = value.trim();
     if let Some(percent) = value.strip_suffix('%') {
         return measure_number(percent).map(|percent| percent / 100.0);
     }
@@ -782,7 +789,7 @@ fn changes_image(effect: Element<'_>, names: &Names) -> bool {
 
 /// A boolean attribute of DrawingML (`xsd:boolean`).
 fn boolean(value: &str) -> Option<bool> {
-    match value.trim() {
+    match value {
         "1" | "true" => Some(true),
         "0" | "false" => Some(false),
         _ => None,

@@ -109,6 +109,10 @@ pub struct Document {
     /// Where the first declaration of each font name is, by the name in lower case.
     pub(crate) font_index: HashMap<String, u32>,
     pub(crate) sections: Vec<SectionData>,
+    /// The elements of the main part's `w:document` other than `w:body`, such as
+    /// `w:background` and unknown extensions, kept for writing, each with whether it comes
+    /// after the body (#111).
+    pub(crate) root_elements: Vec<(xml::Span, bool)>,
     /// The headers, footers, footnotes and endnotes.
     pub(crate) stories: Vec<StoryData>,
     /// The header or footer each relationship of the main part leads to, by its id.
@@ -153,11 +157,12 @@ pub(crate) struct Names {
 pub enum DocumentKind {
     /// A document, `.docx`.
     Document,
-    /// A document with macros, `.docm`. The macros are kept and never run.
+    /// A document with macros, `.docm`. The macros (`vbaProject.bin` and the parts with
+    /// it) are neither read nor run, and the [`Document`] does not keep them.
     MacroEnabledDocument,
     /// A template, `.dotx`.
     Template,
-    /// A template with macros, `.dotm`.
+    /// A template with macros, `.dotm`; its macros are treated as a `.docm`'s.
     MacroEnabledTemplate,
 }
 
@@ -213,6 +218,7 @@ impl Document {
             fonts: Vec::new(),
             font_index: HashMap::new(),
             sections: Vec::new(),
+            root_elements: Vec::new(),
             stories: Vec::new(),
             header_footers: HashMap::new(),
             footnotes: HashMap::new(),
@@ -361,7 +367,9 @@ impl Document {
 
     /// The font table's declaration of a font, by the name runs give it, compared
     /// without regard to case as Word does (MS-OI29500 §17.8.3.10(b); LibreOffice's
-    /// `tdf140137.docx` names `times new roman` against a declared `Times New Roman`).
+    /// `tdf140137.docx` names `times new roman` against a declared `Times New Roman`):
+    /// both names are folded by Unicode's lower-case mapping ([`char::to_lowercase`]), so
+    /// Cyrillic and Greek names match in any case too.
     /// A table may declare one name several times, once per face of a family with its
     /// own PANOSE and signature (`fdo77727.docx` declares five Noto Sans); this gives
     /// the first, and [`fonts`](Self::fonts) all of them.

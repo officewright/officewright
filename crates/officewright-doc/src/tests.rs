@@ -446,6 +446,38 @@ fn kept_xml(document: &Document) -> Vec<String> {
 }
 
 #[test]
+fn keeps_the_elements_of_the_document_around_its_body() {
+    // Issue #111: w:background and unknown elements under w:document were kept without
+    // anything that led to them.
+    let xml = format!(
+        r#"<w:document xmlns:w="{W}" xmlns:x="urn:x"><w:background w:color="FF0000"/><w:body><w:p/></w:body><x:after x:a="1"/></w:document>"#
+    );
+    let document = Document::from_bytes(package(DOCUMENT, &xml, &[])).unwrap();
+    let kept: Vec<(String, bool)> = document
+        .root_elements
+        .iter()
+        .map(|&(span, after)| (document.element(span).to_xml(), after))
+        .collect();
+    assert_eq!(kept.len(), 2, "{kept:?}");
+    assert!(
+        kept[0].0.contains("background") && kept[0].0.contains("FF0000"),
+        "{kept:?}"
+    );
+    assert!(!kept[0].1);
+    assert!(
+        kept[1].0.contains("after") && kept[1].0.contains("urn:x"),
+        "{kept:?}"
+    );
+    assert!(kept[1].1);
+    // Those of another part's root are not the main part's (review of #383).
+    let footnotes = format!(
+        r#"<w:footnotes xmlns:w="{W}" xmlns:x="urn:x"><x:extra/><w:footnote w:id="1"><w:p/></w:footnote></w:footnotes>"#
+    );
+    let document = with_parts("<w:p/>", &[("footnotes", "footnotes.xml", footnotes)]);
+    assert!(document.root_elements.is_empty());
+}
+
+#[test]
 fn keeps_the_namespaces_that_values_in_kept_xml_name() {
     // Prefixes named only in values (#110): by every Markup Compatibility attribute, by
     // Requires and by xsi:type. Each case names a prefix of its own, bound on the
@@ -799,6 +831,46 @@ fn bounds_the_number_of_nodes() {
     ));
     let options = LoadOptions::new().with_limits(Limits::new().with_max_nodes(100));
     assert!(options.open_bytes(docx(&body)).is_ok());
+}
+
+#[test]
+fn names_the_event_that_crosses_the_node_limit_inside_a_kept_element() {
+    // Issue #34: inside an element kept without being read, the error gave the position
+    // of the event before the one that crossed the limit.
+    let body = format!(
+        "<w:p><w14:a>{}</w14:a></w:p>",
+        (0..4)
+            .map(|n| format!(r#"<w14:b w14:n="{n}"/>"#))
+            .collect::<String>()
+    );
+    let xml = document_xml(&body);
+    let column = |marker: &str| xml.find(marker).unwrap() + 1;
+    let mut columns = Vec::new();
+    for max in 1.. {
+        let options = LoadOptions::new().with_limits(Limits::new().with_max_nodes(max));
+        let Err(err) = options.open_bytes(docx(&body)) else {
+            break;
+        };
+        let message = err.to_string();
+        let at = message
+            .split("column ")
+            .nth(1)
+            .and_then(|rest| rest.split(':').next())
+            .unwrap();
+        columns.push(at.parse::<usize>().unwrap());
+    }
+    // The four children cost the same, so each is named as often: before the fix the
+    // first node of each was charged at the event before it, and the last child was named
+    // once less.
+    let count = |marker: &str| columns.iter().filter(|&&c| c == column(marker)).count();
+    let children: Vec<usize> = (0..4)
+        .map(|n| count(&format!(r#"<w14:b w14:n="{n}"/>"#)))
+        .collect();
+    assert!(children[0] > 0, "{columns:?}");
+    assert!(children.iter().all(|&n| n == children[0]), "{columns:?}");
+    // The kept element itself is named by its own node only: charged before its first
+    // child is read, that child's node would be named at it too (review of #383).
+    assert_eq!(count("<w14:a>"), 1, "{columns:?}");
 }
 
 #[test]
@@ -1990,6 +2062,44 @@ fn messages(document: &Document) -> Vec<&str> {
 }
 
 #[test]
+fn refuses_lengths_and_widths_with_whitespace_around_them_as_word_does() {
+    // As integers: Office accepts only atomic values already normalized (MS-OI29500
+    // 2.1.1(a), #243). Each is reported and left out.
+    let document = open(
+        "<w:p><w:pPr><w:ind w:left=\" 720 \"/><w:spacing w:after=\"240&#9;\"/></w:pPr></w:p>\
+         <w:tbl><w:tblPr><w:tblW w:w=\" 5000\" w:type=\"dxa\"/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>",
+    );
+    let properties = first_paragraph(&document).properties();
+    assert_eq!(properties.indentation().and_then(Indentation::start), None);
+    assert_eq!(properties.spacing().and_then(Spacing::after), None);
+    assert_eq!(first_table(&document).properties().width(), None);
+    let listed = messages(&document);
+    assert_eq!(listed.len(), 3, "{listed:?}");
+    assert!(
+        listed
+            .iter()
+            .all(|m| m.ends_with("is not valid; it is ignored")),
+        "{listed:?}"
+    );
+    // Written as Word writes them, they are read.
+    let document = open(
+        "<w:p><w:pPr><w:ind w:left=\"720\"/><w:spacing w:after=\"240\"/></w:pPr></w:p>\
+         <w:tbl><w:tblPr><w:tblW w:w=\"5000\" w:type=\"dxa\"/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>",
+    );
+    let properties = first_paragraph(&document).properties();
+    assert_eq!(
+        properties.indentation().and_then(Indentation::start),
+        Some(Pt(36.0))
+    );
+    assert_eq!(
+        properties.spacing().and_then(Spacing::after),
+        Some(Pt(12.0))
+    );
+    assert!(first_table(&document).properties().width().is_some());
+    assert!(messages(&document).is_empty());
+}
+
+#[test]
 fn refuses_integers_with_whitespace_around_them_as_word_does() {
     // ST_DecimalNumber is an xsd:integer, whose whitespace the schema collapses, but Office
     // accepts only values already normalized (MS-OI29500 2.1.1(a)): each is reported and
@@ -2670,6 +2780,26 @@ fn reports_repeated_section_properties() {
     assert!(messages[2].ends_with(": a second w:type is ignored"));
 }
 
+#[test]
+fn counts_only_the_references_that_are_kept_as_repeated() {
+    // Issue #117: a reference without r:id, which is dropped, made the one with an id a
+    // second reference of its type, in either order.
+    for body in [
+        r#"<w:p/><w:sectPr><w:headerReference w:type="default" r:id="rId1"/><w:headerReference w:type="default"/></w:sectPr>"#,
+        r#"<w:p/><w:sectPr><w:headerReference w:type="default"/><w:headerReference w:type="default" r:id="rId1"/></w:sectPr>"#,
+    ] {
+        let document = open(body);
+        let properties = document.sections().next().unwrap().properties();
+        assert_eq!(properties.headers().len(), 1);
+        let messages = messages(&document);
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert!(
+            messages[0].ends_with(": 1 header or footer references without r:id are ignored"),
+            "{messages:?}"
+        );
+    }
+}
+
 fn with_settings(settings_xml: &str) -> Document {
     Document::from_bytes(package(
         DOCUMENT,
@@ -3186,6 +3316,24 @@ fn repairs_damaged_list_instances() {
     assert!(messages[7].ends_with(": a w:num without a w:abstractNumId names no definition"));
 }
 
+#[test]
+fn reads_the_level_of_an_override_one_way_for_the_model_and_its_diagnostics() {
+    // Issue #55: the diagnostics read w:ilvl as an unsigned number and the model as a
+    // decimal number, so they disagreed on "-0" and on negative levels.
+    let numbering = format!(
+        r#"<w:numbering xmlns:w="{W}"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"/></w:abstractNum><w:num w:numId="1"><w:abstractNumId/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="5"/></w:lvlOverride><w:lvlOverride w:ilvl="-0"><w:startOverride w:val="7"/></w:lvlOverride><w:lvlOverride w:ilvl="-1"><w:startOverride w:val="2"/></w:lvlOverride><w:lvlOverride w:ilvl="-1"><w:startOverride w:val="3"/></w:lvlOverride></w:num></w:numbering>"#
+    );
+    let document = with_numbering("<w:p/>", &numbering);
+    let overrides = document.numbering().instance(1).unwrap().overrides();
+    // "-0" is level 0 again, so it is a repeat; a level outside 0 to 8 is never one.
+    let read: Vec<_> = overrides.iter().map(|o| (o.level(), o.start())).collect();
+    assert_eq!(read, [(0, Some(5)), (-1, Some(2)), (-1, Some(3))]);
+    let messages = messages(&document);
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert!(messages[0].ends_with(": a second w:lvlOverride of level 0 is ignored"));
+    assert!(messages[1].ends_with(": a w:num without a valid w:abstractNumId names no definition"));
+}
+
 /// A document with one part related to the main part by `relationship` (the last
 /// segment of its type), at `target` under `word/`.
 fn with_part(relationship: &str, target: &str, xml: &str) -> Result<Document> {
@@ -3363,6 +3511,43 @@ fn reads_the_font_table() {
         Some("MS Mincho")
     );
     assert!(document.font("Calibri Light").is_none());
+}
+
+#[test]
+fn keeps_a_thousand_notes_on_one_element_and_counts_the_rest() {
+    // Issue #56: the bound of the notes on one element's structure was untested.
+    let fonts = format!(
+        r#"<w:fonts xmlns:w="{W}"><w:font w:name="A">{}</w:font></w:fonts>"#,
+        r#"<w:charset w:val="00"/>"#.repeat(1501)
+    );
+    crate::docx::NOTES_BUILT.set(0);
+    let document = with_part("fontTable", "fontTable.xml", &fonts).unwrap();
+    // The messages of notes beyond the room left are counted, not built.
+    assert_eq!(crate::docx::NOTES_BUILT.get(), 1000);
+    let messages = messages(&document);
+    assert_eq!(messages.len(), 1001);
+    assert!(
+        messages[..1000]
+            .iter()
+            .all(|m| m.ends_with(": a second w:charset in a w:font is ignored")),
+        "{:?}",
+        &messages[..2]
+    );
+    assert_eq!(messages[1000], "500 more diagnostics are not kept");
+}
+
+#[test]
+fn finds_a_font_by_a_name_in_any_case_beyond_ascii() {
+    // Issue #56: an ASCII-only folding passed the test above.
+    let fonts = format!(r#"<w:fonts xmlns:w="{W}"><w:font w:name="Шрифт Ελληνικά"/></w:fonts>"#);
+    let document = with_part("fontTable", "fontTable.xml", &fonts).unwrap();
+    for name in ["шрифт ελληνικά", "ШРИФТ ΕΛΛΗΝΙΚΆ"] {
+        assert_eq!(
+            document.font(name).map(FontDeclaration::name),
+            Some("Шрифт Ελληνικά"),
+            "{name}"
+        );
+    }
 }
 
 #[test]

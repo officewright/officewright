@@ -190,11 +190,12 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
         self.push_start(reader, &tag, read == Some(Disposition::ProcessContent))?;
         let mut depth = 1usize;
         while depth > 0 {
-            self.spend(1)?;
-            self.at = reader.offset();
             let event = reader
                 .read_event()
                 .map_err(|err| Error::from(err.in_part(self.part)))?;
+            // Where the event just read starts, so that an error names it (#34).
+            self.at = reader.offset();
+            self.spend(1)?;
             match event {
                 Some(Event::Start(tag)) => {
                     let name = tag.name();
@@ -410,6 +411,9 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
     /// Runs `read` over the element of `span` and reports the values it finds not valid
     /// as diagnostics at `offset`. Values are collected only while diagnostics have room
     /// for them; the rest are counted, so damage that is not reported costs no memory.
+    /// They are reported together when `read` returns, not in document order with the
+    /// [`notes`](Self::notes) on the element's structure: those come before or after them
+    /// as the reader reports them (the numbering reader reports its notes first).
     pub(super) fn check(
         &mut self,
         span: Span,
@@ -454,7 +458,9 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
     }
 
     /// A collector of notes on structure (repeated or incomplete elements) for one
-    /// element, to give to [`diagnose_notes`](Self::diagnose_notes) after reading it.
+    /// element, to give to [`diagnose_notes`](Self::diagnose_notes) after reading it: they
+    /// come together, before or after the values [`check`](Self::check) reports for the
+    /// element, as the reader reports them.
     pub(super) fn notes(&self) -> Notes {
         Notes {
             room: self.diagnostics.room(),
@@ -536,10 +542,22 @@ pub(super) struct Notes {
 impl Notes {
     /// Adds a note.
     pub(super) fn add(&mut self, message: impl FnOnce() -> String) {
+        // Counted where the message is made, wherever that is.
+        let message = || {
+            #[cfg(test)]
+            NOTES_BUILT.set(NOTES_BUILT.get() + 1);
+            message()
+        };
         if self.messages.len() < self.room {
             self.messages.push(message());
         } else {
             self.omitted += 1;
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The messages of notes made on this thread, for tests of the bound on them.
+    pub(crate) static NOTES_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }

@@ -172,8 +172,10 @@ impl From<officewright_opc::Error> for Error {
                     L::XmlAttributes => Limit::XmlAttributes,
                     L::MceNames => Limit::MceNames,
                     L::XmlNamespaces => Limit::XmlNamespaces,
-                    // A limit added to officewright-opc but not to this enum yet; its
-                    // message still says which.
+                    // A limit added to officewright-opc but not to this enum yet, which
+                    // the test lists_every_limit_so_that_a_new_one_stops_the_build of
+                    // officewright-opc keeps from happening (#52); its message would still
+                    // say which.
                     _ => {
                         return Self::Malformed {
                             message: format!("{context}: a limit of {maximum} is exceeded"),

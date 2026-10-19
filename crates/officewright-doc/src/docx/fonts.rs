@@ -11,7 +11,7 @@ use officewright_opc::xml::{Event, Input};
 use officewright_opc::{Part, PartName};
 
 use super::capture::{Budget, Capture, Notes};
-use super::properties::{Report, on_off, on_off_attribute, value};
+use super::properties::{Report, long_hex, on_off, on_off_attribute, value};
 use super::{R, R_STRICT, W, W_STRICT, shorten};
 use crate::diagnostic::{DiagnosticKind, Diagnostics};
 use crate::model::fonts::{
@@ -223,13 +223,6 @@ fn panose(value: &str) -> Option<[u8; 10]> {
     Some(bytes)
 }
 
-/// ST_LongHexNumber: four bytes, eight hexadecimal digits.
-fn long_hex(value: &str) -> Option<u32> {
-    (value.len() == 8 && value.bytes().all(|b| b.is_ascii_hexdigit()))
-        .then(|| u32::from_str_radix(value, 16).ok())
-        .flatten()
-}
-
 /// Reads the programs of the fonts the font table embeds, from the parts its
 /// relationships lead to: each part read, and reported, once per key, however many fonts
 /// name it.
@@ -340,7 +333,9 @@ pub(super) fn read_programs(
 /// The 16 bytes of a `w:fontKey` (ST_Guid, `{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}`):
 /// those its hexadecimal digits give, read in pairs as written, in reverse order.
 fn font_key(value: &str) -> Option<[u8; 16]> {
-    let digits = value.trim().strip_prefix('{')?.strip_suffix('}')?;
+    // Not trimmed: Office takes atomic values only with their whitespace already
+    // normalized (MS-OI29500 2.1.1(a), #243).
+    let digits = value.strip_prefix('{')?.strip_suffix('}')?;
     let groups: Vec<&str> = digits.split('-').collect();
     let lengths: Vec<usize> = groups.iter().map(|group| group.len()).collect();
     if lengths != [8, 4, 4, 4, 12] {
@@ -388,4 +383,19 @@ fn is_font(bytes: &[u8]) -> bool {
         bytes.get(..4),
         Some(b"\x00\x01\x00\x00" | b"OTTO" | b"true" | b"ttcf")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refuses_a_font_key_with_whitespace_around_it_as_word_does() {
+        // MS-OI29500 2.1.1(a), #243.
+        let key = "{01234567-89AB-CDEF-0123-456789ABCDEF}";
+        assert!(font_key(key).is_some());
+        for value in [format!(" {key}"), format!("{key}\n"), format!("\t{key} ")] {
+            assert_eq!(font_key(&value), None, "{value:?}");
+        }
+    }
 }

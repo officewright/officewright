@@ -235,9 +235,10 @@ fn pattern_number(value: &str) -> Option<f64> {
 }
 
 /// An `xsd:decimal`: an optional sign, then digits with an optional point, at least one
-/// digit in all; spaces around it are collapsed away.
+/// digit in all, with no whitespace around it.
 fn decimal(value: &str) -> Option<f64> {
-    let value = value.trim_matches([' ', '\t', '\n', '\r']);
+    // Not trimmed: Office takes atomic values only with their whitespace already
+    // normalized (MS-OI29500 2.1.1(a), #243).
     let digits = value.strip_prefix(['+', '-']).unwrap_or(value);
     let (whole, fraction) = digits.split_once('.').unwrap_or((digits, ""));
     let only_digits = |part: &str| part.bytes().all(|b| b.is_ascii_digit());
@@ -410,5 +411,19 @@ fn position(element: Element<'_>, names: &Names, report: Report<'_>) -> TablePos
             report,
         ),
         y: length("tblpY", true, report),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refuses_a_width_with_whitespace_around_it_as_word_does() {
+        // MS-OI29500 2.1.1(a), #243.
+        assert_eq!(decimal("5000"), Some(5000.0));
+        for value in [" 5000", "5000 ", "\t50.5", "5000\r\n"] {
+            assert_eq!(decimal(value), None, "{value:?}");
+        }
     }
 }
