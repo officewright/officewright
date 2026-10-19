@@ -698,17 +698,17 @@ impl CffGlyphs {
 /// alone, or for every glyph it keeps alike. `glyphs` is what [`CffGlyphs::read`] read of
 /// the table.
 ///
-/// Decompiling the glyph may read no more than is left of `steps`, which a glyph that
-/// passes takes what it read off, nor than is left of `work`, which every glyph checked
-/// takes what it read off.
+/// Decompiling the glyph may read no more than `steps`, nor than is left of `work`,
+/// which every glyph checked takes what it read off. Returns what it read, which a glyph
+/// that passes every check takes off the steps of the next.
 pub(crate) fn check_glyph(
     cff: &[u8],
     glyphs: &mut CffGlyphs,
     face: u32,
     glyph: u16,
-    steps: &mut u32,
+    steps: u32,
     work: &mut u32,
-) -> Result<()> {
+) -> Result<u32> {
     let damaged = |reason: &str| Error::Subset {
         face,
         source: Cause::new(format!("glyph {glyph}: {reason}")),
@@ -718,8 +718,8 @@ pub(crate) fn check_glyph(
         None => Some(0),
     };
     // The work left bounds the walk where it is less than the steps left.
-    let by_work = *work < *steps;
-    let limit = (*steps).min(*work);
+    let by_work = *work < steps;
+    let limit = steps.min(*work);
     let mut left = limit;
     let walked = match font_dict.and_then(|font_dict| glyphs.local.get_mut(usize::from(font_dict)))
     {
@@ -737,7 +737,7 @@ pub(crate) fn check_glyph(
     let read = limit - left;
     *work -= read;
     match walked {
-        Ok(()) => *steps -= read,
+        Ok(()) => {}
         Err(Stop::Limit) if by_work => {
             return Err(Error::TableOverLimit {
                 face,
@@ -800,7 +800,7 @@ pub(crate) fn check_glyph(
             )));
         }
     }
-    Ok(())
+    Ok(read)
 }
 
 impl Subrs {
@@ -2957,11 +2957,14 @@ mod tests {
 
     #[test]
     fn keeps_the_subroutine_counts_for_the_next_checks() {
-        // Glyph 1 calls global subroutine 0 (operand -107, bias 107).
+        // Glyph 1 calls global subroutine 0 (operand -107, bias 107), glyph 2 local
+        // subroutine 0.
+        let mut glyphs = glyphs_with(1, vec![32, 29, 14]);
+        glyphs[2] = vec![32, 10, 14];
         let cff = programs(
-            &glyphs_with(1, vec![32, 29, 14]),
+            &glyphs,
             &[vec![139, 139, 21, 11]],
-            &[vec![]],
+            &[vec![vec![139, 139, 21, 11]]],
             None,
         );
         let font = crate::testing::TestFont::new("Test Sans")
@@ -2972,13 +2975,18 @@ mod tests {
         let font_ref = FontRef::new(&font).unwrap();
         let (range, mut glyphs) = CffGlyphs::read(&font_ref, &font).unwrap();
         let cff = &font[range];
-        let (mut steps, mut work) = (MAX_STEPS, MAX_CHECK_WORK);
-        check_glyph(cff, &mut glyphs, 0, 1, &mut steps, &mut work).unwrap();
+        let mut work = MAX_CHECK_WORK;
+        check_glyph(cff, &mut glyphs, 0, 1, MAX_STEPS, &mut work).unwrap();
         assert_eq!(glyphs.global.count, Some(1));
         assert_eq!(glyphs.local[0].count, None);
-        // The next check takes the number kept rather than counting again.
+        // Glyph 2 calls local subroutine 0, of one.
+        check_glyph(cff, &mut glyphs, 0, 2, MAX_STEPS, &mut work).unwrap();
+        assert_eq!(glyphs.local[0].count, Some(1));
+        // The next checks take the numbers kept rather than counting again.
         glyphs.global.count = Some(0);
-        assert!(check_glyph(cff, &mut glyphs, 0, 1, &mut steps, &mut work).is_err());
+        glyphs.local[0].count = Some(0);
+        assert!(check_glyph(cff, &mut glyphs, 0, 1, MAX_STEPS, &mut work).is_err());
+        assert!(check_glyph(cff, &mut glyphs, 0, 2, MAX_STEPS, &mut work).is_err());
     }
 
     #[test]
@@ -3003,29 +3011,77 @@ mod tests {
             assert!(matches!(err, Error::TableOverLimit { .. }), "{err}");
             std::error::Error::source(&err).unwrap().to_string()
         };
-        // Glyph 1 passes and takes its 13 steps; glyph 2 then fails and takes none, so
-        // glyph 3 still passes. Work counts every glyph checked.
-        let (mut steps, mut work) = (20, 100);
-        check_glyph(cff, &mut read, 0, 1, &mut steps, &mut work).unwrap();
-        assert_eq!((steps, work), (7, 87));
+        // Glyph 1 reads 13 within 20 steps; glyph 2 does not within 7, and glyph 3 reads 4.
+        // Work counts what every glyph checked read.
+        let reason = |result: Result<u32>| reason(result.map(|_| ()));
+        let mut work = 100;
+        assert_eq!(
+            check_glyph(cff, &mut read, 0, 1, 20, &mut work).unwrap(),
+            13
+        );
+        assert_eq!(work, 87);
         assert!(
-            reason(check_glyph(cff, &mut read, 0, 2, &mut steps, &mut work))
+            reason(check_glyph(cff, &mut read, 0, 2, 7, &mut work))
                 .starts_with("decompiling glyph 2 reads more than the 7 operands,")
         );
-        assert_eq!((steps, work), (7, 80));
-        check_glyph(cff, &mut read, 0, 3, &mut steps, &mut work).unwrap();
-        assert_eq!((steps, work), (3, 76));
+        assert_eq!(work, 80);
+        assert_eq!(check_glyph(cff, &mut read, 0, 3, 7, &mut work).unwrap(), 4);
+        assert_eq!(work, 76);
         // Where the work left is less than the steps, it bounds the walk.
-        let (mut steps, mut work) = (100, 10);
+        let mut work = 10;
         assert_eq!(
-            reason(check_glyph(cff, &mut read, 0, 1, &mut steps, &mut work)),
+            reason(check_glyph(cff, &mut read, 0, 1, 100, &mut work)),
             format!(
                 "checking glyph 1 reads more than the 10 operands, operators and hint mask \
                  bytes left of the {MAX_CHECK_WORK} the checks of one face may read"
             )
         );
-        assert_eq!((steps, work), (100, 0));
-        assert!(check_glyph(cff, &mut read, 0, 3, &mut steps, &mut work).is_err());
+        assert_eq!(work, 0);
+        assert!(check_glyph(cff, &mut read, 0, 3, 100, &mut work).is_err());
+    }
+
+    #[test]
+    fn a_glyph_that_fails_after_its_walk_takes_no_steps_either() {
+        // Global subroutine 2 reads 12,006,001 operands and operators; glyphs 1, 3 and 4
+        // call it once, so two of them together pass the limit of one subset.
+        let calls = |subr: u8, times: usize| {
+            let mut program = [subr + 32, 29].repeat(times);
+            program.push(11);
+            program
+        };
+        let global = [vec![11], calls(0, 2000), calls(1, 2000)];
+        let mut glyphs = glyphs_with(1, vec![34, 29, 14]);
+        glyphs[3] = vec![34, 29, 14];
+        glyphs[4] = vec![34, 29, 14];
+        let face = |cff: Vec<u8>, post: Option<Vec<u8>>| {
+            let mut font = crate::testing::TestFont::new("Test Sans")
+                .with_table(b"CFF ", cff)
+                .without_table(b"glyf")
+                .without_table(b"loca");
+            if let Some(post) = post {
+                font = font.with_table(b"post", post);
+            }
+            crate::font::FontFace::from_bytes(font.build(), 0).unwrap()
+        };
+        let glyph = crate::font::GlyphId::new;
+        // Glyph 3, in Font DICT 1, fails on the font name of its Font DICT, string 393.
+        let cid = Spec {
+            glyphs: glyphs.clone(),
+            global: index_of(&global),
+            local: vec![vec![], vec![]],
+            fd_select: Some(vec![3, 0, 2, 0, 0, 0, 0, 3, 1, 0, 5]),
+            last_font_dict_prefix: vec![28, 1, 137, 12, 38],
+            ..Spec::default()
+        }
+        .build();
+        let font = face(cid, None);
+        assert!(font.check_subset_glyph(glyph(3)).is_err());
+        font.check_subset_glyph(glyph(1)).unwrap();
+        // Glyph 4 fails on its name in a post table that names four glyphs.
+        let sid = programs(&glyphs, &global, &[vec![]], None);
+        let font = face(sid, Some(crate::testing::post_naming(4)));
+        assert!(font.check_subset_glyph(glyph(4)).is_err());
+        font.check_subset_glyph(glyph(1)).unwrap();
     }
 
     #[test]

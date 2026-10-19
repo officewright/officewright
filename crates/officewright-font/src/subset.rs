@@ -192,8 +192,9 @@ impl FontFace {
     /// # Errors
     ///
     /// Those of [`subset`](Self::subset) for the face or for `glyph`, and
-    /// [`Error::TableOverLimit`] once the glyphs checked before have read nearly all a
-    /// subset may, or the components followed reach the limit.
+    /// [`Error::TableOverLimit`] once the glyphs that passed before have read nearly all a
+    /// subset may, the checks of the face have read four times that, or the components
+    /// followed reach their limit.
     pub fn check_subset_glyph(&self, glyph: GlyphId) -> Result<()> {
         self.subset_check().check(self, glyph)
     }
