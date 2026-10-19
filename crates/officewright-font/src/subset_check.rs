@@ -1175,10 +1175,11 @@ mod tests {
             Some(false)
         );
         assert_eq!(components, 60_000);
-        // With none left, a composite is not read at all, even one without components.
+        // With none left, a composite is not read at all: here one whose header is cut off,
+        // which ends the numbering when it is read.
         let mut entries = vec![Vec::new(); 2];
         entries[0] = glyph_entries()[0].clone();
-        entries[1] = vec![0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0];
+        entries[1] = vec![0xFF, 0xFF, 0, 0];
         let face = crate::FontFace::from_bytes(font_of(&entries, false).build(), 0).unwrap();
         let glyf = Tables::read(&face).unwrap().glyf.unwrap();
         let mut none = 0;
