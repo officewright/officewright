@@ -9,9 +9,9 @@ use officewright_core::Pt;
 use crate::fonts::Fonts;
 use crate::ir::{CompatFlag, Document, Paragraph, ParagraphProps};
 use crate::itemize::{FieldValues, Itemized, itemize_with, shape_runs};
-use crate::lines::{Breaker, Input, Line};
+use crate::lines::{Breaker, Input, Line, LineEnd};
 use crate::lists::Label;
-use crate::report::Location;
+use crate::report::{Location, ReportKind};
 use crate::shape::Shaper;
 
 /// The space automatic spacing (`w:beforeAutospacing`, `w:afterAutospacing`) puts
@@ -84,6 +84,21 @@ pub(crate) fn lay_out_with(
         location,
     };
     let lines = Breaker::new(input, &itemized, &shaped, fonts, shaper).lines();
+    // Word hyphenates only where a line wraps, in a paragraph that does not suppress it, in a
+    // document that asks for it (Part 1 §17.3.1.34, §17.15.1.10), so the entry names the
+    // first paragraph with such a line: a document whose paragraphs all suppress it, or
+    // whose lines all end otherwise, gets none.
+    if document.settings().hyphenation().auto()
+        && !paragraph.props().suppress_auto_hyphens()
+        && lines.iter().any(|line| line.end == LineEnd::Wrap)
+    {
+        fonts.report_once(
+            ReportKind::FeatureUnsupported,
+            location,
+            "automatic hyphenation is not done: words are not hyphenated at the ends of lines"
+                .to_owned(),
+        );
+    }
     ParagraphLayout {
         width,
         itemized,
