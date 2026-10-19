@@ -1,6 +1,7 @@
 //! Resolving the formatting in effect (ECMA-376 Part 1, §17.7.2): the document defaults,
-//! in a cell what the table's style gives, numbering, the paragraph's style, the run's
-//! character style and direct formatting, combined as Word combines them.
+//! in a cell what the table's style gives, the paragraph's style, its list level, the
+//! run's character style and direct formatting, combined as Word combines them (the list
+//! level over the paragraph style, see `combination`).
 
 mod character;
 mod paragraph;

@@ -272,8 +272,8 @@ impl ParagraphFlag {
 }
 
 /// The formatting of a paragraph in effect, as Word lays it out: the document defaults,
-/// in a cell what the table's style gives, the paragraph's list level and style, and its
-/// direct formatting combined.
+/// in a cell what the table's style gives, the paragraph's style, its list level over
+/// that, and its direct formatting combined.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct ParagraphFormat {

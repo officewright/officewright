@@ -1043,6 +1043,38 @@ fn takes_the_last_table_style_marked_default() {
     );
 }
 
+#[test]
+fn lays_a_list_level_over_each_table_style_of_its_cell() {
+    // From the review of #360: a list item's level laid over a paragraph style is kept
+    // per table text, so a list item in a right-aligned table's cell does not take the
+    // centring of the list item before it, in a table whose style centres.
+    let styles = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="table" w:styleId="C"><w:name w:val="C"/><w:pPr><w:jc w:val="center"/></w:pPr></w:style><w:style w:type="table" w:styleId="R"><w:name w:val="R"/><w:pPr><w:jc w:val="right"/></w:pPr></w:style>"#;
+    let numbering = r#"<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#;
+    let item = r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>item</w:t></w:r></w:p>"#;
+    let table = |style: &str| {
+        format!(
+            r#"<w:tbl><w:tblPr><w:tblStyle w:val="{style}"/></w:tblPr><w:tblGrid/><w:tr><w:tc>{item}</w:tc></w:tr></w:tbl><w:p/>"#
+        )
+    };
+    let body = format!("{}{}", table("C"), table("R"));
+    let document = open_text(styles, "", numbering, &body);
+    let mut formats = document.formats();
+    let mut found = Vec::new();
+    for block in document.sections().next().unwrap().blocks() {
+        let Block::Table(table) = block else {
+            continue;
+        };
+        let cell = table.rows().next().unwrap().cells().next().unwrap();
+        let Some(Block::Paragraph(paragraph)) = cell.blocks().next() else {
+            panic!("no paragraph");
+        };
+        let format = formats.paragraph(paragraph);
+        assert!(format.list().is_some());
+        found.push(format.justification());
+    }
+    assert_eq!(found, [Justification::Center, Justification::Right]);
+}
+
 /// A document with these styles, the settings `settings` (none for an empty string), a
 /// numbering part when `numbering` is not empty, and this body.
 fn open_text(styles: &str, settings: &str, numbering: &str, body: &str) -> Document {
