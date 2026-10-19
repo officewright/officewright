@@ -362,7 +362,7 @@ fn check_closure(
     Ok(())
 }
 
-/// Whether the components of `glyph`, followed as far as they go, reach a glyph past
+/// Whether the components of `.notdef`, followed as far as they go, reach a glyph past
 /// `glyph_count`; each component read takes one off `components`, and none are left
 /// counts as reaching one.
 fn reaches_past(glyf: &Glyf, data: &[u8], glyph_count: u16, components: &mut u32) -> bool {
@@ -438,12 +438,21 @@ fn closure_overflows(
         if contours >= 0 {
             continue;
         }
+        // None left: the composite is not read at all; more than are left: they are
+        // all used, so that the next checks do not read it again.
+        if components.as_deref() == Some(&0) {
+            return None;
+        }
         let Some(found) = closure_components(entry) else {
             return Some(false);
         };
         if let Some(components) = components.as_deref_mut() {
             let len = u32::try_from(found.len()).unwrap_or(u32::MAX);
-            *components = components.checked_sub(len)?;
+            let Some(left) = components.checked_sub(len) else {
+                *components = 0;
+                return None;
+            };
+            *components = left;
         }
         stack.extend(found.into_iter().filter(|&c| !is_marked(&numbered, c)));
     }
@@ -1115,13 +1124,16 @@ mod tests {
         }
         // A glyph too short for a header, reached first, ends the subsetter's closure with
         // an error of its own before it numbers every ID.
-        let mut short = entries;
-        short[65535] = vec![0xFF];
-        let face = crate::FontFace::from_bytes(font_past(&short, 2), 0).unwrap();
-        assert!(matches!(
-            face.subset([GlyphId::new(1)]),
-            Err(Error::Subset { .. })
-        ));
+        // So does a composite whose header is cut off.
+        for first in [vec![0xFF], vec![0xFF, 0xFF, 0, 0]] {
+            let mut short = entries.clone();
+            short[65535] = first;
+            let face = crate::FontFace::from_bytes(font_past(&short, 2), 0).unwrap();
+            assert!(matches!(
+                face.subset([GlyphId::new(1)]),
+                Err(Error::Subset { .. })
+            ));
+        }
     }
 
     #[test]
@@ -1163,6 +1175,79 @@ mod tests {
             Some(false)
         );
         assert_eq!(components, 60_000);
+        // With none left, a composite is not read at all, even one without components.
+        let mut entries = vec![Vec::new(); 2];
+        entries[0] = glyph_entries()[0].clone();
+        entries[1] = vec![0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0];
+        let face = crate::FontFace::from_bytes(font_of(&entries, false).build(), 0).unwrap();
+        let glyf = Tables::read(&face).unwrap().glyf.unwrap();
+        let mut none = 0;
+        assert_eq!(
+            closure_overflows(&glyf, face.data(), &[0, 1], Some(&mut none)),
+            None
+        );
+        let mut one = 1;
+        assert_eq!(
+            closure_overflows(&glyf, face.data(), &[0, 1], Some(&mut one)),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn spends_the_components_a_numbering_could_not_finish() {
+        // Glyph 2 uses glyph 4, past the count, 100 times; glyphs 1 and 3 each use glyph 2.
+        let mut entries = vec![Vec::new(); 5];
+        entries[0] = glyph_entries()[0].clone();
+        entries[1] = composite_of(&[2]);
+        entries[2] = composite_of(&[4; 100]);
+        entries[3] = composite_of(&[2]);
+        let face = crate::FontFace::from_bytes(font_past(&entries, 4), 0).unwrap();
+        // Glyph 2 follows its 100 components, and numbers its closure with them: 50 left.
+        // Glyph 3 then cannot number glyph 2's again, and uses up what is left, so glyph 1
+        // fails without reading glyph 2.
+        let mut state = State::new(&face, 250);
+        state.check(&face, 2).unwrap();
+        assert_eq!(state.components, 50);
+        assert!(matches!(
+            state.check(&face, 3),
+            Err(Error::TableOverLimit { .. })
+        ));
+        assert_eq!(state.components, 0);
+        assert!(matches!(
+            state.check(&face, 1),
+            Err(Error::TableOverLimit { .. })
+        ));
+    }
+
+    #[test]
+    fn reads_notdefs_closure_up_to_the_glyph_count() {
+        // .notdef uses glyph 65535, the first past a count of 65,535, and glyph 1 glyphs 2
+        // to 65534: together every ID.
+        let mut entries = every_id();
+        entries[0] = composite_of(&[65535]);
+        entries[1] = composite_of(&(2..=65534).collect::<Vec<_>>());
+        let face = crate::FontFace::from_bytes(font_past(&entries, 65535), 0).unwrap();
+        assert!(matches!(
+            face.check_subset_glyph(GlyphId::new(1)),
+            Err(Error::SubsetUnsupported { .. })
+        ));
+        assert!(face.subset([GlyphId::new(1)]).is_err());
+        // .notdef uses glyph 2 twenty times, then glyphs 3 to 65535, past a count of 3.
+        // Reading it stops at the first past the count: 21 components; with fewer left, it
+        // counts as reaching past it, and glyph 1, which takes every ID with it, fails.
+        let mut entries = every_id();
+        let mut components = vec![2; 20];
+        components.extend(3..=65535);
+        entries[0] = composite_of(&components);
+        entries[1] = glyph_entries()[2].clone();
+        let face = crate::FontFace::from_bytes(font_past(&entries, 3), 0).unwrap();
+        let state = State::new(&face, 100_000);
+        assert!(state.notdef_past);
+        assert_eq!(state.components, 100_000 - 21);
+        let mut state = State::new(&face, 10);
+        assert!(state.notdef_past);
+        assert!(state.check(&face, 1).is_err());
+        assert!(face.subset([GlyphId::new(1)]).is_err());
     }
 
     /// The font `data` with its table `tag` replaced by `table`, of the same length.

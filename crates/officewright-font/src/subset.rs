@@ -176,7 +176,10 @@ impl FontFace {
     /// at most four times the limit of one subset in CFF charstrings, those of glyphs that
     /// fail included, which only a crafted face comes near. Several faces subset within one
     /// [`SubsetBudget`], as the faces of one PDF are, can still take more together than it
-    /// has left: the checks bound each face alone.
+    /// has left: the checks bound each face alone. And TrueType glyphs whose components
+    /// name glyph IDs past the face's glyph count, which only a crafted face does, can each
+    /// pass and still take all 65,536 glyph IDs together, which `subset` refuses as
+    /// [`Error::SubsetUnsupported`].
     ///
     /// ```
     /// use officewright_font::{FontFace, GlyphId};
