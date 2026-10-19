@@ -759,7 +759,9 @@ fn applies_the_formats_of_one_cell_in_word_s_order() {
         ),
         [["BBBBBB"]]
     );
-    // Column bands leave out the first and last column when those are on.
+    // Column bands leave out the first column when it is on, as Word does
+    // (word-rules/E-table-style-look.docx, case 01), and the last column when it is on
+    // (our choice; no render shows it yet, #298).
     let banded = style(&[("band1Vert", "111111"), ("band2Vert", "222222")]);
     assert_eq!(
         fill(
@@ -908,8 +910,9 @@ fn takes_the_options_a_partial_look_leaves_out_as_on() {
             ["BBBBBB", "BBBBBB", "BBBBBB"]
         ]
     );
-    // A w:tblLook with neither w:val nor an option: everything off, so both bands are
-    // on, and column bands over row bands (our choice; no render shows it yet).
+    // A w:tblLook with neither w:val nor an option: everything off (our choice; no render
+    // shows it yet), so both bands are on, and column bands over row bands, in the order
+    // of MS-OI29500 §17.7.6.6(a), which E-table-style-look case 01 shows.
     assert_eq!(
         fill(""),
         [
@@ -931,9 +934,10 @@ fn takes_the_options_a_partial_look_leaves_out_as_on() {
 
 #[test]
 fn takes_the_first_row_format_for_every_header_row() {
-    // word-rules/E-table-style-header-rows-on and -off.docx (#300): with the first row's
-    // format on, every header row (w:tblHeader) at the top takes it, and the row bands
-    // start after the last of them.
+    // word-rules/E-table-style-header-rows-on.docx (#300): with the first row's format on,
+    // every header row (w:tblHeader) at the top takes it, and the row bands start after
+    // the last of them. With differentiateMultirowTableHeaders off this is unverified: the
+    // render of E-table-style-header-rows-off.docx shows the setting absent (#343).
     let rows = |header: &[bool], look: &str| {
         let rows: String = header
             .iter()

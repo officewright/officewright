@@ -201,8 +201,8 @@ fn default_look() -> TableLook {
 /// §17.7.6.5(c), §17.7.6.7(b)). Word leaves the first row and the first column out of
 /// the bands when they are formatted on their own (word-rules/E-table-style-look.docx,
 /// cases 01 and 04), and every header row (E-table-style-header-rows-on.docx, #300).
-/// Leaving the last row and column out too is our choice: where they are formatted on
-/// their own, their format hides whether they count, and no render shows it yet.
+/// Leaving the last row and column out too is our choice: in E-table-style-look their
+/// own format covers the band's colour and fill, so no render shows it yet (#298).
 fn band(
     at: usize,
     count: usize,
@@ -496,10 +496,13 @@ impl<'a> Formats<'a> {
         let column_band = band_size(look.no_vertical_bands, properties.column_band_size);
         let rows: Vec<TableRow<'a>> = table.rows().collect();
         // With the first row's format on, every header row (w:tblHeader) at the top of
-        // the table takes it, and the row bands start after the last of them, whatever
-        // differentiateMultirowTableHeaders says: word-rules/E-table-style-header-rows-on
-        // and -off.docx (#300). The header rows make one group for the format's borders,
-        // and each takes the corner formats; no render shows those yet (#298).
+        // the table takes it, and the row bands start after the last of them:
+        // word-rules/E-table-style-header-rows-on.docx, with differentiateMultirowTableHeaders
+        // on (#300). With the setting off this is unverified: Word dropped the setting from
+        // the copy it rendered E-table-style-header-rows-off.docx from, so that render shows
+        // it absent, not off (#343), until Word renders E-table-style-header-rows-3-off of
+        // #321. The header rows make one group for the format's borders, and each takes the
+        // corner formats; no render shows those yet (#298).
         let header_rows = if first_row {
             rows.iter()
                 .take_while(|row| row.properties().header() == Some(true))
