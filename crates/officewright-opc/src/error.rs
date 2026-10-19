@@ -99,6 +99,8 @@ impl Error {
                 column,
                 message,
             },
+            // A part name begins with a slash (ECMA-376 Part 2); the context of an
+            // XML limit that names none yet begins with its line.
             Self::LimitExceeded {
                 limit,
                 maximum,
@@ -106,7 +108,7 @@ impl Error {
             } if matches!(
                 limit,
                 Limit::XmlDepth | Limit::XmlAttributes | Limit::XmlNamespaces | Limit::MceNames
-            ) =>
+            ) && !context.starts_with('/') =>
             {
                 Self::LimitExceeded {
                     limit,
@@ -196,6 +198,19 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "/word/document.xml, line 2, column 7: unexpected end of input"
+        );
+        // So does an XML limit (#101).
+        let depth = Error::LimitExceeded {
+            limit: Limit::XmlDepth,
+            maximum: 256,
+            context: "line 9, column 1".into(),
+        };
+        assert_eq!(
+            depth
+                .in_part("/word/document.xml")
+                .in_part("/other.xml")
+                .to_string(),
+            "/word/document.xml, line 9, column 1: xml element nesting depth exceeds the limit of 256"
         );
     }
 
