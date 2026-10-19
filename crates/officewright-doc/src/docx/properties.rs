@@ -638,3 +638,10 @@ fn indentation(element: Element<'_>, names: &Names, report: Report<'_>) -> Inden
 pub(super) fn integer(value: &str) -> Option<i64> {
     value.parse().ok()
 }
+
+/// ST_LongHexNumber: four bytes, eight hexadecimal digits.
+pub(crate) fn long_hex(value: &str) -> Option<u32> {
+    (value.len() == 8 && value.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| u32::from_str_radix(value, 16).ok())
+        .flatten()
+}

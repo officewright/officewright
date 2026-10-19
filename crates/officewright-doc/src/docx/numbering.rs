@@ -10,13 +10,14 @@ use officewright_opc::xml::{Event, Input};
 
 use super::capture::{Budget, Capture};
 use super::properties::{
-    Report, integer, on_off, on_off_attribute, paragraph_properties, run_properties, value,
+    Report, integer, long_hex, on_off, on_off_attribute, paragraph_properties, run_properties,
+    value,
 };
 use super::{R, R_STRICT, W, W_STRICT, shorten};
 use crate::diagnostic::{DiagnosticKind, Diagnostics};
 use crate::model::numbering::{
     DefinitionData, InstanceData, LegacyNumbering, LevelOverride, LevelSuffix, ListLevel,
-    MultiLevelType, long_hex,
+    MultiLevelType,
 };
 use crate::model::properties::{Justification, NumberFormat, ParagraphProperties, RunProperties};
 use crate::model::xml::{Element, Span};

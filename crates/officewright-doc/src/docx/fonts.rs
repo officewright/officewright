@@ -11,7 +11,7 @@ use officewright_opc::xml::{Event, Input};
 use officewright_opc::{Part, PartName};
 
 use super::capture::{Budget, Capture, Notes};
-use super::properties::{Report, on_off, on_off_attribute, value};
+use super::properties::{Report, long_hex, on_off, on_off_attribute, value};
 use super::{R, R_STRICT, W, W_STRICT, shorten};
 use crate::diagnostic::{DiagnosticKind, Diagnostics};
 use crate::model::fonts::{
@@ -221,13 +221,6 @@ fn panose(value: &str) -> Option<[u8; 10]> {
         *byte = u8::from_str_radix(value.get(index * 2..index * 2 + 2)?, 16).ok()?;
     }
     Some(bytes)
-}
-
-/// ST_LongHexNumber: four bytes, eight hexadecimal digits.
-fn long_hex(value: &str) -> Option<u32> {
-    (value.len() == 8 && value.bytes().all(|b| b.is_ascii_hexdigit()))
-        .then(|| u32::from_str_radix(value, 16).ok())
-        .flatten()
 }
 
 /// Reads the programs of the fonts the font table embeds, from the parts its

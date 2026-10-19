@@ -69,9 +69,9 @@ impl ColorScheme {
     }
 
     /// One colour of the scheme; `None` when it is missing, not valid, or written in a
-    /// colour model this reader does not read yet. RGB and system colours are read: the
-    /// two the corpus has (20,632 and 3,908 of them); Office does not allow a scheme
-    /// colour there (MS-OI29500 §20.1.4.1.9(a)).
+    /// colour model this reader does not read yet. RGB and system colours are read, the
+    /// two models the themes of the corpora use; Office does not allow a scheme colour
+    /// there (MS-OI29500 §20.1.4.1.9(a)).
     pub fn color(&self, index: ColorSchemeIndex) -> Option<&SchemeColor> {
         self.colors.get(position(index))?.as_ref()
     }

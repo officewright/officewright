@@ -11,6 +11,7 @@ use super::properties::{
     Justification, NumberFormat, ParagraphProperties, RunProperties, xml_enum,
 };
 use super::xml::{Element, Span};
+use crate::docx::properties::long_hex;
 
 /// The numbering part as stored: each definition and instance kept whole, with the ids
 /// they are looked up by.
@@ -508,11 +509,4 @@ impl ListLevel {
 /// The level of a `w:lvl`; the reader of the level refuses one past 8.
 fn level_index(lvl: Element<'_>, document: &Document) -> Option<usize> {
     lvl.attribute(&document.names.w, "ilvl")?.parse().ok()
-}
-
-/// ST_LongHexNumber: four bytes, eight hexadecimal digits.
-pub(crate) fn long_hex(value: &str) -> Option<u32> {
-    (value.len() == 8 && value.bytes().all(|b| b.is_ascii_hexdigit()))
-        .then(|| u32::from_str_radix(value, 16).ok())
-        .flatten()
 }
