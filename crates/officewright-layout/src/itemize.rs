@@ -15,9 +15,10 @@ use unicode_script::{Script, UnicodeScript};
 
 use crate::fonts::{Choice, Fonts};
 use crate::ir::{
-    BreakKind, Document, Field, FieldKind, Inline, NumberFormat, RunFonts, RunStyle, RunStyleId,
-    VerticalPosition,
+    BreakKind, Document, Field, FieldKind, Inline, LevelAlignment, NumberFormat, RunFonts,
+    RunStyle, RunStyleId, Suffix, VerticalPosition,
 };
+use crate::lists::Label;
 use crate::numbers::number_text;
 use crate::report::{Location, ReportKind};
 use crate::shape::{Features, ShapeRequest, ShapedRun, Shaper, combining_class};
@@ -47,6 +48,19 @@ pub(crate) struct Itemized {
     pub(crate) items: Vec<Item>,
     /// The bytes of the drawn text that each `PAGE` field the layout computes shows.
     pub(crate) page_fields: Vec<Range<usize>>,
+    /// The list label the paragraph starts with, if it is a list item.
+    pub(crate) label: Option<LabelItems>,
+}
+
+/// Where a paragraph's list label is among its items.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LabelItems {
+    /// The label's own items: its text.
+    pub(crate) text: usize,
+    /// Its items with the suffix after it: a tab, a space or nothing.
+    pub(crate) with_suffix: usize,
+    /// How it stands at the start of the first line.
+    pub(crate) alignment: LevelAlignment,
 }
 
 /// A piece of a paragraph.
@@ -145,14 +159,15 @@ pub(crate) fn itemize(
     fonts: &mut Fonts<'_>,
     location: &Location,
 ) -> Itemized {
-    itemize_with(document, inlines, fonts, location, None)
+    itemize_with(document, (None, inlines), fonts, location, None)
 }
 
-/// [`itemize`], with `fields` the values of the fields the layout computes: `PAGE`,
-/// `NUMPAGES` and `SECTIONPAGES` show them, written in their format.
+/// [`itemize`], the paragraph starting with `label` when it is a list item, and with
+/// `fields` the values of the fields the layout computes: `PAGE`, `NUMPAGES` and
+/// `SECTIONPAGES` show them, written in their format.
 pub(crate) fn itemize_with(
     document: &Document,
-    inlines: &[Inline],
+    (label, inlines): (Option<&Label>, &[Inline]),
     fonts: &mut Fonts<'_>,
     location: &Location,
     fields: Option<&FieldValues>,
@@ -168,6 +183,9 @@ pub(crate) fn itemize_with(
         languages: Vec::new(),
         shaper: Shaper::with_capacity(0),
     };
+    if let Some(label) = label {
+        builder.label(label);
+    }
     builder.inlines(inlines);
     builder.flush();
     builder.out
@@ -252,6 +270,28 @@ impl Builder<'_, '_, '_> {
     fn item(&mut self, item: Item) {
         self.flush();
         self.out.items.push(item);
+    }
+
+    /// Adds a list item's label, in runs of its own, then its suffix. A label in hidden
+    /// text is not drawn, nor its suffix.
+    fn label(&mut self, label: &Label) {
+        if self.style(label.style).hidden() {
+            return;
+        }
+        self.text(&label.text, label.style);
+        self.flush();
+        let text = self.out.items.len();
+        match label.suffix {
+            Suffix::Tab => self.item(Item::Tab(label.style)),
+            Suffix::Space => self.text(" ", label.style),
+            Suffix::Nothing => {}
+        }
+        self.flush();
+        self.out.label = Some(LabelItems {
+            text,
+            with_suffix: self.out.items.len(),
+            alignment: label.alignment,
+        });
     }
 
     fn style(&self, id: RunStyleId) -> RunStyle {
@@ -1457,6 +1497,69 @@ mod tests {
             [("\u{AD}", "\u{F0AD}", 20.0), ("A", "A", 10.0)]
         );
         assert_eq!(families, ["Officewright Hyph", TEST]);
+    }
+
+    #[test]
+    fn a_list_label_comes_first_in_runs_of_its_own_then_its_suffix() {
+        use crate::ir::{LevelAlignment, Suffix};
+
+        let mut setup = Setup::new(vec![minimal()]);
+        let style = setup.style(plain(TEST));
+        let hidden = setup.style(plain(TEST).with_hidden(true));
+        let big = setup.style(plain(TEST).with_size(Pt(20.0)));
+        let itemized = |label: &Label| {
+            let mut fonts = Fonts::new(&setup.book);
+            let inlines = [Inline::text("A", style)];
+            itemize_with(
+                &setup.document,
+                (Some(label), &inlines),
+                &mut fonts,
+                &Location::default(),
+                None,
+            )
+        };
+        let label = |suffix, style| Label {
+            text: "AA".into(),
+            style,
+            suffix,
+            alignment: LevelAlignment::End,
+        };
+        let tabbed = itemized(&label(Suffix::Tab, style));
+        assert_eq!(runs(&tabbed), [("AA", "AA", 10.0), ("A", "A", 10.0)]);
+        assert!(matches!(tabbed.items.get(1), Some(Item::Tab(_))));
+        assert_eq!(
+            tabbed.label,
+            Some(LabelItems {
+                text: 1,
+                with_suffix: 2,
+                alignment: LevelAlignment::End
+            })
+        );
+        // A space after it is a run of its own too, so that the label's width is its own.
+        let spaced = itemized(&label(Suffix::Space, style));
+        assert_eq!(
+            runs(&spaced),
+            [("AA", "AA", 10.0), (" ", " ", 10.0), ("A", "A", 10.0)]
+        );
+        assert_eq!(
+            spaced.label.map(|label| (label.text, label.with_suffix)),
+            Some((1, 2))
+        );
+        let bare = itemized(&label(Suffix::Nothing, style));
+        assert_eq!(
+            bare.label.map(|label| (label.text, label.with_suffix)),
+            Some((1, 1))
+        );
+        // The label and its suffix are in the label's own style.
+        let own = itemized(&label(Suffix::Space, big));
+        assert_eq!(
+            runs(&own),
+            [("AA", "AA", 20.0), (" ", " ", 20.0), ("A", "A", 10.0)]
+        );
+        // A hidden label is not drawn, nor its suffix.
+        let none = itemized(&label(Suffix::Tab, hidden));
+        assert_eq!(runs(&none), [("A", "A", 10.0)]);
+        assert_eq!(none.label, None);
     }
 
     #[test]
