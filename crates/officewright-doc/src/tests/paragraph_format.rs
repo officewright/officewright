@@ -1734,7 +1734,8 @@ fn a_list_label_takes_the_paragraph_style_and_the_marks_character_style() {
     let styles = [
         defaults(""),
         r#"<w:style w:type="paragraph" w:styleId="Heading"><w:name w:val="Heading"/><w:rPr><w:b/><w:sz w:val="26"/></w:rPr></w:style>"#.to_owned(),
-        r#"<w:style w:type="character" w:styleId="Strong"><w:name w:val="Strong"/><w:rPr><w:u w:val="single"/></w:rPr></w:style>"#.to_owned(),
+        r#"<w:style w:type="character" w:styleId="Strong"><w:name w:val="Strong"/><w:rPr><w:u w:val="single" w:color="FF0000"/><w:sz w:val="40"/></w:rPr></w:style>"#.to_owned(),
+        r#"<w:style w:type="paragraph" w:styleId="Lined"><w:name w:val="Lined"/><w:rPr><w:u w:val="double" w:color="0000FF"/></w:rPr></w:style>"#.to_owned(),
     ]
     .concat();
     let item = |level: i64, r_pr: &str| {
@@ -1745,10 +1746,18 @@ fn a_list_label_takes_the_paragraph_style_and_the_marks_character_style() {
     let body = [
         // The style's size and, set by the level, not its bold.
         paragraph("Heading", &item(0, "")),
-        // The mark's character style.
+        // The mark's character style: its size, not its underline
+        // (word-rules/E-list-label-format.docx, case 05, #330).
         paragraph("", &item(0, r#"<w:rStyle w:val="Strong"/>"#)),
         // A level that gives only a size.
         paragraph("", &item(1, r#"<w:sz w:val="28"/>"#)),
+        // Only the character style's underline is left out: one of the paragraph style,
+        // and one written on the mark itself, stay. No render shows these yet (#298).
+        paragraph("Lined", &item(0, r#"<w:rStyle w:val="Strong"/>"#)),
+        paragraph(
+            "",
+            &item(0, r#"<w:rStyle w:val="Strong"/><w:u w:val="dotted"/>"#),
+        ),
     ]
     .concat();
     let document = build(&body, &styles, Some(numbering));
@@ -1759,8 +1768,26 @@ fn a_list_label_takes_the_paragraph_style_and_the_marks_character_style() {
         .collect();
     assert_eq!((labels[0].size(), labels[0].bold()), (Pt(13.0), false));
     assert!(formats.paragraph_mark(paragraphs(&document)[0]).bold());
-    assert_eq!(labels[1].underline(), Some(UnderlineStyle::Single));
+    assert_eq!(
+        (
+            labels[1].size(),
+            labels[1].underline(),
+            labels[1].underline_color()
+        ),
+        (Pt(20.0), None, ColorValue::Auto)
+    );
+    // A run of that paragraph would be underlined, in red.
+    let mark = formats.paragraph_mark(paragraphs(&document)[1]);
+    assert_eq!(
+        (mark.underline(), mark.underline_color()),
+        (Some(UnderlineStyle::Single), ColorValue::Rgb(255, 0, 0))
+    );
     assert_eq!(labels[2].size(), Pt(8.0));
+    assert_eq!(
+        (labels[3].underline(), labels[3].underline_color()),
+        (Some(UnderlineStyle::Double), ColorValue::Rgb(0, 0, 255))
+    );
+    assert_eq!(labels[4].underline(), Some(UnderlineStyle::Dotted));
 
     // A paragraph of another document is labelled by its own document's numbering and
     // styles.
@@ -1921,4 +1948,39 @@ fn takes_the_last_paragraph_style_marked_default() {
     .concat();
     let document = build(&paragraph("", ""), &styles, None);
     assert_eq!(formats(&document)[0].justification(), Justification::Center);
+}
+
+#[test]
+fn looks_for_the_default_style_among_the_styles_the_resolver_uses() {
+    // From the review of #319: a default paragraph style past the first 4,093 styles is
+    // taken neither by the resolver nor by Styles::default_style, so the two agree. With
+    // Normal first, `fillers` character styles put the late default at index fillers + 1:
+    // 4,092 is the last style used, 4,093 the first one left out.
+    let default_with = |fillers: usize| {
+        let many: String = (0..fillers)
+            .map(|n| {
+                format!(
+                    r#"<w:style w:type="character" w:styleId="C{n}"><w:name w:val="C{n}"/></w:style>"#
+                )
+            })
+            .collect();
+        let styles = [
+            defaults(""),
+            r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>"#.to_owned(),
+            many,
+            r#"<w:style w:type="paragraph" w:default="1" w:styleId="Late"><w:name w:val="Late"/><w:pPr><w:jc w:val="center"/></w:pPr></w:style>"#.to_owned(),
+        ]
+        .concat();
+        let document = build(&paragraph("", ""), &styles, None);
+        let resolver = formats(&document)[0].style().map(str::to_owned);
+        let styles = document
+            .styles()
+            .default_style(StyleKind::Paragraph)
+            .map(|style| style.id().to_owned());
+        assert_eq!(resolver, styles, "{fillers}");
+        styles
+    };
+    assert_eq!(default_with(4091).as_deref(), Some("Late"));
+    assert_eq!(default_with(4092).as_deref(), Some("Normal"));
+    assert_eq!(default_with(4100).as_deref(), Some("Normal"));
 }
