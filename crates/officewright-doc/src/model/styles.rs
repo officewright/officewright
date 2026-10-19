@@ -81,13 +81,20 @@ impl<'a> Styles<'a> {
         })
     }
 
-    /// The default style of a kind: what paragraphs, runs or tables that name no style
-    /// of their own get. Of several of a kind marked `w:default`, the last, as the
-    /// standard says ([MS-WPE376] Part 4 §2.7.3.17 quotes it) and Word's render of
-    /// word-rules/E-default-paragraph-style-after-normal.docx shows for paragraph styles,
-    /// even when Normal is one of them (#308).
+    /// The default style of a kind (`w:default`): for paragraph and table styles, the
+    /// one that paragraphs and tables naming no style of their own get from
+    /// [`Formats`](crate::Formats). [`Formats`](crate::Formats) gives runs no default
+    /// character style: Word's own, Default Paragraph Font, gives nothing, and no render
+    /// shows yet what Word does with one that gives something.
+    ///
+    /// Of several of a kind marked `w:default`, the last, as ECMA-376 Part 1 §17.7.4.17
+    /// says and Word's renders of word-rules/E-default-paragraph-style.docx and
+    /// E-default-paragraph-style-after-normal.docx show for paragraph styles, even when
+    /// Normal is one of them (#308). It is looked for among the first 4,093 styles, which
+    /// are those [`Formats`](crate::Formats) uses.
     pub fn default_style(self, kind: StyleKind) -> Option<Style<'a>> {
         self.iter()
+            .take(super::resolve::MAX_STYLES)
             .filter(|style| style.kind() == kind && style.is_default())
             .last()
     }
@@ -178,7 +185,9 @@ impl<'a> Style<'a> {
         self.data.link.as_deref()
     }
 
-    /// Whether this is the default style of its kind (`w:default`).
+    /// Whether the style is marked as the default of its kind (`w:default`). Of several
+    /// so marked among the styles [`Formats`](crate::Formats) uses, the last is the
+    /// default ([`Styles::default_style`]); one past those is not.
     pub fn is_default(self) -> bool {
         self.data.is_default
     }

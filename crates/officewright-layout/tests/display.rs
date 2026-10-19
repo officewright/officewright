@@ -561,6 +561,12 @@ fn a_bar_tab_draws_a_line_through_every_line() -> TestResult {
     // One line through both lines: Liberation Sans 11 pt lines are 12.65 pt, 253 twips,
     // high.
     assert_eq!(bars, [((400, 0), (400, 506))], "{}", painted.text());
+    // 0.14 pt wide, as Word draws it (E-bar-tab): 3 twips in the dump.
+    let widths: Vec<&str> = items(&painted, "line")
+        .iter()
+        .filter_map(|line| line.split(' ').nth(3))
+        .collect();
+    assert_eq!(widths, ["3"], "{}", painted.text());
     Ok(())
 }
 

@@ -566,6 +566,553 @@ fn lists_a_border_around_a_run_of_a_tab_and_the_glyph_features_of_symbols_and_re
 }
 
 #[test]
+fn lists_word_s_text_effects_once_but_no_value_that_changes_nothing() {
+    // Issue #339: Word 2010's effects of text ([MS-DOCX] 2.6.1) have no place in the
+    // IR's run style, so the PDF draws the text plain. Word writes some with values that
+    // change nothing, as in the list levels of LibreOffice's
+    // tdf166205_first_page_header_footer_visible.docx: those are no entry. Attributes not
+    // written take [MS-DOCX]'s defaults (2.6.3), mostly 0.
+    const W14: &str = "http://schemas.microsoft.com/office/word/2010/wordml";
+    let messages = |r_pr: &str, content: &str| -> Vec<String> {
+        let body =
+            format!(r#"<w:p><w:r><w:rPr xmlns:w14="{W14}">{r_pr}</w:rPr>{content}</w:r></w:p>"#);
+        translate(&open(&body))
+            .left_out()
+            .iter()
+            .map(|entry| entry.message().to_owned())
+            .collect()
+    };
+    let glow = "glowing text (w14:glow) is drawn without its glow, here and wherever else the document has it";
+    let shadow = "text with a shadow effect (w14:shadow) is drawn without its shadow, here and wherever else the document has it";
+    let reflection = "a reflection of text (w14:reflection) is not drawn, here and wherever else the document has one";
+    let outline = "an outline of text (w14:textOutline) is not drawn, here and wherever else the document has one";
+    let fill = "a fill of text (w14:textFill) is not applied, so the text is drawn in its colour, here and wherever else the document has one";
+    let depth = "3-D text (w14:scene3d, w14:props3d) is drawn flat, here and wherever else the document has it";
+    let red = r#"<w14:srgbClr w14:val="FF0000"/>"#;
+    let full = r#"w14:sx="100000" w14:sy="100000""#;
+    let front = r#"<w14:camera w14:prst="orthographicFront"/>"#;
+    let listed = [
+        (format!(r#"<w14:glow w14:rad="63500">{red}</w14:glow>"#), glow),
+        (
+            format!(
+                r#"<w14:shadow w14:blurRad="50800" w14:dist="38100" w14:dir="2700000" w14:sx="100000" w14:sy="100000" w14:kx="0" w14:ky="0" w14:algn="tl">{red}</w14:shadow>"#
+            ),
+            shadow,
+        ),
+        // A blurred shadow right under the text shows as a halo; each other difference
+        // from one right under it shows too.
+        (format!(r#"<w14:shadow w14:blurRad="25400" {full}>{red}</w14:shadow>"#), shadow),
+        (format!(r#"<w14:shadow w14:dist="38100" {full}>{red}</w14:shadow>"#), shadow),
+        (format!(r#"<w14:shadow w14:sx="90000" w14:sy="100000">{red}</w14:shadow>"#), shadow),
+        (format!(r#"<w14:shadow w14:sx="100000" w14:sy="90000">{red}</w14:shadow>"#), shadow),
+        (format!(r#"<w14:shadow w14:kx="-800400" {full}>{red}</w14:shadow>"#), shadow),
+        (format!(r#"<w14:shadow w14:ky="800400" {full}>{red}</w14:shadow>"#), shadow),
+        (
+            r#"<w14:reflection w14:blurRad="6350" w14:stA="50000" w14:stPos="0" w14:endA="300" w14:endPos="50000" w14:dist="29997" w14:dir="5400000" w14:fadeDir="5400000" w14:sx="100000" w14:sy="-100000" w14:kx="0" w14:ky="0" w14:algn="bl"/>"#.to_owned(),
+            reflection,
+        ),
+        // Only an end opacity, or only a start one, the other at its default of 0.
+        (format!(r#"<w14:reflection w14:endA="300" w14:endPos="50000" {full}/>"#), reflection),
+        (format!(r#"<w14:reflection w14:stA="47000" w14:endPos="50000" {full}/>"#), reflection),
+        (
+            format!(r#"<w14:textOutline w14:w="9525"><w14:solidFill>{red}</w14:solidFill></w14:textOutline>"#),
+            outline,
+        ),
+        (
+            format!(r#"<w14:textOutline w14:w="0"><w14:gradFill><w14:gsLst><w14:gs w14:pos="0">{red}</w14:gs></w14:gsLst></w14:gradFill></w14:textOutline>"#),
+            outline,
+        ),
+        ("<w14:textFill><w14:noFill/></w14:textFill>".to_owned(), fill),
+        (
+            format!(r#"<w14:textFill><w14:gradFill><w14:gsLst><w14:gs w14:pos="0">{red}</w14:gs></w14:gsLst></w14:gradFill></w14:textFill>"#),
+            fill,
+        ),
+        // Another colour than the text's (automatic), one changed by transparency, black
+        // over red text (a fill without a child, a solid fill without a colour), and a
+        // theme colour without a theme part to resolve it.
+        (format!("<w14:textFill><w14:solidFill>{red}</w14:solidFill></w14:textFill>"), fill),
+        (
+            r#"<w:color w:val="FF0000"/><w14:textFill><w14:solidFill><w14:srgbClr w14:val="FF0000"><w14:alpha w14:val="74000"/></w14:srgbClr></w14:solidFill></w14:textFill>"#.to_owned(),
+            fill,
+        ),
+        (r#"<w:color w:val="FF0000"/><w14:textFill/>"#.to_owned(), fill),
+        (
+            r#"<w:color w:val="FF0000"/><w14:textFill><w14:solidFill/></w14:textFill>"#.to_owned(),
+            fill,
+        ),
+        (
+            r#"<w14:textFill><w14:solidFill><w14:schemeClr w14:val="tx1"/></w14:solidFill></w14:textFill>"#.to_owned(),
+            fill,
+        ),
+        (
+            r#"<w14:scene3d><w14:camera w14:prst="isometricRightUp"/><w14:lightRig w14:rig="threePt" w14:dir="t"/></w14:scene3d>"#.to_owned(),
+            depth,
+        ),
+        (
+            r#"<w14:props3d w14:extrusionH="0" w14:contourW="0" w14:prstMaterial="warmMatte"><w14:bevelT w14:w="27940" w14:h="12700" w14:prst="circle"/></w14:props3d>"#.to_owned(),
+            depth,
+        ),
+        (r#"<w14:props3d w14:contourW="8890"/>"#.to_owned(), depth),
+    ];
+    for (r_pr, message) in &listed {
+        assert_eq!(messages(r_pr, "<w:t>x</w:t>"), [*message], "{r_pr}");
+    }
+    // Values that change nothing, all in one run; the text's own colour as a fill.
+    let nothing = format!(
+        r#"<w:color w:val="FF0000"/><w14:glow w14:rad="0">{red}</w14:glow><w14:shadow w14:blurRad="0" w14:dist="0" w14:dir="0" w14:sx="0" w14:sy="0" w14:kx="0" w14:ky="0" w14:algn="none">{red}</w14:shadow><w14:reflection w14:blurRad="0" w14:stA="0" w14:stPos="0" w14:endA="0" w14:endPos="0" w14:dist="0" w14:dir="0" w14:fadeDir="0" w14:sx="0" w14:sy="0" w14:kx="0" w14:ky="0" w14:algn="none"/><w14:textOutline w14:w="0" w14:cap="rnd" w14:cmpd="sng" w14:algn="ctr"><w14:noFill/><w14:prstDash w14:val="solid"/><w14:bevel/></w14:textOutline><w14:textFill><w14:solidFill>{red}</w14:solidFill></w14:textFill><w14:scene3d>{front}<w14:lightRig w14:rig="threePt" w14:dir="t"><w14:rot w14:lat="0" w14:lon="0" w14:rev="0"/></w14:lightRig></w14:scene3d><w14:props3d w14:extrusionH="0" w14:contourW="0" w14:prstMaterial="none"/>"#
+    );
+    assert!(messages(&nothing, "<w:t>x</w:t>").is_empty());
+    for r_pr in [
+        "<w14:glow/>".to_owned(),
+        // Scaled to nothing: sx and sy are 0 unless written.
+        format!("<w14:shadow>{red}</w14:shadow>"),
+        format!(r#"<w14:shadow w14:blurRad="25400">{red}</w14:shadow>"#),
+        format!(r#"<w14:shadow w14:blurRad="25400" w14:sx="0" w14:sy="100000">{red}</w14:shadow>"#),
+        format!(r#"<w14:shadow w14:blurRad="25400" w14:sx="100000" w14:sy="0">{red}</w14:shadow>"#),
+        format!(r#"<w14:shadow {full}>{red}</w14:shadow>"#),
+        "<w14:reflection/>".to_owned(),
+        format!("<w14:reflection {full}/>"),
+        // Opaque, but of size 0: endPos at its default.
+        format!(r#"<w14:reflection w14:stA="50000" w14:endA="300" {full}/>"#),
+        r#"<w14:reflection w14:stA="50000" w14:sx="0" w14:sy="-100000"/>"#.to_owned(),
+        r#"<w14:reflection w14:stA="50000" w14:sx="100000" w14:sy="0"/>"#.to_owned(),
+        r#"<w14:textOutline w14:w="9525"/>"#.to_owned(),
+        // Black over black text.
+        r#"<w:color w:val="000000"/><w14:textFill/>"#.to_owned(),
+        r#"<w:color w:val="000000"/><w14:textFill><w14:solidFill/></w14:textFill>"#.to_owned(),
+        format!("<w14:scene3d>{front}</w14:scene3d>"),
+        // A bevel without a width or a height (0 unless written), and depth and a bottom
+        // bevel facing away from a camera in front.
+        "<w14:props3d><w14:bevelT/></w14:props3d>".to_owned(),
+        r#"<w14:props3d><w14:bevelT w14:w="38100"/></w14:props3d>"#.to_owned(),
+        r#"<w14:props3d><w14:bevelT w14:h="38100"/></w14:props3d>"#.to_owned(),
+        r#"<w14:props3d w14:extrusionH="57150"><w14:bevelB w14:w="38100" w14:h="38100"/></w14:props3d>"#.to_owned(),
+    ] {
+        assert!(messages(&r_pr, "<w:t>x</w:t>").is_empty(), "{r_pr}");
+    }
+    // A hidden run, or one with no text, shows nothing they could change.
+    let glowing = format!(r#"<w14:glow w14:rad="63500">{red}</w14:glow>"#);
+    assert!(messages(&format!("<w:vanish/>{glowing}"), "<w:t>x</w:t>").is_empty());
+    assert!(messages(&glowing, "<w:tab/>").is_empty());
+    // What a style gives counts, effect by effect, and a run's own value that changes
+    // nothing wins over it.
+    let off = [
+        r#"<w14:glow w14:rad="0"/>"#,
+        "<w14:shadow/>",
+        "<w14:reflection/>",
+        "<w14:textOutline><w14:noFill/></w14:textOutline>",
+        r#"<w14:textFill><w14:solidFill><w14:srgbClr w14:val="000000"/></w14:solidFill></w14:textFill>"#,
+        format!("<w14:scene3d>{front}</w14:scene3d>").leak(),
+        "<w14:props3d/>",
+    ];
+    let given = [0, 1, 8, 11, 13, 20, 21];
+    for (&at, own) in given.iter().zip(off) {
+        let (r_pr, message) = &listed[at];
+        let styles = (
+            "styles",
+            "styles.xml",
+            format!(
+                r#"<w:styles xmlns:w="{W}" xmlns:w14="{W14}"><w:style w:type="character" w:styleId="Effect"><w:name w:val="Effect"/><w:rPr>{r_pr}</w:rPr></w:style></w:styles>"#
+            ),
+        );
+        let entries = |own: &str| -> Vec<String> {
+            let body = format!(
+                r#"<w:p><w:r><w:rPr xmlns:w14="{W14}"><w:rStyle w:val="Effect"/><w:color w:val="000000"/>{own}</w:rPr><w:t>x</w:t></w:r></w:p>"#
+            );
+            translate(&with_parts(&body, std::slice::from_ref(&styles)))
+                .left_out()
+                .iter()
+                .map(|entry| entry.message().to_owned())
+                .collect()
+        };
+        assert_eq!(entries(""), [*message], "{r_pr}");
+        assert!(entries(own).is_empty(), "{own} over {r_pr}");
+    }
+    // A fill of a theme colour is the theme's colour: the text's own changes nothing.
+    let theme = (
+        "theme",
+        "theme/theme1.xml",
+        format!(
+            r#"<a:theme xmlns:a="{A}" name="T"><a:themeElements><a:clrScheme name="C"><a:dk1><a:srgbClr val="000000"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="111111"/></a:dk2><a:lt2><a:srgbClr val="EEEEEE"/></a:lt2><a:accent1><a:srgbClr val="4F81BD"/></a:accent1><a:accent2><a:srgbClr val="C0504D"/></a:accent2><a:accent3><a:srgbClr val="030303"/></a:accent3><a:accent4><a:srgbClr val="040404"/></a:accent4><a:accent5><a:srgbClr val="050505"/></a:accent5><a:accent6><a:srgbClr val="060606"/></a:accent6><a:hlink><a:srgbClr val="0000FF"/></a:hlink><a:folHlink><a:srgbClr val="800080"/></a:folHlink></a:clrScheme><a:fontScheme name="F"><a:majorFont><a:latin typeface="Major"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont><a:minorFont><a:latin typeface="Minor"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont></a:fontScheme><a:fmtScheme name="S"/></a:themeElements></a:theme>"#
+        ),
+    );
+    let themed = |scheme: &str| -> Vec<String> {
+        let body = format!(
+            r#"<w:p><w:r><w:rPr xmlns:w14="{W14}"><w:color w:val="4F81BD" w:themeColor="accent1"/><w14:textFill><w14:solidFill><w14:schemeClr w14:val="{scheme}"/></w14:solidFill></w14:textFill></w:rPr><w:t>x</w:t></w:r></w:p>"#
+        );
+        translate(&with_parts(&body, std::slice::from_ref(&theme)))
+            .left_out()
+            .iter()
+            .map(|entry| entry.message().to_owned())
+            .collect()
+    };
+    assert!(themed("accent1").is_empty());
+    assert_eq!(themed("accent2"), [fill]);
+    // Each colour of the scheme is its theme colour, text and background through the
+    // document's mapping, which here swaps them: a fill of each over text of its own theme
+    // colour changes nothing, and one over another does.
+    let mapping = (
+        "settings",
+        "settings.xml",
+        format!(
+            r#"<w:settings xmlns:w="{W}"><w:clrSchemeMapping w:bg1="dark1" w:t1="light1" w:bg2="dark2" w:t2="light2" w:accent1="accent1" w:accent2="accent2" w:accent3="accent3" w:accent4="accent4" w:accent5="accent5" w:accent6="accent6" w:hyperlink="hyperlink" w:followedHyperlink="followedHyperlink"/></w:settings>"#
+        ),
+    );
+    let mapped = |text: &str, scheme: &str| -> Vec<String> {
+        let body = format!(
+            r#"<w:p><w:r><w:rPr xmlns:w14="{W14}"><w:color w:val="000000" w:themeColor="{text}"/><w14:textFill><w14:solidFill><w14:schemeClr w14:val="{scheme}"/></w14:solidFill></w14:textFill></w:rPr><w:t>x</w:t></w:r></w:p>"#
+        );
+        translate(&with_parts(&body, &[theme.clone(), mapping.clone()]))
+            .left_out()
+            .iter()
+            .map(|entry| entry.message().to_owned())
+            .collect()
+    };
+    let pairs = [
+        ("background1", "bg1"),
+        ("text1", "tx1"),
+        ("background2", "bg2"),
+        ("text2", "tx2"),
+        ("dark1", "dk1"),
+        ("light1", "lt1"),
+        ("dark2", "dk2"),
+        ("light2", "lt2"),
+        ("accent3", "accent3"),
+        ("accent4", "accent4"),
+        ("accent5", "accent5"),
+        ("accent6", "accent6"),
+        ("hyperlink", "hlink"),
+        ("followedHyperlink", "folHlink"),
+    ];
+    for (text, scheme) in pairs {
+        assert!(mapped(text, scheme).is_empty(), "{scheme} over {text}");
+    }
+    // tx1 is light 1 through the mapping, dk1 dark 1 whatever the mapping says.
+    assert_eq!(mapped("text1", "dk1"), [fill]);
+    assert_eq!(mapped("dark1", "tx1"), [fill]);
+    // A gradient is listed over text of any colour, black too.
+    let gradient = r#"<w:color w:val="000000"/><w14:textFill><w14:gradFill><w14:gsLst><w14:gs w14:pos="0"><w14:srgbClr w14:val="000000"/></w14:gs></w14:gsLst></w14:gradFill></w14:textFill>"#;
+    assert_eq!(messages(gradient, "<w:t>x</w:t>"), [fill]);
+}
+
+#[test]
+fn lists_what_a_list_label_asks_for_as_a_run_s() {
+    // From the review of #362: a label is drawn with its run style as runs are, so what
+    // its format asks for and the PDF leaves out is listed; before, only runs were looked
+    // at. The label's level asks for old-style figures and emboss, the text for nothing.
+    const W14: &str = "http://schemas.microsoft.com/office/word/2010/wordml";
+    let decimal = r#"<w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/>"#;
+    let labelled = |r_pr: &str, hidden: bool, level: &str| -> Vec<String> {
+        let mark = if hidden {
+            "<w:rPr><w:vanish/></w:rPr>"
+        } else {
+            ""
+        };
+        let body = format!(
+            r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>{mark}</w:pPr><w:r><w:t>text</w:t></w:r></w:p>"#
+        );
+        let numbering = format!(
+            r#"<w:numbering xmlns:w="{W}" xmlns:w14="{W14}"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0">{level}<w:rPr>{r_pr}</w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#
+        );
+        let settings = format!(
+            r#"<w:settings xmlns:w="{W}"><w:compat><w:compatSetting w:name="enableOpenTypeFeatures" w:uri="http://schemas.microsoft.com/office/word" w:val="1"/></w:compat></w:settings>"#
+        );
+        translate(&with_parts(
+            &body,
+            &[
+                ("numbering", "numbering.xml", numbering),
+                ("settings", "settings.xml", settings),
+            ],
+        ))
+        .left_out()
+        .iter()
+        .map(|entry| entry.message().to_owned())
+        .collect()
+    };
+    let messages = |r_pr: &str, hidden: bool| labelled(r_pr, hidden, decimal);
+    let found = messages(r#"<w14:numForm w14:val="oldStyle"/><w:emboss/>"#, false);
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(found.iter().any(|m| m.contains("w14:numForm")), "{found:?}");
+    assert!(found.iter().any(|m| m.contains("w:emboss")), "{found:?}");
+    // A label hidden with its paragraph mark shows nothing.
+    assert!(messages(r#"<w14:numForm w14:val="oldStyle"/>"#, true).is_empty());
+    // A label that asks for nothing lists nothing.
+    assert!(messages("", false).is_empty());
+    // From the re-check of #362: a label that draws nothing lists nothing, as Word and
+    // the PDF draw no label: an empty text, the number of a level of format none alone,
+    // an empty bullet. A character outside the placeholders draws something.
+    let emboss = "<w:emboss/>";
+    for level in [
+        r#"<w:numFmt w:val="decimal"/><w:lvlText w:val=""/>"#,
+        r#"<w:numFmt w:val="none"/><w:lvlText w:val="%1"/>"#,
+        r#"<w:numFmt w:val="bullet"/><w:lvlText w:val=""/>"#,
+    ] {
+        assert!(labelled(emboss, false, level).is_empty(), "{level}");
+    }
+    for level in [
+        r#"<w:numFmt w:val="none"/><w:lvlText w:val="%1."/>"#,
+        r#"<w:numFmt w:val="bullet"/><w:lvlText w:val="-"/>"#,
+    ] {
+        assert_eq!(labelled(emboss, false, level).len(), 1, "{level}");
+    }
+    // From the next re-check: a placeholder of a deeper level makes Word ignore the whole
+    // text (MS-OI29500 2.1.283 c), a control character alone draws nothing, and the layout
+    // reads only the first 256 characters of a text, counting a placeholder as two.
+    let none_then_x = format!(
+        r#"<w:numFmt w:val="none"/><w:lvlText w:val="{}x"/>"#,
+        "%1".repeat(128)
+    );
+    for level in [
+        r#"<w:numFmt w:val="decimal"/><w:lvlText w:val="%2."/>"#,
+        r#"<w:numFmt w:val="decimal"/><w:lvlText w:val="Article %1.%2"/>"#,
+        r#"<w:numFmt w:val="decimal"/><w:lvlText w:val="&#9;"/>"#,
+        &none_then_x,
+    ] {
+        assert!(labelled(emboss, false, level).is_empty(), "{level}");
+    }
+    let none_then_x = format!(
+        r#"<w:numFmt w:val="none"/><w:lvlText w:val="{}x"/>"#,
+        "%1".repeat(127)
+    );
+    assert_eq!(labelled(emboss, false, &none_then_x).len(), 1);
+    // Characters count one each against the bound.
+    let tabs_then_x = |tabs: usize| {
+        format!(
+            r#"<w:numFmt w:val="decimal"/><w:lvlText w:val="{}x"/>"#,
+            "&#9;".repeat(tabs)
+        )
+    };
+    assert!(labelled(emboss, false, &tabs_then_x(256)).is_empty());
+    assert_eq!(labelled(emboss, false, &tabs_then_x(255)).len(), 1);
+}
+
+#[test]
+fn lists_a_label_by_its_instance_s_levels_overrides_included() {
+    // From the last re-check of #362. The mark asks for emboss, so every label does; an
+    // entry means the label draws something. `levels` are the definition's w:lvl, `num`
+    // what the w:num holds besides its definition, `items` the levels of the items.
+    let listed = |levels: &str, num: &str, items: &[u8]| -> bool {
+        let body: String = items
+            .iter()
+            .map(|level| {
+                format!(
+                    r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="{level}"/><w:numId w:val="1"/></w:numPr><w:rPr><w:emboss/></w:rPr></w:pPr><w:r><w:t>text</w:t></w:r></w:p>"#
+                )
+            })
+            .collect();
+        let numbering = format!(
+            r#"<w:numbering xmlns:w="{W}"><w:abstractNum w:abstractNumId="0">{levels}</w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/>{num}</w:num></w:numbering>"#
+        );
+        !translate(&with_parts(
+            &body,
+            &[("numbering", "numbering.xml", numbering)],
+        ))
+        .left_out()
+        .is_empty()
+    };
+    let level = |at: u8, format: &str, text: &str| {
+        format!(
+            r#"<w:lvl w:ilvl="{at}"><w:numFmt w:val="{format}"/><w:lvlText w:val="{text}"/></w:lvl>"#
+        )
+    };
+    let replace = |at: u8, format: &str, text: &str| {
+        format!(
+            r#"<w:lvlOverride w:ilvl="{at}">{}</w:lvlOverride>"#,
+            level(at, format, text)
+        )
+    };
+    // An override's level replaces the definition's, both ways.
+    assert!(listed(&level(0, "decimal", "%1."), "", &[0]));
+    assert!(!listed(
+        &level(0, "decimal", "%1."),
+        &replace(0, "decimal", ""),
+        &[0]
+    ));
+    assert!(listed(
+        &level(0, "decimal", ""),
+        &replace(0, "decimal", "%1."),
+        &[0]
+    ));
+    // Each level of an instance has its own answer: items of a level that draws nothing,
+    // then of one that draws its number.
+    let two = format!("{}{}", level(0, "decimal", ""), level(1, "decimal", "%2."));
+    assert!(listed(&two, "", &[0, 1]));
+    assert!(!listed(&two, "", &[0, 0]));
+    // A level the definition does not have draws nothing; a placeholder of a missing
+    // level writes its number in decimal.
+    assert!(!listed(&level(0, "decimal", "%1."), "", &[2]));
+    let gap = format!(
+        "{}{}",
+        level(0, "decimal", "%1."),
+        level(2, "decimal", "%2")
+    );
+    assert!(listed(&gap, "", &[2]));
+    // Past the definition's last level, through an override's replacement, too.
+    assert!(listed(
+        &level(0, "decimal", "%1."),
+        &replace(2, "decimal", "%2"),
+        &[2]
+    ));
+    // U+007F is drawn as a bullet; the line and paragraph separators draw nothing; an odd
+    // count leaves no room for a placeholder at the end of the 256.
+    assert!(listed(&level(0, "decimal", "&#127;"), "", &[0]));
+    assert!(!listed(&level(0, "decimal", "&#8232;&#8233;"), "", &[0]));
+    assert!(!listed(
+        &level(0, "decimal", &format!("{}%1", "&#9;".repeat(255))),
+        "",
+        &[0]
+    ));
+    assert!(listed(
+        &level(0, "decimal", &format!("{}%1", "&#9;".repeat(254))),
+        "",
+        &[0]
+    ));
+}
+
+#[test]
+fn lists_a_label_by_the_number_formats_of_the_levels_it_names_once_per_level() {
+    // A number of a bullet level writes nothing, unless the level naming it is legal; the
+    // answer is worked out once for every item of a level of an instance.
+    let labelled = |legal: &str, items: usize| -> Vec<String> {
+        let item = r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="1"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>text</w:t></w:r></w:p>"#;
+        let numbering = format!(
+            r#"<w:numbering xmlns:w="{W}"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="-"/></w:lvl><w:lvl w:ilvl="1"><w:numFmt w:val="decimal"/>{legal}<w:lvlText w:val="%1"/><w:rPr><w:emboss/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#
+        );
+        translate(&with_parts(
+            &item.repeat(items),
+            &[("numbering", "numbering.xml", numbering)],
+        ))
+        .left_out()
+        .iter()
+        .map(|entry| entry.message().to_owned())
+        .collect()
+    };
+    assert!(labelled("", 1).is_empty());
+    assert_eq!(labelled("<w:isLgl/>", 1).len(), 1);
+    super::super::layout::WORK.set(super::super::layout::Work::default());
+    assert!(labelled("", 200).is_empty());
+    assert_eq!(super::super::layout::WORK.get().label_checks, 1);
+}
+
+#[test]
+fn lists_word_s_figure_forms_and_stylistic_sets_with_open_type_features_on() {
+    // Issue #361: Word 2010's choices of a font's figures and stylistic sets ([MS-DOCX]
+    // 2.6.1) have no place in the IR's run style. Word applies the font's features only
+    // with enableOpenTypeFeatures on, as it does ligatures; a choice of the font's
+    // default changes nothing.
+    const W14: &str = "http://schemas.microsoft.com/office/word/2010/wordml";
+    let messages = |r_pr: &str, open_type: bool| -> Vec<String> {
+        let body = format!(
+            r#"<w:p><w:r><w:rPr xmlns:w14="{W14}">{r_pr}</w:rPr><w:t>1234</w:t></w:r></w:p>"#
+        );
+        let setting = if open_type {
+            r#"<w:compat><w:compatSetting w:name="enableOpenTypeFeatures" w:uri="http://schemas.microsoft.com/office/word" w:val="1"/></w:compat>"#
+        } else {
+            ""
+        };
+        let settings = (
+            "settings",
+            "settings.xml",
+            format!(r#"<w:settings xmlns:w="{W}">{setting}</w:settings>"#),
+        );
+        translate(&with_parts(&body, &[settings]))
+            .left_out()
+            .iter()
+            .map(|entry| entry.message().to_owned())
+            .collect()
+    };
+    let form = "lining or old-style figures (w14:numForm) are drawn in the font's default form, here and wherever else the document asks for them";
+    let spacing = "proportional or tabular figures (w14:numSpacing) are drawn in the font's default spacing, here and wherever else the document asks for them";
+    let sets = "stylistic sets (w14:stylisticSets) are not applied, here and wherever else the document has them";
+    for (r_pr, message) in [
+        (r#"<w14:numForm w14:val="oldStyle"/>"#, form),
+        (r#"<w14:numForm w14:val="lining"/>"#, form),
+        (r#"<w14:numSpacing w14:val="tabular"/>"#, spacing),
+        (r#"<w14:numSpacing w14:val="proportional"/>"#, spacing),
+        (
+            r#"<w14:stylisticSets><w14:styleSet w14:id="1"/></w14:stylisticSets>"#,
+            sets,
+        ),
+        (
+            r#"<w14:stylisticSets><w14:styleSet w14:id="1" w14:val="false"/><w14:styleSet w14:id="2" w14:val="true"/></w14:stylisticSets>"#,
+            sets,
+        ),
+    ] {
+        assert_eq!(messages(r_pr, true), [message], "{r_pr}");
+        assert!(
+            messages(r_pr, false).is_empty(),
+            "{r_pr} without the setting"
+        );
+    }
+    for r_pr in [
+        r#"<w14:numForm w14:val="default"/>"#,
+        r#"<w14:numSpacing w14:val="default"/>"#,
+        "<w14:stylisticSets/>",
+        r#"<w14:stylisticSets><w14:styleSet w14:id="3" w14:val="0"/></w14:stylisticSets>"#,
+        r#"<w14:stylisticSets><w14:styleSet w14:id="3" w14:val="false"/></w14:stylisticSets>"#,
+        // Values not valid set nothing, as for ligatures: a form or spacing [MS-DOCX] does
+        // not name, a set's value not of w14's ST_OnOff, a set outside 1 to 20 or none.
+        r#"<w14:numForm w14:val="Lining"/>"#,
+        r#"<w14:numSpacing w14:val=""/>"#,
+        r#"<w14:stylisticSets><w14:styleSet w14:id="3" w14:val="off"/></w14:stylisticSets>"#,
+        r#"<w14:stylisticSets><w14:styleSet w14:id="3" w14:val=" true"/></w14:stylisticSets>"#,
+        r#"<w14:stylisticSets><w14:styleSet w14:id="21"/><w14:styleSet w14:id="0"/><w14:styleSet/></w14:stylisticSets>"#,
+        // Only a w14:styleSet names a set.
+        r#"<w14:stylisticSets><w14:other w14:id="5"/></w14:stylisticSets>"#,
+    ] {
+        assert!(messages(r_pr, true).is_empty(), "{r_pr}");
+    }
+    // Through a style, and turned off by a run's own default.
+    let styles = (
+        "styles",
+        "styles.xml",
+        format!(
+            r#"<w:styles xmlns:w="{W}" xmlns:w14="{W14}"><w:style w:type="character" w:styleId="Old"><w:name w:val="Old"/><w:rPr><w14:numForm w14:val="oldStyle"/><w14:numSpacing w14:val="tabular"/><w14:stylisticSets><w14:styleSet w14:id="4"/></w14:stylisticSets></w:rPr></w:style></w:styles>"#
+        ),
+    );
+    let settings = (
+        "settings",
+        "settings.xml",
+        format!(
+            r#"<w:settings xmlns:w="{W}"><w:compat><w:compatSetting w:name="enableOpenTypeFeatures" w:uri="http://schemas.microsoft.com/office/word" w:val="1"/></w:compat></w:settings>"#
+        ),
+    );
+    let entries = |own: &str| -> Vec<String> {
+        let body = format!(
+            r#"<w:p><w:r><w:rPr xmlns:w14="{W14}"><w:rStyle w:val="Old"/>{own}</w:rPr><w:t>1234</w:t></w:r></w:p>"#
+        );
+        translate(&with_parts(&body, &[styles.clone(), settings.clone()]))
+            .left_out()
+            .iter()
+            .map(|entry| entry.message().to_owned())
+            .collect()
+    };
+    assert_eq!(entries(""), [form, spacing, sets]);
+    assert!(entries(r#"<w14:numForm w14:val="default"/><w14:numSpacing w14:val="default"/><w14:stylisticSets/>"#).is_empty());
+    // From the re-check of #362: a value not valid sets nothing, so the style's choice
+    // stays, where the default would turn it off.
+    assert_eq!(
+        entries(r#"<w14:numForm w14:val="Lining"/><w14:numSpacing w14:val="Tabular"/>"#),
+        [form, spacing, sets]
+    );
+    // The edges of a style set: 20 is the last set, and 1 is on.
+    assert_eq!(
+        messages(
+            r#"<w14:stylisticSets><w14:styleSet w14:id="20"/></w14:stylisticSets>"#,
+            true
+        ),
+        [sets]
+    );
+    assert_eq!(
+        messages(
+            r#"<w14:stylisticSets><w14:styleSet w14:id="2" w14:val="1"/></w14:stylisticSets>"#,
+            true
+        ),
+        [sets]
+    );
+}
+
+#[test]
 fn lists_a_deleted_mark_only_where_a_block_follows_it() {
     // From the re-checks of #326: Word joins a paragraph whose mark is deleted to what
     // follows it, but the last paragraph of a cell or a story has nothing after it. Word
@@ -3224,11 +3771,16 @@ fn translates_tables_with_their_style() {
         .collect();
     assert_eq!(
         left_out,
-        [
-            "what the table's style gives paragraphs and runs is not applied yet",
-            "the table properties of the table style's conditional formats are not applied",
-        ]
+        ["the table properties of the table style's conditional formats are not applied"]
     );
+    // What the style gives the text of its cells: bold.
+    let ir = translation.document();
+    for row in rows {
+        let ir::Block::Paragraph(paragraph) = &row.cells()[0].blocks()[0] else {
+            panic!("no paragraph");
+        };
+        assert!(ir.run_style(paragraph.mark()).unwrap().bold());
+    }
 }
 
 #[test]

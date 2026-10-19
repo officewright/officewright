@@ -279,7 +279,7 @@ impl fmt::Debug for PartEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // A content type is kept once for all the parts that have it; printed in full for
         // each of them, the output would grow with parts times its length.
-        let content_type = self.content_type.as_deref().map(|value| shorten(value, 64));
+        let content_type = self.content_type.as_deref().map(shorten);
         f.debug_struct("Part")
             .field("name", &self.name)
             .field("content_type", &content_type)
@@ -294,14 +294,7 @@ const _: () = {
     assert_send_sync::<Package>();
 };
 
-/// At most `max` characters of `text`, with `…` when there are more, so that error
-/// messages stay short whatever a file holds.
-pub(crate) fn shorten(text: &str, max: usize) -> String {
-    match text.char_indices().nth(max) {
-        Some((end, _)) => format!("{}…", text.get(..end).unwrap_or_default()),
-        None => text.to_owned(),
-    }
-}
+pub(crate) use crate::error::shorten;
 
 /// Refuses a part name longer than [`Limits::max_part_name_length`] bytes, not counting
 /// the leading `/` of a ZIP item name.
@@ -313,7 +306,7 @@ pub(crate) fn check_part_name_length(name: &str, limits: &Limits) -> Result<()> 
     Err(Error::LimitExceeded {
         limit: Limit::PartNameLength,
         maximum: limits.max_part_name_length() as u64,
-        context: format!("part name {} ({length} bytes)", shorten(name, 40)),
+        context: format!("part name {} ({length} bytes)", shorten(name)),
     })
 }
 
@@ -383,7 +376,7 @@ fn read_children(
                         tag.offset(),
                         format!(
                             "the root element is <{}>, not {root} in {}",
-                            shorten(tag.name().qname().as_str(), 64),
+                            shorten(tag.name().qname().as_str()),
                             reader.namespace_uri(namespace)
                         ),
                     ));
@@ -396,7 +389,7 @@ fn read_children(
                         tag.offset(),
                         format!(
                             "unexpected element <{}>",
-                            shorten(tag.name().qname().as_str(), 64)
+                            shorten(tag.name().qname().as_str())
                         ),
                     ));
                 }
@@ -409,8 +402,9 @@ fn read_children(
                         Some(Event::Text(text)) if is_whitespace(&text) => {}
                         Some(Event::Comment(_) | Event::ProcessingInstruction(_)) => {}
                         _ => {
-                            return Err(reader
-                                .error(offset, format!("<{}> must be empty", shorten(name, 64))));
+                            return Err(
+                                reader.error(offset, format!("<{}> must be empty", shorten(name)))
+                            );
                         }
                     }
                 }

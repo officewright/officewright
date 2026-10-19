@@ -135,7 +135,7 @@ const MAX_LOCALIZED_NAMES: usize = 64;
 /// bounds what a face keeps, which matters for fonts a document brings: a name record may
 /// hold 65,535 bytes, records may share them, and a byte of Mac Roman becomes up to three
 /// of UTF-8.
-const MAX_NAME_BYTES: usize = 512;
+pub(crate) const MAX_NAME_BYTES: usize = 512;
 
 /// The most bytes of name records decoded for one face in one pass over its `name`
 /// table: real fonts' names take a few kilobytes. A table may hold 65,535 records that

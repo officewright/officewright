@@ -11,8 +11,9 @@ use common::{TestResult, book, random_paragraph, word_lines};
 use officewright_core::{PageSize, Pt};
 use officewright_layout::fuzzing;
 use officewright_layout::ir::{
-    Block, BreakClear, Cell, Document, Inline, LineSpacing, Margins, PageSetup, Paragraph,
-    ParagraphProps, Row, RunFonts, RunStyle, RunStyleId, Section, Spacing, Table,
+    Block, Border, BorderSide, BreakClear, Cell, Document, Inline, LineSpacing, Margins, PageSetup,
+    Paragraph, ParagraphProps, PreferredWidth, Row, RunFonts, RunStyle, RunStyleId, Section,
+    Spacing, Table, TableBorders, TableLayout, TableProps,
 };
 
 /// How far Word's lines may be from ours: the printer's grid of 600 dots per inch and
@@ -46,9 +47,25 @@ fn paragraph(style: RunStyleId, props: ParagraphProps, inlines: Vec<Inline>) -> 
         .into()
 }
 
-/// A table of one cell holding `block`.
+/// A table of one cell holding `block`, as `E-space-before-top` has them: as wide as the
+/// text, with single borders of 0.5 pt.
 fn in_table(block: Block) -> Block {
+    let line = BorderSide::Line(Border::default().with_width(Pt(0.5)));
+    let borders = TableBorders::default()
+        .with_top(line)
+        .with_start(line)
+        .with_bottom(line)
+        .with_end(line)
+        .with_inside_horizontal(line)
+        .with_inside_vertical(line);
     Table::default()
+        .with_grid([Pt(451.3)])
+        .with_props(
+            TableProps::default()
+                .with_width(PreferredWidth::Points(Pt(451.3)))
+                .with_layout(TableLayout::Fixed)
+                .with_borders(borders),
+        )
         .with_rows(vec![
             Row::default().with_cells(vec![Cell::default().with_blocks([block])]),
         ])
@@ -147,6 +164,18 @@ fn space_before_top() -> (Document, Vec<Option<&'static str>>) {
     (document, words)
 }
 
+/// The baseline of the first glyph run `page` draws, in points from the page's top.
+fn first_baseline(page: &fuzzing::PageDump) -> Option<f64> {
+    page.text()
+        .lines()
+        .filter(|line| line.starts_with("glyphs "))
+        .find_map(|line| {
+            let at = line.split_whitespace().find(|word| word.starts_with('@'))?;
+            let (_, y) = at.trim_start_matches('@').split_once(',')?;
+            y.parse::<f64>().ok().map(|twips| twips / 20.0)
+        })
+}
+
 #[test]
 fn space_above_at_the_top_of_a_page_is_where_word_keeps_it() -> TestResult {
     let book = book()?;
@@ -163,6 +192,19 @@ fn space_above_at_the_top_of_a_page_is_where_word_keeps_it() -> TestResult {
         .find(|line| line.text.starts_with("Control"))
         .ok_or("no control line")?;
     let offset = control.top - 72.0;
+    // Our baselines are below the line's top by what the test font reaches above it in the
+    // same line: the control paragraph's line top is its fragment's.
+    let ours_control = laid
+        .pages()
+        .iter()
+        .find_map(|page| {
+            let fragment = page.fragments().first()?;
+            let starts = words
+                .get(fragment.paragraph())?
+                .is_some_and(|w| w == "Control:");
+            starts.then(|| Some(first_baseline(page)? - fragment.top()))?
+        })
+        .ok_or("no control page of ours")?;
     for (number, page) in laid.pages().iter().enumerate() {
         let first = word
             .iter()
@@ -179,19 +221,19 @@ fn space_above_at_the_top_of_a_page_is_where_word_keeps_it() -> TestResult {
             number + 1,
             first.text
         );
-        // The table's top border, 0.5 pt, is above the cell on page 8; tables are not
-        // laid out yet.
-        let border = if label.starts_with("Case 7") {
-            0.5
+        // Page 8 starts with a table: its fragment is the band, whose top is the table's;
+        // the cell's first line is found by its text, below the top border and the space
+        // before the paragraph, which a cell keeps at the top of a page.
+        let ours = if label.starts_with("Case 7") {
+            first_baseline(page).ok_or("no text on the table's page")? - ours_control
         } else {
-            0.0
+            fragment.top()
         };
         let theirs = first.top - offset;
         assert!(
-            (fragment.top() - theirs).abs() <= GRID + border,
-            "page {}: {label} at {} where Word has {theirs}",
+            (ours - theirs).abs() <= GRID,
+            "page {}: {label} at {ours} where Word has {theirs}",
             number + 1,
-            fragment.top()
         );
     }
     Ok(())
