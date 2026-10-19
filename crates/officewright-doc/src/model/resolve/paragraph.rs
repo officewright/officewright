@@ -130,8 +130,10 @@ impl Formats<'_> {
             None => {
                 // The style's chain, worked out once for every table text, laid over this
                 // one: its cleared stops clear the table text's (#76). The same as laying
-                // the chain over the root style by style, except for a chain that clears
-                // more stops than a level keeps (MAX_TABS).
+                // the chain over the root style by style, except where a level would keep
+                // only some of the stops (MAX_TABS set and as many cleared): when the chain
+                // clears more than that, or the table text's stops and the chain's
+                // together set more, the stops kept may differ.
                 #[cfg(test)]
                 let reads = self.paragraph_chains.reads;
                 let chain =

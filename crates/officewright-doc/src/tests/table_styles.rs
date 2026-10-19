@@ -1425,6 +1425,118 @@ fn lets_the_table_style_win_over_the_default_style_s_11_or_12_pt_and_left_when_t
 }
 
 #[test]
+fn drops_only_the_default_paragraph_style_s_values_equal_to_the_defaults() {
+    // From the re-check of #360: what Word drops is the default paragraph style's own
+    // values equal to what lies below it, no other style's, and a left justification only
+    // when the defaults give no other.
+    let case = |defaults: &str, normal: &str, style: &str| {
+        let styles = format!(
+            r#"<w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr></w:rPrDefault>{defaults}</w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/>{normal}</w:style><w:style w:type="paragraph" w:styleId="Own"><w:name w:val="Own"/><w:pPr><w:jc w:val="left"/></w:pPr><w:rPr><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr></w:style><w:style w:type="table" w:styleId="Big"><w:name w:val="Big"/><w:pPr><w:jc w:val="center"/></w:pPr><w:rPr><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr></w:style>"#
+        );
+        // Mode 15 with the setting on: the override rule lets nothing give way.
+        let settings = r#"<w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/><w:compatSetting w:name="overrideTableStyleFontSizeAndJustification" w:uri="http://schemas.microsoft.com/office/word" w:val="1"/></w:compat>"#;
+        let paragraph = if style.is_empty() {
+            "<w:p/>".to_owned()
+        } else {
+            format!(r#"<w:p><w:pPr><w:pStyle w:val="{style}"/></w:pPr></w:p>"#)
+        };
+        let body = format!(
+            r#"<w:tbl><w:tblPr><w:tblStyle w:val="Big"/></w:tblPr><w:tblGrid/><w:tr><w:tc>{paragraph}</w:tc></w:tr></w:tbl>{paragraph}"#
+        );
+        let document = open_text(&styles, settings, "", &body);
+        let mut formats = document.formats();
+        let inside = cell_paragraphs(&document)[0];
+        let outside = document
+            .sections()
+            .next()
+            .unwrap()
+            .blocks()
+            .find_map(|block| match block {
+                Block::Paragraph(paragraph) => Some(paragraph),
+                _ => None,
+            })
+            .unwrap();
+        let mark = formats.paragraph_mark(inside);
+        (
+            mark.size().0,
+            mark.size_complex_script().0,
+            formats.paragraph(inside).justification(),
+            formats.paragraph(outside).justification(),
+        )
+    };
+    let left_11 = r#"<w:pPr><w:jc w:val="left"/></w:pPr><w:rPr><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr>"#;
+    // Normal's: the table style's show through in the cell.
+    assert_eq!(
+        case("", left_11, ""),
+        (14.0, 14.0, Justification::Center, Justification::Start)
+    );
+    // Another style's equal values are its own.
+    assert_eq!(
+        case("", "", "Own"),
+        (11.0, 11.0, Justification::Left, Justification::Left)
+    );
+    // Over defaults that right-align, Normal's left is its own, in the cell and outside.
+    let right = r#"<w:pPrDefault><w:pPr><w:jc w:val="right"/></w:pPr></w:pPrDefault>"#;
+    assert_eq!(case(right, left_11, "").2, Justification::Left);
+    assert_eq!(case(right, left_11, "").3, Justification::Left);
+    // `start` is dropped as `left` is, and each size on its own.
+    let start = r#"<w:pPr><w:jc w:val="start"/></w:pPr><w:rPr><w:sz w:val="24"/><w:szCs w:val="22"/></w:rPr>"#;
+    assert_eq!(
+        case("", start, ""),
+        (12.0, 14.0, Justification::Center, Justification::Start)
+    );
+}
+
+#[test]
+fn keeps_at_most_4096_style_chains_laid_over_table_texts() {
+    // 250 tables in styles of their own, each cell with a paragraph in each of 17 styles:
+    // 4,250 chains laid over table texts, of which at most 4,096 are kept.
+    let mut styles: String = (0..250)
+        .map(|n| {
+            format!(
+                r#"<w:style w:type="table" w:styleId="S{n}"><w:name w:val="S{n}"/><w:rPr><w:sz w:val="{}"/></w:rPr></w:style>"#,
+                10 + n % 40
+            )
+        })
+        .collect();
+    for k in 0..17 {
+        styles.push_str(&format!(
+            r#"<w:style w:type="paragraph" w:styleId="P{k}"><w:name w:val="P{k}"/><w:pPr><w:ind w:left="{}"/></w:pPr></w:style>"#,
+            20 * k
+        ));
+    }
+    let paragraphs: String = (0..17)
+        .map(|k| format!(r#"<w:p><w:pPr><w:pStyle w:val="P{k}"/></w:pPr></w:p>"#))
+        .collect();
+    let body: String = (0..250)
+        .map(|n| {
+            format!(
+                r#"<w:tbl><w:tblPr><w:tblStyle w:val="S{n}"/></w:tblPr><w:tblGrid/><w:tr><w:tc>{paragraphs}</w:tc></w:tr></w:tbl><w:p/>"#
+            )
+        })
+        .collect();
+    let document = open_with(&styles, &body);
+    let mut formats = document.formats();
+    let mut most = 0;
+    for block in document.sections().next().unwrap().blocks() {
+        let Block::Table(table) = block else {
+            continue;
+        };
+        let cell = table.rows().next().unwrap().cells().next().unwrap();
+        for (k, block) in cell.blocks().enumerate() {
+            let Block::Paragraph(paragraph) = block else {
+                panic!("no paragraph");
+            };
+            let indent = formats.paragraph(paragraph).start_indent().0;
+            assert_eq!(indent, f64::from(u32::try_from(k).unwrap()));
+            most = most.max(formats.kept_table_texts().3);
+        }
+    }
+    assert_eq!(formats.work().cell_levels, 250 * 17);
+    assert_eq!(most, 4096);
+}
+
+#[test]
 fn takes_the_style_of_the_innermost_table_and_gives_list_labels_its_run_properties() {
     let styles = r#"<w:style w:type="table" w:styleId="Outer"><w:name w:val="Outer"/><w:rPr><w:color w:val="111111"/></w:rPr></w:style><w:style w:type="table" w:styleId="Inner"><w:name w:val="Inner"/><w:rPr><w:color w:val="222222"/></w:rPr></w:style><w:style w:type="table" w:styleId="Listed"><w:name w:val="Listed"/><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr></w:style>"#;
     let numbering = r#"<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#;
