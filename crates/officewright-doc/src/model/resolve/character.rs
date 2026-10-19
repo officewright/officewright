@@ -10,8 +10,8 @@ use super::{Formats, Layer, overwrite, style_index};
 use crate::model::Document;
 use crate::model::format::{CharacterFormat, FontFamilies};
 use crate::model::properties::{
-    Color, ColorValue, FontHint, Highlight, Ligatures, RunProperties, Shading, TextEffects,
-    ThemeColor, ThemeFont, Toggle, UnderlineStyle, VerticalPosition,
+    Color, ColorValue, FontChoices, FontHint, Highlight, Ligatures, RunProperties, Shading,
+    TextEffects, ThemeColor, ThemeFont, Toggle, UnderlineStyle, VerticalPosition,
 };
 use crate::model::settings::{ColorSchemeIndex, ColorSchemeMapping};
 use crate::model::styles::StyleKind;
@@ -243,6 +243,7 @@ impl Formats<'_> {
             emphasis_mark: effect.emphasis_mark.unwrap_or(false),
             border: effect.border.unwrap_or(false),
             text_effects: effect.text_effects,
+            font_choices: effect.font_choices,
         }
     }
 
@@ -386,6 +387,16 @@ pub(super) struct CharacterLevel {
     emphasis_mark: Option<bool>,
     border: Option<bool>,
     text_effects: TextEffects,
+    font_choices: FontChoices,
+}
+
+impl FontChoices {
+    /// Lays `above` over these choices, each on its own.
+    fn overlay(&mut self, above: &Self) {
+        overwrite(&mut self.number_form, above.number_form);
+        overwrite(&mut self.number_spacing, above.number_spacing);
+        overwrite(&mut self.stylistic_sets, above.stylistic_sets);
+    }
 }
 
 impl TextEffects {
@@ -440,6 +451,7 @@ impl CharacterLevel {
             emphasis_mark,
             border,
             text_effects,
+            font_choices,
         } = self;
         fonts.iter().any(Option::is_some)
             || hint.is_some()
@@ -462,6 +474,7 @@ impl CharacterLevel {
             || emphasis_mark.is_some()
             || border.is_some()
             || text_effects.is_set()
+            || font_choices.is_set()
     }
 
     /// What one `w:rPr` gives.
@@ -510,6 +523,7 @@ impl CharacterLevel {
             emphasis_mark: properties.emphasis_mark,
             border: properties.border,
             text_effects: properties.text_effects,
+            font_choices: properties.font_choices,
         }
     }
 }
@@ -568,6 +582,7 @@ impl Layer for CharacterLevel {
         overwrite(&mut self.emphasis_mark, above.emphasis_mark);
         overwrite(&mut self.border, above.border);
         self.text_effects.overlay(&above.text_effects);
+        self.font_choices.overlay(&above.font_choices);
     }
 }
 
