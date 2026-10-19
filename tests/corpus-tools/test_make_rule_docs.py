@@ -9,6 +9,7 @@ import dataclasses
 import importlib.util
 import re
 import shutil
+import struct
 import sys
 import tempfile
 import unittest
@@ -17,6 +18,7 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
+CARLITO = Path(__file__).resolve().parents[2] / "tests/fonts/carlito/Carlito-Regular.ttf"
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 W14 = "{http://schemas.microsoft.com/office/word/2010/wordml}"
 CT = "{http://schemas.openxmlformats.org/package/2006/content-types}"
@@ -36,6 +38,49 @@ rules = load("make-rule-docs")
 
 def part(parts, name):
     return ElementTree.fromstring(dict(parts)[name])
+
+
+def carlito_width(text, size=11):
+    """The width in points of text in Carlito, Calibri's metric twin, at size points: the
+    advances of hmtx for the glyphs that its (3, 1) cmap, of format 4, maps the text to."""
+    data = CARLITO.read_bytes()
+    (count,) = struct.unpack(">H", data[4:6])
+    tables = {}
+    for i in range(count):
+        tag, _, offset, length = struct.unpack(">4sIII", data[12 + 16 * i : 28 + 16 * i])
+        tables[tag] = data[offset : offset + length]
+    (units,) = struct.unpack(">H", tables[b"head"][18:20])
+    (metrics,) = struct.unpack(">H", tables[b"hhea"][34:36])
+    cmap = tables[b"cmap"]
+    (subtables,) = struct.unpack(">H", cmap[2:4])
+    for i in range(subtables):
+        platform, encoding, offset = struct.unpack(">HHI", cmap[4 + 8 * i : 12 + 8 * i])
+        if (platform, encoding) == (3, 1):
+            sub = cmap[offset:]
+    assert struct.unpack(">H", sub[0:2]) == (4,)
+    segments = struct.unpack(">H", sub[6:8])[0] // 2
+    ends = struct.unpack(f">{segments}H", sub[14 : 14 + 2 * segments])
+    at = 16 + 2 * segments
+    starts = struct.unpack(f">{segments}H", sub[at : at + 2 * segments])
+    deltas = struct.unpack(f">{segments}h", sub[at + 2 * segments : at + 4 * segments])
+    ranges_at = at + 4 * segments
+    ranges = struct.unpack(f">{segments}H", sub[ranges_at : ranges_at + 2 * segments])
+
+    def glyph(code):
+        for k in range(segments):
+            if starts[k] <= code <= ends[k]:
+                if ranges[k] == 0:
+                    return (code + deltas[k]) & 0xFFFF
+                place = ranges_at + 2 * k + ranges[k] + 2 * (code - starts[k])
+                (found,) = struct.unpack(">H", sub[place : place + 2])
+                return (found + deltas[k]) & 0xFFFF if found else 0
+        return 0
+
+    total = 0
+    for character in text:
+        index = min(glyph(ord(character)), metrics - 1)
+        total += struct.unpack(">H", tables[b"hmtx"][4 * index : 4 * index + 2])[0]
+    return total * size / units
 
 
 class CommittedDocuments(unittest.TestCase):
@@ -2273,15 +2318,37 @@ class Packages(unittest.TestCase):
         self.assertEqual([tags for _, tags, _ in samples], [highlight, size_24])
         self.assertIsNone(p_pr)
 
-        # E-underline-trailspace-margin: n words, 30 spaces and a word, all underlined.
+        # E-underline-trailspace-margin: words, spaces and a word, all underlined, in a
+        # paragraph after the label's, so the words start the line; the spaces end where
+        # the label says, in Carlito, and the word after them cannot share their line.
         found = cases("E-underline-trailspace-margin")
-        self.assertEqual(len(found), 5)
+        self.assertEqual(len(found), 4)
+        _, _, body = load("E-underline-trailspace-margin")
+        self.assertEqual([len(p.findall(f"{W}r")) for p in body.findall(f"{W}p")], [1] * 8)
+        margin, edge = rules.TEXT_W / 20, (rules.PAGE_W - rules.MARGIN) / 20
+        past = []
         for label, ((value, tags, _),), p_pr in found:
-            count = int(re.fullmatch(r"(\d+) underlined words, 30 spaces and a word, left "
-                                     r"aligned", label).group(1))
-            self.assertEqual(value, " ".join(["underlined"] * count) + " " * 30 + "end")
+            words, count, where = re.fullmatch(
+                r"(\d+) underlined words, (\d+) spaces and an underlined word, left aligned; "
+                r"in Calibri 11 pt the spaces end (.+)", label).groups()
+            words = " ".join(["underlined"] * int(words))
+            self.assertEqual(value, words + " " * int(count) + "underlined")
             self.assertEqual(tags, single, label)
             self.assertIsNone(p_pr, label)
+            end = carlito_width(words + " " * int(count))
+            self.assertLess(carlito_width(words), margin, label)
+            self.assertGreater(end + carlito_width("underlined"), margin, label)
+            distance, side, beyond = re.fullmatch(
+                r"(\d+) pt (before|past) the right margin(?:, (\d+) pt past the edge of the "
+                r"page)?", where).groups()
+            self.assertEqual(side, "past" if end > margin else "before", label)
+            self.assertAlmostEqual(abs(end - margin), int(distance), delta=1, msg=label)
+            self.assertEqual(beyond is not None, end > edge, label)
+            if beyond is not None:
+                self.assertAlmostEqual(end - edge, int(beyond), delta=1, msg=label)
+            past.append(end - margin)
+        # Before the margin, just past it, well past it, and past the edge of the page.
+        self.assertTrue(past[0] < -5 and 5 < past[1] < 20 < past[2] < edge - margin < past[3])
 
         # E-tab-margin-alone in modes 15, 14 and 12: the same cases; each sample paragraph has
         # the stop its label names, and its tab is underlined where the label says so.
@@ -2289,6 +2356,10 @@ class Packages(unittest.TestCase):
         for suffix in ("", "-14", "-12"):
             found = cases(f"E-tab-margin-alone{suffix}")
             self.assertEqual(len(found), 3, suffix)
+            # Each label has a paragraph of its own, so the tab follows "before" alone.
+            _, _, body = load(f"E-tab-margin-alone{suffix}")
+            self.assertEqual([len(p.findall(f"{W}r")) for p in body.findall(f"{W}p")],
+                             [1, 3] * 3, suffix)
             for label, samples, p_pr in found:
                 place = re.search(r"a left stop 18 pt (into the right margin|past the right edge "
                                   r"of the page)", label).group(1)
@@ -2332,25 +2403,37 @@ class Packages(unittest.TestCase):
             self.assertEqual(mark, expected, label)
         self.assertEqual(len(set(instances.values())), 4)
 
-        # E-table-style-defaults-size: document defaults 12 pt, Normal 11 pt and justified,
-        # the table style Big 14 pt and centred; mode 15 with the setting on, and mode 14.
+        # E-table-style-defaults-size: document defaults 12 pt and right-aligned, Normal 11 pt
+        # and left-aligned, the table style Big 14 pt and centred; mode 15 with the setting
+        # on, and mode 14.
         for name, mode in (("E-table-style-defaults-size", 15),
                            ("E-table-style-defaults-size-14", 14)):
             doc, parts, body = load(name)
             styles = ElementTree.fromstring(parts["word/styles.xml"])
             defaults = props_of(styles, f"{W}docDefaults/{W}rPrDefault/{W}rPr")
             self.assertEqual((defaults["sz"], defaults["szCs"]), ({"val": "24"}, {"val": "24"}))
+            defaults = props_of(styles, f"{W}docDefaults/{W}pPrDefault/{W}pPr")
+            self.assertEqual(defaults["jc"], {"val": "right"}, name)
             normal = next(s for s in styles.iter(f"{W}style") if s.get(f"{W}styleId") == "Normal")
             self.assertEqual(props_of(normal, f"{W}rPr"), {"sz": {"val": "22"},
                                                            "szCs": {"val": "22"}}, name)
-            self.assertEqual(props_of(normal, f"{W}pPr"), {"jc": {"val": "both"}}, name)
+            self.assertEqual(props_of(normal, f"{W}pPr"), {"jc": {"val": "left"}}, name)
             big = next(s for s in styles.iter(f"{W}style") if s.get(f"{W}styleId") == "Big")
             self.assertEqual(props_of(big, f"{W}rPr"), {"sz": {"val": "28"},
                                                         "szCs": {"val": "28"}}, name)
             self.assertEqual(props_of(big, f"{W}pPr"), {"jc": {"val": "center"}}, name)
             self.assertEqual(doc.mode, mode)
             label = "".join(t.text for t in body.find(f"{W}p").iter(f"{W}t"))
-            self.assertIn("document defaults 12 pt, Normal 11 pt, justified", label)
+            self.assertIn("document defaults 12 pt and right-aligned, Normal 11 pt and "
+                          "left-aligned", label)
+            # The table is in Big, and its cells' text is short enough that left, centre and
+            # right put it in different places.
+            (table,) = body.findall(f"{W}tbl")
+            self.assertEqual(table.find(f"{W}tblPr/{W}tblStyle").get(f"{W}val"), "Big")
+            for cell in table.iter(f"{W}tc"):
+                width = int(cell.find(f"{W}tcPr/{W}tcW").get(f"{W}w")) / 20
+                value = "".join(t.text for t in cell.iter(f"{W}t"))
+                self.assertLess(carlito_width(value, 14), width / 3, value)
 
         def table_styles(parts):
             styles = ElementTree.fromstring(parts["word/styles.xml"])
@@ -2364,51 +2447,153 @@ class Packages(unittest.TestCase):
             look = table.find(f"{W}tblPr/{W}tblLook")
             return {k.replace(W, ""): v for k, v in look.attrib.items()}
 
-        # E-table-style-rows-cols.
+        def band_size(style, kind):
+            found = style.find(f"{W}tblPr/{W}tblStyle{kind}BandSize")
+            return None if found is None else found.get(f"{W}val")
+
+        def shape(table):
+            rows = table.findall(f"{W}tr")
+            return len(rows), len(rows[0].findall(f"{W}tc"))
+
+        def header_rows(table):
+            return [n for n, row in enumerate(table.findall(f"{W}tr"), 1)
+                    if row.find(f"{W}trPr/{W}tblHeader") is not None]
+
+        on = {"firstRow": "1", "lastRow": "1", "firstColumn": "1", "lastColumn": "1",
+              "noHBand": "1", "noVBand": "1"}
+        off = {key: "0" for key in on} | {"noHBand": "1", "noVBand": "1"}
+
+        # E-table-style-rows-cols: a style without corner formats, then band formats only,
+        # with a first or a last row or column on; bands by one.
         _, parts, body = load("E-table-style-rows-cols")
         styles = table_styles(parts)
         self.assertEqual(formats(styles["NoCorners"]),
                          ["firstRow", "lastRow", "firstCol", "lastCol"])
         self.assertEqual(formats(styles["RowBandsOnly"]), ["band1Horz", "band2Horz"])
         self.assertEqual(formats(styles["ColBandsOnly"]), ["band1Vert", "band2Vert"])
+        self.assertEqual((band_size(styles["RowBandsOnly"], "Row"),
+                          band_size(styles["RowBandsOnly"], "Col")), ("1", None))
+        self.assertEqual((band_size(styles["ColBandsOnly"], "Row"),
+                          band_size(styles["ColBandsOnly"], "Col")), (None, "1"))
         tables = body.findall(f"{W}tbl")
-        self.assertEqual(len(tables), 3)
-        on = {"firstRow": "1", "lastRow": "1", "firstColumn": "1", "lastColumn": "1",
-              "noHBand": "1", "noVBand": "1"}
-        off = {key: "0" for key in on} | {"noHBand": "1", "noVBand": "1"}
-        self.assertEqual(look_of(tables[0]), on)
-        self.assertEqual(look_of(tables[1]), off | {"firstRow": "1", "noHBand": "0"})
-        self.assertEqual(look_of(tables[2]), off | {"firstColumn": "1", "noVBand": "0"})
-        self.assertEqual(len(tables[1].findall(f"{W}tr")), 6)
-        self.assertEqual(len(tables[2].find(f"{W}tr").findall(f"{W}tc")), 6)
+        found = cases("E-table-style-rows-cols")
+        expected = [
+            ("NoCorners", on, (5, 5)),
+            ("RowBandsOnly", off | {"firstRow": "1", "noHBand": "0"}, (6, 3)),
+            ("ColBandsOnly", off | {"firstColumn": "1", "noVBand": "0"}, (3, 6)),
+            # The last row or column is the fourth: band 2 if the bands count it.
+            ("RowBandsOnly", off | {"lastRow": "1", "noHBand": "0"}, (4, 3)),
+            ("ColBandsOnly", off | {"lastColumn": "1", "noVBand": "0"}, (3, 4)),
+        ]
+        self.assertEqual(len(tables), len(expected))
+        self.assertEqual(len(found), len(expected))
+        for (label, _, _), table, (style, look, size) in zip(found, tables, expected):
+            self.assertEqual(table.find(f"{W}tblPr/{W}tblStyle").get(f"{W}val"), style)
+            self.assertEqual(look_of(table), look, label)
+            self.assertEqual(shape(table), size, label)
+            if style != "NoCorners":
+                kind = "row" if style == "RowBandsOnly" else "column"
+                which = "first" if look[f"first{kind.title()}"] == "1" else "last"
+                self.assertEqual(label, f"a style with {kind} band formats only; {which} {kind} "
+                                 f"flag on, {kind} bands on")
 
         # E-table-style-header-rows-3: three header rows of 70, a first-row format with a
-        # 3 pt bottom border; 70 rows of at least 12 pt are more than a page.
-        for said in ("on", "off"):
-            doc, parts, body = load(f"E-table-style-header-rows-3-{said}")
-            self.assertEqual(dict(doc.compat_values),
-                             {"differentiateMultirowTableHeaders": 1 if said == "on" else 0})
+        # 3 pt bottom border, row bands by one; 70 rows of at least 12 pt are more than a
+        # page. The setting on and off in mode 15, and mode 14, which has none.
+        for suffix, mode, values in (("on", 15, {"differentiateMultirowTableHeaders": 1}),
+                                     ("off", 15, {"differentiateMultirowTableHeaders": 0}),
+                                     ("14", 14, {})):
+            doc, parts, body = load(f"E-table-style-header-rows-3-{suffix}")
+            self.assertEqual((doc.mode, dict(doc.compat_values)), (mode, values))
             style = table_styles(parts)["ThreeHeaders"]
             self.assertEqual(formats(style), ["firstRow", "band1Horz", "band2Horz"])
+            self.assertEqual(band_size(style, "Row"), "1")
             first = style.find(f"{W}tblStylePr")
             bottom = first.find(f"{W}tcPr/{W}tcBorders/{W}bottom")
             self.assertEqual((bottom.get(f"{W}val"), bottom.get(f"{W}sz")), ("single", "24"))
             (table,) = body.findall(f"{W}tbl")
-            rows = table.findall(f"{W}tr")
-            self.assertEqual(len(rows), 70)
-            headers = [row.find(f"{W}trPr/{W}tblHeader") is not None for row in rows]
-            self.assertEqual(headers, [True] * 3 + [False] * 67)
-            self.assertEqual(look_of(table)["firstRow"], "1")
+            self.assertEqual(shape(table), (70, 3))
+            self.assertEqual(header_rows(table), [1, 2, 3])
+            self.assertEqual(look_of(table), off | {"firstRow": "1", "noHBand": "0"})
             self.assertTrue(70 * 12 > rules.PAGE_H / 20 - 2 * rules.MARGIN / 20)
+
+        # E-table-style-header-rows-format: the header rows each label names, the format of
+        # the style each table is in, and the flags its label names.
+        _, parts, body = load("E-table-style-header-rows-format")
+        styles = table_styles(parts)
+        self.assertEqual(formats(styles["HeaderBorders"]), ["firstRow"])
+        self.assertEqual(formats(styles["HeaderCorners"]),
+                         ["firstRow", "firstCol", "lastCol", "neCell", "nwCell"])
+        self.assertEqual(formats(styles["HeaderBands"]), ["firstRow", "band1Horz", "band2Horz"])
+        self.assertEqual(band_size(styles["HeaderBands"], "Row"), "1")
+        # The first-row format's borders differ from the style's own, which are all single
+        # and ½ pt, and from each other.
+        own = styles["HeaderBorders"].find(f"{W}tblPr/{W}tblBorders")
+        self.assertEqual({(b.get(f"{W}val"), b.get(f"{W}sz")) for b in own}, {("single", "4")})
+        format_borders = styles["HeaderBorders"].find(f"{W}tblStylePr/{W}tcPr/{W}tcBorders")
+        self.assertEqual({b.tag.replace(W, ""): (b.get(f"{W}val"), b.get(f"{W}sz"))
+                          for b in format_borders},
+                         {"top": ("double", "4"), "bottom": ("single", "24"),
+                          "insideH": ("dotted", "8")})
+        tables = body.findall(f"{W}tbl")
+        found = cases("E-table-style-header-rows-format")
+        expected = [
+            ("HeaderBorders", off | {"firstRow": "1"}, (4, 3)),
+            ("HeaderCorners", off | {"firstRow": "1", "firstColumn": "1", "lastColumn": "1"},
+             (4, 4)),
+            ("HeaderBands", off | {"firstRow": "1", "noHBand": "0"}, (6, 3)),
+            ("HeaderBands", off | {"noHBand": "0"}, (6, 3)),
+        ]
+        self.assertEqual(len(tables), len(expected))
+        self.assertEqual(len(found), len(expected))
+        for (label, _, _), table, (style, look, size) in zip(found, tables, expected):
+            self.assertEqual(table.find(f"{W}tblPr/{W}tblStyle").get(f"{W}val"), style)
+            self.assertEqual(look_of(table), look, label)
+            self.assertEqual(shape(table), size, label)
+            named = re.match(r"rows (\d) and (\d) are header rows", label).groups()
+            self.assertEqual(header_rows(table), [int(n) for n in named], label)
+            self.assertEqual("first row flag off" in label, look["firstRow"] == "0", label)
+            self.assertEqual("no bands" in label, look["noHBand"] == "1", label)
+            self.assertEqual("row bands on" in label, look["noHBand"] == "0", label)
+        self.assertEqual(header_rows(tables[2]), [1, 3])
+
+        # E-table-style-two-defaults: Normal Table and two styles of their own are marked
+        # w:default; each of the two gives the table a colour and a grey; the table names
+        # no style.
+        _, parts, body = load("E-table-style-two-defaults")
+        styles = ElementTree.fromstring(parts["word/styles.xml"]).iter(f"{W}style")
+        marked = [s for s in styles if s.get(f"{W}type") == "table"
+                  and s.get(f"{W}default") == "1"]
+        self.assertEqual([s.get(f"{W}styleId") for s in marked],
+                         ["TableNormal", "FirstDefault", "SecondDefault"])
+        looks = [(s.find(f"{W}rPr/{W}color").get(f"{W}val"),
+                  s.find(f"{W}tcPr/{W}shd").get(f"{W}fill")) for s in marked[1:]]
+        self.assertEqual(looks, [("C00000", "D9D9D9"), ("0070C0", "A6A6A6")])
+        self.assertIsNone(marked[0].find(f"{W}tcPr"))
+        (table,) = body.findall(f"{W}tbl")
+        self.assertIsNone(table.find(f"{W}tblPr/{W}tblStyle"))
+        ((label, _, _),) = cases("E-table-style-two-defaults")
+        self.assertIn("FirstDefault (red text, light grey) and SecondDefault (blue text, dark "
+                      "grey)", label)
 
         def margins(element):
             return {c.tag.replace(W, ""): (c.get(f"{W}w"), c.get(f"{W}type"))
                     for c in ([] if element is None else element)}
 
+        def fixed(table):
+            return table.find(f"{W}tblPr/{W}tblLayout").get(f"{W}type") == "fixed"
+
+        def wraps(cell):
+            """Whether the cell's text is wider than the cell, in Carlito 11 pt."""
+            width = int(cell.find(f"{W}tcPr/{W}tcW").get(f"{W}w")) / 20
+            return carlito_width("".join(t.text for t in cell.iter(f"{W}t"))) > width
+
         # E-table-cell-margins: the table's margins of 5 pt, and each cell's own margins of
-        # the type its text names.
+        # the type its text names; fixed widths, and text that wraps in each cell.
         _, _, body = load("E-table-cell-margins")
         (table,) = body.findall(f"{W}tbl")
+        self.assertTrue(fixed(table))
+        self.assertTrue(all(wraps(cell) for cell in table.iter(f"{W}tc")))
         five = ("100", "dxa")
         self.assertEqual(margins(table.find(f"{W}tblPr/{W}tblCellMar")),
                          {side: five for side in rules.SIDES})
@@ -2427,25 +2612,41 @@ class Packages(unittest.TestCase):
                 self.assertEqual(own, {side: (width, kind) for side in rules.SIDES})
 
         # E-table-cell-margins-nil: one table per side, whose only cell margin is that side,
-        # of type nil.
+        # of type nil, in a style whose margin on that side differs from 0 and from Normal
+        # Table's, so the side shows whether Word ignores nil.
         found = cases("E-table-cell-margins-nil")
-        _, _, body = load("E-table-cell-margins-nil")
+        _, parts, body = load("E-table-cell-margins-nil")
+        styles = {s.get(f"{W}styleId"): s
+                  for s in ElementTree.fromstring(parts["word/styles.xml"]).iter(f"{W}style")}
+        normal = margins(styles["TableNormal"].find(f"{W}tblPr/{W}tblCellMar"))
+        style = margins(styles["Margins10"].find(f"{W}tblPr/{W}tblCellMar"))
         tables = body.findall(f"{W}tbl")
         self.assertEqual(len(tables), 4)
+        self.assertEqual(len(found), 4)
         for (label, _, _), table, side in zip(found, tables, rules.SIDES):
-            self.assertEqual(label, f"the table's {side} cell margin of type nil")
+            points = int(re.fullmatch(rf"the table's {side} cell margin of type nil; the style "
+                                      r"Margins10 has (\d+) pt on every side", label).group(1))
+            self.assertEqual(table.find(f"{W}tblPr/{W}tblStyle").get(f"{W}val"), "Margins10")
             self.assertEqual(margins(table.find(f"{W}tblPr/{W}tblCellMar")), {side: ("0", "nil")})
+            self.assertEqual(style[side], (str(points * 20), "dxa"), label)
+            self.assertNotIn(int(style[side][0]), (0, int(normal[side][0])), label)
+            self.assertTrue(fixed(table))
+            self.assertTrue(all(wraps(cell) for cell in table.iter(f"{W}tc")), label)
 
         # E-table-float-align: each table floats by the one alignment its label names.
         _, _, body = load("E-table-float-align")
         tables = body.findall(f"{W}tbl")
         found = cases("E-table-float-align")
         self.assertEqual(len(tables), 2)
+        placed = []
         for (label, _, p_pr), table in zip(found, tables):
             attribute, value = re.search(r"only w:(tblp[XY]Spec) (\w+)", label).groups()
-            placed = table.find(f"{W}tblPr/{W}tblpPr")
-            self.assertEqual({k.replace(W, ""): v for k, v in placed.attrib.items()},
+            attributes = table.find(f"{W}tblPr/{W}tblpPr").attrib
+            self.assertEqual({k.replace(W, ""): v for k, v in attributes.items()},
                              {attribute: value}, label)
+            placed.append((attribute, value))
+        # #172's case 11 asks about these two.
+        self.assertEqual(placed, [("tblpYSpec", "bottom"), ("tblpXSpec", "center")])
         labels = [p for p in body.findall(f"{W}p")
                   if "".join(t.text for t in p.iter(f"{W}t")).startswith("Case ")]
         self.assertEqual([p.find(f"{W}pPr/{W}pageBreakBefore") is not None for p in labels],
@@ -2455,7 +2656,10 @@ class Packages(unittest.TestCase):
         for label, table in zip(labels, tables):
             self.assertIs(children[children.index(label) + 1], table)
             after = children[children.index(table) + 1]
-            self.assertTrue("".join(t.text for t in after.iter(f"{W}t")).startswith("Text around"))
+            text = "".join(t.text for t in after.iter(f"{W}t"))
+            self.assertTrue(text.startswith("Text around"))
+            # Enough text to flow around the table for several lines.
+            self.assertGreater(carlito_width(text), 5 * rules.TEXT_W / 20)
 
         # E-bold-italic-missing: each sample is in the font, size and style its label names.
         _, _, body = load("E-bold-italic-missing")
@@ -2491,8 +2695,14 @@ class Packages(unittest.TestCase):
                   if lvl.find(f"{W}pStyle") is not None
                   and lvl.find(f"{W}pStyle").get(f"{W}val") == "LinkedNoLevel"]
         self.assertEqual(naming, ["2"])
-        templates = [lvl.find(f"{W}lvlText").get(f"{W}val") for lvl in numbering.iter(f"{W}lvl")]
-        self.assertEqual(len(set(templates)), len(templates))
+        # Each level renders a label of its own, at an indent of its own.
+        levels = list(numbering.iter(f"{W}lvl"))
+        self.assertEqual([(lvl.find(f"{W}numFmt").get(f"{W}val"),
+                           lvl.find(f"{W}lvlText").get(f"{W}val")) for lvl in levels],
+                         [("lowerLetter", "%1)"), ("lowerLetter", "(%2)"),
+                          ("lowerLetter", "[%3]")])
+        indents = [lvl.find(f"{W}pPr/{W}ind").get(f"{W}left") for lvl in levels]
+        self.assertEqual(len(set(indents)), len(indents))
         paragraphs = body.findall(f"{W}p")
         self.assertEqual(len(paragraphs), 2)
         for paragraph in paragraphs:
@@ -2511,6 +2721,12 @@ class Packages(unittest.TestCase):
         mistyped = dataclasses.replace(doc, color_mapping=(("t3", "accent3"),))
         with self.assertRaisesRegex(ValueError, "no attribute t3"):
             rules.settings_xml(mistyped)
+
+    def test_refuses_a_grid_that_does_not_fit_the_cells(self):
+        # zip() would drop the cells the grid has no column for.
+        for widths, grid in (([1000] * 4, None), (None, [1000] * 2)):
+            with self.assertRaisesRegex(ValueError, "a column for every cell"):
+                rules.styled_table("Grid", rules.named_cells(2, 3), widths=widths, grid=grid)
 
 
 if __name__ == "__main__":
