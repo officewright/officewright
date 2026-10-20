@@ -162,12 +162,27 @@ fn rejected_on_purpose(text: &str, err: &Error) -> bool {
         .and_then(|rest| rest.split_once(" in <"))
         .map(|(name, _)| name);
     if duplicate.is_some_and(|shown| {
-        attribute_names(text, *line, *column)
-            .into_iter()
-            .any(|name| {
-                short(name) == shown
-                    && (name == "xmlns" || name.starts_with("xmlns:") || name.ends_with(":xmlns"))
-            })
+        let names = attribute_names(text, *line, *column);
+        let shown: Vec<&str> = names
+            .iter()
+            .copied()
+            .filter(|name| short(name) == shown)
+            .collect();
+        // Declarations roxmltree reads twice.
+        shown
+            .iter()
+            .any(|name| *name == "xmlns" || name.starts_with("xmlns:"))
+            // A p:xmlns, which roxmltree takes for a declaration of the default namespace,
+            // so it is only a duplicate when the tag has its name twice, or when roxmltree
+            // finds the attributes duplicates once they are no longer named xmlns.
+            || (shown.iter().any(|name| name.ends_with(":xmlns"))
+                && (shown
+                    .iter()
+                    .any(|name| names.iter().filter(|other| *other == name).count() > 1)
+                    || matches!(
+                        Document::parse_with_options(&text.replace(":xmlns", ":xmlnz"), options()),
+                        Err(roxmltree::Error::DuplicatedAttribute(..))
+                    )))
     }) {
         return true;
     }
@@ -355,7 +370,8 @@ fn is_prefixed_xmlns((namespace, local, _): &(String, String, String)) -> bool {
     !namespace.is_empty() && local == "xmlns"
 }
 
-/// Whether the text at roxmltree's position `at` starts with an attribute `p:xmlns`.
+/// Whether the text at roxmltree's position `at` starts with an attribute `p:xmlns`, not
+/// the declaration `xmlns:xmlns`.
 fn prefixed_xmlns_at(text: &str, at: roxmltree::TextPos) -> bool {
     let Some(rest) =
         offset(text, u64::from(at.row), u64::from(at.col)).and_then(|start| text.get(start..))
@@ -367,7 +383,7 @@ fn prefixed_xmlns_at(text: &str, at: roxmltree::TextPos) -> bool {
         .next()
         .unwrap_or_default();
     name.split_once(':')
-        .is_some_and(|(prefix, local)| !prefix.is_empty() && local == "xmlns")
+        .is_some_and(|(prefix, local)| !prefix.is_empty() && prefix != "xmlns" && local == "xmlns")
 }
 
 /// For each of officewright's `nodes`, whether it is the start of an element in the scope
