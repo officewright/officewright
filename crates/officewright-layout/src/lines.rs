@@ -1903,6 +1903,56 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_piece_shaped_nominally_again_at_a_break_is_reported() {
+        use crate::testing::{with_multiplied_a, with_table};
+        // Re-check of #404: a piece of a line cut from its run is shaped again, with fewer
+        // characters, so the bound on the glyphs of a character can refuse it although its
+        // run was kept. `kern` version 0, one horizontal subtable of format 0 with one
+        // pair: the space (1) then `A` (2), -100 units, so HarfRust marks the `A` after a
+        // space unsafe to break.
+        let kern: Vec<u8> = [0u16, 1, 0, 20, 1, 1, 6, 0, 0, 1, 2, 0xFF9C]
+            .iter()
+            .flat_map(|v| v.to_be_bytes())
+            .collect();
+        let font = with_table(with_multiplied_a(minimal(), 33), b"kern", &kern);
+        let book = book(vec![font]);
+        let mut document = Document::default();
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0))
+                .with_kern_min(Some(Pt(1.0))),
+        );
+        // The run, 12 characters in 44 glyphs, is kept. The line breaks after the space,
+        // and the `A` shaped again on its own is 33 glyphs for one character: nominal.
+        let paragraph = Paragraph::new(style).with_inlines([Inline::text("ÁÁÁÁÁÁÁÁÁÁ A", style)]);
+        let mut fonts = Fonts::new(&book);
+        let mut shaper = Shaper::new();
+        let location = Location::default();
+        let layout = lay_out(
+            &document,
+            &paragraph,
+            Pt(100.0),
+            &mut fonts,
+            &mut shaper,
+            &location,
+        );
+        let messages: Vec<String> = fonts
+            .into_report()
+            .iter()
+            .map(|entry| entry.message().to_owned())
+            .collect();
+        assert_eq!(widths(&layout), [60.0, 6.0]);
+        assert_eq!(
+            messages,
+            [
+                "the layout tables of \"Officewright Test\" cannot be used; its text is drawn \
+                 without kerning, ligatures or mark positioning"
+            ]
+        );
+    }
+
     fn text(text: &'static str) -> impl Fn(RunStyleId) -> Vec<Inline> {
         move |style| vec![Inline::text(text, style)]
     }
