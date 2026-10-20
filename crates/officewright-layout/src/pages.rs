@@ -1401,14 +1401,19 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             .get(flowed.section)
             .map_or_else(PageSetup::default, |section| *section.page());
         let width = self.body()?.width;
-        let prepared = Prepared::new(
-            self.document,
-            table,
-            labels,
-            width,
-            &flowed.location,
-            self.fonts,
-        );
+        // A table that fits its columns to their content measures it once, with the field
+        // values of the page it starts on.
+        let values = self.field_values(flowed.section);
+        let mut measured = tables::Measured::new();
+        let mut context = Context {
+            document: self.document,
+            fonts: &mut *self.fonts,
+            shaper: &mut *self.shaper,
+            leaders: &mut self.leaders,
+            values: Some(&values),
+            measured: &mut measured,
+        };
+        let prepared = Prepared::new(table, labels, width, &flowed.location, &mut context);
         let count = prepared.band_count();
         let mut first_page = None;
         for band in 0..count {
@@ -1426,12 +1431,14 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                     paragraph::space_after(self.document, above.props()).0
                 });
                 let values = self.field_values(flowed.section);
+                let mut measured = tables::Measured::new();
                 let mut context = Context {
                     document: self.document,
                     fonts: &mut *self.fonts,
                     shaper: &mut *self.shaper,
                     leaders: &mut self.leaders,
                     values: Some(&values),
+                    measured: &mut measured,
                 };
                 let drawn = prepared.band(band, &mut context);
                 let top = self.cursor + gap;
@@ -1965,21 +1972,16 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 Some(values),
             )),
             Content::Table(table, labels) => {
-                let prepared = Prepared::new(
-                    self.document,
-                    table,
-                    labels,
-                    width,
-                    &part.location,
-                    self.fonts,
-                );
+                let mut measured = tables::Measured::new();
                 let mut context = Context {
                     document: self.document,
                     fonts: &mut *self.fonts,
                     shaper: &mut *self.shaper,
                     leaders: &mut self.leaders,
                     values: Some(values),
+                    measured: &mut measured,
                 };
+                let prepared = Prepared::new(table, labels, width, &part.location, &mut context);
                 FramePart::Table(prepared.whole(&mut context))
             }
         }

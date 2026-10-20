@@ -106,6 +106,43 @@ pub(crate) fn lay_out_with(
     }
 }
 
+/// The width the paragraphs of a table cell are measured in for their widest line: wider
+/// than any table (a PDF places nothing farther than 32,767 pt from a page's corner), so
+/// that only their breaks end lines.
+const MEASURE_WIDTH: Pt = Pt(1.0e6);
+
+/// The narrowest width `paragraph` of `document` fits in with no word broken between its
+/// characters, and the width it takes with no line wrapped, its indents included, starting
+/// with `label` when it is a list item: what a table that fits its columns to their
+/// content measures each cell's paragraphs by (design 8.2). `location` is its place, for
+/// the report; its fields show the values `fields` gives, as when it is laid out.
+pub(crate) fn content_widths(
+    document: &Document,
+    (paragraph, label): (&Paragraph, Option<&Label>),
+    (fonts, shaper): (&mut Fonts<'_>, &mut Shaper),
+    location: &Location,
+    fields: Option<&FieldValues>,
+) -> (Pt, Pt) {
+    let itemized = itemize_with(
+        document,
+        (label, paragraph.inlines()),
+        fonts,
+        location,
+        fields,
+    );
+    let shaped = shape_runs(document, &itemized, fonts, shaper, location);
+    let input = Input {
+        document,
+        paragraph,
+        width: MEASURE_WIDTH,
+        location,
+    };
+    let mut breaker = Breaker::new(input, &itemized, &shaped, fonts, shaper);
+    let min = breaker.min_width();
+    let max = breaker.max_width();
+    (min, Pt(max.0.max(min.0)))
+}
+
 /// The space between a paragraph with `above` and the one with `below` that follows it,
 /// in `document`: the larger of the space below the first and the space above the
 /// second, as Word's renders of `cv-en-academic-open.docx` and `cv-en-classic-open.docx`
@@ -279,5 +316,59 @@ mod tests {
             |key| style(key, true).with_spacing(Spacing::default().with_before(Pt(12.0)));
         assert_eq!(between(&document, &style(1, true), &before_larger(2)), 12.0);
         assert_eq!(between(&document, &style(1, true), &before_larger(1)), 0.0);
+    }
+
+    #[test]
+    fn a_paragraph_is_measured_by_its_widest_word_and_its_widest_line() {
+        use crate::fonts::Fonts;
+        use crate::ir::{BreakClear, Indent, Inline, RunFonts, RunStyle};
+        use crate::testing::{book, minimal};
+        // The test font at 10 pt: `A` 6 pt, a space 2.5 pt.
+        let book = book(vec![minimal()]);
+        let mut document = Document::default();
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        let measure = |inlines: Vec<Inline>, indent: Indent| {
+            let paragraph = Paragraph::new(style)
+                .with_props(ParagraphProps::default().with_indent(indent))
+                .with_inlines(inlines);
+            let mut fonts = Fonts::new(&book);
+            let mut shaper = Shaper::new();
+            let (min, max) = content_widths(
+                &document,
+                (&paragraph, None),
+                (&mut fonts, &mut shaper),
+                &Location::default(),
+                None,
+            );
+            (min.0, max.0)
+        };
+        let text = |text: &str| vec![Inline::text(text, style)];
+        // The widest word, and the whole line; spaces at the end of either take no room.
+        assert_eq!(measure(text("A AAA AA  "), Indent::default()), (18.0, 41.0));
+        // A line break ends a line, and the widest line counts.
+        let broken = vec![
+            Inline::text("AAAA", style),
+            Inline::line_break(BreakClear::None, style),
+            Inline::text("A A", style),
+        ];
+        assert_eq!(measure(broken, Indent::default()), (24.0, 24.0));
+        // Indents count, the first line's for the first word and line.
+        let indent = Indent::default()
+            .with_start(Pt(10.0))
+            .with_end(Pt(5.0))
+            .with_first_line(Pt(20.0));
+        assert_eq!(measure(text("AA AAAA"), indent), (47.0, 73.5));
+        // A first line that hangs out far: its line alone is narrower than the second
+        // word on a line of its own, and the widest line is never narrower than that.
+        let hanging = Indent::default()
+            .with_start(Pt(30.0))
+            .with_first_line(Pt(-30.0));
+        assert_eq!(measure(text("A AAAA"), hanging), (54.0, 54.0));
+        // Nothing at all takes no room.
+        assert_eq!(measure(Vec::new(), Indent::default()), (0.0, 0.0));
     }
 }

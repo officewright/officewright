@@ -543,6 +543,70 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         }
     }
 
+    /// The narrowest column the paragraph fits in without a word broken between its
+    /// characters: its widest stretch between two places a line may end, the spaces that
+    /// end it left out, with the indents of the line it starts, to the end indent. Tabs
+    /// take no room here, nor does the hyphen of a soft hyphen. Word's minimum width of a
+    /// cell's content (design 8.2): its widest word, as Word's renders of
+    /// `E-table-autofit-*` show.
+    pub(crate) fn min_width(&self) -> Pt {
+        let end_indent = self.paragraph.props().indent().end().0;
+        let mut widest: f64 = 0.0;
+        let mut first = true;
+        let (mut stretch, mut spaces) = (0.0, 0.0);
+        let mut close = |stretch: &mut f64, spaces: &mut f64, first: &mut bool| {
+            if *stretch > 0.0 {
+                let (left, _) = self.edges(*first);
+                widest = widest.max(left.0 + *stretch + end_indent);
+            }
+            *stretch = 0.0;
+            *spaces = 0.0;
+            *first = false;
+        };
+        for unit in &self.units {
+            match &unit.kind {
+                UnitKind::Break { .. } => {
+                    close(&mut stretch, &mut spaces, &mut first);
+                    continue;
+                }
+                UnitKind::Tab { .. } => {}
+                UnitKind::Glyphs { text, .. } if is_space(self.itemized, text) => {
+                    spaces += unit.width.0;
+                }
+                _ => {
+                    stretch += spaces + unit.width.0;
+                    spaces = 0.0;
+                }
+            }
+            if self.breaks.at(unit.range.end).is_some() {
+                close(&mut stretch, &mut spaces, &mut first);
+            }
+        }
+        close(&mut stretch, &mut spaces, &mut first);
+        Pt(widest)
+    }
+
+    /// The width the paragraph takes with no line wrapped, in a column as wide as the
+    /// breaker's: its widest line, from the column's start edge to the line's end, and on
+    /// to the end indent. For a column wider than any line, so that only its breaks end
+    /// lines.
+    pub(crate) fn max_width(&mut self) -> Pt {
+        let end_indent = self.paragraph.props().indent().end().0;
+        let mut widest: f64 = 0.0;
+        let mut start = 0;
+        let mut first = true;
+        while start < self.units.len() {
+            let mut fit = self.fit(start, first);
+            fit.end = fit.end.max(start + 1);
+            let end = fit.end;
+            let line = self.place(start, fit, first);
+            widest = widest.max(line.start.0 + line.width.0 + end_indent);
+            start = end;
+            first = false;
+        }
+        Pt(widest)
+    }
+
     /// Breaks the paragraph into lines.
     pub(crate) fn lines(mut self) -> Vec<Line> {
         let mut lines = Vec::new();
