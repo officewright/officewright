@@ -568,8 +568,9 @@ enum Kind {
 const MAX_FRAME_WORK: usize = 256;
 
 /// The most glyphs and shapes the headers and footers of a document draw in all, on every
-/// page together, and the pieces of their lines that painting walks, where those are more;
-/// past it they are left out, and reported. A frame is drawn on every page, so without it a
+/// page together, with the characters glyphs stand for where those are more ([`drawn`]),
+/// and the pieces of their lines that painting walks, where those are more; past it they
+/// are left out, and reported. A frame is drawn on every page, so without it a
 /// short document of many pages could draw without bound, and one whose lines hold much
 /// that draws nothing, such as tabs or breaks, would cost the whole of it on every page
 /// (#384).
@@ -2067,9 +2068,9 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             ReportKind::Overflow,
             &Location::default(),
             format!(
-                "headers and footers are left out past {MAX_FRAME_DRAWN} glyphs, shapes and \
-                 pieces painted, or {MAX_FRAME_LAID} characters and pieces laid out, on all pages \
-                 together"
+                "headers and footers are left out past {MAX_FRAME_DRAWN} glyphs, characters, \
+                 shapes and pieces painted, or {MAX_FRAME_LAID} characters and pieces laid out, on \
+                 all pages together"
             ),
         );
     }
@@ -5568,7 +5569,7 @@ mod tests {
     #[test]
     fn a_header_that_paints_much_and_draws_little_is_bounded() {
         // Issue #384: a header without fields is laid out once, but painted on every page.
-        // With 5,000 to paint, each header below is painted on four or five pages, then left
+        // With 5,000 to paint, each header below is painted on a few of 100 pages, then left
         // out and reported, and painting walks no more once that is spent.
         let painted = |header: &dyn Fn(RunStyleId) -> Vec<Block>| {
             let document = document(|style| {
