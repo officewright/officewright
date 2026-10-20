@@ -274,11 +274,12 @@ impl Failure {
     }
 }
 
-/// Fails where subsetting the TrueType outlines of `face` to `glyphs` would make the
+/// Fails where subsetting the TrueType outlines of `face` to `kept`, in the order the
+/// subsetter numbers them (`.notdef` first, then each glyph once), would make the
 /// subsetter's glyph closure number all 65,536 glyph IDs, on which it panics
 /// ([`number_closure`]), or cost more than [`MAX_CLOSURE_COST`] ([`closure_cost`]); Ok for
 /// a face whose `glyf` table it does not take.
-pub(crate) fn check_subset_closure(face: &FontFace, glyphs: &[u16]) -> Result<()> {
+pub(crate) fn check_subset_closure(face: &FontFace, kept: &[u16]) -> Result<()> {
     let data = face.data();
     let Ok(font) = crate::font::font_ref(data, face.index()) else {
         return Ok(());
@@ -296,13 +297,8 @@ pub(crate) fn check_subset_closure(face: &FontFace, glyphs: &[u16]) -> Result<()
         glyf,
         long: long != 0,
     };
-    // The subsetter keeps `.notdef` first, then the glyphs in order, once each.
-    let mut kept: Vec<u16> = glyphs.iter().copied().filter(|&glyph| glyph != 0).collect();
-    kept.sort_unstable();
-    kept.dedup();
-    kept.insert(0, 0);
     let face = face.index();
-    if let Some(Numbering::AllIds) = number_closure(&glyf, data, &kept, None) {
+    if let Some(Numbering::AllIds) = number_closure(&glyf, data, kept, None) {
         return Err(Error::SubsetUnsupported {
             face,
             source: Cause::new(
@@ -311,7 +307,7 @@ pub(crate) fn check_subset_closure(face: &FontFace, glyphs: &[u16]) -> Result<()
             ),
         });
     }
-    match closure_cost(&glyf, data, &kept, None) {
+    match closure_cost(&glyf, data, kept, None) {
         Some(cost) if cost > MAX_CLOSURE_COST => Err(Error::TableOverLimit {
             face,
             table: "glyf",
@@ -1528,7 +1524,7 @@ mod tests {
         // here.
         let face = crate::FontFace::from_bytes(font(4094), 0).unwrap();
         face.check_subset_glyph(GlyphId::new(3)).unwrap();
-        check_subset_closure(&face, &[3]).unwrap();
+        check_subset_closure(&face, &[0, 3]).unwrap();
         // The check of glyph 3 follows its 4,094 components, and glyph 1's 4,094 (8,188),
         // and the count of its closure reads them again (16,376): within what the checks
         // may follow, or not.
