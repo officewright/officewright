@@ -1127,7 +1127,9 @@ class Cleaning(unittest.TestCase):
             "https://www.example.gov/a", "", "mailto:help@example.gov", "bookmark=id.1x")})
         self.assertEqual(public.problems(public.clean(kept, DOC).data), [])
         for target in ("D:\\drafts\\x.docx", "file:///\\\\srv\\x.docx", "../drafts/x.docx",
-                       "D:\\drafts\\https://www.example.gov/"):
+                       "D:\\drafts\\https://www.example.gov/",
+                       # A web scheme without "//" is no web address.
+                       "https:D:\\x.docx", "http:\\\\srv\\x.docx"):
             with self.subTest(target):
                 data = package(**{"docProps/app.xml": links("https://www.example.gov/", target)})
                 self.assertIn("docProps/app.xml: HLinks holds a local path", public.problems(data))
