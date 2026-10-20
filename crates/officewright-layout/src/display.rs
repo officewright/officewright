@@ -1213,29 +1213,37 @@ fn expanded_source(itemized: &Itemized, run: &TextRun, drawn: Range<usize>) -> S
     text
 }
 
-/// The spans of `placed` that are words, leaving out spaces, where the glyphs are.
+/// The spans of `placed` that are words, leaving out spaces, where the glyphs are. The
+/// glyphs of a cluster follow one another, and each run of them is looked at once, so the
+/// work is in proportion to the glyphs, however many one cluster has (#399).
 fn word_spans(itemized: &Itemized, placed: &[PlacedGlyph]) -> Vec<(f64, f64)> {
     let mut spans: Vec<(f64, f64)> = Vec::new();
     let mut open: Option<(f64, f64)> = None;
-    for (index, glyph) in placed.iter().enumerate() {
-        let next = placed
-            .iter()
-            .skip(index + 1)
-            .find(|next| next.cluster != glyph.cluster)
-            .map_or(glyph.cluster + 1, |next| next.cluster);
+    let mut clusters = placed.chunk_by(|a, b| a.cluster == b.cluster).peekable();
+    while let Some(glyphs) = clusters.next() {
+        let Some(cluster) = glyphs.first().map(|glyph| glyph.cluster) else {
+            continue;
+        };
+        // The cluster's text runs to where the next one starts.
+        let next = clusters
+            .peek()
+            .and_then(|next| next.first())
+            .map_or(cluster.saturating_add(1), |next| next.cluster);
         let space = itemized
             .text
-            .get(glyph.cluster..next.max(glyph.cluster))
+            .get(cluster..next.max(cluster))
             .is_some_and(|text| !text.is_empty() && text.chars().all(char::is_whitespace));
-        let (start, end) = (glyph.x.0, glyph.x.0 + glyph.advance.0);
-        match (space, open) {
-            (true, Some(span)) => {
-                spans.push(span);
-                open = None;
+        for glyph in glyphs {
+            let (start, end) = (glyph.x.0, glyph.x.0 + glyph.advance.0);
+            match (space, open) {
+                (true, Some(span)) => {
+                    spans.push(span);
+                    open = None;
+                }
+                (true, None) => {}
+                (false, Some((from, _))) => open = Some((from, end)),
+                (false, None) => open = Some((start, end)),
             }
-            (true, None) => {}
-            (false, Some((from, _))) => open = Some((from, end)),
-            (false, None) => open = Some((start, end)),
         }
     }
     spans.extend(open);
@@ -1455,6 +1463,42 @@ mod tests {
     use crate::report::LayoutReport;
     use crate::shape::Shaper;
     use crate::testing::{book, minimal, patched, renamed, with_period};
+
+    #[test]
+    fn words_are_found_by_cluster_however_many_glyphs_a_cluster_has() {
+        // Issue #399: the words a words-only underline covers are found cluster by cluster.
+        // "ab cd", where "a" is drawn with three glyphs and "c" with two, makes two words;
+        // one cluster of 100,000 glyphs is one word, found in time in proportion to its
+        // glyphs (the search for each glyph's next cluster took 12 s on it, in a debug build).
+        let glyph = |x: f64, cluster: usize| PlacedGlyph {
+            glyph: officewright_font::GlyphId::new(1),
+            x: Pt(x),
+            y: Pt(0.0),
+            advance: Pt(1.0),
+            cluster,
+        };
+        let itemized = Itemized {
+            text: "ab cd".to_owned(),
+            ..Itemized::default()
+        };
+        let placed = [
+            glyph(0.0, 0),
+            glyph(1.0, 0),
+            glyph(2.0, 0),
+            glyph(3.0, 1),
+            glyph(4.0, 2),
+            glyph(5.0, 3),
+            glyph(6.0, 3),
+            glyph(7.0, 4),
+        ];
+        assert_eq!(word_spans(&itemized, &placed), [(0.0, 4.0), (5.0, 8.0)]);
+        let one = Itemized {
+            text: "H".to_owned(),
+            ..Itemized::default()
+        };
+        let many: Vec<PlacedGlyph> = (0..100_000).map(|n| glyph(f64::from(n), 0)).collect();
+        assert_eq!(word_spans(&one, &many), [(0.0, 100_000.0)]);
+    }
 
     #[test]
     fn floating_objects_go_where_their_references_and_placements_say() {
