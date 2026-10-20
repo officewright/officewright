@@ -278,6 +278,9 @@ struct Laid<S> {
     /// How many times a header or footer was laid out in the last pass.
     #[cfg_attr(not(test), allow(dead_code))] // reason: read by the tests of that bound only
     frames_laid: usize,
+    /// The pieces of lines painting headers and footers walked in the last pass.
+    #[cfg_attr(not(test), allow(dead_code))] // reason: read by the tests of that bound only
+    frames_walked: usize,
 }
 
 /// Lays out the body of every section of `document` on pages, at most `max_pages` of
@@ -324,9 +327,9 @@ pub(crate) fn paginate_into<S: PageSink>(
     .map(|laid| laid.sink)
 }
 
-/// [`paginate_into`], with headers and footers drawing at most `max_frame_drawn` glyphs
-/// and shapes in all, and laying out at most `max_frame_laid` in a pass, by
-/// [`layout_cost`].
+/// [`paginate_into`], with headers and footers drawing at most `max_frame_drawn` in all,
+/// by [`drawn`] and what painting walks, and laying out at most `max_frame_laid` in a pass,
+/// by [`layout_cost`].
 fn paginate_with<S: PageSink>(
     document: &Document,
     fonts: &mut Fonts<'_>,
@@ -359,6 +362,7 @@ fn paginate_with<S: PageSink>(
             layouts_held: 0,
             most_layouts: 0,
             frames_laid: 0,
+            frames_walked: 0,
             cursor: 0.0,
             above: None,
             next_number: 1,
@@ -390,6 +394,7 @@ fn paginate_with<S: PageSink>(
                 lines,
                 most_held: (pager.most_held, pager.most_layouts),
                 frames_laid: pager.frames_laid,
+                frames_walked: pager.frames_walked,
             });
         }
         totals = found;
@@ -456,16 +461,16 @@ fn section_field_kinds(section: &Section) -> (bool, bool) {
 }
 
 /// What `item` costs of the budget of what headers and footers draw: one for the item,
-/// and one for each of its glyphs.
+/// and for each cluster of glyphs its glyphs, or the characters of the text it stands for
+/// where those are more, since painting copies that text into the PDF on every page (a
+/// face without a space deletes zero-width characters, so one glyph can stand for many).
 fn drawn(item: &DisplayItem) -> usize {
     match item {
-        DisplayItem::Glyphs(run) => {
-            1 + run
-                .clusters
-                .iter()
-                .map(|cluster| cluster.glyphs.len())
-                .sum::<usize>()
-        }
+        DisplayItem::Glyphs(run) => run
+            .clusters
+            .iter()
+            .map(|cluster| cluster.glyphs.len().max(cluster.text.chars().count()))
+            .fold(1, usize::saturating_add),
         _ => 1,
     }
 }
@@ -563,8 +568,12 @@ enum Kind {
 const MAX_FRAME_WORK: usize = 256;
 
 /// The most glyphs and shapes the headers and footers of a document draw in all, on every
-/// page together; past it they are left out, and reported. A frame is drawn on every page,
-/// so without it a short document of many pages could draw without bound.
+/// page together, with the characters glyphs stand for where those are more ([`drawn`]),
+/// and the pieces of their lines that painting walks, where those are more; past it they
+/// are left out, and reported. A frame is drawn on every page, so without it a
+/// short document of many pages could draw without bound, and one whose lines hold much
+/// that draws nothing, such as tabs or breaks, would cost the whole of it on every page
+/// (#384).
 const MAX_FRAME_DRAWN: usize = 1 << 20;
 
 /// The most the headers and footers of a document lay out in a pass, on every page
@@ -595,17 +604,28 @@ struct Frame<'d> {
     values: Option<FieldValues>,
 }
 
-/// A paragraph of a header or footer laid out, or a table of it drawn.
+/// A paragraph of a header or footer laid out, with the pieces painting it walks (one for
+/// each line that has none), or a table of it drawn.
 enum FramePart {
-    Paragraph(ParagraphLayout),
+    Paragraph(ParagraphLayout, usize),
     Table(Drawn),
 }
 
 impl FramePart {
+    /// A paragraph's part of `layout`.
+    fn paragraph(layout: ParagraphLayout) -> Self {
+        let walked = layout
+            .lines
+            .iter()
+            .map(|line| line.pieces.len().max(1))
+            .fold(0, usize::saturating_add);
+        Self::Paragraph(layout, walked)
+    }
+
     /// Its height.
     fn height(&self) -> f64 {
         match self {
-            Self::Paragraph(layout) => layout.height().0,
+            Self::Paragraph(layout, _) => layout.height().0,
             Self::Table(drawn) => drawn.height.0,
         }
     }
@@ -644,8 +664,8 @@ struct Checkpoint {
     next_number: u32,
     /// The leader glyphs the run could still draw.
     leaders: LeaderBudget,
-    /// The glyphs and shapes headers and footers could still draw, and what they could
-    /// still lay out.
+    /// What headers and footers could still draw by [`drawn`] and painting walk, and what
+    /// they could still lay out.
     frame_budget: usize,
     frame_laid_budget: usize,
     /// Whether nothing was on the page yet.
@@ -682,8 +702,10 @@ struct Pager<'d, 'f, 'b, S> {
     /// The paragraph layouts held, and the most at once.
     layouts_held: usize,
     most_layouts: usize,
-    /// How many times a header or footer was laid out.
+    /// How many times a header or footer was laid out, and the pieces of lines painting them
+    /// walked.
     frames_laid: usize,
+    frames_walked: usize,
     /// The top of what comes next on the current page: under the last line placed,
     /// without the space below it.
     cursor: f64,
@@ -694,8 +716,8 @@ struct Pager<'d, 'f, 'b, S> {
     next_number: u32,
     /// The leader glyphs the run may still draw.
     leaders: LeaderBudget,
-    /// The glyphs and shapes headers and footers may still draw, and what they may still
-    /// lay out by [`layout_cost`], what [`paginate_with`] is given at first.
+    /// What headers and footers may still draw by [`drawn`] and painting walk, and what they
+    /// may still lay out by [`layout_cost`], what [`paginate_with`] is given at first.
     frame_budget: usize,
     frame_laid_budget: usize,
     /// The page counts of the pass before, for `NUMPAGES` and `SECTIONPAGES`.
@@ -1934,7 +1956,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
     /// with the field values `values`.
     fn frame_part(&mut self, part: &Flowed<'d>, values: &FieldValues, width: Pt) -> FramePart {
         match &part.content {
-            Content::Paragraph(paragraph, label) => FramePart::Paragraph(paragraph::lay_out_with(
+            Content::Paragraph(paragraph, label) => FramePart::paragraph(paragraph::lay_out_with(
                 self.document,
                 (paragraph, label.as_ref()),
                 width,
@@ -1965,7 +1987,8 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
 
     /// Adds to `items` what `frame` draws, its top left corner at `origin`, as far as the
     /// budget of what frames draw goes: a part that would take more than is left is not
-    /// drawn, nor is anything of a frame after it.
+    /// drawn, nor is anything of a frame after it. A paragraph costs what it draws, or the
+    /// pieces painting walks where those are more.
     fn paint_frame(
         &mut self,
         frame: &Frame<'d>,
@@ -1977,6 +2000,10 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             let Some((part, _)) = frame.candidates.parts.get(*index) else {
                 continue;
             };
+            let walked = match laid.as_ref() {
+                FramePart::Paragraph(_, walked) => *walked,
+                FramePart::Table(_) => 0,
+            };
             if self.frame_budget > 0 {
                 let start = items.len();
                 let at = Point {
@@ -1985,7 +2012,8 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 };
                 let mut anchored = Vec::new();
                 match (laid.as_ref(), part.paragraph()) {
-                    (FramePart::Paragraph(layout), Some(paragraph)) => {
+                    (FramePart::Paragraph(layout, _), Some(paragraph)) => {
+                        self.frames_walked = self.frames_walked.saturating_add(walked);
                         tables::report_borders(paragraph, &part.location, self.fonts);
                         let mut painting = Painting {
                             document: self.document,
@@ -2011,22 +2039,23 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                         tables::shift(&mut table, at.x.0, at.y.0);
                         items.extend(table);
                     }
-                    (FramePart::Paragraph(_), None) => {}
+                    (FramePart::Paragraph(..), None) => {}
                 }
                 let cost: usize = items
                     .iter()
                     .skip(start)
                     .chain(anchored.iter().map(|float| &float.item))
                     .map(drawn)
-                    .sum();
+                    .sum::<usize>()
+                    .max(walked);
                 if cost <= self.frame_budget {
                     self.frame_budget -= cost;
                     floats.extend(anchored);
                     continue;
                 }
                 items.truncate(start);
-                self.frame_budget = 0;
             }
+            self.frame_budget = 0;
             self.report_frames_left_out();
             break;
         }
@@ -2039,8 +2068,9 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             ReportKind::Overflow,
             &Location::default(),
             format!(
-                "headers and footers are left out past {MAX_FRAME_DRAWN} glyphs and shapes \
-                 drawn, or {MAX_FRAME_LAID} characters and pieces laid out, on all pages together"
+                "headers and footers are left out past {MAX_FRAME_DRAWN} glyphs, characters, \
+                 shapes and pieces painted, or {MAX_FRAME_LAID} characters and pieces laid out, on \
+                 all pages together"
             ),
         );
     }
@@ -5534,6 +5564,117 @@ mod tests {
         // The same with what headers may lay out as the bound: three layouts of the
         // header's paragraph and field (2 each). The page made again gets that back too.
         assert_eq!(first((MAX_FRAME_DRAWN, 6)), ["1", "2", "3", "A"]);
+    }
+
+    #[test]
+    fn a_header_that_paints_much_and_draws_little_is_bounded() {
+        // Issue #384: a header without fields is laid out once, but painted on every page.
+        // With 5,000 to paint, each header below is painted on a few of 100 pages, then left
+        // out and reported, and painting walks no more once that is spent.
+        let painted = |header: &dyn Fn(RunStyleId) -> Vec<Block>| {
+            let document = document(|style| {
+                let blocks: Vec<Block> = (0..100)
+                    .map(|n| lines(style, 1, spacing(0.0, 0.0).with_page_break_before(n > 0)))
+                    .collect();
+                vec![
+                    Section::new(close_frames())
+                        .with_headers(HeaderFooterSet::default().with_primary(header(style)))
+                        .with_blocks(blocks),
+                ]
+            });
+            let (laid, report) = laid_within(&document, (5000, MAX_FRAME_LAID));
+            assert_eq!(laid.sink.len(), 100);
+            assert!(
+                report.iter().any(|m| m.contains("left out past")),
+                "{report:?}"
+            );
+            let headed = laid
+                .sink
+                .iter()
+                .filter(|page| texts(page).iter().any(|text| text == "H"))
+                .count();
+            (headed, laid.frames_walked)
+        };
+        let tiny = || {
+            ParagraphProps::default()
+                .with_spacing(Spacing::default().with_line(LineSpacing::Exact(Pt(0.1))))
+        };
+        // "H" and 1,000 tabs on one line draw a run and a glyph, while painting walks
+        // 1,001 pieces: four pages, and no more walked than the budget and one header.
+        let (headed, walked) = painted(&|style| {
+            let mut inlines = vec![Inline::text("H", style)];
+            inlines.extend((0..1000).map(|_| Inline::tab(style)));
+            vec![
+                Paragraph::new(style)
+                    .with_props(tiny())
+                    .with_inlines(inlines)
+                    .into(),
+            ]
+        });
+        assert_eq!(headed, 4);
+        assert!(walked <= 5000 + 1001, "{walked}");
+        // "H" and 1,000 line breaks: 1,001 lines of one piece each, the same.
+        let (headed, _) = painted(&|style| {
+            let mut inlines = vec![Inline::text("H", style)];
+            for _ in 0..1000 {
+                inlines.push(Inline::line_break(BreakClear::None, style));
+            }
+            vec![
+                Paragraph::new(style)
+                    .with_props(tiny())
+                    .with_inlines(inlines)
+                    .into(),
+            ]
+        });
+        assert_eq!(headed, 4);
+        // "H", then 200 empty paragraphs, a line each with no piece, each of which counts
+        // one: 202 a page, so "H" is painted on 25 pages (on all 100 if they counted none).
+        let (headed, _) = painted(&|style| {
+            let mut blocks = vec![text_paragraph(style, "H", tiny())];
+            blocks.extend((0..200).map(|_| Paragraph::new(style).with_props(tiny()).into()));
+            blocks
+        });
+        assert_eq!(headed, 25);
+    }
+
+    #[test]
+    fn a_glyph_costs_the_characters_it_stands_for() {
+        // Review of #392: painting copies the text a glyph stands for into the PDF on every
+        // page, so a cluster costs its characters where those are more than its glyphs. A
+        // run of one glyph standing for 1,000 characters costs 1,001.
+        let face = book(vec![minimal()])
+            .faces()
+            .next()
+            .map(|(id, _)| id)
+            .expect("the test font");
+        let run = |text: String, glyphs: usize| {
+            DisplayItem::Glyphs(crate::display::GlyphItem {
+                face,
+                size: Pt(10.0),
+                color: officewright_core::Color::BLACK,
+                h_scale: 1.0,
+                synthetic_bold: false,
+                synthetic_italic: false,
+                origin: Point {
+                    x: Pt(0.0),
+                    y: Pt(0.0),
+                },
+                clusters: vec![crate::display::Cluster {
+                    text,
+                    glyphs: vec![
+                        crate::display::DrawnGlyph {
+                            glyph: officewright_font::GlyphId::new(1),
+                            x: Pt(0.0),
+                            y: Pt(0.0),
+                        };
+                        glyphs
+                    ],
+                }],
+            })
+        };
+        assert_eq!(drawn(&run("\u{200b}".repeat(1000), 1)), 1001);
+        assert_eq!(drawn(&run("fi".to_owned(), 1)), 3);
+        assert_eq!(drawn(&run("A".to_owned(), 3)), 4);
     }
 
     #[test]
