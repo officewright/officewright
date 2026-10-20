@@ -353,7 +353,8 @@
     "tests/corpus/word-rules/E-underline-24.docx": "opened",
     "tests/corpus/word-rules/E-underline-trailspace-margin.docx": "opened",
     "tests/corpus/word-rules/E-underline-trailspace.docx": "opened",
-    "tests/corpus/word-rules/E-underline.docx": "opened"
+    "tests/corpus/word-rules/E-underline.docx": "opened",
+    "tests/corpus/word-rules/E-vml-pictures.docx": "opened"
   },
   "scores": {
     "tests/corpus/business/contract-ec-data-processing-clauses-bg.docx": {

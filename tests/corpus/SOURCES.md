@@ -133,7 +133,8 @@ writes.
 | word-rules/E-table-header-repeat.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Two header rows (w:tblHeader) repeated on every page a table of 60 body rows crosses |
 | word-rules/E-table-header-repeat-tall.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Whether Word repeats header rows (w:tblHeader) that alone take more than a page: two header rows of 35 lines each, then 10 body rows |
 | word-rules/E-table-row-split-nested.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Where Word splits a row whose cell holds a nested table of 30 rows, starting low on page 1 |
-| word-rules/E-table-row-exact-height.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | What Word shows of a row of exact height (w:trHeight 30 pt, w:hRule exact) that holds 5 lines |
+| word-rules/E-table-row-exact-height.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | What Word shows of rows of exact height (w:trHeight, w:hRule exact) whose content is taller than the row, and where the next row starts: lines, a row lower than one line, large text at each vertical alignment, and a picture |
+| word-rules/E-vml-pictures.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Where Word draws VML pictures (w:pict): inline in a line, taller than the line, floating with square wrap, behind the text and placed from the page; each picture is a grey PNG of its own size |
 
 ## Apache POI test documents (`poi/`)
 

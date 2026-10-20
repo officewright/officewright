@@ -22,8 +22,10 @@ from __future__ import annotations
 
 import argparse
 import re
+import struct
 import sys
 import zipfile
+import zlib
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -39,6 +41,10 @@ R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 WORD_URI = "http://schemas.microsoft.com/office/word"
 W14_NS = "http://schemas.microsoft.com/office/word/2010/wordml"
 MC_NS = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+# VML and its Office and Word extensions, for pictures in w:pict (ECMA-376 Part 4, §14).
+V_NS = "urn:schemas-microsoft-com:vml"
+O_NS = "urn:schemas-microsoft-com:office:office"
+W10_NS = "urn:schemas-microsoft-com:office:word"
 REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 CT_W = "application/vnd.openxmlformats-officedocument.wordprocessingml"
 
@@ -412,6 +418,9 @@ class Doc:
     headers: tuple[tuple[str, str], ...] = ()
     # The last section's w:sectPr, when it is not sect_pr()'s.
     last_section: str = ""
+    # Pictures under word/media/, as (file name, PNG bytes); the body names each by the
+    # relationship id media_id() gives it.
+    media: tuple[tuple[str, bytes], ...] = ()
 
 
 def line_fonts_body(fonts: list[str]) -> str:
@@ -1938,6 +1947,108 @@ def split_row_table(tr_pr: str, lines_in_cell: int) -> str:
     )
 
 
+def media_id(name: str) -> str:
+    """The relationship id of a picture part: rIdimage1 for image1.png."""
+    return "rId" + name.rsplit(".", 1)[0]
+
+
+def grey_png(width_px: int, height_px: int, level: int = 160) -> bytes:
+    """A PNG of one grey level, 8-bit greyscale, with no time or other chunk that would vary."""
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + kind + data
+                + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF))
+
+    rows = b"".join(b"\x00" + bytes([level]) * width_px for _ in range(height_px))
+    header = struct.pack(">IIBBBBB", width_px, height_px, 8, 0, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header)
+            + chunk(b"IDAT", zlib.compress(rows, 9)) + chunk(b"IEND", b""))
+
+
+def vml_picture(name: str, shape_id: str, style: str, wrap: str | None = None) -> str:
+    """A run holding a VML picture (w:pict, v:shape with v:imagedata) of the given CSS style;
+    wrap is the w10:wrap type of a floating one."""
+    wrap_xml = f'<w10:wrap type="{wrap}"/>' if wrap else ""
+    return (f'<w:r><w:pict><v:shape id="{shape_id}" style="{style}" stroked="f">'
+            f'<v:imagedata r:id="{media_id(name)}" o:title=""/>{wrap_xml}</v:shape>'
+            "</w:pict></w:r>")
+
+
+def vml_pictures() -> Doc:
+    # #368, the maintainer's addition: pictures in VML (w:pict), as documents saved by
+    # Word 2003 and earlier, and many converted ones, still hold them; inline and floating.
+    words = " ".join(["Text around the picture"] * 12)
+    inline = "width:72pt;height:36pt"
+    tall = "width:36pt;height:48pt"
+    floating = ("position:absolute;margin-left:{x}pt;margin-top:{y}pt;width:72pt;"
+                "height:72pt;z-index:{z};mso-position-horizontal-relative:{h};"
+                "mso-position-vertical-relative:{v}")
+    cases = [
+        ("an inline picture of 72 x 36 pt between words",
+         para(run("Before ") + vml_picture("image1.png", "p1", inline) + run(" after."))),
+        ("an inline picture 48 pt tall in a line of 11 pt text: the line grows",
+         para(run("Before ") + vml_picture("image2.png", "p2", tall) + run(" after."))),
+        ("a floating picture of 72 x 72 pt, 144 pt from the left margin and 6 pt below the "
+         "paragraph's top, text wrapped square around it",
+         para(vml_picture("image3.png", "p3", floating.format(
+             x=144, y=6, z=1, h="margin", v="paragraph"), "square") + run(words))),
+        ("a floating picture behind the text (z-index -1), no wrap",
+         para(vml_picture("image3.png", "p4", floating.format(
+             x=36, y=0, z=-251658240, h="margin", v="paragraph"), "none") + run(words))),
+        ("a floating picture placed from the page's top left corner, 400 pt across and 600 pt "
+         "down, text wrapped square",
+         para(vml_picture("image3.png", "p5", floating.format(
+             x=400, y=600, z=2, h="page", v="page"), "square") + run(words))),
+    ]
+    body = "".join(para(run(f"Case {n:02d}: {label}"), space=spacing(before=12)) + content
+                   for n, (label, content) in enumerate(cases, 1))
+    return Doc(
+        "E-vml-pictures",
+        "Where Word draws VML pictures (w:pict): inline in a line, taller than the line, "
+        "floating with square wrap, behind the text and placed from the page; each picture is "
+        "a grey PNG of its own size",
+        body + para(run("End of the document.")),
+        media=(("image1.png", grey_png(96, 48)), ("image2.png", grey_png(48, 64)),
+               ("image3.png", grey_png(96, 96))),
+    )
+
+
+def exact_height_overflow() -> Doc:
+    # #368, the maintainer's addition: rows of exact height (w:hRule exact) whose content is
+    # taller than the row: what Word shows of it, and where the next row starts.
+    def exact_table(height_twips: int, content: str, tc_pr: str = "") -> str:
+        return rule_table(
+            [row_cells(["r1c1", "r1c2", "r1c3"]),
+             ([cell(content, tc_pr), cell(para(run("r2c2"))), cell(para(run("r2c3")))],
+              f'<w:trHeight w:val="{height_twips}" w:hRule="exact"/>'),
+             row_cells(["r3c1", "r3c2", "r3c3"])],
+            EVEN_GRID, tbl_w=(TEXT_W, "dxa"), fixed=True, border_eighths=12,
+        )
+
+    big = para(run("Large text", size=28))
+    cases = [
+        ("row 2 is exactly 30 pt high and holds 5 lines",
+         exact_table(600, numbered_lines("Cut", 5))),
+        ("row 2 is exactly 8 pt high and holds one line of 11 pt text",
+         exact_table(160, para(run("Small row")))),
+        ("row 2 is exactly 20 pt high and holds 28 pt text", exact_table(400, big)),
+        ("the same, the cell centred vertically (w:vAlign center)",
+         exact_table(400, big, '<w:vAlign w:val="center"/>')),
+        ("the same, the cell at the bottom (w:vAlign bottom)",
+         exact_table(400, big, '<w:vAlign w:val="bottom"/>')),
+        ("row 2 is exactly 20 pt high and holds an inline picture 60 pt tall",
+         exact_table(400, para(vml_picture("image1.png", "p1", "width:30pt;height:60pt")))),
+    ]
+    body = "".join(table_case(n, label, xml) for n, (label, xml) in enumerate(cases, 1))
+    return Doc(
+        "E-table-row-exact-height",
+        "What Word shows of rows of exact height (w:trHeight, w:hRule exact) whose content is "
+        "taller than the row, and where the next row starts: lines, a row lower than one line, "
+        "large text at each vertical alignment, and a picture",
+        body + para(run("End of the document.")),
+        media=(("image1.png", grey_png(40, 80)),),
+    )
+
+
 def rows_across_pages() -> list[Doc]:
     header = "<w:tblHeader/>"
     header_rows = [(row_cells([f"Head {r}a", f"Head {r}b", f"Head {r}c"]), header)
@@ -1951,13 +2062,6 @@ def rows_across_pages() -> list[Doc]:
     nested = rule_table(
         [[cell(para(run("Outer cell")) + inner + para()), cell(para(run("Outer b")))]],
         [5000, TEXT_W - 5000], tbl_w=(TEXT_W, "dxa"), fixed=True, border_eighths=48,
-    )
-    exact = rule_table(
-        [row_cells(["r1c1", "r1c2", "r1c3"]),
-         ([cell(numbered_lines("Cut", 5)), cell(para(run("r2c2"))), cell(para(run("r2c3")))],
-          '<w:trHeight w:val="600" w:hRule="exact"/>'),
-         row_cells(["r3c1", "r3c2", "r3c3"])],
-        EVEN_GRID, tbl_w=(TEXT_W, "dxa"), fixed=True, border_eighths=48,
     )
     return [
         page_case("E-table-row-split",
@@ -1994,11 +2098,6 @@ def rows_across_pages() -> list[Doc]:
                   "the outer row's first cell holds a nested table of 30 rows; it starts low "
                   "on page 1",
                   nested, filler=30),
-        page_case("E-table-row-exact-height",
-                  "What Word shows of a row of exact height (w:trHeight 30 pt, w:hRule exact) "
-                  "that holds 5 lines",
-                  "row 2 is exactly 30 pt high and holds 5 lines",
-                  exact),
     ]
 
 
@@ -3698,6 +3797,8 @@ def documents() -> list[Doc]:
         table_autofit_14("doNotAutofitConstrainedTables"),
         table_autofit_14("growAutofit"),
         *rows_across_pages(),
+        exact_height_overflow(),
+        vml_pictures(),
     ]
 
 
@@ -3896,6 +3997,8 @@ def parts(doc: Doc) -> list[tuple[str, bytes]]:
         # Word 2010's run properties, which an application that does not know them ignores
         # (ECMA-376 Part 3, mc:Ignorable).
         namespaces += f' xmlns:w14="{W14_NS}" xmlns:mc="{MC_NS}" mc:Ignorable="w14"'
+    if "<v:" in doc.body:
+        namespaces += f' xmlns:v="{V_NS}" xmlns:o="{O_NS}" xmlns:w10="{W10_NS}"'
     document = (
         f"<w:document {namespaces}>"
         f"<w:body>{doc.body}{doc.last_section or sect_pr()}</w:body></w:document>"
@@ -3932,6 +4035,8 @@ def parts(doc: Doc) -> list[tuple[str, bytes]]:
         kind = "header" if name.startswith("header") else "footer"
         word_rels.append((kind, name, part_id(name)))
         overrides.append((f"/word/{name}", f"{CT_W}.{kind}+xml"))
+    for name, _ in doc.media:
+        word_rels.append(("image", f"media/{name}", media_id(name)))
     if doc.theme:
         word_rels.append(("theme", "theme/theme1.xml"))
         overrides.append(
@@ -3942,6 +4047,7 @@ def parts(doc: Doc) -> list[tuple[str, bytes]]:
         '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.'
         'relationships+xml"/>'
         '<Default Extension="xml" ContentType="application/xml"/>'
+        + ('<Default Extension="png" ContentType="image/png"/>' if doc.media else "")
         + "".join(f'<Override PartName="{p}" ContentType="{t}"/>' for p, t in overrides)
         + "</Types>"
     )
@@ -3968,7 +4074,9 @@ def parts(doc: Doc) -> list[tuple[str, bytes]]:
     for name, root in doc.headers:
         result.append((f"word/{name}", xml_part(root)))
     result.append(("word/_rels/document.xml.rels", xml_part(relationships(word_rels))))
-    for name, data in result:
+    xml_parts = list(result)
+    result += [(f"word/media/{name}", data) for name, data in doc.media]
+    for name, data in xml_parts:
         try:
             minidom.parseString(data)
         except Exception as error:  # any parse failure is a bug in this script

@@ -2917,9 +2917,46 @@ class Packages(unittest.TestCase):
         nested = only_table("E-table-row-split-nested").find(f"{W}tr/{W}tc/{W}tbl")
         self.assertEqual(len(nested.findall(f"{W}tr")), 30)
         self.assertEqual(lines_before_table("E-table-row-split-nested"), 30)
-        row = only_table("E-table-row-exact-height").findall(f"{W}tr")[1]
-        self.assertEqual(attrs(row, f"{W}trPr/{W}trHeight"), {"val": "600", "hRule": "exact"})
-        self.assertEqual(len(row.find(f"{W}tc").findall(f"{W}p")), 5)
+        # Rows of exact height whose content is taller than the row (the maintainer's
+        # addition to #368).
+        exact = labelled_tables("E-table-row-exact-height")
+        self.assertEqual(sorted(exact), [1, 2, 3, 4, 5, 6])
+        rows = {n: tbl.findall(f"{W}tr")[1] for n, tbl in exact.items()}
+        self.assertEqual({n: attrs(r, f"{W}trPr/{W}trHeight") for n, r in rows.items()},
+                         {1: {"val": "600", "hRule": "exact"}, 2: {"val": "160", "hRule": "exact"},
+                          **{n: {"val": "400", "hRule": "exact"} for n in (3, 4, 5, 6)}})
+        self.assertEqual(len(rows[1].find(f"{W}tc").findall(f"{W}p")), 5)
+        for n, align in ((3, None), (4, {"val": "center"}), (5, {"val": "bottom"})):
+            first = rows[n].find(f"{W}tc")
+            self.assertEqual(attrs(first, f"{W}tcPr/{W}vAlign"), align, n)
+            self.assertEqual(attrs(first, f"{W}p/{W}r/{W}rPr/{W}sz"), {"val": "56"}, n)
+        self.assertIsNotNone(rows[6].find(f"{W}tc/{W}p/{W}r/{W}pict"))
+
+    def test_vml_picture_cases_have_the_markup_their_labels_name(self):
+        v = "{urn:schemas-microsoft-com:vml}"
+        r_ns = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+        doc = next(doc for doc in self.docs if doc.name == "E-vml-pictures")
+        parts = dict(rules.parts(doc))
+        body = ElementTree.fromstring(parts["word/document.xml"]).find(f"{W}body")
+        shapes = list(body.iter(f"{v}shape"))
+        styles = [dict(item.split(":", 1) for item in shape.get("style").split(";"))
+                  for shape in shapes]
+        self.assertEqual([s.get("position") for s in styles],
+                         [None, None, "absolute", "absolute", "absolute"])
+        self.assertEqual([(s["width"], s["height"]) for s in styles],
+                         [("72pt", "36pt"), ("36pt", "48pt")] + [("72pt", "72pt")] * 3)
+        self.assertEqual([s.get("mso-position-vertical-relative") for s in styles[2:]],
+                         ["paragraph", "paragraph", "page"])
+        self.assertLess(int(styles[3]["z-index"]), 0)
+        # Each picture names a PNG part of the package, of the pixel size its label implies.
+        rels = ElementTree.fromstring(parts["word/_rels/document.xml.rels"])
+        targets = {rel.get("Id"): rel.get("Target") for rel in rels}
+        for shape in shapes:
+            target = targets[shape.find(f"{v}imagedata").get(f"{r_ns}id")]
+            data = parts[f"word/{target}"]
+            self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"), target)
+        self.assertEqual(struct.unpack(">II", parts["word/media/image1.png"][16:24]), (96, 48))
+        self.assertIn(b'Extension="png"', parts["[Content_Types].xml"])
 
     def test_refuses_a_setting_word_does_not_write_in_the_mode(self):
         doc = next(doc for doc in self.docs if doc.name == "E-opentype-on")
