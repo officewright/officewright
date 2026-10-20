@@ -14,6 +14,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+import zlib
 from pathlib import Path
 from xml.etree import ElementTree
 
@@ -290,6 +291,8 @@ class Packages(unittest.TestCase):
                 "E-tab-hanging-noindenttab-14": {"doNotUseIndentAsNumberingTabStop"},
                 "E-underline-trailspace": {"ulTrailSpace"},
                 "E-underline-trailspace-margin": {"ulTrailSpace"},
+                "E-table-autofit-constrained-14": {"doNotAutofitConstrainedTables"},
+                "E-table-autofit-grow-14": {"growAutofit"},
             }.get(doc.name, set())
             self.assertEqual(flags, expected, doc.name)
             # The documents about a setting name its value; every other document in mode 15
@@ -2824,6 +2827,255 @@ class Packages(unittest.TestCase):
         self.assertTrue(labels[1].startswith("Case 02: a paragraph in Normal, which has level 1 "
                                              "from the document defaults but no list"))
         self.assertIsNone(paragraphs[1].find(f"{W}pPr"))
+
+    def test_table_autofit_and_page_cases_have_the_markup_their_labels_name(self):
+        # #368: table autofit, rows across pages and repeated header rows.
+        def body(name):
+            doc = next(doc for doc in self.docs if doc.name == name)
+            return ElementTree.fromstring(
+                dict(rules.parts(doc))["word/document.xml"]).find(f"{W}body")
+
+        def attrs(element, path):
+            found = element.find(path)
+            return None if found is None else {
+                k.replace(W, ""): v for k, v in found.attrib.items()}
+
+        def labelled_tables(name):
+            """{case number: its table}, from the "Case NN:" paragraph before each table."""
+            found, number = {}, None
+            for child in body(name):
+                if child.tag == f"{W}p":
+                    words = "".join(t.text or "" for t in child.iter(f"{W}t"))
+                    match = re.match(r"Case (\d\d): ", words)
+                    number = int(match.group(1)) if match else number
+                elif child.tag == f"{W}tbl":
+                    found[number] = child
+            return found
+
+        def cell_widths(tbl):
+            return [attrs(tc, f"{W}tcPr/{W}tcW") for tc in tbl.find(f"{W}tr").findall(f"{W}tc")]
+
+        tables = labelled_tables("E-table-autofit-15")
+        self.assertEqual(sorted(tables), [1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12])
+        for n, tbl in tables.items():
+            fixed = attrs(tbl, f"{W}tblPr/{W}tblLayout")
+            self.assertEqual(fixed, {"type": "fixed"} if n == 10 else None, n)
+        self.assertEqual(attrs(tables[1], f"{W}tblPr/{W}tblW"), {"w": "0", "type": "auto"})
+        self.assertEqual(cell_widths(tables[1]), [None] * 3)
+        expected = {2: ("5000", "pct", "0", "auto"), 3: ("0", "auto", "1440", "dxa"),
+                    4: ("0", "auto", "4000", "dxa"), 5: ("0", "auto", "2000", "pct")}
+        for name in ("E-table-autofit-15", "E-table-autofit-14", "E-table-autofit-constrained-14",
+                     "E-table-autofit-grow-14"):
+            found = labelled_tables(name)
+            for n, (tbl_w, tbl_type, tc_w, tc_type) in expected.items():
+                with self.subTest(name, case=n):
+                    self.assertEqual(attrs(found[n], f"{W}tblPr/{W}tblW"),
+                                     {"w": tbl_w, "type": tbl_type})
+                    self.assertEqual(cell_widths(found[n]), [{"w": tc_w, "type": tc_type}] * 3)
+        # Cases 11 and 12, which the settings of mode 14 act on (ISO/IEC 29500 §17.15.3), in
+        # every autofit document: minimum widths wider than the text width, and a table
+        # beside a floating picture with square wrap.
+        v = "{urn:schemas-microsoft-com:vml}"
+        for name in ("E-table-autofit-15", "E-table-autofit-14", "E-table-autofit-constrained-14",
+                     "E-table-autofit-grow-14"):
+            found = labelled_tables(name)
+            with self.subTest(name):
+                self.assertEqual(sorted(found)[-2:], [11, 12])
+                words = ["".join(t.text for t in tc.iter(f"{W}t"))
+                         for tc in found[11].find(f"{W}tr").findall(f"{W}tc")]
+                self.assertEqual(words, [rules.AUTOFIT_WORD] * 3)
+                # Calibri's twin Carlito: three of the word are wider than the text width.
+                self.assertGreater(3 * carlito_width(rules.AUTOFIT_WORD), rules.TEXT_W / 20)
+                children = list(body(name))
+                labels = ["".join(t.text or "" for t in c.iter(f"{W}t")) for c in children]
+                at = next(i for i, text in enumerate(labels) if text.startswith("Case 12: "))
+                self.assertEqual(children[at + 2].tag, f"{W}tbl")
+                shape = children[at + 1].find(f".//{v}shape")
+                self.assertIn("position:absolute", shape.get("style"))
+                style = dict(i.split(":", 1) for i in shape.get("style").split(";"))
+                self.assertEqual((style["margin-left"], style["margin-top"], style["width"],
+                                  style["height"], style["mso-position-horizontal-relative"],
+                                  style["mso-position-vertical-relative"]),
+                                 ("0", "0", "216pt", "108pt", "margin", "paragraph"))
+                # The table must be narrowed to fit beside the picture: its content, the
+                # widest text of each column with 5.4 pt cell margins on each side, is wider
+                # than the room the picture leaves, and its longest words are not.
+                tbl = children[at + 2]
+                self.assertIsNone(tbl.find(f"{W}tblPr/{W}tblLayout"))
+                # No preferred width anywhere: the only kind of table Word narrows to fit
+                # beside a floating object (MS-OI29500 2.1.1777).
+                self.assertEqual(attrs(tbl, f"{W}tblPr/{W}tblW"), {"w": "0", "type": "auto"})
+                self.assertEqual({tuple(attrs(tc, f"{W}tcPr/{W}tcW").items())
+                                  for tc in tbl.iter(f"{W}tc")},
+                                 {(("w", "0"), ("type", "auto"))})
+                columns = zip(*[["".join(t.text for t in tc.iter(f"{W}t"))
+                                 for tc in tr.findall(f"{W}tc")] for tr in tbl.findall(f"{W}tr")])
+                content = sum(max(carlito_width(t) for t in col) + 10.8 for col in columns)
+                # The room beside the picture, less the 9 pt wrap distance Word writes on
+                # its VML shapes.
+                room = rules.TEXT_W / 20 - 216 - 9
+                self.assertGreater(content, room)
+                words = [w for tr in tbl.findall(f"{W}tr") for tc in tr.findall(f"{W}tc")
+                         for w in "".join(t.text for t in tc.iter(f"{W}t")).split()]
+                self.assertLess(3 * (max(carlito_width(w) for w in words) + 10.8), room)
+                self.assertEqual(shape.find("{urn:schemas-microsoft-com:office:word}wrap")
+                                 .get("type"), "square")
+        # Case 3 sums to less than the text width, case 4 to more, case 5 to 120 %.
+        self.assertLess(3 * 1440, rules.TEXT_W)
+        self.assertGreater(3 * 4000, rules.TEXT_W)
+        # Case 6: the long word alone in a narrow column; case 10: the same word, fixed.
+        for n, column in ((6, "720"), (10, "1440")):
+            first = tables[n].find(f"{W}tr/{W}tc")
+            self.assertEqual(attrs(first, f"{W}tcPr/{W}tcW")["w"], column)
+            self.assertEqual("".join(t.text for t in first.iter(f"{W}t")), rules.AUTOFIT_WORD)
+        self.assertNotIn(" ", rules.AUTOFIT_WORD)
+        # Case 7: a nested table in the first cell; case 8: a spanning cell of 300 pt.
+        self.assertIsNotNone(tables[7].find(f"{W}tr/{W}tc/{W}tbl"))
+        first_row = tables[8].find(f"{W}tr/{W}tc")
+        self.assertEqual(attrs(first_row, f"{W}tcPr/{W}gridSpan"), {"val": "2"})
+        self.assertEqual(attrs(first_row, f"{W}tcPr/{W}tcW"), {"w": "6000", "type": "dxa"})
+
+        def only_table(name):
+            (tbl,) = body(name).findall(f"{W}tbl")
+            borders = tbl.find(f"{W}tblPr/{W}tblBorders")
+            self.assertEqual({b.get(f"{W}sz") for b in borders}, {"48"}, name)
+            return tbl
+
+        def lines_before_table(name):
+            return sum(1 for child in body(name).iter() if child.tag == f"{W}t"
+                       and (child.text or "").startswith("Filler"))
+
+        for name, cant_split, lines, filler in (
+            ("E-table-row-split", False, 40, 30),
+            ("E-table-row-cant-split", True, 40, 30),
+            ("E-table-row-cant-split-tall", True, 80, 0),
+        ):
+            with self.subTest(name):
+                rows = only_table(name).findall(f"{W}tr")
+                self.assertEqual(rows[2].find(f"{W}trPr/{W}cantSplit") is not None, cant_split)
+                self.assertEqual(len(rows[2].find(f"{W}tc").findall(f"{W}p")), lines)
+                self.assertEqual(lines_before_table(name), filler)
+        rows = only_table("E-table-header-repeat").findall(f"{W}tr")
+        self.assertEqual(len(rows), 62)
+        self.assertEqual([r.find(f"{W}trPr/{W}tblHeader") is not None for r in rows],
+                         [True, True] + [False] * 60)
+        rows = only_table("E-table-header-repeat-tall").findall(f"{W}tr")
+        self.assertEqual([r.find(f"{W}trPr/{W}tblHeader") is not None for r in rows],
+                         [True, True] + [False] * 60)
+        self.assertEqual([len(r.find(f"{W}tc").findall(f"{W}p")) for r in rows[:2]], [35, 35])
+        nested = only_table("E-table-row-split-nested").find(f"{W}tr/{W}tc/{W}tbl")
+        self.assertEqual(len(nested.findall(f"{W}tr")), 30)
+        self.assertEqual(lines_before_table("E-table-row-split-nested"), 30)
+        # Rows of exact height whose content is taller than the row (the maintainer's
+        # addition to #368).
+        exact = labelled_tables("E-table-row-exact-height")
+        self.assertEqual(sorted(exact), [1, 2, 3, 4, 5, 6])
+        rows = {n: tbl.findall(f"{W}tr")[1] for n, tbl in exact.items()}
+        self.assertEqual({n: attrs(r, f"{W}trPr/{W}trHeight") for n, r in rows.items()},
+                         {1: {"val": "600", "hRule": "exact"}, 2: {"val": "160", "hRule": "exact"},
+                          **{n: {"val": "400", "hRule": "exact"} for n in (3, 4, 5, 6)}})
+        self.assertEqual(len(rows[1].find(f"{W}tc").findall(f"{W}p")), 5)
+        for n, align in ((3, None), (4, {"val": "center"}), (5, {"val": "bottom"})):
+            first = rows[n].find(f"{W}tc")
+            self.assertEqual(attrs(first, f"{W}tcPr/{W}vAlign"), align, n)
+            self.assertEqual(attrs(first, f"{W}p/{W}r/{W}rPr/{W}sz"), {"val": "56"}, n)
+        shape = rows[6].find(f"{W}tc/{W}p/{W}r/{W}pict/{v}shape")
+        self.assertIn("height:60pt", shape.get("style"))
+
+    def test_vml_picture_cases_have_the_markup_their_labels_name(self):
+        v = "{urn:schemas-microsoft-com:vml}"
+        r_ns = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+        doc = next(doc for doc in self.docs if doc.name == "E-vml-pictures")
+        parts = dict(rules.parts(doc))
+        body = ElementTree.fromstring(parts["word/document.xml"]).find(f"{W}body")
+        shapes = list(body.iter(f"{v}shape"))
+        styles = [dict(item.split(":", 1) for item in shape.get("style").split(";"))
+                  for shape in shapes]
+        self.assertEqual([s.get("position") for s in styles],
+                         [None, None, "absolute", "absolute", "absolute"])
+        self.assertEqual([(s["width"], s["height"]) for s in styles],
+                         [("72pt", "36pt"), ("36pt", "48pt")] + [("72pt", "72pt")] * 3)
+        self.assertEqual([s.get("mso-position-vertical-relative") for s in styles[2:]],
+                         ["paragraph", "paragraph", "page"])
+        self.assertEqual([s.get("mso-position-horizontal-relative") for s in styles[2:]],
+                         ["margin", "margin", "page"])
+        self.assertEqual([(s.get("margin-left"), s.get("margin-top")) for s in styles[2:]],
+                         [("144pt", "6pt"), ("36pt", "0pt"), ("300pt", "150pt")])
+        self.assertLess(int(styles[3]["z-index"]), 0)
+        # Case 05 starts a page of its own.
+        label = next(p for p in body.iter(f"{W}p")
+                     if "".join(t.text or "" for t in p.iter(f"{W}t")).startswith("Case 05: "))
+        self.assertIsNotNone(label.find(f"{W}pPr/{W}pageBreakBefore"))
+        w10 = "{urn:schemas-microsoft-com:office:word}"
+        self.assertEqual([None if shape.find(f"{w10}wrap") is None
+                          else shape.find(f"{w10}wrap").get("type") for shape in shapes],
+                         [None, None, "square", "none", "square"])
+        # Each picture names a PNG part of the package, of the pixel size its label implies.
+        rels = ElementTree.fromstring(parts["word/_rels/document.xml.rels"])
+        targets = {rel.get("Id"): rel.get("Target") for rel in rels}
+        for shape in shapes:
+            target = targets[shape.find(f"{v}imagedata").get(f"{r_ns}id")]
+            data = parts[f"word/{target}"]
+            self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"), target)
+        self.assertEqual(struct.unpack(">II", parts["word/media/image1.png"][16:24]), (96, 48))
+        self.assertIn(b'Extension="png"', parts["[Content_Types].xml"])
+
+    def test_pictures_are_typed_png_parts_that_resolve(self):
+        # Every VML picture of every document is Word's picture frame (the shape type defined
+        # once, before its first use), names a picture relationship to a part of the package,
+        # and that part is a well-formed PNG whose rows all use filter 0.
+        v = "{urn:schemas-microsoft-com:vml}"
+        r_ns = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+        seen = 0
+        for doc in self.docs:
+            parts = dict(rules.parts(doc))
+            document = ElementTree.fromstring(parts["word/document.xml"])
+            shapes = list(document.iter(f"{v}shape"))
+            if not shapes:
+                self.assertEqual(doc.media, (), doc.name)
+                continue
+            seen += 1
+            types = list(document.iter(f"{v}shapetype"))
+            self.assertEqual([t.get("id") for t in types], ["_x0000_t75"], doc.name)
+            self.assertIn(rules.PICTURE_FRAME.encode(), parts["word/document.xml"], doc.name)
+            order = list(document.iter())
+            self.assertLess(order.index(types[0]), order.index(shapes[0]), doc.name)
+            rels = {rel.get("Id"): rel for rel in ElementTree.fromstring(
+                parts["word/_rels/document.xml.rels"])}
+            for shape in shapes:
+                self.assertEqual(shape.get("type"), "#_x0000_t75", doc.name)
+                rel = rels[shape.find(f"{v}imagedata").get(f"{r_ns}id")]
+                self.assertEqual(rel.get("Type"), f"{rules.REL}/image", doc.name)
+                png = parts[f"word/{rel.get('Target')}"]
+                self.assertTrue(png.startswith(b"\x89PNG\r\n\x1a\n"), doc.name)
+                at, idat, width = 8, b"", None
+                while at < len(png):
+                    (size,) = struct.unpack(">I", png[at:at + 4])
+                    kind, data = png[at + 4:at + 8], png[at + 8:at + 8 + size]
+                    (crc,) = struct.unpack(">I", png[at + 8 + size:at + 12 + size])
+                    self.assertEqual(crc, zlib.crc32(kind + data) & 0xFFFFFFFF, doc.name)
+                    if kind == b"IHDR":
+                        width, height = struct.unpack(">II", data[:8])
+                    elif kind == b"IDAT":
+                        idat += data
+                    at += 12 + size
+                # One stored deflate block (RFC 1951, §3.2.4), not compressed data.
+                self.assertEqual(idat[:3], b"\x78\x01\x01", doc.name)
+                pixels = zlib.decompress(idat)
+                self.assertEqual(len(pixels), (width + 1) * height, doc.name)
+                self.assertEqual(set(pixels[::width + 1]), {0}, doc.name)
+        self.assertGreaterEqual(seen, 6)
+        # The shape type is Word's picture frame, as a copy Word re-saved writes it.
+        resaved = (SCRIPTS.parent / "tests/corpus/resaved/business"
+                   / "contract-ec-data-processing-clauses-bg.docx")
+        with zipfile.ZipFile(resaved) as archive:
+            written = archive.read("word/document.xml").decode()
+        frame = re.search(r'<v:shapetype id="_x0000_t75".*?</v:shapetype>', written, re.S)
+        self.assertEqual(rules.PICTURE_FRAME, frame.group(0))
+        # The pixels are stored, not compressed, so the bytes are the same on every zlib.
+        self.assertEqual(rules.stored_zlib(b"abc"), b"\x78\x01\x01\x03\x00\xfc\xffabc"
+                         + struct.pack(">I", zlib.adler32(b"abc")))
+        self.assertEqual(zlib.decompress(rules.stored_zlib(bytes(70000))), bytes(70000))
 
     def test_refuses_a_setting_word_does_not_write_in_the_mode(self):
         doc = next(doc for doc in self.docs if doc.name == "E-opentype-on")

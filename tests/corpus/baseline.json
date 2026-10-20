@@ -306,11 +306,22 @@
     "tests/corpus/word-rules/E-tab-margin-alone-14.docx": "opened",
     "tests/corpus/word-rules/E-tab-margin-alone.docx": "opened",
     "tests/corpus/word-rules/E-tab-margin.docx": "opened",
+    "tests/corpus/word-rules/E-table-autofit-14.docx": "opened",
+    "tests/corpus/word-rules/E-table-autofit-15.docx": "opened",
+    "tests/corpus/word-rules/E-table-autofit-constrained-14.docx": "opened",
+    "tests/corpus/word-rules/E-table-autofit-grow-14.docx": "opened",
     "tests/corpus/word-rules/E-table-cell-margins-nil.docx": "opened",
     "tests/corpus/word-rules/E-table-cell-margins.docx": "opened",
     "tests/corpus/word-rules/E-table-float-align.docx": "opened",
+    "tests/corpus/word-rules/E-table-header-repeat-tall.docx": "opened",
+    "tests/corpus/word-rules/E-table-header-repeat.docx": "opened",
     "tests/corpus/word-rules/E-table-indent-14.docx": "opened",
     "tests/corpus/word-rules/E-table-indent-15.docx": "opened",
+    "tests/corpus/word-rules/E-table-row-cant-split-tall.docx": "opened",
+    "tests/corpus/word-rules/E-table-row-cant-split.docx": "opened",
+    "tests/corpus/word-rules/E-table-row-exact-height.docx": "opened",
+    "tests/corpus/word-rules/E-table-row-split-nested.docx": "opened",
+    "tests/corpus/word-rules/E-table-row-split.docx": "opened",
     "tests/corpus/word-rules/E-table-style-bands-5.docx": "opened",
     "tests/corpus/word-rules/E-table-style-bands.docx": "opened",
     "tests/corpus/word-rules/E-table-style-defaults-size-14.docx": "opened",
@@ -342,7 +353,8 @@
     "tests/corpus/word-rules/E-underline-24.docx": "opened",
     "tests/corpus/word-rules/E-underline-trailspace-margin.docx": "opened",
     "tests/corpus/word-rules/E-underline-trailspace.docx": "opened",
-    "tests/corpus/word-rules/E-underline.docx": "opened"
+    "tests/corpus/word-rules/E-underline.docx": "opened",
+    "tests/corpus/word-rules/E-vml-pictures.docx": "opened"
   },
   "scores": {
     "tests/corpus/business/contract-ec-data-processing-clauses-bg.docx": {

@@ -22,8 +22,10 @@ from __future__ import annotations
 
 import argparse
 import re
+import struct
 import sys
 import zipfile
+import zlib
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -39,6 +41,10 @@ R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 WORD_URI = "http://schemas.microsoft.com/office/word"
 W14_NS = "http://schemas.microsoft.com/office/word/2010/wordml"
 MC_NS = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+# VML and its Office and Word extensions, for pictures in w:pict (ECMA-376 Part 4, §14).
+V_NS = "urn:schemas-microsoft-com:vml"
+O_NS = "urn:schemas-microsoft-com:office:office"
+W10_NS = "urn:schemas-microsoft-com:office:word"
 REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 CT_W = "application/vnd.openxmlformats-officedocument.wordprocessingml"
 
@@ -412,6 +418,9 @@ class Doc:
     headers: tuple[tuple[str, str], ...] = ()
     # The last section's w:sectPr, when it is not sect_pr()'s.
     last_section: str = ""
+    # Pictures under word/media/, as (file name, PNG bytes); the body names each by the
+    # relationship id media_id() gives it.
+    media: tuple[tuple[str, bytes], ...] = ()
 
 
 def line_fonts_body(fonts: list[str]) -> str:
@@ -1770,6 +1779,385 @@ def table_style_header_rows(setting: int) -> Doc:
         styles=header,
         compat_values=(("differentiateMultirowTableHeaders", setting),),
     )
+
+
+# Table autofit, rows across pages and repeated header rows (#368, layout plan PR 13).
+# Calibri 11 pt, A4, 72 pt margins. A cell is (paragraphs, w:tcPr content); a row is its
+# cells, or (cells, w:trPr content).
+def cell(content: str, tc_pr: str = "") -> tuple[str, str]:
+    return content, tc_pr
+
+
+def width(value: int | None, kind: str) -> str:
+    """A w:tcW: kind dxa (twips), pct (fiftieths of a percent) or auto (value 0)."""
+    return f'<w:tcW w:w="{value or 0}" w:type="{kind}"/>'
+
+
+def rule_table(
+    rows: list,
+    grid: list[int],
+    *,
+    tbl_w: tuple[int, str] | None = (0, "auto"),
+    fixed: bool = False,
+    border_eighths: int = 4,
+) -> str:
+    """A table with single borders border_eighths eighths of a point wide (4 for 0.5 pt),
+    the grid saved as given, w:tblW as (value, type) or none, and an autofit layout unless
+    fixed. rows holds each row's cells, or (cells, w:trPr content)."""
+    tbl_pr = ""
+    if tbl_w is not None:
+        tbl_pr += f'<w:tblW w:w="{tbl_w[0]}" w:type="{tbl_w[1]}"/>'
+    rule = f'w:val="single" w:sz="{border_eighths}" w:space="0" w:color="000000"'
+    sides = ("top", "left", "bottom", "right", "insideH", "insideV")
+    tbl_pr += "<w:tblBorders>" + "".join(f"<w:{s} {rule}/>" for s in sides) + "</w:tblBorders>"
+    if fixed:
+        tbl_pr += '<w:tblLayout w:type="fixed"/>'
+    tbl_pr += (
+        '<w:tblCellMar><w:left w:w="108" w:type="dxa"/><w:right w:w="108" w:type="dxa"/>'
+        "</w:tblCellMar>"
+    )
+    grid_xml = "".join(f'<w:gridCol w:w="{w}"/>' for w in grid)
+    trs = []
+    for row in rows:
+        cells, tr_pr = row if isinstance(row, tuple) else (row, "")
+        tcs = "".join(
+            f"<w:tc>{f'<w:tcPr>{tc_pr}</w:tcPr>' if tc_pr else ''}{content}</w:tc>"
+            for content, tc_pr in cells
+        )
+        trs.append(f"<w:tr>{f'<w:trPr>{tr_pr}</w:trPr>' if tr_pr else ''}{tcs}</w:tr>")
+    return (
+        f"<w:tbl><w:tblPr>{tbl_pr}</w:tblPr><w:tblGrid>{grid_xml}</w:tblGrid>"
+        f"{''.join(trs)}</w:tbl>"
+    )
+
+
+# Short texts of different lengths, so that autofit gives the columns different widths.
+AUTOFIT_TEXTS = ("Ab", "A longer cell of several words", "Middle text")
+# A word no line can break, for the unbreakable minimum of a column.
+AUTOFIT_WORD = "Interdepartmentalisationsprocedurecharacteristically"
+EVEN_GRID = [TEXT_W // 3] * 3
+
+
+def autofit_cells(tc_prs: list[str]) -> list:
+    """Two rows of AUTOFIT_TEXTS, each cell with the w:tcPr content of its column."""
+    return [
+        [cell(para(run(f"{t} r{r}")), tc) for t, tc in zip(AUTOFIT_TEXTS, tc_prs)]
+        for r in (1, 2)
+    ]
+
+
+def autofit_widths_cases() -> list[tuple[str, str]]:
+    """Cases 2 to 5 of #368, which compatibility mode 14 repeats."""
+    return [
+        ("w:tblW 100 % (pct 5000), cells auto",
+         rule_table(autofit_cells([width(0, "auto")] * 3), EVEN_GRID, tbl_w=(5000, "pct"))),
+        ("w:tblW auto, cells of 72 pt each (216 pt, less than the 451.3 pt text width)",
+         rule_table(autofit_cells([width(1440, "dxa")] * 3), [1440] * 3)),
+        ("w:tblW auto, cells of 200 pt each (600 pt, more than the text width)",
+         rule_table(autofit_cells([width(4000, "dxa")] * 3), [4000] * 3)),
+        ("w:tblW auto, cells of 40 % each (120 %)",
+         rule_table(autofit_cells([width(2000, "pct")] * 3), EVEN_GRID)),
+    ]
+
+
+def autofit_setting_cases(first: int) -> list[tuple[int, str, str]]:
+    """Cases the settings of mode 14 act on (ISO/IEC 29500 §17.15.3): w:growAutofit, minimum
+    content widths that sum to more than the text width; w:doNotAutofitConstrainedTables, an
+    autofit table beside a floating picture with square wrap."""
+    auto = width(0, "auto")
+    picture = vml_picture(
+        "image1.png", "f1",
+        "position:absolute;margin-left:0;margin-top:0;width:216pt;height:108pt;z-index:1;"
+        "mso-position-horizontal-relative:margin;mso-position-vertical-relative:paragraph",
+        "square", first=True)
+    return [
+        (first, f"three cells each holding {AUTOFIT_WORD}, together wider than the text width",
+         rule_table([[cell(para(run(AUTOFIT_WORD)), auto)] * 3], EVEN_GRID)),
+        (first + 1, "a floating picture of 216 x 108 pt at the left margin, square wrap, then "
+                    "an autofit table (cells auto) beside it, whose content is wider than the "
+                    "room beside the picture",
+         para(picture + run("The picture is anchored here.")) + rule_table(
+             autofit_cells([auto] * 3), EVEN_GRID)),
+    ]
+
+
+def autofit_doc(name: str, purpose: str, cases: list[tuple[str, str]], **options) -> Doc:
+    body = "".join(table_case(n, label, xml) for n, label, xml in cases)
+    return Doc(name, purpose, body + para(run("End of the document.")),
+               media=(("image1.png", grey_png(96, 48)),), **options)
+
+
+def table_autofit() -> Doc:
+    auto = width(0, "auto")
+    nested = rule_table(
+        [[cell(para(run(f"in{r}{c}"))) for c in "ab"] for r in (1, 2)], [1500, 1500]
+    )
+    cases = [
+        (1, "no widths: w:tblW auto, no w:tcW, an even grid saved by us that autofit replaces",
+         rule_table(autofit_cells([""] * 3), EVEN_GRID)),
+        *[(n, label, xml) for n, (label, xml) in zip(range(2, 6), autofit_widths_cases())],
+        (6, f"one cell holds the single word {AUTOFIT_WORD}, in a column of 36 pt",
+         rule_table([[cell(para(run(AUTOFIT_WORD)), width(720, "dxa")),
+                      cell(para(run("Short")), auto), cell(para(run("Other")), auto)]],
+                    [720, 4153, 4153])),
+        (7, "a nested table of two auto columns in the first cell",
+         rule_table([[cell(para(run("Outer a")) + nested + para(), auto),
+                      cell(para(run("Outer b")), auto)]], [4513, 4513])),
+        (8, "row 1: a cell spanning two columns (w:gridSpan 2) of 300 pt; row 2: cells of 50 "
+            "and 100 pt",
+         rule_table([[cell(para(run("Spanning cell")),
+                           width(6000, "dxa") + '<w:gridSpan w:val="2"/>')],
+                     [cell(para(run("Fifty")), width(1000, "dxa")),
+                      cell(para(run("Hundred")), width(2000, "dxa"))]], [1000, 2000])),
+        (10, f"for contrast, a fixed layout (w:tblLayout fixed) of 72 pt columns, the first "
+             f"holding {AUTOFIT_WORD}",
+         rule_table([[cell(para(run(AUTOFIT_WORD)), width(1440, "dxa")),
+                      cell(para(run("Short")), width(1440, "dxa")),
+                      cell(para(run("Other")), width(1440, "dxa"))]],
+                    [1440] * 3, tbl_w=(4320, "dxa"), fixed=True)),
+        *autofit_setting_cases(11),
+    ]
+    return autofit_doc(
+        "E-table-autofit-15",
+        "Column widths Word's autofit gives tables from their content and preferred widths "
+        "(no widths, 100 %, sums of cell widths below and above the text width, percents "
+        "over 100, an unbreakable word, a nested table, a spanning cell; a fixed layout for "
+        "contrast; minimum widths wider than the text, a table beside a floating picture), in "
+        "compatibility mode 15",
+        cases,
+    )
+
+
+def table_autofit_14(flag: str | None) -> Doc:
+    said = {None: "", "doNotAutofitConstrainedTables": "-constrained",
+            "growAutofit": "-grow"}[flag]
+    setting = f", with w:{flag}" if flag else ""
+    cases = [(n, label, xml) for n, (label, xml) in zip(range(2, 6), autofit_widths_cases())]
+    cases += autofit_setting_cases(11)
+    return autofit_doc(
+        f"E-table-autofit{said}-14",
+        "Column widths Word's autofit gives the tables of cases 2 to 5, 11 and 12 of "
+        f"E-table-autofit-15 in compatibility mode 14{setting}",
+        cases,
+        mode=14,
+        compat_flags=(flag,) if flag else (),
+    )
+
+
+def numbered_lines(prefix: str, count: int) -> str:
+    """count paragraphs reading <prefix> 01, <prefix> 02, ..., one line each."""
+    return "".join(para(run(f"{prefix} {i:02d}")) for i in range(1, count + 1))
+
+
+def page_case(name: str, purpose: str, label: str, content: str, filler: int = 0) -> Doc:
+    """A document of one case of rows across pages: its label, filler lines so that it
+    starts low on page 1, and the content, with 6 pt borders that show where Word draws."""
+    body = (para(run(f"Case: {label}")) + numbered_lines("Filler", filler) + content
+            + para(run("End of the document.")))
+    return Doc(name, purpose, body)
+
+
+def row_cells(texts: list[str]) -> list:
+    return [cell(para(run(t))) for t in texts]
+
+
+def split_row_table(tr_pr: str, lines_in_cell: int) -> str:
+    """Three columns; rows 1 and 2 short, row 3 with a cell of lines_in_cell lines."""
+    third = [cell(numbered_lines("Long", lines_in_cell)), cell(para(run("r3c2"))),
+             cell(para(run("r3c3")))]
+    return rule_table(
+        [row_cells(["r1c1", "r1c2", "r1c3"]), row_cells(["r2c1", "r2c2", "r2c3"]),
+         (third, tr_pr), row_cells(["r4c1", "r4c2", "r4c3"])],
+        EVEN_GRID, tbl_w=(TEXT_W, "dxa"), fixed=True, border_eighths=48,
+    )
+
+
+def media_id(name: str) -> str:
+    """The relationship id of a picture part: rIdimage1 for image1.png."""
+    return "rId" + name.rsplit(".", 1)[0]
+
+
+def grey_png(width_px: int, height_px: int, level: int = 160) -> bytes:
+    """A PNG of one grey level, 8-bit greyscale, with no time or other chunk that would vary,
+    its pixels in stored deflate blocks (stored_zlib)."""
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + kind + data
+                + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF))
+
+    rows = b"".join(b"\x00" + bytes([level]) * width_px for _ in range(height_px))
+    header = struct.pack(">IIBBBBB", width_px, height_px, 8, 0, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header)
+            + chunk(b"IDAT", stored_zlib(rows)) + chunk(b"IEND", b""))
+
+
+def stored_zlib(data: bytes) -> bytes:
+    """data as a zlib stream of stored (uncompressed) deflate blocks (RFC 1950 and 1951,
+    §3.2.4): unlike zlib.compress, the same bytes whatever zlib the platform has."""
+    blocks = [data[i:i + 65535] for i in range(0, len(data), 65535)] or [b""]
+    out = b"\x78\x01"
+    for n, block in enumerate(blocks):
+        last = 1 if n == len(blocks) - 1 else 0
+        out += bytes([last]) + struct.pack("<HH", len(block), len(block) ^ 0xFFFF) + block
+    return out + struct.pack(">I", zlib.adler32(data) & 0xFFFFFFFF)
+
+
+# The picture frame shape type (o:spt 75), as Word writes it into the first w:pict of a
+# document that has VML pictures (the re-saved copies under tests/corpus/resaved/ show it).
+PICTURE_FRAME = (
+    '<v:shapetype id="_x0000_t75" coordsize="21600,21600" o:spt="75" o:preferrelative="t" '
+    'path="m@4@5l@4@11@9@11@9@5xe" filled="f" stroked="f"><v:stroke joinstyle="miter"/>'
+    '<v:formulas><v:f eqn="if lineDrawn pixelLineWidth 0"/><v:f eqn="sum @0 1 0"/>'
+    '<v:f eqn="sum 0 0 @1"/><v:f eqn="prod @2 1 2"/><v:f eqn="prod @3 21600 pixelWidth"/>'
+    '<v:f eqn="prod @3 21600 pixelHeight"/><v:f eqn="sum @0 0 1"/><v:f eqn="prod @6 1 2"/>'
+    '<v:f eqn="prod @7 21600 pixelWidth"/><v:f eqn="sum @8 21600 0"/>'
+    '<v:f eqn="prod @7 21600 pixelHeight"/><v:f eqn="sum @10 21600 0"/></v:formulas>'
+    '<v:path o:extrusionok="f" gradientshapeok="t" o:connecttype="rect"/>'
+    '<o:lock v:ext="edit" aspectratio="t"/></v:shapetype>'
+)
+
+
+def vml_picture(name: str, shape_id: str, style: str, wrap: str | None = None,
+                first: bool = False) -> str:
+    """A run holding a VML picture (w:pict, v:shape of the picture frame type with
+    v:imagedata) of the given CSS style; wrap is the w10:wrap type of a floating one. The
+    first picture of a document defines the shape type (first)."""
+    wrap_xml = f'<w10:wrap type="{wrap}"/>' if wrap else ""
+    shape_type = PICTURE_FRAME if first else ""
+    return (f'<w:r><w:pict>{shape_type}<v:shape id="{shape_id}" type="#_x0000_t75" '
+            f'style="{style}"><v:imagedata r:id="{media_id(name)}" o:title=""/>{wrap_xml}'
+            "</v:shape></w:pict></w:r>")
+
+
+def vml_pictures() -> Doc:
+    # #368, the maintainer's addition: pictures in VML (w:pict), as documents saved by
+    # Word 2003 and earlier, and many converted ones, still hold them; inline and floating.
+    words = " ".join(["Text around the picture"] * 30)
+    inline = "width:72pt;height:36pt"
+    tall = "width:36pt;height:48pt"
+    floating = ("position:absolute;margin-left:{x}pt;margin-top:{y}pt;width:72pt;"
+                "height:72pt;z-index:{z};mso-position-horizontal-relative:{h};"
+                "mso-position-vertical-relative:{v}")
+    cases = [
+        ("an inline picture of 72 x 36 pt between words",
+         para(run("Before ") + vml_picture("image1.png", "p1", inline, first=True)
+              + run(" after."))),
+        ("an inline picture 48 pt tall in a line of 11 pt text: the line grows",
+         para(run("Before ") + vml_picture("image2.png", "p2", tall) + run(" after."))),
+        ("a floating picture of 72 x 72 pt, 144 pt from the left margin and 6 pt below the "
+         "paragraph's top, text wrapped square around it",
+         para(vml_picture("image3.png", "p3", floating.format(
+             x=144, y=6, z=1, h="margin", v="paragraph"), "square") + run(words))),
+        ("a floating picture behind the text (a negative z-index), no wrap",
+         para(vml_picture("image3.png", "p4", floating.format(
+             x=36, y=0, z=-251658240, h="margin", v="paragraph"), "none") + run(words))),
+        ("on a page of its own, a floating picture placed from the page's top left corner, "
+         "300 pt across and 150 pt down, text wrapped square",
+         para(vml_picture("image3.png", "p5", floating.format(
+             x=300, y=150, z=2, h="page", v="page"), "square") + run(words + " " + words))),
+    ]
+    body = "".join(para(run(f"Case {n:02d}: {label}"), space=spacing(before=12),
+                        page_break_before=n == 5) + content
+                   for n, (label, content) in enumerate(cases, 1))
+    return Doc(
+        "E-vml-pictures",
+        "Where Word draws VML pictures (w:pict, the picture frame shape type): inline in a "
+        "line, taller than the line, floating with square wrap, behind the text and placed "
+        "from the page; each picture is a grey PNG of its own size",
+        body + para(run("End of the document.")),
+        media=(("image1.png", grey_png(96, 48)), ("image2.png", grey_png(48, 64)),
+               ("image3.png", grey_png(96, 96))),
+    )
+
+
+def exact_height_overflow() -> Doc:
+    # #368, the maintainer's addition: rows of exact height (w:hRule exact) whose content is
+    # taller than the row: what Word shows of it, and where the next row starts.
+    def exact_table(height_twips: int, content: str, tc_pr: str = "") -> str:
+        return rule_table(
+            [row_cells(["r1c1", "r1c2", "r1c3"]),
+             ([cell(content, tc_pr), cell(para(run("r2c2"))), cell(para(run("r2c3")))],
+              f'<w:trHeight w:val="{height_twips}" w:hRule="exact"/>'),
+             row_cells(["r3c1", "r3c2", "r3c3"])],
+            EVEN_GRID, tbl_w=(TEXT_W, "dxa"), fixed=True, border_eighths=12,
+        )
+
+    big = para(run("Large text", size=28))
+    cases = [
+        ("row 2 is exactly 30 pt high and holds 5 lines",
+         exact_table(600, numbered_lines("Cut", 5))),
+        ("row 2 is exactly 8 pt high and holds one line of 11 pt text",
+         exact_table(160, para(run("Small row")))),
+        ("row 2 is exactly 20 pt high and holds 28 pt text", exact_table(400, big)),
+        ("the same, the cell centred vertically (w:vAlign center)",
+         exact_table(400, big, '<w:vAlign w:val="center"/>')),
+        ("the same, the cell at the bottom (w:vAlign bottom)",
+         exact_table(400, big, '<w:vAlign w:val="bottom"/>')),
+        ("row 2 is exactly 20 pt high and holds an inline picture 60 pt tall",
+         exact_table(400, para(vml_picture("image1.png", "p1", "width:30pt;height:60pt",
+                                           first=True)))),
+    ]
+    body = "".join(table_case(n, label, xml) for n, (label, xml) in enumerate(cases, 1))
+    return Doc(
+        "E-table-row-exact-height",
+        "What Word shows of rows of exact height (w:trHeight, w:hRule exact) whose content is "
+        "taller than the row, and where the next row starts: lines, a row lower than one line, "
+        "large text at each vertical alignment, and a picture",
+        body + para(run("End of the document.")),
+        media=(("image1.png", grey_png(40, 80)),),
+    )
+
+
+def rows_across_pages() -> list[Doc]:
+    header = "<w:tblHeader/>"
+    header_rows = [(row_cells([f"Head {r}a", f"Head {r}b", f"Head {r}c"]), header)
+                   for r in (1, 2)]
+    body_rows = [row_cells([f"Body {r:02d}a", f"Body {r:02d}b", f"Body {r:02d}c"])
+                 for r in range(1, 61)]
+    tall_header = [([cell(numbered_lines(f"Head {r}", 35)), cell(para(run(f"Head {r}b"))),
+                     cell(para(run(f"Head {r}c")))], header) for r in (1, 2)]
+    inner = rule_table([row_cells([f"Inner {r:02d}a", f"Inner {r:02d}b"]) for r in range(1, 31)],
+                       [2000, 2000], tbl_w=(4000, "dxa"), fixed=True, border_eighths=48)
+    nested = rule_table(
+        [[cell(para(run("Outer cell")) + inner + para()), cell(para(run("Outer b")))]],
+        [5000, TEXT_W - 5000], tbl_w=(TEXT_W, "dxa"), fixed=True, border_eighths=48,
+    )
+    return [
+        page_case("E-table-row-split",
+                  "Where Word splits a table row across pages, and which 6 pt borders it draws "
+                  "at the bottom of page 1 and the top of page 2: the third row holds a cell "
+                  "of 40 lines and starts low on page 1",
+                  "row 3 holds a cell of 40 lines and starts low on page 1",
+                  split_row_table("", 40), filler=30),
+        page_case("E-table-row-cant-split",
+                  "Where Word puts a table row that may not split (w:cantSplit), starting low "
+                  "on page 1 with a cell of 40 lines",
+                  "row 3 has w:cantSplit, holds a cell of 40 lines and starts low on page 1",
+                  split_row_table("<w:cantSplit/>", 40), filler=30),
+        page_case("E-table-row-cant-split-tall",
+                  "What Word does with a table row that may not split (w:cantSplit) and is "
+                  "taller than a page: a cell of 80 lines",
+                  "row 3 has w:cantSplit and holds a cell of 80 lines, more than a page",
+                  split_row_table("<w:cantSplit/>", 80)),
+        page_case("E-table-header-repeat",
+                  "Two header rows (w:tblHeader) repeated on every page a table of 60 body "
+                  "rows crosses",
+                  "rows 1 and 2 are header rows; 60 body rows follow",
+                  rule_table(header_rows + body_rows, EVEN_GRID, tbl_w=(TEXT_W, "dxa"),
+                             fixed=True, border_eighths=48)),
+        page_case("E-table-header-repeat-tall",
+                  "Whether Word repeats header rows (w:tblHeader) that alone take more than a "
+                  "page: two header rows of 35 lines each, then 60 body rows, which cross at "
+                  "least one more page",
+                  "rows 1 and 2 are header rows of 35 lines each; 60 body rows follow",
+                  rule_table(tall_header + body_rows, EVEN_GRID, tbl_w=(TEXT_W, "dxa"),
+                             fixed=True, border_eighths=48)),
+        page_case("E-table-row-split-nested",
+                  "Where Word splits a row whose cell holds a nested table of 30 rows, "
+                  "starting low on page 1",
+                  "the outer row's first cell holds a nested table of 30 rows; it starts low "
+                  "on page 1",
+                  nested, filler=30),
+    ]
 
 
 # Lines and drawing (#186, layout-engine.md E6 and E27 to E33). Calibri 11 pt unless a case
@@ -3463,6 +3851,13 @@ def documents() -> list[Doc]:
         bold_italic_missing(),
         list_level_linked_no_level(),
         list_level_linked_defaults(),
+        table_autofit(),
+        table_autofit_14(None),
+        table_autofit_14("doNotAutofitConstrainedTables"),
+        table_autofit_14("growAutofit"),
+        *rows_across_pages(),
+        exact_height_overflow(),
+        vml_pictures(),
     ]
 
 
@@ -3661,6 +4056,8 @@ def parts(doc: Doc) -> list[tuple[str, bytes]]:
         # Word 2010's run properties, which an application that does not know them ignores
         # (ECMA-376 Part 3, mc:Ignorable).
         namespaces += f' xmlns:w14="{W14_NS}" xmlns:mc="{MC_NS}" mc:Ignorable="w14"'
+    if "<v:" in doc.body:
+        namespaces += f' xmlns:v="{V_NS}" xmlns:o="{O_NS}" xmlns:w10="{W10_NS}"'
     document = (
         f"<w:document {namespaces}>"
         f"<w:body>{doc.body}{doc.last_section or sect_pr()}</w:body></w:document>"
@@ -3697,6 +4094,8 @@ def parts(doc: Doc) -> list[tuple[str, bytes]]:
         kind = "header" if name.startswith("header") else "footer"
         word_rels.append((kind, name, part_id(name)))
         overrides.append((f"/word/{name}", f"{CT_W}.{kind}+xml"))
+    for name, _ in doc.media:
+        word_rels.append(("image", f"media/{name}", media_id(name)))
     if doc.theme:
         word_rels.append(("theme", "theme/theme1.xml"))
         overrides.append(
@@ -3707,6 +4106,7 @@ def parts(doc: Doc) -> list[tuple[str, bytes]]:
         '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.'
         'relationships+xml"/>'
         '<Default Extension="xml" ContentType="application/xml"/>'
+        + ('<Default Extension="png" ContentType="image/png"/>' if doc.media else "")
         + "".join(f'<Override PartName="{p}" ContentType="{t}"/>' for p, t in overrides)
         + "</Types>"
     )
@@ -3733,7 +4133,9 @@ def parts(doc: Doc) -> list[tuple[str, bytes]]:
     for name, root in doc.headers:
         result.append((f"word/{name}", xml_part(root)))
     result.append(("word/_rels/document.xml.rels", xml_part(relationships(word_rels))))
-    for name, data in result:
+    xml_parts = list(result)
+    result += [(f"word/media/{name}", data) for name, data in doc.media]
+    for name, data in xml_parts:
         try:
             minidom.parseString(data)
         except Exception as error:  # any parse failure is a bug in this script
