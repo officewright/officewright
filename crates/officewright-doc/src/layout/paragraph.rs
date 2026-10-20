@@ -359,4 +359,89 @@ mod tests {
         let compared = super::super::WORK.get().props_compared;
         assert!(compared <= 1000 * SHARED_PER_FINGERPRINT, "{compared}");
     }
+
+    #[test]
+    fn fingerprints_every_field_that_equality_compares() {
+        // From the re-check of #390: properties that differ in any one field have
+        // fingerprints of their own, so that four early paragraphs that differ in it do
+        // not fill a fingerprint's places and stop the sharing of the rest.
+        use officewright_core::{Color, Pt};
+        let base = ir::ParagraphProps::default();
+        let spacing = ir::Spacing::default();
+        let border = ir::Border::default().with_width(Pt(0.5));
+        let red = ir::ColorValue::Rgb(Color::rgb(255, 0, 0));
+        let borders =
+            |set: fn(ir::ParagraphBorders, Option<ir::Border>) -> ir::ParagraphBorders,
+             border: ir::Border| {
+                base.clone()
+                    .with_borders(set(ir::ParagraphBorders::default(), Some(border)))
+            };
+        let tab = ir::TabStop::default().with_position(Pt(36.0));
+        let shading = ir::Shading::default();
+        let variants = [
+            base.clone()
+                .with_indent(ir::Indent::default().with_start(Pt(1.0))),
+            base.clone()
+                .with_indent(ir::Indent::default().with_end(Pt(1.0))),
+            base.clone()
+                .with_indent(ir::Indent::default().with_first_line(Pt(1.0))),
+            base.clone().with_spacing(spacing.with_before(Pt(1.0))),
+            base.clone().with_spacing(spacing.with_after(Pt(1.0))),
+            base.clone().with_spacing(spacing.with_before_auto(true)),
+            base.clone().with_spacing(spacing.with_after_auto(true)),
+            base.clone()
+                .with_spacing(spacing.with_line(ir::LineSpacing::Multiple(1.5))),
+            base.clone()
+                .with_spacing(spacing.with_line(ir::LineSpacing::Exact(Pt(12.0)))),
+            base.clone()
+                .with_spacing(spacing.with_line(ir::LineSpacing::AtLeast(Pt(12.0)))),
+            base.clone()
+                .with_spacing(spacing.with_line(ir::LineSpacing::AtLeast(Pt(13.0)))),
+            base.clone()
+                .with_spacing(spacing.with_line(ir::LineSpacing::Exact(Pt(13.0)))),
+            base.clone().with_alignment(ir::Alignment::Center),
+            base.clone().with_contextual_spacing(true),
+            base.clone().with_keep_next(true),
+            base.clone().with_keep_lines(true),
+            base.clone().with_widow_control(false),
+            base.clone().with_page_break_before(true),
+            base.clone().with_word_wrap(false),
+            base.clone().with_suppress_auto_hyphens(true),
+            base.clone().with_outline_level(Some(0)),
+            base.clone().with_style_key(ir::StyleKey::new(1)),
+            base.clone().with_tabs(vec![tab]),
+            base.clone().with_tabs(vec![tab.with_position(Pt(72.0))]),
+            base.clone()
+                .with_tabs(vec![tab.with_kind(ir::TabKind::End)]),
+            base.clone()
+                .with_tabs(vec![tab.with_leader(ir::TabLeader::Dot)]),
+            borders(ir::ParagraphBorders::with_top, border),
+            borders(ir::ParagraphBorders::with_bottom, border),
+            borders(ir::ParagraphBorders::with_start, border),
+            borders(ir::ParagraphBorders::with_end, border),
+            borders(ir::ParagraphBorders::with_between, border),
+            borders(ir::ParagraphBorders::with_bar, border),
+            borders(
+                ir::ParagraphBorders::with_top,
+                border.with_style(ir::BorderStyle::Double),
+            ),
+            borders(ir::ParagraphBorders::with_top, border.with_width(Pt(1.0))),
+            borders(ir::ParagraphBorders::with_top, border.with_space(Pt(1.0))),
+            borders(ir::ParagraphBorders::with_top, border.with_color(red)),
+            borders(ir::ParagraphBorders::with_top, border.with_shadow(true)),
+            base.clone().with_shading(Some(shading)),
+            base.clone()
+                .with_shading(Some(shading.with_pattern(ir::ShadingPattern::Solid))),
+            base.clone().with_shading(Some(shading.with_color(red))),
+            base.clone().with_shading(Some(shading.with_fill(red))),
+        ];
+        let mut seen = std::collections::HashMap::new();
+        seen.insert(fingerprint(&base), usize::MAX);
+        for (n, props) in variants.iter().enumerate() {
+            assert_ne!(*props, base, "variant {n} changes nothing");
+            if let Some(other) = seen.insert(fingerprint(props), n) {
+                panic!("variant {n} has the fingerprint of {other}");
+            }
+        }
+    }
 }
