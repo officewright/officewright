@@ -26,7 +26,7 @@ enum Node {
 }
 
 fuzz_target!(|data: &[u8]| {
-    check_utf16(data);
+    check_decoding(data);
     let limits = Limits::new();
     let input = match Input::decode(data) {
         Ok(input) => input,
@@ -358,36 +358,46 @@ fn push_text(nodes: &mut Vec<Node>, text: &str) {
     }
 }
 
-/// UTF-16 has no oracle in roxmltree, which reads the text `Input::decode` gives (#259):
-/// for input that `Input::decode` takes as UTF-16 (a byte order mark, or `<?` in either
-/// order of bytes), decode it here with the standard library and XML 1.0's rules
-/// (section 2.11: CR LF and a lone CR become LF; section 2.2: the characters XML allows),
-/// and require the same text, or a failure exactly when this decoding fails.
-fn check_utf16(data: &[u8]) {
-    let (units, little) = match data {
-        [0xFF, 0xFE, rest @ ..] => (rest, true),
-        [0xFE, 0xFF, rest @ ..] => (rest, false),
-        [0x3C, 0x00, 0x3F, 0x00, ..] => (data, true),
-        [0x00, 0x3C, 0x00, 0x3F, ..] => (data, false),
-        _ => return,
+/// The decoding has no oracle in roxmltree, which reads the text `Input::decode` gives
+/// (#259). Every input is decoded here as well, with the standard library and XML 1.0's
+/// rules: as UTF-16 where `Input::decode` should take it so (a byte order mark, or `<?`
+/// in either order of bytes), else as UTF-8 after an optional byte order mark; then
+/// section 2.11 (CR LF and a lone CR become LF) and section 2.2 (the characters XML
+/// allows). `Input::decode` must give the same text, or fail exactly when this decoding
+/// fails, so a decoder that takes too much as UTF-16 fails too (review of #387).
+fn check_decoding(data: &[u8]) {
+    let utf16 = |units: &[u8], little: bool| {
+        units
+            .len()
+            .is_multiple_of(2)
+            .then(|| {
+                let units: Vec<u16> = units
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|&pair| {
+                        if little {
+                            u16::from_le_bytes(pair)
+                        } else {
+                            u16::from_be_bytes(pair)
+                        }
+                    })
+                    .collect();
+                String::from_utf16(&units).ok()
+            })
+            .flatten()
     };
-    let expected = (units.len() % 2 == 0)
-        .then(|| {
-            let units: Vec<u16> = units
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|&pair| {
-                    if little {
-                        u16::from_le_bytes(pair)
-                    } else {
-                        u16::from_be_bytes(pair)
-                    }
-                })
-                .collect();
-            String::from_utf16(&units).ok()
-        })
-        .flatten()
+    let decoded = match data {
+        [0xFF, 0xFE, rest @ ..] => utf16(rest, true),
+        [0xFE, 0xFF, rest @ ..] => utf16(rest, false),
+        [0x3C, 0x00, 0x3F, 0x00, ..] => utf16(data, true),
+        [0x00, 0x3C, 0x00, 0x3F, ..] => utf16(data, false),
+        _ => {
+            let text = data.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(data);
+            std::str::from_utf8(text).ok().map(str::to_owned)
+        }
+    };
+    let expected = decoded
         .map(|text| text.replace("\r\n", "\n").replace('\r', "\n"))
         .filter(|text| text.chars().all(is_xml_char));
     match (Input::decode(data), expected) {
