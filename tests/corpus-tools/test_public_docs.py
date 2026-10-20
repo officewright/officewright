@@ -1070,6 +1070,84 @@ class Cleaning(unittest.TestCase):
                      "</x:creator>")
         self.assertEqual(public.people_left("docProps/core.xml", empty.encode(), {"core"}), [])
 
+    def test_a_template_path_and_the_schema_library_are_removed(self):
+        # The extended properties' Template keeps a name, never a path, and the settings'
+        # schema library, whose locations are paths, goes (#385).
+        sl = "http://schemas.openxmlformats.org/schemaLibrary/2006/main"
+        library = (f"<sl:schemaLibrary xmlns:sl='{sl}'><sl:schema sl:uri='urn:x' "
+                   "sl:schemaLocation='D:\\jroe\\x.xsd'/></sl:schemaLibrary>")
+        data = package(**{
+            "docProps/app.xml": "<Properties><Template>D:\\templates\\jroe.dotx</Template>"
+                                "<Pages>1</Pages></Properties>",
+            "word/settings.xml": f"<w:settings xmlns:w='w'>{library}<w:zoom/></w:settings>",
+        })
+        found = public.problems(data)
+        self.assertIn("docProps/app.xml: Template holds a path", found)
+        self.assertIn("word/settings.xml: sl:schemaLibrary is still there", found)
+        cleaned = public.clean(data, DOC)
+        parts = parts_of(cleaned.data)
+        self.assertIn("<Template></Template>", parts["docProps/app.xml"].decode())
+        self.assertNotIn("schemaLibrary", parts["word/settings.xml"].decode())
+        self.assertIn("<w:zoom/>", parts["word/settings.xml"].decode())
+        changes = "; ".join(cleaned.changes)
+        self.assertIn("template path", changes)
+        self.assertIn("settings: schema library removed", changes)
+        self.assertEqual(public.problems(cleaned.data), [])
+        # A plain name stays, and so does the namespace Word declares in every settings part.
+        plain = package(**{"docProps/app.xml": "<Properties><Template>Normal.dotm</Template>"
+                                               "</Properties>",
+                           "word/settings.xml": f"<w:settings xmlns:w='w' xmlns:sl='{sl}'>"
+                                                "<w:zoom/></w:settings>"})
+        parts = parts_of(public.clean(plain, DOC).data)
+        self.assertIn("<Template>Normal.dotm</Template>", parts["docProps/app.xml"].decode())
+        self.assertIn(f"xmlns:sl='{sl}'", parts["word/settings.xml"].decode())
+        # A drive-relative name, a relative path with a backslash, one with slashes only and
+        # one in a child element are paths too.
+        for template in ("D:jroe.dotx", "templates\\jroe.dotx", "/srv/templates/x.dotx",
+                         "<x:b xmlns:x='urn:x'>D:\\x.dotx</x:b>"):
+            with self.subTest(template):
+                xml = f"<Properties><Template>{template}</Template></Properties>"
+                self.assertIn("docProps/app.xml: Template holds a path",
+                              public.problems(package(**{"docProps/app.xml": xml})))
+        # A self-closing schema library goes too.
+        lone = package(**{"word/settings.xml": f"<w:settings xmlns:w='w'><sl:schemaLibrary "
+                                               f"xmlns:sl='{sl}'/><w:zoom/></w:settings>"})
+        self.assertNotIn("schemaLibrary", parts_of(public.clean(lone, DOC).data)[
+            "word/settings.xml"].decode())
+        # HLinks may keep web and mail addresses and bookmarks, never a local path.
+        vt = "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"
+
+        def links(*targets):
+            values = "".join(f"<vt:variant><vt:lpwstr>{t}</vt:lpwstr></vt:variant>"
+                             for t in targets)
+            return (f"<Properties xmlns:vt='{vt}'><HLinks><vt:vector size='{len(targets)}' "
+                    f"baseType='variant'>{values}</vt:vector></HLinks></Properties>")
+
+        kept = package(**{"docProps/app.xml": links(
+            "https://www.example.gov/a", "", "mailto:help@example.gov", "bookmark=id.1x")})
+        self.assertEqual(public.problems(public.clean(kept, DOC).data), [])
+        for target in ("D:\\drafts\\x.docx", "file:///\\\\srv\\x.docx", "../drafts/x.docx",
+                       "D:\\drafts\\https://www.example.gov/",
+                       # A web scheme without "//" is no web address.
+                       "https:D:\\x.docx", "http:\\\\srv\\x.docx"):
+            with self.subTest(target):
+                data = package(**{"docProps/app.xml": links("https://www.example.gov/", target)})
+                self.assertIn("docProps/app.xml: HLinks holds a local path", public.problems(data))
+                with self.assertRaises(public.Refused) as caught:
+                    public.clean(data, DOC)
+                self.assertIn("HLinks holds a local path", str(caught.exception))
+        # Another spelling is refused.
+        for part, xml, message in (
+            ("docProps/app.xml", "<Properties><Template >D:\\x.dotx</Template ></Properties>",
+             "Template holds a path"),
+            ("word/settings.xml", f"<w:settings xmlns:w='w'><q:schemaLibrary xmlns:q='{sl}'/>"
+                                  "</w:settings>", "sl:schemaLibrary is still there"),
+        ):
+            with self.subTest(message):
+                with self.assertRaises(public.Refused) as caught:
+                    public.clean(package(**{part: xml}), DOC)
+                self.assertIn(f"{part}: {message}", str(caught.exception))
+
     def test_an_external_relationship_gives_no_role(self):
         data = package(**{"word/_rels/header1.xml.rels": relationships(
             (f"{REL}/custom-properties", "../word/document.xml", ' TargetMode="External"'))})

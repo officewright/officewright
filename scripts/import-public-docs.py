@@ -16,7 +16,8 @@ listed SHA-256. The script then writes tests/corpus/business/<name>.docx with
   - every picture replaced by a grey placeholder of ours of the same pixel size, saved as
     PNG: agency seals, emblems and logos must not be reused, so no picture of the original
     is kept;
-  - the attached template and the document variables removed from the settings;
+  - the attached template, the document variables and the schema library removed from the
+    settings, and a template name that is a path emptied in the extended properties;
     the properties and settings are then read again as XML, and a document is refused if
     they still hold any of these in another spelling of the markup;
   - the text replacements listed for the document, which put fictional names and addresses
@@ -1298,14 +1299,21 @@ PEOPLE_ELEMENTS = {
     "app": {"Company": "Company", "Manager": "Manager", "HyperlinkBase": "HyperlinkBase"},
 }
 SETTINGS_ELEMENTS = {"docVars": "w:docVars", "attachedTemplate": "w:attachedTemplate",
-                     "mailMerge": "w:mailMerge"}
+                     "mailMerge": "w:mailMerge", "schemaLibrary": "sl:schemaLibrary"}
+# A template's name with a slash, a backslash or a colon is a path on the author's machine
+# (#385); a plain name such as Normal.dotm names none.
+PATH_LIKE = re.compile(r"[\\/:]")
+# The extended properties' HLinks keep the targets of the document's links, also of links it
+# no longer has: each must be a web or mail address or hold no path (a bookmark).
+WEB_OR_MAIL = re.compile(r"(?i)(https?://|mailto:)")
 
 
 def people_left(name: str, data: bytes, roles: set[str]) -> list[str]:
     """What a part with these roles still holds of PEOPLE_ELEMENTS (an element with text,
     attributes, child elements, comments or processing instructions) and SETTINGS_ELEMENTS
-    (any such element), read as XML. Raises Unreadable when the part is not well-formed or
-    declares a document type."""
+    (any such element), and in the extended properties a Template that is a path or HLinks
+    with a target that is a local path (PATH_LIKE, not a web or mail address), read as XML.
+    Raises Unreadable when the part is not well-formed or declares a document type."""
     wanted = {local: label for role in roles & PEOPLE_ELEMENTS.keys()
               for local, label in PEOPLE_ELEMENTS[role].items()}
     settings = "settings" in roles
@@ -1316,6 +1324,15 @@ def people_left(name: str, data: bytes, roles: set[str]) -> list[str]:
         if not isinstance(element.tag, str):
             continue  # a comment or processing instruction, counted in its parent
         local = element.tag.rpartition("}")[2]
+        if "app" in roles and local == "Template" and PATH_LIKE.search(
+            "".join(element.itertext())
+        ):
+            found.append(f"{name}: Template holds a path")
+        if "app" in roles and local == "HLinks" and any(
+            PATH_LIKE.search(text) and not WEB_OR_MAIL.match(text.strip())
+            for text in element.itertext()
+        ):
+            found.append(f"{name}: HLinks holds a local path")
         if local in wanted and (
             len(element) or element.attrib or "".join(element.itertext()).strip()
         ):
@@ -1439,7 +1456,13 @@ def clean(original: bytes, doc: PublicDoc) -> Cleaned:
             data = empty_elements(text_of(name, data), names_, people).encode("utf-8")
         if "app" in held:
             names_ = {"Company": "company", "Manager": "manager", "HyperlinkBase": "hyperlink base"}
-            data = empty_elements(text_of(name, data), names_, people).encode("utf-8")
+            text = empty_elements(text_of(name, data), names_, people)
+            # The template's name stays unless it is a path (#385).
+            template = re.search(r"<Template>([^<]*)</Template>", text)
+            if template and PATH_LIKE.search(template.group(1)):
+                text = text.replace(template.group(0), "<Template></Template>")
+                people.append("template path")
+            data = text.encode("utf-8")
         if "settings" in held:
             text = text_of(name, data)
             if "<w:mailMerge" in text:
@@ -1448,6 +1471,9 @@ def clean(original: bytes, doc: PublicDoc) -> Cleaned:
             for pattern, what in (
                 (r"<w:attachedTemplate\b[^>]*/>", "attached template"),
                 (r"<w:docVars>.*?</w:docVars>", "document variables"),
+                # Its schemas' locations are paths on the author's machine (#385).
+                (r"<sl:schemaLibrary\b[^>]*/>|<sl:schemaLibrary\b.*?</sl:schemaLibrary>",
+                 "schema library"),
             ):
                 edited, count = re.subn(pattern, "", edited, flags=re.S)
                 if count:
