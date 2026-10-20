@@ -39,6 +39,9 @@ pub(crate) struct Checker<'a> {
     table_depth: usize,
     /// Whether the walk is inside a note or the separators of notes.
     in_note: bool,
+    /// When the walk is inside a text box, whether it was inside the stored result of a
+    /// field where it entered the box.
+    text_box: Option<bool>,
 }
 
 impl<'a> Checker<'a> {
@@ -49,6 +52,7 @@ impl<'a> Checker<'a> {
             in_field_result: false,
             table_depth: 0,
             in_note: false,
+            text_box: None,
         }
     }
 
@@ -117,6 +121,26 @@ impl<'a> Checker<'a> {
         self.table_depth = self.table_depth.saturating_sub(1);
     }
 
+    /// Steps into a text box, failing when the walk is in one already: Word holds no text
+    /// box in another, and refusing one keeps the walk from recursing deeply. The box's
+    /// paragraphs are a story of their own, so their fields may be inside the stored
+    /// result of a field that holds the box.
+    pub(crate) fn enter_text_box(&mut self) -> Result<()> {
+        if self.text_box.is_some() {
+            return Err(self.error("a text box inside a text box; Word holds none"));
+        }
+        self.text_box = Some(self.in_field_result);
+        self.in_field_result = false;
+        Ok(())
+    }
+
+    /// Steps back out of the text box entered.
+    pub(crate) fn leave_text_box(&mut self) {
+        if let Some(in_field_result) = self.text_box.take() {
+            self.in_field_result = in_field_result;
+        }
+    }
+
     /// The error for a problem with the value being checked.
     pub(crate) fn error(&self, problem: impl Into<String>) -> Error {
         Error::InvalidDocument {
@@ -133,6 +157,8 @@ pub(crate) struct Clamper {
     report: LayoutReport,
     /// How many tables the walk is inside.
     table_depth: usize,
+    /// Whether the walk is inside a text box.
+    in_text_box: bool,
     /// The values many items share that the walk has clamped, by the address of the
     /// value: the value itself, and what clamping made of it. Holding the value keeps
     /// the items that still share it from looking like its only holders, which
@@ -173,6 +199,17 @@ impl Clamper {
     /// Steps back out of the table last entered.
     pub(crate) fn leave_table(&mut self) {
         self.table_depth = self.table_depth.saturating_sub(1);
+    }
+
+    /// Steps into a text box, unless the walk is in one already: then it returns false
+    /// and the walk leaves the inner box alone, which `validate` rejects.
+    pub(crate) fn enter_text_box(&mut self) -> bool {
+        !std::mem::replace(&mut self.in_text_box, true)
+    }
+
+    /// Steps back out of the text box entered.
+    pub(crate) fn leave_text_box(&mut self) {
+        self.in_text_box = false;
     }
 
     /// Records that the value being clamped was changed.

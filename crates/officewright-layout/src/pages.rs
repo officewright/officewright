@@ -150,7 +150,7 @@ struct Walk<'a, 'w> {
 
 /// Reports, once, at the first of them, labels with a number written in decimal because
 /// its format is one the layout does not write.
-fn report_list_formats(counters: &Counters, fonts: &mut Fonts<'_>) {
+pub(crate) fn report_list_formats(counters: &Counters, fonts: &mut Fonts<'_>) {
     if let Some(location) = &counters.unsupported_format {
         fonts.report_once(
             ReportKind::FeatureUnsupported,
@@ -516,16 +516,29 @@ fn has_page_field(paragraph: &Paragraph) -> bool {
 /// `SECTIONPAGES`).
 fn paragraph_field_kinds(paragraph: &Paragraph) -> (bool, bool) {
     let mut kinds = (false, false);
-    for inline in paragraph.inlines() {
+    inline_field_kinds(paragraph.inlines(), true, &mut kinds);
+    kinds
+}
+
+/// Adds to `kinds` whether `inlines` have a `PAGE` field and a page count, with those of
+/// the paragraphs of the text boxes they show when `boxes` holds: those are laid out with
+/// the paragraph that holds the box, and no box is laid out in a box.
+fn inline_field_kinds(inlines: &[Inline], boxes: bool, kinds: &mut (bool, bool)) {
+    for inline in inlines {
         if let Inline::Field(field) = inline {
             match field.kind() {
                 FieldKind::Page => kinds.0 = true,
                 FieldKind::NumPages | FieldKind::SectionPages => kinds.1 = true,
                 _ => {}
             }
+        } else if let Some((text_box, _)) = paragraph::text_box(inline).filter(|_| boxes) {
+            for block in text_box.blocks() {
+                if let Block::Paragraph(inner) = block {
+                    inline_field_kinds(inner.inlines(), false, kinds);
+                }
+            }
         }
     }
-    kinds
 }
 
 /// Whether `blocks` have a `PAGE` field, and whether they have a page count
@@ -614,11 +627,7 @@ enum FramePart {
 impl FramePart {
     /// A paragraph's part of `layout`.
     fn paragraph(layout: ParagraphLayout) -> Self {
-        let walked = layout
-            .lines
-            .iter()
-            .map(|line| line.pieces.len().max(1))
-            .fold(0, usize::saturating_add);
+        let walked = walked(&layout);
         Self::Paragraph(layout, walked)
     }
 
@@ -629,6 +638,23 @@ impl FramePart {
             Self::Table(drawn) => drawn.height.0,
         }
     }
+}
+
+/// The pieces painting walks in `layout`, one for each line that has none, with those of
+/// the paragraphs of its text boxes, which hold no text box.
+fn walked(layout: &ParagraphLayout) -> usize {
+    layout
+        .lines
+        .iter()
+        .map(|line| line.pieces.len().max(1))
+        .chain(
+            layout
+                .boxes
+                .iter()
+                .flat_map(|laid| &laid.paragraphs)
+                .map(|(_, inner, _)| walked(inner)),
+        )
+        .fold(0, usize::saturating_add)
 }
 
 /// The space between `above` and `below` in a stack of paragraphs and tables, or above
@@ -1916,7 +1942,9 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 Some(laid) => Rc::clone(laid),
                 None => {
                     let cost = match &part.content {
-                        Content::Paragraph(paragraph, _) => paragraph_cost(document, paragraph),
+                        Content::Paragraph(paragraph, _) => {
+                            paragraph_cost(document, paragraph, true)
+                        }
                         Content::Table(table, _) => table_cost(document, table),
                     };
                     self.frame_laid_budget = self.frame_laid_budget.saturating_sub(cost);
@@ -2044,7 +2072,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 let cost: usize = items
                     .iter()
                     .skip(start)
-                    .chain(anchored.iter().map(|float| &float.item))
+                    .chain(anchored.iter().flat_map(|float| &float.items))
                     .map(drawn)
                     .sum::<usize>()
                     .max(walked);
@@ -2158,25 +2186,28 @@ fn layout_cost(document: &Document, blocks: &[Block]) -> usize {
     blocks
         .iter()
         .map(|block| match block {
-            Block::Paragraph(paragraph) => paragraph_cost(document, paragraph),
+            Block::Paragraph(paragraph) => paragraph_cost(document, paragraph, true),
             Block::Table(table) => table_cost(document, table),
         })
         .fold(0, usize::saturating_add)
 }
 
-/// [`layout_cost`] of `paragraph`.
-fn paragraph_cost(document: &Document, paragraph: &Paragraph) -> usize {
+/// [`layout_cost`] of `paragraph`, with the paragraphs of the text boxes it shows when
+/// `boxes` holds.
+fn paragraph_cost(document: &Document, paragraph: &Paragraph, boxes: bool) -> usize {
     paragraph
         .inlines()
         .iter()
-        .map(|inline| inline_cost(document, inline))
+        .map(|inline| inline_cost(document, inline, boxes))
         .fold(1, usize::saturating_add)
 }
 
 /// [`layout_cost`] of `inline`. Headers and footers are laid out with field values, so a
 /// field the layout computes shows its number, not its stored result; the result of any
-/// other field is laid out, and counts (a result holds no fields).
-fn inline_cost(document: &Document, inline: &Inline) -> usize {
+/// other field is laid out, and counts (a result holds no fields). An object that shows a
+/// text box counts the box's paragraphs when `boxes` holds: they are laid out with the
+/// paragraph that holds it, and no box is laid out in a box.
+fn inline_cost(document: &Document, inline: &Inline, boxes: bool) -> usize {
     if itemize::hidden(document, inline) {
         return 1;
     }
@@ -2185,9 +2216,19 @@ fn inline_cost(document: &Document, inline: &Inline) -> usize {
         Inline::Field(field) if !itemize::computed(field.kind()) => field
             .result()
             .iter()
-            .map(|inline| inline_cost(document, inline))
+            .map(|inline| inline_cost(document, inline, boxes))
             .fold(1, usize::saturating_add),
-        _ => 1,
+        _ => match paragraph::text_box(inline).filter(|_| boxes) {
+            Some((text_box, _)) => text_box
+                .blocks()
+                .iter()
+                .filter_map(|block| match block {
+                    Block::Paragraph(inner) => Some(paragraph_cost(document, inner, false)),
+                    Block::Table(_) => None,
+                })
+                .fold(1, usize::saturating_add),
+            None => 1,
+        },
     }
 }
 
@@ -6176,5 +6217,376 @@ mod tests {
             .map(|entry| entry.location().to_string())
             .collect();
         assert_eq!(places, ["sections[0].blocks[1]"], "{report:?}");
+    }
+
+    /// A box of `blocks` with insets of 10 pt across and 5 pt down.
+    fn text_box(blocks: Vec<Block>) -> crate::ir::TextBox {
+        crate::ir::TextBox::new().with_blocks(blocks).with_insets(
+            crate::ir::Insets::default()
+                .with_left(Pt(10.0))
+                .with_top(Pt(5.0))
+                .with_right(Pt(10.0))
+                .with_bottom(Pt(5.0)),
+        )
+    }
+
+    /// An object floating in front of the text that shows `text_box` in a frame of `size`,
+    /// its top left corner `at` that of the page.
+    fn floating_box(text_box: crate::ir::TextBox, size: (f64, f64), at: (f64, f64)) -> Inline {
+        use crate::ir::{
+            AnchoredObject, HorizontalAnchor, HorizontalPlacement, HorizontalReference,
+            ObjectContent, Size, VerticalAnchor, VerticalPlacement, VerticalReference,
+        };
+        Inline::anchored(AnchoredObject::new(
+            ObjectContent::text_box(text_box),
+            Size::new(Pt(size.0), Pt(size.1)),
+            HorizontalAnchor::default()
+                .with_relative_to(HorizontalReference::Page)
+                .with_placement(HorizontalPlacement::Offset(Pt(at.0))),
+            VerticalAnchor::default()
+                .with_relative_to(VerticalReference::Page)
+                .with_placement(VerticalPlacement::Offset(Pt(at.1))),
+        ))
+    }
+
+    /// A paragraph of exact 20 pt lines holding `inlines`.
+    fn holding(style: RunStyleId, inlines: Vec<Inline>) -> Block {
+        Paragraph::new(style)
+            .with_props(spacing(0.0, 0.0))
+            .with_inlines(inlines)
+            .into()
+    }
+
+    /// What `page` draws, in drawing order: rectangles and lines by their corners and
+    /// widths, glyph runs by their text and the start of their baseline, pictures by their
+    /// corner.
+    fn drawing(page: &Page) -> Vec<String> {
+        page.items
+            .iter()
+            .map(|item| match item {
+                DisplayItem::Rect {
+                    at, width, height, ..
+                } => format!("rect {} {} {} {}", at.x.0, at.y.0, width.0, height.0),
+                DisplayItem::Glyphs(run) => {
+                    let text: String = run.clusters.iter().map(|c| c.text.as_str()).collect();
+                    format!("text {text} {} {}", run.origin.x.0, run.origin.y.0)
+                }
+                DisplayItem::Line(line) => format!(
+                    "line {} {} {} {} {}",
+                    line.from.x.0, line.from.y.0, line.to.x.0, line.to.y.0, line.width.0
+                ),
+                DisplayItem::Image(image) => format!("image {} {}", image.at.x.0, image.at.y.0),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_floating_text_box_draws_its_fill_its_text_inside_its_insets_and_its_outline() {
+        use officewright_core::Color;
+
+        use crate::ir::Border;
+        // A box 100 x 60 at 50, 40 of the page, filled and outlined in 1 pt: its exact 20 pt
+        // line of `Á` starts 10 pt in and has its baseline 5 + 16 pt down, in front of the
+        // fill and behind the outline, whose lines across close the corners.
+        let outlined = document(|style| {
+            let text_box = text_box(vec![text_paragraph(style, "Á", spacing(0.0, 0.0))])
+                .with_fill(Some(Color::rgb(200, 200, 200)))
+                .with_outline(Some(Border::default().with_width(Pt(1.0))));
+            one_section(vec![holding(
+                style,
+                vec![
+                    floating_box(text_box, (100.0, 60.0), (50.0, 40.0)),
+                    Inline::text("A", style),
+                ],
+            )])
+        });
+        let (pages, report) = laid(&outlined, 10);
+        let pages = pages.expect("pages").pages;
+        assert!(report.is_empty(), "{report:?}");
+        assert_eq!(
+            drawing(&pages[0]),
+            [
+                "text A 20 36",
+                "rect 50 40 100 60",
+                "text Á 60 61",
+                "line 49.5 40 150.5 40 1",
+                "line 49.5 100 150.5 100 1",
+                "line 50 40 50 100 1",
+                "line 150 40 150 100 1",
+            ]
+        );
+        // Automatic text is white on a dark fill, as on dark shading.
+        let dark = document(|style| {
+            let text_box = text_box(vec![text_paragraph(style, "Á", spacing(0.0, 0.0))])
+                .with_fill(Some(Color::rgb(0, 0, 80)));
+            one_section(vec![holding(
+                style,
+                vec![floating_box(text_box, (100.0, 60.0), (50.0, 40.0))],
+            )])
+        });
+        let (pages, _) = laid(&dark, 10);
+        let colors: Vec<Color> = pages.expect("pages").pages[0]
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                DisplayItem::Glyphs(run) => Some(run.color),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(colors, [Color::WHITE]);
+    }
+
+    #[test]
+    fn a_text_box_s_anchor_puts_its_text_at_the_top_middle_or_bottom_unless_it_overflows() {
+        use crate::ir::TextBoxAnchor;
+        // The box is 60 pt high, 50 inside its insets: a line of 20 pt leaves 30 free, so
+        // its baseline is 61 at the top, 15 lower centred and 30 lower at the bottom. Three
+        // lines overflow the box and start at its top whatever the anchor. The paragraph's
+        // space before and after is part of the text: 4 pt before and 6 after leave 20 free.
+        let cases = [
+            (TextBoxAnchor::Top, 1, (0.0, 0.0), 61.0),
+            (TextBoxAnchor::Center, 1, (0.0, 0.0), 76.0),
+            (TextBoxAnchor::Bottom, 1, (0.0, 0.0), 91.0),
+            (TextBoxAnchor::Center, 3, (0.0, 0.0), 61.0),
+            (TextBoxAnchor::Bottom, 3, (0.0, 0.0), 61.0),
+            (TextBoxAnchor::Top, 1, (4.0, 6.0), 65.0),
+            (TextBoxAnchor::Bottom, 1, (4.0, 6.0), 85.0),
+        ];
+        for (anchor, count, (before, after), baseline) in cases {
+            let document = document(|style| {
+                let text_box =
+                    text_box(vec![lines(style, count, spacing(before, after))]).with_anchor(anchor);
+                one_section(vec![holding(
+                    style,
+                    vec![floating_box(text_box, (100.0, 60.0), (50.0, 40.0))],
+                )])
+            });
+            let (laid, _) = laid(&document, 10);
+            let drawn = drawing(&laid.expect("pages").pages[0]);
+            assert_eq!(
+                drawn.first().map(String::as_str),
+                Some(format!("text A 60 {baseline}").as_str()),
+                "{anchor:?}, {count} lines: {drawn:?}"
+            );
+            assert_eq!(drawn.len(), count, "{drawn:?}");
+        }
+    }
+
+    #[test]
+    fn a_text_box_s_text_wraps_inside_its_insets() {
+        // A box 40 pt wide is 20 pt wide inside its insets: `A A` (14.5 pt) fits on a line,
+        // with the space after it, and `A A A` does not.
+        let document = document(|style| {
+            let text_box = text_box(vec![text_paragraph(style, "A A A", spacing(0.0, 0.0))]);
+            one_section(vec![holding(
+                style,
+                vec![floating_box(text_box, (40.0, 60.0), (50.0, 40.0))],
+            )])
+        });
+        let (laid, _) = laid(&document, 10);
+        assert_eq!(
+            drawing(&laid.expect("pages").pages[0]),
+            ["text A A 60 61", "text   74.5 61", "text A 60 81"]
+        );
+    }
+
+    #[test]
+    fn an_inline_text_box_draws_its_text_in_its_frame_on_the_line() {
+        use officewright_core::Color;
+
+        use crate::ir::{InlineObject, ObjectContent, Size};
+        // A box 40 x 30 on the baseline of an exact 20 pt line, before `A`: its text is
+        // inside its insets, and `A` follows its frame.
+        let document = document(|style| {
+            let text_box = text_box(vec![text_paragraph(style, "Á", spacing(0.0, 0.0))])
+                .with_fill(Some(Color::rgb(200, 200, 200)));
+            let object = InlineObject::new(
+                ObjectContent::text_box(text_box),
+                Size::new(Pt(40.0), Pt(30.0)),
+            );
+            one_section(vec![holding(
+                style,
+                vec![Inline::Object(object), Inline::text("A", style)],
+            )])
+        });
+        let (laid, report) = laid(&document, 10);
+        assert!(report.is_empty(), "{report:?}");
+        // The line's baseline is at 36: the frame's top is 30 pt above it.
+        assert_eq!(
+            drawing(&laid.expect("pages").pages[0]),
+            ["rect 20 6 40 30", "text Á 30 27", "text A 60 36"]
+        );
+    }
+
+    #[test]
+    fn a_page_field_in_a_footer_s_text_box_shows_each_page_s_number() {
+        use crate::ir::FieldKind;
+        let document = document(|style| {
+            let footer = holding(
+                style,
+                vec![floating_box(
+                    text_box(vec![fields(style, vec![FieldKind::Page])]),
+                    (60.0, 30.0),
+                    (100.0, 165.0),
+                )],
+            );
+            vec![
+                Section::new(close_frames())
+                    .with_footers(HeaderFooterSet::default().with_primary(vec![footer]))
+                    .with_blocks(vec![
+                        lines(style, 1, spacing(0.0, 0.0)),
+                        lines(style, 1, spacing(0.0, 0.0).with_page_break_before(true)),
+                    ]),
+            ]
+        });
+        let (laid, _) = laid(&document, 10);
+        let numbers: Vec<Vec<String>> = laid
+            .expect("pages")
+            .pages
+            .iter()
+            .map(|page| texts(page).into_iter().filter(|text| text != "A").collect())
+            .collect();
+        assert_eq!(numbers, [["1"], ["2"]]);
+    }
+
+    #[test]
+    fn a_text_box_s_lists_count_from_its_start_and_its_tables_and_floats_are_reported() {
+        use crate::ir::{Level, LevelTextPart, ListDefinition, ListInstance, ListItem};
+        let mut document = Document::default();
+        let style = document
+            .add_run_style(RunStyle::default().with_fonts(RunFonts::new("Officewright Test")));
+        let level = Level::default()
+            .with_text([
+                LevelTextPart::Placeholder(0),
+                LevelTextPart::Literal(".".into()),
+            ])
+            .with_start(1);
+        let list = document.add_list(ListDefinition::default().with_levels([level]));
+        let instance = document.add_list_instance(ListInstance::new(list));
+        let item = || -> Block {
+            Paragraph::new(style)
+                .with_list(Some(ListItem::new(instance, 0, style)))
+                .with_inlines([Inline::text("A", style)])
+                .into()
+        };
+        let table = Table::default()
+            .with_grid([Pt(50.0)])
+            .with_rows([Row::default().with_cells([
+                Cell::default().with_blocks([text_paragraph(style, "T", spacing(0.0, 0.0))])
+            ])]);
+        let floating = anchored_picture(
+            &mut document,
+            (
+                crate::ir::HorizontalReference::Page,
+                crate::ir::HorizontalPlacement::Offset(Pt(0.0)),
+            ),
+            (
+                crate::ir::VerticalReference::Page,
+                crate::ir::VerticalPlacement::Offset(Pt(0.0)),
+            ),
+        );
+        let in_box = text_box(vec![
+            item(),
+            item(),
+            table.into(),
+            holding(style, vec![floating, Inline::text("F", style)]),
+        ]);
+        document.add_section(Section::new(setup()).with_blocks(vec![
+            item(),
+            holding(
+                style,
+                vec![floating_box(in_box, (100.0, 100.0), (150.0, 20.0))],
+            ),
+            item(),
+        ]));
+        let (laid, report) = laid(&document, 10);
+        let texts = texts(&laid.expect("pages").pages[0]);
+        // The body counts 1 and 2 around the box, whose list counts 1 and 2 of its own;
+        // the table's text is not drawn.
+        assert_eq!(
+            texts,
+            ["1.", "A", "2.", "A", "1.", "A", "2.", "A", "F"],
+            "{texts:?}"
+        );
+        let messages = messages(&report);
+        assert!(
+            messages.contains(&"tables in text boxes are not drawn yet".to_owned()),
+            "{messages:?}"
+        );
+        assert!(
+            messages.contains(&"floating objects in text boxes are not drawn".to_owned()),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn a_text_box_in_a_text_box_is_not_laid_out() {
+        use crate::ir::{InlineObject, ObjectContent, Size};
+        // `validate` refuses a box in a box; laid out all the same, the outer box draws its
+        // text and the inner one nothing, so that boxes cannot nest the layout deeply.
+        let document = document(|style| {
+            let inner = Inline::Object(InlineObject::new(
+                ObjectContent::text_box(text_box(vec![text_paragraph(
+                    style,
+                    "A",
+                    spacing(0.0, 0.0),
+                )])),
+                Size::new(Pt(30.0), Pt(10.0)),
+            ));
+            let outer = text_box(vec![holding(style, vec![inner, Inline::text("Á", style)])]);
+            one_section(vec![holding(
+                style,
+                vec![floating_box(outer, (100.0, 60.0), (50.0, 40.0))],
+            )])
+        });
+        assert!(document.validate().is_err());
+        let (laid, _) = laid(&document, 10);
+        assert_eq!(texts(&laid.expect("pages").pages[0]), ["Á"]);
+    }
+
+    #[test]
+    fn what_a_header_s_text_box_lays_out_and_walks_counts_towards_the_frames_bounds() {
+        // A header paragraph holding a box: the box's text counts towards what headers lay
+        // out, and the pieces of its lines towards what they draw and walk, though the
+        // tabs draw nothing. Past either bound the header is left out, and reported.
+        let document = |inlines: &dyn Fn(RunStyleId) -> Vec<Inline>| {
+            document(|style| {
+                let inner = Paragraph::new(style)
+                    .with_props(spacing(0.0, 0.0))
+                    .with_inlines(inlines(style));
+                let header = holding(
+                    style,
+                    vec![floating_box(
+                        text_box(vec![inner.into()]),
+                        (200.0, 15.0),
+                        (20.0, 2.0),
+                    )],
+                );
+                vec![
+                    Section::new(close_frames())
+                        .with_headers(HeaderFooterSet::default().with_primary(vec![header]))
+                        .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+                ]
+            })
+        };
+        let left_out = |messages: &[String]| {
+            messages
+                .iter()
+                .any(|message| message.starts_with("headers and footers are left out past"))
+        };
+        let text = |count: usize| move |style| vec![Inline::text("A".repeat(count), style)];
+        let tabs = |count: usize| move |style| vec![Inline::Tab { style }; count];
+        // The header's paragraph costs 1, the box 1, and its paragraph 1 and its text.
+        let (laid, messages) = laid_within(&document(&text(10)), (MAX_FRAME_DRAWN, 20));
+        assert!(!left_out(&messages), "{messages:?}");
+        assert!(texts(&laid.sink[0]).contains(&"A".repeat(10)));
+        let (laid, messages) = laid_within(&document(&text(40)), (MAX_FRAME_DRAWN, 20));
+        assert!(left_out(&messages), "{messages:?}");
+        assert_eq!(texts(&laid.sink[0]), ["A"]);
+        // The holder's line walks its one piece, and the box's line one for each tab.
+        let (_, messages) = laid_within(&document(&tabs(5)), (20, MAX_FRAME_LAID));
+        assert!(!left_out(&messages), "{messages:?}");
+        let (_, messages) = laid_within(&document(&tabs(40)), (20, MAX_FRAME_LAID));
+        assert!(left_out(&messages), "{messages:?}");
     }
 }

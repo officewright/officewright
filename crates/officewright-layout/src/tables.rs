@@ -1237,7 +1237,12 @@ fn weight(border: &Border) -> f64 {
 /// Adds the line of `border` from `from` to `to`, centred on them. Lines of several
 /// strokes are drawn as one, as thick as the border. Hypothesis until a Word reference
 /// (`E-table-borders-geometry.docx`): where the strokes of a double border go.
-fn border_line(border: &Border, from: (f64, f64), to: (f64, f64), items: &mut Vec<DisplayItem>) {
+pub(crate) fn border_line(
+    border: &Border,
+    from: (f64, f64),
+    to: (f64, f64),
+    items: &mut Vec<DisplayItem>,
+) {
     let style = match border.style() {
         BorderStyle::Dotted => LineStyle::Dotted,
         BorderStyle::Dashed | BorderStyle::DashSmallGap => LineStyle::Dashed,

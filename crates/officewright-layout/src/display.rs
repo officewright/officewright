@@ -13,10 +13,10 @@ use officewright_font::{FaceId, FontFace, GlyphId};
 
 use crate::fonts::{Choice, Fonts};
 use crate::ir::{
-    AnchorHorizontalAlign, AnchorVerticalAlign, AnchoredObject, ColorValue, CompatFlag, Crop,
-    Document, HorizontalPlacement, HorizontalReference, Inline, ObjectContent, Paragraph, RunStyle,
-    Shading, ShadingPattern, TabKind, TabLeader, UnderlineKind, VerticalPlacement,
-    VerticalPosition, VerticalReference, Wrap,
+    AnchorHorizontalAlign, AnchorVerticalAlign, AnchoredObject, Block, ColorValue, CompatFlag,
+    Crop, Document, HorizontalPlacement, HorizontalReference, Inline, ObjectContent, Paragraph,
+    RunStyle, Shading, ShadingPattern, Size, TabKind, TabLeader, TextBox, TextBoxAnchor,
+    UnderlineKind, VerticalPlacement, VerticalPosition, VerticalReference, Wrap,
 };
 use crate::itemize::{Item, Itemized, TextRun, drawn_size};
 use crate::lines::{EPSILON, Piece, PieceKind, PlacedGlyph, inline_at, no_font};
@@ -24,6 +24,7 @@ use crate::metrics::{TypoRule, line_metrics};
 use crate::paragraph::ParagraphLayout;
 use crate::report::{Location, ReportKind};
 use crate::shape::ShapingFace;
+use crate::tables::border_line;
 
 /// How far the baseline of a superscript rises, as a fraction of the size its
 /// formatting gives. Hypothesis, like the size superscripts are drawn at, until a Word
@@ -178,13 +179,13 @@ pub(crate) struct PageBox {
     pub(crate) odd: bool,
 }
 
-/// A floating object drawn on a page: in front of the text or behind it, and its place in
-/// the stack of floating objects.
+/// A floating object drawn on a page: in front of the text or behind it, its place in the
+/// stack of floating objects, and what it draws.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Float {
     pub(crate) behind: bool,
     pub(crate) z_order: u32,
-    pub(crate) item: DisplayItem,
+    pub(crate) items: Vec<DisplayItem>,
 }
 
 /// Orders the floating objects of a page around `items`, what it draws otherwise: those
@@ -198,9 +199,9 @@ pub(crate) fn stack(items: Vec<DisplayItem>, mut floats: Vec<Float>) -> Vec<Disp
     let split = floats.partition_point(|float| float.behind);
     let front = floats.split_off(split);
     let mut out = Vec::with_capacity(items.len() + floats.len() + front.len());
-    out.extend(floats.into_iter().map(|float| float.item));
+    out.extend(floats.into_iter().flat_map(|float| float.items));
     out.extend(items);
-    out.extend(front.into_iter().map(|float| float.item));
+    out.extend(front.into_iter().flat_map(|float| float.items));
     out
 }
 
@@ -468,11 +469,7 @@ impl Painting<'_, '_, '_> {
                     PieceKind::Object {
                         item,
                         height: Some(height),
-                    } => {
-                        if let Some(image) = self.picture(*item, x, baseline - height.0) {
-                            front.push(DisplayItem::Image(image));
-                        }
-                    }
+                    } => self.object(*item, x, baseline - height.0, &mut front),
                     PieceKind::Object { item, height: None } => {
                         self.float(*item, (x, (top, top + line.height.0), origin.y.0));
                     }
@@ -1072,50 +1069,134 @@ impl Painting<'_, '_, '_> {
             );
         }
         let (x, y) = float_position(object, &page, anchor);
-        let size = object.size();
-        let item = match object.content() {
-            ObjectContent::Picture(picture) => DisplayItem::Image(ImageItem {
-                image: picture.image(),
-                at: Point { x: Pt(x), y: Pt(y) },
-                width: size.width(),
-                height: size.height(),
-                crop: picture.crop(),
-                rotation: picture.rotation(),
-                flip_horizontal: picture.flip_horizontal(),
-                flip_vertical: picture.flip_vertical(),
-            }),
-        };
+        let mut items = Vec::new();
+        let at = Point { x: Pt(x), y: Pt(y) };
+        self.content(item, object.content(), (at, object.size()), &mut items);
         self.floats.push(Float {
             behind: object.behind_text(),
             z_order: object.z_order(),
-            item,
+            items,
         });
     }
 
-    /// The picture of an inline object of item `item`, its box's top left corner at
-    /// `x`, `top`: inside the room its effects take.
-    fn picture(&self, item: usize, x: f64, top: f64) -> Option<ImageItem> {
+    /// Adds to `out` what the inline object of item `item` shows, its box's top left
+    /// corner at `x`, `top`: inside the room its effects take.
+    fn object(&mut self, item: usize, x: f64, top: f64, out: &mut Vec<DisplayItem>) {
         let Some(Item::Object(path)) = self.layout.itemized.items.get(item) else {
-            return None;
+            return;
         };
         let Some(Inline::Object(object)) = inline_at(self.paragraph.inlines(), path) else {
-            return None;
+            return;
         };
-        let (size, extent) = (object.size(), object.effect_extent());
-        match object.content() {
-            ObjectContent::Picture(picture) => Some(ImageItem {
+        let extent = object.effect_extent();
+        let at = Point {
+            x: Pt(x + extent.left().0),
+            y: Pt(top + extent.top().0),
+        };
+        self.content(item, object.content(), (at, object.size()), out);
+    }
+
+    /// Adds to `out` what `content`, shown by the object of item `item`, draws in its
+    /// frame, whose top left corner is at `at`.
+    fn content(
+        &mut self,
+        item: usize,
+        content: &ObjectContent,
+        (at, size): (Point, Size),
+        out: &mut Vec<DisplayItem>,
+    ) {
+        match content {
+            ObjectContent::Picture(picture) => out.push(DisplayItem::Image(ImageItem {
                 image: picture.image(),
-                at: Point {
-                    x: Pt(x + extent.left().0),
-                    y: Pt(top + extent.top().0),
-                },
+                at,
                 width: size.width(),
                 height: size.height(),
                 crop: picture.crop(),
                 rotation: picture.rotation(),
                 flip_horizontal: picture.flip_horizontal(),
                 flip_vertical: picture.flip_vertical(),
-            }),
+            })),
+            ObjectContent::TextBox(text_box) => self.text_box(item, text_box, (at, size), out),
+        }
+    }
+
+    /// Adds to `out` what `text_box`, shown by the object of item `item`, draws in its
+    /// frame, whose top left corner is at `at`: its fill, its paragraphs inside its insets
+    /// and where its anchor puts them down the box, and its outline along the frame. Text
+    /// taller than the room inside the insets starts at its top and runs on past the
+    /// frame, as `vertOverflow="overflow"`, the default, has it (ECMA-376 Part 1,
+    /// §21.1.2.1.1; a hypothesis until Word renders `E-textbox-anchor.docx`).
+    fn text_box(
+        &mut self,
+        item: usize,
+        text_box: &TextBox,
+        (at, size): (Point, Size),
+        out: &mut Vec<DisplayItem>,
+    ) {
+        let (left, top) = (at.x.0, at.y.0);
+        let (width, height) = (size.width().0, size.height().0);
+        if let Some(color) = text_box.fill() {
+            out.push(DisplayItem::Rect {
+                at,
+                width: size.width(),
+                height: size.height(),
+                color,
+            });
+        }
+        let layout = self.layout;
+        if let Some(laid) = layout.text_box(item) {
+            let insets = text_box.insets();
+            let free = (height - insets.top().0 - insets.bottom().0 - laid.height).max(0.0);
+            let start = top
+                + insets.top().0
+                + match text_box.anchor() {
+                    TextBoxAnchor::Center => free / 2.0,
+                    TextBoxAnchor::Bottom => free,
+                    _ => 0.0,
+                };
+            for (block, inner, offset) in &laid.paragraphs {
+                let Some(Block::Paragraph(paragraph)) = text_box.blocks().get(*block) else {
+                    continue;
+                };
+                let mut painting = Painting {
+                    document: self.document,
+                    paragraph,
+                    layout: inner,
+                    fonts: &mut *self.fonts,
+                    location: self.location,
+                    background: text_box.fill().or(self.background),
+                    leaders: &mut *self.leaders,
+                    // Floating objects in a box are left out, and reported, as the box is
+                    // laid out.
+                    page: None,
+                    floats: Vec::new(),
+                    // Hypothesis, as no reference shows them: in a text box, bar tabs
+                    // reach only through the lines.
+                    bar_reach: (0.0, 0.0),
+                };
+                let origin = Point {
+                    x: Pt(left + insets.left().0),
+                    y: Pt(start + offset),
+                };
+                let lines = 0..inner.lines.len();
+                painting.paint_shading(lines.clone(), origin, out);
+                painting.paint(lines, origin, out);
+            }
+        }
+        if let Some(outline) = text_box.outline() {
+            // The lines across reach over the ends of those down, so that the corners
+            // are closed.
+            let reach = outline.width().0 / 2.0;
+            let (right, bottom) = (left + width, top + height);
+            border_line(&outline, (left - reach, top), (right + reach, top), out);
+            border_line(
+                &outline,
+                (left - reach, bottom),
+                (right + reach, bottom),
+                out,
+            );
+            border_line(&outline, (left, top), (left, bottom), out);
+            border_line(&outline, (right, top), (right, bottom), out);
         }
     }
 }
@@ -1690,7 +1771,7 @@ mod tests {
         let float = |behind, z_order, x| Float {
             behind,
             z_order,
-            item: rect(x),
+            items: vec![rect(x)],
         };
         let floats = vec![
             float(false, 5, 1.0),

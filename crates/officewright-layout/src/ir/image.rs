@@ -3,12 +3,12 @@
 
 use std::sync::Arc;
 
-use officewright_core::Pt;
+use officewright_core::{Color, Pt};
 
-use super::ImageId;
 use super::macros::{ir_struct, no_rules};
 use super::rules;
 use super::walk::{Check, Checker, Clamp, Clamper};
+use super::{Block, Border, ImageId};
 use crate::Result;
 
 ir_struct! {
@@ -79,18 +79,123 @@ impl Picture {
     }
 }
 
+ir_struct! {
+    /// A text box (`wps:txbx` in DrawingML, `v:textbox` in VML): text laid out in the frame
+    /// of the object that shows it ([`InlineObject`] or [`AnchoredObject`]), inside its
+    /// insets, on the box's fill and inside its outline. Its paragraphs are laid out as a
+    /// small story of their own: their list labels count from the box's start. Tables in
+    /// a box, and floating objects in its paragraphs, are left out and reported; so is text
+    /// that is turned, runs vertically or flows on into a linked box, which the producer
+    /// reports.
+    ///
+    /// A text box holds no text box: `Document::validate` refuses one, as Word holds none.
+    ///
+    /// ```
+    /// use officewright_core::{Color, Pt};
+    /// use officewright_layout::ir::{
+    ///     AnchoredObject, Border, Document, HorizontalAnchor, HorizontalReference, Inline,
+    ///     Insets, ObjectContent, PageSetup, Paragraph, RunStyle, Section, Size, TextBox,
+    ///     TextBoxAnchor, VerticalAnchor, VerticalPlacement, VerticalReference,
+    /// };
+    ///
+    /// let mut document = Document::default();
+    /// let style = document.add_run_style(RunStyle::default());
+    /// let address = Paragraph::new(style).with_inlines([Inline::text("Main Street 1", style)]);
+    /// // An address in a box with a thin black outline, its text centred down the box.
+    /// let text_box = TextBox::new()
+    ///     .with_blocks([address.into()])
+    ///     .with_insets(Insets::default().with_left(Pt(7.2)).with_right(Pt(7.2)))
+    ///     .with_anchor(TextBoxAnchor::Center)
+    ///     .with_fill(Some(Color::WHITE))
+    ///     .with_outline(Some(Border::default().with_width(Pt(0.5))));
+    /// let object = AnchoredObject::new(
+    ///     ObjectContent::text_box(text_box),
+    ///     Size::new(Pt(180.0), Pt(60.0)),
+    ///     HorizontalAnchor::default().with_relative_to(HorizontalReference::Margin),
+    ///     VerticalAnchor::default()
+    ///         .with_relative_to(VerticalReference::Margin)
+    ///         .with_placement(VerticalPlacement::Offset(Pt(36.0))),
+    /// );
+    /// let anchor = Paragraph::new(style).with_inlines([Inline::anchored(object)]);
+    /// document.add_section(Section::new(PageSetup::default()).with_blocks([anchor.into()]));
+    /// document.validate()?;
+    /// # Ok::<(), officewright_layout::Error>(())
+    /// ```
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct TextBox {
+        /// What the box holds, in reading order. Only its paragraphs are drawn yet.
+        vec blocks: Block = Vec::new() => with_blocks;
+        /// The room between the frame and the text on each side (`wps:bodyPr`'s `lIns`,
+        /// `tIns`, `rIns` and `bIns`, `v:textbox`'s `inset`). The default is DrawingML's
+        /// for attributes the document leaves out: 7.2 pt at the left and right, 3.6 pt at
+        /// the top and bottom (ECMA-376 Part 1, §20.1.2.1.1).
+        copy insets: Insets = Insets {
+            left: Pt(7.2),
+            top: Pt(3.6),
+            right: Pt(7.2),
+            bottom: Pt(3.6),
+        } => with_insets, check insets_non_negative;
+        /// Where the text is down the box when it is shorter than the box
+        /// (`wps:bodyPr`'s `anchor`, `v:textbox`'s `v-text-anchor` in its style).
+        copy anchor: TextBoxAnchor = TextBoxAnchor::Top => with_anchor;
+        /// The colour the box is filled with, behind its text; `None` for none.
+        copy fill: Option<Color> = None => with_fill;
+        /// The line drawn along the frame, centred on it; `None` for none. Its `space` and
+        /// `shadow` are not used.
+        copy outline: Option<Border> = None => with_outline;
+    }
+}
+
+impl TextBox {
+    /// An empty box, with DrawingML's default insets, its text at the top, neither
+    /// filled nor outlined.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Where the text of a text box is down the box (ST_TextAnchoringType, without `just` and
+/// `dist`, which the producer passes as `Center` and `Top`). Text taller than the box
+/// starts at its top and runs on past its bottom.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum TextBoxAnchor {
+    /// At the top.
+    #[default]
+    Top,
+    /// Centred.
+    Center,
+    /// At the bottom.
+    Bottom,
+}
+
 /// What a drawing object shows, in a line of text or floating.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum ObjectContent {
     /// A picture.
     Picture(Picture),
+    /// A text box, boxed so that it makes no inline larger ([`ObjectContent::text_box`]).
+    TextBox(Box<TextBox>),
+}
+
+impl ObjectContent {
+    /// A text box.
+    pub fn text_box(text_box: TextBox) -> Self {
+        Self::TextBox(Box::new(text_box))
+    }
 }
 
 impl Check for ObjectContent {
     fn check(&self, checker: &mut Checker<'_>) -> Result<()> {
         match self {
             Self::Picture(picture) => picture.check(checker),
+            Self::TextBox(text_box) => {
+                checker.enter_text_box()?;
+                text_box.check(checker)?;
+                checker.leave_text_box();
+                Ok(())
+            }
         }
     }
 }
@@ -99,6 +204,12 @@ impl Clamp for ObjectContent {
     fn clamp(&mut self, clamper: &mut Clamper) {
         match self {
             Self::Picture(picture) => picture.clamp(clamper),
+            Self::TextBox(text_box) => {
+                if clamper.enter_text_box() {
+                    text_box.clamp(clamper);
+                    clamper.leave_text_box();
+                }
+            }
         }
     }
 }
@@ -466,5 +577,6 @@ no_rules!(
     VerticalReference,
     AnchorHorizontalAlign,
     AnchorVerticalAlign,
+    TextBoxAnchor,
     Wrap
 );
