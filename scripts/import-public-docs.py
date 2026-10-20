@@ -1014,13 +1014,17 @@ SETTINGS_ELEMENTS = {"docVars": "w:docVars", "attachedTemplate": "w:attachedTemp
 # A template's name with a slash, a backslash or a colon is a path on the author's machine
 # (#385); a plain name such as Normal.dotm names none.
 PATH_LIKE = re.compile(r"[\\/:]")
+# The extended properties' HLinks keep the targets of the document's links, also of links it
+# no longer has: each must be a web or mail address or hold no path (a bookmark).
+WEB_OR_MAIL = re.compile(r"(?i)(https?://|mailto:)")
 
 
 def people_left(name: str, data: bytes, roles: set[str]) -> list[str]:
     """What a part with these roles still holds of PEOPLE_ELEMENTS (an element with text,
     attributes, child elements, comments or processing instructions) and SETTINGS_ELEMENTS
-    (any such element), read as XML. Raises Unreadable when the part is not well-formed or
-    declares a document type."""
+    (any such element), and in the extended properties a Template that is a path or HLinks
+    with a target that is a local path (PATH_LIKE, not a web or mail address), read as XML.
+    Raises Unreadable when the part is not well-formed or declares a document type."""
     wanted = {local: label for role in roles & PEOPLE_ELEMENTS.keys()
               for local, label in PEOPLE_ELEMENTS[role].items()}
     settings = "settings" in roles
@@ -1035,6 +1039,11 @@ def people_left(name: str, data: bytes, roles: set[str]) -> list[str]:
             "".join(element.itertext())
         ):
             found.append(f"{name}: Template holds a path")
+        if "app" in roles and local == "HLinks" and any(
+            PATH_LIKE.search(text) and not WEB_OR_MAIL.match(text.strip())
+            for text in element.itertext()
+        ):
+            found.append(f"{name}: HLinks holds a local path")
         if local in wanted and (
             len(element) or element.attrib or "".join(element.itertext()).strip()
         ):

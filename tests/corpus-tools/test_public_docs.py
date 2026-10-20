@@ -1101,12 +1101,39 @@ class Cleaning(unittest.TestCase):
         parts = parts_of(public.clean(plain, DOC).data)
         self.assertIn("<Template>Normal.dotm</Template>", parts["docProps/app.xml"].decode())
         self.assertIn(f"xmlns:sl='{sl}'", parts["word/settings.xml"].decode())
-        # A drive-relative name and a relative path are paths too.
-        for template in ("D:jroe.dotx", "templates\\jroe.dotx"):
+        # A drive-relative name, a relative path with a backslash, one with slashes only and
+        # one in a child element are paths too.
+        for template in ("D:jroe.dotx", "templates\\jroe.dotx", "/srv/templates/x.dotx",
+                         "<x:b xmlns:x='urn:x'>D:\\x.dotx</x:b>"):
             with self.subTest(template):
                 xml = f"<Properties><Template>{template}</Template></Properties>"
                 self.assertIn("docProps/app.xml: Template holds a path",
                               public.problems(package(**{"docProps/app.xml": xml})))
+        # A self-closing schema library goes too.
+        lone = package(**{"word/settings.xml": f"<w:settings xmlns:w='w'><sl:schemaLibrary "
+                                               f"xmlns:sl='{sl}'/><w:zoom/></w:settings>"})
+        self.assertNotIn("schemaLibrary", parts_of(public.clean(lone, DOC).data)[
+            "word/settings.xml"].decode())
+        # HLinks may keep web and mail addresses and bookmarks, never a local path.
+        vt = "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"
+
+        def links(*targets):
+            values = "".join(f"<vt:variant><vt:lpwstr>{t}</vt:lpwstr></vt:variant>"
+                             for t in targets)
+            return (f"<Properties xmlns:vt='{vt}'><HLinks><vt:vector size='{len(targets)}' "
+                    f"baseType='variant'>{values}</vt:vector></HLinks></Properties>")
+
+        kept = package(**{"docProps/app.xml": links(
+            "https://www.example.gov/a", "", "mailto:help@example.gov", "bookmark=id.1x")})
+        self.assertEqual(public.problems(public.clean(kept, DOC).data), [])
+        for target in ("D:\\drafts\\x.docx", "file:///\\\\srv\\x.docx", "../drafts/x.docx",
+                       "D:\\drafts\\https://www.example.gov/"):
+            with self.subTest(target):
+                data = package(**{"docProps/app.xml": links("https://www.example.gov/", target)})
+                self.assertIn("docProps/app.xml: HLinks holds a local path", public.problems(data))
+                with self.assertRaises(public.Refused) as caught:
+                    public.clean(data, DOC)
+                self.assertIn("HLinks holds a local path", str(caught.exception))
         # Another spelling is refused.
         for part, xml, message in (
             ("docProps/app.xml", "<Properties><Template >D:\\x.dotx</Template ></Properties>",
