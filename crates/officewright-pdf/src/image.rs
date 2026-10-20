@@ -454,8 +454,9 @@ fn u32_at(data: &[u8], at: usize) -> Option<u32> {
 /// 65500, sampling factors that do not divide the largest of the frame, more than 10
 /// components, of which no PDF takes more than 4); whether the tables the headers name
 /// are defined; the coded data; what comes after the end of image, which libjpeg does not
-/// read; and what comes after the first scan once the file ends early or has a marker that
-/// T.81 reserves there, where the check stops.
+/// read; and what comes after the first scan once the file ends early, where the check
+/// stops. A marker libjpeg does not know is refused wherever it is
+/// ([`refuse_unknown_marker`]).
 fn read_jpeg(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> {
     let mut at = 2;
     let mut frame = None;
@@ -479,7 +480,7 @@ fn read_jpeg(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> 
             // Markers without a segment: TEM and the restart markers.
             0x01 | 0xD0..=0xD7 => continue,
             0xD8 | 0xD9 => return Err(malformed("the JPEG file has no scan")),
-            _ => {}
+            _ => refuse_unknown_marker(code, at - 2)?,
         }
         // A scan comes after its frame header (B.2.1).
         let scan_frame = if code == 0xDA {
@@ -579,6 +580,19 @@ fn coded_data_end(data: &[u8], coded: usize) -> usize {
     }
 }
 
+/// Fails for a marker at byte `at` that libjpeg does not know, wherever it is in the file:
+/// those T.81 reserves (0x02 to 0xBF, B.1.1.3) and JPG and JPGn (0xC8, 0xF0 to 0xFD), kept
+/// for extensions. libjpeg stops at them ("Unsupported marker type", or "Unsupported JPEG
+/// process: SOF type 0xc8"), so such a file draws nothing in a viewer that decodes with it.
+fn refuse_unknown_marker(code: u8, at: usize) -> std::result::Result<(), Problem> {
+    match code {
+        0x02..=0xBF | 0xC8 | 0xF0..=0xFD => Err(malformed(format!(
+            "the JPEG file has marker FF{code:02X} at byte {at}, which T.81 reserves"
+        ))),
+        _ => Ok(()),
+    }
+}
+
 /// Fails for a marker of a frame that cannot go into a PDF: lossless, differential and
 /// arithmetic-coded frames, and the DHP and EXP markers of hierarchical files (B.3,
 /// Annex J). DHT, JPG and DAC are not frame headers.
@@ -605,7 +619,8 @@ fn refuse_other_frame(code: u8) -> std::result::Result<(), Problem> {
 /// The coded data of a scan runs to the next marker, a 0xFF that is not a stuffed zero
 /// (0xFF 0x00), fill (more 0xFF) or a restart marker (B.1.1.2, B.1.1.5). The check ends at
 /// the end of image, after which libjpeg reads nothing; it also ends, refusing nothing,
-/// where the file ends early, or at a marker T.81 reserves, which it cannot follow.
+/// where the file ends early. A marker libjpeg does not know is refused
+/// ([`refuse_unknown_marker`]).
 fn check_later_scans(
     data: &[u8],
     coded: usize,
@@ -647,11 +662,10 @@ fn check_later_scans(
                 )));
             }
             // Segments, skipped by their length as before the first scan: 0xC3 to 0xCF
-            // (the other frame markers, DHT, JPG and DAC), SOS, DQT, DNL, DRI, DHP, EXP,
-            // APP0 to APP15 and COM. Any other marker is one T.81 reserves (0x02 to 0xBF,
-            // JPGn 0xF0 to 0xFD) and is not followed.
-            0xC3..=0xCF | 0xDA..=0xDF | 0xE0..=0xEF | 0xFE => {}
-            _ => return Ok(()),
+            // but JPG (the other frame markers, DHT and DAC), SOS, DQT, DNL, DRI, DHP, EXP,
+            // APP0 to APP15 and COM. Any other marker is one libjpeg does not know.
+            0xC3..=0xC7 | 0xC9..=0xCF | 0xDA..=0xDF | 0xE0..=0xEF | 0xFE => {}
+            _ => return refuse_unknown_marker(code, at - 2),
         }
         refuse_other_frame(code)?;
         let Some(length) = u16_at(data, at).map(usize::from) else {
@@ -2837,17 +2851,11 @@ pub(crate) mod tests {
                 panic!("{more:02X?}: {err}");
             });
         }
-        // A file that ends early, or a marker T.81 reserves between scans, ends the
-        // check: what follows is not read.
+        // A file that ends early ends the check: what follows is not read.
         let cut = [&progressive[..progressive.len() - 2], &sound].concat();
         Image::from_bytes(cut.clone()).unwrap();
         Image::from_bytes([&cut[..], &bad[..7]].concat()).unwrap();
         Image::from_bytes([&cut[..], &bad[..3]].concat()).unwrap();
-        Image::from_bytes(with_more(
-            &progressive,
-            &[&b"\xFF\x02\x00\x04ab"[..], &bad].concat(),
-        ))
-        .unwrap();
 
         let refused = [
             (
@@ -2919,6 +2927,11 @@ pub(crate) mod tests {
                 b"\xFF\xD8".to_vec(),
                 "the JPEG file has a second start of image, at byte",
             ),
+            // A marker libjpeg does not know (#335), before a scan the check would refuse.
+            (
+                [&b"\xFF\x02\x00\x04ab"[..], &bad].concat(),
+                "has marker FF02 at byte",
+            ),
         ];
         for (more, message) in refused {
             let err = error(with_more(&progressive, &more));
@@ -2980,6 +2993,8 @@ pub(crate) mod tests {
                 b"\xFF\xC0\x00\x0B\x08\x00\x04\x00\x04\x01\x01\x11\x00".to_vec(),
                 b"\xFF\xC3\x00\x0B\x08\x00\x04\x00\x04\x01\x01\x11\x00".to_vec(),
                 b"\xFF\xD8".to_vec(),
+                // A marker libjpeg does not know (#335).
+                b"\xFF\x02\x00\x04ab".to_vec(),
             ] {
                 assert_eq!(written(with_more(&single, &after)), single, "{after:02X?}");
             }
@@ -2997,14 +3012,9 @@ pub(crate) mod tests {
                 written(with_more(&single, &[&fill[..], &scan(&[1])].concat())),
                 [&single[..end], fill, b"\xFF\xD9"].concat()
             );
-            // What the check does not refuse stays as it is: a COM segment, a segment cut off
-            // by the end of the file, and a marker T.81 reserves (libjpeg fails on the last
-            // two, #335).
-            for after in [
-                &b"\xFF\xFE\x00\x03x"[..],
-                b"\xFF\xDA\x00",
-                b"\xFF\x02\x00\x04ab",
-            ] {
+            // What the check does not refuse stays as it is: a COM segment, and a segment cut
+            // off by the end of the file (libjpeg fails on the last).
+            for after in [&b"\xFF\xFE\x00\x03x"[..], b"\xFF\xDA\x00"] {
                 let data = with_more(&single, after);
                 assert_eq!(written(data.clone()), data, "{after:02X?}");
             }
@@ -3045,6 +3055,52 @@ pub(crate) mod tests {
             error(with_more(&twelve_bit, &bad)),
             error(twelve_bit.clone()),
         );
+    }
+
+    #[test]
+    fn refuses_markers_libjpeg_does_not_know() {
+        // T.81's reserved markers, JPG and JPGn: libjpeg stops at each, before the first
+        // scan and after it (#335).
+        let unknown = (0x02..=0xBF).chain([0xC8]).chain(0xF0..=0xFD);
+        let baseline = jpeg(0xC0, 8, 4, 4, 1, false);
+        let progressive = jpeg(0xC2, 8, 4, 4, 1, false);
+        let ac = b"\xFF\xDA\x00\x08\x01\x01\x11\x01\x3F\x00\x12\x34";
+        let mut count = 0;
+        for code in unknown {
+            let segment = [0xFF, code, 0x00, 0x04, b'a', b'b'];
+            let message = format!("the JPEG file has marker FF{code:02X} at byte 2, which");
+            let before = [&baseline[..2], &segment, &baseline[2..]].concat();
+            let err = error(before);
+            assert!(err.contains(&message), "{code:02X}: {err}");
+            // Between the scans of a progressive frame, before a scan it would take.
+            let between = with_more(&progressive, &[&segment[..], ac].concat());
+            let err = error(between);
+            assert!(
+                err.contains(&format!("marker FF{code:02X} at byte")),
+                "{code:02X}: {err}"
+            );
+            // After the only scan of a sequential frame, which goes in without it.
+            let after = with_more(&baseline, &segment);
+            let image = Image::from_bytes(after).unwrap();
+            assert!(
+                matches!(image.inner.encoding, Encoding::Jpeg { end: Some(_), .. }),
+                "{code:02X}"
+            );
+            count += 1;
+        }
+        assert_eq!(count, 0xBE + 1 + 14);
+        // Every other marker is known: those with a segment are read or skipped by their
+        // length before the frame header, and the rest are refused for what they are.
+        for code in (0xC0..=0xFE).filter(|code| !matches!(code, 0xC8 | 0xF0..=0xFD)) {
+            let segment = [0xFF, code, 0x00, 0x04, b'a', b'b'];
+            let before = [&baseline[..2], &segment, &baseline[2..]].concat();
+            if let Err(err) = Image::from_bytes(before) {
+                assert!(
+                    !err.to_string().contains("which T.81 reserves"),
+                    "{code:02X}: {err}"
+                );
+            }
+        }
     }
 
     #[test]
