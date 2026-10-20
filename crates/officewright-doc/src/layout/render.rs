@@ -29,7 +29,7 @@ impl Document {
     /// Word embeds under a name of its own (`___WRD_EMBED_SUB_` and a number) is found by
     /// none, so other fonts are used, and the report says so (#216). At most 256 faces
     /// and named instances of embedded fonts are used, and no program with a name longer
-    /// than any font's (#226); the report says what is left out.
+    /// than any font's; the report says what is left out.
     ///
     /// # Errors
     ///
@@ -166,9 +166,9 @@ impl Document {
                     continue;
                 }
                 faces += count;
-                // The font book keeps each name a face or instance has, however long; a
-                // document's program could hold names of megabytes. Until it bounds them
-                // (#226), such a program does not reach a font book.
+                // A name longer than any font's marks a program made to cost memory: the
+                // font book leaves such a name out since #210 (#226), and this leaves the
+                // whole program out and reports it.
                 if scan.long_name {
                     entries.push(ReportEntry::new(
                         ReportKind::FontEmbedding,
@@ -236,15 +236,16 @@ impl Document {
 /// add to the font book, a collection counting each of its faces and a variable font
 /// each of the instances the font book reads. Word embeds at most four programs a font;
 /// the limit is our choice, far above what documents embed (24 programs in all in the
-/// corpora), and with name records of at most [`MAX_NAME_BYTES`] it bounds what they
-/// keep to about 150 MiB at worst: the font book keeps the decoded text, and a Mac Roman
-/// byte can take three bytes of UTF-8 (one collection of 256 faces, each with 198 names
-/// of 512 bytes, took 155 MiB; #226 is to bound the decoded text).
+/// corpora). The font book bounds the names it keeps since #210: none longer than 512
+/// bytes of UTF-8, no name record of more than 1,024 bytes decoded, at most 64 KiB of
+/// names read in each of its passes, so about 300 KB for a face and 15 KB for a named
+/// instance, and about 77 MB for the 256 (#236).
 const MAX_EMBEDDED_FACES: usize = 256;
 
 /// The longest name, in bytes, that an embedded program may have among those the font
 /// book keeps. Real fonts' are short: Windows allows 31 characters in a face name and
-/// OpenType 63 in a PostScript name. Our choice, until the font book bounds them (#226).
+/// OpenType 63 in a PostScript name. Our choice; the font book leaves out a longer name
+/// itself since #210, and this leaves out the program.
 const MAX_NAME_BYTES: u16 = 512;
 
 /// What the font book would keep of a program, read from its tables without reading its
