@@ -1,6 +1,6 @@
-//! Drawings as IR objects: a picture in the line or floating, with its image added to
-//! the IR once however many pictures show it. Drawings that show no picture (shapes,
-//! charts, groups) are listed.
+//! Drawings, DrawingML (`w:drawing`) and VML (`w:pict`), as IR objects: a picture in the
+//! line or floating, with its image added to the IR once however many pictures show it.
+//! Drawings that show no picture (shapes, charts, text boxes, groups) are listed.
 
 use officewright_core::Pt;
 use officewright_layout::ReportKind;
@@ -8,8 +8,8 @@ use officewright_layout::ir;
 
 use super::{Once, Translator};
 use crate::model::{
-    Anchor, AnchorHorizontalAlign, AnchorVerticalAlign, Drawing, HorizontalReference, Image,
-    Offsets, VerticalReference, WrapKind,
+    Anchor, AnchorHorizontalAlign, AnchorVerticalAlign, Crop, Drawing, HorizontalReference, Image,
+    Offsets, VerticalReference, VmlDrawing, WrapKind,
 };
 
 /// The PNG file signature.
@@ -34,15 +34,7 @@ impl<'a> Translator<'a> {
             });
             return None;
         };
-        let image = match picture.image() {
-            Some(image) => self.image(picture.image_index(), image),
-            None => {
-                self.leave_out(ReportKind::FeatureUnsupported, || {
-                    "a picture's image is not in the package: its frame is left empty".into()
-                });
-                self.missing_image()
-            }
-        };
+        let image = self.picture_image(picture.image_index(), picture.image());
         // The IR's picture has no outline, colour effects, other effects or shape yet
         // (#303). Each is looked for until it is listed.
         if !self.reported(Once::PictureOutline) && picture.has_outline() {
@@ -69,16 +61,9 @@ impl<'a> Translator<'a> {
                 "a picture cut to a shape (a:prstGeom other than rect, or a:custGeom) is drawn whole as a rectangle, here and wherever else the document has one",
             );
         }
-        let crop = picture.crop().map(|crop| {
-            ir::Crop::default()
-                .with_left(crop.left())
-                .with_top(crop.top())
-                .with_right(crop.right())
-                .with_bottom(crop.bottom())
-        });
         let content = ir::ObjectContent::Picture(
             ir::Picture::new(image)
-                .with_crop(crop)
+                .with_crop(picture.crop().map(crop))
                 .with_rotation(picture.rotation())
                 .with_flip_horizontal(picture.flip_horizontal())
                 .with_flip_vertical(picture.flip_vertical()),
@@ -93,15 +78,76 @@ impl<'a> Translator<'a> {
             );
         };
         Some(ir::Inline::anchored(
-            ir::AnchoredObject::new(content, size, horizontal(&anchor), vertical(&anchor))
-                .with_effect_extent(effect_extent)
-                .with_wrap(wrap(anchor.wrap()))
-                .with_behind_text(anchor.behind_text())
-                .with_layout_in_cell(anchor.layout_in_cell())
-                .with_allow_overlap(anchor.allow_overlap())
-                .with_z_order(anchor.z_order())
-                .with_distances(insets(anchor.distances())),
+            anchored(content, size, &anchor).with_effect_extent(effect_extent),
         ))
+    }
+
+    /// A VML drawing as an IR object in the line or anchored there, as
+    /// [`drawing`](Self::drawing) makes one of a drawing; none when it shows no
+    /// picture, has no size, or is hidden, which Word does not show either.
+    pub(super) fn vml_drawing(&mut self, drawing: VmlDrawing<'a>) -> Option<ir::Inline> {
+        let Some(picture) = drawing.picture() else {
+            self.leave_out(ReportKind::FeatureUnsupported, || {
+                "a VML drawing that shows no picture (a shape, text box or group) is left out (w:pict)"
+                    .into()
+            });
+            return None;
+        };
+        if picture.is_hidden() {
+            return None;
+        }
+        let (Some(width), Some(height)) = (picture.width(), picture.height()) else {
+            self.leave_out(ReportKind::FeatureUnsupported, || {
+                "a picture without a size is left out".into()
+            });
+            return None;
+        };
+        let image = self.picture_image(picture.image_index(), picture.image());
+        // As for DrawingML (#303), each is looked for until it is listed.
+        if !self.reported(Once::VmlPictureOutline) && picture.has_outline() {
+            self.report_once(
+                Once::VmlPictureOutline,
+                "a VML picture's outline (stroked, v:stroke) is not drawn, here and wherever else the document has one",
+            );
+        }
+        if !self.reported(Once::VmlPictureColor) && picture.has_color_adjustments() {
+            self.report_once(
+                Once::VmlPictureColor,
+                "a VML picture's colour adjustments (v:imagedata, such as gain, blacklevel or grayscale) are not applied, here and wherever else the document has them",
+            );
+        }
+        if !self.reported(Once::VmlPictureText) && picture.has_text() {
+            self.report_once(
+                Once::VmlPictureText,
+                "a VML picture's text (v:textbox) is left out, here and wherever else the document has some",
+            );
+        }
+        let content = ir::ObjectContent::Picture(
+            ir::Picture::new(image)
+                .with_crop(picture.crop().map(crop))
+                .with_rotation(picture.rotation())
+                .with_flip_horizontal(picture.flip_horizontal())
+                .with_flip_vertical(picture.flip_vertical()),
+        );
+        let size = ir::Size::new(width, height);
+        Some(match picture.anchor() {
+            Some(anchor) => ir::Inline::anchored(anchored(content, size, &anchor)),
+            None => ir::InlineObject::new(content, size).into(),
+        })
+    }
+
+    /// The IR image a picture shows, or the empty one, listed, when the package does not
+    /// have its image: the layout keeps the picture's frame.
+    fn picture_image(&mut self, index: Option<u32>, image: Option<Image<'a>>) -> ir::ImageId {
+        match image {
+            Some(image) => self.image(index, image),
+            None => {
+                self.leave_out(ReportKind::FeatureUnsupported, || {
+                    "a picture's image is not in the package: its frame is left empty".into()
+                });
+                self.missing_image()
+            }
+        }
     }
 
     /// The IR image of an image of the package, added the first time a picture shows it.
@@ -183,6 +229,26 @@ fn subtype(content_type: &str) -> String {
         .to_ascii_lowercase();
     let subtype = subtype.strip_prefix("x-").unwrap_or(&subtype);
     subtype.strip_suffix("+xml").unwrap_or(subtype).to_owned()
+}
+
+/// The IR's crop of a picture.
+fn crop(crop: Crop) -> ir::Crop {
+    ir::Crop::default()
+        .with_left(crop.left())
+        .with_top(crop.top())
+        .with_right(crop.right())
+        .with_bottom(crop.bottom())
+}
+
+/// A floating object placed by its anchor.
+fn anchored(content: ir::ObjectContent, size: ir::Size, anchor: &Anchor) -> ir::AnchoredObject {
+    ir::AnchoredObject::new(content, size, horizontal(anchor), vertical(anchor))
+        .with_wrap(wrap(anchor.wrap()))
+        .with_behind_text(anchor.behind_text())
+        .with_layout_in_cell(anchor.layout_in_cell())
+        .with_allow_overlap(anchor.allow_overlap())
+        .with_z_order(anchor.z_order())
+        .with_distances(insets(anchor.distances()))
 }
 
 fn insets(offsets: Offsets) -> ir::Insets {

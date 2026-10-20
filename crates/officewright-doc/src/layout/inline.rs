@@ -154,6 +154,12 @@ impl<'a> Translator<'a> {
                         content.push(object);
                     }
                 }
+                RunContent::VmlDrawing(drawing) => {
+                    if let Some(object) = self.vml_drawing(drawing) {
+                        boxed |= matches!(object, ir::Inline::Object(_));
+                        content.push(object);
+                    }
+                }
                 RunContent::CommentReference(_) | RunContent::LastRenderedPageBreak => {}
                 // The legacy page number: a PAGE field (ECMA-376 Part 1, §17.3.3.22).
                 RunContent::Other(other) if other.local_name() == "pgNum" => {
@@ -173,7 +179,6 @@ impl<'a> Translator<'a> {
                 }
                 RunContent::Other(other) => {
                     let message = match other.local_name() {
-                        "pict" => "a VML drawing is left out",
                         "object" => "an embedded object is left out",
                         "ptab" => "an absolute position tab is left out",
                         name if is_marker(name) => continue,

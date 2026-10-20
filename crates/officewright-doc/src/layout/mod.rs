@@ -102,8 +102,8 @@ impl Document {
     ///
     /// Not translated yet, and listed: the table properties of a table style's conditional
     /// formats and a row's table property exceptions, drawings that show no picture
-    /// (shapes, charts, groups), VML drawings
-    /// (`w:pict`) and other objects, equations, and indents and spacing given in
+    /// (shapes, charts, text boxes, groups, in DrawingML or VML) and other objects,
+    /// equations, and indents and spacing given in
     /// character or line units, which keep their value in points.
     ///
     /// Also listed is what the IR has no place for yet: a row's own alignment and cell
@@ -258,6 +258,7 @@ const DELETED_MARK: &str = "a paragraph mark deleted or moved away as a tracked 
 /// section (a mail merge writes a section per letter), so that the report's 1,000
 /// entries are not spent on one feature.
 #[derive(Clone, Copy, Debug)]
+#[repr(u32)]
 enum Once {
     Emboss = 1,
     Imprint = 1 << 1,
@@ -288,6 +289,9 @@ enum Once {
     NumberForm = 1 << 26,
     NumberSpacing = 1 << 27,
     StylisticSets = 1 << 28,
+    VmlPictureOutline = 1 << 29,
+    VmlPictureColor = 1 << 30,
+    VmlPictureText = 1 << 31,
 }
 
 impl<'a> Translator<'a> {
