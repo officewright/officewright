@@ -337,6 +337,20 @@ fn splits_arrays_and_strings_at_the_limits_readers_handle() -> TestResult {
 }
 
 #[test]
+fn notdef_keeps_cid_0_wherever_it_is_drawn() -> TestResult {
+    let font = Font::from_bytes(minimal()?, 0)?;
+    let mut run = GlyphRun::new(&font, Pt(10.0), Pt(72.0), Pt(700.0));
+    // .notdef first, as a layout draws it for a character no font has.
+    run.push_cluster("\u{FFFF}", [glyph(GlyphId::NOTDEF, 0.0, 0.0)]);
+    run.push_cluster("A", [glyph(A, 6.0, 0.0)]);
+    let pdf = pdf_of(&[run])?;
+    // Every subset keeps .notdef as glyph 0, so the A is CID 1 and has its own width.
+    assert!(content(&pdf)?.contains("<0000"), "{pdf}");
+    assert_eq!(widths(&pdf)?.get(&1), Some(&600.0), "{pdf}");
+    Ok(())
+}
+
+#[test]
 fn writes_the_run_state_inside_its_own_graphics_state() -> TestResult {
     let font = Font::from_bytes(minimal()?, 0)?;
     let mut plain = GlyphRun::new(&font, Pt(10.0), Pt(72.0), Pt(700.0));

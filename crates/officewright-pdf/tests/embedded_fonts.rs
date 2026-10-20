@@ -761,6 +761,35 @@ fn a_shared_glyph_keeps_each_character_for_text_extraction() -> TestResult {
 }
 
 #[test]
+fn replacement_text_on_an_earlier_page_makes_the_file_pdf_15() -> TestResult {
+    let font = shared_glyph_font()?;
+    let mut doc = Document::new();
+    doc.add_page(PageSize::A4)?
+        .add_text(Pt(72.0), Pt(700.0), &font, Pt(12.0), "AÁ")?;
+    // The first page is encoded when the second is added; its replacement text still
+    // decides the version.
+    doc.add_page(PageSize::A4)?
+        .add_text(Pt(72.0), Pt(700.0), &font, Pt(12.0), "A")?;
+    let pdf = doc.to_bytes()?;
+    assert!(pdf.starts_with(b"%PDF-1.5\n"));
+    assert!(String::from_utf8_lossy(&pdf).contains("/ActualText"));
+    Ok(())
+}
+
+#[test]
+fn writes_nothing_when_a_font_cannot_be_reduced() -> TestResult {
+    let font = Font::from_bytes(noto_sans()?, 0)?;
+    let mut doc = one_line(&font, "Noto")?;
+    // Reducing CFF outlines reads charstrings, and a budget of nothing allows none.
+    doc.set_subset_budget(0);
+    let mut out = Vec::new();
+    let err = doc.write_to(&mut out).unwrap_err();
+    assert!(matches!(err, Error::Embed { .. }), "{err:?}");
+    assert!(out.is_empty(), "{} bytes were written", out.len());
+    Ok(())
+}
+
+#[test]
 fn shows_long_text_with_strings_readers_handle() -> TestResult {
     // 40,001 characters shown with their glyphs' own mappings, then 20,000 with
     // replacement text: more than the 32,767 bytes of a string in PDF 1.5. Neither part
