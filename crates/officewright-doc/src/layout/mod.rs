@@ -29,8 +29,8 @@ thread_local! {
     /// Work the translation did on this thread, for tests of its cost: inlines added to
     /// paragraphs and field results, bytes of names and tags looked up to share run
     /// styles, run styles built, places tried to cut names, comparisons of compatibility
-    /// flags, table cells copied where a horizontal merge should move them, and cells
-    /// whose properties in effect were worked out.
+    /// flags, table cells copied where a horizontal merge should move them, cells whose
+    /// properties in effect were worked out, and paragraph properties not shared.
     pub(crate) static WORK: std::cell::Cell<Work> = const { std::cell::Cell::new(Work {
         inlines: 0,
         compared: 0,
@@ -40,6 +40,8 @@ thread_local! {
         cell_copies: 0,
         cell_reads: 0,
         label_checks: 0,
+        paragraph_props: 0,
+        props_compared: 0,
     }) };
 }
 
@@ -59,6 +61,10 @@ pub(crate) struct Work {
     pub(crate) cell_reads: usize,
     /// Levels of list instances whose labels were looked at for what they draw.
     pub(crate) label_checks: usize,
+    /// Paragraph properties not shared with an earlier paragraph's.
+    pub(crate) paragraph_props: usize,
+    /// Comparisons of paragraph properties with kept ones.
+    pub(crate) props_compared: usize,
 }
 
 /// Counts work for [`WORK`].
@@ -194,6 +200,10 @@ struct Translator<'a> {
     formats: Formats<'a>,
     ir: ir::Document,
     run_styles: style::RunStyles,
+    /// The paragraph properties given to the IR so far, by a fingerprint of them, at most
+    /// [`paragraph::SHARED_PER_FINGERPRINT`] for each: paragraphs with equal properties
+    /// share one (#275).
+    paragraph_props: paragraph::SharedProps,
     lists: list::Lists,
     /// A key per paragraph style, by its place among the styles, for contextual spacing.
     style_keys: HashMap<usize, ir::StyleKey>,
@@ -287,6 +297,7 @@ impl<'a> Translator<'a> {
             formats: document.formats(),
             ir: ir::Document::default(),
             run_styles: style::RunStyles::default(),
+            paragraph_props: paragraph::SharedProps::default(),
             lists: list::Lists::default(),
             style_keys: HashMap::new(),
             left_out: Vec::new(),
