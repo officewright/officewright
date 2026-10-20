@@ -7,7 +7,8 @@ use officewright_core::{Color, Pt};
 use officewright_font::GlyphId;
 
 use crate::document::{MAX_POSITION, check_position, number};
-use crate::embed::{Prepared, Usage, text_string};
+use crate::embed::{Codes, text_string, width};
+use crate::font::Embedded;
 use crate::font::check_font_size;
 use crate::path::{check_length, check_range, color};
 use crate::{Error, Font, Result};
@@ -284,21 +285,22 @@ impl GlyphRun {
     }
 
     /// Records the glyphs the run shows and the text of those that show a cluster alone.
-    pub(crate) fn record(&self, usage: &mut Usage) {
+    pub(crate) fn record(&self, codes: &mut Codes) {
         for (text, glyphs) in self.clusters() {
             match mapped(text, glyphs) {
-                Some(glyph) => usage.add(glyph, text),
+                Some(glyph) => codes.add(glyph, text),
                 None => {
                     for placed in glyphs {
-                        usage.add_unmapped(placed.glyph.to_u16());
+                        codes.add_unmapped(placed.glyph.to_u16());
                     }
                 }
             }
         }
     }
 
-    /// Writes the run as a text object that uses the font resource `/F<resource>`, and
-    /// returns whether it needed replacement text.
+    /// Writes the run as a text object that uses the font resource `/F<resource>`, the
+    /// run's font `font` with the CIDs of `codes`, which has recorded the run, and returns
+    /// whether it needed replacement text.
     ///
     /// The run's state is set inside `q` … `Q`, so nothing drawn after it inherits its
     /// colour, scale, rise or rendering mode.
@@ -306,7 +308,8 @@ impl GlyphRun {
         &self,
         out: &mut Vec<u8>,
         resource: usize,
-        prepared: &Prepared<'_>,
+        font: &Embedded,
+        codes: &Codes,
     ) -> bool {
         let size = written(self.size.0);
         let scale = written(self.horizontal_scale * 100.0) / 100.0;
@@ -327,7 +330,8 @@ impl GlyphRun {
         let mut writer = Writer {
             out,
             run: self,
-            prepared,
+            font,
+            codes,
             // One em of glyph space, 1000 units, is this wide on the page.
             em: size * scale,
             pen: None,
@@ -336,8 +340,7 @@ impl GlyphRun {
         };
         let mut actual_text = false;
         for (text, glyphs) in self.clusters() {
-            let replaced =
-                mapped(text, glyphs).is_none_or(|glyph| prepared.usage().text(glyph) != Some(text));
+            let replaced = mapped(text, glyphs).is_none_or(|glyph| codes.text(glyph) != Some(text));
             if replaced {
                 writer.end_array();
                 let line = format!("/Span << /ActualText {} >> BDC\n", text_string(text));
@@ -379,7 +382,8 @@ fn written(value: f64) -> f64 {
 struct Writer<'a, 'b> {
     out: &'a mut Vec<u8>,
     run: &'b GlyphRun,
-    prepared: &'b Prepared<'b>,
+    font: &'b Embedded,
+    codes: &'b Codes,
     /// The width on the page of 1000 units of glyph space: the font size times the
     /// horizontal scale, as written.
     em: f64,
@@ -427,7 +431,7 @@ impl Writer<'_, '_> {
             None => self.place(x),
         };
         let glyph = placed.glyph.to_u16();
-        let cid = self.prepared.cid(glyph);
+        let cid = self.codes.cid(glyph);
         match self.array.last_mut() {
             // A string may have 32767 bytes, two per CID; the element starts with `<`.
             Some(last) if last.starts_with('<') && last.len() < 1 + 4 * (MAX_STRING_BYTES / 2) => {
@@ -435,7 +439,7 @@ impl Writer<'_, '_> {
             }
             _ => self.array.push(format!("<{cid:04X}")),
         }
-        self.pen = Some(pen + self.prepared.width(glyph) * self.em / 1000.0);
+        self.pen = Some(pen + width(self.font, glyph) * self.em / 1000.0);
     }
 
     /// Sets the text matrix so that the next glyph starts at `x` on the run's baseline,

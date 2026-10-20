@@ -7,7 +7,7 @@ use officewright_font::SubsetBudget;
 
 use officewright_core::Color;
 
-use crate::embed::{EXTRA_OBJECTS, Prepared, Usage};
+use crate::embed::{Codes, EXTRA_OBJECTS, Prepared, show};
 use crate::font::check_font_size;
 use crate::glyphs::MAX_STRING_BYTES;
 use crate::image::draw_operators;
@@ -52,6 +52,11 @@ pub struct Document {
     pages: Vec<Page>,
     compression: Compression,
     subset_budget: u64,
+    /// The CIDs of the embedded fonts' glyphs that the encoded pages show.
+    codes: FontCodes,
+    /// The page handed out last, by `add_page` or `page_mut`: the only page whose text
+    /// and glyph runs may not be encoded yet.
+    open: Option<usize>,
 }
 
 impl Default for Document {
@@ -60,6 +65,8 @@ impl Default for Document {
             pages: Vec::new(),
             compression: Compression::default(),
             subset_budget: SUBSET_BUDGET,
+            codes: FontCodes::default(),
+            open: None,
         }
     }
 }
@@ -74,12 +81,17 @@ pub struct Page {
     /// The images the page draws, in the order of first use; the first is the page's
     /// image resource `/Im1`.
     images: Vec<Image>,
-    /// The content stream. Text stays text until the document is written, when the text
-    /// of every page is known.
+    /// The content stream: operators, followed by the text and glyph runs drawn since the
+    /// page was last encoded and the operators drawn after them. The document encodes
+    /// a page when it hands out another one, so that only the page being drawn keeps text
+    /// and runs, which take far more memory than the operators that show them; the
+    /// glyphs are then given CIDs in the order they are drawn.
     content: Vec<Content>,
     /// How many clipping paths are in effect: the `q` operators of push_clip that no
     /// pop_clip has closed yet.
     clips: usize,
+    /// Whether some text encoded so far needed replacement text.
+    actual_text: bool,
 }
 
 /// A piece of a page's content stream.
@@ -87,11 +99,14 @@ pub struct Page {
 enum Content {
     /// Operators, ready to write.
     Operators(Vec<u8>),
-    /// Text that has been checked against its font, to show with one string operator.
+    /// Text in an embedded font that has been checked against it, to show with one string
+    /// operator.
     Text {
         /// The font's index in the page's fonts.
         font: usize,
         text: String,
+        /// The glyph of each character.
+        glyphs: Vec<u16>,
     },
     /// A run of glyphs that has been checked.
     Glyphs {
@@ -119,6 +134,7 @@ impl Document {
                 height: size.height(),
             });
         }
+        self.encode_open_page();
         let index = self.pages.len();
         self.pages.push(Page {
             size,
@@ -126,7 +142,9 @@ impl Document {
             images: Vec::new(),
             content: Vec::new(),
             clips: 0,
+            actual_text: false,
         });
+        self.open = Some(index);
         #[allow(clippy::indexing_slicing)] // reason: the page was just pushed at `index`
         let page = &mut self.pages[index];
         Ok(page)
@@ -139,7 +157,22 @@ impl Document {
 
     /// The page at `index`, counting from 0 in the order the pages were added.
     pub fn page_mut(&mut self, index: usize) -> Option<&mut Page> {
+        // The page being drawn stays as it is until another is: a caller that asks for it
+        // for each thing it draws, as the C ABI does, encodes it once.
+        if self.open != Some(index) {
+            self.encode_open_page();
+            if index < self.pages.len() {
+                self.open = Some(index);
+            }
+        }
         self.pages.get_mut(index)
+    }
+
+    /// Encodes the text and glyph runs of the page handed out last.
+    fn encode_open_page(&mut self) {
+        if let Some(page) = self.open.take().and_then(|index| self.pages.get_mut(index)) {
+            page.encode(&mut self.codes);
+        }
     }
 
     /// Sets how the file stores page content, embedded fonts, and the samples and soft
@@ -258,53 +291,33 @@ impl Document {
             .collect();
 
         // Everything is prepared before anything is written, so an error leaves `out`
-        // untouched. First the glyphs each embedded font shows, over all pages.
-        let mut usages = vec![Usage::default(); fonts.len()];
-        for (page, map) in self.pages.iter().zip(&page_fonts) {
-            for piece in &page.content {
-                let (Content::Text { font, .. } | Content::Glyphs { font, .. }) = piece else {
-                    continue;
-                };
-                // reason: `map` has an entry for each of the page's fonts, which are the
-                // only fonts its texts and runs use
-                #[allow(clippy::indexing_slicing)]
-                let font = map[*font];
-                let (Some(font), Some(usage)) = (fonts.get(font), usages.get_mut(font)) else {
-                    continue;
-                };
-                match piece {
-                    Content::Text { text, .. } if font.embedded().is_some() => {
-                        let lookup = font.lookup();
-                        for (offset, ch) in text.char_indices() {
-                            usage.add(lookup.glyph(ch, offset)?.id, ch.encode_utf8(&mut [0; 4]));
-                        }
-                    }
-                    Content::Glyphs { run, .. } => run.record(usage),
-                    _ => {}
-                }
+        // untouched. First the text and runs of the page drawn last, which give the last
+        // glyphs their CIDs.
+        let mut codes = self.codes.clone();
+        let mut open_content = None;
+        let mut actual_text = false;
+        for (i, page) in self.pages.iter().enumerate() {
+            actual_text |= page.actual_text;
+            if page.content.iter().any(Content::is_pending) {
+                let mut stream = Vec::new();
+                actual_text |= encode(&page.content, &page.fonts, &mut codes, &mut stream);
+                open_content = Some((i, stream));
             }
         }
         // The fonts share one budget, since all their subsets are kept until the file is
         // written.
+        let entries: Vec<Option<usize>> = fonts.iter().map(|font| codes.entry(font)).collect();
         let mut budget = SubsetBudget::new(self.subset_budget);
-        let encoders = fonts
+        let prepared = fonts
             .iter()
-            .zip(usages)
-            .map(|(&font, usage)| match font.embedded() {
-                Some(embedded) => Ok(Encoder::Embedded(
-                    font,
-                    Prepared::new(embedded, usage, &mut budget)?,
-                )),
-                None => Ok(Encoder::Standard(font)),
+            .zip(&entries)
+            .map(|(font, entry)| match (font.embedded(), entry) {
+                (Some(embedded), Some(entry)) => {
+                    Prepared::new(embedded, codes.get(*entry), &mut budget).map(Some)
+                }
+                _ => Ok(None),
             })
             .collect::<Result<Vec<_>>>()?;
-        let mut actual_text = false;
-        let mut contents = Vec::with_capacity(self.pages.len());
-        for (page, map) in self.pages.iter().zip(&page_fonts) {
-            let (content, spans) = page.content_stream(map, &encoders)?;
-            contents.push(content);
-            actual_text |= spans;
-        }
 
         // Objects: 1 catalog, 2 page tree, then a font dictionary per font, then a page
         // and its content stream per page, then the other objects of each embedded font,
@@ -313,14 +326,14 @@ impl Document {
         let first_page = 3 + fonts.len();
         let page_object = |i: usize| first_page + 2 * i;
         let mut next_object = first_page + 2 * self.pages.len();
-        let mut font_dictionaries = Vec::with_capacity(encoders.len());
+        let mut font_dictionaries = Vec::with_capacity(fonts.len());
         let mut font_objects = Vec::new();
-        for encoder in &encoders {
-            match encoder {
-                Encoder::Standard(font) => {
+        for (font, prepared) in fonts.iter().zip(&prepared) {
+            match prepared {
+                None => {
                     font_dictionaries.push(font.standard_dictionary().unwrap_or_default().to_vec());
                 }
-                Encoder::Embedded(_, prepared) => {
+                Some(prepared) => {
                     font_dictionaries.push(prepared.dictionary(next_object));
                     font_objects.extend(prepared.objects(next_object, self.compression));
                     next_object += EXTRA_OBJECTS;
@@ -367,12 +380,11 @@ impl Document {
             out.put_object(font_object(i), dictionary)?;
         }
 
-        for (i, (((page, fonts), images), content)) in self
+        for (i, ((page, fonts), images)) in self
             .pages
             .iter()
             .zip(&page_fonts)
             .zip(&page_images)
-            .zip(&contents)
             .enumerate()
         {
             let page_id = page_object(i);
@@ -413,8 +425,13 @@ impl Document {
                 .as_bytes(),
             )?;
 
+            // One page's content stream at a time.
+            let content = match &open_content {
+                Some((open, stream)) if *open == i => page.content_stream(stream),
+                _ => page.content_stream(&[]),
+            };
             offsets.push(out.written);
-            out.put_object(page_id + 1, &stream_object("", content, self.compression))?;
+            out.put_object(page_id + 1, &stream_object("", &content, self.compression))?;
         }
 
         let mut id = first_page + 2 * self.pages.len();
@@ -523,9 +540,15 @@ impl Page {
         check_font_size(font_size)?;
         check_position(x, y)?;
         let lookup = font.lookup();
+        let mut glyphs = Vec::new();
         for (offset, ch) in text.char_indices() {
-            lookup.glyph(ch, offset)?;
+            glyphs.push(lookup.glyph(ch, offset)?.id);
         }
+        // Text in a standard font needs no CIDs, and is encoded at once.
+        let standard = match font.embedded() {
+            None => Some(font.encode(text)?),
+            Some(_) => None,
+        };
         let font = self.font_index(font);
         self.push_operators(
             format!(
@@ -537,10 +560,18 @@ impl Page {
             )
             .as_bytes(),
         );
-        self.content.push(Content::Text {
-            font,
-            text: text.to_owned(),
-        });
+        match standard {
+            Some(encoded) => {
+                let mut operators = Vec::new();
+                show_standard(&mut operators, &encoded);
+                self.push_operators(&operators);
+            }
+            None => self.content.push(Content::Text {
+                font,
+                text: text.to_owned(),
+                glyphs,
+            }),
+        }
         self.push_operators(b"\nET\n");
         Ok(())
     }
@@ -740,80 +771,134 @@ impl Page {
         }
     }
 
-    /// Writes the content stream, encoding the text, and says whether it needed
-    /// replacement text. `map` gives the document's index of each of the page's fonts,
-    /// and `encoders` the document's fonts.
-    fn content_stream(&self, map: &[usize], encoders: &[Encoder<'_>]) -> Result<(Vec<u8>, bool)> {
-        let mut actual_text = false;
+    /// Encodes the text and glyph runs drawn since the page was last encoded, giving their
+    /// glyphs CIDs in `codes`.
+    fn encode(&mut self, codes: &mut FontCodes) {
+        let Some(first) = self.content.iter().position(Content::is_pending) else {
+            return;
+        };
+        let pending: Vec<Content> = self.content.drain(first..).collect();
+        // Operators that come one after another are kept as one piece.
+        let mut stream = match self.content.pop() {
+            Some(Content::Operators(operators)) => operators,
+            Some(other) => {
+                self.content.push(other);
+                Vec::new()
+            }
+            None => Vec::new(),
+        };
+        self.actual_text |= encode(&pending, &self.fonts, codes, &mut stream);
+        // The page is left: what it keeps until the file is written is no larger than it
+        // needs to be.
+        stream.shrink_to_fit();
+        self.content.push(Content::Operators(stream));
+    }
+
+    /// The content stream: the page's operators, or `encoded` for a page whose text and
+    /// runs `write_to` encoded itself, and the end of the clipping paths still in effect.
+    fn content_stream(&self, encoded: &[u8]) -> Vec<u8> {
         let mut stream = Vec::new();
-        for piece in &self.content {
-            match piece {
-                Content::Operators(operators) => stream.extend_from_slice(operators),
-                Content::Text { font, text } => {
-                    // reason: `font` came from font_index, a page's fonts are never removed,
-                    // and `map` and `encoders` cover every font of the document
-                    #[allow(clippy::indexing_slicing)]
-                    let encoder = &encoders[map[*font]];
-                    actual_text |= encoder.show(&mut stream, text)?;
-                }
-                Content::Glyphs { font, run } => {
-                    // reason: as for text
-                    #[allow(clippy::indexing_slicing)]
-                    let encoder = &encoders[map[*font]];
-                    match encoder {
-                        Encoder::Embedded(_, prepared) => {
-                            actual_text |= run.write(&mut stream, font + 1, prepared);
-                        }
-                        // draw_glyphs refuses runs in a standard font.
-                        Encoder::Standard(font) => {
-                            return Err(Error::NotEmbedded {
-                                font: font.name().to_owned(),
-                            });
-                        }
-                    }
+        if self.content.iter().any(Content::is_pending) {
+            stream.extend_from_slice(encoded);
+        } else {
+            for piece in &self.content {
+                if let Content::Operators(operators) = piece {
+                    stream.extend_from_slice(operators);
                 }
             }
         }
-        // The clipping paths still in effect end with the page.
         for _ in 0..self.clips {
             stream.extend_from_slice(b"Q\n");
         }
-        Ok((stream, actual_text))
+        stream
     }
 }
 
-/// How a document's font turns text into a content stream's strings.
-enum Encoder<'a> {
-    /// A standard font: a literal string in its encoding.
-    Standard(&'a Font),
-    /// An embedded font: two-byte CIDs of its subset.
-    Embedded(&'a Font, Prepared<'a>),
+impl Content {
+    /// Whether the piece is text or a run that has not been encoded yet.
+    fn is_pending(&self) -> bool {
+        !matches!(self, Self::Operators(_))
+    }
 }
 
-impl Encoder<'_> {
-    /// Writes `text` with the operators that show it, and says whether it needed
-    /// replacement text.
-    fn show(&self, out: &mut Vec<u8>, text: &str) -> Result<bool> {
-        match self {
-            Self::Standard(font) => {
-                // One byte a character; long text is shown with several strings, each
-                // within the 32767 bytes readers have to handle (ISO 32000-1, Annex C).
-                let encoded = font.encode(text)?;
-                let mut pieces = encoded.chunks(MAX_STRING_BYTES).peekable();
-                if pieces.peek().is_none() {
-                    out.extend_from_slice(b"() Tj");
-                }
-                for (i, piece) in pieces.enumerate() {
-                    if i > 0 {
-                        out.push(b'\n');
-                    }
-                    push_string(out, piece);
-                    out.extend_from_slice(b" Tj");
-                }
-                Ok(false)
+/// Writes `pieces` of the content of a page whose fonts are `fonts` to `out`, encoding
+/// their text and glyph runs with the CIDs of `codes`, which gives CIDs to the glyphs
+/// shown for the first time, and says whether some text needed replacement text.
+fn encode(pieces: &[Content], fonts: &[Font], codes: &mut FontCodes, out: &mut Vec<u8>) -> bool {
+    let mut actual_text = false;
+    for piece in pieces {
+        let (font, text) = match piece {
+            Content::Operators(operators) => {
+                out.extend_from_slice(operators);
+                continue;
             }
-            Self::Embedded(font, prepared) => prepared.show(out, &font.lookup(), text),
+            Content::Text { font, .. } | Content::Glyphs { font, .. } => (*font, piece),
+        };
+        // Text and runs are kept only in embedded fonts, which have codes.
+        let Some((embedded, entry)) = fonts
+            .get(font)
+            .and_then(|font| Some((font.embedded()?, codes.entry(font)?)))
+        else {
+            continue;
+        };
+        let codes = codes.get_mut(entry);
+        match text {
+            Content::Text { text, glyphs, .. } => actual_text |= show(out, codes, text, glyphs),
+            Content::Glyphs { run, .. } => {
+                run.record(codes);
+                actual_text |= run.write(out, font + 1, embedded, codes);
+            }
+            Content::Operators(_) => {}
         }
+    }
+    actual_text
+}
+
+/// The CIDs of each embedded font of a document.
+#[derive(Clone, Debug, Default)]
+struct FontCodes(Vec<(Font, Codes)>);
+
+impl FontCodes {
+    /// Where the codes of `font` are, added on its first use; `None` for a standard font.
+    fn entry(&mut self, font: &Font) -> Option<usize> {
+        let embedded = font.embedded()?;
+        match self.0.iter().position(|(known, _)| known == font) {
+            Some(index) => Some(index),
+            None => {
+                self.0.push((font.clone(), Codes::new(embedded.whole)));
+                Some(self.0.len() - 1)
+            }
+        }
+    }
+
+    fn get(&self, entry: usize) -> &Codes {
+        // reason: entries come from `entry`, and none is ever removed
+        #[allow(clippy::indexing_slicing)]
+        &self.0[entry].1
+    }
+
+    fn get_mut(&mut self, entry: usize) -> &mut Codes {
+        // reason: as for `get`
+        #[allow(clippy::indexing_slicing)]
+        &mut self.0[entry].1
+    }
+}
+
+/// Writes text in a standard font, `encoded` with one byte a character, with the operators
+/// that show it.
+fn show_standard(out: &mut Vec<u8>, encoded: &[u8]) {
+    // Long text is shown with several strings, each within the 32767 bytes readers have
+    // to handle (ISO 32000-1, Annex C).
+    let mut pieces = encoded.chunks(MAX_STRING_BYTES).peekable();
+    if pieces.peek().is_none() {
+        out.extend_from_slice(b"() Tj");
+    }
+    for (i, piece) in pieces.enumerate() {
+        if i > 0 {
+            out.push(b'\n');
+        }
+        push_string(out, piece);
+        out.extend_from_slice(b" Tj");
     }
 }
 
@@ -1189,28 +1274,6 @@ mod tests {
             ),
             "{pdf}"
         );
-    }
-
-    #[test]
-    fn writes_nothing_when_text_cannot_be_encoded() {
-        // add_text rejects such text, so it is planted directly.
-        let mut doc = hello();
-        doc.page_mut(0).unwrap().content.push(Content::Text {
-            font: 0,
-            text: "Ж".to_owned(),
-        });
-        let mut out = Vec::new();
-        let err = doc.write_to(&mut out).unwrap_err();
-        assert!(
-            matches!(
-                err,
-                Error::Unencodable {
-                    ch: 'Ж', offset: 0
-                }
-            ),
-            "{err:?}"
-        );
-        assert!(out.is_empty(), "{} bytes were written", out.len());
     }
 
     #[test]

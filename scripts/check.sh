@@ -114,7 +114,7 @@ step "published crates leave out third-party data"
 # Adobe's AFM files, the test fonts and the tests that read them are not under
 # Officewright's license; see THIRD-PARTY-NOTICES.md. The test fonts live outside every crate.
 packaged=$(cargo package --list --allow-dirty --quiet -p officewright-pdf)
-if printf '%s\n' "$packaged" | grep -E '^(data/afm/|tests/(helvetica_afm|embedded_fonts|glyph_runs)\.rs$)'; then
+if printf '%s\n' "$packaged" | grep -E '^(data/afm/|tests/(helvetica_afm|embedded_fonts|glyph_runs|page_memory)\.rs$)'; then
 	fail "officewright-pdf would publish the files above"
 fi
 packaged=$(cargo package --list --allow-dirty --quiet -p officewright-font)

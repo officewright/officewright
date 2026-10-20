@@ -14,6 +14,7 @@ exclude = [
   "tests/helvetica_afm.rs",
   "tests/embedded_fonts.rs",
   "tests/glyph_runs.rs",
+  "tests/page_memory.rs",
 ]
 
 [features]

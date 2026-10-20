@@ -479,8 +479,11 @@ fn a_subset_tag_tells_glyph_sets_and_fonts_apart() -> TestResult {
         Ok(name.get(..6).ok_or("short name")?.to_owned())
     };
     let ab = tag(liberation_sans()?, "АБ")?;
-    assert_eq!(ab, tag(liberation_sans()?, "БА")?);
+    assert_eq!(ab, tag(liberation_sans()?, "АБ")?);
     assert_ne!(ab, tag(liberation_sans()?, "АВ")?);
+    // The same glyphs numbered in another order, the order they are first shown in, are
+    // another subset.
+    assert_ne!(ab, tag(liberation_sans()?, "БА")?);
     // Another font with the same name and glyph IDs: Liberation Sans with another
     // advance width for А (its hmtx entry, an advance and a side bearing per glyph).
     let mut other = liberation_sans()?;
@@ -502,13 +505,12 @@ fn widths_and_metrics_are_the_fonts_own() -> TestResult {
     let face = FontFace::from_bytes(liberation_sans()?, 0)?;
     let text = "AWЖ.";
     let pdf = pdf_text(&one_line(&Font::from_face(face.clone())?, text)?)?;
-    // The subset numbers the glyphs from 1 in the order of their IDs in the font, and
-    // /W gives their advances in 1/1000 em: Liberation Sans has 2048 units per em.
-    let mut glyphs: Vec<_> = text
+    // The subset numbers the glyphs from 1 in the order they are first shown in, and /W
+    // gives their advances in 1/1000 em: Liberation Sans has 2048 units per em.
+    let glyphs: Vec<_> = text
         .chars()
         .map(|ch| face.glyph_id(ch).ok_or("no glyph"))
         .collect::<Result<_, _>>()?;
-    glyphs.sort();
     let (_, widths) = pdf.split_once("/W [1 [").ok_or("no /W")?;
     let (widths, _) = widths.split_once("]]").ok_or("no end of /W")?;
     let widths: Vec<f64> = widths
@@ -626,6 +628,94 @@ fn embeds_each_font_once_with_the_glyphs_of_every_page() -> TestResult {
     assert!(pdf.contains("3 beginbfchar"), "{pdf}");
     // The second page uses both fonts.
     assert!(pdf.contains("/Font << /F1 4 0 R /F2 3 0 R >>"), "{pdf}");
+    Ok(())
+}
+
+/// The CIDs every page of `pdf` shows, page after page, and the subset font program of
+/// its one embedded TrueType font.
+fn cids_and_program(pdf: &[u8]) -> TestResult<(Vec<Vec<Vec<u16>>>, FontFace)> {
+    let streams = streams(pdf)?;
+    let pages = streams
+        .iter()
+        .filter(|stream| stream.dictionary.starts_with("<< /Length"))
+        .filter(|stream| !stream.dictionary.contains("/Length1"))
+        .filter(|stream| !String::from_utf8_lossy(&stream.data).contains("begincmap"))
+        .map(|stream| shown_cids(&String::from_utf8_lossy(&stream.data)))
+        .collect();
+    let program = streams
+        .into_iter()
+        .find(|stream| stream.dictionary.contains("/Length1"))
+        .ok_or("no font program")?;
+    Ok((pages, FontFace::from_bytes(program.data, 0)?))
+}
+
+#[test]
+fn numbers_glyphs_in_the_order_they_are_drawn_across_pages() -> TestResult {
+    let face = FontFace::from_bytes(liberation_sans()?, 0)?;
+    let font = Font::from_face(face.clone())?;
+    // By glyph ID the order is ., W, i, m; drawn, it is m, W, i, ., the last two on the
+    // second page and back on the first.
+    let mut doc = Document::new();
+    doc.add_page(PageSize::A4)?
+        .add_text(Pt(72.0), Pt(700.0), &font, Pt(12.0), "mW")?;
+    doc.add_page(PageSize::A4)?
+        .add_text(Pt(72.0), Pt(700.0), &font, Pt(12.0), "iW")?;
+    doc.page_mut(0)
+        .ok_or("no first page")?
+        .add_text(Pt(72.0), Pt(680.0), &font, Pt(12.0), ".m")?;
+    let pdf = doc.to_bytes()?;
+    let (pages, subset) = cids_and_program(&pdf)?;
+    assert_eq!(pages, [vec![vec![1, 2], vec![4, 1]], vec![vec![3, 2]]]);
+    // Each CID is the glyph it was drawn for: the four have different advances.
+    for (cid, ch) in (1..).zip(['m', 'W', 'i', '.']) {
+        let glyph = face.glyph_id(ch).ok_or("no glyph")?;
+        assert_eq!(
+            subset.advance_width(officewright_font::GlyphId::new(cid)),
+            face.advance_width(glyph),
+            "{ch}"
+        );
+    }
+    let text = pdf_text(&doc)?;
+    assert!(
+        text.contains(
+            "4 beginbfchar\n<0001> <006D>\n<0002> <0057>\n<0003> <0069>\n<0004> <002E>\nendbfchar"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("/W [1 [833.0078 943.8477 222.168 277.832]]"),
+        "{text}"
+    );
+    Ok(())
+}
+
+#[test]
+fn writes_the_page_being_drawn_as_far_as_it_is_drawn() -> TestResult {
+    let font = Font::from_bytes(liberation_sans()?, 0)?;
+    let mut doc = Document::new();
+    doc.add_page(PageSize::A4)?
+        .add_text(Pt(72.0), Pt(700.0), &font, Pt(12.0), "Wm")?;
+    // Written while the page is still being drawn, and again: writing changes nothing.
+    let first = doc.to_bytes()?;
+    assert_eq!(doc.to_bytes()?, first);
+    let (pages, _) = cids_and_program(&first)?;
+    assert_eq!(pages, [vec![vec![1, 2]]]);
+    // Drawing goes on where it was, with the CIDs given before.
+    doc.page_mut(0)
+        .ok_or("no page")?
+        .add_text(Pt(72.0), Pt(680.0), &font, Pt(12.0), "im")?;
+    let (pages, _) = cids_and_program(&doc.to_bytes()?)?;
+    assert_eq!(pages, [vec![vec![1, 2], vec![3, 2]]]);
+    // A copy goes on by itself.
+    let mut copy = doc.clone();
+    copy.add_page(PageSize::A4)?
+        .add_text(Pt(72.0), Pt(700.0), &font, Pt(12.0), ".")?;
+    doc.add_page(PageSize::A4)?
+        .add_text(Pt(72.0), Pt(700.0), &font, Pt(12.0), "W")?;
+    let (pages, _) = cids_and_program(&copy.to_bytes()?)?;
+    assert_eq!(pages, [vec![vec![1, 2], vec![3, 2]], vec![vec![4]]]);
+    let (pages, _) = cids_and_program(&doc.to_bytes()?)?;
+    assert_eq!(pages, [vec![vec![1, 2], vec![3, 2]], vec![vec![1]]]);
     Ok(())
 }
 
