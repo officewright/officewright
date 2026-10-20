@@ -764,6 +764,85 @@ fn refuses_a_page_another_document_encoded() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn a_page_keeps_the_codes_of_the_document_that_encoded_it() -> TestResult {
+    use officewright_pdf::{Color, GraphicsPath};
+    let font = Font::from_bytes(liberation_sans()?, 0)?;
+    let text = |doc: &mut Document, index: usize, y: f64, text: &str| -> TestResult {
+        doc.page_mut(index)
+            .ok_or("no page")?
+            .add_text(Pt(72.0), Pt(y), &font, Pt(12.0), text)?;
+        Ok(())
+    };
+    // A clone of a document whose page is encoded writes that page as its own.
+    let mut a = Document::new();
+    a.add_page(PageSize::A4)?;
+    text(&mut a, 0, 700.0, "ABC")?;
+    a.add_page(PageSize::A4)?;
+    let mut clone = a.clone();
+    let (pages, _) = cids_and_program(&clone.to_bytes()?)?;
+    assert_eq!(pages, [vec![vec![1, 2, 3]], vec![]]);
+    // The two go on by themselves, each giving its next glyph CID 4: a page one encodes
+    // is refused by the other.
+    text(&mut a, 1, 700.0, "D")?;
+    a.add_page(PageSize::A4)?;
+    text(&mut clone, 1, 700.0, "E")?;
+    clone.add_page(PageSize::A4)?;
+    std::mem::swap(
+        a.page_mut(1).ok_or("no page")?,
+        clone.page_mut(1).ok_or("no page")?,
+    );
+    assert!(matches!(a.to_bytes(), Err(Error::ForeignPage { page: 1 })));
+    assert!(matches!(
+        clone.to_bytes(),
+        Err(Error::ForeignPage { page: 1 })
+    ));
+    std::mem::swap(
+        a.page_mut(1).ok_or("no page")?,
+        clone.page_mut(1).ok_or("no page")?,
+    );
+    // A page that goes into another document and back, drawn on there, is encoded by the
+    // document whose codes its text uses: what was drawn elsewhere stays as drawn, and the
+    // other document refuses it.
+    let mut b = Document::new();
+    b.add_page(PageSize::A4)?;
+    text(&mut b, 0, 700.0, "CBA")?;
+    b.add_page(PageSize::A4)?;
+    std::mem::swap(
+        a.page_mut(0).ok_or("no page")?,
+        b.page_mut(1).ok_or("no page")?,
+    );
+    text(&mut b, 1, 600.0, "A")?;
+    b.page_mut(0);
+    assert!(matches!(b.to_bytes(), Err(Error::ForeignPage { page: 1 })));
+    std::mem::swap(
+        a.page_mut(0).ok_or("no page")?,
+        b.page_mut(1).ok_or("no page")?,
+    );
+    let (pages, _) = cids_and_program(&a.to_bytes()?)?;
+    assert_eq!(pages[0], [vec![1, 2, 3], vec![1]]);
+    // A page with only a path and text in a standard font goes anywhere.
+    let mut c = Document::new();
+    let page = c.add_page(PageSize::A4)?;
+    page.fill_path(
+        &GraphicsPath::rect(Pt(72.0), Pt(72.0), Pt(10.0), Pt(10.0)),
+        Color::BLACK,
+    )?;
+    page.add_text(
+        Pt(72.0),
+        Pt(700.0),
+        &Font::standard(StandardFont::Helvetica),
+        Pt(12.0),
+        "Hi",
+    )?;
+    c.add_page(PageSize::A4)?;
+    let mut d = Document::new();
+    d.add_page(PageSize::A4)?;
+    *d.page_mut(0).ok_or("no page")? = c.page_mut(0).ok_or("no page")?.clone();
+    assert!(pdf_text(&d)?.contains("(Hi) Tj"));
+    Ok(())
+}
+
 /// minimal.ttf with Á and ´ mapped to the glyph of A, as fonts do for look-alike
 /// characters (Arial maps Latin Ə and Cyrillic Ә to one glyph). Its cmap has one segment
 /// per character, and idDelta is the glyph minus the character.

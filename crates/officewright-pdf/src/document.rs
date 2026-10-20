@@ -83,6 +83,13 @@ impl Default for Document {
 }
 
 /// A page of a [`Document`].
+///
+/// A page belongs to its document. Once the document has handed out another page, the
+/// text drawn on this one in an embedded font is encoded with the document's own glyph
+/// codes, and a copy of the page put into another document, or the page swapped into one,
+/// makes that document's [`write_to`](Document::write_to) fail with
+/// [`Error::ForeignPage`]. A page that has only text in a standard font, paths and images,
+/// or whose text is not encoded yet, can go into another document.
 #[derive(Clone, Debug)]
 pub struct Page {
     size: PageSize,
@@ -157,7 +164,7 @@ impl Document {
         Self::default()
     }
 
-    /// Appends a page and returns it.
+    /// Appends a page and returns it. The page belongs to the document ([`Page`]).
     ///
     /// # Errors
     ///
@@ -191,12 +198,8 @@ impl Document {
         self.pages.len()
     }
 
-    /// The page at `index`, counting from 0 in the order the pages were added.
-    ///
-    /// A page belongs to its document. Once the document has handed out another page, the
-    /// text drawn on this one is encoded with the document's own glyph codes, so a copy of
-    /// the page put into another document, or a page swapped into one, makes that
-    /// document's [`write_to`](Self::write_to) fail with [`Error::ForeignPage`].
+    /// The page at `index`, counting from 0 in the order the pages were added. Like the
+    /// page [`add_page`](Self::add_page) returns, it belongs to the document ([`Page`]).
     pub fn page_mut(&mut self, index: usize) -> Option<&mut Page> {
         // The page being drawn stays as it is until another is: a caller that asks for it
         // for each thing it draws, as the C ABI does, encodes it once.
@@ -287,7 +290,7 @@ impl Document {
     /// [subset budget](Self::set_subset_budget) after the fonts reduced before it,
     /// [`Error::TooLarge`] if the file
     /// would exceed 10<sup>10</sup> bytes, [`Error::ForeignPage`] for a page that another
-    /// document encoded ([`page_mut`](Self::page_mut)), and [`Error::Io`] if writing fails.
+    /// document encoded ([`Page`]), and [`Error::Io`] if writing fails.
     pub fn write_to(&self, out: impl Write) -> Result<()> {
         if self.pages.is_empty() {
             return Err(Error::NoPages);
@@ -824,11 +827,16 @@ impl Page {
     /// Encodes the text and glyph runs drawn since the page was last encoded, giving their
     /// glyphs CIDs in `codes`, those of document `document`.
     fn encode(&mut self, codes: &mut FontCodes, document: u64) {
+        // A page another document encoded keeps its text and runs as they were drawn: the
+        // document whose codes its encoded text uses can still encode them, and any other
+        // refuses the page when it is written.
+        if self.encoded_by.is_some_and(|id| id != document) {
+            return;
+        }
         let Some(first) = self.content.iter().position(Content::is_pending) else {
             return;
         };
-        // A page another document encoded keeps its mark, and is refused when written.
-        self.encoded_by.get_or_insert(document);
+        self.encoded_by = Some(document);
         let pending: Vec<Content> = self.content.drain(first..).collect();
         // Operators that come one after another are kept as one piece.
         let mut stream = match self.content.pop() {
@@ -1527,6 +1535,7 @@ mod tests {
             Error::InvalidDash,
             Error::NoClip,
             Error::TooManyClips,
+            Error::ForeignPage { page: 2 },
         ] {
             let message = err.to_string();
             assert!(

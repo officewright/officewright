@@ -66,9 +66,9 @@ pub enum Error {
     },
     /// The document has no pages; a PDF needs at least one.
     NoPages,
-    /// Page `page` was put into the document from another one after that document had
-    /// encoded its text, whose glyph codes are that document's own; see
-    /// [`Document::page_mut`](crate::Document::page_mut).
+    /// The page at index `page` was put into the document from another one after that
+    /// document had encoded its text, whose glyph codes are that document's own; see
+    /// [`Page`](crate::Page).
     ForeignPage {
         /// The page's index, counting from 0.
         page: usize,
@@ -276,8 +276,8 @@ impl fmt::Display for Error {
             Self::NoPages => f.write_str("document has no pages"),
             Self::ForeignPage { page } => write!(
                 f,
-                "page {page} holds text that another document encoded with glyph codes of \
-                 its own, which this document does not have"
+                "the page at index {page} holds text that another document encoded with \
+                 glyph codes of its own, which this document does not have"
             ),
             Self::NotEmbedded { font } => write!(
                 f,
