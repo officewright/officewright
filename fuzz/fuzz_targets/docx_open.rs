@@ -1,7 +1,8 @@
 //! Opens the input as a Word document and walks everything the model read from it:
 //! sections, headers, footers and notes, blocks, tables, inline content and runs, the
-//! text, the programs of embedded fonts, and the XML of every drawing and of every
-//! element kept without being understood, which must read back as XML. The formatting in
+//! text, the programs of embedded fonts, and the XML of the drawings and of the elements
+//! kept without being understood, which must read back as XML (the first 16 MiB of it,
+//! `WRITE_BACK_BYTES`). The formatting in
 //! effect of every paragraph, run, paragraph mark, table, row and cell is resolved, and
 //! must not depend on what the resolver remembered from earlier ones. The document's
 //! translation into the layout IR must be valid IR.
@@ -68,6 +69,7 @@ fuzz_target!(|data: &[u8]| {
     // runs are compared, each with a budget of its own: the checks stay, the cost does
     // not grow with their number × chain length.
     let (mut paragraphs_compared, mut runs_compared, mut cells_compared) = (0, 0, 0);
+    let mut write_back = WriteBack::default();
     let mut blocks: Vec<Block<'_>> = document.sections().flat_map(|s| s.blocks()).collect();
     // The headers, footers and notes, each walked like the body. Each header and footer
     // is walked once, however many sections have it: thousands of sections may name or
@@ -120,9 +122,11 @@ fuzz_target!(|data: &[u8]| {
                             let _ = run.properties();
                             for item in run.content() {
                                 match item {
-                                    RunContent::Other(opaque) => check(&opaque.to_xml()),
+                                    RunContent::Other(opaque) => {
+                                        write_back.check(|| opaque.to_xml())
+                                    }
                                     RunContent::Drawing(drawing) => {
-                                        check(&drawing.to_xml());
+                                        write_back.check(|| drawing.to_xml());
                                         let _ = (drawing.is_inline(), drawing.width());
                                         let _ = (drawing.height(), drawing.effect_extent());
                                         let _ = drawing.anchor();
@@ -153,7 +157,7 @@ fuzz_target!(|data: &[u8]| {
                             let _ = field.instruction();
                             inlines.extend(field.inlines());
                         }
-                        Inline::Other(opaque) => check(&opaque.to_xml()),
+                        Inline::Other(opaque) => write_back.check(|| opaque.to_xml()),
                         _ => {}
                     }
                 }
@@ -185,7 +189,7 @@ fuzz_target!(|data: &[u8]| {
                 }
             }
             Block::ContentControl(control) => blocks.extend(control.blocks()),
-            Block::Other(opaque) => check(&opaque.to_xml()),
+            Block::Other(opaque) => write_back.check(|| opaque.to_xml()),
             _ => {}
         }
     }
@@ -195,6 +199,29 @@ fuzz_target!(|data: &[u8]| {
         panic!("{err}");
     }
 });
+
+/// The kept elements and drawings written back and read again. Each one's XML declares
+/// every namespace it needs, so a small file of many elements that each need a long
+/// namespace bound outside them writes back gigabytes (#283): the check stops after
+/// [`WRITE_BACK_BYTES`] in all.
+#[derive(Default)]
+struct WriteBack {
+    written: usize,
+}
+
+/// How many bytes of XML the target writes back and reads again at most.
+const WRITE_BACK_BYTES: usize = 16 << 20;
+
+impl WriteBack {
+    fn check(&mut self, xml: impl FnOnce() -> String) {
+        if self.written >= WRITE_BACK_BYTES {
+            return;
+        }
+        let xml = xml();
+        self.written = self.written.saturating_add(xml.len());
+        check(&xml);
+    }
+}
 
 /// An element kept as written, or a drawing, must write back as well-formed XML.
 fn check(xml: &str) {
