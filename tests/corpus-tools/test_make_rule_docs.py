@@ -290,6 +290,8 @@ class Packages(unittest.TestCase):
                 "E-tab-hanging-noindenttab-14": {"doNotUseIndentAsNumberingTabStop"},
                 "E-underline-trailspace": {"ulTrailSpace"},
                 "E-underline-trailspace-margin": {"ulTrailSpace"},
+                "E-table-autofit-constrained-14": {"doNotAutofitConstrainedTables"},
+                "E-table-autofit-grow-14": {"growAutofit"},
             }.get(doc.name, set())
             self.assertEqual(flags, expected, doc.name)
             # The documents about a setting name its value; every other document in mode 15
@@ -2824,6 +2826,100 @@ class Packages(unittest.TestCase):
         self.assertTrue(labels[1].startswith("Case 02: a paragraph in Normal, which has level 1 "
                                              "from the document defaults but no list"))
         self.assertIsNone(paragraphs[1].find(f"{W}pPr"))
+
+    def test_table_autofit_and_page_cases_have_the_markup_their_labels_name(self):
+        # #368: table autofit, rows across pages and repeated header rows.
+        def body(name):
+            doc = next(doc for doc in self.docs if doc.name == name)
+            return ElementTree.fromstring(
+                dict(rules.parts(doc))["word/document.xml"]).find(f"{W}body")
+
+        def attrs(element, path):
+            found = element.find(path)
+            return None if found is None else {
+                k.replace(W, ""): v for k, v in found.attrib.items()}
+
+        def labelled_tables(name):
+            """{case number: its table}, from the "Case NN:" paragraph before each table."""
+            found, number = {}, None
+            for child in body(name):
+                if child.tag == f"{W}p":
+                    words = "".join(t.text or "" for t in child.iter(f"{W}t"))
+                    match = re.match(r"Case (\d\d): ", words)
+                    number = int(match.group(1)) if match else number
+                elif child.tag == f"{W}tbl":
+                    found[number] = child
+            return found
+
+        def cell_widths(tbl):
+            return [attrs(tc, f"{W}tcPr/{W}tcW") for tc in tbl.find(f"{W}tr").findall(f"{W}tc")]
+
+        tables = labelled_tables("E-table-autofit-15")
+        self.assertEqual(sorted(tables), [1, 2, 3, 4, 5, 6, 7, 8, 10])
+        for n, tbl in tables.items():
+            fixed = attrs(tbl, f"{W}tblPr/{W}tblLayout")
+            self.assertEqual(fixed, {"type": "fixed"} if n == 10 else None, n)
+        self.assertEqual(attrs(tables[1], f"{W}tblPr/{W}tblW"), {"w": "0", "type": "auto"})
+        self.assertEqual(cell_widths(tables[1]), [None] * 3)
+        expected = {2: ("5000", "pct", "0", "auto"), 3: ("0", "auto", "1440", "dxa"),
+                    4: ("0", "auto", "4000", "dxa"), 5: ("0", "auto", "2000", "pct")}
+        for name in ("E-table-autofit-15", "E-table-autofit-14", "E-table-autofit-constrained-14",
+                     "E-table-autofit-grow-14"):
+            found = labelled_tables(name)
+            for n, (tbl_w, tbl_type, tc_w, tc_type) in expected.items():
+                with self.subTest(name, case=n):
+                    self.assertEqual(attrs(found[n], f"{W}tblPr/{W}tblW"),
+                                     {"w": tbl_w, "type": tbl_type})
+                    self.assertEqual(cell_widths(found[n]), [{"w": tc_w, "type": tc_type}] * 3)
+        # Case 3 sums to less than the text width, case 4 to more, case 5 to 120 %.
+        self.assertLess(3 * 1440, rules.TEXT_W)
+        self.assertGreater(3 * 4000, rules.TEXT_W)
+        # Case 6: the long word alone in a narrow column; case 10: the same word, fixed.
+        for n, column in ((6, "720"), (10, "1440")):
+            first = tables[n].find(f"{W}tr/{W}tc")
+            self.assertEqual(attrs(first, f"{W}tcPr/{W}tcW")["w"], column)
+            self.assertEqual("".join(t.text for t in first.iter(f"{W}t")), rules.AUTOFIT_WORD)
+        self.assertNotIn(" ", rules.AUTOFIT_WORD)
+        # Case 7: a nested table in the first cell; case 8: a spanning cell of 300 pt.
+        self.assertIsNotNone(tables[7].find(f"{W}tr/{W}tc/{W}tbl"))
+        first_row = tables[8].find(f"{W}tr/{W}tc")
+        self.assertEqual(attrs(first_row, f"{W}tcPr/{W}gridSpan"), {"val": "2"})
+        self.assertEqual(attrs(first_row, f"{W}tcPr/{W}tcW"), {"w": "6000", "type": "dxa"})
+
+        def only_table(name):
+            (tbl,) = body(name).findall(f"{W}tbl")
+            borders = tbl.find(f"{W}tblPr/{W}tblBorders")
+            self.assertEqual({b.get(f"{W}sz") for b in borders}, {"48"}, name)
+            return tbl
+
+        def lines_before_table(name):
+            return sum(1 for child in body(name).iter() if child.tag == f"{W}t"
+                       and (child.text or "").startswith("Filler"))
+
+        for name, cant_split, lines, filler in (
+            ("E-table-row-split", False, 40, 30),
+            ("E-table-row-cant-split", True, 40, 30),
+            ("E-table-row-cant-split-tall", True, 80, 0),
+        ):
+            with self.subTest(name):
+                rows = only_table(name).findall(f"{W}tr")
+                self.assertEqual(rows[2].find(f"{W}trPr/{W}cantSplit") is not None, cant_split)
+                self.assertEqual(len(rows[2].find(f"{W}tc").findall(f"{W}p")), lines)
+                self.assertEqual(lines_before_table(name), filler)
+        rows = only_table("E-table-header-repeat").findall(f"{W}tr")
+        self.assertEqual(len(rows), 62)
+        self.assertEqual([r.find(f"{W}trPr/{W}tblHeader") is not None for r in rows],
+                         [True, True] + [False] * 60)
+        rows = only_table("E-table-header-repeat-tall").findall(f"{W}tr")
+        self.assertEqual([r.find(f"{W}trPr/{W}tblHeader") is not None for r in rows],
+                         [True, True] + [False] * 10)
+        self.assertEqual([len(r.find(f"{W}tc").findall(f"{W}p")) for r in rows[:2]], [35, 35])
+        nested = only_table("E-table-row-split-nested").find(f"{W}tr/{W}tc/{W}tbl")
+        self.assertEqual(len(nested.findall(f"{W}tr")), 30)
+        self.assertEqual(lines_before_table("E-table-row-split-nested"), 30)
+        row = only_table("E-table-row-exact-height").findall(f"{W}tr")[1]
+        self.assertEqual(attrs(row, f"{W}trPr/{W}trHeight"), {"val": "600", "hRule": "exact"})
+        self.assertEqual(len(row.find(f"{W}tc").findall(f"{W}p")), 5)
 
     def test_refuses_a_setting_word_does_not_write_in_the_mode(self):
         doc = next(doc for doc in self.docs if doc.name == "E-opentype-on")
