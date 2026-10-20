@@ -1867,14 +1867,15 @@ def autofit_setting_cases(first: int) -> list[tuple[int, str, str]]:
     auto = width(0, "auto")
     picture = vml_picture(
         "image1.png", "f1",
-        "position:absolute;margin-left:0;margin-top:0;width:144pt;height:72pt;z-index:1;"
+        "position:absolute;margin-left:0;margin-top:0;width:216pt;height:108pt;z-index:1;"
         "mso-position-horizontal-relative:margin;mso-position-vertical-relative:paragraph",
         "square", first=True)
     return [
         (first, f"three cells each holding {AUTOFIT_WORD}, together wider than the text width",
          rule_table([[cell(para(run(AUTOFIT_WORD)), auto)] * 3], EVEN_GRID)),
-        (first + 1, "a floating picture of 144 x 72 pt at the left margin, square wrap, then "
-                    "an autofit table (cells auto) beside it",
+        (first + 1, "a floating picture of 216 x 108 pt at the left margin, square wrap, then "
+                    "an autofit table (cells auto) beside it, whose content is wider than the "
+                    "room beside the picture",
          para(picture + run("The picture is anchored here.")) + rule_table(
              autofit_cells([auto] * 3), EVEN_GRID)),
     ]

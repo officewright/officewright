@@ -2892,6 +2892,23 @@ class Packages(unittest.TestCase):
                 self.assertEqual(children[at + 2].tag, f"{W}tbl")
                 shape = children[at + 1].find(f".//{v}shape")
                 self.assertIn("position:absolute", shape.get("style"))
+                style = dict(i.split(":", 1) for i in shape.get("style").split(";"))
+                self.assertEqual((style["margin-left"], style["margin-top"], style["width"],
+                                  style["mso-position-horizontal-relative"]),
+                                 ("0", "0", "216pt", "margin"))
+                # The table must be narrowed to fit beside the picture: its content, the
+                # widest text of each column with 5.4 pt cell margins on each side, is wider
+                # than the room the picture leaves, and its longest words are not.
+                tbl = children[at + 2]
+                self.assertIsNone(tbl.find(f"{W}tblPr/{W}tblLayout"))
+                columns = zip(*[["".join(t.text for t in tc.iter(f"{W}t"))
+                                 for tc in tr.findall(f"{W}tc")] for tr in tbl.findall(f"{W}tr")])
+                content = sum(max(carlito_width(t) for t in col) + 10.8 for col in columns)
+                room = rules.TEXT_W / 20 - 216
+                self.assertGreater(content, room)
+                words = [w for tr in tbl.findall(f"{W}tr") for tc in tr.findall(f"{W}tc")
+                         for w in "".join(t.text for t in tc.iter(f"{W}t")).split()]
+                self.assertLess(3 * (max(carlito_width(w) for w in words) + 10.8), room)
                 self.assertEqual(shape.find("{urn:schemas-microsoft-com:office:word}wrap")
                                  .get("type"), "square")
         # Case 3 sums to less than the text width, case 4 to more, case 5 to 120 %.
@@ -2976,6 +2993,10 @@ class Packages(unittest.TestCase):
         self.assertEqual([(s.get("margin-left"), s.get("margin-top")) for s in styles[2:]],
                          [("144pt", "6pt"), ("36pt", "0pt"), ("300pt", "150pt")])
         self.assertLess(int(styles[3]["z-index"]), 0)
+        # Case 05 starts a page of its own.
+        label = next(p for p in body.iter(f"{W}p")
+                     if "".join(t.text or "" for t in p.iter(f"{W}t")).startswith("Case 05: "))
+        self.assertIsNotNone(label.find(f"{W}pPr/{W}pageBreakBefore"))
         w10 = "{urn:schemas-microsoft-com:office:word}"
         self.assertEqual([None if shape.find(f"{w10}wrap") is None
                           else shape.find(f"{w10}wrap").get("type") for shape in shapes],
@@ -3007,6 +3028,7 @@ class Packages(unittest.TestCase):
             seen += 1
             types = list(document.iter(f"{v}shapetype"))
             self.assertEqual([t.get("id") for t in types], ["_x0000_t75"], doc.name)
+            self.assertIn(rules.PICTURE_FRAME.encode(), parts["word/document.xml"], doc.name)
             order = list(document.iter())
             self.assertLess(order.index(types[0]), order.index(shapes[0]), doc.name)
             rels = {rel.get("Id"): rel for rel in ElementTree.fromstring(
@@ -3028,10 +3050,19 @@ class Packages(unittest.TestCase):
                     elif kind == b"IDAT":
                         idat += data
                     at += 12 + size
+                # One stored deflate block (RFC 1951, §3.2.4), not compressed data.
+                self.assertEqual(idat[:3], b"\x78\x01\x01", doc.name)
                 pixels = zlib.decompress(idat)
                 self.assertEqual(len(pixels), (width + 1) * height, doc.name)
                 self.assertEqual(set(pixels[::width + 1]), {0}, doc.name)
         self.assertGreaterEqual(seen, 6)
+        # The shape type is Word's picture frame, as a copy Word re-saved writes it.
+        resaved = (SCRIPTS.parent / "tests/corpus/resaved/business"
+                   / "contract-ec-data-processing-clauses-bg.docx")
+        with zipfile.ZipFile(resaved) as archive:
+            written = archive.read("word/document.xml").decode()
+        frame = re.search(r'<v:shapetype id="_x0000_t75".*?</v:shapetype>', written, re.S)
+        self.assertEqual(rules.PICTURE_FRAME, frame.group(0))
         # The pixels are stored, not compressed, so the bytes are the same on every zlib.
         self.assertEqual(rules.stored_zlib(b"abc"), b"\x78\x01\x01\x03\x00\xfc\xffabc"
                          + struct.pack(">I", zlib.adler32(b"abc")))
