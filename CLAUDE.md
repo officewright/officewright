@@ -303,19 +303,19 @@ The author queues the PR with
 gh pr merge <n> --squash --auto --match-head-commit <the head commit checked>
 ```
 
-where the head commit checked is the PR's head that the first condition compared with the commit the last review names (for a Dependabot PR, which gets no review and is queued only with its checks green, the head whose update was checked), so that nothing pushed since is queued. The command may be run before the PR's checks have finished on that head: it turns on auto-merge, and GitHub puts the PR into the queue only once the required checks pass. Neither auto-merge nor the queue keeps the head it was given, so before anything is pushed to the branch (a fix, or a merge of main) the author reads the PR's state:
+where the head commit checked is the PR's head that the first condition compared with the commit the last review names (for a Dependabot PR, which gets no review and is queued only with its checks green, the head whose update was checked), so that nothing pushed since is queued. The command may be run before the PR's checks have finished on that head: it turns on auto-merge, and GitHub puts the PR into the queue only once the required checks pass. Auto-merge does not keep the head it was turned on for (a push leaves it on, for the new head), and what a push does to a queued PR is not documented, so nothing is pushed to the branch (a fix, or a merge of main) while the PR may still be merged. The author reads the PR's state with
 
 ```sh
-gh api graphql -f query='{repository(owner:"officewright",name:"officewright"){pullRequest(number:<n>){state isInMergeQueue autoMergeRequest{enabledAt} timelineItems(last:1,itemTypes:[ADDED_TO_MERGE_QUEUE_EVENT,REMOVED_FROM_MERGE_QUEUE_EVENT]){nodes{__typename}}}}}'
+gh api graphql -f query='{repository(owner:"officewright",name:"officewright"){pullRequest(number:<n>){state isInMergeQueue autoMergeRequest{enabledAt} timelineItems(last:1,itemTypes:[ADDED_TO_MERGE_QUEUE_EVENT,REMOVED_FROM_MERGE_QUEUE_EVENT]){nodes{__typename ... on RemovedFromMergeQueueEvent{reason actor{login}}}}}}}'
 ```
 
-and takes the PR back first: auto-merge with `gh pr merge <n> --disable-auto`, and a queued PR (`isInMergeQueue` true), which gh cannot take out of the queue, with
+takes a queued PR (`isInMergeQueue` true), which gh cannot take out of the queue, out first with
 
 ```sh
 gh api graphql -f query='mutation($id:ID!){dequeuePullRequest(input:{id:$id}){mergeQueueEntry{state}}}' -f id="$(gh pr view <n> --json id --jq .id)"
 ```
 
-then it runs the command again with the new head once the merge conditions hold for it. The author follows the PR with the same query until its state is `MERGED`: an open PR whose last queue event is `RemovedFromMergeQueueEvent` was dropped by the queue (above); one whose checks have passed, with auto-merge on but not queued, gets `--disable-auto` and the command again.
+then turns auto-merge off with `gh pr merge <n> --disable-auto`, reads the state again, and pushes only when it shows `isInMergeQueue` false and `autoMergeRequest` null; once the merge conditions hold for the new head, it runs the command again with that head. The author follows the PR with the same query until its state is `MERGED`. An open PR whose last queue event is a removal by `github-merge-queue` with a reason other than `merged` was dropped by the queue (above); an open PR whose checks have passed, with auto-merge on but not in the queue, gets `--disable-auto` and the command again.
 
 A PR that contains anything on the list "Always ask the maintainer first" is merged only with the maintainer's consent, which the author quotes in the PR with its date (the sessions and the maintainer post from the same account, so a quote from the chat is what records it). After each merge the author sends the maintainer a short report; the maintainer runs the "How to check by hand" steps when they choose.
 
