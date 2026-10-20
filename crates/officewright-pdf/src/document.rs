@@ -294,14 +294,15 @@ impl Document {
         // untouched. First the text and runs of the page drawn last, which give the last
         // glyphs their CIDs.
         let mut codes = self.codes.clone();
-        let mut open_content = None;
+        // Only the page handed out last can have them, but every page that has is encoded.
+        let mut encoded = Vec::new();
         let mut actual_text = false;
         for (i, page) in self.pages.iter().enumerate() {
             actual_text |= page.actual_text;
             if page.content.iter().any(Content::is_pending) {
                 let mut stream = Vec::new();
                 actual_text |= encode(&page.content, &page.fonts, &mut codes, &mut stream);
-                open_content = Some((i, stream));
+                encoded.push((i, stream));
             }
         }
         // The fonts share one budget, since all their subsets are kept until the file is
@@ -426,9 +427,9 @@ impl Document {
             )?;
 
             // One page's content stream at a time.
-            let content = match &open_content {
-                Some((open, stream)) if *open == i => page.content_stream(stream),
-                _ => page.content_stream(&[]),
+            let content = match encoded.iter().find(|(page, _)| *page == i) {
+                Some((_, stream)) => page.content_stream(stream),
+                None => page.content_stream(&[]),
             };
             offsets.push(out.written);
             out.put_object(page_id + 1, &stream_object("", &content, self.compression))?;
@@ -826,6 +827,10 @@ impl Content {
 /// shown for the first time, and says whether some text needed replacement text.
 fn encode(pieces: &[Content], fonts: &[Font], codes: &mut FontCodes, out: &mut Vec<u8>) -> bool {
     let mut actual_text = false;
+    // Where the codes of each of the page's fonts are, found once: finding them compares
+    // the font with the document's, which compares the font data of two fonts loaded
+    // from the same bytes.
+    let mut entries: Vec<Option<Option<usize>>> = vec![None; fonts.len()];
     for piece in pieces {
         let (font, text) = match piece {
             Content::Operators(operators) => {
@@ -835,10 +840,12 @@ fn encode(pieces: &[Content], fonts: &[Font], codes: &mut FontCodes, out: &mut V
             Content::Text { font, .. } | Content::Glyphs { font, .. } => (*font, piece),
         };
         // Text and runs are kept only in embedded fonts, which have codes.
-        let Some((embedded, entry)) = fonts
-            .get(font)
-            .and_then(|font| Some((font.embedded()?, codes.entry(font)?)))
-        else {
+        let Some((embedded, entry)) = fonts.get(font).and_then(|of_page| {
+            let entry = *entries
+                .get_mut(font)?
+                .get_or_insert_with(|| codes.entry(of_page));
+            Some((of_page.embedded()?, entry?))
+        }) else {
             continue;
         };
         let codes = codes.get_mut(entry);
