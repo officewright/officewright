@@ -1100,11 +1100,18 @@ impl Reading<'_, '_, '_> {
     }
 
     /// Notes an element kept under the main part's `w:document`, before or after its
-    /// body; the other stories' roots keep none.
+    /// body, or under `w:footnotes` or `w:endnotes`, among their notes (#388). The roots
+    /// of headers and footers hold blocks, so they keep none.
     fn keep_at_root(&mut self, span: Span) {
-        if self.story == Story::Document {
-            let after_body = self.body_read;
-            self.c.document.root_elements.push((span, after_body));
+        let document = &mut *self.c.document;
+        match self.story {
+            Story::Document => document.root_elements.push((span, self.body_read)),
+            Story::Footnotes | Story::Endnotes => {
+                let before = document.stories.len() as u32;
+                let endnotes = self.story == Story::Endnotes;
+                document.note_root_elements.push((span, endnotes, before));
+            }
+            Story::Header | Story::Footer => {}
         }
     }
 

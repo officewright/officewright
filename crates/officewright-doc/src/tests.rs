@@ -478,6 +478,54 @@ fn keeps_the_elements_of_the_document_around_its_body() {
 }
 
 #[test]
+fn keeps_the_elements_of_the_notes_parts_among_their_notes() {
+    // Issue #388: elements of w:footnotes and w:endnotes other than notes were kept
+    // without anything that led to them.
+    let footnotes = format!(
+        r#"<w:footnotes xmlns:w="{W}" xmlns:x="urn:x"><x:first/><w:footnote w:id="1"><w:p/></w:footnote><x:middle/><w:footnote w:id="2"><w:p/></w:footnote><x:last/></w:footnotes>"#
+    );
+    let endnotes = format!(
+        r#"<w:endnotes xmlns:w="{W}" xmlns:x="urn:x"><w:endnote w:id="1"><w:p/></w:endnote><x:end x:a="1"/></w:endnotes>"#
+    );
+    let document = with_parts(
+        "<w:p/>",
+        &[
+            ("footnotes", "footnotes.xml", footnotes),
+            ("endnotes", "endnotes.xml", endnotes),
+        ],
+    );
+    let footnote = |id| document.footnotes[&id];
+    let endnote = document.endnotes[&1];
+    let kept: Vec<(String, bool, u32)> = document
+        .note_root_elements
+        .iter()
+        .map(|&(span, endnotes, before)| (document.element(span).to_xml(), endnotes, before))
+        .collect();
+    assert_eq!(kept.len(), 4, "{kept:?}");
+    let names: Vec<bool> = ["first", "middle", "last", "end"]
+        .iter()
+        .zip(&kept)
+        .map(|(name, (xml, _, _))| xml.contains(&format!("x:{name}")) && xml.contains("urn:x"))
+        .collect();
+    assert_eq!(names, [true; 4], "{kept:?}");
+    // Before the first footnote, between the two, after the last; after the endnote.
+    let places: Vec<(bool, u32)> = kept
+        .iter()
+        .map(|&(_, endnotes, before)| (endnotes, before))
+        .collect();
+    assert_eq!(
+        places,
+        [
+            (false, footnote(1)),
+            (false, footnote(2)),
+            (false, footnote(2) + 1),
+            (true, endnote + 1),
+        ]
+    );
+    assert!(document.root_elements.is_empty());
+}
+
+#[test]
 fn keeps_the_namespaces_that_values_in_kept_xml_name() {
     // Prefixes named only in values (#110): by every Markup Compatibility attribute, by
     // Requires and by xsi:type. Each case names a prefix of its own, bound on the
