@@ -252,7 +252,8 @@ impl Check for Inline {
 }
 
 // Fields are not walked into, so that a document that was not validated cannot make the
-// walk recurse deeply; drawing objects hold no blocks, so walking them is bounded.
+// walk recurse deeply; drawing objects hold blocks only in a text box, which holds no
+// text box (`Clamper::enter_text_box`), so walking them is bounded.
 impl Clamp for Inline {
     fn clamp(&mut self, clamper: &mut Clamper) {
         match self {

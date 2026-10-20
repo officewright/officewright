@@ -1823,7 +1823,9 @@ fn images_anchored_objects_and_notes_validate_and_read_back() {
     let Inline::Object(object) = &paragraph.inlines()[3] else {
         panic!("not an inline object");
     };
-    let ObjectContent::Picture(picture) = object.content();
+    let ObjectContent::Picture(picture) = object.content() else {
+        panic!("not a picture");
+    };
     let image = document.image(picture.image()).expect("the image");
     assert_eq!((image.format(), &**image.bytes()), (&ImageFormat::Png, PNG));
     let Inline::NoteReference {
@@ -1960,7 +1962,9 @@ fn image_note_and_style_ids_belong_to_their_document() {
 fn drawing_lengths_are_finite_and_sizes_not_negative() {
     type ObjectChange = fn(InlineObject) -> InlineObject;
     fn picture(object: InlineObject, change: fn(Picture) -> Picture) -> InlineObject {
-        let ObjectContent::Picture(picture) = object.content();
+        let ObjectContent::Picture(picture) = object.content() else {
+            panic!("not a picture");
+        };
         let changed = change(*picture);
         object.with_content(ObjectContent::Picture(changed))
     }
@@ -2677,4 +2681,148 @@ fn shared_properties_are_clamped_once_and_stay_shared() {
     assert_eq!(props[3].tabs()[0].position(), Pt(1584.0));
     // The producer's copy is as it was.
     assert_eq!(beyond.tabs()[0].position(), Pt(3_600.0));
+}
+
+/// An inline object of 100 x 50 pt showing `text_box`.
+fn boxed(text_box: TextBox) -> Inline {
+    Inline::Object(InlineObject::new(
+        ObjectContent::text_box(text_box),
+        Size::new(Pt(100.0), Pt(50.0)),
+    ))
+}
+
+#[test]
+fn a_text_box_holds_paragraphs_and_tables_but_no_text_box() {
+    let text = |style| -> Block {
+        Paragraph::new(style)
+            .with_inlines([Inline::text("text", style)])
+            .into()
+    };
+    let holding = |inline: Inline, style| -> Vec<Block> {
+        vec![Paragraph::new(style).with_inlines([inline]).into()]
+    };
+    let document = document_with(|style| {
+        let table = Table::default()
+            .with_grid([Pt(10.0)])
+            .with_rows([Row::default().with_cells([Cell::default().with_blocks([text(style)])])]);
+        holding(
+            boxed(TextBox::new().with_blocks([text(style), table.into()])),
+            style,
+        )
+    });
+    assert!(document.validate().is_ok());
+
+    // A box in a box, inline or floating, is refused where the inner one is.
+    let inner = |style| boxed(TextBox::new().with_blocks([text(style)]));
+    let document = document_with(|style| {
+        holding(
+            boxed(TextBox::new().with_blocks(holding(inner(style), style))),
+            style,
+        )
+    });
+    assert_eq!(
+        document.validate().unwrap_err().to_string(),
+        "sections[0].blocks[0].inlines[0].content.blocks[0].inlines[0].content: a text box \
+         inside a text box; Word holds none"
+    );
+    let document = document_with(|style| {
+        let floating = Inline::anchored(AnchoredObject::new(
+            ObjectContent::text_box(TextBox::new().with_blocks(holding(inner(style), style))),
+            Size::new(Pt(100.0), Pt(50.0)),
+            HorizontalAnchor::default(),
+            VerticalAnchor::default(),
+        ));
+        holding(floating, style)
+    });
+    assert!(
+        document
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .ends_with(": a text box inside a text box; Word holds none")
+    );
+
+    // Two boxes side by side are each the only one they are in.
+    let document = document_with(|style| {
+        vec![
+            Paragraph::new(style)
+                .with_inlines([inner(style), inner(style)])
+                .into(),
+        ]
+    });
+    assert!(document.validate().is_ok());
+}
+
+#[test]
+fn a_text_box_is_a_story_of_its_own_for_the_fields_of_a_field_result() {
+    // A field's result holds no field, but a box in a result holds paragraphs of its own,
+    // whose fields may be anywhere; past the box, the result's rule holds again.
+    let document = |after_box: bool| {
+        document_with(|style| {
+            let page = Inline::Field(Field::new(FieldKind::Page, style));
+            let in_box = boxed(
+                TextBox::new()
+                    .with_blocks([Paragraph::new(style).with_inlines([page.clone()]).into()]),
+            );
+            let mut result = vec![in_box];
+            if after_box {
+                result.push(page);
+            }
+            let field = Field::new(FieldKind::Other("QUOTE".into()), style).with_result(result);
+            vec![
+                Paragraph::new(style)
+                    .with_inlines([Inline::Field(field)])
+                    .into(),
+            ]
+        })
+    };
+    assert!(document(false).validate().is_ok());
+    assert!(
+        document(true)
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("a field inside the result of a field")
+    );
+}
+
+#[test]
+fn a_text_box_s_insets_are_not_negative_and_its_content_is_checked_and_clamped() {
+    let document = document_with(|style| {
+        vec![
+            Paragraph::new(style)
+                .with_inlines([boxed(
+                    TextBox::new().with_insets(Insets::default().with_top(Pt(-1.0))),
+                )])
+                .into(),
+        ]
+    });
+    assert_eq!(
+        document.validate().unwrap_err().to_string(),
+        "sections[0].blocks[0].inlines[0].content.insets.top: -1 pt is negative"
+    );
+
+    // The paragraphs of a box are clamped as any others; those of a box in a box, which
+    // `validate` refuses, are left alone.
+    let beyond =
+        || ParagraphProps::default().with_tabs([TabStop::default().with_position(Pt(1700.0))]);
+    let mut document = document_with(|style| {
+        let deeper =
+            boxed(TextBox::new().with_blocks([Paragraph::new(style).with_props(beyond()).into()]));
+        let inner = Paragraph::new(style)
+            .with_props(beyond())
+            .with_inlines([deeper]);
+        vec![
+            Paragraph::new(style)
+                .with_inlines([boxed(TextBox::new().with_blocks([inner.into()]))])
+                .into(),
+        ]
+    });
+    assert_eq!(
+        entries(&document.clamp()),
+        [
+            "sections[0].blocks[0].inlines[0].content.blocks[0].props.tabs[0].position: tab \
+             stop position 1700 pt is outside Word's range of -1584 to 1584 pt and becomes 1584 pt"
+        ]
+    );
 }

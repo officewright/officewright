@@ -7,10 +7,13 @@
 use officewright_core::Pt;
 
 use crate::fonts::Fonts;
-use crate::ir::{CompatFlag, Document, Paragraph, ParagraphProps};
-use crate::itemize::{FieldValues, Itemized, itemize_with, shape_runs};
-use crate::lines::{Breaker, Input, Line, LineEnd};
-use crate::lists::Label;
+use crate::ir::{
+    Block, CompatFlag, Document, Inline, ObjectContent, Paragraph, ParagraphProps, Size, TextBox,
+};
+use crate::itemize::{FieldValues, Item, Itemized, itemize_with, shape_runs};
+use crate::lines::{Breaker, Input, Line, LineEnd, inline_at};
+use crate::lists::{Counters, Label};
+use crate::pages::report_list_formats;
 use crate::report::{Location, ReportKind};
 use crate::shape::Shaper;
 
@@ -27,6 +30,8 @@ pub(crate) struct ParagraphLayout {
     /// Its text and pieces, as the lines refer to them.
     pub(crate) itemized: Itemized,
     pub(crate) lines: Vec<Line>,
+    /// The text boxes its objects show, laid out, in the order of their items.
+    pub(crate) boxes: Vec<BoxLayout>,
 }
 
 impl ParagraphLayout {
@@ -34,6 +39,24 @@ impl ParagraphLayout {
     pub(crate) fn height(&self) -> Pt {
         Pt(self.lines.iter().map(|line| line.height.0).sum())
     }
+
+    /// The text box that item `item` shows, laid out.
+    pub(crate) fn text_box(&self, item: usize) -> Option<&BoxLayout> {
+        self.boxes.iter().find(|laid| laid.item == item)
+    }
+}
+
+/// The text of a text box laid out in the box's frame, inside its insets.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct BoxLayout {
+    /// The item of the object that shows the box.
+    pub(crate) item: usize,
+    /// Its paragraphs, each by its place among the box's blocks, with its layout and its
+    /// top from the top of the text.
+    pub(crate) paragraphs: Vec<(usize, ParagraphLayout, f64)>,
+    /// The height of the text, from the space before its first paragraph to the space
+    /// after its last.
+    pub(crate) height: f64,
 }
 
 /// Lays out `paragraph` of `document` in a column `width` wide, without a list label;
@@ -59,15 +82,31 @@ pub(crate) fn lay_out(
 }
 
 /// Lays out `paragraph` of `document` in a column `width` wide, starting with `label` when
-/// it is a list item; `location` is its place, for the report. Its fields show the values
-/// `fields` gives for those the layout computes, else the results the document stores.
+/// it is a list item, and the text boxes its objects show; `location` is its place, for
+/// the report. Its fields show the values `fields` gives for those the layout computes,
+/// else the results the document stores.
 pub(crate) fn lay_out_with(
+    document: &Document,
+    paragraph: (&Paragraph, Option<&Label>),
+    width: Pt,
+    tools: (&mut Fonts<'_>, &mut Shaper),
+    location: &Location,
+    fields: Option<&FieldValues>,
+) -> ParagraphLayout {
+    lay_out_paragraph(document, paragraph, width, tools, (location, fields), true)
+}
+
+/// [`lay_out_with`], laying out the text boxes of the paragraph's objects when `boxes`
+/// holds, as it does but in a text box: no box is laid out in a box, which
+/// `Document::validate` refuses, so that a document that was not validated cannot make the
+/// layout recurse without bound.
+fn lay_out_paragraph(
     document: &Document,
     (paragraph, label): (&Paragraph, Option<&Label>),
     width: Pt,
     (fonts, shaper): (&mut Fonts<'_>, &mut Shaper),
-    location: &Location,
-    fields: Option<&FieldValues>,
+    (location, fields): (&Location, Option<&FieldValues>),
+    boxes: bool,
 ) -> ParagraphLayout {
     let itemized = itemize_with(
         document,
@@ -99,10 +138,131 @@ pub(crate) fn lay_out_with(
                 .to_owned(),
         );
     }
+    let boxes = if boxes {
+        lay_out_boxes(
+            document,
+            paragraph,
+            &itemized,
+            (fonts, shaper),
+            (location, fields),
+        )
+    } else {
+        Vec::new()
+    };
     ParagraphLayout {
         width,
         itemized,
         lines,
+        boxes,
+    }
+}
+
+/// The text boxes that the objects of `paragraph`, itemized as `itemized`, show, laid out.
+fn lay_out_boxes(
+    document: &Document,
+    paragraph: &Paragraph,
+    itemized: &Itemized,
+    (fonts, shaper): (&mut Fonts<'_>, &mut Shaper),
+    (location, fields): (&Location, Option<&FieldValues>),
+) -> Vec<BoxLayout> {
+    let mut boxes = Vec::new();
+    for (item, entry) in itemized.items.iter().enumerate() {
+        let (Item::Object(path) | Item::Anchored(path)) = entry else {
+            continue;
+        };
+        if let Some((text_box, size)) = inline_at(paragraph.inlines(), path).and_then(text_box) {
+            let laid = lay_out_box(
+                document,
+                (item, text_box, size),
+                (fonts, shaper),
+                (location, fields),
+            );
+            boxes.push(laid);
+        }
+    }
+    boxes
+}
+
+/// The text box `inline` shows, if it is an object that shows one, with the size of the
+/// object's frame.
+pub(crate) fn text_box(inline: &Inline) -> Option<(&TextBox, Size)> {
+    let (content, size) = match inline {
+        Inline::Object(object) => (object.content(), object.size()),
+        Inline::Anchored(object) => (object.content(), object.size()),
+        _ => return None,
+    };
+    match content {
+        ObjectContent::TextBox(text_box) => Some((text_box, size)),
+        _ => None,
+    }
+}
+
+/// `text_box` laid out in a frame of `size`, inside its insets, as a story of its own: its
+/// paragraphs stacked with their spacing as in a header (a hypothesis, until Word renders
+/// `E-textbox-*.docx`), their list labels counted from the box's start. Tables in the box,
+/// and floating objects in its paragraphs, are left out and reported. `item` is that of the
+/// object that shows it.
+fn lay_out_box(
+    document: &Document,
+    (item, text_box, size): (usize, &TextBox, Size),
+    (fonts, shaper): (&mut Fonts<'_>, &mut Shaper),
+    (location, fields): (&Location, Option<&FieldValues>),
+) -> BoxLayout {
+    let insets = text_box.insets();
+    let width = Pt((size.width().0 - insets.left().0 - insets.right().0).max(0.0));
+    let mut counters = Counters::default();
+    let mut paragraphs = Vec::new();
+    let mut height = 0.0;
+    let mut above: Option<&Paragraph> = None;
+    for (index, block) in text_box.blocks().iter().enumerate() {
+        let Block::Paragraph(inner) = block else {
+            fonts.report_once(
+                ReportKind::FeatureUnsupported,
+                location,
+                "tables in text boxes are not drawn yet".to_owned(),
+            );
+            continue;
+        };
+        height += match above {
+            Some(above) => space_between(document, above.props(), inner.props()).0,
+            None => space_before(document, inner.props()).0,
+        };
+        let label = inner
+            .list()
+            .and_then(|item| counters.label(document, &item, location));
+        let layout = lay_out_paragraph(
+            document,
+            (inner, label.as_ref()),
+            width,
+            (fonts, shaper),
+            (location, fields),
+            false,
+        );
+        if layout
+            .itemized
+            .items
+            .iter()
+            .any(|item| matches!(item, Item::Anchored(_)))
+        {
+            fonts.report_once(
+                ReportKind::FeatureUnsupported,
+                location,
+                "floating objects in text boxes are not drawn".to_owned(),
+            );
+        }
+        let top = height;
+        height += layout.height().0;
+        paragraphs.push((index, layout, top));
+        above = Some(inner);
+    }
+    if let Some(last) = above {
+        height += space_after(document, last.props()).0;
+    }
+    report_list_formats(&counters, fonts);
+    BoxLayout {
+        item,
+        paragraphs,
+        height,
     }
 }
 
