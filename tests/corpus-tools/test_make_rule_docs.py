@@ -2894,17 +2894,26 @@ class Packages(unittest.TestCase):
                 self.assertIn("position:absolute", shape.get("style"))
                 style = dict(i.split(":", 1) for i in shape.get("style").split(";"))
                 self.assertEqual((style["margin-left"], style["margin-top"], style["width"],
-                                  style["mso-position-horizontal-relative"]),
-                                 ("0", "0", "216pt", "margin"))
+                                  style["height"], style["mso-position-horizontal-relative"],
+                                  style["mso-position-vertical-relative"]),
+                                 ("0", "0", "216pt", "108pt", "margin", "paragraph"))
                 # The table must be narrowed to fit beside the picture: its content, the
                 # widest text of each column with 5.4 pt cell margins on each side, is wider
                 # than the room the picture leaves, and its longest words are not.
                 tbl = children[at + 2]
                 self.assertIsNone(tbl.find(f"{W}tblPr/{W}tblLayout"))
+                # No preferred width anywhere: the only kind of table Word narrows to fit
+                # beside a floating object (MS-OI29500 2.1.1777).
+                self.assertEqual(attrs(tbl, f"{W}tblPr/{W}tblW"), {"w": "0", "type": "auto"})
+                self.assertEqual({tuple(attrs(tc, f"{W}tcPr/{W}tcW").items())
+                                  for tc in tbl.iter(f"{W}tc")},
+                                 {(("w", "0"), ("type", "auto"))})
                 columns = zip(*[["".join(t.text for t in tc.iter(f"{W}t"))
                                  for tc in tr.findall(f"{W}tc")] for tr in tbl.findall(f"{W}tr")])
                 content = sum(max(carlito_width(t) for t in col) + 10.8 for col in columns)
-                room = rules.TEXT_W / 20 - 216
+                # The room beside the picture, less the 9 pt wrap distance Word writes on
+                # its VML shapes.
+                room = rules.TEXT_W / 20 - 216 - 9
                 self.assertGreater(content, room)
                 words = [w for tr in tbl.findall(f"{W}tr") for tc in tr.findall(f"{W}tc")
                          for w in "".join(t.text for t in tc.iter(f"{W}t")).split()]
