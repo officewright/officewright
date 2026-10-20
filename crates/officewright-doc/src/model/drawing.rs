@@ -437,6 +437,10 @@ pub struct Image<'a> {
 }
 
 impl<'a> Image<'a> {
+    pub(super) fn new(data: &'a ImageData) -> Self {
+        Self { data }
+    }
+
     /// The content type of its part, such as `image/png`.
     pub fn content_type(self) -> &'a str {
         &self.data.content_type
@@ -459,10 +463,10 @@ impl<'a> Image<'a> {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub struct Offsets {
-    left: Pt,
-    top: Pt,
-    right: Pt,
-    bottom: Pt,
+    pub(super) left: Pt,
+    pub(super) top: Pt,
+    pub(super) right: Pt,
+    pub(super) bottom: Pt,
 }
 
 impl Offsets {
@@ -492,10 +496,10 @@ impl Offsets {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub struct Crop {
-    left: f64,
-    top: f64,
-    right: f64,
-    bottom: f64,
+    pub(super) left: f64,
+    pub(super) top: f64,
+    pub(super) right: f64,
+    pub(super) bottom: f64,
 }
 
 impl Crop {
@@ -527,18 +531,18 @@ impl Crop {
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct Anchor {
-    horizontal_reference: Option<HorizontalReference>,
-    horizontal_align: Option<AnchorHorizontalAlign>,
-    horizontal_offset: Option<Pt>,
-    vertical_reference: Option<VerticalReference>,
-    vertical_align: Option<AnchorVerticalAlign>,
-    vertical_offset: Option<Pt>,
-    wrap: Option<WrapKind>,
-    behind_text: bool,
-    layout_in_cell: bool,
-    allow_overlap: bool,
-    z_order: u32,
-    distances: Offsets,
+    pub(super) horizontal_reference: Option<HorizontalReference>,
+    pub(super) horizontal_align: Option<AnchorHorizontalAlign>,
+    pub(super) horizontal_offset: Option<Pt>,
+    pub(super) vertical_reference: Option<VerticalReference>,
+    pub(super) vertical_align: Option<AnchorVerticalAlign>,
+    pub(super) vertical_offset: Option<Pt>,
+    pub(super) wrap: Option<WrapKind>,
+    pub(super) behind_text: bool,
+    pub(super) layout_in_cell: bool,
+    pub(super) allow_overlap: bool,
+    pub(super) z_order: u32,
+    pub(super) distances: Offsets,
 }
 
 impl Anchor {

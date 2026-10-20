@@ -140,6 +140,21 @@ fuzz_target!(|data: &[u8]| {
                                                 picture.image().map(|image| image.bytes().len());
                                         }
                                     }
+                                    RunContent::VmlDrawing(drawing) => {
+                                        write_back.check(|| drawing.to_xml());
+                                        if let Some(picture) = drawing.picture() {
+                                            let _ = (picture.width(), picture.height());
+                                            let _ = (picture.crop(), picture.rotation());
+                                            let _ = (
+                                                picture.flip_horizontal(),
+                                                picture.flip_vertical(),
+                                                picture.is_hidden(),
+                                            );
+                                            let _ = picture.anchor();
+                                            let _ =
+                                                picture.image().map(|image| image.bytes().len());
+                                        }
+                                    }
                                     _ => {}
                                 }
                             }

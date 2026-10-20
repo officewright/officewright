@@ -3761,6 +3761,246 @@ fn translates_pictures_with_their_images() {
 }
 
 #[test]
+fn translates_vml_pictures_as_pictures_are() {
+    use super::drawing::{inline_picture, with_images};
+    use super::vml::{
+        bare_floating_vml_picture, floating_vml_picture, inline_vml_picture, pict, vml_picture,
+    };
+    let body = format!(
+        "<w:p>{}{}{}{}{}{}{}{}</w:p>",
+        inline_vml_picture("rIdPng"),
+        floating_vml_picture("rIdJpeg"),
+        bare_floating_vml_picture("rIdPng"),
+        inline_picture("rIdPng"),
+        vml_picture("rIdGone", "width:1pt;height:1pt", "", "", ""),
+        pict(r#"<v:line from="0,0" to="10pt,0"/>"#),
+        vml_picture("rIdPng", "height:1pt", "", "", ""),
+        vml_picture(
+            "rIdPng",
+            "width:1pt;height:1pt;visibility:hidden",
+            "",
+            "",
+            ""
+        ),
+    );
+    let translation = translate(&with_images(&body));
+    let ir = translation.document();
+    let picture = |inline: &ir::Inline| -> ir::Picture {
+        let content = match inline {
+            ir::Inline::Object(object) => object.content(),
+            ir::Inline::Anchored(object) => object.content(),
+            other => panic!("not an object: {other:?}"),
+        };
+        match content {
+            ir::ObjectContent::Picture(picture) => *picture,
+            other => panic!("not a picture: {other:?}"),
+        }
+    };
+    let inlines = paragraphs(&translation)[0].inlines();
+    // The line, the picture without a width and the hidden one are left out.
+    assert_eq!(inlines.len(), 5);
+
+    let ir::Inline::Object(object) = &inlines[0] else {
+        panic!("a picture in the line");
+    };
+    assert_eq!(object.size(), ir::Size::new(Pt(144.0), Pt(72.0)));
+    assert_eq!(object.effect_extent(), ir::Insets::default());
+    let shown = picture(&inlines[0]);
+    assert_eq!(
+        shown.crop(),
+        Some(
+            ir::Crop::default()
+                .with_left(6554.0 / 65536.0)
+                .with_bottom(-0.05)
+        )
+    );
+    assert_eq!(shown.rotation(), -90.0);
+    assert!(shown.flip_horizontal() && !shown.flip_vertical());
+    assert_eq!(
+        ir.image(shown.image()).unwrap().format(),
+        &ir::ImageFormat::Png
+    );
+    // A VML and a DrawingML picture of one part show one image.
+    assert_eq!(picture(&inlines[3]).image(), shown.image());
+
+    let ir::Inline::Anchored(floating) = &inlines[1] else {
+        panic!("a floating picture");
+    };
+    assert_eq!(floating.size(), ir::Size::new(Pt(100.0), Pt(40.0)));
+    assert_eq!(
+        floating.horizontal(),
+        ir::HorizontalAnchor::default()
+            .with_relative_to(ir::HorizontalReference::Page)
+            .with_placement(ir::HorizontalPlacement::Align(
+                ir::AnchorHorizontalAlign::Right
+            ))
+    );
+    assert_eq!(
+        floating.vertical(),
+        ir::VerticalAnchor::default()
+            .with_relative_to(ir::VerticalReference::TopMargin)
+            .with_placement(ir::VerticalPlacement::Offset(Pt(-10.0)))
+    );
+    assert_eq!(floating.wrap(), ir::Wrap::Square);
+    assert!(floating.behind_text());
+    assert!(!floating.layout_in_cell() && floating.allow_overlap());
+    assert_eq!(floating.z_order(), 2_147_483_648 - 251_658_240);
+    assert_eq!(
+        floating.distances(),
+        ir::Insets::default()
+            .with_right(Pt(9.0))
+            .with_bottom(Pt(3.0))
+    );
+    assert_eq!(
+        ir.image(picture(&inlines[1]).image()).unwrap().format(),
+        &ir::ImageFormat::Jpeg
+    );
+
+    let ir::Inline::Anchored(bare) = &inlines[2] else {
+        panic!("a floating picture");
+    };
+    assert_eq!(
+        (bare.horizontal(), bare.vertical()),
+        (
+            ir::HorizontalAnchor::default()
+                .with_relative_to(ir::HorizontalReference::Column)
+                .with_placement(ir::HorizontalPlacement::Offset(Pt(0.0))),
+            ir::VerticalAnchor::default()
+                .with_relative_to(ir::VerticalReference::Paragraph)
+                .with_placement(ir::VerticalPlacement::Offset(Pt(0.0)))
+        )
+    );
+    assert_eq!(bare.wrap(), ir::Wrap::None);
+    assert!(bare.layout_in_cell() && bare.allow_overlap() && !bare.behind_text());
+
+    // A picture whose image the package does not have keeps its frame, empty.
+    assert_eq!(
+        ir.image(picture(&inlines[4]).image()).unwrap().format(),
+        &ir::ImageFormat::Other("missing".into())
+    );
+
+    let left_out: Vec<&str> = translation
+        .left_out()
+        .iter()
+        .map(ReportEntry::message)
+        .collect();
+    assert_eq!(
+        left_out,
+        [
+            "a picture's image is not in the package: its frame is left empty",
+            "a VML drawing that shows no picture (a shape, text box or group) is left out (w:pict)",
+            "a picture without a size is left out",
+        ]
+    );
+}
+
+#[test]
+fn lists_a_vml_picture_s_outline_colour_adjustments_and_text_once() {
+    use super::drawing::with_images;
+    use super::vml::{inline_vml_picture, pict, vml_picture};
+    let listed = |runs: &[String]| -> Vec<String> {
+        translate(&with_images(&format!("<w:p>{}</w:p>", runs.concat())))
+            .left_out()
+            .iter()
+            .map(|entry| entry.message().to_owned())
+            .filter(|message| message.starts_with("a VML picture's"))
+            .collect()
+    };
+    let outline = "a VML picture's outline (stroked, v:stroke) is not drawn, here and wherever else the document has one";
+    let colour = "a VML picture's colour adjustments (v:imagedata, such as gain, blacklevel or grayscale) are not applied, here and wherever else the document has them";
+    let text = "a VML picture's text (v:textbox) is left out, here and wherever else the document has some";
+    let size = "width:1pt;height:1pt";
+    // Word's picture frame is not stroked, nor are its gain of 1 and black level of 0 a
+    // change, nor is a shape type it wrote in an earlier w:pict.
+    assert!(
+        listed(&[
+            inline_vml_picture("rIdPng"),
+            vml_picture("rIdPng", size, "", r#"gain="1" blacklevel="0f" grayscale="f""#, ""),
+            pict(&format!(
+                r##"<v:shape type="#_x0000_t75" style="{size}"><v:imagedata r:id="rIdPng"/></v:shape>"##
+            )),
+            vml_picture("rIdPng", size, r#"stroked="f""#, "", r#"<v:stroke joinstyle="miter"/>"#),
+        ])
+        .is_empty()
+    );
+    // A shape without a type is stroked by VML's default; v:stroke's on decides first;
+    // each is listed once.
+    let bare = pict(&format!(
+        r#"<v:shape style="{size}"><v:imagedata r:id="rIdPng"/></v:shape>"#
+    ));
+    assert_eq!(listed(&[bare.clone(), bare]), [outline]);
+    assert_eq!(
+        listed(&[vml_picture("rIdPng", size, r#"stroked="t""#, "", "")]),
+        [outline]
+    );
+    assert_eq!(
+        listed(&[vml_picture(
+            "rIdPng",
+            size,
+            r#"stroked="f""#,
+            "",
+            r#"<v:stroke on="t"/>"#
+        )]),
+        [outline]
+    );
+    // The washed-out look of a picture watermark, and the other adjustments.
+    for data in [
+        r#"gain="19661f" blacklevel="22938f""#,
+        r#"gamma="2""#,
+        r#"grayscale="t""#,
+        r#"bilevel="true""#,
+        r#"chromakey="white""#,
+    ] {
+        assert_eq!(
+            listed(&[vml_picture("rIdPng", size, "", data, "")]),
+            [colour],
+            "{data}"
+        );
+    }
+    assert_eq!(
+        listed(&[vml_picture(
+            "rIdPng",
+            size,
+            "",
+            "",
+            "<v:textbox><w:txbxContent><w:p/></w:txbxContent></v:textbox>"
+        )]),
+        [text]
+    );
+}
+
+#[test]
+fn lists_a_border_around_a_vml_picture_in_the_line_only() {
+    use super::drawing::with_images;
+    use super::vml::{bare_floating_vml_picture, inline_vml_picture};
+    let bordered = |picture: String| {
+        let body = format!(
+            r#"<w:p>{}</w:p>"#,
+            picture.replacen(
+                "<w:r>",
+                r#"<w:r><w:rPr><w:bdr w:val="single" w:sz="4" w:space="0" w:color="auto"/></w:rPr>"#,
+                1
+            )
+        );
+        translate(&with_images(&body))
+            .left_out()
+            .iter()
+            .map(|entry| entry.message().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let inline = bordered(inline_vml_picture("rIdPng"));
+    assert!(
+        inline.iter().any(|message| message.contains("border")),
+        "{inline:?}"
+    );
+    let floating = bordered(bare_floating_vml_picture("rIdPng"));
+    assert!(
+        !floating.iter().any(|message| message.contains("border")),
+        "{floating:?}"
+    );
+}
+
+#[test]
 fn translates_pictures_whose_lengths_are_out_of_range_into_valid_ir() {
     // Lengths of 308 digits and a unit, which are infinite as numbers of points, in each
     // place a drawing has one: none reaches the IR, which `translate` validates.
