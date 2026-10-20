@@ -1468,6 +1468,25 @@ class Cleaning(unittest.TestCase):
                 "<w:r><w:t>:\\private\\x.docx</w:t></w:r></w:p></w:txbxContent></w:r></v:textbox>"
                 "</w:r>"),
             # A field begun inside a w:fldSimple ends inside it.
+            # Instruction text in a w:fldSimple inside a branch, which Word would read into
+            # the instruction begun outside the branch (re-check of #381).
+            "instruction text in a fldSimple in a Fallback": piece(branch(
+                "", "<w:fldSimple w:instr='QUOTE x'><w:r><w:instrText>:\\private\\x.docx"
+                    "</w:instrText></w:r></w:fldSimple>")),
+            # Instruction text in a w:fldSimple nested in the instruction of a field that is
+            # itself in another field's result, harmless if it were read in.
+            "instruction text in a fldSimple nested in a result's field": (
+                f"<w:document xmlns:w='{w}'><w:body><w:p>"
+                "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                "<w:r><w:instrText>QUOTE x</w:instrText></w:r>"
+                "<w:r><w:fldChar w:fldCharType='separate'/></w:r>"
+                "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                '<w:r><w:instrText>HYPERLINK "</w:instrText></w:r>'
+                "<w:fldSimple w:instr='MERGEFIELD url'><w:r><w:instrText>"
+                "https://www.example.gov/a</w:instrText></w:r></w:fldSimple>"
+                '<w:r><w:instrText>"</w:instrText></w:r>'
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r>"
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:p></w:body></w:document>"),
             "a field begun in a fldSimple and left open": (
                 f"<w:document xmlns:w='{w}'><w:body><w:p>"
                 "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
