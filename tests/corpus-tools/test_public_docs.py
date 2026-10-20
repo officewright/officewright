@@ -1329,6 +1329,524 @@ class Cleaning(unittest.TestCase):
         found = "; ".join(public.problems(package(**{"word/document.xml": authored})))
         self.assertIn("document.xml has tracked changes or an author", found)
 
+    def test_fields_that_name_local_files_are_refused_and_reported(self):
+        # A field instruction can name a file to open or load, in w:instrText split across
+        # runs or in w:fldSimple (#372).
+        w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+        def field(*pieces, prefix="w", namespace=w):
+            runs = "".join(f"<{prefix}:r><{prefix}:instrText xml:space='preserve'>{piece}"
+                           f"</{prefix}:instrText></{prefix}:r>" for piece in pieces)
+            return (f"<{prefix}:document xmlns:{prefix}='{namespace}'><{prefix}:body><{prefix}:p>"
+                    f"<{prefix}:r><{prefix}:fldChar {prefix}:fldCharType='begin'/></{prefix}:r>"
+                    f"{runs}<{prefix}:r><{prefix}:fldChar {prefix}:fldCharType='separate'/>"
+                    f"</{prefix}:r><{prefix}:r><{prefix}:t>x</{prefix}:t></{prefix}:r>"
+                    f"<{prefix}:r><{prefix}:fldChar {prefix}:fldCharType='end'/></{prefix}:r>"
+                    f"</{prefix}:p></{prefix}:body></{prefix}:document>")
+
+        def simple(instruction):
+            return (f"<w:document xmlns:w='{w}'><w:body><w:p><w:fldSimple w:instr='{instruction}'>"
+                    "<w:r><w:t>x</w:t></w:r></w:fldSimple></w:p></w:body></w:document>")
+
+        def text_in(before, text, after):
+            return (f"<w:document xmlns:w='{w}'><w:body><w:p>"
+                    "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                    f"<w:r><w:instrText>{before}</w:instrText></w:r><w:r><w:t>{text}</w:t></w:r>"
+                    f"<w:r><w:instrText>{after}</w:instrText></w:r>"
+                    "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:p></w:body></w:document>")
+
+        def nested_result(result):
+            return (f"<w:document xmlns:w='{w}'><w:body><w:p>"
+                    "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                    '<w:r><w:instrText>INCLUDEPICTURE "</w:instrText></w:r>'
+                    "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                    "<w:r><w:instrText>MERGEFIELD Photo</w:instrText></w:r>"
+                    "<w:r><w:fldChar w:fldCharType='separate'/></w:r>"
+                    f"<w:r><w:t>{result}</w:t></w:r>"
+                    "<w:r><w:fldChar w:fldCharType='end'/></w:r>"
+                    '<w:r><w:instrText>" \\d</w:instrText></w:r>'
+                    "<w:r><w:fldChar w:fldCharType='separate'/></w:r>"
+                    "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:p></w:body></w:document>")
+
+        nested = (f"<w:document xmlns:w='{w}'><w:body><w:p>"
+                  "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                  "<w:r><w:instrText>IF 1 = 1 </w:instrText></w:r>"
+                  "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                  '<w:r><w:instrText>INCLUDETEXT "D:\\\\drafts\\\\x.docx"</w:instrText></w:r>'
+                  "<w:r><w:fldChar w:fldCharType='end'/></w:r>"
+                  "<w:r><w:instrText> yes</w:instrText></w:r>"
+                  "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:p></w:body></w:document>")
+        cases = {
+            "a file URL": field('HYPERLINK "file:///D:/drafts/x.docx"'),
+            # No piece names a place alone.
+            "split across runs": field('HYPERLINK "fi', "le:/", "/D", ':/x.docx"'),
+            "a drive with single backslashes": field('INCLUDETEXT "C:\\drafts\\x.docx"'),
+            "an unquoted drive": field("INCLUDEPICTURE C:\\\\pics\\\\a.png \\d"),
+            "a server by slashes": field('HYPERLINK "//server/share/x.docx"'),
+            "a relative path": field('INCLUDEPICTURE "../pics/a.png"'),
+            "another scheme": field('HYPERLINK "notes://server/db"'),
+            "a scheme without slashes": field('HYPERLINK "callto:jroe"'),
+            "a local path in a web address": field(
+                'HYPERLINK "https://www.example.gov/?r=file:///C:/x"'),
+            "a link to a server file": field('LINK Excel.Sheet.8 "\\\\\\\\srv\\\\x.xls" ""'),
+            "a database": field('DATABASE \\d "orders.mdb" \\s "SELECT *"'),
+            "a dde topic": field('DDEAUTO Excel "budget.xls"'),
+            "fldSimple": simple('INCLUDEPICTURE "C:\\\\pics\\\\a.png"'),
+            "a nested field": nested,
+            "an unclosed field": field('HYPERLINK "file:///D:/x.docx"').replace(
+                "<w:r><w:fldChar w:fldCharType='separate'/></w:r>", "").replace(
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r>", ""),
+            "a deleted instruction": field('HYPERLINK "file:///D:/x.docx"').replace(
+                "instrText", "delInstrText"),
+            "another prefix": field('HYPERLINK "file:///D:/x.docx"', prefix="q"),
+            "strict": field('HYPERLINK "file:///D:/x.docx"',
+                            namespace="http://purl.oclc.org/ooxml/wordprocessingml/main"),
+            "character references": field('HYPERLINK "&#x66;ile:///D:/x.docx"'),
+            "cdata": field('HYPERLINK "<![CDATA[file:///D:/x.docx]]>"'),
+            # A field that loads nothing still writes its instruction into the document.
+            "a drive in any field": field('QUOTE "D:/drafts"'),
+            "a server in any field": field('QUOTE "\\\\srv\\x"'),
+            "a server by slashes in any field": field('QUOTE "//srv/x"'),
+            "a file URL in any field": field('QUOTE "file:x"'),
+            "another scheme in any field": field('QUOTE "smb://srv/x"'),
+            # A place inside a web or mail address that does not begin an argument.
+            "a file URL inside an address": field(
+                'QUOTE "(https://www.example.gov/?r=file:///D:/private/x.docx)"'),
+            "a server inside an address": field(
+                'QUOTE "see https://www.example.gov/?r=\\\\srv\\private"'),
+            "a drive inside a mail address": field(
+                'QUOTE "a mailto:x@example.gov?body=C:\\private"'),
+            # Each field that loads or opens a file, with a relative path.
+            "a relative path with backslashes": field('INCLUDETEXT "..\\drafts\\x.docx"'),
+            "a relative link": field('LINK Excel.Sheet.8 "drafts/x.xls" ""'),
+            "a relative rd": field('RD "drafts/x.docx"'),
+            "a relative include": field('INCLUDE "drafts/x.docx"'),
+            "a relative import": field('IMPORT "drafts/x.wmf"'),
+            "a relative hyperlink": field('HYPERLINK "drafts/x.docx"'),
+            "a field name in lower case": field('includepicture "../pics/a.png"'),
+            "a name ended by a switch": field('INCLUDEPICTURE\\d "..\\pics\\a.png"'),
+            "a name ended by a quote": field('INCLUDETEXT"..\\drafts\\x.docx"'),
+            "dde": field('DDE Excel "budget.xls"'),
+            # Fields whose result shows a path or a person.
+            "filename": field("FILENAME \\p"), "template": field("TEMPLATE \\p"),
+            "author": field("AUTHOR"), "last saved by": field("LASTSAVEDBY"),
+            "user name": field("USERNAME"), "user initials": field("USERINITIALS"),
+            "user address": field("USERADDRESS"),
+            **{f"docproperty {p}": field(f'DOCPROPERTY "{p}"') for p in (
+                "Author", "Creator", "LastSavedBy", "LastModifiedBy", "Manager")},
+            "docproperty company": field("DOCPROPERTY Company"),
+            # Instruction text outside a field's instruction is read as one of its own.
+            "an instruction outside a field": (
+                f"<w:document xmlns:w='{w}'><w:body><w:p><w:r><w:instrText>"
+                'HYPERLINK "file:///D:/x.docx"</w:instrText></w:r></w:p></w:body></w:document>'),
+            "an instruction that begins with the path": simple('"D:\\drafts\\x.docx"'),
+            "an unquoted path first": simple("D:\\drafts\\x"),
+            # INFO and DOCPROPERTY show a property: only an allowed one is kept.
+            **{f"info {p}": field(f"INFO {p}") for p in (
+                "Author", "LastSavedBy", "FileName", "Template")},
+            "docproperty hyperlink base": field("DOCPROPERTY HyperlinkBase"),
+            "a custom docproperty": field('DOCPROPERTY "Owner"'),
+            "docvariable": field("DOCVARIABLE owner"),
+            # Two separators in any mix, and "//" after a scheme that does not begin a word.
+            "a backslash and a slash": field('QUOTE "\\/srv\\x"'),
+            "a slash and a backslash": field('QUOTE "/\\srv\\x"'),
+            "a scheme after an underscore": field(
+                'QUOTE "https://www.example.gov/?r=_smb://srv/x"'),
+            "a scheme after a digit": field('QUOTE "1smb://srv/x"'),
+            "a web scheme that does not begin a word": field('QUOTE "x_https://srv/x"'),
+            # The result of a field nested in an instruction is part of that instruction.
+            "a nested result with a drive": nested_result("D:\\photos\\x.jpg"),
+            "a nested relative result": nested_result("photos/x.jpg"),
+            "a nested deleted result": nested_result("photos/x.jpg").replace(
+                "<w:t>photos", "<w:delText>photos").replace("x.jpg</w:t>", "x.jpg</w:delText>"),
+            # The innermost open instruction takes the result: a QUOTE around it loads nothing.
+            "a nested result in the innermost instruction": (
+                f"<w:document xmlns:w='{w}'><w:body><w:p>"
+                "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                '<w:r><w:instrText>QUOTE "</w:instrText></w:r>'
+                + nested_result("photos/x.jpg").split("<w:p>", 1)[1].split("</w:p>", 1)[0]
+                + '<w:r><w:instrText>"</w:instrText></w:r>'
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:p></w:body></w:document>"),
+            # Text written straight into an instruction is read on its own, so that it can
+            # change no field's name.
+            "text inside an instruction": (
+                f"<w:document xmlns:w='{w}'><w:body><w:p>"
+                "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                "<w:r><w:instrText>INC</w:instrText></w:r><w:r><w:t>X</w:t></w:r>"
+                '<w:r><w:instrText>LUDETEXT "..\\drafts\\x.docx"</w:instrText></w:r>'
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:p></w:body></w:document>"),
+            # Text written straight into an instruction is refused, whether Word reads it in
+            # or skips it (re-check of #381).
+            "a quote written into an instruction": text_in(
+                'LINK Excel.Sheet.8 "http://srv/a', '" "', '..\\x.xls"'),
+            "a colon written into an instruction": text_in('INCLUDETEXT "http://x/D', ":", '\\y"'),
+            "a path written into an instruction": text_in(
+                'INCLUDETEXT "', "D:\\private\\x.docx", '"'),
+            "text in a field begun inside a fldSimple": (
+                f"<w:document xmlns:w='{w}'><w:body><w:p><w:fldSimple w:instr='QUOTE x'>"
+                "<w:r><w:fldChar w:fldCharType='begin'/></w:r><w:r><w:t>QUOTE </w:t></w:r>"
+                '<w:r><w:instrText>INCLUDETEXT "drafts/x.docx"</w:instrText></w:r>'
+                "<w:r><w:fldChar w:fldCharType='separate'/></w:r>"
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:fldSimple></w:p></w:body>"
+                "</w:document>"),
+            "a nested result in instruction text": nested_result("photos/x.jpg").replace(
+                "<w:t>photos/x.jpg</w:t>", "<w:instrText>photos/x.jpg</w:instrText>"),
+            "docproperty with an allowed second argument": field("DOCPROPERTY Author Title"),
+            "a bare info": field("INFO"),
+            **{f"a web scheme after {c}": field(f'QUOTE "a{c}https://srv/x"') for c in "+.-1x"},
+            **{f"an http scheme after {c}": field(f'QUOTE "a{c}http://srv/x"') for c in "+.-1x_"},
+            "a nested fldSimple result": (
+                f"<w:document xmlns:w='{w}'><w:body><w:p>"
+                "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                '<w:r><w:instrText>INCLUDETEXT "</w:instrText></w:r>'
+                "<w:fldSimple w:instr='MERGEFIELD f'><w:r><w:t>drafts/x.docx</w:t></w:r>"
+                '</w:fldSimple><w:r><w:instrText>"</w:instrText></w:r>'
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:p></w:body></w:document>"),
+        }
+        plain = public.PublicDoc("plain", "nara", "https://www.example.gov/p.docx",
+                                 "2026-10-19", "0" * 64)
+        for label, document in cases.items():
+            for part in ("word/document.xml", "word/header1.xml"):
+                data = package(**{part: document})
+                with self.subTest(label, part=part):
+                    expected = f"{part} has a field"
+                    self.assertTrue(any(p.startswith(expected) for p in public.problems(data)),
+                                    public.problems(data))
+                    with self.assertRaises(public.Refused) as caught:
+                        public.clean(data, plain)
+                    self.assertIn(expected, str(caught.exception))
+                    if label.startswith(("an instruction that begins", "an unquoted path")):
+                        self.assertIn(f"{part} has a field that names", str(caught.exception))
+                    # The part is named, never the path.
+                    for path in ("drafts", "D:", "C:", "server", "srv", "pics", "jroe", "orders",
+                                 "private", "DRAFTS"):
+                        self.assertNotIn(path, str(caught.exception))
+        utf16 = field('HYPERLINK "file:///D:/x.docx"').replace(
+            "<w:document", "<?xml version='1.0' encoding='UTF-16'?><w:document", 1)
+        # UTF-16 with a byte order mark, and without one in either byte order.
+        for encoding in ("utf-16", "utf-16-le", "utf-16-be"):
+            with self.subTest(encoding):
+                self.assertIn("word/footnotes.xml has a field (HYPERLINK)",
+                              "; ".join(public.problems(package(**{
+                                  "word/footnotes.xml": utf16.encode(encoding)}))))
+        # A part name in upper case is read too, and each part is named once.
+        twice = field('HYPERLINK "file:///D:/x.docx"').replace(
+            "</w:p>", "<w:fldSimple w:instr='INCLUDETEXT \"D:/x\"'/></w:p>")
+        found = public.field_problems({"word/header1.XML": twice.encode()})
+        self.assertEqual(found, ["word/header1.XML has a field (HYPERLINK) that names a local "
+                                 "file, another scheme or another program, or people's data"])
+
+    def test_fields_across_markup_compatibility_or_foreign_markup_are_refused(self):
+        # Word takes one branch of mc:AlternateContent and drops ignorable markup, so a field
+        # mark there could end a field this check reads while Word reads on (review of #381).
+        w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        mc = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+
+        def document(middle, instruction='INCLUDETEXT "x.docx"'):
+            return (f"<w:document xmlns:w='{w}' xmlns:mc='{mc}' xmlns:zz='urn:zz' "
+                    "mc:Ignorable='zz'><w:body><w:p>"
+                    "<w:r><w:fldChar w:fldCharType='begin'/></w:r>" + middle +
+                    f"<w:r><w:instrText>{instruction}</w:instrText></w:r>"
+                    "<w:r><w:fldChar w:fldCharType='separate'/></w:r>"
+                    "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:p></w:body></w:document>")
+
+        def branch(choice, fallback):
+            return (f"<w:r><mc:AlternateContent><mc:Choice Requires='zz'>{choice}</mc:Choice>"
+                    f"<mc:Fallback>{fallback}</mc:Fallback></mc:AlternateContent></w:r>")
+
+        separate = "<w:fldChar w:fldCharType='separate'/>"
+        end = "<w:fldChar w:fldCharType='end'/>"
+
+        def nested_in_branch(middle):
+            return (f"<w:document xmlns:w='{w}' xmlns:mc='{mc}' xmlns:zz='urn:zz' "
+                    "xmlns:w14='urn:w14' mc:Ignorable='zz'><w:body><w:p>"
+                    "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                    '<w:r><w:instrText>INCLUDEPICTURE "</w:instrText></w:r>' + middle
+                    + '<w:r><w:instrText>" \\d</w:instrText></w:r>'
+                    "<w:r><w:fldChar w:fldCharType='separate'/></w:r>"
+                    "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:p></w:body></w:document>")
+
+        def piece(middle):
+            return (f"<w:document xmlns:w='{w}' xmlns:mc='{mc}' xmlns:zz='urn:zz' "
+                    "xmlns:w14='urn:w14' mc:Ignorable='zz'><w:body><w:p>"
+                    "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                    '<w:r><w:instrText>INCLUDETEXT "D</w:instrText></w:r>' + middle
+                    + '<w:r><w:instrText>"</w:instrText></w:r>'
+                    "<w:r><w:fldChar w:fldCharType='separate'/></w:r>"
+                    "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:p></w:body></w:document>")
+        cases = {
+            "a separate in a Choice": document(branch(separate, "")),
+            "an end in a Choice": document(branch(end, "")),
+            "a separate in a Fallback": document(branch("", separate)),
+            "a separate in ignorable markup": document(f"<zz:x><w:r>{separate}</w:r></zz:x>"),
+            "markup inside an instruction": document(
+                "", 'HYPERLINK "fi<zz:x/>le:///D:/x.docx"'),
+            "custom field data": document("<w:r><w:fldData>AAAA</w:fldData></w:r>"),
+            "a begin in a Choice": document(branch("<w:fldChar w:fldCharType='begin'/>", "")),
+            "a begin in a text box": document(
+                "<w:r><v:textbox xmlns:v='urn:schemas-microsoft-com:vml'><w:txbxContent><w:p><w:r>"
+                "<w:fldChar w:fldCharType='begin'/></w:r></w:p></w:txbxContent></v:textbox></w:r>"),
+            # Instruction text in a branch goes on the instruction begun outside it, in the
+            # branch Word takes (review of #381).
+            "an instruction piece in a Fallback": piece(branch(
+                "", "<w:instrText>:\\private\\x.docx</w:instrText>")),
+            "an instruction piece in a w14 Choice": piece(
+                "<w:r><mc:AlternateContent><mc:Choice Requires='w14'><w:instrText>"
+                ":\\private\\x.docx</w:instrText></mc:Choice><mc:Fallback/>"
+                "</mc:AlternateContent></w:r>"),
+            "an instruction piece in foreign markup": piece(
+                "<w:r><zz:x><w:instrText>:\\private\\x.docx</w:instrText></zz:x></w:r>"),
+            # The same with a run between the branch and the text, as a branch around runs
+            # has it.
+            "a run with an instruction piece in a Fallback": piece(
+                "<mc:AlternateContent><mc:Choice Requires='zz'/><mc:Fallback><w:r><w:instrText>"
+                ":\\private\\x.docx</w:instrText></w:r></mc:Fallback></mc:AlternateContent>"),
+            "a run with an instruction piece in a w14 Choice": piece(
+                "<mc:AlternateContent><mc:Choice Requires='w14'><w:r><w:instrText>"
+                ":\\private\\x.docx</w:instrText></w:r></mc:Choice><mc:Fallback/>"
+                "</mc:AlternateContent>"),
+            "a run with an instruction piece in foreign markup": piece(
+                "<zz:x><w:r><w:instrText>:\\private\\x.docx</w:instrText></w:r></zz:x>"),
+            # Text in a branch that Word reads into an instruction begun outside it.
+            "a text piece in foreign markup in a Fallback": piece(
+                "<mc:AlternateContent><mc:Choice Requires='zz'/><mc:Fallback><zz:x><w:r><w:t>"
+                ":\\private\\x.docx</w:t></w:r></zz:x></mc:Fallback></mc:AlternateContent>"),
+            "a plain text piece in a Fallback": piece(
+                "<mc:AlternateContent><mc:Choice Requires='zz'/><mc:Fallback><w:r><w:t>"
+                ":\\private\\x.docx</w:t></w:r></mc:Fallback></mc:AlternateContent>"),
+            # A w:txbxContent outside a drawing's text box is read like any other element
+            # (re-check of #381).
+            "a text box straight in an instruction": piece(
+                "<w:r><w:txbxContent><w:p><w:r><w:t>:\\private\\x.docx</w:t></w:r></w:p>"
+                "</w:txbxContent></w:r>"),
+            "a text box in a w14 Choice without a drawing": piece(
+                "<mc:AlternateContent><mc:Choice Requires='w14'><w:txbxContent><w:p><w:r><w:t>"
+                ":\\private\\x.docx</w:t></w:r></w:p></w:txbxContent></mc:Choice><mc:Fallback/>"
+                "</mc:AlternateContent>"),
+            "a text box in foreign markup": piece(
+                "<zz:x><w:txbxContent><w:p><w:r><w:t>:\\private\\x.docx</w:t></w:r></w:p>"
+                "</w:txbxContent></zz:x>"),
+            # Only a wps or VML text box is a story of its own: a foreign element of the same
+            # name, or a w:txbxContent that is not its child, is read like any other.
+            "a foreign textbox in an instruction": piece(
+                "<w:r><zz:textbox><w:txbxContent><w:p><w:r><w:t>:\\private\\x.docx</w:t></w:r>"
+                "</w:p></w:txbxContent></zz:textbox></w:r>"),
+            "a text box below a run in a VML textbox": piece(
+                "<w:r><v:textbox xmlns:v='urn:schemas-microsoft-com:vml'><w:r><w:txbxContent><w:p>"
+                "<w:r><w:t>:\\private\\x.docx</w:t></w:r></w:p></w:txbxContent></w:r></v:textbox>"
+                "</w:r>"),
+            # A field begun inside a w:fldSimple ends inside it.
+            # Instruction text in a w:fldSimple inside a branch, which Word would read into
+            # the instruction begun outside the branch (re-check of #381).
+            "instruction text in a fldSimple in a Fallback": piece(branch(
+                "", "<w:fldSimple w:instr='QUOTE x'><w:r><w:instrText>:\\private\\x.docx"
+                    "</w:instrText></w:r></w:fldSimple>")),
+            # Instruction text in a w:fldSimple nested in the instruction of a field that is
+            # itself in another field's result, harmless if it were read in.
+            "instruction text in a fldSimple nested in a result's field": (
+                f"<w:document xmlns:w='{w}'><w:body><w:p>"
+                "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                "<w:r><w:instrText>QUOTE x</w:instrText></w:r>"
+                "<w:r><w:fldChar w:fldCharType='separate'/></w:r>"
+                "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                '<w:r><w:instrText>HYPERLINK "</w:instrText></w:r>'
+                "<w:fldSimple w:instr='MERGEFIELD url'><w:r><w:instrText>"
+                "https://www.example.gov/a</w:instrText></w:r></w:fldSimple>"
+                '<w:r><w:instrText>"</w:instrText></w:r>'
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r>"
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:p></w:body></w:document>"),
+            "a field begun in a fldSimple and left open": (
+                f"<w:document xmlns:w='{w}'><w:body><w:p>"
+                "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                '<w:r><w:instrText>INCLUDETEXT "</w:instrText></w:r>'
+                "<w:fldSimple w:instr='QUOTE x'><w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                "<w:r><w:instrText>QUOTE </w:instrText></w:r></w:fldSimple>"
+                "<w:r><w:instrText>drafts/x.docx</w:instrText></w:r>"
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r>"
+                '<w:r><w:instrText>"</w:instrText></w:r>'
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:p></w:body></w:document>"),
+            # A w:fldSimple nested in an instruction gives it only its result.
+            "instruction text in a nested fldSimple": nested_in_branch(
+                "<w:fldSimple w:instr='QUOTE x'><w:r><w:instrText>INCLUDETEXT x</w:instrText>"
+                "</w:r></w:fldSimple>"),
+            "a field mark in a fldSimple closing the field outside": (
+                f"<w:document xmlns:w='{w}'><w:body><w:p>"
+                "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                '<w:r><w:instrText>QUOTE "</w:instrText></w:r>'
+                "<w:fldSimple w:instr='QUOTE x'><w:r><w:fldChar w:fldCharType='end'/></w:r>"
+                "</w:fldSimple><w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                "<w:r><w:instrText>PAGE</w:instrText></w:r>"
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:p></w:body></w:document>"),
+            # Instruction text in a nested complex result, harmless if read in, is refused.
+            "harmless instruction text in a nested result": nested_in_branch(
+                "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                "<w:r><w:instrText>MERGEFIELD Photo</w:instrText></w:r>"
+                "<w:r><w:fldChar w:fldCharType='separate'/></w:r>"
+                "<w:r><w:instrText>https://www.example.gov/a.png</w:instrText></w:r>"
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r>"),
+            # Straight text in a field begun in a branch or a text box inside a w:fldSimple
+            # that is nested in an instruction.
+            "straight text in a branch inside a nested fldSimple": nested_in_branch(
+                "<w:fldSimple w:instr='QUOTE x'><mc:AlternateContent><mc:Choice Requires='zz'/>"
+                "<mc:Fallback><w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                "<w:r><w:instrText>QUOTE </w:instrText></w:r><w:r><w:t>x</w:t></w:r>"
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r></mc:Fallback>"
+                "</mc:AlternateContent></w:fldSimple>"),
+            "straight text in a text box inside a nested fldSimple": nested_in_branch(
+                "<w:fldSimple w:instr='QUOTE x'><w:r><v:textbox xmlns:v='urn:schemas-microsoft-com:vml'>"
+                "<w:txbxContent><w:p>"
+                "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                "<w:r><w:instrText>QUOTE </w:instrText></w:r><w:r><w:t>x</w:t></w:r>"
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:p></w:txbxContent></v:textbox>"
+                "</w:r></w:fldSimple>"),
+            "a nested result in a Fallback": nested_in_branch(
+                "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                "<w:r><w:instrText>MERGEFIELD Photo</w:instrText></w:r>"
+                "<w:r><w:fldChar w:fldCharType='separate'/></w:r>"
+                "<mc:AlternateContent><mc:Choice Requires='zz'/><mc:Fallback><w:r><w:t>"
+                "D:\\photos\\x.jpg</w:t></w:r></mc:Fallback></mc:AlternateContent>"
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r>"),
+            "a nested result in a w14 Choice": nested_in_branch(
+                "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                "<w:r><w:instrText>MERGEFIELD Photo</w:instrText></w:r>"
+                "<w:r><w:fldChar w:fldCharType='separate'/></w:r>"
+                "<mc:AlternateContent><mc:Choice Requires='w14'><w:r><w:t>D:\\photos\\x.jpg"
+                "</w:t></w:r></mc:Choice><mc:Fallback/></mc:AlternateContent>"
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r>"),
+            "a nested result in foreign markup": nested_in_branch(
+                "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                "<w:r><w:instrText>MERGEFIELD Photo</w:instrText></w:r>"
+                "<w:r><w:fldChar w:fldCharType='separate'/></w:r>"
+                "<zz:x><w:r><w:t>D:\\photos\\x.jpg</w:t></w:r></zz:x>"
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r>"),
+            "a whole nested field in a Fallback": nested_in_branch(
+                "<mc:AlternateContent><mc:Choice Requires='zz'/><mc:Fallback>"
+                "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                "<w:r><w:instrText>MERGEFIELD Photo</w:instrText></w:r>"
+                "<w:r><w:fldChar w:fldCharType='separate'/></w:r>"
+                "<w:r><w:t>D:\\photos\\x.jpg</w:t></w:r>"
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r>"
+                "</mc:Fallback></mc:AlternateContent>"),
+            "a nested fldSimple in a Fallback": nested_in_branch(
+                "<mc:AlternateContent><mc:Choice Requires='zz'/><mc:Fallback>"
+                "<w:fldSimple w:instr='MERGEFIELD f'><w:r><w:t>drafts/x.docx</w:t></w:r>"
+                "</w:fldSimple></mc:Fallback></mc:AlternateContent>"),
+        }
+        # Custom field data in a field without an instruction.
+        cases["custom field data alone"] = (
+            f"<w:document xmlns:w='{w}'><w:body><w:p><w:r><w:fldChar w:fldCharType='begin'>"
+            "<w:fldData>AAAA</w:fldData></w:fldChar></w:r><w:r>"
+            "<w:fldChar w:fldCharType='end'/></w:r></w:p></w:body></w:document>")
+        for label, xml in cases.items():
+            data = package(**{"word/header1.xml": xml})
+            with self.subTest(label):
+                message = "word/header1.xml has a field across Markup Compatibility branches"
+                self.assertIn(message, "; ".join(public.problems(data)))
+                with self.assertRaises(public.Refused) as caught:
+                    public.clean(data, DOC)
+                self.assertIn(message, str(caught.exception))
+        # A whole field in each branch, as Word writes text boxes, is read and kept.
+        whole = ("<w:r><w:fldChar w:fldCharType='begin'/></w:r><w:r><w:instrText>PAGE"
+                 "</w:instrText></w:r><w:r><w:fldChar w:fldCharType='end'/></w:r>")
+        kept = (f"<w:document xmlns:w='{w}' xmlns:mc='{mc}'><w:body><w:p><w:r>"
+                f"<mc:AlternateContent><mc:Choice Requires='w14'>{whole}</mc:Choice>"
+                f"<mc:Fallback>{whole}</mc:Fallback></mc:AlternateContent></w:r></w:p></w:body>"
+                "</w:document>")
+        self.assertEqual(public.field_problems({"word/header1.xml": kept.encode()}), [])
+        # A text box in an IF argument is a story of its own, as Word keeps it: its text goes
+        # on no instruction, and its own fields are read.
+        box = ("<w:txbxContent><w:p><w:r><w:t>{text}</w:t></w:r>{field}</w:p></w:txbxContent>")
+        page = ("<w:r><w:fldChar w:fldCharType='begin'/></w:r><w:r><w:instrText>{instr}"
+                "</w:instrText></w:r><w:r><w:fldChar w:fldCharType='end'/></w:r>")
+
+        def text_box_in_if(text, instr):
+            inner = box.format(text=text, field=page.format(instr=instr))
+            return (f"<w:document xmlns:w='{w}' xmlns:mc='{mc}' "
+                    "xmlns:wps='http://schemas.microsoft.com/office/word/2010/wordprocessingShape' "
+                    "xmlns:v='urn:schemas-microsoft-com:vml'><w:body><w:p>"
+                    "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                    '<w:r><w:instrText>IF 1 = 1 "</w:instrText></w:r><w:r><mc:AlternateContent>'
+                    "<mc:Choice Requires='wps'><w:drawing><wps:txbx>" + inner
+                    + "</wps:txbx></w:drawing></mc:Choice><mc:Fallback><w:pict><v:textbox>"
+                    + inner + "</v:textbox></w:pict></mc:Fallback></mc:AlternateContent></w:r>"
+                    '<w:r><w:instrText>" ""</w:instrText></w:r>'
+                    "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:p></w:body></w:document>")
+
+        self.assertEqual(public.field_problems({"word/document.xml": text_box_in_if(
+            "Due D:", "PAGE").encode()}), [])
+        # A w:fldSimple nested in an instruction gives it its result.
+        simple = (f"<w:document xmlns:w='{w}'><w:body><w:p>"
+                  "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                  '<w:r><w:instrText>HYPERLINK "</w:instrText></w:r>'
+                  "<w:fldSimple w:instr='MERGEFIELD url'><w:r><w:t>https://www.example.gov/a"
+                  "</w:t></w:r></w:fldSimple><w:r><w:instrText>\"</w:instrText></w:r>"
+                  "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:p></w:body></w:document>")
+        self.assertEqual(public.field_problems({"word/document.xml": simple.encode()}), [])
+        self.assertEqual(public.field_problems({"word/document.xml": text_box_in_if(
+            "Due", 'INCLUDETEXT "D:\\x"').encode()}),
+            ["word/document.xml has a field (INCLUDETEXT) that names a local file, another "
+             "scheme or another program, or people's data"])
+
+    def test_fields_that_name_no_local_file_are_kept(self):
+        w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        for instruction in ("PAGE  \\* MERGEFORMAT", 'TOC \\o "1-3" \\h \\z \\u',
+                            "PAGEREF _Toc198565444 \\h", "SEQ Table \\* ARABIC",
+                            'DATE \\@ "M/d/yyyy"', 'HYPERLINK "https://www.example.gov/a/b"',
+                            'HYPERLINK \\l "_Toc1"', 'HYPERLINK "mailto:help@example.gov"',
+                            'INCLUDEPICTURE "https://www.example.gov/a.png" \\d',
+                            'HYPERLINK "x.docx"',
+                            'HYPERLINK "HTTPS://WWW.EXAMPLE.GOV/A"',
+                            'DOCPROPERTY "Title"', "INFO NumPages", "DOCPROPERTY Pages",
+                            'HYPERLINK "http://www.example.gov/a"', "INFO RevNum",
+                            "INFO EditTime", "DOCPROPERTY FileSize",
+                            "DOCPROPERTY LastSavedTime", "INFO LastPrinted"):
+            document = (f"<w:document xmlns:w='{w}'><w:body><w:p><w:fldSimple "
+                        f"w:instr='{instruction}'/><w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                        f"<w:r><w:instrText>{instruction}</w:instrText></w:r><w:r>"
+                        "<w:fldChar w:fldCharType='end'/></w:r></w:p></w:body></w:document>")
+            with self.subTest(instruction):
+                self.assertEqual(public.field_problems({"word/header1.xml":
+                                                        document.encode()}), [])
+
+    def test_field_instructions_are_read_as_field_syntax_reads_them(self):
+        # ECMA-376 Part 1 §17.16.1: in quotes, a backslash escapes a quote or a backslash, so
+        # "\\" before a quote ends the argument; the name ends at anything but a letter.
+        self.assertEqual(public.field_arguments('QUOTE "x\\\\" "y z"'),
+                         ("QUOTE", ["x\\\\", "y z"]))
+        self.assertEqual(public.field_arguments('QUOTE "say \\"hi\\""'), ("QUOTE", ['say "hi"']))
+        self.assertEqual(public.field_arguments('includetext"a b"\\c x'),
+                         ("INCLUDETEXT", ["a b", "x"]))
+        self.assertEqual(public.field_arguments('"D:\\x"'), ("", ["D:\\x"]))
+
+    def test_a_part_with_fields_that_cannot_be_read_hides_no_other_problem(self):
+        # The field check stands apart from the others in problems() (#381's merge of #378).
+        data = package(**{"word/header1.xml": "<w:hdr xmlns:w='w'><w:instrText>",
+                          "word/comments.xml": "<w:comments xmlns:w='w'/>"})
+        found = "; ".join(public.problems(data))
+        self.assertIn("word/header1.xml is not well-formed XML", found)
+        self.assertIn("word/comments.xml holds comments", found)
+        self.assertIn("docProps/custom.xml is still there", found)
+
+    def test_a_part_nested_too_deeply_is_refused_with_a_message(self):
+        w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        deep = (f"<w:document xmlns:w='{w}'>" + "<w:sdt>" * 1200
+                + "<w:instrText>PAGE</w:instrText>" + "</w:sdt>" * 1200 + "</w:document>")
+        with self.assertRaises(public.Unreadable) as caught:
+            public.field_problems({"word/document.xml": deep.encode()})
+        self.assertIn("word/document.xml nests its elements too deeply", str(caught.exception))
+
+    def test_a_part_with_fields_must_be_well_formed(self):
+        broken = package(**{"word/header1.xml": "<w:hdr xmlns:w='w'><w:instrText>"})
+        typed = package(**{"word/header1.xml": "<!DOCTYPE hdr><w:hdr xmlns:w='w'>"
+                           "<w:instrText>PAGE</w:instrText></w:hdr>"})
+        for data, message in ((broken, "word/header1.xml is not well-formed XML"),
+                              (typed, "word/header1.xml declares a document type")):
+            with self.subTest(message):
+                self.assertIn(message, "; ".join(public.problems(data)))
+                with self.assertRaises(public.Refused) as caught:
+                    public.clean(data, DOC)
+                self.assertIn(message, str(caught.exception))
+
     def test_more_refusals(self):
         with self.assertRaises(public.Refused) as caught:
             public.clean(package(**{"word/vbaProject.bin": b"macro"}), DOC)

@@ -26,8 +26,9 @@ listed SHA-256. The script then writes tests/corpus/business/<name>.docx with
 and the document's row in the table of tests/corpus/SOURCES.md: URL, download date,
 licence statement and the changes. It refuses documents with tracked changes, comments,
 ActiveX controls, embedded fonts or objects, macros, mail merge sources, links to local
-files and archives in which two entries name one part. With --check it writes nothing and
-fails if a committed file differs from what it would write. Python standard library only.
+files (by relationship or field instruction), fields that show people's data and archives
+in which two entries name one part. With --check it writes nothing and fails if a
+committed file differs from what it would write. Python standard library only.
 """
 
 from __future__ import annotations
@@ -942,6 +943,294 @@ def external_link_problems(parts: dict[str, bytes]) -> list[str]:
     return found
 
 
+# Fields whose arguments name a file or an address to load or open (ECMA-376 Part 1,
+# §17.16.5): an argument with a slash, a backslash or a scheme must be a web or mail address.
+FILE_FIELDS = {"HYPERLINK", "INCLUDEPICTURE", "INCLUDETEXT", "INCLUDE", "IMPORT", "LINK", "RD"}
+# Fields that read another file or program by their nature, whatever their arguments (a
+# database connection can name a user and a server, a DDE topic a file), and fields whose
+# result shows the path of the file or its template, or the author's or user's name and
+# address, as the author's machine computed it.
+REFUSED_FIELDS = {"DATABASE", "DDE", "DDEAUTO", "FILENAME", "TEMPLATE", "AUTHOR",
+                  "LASTSAVEDBY", "USERNAME", "USERINITIALS", "USERADDRESS", "DOCVARIABLE"}
+# DOCPROPERTY and INFO show a document property, which can be a person, a path, the
+# hyperlink base or a custom property: only these, which hold none, are kept.
+SAFE_PROPERTIES = {"title", "subject", "category", "pages", "words", "characters",
+                   "characterswithspaces", "lines", "paragraphs", "createdate", "createtime",
+                   "savedate", "printdate", "revisionnumber", "revnum", "editingtime",
+                   "edittime", "totaleditingtime", "numpages", "numwords", "numchars", "bytes",
+                   "filesize", "lastsavedtime", "lastprinted"}
+PROPERTY_FIELDS = {"DOCPROPERTY", "INFO"}
+# The names a refusal may give: a field's name, never letters a path begins with.
+KNOWN_FIELDS = FILE_FIELDS | REFUSED_FIELDS | PROPERTY_FIELDS | {"QUOTE", "IF", "MERGEFIELD"}
+WEB_ADDRESS = re.compile(r"(?i)(https?://|mailto:)")
+SCHEME = re.compile(r"(?i)[a-z][a-z0-9+.-]*:")
+# A drive, a server path (two slashes or backslashes in any mix, "//" unless it follows an
+# http: or https: that begins a word, which also catches another scheme's "//") or a file
+# URL, anywhere in an instruction, inside a web address too. Backslashes are matched as
+# written, single or doubled, so no escaping hides a path. One pass, in time linear in the
+# instruction's length.
+LOCAL_PLACE = re.compile(
+    r"(?i)(?<![a-z0-9])[a-z]:[\\/]|\\\\|\\/|/\\|(?<![a-z0-9])file:"
+    r"|(?<!(?<![a-z0-9+._-])https:)(?<!(?<![a-z0-9+._-])http:)//"
+)
+
+
+def names_place(text: str) -> bool:
+    """Whether text names a local or network place or another scheme (LOCAL_PLACE)."""
+    return bool(LOCAL_PLACE.search(text))
+
+
+WORDML_NAMESPACES = ("http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+                     "http://purl.oclc.org/ooxml/wordprocessingml/main")
+MC_NAMESPACE = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+# The elements around a drawing's text box: a wps shape's and a VML shape's.
+TEXT_BOXES = {("http://schemas.microsoft.com/office/word/2010/wordprocessingShape", "txbx"),
+              ("urn:schemas-microsoft-com:vml", "textbox")}
+
+
+def field_arguments(instruction: str) -> tuple[str, list[str]]:
+    """A field instruction's name, upper case, and its arguments, switches left out (ECMA-376
+    Part 1, §17.16.1). The name is the letters the instruction begins with, ended by
+    anything else ("INCLUDETEXT\\c" or 'INCLUDETEXT"x"'); an instruction that begins
+    otherwise has no name. An argument is quoted text, in which a backslash escapes a quote
+    or a backslash, or text up to the next space. Backslashes are kept as written. A switch
+    is a backslash and one character outside quotes; two backslashes opening a word are an
+    argument."""
+    name = re.match(r"\s*([A-Za-z]+)", instruction)
+    rest = instruction[name.end():] if name else instruction
+    tokens: list[str] = []
+    i, n = 0, len(rest)
+    while i < n:
+        c = rest[i]
+        if c.isspace():
+            i += 1
+        elif c == '"':
+            i += 1
+            text = []
+            while i < n and rest[i] != '"':
+                if rest.startswith("\\\\", i):
+                    text.append("\\\\")
+                    i += 2
+                    continue
+                if rest.startswith('\\"', i):
+                    i += 1
+                text.append(rest[i])
+                i += 1
+            tokens.append("".join(text))
+            i += 1
+        elif c == "\\" and not rest.startswith("\\\\", i):
+            i += 2  # a switch; an argument of it is read as an argument
+        else:
+            start = i
+            while i < n and not rest[i].isspace():
+                i += 1
+            tokens.append(rest[start:i])
+    return (name.group(1).upper() if name else ""), tokens
+
+
+def names_local_place(instruction: str) -> bool:
+    """Whether a field instruction names a local or network place or another scheme, or
+    shows people's data: names_place anywhere in it; a field of REFUSED_FIELDS, or one of
+    PROPERTY_FIELDS that shows a property outside SAFE_PROPERTIES; and, for a field that
+    loads or opens a file (FILE_FIELDS), an argument with a slash, a backslash or a scheme
+    that is not a web or mail address."""
+    field, arguments = field_arguments(instruction)
+    if field in REFUSED_FIELDS or names_place(instruction):
+        return True
+    if field in PROPERTY_FIELDS and not (
+        arguments and arguments[0].strip().lower() in SAFE_PROPERTIES
+    ):
+        return True
+    return field in FILE_FIELDS and any(
+        not WEB_ADDRESS.match(a) and ("/" in a or "\\" in a or SCHEME.match(a))
+        for a in arguments
+    )
+
+
+class FieldMarkup(Exception):
+    """Field markup this check cannot read as Word does: a field across the edge of a Markup
+    Compatibility branch, foreign markup or a text box, text written into an instruction,
+    instruction text in a nested result, or custom field data."""
+
+
+class _FieldScope:
+    """The fields open in one part of a part's tree: the part itself, or one mc:Choice,
+    mc:Fallback, foreign element or drawing's text box. fields holds each open field's
+    instruction while it is being read and None after its separate or end;
+    open_instructions the instructions not yet complete, innermost last, so that a nested
+    result finds its own in constant time."""
+
+    def __init__(self) -> None:
+        self.fields: list[list[str] | None] = []
+        self.open_instructions: list[list[str]] = []
+
+
+def field_instructions(name: str, data: bytes) -> list[str]:
+    """The instructions of the fields of an XML part, read as XML: the text of w:instrText
+    and w:delInstrText joined across runs from each field's begin to its separate or end,
+    nested fields apart, with the result of a field nested in an instruction (a complex
+    field or w:fldSimple, its w:t and w:delText) read into that instruction, as Word reads
+    {INCLUDEPICTURE "{MERGEFIELD Photo}"}; w:fldSimple's w:instr; and as an instruction of
+    its own any instruction text outside a field's instruction and its results. A text box
+    (w:txbxContent in wps:txbx or v:textbox) of a drawing is a story of its own.
+
+    Word takes one branch of mc:AlternateContent and drops elements of ignorable namespaces,
+    so a field mark there could end a field for this reading that Word goes on reading. So
+    the fields inside an mc:Choice, an mc:Fallback or any element outside WordprocessingML
+    must begin and end inside it, as Word's own text boxes hold them, and no text inside one
+    may go on an instruction begun outside it. A part with a field across such an edge,
+    with such text, with an element inside an instruction, with text (w:t) written straight
+    into an instruction or instruction text in a nested result (a complex field or a
+    w:fldSimple), which Word may read either way, with a field mark in a w:fldSimple that
+    closes a field begun outside it, or with w:fldData (custom field data), is refused.
+    Raises Unreadable when the part is not well-formed or declares a document type, or
+    nests too deeply, and FieldMarkup."""
+    builder = _Builder()
+    parser = ElementTree.XMLParser(target=builder)
+    try:
+        parser.feed(data)
+        root = parser.close()
+    except (ElementTree.ParseError, ValueError, LookupError) as error:
+        raise Unreadable(f"{name} is not well-formed XML ({error})") from error
+    if builder.doctype_seen:
+        raise Unreadable(f"{name} declares a document type, which OPC forbids")
+    found: list[str] = []
+
+    def walk(element: ElementTree.Element, scope: _FieldScope, isolated: bool,
+             outer_open: bool, simple_at: int, in_box: bool = False) -> None:
+        # isolated: inside an mc:Choice, mc:Fallback or foreign element; outer_open: an
+        # instruction was open outside the innermost such element; simple_at: the number
+        # of fields open where the innermost w:fldSimple began (-1 outside one), so that
+        # its text counts as a nested result only for an instruction begun outside it;
+        # in_box: a child of a drawing's text box (wps:txbx, v:textbox).
+        namespace, _, local = element.tag.rpartition("}")
+        namespace = namespace.lstrip("{")
+        fields = scope.fields
+        if namespace == MC_NAMESPACE and local in ("Choice", "Fallback") or (
+            namespace not in (*WORDML_NAMESPACES, MC_NAMESPACE) and element is not root
+        ):
+            inner = _FieldScope()
+            opened = outer_open or bool(scope.open_instructions)
+            box = (namespace, local) in TEXT_BOXES
+            for child in element:
+                # Inside, the fields counted are the branch's own; no w:fldSimple is open.
+                walk(child, inner, True, opened, -1, box)
+            if inner.fields:
+                raise FieldMarkup(name)
+            return
+        if local == "txbxContent" and in_box:
+            # A drawing's text box is a story of its own ([MS-DOC] counts it apart,
+            # ccpTxbx): its text goes on no instruction around it, and its own fields begin
+            # and end in it. Anywhere else a w:txbxContent is read like any other element.
+            inner = _FieldScope()
+            for child in element:
+                walk(child, inner, isolated, False, -1)
+            if inner.fields:
+                raise FieldMarkup(name)
+            return
+        w = "{" + namespace + "}" if namespace else ""
+        if local == "fldSimple":
+            found.append(element.get(f"{w}instr", ""))
+            simple_at = len(fields)
+            for child in element:
+                walk(child, scope, isolated, outer_open, simple_at)
+            # A field begun inside a w:fldSimple ends inside it, as a mark inside it closes
+            # only a field begun there.
+            if len(fields) > simple_at:
+                raise FieldMarkup(name)
+            return
+        elif local == "fldData":
+            raise FieldMarkup(name)
+        elif local == "fldChar":
+            kind = element.get(f"{w}fldCharType", "")
+            if kind == "begin":
+                instruction: list[str] = []
+                fields.append(instruction)
+                scope.open_instructions.append(instruction)
+            elif kind in ("separate", "end"):
+                # Inside a w:fldSimple, a mark closes only a field begun inside it.
+                if len(fields) <= max(simple_at, 0):
+                    raise FieldMarkup(name)
+                if fields[-1] is not None:
+                    found.append("".join(fields[-1]))
+                    fields[-1] = None
+                    scope.open_instructions.pop()
+                if kind == "end":
+                    fields.pop()
+        elif local in ("instrText", "delInstrText"):
+            # Markup inside an instruction would split its text where Word may not.
+            if len(element):
+                raise FieldMarkup(name)
+            text = element.text or ""
+            if fields and fields[-1] is not None and len(fields) > simple_at:
+                fields[-1].append(text)
+            elif isolated or scope.open_instructions:
+                # Word puts the branch it takes in the place of mc:AlternateContent, so
+                # this text could go on an instruction begun outside; and instruction text
+                # in a nested result could go on the instruction around it.
+                raise FieldMarkup(name)
+            else:
+                found.append(text)
+            return
+        elif local in ("t", "delText"):
+            text = element.text or ""
+            if fields and fields[-1] is not None and len(fields) > simple_at:
+                # Text written straight into an instruction: nothing shows whether Word
+                # reads it in or skips it, so it is refused, safe either way.
+                raise FieldMarkup(name)
+            elif scope.open_instructions:
+                # The result of a field nested in an open instruction.
+                scope.open_instructions[-1].append(text)
+            elif outer_open:
+                # Text in a branch, read by Word into an instruction begun outside it.
+                raise FieldMarkup(name)
+        for child in element:
+            walk(child, scope, isolated, outer_open, simple_at)
+
+    scope = _FieldScope()
+    try:
+        walk(root, scope, False, False, -1)
+    except RecursionError as error:
+        raise Unreadable(f"{name} nests its elements too deeply to be read") from error
+    # A field left open at the end of the part still has an instruction.
+    found += ["".join(text) for text in scope.fields if text is not None]
+    return found
+
+
+def field_problems(parts: dict[str, bytes]) -> list[str]:
+    """The XML parts with a field whose instruction names a local or network file or
+    another scheme, reads another file or program, or shows people's data
+    (names_local_place), or with field markup this check cannot read as Word does
+    (field_instructions) (#372). Each part is named once, with the field's name when it has
+    one, never the path. Raises Unreadable when such a part cannot be read."""
+    found = []
+    for name, data in parts.items():
+        if not name.lower().endswith(".xml"):
+            continue
+        # Element and attribute names cannot be written with character references, so a
+        # part with fields holds "instr" (or "fldData") or is UTF-16, which the parser reads:
+        # it begins with a byte order mark, or without one has a NUL in its first two bytes.
+        lower = data.lower()
+        utf16 = data.startswith((b"\xff\xfe", b"\xfe\xff")) or b"\x00" in data[:2]
+        if b"instr" not in lower and b"flddata" not in lower and not utf16:
+            continue
+        try:
+            instructions = field_instructions(name, data)
+        except FieldMarkup:
+            found.append(f"{name} has a field across Markup Compatibility branches, foreign "
+                         "markup, text written into an instruction or custom field data")
+            continue
+        for instruction in instructions:
+            if names_local_place(instruction):
+                field = field_arguments(instruction)[0]
+                field = field if field in KNOWN_FIELDS else ""
+                found.append(f"{name} has a field{f' ({field})' if field else ''} that "
+                             "names a local file, another scheme or another program, or "
+                             "people's data")
+                break
+    return found
+
+
 def attribute(element: str, name: str) -> re.Match | None:
     """An attribute of an XML start tag, in double or single quotes: group 2 is its value."""
     return re.search(rf"""\b{name}\s*=\s*(["'])(.*?)\1""", element)
@@ -1185,6 +1474,13 @@ def clean(original: bytes, doc: PublicDoc) -> Cleaned:
         raise Refused(f"{doc.name}: {error}") from error
     if links:
         raise Refused(f"{doc.name}: {'; '.join(links)}")
+    # And a field instruction that names a local file (#372).
+    try:
+        fields = field_problems({info.filename: data for info, data in out})
+    except Unreadable as error:
+        raise Refused(f"{doc.name}: {error}") from error
+    if fields:
+        raise Refused(f"{doc.name}: {'; '.join(fields)}")
     if people:
         changes.insert(0, "document properties emptied: " + ", ".join(people))
     if settings_removed:
@@ -1238,6 +1534,11 @@ def problems(
         except Unreadable as error:
             found.append(str(error))
             embedded, roles = [], {}
+        # Apart, so that a part with fields that cannot be read hides none of the rest.
+        try:
+            found += field_problems(parts)
+        except Unreadable as error:
+            found.append(str(error))
         roles_of = lambda name: roles.get(name, set())
         found += [f"{name} is embedded" for name in embedded if name not in parts]
         for name, body in parts.items():
