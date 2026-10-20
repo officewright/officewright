@@ -1416,8 +1416,8 @@ class Cleaning(unittest.TestCase):
             "custom field data": document("<w:r><w:fldData>AAAA</w:fldData></w:r>"),
             "a begin in a Choice": document(branch("<w:fldChar w:fldCharType='begin'/>", "")),
             "a begin in a text box": document(
-                "<w:r><zz:textbox><w:txbxContent><w:p><w:r><w:fldChar w:fldCharType='begin'/>"
-                "</w:r></w:p></w:txbxContent></zz:textbox></w:r>"),
+                "<w:r><v:textbox xmlns:v='urn:schemas-microsoft-com:vml'><w:txbxContent><w:p><w:r>"
+                "<w:fldChar w:fldCharType='begin'/></w:r></w:p></w:txbxContent></v:textbox></w:r>"),
             # Instruction text in a branch goes on the instruction begun outside it, in the
             # branch Word takes (review of #381).
             "an instruction piece in a Fallback": piece(branch(
@@ -1458,6 +1458,26 @@ class Cleaning(unittest.TestCase):
             "a text box in foreign markup": piece(
                 "<zz:x><w:txbxContent><w:p><w:r><w:t>:\\private\\x.docx</w:t></w:r></w:p>"
                 "</w:txbxContent></zz:x>"),
+            # Only a wps or VML text box is a story of its own: a foreign element of the same
+            # name, or a w:txbxContent that is not its child, is read like any other.
+            "a foreign textbox in an instruction": piece(
+                "<w:r><zz:textbox><w:txbxContent><w:p><w:r><w:t>:\\private\\x.docx</w:t></w:r>"
+                "</w:p></w:txbxContent></zz:textbox></w:r>"),
+            "a text box below a run in a VML textbox": piece(
+                "<w:r><v:textbox xmlns:v='urn:schemas-microsoft-com:vml'><w:r><w:txbxContent><w:p>"
+                "<w:r><w:t>:\\private\\x.docx</w:t></w:r></w:p></w:txbxContent></w:r></v:textbox>"
+                "</w:r>"),
+            # A field begun inside a w:fldSimple ends inside it.
+            "a field begun in a fldSimple and left open": (
+                f"<w:document xmlns:w='{w}'><w:body><w:p>"
+                "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                '<w:r><w:instrText>INCLUDETEXT "</w:instrText></w:r>'
+                "<w:fldSimple w:instr='QUOTE x'><w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                "<w:r><w:instrText>QUOTE </w:instrText></w:r></w:fldSimple>"
+                "<w:r><w:instrText>drafts/x.docx</w:instrText></w:r>"
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r>"
+                '<w:r><w:instrText>"</w:instrText></w:r>'
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:p></w:body></w:document>"),
             # A w:fldSimple nested in an instruction gives it only its result.
             "instruction text in a nested fldSimple": nested_in_branch(
                 "<w:fldSimple w:instr='QUOTE x'><w:r><w:instrText>INCLUDETEXT x</w:instrText>"
@@ -1486,10 +1506,11 @@ class Cleaning(unittest.TestCase):
                 "<w:r><w:fldChar w:fldCharType='end'/></w:r></mc:Fallback>"
                 "</mc:AlternateContent></w:fldSimple>"),
             "straight text in a text box inside a nested fldSimple": nested_in_branch(
-                "<w:fldSimple w:instr='QUOTE x'><w:r><zz:textbox><w:txbxContent><w:p>"
+                "<w:fldSimple w:instr='QUOTE x'><w:r><v:textbox xmlns:v='urn:schemas-microsoft-com:vml'>"
+                "<w:txbxContent><w:p>"
                 "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
                 "<w:r><w:instrText>QUOTE </w:instrText></w:r><w:r><w:t>x</w:t></w:r>"
-                "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:p></w:txbxContent></zz:textbox>"
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:p></w:txbxContent></v:textbox>"
                 "</w:r></w:fldSimple>"),
             "a nested result in a Fallback": nested_in_branch(
                 "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
@@ -1553,8 +1574,9 @@ class Cleaning(unittest.TestCase):
 
         def text_box_in_if(text, instr):
             inner = box.format(text=text, field=page.format(instr=instr))
-            return (f"<w:document xmlns:w='{w}' xmlns:mc='{mc}' xmlns:wps='urn:wps' "
-                    "xmlns:v='urn:v'><w:body><w:p>"
+            return (f"<w:document xmlns:w='{w}' xmlns:mc='{mc}' "
+                    "xmlns:wps='http://schemas.microsoft.com/office/word/2010/wordprocessingShape' "
+                    "xmlns:v='urn:schemas-microsoft-com:vml'><w:body><w:p>"
                     "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
                     '<w:r><w:instrText>IF 1 = 1 "</w:instrText></w:r><w:r><mc:AlternateContent>'
                     "<mc:Choice Requires='wps'><w:drawing><wps:txbx>" + inner

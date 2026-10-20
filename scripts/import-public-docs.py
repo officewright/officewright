@@ -972,6 +972,9 @@ def names_place(text: str) -> bool:
 WORDML_NAMESPACES = ("http://schemas.openxmlformats.org/wordprocessingml/2006/main",
                      "http://purl.oclc.org/ooxml/wordprocessingml/main")
 MC_NAMESPACE = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+# The elements around a drawing's text box: a wps shape's and a VML shape's.
+TEXT_BOXES = {("http://schemas.microsoft.com/office/word/2010/wordprocessingShape", "txbx"),
+              ("urn:schemas-microsoft-com:vml", "textbox")}
 
 
 def field_arguments(instruction: str) -> tuple[str, list[str]]:
@@ -1097,7 +1100,7 @@ def field_instructions(name: str, data: bytes) -> list[str]:
         ):
             inner = _FieldScope()
             opened = outer_open or bool(scope.open_instructions)
-            box = local in ("txbx", "textbox")
+            box = (namespace, local) in TEXT_BOXES
             for child in element:
                 # Inside, the fields counted are the branch's own; no w:fldSimple is open.
                 walk(child, inner, True, opened, -1, box)
@@ -1118,6 +1121,13 @@ def field_instructions(name: str, data: bytes) -> list[str]:
         if local == "fldSimple":
             found.append(element.get(f"{w}instr", ""))
             simple_at = len(fields)
+            for child in element:
+                walk(child, scope, isolated, outer_open, simple_at)
+            # A field begun inside a w:fldSimple ends inside it, as a mark inside it closes
+            # only a field begun there.
+            if len(fields) > simple_at:
+                raise FieldMarkup(name)
+            return
         elif local == "fldData":
             raise FieldMarkup(name)
         elif local == "fldChar":
