@@ -750,8 +750,15 @@ pub fn lay_out(
                         let hyphen = matches!(piece.kind, PieceKind::Hyphen { .. });
                         let glyphs = piece.glyphs(itemized);
                         for (index, glyph) in glyphs.iter().enumerate() {
+                            // A cluster's text goes with its first glyph, whose search for
+                            // the next cluster passes over its own glyphs once (#403).
                             let cluster = if hyphen {
                                 "-".to_owned()
+                            } else if glyphs
+                                .get(index.wrapping_sub(1))
+                                .is_some_and(|before| before.cluster == glyph.cluster)
+                            {
+                                String::new()
                             } else {
                                 let end = glyphs
                                     .iter()
@@ -761,18 +768,11 @@ pub fn lay_out(
                                         || piece_text_end(&piece.kind),
                                         |next| next.cluster,
                                     );
-                                if glyphs
-                                    .get(index.wrapping_sub(1))
-                                    .is_some_and(|before| before.cluster == glyph.cluster)
-                                {
-                                    String::new()
-                                } else {
-                                    itemized
-                                        .text
-                                        .get(glyph.cluster..end)
-                                        .unwrap_or_default()
-                                        .to_owned()
-                                }
+                                itemized
+                                    .text
+                                    .get(glyph.cluster..end)
+                                    .unwrap_or_default()
+                                    .to_owned()
                             };
                             text.push_str(&cluster);
                             if cluster.chars().all(char::is_whitespace) && !cluster.is_empty() {

@@ -140,6 +140,14 @@ impl Features {
 /// Microsoft's "standard" shaping covers (Latin, Greek, Cyrillic, Armenian, Georgian,
 /// Runic and Ogham, "Developing OpenType Fonts for Standard Scripts"), and characters
 /// common to scripts.
+/// The most glyphs a run keeps for each of its characters; a run the font shapes into
+/// more is shaped nominally, and that is reported. HarfRust keeps up to 256 glyphs a
+/// character, and at least 65,536 for a run, so a font whose layout tables multiply
+/// glyphs could turn one character into tens of thousands, which every line and page they
+/// are on would then hold (#403). No writing system needs more than a few glyphs a
+/// character.
+const MAX_GLYPHS_PER_CHARACTER: usize = 32;
+
 const STANDARD_SCRIPTS: [Script; 10] = [
     Script::LATIN,
     Script::GREEK,
@@ -409,6 +417,14 @@ fn shape(face: &ShapingFace, text: &str, request: &ShapeRequest, plans: &mut Pla
         // then holds a half-substituted state, so the run is shaped nominally.
         return shape_nominal(&face.face, text);
     }
+    if buffer.len()
+        > text
+            .chars()
+            .count()
+            .saturating_mul(MAX_GLYPHS_PER_CHARACTER)
+    {
+        return shape_nominal(&face.face, text);
+    }
     let raw = buffer
         .glyph_infos()
         .iter()
@@ -550,6 +566,39 @@ mod tests {
         assert!(!shaped.is_nominal());
         assert_eq!(ids(&shaped), [(2, 0, 600), (1, 1, 250), (4, 2, 600)]);
         assert_eq!(shaped.replaced_glyphs(), 0);
+    }
+
+    #[test]
+    fn a_run_of_more_glyphs_than_any_writing_system_needs_is_shaped_nominally() {
+        // Issue #403: a font whose layout tables turn `A` into 1,000 glyphs. No writing
+        // system needs that many glyphs a character, so the run is shaped from the
+        // character map: one glyph, the run marked nominal, which the itemizer reports.
+        let multiplied = |copies: u16| {
+            let data = crate::testing::with_multiplied_a(crate::testing::minimal(), copies);
+            ShapingFace::new(FontFace::from_bytes(data, 0).expect("the test font"))
+        };
+        let run = shape(
+            &multiplied(1000),
+            "A",
+            &ShapeRequest::default(),
+            &mut Plans::default(),
+        );
+        assert!(run.is_nominal());
+        assert_eq!(ids(&run), [(2, 0, 600)]);
+        // Up to the bound, the font's glyphs are kept: 32 of `A`, and 64 for two.
+        let face = multiplied(32);
+        let run = shape(&face, "A", &ShapeRequest::default(), &mut Plans::default());
+        assert!(!run.is_nominal());
+        assert_eq!(run.glyphs().len(), 32);
+        let run = shape(&face, "AA", &ShapeRequest::default(), &mut Plans::default());
+        assert_eq!(run.glyphs().len(), 64);
+        let run = shape(
+            &multiplied(33),
+            "A",
+            &ShapeRequest::default(),
+            &mut Plans::default(),
+        );
+        assert!(run.is_nominal());
     }
 
     #[test]

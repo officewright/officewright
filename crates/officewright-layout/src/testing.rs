@@ -169,6 +169,37 @@ fn remapped(font: Vec<u8>, index: usize, from: u16, to: u16) -> Vec<u8> {
     font
 }
 
+/// `font` (the test font) with a `GSUB` table whose `ccmp` feature turns `A` (glyph 2)
+/// into `copies` glyphs of `A` by one multiple substitution: a script list of `DFLT`, a
+/// feature list of `ccmp`, and one lookup of type 2.
+pub(crate) fn with_multiplied_a(font: Vec<u8>, copies: u16) -> Vec<u8> {
+    let be = |values: &[u16]| -> Vec<u8> { values.iter().flat_map(|v| v.to_be_bytes()).collect() };
+    // Offsets from the start of the table: header 10, script list at 10.
+    let script_list = 10u16;
+    let mut gsub = be(&[1, 0, script_list, 0, 0]);
+    // Script list: one record, DFLT, its script 8 bytes in; the script: its default
+    // language system 4 bytes in, no others; the language system: feature 0 alone.
+    gsub.extend(be(&[1]));
+    gsub.extend(b"DFLT");
+    gsub.extend(be(&[8, 4, 0, 0, 0xFFFF, 1, 0]));
+    let feature_list = u16::try_from(gsub.len()).expect("small");
+    // Feature list: one record, ccmp, its feature 8 bytes in; the feature: lookup 0.
+    gsub.extend(be(&[1]));
+    gsub.extend(b"ccmp");
+    gsub.extend(be(&[8, 0, 1, 0]));
+    let lookup_list = u16::try_from(gsub.len()).expect("small");
+    // Lookup list: one lookup, 4 bytes in; the lookup: type 2, its subtable 8 bytes in;
+    // the subtable: format 1, its coverage after the sequence, one sequence 8 bytes in.
+    gsub.extend(be(&[1, 4, 2, 0, 1, 8]));
+    let coverage = 8 + 2 + 2 * copies;
+    gsub.extend(be(&[1, coverage, 1, 8, copies]));
+    gsub.extend(be(&vec![2; usize::from(copies)]));
+    gsub.extend(be(&[1, 1, 2]));
+    gsub[6..8].copy_from_slice(&feature_list.to_be_bytes());
+    gsub[8..10].copy_from_slice(&lookup_list.to_be_bytes());
+    with_table(font, b"GSUB", &gsub)
+}
+
 /// `font` marked italic in `OS/2` `fsSelection` and `head` `macStyle`.
 pub(crate) fn italic(font: Vec<u8>) -> Vec<u8> {
     let at = table(&font, b"OS/2") + 62;
