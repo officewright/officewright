@@ -1070,6 +1070,55 @@ class Cleaning(unittest.TestCase):
                      "</x:creator>")
         self.assertEqual(public.people_left("docProps/core.xml", empty.encode(), {"core"}), [])
 
+    def test_a_template_path_and_the_schema_library_are_removed(self):
+        # The extended properties' Template keeps a name, never a path, and the settings'
+        # schema library, whose locations are paths, goes (#385).
+        sl = "http://schemas.openxmlformats.org/schemaLibrary/2006/main"
+        library = (f"<sl:schemaLibrary xmlns:sl='{sl}'><sl:schema sl:uri='urn:x' "
+                   "sl:schemaLocation='D:\\jroe\\x.xsd'/></sl:schemaLibrary>")
+        data = package(**{
+            "docProps/app.xml": "<Properties><Template>D:\\templates\\jroe.dotx</Template>"
+                                "<Pages>1</Pages></Properties>",
+            "word/settings.xml": f"<w:settings xmlns:w='w'>{library}<w:zoom/></w:settings>",
+        })
+        found = public.problems(data)
+        self.assertIn("docProps/app.xml: Template holds a path", found)
+        self.assertIn("word/settings.xml: sl:schemaLibrary is still there", found)
+        cleaned = public.clean(data, DOC)
+        parts = parts_of(cleaned.data)
+        self.assertIn("<Template></Template>", parts["docProps/app.xml"].decode())
+        self.assertNotIn("schemaLibrary", parts["word/settings.xml"].decode())
+        self.assertIn("<w:zoom/>", parts["word/settings.xml"].decode())
+        changes = "; ".join(cleaned.changes)
+        self.assertIn("template path", changes)
+        self.assertIn("settings: schema library removed", changes)
+        self.assertEqual(public.problems(cleaned.data), [])
+        # A plain name stays, and so does the namespace Word declares in every settings part.
+        plain = package(**{"docProps/app.xml": "<Properties><Template>Normal.dotm</Template>"
+                                               "</Properties>",
+                           "word/settings.xml": f"<w:settings xmlns:w='w' xmlns:sl='{sl}'>"
+                                                "<w:zoom/></w:settings>"})
+        parts = parts_of(public.clean(plain, DOC).data)
+        self.assertIn("<Template>Normal.dotm</Template>", parts["docProps/app.xml"].decode())
+        self.assertIn(f"xmlns:sl='{sl}'", parts["word/settings.xml"].decode())
+        # A drive-relative name and a relative path are paths too.
+        for template in ("D:jroe.dotx", "templates\\jroe.dotx"):
+            with self.subTest(template):
+                xml = f"<Properties><Template>{template}</Template></Properties>"
+                self.assertIn("docProps/app.xml: Template holds a path",
+                              public.problems(package(**{"docProps/app.xml": xml})))
+        # Another spelling is refused.
+        for part, xml, message in (
+            ("docProps/app.xml", "<Properties><Template >D:\\x.dotx</Template ></Properties>",
+             "Template holds a path"),
+            ("word/settings.xml", f"<w:settings xmlns:w='w'><q:schemaLibrary xmlns:q='{sl}'/>"
+                                  "</w:settings>", "sl:schemaLibrary is still there"),
+        ):
+            with self.subTest(message):
+                with self.assertRaises(public.Refused) as caught:
+                    public.clean(package(**{part: xml}), DOC)
+                self.assertIn(f"{part}: {message}", str(caught.exception))
+
     def test_an_external_relationship_gives_no_role(self):
         data = package(**{"word/_rels/header1.xml.rels": relationships(
             (f"{REL}/custom-properties", "../word/document.xml", ' TargetMode="External"'))})

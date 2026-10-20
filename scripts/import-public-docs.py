@@ -16,7 +16,8 @@ listed SHA-256. The script then writes tests/corpus/business/<name>.docx with
   - every picture replaced by a grey placeholder of ours of the same pixel size, saved as
     PNG: agency seals, emblems and logos must not be reused, so no picture of the original
     is kept;
-  - the attached template and the document variables removed from the settings;
+  - the attached template, the document variables and the schema library removed from the
+    settings, and a template name that is a path emptied in the extended properties;
     the properties and settings are then read again as XML, and a document is refused if
     they still hold any of these in another spelling of the markup;
   - the text replacements listed for the document, which put fictional names and addresses
@@ -1009,7 +1010,10 @@ PEOPLE_ELEMENTS = {
     "app": {"Company": "Company", "Manager": "Manager", "HyperlinkBase": "HyperlinkBase"},
 }
 SETTINGS_ELEMENTS = {"docVars": "w:docVars", "attachedTemplate": "w:attachedTemplate",
-                     "mailMerge": "w:mailMerge"}
+                     "mailMerge": "w:mailMerge", "schemaLibrary": "sl:schemaLibrary"}
+# A template's name with a slash, a backslash or a colon is a path on the author's machine
+# (#385); a plain name such as Normal.dotm names none.
+PATH_LIKE = re.compile(r"[\\/:]")
 
 
 def people_left(name: str, data: bytes, roles: set[str]) -> list[str]:
@@ -1027,6 +1031,10 @@ def people_left(name: str, data: bytes, roles: set[str]) -> list[str]:
         if not isinstance(element.tag, str):
             continue  # a comment or processing instruction, counted in its parent
         local = element.tag.rpartition("}")[2]
+        if "app" in roles and local == "Template" and PATH_LIKE.search(
+            "".join(element.itertext())
+        ):
+            found.append(f"{name}: Template holds a path")
         if local in wanted and (
             len(element) or element.attrib or "".join(element.itertext()).strip()
         ):
@@ -1150,7 +1158,13 @@ def clean(original: bytes, doc: PublicDoc) -> Cleaned:
             data = empty_elements(text_of(name, data), names_, people).encode("utf-8")
         if "app" in held:
             names_ = {"Company": "company", "Manager": "manager", "HyperlinkBase": "hyperlink base"}
-            data = empty_elements(text_of(name, data), names_, people).encode("utf-8")
+            text = empty_elements(text_of(name, data), names_, people)
+            # The template's name stays unless it is a path (#385).
+            template = re.search(r"<Template>([^<]*)</Template>", text)
+            if template and PATH_LIKE.search(template.group(1)):
+                text = text.replace(template.group(0), "<Template></Template>")
+                people.append("template path")
+            data = text.encode("utf-8")
         if "settings" in held:
             text = text_of(name, data)
             if "<w:mailMerge" in text:
@@ -1159,6 +1173,9 @@ def clean(original: bytes, doc: PublicDoc) -> Cleaned:
             for pattern, what in (
                 (r"<w:attachedTemplate\b[^>]*/>", "attached template"),
                 (r"<w:docVars>.*?</w:docVars>", "document variables"),
+                # Its schemas' locations are paths on the author's machine (#385).
+                (r"<sl:schemaLibrary\b[^>]*/>|<sl:schemaLibrary\b.*?</sl:schemaLibrary>",
+                 "schema library"),
             ):
                 edited, count = re.subn(pattern, "", edited, flags=re.S)
                 if count:
