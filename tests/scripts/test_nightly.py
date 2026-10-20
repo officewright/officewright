@@ -122,7 +122,7 @@ class Nightly(unittest.TestCase):
             f"tests/corpus/reference -- {LIMITS}",
             "cargo +nightly fuzz run docx_open fuzz/corpus/docx_open tests/corpus/word-rules "
             "tests/corpus/resaved tests/corpus/poi crates/officewright-doc/tests/data "
-            f"-- {LIMITS}",
+            f"fuzz/seeds/docx_open -- {LIMITS}",
         ])
         self.assertTrue((self.tree / "fuzz/corpus/docx_open").is_dir())
 

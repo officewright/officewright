@@ -85,7 +85,7 @@ fuzz_targets() {
 # Each target is seeded with files of the format it reads.
 seeds() {
 	case $1 in
-	docx_open) echo tests/corpus/word-rules tests/corpus/resaved tests/corpus/poi crates/officewright-doc/tests/data ;;
+	docx_open) echo tests/corpus/word-rules tests/corpus/resaved tests/corpus/poi crates/officewright-doc/tests/data fuzz/seeds/docx_open ;;
 	font_* | pdf_embed | shape_font) echo tests/fonts crates/officewright-font/tests/data ;;
 	jpeg_header) echo fuzz/seeds/jpeg ;;
 	layout_shape) echo tests/pdf-output fuzz/seeds/layout_shape ;;
