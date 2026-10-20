@@ -1860,9 +1860,30 @@ def autofit_widths_cases() -> list[tuple[str, str]]:
     ]
 
 
+def autofit_setting_cases(first: int) -> list[tuple[int, str, str]]:
+    """Cases the settings of mode 14 act on (ISO/IEC 29500 §17.15.3): w:growAutofit, minimum
+    content widths that sum to more than the text width; w:doNotAutofitConstrainedTables, an
+    autofit table beside a floating picture with square wrap."""
+    auto = width(0, "auto")
+    picture = vml_picture(
+        "image1.png", "f1",
+        "position:absolute;margin-left:0;margin-top:0;width:144pt;height:72pt;z-index:1;"
+        "mso-position-horizontal-relative:margin;mso-position-vertical-relative:paragraph",
+        "square", first=True)
+    return [
+        (first, f"three cells each holding {AUTOFIT_WORD}, together wider than the text width",
+         rule_table([[cell(para(run(AUTOFIT_WORD)), auto)] * 3], EVEN_GRID)),
+        (first + 1, "a floating picture of 144 x 72 pt at the left margin, square wrap, then "
+                    "an autofit table (cells auto) beside it",
+         para(picture + run("The picture is anchored here.")) + rule_table(
+             autofit_cells([auto] * 3), EVEN_GRID)),
+    ]
+
+
 def autofit_doc(name: str, purpose: str, cases: list[tuple[str, str]], **options) -> Doc:
     body = "".join(table_case(n, label, xml) for n, label, xml in cases)
-    return Doc(name, purpose, body + para(run("End of the document.")), **options)
+    return Doc(name, purpose, body + para(run("End of the document.")),
+               media=(("image1.png", grey_png(96, 48)),), **options)
 
 
 def table_autofit() -> Doc:
@@ -1893,13 +1914,15 @@ def table_autofit() -> Doc:
                       cell(para(run("Short")), width(1440, "dxa")),
                       cell(para(run("Other")), width(1440, "dxa"))]],
                     [1440] * 3, tbl_w=(4320, "dxa"), fixed=True)),
+        *autofit_setting_cases(11),
     ]
     return autofit_doc(
         "E-table-autofit-15",
         "Column widths Word's autofit gives tables from their content and preferred widths "
         "(no widths, 100 %, sums of cell widths below and above the text width, percents "
         "over 100, an unbreakable word, a nested table, a spanning cell; a fixed layout for "
-        "contrast), in compatibility mode 15",
+        "contrast; minimum widths wider than the text, a table beside a floating picture), in "
+        "compatibility mode 15",
         cases,
     )
 
@@ -1909,10 +1932,11 @@ def table_autofit_14(flag: str | None) -> Doc:
             "growAutofit": "-grow"}[flag]
     setting = f", with w:{flag}" if flag else ""
     cases = [(n, label, xml) for n, (label, xml) in zip(range(2, 6), autofit_widths_cases())]
+    cases += autofit_setting_cases(11)
     return autofit_doc(
         f"E-table-autofit{said}-14",
-        "Column widths Word's autofit gives the tables of cases 2 to 5 of E-table-autofit-15 "
-        f"in compatibility mode 14{setting}",
+        "Column widths Word's autofit gives the tables of cases 2 to 5, 11 and 12 of "
+        f"E-table-autofit-15 in compatibility mode 14{setting}",
         cases,
         mode=14,
         compat_flags=(flag,) if flag else (),
@@ -1953,7 +1977,8 @@ def media_id(name: str) -> str:
 
 
 def grey_png(width_px: int, height_px: int, level: int = 160) -> bytes:
-    """A PNG of one grey level, 8-bit greyscale, with no time or other chunk that would vary."""
+    """A PNG of one grey level, 8-bit greyscale, with no time or other chunk that would vary,
+    its pixels in stored deflate blocks (stored_zlib)."""
     def chunk(kind: bytes, data: bytes) -> bytes:
         return (struct.pack(">I", len(data)) + kind + data
                 + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF))
@@ -1961,22 +1986,51 @@ def grey_png(width_px: int, height_px: int, level: int = 160) -> bytes:
     rows = b"".join(b"\x00" + bytes([level]) * width_px for _ in range(height_px))
     header = struct.pack(">IIBBBBB", width_px, height_px, 8, 0, 0, 0, 0)
     return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header)
-            + chunk(b"IDAT", zlib.compress(rows, 9)) + chunk(b"IEND", b""))
+            + chunk(b"IDAT", stored_zlib(rows)) + chunk(b"IEND", b""))
 
 
-def vml_picture(name: str, shape_id: str, style: str, wrap: str | None = None) -> str:
-    """A run holding a VML picture (w:pict, v:shape with v:imagedata) of the given CSS style;
-    wrap is the w10:wrap type of a floating one."""
+def stored_zlib(data: bytes) -> bytes:
+    """data as a zlib stream of stored (uncompressed) deflate blocks (RFC 1950 and 1951,
+    §3.2.4): unlike zlib.compress, the same bytes whatever zlib the platform has."""
+    blocks = [data[i:i + 65535] for i in range(0, len(data), 65535)] or [b""]
+    out = b"\x78\x01"
+    for n, block in enumerate(blocks):
+        last = 1 if n == len(blocks) - 1 else 0
+        out += bytes([last]) + struct.pack("<HH", len(block), len(block) ^ 0xFFFF) + block
+    return out + struct.pack(">I", zlib.adler32(data) & 0xFFFFFFFF)
+
+
+# The picture frame shape type (o:spt 75), as Word writes it into the first w:pict of a
+# document that has VML pictures (the re-saved copies under tests/corpus/resaved/ show it).
+PICTURE_FRAME = (
+    '<v:shapetype id="_x0000_t75" coordsize="21600,21600" o:spt="75" o:preferrelative="t" '
+    'path="m@4@5l@4@11@9@11@9@5xe" filled="f" stroked="f"><v:stroke joinstyle="miter"/>'
+    '<v:formulas><v:f eqn="if lineDrawn pixelLineWidth 0"/><v:f eqn="sum @0 1 0"/>'
+    '<v:f eqn="sum 0 0 @1"/><v:f eqn="prod @2 1 2"/><v:f eqn="prod @3 21600 pixelWidth"/>'
+    '<v:f eqn="prod @3 21600 pixelHeight"/><v:f eqn="sum @0 0 1"/><v:f eqn="prod @6 1 2"/>'
+    '<v:f eqn="prod @7 21600 pixelWidth"/><v:f eqn="sum @8 21600 0"/>'
+    '<v:f eqn="prod @7 21600 pixelHeight"/><v:f eqn="sum @10 21600 0"/></v:formulas>'
+    '<v:path o:extrusionok="f" gradientshapeok="t" o:connecttype="rect"/>'
+    '<o:lock v:ext="edit" aspectratio="t"/></v:shapetype>'
+)
+
+
+def vml_picture(name: str, shape_id: str, style: str, wrap: str | None = None,
+                first: bool = False) -> str:
+    """A run holding a VML picture (w:pict, v:shape of the picture frame type with
+    v:imagedata) of the given CSS style; wrap is the w10:wrap type of a floating one. The
+    first picture of a document defines the shape type (first)."""
     wrap_xml = f'<w10:wrap type="{wrap}"/>' if wrap else ""
-    return (f'<w:r><w:pict><v:shape id="{shape_id}" style="{style}" stroked="f">'
-            f'<v:imagedata r:id="{media_id(name)}" o:title=""/>{wrap_xml}</v:shape>'
-            "</w:pict></w:r>")
+    shape_type = PICTURE_FRAME if first else ""
+    return (f'<w:r><w:pict>{shape_type}<v:shape id="{shape_id}" type="#_x0000_t75" '
+            f'style="{style}"><v:imagedata r:id="{media_id(name)}" o:title=""/>{wrap_xml}'
+            "</v:shape></w:pict></w:r>")
 
 
 def vml_pictures() -> Doc:
     # #368, the maintainer's addition: pictures in VML (w:pict), as documents saved by
     # Word 2003 and earlier, and many converted ones, still hold them; inline and floating.
-    words = " ".join(["Text around the picture"] * 12)
+    words = " ".join(["Text around the picture"] * 30)
     inline = "width:72pt;height:36pt"
     tall = "width:36pt;height:48pt"
     floating = ("position:absolute;margin-left:{x}pt;margin-top:{y}pt;width:72pt;"
@@ -1984,28 +2038,30 @@ def vml_pictures() -> Doc:
                 "mso-position-vertical-relative:{v}")
     cases = [
         ("an inline picture of 72 x 36 pt between words",
-         para(run("Before ") + vml_picture("image1.png", "p1", inline) + run(" after."))),
+         para(run("Before ") + vml_picture("image1.png", "p1", inline, first=True)
+              + run(" after."))),
         ("an inline picture 48 pt tall in a line of 11 pt text: the line grows",
          para(run("Before ") + vml_picture("image2.png", "p2", tall) + run(" after."))),
         ("a floating picture of 72 x 72 pt, 144 pt from the left margin and 6 pt below the "
          "paragraph's top, text wrapped square around it",
          para(vml_picture("image3.png", "p3", floating.format(
              x=144, y=6, z=1, h="margin", v="paragraph"), "square") + run(words))),
-        ("a floating picture behind the text (z-index -1), no wrap",
+        ("a floating picture behind the text (a negative z-index), no wrap",
          para(vml_picture("image3.png", "p4", floating.format(
              x=36, y=0, z=-251658240, h="margin", v="paragraph"), "none") + run(words))),
-        ("a floating picture placed from the page's top left corner, 400 pt across and 600 pt "
-         "down, text wrapped square",
+        ("on a page of its own, a floating picture placed from the page's top left corner, "
+         "300 pt across and 150 pt down, text wrapped square",
          para(vml_picture("image3.png", "p5", floating.format(
-             x=400, y=600, z=2, h="page", v="page"), "square") + run(words))),
+             x=300, y=150, z=2, h="page", v="page"), "square") + run(words + " " + words))),
     ]
-    body = "".join(para(run(f"Case {n:02d}: {label}"), space=spacing(before=12)) + content
+    body = "".join(para(run(f"Case {n:02d}: {label}"), space=spacing(before=12),
+                        page_break_before=n == 5) + content
                    for n, (label, content) in enumerate(cases, 1))
     return Doc(
         "E-vml-pictures",
-        "Where Word draws VML pictures (w:pict): inline in a line, taller than the line, "
-        "floating with square wrap, behind the text and placed from the page; each picture is "
-        "a grey PNG of its own size",
+        "Where Word draws VML pictures (w:pict, the picture frame shape type): inline in a "
+        "line, taller than the line, floating with square wrap, behind the text and placed "
+        "from the page; each picture is a grey PNG of its own size",
         body + para(run("End of the document.")),
         media=(("image1.png", grey_png(96, 48)), ("image2.png", grey_png(48, 64)),
                ("image3.png", grey_png(96, 96))),
@@ -2036,7 +2092,8 @@ def exact_height_overflow() -> Doc:
         ("the same, the cell at the bottom (w:vAlign bottom)",
          exact_table(400, big, '<w:vAlign w:val="bottom"/>')),
         ("row 2 is exactly 20 pt high and holds an inline picture 60 pt tall",
-         exact_table(400, para(vml_picture("image1.png", "p1", "width:30pt;height:60pt")))),
+         exact_table(400, para(vml_picture("image1.png", "p1", "width:30pt;height:60pt",
+                                           first=True)))),
     ]
     body = "".join(table_case(n, label, xml) for n, (label, xml) in enumerate(cases, 1))
     return Doc(
@@ -2088,9 +2145,10 @@ def rows_across_pages() -> list[Doc]:
                              fixed=True, border_eighths=48)),
         page_case("E-table-header-repeat-tall",
                   "Whether Word repeats header rows (w:tblHeader) that alone take more than a "
-                  "page: two header rows of 35 lines each, then 10 body rows",
-                  "rows 1 and 2 are header rows of 35 lines each; 10 body rows follow",
-                  rule_table(tall_header + body_rows[:10], EVEN_GRID, tbl_w=(TEXT_W, "dxa"),
+                  "page: two header rows of 35 lines each, then 60 body rows, which cross at "
+                  "least one more page",
+                  "rows 1 and 2 are header rows of 35 lines each; 60 body rows follow",
+                  rule_table(tall_header + body_rows, EVEN_GRID, tbl_w=(TEXT_W, "dxa"),
                              fixed=True, border_eighths=48)),
         page_case("E-table-row-split-nested",
                   "Where Word splits a row whose cell holds a nested table of 30 rows, "
