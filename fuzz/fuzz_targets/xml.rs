@@ -78,7 +78,16 @@ fuzz_target!(|data: &[u8]| {
                     .any(|(namespace, local, _)| !namespace.is_empty() && local == "xmlns"),
                 _ => false,
             });
-            if !prefixed_xmlns {
+            if prefixed_xmlns {
+                // The namespaces of names differ in the scope of such an attribute, so the
+                // comparison leaves them out and drops the attribute from officewright's
+                // side; names, values, text, comments and processing instructions still
+                // compare (#102: the whole comparison was skipped before).
+                assert_eq!(
+                    without_namespaces(ours, true),
+                    without_namespaces(nodes, false)
+                );
+            } else {
                 assert_eq!(ours, nodes);
             }
         }
@@ -309,6 +318,35 @@ fn read(input: &Input<'_>, limits: &Limits) -> Result<Vec<Node>, Error> {
 
 /// Walks roxmltree's tree; only called when officewright read the document, so its depth
 /// is within officewright's limit.
+/// `nodes` without the namespaces of elements and attributes, and without the attributes
+/// `p:xmlns` when `drop_prefixed_xmlns`, for a document in which roxmltree reads such an
+/// attribute as a declaration of the default namespace.
+fn without_namespaces(nodes: Vec<Node>, drop_prefixed_xmlns: bool) -> Vec<Node> {
+    nodes
+        .into_iter()
+        .map(|node| match node {
+            Node::Start {
+                local, attributes, ..
+            } => {
+                let mut attributes: Vec<_> = attributes
+                    .into_iter()
+                    .filter(|(namespace, local, _)| {
+                        !(drop_prefixed_xmlns && !namespace.is_empty() && local == "xmlns")
+                    })
+                    .map(|(_, local, value)| (String::new(), local, value))
+                    .collect();
+                attributes.sort();
+                Node::Start {
+                    namespace: String::new(),
+                    local,
+                    attributes,
+                }
+            }
+            other => other,
+        })
+        .collect()
+}
+
 fn walk(node: roxmltree::Node<'_, '_>, nodes: &mut Vec<Node>) {
     for child in node.children() {
         match child.node_type() {
