@@ -1,5 +1,6 @@
 use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{fs, io};
 
 use officewright_core::{PageSize, Pt};
@@ -47,8 +48,10 @@ const SUBSET_BUDGET: u64 = 1 << 25;
 /// A PDF document being built.
 ///
 /// A `Document` can be moved between threads; it has no interior mutability.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Document {
+    /// Tells this document's pages from those another document encoded.
+    id: u64,
     pages: Vec<Page>,
     compression: Compression,
     subset_budget: u64,
@@ -59,9 +62,17 @@ pub struct Document {
     open: Option<usize>,
 }
 
+/// The identity of the next document made or cloned.
+static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+fn next_id() -> u64 {
+    NEXT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
 impl Default for Document {
     fn default() -> Self {
         Self {
+            id: next_id(),
             pages: Vec::new(),
             compression: Compression::default(),
             subset_budget: SUBSET_BUDGET,
@@ -92,6 +103,8 @@ pub struct Page {
     clips: usize,
     /// Whether some text encoded so far needed replacement text.
     actual_text: bool,
+    /// The document whose glyph codes the page's encoded text uses, once it has some.
+    encoded_by: Option<u64>,
 }
 
 /// A piece of a page's content stream.
@@ -114,6 +127,28 @@ enum Content {
         font: usize,
         run: GlyphRun,
     },
+}
+
+impl Clone for Document {
+    /// A copy that goes on by itself: its pages are its own, encoded with its own copy of
+    /// the glyph codes.
+    fn clone(&self) -> Self {
+        let id = next_id();
+        let mut pages = self.pages.clone();
+        for page in &mut pages {
+            if page.encoded_by == Some(self.id) {
+                page.encoded_by = Some(id);
+            }
+        }
+        Self {
+            id,
+            pages,
+            compression: self.compression,
+            subset_budget: self.subset_budget,
+            codes: self.codes.clone(),
+            open: self.open,
+        }
+    }
 }
 
 impl Document {
@@ -143,6 +178,7 @@ impl Document {
             content: Vec::new(),
             clips: 0,
             actual_text: false,
+            encoded_by: None,
         });
         self.open = Some(index);
         #[allow(clippy::indexing_slicing)] // reason: the page was just pushed at `index`
@@ -156,6 +192,11 @@ impl Document {
     }
 
     /// The page at `index`, counting from 0 in the order the pages were added.
+    ///
+    /// A page belongs to its document. Once the document has handed out another page, the
+    /// text drawn on this one is encoded with the document's own glyph codes, so a copy of
+    /// the page put into another document, or a page swapped into one, makes that
+    /// document's [`write_to`](Self::write_to) fail with [`Error::ForeignPage`].
     pub fn page_mut(&mut self, index: usize) -> Option<&mut Page> {
         // The page being drawn stays as it is until another is: a caller that asks for it
         // for each thing it draws, as the C ABI does, encodes it once.
@@ -171,7 +212,7 @@ impl Document {
     /// Encodes the text and glyph runs of the page handed out last.
     fn encode_open_page(&mut self) {
         if let Some(page) = self.open.take().and_then(|index| self.pages.get_mut(index)) {
-            page.encode(&mut self.codes);
+            page.encode(&mut self.codes, self.id);
         }
     }
 
@@ -245,10 +286,18 @@ impl Document {
     /// are past a limit of the library or past what is left of the
     /// [subset budget](Self::set_subset_budget) after the fonts reduced before it,
     /// [`Error::TooLarge`] if the file
-    /// would exceed 10<sup>10</sup> bytes, and [`Error::Io`] if writing fails.
+    /// would exceed 10<sup>10</sup> bytes, [`Error::ForeignPage`] for a page that another
+    /// document encoded ([`page_mut`](Self::page_mut)), and [`Error::Io`] if writing fails.
     pub fn write_to(&self, out: impl Write) -> Result<()> {
         if self.pages.is_empty() {
             return Err(Error::NoPages);
+        }
+        if let Some(page) = self
+            .pages
+            .iter()
+            .position(|page| page.encoded_by.is_some_and(|id| id != self.id))
+        {
+            return Err(Error::ForeignPage { page });
         }
         // Each font is written once, in the order the pages first use it. For each page,
         // `page_fonts` has the document's index of each of its font resources.
@@ -773,11 +822,13 @@ impl Page {
     }
 
     /// Encodes the text and glyph runs drawn since the page was last encoded, giving their
-    /// glyphs CIDs in `codes`.
-    fn encode(&mut self, codes: &mut FontCodes) {
+    /// glyphs CIDs in `codes`, those of document `document`.
+    fn encode(&mut self, codes: &mut FontCodes, document: u64) {
         let Some(first) = self.content.iter().position(Content::is_pending) else {
             return;
         };
+        // A page another document encoded keeps its mark, and is refused when written.
+        self.encoded_by.get_or_insert(document);
         let pending: Vec<Content> = self.content.drain(first..).collect();
         // Operators that come one after another are kept as one piece.
         let mut stream = match self.content.pop() {

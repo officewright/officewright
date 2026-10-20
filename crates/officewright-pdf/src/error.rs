@@ -66,6 +66,13 @@ pub enum Error {
     },
     /// The document has no pages; a PDF needs at least one.
     NoPages,
+    /// Page `page` was put into the document from another one after that document had
+    /// encoded its text, whose glyph codes are that document's own; see
+    /// [`Document::page_mut`](crate::Document::page_mut).
+    ForeignPage {
+        /// The page's index, counting from 0.
+        page: usize,
+    },
     #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
     /// A [`GlyphRun`](crate::GlyphRun) is in a standard font. Glyphs are drawn by their
     /// IDs in an embedded font; a standard font is addressed through WinAnsiEncoding.
@@ -267,6 +274,11 @@ impl fmt::Display for Error {
                 width.0, height.0, margin.0
             ),
             Self::NoPages => f.write_str("document has no pages"),
+            Self::ForeignPage { page } => write!(
+                f,
+                "page {page} holds text that another document encoded with glyph codes of \
+                 its own, which this document does not have"
+            ),
             Self::NotEmbedded { font } => write!(
                 f,
                 "glyphs can be drawn only in an embedded font, and {font} is a standard font"
@@ -393,6 +405,7 @@ impl From<Error> for officewright_core::Error {
             | Error::InvalidPageSize { .. }
             | Error::NoRoomForText { .. }
             | Error::NoPages
+            | Error::ForeignPage { .. }
             | Error::NotEmbedded { .. }
             | Error::InvalidGlyph { .. }
             | Error::EmptyCluster { .. }

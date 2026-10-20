@@ -719,6 +719,51 @@ fn writes_the_page_being_drawn_as_far_as_it_is_drawn() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn refuses_a_page_another_document_encoded() -> TestResult {
+    let font = Font::from_bytes(liberation_sans()?, 0)?;
+    // In `a`, A, B and C are CIDs 1, 2 and 3; in `b`, C, B and A. Adding a page encodes
+    // the one before.
+    let mut a = Document::new();
+    a.add_page(PageSize::A4)?
+        .add_text(Pt(72.0), Pt(700.0), &font, Pt(12.0), "ABC")?;
+    a.add_page(PageSize::A4)?;
+    let mut b = Document::new();
+    b.add_page(PageSize::A4)?
+        .add_text(Pt(72.0), Pt(700.0), &font, Pt(12.0), "CBA")?;
+    b.add_page(PageSize::A4)?;
+    let copied = a.page_mut(0).ok_or("no page")?.clone();
+    *b.page_mut(1).ok_or("no page")? = copied;
+    assert!(matches!(b.to_bytes(), Err(Error::ForeignPage { page: 1 })));
+    // Swapped into a document that never used the font, the page is refused there; the
+    // page without text swapped out into `a` is written there as it is.
+    let mut c = Document::new();
+    c.add_page(PageSize::A4)?;
+    std::mem::swap(
+        a.page_mut(0).ok_or("no page")?,
+        c.page_mut(0).ok_or("no page")?,
+    );
+    assert!(matches!(c.to_bytes(), Err(Error::ForeignPage { page: 0 })));
+    a.to_bytes()?;
+    // A page whose text is not encoded yet goes into another document as it is.
+    let mut d = Document::new();
+    d.add_page(PageSize::A4)?
+        .add_text(Pt(72.0), Pt(700.0), &font, Pt(12.0), "AB")?;
+    let mut e = Document::new();
+    e.add_page(PageSize::A4)?;
+    std::mem::swap(
+        d.page_mut(0).ok_or("no page")?,
+        e.page_mut(0).ok_or("no page")?,
+    );
+    let (pages, _) = cids_and_program(&e.to_bytes()?)?;
+    assert_eq!(pages, [vec![vec![1, 2]]]);
+    // A copy of a page within its own document, and of a whole document, are fine.
+    let copied = a.page_mut(1).ok_or("no page")?.clone();
+    *a.add_page(PageSize::A4)? = copied;
+    a.clone().to_bytes()?;
+    Ok(())
+}
+
 /// minimal.ttf with Á and ´ mapped to the glyph of A, as fonts do for look-alike
 /// characters (Arial maps Latin Ə and Cyrillic Ә to one glyph). Its cmap has one segment
 /// per character, and idDelta is the glyph minus the character.
