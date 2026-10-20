@@ -1290,6 +1290,28 @@ mod tests {
     }
 
     #[test]
+    fn checks_the_closure_in_the_order_the_glyphs_are_numbered() {
+        // Glyph 1 uses glyphs 3 to 65535; glyph 2 is too short for a header. Numbered 2, 1,
+        // the subsetter reads glyph 1's components before glyph 2 and would number every
+        // ID, which the check refuses.
+        let mut entries = every_id();
+        entries[1] = composite_of(&(3..=65535).collect::<Vec<_>>());
+        entries[2] = vec![0xFF];
+        let face = crate::FontFace::from_bytes(font_past(&entries, 3), 0).unwrap();
+        let mut budget = SubsetBudget::new(u64::MAX);
+        let glyphs = [GlyphId::new(2), GlyphId::new(1)];
+        assert!(matches!(
+            face.subset_in_order_within(glyphs, &mut budget),
+            Err(Error::SubsetUnsupported { .. })
+        ));
+        // By ID it reaches glyph 2 first, and fails with an error of its own.
+        assert!(matches!(
+            face.subset_within(glyphs, &mut budget),
+            Err(Error::Subset { .. })
+        ));
+    }
+
+    #[test]
     fn remembers_which_sound_glyphs_reach_past_the_glyph_count() {
         // Glyph 2 uses glyphs 3 to 65535, past the count: with .notdef 65,535 IDs, which
         // subset. Glyph 1 uses glyph 2: 65,536. Checked after glyph 2, its check does not
