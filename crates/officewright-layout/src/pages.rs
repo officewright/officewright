@@ -1980,8 +1980,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
     /// Adds to `items` what `frame` draws, its top left corner at `origin`, as far as the
     /// budget of what frames draw goes: a part that would take more than is left is not
     /// drawn, nor is anything of a frame after it. A paragraph costs what it draws, or the
-    /// pieces painting walks where those are more, and one that would walk more than is
-    /// left is not painted at all.
+    /// pieces painting walks where those are more.
     fn paint_frame(
         &mut self,
         frame: &Frame<'d>,
@@ -1997,7 +1996,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 FramePart::Paragraph(_, walked) => *walked,
                 FramePart::Table(_) => 0,
             };
-            if self.frame_budget > 0 && walked <= self.frame_budget {
+            if self.frame_budget > 0 {
                 let start = items.len();
                 let at = Point {
                     x: origin.x,
