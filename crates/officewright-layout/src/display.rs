@@ -1467,9 +1467,7 @@ mod tests {
     #[test]
     fn words_are_found_by_cluster_however_many_glyphs_a_cluster_has() {
         // Issue #399: the words a words-only underline covers are found cluster by cluster.
-        // "ab cd", where "a" is drawn with three glyphs and "c" with two, makes two words;
-        // one cluster of 100,000 glyphs is one word, found in time in proportion to its
-        // glyphs (the search for each glyph's next cluster took 12 s on it, in a debug build).
+        // "ab cd", where "a" is drawn with three glyphs and "c" with two, makes two words.
         let glyph = |x: f64, cluster: usize| PlacedGlyph {
             glyph: officewright_font::GlyphId::new(1),
             x: Pt(x),
@@ -1492,13 +1490,36 @@ mod tests {
             glyph(7.0, 4),
         ];
         assert_eq!(word_spans(&itemized, &placed), [(0.0, 4.0), (5.0, 8.0)]);
-        let one = Itemized {
-            text: "H".to_owned(),
+        // A space that is the last cluster of the piece is no word; nor is a space of more
+        // than one byte, which runs to where the next cluster starts.
+        let text = |text: &str| Itemized {
+            text: text.to_owned(),
             ..Itemized::default()
         };
-        let many: Vec<PlacedGlyph> = (0..100_000).map(|n| glyph(f64::from(n), 0)).collect();
-        assert_eq!(word_spans(&one, &many), [(0.0, 100_000.0)]);
+        let trailing = [glyph(0.0, 0), glyph(1.0, 1), glyph(2.0, 2)];
+        assert_eq!(word_spans(&text("ab "), &trailing), [(0.0, 2.0)]);
+        let ideographic = [glyph(0.0, 0), glyph(1.0, 1), glyph(2.0, 4)];
+        assert_eq!(
+            word_spans(&text("a\u{3000}b"), &ideographic),
+            [(0.0, 1.0), (2.0, 3.0)]
+        );
+        // One cluster of up to 262,144 glyphs is one word, found in time in proportion to
+        // its glyphs: well under a second in all in a debug build, where the search for each
+        // glyph's next cluster passed the bound at 131,072 glyphs.
+        let started = std::time::Instant::now();
+        for size in (14..=18).map(|power| 1_u32 << power) {
+            let many: Vec<PlacedGlyph> = (0..size).map(|n| glyph(f64::from(n), 0)).collect();
+            assert_eq!(word_spans(&text("H"), &many), [(0.0, f64::from(size))]);
+            assert!(
+                started.elapsed() < LINEAR_TIME,
+                "clusters up to {size} glyphs took {:?}: finding words is no longer linear",
+                started.elapsed()
+            );
+        }
     }
+
+    /// The longest the clusters of the test above may take in all.
+    const LINEAR_TIME: std::time::Duration = std::time::Duration::from_secs(10);
 
     #[test]
     fn floating_objects_go_where_their_references_and_placements_say() {
