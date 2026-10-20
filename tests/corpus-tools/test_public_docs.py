@@ -1326,7 +1326,7 @@ class Cleaning(unittest.TestCase):
             "docproperty with an allowed second argument": field("DOCPROPERTY Author Title"),
             "a bare info": field("INFO"),
             **{f"a web scheme after {c}": field(f'QUOTE "a{c}https://srv/x"') for c in "+.-1x"},
-            **{f"an http scheme after {c}": field(f'QUOTE "a{c}http://srv/x"') for c in "+.-1x"},
+            **{f"an http scheme after {c}": field(f'QUOTE "a{c}http://srv/x"') for c in "+.-1x_"},
             "a nested fldSimple result": (
                 f"<w:document xmlns:w='{w}'><w:body><w:p>"
                 "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
@@ -1416,8 +1416,8 @@ class Cleaning(unittest.TestCase):
             "custom field data": document("<w:r><w:fldData>AAAA</w:fldData></w:r>"),
             "a begin in a Choice": document(branch("<w:fldChar w:fldCharType='begin'/>", "")),
             "a begin in a text box": document(
-                "<w:r><w:txbxContent><w:p><w:r><w:fldChar w:fldCharType='begin'/></w:r></w:p>"
-                "</w:txbxContent></w:r>"),
+                "<w:r><zz:textbox><w:txbxContent><w:p><w:r><w:fldChar w:fldCharType='begin'/>"
+                "</w:r></w:p></w:txbxContent></zz:textbox></w:r>"),
             # Instruction text in a branch goes on the instruction begun outside it, in the
             # branch Word takes (review of #381).
             "an instruction piece in a Fallback": piece(branch(
@@ -1446,6 +1446,51 @@ class Cleaning(unittest.TestCase):
             "a plain text piece in a Fallback": piece(
                 "<mc:AlternateContent><mc:Choice Requires='zz'/><mc:Fallback><w:r><w:t>"
                 ":\\private\\x.docx</w:t></w:r></mc:Fallback></mc:AlternateContent>"),
+            # A w:txbxContent outside a drawing's text box is read like any other element
+            # (re-check of #381).
+            "a text box straight in an instruction": piece(
+                "<w:r><w:txbxContent><w:p><w:r><w:t>:\\private\\x.docx</w:t></w:r></w:p>"
+                "</w:txbxContent></w:r>"),
+            "a text box in a w14 Choice without a drawing": piece(
+                "<mc:AlternateContent><mc:Choice Requires='w14'><w:txbxContent><w:p><w:r><w:t>"
+                ":\\private\\x.docx</w:t></w:r></w:p></w:txbxContent></mc:Choice><mc:Fallback/>"
+                "</mc:AlternateContent>"),
+            "a text box in foreign markup": piece(
+                "<zz:x><w:txbxContent><w:p><w:r><w:t>:\\private\\x.docx</w:t></w:r></w:p>"
+                "</w:txbxContent></zz:x>"),
+            # A w:fldSimple nested in an instruction gives it only its result.
+            "instruction text in a nested fldSimple": nested_in_branch(
+                "<w:fldSimple w:instr='QUOTE x'><w:r><w:instrText>INCLUDETEXT x</w:instrText>"
+                "</w:r></w:fldSimple>"),
+            "a field mark in a fldSimple closing the field outside": (
+                f"<w:document xmlns:w='{w}'><w:body><w:p>"
+                "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                '<w:r><w:instrText>QUOTE "</w:instrText></w:r>'
+                "<w:fldSimple w:instr='QUOTE x'><w:r><w:fldChar w:fldCharType='end'/></w:r>"
+                "</w:fldSimple><w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                "<w:r><w:instrText>PAGE</w:instrText></w:r>"
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:p></w:body></w:document>"),
+            # Instruction text in a nested complex result, harmless if read in, is refused.
+            "harmless instruction text in a nested result": nested_in_branch(
+                "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                "<w:r><w:instrText>MERGEFIELD Photo</w:instrText></w:r>"
+                "<w:r><w:fldChar w:fldCharType='separate'/></w:r>"
+                "<w:r><w:instrText>https://www.example.gov/a.png</w:instrText></w:r>"
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r>"),
+            # Straight text in a field begun in a branch or a text box inside a w:fldSimple
+            # that is nested in an instruction.
+            "straight text in a branch inside a nested fldSimple": nested_in_branch(
+                "<w:fldSimple w:instr='QUOTE x'><mc:AlternateContent><mc:Choice Requires='zz'/>"
+                "<mc:Fallback><w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                "<w:r><w:instrText>QUOTE </w:instrText></w:r><w:r><w:t>x</w:t></w:r>"
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r></mc:Fallback>"
+                "</mc:AlternateContent></w:fldSimple>"),
+            "straight text in a text box inside a nested fldSimple": nested_in_branch(
+                "<w:fldSimple w:instr='QUOTE x'><w:r><zz:textbox><w:txbxContent><w:p>"
+                "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
+                "<w:r><w:instrText>QUOTE </w:instrText></w:r><w:r><w:t>x</w:t></w:r>"
+                "<w:r><w:fldChar w:fldCharType='end'/></w:r></w:p></w:txbxContent></zz:textbox>"
+                "</w:r></w:fldSimple>"),
             "a nested result in a Fallback": nested_in_branch(
                 "<w:r><w:fldChar w:fldCharType='begin'/></w:r>"
                 "<w:r><w:instrText>MERGEFIELD Photo</w:instrText></w:r>"

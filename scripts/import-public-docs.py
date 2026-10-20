@@ -1034,14 +1034,17 @@ def names_local_place(instruction: str) -> bool:
 
 
 class FieldMarkup(Exception):
-    """A field that crosses the edge of a Markup Compatibility branch or of foreign markup."""
+    """Field markup this check cannot read as Word does: a field across the edge of a Markup
+    Compatibility branch, foreign markup or a text box, text written into an instruction,
+    instruction text in a nested result, or custom field data."""
 
 
 class _FieldScope:
     """The fields open in one part of a part's tree: the part itself, or one mc:Choice,
-    mc:Fallback or foreign element. fields holds each open field's instruction while it is
-    being read and None after its separate or end; open_instructions the instructions not
-    yet complete, innermost last, so that a nested result finds its own in constant time."""
+    mc:Fallback, foreign element or drawing's text box. fields holds each open field's
+    instruction while it is being read and None after its separate or end;
+    open_instructions the instructions not yet complete, innermost last, so that a nested
+    result finds its own in constant time."""
 
     def __init__(self) -> None:
         self.fields: list[list[str] | None] = []
@@ -1055,7 +1058,7 @@ def field_instructions(name: str, data: bytes) -> list[str]:
     field or w:fldSimple, its w:t and w:delText) read into that instruction, as Word reads
     {INCLUDEPICTURE "{MERGEFIELD Photo}"}; w:fldSimple's w:instr; and as an instruction of
     its own any instruction text outside a field's instruction and its results. A text box
-    (w:txbxContent) is a story of its own.
+    (w:txbxContent in wps:txbx or v:textbox) of a drawing is a story of its own.
 
     Word takes one branch of mc:AlternateContent and drops elements of ignorable namespaces,
     so a field mark there could end a field for this reading that Word goes on reading. So
@@ -1063,9 +1066,11 @@ def field_instructions(name: str, data: bytes) -> list[str]:
     must begin and end inside it, as Word's own text boxes hold them, and no text inside one
     may go on an instruction begun outside it. A part with a field across such an edge,
     with such text, with an element inside an instruction, with text (w:t) written straight
-    into an instruction or instruction text in a nested result, which Word may read either
-    way, or with w:fldData (custom field data), is refused. Raises Unreadable when the part is not well-formed or declares a
-    document type, or nests too deeply, and FieldMarkup."""
+    into an instruction or instruction text in a nested result (a complex field or a
+    w:fldSimple), which Word may read either way, with a field mark in a w:fldSimple that
+    closes a field begun outside it, or with w:fldData (custom field data), is refused.
+    Raises Unreadable when the part is not well-formed or declares a document type, or
+    nests too deeply, and FieldMarkup."""
     builder = _Builder()
     parser = ElementTree.XMLParser(target=builder)
     try:
@@ -1078,11 +1083,12 @@ def field_instructions(name: str, data: bytes) -> list[str]:
     found: list[str] = []
 
     def walk(element: ElementTree.Element, scope: _FieldScope, isolated: bool,
-             outer_open: bool, simple_at: int) -> None:
+             outer_open: bool, simple_at: int, in_box: bool = False) -> None:
         # isolated: inside an mc:Choice, mc:Fallback or foreign element; outer_open: an
         # instruction was open outside the innermost such element; simple_at: the number
         # of fields open where the innermost w:fldSimple began (-1 outside one), so that
-        # its text counts as a nested result only for an instruction begun outside it.
+        # its text counts as a nested result only for an instruction begun outside it;
+        # in_box: a child of a drawing's text box (wps:txbx, v:textbox).
         namespace, _, local = element.tag.rpartition("}")
         namespace = namespace.lstrip("{")
         fields = scope.fields
@@ -1091,15 +1097,17 @@ def field_instructions(name: str, data: bytes) -> list[str]:
         ):
             inner = _FieldScope()
             opened = outer_open or bool(scope.open_instructions)
+            box = local in ("txbx", "textbox")
             for child in element:
                 # Inside, the fields counted are the branch's own; no w:fldSimple is open.
-                walk(child, inner, True, opened, -1)
+                walk(child, inner, True, opened, -1, box)
             if inner.fields:
                 raise FieldMarkup(name)
             return
-        if local == "txbxContent":
-            # A text box's text is a story of its own ([MS-DOC] counts it apart, ccpTxbx):
-            # it goes on no instruction around it, and its own fields begin and end in it.
+        if local == "txbxContent" and in_box:
+            # A drawing's text box is a story of its own ([MS-DOC] counts it apart,
+            # ccpTxbx): its text goes on no instruction around it, and its own fields begin
+            # and end in it. Anywhere else a w:txbxContent is read like any other element.
             inner = _FieldScope()
             for child in element:
                 walk(child, inner, isolated, False, -1)
@@ -1119,7 +1127,8 @@ def field_instructions(name: str, data: bytes) -> list[str]:
                 fields.append(instruction)
                 scope.open_instructions.append(instruction)
             elif kind in ("separate", "end"):
-                if not fields:
+                # Inside a w:fldSimple, a mark closes only a field begun inside it.
+                if len(fields) <= max(simple_at, 0):
                     raise FieldMarkup(name)
                 if fields[-1] is not None:
                     found.append("".join(fields[-1]))
@@ -1132,7 +1141,7 @@ def field_instructions(name: str, data: bytes) -> list[str]:
             if len(element):
                 raise FieldMarkup(name)
             text = element.text or ""
-            if fields and fields[-1] is not None:
+            if fields and fields[-1] is not None and len(fields) > simple_at:
                 fields[-1].append(text)
             elif isolated or scope.open_instructions:
                 # Word puts the branch it takes in the place of mc:AlternateContent, so
