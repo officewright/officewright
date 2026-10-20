@@ -40,14 +40,25 @@ fn shares_paragraph_properties_and_font_names_between_items_that_repeat_them() {
             r#"<w:styles xmlns:w="{W}"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:pPr><w:tabs>{tabs}</w:tabs></w:pPr></w:style></w:styles>"#
         ),
     );
+    // First four paragraphs that differ from the rest only in what the fingerprint once
+    // left out: line spacing, keeping with the next, shading, a border (review of #390).
+    let differing = [
+        r#"<w:spacing w:line="300" w:lineRule="auto"/>"#,
+        "<w:keepNext/>",
+        r#"<w:shd w:val="clear" w:color="auto" w:fill="FF0000"/>"#,
+        r#"<w:pBdr><w:top w:val="single" w:sz="4" w:space="1" w:color="000000"/></w:pBdr>"#,
+    ]
+    .map(|p_pr| format!("<w:p><w:pPr>{p_pr}</w:pPr></w:p>"))
+    .concat();
     let body = format!(
-        "{}{}",
+        "{differing}{}{}",
         r#"<w:p><w:r><w:sym w:font="Wingdings" w:char="F04A"/></w:r></w:p>"#.repeat(500),
         r#"<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Wingdings"/><w:b/></w:rPr><w:t>x</w:t></w:r></w:p>"#
     );
     super::super::layout::WORK.set(super::super::layout::Work::default());
     let translation = translate(&with_parts(&body, &[styles]));
     let found = paragraphs(&translation);
+    let found = &found[4..];
     assert_eq!(found.len(), 501);
     // Two sets of properties: the 500 plain paragraphs share one.
     assert!(
@@ -57,7 +68,7 @@ fn shares_paragraph_properties_and_font_names_between_items_that_repeat_them() {
     );
     assert!(!std::ptr::eq(found[500].props(), found[0].props()));
     assert_eq!(found[0].props().tabs().len(), 64);
-    assert_eq!(super::super::layout::WORK.get().paragraph_props, 2);
+    assert_eq!(super::super::layout::WORK.get().paragraph_props, 2 + 4);
     // Every symbol's font, and the run style's, is one name.
     let mut names: Vec<&std::sync::Arc<str>> = Vec::new();
     for paragraph in &found[..500] {

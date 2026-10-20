@@ -18,7 +18,6 @@ mod style;
 mod table;
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use officewright_layout::ir;
 use officewright_layout::{LayoutReport, Location, ReportEntry, ReportKind};
@@ -42,6 +41,7 @@ thread_local! {
         cell_reads: 0,
         label_checks: 0,
         paragraph_props: 0,
+        props_compared: 0,
     }) };
 }
 
@@ -63,6 +63,8 @@ pub(crate) struct Work {
     pub(crate) label_checks: usize,
     /// Paragraph properties not shared with an earlier paragraph's.
     pub(crate) paragraph_props: usize,
+    /// Comparisons of paragraph properties with kept ones.
+    pub(crate) props_compared: usize,
 }
 
 /// Counts work for [`WORK`].
@@ -201,7 +203,7 @@ struct Translator<'a> {
     /// The paragraph properties given to the IR so far, by a fingerprint of them, at most
     /// [`paragraph::SHARED_PER_FINGERPRINT`] for each: paragraphs with equal properties
     /// share one (#275).
-    paragraph_props: HashMap<u64, Vec<Arc<ir::ParagraphProps>>>,
+    paragraph_props: paragraph::SharedProps,
     lists: list::Lists,
     /// A key per paragraph style, by its place among the styles, for contextual spacing.
     style_keys: HashMap<usize, ir::StyleKey>,
@@ -295,7 +297,7 @@ impl<'a> Translator<'a> {
             formats: document.formats(),
             ir: ir::Document::default(),
             run_styles: style::RunStyles::default(),
-            paragraph_props: HashMap::new(),
+            paragraph_props: paragraph::SharedProps::default(),
             lists: list::Lists::default(),
             style_keys: HashMap::new(),
             left_out: Vec::new(),
