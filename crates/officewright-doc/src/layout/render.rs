@@ -166,9 +166,11 @@ impl Document {
                     continue;
                 }
                 faces += count;
-                // A name longer than any font's marks a program made to cost memory: the
-                // font book leaves such a name out since #210 (#226), and this leaves the
-                // whole program out and reports it.
+                // A name record longer than any font's marks a program made to cost
+                // memory, and this leaves the whole program out and reports it. The font
+                // book bounds names itself since #210 (#226), by their decoded text: it
+                // keeps a UTF-16 name of 257 to 512 characters, which this refuses for its
+                // record's bytes. The guard stays by choice, as a font's names are short.
                 if scan.long_name {
                     entries.push(ReportEntry::new(
                         ReportKind::FontEmbedding,
@@ -244,8 +246,9 @@ const MAX_EMBEDDED_FACES: usize = 256;
 
 /// The longest name, in bytes, that an embedded program may have among those the font
 /// book keeps. Real fonts' are short: Windows allows 31 characters in a face name and
-/// OpenType 63 in a PostScript name. Our choice; the font book leaves out a longer name
-/// itself since #210, and this leaves out the program.
+/// OpenType 63 in a PostScript name. Our choice, counted in the record's bytes; the font
+/// book bounds names itself since #210 by their decoded UTF-8 (512 bytes), so it keeps
+/// some names whose records this refuses.
 const MAX_NAME_BYTES: u16 = 512;
 
 /// What the font book would keep of a program, read from its tables without reading its

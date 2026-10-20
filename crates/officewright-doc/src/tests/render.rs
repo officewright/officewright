@@ -661,8 +661,9 @@ fn collection_of(programs: &[&[u8]], order: &[usize]) -> Vec<u8> {
 
 #[test]
 fn leaves_out_a_program_with_a_name_longer_than_any_font_s() {
-    // The font book keeps names however long (#226): a program with a family of 600
-    // bytes is left out before it reaches one; one of 500 bytes is not.
+    // A program with a family of 600 bytes is left out before it reaches a font book,
+    // which would keep the name (it bounds decoded text, since #210); one of 500 bytes is
+    // not.
     let left_out = |program: &[u8]| {
         let document = embedding(&[("Officewright Test", program)]);
         let (_, report) = document.save_pdf_bytes(&without_system_fonts()).unwrap();
