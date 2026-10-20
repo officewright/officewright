@@ -479,8 +479,11 @@ fn a_subset_tag_tells_glyph_sets_and_fonts_apart() -> TestResult {
         Ok(name.get(..6).ok_or("short name")?.to_owned())
     };
     let ab = tag(liberation_sans()?, "АБ")?;
-    assert_eq!(ab, tag(liberation_sans()?, "БА")?);
+    assert_eq!(ab, tag(liberation_sans()?, "АБ")?);
     assert_ne!(ab, tag(liberation_sans()?, "АВ")?);
+    // The same glyphs numbered in another order, the order they are first shown in, are
+    // another subset.
+    assert_ne!(ab, tag(liberation_sans()?, "БА")?);
     // Another font with the same name and glyph IDs: Liberation Sans with another
     // advance width for А (its hmtx entry, an advance and a side bearing per glyph).
     let mut other = liberation_sans()?;
@@ -502,13 +505,12 @@ fn widths_and_metrics_are_the_fonts_own() -> TestResult {
     let face = FontFace::from_bytes(liberation_sans()?, 0)?;
     let text = "AWЖ.";
     let pdf = pdf_text(&one_line(&Font::from_face(face.clone())?, text)?)?;
-    // The subset numbers the glyphs from 1 in the order of their IDs in the font, and
-    // /W gives their advances in 1/1000 em: Liberation Sans has 2048 units per em.
-    let mut glyphs: Vec<_> = text
+    // The subset numbers the glyphs from 1 in the order they are first shown in, and /W
+    // gives their advances in 1/1000 em: Liberation Sans has 2048 units per em.
+    let glyphs: Vec<_> = text
         .chars()
         .map(|ch| face.glyph_id(ch).ok_or("no glyph"))
         .collect::<Result<_, _>>()?;
-    glyphs.sort();
     let (_, widths) = pdf.split_once("/W [1 [").ok_or("no /W")?;
     let (widths, _) = widths.split_once("]]").ok_or("no end of /W")?;
     let widths: Vec<f64> = widths
@@ -629,6 +631,226 @@ fn embeds_each_font_once_with_the_glyphs_of_every_page() -> TestResult {
     Ok(())
 }
 
+/// The CIDs every page of `pdf` shows, page after page, and the subset font program of
+/// its one embedded TrueType font.
+fn cids_and_program(pdf: &[u8]) -> TestResult<(Vec<Vec<Vec<u16>>>, FontFace)> {
+    let streams = streams(pdf)?;
+    let pages = streams
+        .iter()
+        .filter(|stream| stream.dictionary.starts_with("<< /Length"))
+        .filter(|stream| !stream.dictionary.contains("/Length1"))
+        .filter(|stream| !String::from_utf8_lossy(&stream.data).contains("begincmap"))
+        .map(|stream| shown_cids(&String::from_utf8_lossy(&stream.data)))
+        .collect();
+    let program = streams
+        .into_iter()
+        .find(|stream| stream.dictionary.contains("/Length1"))
+        .ok_or("no font program")?;
+    Ok((pages, FontFace::from_bytes(program.data, 0)?))
+}
+
+#[test]
+fn numbers_glyphs_in_the_order_they_are_drawn_across_pages() -> TestResult {
+    let face = FontFace::from_bytes(liberation_sans()?, 0)?;
+    let font = Font::from_face(face.clone())?;
+    // By glyph ID the order is ., W, i, m; drawn, it is m, W, i, ., the last two on the
+    // second page and back on the first.
+    let mut doc = Document::new();
+    doc.add_page(PageSize::A4)?
+        .add_text(Pt(72.0), Pt(700.0), &font, Pt(12.0), "mW")?;
+    doc.add_page(PageSize::A4)?
+        .add_text(Pt(72.0), Pt(700.0), &font, Pt(12.0), "iW")?;
+    doc.page_mut(0)
+        .ok_or("no first page")?
+        .add_text(Pt(72.0), Pt(680.0), &font, Pt(12.0), ".m")?;
+    let pdf = doc.to_bytes()?;
+    let (pages, subset) = cids_and_program(&pdf)?;
+    assert_eq!(pages, [vec![vec![1, 2], vec![4, 1]], vec![vec![3, 2]]]);
+    // Each CID is the glyph it was drawn for: the four have different advances.
+    for (cid, ch) in (1..).zip(['m', 'W', 'i', '.']) {
+        let glyph = face.glyph_id(ch).ok_or("no glyph")?;
+        assert_eq!(
+            subset.advance_width(officewright_font::GlyphId::new(cid)),
+            face.advance_width(glyph),
+            "{ch}"
+        );
+    }
+    let text = pdf_text(&doc)?;
+    assert!(
+        text.contains(
+            "4 beginbfchar\n<0001> <006D>\n<0002> <0057>\n<0003> <0069>\n<0004> <002E>\nendbfchar"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("/W [1 [833.0078 943.8477 222.168 277.832]]"),
+        "{text}"
+    );
+    Ok(())
+}
+
+#[test]
+fn writes_the_page_being_drawn_as_far_as_it_is_drawn() -> TestResult {
+    let font = Font::from_bytes(liberation_sans()?, 0)?;
+    let mut doc = Document::new();
+    doc.add_page(PageSize::A4)?
+        .add_text(Pt(72.0), Pt(700.0), &font, Pt(12.0), "Wm")?;
+    // Written while the page is still being drawn, and again: writing changes nothing.
+    let first = doc.to_bytes()?;
+    assert_eq!(doc.to_bytes()?, first);
+    let (pages, _) = cids_and_program(&first)?;
+    assert_eq!(pages, [vec![vec![1, 2]]]);
+    // Drawing goes on where it was, with the CIDs given before.
+    doc.page_mut(0)
+        .ok_or("no page")?
+        .add_text(Pt(72.0), Pt(680.0), &font, Pt(12.0), "im")?;
+    let (pages, _) = cids_and_program(&doc.to_bytes()?)?;
+    assert_eq!(pages, [vec![vec![1, 2], vec![3, 2]]]);
+    // A copy goes on by itself.
+    let mut copy = doc.clone();
+    copy.add_page(PageSize::A4)?
+        .add_text(Pt(72.0), Pt(700.0), &font, Pt(12.0), ".")?;
+    doc.add_page(PageSize::A4)?
+        .add_text(Pt(72.0), Pt(700.0), &font, Pt(12.0), "W")?;
+    let (pages, _) = cids_and_program(&copy.to_bytes()?)?;
+    assert_eq!(pages, [vec![vec![1, 2], vec![3, 2]], vec![vec![4]]]);
+    let (pages, _) = cids_and_program(&doc.to_bytes()?)?;
+    assert_eq!(pages, [vec![vec![1, 2], vec![3, 2]], vec![vec![1]]]);
+    Ok(())
+}
+
+#[test]
+fn refuses_a_page_another_document_encoded() -> TestResult {
+    let font = Font::from_bytes(liberation_sans()?, 0)?;
+    // In `a`, A, B and C are CIDs 1, 2 and 3; in `b`, C, B and A. Adding a page encodes
+    // the one before.
+    let mut a = Document::new();
+    a.add_page(PageSize::A4)?
+        .add_text(Pt(72.0), Pt(700.0), &font, Pt(12.0), "ABC")?;
+    a.add_page(PageSize::A4)?;
+    let mut b = Document::new();
+    b.add_page(PageSize::A4)?
+        .add_text(Pt(72.0), Pt(700.0), &font, Pt(12.0), "CBA")?;
+    b.add_page(PageSize::A4)?;
+    let copied = a.page_mut(0).ok_or("no page")?.clone();
+    *b.page_mut(1).ok_or("no page")? = copied;
+    assert!(matches!(b.to_bytes(), Err(Error::ForeignPage { page: 1 })));
+    // Swapped into a document that never used the font, the page is refused there; the
+    // page without text swapped out into `a` is written there as it is.
+    let mut c = Document::new();
+    c.add_page(PageSize::A4)?;
+    std::mem::swap(
+        a.page_mut(0).ok_or("no page")?,
+        c.page_mut(0).ok_or("no page")?,
+    );
+    assert!(matches!(c.to_bytes(), Err(Error::ForeignPage { page: 0 })));
+    a.to_bytes()?;
+    // A page whose text is not encoded yet goes into another document as it is.
+    let mut d = Document::new();
+    d.add_page(PageSize::A4)?
+        .add_text(Pt(72.0), Pt(700.0), &font, Pt(12.0), "AB")?;
+    let mut e = Document::new();
+    e.add_page(PageSize::A4)?;
+    std::mem::swap(
+        d.page_mut(0).ok_or("no page")?,
+        e.page_mut(0).ok_or("no page")?,
+    );
+    let (pages, _) = cids_and_program(&e.to_bytes()?)?;
+    assert_eq!(pages, [vec![vec![1, 2]]]);
+    // A copy of a page within its own document, and of a whole document, are fine.
+    let copied = a.page_mut(1).ok_or("no page")?.clone();
+    *a.add_page(PageSize::A4)? = copied;
+    a.clone().to_bytes()?;
+    Ok(())
+}
+
+#[test]
+fn a_page_keeps_the_codes_of_the_document_that_encoded_it() -> TestResult {
+    use officewright_pdf::{Color, GraphicsPath};
+    let font = Font::from_bytes(liberation_sans()?, 0)?;
+    let text = |doc: &mut Document, index: usize, y: f64, text: &str| -> TestResult {
+        doc.page_mut(index)
+            .ok_or("no page")?
+            .add_text(Pt(72.0), Pt(y), &font, Pt(12.0), text)?;
+        Ok(())
+    };
+    // A clone of a document whose page is encoded writes that page as its own.
+    let mut a = Document::new();
+    a.add_page(PageSize::A4)?;
+    text(&mut a, 0, 700.0, "ABC")?;
+    a.add_page(PageSize::A4)?;
+    let mut clone = a.clone();
+    let (pages, _) = cids_and_program(&clone.to_bytes()?)?;
+    assert_eq!(pages, [vec![vec![1, 2, 3]], vec![]]);
+    // The two go on by themselves, each giving its next glyph CID 4: a page one encodes
+    // is refused by the other.
+    text(&mut a, 1, 700.0, "D")?;
+    a.add_page(PageSize::A4)?;
+    text(&mut clone, 1, 700.0, "E")?;
+    clone.add_page(PageSize::A4)?;
+    std::mem::swap(
+        a.page_mut(1).ok_or("no page")?,
+        clone.page_mut(1).ok_or("no page")?,
+    );
+    assert!(matches!(a.to_bytes(), Err(Error::ForeignPage { page: 1 })));
+    assert!(matches!(
+        clone.to_bytes(),
+        Err(Error::ForeignPage { page: 1 })
+    ));
+    std::mem::swap(
+        a.page_mut(1).ok_or("no page")?,
+        clone.page_mut(1).ok_or("no page")?,
+    );
+    // A page that goes into another document and back, drawn on there, is encoded by the
+    // document whose codes its text uses: what was drawn elsewhere stays as drawn, and the
+    // other document refuses it.
+    let mut b = Document::new();
+    b.add_page(PageSize::A4)?;
+    text(&mut b, 0, 700.0, "CBA")?;
+    b.add_page(PageSize::A4)?;
+    std::mem::swap(
+        a.page_mut(0).ok_or("no page")?,
+        b.page_mut(1).ok_or("no page")?,
+    );
+    text(&mut b, 1, 600.0, "A")?;
+    b.page_mut(0);
+    assert!(matches!(b.to_bytes(), Err(Error::ForeignPage { page: 1 })));
+    // A clone of `b` takes its own pages over, not the page `a` encoded.
+    assert!(matches!(
+        b.clone().to_bytes(),
+        Err(Error::ForeignPage { page: 1 })
+    ));
+    std::mem::swap(
+        a.page_mut(0).ok_or("no page")?,
+        b.page_mut(1).ok_or("no page")?,
+    );
+    let (pages, _) = cids_and_program(&a.to_bytes()?)?;
+    assert_eq!(pages[0], [vec![1, 2, 3], vec![1]]);
+    // A page with only a path and text in a standard font goes anywhere.
+    let mut c = Document::new();
+    let page = c.add_page(PageSize::A4)?;
+    page.fill_path(
+        &GraphicsPath::rect(Pt(72.0), Pt(72.0), Pt(10.0), Pt(10.0)),
+        Color::BLACK,
+    )?;
+    page.add_text(
+        Pt(72.0),
+        Pt(700.0),
+        &Font::standard(StandardFont::Helvetica),
+        Pt(12.0),
+        "Hi",
+    )?;
+    c.add_page(PageSize::A4)?;
+    // So does such a page of a clone.
+    for mut from in [c.clone(), c] {
+        let mut d = Document::new();
+        d.add_page(PageSize::A4)?;
+        *d.page_mut(0).ok_or("no page")? = from.page_mut(0).ok_or("no page")?.clone();
+        assert!(pdf_text(&d)?.contains("(Hi) Tj"));
+    }
+    Ok(())
+}
+
 /// minimal.ttf with Á and ´ mapped to the glyph of A, as fonts do for look-alike
 /// characters (Arial maps Latin Ə and Cyrillic Ә to one glyph). Its cmap has one segment
 /// per character, and idDelta is the glyph minus the character.
@@ -667,6 +889,35 @@ fn a_shared_glyph_keeps_each_character_for_text_extraction() -> TestResult {
         pdf.contains("<0001> Tj\n/Span << /ActualText <FEFF00C1> >> BDC <0001> Tj EMC\n<0001> Tj"),
         "{pdf}"
     );
+    Ok(())
+}
+
+#[test]
+fn replacement_text_on_an_earlier_page_makes_the_file_pdf_15() -> TestResult {
+    let font = shared_glyph_font()?;
+    let mut doc = Document::new();
+    doc.add_page(PageSize::A4)?
+        .add_text(Pt(72.0), Pt(700.0), &font, Pt(12.0), "AÁ")?;
+    // The first page is encoded when the second is added; its replacement text still
+    // decides the version.
+    doc.add_page(PageSize::A4)?
+        .add_text(Pt(72.0), Pt(700.0), &font, Pt(12.0), "A")?;
+    let pdf = doc.to_bytes()?;
+    assert!(pdf.starts_with(b"%PDF-1.5\n"));
+    assert!(String::from_utf8_lossy(&pdf).contains("/ActualText"));
+    Ok(())
+}
+
+#[test]
+fn writes_nothing_when_a_font_cannot_be_reduced() -> TestResult {
+    let font = Font::from_bytes(noto_sans()?, 0)?;
+    let mut doc = one_line(&font, "Noto")?;
+    // Reducing CFF outlines reads charstrings, and a budget of nothing allows none.
+    doc.set_subset_budget(0);
+    let mut out = Vec::new();
+    let err = doc.write_to(&mut out).unwrap_err();
+    assert!(matches!(err, Error::Embed { .. }), "{err:?}");
+    assert!(out.is_empty(), "{} bytes were written", out.len());
     Ok(())
 }
 

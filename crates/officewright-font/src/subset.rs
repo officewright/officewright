@@ -14,7 +14,8 @@ use crate::font::{FontFace, GlyphId};
 /// A font reduced to the glyphs a document uses, for embedding in a PDF.
 ///
 /// The glyphs are renumbered from 0 in the order of their original IDs, with `.notdef`
-/// first; glyphs that composite glyphs are built from are kept as well. The font is
+/// first, or in the order they were given ([`FontFace::subset_in_order_within`]); glyphs
+/// that composite glyphs are built from are kept as well. The font is
 /// meant for a PDF CIDFont whose CIDs are the new glyph IDs (`CIDToGIDMap /Identity`):
 /// it has no `cmap` or `OS/2` table, and CFF fonts are converted to CID-keyed
 /// CFF. It is not a general-purpose font file.
@@ -218,6 +219,46 @@ impl FontFace {
         glyphs: impl IntoIterator<Item = GlyphId>,
         budget: &mut SubsetBudget,
     ) -> Result<Subset> {
+        self.subset_numbered(glyphs, budget, Numbering::ById)
+    }
+
+    /// [`subset_within`](Self::subset_within), with the glyphs numbered in the order
+    /// `glyphs` gives them rather than by their original IDs: `.notdef` stays glyph 0, and
+    /// each other glyph takes the next ID where it first comes, so that glyph IDs can be
+    /// given out before the whole set of glyphs is known. The components of composite
+    /// glyphs follow those asked for.
+    ///
+    /// ```
+    /// use officewright_font::{FontFace, GlyphId, SubsetBudget};
+    ///
+    /// let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/minimal.ttf"))?;
+    /// let font = FontFace::from_bytes(data, 0)?;
+    /// let (first, second) = (GlyphId::new(3), GlyphId::new(1));
+    /// let mut budget = SubsetBudget::new(1_000_000);
+    /// let subset = font.subset_in_order_within([first, second, first], &mut budget)?;
+    /// assert_eq!(subset.glyph_id(first).map(u16::from), Some(1));
+    /// assert_eq!(subset.glyph_id(second).map(u16::from), Some(2));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Those of [`subset_within`](Self::subset_within).
+    pub fn subset_in_order_within(
+        &self,
+        glyphs: impl IntoIterator<Item = GlyphId>,
+        budget: &mut SubsetBudget,
+    ) -> Result<Subset> {
+        self.subset_numbered(glyphs, budget, Numbering::InOrder)
+    }
+
+    /// [`subset_within`](Self::subset_within) with the glyphs numbered as `numbering` says.
+    fn subset_numbered(
+        &self,
+        glyphs: impl IntoIterator<Item = GlyphId>,
+        budget: &mut SubsetBudget,
+        numbering: Numbering,
+    ) -> Result<Subset> {
         let face = self.index();
         let outline_format = match self.outline_format() {
             Some(format @ (OutlineFormat::TrueType | OutlineFormat::Cff)) => format,
@@ -235,6 +276,12 @@ impl FontFace {
             }
             ids.push(glyph.to_u16());
         }
+        let remapper = match numbering {
+            Numbering::ById => GlyphRemapper::new_from_glyphs_sorted(&ids),
+            Numbering::InOrder => GlyphRemapper::new_from_glyphs(&ids),
+        };
+        // The checks take the glyphs in the order the subsetter numbers and reads them.
+        let kept: Vec<u16> = remapper.remapped_gids().collect();
         // What subsetter 0.2.6 would panic on is refused first, in the tables it takes.
         // It reads `CFF ` only when it finds no `glyf` table, which is decided by its
         // lookup, not by the outline format the font parser reports.
@@ -242,7 +289,7 @@ impl FontFace {
         crate::name_offsets::check(&font, self.data(), face)?;
         let read = if subsetter_table(&font, self.data(), b"glyf").is_none() {
             let limit = crate::cff::Limit::within(budget.left);
-            crate::cff::check(&font, self.data(), face, &ids, limit)?
+            crate::cff::check(&font, self.data(), face, &kept, limit)?
         } else {
             0
         };
@@ -251,8 +298,7 @@ impl FontFace {
         // (<https://github.com/typst/subsetter/issues/35>), and its glyph closure reads a
         // glyph again each time it reaches it, quadratic in a composite that names one
         // glyph many times (<https://github.com/typst/subsetter/issues/36>).
-        crate::subset_check::check_subset_closure(self, &ids)?;
-        let remapper = GlyphRemapper::new_from_glyphs_sorted(&ids);
+        crate::subset_check::check_subset_closure(self, &kept)?;
         let data = self.data();
         let data = catch_subsetter_panic(face, || subsetter::subset(data, face, &remapper))?
             .map_err(|err| subsetter_error(face, &err))?;
@@ -283,6 +329,15 @@ impl FontFace {
             cff,
         })
     }
+}
+
+/// How a subset numbers the glyphs asked for, after `.notdef`.
+#[derive(Clone, Copy)]
+enum Numbering {
+    /// In the order of their original IDs.
+    ById,
+    /// In the order they were given, each where it first comes.
+    InOrder,
 }
 
 /// Where the table `tag` is in the font data of `len` bytes, if it is there whole.
@@ -445,6 +500,40 @@ mod tests {
             font.advance_width(space)
         );
         assert_eq!(reread.advance_width(GlyphId::new(2)), font.advance_width(a));
+    }
+
+    #[test]
+    fn numbers_glyphs_in_the_order_given() {
+        let font = font();
+        let a = font.glyph_id('A').unwrap();
+        let space = font.glyph_id(' ').unwrap();
+        let aacute = font.glyph_id('\u{C1}').unwrap();
+        // A comes before the space by ID; here it comes after it, and twice. .notdef keeps
+        // its place even when it is given.
+        let glyphs = [aacute, space, GlyphId::NOTDEF, a, aacute];
+        let mut budget = SubsetBudget::new(u64::MAX);
+        let subset = font.subset_in_order_within(glyphs, &mut budget).unwrap();
+        assert_eq!(subset.glyph_id(GlyphId::NOTDEF), Some(GlyphId::NOTDEF));
+        assert_eq!(subset.glyph_id(aacute), Some(GlyphId::new(1)));
+        assert_eq!(subset.glyph_id(space), Some(GlyphId::new(2)));
+        assert_eq!(subset.glyph_id(a), Some(GlyphId::new(3)));
+        // Á's other component, the acute, follows those asked for.
+        assert_eq!(subset.glyph_count(), 5);
+        let reread = FontFace::from_bytes(subset.data().to_vec(), 0).unwrap();
+        for (new, old) in [(1, aacute), (2, space), (3, a)] {
+            assert_eq!(
+                reread.advance_width(GlyphId::new(new)),
+                font.advance_width(old),
+                "{new}"
+            );
+        }
+        // Numbered by ID, the same glyphs are in the order of their original IDs.
+        let by_id = font.subset_within(glyphs, &mut budget).unwrap();
+        let mut ids: Vec<u16> = [space, a, aacute].map(GlyphId::to_u16).to_vec();
+        ids.sort_unstable();
+        for (new, old) in (1..).zip(ids) {
+            assert_eq!(by_id.glyph_id(GlyphId::new(old)), Some(GlyphId::new(new)));
+        }
     }
 
     #[test]
