@@ -139,6 +139,12 @@ pub(crate) fn with_soft_hyphen(font: Vec<u8>) -> Vec<u8> {
     remapped(font, 2, 0xB4, 0xAD)
 }
 
+/// `font` (the test font) with its glyph of `A` mapped from the hyphen-minus instead, as
+/// [`with_period`] does: a font whose hyphen [`with_multiplied_a`] multiplies.
+pub(crate) fn with_hyphen(font: Vec<u8>) -> Vec<u8> {
+    remapped(font, 1, 0x41, 0x2D)
+}
+
 /// `font` with segment `index` of its format 4 `cmap`, character `from` alone, mapped
 /// from `to` instead, to the glyph its delta gives `from`; `to` must keep the segments
 /// in order.

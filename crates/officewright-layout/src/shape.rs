@@ -136,18 +136,19 @@ impl Features {
     }
 }
 
-/// The scripts in which kerning and the optional ligatures follow the run: those that
-/// Microsoft's "standard" shaping covers (Latin, Greek, Cyrillic, Armenian, Georgian,
-/// Runic and Ogham, "Developing OpenType Fonts for Standard Scripts"), and characters
-/// common to scripts.
-/// The most glyphs a run keeps for each of its characters; a run the font shapes into
+/// The most glyphs a run keeps for its characters, on average; a run the font shapes into
 /// more is shaped nominally, and that is reported. HarfRust keeps up to 256 glyphs a
 /// character, and at least 65,536 for a run, so a font whose layout tables multiply
 /// glyphs could turn one character into tens of thousands, which every line and page they
 /// are on would then hold (#403). No writing system needs more than a few glyphs a
-/// character.
+/// character. The bound limits what the layout keeps, not the time HarfRust takes to
+/// shape the run before it is refused.
 const MAX_GLYPHS_PER_CHARACTER: usize = 32;
 
+/// The scripts in which kerning and the optional ligatures follow the run: those that
+/// Microsoft's "standard" shaping covers (Latin, Greek, Cyrillic, Armenian, Georgian,
+/// Runic and Ogham, "Developing OpenType Fonts for Standard Scripts"), and characters
+/// common to scripts.
 const STANDARD_SCRIPTS: [Script; 10] = [
     Script::LATIN,
     Script::GREEK,
@@ -595,6 +596,15 @@ mod tests {
         let run = shape(
             &multiplied(33),
             "A",
+            &ShapeRequest::default(),
+            &mut Plans::default(),
+        );
+        assert!(run.is_nominal());
+        // Characters are counted, not bytes: `AÁ` is three bytes, and 65 glyphs are more
+        // than 32 for each of its two characters.
+        let run = shape(
+            &multiplied(64),
+            "AÁ",
             &ShapeRequest::default(),
             &mut Plans::default(),
         );

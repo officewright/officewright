@@ -18,7 +18,7 @@ use crate::ir::{
     Alignment, BreakKind, CompatFlag, Document, Inline, LevelAlignment, LineSpacing, Paragraph,
     RunStyleId, TabKind, TabLeader,
 };
-use crate::itemize::{InlinePath, Item, Itemized, request};
+use crate::itemize::{InlinePath, Item, Itemized, TextRun, report_shaped, request};
 use crate::metrics::{LineMetrics, TypoRule, line_metrics};
 use crate::report::{Location, ReportKind};
 use crate::shape::{ShapedRun, Shaper, ShapingFace};
@@ -838,23 +838,34 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
     /// face and style.
     fn hyphen(&mut self, index: usize) -> Option<(usize, Arc<ShapedRun>)> {
         let item = self.units.get(index)?.kind.item();
-        let Some(Item::Text(run)) = self.itemized.items.get(item) else {
+        let itemized = self.itemized;
+        let Some(Item::Text(run)) = itemized.items.get(item) else {
             return None;
         };
         let face = self.fonts.face(run.face?)?;
-        let style = self
-            .document
-            .run_style(run.style)
-            .cloned()
-            .unwrap_or_default();
         // U+2010 when the face has it, as Word draws it, else the hyphen-minus.
         let hyphen = if face.face().glyph_id('\u{2010}').is_some() {
             "\u{2010}"
         } else {
             "-"
         };
-        let shaped = self.shaper.shape(&face, hyphen, &request(run, &style));
-        Some((item, shaped))
+        Some((item, self.shape_alone(run, hyphen)?))
+    }
+
+    /// `text` shaped on its own in the face and style of `run`, with what could not be
+    /// shaped as the face asks reported: text shaped apart from its run has fewer
+    /// characters, so the bound on the glyphs of a character can refuse it although the
+    /// run was kept.
+    fn shape_alone(&mut self, run: &TextRun, text: &str) -> Option<Arc<ShapedRun>> {
+        let face = self.fonts.face(run.face?)?;
+        let style = self
+            .document
+            .run_style(run.style)
+            .cloned()
+            .unwrap_or_default();
+        let shaped = self.shaper.shape(&face, text, &request(run, &style));
+        report_shaped(self.fonts, &face, &shaped, self.location);
+        Some(shaped)
     }
 
     /// The width of all of `run`, shaped text of item `item` that is one cluster (the
@@ -984,17 +995,11 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
 
     /// Bytes `text` of the drawn text of item `item`, shaped on their own.
     fn reshape(&mut self, item: usize, text: Range<usize>) -> Option<Arc<ShapedRun>> {
-        let Some(Item::Text(run)) = self.itemized.items.get(item) else {
+        let itemized = self.itemized;
+        let Some(Item::Text(run)) = itemized.items.get(item) else {
             return None;
         };
-        let face = self.fonts.face(run.face?)?;
-        let style = self
-            .document
-            .run_style(run.style)
-            .cloned()
-            .unwrap_or_default();
-        let string = self.itemized.text.get(text)?;
-        Some(self.shaper.shape(&face, string, &request(run, &style)))
+        self.shape_alone(run, itemized.text.get(text)?)
     }
 
     /// The line from unit `start` to before unit `fit.end`, each piece where it goes, with
@@ -1828,7 +1833,17 @@ mod tests {
         props: ParagraphProps,
         width: f64,
     ) -> (ParagraphLayout, Vec<String>) {
-        let book = book(vec![minimal()]);
+        lay_in(minimal(), make, props, width)
+    }
+
+    /// [`lay`] in `font`, a copy of the test font.
+    fn lay_in(
+        font: Vec<u8>,
+        make: impl Fn(RunStyleId) -> Vec<Inline>,
+        props: ParagraphProps,
+        width: f64,
+    ) -> (ParagraphLayout, Vec<String>) {
+        let book = book(vec![font]);
         let mut document = Document::default();
         let style = document.add_run_style(
             RunStyle::default()
@@ -1855,6 +1870,37 @@ mod tests {
             .map(|entry| entry.message().to_owned())
             .collect();
         (layout, messages)
+    }
+
+    #[test]
+    fn a_hyphen_shaped_nominally_on_its_own_is_reported() {
+        use crate::testing::{with_hyphen, with_multiplied_a, with_soft_hyphen};
+        // Review of #404: the hyphen of a soft hyphen is shaped on its own, as a piece cut
+        // from its run is shaped again, so the bound on the glyphs of a character can
+        // refuse it although its run was kept. In this font the hyphen-minus is the glyph
+        // `A` was, which its layout tables turn into 33. `ÁÁ` and the hyphen fit in 20 pt,
+        // `ÁÁÁÁ` does not.
+        let font = with_multiplied_a(with_soft_hyphen(with_hyphen(minimal())), 33);
+        let (layout, messages) = lay_in(
+            font,
+            |style| {
+                vec![
+                    Inline::text("ÁÁ", style),
+                    Inline::soft_hyphen(style),
+                    Inline::text("ÁÁ", style),
+                ]
+            },
+            ParagraphProps::default(),
+            20.0,
+        );
+        assert_eq!(widths(&layout), [18.0, 12.0]);
+        assert_eq!(
+            messages,
+            [
+                "the layout tables of \"Officewright Test\" cannot be used; its text is drawn \
+                 without kerning, ligatures or mark positioning"
+            ]
+        );
     }
 
     fn text(text: &'static str) -> impl Fn(RunStyleId) -> Vec<Inline> {
