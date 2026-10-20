@@ -303,7 +303,7 @@ The author queues the PR with
 gh pr merge <n> --squash --auto --match-head-commit <the head commit checked>
 ```
 
-where the head commit checked is the PR's head that the first condition compared with the commit the last review names, so that nothing pushed since is queued. The command may be run before the PR's checks have finished on that head: it turns on auto-merge, and GitHub puts the PR into the queue only once the required checks pass (`gh pr merge <n> --disable-auto` takes it back before then); with the checks already green it queues the PR at once.
+where the head commit checked is the PR's head that the first condition compared with the commit the last review names (for a Dependabot PR, which gets no review, the head whose update was checked), so that nothing pushed since is queued. The command may be run before the PR's checks have finished on that head: it turns on auto-merge, and GitHub puts the PR into the queue only once the required checks pass (`gh pr merge <n> --disable-auto` takes it back before then); with the checks already green it queues the PR at once.
 
 A PR that contains anything on the list "Always ask the maintainer first" is merged only with the maintainer's consent, which the author quotes in the PR with its date (the sessions and the maintainer post from the same account, so a quote from the chat is what records it). After each merge the author sends the maintainer a short report; the maintainer runs the "How to check by hand" steps when they choose.
 
