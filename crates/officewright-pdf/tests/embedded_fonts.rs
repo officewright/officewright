@@ -815,6 +815,11 @@ fn a_page_keeps_the_codes_of_the_document_that_encoded_it() -> TestResult {
     text(&mut b, 1, 600.0, "A")?;
     b.page_mut(0);
     assert!(matches!(b.to_bytes(), Err(Error::ForeignPage { page: 1 })));
+    // A clone of `b` takes its own pages over, not the page `a` encoded.
+    assert!(matches!(
+        b.clone().to_bytes(),
+        Err(Error::ForeignPage { page: 1 })
+    ));
     std::mem::swap(
         a.page_mut(0).ok_or("no page")?,
         b.page_mut(1).ok_or("no page")?,
@@ -836,10 +841,13 @@ fn a_page_keeps_the_codes_of_the_document_that_encoded_it() -> TestResult {
         "Hi",
     )?;
     c.add_page(PageSize::A4)?;
-    let mut d = Document::new();
-    d.add_page(PageSize::A4)?;
-    *d.page_mut(0).ok_or("no page")? = c.page_mut(0).ok_or("no page")?.clone();
-    assert!(pdf_text(&d)?.contains("(Hi) Tj"));
+    // So does such a page of a clone.
+    for mut from in [c.clone(), c] {
+        let mut d = Document::new();
+        d.add_page(PageSize::A4)?;
+        *d.page_mut(0).ok_or("no page")? = from.page_mut(0).ok_or("no page")?.clone();
+        assert!(pdf_text(&d)?.contains("(Hi) Tj"));
+    }
     Ok(())
 }
 

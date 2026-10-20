@@ -88,8 +88,10 @@ impl Default for Document {
 /// text drawn on this one in an embedded font is encoded with the document's own glyph
 /// codes, and a copy of the page put into another document, or the page swapped into one,
 /// makes that document's [`write_to`](Document::write_to) fail with
-/// [`Error::ForeignPage`]. A page that has only text in a standard font, paths and images,
-/// or whose text is not encoded yet, can go into another document.
+/// [`Error::ForeignPage`]; a copy of the whole document made by
+/// [`Document::clone`](Clone::clone) gets pages of its own. A page that has only text in a
+/// standard font, paths and images, or whose text is not encoded yet, can go into another
+/// document.
 #[derive(Clone, Debug)]
 pub struct Page {
     size: PageSize,
