@@ -457,7 +457,7 @@ fn u32_at(data: &[u8], at: usize) -> Option<u32> {
 /// read; and what comes after the first scan once the file ends early, where the check
 /// stops. A marker libjpeg does not know is refused wherever it is
 /// ([`refuse_unknown_marker`]), but where libjpeg skips it: in the coded data of a scan
-/// before one of its restart markers ([`resync_to_restart`]).
+/// while a restart marker is still to come ([`at_restart`]).
 fn read_jpeg(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> {
     let mut at = 2;
     let mut frame = None;
@@ -571,11 +571,13 @@ fn read_jpeg(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> 
     ))
 }
 
-/// Where the coded data of a scan that starts at `coded`, and holds `restarts` restart
-/// markers ([`scan_restarts`]), ends: at the first 0xFF, or run of them, before a marker that
-/// is not a stuffed zero or a restart marker, nor one that libjpeg skips before a restart
-/// marker ([`resync_to_restart`]); else at the end of `data`.
-fn coded_data_end(data: &[u8], coded: usize, mut restarts: u64) -> usize {
+/// Where the coded data of a scan that starts at `coded`, and has `restarts` restart
+/// markers ([`scan_restarts`]), ends: at the first 0xFF, or run of them, before a marker
+/// that ends the scan for libjpeg ([`at_restart`]), else at the end of `data`. Stuffed
+/// zeros, restart markers, and the markers libjpeg skips at a restart marker it expects are
+/// part of the coded data.
+fn coded_data_end(data: &[u8], coded: usize, restarts: u64) -> usize {
+    let mut restarts = Restarts::new(restarts);
     let mut at = coded;
     loop {
         while data.get(at).is_some_and(|&byte| byte != 0xFF) {
@@ -587,17 +589,13 @@ fn coded_data_end(data: &[u8], coded: usize, mut restarts: u64) -> usize {
         }
         match data.get(at) {
             Some(0x00) => at += 1,
-            Some(0xD0..=0xD7) => {
-                restarts = restarts.saturating_sub(1);
-                at += 1;
-            }
-            Some(0x01..=0xBF) if restarts > 0 => match resync_to_restart(data, at + 1) {
-                Some(next) => {
-                    restarts -= 1;
-                    at = next;
+            Some(&code) if restarts.left > 0 => {
+                match at_restart(data, start, code, at, &mut restarts) {
+                    Resume::Data(next) => at = next,
+                    Resume::Marker(start) => return start,
                 }
-                None => return start,
-            },
+            }
+            Some(0xD0..=0xD7) => at += 1,
             _ => return start.min(data.len()),
         }
     }
@@ -639,27 +637,108 @@ fn scan_restarts(frame: &Frame, segment: &[u8], interval: u16) -> u64 {
     mcus.div_ceil(u64::from(interval)).saturating_sub(1)
 }
 
-/// Where the coded data goes on after a marker of 0x01 to 0xBF whose code ends at `at`, in a
-/// scan that has a restart marker still to come: libjpeg, finding such a marker where it
-/// expects a restart marker, warns and looks on for the next marker, skipping the bytes on
-/// the way, stuffed zeros among them, and any further marker of 0x01 to 0xBF. Where that
-/// next marker is a restart marker, it resynchronises there and draws the rest of the scan,
-/// as `qpdf --check` shows; any other marker ends the scan, and libjpeg then fails on the
-/// marker it skipped. Returns where the coded data goes on after the restart marker, `None`
-/// without one.
-fn resync_to_restart(data: &[u8], mut at: usize) -> Option<usize> {
+/// The restart markers libjpeg still expects in the coded data of a scan, and the number,
+/// 0 to 7, of the next of them (B.2.4.4, E.1.4).
+#[derive(Clone, Copy, Debug)]
+struct Restarts {
+    left: u64,
+    next: u8,
+}
+
+impl Restarts {
+    /// A scan's `left` restart markers, numbered from 0.
+    fn new(left: u64) -> Self {
+        Self { left, next: 0 }
+    }
+
+    /// One restart marker done: the next is expected.
+    fn take(&mut self) {
+        self.left = self.left.saturating_sub(1);
+        self.next = (self.next + 1) % 8;
+    }
+}
+
+/// Where the walk of a scan's coded data goes on after a marker met in it.
+enum Resume {
+    /// In the coded data, at this byte.
+    Data(usize),
+    /// The scan has ended: the walk takes the marker whose run of 0xFF starts at this byte,
+    /// as it takes any marker between segments.
+    Marker(usize),
+}
+
+/// The next marker of `data` from byte `from`, as libjpeg looks for it: past any bytes
+/// before it, stuffed zeros among them, and the 0xFF bytes that pad it. Returns where its
+/// run of 0xFF starts and its code's byte, or `None` at the end of `data`.
+fn next_marker(data: &[u8], mut at: usize) -> Option<(usize, usize)> {
     loop {
         while data.get(at).is_some_and(|&byte| byte != 0xFF) {
             at += 1;
         }
+        let start = at;
         while data.get(at) == Some(&0xFF) {
             at += 1;
         }
         match data.get(at)? {
-            0x00..=0xBF => at += 1,
-            0xD0..=0xD7 => return Some(at + 1),
-            _ => return None,
+            0x00 => at += 1,
+            _ => return Some((start, at)),
         }
+    }
+}
+
+/// What libjpeg does with a marker it meets in a scan's coded data while `restarts` are
+/// still to come: the marker whose run of 0xFF starts at `start`, with `code` at byte `at`.
+/// libjpeg takes any marker in coded data at the next restart point, where it expects
+/// restart marker `restarts.next`, as `qpdf --check` shows on generated files:
+///
+/// - that restart marker is taken, and the coded data goes on after it;
+/// - a restart marker one or two numbers further on is left unread, as if the expected
+///   one were missing: the restart point passes, and the marker is met again at the next;
+/// - a restart marker one or two numbers back is skipped, as is any marker of 0x01 to
+///   0xBF, one libjpeg does not know among them: it warns and looks on for the next marker;
+/// - any other restart marker is taken for the one expected;
+/// - any other marker ends the scan: it is left unread at every restart point still to
+///   come, and then read as any marker between segments is.
+///
+/// So a marker libjpeg does not know is skipped in the coded data while a restart marker
+/// is still to come, and refused after the scan's last one.
+fn at_restart(
+    data: &[u8],
+    mut start: usize,
+    mut code: u8,
+    mut at: usize,
+    restarts: &mut Restarts,
+) -> Resume {
+    loop {
+        if restarts.left == 0 {
+            return Resume::Marker(start);
+        }
+        match code {
+            0xD0..=0xD7 => match (code - 0xD0 + 8 - restarts.next) % 8 {
+                0 | 3..=5 => {
+                    restarts.take();
+                    return Resume::Data(at + 1);
+                }
+                1 | 2 => {
+                    restarts.take();
+                    continue;
+                }
+                _ => {}
+            },
+            0x01..=0xBF => {}
+            _ => {
+                restarts.left = 0;
+                return Resume::Marker(start);
+            }
+        }
+        // Skipped: libjpeg looks on for the next marker.
+        let Some((next_start, next_at)) = next_marker(data, at + 1) else {
+            return Resume::Data(data.len());
+        };
+        let Some(&next_code) = data.get(next_at) else {
+            return Resume::Data(data.len());
+        };
+        (start, code, at) = (next_start, next_code, next_at);
     }
 }
 
@@ -704,7 +783,7 @@ fn refuse_other_frame(code: u8) -> std::result::Result<(), Problem> {
 /// the end of image, after which libjpeg reads nothing; it also ends, refusing nothing,
 /// where the file ends early. A marker libjpeg does not know is refused
 /// ([`refuse_unknown_marker`]), but where libjpeg skips it: in the coded data of a scan
-/// before one of its restart markers ([`resync_to_restart`]).
+/// while a restart marker is still to come ([`at_restart`]).
 fn check_later_scans(
     data: &[u8],
     coded: usize,
@@ -714,8 +793,9 @@ fn check_later_scans(
         frame,
         more_scans,
         mut interval,
-        mut restarts,
+        restarts,
     } = later;
+    let mut restarts = Restarts::new(restarts);
     let mut at = coded;
     loop {
         // Coded data, or bytes between segments, up to the next marker.
@@ -723,17 +803,26 @@ fn check_later_scans(
             while data.get(at).is_some_and(|&byte| byte != 0xFF) {
                 at += 1;
             }
+            let start = at;
             while data.get(at) == Some(&0xFF) {
                 at += 1;
             }
             let Some(&code) = data.get(at) else {
                 return Ok(());
             };
-            at += 1;
             match code {
-                0x00 => {}
-                0xD0..=0xD7 => restarts = restarts.saturating_sub(1),
-                _ => break code,
+                0x00 => at += 1,
+                _ if restarts.left > 0 => match at_restart(data, start, code, at, &mut restarts) {
+                    Resume::Data(next) => at = next,
+                    // Met again with no restart marker to come.
+                    Resume::Marker(start) => at = start,
+                },
+                // A restart marker the scan does not expect has no segment either.
+                0xD0..=0xD7 => at += 1,
+                _ => {
+                    at += 1;
+                    break code;
+                }
             }
         };
         match code {
@@ -756,16 +845,7 @@ fn check_later_scans(
             // but JPG (the other frame markers, DHT and DAC), SOS, DQT, DNL, DRI, DHP, EXP,
             // APP0 to APP15 and COM.
             0xC3..=0xC7 | 0xC9..=0xCF | 0xDA..=0xDF | 0xE0..=0xEF | 0xFE => {}
-            // Any other marker is one libjpeg does not know, which it skips only in the
-            // coded data of a scan, before one of its restart markers.
-            0x02..=0xBF if restarts > 0 => match resync_to_restart(data, at) {
-                Some(next) => {
-                    restarts -= 1;
-                    at = next;
-                    continue;
-                }
-                None => return refuse_unknown_marker(code, at - 2),
-            },
+            // Any other marker is one libjpeg does not know.
             _ => return refuse_unknown_marker(code, at - 2),
         }
         refuse_other_frame(code)?;
@@ -779,9 +859,9 @@ fn check_later_scans(
             interval = u16_at(segment, 0).unwrap_or(0);
         }
         // Only a scan header is followed by coded data, with restart markers in it.
-        restarts = 0;
+        restarts = Restarts::new(0);
         if code == 0xDA {
-            restarts = scan_restarts(frame, segment, interval);
+            restarts = Restarts::new(scan_restarts(frame, segment, interval));
             // libjpeg reads the scan header before it finds the scan unexpected.
             check_scan(segment, length, frame)?;
             // `read_jpeg` cuts the file before such a scan rather than refusing it, so this
@@ -3284,6 +3364,21 @@ pub(crate) mod tests {
         [&data[..at], inserted, &data[at..]].concat()
     }
 
+    /// `data` with `inserted` put before the `rst` (counting from 0, at most 2) restart
+    /// marker of the `nth` scan (counting from 0), whose coded data is `restarted`'s.
+    fn before_restart_n(data: &[u8], nth: usize, rst: u8, inserted: &[u8]) -> Vec<u8> {
+        let marker = [0x3F, 0xFF, 0xD0 + rst];
+        let at = data
+            .windows(3)
+            .enumerate()
+            .filter(|(_, w)| *w == marker)
+            .nth(nth)
+            .unwrap()
+            .0
+            + 1;
+        [&data[..at], inserted, &data[at..]].concat()
+    }
+
     #[test]
     fn counts_the_restart_markers_of_a_scan_by_its_mcus() {
         // 4:2:0: the first component sampled 2 × 2, the others 1 × 1 (A.2).
@@ -3314,6 +3409,26 @@ pub(crate) mod tests {
         assert_eq!(scan_restarts(&wide, &all, 1), 3 * 2 - 1);
         // A component the frame does not have.
         assert_eq!(scan_restarts(&wide, &one(4), 1), 0);
+        // A scan of two of the three components is a scan of several.
+        assert_eq!(scan_restarts(&square, &[2, 1, 0, 2, 0, 0, 63, 0], 1), 3);
+        // 40 pixels high: three rows of MCUs of 16 pixels.
+        let tall = Frame {
+            height: 40,
+            ..frame(32)
+        };
+        assert_eq!(scan_restarts(&tall, &all, 1), 2 * 3 - 1);
+        // 4:2:2, 48 × 40: the first component sampled 2 × 1, MCUs of 16 × 8 pixels, and
+        // blocks of 24 × 40 samples for the others.
+        let wide_mcus = Frame {
+            height: 40,
+            width: 48,
+            components: vec![(1, 2, 1), (2, 1, 1), (3, 1, 1)],
+            progressive: false,
+            precision: 8,
+        };
+        assert_eq!(scan_restarts(&wide_mcus, &all, 1), 3 * 5 - 1);
+        assert_eq!(scan_restarts(&wide_mcus, &one(1), 1), 6 * 5 - 1);
+        assert_eq!(scan_restarts(&wide_mcus, &one(2), 1), 3 * 5 - 1);
     }
 
     #[test]
@@ -3337,10 +3452,12 @@ pub(crate) mod tests {
                 );
             }
         }
-        // Several such markers, fill before them, and stuffed zeros between them.
+        // Several such markers, fill before them and after them, and stuffed zeros between
+        // them.
         for inserted in [
             &b"\xFF\x02\x00\x04ab\xFF\x03\x12"[..],
             b"\xFF\xFF\xFF\x02\x00\x04ab",
+            b"\xFF\x02\x00\x04ab\xFF\xFF",
             b"\xFF\x02\xFF\x00\x34\xFF\x01",
         ] {
             assert!(
@@ -3348,18 +3465,71 @@ pub(crate) mod tests {
                 "{inserted:02X?}"
             );
         }
-        // Refused where libjpeg fails: without a restart interval, with one of 0, with a
-        // marker that is no restart marker before the next restart marker, and after the
-        // last restart marker of a scan.
+        // libjpeg looks for the next marker past stuffed zeros and fill: here a second
+        // unknown marker after a stuffed zero, and, after fill, a marker before the next
+        // restart marker, both skipped.
+        let first_rst2 = three.windows(3).position(|w| w == b"\x3F\xFF\xD2").unwrap() + 1;
+        let first_rst1 = three.windows(3).position(|w| w == b"\x3F\xFF\xD1").unwrap() + 1;
+        for data in [
+            [
+                &three[..first_rst1],
+                b"\xFF\x02\x00\x04ab\xFF\x00\xFF\x03\x00\x04ab",
+                &three[first_rst1..],
+            ]
+            .concat(),
+            [
+                &three[..first_rst1],
+                b"\xFF\x02\x00\x04ab\xFF\xFF",
+                &three[first_rst1..first_rst2],
+                b"\xFF\x03\x00\x04ab",
+                &three[first_rst2..],
+            ]
+            .concat(),
+        ] {
+            assert!(whole(data));
+        }
+        // When the next marker is not a restart marker, the scan ends there, and libjpeg
+        // reads on from that marker: the next scan, the end of image, a segment, or a
+        // restart marker damaged into one it does not know, such as RST2 with bit 7 off.
+        let second = three.windows(2).rposition(|w| w == b"\xFF\xDA").unwrap();
+        let last_rst1 = three
+            .windows(3)
+            .rposition(|w| w == b"\x3F\xFF\xD1")
+            .unwrap()
+            + 1;
+        let first_rst2 = three.windows(3).position(|w| w == b"\x3F\xFF\xD2").unwrap() + 2;
+        let mut flipped = three.clone();
+        flipped[first_rst2] = 0x52;
+        for data in [
+            flipped,
+            [&three[..first_rst1], reserved, &three[second..]].concat(),
+            [&three[..last_rst1], reserved, b"\xFF\xD9"].concat(),
+            before_restart(&three, 0, b"\xFF\x02\x00\x04ab\xFF\xFE\x00\x03x"),
+        ] {
+            assert!(whole(data));
+        }
+        // Refused where libjpeg fails: without a restart interval, with one of 0, given
+        // between scans or after another before the first, and after the last restart
+        // marker of a scan.
         let no_interval = restarted(3, &[&[1], &[2], &[3]], 0, b"");
         let offset = |data: &[u8]| data.windows(6).position(|w| w == reserved).unwrap();
+        let sos = no_interval
+            .windows(2)
+            .position(|w| w == b"\xFF\xDA")
+            .unwrap();
+        let zero_after_one = [
+            &no_interval[..sos],
+            b"\xFF\xDD\x00\x04\x00\x01\xFF\xDD\x00\x04\x00\x00",
+            &no_interval[sos..],
+        ]
+        .concat();
         for data in [
             before_restart(&no_interval, 0, reserved),
             {
                 let off = restarted(3, &[&[1], &[2], &[3]], 1, b"\xFF\xDD\x00\x04\x00\x00");
                 before_restart(&off, 1, reserved)
             },
-            before_restart(&three, 0, b"\xFF\x02\x00\x04ab\xFF\xC8\x00\x04ab"),
+            before_restart(&zero_after_one, 0, reserved),
             {
                 // The first scan's header takes 10 bytes, and its last interval starts 9
                 // bytes into its coded data, after RST2.
@@ -3377,6 +3547,10 @@ pub(crate) mod tests {
                 "{err}"
             );
         }
+        // A marker that ends the scan is read as it is anywhere: JPG is refused.
+        let jpg = before_restart(&three, 0, b"\xFF\x02\x00\x04ab\xFF\xC8\x00\x04ab");
+        let at = jpg.windows(2).position(|w| w == b"\xFF\xC8").unwrap();
+        assert!(error(jpg).contains(&format!("marker FFC8 at byte {at}")));
         // libjpeg skips it only before a restart marker the scan has still to come: after
         // a scan's last interval, a restart marker more than its MCUs need does not save it.
         let extra = restarted(3, &[&[1], &[2], &[3]], 1, b"\xFF\x02\x00\x04ab\xFF\xD3");
@@ -3415,6 +3589,38 @@ pub(crate) mod tests {
         assert!(whole(before_restart(&later, 1, reserved)));
         assert!(error(before_restart(&later, 0, reserved)).contains("marker FF02"));
 
+        // Restart markers go by their numbers, 0 to 7 in turn. RST0 twice: the second is
+        // one back, skipped, so RST1 and RST2 still come, and a marker before RST2 is
+        // skipped.
+        let doubled = [
+            &three[..first_rst1 - 3],
+            b"\xFF\xD0",
+            &three[first_rst1 - 3..],
+        ]
+        .concat();
+        assert_eq!(
+            doubled[first_rst1 - 3..first_rst1 + 1],
+            *b"\xFF\xD0\xFF\xD0"
+        );
+        assert!(whole(before_restart_n(&doubled, 0, 2, reserved)));
+        // RST1 missing: RST2 is one further on, so the restart point passes and RST2 is
+        // taken at the next; none is left for a marker after it, with another restart
+        // marker after that.
+        let missing = [&three[..first_rst1], &three[first_rst1 + 2..]].concat();
+        let after_last = missing
+            .windows(3)
+            .position(|w| w == b"\xFF\xD2\x3F")
+            .unwrap()
+            + 3;
+        let late = [
+            &missing[..after_last],
+            b"\xFF\x02\x00\x04ab\xFF\xD3",
+            &missing[after_last..],
+        ]
+        .concat();
+        let at = offset(&late);
+        assert!(error(late).contains(&format!("marker FF02 at byte {at}")));
+
         // A file whose only scan codes every component goes in whole when the marker is
         // skipped, and is cut before it otherwise. Cut for what follows its scan, it keeps
         // the marker libjpeg skips in its coded data.
@@ -3429,6 +3635,34 @@ pub(crate) mod tests {
         assert_eq!(end(unmarked.clone()), Some(offset(&unmarked)));
         let followed = with_more(&marked, b"\xFF\xD8");
         assert_eq!(end(followed), Some(marked.len() - 2));
+        // The cut counts the restart markers as the check does: it ends at a second marker
+        // after the last restart marker, at a marker libjpeg fails on after a skipped
+        // one, and at a marker after the scan's last interval.
+        let grey_last = grey.windows(3).position(|w| w == b"\x3F\xFF\xD2").unwrap() + 1;
+        let grey_end = grey_last + 3;
+        let twice = [
+            &grey[..grey_last],
+            reserved,
+            &grey[grey_last..grey_end],
+            b"\xFF\x03\x00\x04ab\xFF\xD3",
+            &grey[grey_end..],
+        ]
+        .concat();
+        let at = twice.windows(2).position(|w| w == b"\xFF\x03").unwrap();
+        assert_eq!(end(twice), Some(at));
+        let jpg = before_restart(&grey, 0, b"\xFF\x02\x00\x04ab\xFF\xC8\x00\x04ab");
+        let at = jpg.windows(2).position(|w| w == b"\xFF\xC8").unwrap();
+        assert_eq!(end(jpg), Some(at));
+        let extra = with_more(&grey, b"\xFF\x02\x00\x04ab\xFF\xD3");
+        assert_eq!(end(extra.clone()), Some(offset(&extra)));
+        // An interval of more than 255 MCUs: a grey 160 × 160 frame has 400, so an interval
+        // of 257 has one restart marker, after which a marker is not skipped.
+        let mut big = restarted(1, &[&[1]], 257, b"");
+        let sof = big.windows(2).position(|w| w == b"\xFF\xC0").unwrap();
+        big[sof + 5..sof + 9].copy_from_slice(b"\x00\xA0\x00\xA0");
+        let rst1 = big.windows(3).position(|w| w == b"\x3F\xFF\xD1").unwrap() + 1;
+        let big = [&big[..rst1], reserved, &big[rst1..]].concat();
+        assert_eq!(end(big.clone()), Some(offset(&big)));
     }
 
     #[test]
