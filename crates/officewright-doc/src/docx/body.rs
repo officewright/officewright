@@ -762,7 +762,8 @@ impl Reading<'_, '_, '_> {
     }
 
     /// Begins a note (`w:footnote`, `w:endnote`): its blocks are read like a body's. One
-    /// without a valid id is kept without being read, as nothing can refer to it.
+    /// without a valid id is kept without being read, with its place among the notes as
+    /// any other element of the part's root (#388), as nothing can refer to it.
     fn open_note(
         &mut self,
         reader: &mut Reader<'_>,
@@ -775,7 +776,9 @@ impl Reading<'_, '_, '_> {
         let Some(id) = id else {
             let value = self.w_attribute(&tag, "id").unwrap_or_default().to_owned();
             self.invalid(&tag, "id", &value);
-            return self.c.capture(reader, mce, tag, None).map(drop);
+            let span = self.c.capture(reader, mce, tag, None)?;
+            self.keep_at_root(span);
+            return Ok(());
         };
         let note_type = match self.w_attribute(&tag, "type") {
             None => NoteType::Normal,
@@ -1100,11 +1103,18 @@ impl Reading<'_, '_, '_> {
     }
 
     /// Notes an element kept under the main part's `w:document`, before or after its
-    /// body; the other stories' roots keep none.
+    /// body, or under `w:footnotes` or `w:endnotes`, among their notes (#388). The roots
+    /// of headers and footers hold blocks, so they keep none.
     fn keep_at_root(&mut self, span: Span) {
-        if self.story == Story::Document {
-            let after_body = self.body_read;
-            self.c.document.root_elements.push((span, after_body));
+        let document = &mut *self.c.document;
+        match self.story {
+            Story::Document => document.root_elements.push((span, self.body_read)),
+            Story::Footnotes | Story::Endnotes => {
+                let before = document.stories.len() as u32;
+                let endnotes = self.story == Story::Endnotes;
+                document.note_root_elements.push((span, endnotes, before));
+            }
+            Story::Header | Story::Footer => {}
         }
     }
 
