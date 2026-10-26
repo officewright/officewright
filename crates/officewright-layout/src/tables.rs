@@ -1279,12 +1279,6 @@ fn bands(rows: &[Vec<Placed>]) -> Vec<Range<usize>> {
 fn report_unsupported(table: &Table, location: &Location, fonts: &mut Fonts<'_>) {
     let props = table.props();
     let mut notes = Vec::new();
-    if props.layout() == TableLayout::Autofit {
-        notes.push(
-            "tables that fit their columns to their content are laid out with the column \
-             widths the document stores",
-        );
-    }
     if props.cell_spacing().0 > 0.0 {
         notes.push("spacing between table cells is laid out as none");
     }
@@ -2243,6 +2237,12 @@ mod tests {
             &reported(&document, &wide, 400.0),
             "table columns wider than"
         ));
+        // A table that fits its columns to its content is laid out as Word lays it out,
+        // with nothing to report.
+        let fitting = Table::default()
+            .with_grid([Pt(100.0)])
+            .with_rows(vec![row(vec![cell(vec![lines(style, 1, "A")])])]);
+        assert!(reported(&document, &fitting, 400.0).is_empty());
         // Cells past the grid.
         let past = Table::default()
             .with_grid([Pt(100.0)])

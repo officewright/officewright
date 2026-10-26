@@ -4764,7 +4764,10 @@ mod tests {
                     .with_borders(ParagraphBorders::default().with_bottom(Some(Border::default()))),
             );
             let cell = Cell::default().with_blocks([lines(style, 1, spacing(0.0, 0.0))]);
+            // A table in a header reports what it lays out otherwise than Word, here the
+            // spacing between its cells.
             let table: Block = Table::default()
+                .with_props(crate::ir::TableProps::default().with_cell_spacing(Pt(2.0)))
                 .with_rows(vec![Row::default().with_cells(vec![cell])])
                 .into();
             let hebrew = Paragraph::new(style).with_inlines([Inline::Field(
@@ -4781,7 +4784,7 @@ mod tests {
         });
         let (_, report) = laid(&document, 100);
         let all = messages(&report);
-        for expected in ["borders", "tables", "decimal", "chapter"] {
+        for expected in ["borders", "table cells", "decimal", "chapter"] {
             assert!(
                 all.iter().any(|m| m.contains(expected)),
                 "{expected}: {all:?}"
