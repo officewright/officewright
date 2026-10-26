@@ -28,12 +28,40 @@ const PROBE_BUDGET: u64 = 1 << 16;
 ///   [`Page::add_text`](crate::Page::add_text) lists them.
 ///
 /// Cloning is cheap: the font data is shared. Two fonts are equal if they are the same
-/// standard font or the same face of the same font data, and a document embeds each
-/// font once however many pages use it. A `Font` is `Send` and `Sync`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// standard font or the same face of the same font data, whatever synthetic styles
+/// [`Font::resolve`] gave them, and a document embeds each font once however many pages
+/// use it. A `Font` is `Send` and `Sync`.
+#[derive(Clone, Debug)]
 pub struct Font {
     kind: Kind,
+    /// The styles the resolved face lacks, which [`Page::add_text`](crate::Page::add_text)
+    /// draws on top of it.
+    synthetic: Synthetic,
 }
+
+impl PartialEq for Font {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind
+    }
+}
+
+impl Eq for Font {}
+
+/// Styles a face lacks, drawn on top of it as the layout engine draws them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Synthetic {
+    /// Filled and stroked, with a stroke of [`SYNTHETIC_BOLD_STROKE`] of the size.
+    pub(crate) bold: bool,
+    /// Slanted by [`SYNTHETIC_ITALIC_SKEW`] about the baseline.
+    pub(crate) italic: bool,
+}
+
+/// The width of the stroke that draws synthetic bold, as a share of the size: what the
+/// layout engine draws.
+pub(crate) const SYNTHETIC_BOLD_STROKE: f64 = 1.0 / 30.0;
+
+/// The slant of synthetic italic, as a tangent: what the layout engine draws.
+pub(crate) const SYNTHETIC_ITALIC_SKEW: f64 = 1.0 / 3.0;
 
 #[derive(Clone, Debug)]
 enum Kind {
@@ -125,6 +153,7 @@ impl Font {
     pub fn standard(font: StandardFont) -> Self {
         Self {
             kind: Kind::Standard(font),
+            synthetic: Synthetic::default(),
         }
     }
 
@@ -205,8 +234,10 @@ impl Font {
     /// Every substitution is added to the resolver's
     /// [`substitutions`](FontResolver::substitutions), the report to show next to the
     /// output; the font's own [`embedding_notes`](Self::embedding_notes) report what its
-    /// license restricts. A style the face lacks is reported as synthetic bold or
-    /// italic but not drawn yet: the face is used as it is.
+    /// license restricts. A style the face lacks is reported as synthetic bold or italic,
+    /// and [`Page::add_text`](crate::Page::add_text) draws it on top of the face, as the
+    /// layout engine does: italic slanted by a third about the baseline, bold filled and
+    /// stroked with a stroke a thirtieth of the size wide.
     ///
     /// ```no_run
     /// use officewright_font::{FontBook, FontRequest, FontResolver};
@@ -228,7 +259,12 @@ impl Font {
     /// errors of [`from_face`](Self::from_face) for the face it chose, with
     /// [`Error::Font`] also if the face's file cannot be read any more.
     pub fn resolve(resolver: &mut FontResolver<'_>, request: &FontRequest) -> Result<Self> {
-        let Some(id) = resolver.resolve(request).face() else {
+        let resolution = resolver.resolve(request);
+        let synthetic = Synthetic {
+            bold: resolution.synthetic_bold(),
+            italic: resolution.synthetic_italic(),
+        };
+        let Some(id) = resolution.face() else {
             return Err(Error::FontNotFound {
                 family: request.family().to_owned(),
             });
@@ -239,7 +275,14 @@ impl Font {
             path: path.map(Path::to_owned),
             source,
         })?;
-        Self::embed(face, path)
+        let mut font = Self::embed(face, path)?;
+        font.synthetic = synthetic;
+        Ok(font)
+    }
+
+    /// The styles the face lacks, which [`Page::add_text`](crate::Page::add_text) draws.
+    pub(crate) fn synthetic(&self) -> Synthetic {
+        self.synthetic
     }
 
     fn embed(face: FontFace, path: Option<&Path>) -> Result<Self> {
@@ -281,6 +324,7 @@ impl Font {
                 whole,
                 notes,
             })),
+            synthetic: Synthetic::default(),
         })
     }
 

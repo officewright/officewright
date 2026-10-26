@@ -9,7 +9,7 @@ use officewright_font::SubsetBudget;
 use officewright_core::Color;
 
 use crate::embed::{Codes, EXTRA_OBJECTS, Prepared, show};
-use crate::font::check_font_size;
+use crate::font::{SYNTHETIC_BOLD_STROKE, SYNTHETIC_ITALIC_SKEW, Synthetic, check_font_size};
 use crate::glyphs::MAX_STRING_BYTES;
 use crate::image::draw_operators;
 use crate::path::check_range;
@@ -569,6 +569,10 @@ impl Page {
     /// first character starts. The text is not wrapped or clipped;
     /// [`Font::text_width`] measures it.
     ///
+    /// A font from [`Font::resolve`] draws the styles its face lacks on top of it: italic
+    /// slanted by a third about the baseline, bold filled and stroked with a stroke a
+    /// thirtieth of `font_size` wide, in the text's colour, black.
+    ///
     /// Each character is drawn with its own glyph, one after the other, without
     /// kerning, ligatures or other shaping. With an embedded font that is right for the
     /// Latin, Greek, Cyrillic, Armenian, Georgian, Han, Hiragana and Katakana scripts,
@@ -604,17 +608,35 @@ impl Page {
             None => Some(font.encode(text)?),
             Some(_) => None,
         };
+        let synthetic = font.synthetic();
         let font = self.font_index(font);
-        self.push_operators(
-            format!(
-                "BT\n/F{} {} Tf\n{} {} Td\n",
-                font + 1,
-                number(font_size.0),
-                number(x.0),
-                number(y.0)
-            )
-            .as_bytes(),
-        );
+        let resource = font + 1;
+        let size = number(font_size.0);
+        let (x, y) = (number(x.0), number(y.0));
+        let head = if synthetic == Synthetic::default() {
+            format!("BT\n/F{resource} {size} Tf\n{x} {y} Td\n")
+        } else {
+            // The styles the face lacks, inside `q` … `Q`, so that nothing drawn after
+            // inherits the stroke or the rendering mode.
+            let mut head = String::from("q\n");
+            if synthetic.bold {
+                let width = number(font_size.0 * SYNTHETIC_BOLD_STROKE);
+                head.push_str(&format!("{width} w\n"));
+            }
+            head.push_str(&format!("BT\n/F{resource} {size} Tf\n"));
+            if synthetic.bold {
+                // Fill, then stroke (ISO 32000-1, 9.3.6).
+                head.push_str("2 Tr\n");
+            }
+            if synthetic.italic {
+                let skew = number(SYNTHETIC_ITALIC_SKEW);
+                head.push_str(&format!("1 0 {skew} 1 {x} {y} Tm\n"));
+            } else {
+                head.push_str(&format!("{x} {y} Td\n"));
+            }
+            head
+        };
+        self.push_operators(head.as_bytes());
         match standard {
             Some(encoded) => {
                 let mut operators = Vec::new();
@@ -628,6 +650,9 @@ impl Page {
             }),
         }
         self.push_operators(b"\nET\n");
+        if synthetic != Synthetic::default() {
+            self.push_operators(b"Q\n");
+        }
         Ok(())
     }
 
