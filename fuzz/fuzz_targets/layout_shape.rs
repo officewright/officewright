@@ -12,9 +12,10 @@
 //! the next, kept together, with or without widow control and a page break before as the
 //! first bytes say, are then laid out on pages of a height they give, the last of them in a
 //! second section of a start the first bytes give when they say so, with every line on
-//! exactly one page inside its body (`check_pages`); with the paragraph as their header and
-//! the page fields as their footer, in a number format, with a title page and even pages of
-//! their own, when the first bytes say so.
+//! exactly one page inside its body (`check_pages`); those of the first section as the rows
+//! of a table, the first a header row, and with the paragraph as their header and the page
+//! fields as their footer, in a number format, with a title page and even pages of their
+//! own, when the first bytes say so.
 #![no_main]
 
 use std::path::Path;
@@ -26,13 +27,14 @@ use officewright_core::Pt;
 use officewright_font::{FontBook, FontOrigin};
 use officewright_layout::fuzzing::{check_lines, check_pages, check_paragraph};
 use officewright_layout::ir::{
-    Alignment, AnchorHorizontalAlign, AnchorVerticalAlign, AnchoredObject, Document,
-    DocumentSettings, Field, FieldKind, FontHint, HeaderFooterSet, HorizontalAnchor,
-    HorizontalPlacement, HorizontalReference, ImageData, ImageFormat, ImageId, Indent, Inline,
-    Level, LevelAlignment, LevelTextPart, LineSpacing, ListDefinition, ListInstance, ListItem,
-    Margins, NumberFormat, ObjectContent, PageSetup, Paragraph, ParagraphProps, Picture, RunFonts,
-    RunStyle, Section, SectionStart, Size, Spacing, Suffix, TabKind, TabStop, VerticalAnchor,
-    VerticalPlacement, VerticalReference, Wrap,
+    Alignment, AnchorHorizontalAlign, AnchorVerticalAlign, AnchoredObject, Border, BorderSide,
+    Cell, Document, DocumentSettings, Field, FieldKind, FontHint, HeaderFooterSet,
+    HorizontalAnchor, HorizontalPlacement, HorizontalReference, ImageData, ImageFormat, ImageId,
+    Indent, Inline, Level, LevelAlignment, LevelTextPart, LineSpacing, ListDefinition,
+    ListInstance, ListItem, Margins, NumberFormat, ObjectContent, PageSetup, Paragraph,
+    ParagraphProps, Picture, Row, RunFonts, RunStyle, Section, SectionStart, Size, Spacing, Suffix,
+    TabKind, TabStop, Table, TableBorders, TableProps, VerticalAnchor, VerticalPlacement,
+    VerticalReference, Wrap,
 };
 
 const FAMILIES: [&str; 8] = [
@@ -328,6 +330,34 @@ fuzz_target!(|data: &[u8]| {
         blocks.split_off(blocks.len().saturating_sub(if copies > 2 { 2 } else { 1 }))
     } else {
         Vec::new()
+    };
+    // The copies of the first section, if any, as the rows of a table with 1 pt borders
+    // when bit 6 of byte 12 says so, the first a header row when bit 7 says so: rows are
+    // cut over pages, and header rows repeated.
+    let blocks = if byte(12) & 64 != 0 && !blocks.is_empty() {
+        let line = BorderSide::Line(Border::default().with_width(Pt(1.0)));
+        let borders = TableBorders::default()
+            .with_top(line)
+            .with_start(line)
+            .with_bottom(line)
+            .with_end(line)
+            .with_inside_horizontal(line);
+        let rows: Vec<Row> = blocks
+            .into_iter()
+            .enumerate()
+            .map(|(index, block)| {
+                Row::default()
+                    .with_header(index == 0 && byte(12) & 128 != 0)
+                    .with_cells(vec![Cell::default().with_blocks([block])])
+            })
+            .collect();
+        let table = Table::default()
+            .with_grid([Pt(width)])
+            .with_props(TableProps::default().with_borders(borders))
+            .with_rows(rows);
+        vec![table.into()]
+    } else {
+        blocks
     };
     let mut section = Section::new(setup).with_blocks(blocks);
     if flags & 64 != 0 {
