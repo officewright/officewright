@@ -52,6 +52,8 @@ pub use document::{Document, Page};
 pub use error::{Error, Result};
 pub use font::{EmbeddingNote, Font, StandardFont};
 #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
+pub use font::{SYNTHETIC_BOLD_STROKE, SYNTHETIC_ITALIC_SKEW};
+#[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
 pub use glyphs::{GlyphRun, PlacedGlyph};
 #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
 pub use image::Image;

@@ -56,12 +56,18 @@ pub(crate) struct Synthetic {
     pub(crate) italic: bool,
 }
 
-/// The width of the stroke that draws synthetic bold, as a share of the size: what the
-/// layout engine draws.
-pub(crate) const SYNTHETIC_BOLD_STROKE: f64 = 1.0 / 30.0;
+/// The width of the stroke that draws synthetic bold, as a share of the font size.
+/// [`Page::add_text`](crate::Page::add_text) strokes text in a font from [`Font::resolve`]
+/// whose face lacks bold with it, and a glyph run takes it through
+/// [`GlyphRun::with_stroke`](crate::GlyphRun::with_stroke), as the layout engine draws
+/// synthetic bold.
+pub const SYNTHETIC_BOLD_STROKE: f64 = 1.0 / 30.0;
 
-/// The slant of synthetic italic, as a tangent: what the layout engine draws.
-pub(crate) const SYNTHETIC_ITALIC_SKEW: f64 = 1.0 / 3.0;
+/// The slant of synthetic italic, as a tangent. [`Page::add_text`](crate::Page::add_text)
+/// slants text in a font from [`Font::resolve`] whose face lacks italic by it, and a glyph
+/// run takes it through [`GlyphRun::with_skew`](crate::GlyphRun::with_skew), as the layout
+/// engine draws synthetic italic.
+pub const SYNTHETIC_ITALIC_SKEW: f64 = 1.0 / 3.0;
 
 #[derive(Clone, Debug)]
 enum Kind {
