@@ -4,7 +4,7 @@
 use officewright_core::Pt;
 
 use super::drawing::Drawing;
-use super::vml::VmlDrawing;
+use super::vml::{EmbeddedObject, VmlDrawing};
 use super::xml::Element;
 use super::xml::Span;
 use super::{
@@ -585,10 +585,13 @@ pub enum RunContent<'a> {
     /// A VML drawing (`w:pict`): a picture, in the line or floating, or a shape, text box
     /// or group, which shows as no picture.
     VmlDrawing(VmlDrawing<'a>),
+    /// An embedded object (`w:object`), such as an equation or a spreadsheet, which Word
+    /// shows by its preview picture.
+    Object(EmbeddedObject<'a>),
     /// Where Word's last layout broke the page; a hint, not a break.
     LastRenderedPageBreak,
-    /// An element kept without being understood, such as an embedded object
-    /// (`w:object`).
+    /// An element kept without being understood, such as an absolute position tab
+    /// (`w:ptab`).
     Other(Opaque<'a>),
 }
 
@@ -620,6 +623,9 @@ impl<'a> RunContent<'a> {
             }
             RunItem::VmlDrawing { element, image } => {
                 Self::VmlDrawing(VmlDrawing::new(document, *element, *image))
+            }
+            RunItem::Object { element, image } => {
+                Self::Object(EmbeddedObject::new(document, *element, *image))
             }
             RunItem::LastRenderedPageBreak => Self::LastRenderedPageBreak,
             RunItem::Other(span) => Self::Other(Opaque::new(document, *span)),

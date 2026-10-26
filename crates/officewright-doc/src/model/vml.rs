@@ -1,5 +1,6 @@
-//! VML drawings in runs (`w:pict`, ECMA-376 Part 4, §14.3.2.2 and §19): the picture one
-//! shows, in the line or floating, read from the kept XML when asked for.
+//! VML drawings in runs (`w:pict`, ECMA-376 Part 4, §14.3.2.2 and §19) and the preview
+//! pictures of embedded objects (`w:object`, Part 1, §17.3.3.19): the picture one shows,
+//! in the line or floating, read from the kept XML when asked for.
 //!
 //! VML places a shape with the CSS-like declarations of its `style` attribute, which
 //! ECMA-376 leaves partly open; Word's reading of them is in MS-OI29500's notes on
@@ -118,12 +119,103 @@ impl<'a> VmlDrawing<'a> {
     }
 }
 
+/// An embedded object in a run (`w:object`, ECMA-376 Part 1, §17.3.3.19): content of
+/// another application, such as an equation, a spreadsheet or a package, which Word shows
+/// by its preview, a VML picture beside the object's data (`o:OLEObject`) or control
+/// (`w:control`). The preview is read, in the line or floating;
+/// [`to_xml`](Self::to_xml) gives the object as written.
+///
+/// ```
+/// # fn main() -> officewright_doc::Result<()> {
+/// use officewright_core::Pt;
+/// use officewright_doc::{Block, Document, RunContent};
+///
+/// let document = Document::open("tests/data/object-preview.docx")?;
+/// let mut previews = Vec::new();
+/// for section in document.sections() {
+///     for block in section.blocks() {
+///         let Block::Paragraph(paragraph) = block else {
+///             continue;
+///         };
+///         for item in paragraph.runs().flat_map(|run| run.content()) {
+///             let RunContent::Object(object) = item else {
+///                 continue;
+///             };
+///             // Word shows the object by its preview; the object's data is there as XML.
+///             let Some(preview) = object.preview() else {
+///                 continue;
+///             };
+///             previews.push((
+///                 preview.width(),
+///                 preview.height(),
+///                 preview.image().map(|image| image.content_type().to_owned()),
+///             ));
+///         }
+///     }
+/// }
+/// assert_eq!(
+///     previews,
+///     [(Some(Pt(72.0)), Some(Pt(36.0)), Some("image/png".to_owned()))]
+/// );
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone, Copy, Debug)]
+pub struct EmbeddedObject<'a> {
+    document: &'a Document,
+    element: Span,
+    image: Option<u32>,
+}
+
+impl<'a> EmbeddedObject<'a> {
+    pub(crate) fn new(document: &'a Document, element: Span, image: Option<u32>) -> Self {
+        Self {
+            document,
+            element,
+            image,
+        }
+    }
+
+    /// The object as written, `w:object` and everything in it, as XML with the namespace
+    /// declarations it needs.
+    pub fn to_xml(self) -> String {
+        self.document.element(self.element).to_xml()
+    }
+
+    /// The picture Word shows for it: its first `v:shape` whose `v:imagedata` names an
+    /// image by `r:id`, if it has one, as [`VmlDrawing::picture`] finds a drawing's.
+    pub fn preview(self) -> Option<VmlPicture<'a>> {
+        let names = &self.document.names;
+        let object = self.document.element(self.element);
+        let shape = picture(object, names)?;
+        Some(VmlPicture {
+            document: self.document,
+            pict: object,
+            shape,
+            image: self.image,
+        })
+    }
+
+    /// Whether it holds a drawing (`w:drawing`), which Word shows in place of the object,
+    /// ignoring the object (MS-OI29500, Part 1, §17.3.3.19(a)); the layout leaves it out.
+    // reason: only the translation into the layout IR asks for it.
+    #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
+    pub(crate) fn has_drawing(self) -> bool {
+        let names = &self.document.names;
+        self.document
+            .element(self.element)
+            .children_through_alternates(names.mc)
+            .any(|child| child.is(&names.w, "drawing"))
+    }
+}
+
 /// A VML picture (a `v:shape` whose `v:imagedata` names its image): an image, cropped,
-/// turned and mirrored, in the line or floating.
+/// turned and mirrored, in the line or floating. It is the picture of a VML drawing or
+/// the preview of an embedded object.
 #[derive(Clone, Copy)]
 pub struct VmlPicture<'a> {
     document: &'a Document,
-    /// The `w:pict` that holds it.
+    /// The `w:pict` or `w:object` that holds it.
     pict: Element<'a>,
     shape: Element<'a>,
     image: Option<u32>,
@@ -456,7 +548,7 @@ fn z_order(z_index: i32) -> u32 {
     u32::try_from(height.max(0)).unwrap_or(0)
 }
 
-/// The picture of a `w:pict`: its first `v:shape` whose `v:imagedata` names an image by
+/// The picture of a `w:pict` or `w:object`: its first `v:shape` whose `v:imagedata` names an image by
 /// `r:id`, the only way Word takes one in a document (MS-OI29500, Part 4,
 /// §19.1.2.11(q)). A shape whose `v:imagedata` names none, as a text box Word writes may
 /// have, shows no picture.

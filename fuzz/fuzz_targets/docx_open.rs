@@ -155,6 +155,21 @@ fuzz_target!(|data: &[u8]| {
                                                 picture.image().map(|image| image.bytes().len());
                                         }
                                     }
+                                    RunContent::Object(object) => {
+                                        write_back.check(|| object.to_xml());
+                                        if let Some(preview) = object.preview() {
+                                            let _ = (preview.width(), preview.height());
+                                            let _ = (preview.crop(), preview.rotation());
+                                            let _ = (
+                                                preview.flip_horizontal(),
+                                                preview.flip_vertical(),
+                                                preview.is_hidden(),
+                                            );
+                                            let _ = preview.anchor();
+                                            let _ =
+                                                preview.image().map(|image| image.bytes().len());
+                                        }
+                                    }
                                     _ => {}
                                 }
                             }
