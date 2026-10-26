@@ -500,12 +500,24 @@ class AbiTest(unittest.TestCase):
             path = FONTS / "liberation" / f"LiberationSans-{style}.ttf"
             self.check(lib.ow_font_book_add_file(book, str(path).encode(), byref(added)))
         resolver = self.resolver(book)
-        self.resolve(resolver, "Liberation Sans", italic=1)
-        self.resolve(resolver, "Liberation Sans", bold=1, italic=1)
+        italic = self.resolve(resolver, "Liberation Sans", italic=1)
+        bold_italic = self.resolve(resolver, "Liberation Sans", bold=1, italic=1)
         self.assertEqual(
             self.substitutions(resolver),
             [(OW_RESOLUTION_EXACT, '"Liberation Sans" italic → "Liberation Sans" with synthetic italic')],
         )
+        # Drawn, the synthetic italic is slanted by a third about its baseline, inside
+        # q … Q; the Bold Italic face is drawn as it is.
+        doc = self.new_document()
+        page = c_size_t()
+        self.check(lib.ow_pdf_document_add_page(doc, 595.0, 842.0, byref(page)))
+        self.check(lib.ow_pdf_document_add_text(doc, page, 72.0, 700.0, italic, 12.0, b"Sans"))
+        self.check(lib.ow_pdf_document_add_text(doc, page, 72.0, 680.0, bold_italic, 12.0, b"Sans"))
+        self.check(lib.ow_pdf_document_set_compression(doc, OW_COMPRESSION_NONE))
+        pdf = self.save_bytes(doc)
+        self.assertIn(b"q\nBT\n/F1 12 Tf\n1 0 0.3333 1 72 700 Tm\n", pdf)
+        self.assertIn(b"BT\n/F2 12 Tf\n72 680 Td\n", pdf)
+        self.assertEqual(pdf.count(b"Tj\nET\nQ\n"), 1)
         # Only its Bold face: regular text comes out bold, and the report says so.
         book = self.new_book()
         bold = FONTS / "liberation" / "LiberationSans-Bold.ttf"

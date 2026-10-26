@@ -83,9 +83,10 @@ tests/pdf-output/       checks text-to-pdf output, in Helvetica and with Liberat
                         (CFF) from tests/fonts embedded, the page of glyph runs and vector graphics that
                         officewright-pdf's example `primitives` draws in both fonts, and the JPEG and PNG files
                         images.py makes (also the fuzz seeds in fuzz/seeds/png and jpeg) drawn by the example
-                        `images`, with qpdf, pdftotext, pdffonts, pdfimages and pdftoppm, and what the example
-                        `embed_report` counts for fonts it cannot embed (Linux, macOS; Windows has no official
-                        poppler build, and the golden snapshot proves the bytes are the same)
+                        `images`, the synthetic italic and bold the example `synthetic` draws for a family
+                        resolved without those faces, with qpdf, pdftotext, pdffonts, pdfimages and pdftoppm,
+                        and what the example `embed_report` counts for fonts it cannot embed (Linux, macOS;
+                        Windows has no official poppler build, and the golden snapshot proves the bytes are the same)
 tests/corpus/           small curated real documents (committed) + SOURCES.md + baseline.json
 tests/corpus/word-rules/  documents written by scripts/make-rule-docs.py, one undocumented Word rule each
 tests/corpus/poi/        unmodified Apache POI test documents (Apache-2.0) with POI's LICENSE and NOTICE
@@ -372,8 +373,9 @@ PDF output of officewright text-to-pdf (tests/pdf-output): qpdf --check without 
   pdftoppm renders the subset exactly as the whole font and the shapes, colours and clips where the page puts them;
   the example images' page: pdfimages lists every JPEG and PNG as passed through or decoded with a soft mask, pdftoppm
   shows their colours and transparency, a PNG with every filter type renders the same decoded by officewright as
-  unfiltered by poppler, the committed fuzz seeds equal images.py's output; the example embed_report counts a font the
-  subsetter does not support apart from a damaged one (Linux, macOS)
+  unfiltered by poppler, the committed fuzz seeds equal images.py's output; the example synthetic's page: qpdf --check,
+  pdftotext reads every line, pdftoppm shows synthetic italic slanted by a third and synthetic bold bolder; the example
+  embed_report counts a font the subsetter does not support apart from a damaged one (Linux, macOS)
 corpus-runner over tests/corpus (committed corpus), every document rendered with the fonts of tests/fonts and, first,
   tests/fonts-word/noto-truetype (the TrueType Noto Sans, the build Word had for the references that use it) and
   tests/fonts-word/test-symbol (the symbol font),

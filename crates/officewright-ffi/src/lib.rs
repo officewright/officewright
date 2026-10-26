@@ -351,6 +351,10 @@ pub unsafe extern "C" fn ow_pdf_document_add_page(
 /// size outside 0.01 to 32767 pt, or a position outside -32767 to 32767 pt. On failure
 /// the page is unchanged.
 ///
+/// A font from `ow_pdf_font_resolve` draws the styles its face lacks on top of it:
+/// synthetic italic slanted by a third about the baseline, synthetic bold filled and
+/// stroked with a stroke a thirtieth of `font_size_pt` wide.
+///
 /// # Safety
 ///
 /// `doc` must be NULL or a live handle not used by another thread during the call;
@@ -1103,8 +1107,10 @@ pub unsafe extern "C" fn ow_font_resolver_new(
 /// Cambria, which lays out differently) or a common font of the same kind; a style the
 /// face lacks is synthetic, italic before taking a face of another weight, as Word does,
 /// and a family with no regular face installed gives regular text its bold one. Every
-/// such substitution is added to the resolver's report (`ow_font_resolver_substitution`);
-/// synthetic styles are reported but not drawn yet.
+/// such substitution is added to the resolver's report (`ow_font_resolver_substitution`).
+/// `ow_pdf_document_add_text` draws the synthetic styles on top of the face: italic
+/// slanted by a third about the baseline, bold filled and stroked with a stroke a
+/// thirtieth of the size wide.
 ///
 /// Fails with `OW_STATUS_UNSUPPORTED` if no font could be found, or the chosen font's
 /// license forbids embedding or its outlines cannot be embedded (CFF2, or CID-keyed CFF
