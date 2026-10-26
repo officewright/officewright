@@ -946,6 +946,65 @@ class Import(unittest.TestCase):
                 self.assertIn("file must be the name of a .docx file", self.refused())
 
 
+class RenderedPageBreaks(unittest.TestCase):
+    """Word marks a page break that a table row crosses in the cell that crosses it and
+    again at the start of each later cell of the row (#410); the importer keeps one."""
+
+    @staticmethod
+    def document(body: str) -> dict:
+        w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        xml = f'<w:document xmlns:w="{w}"><w:body>{body}</w:body></w:document>'
+        return {"word/document.xml": xml.encode()}
+
+    @staticmethod
+    def p(text: str, mark: bool = False) -> str:
+        before = "<w:r><w:lastRenderedPageBreak/></w:r>" if mark else ""
+        return f"<w:p>{before}<w:r><w:t>{text}</w:t></w:r></w:p>"
+
+    def cell(self, *paragraphs: str) -> str:
+        return f"<w:tc>{''.join(paragraphs)}</w:tc>"
+
+    def breaks(self, body: str) -> list[tuple[int, str]]:
+        return [(b["paragraph"], b["text_after"])
+                for b in importer.rendered_page_breaks(self.document(body))]
+
+    def test_a_split_row_counts_once(self):
+        # The first cell crosses the page before "Long 18"; Word marks the two cells after
+        # it at their start too, though their text is on the page before.
+        row = ("<w:tbl><w:tr>"
+               + self.cell(self.p("Long 17"), self.p("Long 18", True))
+               + self.cell(self.p("r3c2", True)) + self.cell(self.p("r3c3", True))
+               + "</w:tr></w:tbl>")
+        self.assertEqual(self.breaks(self.p("before") + row + self.p("after")),
+                         [(2, "Long 18")])
+
+    def test_a_row_that_starts_a_page_counts_once(self):
+        row = ("<w:tbl><w:tr>" + self.cell(self.p("Long 01", True))
+               + self.cell(self.p("r3c2", True)) + "</w:tr></w:tbl>")
+        self.assertEqual(self.breaks(row), [(0, "Long 01")])
+
+    def test_a_nested_table_counts_once_at_each_level(self):
+        inner = ("<w:tbl>"
+                 + "<w:tr>" + self.cell(self.p("Inner 12a")) + self.cell(self.p("Inner 12b"))
+                 + "</w:tr><w:tr>" + self.cell(self.p("Inner 13a", True))
+                 + self.cell(self.p("Inner 13b", True)) + "</w:tr></w:tbl>")
+        outer = ("<w:tbl><w:tr>" + self.cell(self.p("Outer cell"), inner, self.p(""))
+                 + self.cell(self.p("Outer b", True)) + "</w:tr></w:tbl>")
+        self.assertEqual(self.breaks(outer), [(3, "Inner 13a")])
+
+    def test_marks_inside_a_later_cell_and_outside_tables_are_kept(self):
+        # A mark at the start of a later cell's second paragraph, or within its first, is
+        # where that cell's own text crosses a page; a first cell without marks leaves a
+        # later cell's start mark alone; marks outside tables all count.
+        row = ("<w:tbl><w:tr>" + self.cell(self.p("short"))
+               + self.cell(self.p("starts here", True))
+               + self.cell(self.p("first"), self.p("second", True)) + "</w:tr></w:tbl>")
+        mid = '<w:p><w:r><w:t>ab</w:t><w:lastRenderedPageBreak/><w:t>cd</w:t></w:r></w:p>'
+        self.assertEqual(self.breaks(self.p("one", True) + row + mid + self.p("two", True)),
+                         [(0, "one"), (2, "starts here"), (4, "second"), (5, "cd"),
+                          (6, "two")])
+
+
 class GeometryText(unittest.TestCase):
     GEOMETRY = {
         "format": 1,

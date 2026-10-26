@@ -26,7 +26,8 @@ tests/corpus/reference/<group>/<name>/ go instead
     resolution and colour model the SSIM comparison uses;
   - geometry.json: page sizes and the position of every line and word (pdftotext
     -bbox-layout, in points from the top left of the page), the page count, Word's own page
-    breaks (the w:lastRenderedPageBreak marks of the re-saved copy), the fonts the PDF
+    breaks (the w:lastRenderedPageBreak marks of the re-saved copy, a table row that crosses
+    a page counted once), the fonts the PDF
     references without embedding them, and what Word changed when it saved the copy: the
     w:compat settings it dropped and added, the style and numbering properties it dropped,
     added and changed, and the paragraphs whose style it changed; every value on a line of
@@ -859,13 +860,45 @@ def page_geometry(bbox: str) -> list[dict]:
     return pages
 
 
+def cell_start_echoes(root: ElementTree.Element) -> set[int]:
+    """The ids of the paragraphs whose w:lastRenderedPageBreak at their start Word adds for a
+    page break it has already marked: the first paragraph of a table cell, where an earlier
+    cell of the same row holds a mark. When a row crosses a page, Word marks the break in the
+    cell that crosses it and again at the start of each cell after it, even of one whose text
+    lies wholly on the page before (#410: E-table-row-split, E-table-row-cant-split-tall,
+    E-table-row-split-nested)."""
+    parents = {child: parent for parent in root.iter() for child in parent}
+
+    def nearest(element: ElementTree.Element, tag: str) -> ElementTree.Element | None:
+        while element in parents:
+            element = parents[element]
+            if element.tag == tag:
+                return element
+        return None
+
+    marked = {id(mark) for mark in root.iter(f"{W}lastRenderedPageBreak")}
+    echoes = set()
+    for row in root.iter(f"{W}tr"):
+        # The row's own cells, in order; a cell of a nested table belongs to its own row.
+        cells = [cell for cell in row.iter(f"{W}tc") if nearest(cell, f"{W}tr") is row]
+        for n, cell in enumerate(cells):
+            first = next(cell.iter(f"{W}p"), None)
+            earlier = any(id(mark) in marked for c in cells[:n]
+                          for mark in c.iter(f"{W}lastRenderedPageBreak"))
+            if first is not None and earlier:
+                echoes.add(id(first))
+    return echoes
+
+
 def rendered_page_breaks(parts: dict[str, bytes]) -> list[dict]:
-    """Word's page breaks: the w:lastRenderedPageBreak marks of a saved document.
+    """Word's page breaks: the w:lastRenderedPageBreak marks of a saved document, but for
+    those cell_start_echoes leaves out, so that a row crossing a page counts once.
 
     Paragraphs are counted in document order from 0, table cells included; the offset is
     the number of characters of the paragraph's text before the mark.
     """
     root = ElementTree.fromstring(parts["word/document.xml"])
+    echoes = cell_start_echoes(root)
     breaks = []
     for index, paragraph in enumerate(root.iter(f"{W}p")):
         text = ""
@@ -879,6 +912,8 @@ def rendered_page_breaks(parts: dict[str, bytes]) -> list[dict]:
             elif name == "lastRenderedPageBreak":
                 marks.append(len(text))
         for offset in marks:
+            if offset == 0 and id(paragraph) in echoes:
+                continue
             breaks.append(
                 {
                     "paragraph": index,
