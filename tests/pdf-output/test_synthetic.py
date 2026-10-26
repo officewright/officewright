@@ -116,9 +116,10 @@ class SyntheticStylesTest(unittest.TestCase):
         bold = self.page.ink(BASELINES["bold"])
         bold_italic = self.page.ink(BASELINES["bold italic"])
         self.assertGreater(regular, 0)
-        # The stroke, a thirtieth of the size wide, widens each stem by 0.8 pt.
-        self.assertGreater(bold / regular, 1.15, (bold, regular))
-        self.assertGreater(bold_italic / italic, 1.15, (bold_italic, italic))
+        # The stroke, a thirtieth of the size wide, widens each stem by 0.8 pt: about 1.47
+        # times the ink upright and 1.42 slanted, where half the stroke gives about 1.24.
+        self.assertGreater(bold / regular, 1.35, (bold, regular))
+        self.assertGreater(bold_italic / italic, 1.35, (bold_italic, italic))
         self.assertLess(italic / regular, 1.1, (italic, regular))
 
 

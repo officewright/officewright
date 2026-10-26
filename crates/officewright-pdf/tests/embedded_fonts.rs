@@ -1301,6 +1301,9 @@ fn draws_the_styles_a_resolved_face_lacks() -> TestResult {
         &FontRequest::new("Liberation Sans").italic(true),
     )?;
     page.add_text(Pt(72.0), Pt(620.0), &liberation, Pt(12.0), "Sans")?;
+    // The stroke grows with the size: 0.8 pt at 24 pt.
+    let bold = Font::resolve(&mut resolver, &request(true, false))?;
+    page.add_text(Pt(72.0), Pt(590.0), &bold, Pt(24.0), "Noto")?;
     let pdf = pdf_text(&doc)?;
     // A stroke a thirtieth of 12 pt wide, filled and stroked; a slant of a third about the
     // baseline, inside `q` … `Q`.
@@ -1310,10 +1313,11 @@ fn draws_the_styles_a_resolved_face_lacks() -> TestResult {
         "q\nBT\n/F1 12 Tf\n1 0 0.3333 1 72 660 Tm\n",
         "q\n0.4 w\nBT\n/F1 12 Tf\n2 Tr\n72 640 Td\n",
         "BT\n/F2 12 Tf\n72 620 Td\n",
+        "q\n0.8 w\nBT\n/F1 24 Tf\n2 Tr\n72 590 Td\n",
     ] {
         assert!(pdf.contains(part), "no {part:?} in {pdf}");
     }
-    assert_eq!(pdf.matches("Tj\nET\nQ\n").count(), 3, "{pdf}");
+    assert_eq!(pdf.matches("Tj\nET\nQ\n").count(), 4, "{pdf}");
     // The four lines in Noto Sans share one font resource, and the file embeds it once.
     assert_eq!(pdf.matches("/Subtype /Type0").count(), 2, "{pdf}");
     Ok(())
