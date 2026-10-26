@@ -3849,8 +3849,9 @@ def symbol_font() -> Doc:
                          "Liberation Sans"))
         body += para(lines([f"{size} pt line {k}: Hamburgefonts gjpqy" for k in range(1, 6)],
                            SYMBOL_FONT, size), shading=GREY)
-    # Whether Word breaks lines at the symbol font's space, U+F020, and stretches it when the
-    # paragraph is justified.
+    # Whether Word breaks lines at the spaces of text in the symbol font (U+0020, which the font
+    # draws with the glyph of its code U+F020) and stretches them when the paragraph is
+    # justified.
     body += para(run("Case 24: a justified paragraph of words in the symbol font, long enough "
                      "to wrap:", "Liberation Sans"))
     body += para(slot_run(" ".join(["Hamburgefonts gjpqy"] * 12), every), jc="both")
@@ -3863,7 +3864,7 @@ def symbol_font() -> Doc:
         "does not map, the font in one slot of "
         "w:rFonts only, capitals, small capitals, bold and italic it has no face for, spaces, "
         "list bullets, the height of its lines at 11 and 20 pt, and a justified paragraph "
-        "that wraps; one paragraph per case",
+        "that wraps; each case starts with a paragraph that says what it is",
         body,
         numbering=numbering,
     )

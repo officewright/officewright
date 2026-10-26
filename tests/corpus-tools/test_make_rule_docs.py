@@ -3086,7 +3086,7 @@ class Packages(unittest.TestCase):
         self.assertIsNone(bold.find(f"{W}rPr/{W}i"))
         self.assertIsNotNone(italic.find(f"{W}rPr/{W}i"))
         self.assertIsNone(italic.find(f"{W}rPr/{W}b"))
-        self.assertEqual(sample(16), [("A B  C D", every)])
+        self.assertEqual(sample(16), [("A B  C\u00a0D", every)])
         sym = cases[17][1][0]
         self.assertEqual(sym.find(f"{W}sym").get(f"{W}char"), "F0B7")
         self.assertEqual(sym.find(f"{W}sym").get(f"{W}font"), symbol)
@@ -3116,7 +3116,7 @@ class Packages(unittest.TestCase):
             self.assertEqual(r.find(f"{W}rPr/{W}sz").get(f"{W}val"), size, n)
             self.assertEqual(len(r.findall(f"{W}br")), 4, n)
         # Case 24: the next paragraph is justified, one run of words in the symbol font, wider
-        # than the text column even in the narrow Liberation Sans.
+        # than two text columns in Carlito (Calibri's twin), so wider still in Noto Sans.
         justified = paragraphs[paragraphs.index(cases[24][0]) + 1]
         self.assertEqual(justified.find(f"{W}pPr/{W}jc").get(f"{W}val"), "both")
         (r,) = justified.findall(f"{W}r")
