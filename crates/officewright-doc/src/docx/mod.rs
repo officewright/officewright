@@ -44,6 +44,11 @@ const WP_STRICT: &str = "http://purl.oclc.org/ooxml/drawingml/wordprocessingDraw
 /// DrawingML pictures, Transitional and Strict.
 const PIC: &str = "http://schemas.openxmlformats.org/drawingml/2006/picture";
 const PIC_STRICT: &str = "http://purl.oclc.org/ooxml/drawingml/picture";
+/// VML (ECMA-376 Part 4, §19), its Office extensions (`o:`) and Word's (`w10:`): Strict
+/// has no VML, so each has one name.
+const V: &str = "urn:schemas-microsoft-com:vml";
+const O: &str = "urn:schemas-microsoft-com:office:office";
+const W10: &str = "urn:schemas-microsoft-com:office:word";
 
 /// The relationship type of the main part, Transitional and Strict.
 const OFFICE_DOCUMENT: [&str; 2] = [
@@ -59,6 +64,9 @@ impl Names {
             a: [Some(strings.intern(A)), Some(strings.intern(A_STRICT))],
             wp: [Some(strings.intern(WP)), Some(strings.intern(WP_STRICT))],
             pic: [Some(strings.intern(PIC)), Some(strings.intern(PIC_STRICT))],
+            v: [Some(strings.intern(V))],
+            o: [Some(strings.intern(O))],
+            w10: [Some(strings.intern(W10))],
             mc: Some(strings.intern(officewright_opc::mce::NAMESPACE)),
             w14: Some(strings.intern(W14)),
         }

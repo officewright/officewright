@@ -426,21 +426,21 @@
     "tests/corpus/business/contract-ec-data-processing-clauses-bg.docx": {
       "line_agreement": 0.9928,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.9256,
+      "ssim_mean": 0.9277,
       "ssim_min": 0.6543,
       "text_score": 0.9999
     },
     "tests/corpus/business/contract-ec-data-processing-clauses-de.docx": {
       "line_agreement": 0.9821,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.9251,
+      "ssim_mean": 0.9263,
       "ssim_min": 0.6504,
       "text_score": 0.9999
     },
     "tests/corpus/business/contract-ec-data-processing-clauses-el.docx": {
       "line_agreement": 0.9451,
       "page_break_agreement": 0.6,
-      "ssim_mean": 0.8031,
+      "ssim_mean": 0.8051,
       "ssim_min": 0.498,
       "text_score": 0.9236
     },
@@ -1320,27 +1320,27 @@
     },
     "tests/corpus/word-rules/E-table-autofit-14.docx": {
       "line_agreement": 0.7692,
-      "ssim_mean": 0.9266,
-      "ssim_min": 0.9266,
+      "ssim_mean": 0.9529,
+      "ssim_min": 0.9529,
       "text_score": 0.9675
     },
     "tests/corpus/word-rules/E-table-autofit-15.docx": {
       "line_agreement": 1.0,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.9161,
+      "ssim_mean": 0.9291,
       "ssim_min": 0.8851,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-autofit-constrained-14.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9281,
-      "ssim_min": 0.9281,
+      "ssim_mean": 0.9517,
+      "ssim_min": 0.9517,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-autofit-grow-14.docx": {
       "line_agreement": 0.72,
-      "ssim_mean": 0.9145,
-      "ssim_min": 0.9145,
+      "ssim_mean": 0.9409,
+      "ssim_min": 0.9409,
       "text_score": 0.9662
     },
     "tests/corpus/word-rules/E-table-cell-margins-nil.docx": {
@@ -1404,8 +1404,8 @@
     },
     "tests/corpus/word-rules/E-table-row-exact-height.docx": {
       "line_agreement": 0.9231,
-      "ssim_mean": 0.7117,
-      "ssim_min": 0.7117,
+      "ssim_mean": 0.7122,
+      "ssim_min": 0.7122,
       "text_score": 0.9709
     },
     "tests/corpus/word-rules/E-table-row-split-nested.docx": {
@@ -1618,10 +1618,10 @@
       "text_score": 0.9916
     },
     "tests/corpus/word-rules/E-vml-pictures.docx": {
-      "line_agreement": 0.322,
+      "line_agreement": 0.3898,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.8049,
-      "ssim_min": 0.7299,
+      "ssim_mean": 0.8914,
+      "ssim_min": 0.8891,
       "text_score": 1.0
     }
   }
