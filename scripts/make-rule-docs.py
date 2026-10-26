@@ -3841,13 +3841,23 @@ def table_autofit_shares() -> Doc:
         (5, "w:tblW 100 % (pct 5000), cells auto, borders of 3 pt",
          rule_table(autofit_cells([auto] * 3), EVEN_GRID, tbl_w=(5000, "pct"),
                     border_eighths=24)),
+        # Cases 01 and 02 span up to the last column; here the span ends before it, where
+        # the explanations of E-table-autofit-15's case 8 give different grids.
+        (6, "row 1: a cell spanning the first two of three columns, of 300 pt, and a cell of "
+            "50 pt; row 2: cells of 50, 100 and 50 pt",
+         rule_table([[cell(para(run("Spanning two")),
+                           width(6000, "dxa") + '<w:gridSpan w:val="2"/>'),
+                      cell(para(run("Third")), width(1000, "dxa"))],
+                     [cell(para(run("Fifty")), width(1000, "dxa")),
+                      cell(para(run("Hundred")), width(2000, "dxa")),
+                      cell(para(run("Last")), width(1000, "dxa"))]], [1000, 2000, 1000])),
     ]
     return autofit_doc(
         "E-table-autofit-shares",
         "How Word's autofit shares width in compatibility mode 15: a cell spanning three "
         "columns, a spanning cell over a wider first column, minimum widths of three "
-        "different words that together exceed the text width, and 100 % tables with "
-        "borders of 6 and 3 pt",
+        "different words that together exceed the text width, 100 % tables with borders of 6 "
+        "and 3 pt, and a span that ends before the last column",
         cases,
     )
 
@@ -3877,11 +3887,14 @@ def table_autofit_beside(mode: int, flag: str | None = None) -> Doc:
               + run("The picture is anchored here."))
          + rule_table(fixed, [1000] * 3, tbl_w=(3000, "dxa"), fixed=True)),
     ]
-    body = "".join(table_case(n, label, xml) for n, label, xml in cases)
+    # Each case starts a page, so that case 02's picture cannot meet case 01's.
+    body = "".join(para(run(f"Case {n:02d}: {label}"), page_break_before=n > 1) + xml + para()
+                   for n, label, xml in cases)
     return Doc(
         f"E-table-autofit-beside{said}-{mode}",
         "Whether a table that fits beside a floating picture of 216 x 108 pt with square wrap "
-        "stays beside it: an autofit table of about 120 pt and a fixed one of 150 pt, in "
+        "stays beside it: an autofit table of about 120 pt and a fixed one of 150 pt, each on "
+        "a page of its own, in "
         f"compatibility mode {mode}{setting}",
         body + para(run("End of the document.")),
         media=(("image1.png", grey_png(96, 48)),),
@@ -4019,18 +4032,23 @@ def header_cut() -> Doc:
         ("a footer of 200 empty lines of exact 2 pt, shaded in bands of 10, on A4",
          "footerReference", shaded_lines(200, 2, 10), {}),
     ]
+    # A section without a header of its own shows the previous section's, so the footer's
+    # case gets an empty header (E-section-restart-parity shows Word doing so).
     parts, sections = [], []
     for n, (label, element, content, options) in enumerate(cases, 1):
         kind = "header" if element == "headerReference" else "footer"
         name = f"{kind}{n}.xml"
         parts.append(header_part(name, content))
-        sections.append(([run(f"Case {n:02d}: {label}")],
-                         section(refs=((element, "default", name),), **options)))
+        refs = ((element, "default", name),)
+        if kind == "footer":
+            parts.append(header_part(f"header{n}.xml", page_para()))
+            refs = (("headerReference", "default", f"header{n}.xml"),) + refs
+        sections.append(([run(f"Case {n:02d}: {label}")], section(refs=refs, **options)))
     return Doc(
         "E-header-cut",
         "Where Word cuts a header or footer taller than the room for it: lines of exact 1 and "
-        "2 pt, a header 72 pt from the edge, a Letter and an A5 page; each case is a section "
-        "of its own",
+        "2 pt, a header 72 pt from the edge, a Letter and an A5 page, and a footer under an "
+        "empty header; each case is a section of its own",
         sectioned(sections),
         headers=tuple(parts),
         last_section=sections[-1][1],
@@ -4069,9 +4087,10 @@ def para_shading_borders_sides() -> Doc:
     )
 
 
-# Page numbers around the last that letters can show if they repeat up to 64 times (780,
-# 781, 1664), and Roman numerals past 4999.
-LETTER_STARTS = [780, 781, 1664, 5000, 10000]
+# Page numbers whose letters repeat 20, 30, 31, 40, 50 and 64 times (520, 780, 781, 1040,
+# 1300, 1664), between 53, which Word shows as letters, and 1665, which it does not; and
+# Roman numerals past 4999.
+LETTER_STARTS = [520, 780, 781, 1040, 1300, 1664, 5000, 10000]
 
 
 def number_formats_letters() -> Doc:
@@ -4083,8 +4102,8 @@ def number_formats_letters() -> Doc:
         sections.append((contents, section(page_start=start)))
     return Doc(
         "E-number-formats-letters",
-        "PAGE fields as letters and Roman numerals at page numbers 780, 781 and 1664, "
-        "around where letters may stop, and at 5000 and 10000, past 4999",
+        "PAGE fields as letters and Roman numerals at page numbers 520, 780, 781, 1040, 1300 "
+        "and 1664, whose letters repeat 20 to 64 times, and at 5000 and 10000, past 4999",
         sectioned(sections),
         last_section=sections[-1][1],
     )
@@ -4149,7 +4168,8 @@ def table_style_size_pair(defaults: int, normal: int) -> Doc:
     # E-table-style-defaults-size-14 and E-table-style-size-*-14 left two rules for when
     # Normal's size overrides a table style's in mode 14: its 11 or 12 pt is ignored unless
     # smaller than the defaults, or its size is ignored when it equals the defaults or is
-    # 12 pt. Defaults 12 with Normal 12, and defaults 10 with Normal 11, tell them apart.
+    # 12 pt. Defaults 13 with Normal 12 (the first keeps 12, the second 14) and defaults 10
+    # with Normal 11 (the first keeps 14, the second 11) tell them apart.
     big = table_style(
         "Big", [],
         whole='<w:pPr><w:jc w:val="center"/></w:pPr>'
@@ -4335,7 +4355,7 @@ def documents() -> list[Doc]:
         number_formats_letters(),
         superscript_steps(),
         table_float_center_margins(),
-        table_style_size_pair(12, 12),
+        table_style_size_pair(13, 12),
         table_style_size_pair(10, 11),
         underline_trailspace_indent(),
     ]

@@ -3071,12 +3071,41 @@ class Packages(unittest.TestCase):
         (inner,) = tables[3].findall(f".//{W}tbl")
         self.assertEqual(borders(inner), rules.INNER_BORDERS)
         self.assertEqual(len(inner.findall(f"{W}tr")), 30)
+        # Each table starts on its case's page and crosses it: counted in lines of Calibri
+        # 11 pt (13.43 pt; 51 fill the 697.9 pt of the body, borders left aside), the label,
+        # the filler and the rows before the long one leave room for the long one to start,
+        # and the whole table does not fit.
+        page_lines = int(697.9 / 13.43)
+
+        def cell_lines(tc):
+            nested = [len(t.findall(f"{W}tr")) for t in tc.findall(f"{W}tbl")]
+            written = [p for p in tc.findall(f"{W}p") if texts(p)]
+            return len(written) + sum(nested)
+
+        children = list(body)
+        for case, (table, filler) in enumerate(zip(tables, (30, 30, 20, 30)), 1):
+            at = children.index(table)
+            before = children[at - filler - 1:at]
+            self.assertTrue(texts(before[0]).startswith(f"Case {case:02d}: "), case)
+            self.assertEqual([texts(p) for p in before[1:]],
+                             [f"Case {case:02d} filler {k:02d}" for k in range(1, filler + 1)])
+            lines = [max(cell_lines(tc) for tc in tr.findall(f"{W}tc"))
+                     for tr in table.findall(f"{W}tr")]
+            longest = lines.index(max(lines))
+            self.assertLess(1 + filler + sum(lines[:longest]) + 1, page_lines - 5, case)
+            self.assertGreater(1 + filler + sum(lines), page_lines + 5, case)
 
         # E-table-autofit-shares.
         _, parts, body = load("E-table-autofit-shares")
         self.assertNotIn("word/media/image1.png", parts)
         tables = body.findall(f"{W}tbl")
-        self.assertEqual(len(tables), 5)
+        self.assertEqual(len(tables), 6)
+        span = tables[5].findall(f"{W}tr")
+        self.assertEqual([val(tc, f"{W}tcPr/{W}gridSpan") for tc in span[0]], ["2", None])
+        self.assertEqual([val(tc, f"{W}tcPr/{W}tcW", "w") for tc in span[0]], ["6000", "1000"])
+        self.assertEqual([val(tc, f"{W}tcPr/{W}tcW", "w") for tc in span[1]],
+                         ["1000", "2000", "1000"])
+        self.assertEqual(len(tables[5].findall(f"{W}tblGrid/{W}gridCol")), 3)
         span = tables[0].findall(f"{W}tr")
         self.assertEqual(val(span[0], f"{W}tc/{W}tcPr/{W}gridSpan"), "3")
         self.assertEqual(val(span[0], f"{W}tc/{W}tcPr/{W}tcW", "w"), "8000")
@@ -3107,6 +3136,9 @@ class Packages(unittest.TestCase):
                 self.assertIn("width:216pt;height:108pt", shape.get("style"))
                 self.assertIn("mso-position-horizontal-relative:margin", shape.get("style"))
             autofit, fixed = body.findall(f"{W}tbl")
+            starts = [p for p in body.findall(f"{W}p") if texts(p).startswith("Case ")]
+            self.assertEqual([p.find(f"{W}pPr/{W}pageBreakBefore") is not None for p in starts],
+                             [False, True], name)
             self.assertIsNone(autofit.find(f"{W}tblPr/{W}tblLayout"))
             cells = [[texts(tc) for tc in tr.findall(f"{W}tc")] for tr in autofit.iter(f"{W}tr")]
             widest = sum(max(carlito_width(row[c]) for row in cells) + 10.8 for c in range(3))
@@ -3165,12 +3197,23 @@ class Packages(unittest.TestCase):
         rels = ElementTree.fromstring(parts["word/_rels/document.xml.rels"])
         targets = {rel.get("Id"): rel.get("Target") for rel in rels}
         r_id = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
-        named = []
+        # A section without a default header or footer of its own shows the previous one's
+        # (E-section-restart-parity); what each section shows:
+        shown, header, footer = [], None, None
         for s in sections:
-            (ref,) = [child for child in s if child.tag.endswith("Reference")]
-            named.append((ref.tag[len(W):], targets[ref.get(r_id)]))
-        self.assertEqual(named, [("headerReference", f"header{n}.xml") for n in range(1, 6)]
-                         + [("footerReference", "footer6.xml")])
+            for ref in s:
+                if ref.tag in (f"{W}headerReference", f"{W}footerReference"):
+                    self.assertEqual(ref.get(f"{W}type"), "default")
+                    if ref.tag == f"{W}headerReference":
+                        header = targets[ref.get(r_id)]
+                    else:
+                        footer = targets[ref.get(r_id)]
+            shown.append((header, footer))
+        self.assertEqual(shown, [(f"header{n}.xml", None) for n in range(1, 6)]
+                         + [("header6.xml", "footer6.xml")])
+        (empty,) = ElementTree.fromstring(parts["word/header6.xml"]).findall(f"{W}p")
+        self.assertEqual(texts(empty), "")
+        self.assertIsNone(empty.find(f"{W}pPr/{W}shd"))
         for target, count, height in (("header1.xml", 400, "20"), ("header2.xml", 200, "40"),
                                       ("footer6.xml", 200, "40")):
             paragraphs = ElementTree.fromstring(parts[f"word/{target}"]).findall(f"{W}p")
@@ -3179,6 +3222,11 @@ class Packages(unittest.TestCase):
                                val(p, f"{W}pPr/{W}spacing", "lineRule")) for p in paragraphs},
                              {(height, "exact")}, target)
             self.assertEqual({texts(p) for p in paragraphs}, {""}, target)
+            # Bands of 20 (1 pt) or 10 (2 pt) lines, alternately grey and dark grey.
+            band = 20 if height == "20" else 10
+            fills = [val(p, f"{W}pPr/{W}shd", "fill") for p in paragraphs]
+            self.assertEqual(fills, [("D9D9D9", "808080")[(n // band) % 2] for n in range(count)],
+                             target)
         for target in ("header3.xml", "header4.xml", "header5.xml"):
             (paragraph,) = ElementTree.fromstring(parts[f"word/{target}"]).findall(f"{W}p")
             self.assertEqual(len(paragraph.findall(f"{W}r/{W}br")), 39, target)
@@ -3188,9 +3236,9 @@ class Packages(unittest.TestCase):
         _, _, body = load("E-number-formats-letters")
         sections = list(body.iter(f"{W}sectPr"))
         self.assertEqual([int(val(s, f"{W}pgNumType", "start")) for s in sections],
-                         [780, 781, 1664, 5000, 10000])
+                         [520, 780, 781, 1040, 1300, 1664, 5000, 10000])
         instructions = [f.get(f"{W}instr").strip() for f in body.iter(f"{W}fldSimple")]
-        self.assertEqual(len(instructions), 25)
+        self.assertEqual(len(instructions), 40)
         self.assertEqual(set(instructions), {f"PAGE \\* {s}" for s in
                                              ("Arabic", "ALPHABETIC", "alphabetic", "ROMAN",
                                               "roman")})
@@ -3223,7 +3271,7 @@ class Packages(unittest.TestCase):
                                   ("text", "page", "center", "9200")])
 
         # E-table-style-defaults-size-12-12-14 and -10-11-14: the sizes the name gives.
-        for defaults_pt, normal_pt in ((12, 12), (10, 11)):
+        for defaults_pt, normal_pt in ((13, 12), (10, 11)):
             name = f"E-table-style-defaults-size-{defaults_pt}-{normal_pt}-14"
             doc, parts, body = load(name)
             self.assertEqual(doc.mode, 14)
@@ -3262,6 +3310,30 @@ class Packages(unittest.TestCase):
                 self.assertAlmostEqual(end, right_margin + 11, delta=2)
             else:
                 self.assertAlmostEqual(end, right_margin + 101, delta=2)
+
+        # E-para-shading-borders-sides: per paragraph its text's start, shading, the sides of
+        # its border with their distance from the text, and its space before and after.
+        _, _, body = load("E-para-shading-borders-sides")
+        seen = []
+        for p in body.findall(f"{W}p"):
+            sides = p.find(f"{W}pPr/{W}pBdr")
+            seen.append((
+                texts(p).split(":")[0],
+                val(p, f"{W}pPr/{W}shd", "fill"),
+                None if sides is None else [(side.tag[len(W):], side.get(f"{W}space"))
+                                             for side in sides],
+                val(p, f"{W}pPr/{W}spacing", "before"),
+                val(p, f"{W}pPr/{W}spacing", "after"),
+            ))
+        plain = ("not shaded", None, None, None, None)
+        self.assertEqual(seen, [
+            ("Case 01", "D9D9D9", [("left", "4"), ("right", "4")], None, None), plain,
+            ("Case 02", "D9D9D9", [("top", "4"), ("bottom", "4")], None, None), plain,
+            ("Case 03", "D9D9D9", [("left", "0")], None, None), plain,
+            ("Case 04", "D9D9D9", None, None, "240"), ("Case 04", None, None, "240", None),
+            plain,
+            ("Case 05", None, None, None, "240"), ("Case 05", "D9D9D9", None, "240", None),
+        ])
 
     def test_pictures_are_typed_png_parts_that_resolve(self):
         # Every VML picture of every document is Word's picture frame (the shape type defined
