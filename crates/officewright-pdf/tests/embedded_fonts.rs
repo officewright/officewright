@@ -1318,7 +1318,7 @@ fn draws_the_styles_a_resolved_face_lacks() -> TestResult {
         assert!(pdf.contains(part), "no {part:?} in {pdf}");
     }
     assert_eq!(pdf.matches("Tj\nET\nQ\n").count(), 4, "{pdf}");
-    // The four lines in Noto Sans share one font resource, and the file embeds it once.
+    // The five lines in Noto Sans share one font resource, and the file embeds it once.
     assert_eq!(pdf.matches("/Subtype /Type0").count(), 2, "{pdf}");
     Ok(())
 }

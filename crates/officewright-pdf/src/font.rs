@@ -58,15 +58,21 @@ pub(crate) struct Synthetic {
 
 /// The width of the stroke that draws synthetic bold, as a share of the font size.
 /// [`Page::add_text`](crate::Page::add_text) strokes text in a font from [`Font::resolve`]
-/// whose face lacks bold with it, and a glyph run takes it through
-/// [`GlyphRun::with_stroke`](crate::GlyphRun::with_stroke), as the layout engine draws
-/// synthetic bold.
+/// whose face lacks bold with a stroke this share of the size wide; a glyph run of size
+/// `s` is stroked so with [`GlyphRun::with_stroke`](crate::GlyphRun::with_stroke)`(Pt(s ×
+/// SYNTHETIC_BOLD_STROKE))`, as the layout engine draws synthetic bold.
+///
+/// One of the drawing primitives the layout engine paints with: public, but exempt from
+/// semantic versioning until officewright 1.0 (feature `unstable-drawing`).
 pub const SYNTHETIC_BOLD_STROKE: f64 = 1.0 / 30.0;
 
 /// The slant of synthetic italic, as a tangent. [`Page::add_text`](crate::Page::add_text)
-/// slants text in a font from [`Font::resolve`] whose face lacks italic by it, and a glyph
-/// run takes it through [`GlyphRun::with_skew`](crate::GlyphRun::with_skew), as the layout
-/// engine draws synthetic italic.
+/// slants text in a font from [`Font::resolve`] whose face lacks italic by it; a glyph run
+/// is slanted so with [`GlyphRun::with_skew`](crate::GlyphRun::with_skew)`(SYNTHETIC_ITALIC_SKEW)`,
+/// as the layout engine draws synthetic italic.
+///
+/// One of the drawing primitives the layout engine paints with: public, but exempt from
+/// semantic versioning until officewright 1.0 (feature `unstable-drawing`).
 pub const SYNTHETIC_ITALIC_SKEW: f64 = 1.0 / 3.0;
 
 #[derive(Clone, Debug)]
