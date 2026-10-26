@@ -293,6 +293,9 @@ class Packages(unittest.TestCase):
                 "E-underline-trailspace-margin": {"ulTrailSpace"},
                 "E-table-autofit-constrained-14": {"doNotAutofitConstrainedTables"},
                 "E-table-autofit-grow-14": {"growAutofit"},
+                "E-table-autofit-beside-constrained-14": {"doNotAutofitConstrainedTables"},
+                "E-table-autofit-grow-15": {"growAutofit"},
+                "E-underline-trailspace-indent": {"ulTrailSpace"},
             }.get(doc.name, set())
             self.assertEqual(flags, expected, doc.name)
             # The documents about a setting name its value; every other document in mode 15
@@ -3019,6 +3022,246 @@ class Packages(unittest.TestCase):
             self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"), target)
         self.assertEqual(struct.unpack(">II", parts["word/media/image1.png"][16:24]), (96, 48))
         self.assertIn(b'Extension="png"', parts["[Content_Types].xml"])
+
+    def test_batch_8_documents_have_the_markup_their_labels_name(self):
+        by_name = {doc.name: doc for doc in self.docs}
+
+        def load(name):
+            doc = by_name[name]
+            parts = dict(rules.parts(doc))
+            return doc, parts, ElementTree.fromstring(parts["word/document.xml"]).find(f"{W}body")
+
+        def texts(element):
+            return "".join(t.text or "" for t in element.iter(f"{W}t"))
+
+        def val(element, path, name="val"):
+            found = element.find(path)
+            return None if found is None else found.get(f"{W}{name}")
+
+        def borders(table):
+            return {side.tag[len(W):]: int(side.get(f"{W}sz"))
+                    for side in table.find(f"{W}tblPr/{W}tblBorders")}
+
+        def labels(body):
+            return [p for p in body.findall(f"{W}p") if texts(p).startswith("Case ")]
+
+        # E-table-split-borders: four cases, each on a page of its own, with the borders
+        # the purpose names; the nested table has its own.
+        _, _, body = load("E-table-split-borders")
+        # The label of each case: "Case NN: " and not the paragraph after its table.
+        starts = [p for p in body.findall(f"{W}p")
+                  if re.match(r"Case \d\d: ", texts(p)) and "after the table" not in texts(p)]
+        self.assertEqual([texts(p)[:7] for p in starts],
+                         ["Case 01", "Case 02", "Case 03", "Case 04"])
+        self.assertEqual([p.find(f"{W}pPr/{W}pageBreakBefore") is not None for p in starts],
+                         [False, True, True, True])
+        tables = body.findall(f"{W}tbl")
+        self.assertEqual(len(tables), 4)
+        for table in tables:
+            self.assertEqual(borders(table), rules.SPLIT_BORDERS)
+        self.assertEqual(rules.SPLIT_BORDERS,
+                         {"top": 48, "bottom": 24, "insideH": 12, "left": 4, "right": 4,
+                          "insideV": 4})
+        rows = [table.findall(f"{W}tr") for table in tables]
+        self.assertEqual([len(r) for r in rows], [4, 3, 42, 1])
+        for case_rows in (rows[0], rows[1]):
+            self.assertEqual(texts(case_rows[2].find(f"{W}tc")).count("Long"), 40)
+        self.assertEqual([r.find(f"{W}trPr/{W}tblHeader") is not None for r in rows[2]],
+                         [True, True] + [False] * 40)
+        (inner,) = tables[3].findall(f".//{W}tbl")
+        self.assertEqual(borders(inner), rules.INNER_BORDERS)
+        self.assertEqual(len(inner.findall(f"{W}tr")), 30)
+
+        # E-table-autofit-shares.
+        _, parts, body = load("E-table-autofit-shares")
+        self.assertNotIn("word/media/image1.png", parts)
+        tables = body.findall(f"{W}tbl")
+        self.assertEqual(len(tables), 5)
+        span = tables[0].findall(f"{W}tr")
+        self.assertEqual(val(span[0], f"{W}tc/{W}tcPr/{W}gridSpan"), "3")
+        self.assertEqual(val(span[0], f"{W}tc/{W}tcPr/{W}tcW", "w"), "8000")
+        self.assertEqual([val(tc, f"{W}tcPr/{W}tcW", "w") for tc in span[1]],
+                         ["1000", "2000", "3000"])
+        span = tables[1].findall(f"{W}tr")
+        self.assertEqual(val(span[0], f"{W}tc/{W}tcPr/{W}gridSpan"), "2")
+        self.assertEqual(val(span[0], f"{W}tc/{W}tcPr/{W}tcW", "w"), "6000")
+        self.assertEqual([val(tc, f"{W}tcPr/{W}tcW", "w") for tc in span[1]], ["3000", "1000"])
+        words = [texts(tc) for tc in tables[2].iter(f"{W}tc")]
+        self.assertEqual(words, list(rules.SHARE_WORDS))
+        self.assertEqual(len({carlito_width(w) for w in words}), 3)
+        # Their minimum widths, cell margins included, exceed the 451.3 pt of text.
+        self.assertGreater(sum(carlito_width(w) + 10.8 for w in words), rules.TEXT_W / 20)
+        for table, eighths in ((tables[3], 48), (tables[4], 24)):
+            self.assertEqual(val(table, f"{W}tblPr/{W}tblW", "type"), "pct")
+            self.assertEqual(set(borders(table).values()), {eighths})
+
+        # E-table-autofit-beside-*: the picture and the two tables beside it.
+        for name, mode in (("E-table-autofit-beside-15", 15), ("E-table-autofit-beside-14", 14),
+                           ("E-table-autofit-beside-constrained-14", 14)):
+            doc, parts, body = load(name)
+            self.assertEqual(doc.mode, mode)
+            self.assertIn("word/media/image1.png", parts)
+            shapes = list(body.iter("{urn:schemas-microsoft-com:vml}shape"))
+            self.assertEqual(len(shapes), 2, name)
+            for shape in shapes:
+                self.assertIn("width:216pt;height:108pt", shape.get("style"))
+                self.assertIn("mso-position-horizontal-relative:margin", shape.get("style"))
+            autofit, fixed = body.findall(f"{W}tbl")
+            self.assertIsNone(autofit.find(f"{W}tblPr/{W}tblLayout"))
+            cells = [[texts(tc) for tc in tr.findall(f"{W}tc")] for tr in autofit.iter(f"{W}tr")]
+            widest = sum(max(carlito_width(row[c]) for row in cells) + 10.8 for c in range(3))
+            # About 120 pt: well within the 226 pt beside the picture and its 9 pt gap.
+            self.assertLess(abs(widest - 120), 5, name)
+            self.assertEqual(val(fixed, f"{W}tblPr/{W}tblLayout", "type"), "fixed")
+            self.assertEqual(val(fixed, f"{W}tblPr/{W}tblW", "w"), "3000")
+
+        # E-table-header-repeat-limit and -single-tall.
+        for name, heads in (("E-table-header-repeat-limit", [22, 22]),
+                            ("E-table-header-repeat-single-tall", [60])):
+            _, _, body = load(name)
+            (table,) = body.findall(f"{W}tbl")
+            rows = table.findall(f"{W}tr")
+            self.assertEqual(len(rows), len(heads) + 10, name)
+            for row, count in zip(rows, heads):
+                self.assertIsNotNone(row.find(f"{W}trPr/{W}tblHeader"))
+                self.assertEqual(texts(row.find(f"{W}tc")).count("Head"), count)
+            self.assertIsNone(rows[len(heads)].find(f"{W}trPr/{W}tblHeader"))
+            after = [texts(p) for p in body.findall(f"{W}p")][-2:]
+            self.assertEqual(after[-1], "End of the document.")
+            self.assertEqual(after[0] == "After the table.", len(heads) == 2, name)
+
+        # E-table-row-exact-valign.
+        _, _, body = load("E-table-row-exact-valign")
+        seen = []
+        for table in body.findall(f"{W}tbl"):
+            row = table.findall(f"{W}tr")[1]
+            seen.append((val(row, f"{W}trPr/{W}trHeight"), val(row, f"{W}trPr/{W}trHeight", "hRule"),
+                         val(row, f"{W}tc/{W}tcPr/{W}vAlign"), texts(row.find(f"{W}tc"))))
+        self.assertEqual(seen, [("800", "exact", "top", "Short"), ("800", "exact", "center", "Short"),
+                                ("800", "exact", "bottom", "Short"),
+                                ("800", "atLeast", "center", "Short")])
+
+        # E-table-nested-empty-para-14: the first cell ends with a nested table and then an
+        # empty paragraph, or one of text.
+        doc, _, body = load("E-table-nested-empty-para-14")
+        self.assertEqual(doc.mode, 14)
+        ends = []
+        for table in body.findall(f"{W}tbl"):
+            first = table.find(f"{W}tr/{W}tc")
+            children = [child.tag for child in first if child.tag != f"{W}tcPr"]
+            self.assertEqual(children[-2:], [f"{W}tbl", f"{W}p"])
+            ends.append(texts(list(first)[-1]))
+        self.assertEqual(ends, ["", "After the nested table"])
+
+        # E-header-cut: one section per case, with its page size, header distance and part.
+        _, parts, body = load("E-header-cut")
+        sections = list(body.iter(f"{W}sectPr"))
+        self.assertEqual(len(sections), 6)
+        sizes = [(val(s, f"{W}pgSz", "w"), val(s, f"{W}pgSz", "h")) for s in sections]
+        a4, letter, a5 = ("11906", "16838"), ("12240", "15840"), ("8391", "11906")
+        self.assertEqual(sizes, [a4, a4, a4, letter, a5, a4])
+        self.assertEqual([val(s, f"{W}pgMar", "header") for s in sections],
+                         ["708", "708", "1440", "708", "708", "708"])
+        rels = ElementTree.fromstring(parts["word/_rels/document.xml.rels"])
+        targets = {rel.get("Id"): rel.get("Target") for rel in rels}
+        r_id = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+        named = []
+        for s in sections:
+            (ref,) = [child for child in s if child.tag.endswith("Reference")]
+            named.append((ref.tag[len(W):], targets[ref.get(r_id)]))
+        self.assertEqual(named, [("headerReference", f"header{n}.xml") for n in range(1, 6)]
+                         + [("footerReference", "footer6.xml")])
+        for target, count, height in (("header1.xml", 400, "20"), ("header2.xml", 200, "40"),
+                                      ("footer6.xml", 200, "40")):
+            paragraphs = ElementTree.fromstring(parts[f"word/{target}"]).findall(f"{W}p")
+            self.assertEqual(len(paragraphs), count, target)
+            self.assertEqual({(val(p, f"{W}pPr/{W}spacing", "line"),
+                               val(p, f"{W}pPr/{W}spacing", "lineRule")) for p in paragraphs},
+                             {(height, "exact")}, target)
+            self.assertEqual({texts(p) for p in paragraphs}, {""}, target)
+        for target in ("header3.xml", "header4.xml", "header5.xml"):
+            (paragraph,) = ElementTree.fromstring(parts[f"word/{target}"]).findall(f"{W}p")
+            self.assertEqual(len(paragraph.findall(f"{W}r/{W}br")), 39, target)
+            self.assertEqual(val(paragraph, f"{W}pPr/{W}spacing", "line"), "240", target)
+
+        # E-number-formats-letters: the sections restart at the numbers the purpose names.
+        _, _, body = load("E-number-formats-letters")
+        sections = list(body.iter(f"{W}sectPr"))
+        self.assertEqual([int(val(s, f"{W}pgNumType", "start")) for s in sections],
+                         [780, 781, 1664, 5000, 10000])
+        instructions = [f.get(f"{W}instr").strip() for f in body.iter(f"{W}fldSimple")]
+        self.assertEqual(len(instructions), 25)
+        self.assertEqual(set(instructions), {f"PAGE \\* {s}" for s in
+                                             ("Arabic", "ALPHABETIC", "alphabetic", "ROMAN",
+                                              "roman")})
+
+        # E-superscript-steps: every half point from 8 to 14 pt in both fonts.
+        _, _, body = load("E-superscript-steps")
+        found = []
+        for p in labels(body):
+            runs = p.findall(f"{W}r")[1:]
+            self.assertEqual([val(r, f"{W}rPr/{W}vertAlign") for r in runs],
+                             [None, "superscript", None, "subscript"])
+            self.assertEqual(len({val(r, f"{W}rPr/{W}sz") for r in runs}), 1)
+            found.append((val(runs[0], f"{W}rPr/{W}rFonts", "ascii"),
+                          int(val(runs[0], f"{W}rPr/{W}sz"))))
+        self.assertEqual(found, [(font, hp) for font in ("Calibri", "Liberation Sans")
+                                 for hp in range(16, 29)])
+
+        # E-table-float-center-margins: unequal margins, four anchors, placed from the page.
+        _, _, body = load("E-table-float-center-margins")
+        (section,) = body.iter(f"{W}sectPr")
+        self.assertEqual((val(section, f"{W}pgMar", "left"), val(section, f"{W}pgMar", "right")),
+                         ("2880", "720"))
+        placed = [(val(t, f"{W}tblPr/{W}tblpPr", "horzAnchor"),
+                   val(t, f"{W}tblPr/{W}tblpPr", "vertAnchor"),
+                   val(t, f"{W}tblPr/{W}tblpPr", "tblpXSpec"),
+                   val(t, f"{W}tblPr/{W}tblpPr", "tblpY")) for t in body.findall(f"{W}tbl")]
+        self.assertEqual(placed, [(None, "page", "center", "2000"),
+                                  ("margin", "page", "center", "4400"),
+                                  ("page", "page", "center", "6800"),
+                                  ("text", "page", "center", "9200")])
+
+        # E-table-style-defaults-size-12-12-14 and -10-11-14: the sizes the name gives.
+        for defaults_pt, normal_pt in ((12, 12), (10, 11)):
+            name = f"E-table-style-defaults-size-{defaults_pt}-{normal_pt}-14"
+            doc, parts, body = load(name)
+            self.assertEqual(doc.mode, 14)
+            styles = ElementTree.fromstring(parts["word/styles.xml"])
+            self.assertEqual(val(styles, f"{W}docDefaults/{W}rPrDefault/{W}rPr/{W}sz"),
+                             str(2 * defaults_pt), name)
+            self.assertIsNone(styles.find(f"{W}docDefaults/{W}pPrDefault/{W}pPr/{W}jc"), name)
+            normal = next(s for s in styles.iter(f"{W}style") if s.get(f"{W}styleId") == "Normal")
+            self.assertEqual(val(normal, f"{W}rPr/{W}sz"), str(2 * normal_pt), name)
+            self.assertEqual(val(normal, f"{W}pPr/{W}jc"), "left", name)
+            big = next(s for s in styles.iter(f"{W}style") if s.get(f"{W}styleId") == "Big")
+            self.assertEqual(val(big, f"{W}rPr/{W}sz"), "28")
+            (table,) = body.findall(f"{W}tbl")
+            self.assertEqual(val(table, f"{W}tblPr/{W}tblStyle"), "Big")
+            self.assertIn(f"document defaults {defaults_pt} pt, Normal {normal_pt} pt",
+                          texts(body.find(f"{W}p")))
+
+        # E-underline-trailspace-indent: the spaces end where the labels say, for Carlito's
+        # space (Calibri's twin) and the 72 pt right indent.
+        _, _, body = load("E-underline-trailspace-indent")
+        samples = [p for p in body.findall(f"{W}p") if p.find(f"{W}pPr/{W}ind") is not None]
+        self.assertEqual([val(p, f"{W}pPr/{W}ind", "right") for p in samples], ["1440"] * 4)
+        right_margin = rules.TEXT_W / 20
+        for sample, (count, _) in zip(samples, rules.TRAILING_SPACES_INDENT):
+            value = texts(sample)
+            self.assertEqual(value.count(" "), 4 + count)
+            self.assertIsNotNone(sample.find(f"{W}r/{W}rPr/{W}u"))
+            words = carlito_width(" ".join(["underlined"] * 5))
+            end = words + count * carlito_width(" ")
+            label = dict(rules.TRAILING_SPACES_INDENT)[count]
+            if label.startswith("11 pt before the right indent"):
+                self.assertAlmostEqual(end, right_margin - 72 - 11, delta=2)
+            elif label.startswith("36 pt past the right indent"):
+                self.assertAlmostEqual(end, right_margin - 36, delta=2)
+            elif label.startswith("11 pt past the right margin"):
+                self.assertAlmostEqual(end, right_margin + 11, delta=2)
+            else:
+                self.assertAlmostEqual(end, right_margin + 101, delta=2)
 
     def test_pictures_are_typed_png_parts_that_resolve(self):
         # Every VML picture of every document is Word's picture frame (the shape type defined
