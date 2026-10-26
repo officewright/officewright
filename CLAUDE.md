@@ -82,9 +82,10 @@ tests/pdf-output/       checks text-to-pdf output, in Helvetica and with Liberat
                         (CFF) from tests/fonts embedded, the page of glyph runs and vector graphics that
                         officewright-pdf's example `primitives` draws in both fonts, and the JPEG and PNG files
                         images.py makes (also the fuzz seeds in fuzz/seeds/png and jpeg) drawn by the example
-                        `images`, with qpdf, pdftotext, pdffonts, pdfimages and pdftoppm, and what the example
-                        `embed_report` counts for fonts it cannot embed (Linux, macOS; Windows has no official
-                        poppler build, and the golden snapshot proves the bytes are the same)
+                        `images`, the synthetic italic and bold the example `synthetic` draws for a family
+                        resolved without those faces, with qpdf, pdftotext, pdffonts, pdfimages and pdftoppm,
+                        and what the example `embed_report` counts for fonts it cannot embed (Linux, macOS;
+                        Windows has no official poppler build, and the golden snapshot proves the bytes are the same)
 tests/corpus/           small curated real documents (committed) + SOURCES.md + baseline.json
 tests/corpus/word-rules/  documents written by scripts/make-rule-docs.py, one undocumented Word rule each
 tests/corpus/poi/        unmodified Apache POI test documents (Apache-2.0) with POI's LICENSE and NOTICE
