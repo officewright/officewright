@@ -478,6 +478,70 @@ fn keeps_the_elements_of_the_document_around_its_body() {
 }
 
 #[test]
+fn keeps_the_elements_of_the_notes_parts_among_their_notes() {
+    // Issue #388: elements of w:footnotes and w:endnotes other than notes were kept
+    // without anything that led to them.
+    // From the review of #414: WordprocessingML elements that are not notes there (a
+    // paragraph, an endnote in the footnotes) and a note without a valid id are kept too.
+    let footnotes = format!(
+        r#"<w:footnotes xmlns:w="{W}" xmlns:x="urn:x"><x:first/><w:footnote w:id="1"><w:p/></w:footnote><x:middle/><w:p w:rsidR="00A1"/><w:footnote w:id="2"><w:p/></w:footnote><x:last/><w:footnote w:id="x"><w:p/></w:footnote><w:endnote w:id="3"><w:p/></w:endnote></w:footnotes>"#
+    );
+    let endnotes = format!(
+        r#"<w:endnotes xmlns:w="{W}" xmlns:x="urn:x"><w:endnote w:id="1"><w:p/></w:endnote><x:end x:a="1"/></w:endnotes>"#
+    );
+    let document = with_parts(
+        "<w:p/>",
+        &[
+            ("footnotes", "footnotes.xml", footnotes),
+            ("endnotes", "endnotes.xml", endnotes),
+        ],
+    );
+    let footnote = |id| document.footnotes[&id];
+    let endnote = document.endnotes[&1];
+    let kept: Vec<(String, bool, u32)> = document
+        .note_root_elements
+        .iter()
+        .map(|&(span, endnotes, before)| (document.element(span).to_xml(), endnotes, before))
+        .collect();
+    assert_eq!(kept.len(), 7, "{kept:?}");
+    let names: Vec<bool> = [
+        ("<x:first ", ""),
+        ("<x:middle ", ""),
+        ("<w:p ", "w:rsidR=\"00A1\""),
+        ("<x:last ", ""),
+        ("<w:footnote ", "w:id=\"x\""),
+        ("<w:endnote ", "w:id=\"3\""),
+        ("<x:end ", "x:a=\"1\""),
+    ]
+    .iter()
+    .zip(&kept)
+    .map(|((start, attribute), (xml, _, _))| xml.starts_with(start) && xml.contains(attribute))
+    .collect();
+    assert_eq!(names, [true; 7], "{kept:?}");
+    // Neither the note without a valid id nor the misplaced endnote is a note.
+    assert_eq!(document.footnotes.len(), 2);
+    assert_eq!(document.endnotes.len(), 1);
+    // Before the first footnote, between the two, after the last; after the endnote.
+    let places: Vec<(bool, u32)> = kept
+        .iter()
+        .map(|&(_, endnotes, before)| (endnotes, before))
+        .collect();
+    assert_eq!(
+        places,
+        [
+            (false, footnote(1)),
+            (false, footnote(2)),
+            (false, footnote(2)),
+            (false, footnote(2) + 1),
+            (false, footnote(2) + 1),
+            (false, footnote(2) + 1),
+            (true, endnote + 1),
+        ]
+    );
+    assert!(document.root_elements.is_empty());
+}
+
+#[test]
 fn keeps_the_namespaces_that_values_in_kept_xml_name() {
     // Prefixes named only in values (#110): by every Markup Compatibility attribute, by
     // Requires and by xsi:type. Each case names a prefix of its own, bound on the

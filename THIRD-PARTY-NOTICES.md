@@ -91,8 +91,11 @@ measured by `scripts/corpus-import.py`.
 ## Test fonts
 
 Fonts in `tests/fonts/` and `tests/fonts-word/`, at the repository root and so outside
-every crate. Those of `tests/fonts-word/` are read only by the corpus runner of
-`scripts/check.sh`; those of `tests/fonts/` by it and by
+every crate. None of the library's crates or their tests read those of `tests/fonts-word/`:
+the corpus runner (`tools/corpus-runner`, run by `scripts/check.sh`) lays documents out with
+them, and `scripts/make-symbol-font.py` and `tests/corpus-tools/test_symbol_font.py` read the
+symbol font and the face it is made from.
+Those of `tests/fonts/` are read by the corpus runner and by
 `crates/officewright-font/tests/third_party_fonts.rs`,
 `crates/officewright-font/tests/metric_compatible.rs`,
 `crates/officewright-pdf/tests/embedded_fonts.rs`,
@@ -103,10 +106,12 @@ checks in `tests/pdf-output` and `tests/corpus-tools/poppler/test_font_embedding
 they seed the fuzz targets in `fuzz/`. `tests/corpus-tools/test_test_fonts.py` checks
 that every file in both folders is listed below with its SHA-256, and that every file
 listed is there; `scripts/check-test-fonts.sh`, run at night, that each is byte for byte
-the file of the source given for it. The tests embed the fonts, reduced to some of their
-glyphs, in PDF files they write to temporary directories; those files are not committed
-or published. Each font is unmodified and sits next to the license file it was
-distributed with, byte for byte.
+the file of the source given for it, or for the symbol font what
+`scripts/make-symbol-font.py` writes from that source. The tests embed the fonts, reduced
+to some of their glyphs, in PDF files they write to temporary directories; those files are
+not committed or published. Each font but the symbol font, Officewright Test Symbol, is
+unmodified, and each sits next to the license file it was distributed with, byte for byte;
+the symbol font is a modified version of Noto Sans, described in its section.
 
 ### Liberation Sans, Serif and Mono
 
@@ -200,6 +205,28 @@ distributed with, byte for byte.
   `tests/fonts`. It lies outside `tests/fonts`, so the tests of the crates, some of which
   need a family without a Bold face, do not see it. There is no Italic face because Word had
   none, and it slanted the Regular.
+- Files of the symbol font, a modified version of the TrueType Regular face:
+  `tests/fonts-word/test-symbol/OfficewrightTestSymbol-Regular.ttf`
+  (SHA-256 `ff6f75a32bbef05db3e4f9ad389427b90eb8c7d08d63257a6f56d277b7bb2fdf`), written by
+  `scripts/make-symbol-font.py` from `tests/fonts-word/noto-truetype/NotoSans-Regular.ttf`,
+  and `tests/fonts-word/test-symbol/LICENSE`
+  (SHA-256 `f2095b08bed08b23a6fe26112fcd679a2bee3f002eef077eb05d215ed1051bd8`), the file
+  `fonts/LICENSE` of the same repository at the same commit. Changes: the character map
+  is a Windows symbol one (platform 3, encoding 0) that maps U+F020 to U+F0FF to the glyphs
+  Noto Sans maps U+0020 to U+00FF to, and no other character; the family is named
+  Officewright Test Symbol, and the names keep Noto Sans's copyright, version, trademark,
+  designer and license notices; the OS/2 table gives the symbol character set, the Private
+  Use Area, the first and last codes of the map, and vendor NONE. Every other table is
+  Noto Sans's, byte for byte, but for the head table's checksum of the whole font
+  (checkSumAdjustment). It is distributed under the SIL Open Font License 1.1, as
+  the license requires of a modified version.
+- Why the symbol font: Word draws text in a symbol font through the font's symbol
+  character map, and no font of `tests/fonts` has one. Word renders the reference of
+  `E-symbol-font` with this font installed for the user, and the corpus runner of
+  `scripts/check.sh` lays that document out with this folder. `make-symbol-font.py` writes
+  the same bytes on every machine: `tests/corpus-tools/test_symbol_font.py` checks the
+  committed font against it, and `scripts/check-test-fonts.sh` against what it writes from
+  upstream's `NotoSans-Regular.ttf`.
 
 ## Apache POI test documents
 
