@@ -26,12 +26,11 @@ tests/corpus/reference/<group>/<name>/ go instead
     resolution and colour model the SSIM comparison uses;
   - geometry.json: page sizes and the position of every line and word (pdftotext
     -bbox-layout, in points from the top left of the page), the page count, Word's own page
-    breaks (the w:lastRenderedPageBreak marks of the re-saved copy, a table row that crosses
-    a page counted once), the fonts the PDF
-    references without embedding them, and what Word changed when it saved the copy: the
-    w:compat settings it dropped and added, the style and numbering properties it dropped,
-    added and changed, and the paragraphs whose style it changed; every value on a line of
-    its own, without indentation (geometry_text);
+    breaks (the w:lastRenderedPageBreak marks of the re-saved copy, each page a table row
+    crosses counted once), the fonts the PDF references without embedding them, and what
+    Word changed when it saved the copy: the w:compat settings it dropped and added, the
+    style and numbering properties it dropped, added and changed, and the paragraphs whose
+    style it changed; every value on a line of its own, without indentation (geometry_text);
   - formatting.json, from make-reference.ps1 format 3 on: the formatting Word computes for
     every paragraph of every story, with its runs of formatting when Word gave them, and the
     body paragraphs' style ids and names taken from the re-saved copy.
@@ -860,45 +859,83 @@ def page_geometry(bbox: str) -> list[dict]:
     return pages
 
 
-def cell_start_echoes(root: ElementTree.Element) -> set[int]:
-    """The ids of the paragraphs whose w:lastRenderedPageBreak at their start Word adds for a
-    page break it has already marked: the first paragraph of a table cell, where an earlier
-    cell of the same row holds a mark. When a row crosses a page, Word marks the break in the
-    cell that crosses it and again at the start of each cell after it, even of one whose text
-    lies wholly on the page before (#410: E-table-row-split, E-table-row-cant-split-tall,
-    E-table-row-split-nested)."""
-    parents = {child: parent for parent in root.iter() for child in parent}
+def leads(paragraph: ElementTree.Element, mark: ElementTree.Element) -> bool:
+    """Whether the mark comes before everything the paragraph shows: only the properties of
+    the paragraph and of its runs precede it."""
 
-    def nearest(element: ElementTree.Element, tag: str) -> ElementTree.Element | None:
-        while element in parents:
-            element = parents[element]
-            if element.tag == tag:
-                return element
+    def walk(element: ElementTree.Element) -> bool | None:
+        for child in element:
+            if child is mark:
+                return True
+            name = local_name(child.tag)
+            if name in ("pPr", "rPr"):
+                continue
+            if name != "r":
+                return False
+            found = walk(child)
+            if found is not None:
+                return found
         return None
 
-    marked = {id(mark) for mark in root.iter(f"{W}lastRenderedPageBreak")}
-    echoes = set()
-    for row in root.iter(f"{W}tr"):
-        # The row's own cells, in order; a cell of a nested table belongs to its own row.
-        cells = [cell for cell in row.iter(f"{W}tc") if nearest(cell, f"{W}tr") is row]
-        for n, cell in enumerate(cells):
+    return walk(paragraph) is True
+
+
+def row_repeats(root: ElementTree.Element) -> set[int]:
+    """The ids of the w:lastRenderedPageBreak marks that repeat a page a table row has
+    already marked, so that each page a row crosses counts once (#410).
+
+    Word marks a paragraph that starts on another page than the one where the text before
+    it ended, and every cell of a row starts on the row's first page. So a row that starts
+    a page is marked at the start of its first cell (E-table-row-cant-split); a cell that
+    crosses a page is marked where it does; and the cell after it is marked at its start,
+    though its text is on the page before ("r3c2" in E-table-row-split and
+    E-table-row-cant-split-tall, "Outer b" in E-table-row-split-nested). Such a mark at the
+    start of a later cell, after an earlier cell's mark, repeats a page. Of the other marks,
+    the n-th of each cell is the row's n-th page after its first, kept in the first cell
+    that has it; no reference shows two cells crossing one page, and the rule counts such a
+    page once whichever cells mark it. Nested rows come first, so that the marks they leave
+    out do not count for the cell around them.
+    """
+    parents = {child: parent for parent in root.iter() for child in parent}
+
+    def rows_above(element: ElementTree.Element) -> list[ElementTree.Element]:
+        rows = []
+        while element in parents:
+            element = parents[element]
+            if element.tag == f"{W}tr":
+                rows.append(element)
+        return rows
+
+    repeats: set[int] = set()
+    rows = sorted(root.iter(f"{W}tr"), key=lambda row: len(rows_above(row)), reverse=True)
+    for row in rows:
+        reached = 0  # pages after its first that the row's earlier cells mark
+        marked = False  # whether an earlier cell holds a mark
+        for n, cell in enumerate(c for c in row.iter(f"{W}tc") if rows_above(c)[0] is row):
+            marks = [m for m in cell.iter(f"{W}lastRenderedPageBreak") if id(m) not in repeats]
             first = next(cell.iter(f"{W}p"), None)
-            earlier = any(id(mark) in marked for c in cells[:n]
-                          for mark in c.iter(f"{W}lastRenderedPageBreak"))
-            if first is not None and earlier:
-                echoes.add(id(first))
-    return echoes
+            if marks and first is not None and leads(first, marks[0]) and (n == 0 or marked):
+                if n > 0:
+                    repeats.add(id(marks[0]))
+                marked = True
+                marks = marks[1:]
+            for page, mark in enumerate(marks):
+                if page < reached:
+                    repeats.add(id(mark))
+            reached = max(reached, len(marks))
+            marked = marked or bool(marks)
+    return repeats
 
 
 def rendered_page_breaks(parts: dict[str, bytes]) -> list[dict]:
     """Word's page breaks: the w:lastRenderedPageBreak marks of a saved document, but for
-    those cell_start_echoes leaves out, so that a row crossing a page counts once.
+    those row_repeats leaves out, so that each page a table row crosses counts once.
 
     Paragraphs are counted in document order from 0, table cells included; the offset is
     the number of characters of the paragraph's text before the mark.
     """
     root = ElementTree.fromstring(parts["word/document.xml"])
-    echoes = cell_start_echoes(root)
+    repeats = row_repeats(root)
     breaks = []
     for index, paragraph in enumerate(root.iter(f"{W}p")):
         text = ""
@@ -909,11 +946,9 @@ def rendered_page_breaks(parts: dict[str, bytes]) -> list[dict]:
                 text += element.text or ""
             elif name == "tab":
                 text += "\t"
-            elif name == "lastRenderedPageBreak":
+            elif name == "lastRenderedPageBreak" and id(element) not in repeats:
                 marks.append(len(text))
         for offset in marks:
-            if offset == 0 and id(paragraph) in echoes:
-                continue
             breaks.append(
                 {
                     "paragraph": index,

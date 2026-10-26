@@ -947,8 +947,9 @@ class Import(unittest.TestCase):
 
 
 class RenderedPageBreaks(unittest.TestCase):
-    """Word marks a page break that a table row crosses in the cell that crosses it and
-    again at the start of each later cell of the row (#410); the importer keeps one."""
+    """Each page a table row crosses counts once among Word's page breaks (#410). The
+    first tests give the marks of Word's re-saved copies of E-table-row-split,
+    E-table-row-cant-split-tall, E-table-row-split-nested and E-table-row-cant-split."""
 
     @staticmethod
     def document(body: str) -> dict:
@@ -958,51 +959,133 @@ class RenderedPageBreaks(unittest.TestCase):
 
     @staticmethod
     def p(text: str, mark: bool = False) -> str:
-        before = "<w:r><w:lastRenderedPageBreak/></w:r>" if mark else ""
-        return f"<w:p>{before}<w:r><w:t>{text}</w:t></w:r></w:p>"
+        # Word writes a mark at a paragraph's start as the first child of its first run.
+        before = "<w:lastRenderedPageBreak/>" if mark else ""
+        return f"<w:p><w:r><w:rPr><w:b/></w:rPr>{before}<w:t>{text}</w:t></w:r></w:p>"
+
+    @staticmethod
+    def mid(before: str, after: str) -> str:
+        return (f"<w:p><w:r><w:t>{before}</w:t><w:lastRenderedPageBreak/>"
+                f"<w:t>{after}</w:t></w:r></w:p>")
 
     def cell(self, *paragraphs: str) -> str:
         return f"<w:tc>{''.join(paragraphs)}</w:tc>"
+
+    def row(self, *cells: str) -> str:
+        return f"<w:tr>{''.join(cells)}</w:tr>"
 
     def breaks(self, body: str) -> list[tuple[int, str]]:
         return [(b["paragraph"], b["text_after"])
                 for b in importer.rendered_page_breaks(self.document(body))]
 
-    def test_a_split_row_counts_once(self):
-        # The first cell crosses the page before "Long 18"; Word marks the two cells after
-        # it at their start too, though their text is on the page before.
-        row = ("<w:tbl><w:tr>"
-               + self.cell(self.p("Long 17"), self.p("Long 18", True))
-               + self.cell(self.p("r3c2", True)) + self.cell(self.p("r3c3", True))
-               + "</w:tr></w:tbl>")
-        self.assertEqual(self.breaks(self.p("before") + row + self.p("after")),
+    def test_the_cell_after_one_that_crosses_a_page_repeats_it_at_its_start(self):
+        # E-table-row-split: the first cell crosses the page before "Long 18"; Word marks
+        # "r3c2" at its start, though its text is on the page before, and not "r3c3".
+        table = ("<w:tbl>"
+                 + self.row(self.cell(self.p("Long 17"), self.p("Long 18", True)),
+                            self.cell(self.p("r3c2", True)), self.cell(self.p("r3c3")))
+                 + self.row(self.cell(self.p("r4c1")), self.cell(self.p("r4c2")))
+                 + "</w:tbl>")
+        self.assertEqual(self.breaks(self.p("before") + table + self.p("after")),
                          [(2, "Long 18")])
 
-    def test_a_row_that_starts_a_page_counts_once(self):
-        row = ("<w:tbl><w:tr>" + self.cell(self.p("Long 01", True))
-               + self.cell(self.p("r3c2", True)) + "</w:tr></w:tbl>")
-        self.assertEqual(self.breaks(row), [(0, "Long 01")])
+    def test_a_row_that_starts_a_page_and_crosses_another(self):
+        # E-table-row-cant-split-tall: the row starts a page at "Long 01" and crosses the
+        # next at "Long 52", and "r3c2" repeats the second.
+        table = ("<w:tbl>"
+                 + self.row(self.cell(self.p("Long 01", True), self.p("Long 52", True)),
+                            self.cell(self.p("r3c2", True)), self.cell(self.p("r3c3")))
+                 + "</w:tbl>")
+        self.assertEqual(self.breaks(table), [(0, "Long 01"), (1, "Long 52")])
+
+    def test_a_row_that_only_starts_a_page_keeps_its_mark(self):
+        # E-table-row-cant-split: Word marks the first cell alone.
+        table = ("<w:tbl>"
+                 + self.row(self.cell(self.p("Long 01", True)), self.cell(self.p("r3c2")))
+                 + "</w:tbl>")
+        self.assertEqual(self.breaks(table), [(0, "Long 01")])
 
     def test_a_nested_table_counts_once_at_each_level(self):
+        # E-table-row-split-nested: the nested row "Inner 13" starts the page, and the outer
+        # cell after the one holding the nested table repeats it at its start.
         inner = ("<w:tbl>"
-                 + "<w:tr>" + self.cell(self.p("Inner 12a")) + self.cell(self.p("Inner 12b"))
-                 + "</w:tr><w:tr>" + self.cell(self.p("Inner 13a", True))
-                 + self.cell(self.p("Inner 13b", True)) + "</w:tr></w:tbl>")
-        outer = ("<w:tbl><w:tr>" + self.cell(self.p("Outer cell"), inner, self.p(""))
-                 + self.cell(self.p("Outer b", True)) + "</w:tr></w:tbl>")
+                 + self.row(self.cell(self.p("Inner 12a")), self.cell(self.p("Inner 12b")))
+                 + self.row(self.cell(self.p("Inner 13a", True)), self.cell(self.p("Inner 13b")))
+                 + "</w:tbl>")
+        outer = ("<w:tbl>"
+                 + self.row(self.cell(self.p("Outer cell"), inner, self.p("")),
+                            self.cell(self.p("Outer b", True)))
+                 + "</w:tbl>")
         self.assertEqual(self.breaks(outer), [(3, "Inner 13a")])
 
-    def test_marks_inside_a_later_cell_and_outside_tables_are_kept(self):
-        # A mark at the start of a later cell's second paragraph, or within its first, is
-        # where that cell's own text crosses a page; a first cell without marks leaves a
-        # later cell's start mark alone; marks outside tables all count.
-        row = ("<w:tbl><w:tr>" + self.cell(self.p("short"))
-               + self.cell(self.p("starts here", True))
-               + self.cell(self.p("first"), self.p("second", True)) + "</w:tr></w:tbl>")
-        mid = '<w:p><w:r><w:t>ab</w:t><w:lastRenderedPageBreak/><w:t>cd</w:t></w:r></w:p>'
-        self.assertEqual(self.breaks(self.p("one", True) + row + mid + self.p("two", True)),
-                         [(0, "one"), (2, "starts here"), (4, "second"), (5, "cd"),
-                          (6, "two")])
+    def test_a_later_cell_that_crosses_a_page_the_row_starts_on_counts(self):
+        # The row starts a page; only its second cell crosses into the next one, within its
+        # first paragraph or at the start of its second.
+        for second, crossing in ((self.cell(self.mid("ab", "cd")), (1, "cd")),
+                                 (self.cell(self.p("first"), self.p("second", True)),
+                                  (2, "second"))):
+            with self.subTest(second=second):
+                table = ("<w:tbl>" + self.row(self.cell(self.p("Name", True)), second)
+                         + "</w:tbl>")
+                self.assertEqual(self.breaks(table), [(0, "Name"), crossing])
+
+    def test_a_mark_at_a_later_cell_s_start_with_none_before_it_stays(self):
+        # Only a mark after an earlier cell's repeats a page; one with none before it is
+        # kept, as every mark outside a table is.
+        table = ("<w:tbl>"
+                 + self.row(self.cell(self.p("short")), self.cell(self.p("starts", True)))
+                 + "</w:tbl>")
+        self.assertEqual(self.breaks(table), [(1, "starts")])
+
+    def test_a_mark_after_what_a_paragraph_shows_is_not_a_repeat(self):
+        # The row starts a page; the second cell's first paragraph shows a picture, a line
+        # break, a symbol or a field on that page before the mark, and its caption on the
+        # next page.
+        shown = ("<w:drawing/>", "<w:br/>", '<w:sym w:font="Symbol" w:char="F041"/>',
+                 '<w:fldChar w:fldCharType="begin"/>')
+        for item in shown:
+            with self.subTest(item=item):
+                second = (f"<w:p><w:r>{item}</w:r><w:r><w:lastRenderedPageBreak/>"
+                          "<w:t>caption</w:t></w:r></w:p>")
+                table = ("<w:tbl>" + self.row(self.cell(self.p("Name", True)),
+                                              self.cell(second)) + "</w:tbl>")
+                self.assertEqual(self.breaks(table), [(0, "Name"), (1, "caption")])
+
+    def test_a_page_that_several_cells_cross_counts_once(self):
+        # Every cell that crosses a page marks it, and the cell after the first that does
+        # repeats it at its start; the page counts once, at the first cell's mark.
+        table = ("<w:tbl>"
+                 + self.row(self.cell(self.mid("a1", "a2")),
+                            self.cell(self.p("b1", True), self.mid("b1", "b2")),
+                            self.cell(self.mid("c1", "c2")))
+                 + "</w:tbl>")
+        self.assertEqual(self.breaks(table), [(0, "a2")])
+
+    def test_a_later_cell_that_crosses_more_pages_keeps_the_further_ones(self):
+        table = ("<w:tbl>"
+                 + self.row(self.cell(self.mid("a1", "a2")),
+                            self.cell(self.p("b1", True), self.mid("b1", "b2"),
+                                      self.mid("b2", "b3")))
+                 + "</w:tbl>")
+        self.assertEqual(self.breaks(table), [(0, "a2"), (3, "b3")])
+
+    def test_a_nested_row_s_repeats_do_not_count_for_the_cell_around_it(self):
+        # The nested row's second cell repeats its first cell's page, so the outer first
+        # cell crosses one page; the outer second cell crosses two, and its second stays.
+        inner = ("<w:tbl>"
+                 + self.row(self.cell(self.mid("x1", "x2")),
+                            self.cell(self.p("y1", True), self.mid("y1", "y2")))
+                 + "</w:tbl>")
+        outer = ("<w:tbl>"
+                 + self.row(self.cell(self.p("Outer"), inner),
+                            self.cell(self.p("z1", True), self.mid("z1", "z2"),
+                                      self.mid("z2", "z3")))
+                 + "</w:tbl>")
+        self.assertEqual(self.breaks(outer), [(1, "x2"), (6, "z3")])
+
+    def test_marks_outside_tables_all_count(self):
+        body = self.p("one", True) + self.mid("ab", "cd") + self.p("two", True)
+        self.assertEqual(self.breaks(body), [(0, "one"), (1, "cd"), (2, "two")])
 
 
 class GeometryText(unittest.TestCase):
