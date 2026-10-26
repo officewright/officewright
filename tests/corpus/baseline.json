@@ -440,18 +440,18 @@
       "text_score": 0.7426
     },
     "tests/corpus/business/contract-hhs-sow-usability-testing.docx": {
-      "line_agreement": 0.8733,
+      "line_agreement": 0.8756,
       "page_break_agreement": 0.0,
-      "ssim_mean": 0.5125,
-      "ssim_min": 0.4429,
-      "text_score": 0.6292
+      "ssim_mean": 0.511,
+      "ssim_min": 0.4448,
+      "text_score": 0.6136
     },
     "tests/corpus/business/contract-hhs-teaming-agreement.docx": {
       "line_agreement": 0.5442,
       "page_break_agreement": 0.1667,
-      "ssim_mean": 0.7191,
-      "ssim_min": 0.53,
-      "text_score": 0.643
+      "ssim_mean": 0.734,
+      "ssim_min": 0.5463,
+      "text_score": 0.7856
     },
     "tests/corpus/business/contract-usds-statement-of-objectives.docx": {
       "line_agreement": 0.8496,
@@ -624,9 +624,9 @@
     "tests/corpus/generated/contract-zh.docx": {
       "line_agreement": 0.2703,
       "page_break_agreement": 0.0,
-      "ssim_mean": 0.8472,
-      "ssim_min": 0.7387,
-      "text_score": 0.7664
+      "ssim_mean": 0.847,
+      "ssim_min": 0.7291,
+      "text_score": 0.5575
     },
     "tests/corpus/generated/cv-en-academic-open.docx": {
       "line_agreement": 0.8889,
@@ -715,18 +715,18 @@
       "text_score": 0.8698
     },
     "tests/corpus/generated/invoice-en-long-open.docx": {
-      "line_agreement": 0.971,
-      "page_break_agreement": 0.0,
-      "ssim_mean": 0.8755,
-      "ssim_min": 0.8185,
-      "text_score": 0.9757
+      "line_agreement": 0.9978,
+      "page_break_agreement": 1.0,
+      "ssim_mean": 0.9499,
+      "ssim_min": 0.9377,
+      "text_score": 0.9875
     },
     "tests/corpus/generated/invoice-en-long.docx": {
-      "line_agreement": 0.971,
-      "page_break_agreement": 0.0,
-      "ssim_mean": 0.8655,
-      "ssim_min": 0.8164,
-      "text_score": 0.9757
+      "line_agreement": 0.9978,
+      "page_break_agreement": 1.0,
+      "ssim_mean": 0.9346,
+      "ssim_min": 0.92,
+      "text_score": 0.9875
     },
     "tests/corpus/generated/invoice-en-merged-open.docx": {
       "line_agreement": 1.0,
@@ -1309,8 +1309,8 @@
     "tests/corpus/word-rules/E-table-autofit-15.docx": {
       "line_agreement": 1.0,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.9161,
-      "ssim_min": 0.8851,
+      "ssim_mean": 0.9612,
+      "ssim_min": 0.947,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-autofit-constrained-14.docx": {
@@ -1346,17 +1346,17 @@
     },
     "tests/corpus/word-rules/E-table-header-repeat-tall.docx": {
       "line_agreement": 1.0,
-      "page_break_agreement": 0.6,
-      "ssim_mean": 0.4928,
+      "page_break_agreement": 0.8,
+      "ssim_mean": 0.8191,
       "ssim_min": 0.0,
-      "text_score": 0.2444
+      "text_score": 0.8245
     },
     "tests/corpus/word-rules/E-table-header-repeat.docx": {
-      "line_agreement": 0.9691,
-      "page_break_agreement": 0.0,
-      "ssim_mean": 0.9401,
-      "ssim_min": 0.9257,
-      "text_score": 0.9409
+      "line_agreement": 1.0,
+      "page_break_agreement": 1.0,
+      "ssim_mean": 0.9656,
+      "ssim_min": 0.9586,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-indent-14.docx": {
       "line_agreement": 1.0,
@@ -1371,11 +1371,11 @@
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-row-cant-split-tall.docx": {
-      "line_agreement": 0.7312,
-      "page_break_agreement": 0.5,
-      "ssim_mean": 0.9524,
-      "ssim_min": 0.9041,
-      "text_score": 0.676
+      "line_agreement": 1.0,
+      "page_break_agreement": 1.0,
+      "ssim_mean": 0.9911,
+      "ssim_min": 0.9848,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-row-cant-split.docx": {
       "line_agreement": 1.0,
@@ -1385,24 +1385,24 @@
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-row-exact-height.docx": {
-      "line_agreement": 0.9231,
-      "ssim_mean": 0.7117,
-      "ssim_min": 0.7117,
-      "text_score": 0.9709
+      "line_agreement": 1.0,
+      "ssim_mean": 0.9752,
+      "ssim_min": 0.9752,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-row-split-nested.docx": {
       "line_agreement": 1.0,
-      "page_break_agreement": 0.0,
-      "ssim_mean": 0.7953,
-      "ssim_min": 0.7229,
-      "text_score": 0.5975
+      "page_break_agreement": 1.0,
+      "ssim_mean": 0.9863,
+      "ssim_min": 0.9809,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-row-split.docx": {
-      "line_agreement": 0.9518,
-      "page_break_agreement": 0.0,
-      "ssim_mean": 0.9228,
-      "ssim_min": 0.9104,
-      "text_score": 0.6367
+      "line_agreement": 1.0,
+      "page_break_agreement": 1.0,
+      "ssim_mean": 0.9884,
+      "ssim_min": 0.9824,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-style-bands-5.docx": {
       "line_agreement": 1.0,
@@ -1435,25 +1435,25 @@
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-style-header-rows-3-14.docx": {
-      "line_agreement": 0.9502,
-      "page_break_agreement": 0.0,
-      "ssim_mean": 0.6299,
-      "ssim_min": 0.5247,
-      "text_score": 0.9222
+      "line_agreement": 1.0,
+      "page_break_agreement": 1.0,
+      "ssim_mean": 0.6271,
+      "ssim_min": 0.5293,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-style-header-rows-3-off.docx": {
-      "line_agreement": 0.9502,
-      "page_break_agreement": 0.0,
-      "ssim_mean": 0.9489,
-      "ssim_min": 0.9439,
-      "text_score": 0.9222
+      "line_agreement": 1.0,
+      "page_break_agreement": 1.0,
+      "ssim_mean": 0.973,
+      "ssim_min": 0.961,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-style-header-rows-3-on.docx": {
-      "line_agreement": 0.9502,
-      "page_break_agreement": 0.0,
-      "ssim_mean": 0.9489,
-      "ssim_min": 0.9439,
-      "text_score": 0.9222
+      "line_agreement": 1.0,
+      "page_break_agreement": 1.0,
+      "ssim_mean": 0.973,
+      "ssim_min": 0.961,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-style-header-rows-format.docx": {
       "line_agreement": 1.0,
