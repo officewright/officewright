@@ -148,7 +148,8 @@ class TestSymbolFont(unittest.TestCase):
         self.assertEqual(os2[58:62], b"NONE")
         self.assertEqual(struct.unpack_from(">HH", os2, 64), (0xF020, 0xF0FF))
         self.assertEqual(struct.unpack_from(">II", os2, 78), (1 << 31, 0))
-        changed = set(range(42, 68)) | set(range(78, 86))
+        # The Unicode ranges, the vendor, the first and last characters and the code pages.
+        changed = set(range(42, 62)) | set(range(64, 68)) | set(range(78, 86))
         self.assertEqual(len(os2), len(source))
         for at in range(len(os2)):
             if at not in changed:
@@ -163,6 +164,30 @@ class TestSymbolFont(unittest.TestCase):
                                  + self.source_tables[tag][12:])
             elif tag not in (b"cmap", b"name", b"OS/2"):
                 self.assertEqual(table, self.source_tables[tag], tag)
+
+    def test_the_binary_search_fields_and_the_table_order_are_right(self):
+        # OpenType: searchRange is the largest power of two not above the count times the
+        # unit, entrySelector its log2, rangeShift the rest; tables in tag order, each after
+        # the last.
+        def fields(count, unit):
+            power = 1 << (count.bit_length() - 1)
+            return power * unit, power.bit_length() - 1, (count - power) * unit
+
+        (count,) = struct.unpack_from(">H", self.font, 4)
+        self.assertEqual(struct.unpack_from(">HHH", self.font, 6), fields(count, 16))
+        entries = directory(self.font)
+        tags = [tag for tag, _, _, _ in entries]
+        self.assertEqual(tags, sorted(tags))
+        offsets = [offset for _, _, offset, _ in entries]
+        self.assertEqual(offsets, sorted(offsets))
+        self.assertEqual(offsets[0], 12 + 16 * count)
+        cmap = self.tables[b"cmap"]
+        (offset,) = [s[3] for s in subtables(cmap)]
+        (seg_x2,) = struct.unpack_from(">H", cmap, offset + 6)
+        self.assertEqual(struct.unpack_from(">HHH", cmap, offset + 8), fields(seg_x2 // 2, 2))
+        # The subtable's length is its own, to the end of the table.
+        (length,) = struct.unpack_from(">H", cmap, offset + 2)
+        self.assertEqual(offset + length, len(cmap))
 
     def test_checksums_are_right(self):
         for tag, stored, offset, length in directory(self.font):

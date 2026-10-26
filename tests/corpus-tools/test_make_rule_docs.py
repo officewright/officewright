@@ -3043,7 +3043,7 @@ class Packages(unittest.TestCase):
             if label.startswith("Case "):
                 self.assertEqual(fonts(runs[0])["ascii"], other, label)
                 cases[int(label[5:7])] = (p, runs[1:])
-        self.assertEqual(sorted(cases), list(range(1, 22)))
+        self.assertEqual(sorted(cases), list(range(1, 24)))
 
         def sample(n):
             """The text and fonts of each run of case n after its label."""
@@ -3084,20 +3084,23 @@ class Packages(unittest.TestCase):
         self.assertEqual(sym.find(f"{W}sym").get(f"{W}char"), "F0B7")
         self.assertEqual(fonts(sym)["ascii"], other)
         self.assertEqual(sym.find(f"{W}rPr/{W}sz").get(f"{W}val"), "40")
-        # Cases 18 and 19 are list items whose bullet is in the symbol font.
+        self.assertEqual(sample(18), [(codes("\u00c4\u00e9\u00df\u00b7"), every)])
+        # Codes of the symbol range that Noto Sans maps nothing to at U+007F to U+009F.
+        self.assertEqual(sample(19), [("\uf07f\uf080\uf09f", every)])
+        # Cases 20 and 21 are list items whose bullet is in the symbol font.
         numbering = ElementTree.fromstring(parts["word/numbering.xml"])
         abstract = {a.get(f"{W}abstractNumId"): a for a in numbering.iter(f"{W}abstractNum")}
         instances = {n.get(f"{W}numId"): n.find(f"{W}abstractNumId").get(f"{W}val")
                      for n in numbering.iter(f"{W}num")}
-        for n, bullet in ((18, ""), (19, "·")):
+        for n, bullet in ((20, ""), (21, "·")):
             num_id = cases[n][0].find(f"{W}pPr/{W}numPr/{W}numId").get(f"{W}val")
             lvl = abstract[instances[num_id]].find(f"{W}lvl")
             self.assertEqual(lvl.find(f"{W}numFmt").get(f"{W}val"), "bullet", n)
             self.assertEqual(lvl.find(f"{W}lvlText").get(f"{W}val"), bullet, n)
             self.assertEqual(lvl.find(f"{W}rPr/{W}rFonts").get(f"{W}ascii"), symbol, n)
-        # Cases 20 and 21: the next paragraph is shaded, five lines in the symbol font.
+        # Cases 22 and 23: the next paragraph is shaded, five lines in the symbol font.
         paragraphs = list(body.iter(f"{W}p"))
-        for n, size in ((20, "22"), (21, "40")):
+        for n, size in ((22, "22"), (23, "40")):
             shaded = paragraphs[paragraphs.index(cases[n][0]) + 1]
             self.assertIsNotNone(shaded.find(f"{W}pPr/{W}shd"), n)
             (r,) = shaded.findall(f"{W}r")

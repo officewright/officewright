@@ -91,8 +91,10 @@ measured by `scripts/corpus-import.py`.
 ## Test fonts
 
 Fonts in `tests/fonts/` and `tests/fonts-word/`, at the repository root and so outside
-every crate. Those of `tests/fonts-word/` are read only by the corpus runner of
-`scripts/check.sh`; those of `tests/fonts/` by it and by
+every crate. No crate reads those of `tests/fonts-word/`: the corpus runner of
+`scripts/check.sh` lays documents out with them, and `scripts/make-symbol-font.py` and
+`tests/corpus-tools/test_symbol_font.py` read the symbol font and the face it is made from.
+Those of `tests/fonts/` are read by the corpus runner and by
 `crates/officewright-font/tests/third_party_fonts.rs`,
 `crates/officewright-font/tests/metric_compatible.rs`,
 `crates/officewright-pdf/tests/embedded_fonts.rs`,
@@ -214,7 +216,8 @@ the symbol font is a modified version of Noto Sans, described in its section.
   Officewright Test Symbol, and the names keep Noto Sans's copyright, version, trademark,
   designer and license notices; the OS/2 table gives the symbol character set, the Private
   Use Area, the first and last codes of the map, and vendor NONE. Every other table is
-  Noto Sans's, byte for byte. It is distributed under the SIL Open Font License 1.1, as
+  Noto Sans's, byte for byte, but for the head table's checksum of the whole font
+  (checkSumAdjustment). It is distributed under the SIL Open Font License 1.1, as
   the license requires of a modified version.
 - Why the symbol font: Word draws text in a symbol font through the font's symbol
   character map, and no font of `tests/fonts` has one. Word renders the reference of

@@ -3827,6 +3827,12 @@ def symbol_font() -> Doc:
         ("a w:sym of the symbol font, code F0B7, in a run of Liberation Sans 20 pt",
          sym("F0B7", rpr_xml=f'<w:rPr><w:rFonts w:ascii="Liberation Sans" '
              f'w:hAnsi="Liberation Sans"/>{size_20}</w:rPr>')),
+        ("the codes U+F0C4, U+F0E9, U+F0DF and U+F0B7, case 06's characters U+F000 above "
+         "them, in the symbol font",
+         slot_run(symbol_codes("\u00c4\u00e9\u00df\u00b7"), every)),
+        ("the codes U+F07F, U+F080 and U+F09F, inside the symbol range but not mapped by the "
+         "font, in the symbol font",
+         slot_run("\uf07f\uf080\uf09f", every)),
     ]
     body = ""
     for n, (label, sample) in enumerate(cases, 1):
@@ -3848,7 +3854,8 @@ def symbol_font() -> Doc:
         "Text in a symbol font (Officewright Test Symbol, Noto Sans Regular with a Windows "
         "symbol character map, written by scripts/make-symbol-font.py and installed for the "
         "user): ASCII and Latin-1 characters and their codes U+F000 above them, w:sym with "
-        "and without F000, characters the font has no code for, the font in one slot of "
+        "and without F000, characters the font has no code for and codes of its range it "
+        "does not map, the font in one slot of "
         "w:rFonts only, capitals, small capitals, bold and italic it has no face for, spaces, "
         "list bullets, and the height of its lines at 11 and 20 pt; one paragraph per case",
         body,

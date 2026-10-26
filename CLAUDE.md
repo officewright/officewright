@@ -105,11 +105,12 @@ tests/scripts/          tests of scripts/check-added-files.sh in a throwaway git
                         scripts/nightly.sh's parts with a fake cargo (Python)
 tests/fonts/            unmodified OFL test fonts with their license files, listed in THIRD-PARTY-NOTICES.md;
                         outside every crate, so never published
-tests/fonts-word/       the same for faces Word had installed when it rendered references, in a build tests/fonts
-                        does not hold: the TrueType Noto Sans (noto-truetype/; tests/fonts/noto/ is its CFF build)
-                        and the symbol font Officewright Test Symbol (test-symbol/), its Regular face with a Windows
-                        symbol character map, written by scripts/make-symbol-font.py; only the corpus runner of
-                        check.sh reads them, so the crates' tests do not see them
+tests/fonts-word/       OFL fonts Word had installed when it rendered references, with their license files, listed
+                        in THIRD-PARTY-NOTICES.md: the TrueType Noto Sans, unmodified (noto-truetype/;
+                        tests/fonts/noto/ is its CFF build), and the symbol font Officewright Test Symbol
+                        (test-symbol/), its Regular face with a Windows symbol character map, written by
+                        scripts/make-symbol-font.py; no crate's tests read them, the corpus runner of check.sh
+                        lays documents out with them
 tools/corpus-runner/    workspace member, publish = false: runs the library over a corpus, writes a JSON report
 tools/ooxml-validate/   small .NET tool: validates generated OOXML with Open XML SDK's OpenXmlValidator (MIT)
 corpus-ext/             gitignored: large external corpora downloaded by scripts/fetch-corpus.sh

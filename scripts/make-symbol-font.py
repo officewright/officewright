@@ -11,8 +11,9 @@ Regular with one: U+F020 to U+F0FF map to the glyphs Noto Sans maps U+0020 to U+
 no other character is mapped. It has names of its own; its OS/2 table gives the symbol
 character set as its only code page, the Private Use Area as its only Unicode range, U+F020
 and U+F0FF as its first and last characters, and NONE as its vendor; and every other table is
-Noto Sans's, byte for byte, so its outlines and metrics are those of Noto Sans. The SIL Open
-Font License 1.1 of Noto Sans covers it, and its license file is that of Noto Sans.
+Noto Sans's, byte for byte, but for the checksum of the whole font in the head table, so its
+outlines and metrics are those of Noto Sans. The SIL Open Font License 1.1 of Noto Sans covers
+it, and its license file is that of Noto Sans.
 
     make-symbol-font.py                     write the font
     make-symbol-font.py --check             fail if the committed font is not what this writes
