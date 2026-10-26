@@ -51,7 +51,8 @@ crates/
                         shapes with HarfRust, breaks lines first fit by UAX #14 (unicode-linebreak) with
                         Word's rules on top, and flows paragraphs onto the pages of each section with Word's
                         keep and widow rules, headers, footers, page numbers, list labels (counted per
-                        list definition, as Word counts) and tables (the grid's widths, merged cells,
+                        list definition, as Word counts) and tables (columns fitted to their content
+                        as Word fits them, or the grid's widths for fixed layout, merged cells,
                         borders by Word's conflict rules, shading, nesting; a row is not split across
                         pages, nor are header rows repeated, yet), and draws floating pictures where
                         they are anchored (stacked behind or in front of the text, which does not wrap

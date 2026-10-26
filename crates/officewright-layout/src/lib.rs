@@ -27,6 +27,7 @@
 //! ```
 #![forbid(unsafe_code)]
 
+mod autofit;
 mod breaks;
 mod display;
 mod error;
