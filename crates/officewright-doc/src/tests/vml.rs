@@ -520,3 +520,74 @@ fn reads_vml_drawings_through_markup_compatibility() {
         (Some(Pt(2.0)), Some("application/octet-stream".to_owned()))
     );
 }
+
+#[test]
+fn takes_a_floating_vml_picture_s_bases_from_its_wrap_when_its_style_names_none() {
+    // From the review of #401: Word 2007 wrote a picture's bases in w10:wrap's anchorx and
+    // anchory only, as LibreOffice's n764005.docx (a page-size picture in a header) has;
+    // read from the column and the paragraph instead, that picture moved 72 pt right and
+    // 36 pt down.
+    let references = |style: &str, wrap: &str| {
+        let document = with_images(&format!(
+            "<w:p>{}</w:p>",
+            vml_picture(
+                "rIdPng",
+                &format!("position:absolute;width:1pt;height:1pt;{style}"),
+                "",
+                "",
+                wrap
+            )
+        ));
+        let anchor = vml_drawings(&document)[0]
+            .picture()
+            .unwrap()
+            .anchor()
+            .unwrap();
+        (anchor.horizontal_reference(), anchor.vertical_reference())
+    };
+    assert_eq!(
+        references("", r#"<w10:wrap anchorx="page" anchory="page"/>"#),
+        (
+            Some(HorizontalReference::Page),
+            Some(VerticalReference::Page)
+        )
+    );
+    assert_eq!(
+        references(
+            "",
+            r#"<w10:wrap type="none" anchorx="margin" anchory="margin"/>"#
+        ),
+        (
+            Some(HorizontalReference::Margin),
+            Some(VerticalReference::Margin)
+        )
+    );
+    assert_eq!(
+        references("", r#"<w10:wrap anchorx="char" anchory="line"/>"#),
+        (
+            Some(HorizontalReference::Character),
+            Some(VerticalReference::Line)
+        )
+    );
+    assert_eq!(
+        references("", r#"<w10:wrap anchorx="text" anchory="text"/>"#),
+        (
+            Some(HorizontalReference::Column),
+            Some(VerticalReference::Paragraph)
+        )
+    );
+    // The style's bases come first; with neither, the column and the paragraph, Office's
+    // default text, are taken by the layout.
+    assert_eq!(
+        references(
+            "mso-position-horizontal-relative:margin;mso-position-vertical-relative:line",
+            r#"<w10:wrap anchorx="page" anchory="page"/>"#
+        ),
+        (
+            Some(HorizontalReference::Margin),
+            Some(VerticalReference::Line)
+        )
+    );
+    assert_eq!(references("", "<w10:wrap/>"), (None, None));
+    assert_eq!(references("", ""), (None, None));
+}

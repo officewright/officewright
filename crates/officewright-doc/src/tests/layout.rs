@@ -3946,10 +3946,13 @@ fn lists_a_vml_picture_s_outline_colour_adjustments_and_text_once() {
     // The washed-out look of a picture watermark, and the other adjustments.
     for data in [
         r#"gain="19661f" blacklevel="22938f""#,
+        r#"blacklevel="0.1""#,
         r#"gamma="2""#,
         r#"grayscale="t""#,
         r#"bilevel="true""#,
         r#"chromakey="white""#,
+        r##"embosscolor="#808080""##,
+        r#"recolortarget="red""#,
     ] {
         assert_eq!(
             listed(&[vml_picture("rIdPng", size, "", data, "")]),
@@ -3987,12 +3990,86 @@ fn lists_a_vml_picture_s_outline_colour_adjustments_and_text_once() {
         )]),
         [shadow]
     );
+    // Office takes a blank on for true, an absent one for false (MS-OI29500, Part 4,
+    // §19.1.2.18).
+    assert_eq!(
+        listed(&[vml_picture("rIdPng", size, "", "", r#"<v:shadow on=""/>"#)]),
+        [shadow]
+    );
     for off in [r#"<v:shadow on="f"/>"#, r#"<v:shadow color="black"/>"#] {
         assert!(
             listed(&[vml_picture("rIdPng", size, "", "", off)]).is_empty(),
             "{off}"
         );
     }
+    // Each is listed once of its own: a picture with a shadow and text lists both.
+    assert_eq!(
+        listed(&[vml_picture(
+            "rIdPng",
+            size,
+            "",
+            "",
+            r#"<v:shadow on="t"/><v:textbox><w:txbxContent><w:p/></w:txbxContent></v:textbox>"#
+        )]),
+        [shadow, text]
+    );
+}
+
+#[test]
+fn translates_vml_pictures_whose_values_are_out_of_range_into_valid_ir() {
+    // From the review of #401: a rotation of 400 digits, which is infinite as a number,
+    // and negative wrap distances never reach the IR, which `translate` validates; the
+    // same for lengths past ST_Coordinate's range and z-indexes at the ends of their range.
+    use super::drawing::with_images;
+    use super::vml::vml_picture;
+    let nines = "9".repeat(400);
+    let pictures = [
+        vml_picture(
+            "rIdPng",
+            &format!("width:1pt;height:1pt;rotation:{nines}"),
+            "",
+            "",
+            "",
+        ),
+        vml_picture(
+            "rIdPng",
+            &format!("width:1pt;height:1pt;rotation:-{nines}fd"),
+            "",
+            "",
+            "",
+        ),
+        vml_picture(
+            "rIdPng",
+            &format!(
+                "position:absolute;width:1pt;height:1pt;margin-left:{nines}pt;margin-top:-{nines}in;left:{nines}pt;z-index:-2147483648;mso-wrap-distance-left:-5pt;mso-wrap-distance-right:-0.1pt;mso-wrap-distance-top:-1in;mso-wrap-distance-bottom:{nines}pt"
+            ),
+            "",
+            &format!(
+                r#"cropleft="{nines}" croptop="2147418112f" cropright="-32768" cropbottom="-2147483648f""#
+            ),
+            "",
+        ),
+        vml_picture(
+            "rIdPng",
+            "position:absolute;width:2147483647pt;height:2147483647pt;margin-left:2147483647pt;z-index:2147483647",
+            "",
+            "",
+            "",
+        ),
+    ];
+    let translation = translate(&with_images(&format!("<w:p>{}</w:p>", pictures.concat())));
+    let inlines = paragraphs(&translation)[0].inlines();
+    assert_eq!(inlines.len(), 4);
+    let ir::Inline::Anchored(floating) = &inlines[2] else {
+        panic!("a floating picture");
+    };
+    // A negative or unreadable wrap distance is none: 9 pt beside the picture, 0 above and
+    // below, as when the style writes none.
+    assert_eq!(
+        floating.distances(),
+        ir::Insets::default().with_left(Pt(9.0)).with_right(Pt(9.0))
+    );
+    assert_eq!(floating.z_order(), 0);
 }
 
 #[test]

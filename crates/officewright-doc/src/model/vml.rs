@@ -305,7 +305,8 @@ impl<'a> VmlPicture<'a> {
     }
 
     /// Whether it casts a shadow (`v:shadow` with `on` true, which a shadow needs to show),
-    /// which the layout does not draw yet.
+    /// which the layout does not draw yet. Office takes a blank `on` for true and an
+    /// absent one for false (MS-OI29500, Part 4, §19.1.2.18).
     // reason: only the translation into the layout IR asks for it.
     #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
     pub(crate) fn has_shadow(self) -> bool {
@@ -313,7 +314,11 @@ impl<'a> VmlPicture<'a> {
         self.shape
             .children_through_alternates(names.mc)
             .filter(|child| child.is(&names.v, "shadow"))
-            .any(|shadow| shadow.attribute(&[None], "on").and_then(true_false) == Some(true))
+            .any(|shadow| match shadow.attribute(&[None], "on") {
+                Some("") => true,
+                Some(on) => true_false(on) == Some(true),
+                None => false,
+            })
     }
 
     /// Whether it holds text (`v:textbox`), which the layout does not draw yet.
@@ -333,8 +338,10 @@ impl<'a> VmlPicture<'a> {
     /// `mso-position-horizontal-relative`, else `margin-left` and `left` added up as an
     /// offset from it, as Word combines them (MS-OI29500, Part 4, §19.1.2.1(hh, dddd));
     /// down, the same with `mso-position-vertical`, `mso-position-vertical-relative`,
-    /// `margin-top` and `top`. A negative `z-index` puts it behind the text, and the
-    /// value orders it among the pictures of its side. Text wraps as its `w10:wrap`
+    /// `margin-top` and `top`. Where the style names no base, `w10:wrap`'s `anchorx` and
+    /// `anchory` do, as Word 2007 wrote it, `text` when not written (§19.3.2.6(a)). A
+    /// negative `z-index` puts it behind the text, and the value orders it among the
+    /// floating objects of its side. Text wraps as its `w10:wrap`
     /// says, `mso-wrap-distance-left` and `-right` from it, 9 pt when not written, as
     /// Word takes them (§19.1.2.1(o)), and `-top` and `-bottom`, 0 when not written.
     pub fn anchor(self) -> Option<Anchor> {
@@ -372,21 +379,25 @@ impl<'a> VmlPicture<'a> {
                 .unwrap_or(true)
         };
         let distance = |name, default| style.size(name).unwrap_or(Pt(default));
-        let wrap = self
+        let wrap_element = self
             .shape
             .children_through_alternates(names.mc)
-            .find(|child| child.is(&names.w10, "wrap"))
-            .and_then(|wrap| wrap.attribute(&[None], "type"))
-            .and_then(WrapKind::from_vml);
+            .find(|child| child.is(&names.w10, "wrap"));
+        let wrap_attribute = |name| wrap_element.and_then(|wrap| wrap.attribute(&[None], name));
+        let wrap = wrap_attribute("type").and_then(WrapKind::from_vml);
+        // anchorx and anchory take values of ST_HorizontalAnchor and ST_VerticalAnchor
+        // (margin, page, text, and char or line), which name the bases as the style does.
         Some(Anchor {
             horizontal_reference: style
                 .get("mso-position-horizontal-relative")
-                .and_then(HorizontalReference::from_vml),
+                .and_then(HorizontalReference::from_vml)
+                .or_else(|| wrap_attribute("anchorx").and_then(HorizontalReference::from_vml)),
             horizontal_align,
             horizontal_offset,
             vertical_reference: style
                 .get("mso-position-vertical-relative")
-                .and_then(VerticalReference::from_vml),
+                .and_then(VerticalReference::from_vml)
+                .or_else(|| wrap_attribute("anchory").and_then(VerticalReference::from_vml)),
             vertical_align,
             vertical_offset,
             wrap,
@@ -411,11 +422,12 @@ const BEHIND_TEXT_Z_SHIFT: i64 = 503_316_480;
 /// The order of a picture among the floating objects of its side of the text, on the
 /// scale of DrawingML's `relativeHeight`, from its `z-index`. MS-OI29500, Part 4,
 /// §19.1.2.1(ee), says only that Office keeps the order and sign of `z-index`; where Word
-/// writes a picture twice, DrawingML with a VML fallback, the `z-index` of one in front
-/// of the text is its `relativeHeight` and that of one behind the text its
-/// `relativeHeight` less [`BEHIND_TEXT_Z_SHIFT`] (every such pair of the committed corpus,
-/// 15 in front and 18 behind). So the order is taken back the same way, and VML and
-/// DrawingML pictures stack together; an index below that shift is at the back.
+/// writes a floating object twice, a DrawingML shape with a VML fallback, the `z-index`
+/// of one in front of the text is its `relativeHeight` and that of one behind the text
+/// its `relativeHeight` less [`BEHIND_TEXT_Z_SHIFT`] (every such pair of the committed
+/// corpus, 15 in front and 18 behind, and all but 3 of the 483 pairs of corpus-ext, which
+/// LibreOffice wrote). So the order is taken back the same way, and VML pictures and
+/// DrawingML objects stack together; an index below that shift is at the back.
 fn z_order(z_index: i32) -> u32 {
     let height = if z_index >= 0 {
         i64::from(z_index)
