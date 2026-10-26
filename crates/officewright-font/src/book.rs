@@ -317,9 +317,10 @@ impl fmt::Display for SkippedFont {
 /// changes, so a font that was still being copied during one scan is found by the next.
 /// Links, font files that could not be resolved and directories that could not be read
 /// are tried on every scan. Each skipped path is listed once, with the error of its
-/// latest attempt, and leaves the list when it is read; one whose folder is replaced by a
-/// link to where it went is listed under its new place once a scan finds it there. A path
-/// that is removed stays listed; a process that wants a fresh list starts a new book.
+/// latest attempt, and leaves the list when it is read. A directory or file whose folder is
+/// replaced by a link to where it went is listed under its new place once a scan reads
+/// that place. A path that is removed stays listed; a process that wants a fresh list
+/// starts a new book.
 ///
 /// ```
 /// use officewright_font::{FontBook, FontRequest, FontResolver};
@@ -335,7 +336,7 @@ impl fmt::Display for SkippedFont {
 #[derive(Clone, Debug, Default)]
 pub struct FontBook {
     faces: Vec<FaceInfo>,
-    skipped: Vec<SkippedFont>,
+    skipped: SkippedList,
     /// Canonical paths of the files already added, so a font reachable through
     /// several directories or links is indexed once.
     files: HashSet<PathBuf>,
@@ -346,6 +347,60 @@ pub struct FontBook {
     /// The canonical directory behind each location in `failed` of a directory that could
     /// not be read, so that reading that directory by any path drops them all.
     unreadable_dirs: HashMap<PathBuf, PathBuf>,
+}
+
+/// The skipped paths in the order they were listed, with the place of each entry listed
+/// under a key, so that a scan replaces and drops entries without searching the list. An
+/// entry dropped is only marked; [`compact`](Self::compact), which every public method of
+/// [`FontBook`] that drops entries calls before it returns, removes the marked ones at once.
+#[derive(Clone, Debug, Default)]
+struct SkippedList {
+    entries: Vec<SkippedFont>,
+    /// The place in `entries` of each keyed entry still listed.
+    places: HashMap<PathBuf, usize>,
+    /// The places of the entries marked as dropped.
+    dropped: HashSet<usize>,
+}
+
+impl SkippedList {
+    fn push(&mut self, entry: SkippedFont) {
+        if let Some(key) = &entry.key {
+            self.places.insert(key.clone(), self.entries.len());
+        }
+        self.entries.push(entry);
+    }
+
+    /// The entry listed under `key`.
+    fn get_mut(&mut self, key: &Path) -> Option<&mut SkippedFont> {
+        let place = *self.places.get(key)?;
+        self.entries.get_mut(place)
+    }
+
+    /// Marks the entry listed under `key` as dropped.
+    fn drop_key(&mut self, key: &Path) {
+        if let Some(place) = self.places.remove(key) {
+            self.dropped.insert(place);
+        }
+    }
+
+    /// Removes the entries marked as dropped.
+    fn compact(&mut self) {
+        if self.dropped.is_empty() {
+            return;
+        }
+        let dropped = std::mem::take(&mut self.dropped);
+        let mut place = 0;
+        self.entries.retain(|_| {
+            place += 1;
+            !dropped.contains(&(place - 1))
+        });
+        self.places = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(place, entry)| Some((entry.key.clone()?, place)))
+            .collect();
+    }
 }
 
 /// How a path that a directory scan could not add looked, so the next scan tries it
@@ -610,7 +665,7 @@ impl FontBook {
     /// The directories, files and faces that could not be read or indexed, each path
     /// with the error of its latest attempt.
     pub fn skipped(&self) -> &[SkippedFont] {
-        &self.skipped
+        &self.skipped.entries
     }
 
     /// Reads a face. A face added from a file reads the whole file again; keep the
@@ -652,6 +707,7 @@ impl FontBook {
                 self.forget_failure(&location);
             }
         }
+        self.skipped.compact();
         result
     }
 
@@ -690,11 +746,7 @@ impl FontBook {
         // A directory behind the path is remembered again by the caller if it is one.
         self.unreadable_dirs.remove(&key);
         if failure == Failure::Unreachable && self.failed.get(&key) == Some(&failure) {
-            let listed = self
-                .skipped
-                .iter_mut()
-                .find(|skipped| skipped.key.as_ref() == Some(&key));
-            if let Some(listed) = listed {
+            if let Some(listed) = self.skipped.get_mut(&key) {
                 // The message names the path, so it keeps the listed one too.
                 if let (Error::Read { path, .. }, Some(first)) = (&mut error, &listed.path) {
                     path.clone_from(first);
@@ -716,8 +768,7 @@ impl FontBook {
     fn forget_failure(&mut self, key: &Path) {
         self.unreadable_dirs.remove(key);
         if self.failed.remove(key).is_some() {
-            self.skipped
-                .retain(|skipped| skipped.key.as_deref() != Some(key));
+            self.skipped.drop_key(key);
         }
     }
 
@@ -778,31 +829,38 @@ impl FontBook {
             }
             return Ok(0);
         }
-        self.skipped
-            .extend(errors.into_iter().map(|error| SkippedFont {
+        for error in errors {
+            self.skipped.push(SkippedFont {
                 path: path.clone(),
                 error: Arc::new(error),
                 key: None,
-            }));
+            });
+        }
         Ok(added)
     }
 
     /// Drops what is listed under a place whose folder no longer resolves to itself, because
-    /// a folder above it was replaced by a link or a link above it was repointed: a scan
-    /// that reaches the entry now lists it under where it is. A folder that is gone keeps
-    /// what is listed in it, as a removed path does. Each folder is resolved once.
-    fn forget_moved(&mut self) {
-        let mut moved: HashMap<PathBuf, bool> = HashMap::new();
+    /// that folder, or one above it, was replaced by a link: an entry of a folder that this
+    /// scan read under where it went, `visited`, and that is still there, is listed under its
+    /// new place if it still cannot be read, or has been read. An entry of a folder the scan
+    /// did not read, or that is gone from it, stays, as a removed path does. Each folder is
+    /// resolved once.
+    fn forget_moved(&mut self, visited: &HashMap<PathBuf, bool>) {
+        let mut moved: HashMap<PathBuf, Option<PathBuf>> = HashMap::new();
         let mut stale = Vec::new();
         for key in self.failed.keys() {
-            let Some(dir) = key.parent() else {
+            let (Some(dir), Some(name)) = (key.parent(), key.file_name()) else {
                 continue;
             };
-            let dir_moved = *moved
-                .entry(dir.to_owned())
-                .or_insert_with(|| fs::canonicalize(dir).is_ok_and(|resolved| resolved != dir));
-            if dir_moved {
-                stale.push(key.clone());
+            let now = moved.entry(dir.to_owned()).or_insert_with(|| {
+                fs::canonicalize(dir)
+                    .ok()
+                    .filter(|now| now != dir && visited.get(now) == Some(&true))
+            });
+            if let Some(now) = now {
+                if fs::symlink_metadata(now.join(name)).is_ok() {
+                    stale.push(key.clone());
+                }
             }
         }
         for key in stale {
@@ -812,7 +870,6 @@ impl FontBook {
 
     /// Adds the fonts under `root`; unreadable files and directories are skipped.
     fn scan_dir(&mut self, root: &Path, origin: FontOrigin) -> usize {
-        self.forget_moved();
         let mut added = 0;
         // Whether each directory reached in this scan could be read.
         let mut visited: HashMap<PathBuf, bool> = HashMap::new();
@@ -943,6 +1000,8 @@ impl FontBook {
             }
             stack.extend(subdirs.into_iter().rev());
         }
+        self.forget_moved(&visited);
+        self.skipped.compact();
         added
     }
 }
@@ -1716,13 +1775,19 @@ mod tests {
         fs::create_dir(&fonts).unwrap();
         fs::create_dir(&data).unwrap();
         fs::write(fonts.join("bad.ttf"), b"not a font").unwrap();
+        let listed = |book: &FontBook| -> Vec<PathBuf> {
+            book.skipped()
+                .iter()
+                .filter_map(|skipped| skipped.path().map(Path::to_owned))
+                .collect()
+        };
         let mut book = FontBook::new();
         book.add_dir(&fonts).unwrap();
-        assert_eq!(book.skipped().len(), 1);
+        assert_eq!(listed(&book), [fonts.join("bad.ttf")]);
         fs::rename(&fonts, data.join("fonts")).unwrap();
         dir_link(&data.join("fonts"), &fonts);
         book.add_dir(&fonts).unwrap();
-        assert_eq!(book.skipped().len(), 1, "{:?}", book.skipped());
+        assert_eq!(listed(&book), [fonts.join("bad.ttf")]);
         // A folder that is gone keeps what is listed in it.
         let other = dir.0.join("other");
         fs::create_dir(&other).unwrap();
@@ -1731,7 +1796,146 @@ mod tests {
         book.add_dir(&other).unwrap();
         fs::rename(&other, dir.0.join("gone")).unwrap();
         book.add_dir(&data).unwrap();
-        assert_eq!(book.skipped().len(), 2, "{:?}", book.skipped());
+        assert_eq!(
+            listed(&book),
+            [other.join("bad.ttf"), data.join("fonts/bad.ttf")]
+        );
+        // So does one replaced by a link to a folder without the path.
+        let empty = dir.0.join("empty");
+        fs::create_dir(&empty).unwrap();
+        dir_link(&empty, &other);
+        book.add_dir(&other).unwrap();
+        assert_eq!(
+            listed(&book),
+            [other.join("bad.ttf"), data.join("fonts/bad.ttf")]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_unresolvable_font_file_follows_its_folder_replaced_by_a_link() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new("moved-dangling");
+        let (fonts, data) = (dir.0.join("fonts"), dir.0.join("data"));
+        fs::create_dir(&fonts).unwrap();
+        fs::create_dir(&data).unwrap();
+        symlink(dir.0.join("missing.ttf"), fonts.join("dead.ttf")).unwrap();
+        let mut book = FontBook::new();
+        book.add_dir(&fonts).unwrap();
+        assert_eq!(book.skipped().len(), 1);
+        fs::rename(&fonts, data.join("fonts")).unwrap();
+        symlink(data.join("fonts"), &fonts).unwrap();
+        book.add_dir(&fonts).unwrap();
+        let listed: Vec<Option<&Path>> = book.skipped().iter().map(SkippedFont::path).collect();
+        assert_eq!(listed, [Some(fonts.join("dead.ttf").as_path())]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_scan_keeps_what_is_listed_in_a_moved_folder_it_does_not_read() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let set_mode =
+            |path: &Path, mode| fs::set_permissions(path, fs::Permissions::from_mode(mode));
+        let dir = TempDir::new("moved-unscanned");
+        let (fonts, data, other) = (dir.0.join("fonts"), dir.0.join("data"), dir.0.join("other"));
+        fs::create_dir_all(fonts.join("sub")).unwrap();
+        fs::create_dir(&data).unwrap();
+        fs::create_dir(&other).unwrap();
+        fs::write(fonts.join("bad.ttf"), b"not a font").unwrap();
+        set_mode(&fonts.join("sub"), 0o000).unwrap();
+        let readable = fs::read_dir(fonts.join("sub")).is_ok();
+        let mut book = FontBook::new();
+        book.add_dir(&fonts).unwrap();
+        let before = book.skipped().len();
+        fs::rename(&fonts, data.join("fonts")).unwrap();
+        symlink(data.join("fonts"), &fonts).unwrap();
+        // A scan of another folder does not read the moved one: both entries stay.
+        book.add_dir(&other).unwrap();
+        let after = book.skipped().len();
+        set_mode(&data.join("fonts/sub"), 0o755).unwrap();
+        // Root reads every directory, so this has to run as an ordinary user.
+        assert!(
+            !readable,
+            "run the tests as a user who cannot read mode 000"
+        );
+        assert_eq!((before, after), (2, 2));
+    }
+
+    /// Fails unless rescanning a book takes time in proportion to `n`, the number of
+    /// entries `setup(n)` lists in a fresh book before it returns the book and the folder to
+    /// scan again: at most 24 times what `n / 8` entries take, where linear work takes
+    /// about 8 times and work that grows with the square of `n` about 64 times. Each size
+    /// is timed as the shortest of several runs, since load on the machine only ever adds
+    /// time, and a test fails only when a second measurement agrees; a floor of 50 ms keeps
+    /// the timer's resolution out of it.
+    fn rescans_in_linear_time(setup: impl Fn(usize) -> (FontBook, PathBuf, TempDir), n: usize) {
+        use std::time::{Duration, Instant};
+        let time = |count: usize| {
+            let (mut book, root, _dir) = setup(count);
+            let start = Instant::now();
+            book.add_dir(&root).unwrap();
+            start.elapsed()
+        };
+        let mut measured = Vec::new();
+        for _ in 0..2 {
+            let small = (0..3)
+                .map(|_| time(n / 8))
+                .min()
+                .unwrap_or_default()
+                .max(Duration::from_millis(50));
+            let full = (0..2).map(|_| time(n)).min().unwrap_or(Duration::MAX);
+            if full < small * 24 {
+                return;
+            }
+            measured.push((full, small));
+        }
+        panic!("{measured:?}: the shortest times for {n} and for {}", n / 8);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rescans_a_moved_folder_of_damaged_fonts_in_linear_time() {
+        rescans_in_linear_time(
+            |n| {
+                let dir = TempDir::new(&format!("linear-moved-{n}"));
+                let (fonts, data) = (dir.0.join("fonts"), dir.0.join("data"));
+                fs::create_dir(&fonts).unwrap();
+                fs::create_dir(&data).unwrap();
+                for i in 0..n {
+                    fs::write(fonts.join(format!("bad{i:06}.ttf")), b"not a font").unwrap();
+                }
+                let mut book = FontBook::new();
+                book.add_dir(&fonts).unwrap();
+                assert_eq!(book.skipped().len(), n);
+                fs::rename(&fonts, data.join("fonts")).unwrap();
+                dir_link(&data.join("fonts"), &fonts);
+                (book, fonts, dir)
+            },
+            8_000,
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rescans_unresolvable_font_files_in_linear_time() {
+        rescans_in_linear_time(
+            |n| {
+                let dir = TempDir::new(&format!("linear-dangling-{n}"));
+                let fonts = dir.0.join("fonts");
+                fs::create_dir(&fonts).unwrap();
+                for i in 0..n {
+                    let link = fonts.join(format!("dead{i:06}.ttf"));
+                    std::os::unix::fs::symlink(dir.0.join("missing.ttf"), link).unwrap();
+                }
+                let mut book = FontBook::new();
+                book.add_dir(&fonts).unwrap();
+                assert_eq!(book.skipped().len(), n);
+                (book, fonts, dir)
+            },
+            8_000,
+        );
     }
 
     #[test]
