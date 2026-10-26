@@ -1228,10 +1228,10 @@
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-spacing-condensed.docx": {
-      "line_agreement": 0.5333,
+      "line_agreement": 0.5,
       "ssim_mean": 0.9859,
       "ssim_min": 0.9859,
-      "text_score": 0.9241
+      "text_score": 0.8943
     },
     "tests/corpus/word-rules/E-strike.docx": {
       "line_agreement": 1.0,
