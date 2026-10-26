@@ -3823,7 +3823,7 @@ def symbol_font() -> Doc:
         ("bold, then italic, in the symbol font, which has neither face",
          slot_run("ABC", every, "<w:b/><w:bCs/>") + slot_run(" ABC", every, "<w:i/><w:iCs/>")),
         ("spaces and a no-break space between letters in the symbol font",
-         slot_run("A B  C D", every)),
+         slot_run("A B  C\u00a0D", every)),
         ("a w:sym of the symbol font, code F0B7, in a run of Liberation Sans 20 pt",
          sym("F0B7", rpr_xml=f'<w:rPr><w:rFonts w:ascii="Liberation Sans" '
              f'w:hAnsi="Liberation Sans"/>{size_20}</w:rPr>')),
@@ -3849,6 +3849,11 @@ def symbol_font() -> Doc:
                          "Liberation Sans"))
         body += para(lines([f"{size} pt line {k}: Hamburgefonts gjpqy" for k in range(1, 6)],
                            SYMBOL_FONT, size), shading=GREY)
+    # Whether Word breaks lines at the symbol font's space, U+F020, and stretches it when the
+    # paragraph is justified.
+    body += para(run("Case 24: a justified paragraph of words in the symbol font, long enough "
+                     "to wrap:", "Liberation Sans"))
+    body += para(slot_run(" ".join(["Hamburgefonts gjpqy"] * 12), every), jc="both")
     return Doc(
         "E-symbol-font",
         "Text in a symbol font (Officewright Test Symbol, Noto Sans Regular with a Windows "
@@ -3857,7 +3862,8 @@ def symbol_font() -> Doc:
         "and without F000, characters the font has no code for and codes of its range it "
         "does not map, the font in one slot of "
         "w:rFonts only, capitals, small capitals, bold and italic it has no face for, spaces, "
-        "list bullets, and the height of its lines at 11 and 20 pt; one paragraph per case",
+        "list bullets, the height of its lines at 11 and 20 pt, and a justified paragraph "
+        "that wraps; one paragraph per case",
         body,
         numbering=numbering,
     )
@@ -4139,7 +4145,13 @@ def settings_xml(doc: Doc) -> str:
 
 
 def font_table_xml(fonts: list[str]) -> str:
-    entries = "".join(f'<w:font w:name="{attr(f)}"/>' for f in fonts)
+    # The symbol font has the symbol character set (w:charset 02), as Word writes it for
+    # Symbol and Wingdings.
+    entries = "".join(
+        f'<w:font w:name="{attr(f)}"><w:charset w:val="02"/></w:font>' if f == SYMBOL_FONT
+        else f'<w:font w:name="{attr(f)}"/>'
+        for f in fonts
+    )
     return f'<w:fonts xmlns:w="{W_NS}">{entries}</w:fonts>'
 
 

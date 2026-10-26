@@ -115,4 +115,4 @@ done <"$work/files"
 
 [ "$checked" -gt 0 ] || fail "no files in tests/fonts and tests/fonts-word"
 [ -z "$failed" ] || exit 1
-echo "check-test-fonts.sh: all $checked files in tests/fonts and tests/fonts-word are upstream's"
+echo "check-test-fonts.sh: all $checked files in tests/fonts and tests/fonts-word are upstream's, or what make-symbol-font.py writes from upstream's"

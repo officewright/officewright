@@ -3043,7 +3043,7 @@ class Packages(unittest.TestCase):
             if label.startswith("Case "):
                 self.assertEqual(fonts(runs[0])["ascii"], other, label)
                 cases[int(label[5:7])] = (p, runs[1:])
-        self.assertEqual(sorted(cases), list(range(1, 24)))
+        self.assertEqual(sorted(cases), list(range(1, 25)))
 
         def sample(n):
             """The text and fonts of each run of case n after its label."""
@@ -3063,7 +3063,11 @@ class Packages(unittest.TestCase):
             self.assertEqual([s.get(f"{W}font") for s in syms], [symbol] * 3, n)
             self.assertEqual([s.get(f"{W}char") for s in syms], chars, n)
         self.assertEqual(sample(6), [("Äéß·", every)])
-        self.assertTrue(all(ord(c) > 0xFF or c == " " for c in sample(7)[0][0]))
+        # Cyrillic, Greek and the euro sign: none is a code of the font, U+0020 to U+00FF or
+        # U+F020 to U+F0FF.
+        self.assertEqual(sample(7), [("\u0416\u0436 \u03a9\u03c9 \u20ac", every)])
+        for c in sample(7)[0][0].replace(" ", ""):
+            self.assertFalse(0x20 <= ord(c) <= 0xFF or 0xF020 <= ord(c) <= 0xF0FF, c)
         alone = {"ascii": other, "hAnsi": other, "eastAsia": other, "cs": other}
         for n, value, slots in (
             (8, "ABC", {"ascii": symbol}),
@@ -3077,11 +3081,15 @@ class Packages(unittest.TestCase):
             self.assertEqual(sample(n), [("abc", every)], n)
             self.assertIsNotNone(cases[n][1][0].find(f"{W}rPr/{W}{toggle}"), n)
         bold, italic = cases[15][1]
+        self.assertEqual(sample(15), [("ABC", every), (" ABC", every)])
         self.assertIsNotNone(bold.find(f"{W}rPr/{W}b"))
+        self.assertIsNone(bold.find(f"{W}rPr/{W}i"))
         self.assertIsNotNone(italic.find(f"{W}rPr/{W}i"))
+        self.assertIsNone(italic.find(f"{W}rPr/{W}b"))
         self.assertEqual(sample(16), [("A B  C D", every)])
         sym = cases[17][1][0]
         self.assertEqual(sym.find(f"{W}sym").get(f"{W}char"), "F0B7")
+        self.assertEqual(sym.find(f"{W}sym").get(f"{W}font"), symbol)
         self.assertEqual(fonts(sym)["ascii"], other)
         self.assertEqual(sym.find(f"{W}rPr/{W}sz").get(f"{W}val"), "40")
         self.assertEqual(sample(18), [(codes("\u00c4\u00e9\u00df\u00b7"), every)])
@@ -3107,6 +3115,20 @@ class Packages(unittest.TestCase):
             self.assertEqual(fonts(r), every, n)
             self.assertEqual(r.find(f"{W}rPr/{W}sz").get(f"{W}val"), size, n)
             self.assertEqual(len(r.findall(f"{W}br")), 4, n)
+        # Case 24: the next paragraph is justified, one run of words in the symbol font, wider
+        # than the text column even in the narrow Liberation Sans.
+        justified = paragraphs[paragraphs.index(cases[24][0]) + 1]
+        self.assertEqual(justified.find(f"{W}pPr/{W}jc").get(f"{W}val"), "both")
+        (r,) = justified.findall(f"{W}r")
+        self.assertEqual(fonts(r), every)
+        words = "".join(t.text or "" for t in r.iter(f"{W}t"))
+        self.assertGreater(carlito_width(words), 2 * rules.TEXT_W / 20)
+        # The font table gives the symbol font the symbol character set, and no other font
+        # a character set.
+        table = ElementTree.fromstring(parts["word/fontTable.xml"])
+        charsets = {f.get(f"{W}name"): f.find(f"{W}charset") for f in table}
+        self.assertEqual(charsets[symbol].get(f"{W}val"), "02")
+        self.assertEqual([name for name, c in charsets.items() if c is not None], [symbol])
 
     def test_pictures_are_typed_png_parts_that_resolve(self):
         # Every VML picture of every document is Word's picture frame (the shape type defined

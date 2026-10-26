@@ -105,7 +105,7 @@ tests/scripts/          tests of scripts/check-added-files.sh in a throwaway git
                         scripts/nightly.sh's parts with a fake cargo (Python)
 tests/fonts/            unmodified OFL test fonts with their license files, listed in THIRD-PARTY-NOTICES.md;
                         outside every crate, so never published
-tests/fonts-word/       OFL fonts Word had installed when it rendered references, with their license files, listed
+tests/fonts-word/       OFL fonts installed for Word when it renders references, with their license files, listed
                         in THIRD-PARTY-NOTICES.md: the TrueType Noto Sans, unmodified (noto-truetype/;
                         tests/fonts/noto/ is its CFF build), and the symbol font Officewright Test Symbol
                         (test-symbol/), its Regular face with a Windows symbol character map, written by

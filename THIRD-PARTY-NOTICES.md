@@ -91,9 +91,10 @@ measured by `scripts/corpus-import.py`.
 ## Test fonts
 
 Fonts in `tests/fonts/` and `tests/fonts-word/`, at the repository root and so outside
-every crate. No crate reads those of `tests/fonts-word/`: the corpus runner of
-`scripts/check.sh` lays documents out with them, and `scripts/make-symbol-font.py` and
-`tests/corpus-tools/test_symbol_font.py` read the symbol font and the face it is made from.
+every crate. None of the library's crates or their tests read those of `tests/fonts-word/`:
+the corpus runner (`tools/corpus-runner`, run by `scripts/check.sh`) lays documents out with
+them, and `scripts/make-symbol-font.py` and `tests/corpus-tools/test_symbol_font.py` read the
+symbol font and the face it is made from.
 Those of `tests/fonts/` are read by the corpus runner and by
 `crates/officewright-font/tests/third_party_fonts.rs`,
 `crates/officewright-font/tests/metric_compatible.rs`,
