@@ -234,11 +234,15 @@ def section(
     margins: tuple[int, int] = (MARGIN, MARGIN),
     page_format: str | None = None,
     title_page: bool = False,
+    size: tuple[int, int] = (PAGE_W, PAGE_H),
+    sides: tuple[int, int] = (MARGIN, MARGIN),
+    header_distance: int = 708,
 ) -> str:
     """A section's properties: A4 portrait as sect_pr(), with a start type (w:type), header
     and footer references as (headerReference or footerReference, w:type, part name), a
     first page number and the top and bottom margins (negative for a fixed body edge); the
-    format of its page numbers (w:pgNumType w:fmt) and a title page (w:titlePg)."""
+    format of its page numbers (w:pgNumType w:fmt) and a title page (w:titlePg); another
+    page size, left and right margins and distance of the header from the edge, in twips."""
     references = "".join(
         f'<w:{element} w:type="{ref_type}" r:id="{part_id(name)}"/>'
         for element, ref_type, name in refs
@@ -250,11 +254,12 @@ def section(
         numbers = f'<w:pgNumType w:fmt="{page_format}"{first}/>'
     title = "<w:titlePg/>" if title_page else ""
     top, bottom = margins
+    left, right = sides
     return (
         f"<w:sectPr>{references}{start}"
-        f'<w:pgSz w:w="{PAGE_W}" w:h="{PAGE_H}"/>'
-        f'<w:pgMar w:top="{top}" w:right="{MARGIN}" w:bottom="{bottom}" w:left="{MARGIN}"'
-        ' w:header="708" w:footer="708" w:gutter="0"/>'
+        f'<w:pgSz w:w="{size[0]}" w:h="{size[1]}"/>'
+        f'<w:pgMar w:top="{top}" w:right="{right}" w:bottom="{bottom}" w:left="{left}"'
+        f' w:header="{header_distance}" w:footer="708" w:gutter="0"/>'
         f'{numbers}<w:cols w:space="708"/>{title}'
         '<w:docGrid w:linePitch="360"/>'
         "</w:sectPr>"
@@ -1800,16 +1805,21 @@ def rule_table(
     tbl_w: tuple[int, str] | None = (0, "auto"),
     fixed: bool = False,
     border_eighths: int = 4,
+    borders: dict[str, int] | None = None,
 ) -> str:
-    """A table with single borders border_eighths eighths of a point wide (4 for 0.5 pt),
-    the grid saved as given, w:tblW as (value, type) or none, and an autofit layout unless
-    fixed. rows holds each row's cells, or (cells, w:trPr content)."""
+    """A table with single borders border_eighths eighths of a point wide (4 for 0.5 pt), or
+    as wide as borders gives for each side, the grid saved as given, w:tblW as (value, type)
+    or none, and an autofit layout unless fixed. rows holds each row's cells, or (cells,
+    w:trPr content)."""
     tbl_pr = ""
     if tbl_w is not None:
         tbl_pr += f'<w:tblW w:w="{tbl_w[0]}" w:type="{tbl_w[1]}"/>'
-    rule = f'w:val="single" w:sz="{border_eighths}" w:space="0" w:color="000000"'
     sides = ("top", "left", "bottom", "right", "insideH", "insideV")
-    tbl_pr += "<w:tblBorders>" + "".join(f"<w:{s} {rule}/>" for s in sides) + "</w:tblBorders>"
+    eighths = borders or dict.fromkeys(sides, border_eighths)
+    tbl_pr += "<w:tblBorders>" + "".join(
+        f'<w:{s} w:val="single" w:sz="{eighths[s]}" w:space="0" w:color="000000"/>'
+        for s in sides
+    ) + "</w:tblBorders>"
     if fixed:
         tbl_pr += '<w:tblLayout w:type="fixed"/>'
     tbl_pr += (
@@ -1882,9 +1892,12 @@ def autofit_setting_cases(first: int) -> list[tuple[int, str, str]]:
 
 
 def autofit_doc(name: str, purpose: str, cases: list[tuple[str, str]], **options) -> Doc:
+    """The labelled cases, then the end; the picture of autofit_setting_cases when a case
+    holds it."""
     body = "".join(table_case(n, label, xml) for n, label, xml in cases)
-    return Doc(name, purpose, body + para(run("End of the document.")),
-               media=(("image1.png", grey_png(96, 48)),), **options)
+    media = (("image1.png", grey_png(96, 48)),) if "<v:imagedata" in body else ()
+    return Doc(name, purpose, body + para(run("End of the document.")), media=media,
+               **options)
 
 
 def table_autofit() -> Doc:
@@ -3743,6 +3756,603 @@ def list_level_linked_defaults() -> Doc:
     )
 
 
+# A symbol font: Noto Sans Regular with a Windows symbol character map (U+F020 to U+F0FF),
+# written by scripts/make-symbol-font.py into tests/fonts-word/test-symbol/ and installed for
+# the user when Word renders the reference. Word treats a character U+0020 to U+00FF in such
+# a font as the code U+F000 above it; the cases show that, which slot of w:rFonts Word takes
+# for the codes U+F020 to U+F0FF, and what it does with characters the font has no code for.
+SYMBOL_FONT = "Officewright Test Symbol"
+
+
+def symbol_codes(value: str) -> str:
+    """The characters of value as the codes of a symbol font, U+F000 above each."""
+    return "".join(chr(0xF000 + ord(c)) for c in value)
+
+
+def slot_run(value: str, slots: dict[str, str], toggles: str = "", size: float = 11) -> str:
+    """A run whose w:rFonts gives the fonts of slots (ascii, hAnsi, eastAsia, cs, hint) and
+    Liberation Sans in the other three slots."""
+    fonts = {slot: "Liberation Sans" for slot in ("ascii", "hAnsi", "eastAsia", "cs")}
+    fonts.update(slots)
+    attrs = " ".join(f'w:{slot}="{attr(font)}"' for slot, font in fonts.items())
+    hp = half_points(size)
+    return (
+        f'<w:r><w:rPr><w:rFonts {attrs}/>{toggles}<w:sz w:val="{hp}"/><w:szCs w:val="{hp}"/>'
+        f"</w:rPr>{text(value)}</w:r>"
+    )
+
+
+def sym(code: str, font: str = SYMBOL_FONT, rpr_xml: str = "") -> str:
+    """A w:sym of font with the hexadecimal code, in a run of its own."""
+    return f'<w:r>{rpr_xml}<w:sym w:font="{attr(font)}" w:char="{code}"/></w:r>'
+
+
+def symbol_font() -> Doc:
+    letters = "ABC xyz 0123 !?&"
+    every = {"ascii": SYMBOL_FONT, "hAnsi": SYMBOL_FONT, "eastAsia": SYMBOL_FONT,
+             "cs": SYMBOL_FONT}
+    bullet_label = (
+        f'<w:rFonts w:ascii="{SYMBOL_FONT}" w:hAnsi="{SYMBOL_FONT}" w:hint="default"/>'
+    )
+    numbering = (
+        abstract_num(0, "5C3A0040", [
+            level(0, "bullet", symbol_codes("·"), left=720, hanging=360,
+                  label=bullet_label)])
+        + abstract_num(1, "5C3A0041", [
+            level(0, "bullet", "·", left=720, hanging=360, label=bullet_label)])
+        + num(1, 0)
+        + num(2, 1)
+    )
+    size_20 = '<w:sz w:val="40"/><w:szCs w:val="40"/>'
+    cases = [
+        ("ASCII letters, digits and punctuation in the symbol font, in all four slots",
+         slot_run(letters, every)),
+        ("the same characters as the codes U+F041 and so on, U+F000 above each",
+         slot_run(symbol_codes(letters), every)),
+        ("the same characters in Noto Sans, whose glyphs the symbol font has",
+         run(letters, "Noto Sans")),
+        ("w:sym of the symbol font with the codes F041, F062 and F033",
+         sym("F041") + sym("F062") + sym("F033")),
+        ("w:sym of the symbol font with the codes 0041, 0062 and 0033",
+         sym("0041") + sym("0062") + sym("0033")),
+        ("Latin-1 characters U+00C4, U+00E9, U+00DF and U+00B7 in the symbol font",
+         slot_run("Äéß·", every)),
+        ("characters the symbol font has no code for: Cyrillic, Greek and the euro sign",
+         slot_run("Жж Ωω €", every)),
+        ("ASCII letters with the symbol font in w:ascii only",
+         slot_run("ABC", {"ascii": SYMBOL_FONT})),
+        ("ASCII letters with the symbol font in w:hAnsi only",
+         slot_run("ABC", {"hAnsi": SYMBOL_FONT})),
+        ("the codes U+F041 to U+F043 with the symbol font in w:ascii only",
+         slot_run(symbol_codes("ABC"), {"ascii": SYMBOL_FONT})),
+        ("the codes U+F041 to U+F043 with the symbol font in w:hAnsi only",
+         slot_run(symbol_codes("ABC"), {"hAnsi": SYMBOL_FONT})),
+        ("the codes U+F041 to U+F043 with the symbol font in w:eastAsia only, hint eastAsia",
+         slot_run(symbol_codes("ABC"), {"eastAsia": SYMBOL_FONT, "hint": "eastAsia"})),
+        ("lower-case letters in the symbol font with w:caps",
+         slot_run("abc", every, "<w:caps/>")),
+        ("lower-case letters in the symbol font with w:smallCaps",
+         slot_run("abc", every, "<w:smallCaps/>")),
+        ("bold, then italic, in the symbol font, which has neither face",
+         slot_run("ABC", every, "<w:b/><w:bCs/>") + slot_run(" ABC", every, "<w:i/><w:iCs/>")),
+        ("spaces and a no-break space between letters in the symbol font",
+         slot_run("A B  C\u00a0D", every)),
+        ("a w:sym of the symbol font, code F0B7, in a run of Liberation Sans 20 pt",
+         sym("F0B7", rpr_xml=f'<w:rPr><w:rFonts w:ascii="Liberation Sans" '
+             f'w:hAnsi="Liberation Sans"/>{size_20}</w:rPr>')),
+        ("the codes U+F0C4, U+F0E9, U+F0DF and U+F0B7, case 06's characters U+F000 above "
+         "them, in the symbol font",
+         slot_run(symbol_codes("\u00c4\u00e9\u00df\u00b7"), every)),
+        ("the codes U+F07F, U+F080 and U+F09F, inside the symbol range but not mapped by the "
+         "font, in the symbol font",
+         slot_run("\uf07f\uf080\uf09f", every)),
+    ]
+    body = ""
+    for n, (label, sample) in enumerate(cases, 1):
+        body += para(run(f"Case {n:02d}: {label}: ", "Liberation Sans") + sample)
+    n = len(cases)
+    for i, (label, instance) in enumerate((
+        ("a list item whose bullet is the code U+F0B7 in the symbol font", 1),
+        ("a list item whose bullet is U+00B7 in the symbol font", 2),
+    ), n + 1):
+        body += para(run(f"Case {i:02d}: {label}", "Liberation Sans"), list_item=(instance, 0))
+    n += 2
+    for i, size in enumerate((11, 20), n + 1):
+        body += para(run(f"Case {i:02d}: five lines in the symbol font at {size} pt, shaded:",
+                         "Liberation Sans"))
+        body += para(lines([f"{size} pt line {k}: Hamburgefonts gjpqy" for k in range(1, 6)],
+                           SYMBOL_FONT, size), shading=GREY)
+    # Whether Word breaks lines at the spaces of text in the symbol font (U+0020, which the font
+    # draws with the glyph of its code U+F020) and stretches them when the paragraph is
+    # justified.
+    body += para(run("Case 24: a justified paragraph of words in the symbol font, long enough "
+                     "to wrap:", "Liberation Sans"))
+    body += para(slot_run(" ".join(["Hamburgefonts gjpqy"] * 12), every), jc="both")
+    return Doc(
+        "E-symbol-font",
+        "Text in a symbol font (Officewright Test Symbol, Noto Sans Regular with a Windows "
+        "symbol character map, written by scripts/make-symbol-font.py and installed for the "
+        "user): ASCII and Latin-1 characters and their codes U+F000 above them, w:sym with "
+        "and without F000, characters the font has no code for and codes of its range it "
+        "does not map, the font in one slot of "
+        "w:rFonts only, capitals, small capitals, bold and italic it has no face for, spaces, "
+        "list bullets, the height of its lines at 11 and 20 pt, and a justified paragraph "
+        "that wraps; each case starts with a paragraph that says what it is",
+        body,
+        numbering=numbering,
+    )
+
+
+# Batch 8 (#409): what the references of #318, #321 and #368 left open.
+
+# Borders of different widths on each side, so that a page shows which one Word draws at a
+# split: top 6 pt, bottom 3 pt, between rows 1.5 pt, the vertical ones 0.5 pt; and those of
+# a nested table, 4.5, 2.25 and 0.75 pt.
+SPLIT_BORDERS = {"top": 48, "left": 4, "bottom": 24, "right": 4, "insideH": 12, "insideV": 4}
+INNER_BORDERS = {"top": 36, "left": 4, "bottom": 18, "right": 4, "insideH": 6, "insideV": 4}
+
+
+def split_case(n: int, label: str, content: str, filler_lines: int) -> str:
+    """A case of E-table-split-borders on a page of its own: its label, filler lines so that
+    the table starts low on the page, the table and a paragraph after it."""
+    return (para(run(f"Case {n:02d}: {label}"), page_break_before=n > 1)
+            + numbered_lines(f"Case {n:02d} filler", filler_lines) + content
+            + para(run(f"Case {n:02d}: after the table")))
+
+
+def table_split_borders() -> Doc:
+    def split_table(rows: list) -> str:
+        return rule_table(rows, EVEN_GRID, tbl_w=(TEXT_W, "dxa"), fixed=True,
+                          borders=SPLIT_BORDERS)
+
+    long_row = [cell(numbered_lines("Long", 40)), cell(para(run("r3c2"))),
+                cell(para(run("r3c3")))]
+    first = [row_cells(["r1c1", "r1c2", "r1c3"]), row_cells(["r2c1", "r2c2", "r2c3"])]
+    header = [(row_cells([f"Head {r}a", f"Head {r}b", f"Head {r}c"]), "<w:tblHeader/>")
+              for r in (1, 2)]
+    body_rows = [row_cells([f"Body {r:02d}a", f"Body {r:02d}b", f"Body {r:02d}c"])
+                 for r in range(1, 41)]
+    inner = rule_table([row_cells([f"Inner {r:02d}a", f"Inner {r:02d}b"]) for r in range(1, 31)],
+                       [2000, 2000], tbl_w=(4000, "dxa"), fixed=True, borders=INNER_BORDERS)
+    nested = rule_table(
+        [[cell(para(run("Outer cell")) + inner + para()), cell(para(run("Outer b")))]],
+        [5000, TEXT_W - 5000], tbl_w=(TEXT_W, "dxa"), fixed=True, borders=SPLIT_BORDERS,
+    )
+    body = "".join([
+        split_case(1, "row 3 of 4 holds a cell of 40 lines and crosses the page",
+                   split_table(first + [long_row, row_cells(["r4c1", "r4c2", "r4c3"])]), 30),
+        split_case(2, "row 3 is the last row, holds a cell of 40 lines and crosses the page",
+                   split_table(first + [long_row]), 30),
+        split_case(3, "rows 1 and 2 are header rows; 40 body rows cross the page",
+                   split_table(header + body_rows), 20),
+        split_case(4, "the outer row's first cell holds a nested table of 30 rows (top 4.5, "
+                      "bottom 2.25, between rows 0.75 pt) and crosses the page", nested, 30),
+    ])
+    return Doc(
+        "E-table-split-borders",
+        "Which border Word draws where a table crosses a page, with borders of different "
+        "widths (top 6 pt, bottom 3 pt, between rows 1.5 pt): a split middle row, a split "
+        "last row, repeated header rows, and a split row holding a nested table with "
+        "borders of its own; each case starts a page",
+        body,
+    )
+
+
+# Unbreakable words of three widths, which together are wider than the text.
+SHARE_WORDS = (AUTOFIT_WORD, "Supercalifragilisticexpialidocious", "Internationalisation")
+
+
+def table_autofit_shares() -> Doc:
+    auto = width(0, "auto")
+    cases = [
+        (1, "row 1: a cell spanning three columns (w:gridSpan 3) of 400 pt; row 2: cells of "
+            "50, 100 and 150 pt",
+         rule_table([[cell(para(run("Spanning three")),
+                           width(8000, "dxa") + '<w:gridSpan w:val="3"/>')],
+                     [cell(para(run("Fifty")), width(1000, "dxa")),
+                      cell(para(run("Hundred")), width(2000, "dxa")),
+                      cell(para(run("Hundred fifty")), width(3000, "dxa"))]],
+                    [1000, 2000, 3000])),
+        (2, "row 1: a cell spanning two columns of 300 pt; row 2: cells of 150 and 50 pt, the "
+            "first spanned column's cell the wider",
+         rule_table([[cell(para(run("Spanning cell")),
+                           width(6000, "dxa") + '<w:gridSpan w:val="2"/>')],
+                     [cell(para(run("Hundred fifty")), width(3000, "dxa")),
+                      cell(para(run("Fifty")), width(1000, "dxa"))]], [3000, 1000])),
+        (3, "three cells, auto, each holding one unbreakable word of another width ("
+            + ", ".join(SHARE_WORDS) + "), together wider than the text width",
+         rule_table([[cell(para(run(word)), auto) for word in SHARE_WORDS]], EVEN_GRID)),
+        (4, "w:tblW 100 % (pct 5000), cells auto, borders of 6 pt",
+         rule_table(autofit_cells([auto] * 3), EVEN_GRID, tbl_w=(5000, "pct"),
+                    border_eighths=48)),
+        (5, "w:tblW 100 % (pct 5000), cells auto, borders of 3 pt",
+         rule_table(autofit_cells([auto] * 3), EVEN_GRID, tbl_w=(5000, "pct"),
+                    border_eighths=24)),
+        # Cases 01 and 02 span up to the last column; here the span ends before it, where
+        # the explanations of E-table-autofit-15's case 8 give different grids.
+        (6, "row 1: a cell spanning the first two of three columns, of 300 pt, and a cell of "
+            "50 pt; row 2: cells of 50, 100 and 50 pt",
+         rule_table([[cell(para(run("Spanning two")),
+                           width(6000, "dxa") + '<w:gridSpan w:val="2"/>'),
+                      cell(para(run("Third")), width(1000, "dxa"))],
+                     [cell(para(run("Fifty")), width(1000, "dxa")),
+                      cell(para(run("Hundred")), width(2000, "dxa")),
+                      cell(para(run("Last")), width(1000, "dxa"))]], [1000, 2000, 1000])),
+    ]
+    return autofit_doc(
+        "E-table-autofit-shares",
+        "How Word's autofit shares width in compatibility mode 15: a cell spanning three "
+        "columns, a spanning cell over a wider first column, minimum widths of three "
+        "different words that together exceed the text width, 100 % tables with borders of 6 "
+        "and 3 pt, and a span that ends before the last column",
+        cases,
+    )
+
+
+def table_autofit_beside(mode: int, flag: str | None = None) -> Doc:
+    said = {None: "", "doNotAutofitConstrainedTables": "-constrained"}[flag]
+    setting = f", with w:{flag}" if flag else ""
+    picture = vml_picture(
+        "image1.png", "f1",
+        "position:absolute;margin-left:0;margin-top:0;width:216pt;height:108pt;z-index:1;"
+        "mso-position-horizontal-relative:margin;mso-position-vertical-relative:paragraph",
+        "square", first=True)
+    small = [[cell(para(run(f"Cell {r}{c}")), width(0, "auto")) for c in "abc"] for r in (1, 2)]
+    fixed = [[cell(para(run(f"Cell {r}{c}")), width(1000, "dxa")) for c in "abc"]
+             for r in (1, 2)]
+    cases = [
+        (1, "a floating picture of 216 x 108 pt at the left margin, square wrap, then an "
+            "autofit table (cells auto) of about 120 pt, which fits beside it",
+         para(picture + run("The picture is anchored here.")) + rule_table(small, EVEN_GRID)),
+        (2, "the same picture, then a fixed table of three 50 pt columns (150 pt), which fits "
+            "beside it",
+         para(vml_picture(
+             "image1.png", "f2",
+             "position:absolute;margin-left:0;margin-top:0;width:216pt;height:108pt;"
+             "z-index:2;mso-position-horizontal-relative:margin;"
+             "mso-position-vertical-relative:paragraph", "square")
+              + run("The picture is anchored here."))
+         + rule_table(fixed, [1000] * 3, tbl_w=(3000, "dxa"), fixed=True)),
+    ]
+    # Each case starts a page, so that case 02's picture cannot meet case 01's.
+    body = "".join(para(run(f"Case {n:02d}: {label}"), page_break_before=n > 1) + xml + para()
+                   for n, label, xml in cases)
+    return Doc(
+        f"E-table-autofit-beside{said}-{mode}",
+        "Whether a table that fits beside a floating picture of 216 x 108 pt with square wrap "
+        "stays beside it: an autofit table of about 120 pt and a fixed one of 150 pt, each on "
+        "a page of its own, in "
+        f"compatibility mode {mode}{setting}",
+        body + para(run("End of the document.")),
+        media=(("image1.png", grey_png(96, 48)),),
+        mode=mode,
+        compat_flags=(flag,) if flag else (),
+    )
+
+
+def table_autofit_grow_15() -> Doc:
+    return autofit_doc(
+        "E-table-autofit-grow-15",
+        "The cases w:growAutofit changed in compatibility mode 14 (E-table-autofit-grow-14: "
+        "minimum widths wider than the text, a table beside a floating picture), in "
+        "compatibility mode 15 with w:growAutofit",
+        autofit_setting_cases(1),
+        compat_flags=("growAutofit",),
+    )
+
+
+def header_repeat_limits() -> list[Doc]:
+    header = "<w:tblHeader/>"
+    body_rows = [row_cells([f"Body {r:02d}a", f"Body {r:02d}b", f"Body {r:02d}c"])
+                 for r in range(1, 11)]
+
+    def header_row(r: int, count: int) -> tuple:
+        return ([cell(numbered_lines(f"Head {r}", count)), cell(para(run(f"Head {r}b"))),
+                 cell(para(run(f"Head {r}c")))], header)
+
+    def table_of(rows: list) -> str:
+        return rule_table(rows, EVEN_GRID, tbl_w=(TEXT_W, "dxa"), fixed=True,
+                          border_eighths=48)
+
+    return [
+        page_case("E-table-header-repeat-limit",
+                  "Whether Word repeats header rows (w:tblHeader) that together take just "
+                  "under a page: two header rows of 22 lines each (about 600 pt), 10 body "
+                  "rows, then a paragraph between the table and the end of the document",
+                  "rows 1 and 2 are header rows of 22 lines each; 10 body rows follow",
+                  table_of([header_row(1, 22), header_row(2, 22)] + body_rows)
+                  + para(run("After the table."))),
+        page_case("E-table-header-repeat-single-tall",
+                  "Whether Word repeats a single header row (w:tblHeader) taller than a page, "
+                  "a cell of 60 lines, followed by 10 body rows and the end of the document",
+                  "row 1 is a header row of 60 lines; 10 body rows follow",
+                  table_of([header_row(1, 60)] + body_rows)),
+    ]
+
+
+def exact_height_valign() -> Doc:
+    def table_of(rule: str, tc_pr: str) -> str:
+        return rule_table(
+            [row_cells(["r1c1", "r1c2", "r1c3"]),
+             ([cell(para(run("Short")), tc_pr), cell(para(run("r2c2"))),
+               cell(para(run("r2c3")))], f'<w:trHeight w:val="800" w:hRule="{rule}"/>'),
+             row_cells(["r3c1", "r3c2", "r3c3"])],
+            EVEN_GRID, tbl_w=(TEXT_W, "dxa"), fixed=True, border_eighths=12,
+        )
+
+    cases = [
+        ("row 2 is exactly 40 pt high and holds one line, at the top (w:vAlign top)",
+         table_of("exact", '<w:vAlign w:val="top"/>')),
+        ("the same, centred (w:vAlign center)", table_of("exact", '<w:vAlign w:val="center"/>')),
+        ("the same, at the bottom (w:vAlign bottom)",
+         table_of("exact", '<w:vAlign w:val="bottom"/>')),
+        ("row 2 is at least 40 pt high (w:hRule atLeast) and holds one line, centred",
+         table_of("atLeast", '<w:vAlign w:val="center"/>')),
+    ]
+    body = "".join(table_case(n, label, xml) for n, (label, xml) in enumerate(cases, 1))
+    return Doc(
+        "E-table-row-exact-valign",
+        "Where Word puts a line in a row of exact height (w:trHeight, w:hRule exact) taller "
+        "than it, at each vertical alignment (top, centre, bottom), and in a row of at least "
+        "that height for contrast",
+        body + para(run("End of the document.")),
+    )
+
+
+def nested_empty_paragraph_14() -> Doc:
+    inner = rule_table([[cell(para(run(f"in{r}{c}"))) for c in "ab"] for r in (1, 2)],
+                       [1500, 1500], tbl_w=(3000, "dxa"), fixed=True)
+
+    def outer(after: str) -> str:
+        return rule_table([[cell(para(run("Outer a")) + inner + after),
+                            cell(para(run("Outer b")))]],
+                          [4513, 4513], tbl_w=(TEXT_W, "dxa"), fixed=True)
+
+    cases = [
+        ("the first cell holds a line, a nested table and an empty paragraph", outer(para())),
+        ("the same, with a paragraph of text after the nested table",
+         outer(para(run("After the nested table")))),
+    ]
+    body = "".join(table_case(n, label, xml) for n, (label, xml) in enumerate(cases, 1))
+    return Doc(
+        "E-table-nested-empty-para-14",
+        "Whether the empty paragraph that ends a cell after a nested table takes height in "
+        "compatibility mode 14 (in mode 15 it takes none): a nested table followed by an "
+        "empty paragraph, and by a paragraph of text for contrast",
+        body + para(run("End of the document.")),
+        mode=14,
+    )
+
+
+def shaded_lines(count: int, height: float, band: int) -> str:
+    """count empty paragraphs of an exact height, shaded in bands of band paragraphs that
+    alternate between grey and dark grey, so that a raster shows how many Word drew."""
+    return "".join(
+        para(space=spacing(line=("exact", height)),
+             shading=GREY if (n // band) % 2 == 0 else "808080")
+        for n in range(count)
+    )
+
+
+# Letter and A5, in twips.
+LETTER = (12240, 15840)
+A5 = (8391, 11906)
+
+
+def header_cut() -> Doc:
+    # E-header-no-room and E-header-taller-than-page: Word draws 28 lines of 12 pt of a header
+    # taller than the room for it on A4, with the header 35.4 pt from the edge. The cut may
+    # fall after 28 lines, or at a height (about 336 pt, or 0.4 of the page), or at a
+    # distance from the edge; each section changes one of those.
+    header_lines = page_para(lines([f"header line {n}" for n in range(1, 41)]))
+    cases = [
+        ("a header of 400 empty lines of exact 1 pt, shaded in bands of 20, on A4",
+         "headerReference", shaded_lines(400, 1, 20), {}),
+        ("a header of 200 empty lines of exact 2 pt, shaded in bands of 10, on A4",
+         "headerReference", shaded_lines(200, 2, 10), {}),
+        ("a header of 40 lines of 12 pt, 72 pt from the edge, on A4",
+         "headerReference", header_lines, {"header_distance": 1440}),
+        ("a header of 40 lines of 12 pt on a Letter page", "headerReference", header_lines,
+         {"size": LETTER}),
+        ("a header of 40 lines of 12 pt on an A5 page", "headerReference", header_lines,
+         {"size": A5}),
+        ("a footer of 200 empty lines of exact 2 pt, shaded in bands of 10, on A4",
+         "footerReference", shaded_lines(200, 2, 10), {}),
+    ]
+    # A section without a header of its own shows the previous section's, so the footer's
+    # case gets an empty header (E-section-restart-parity shows Word doing so).
+    parts, sections = [], []
+    for n, (label, element, content, options) in enumerate(cases, 1):
+        kind = "header" if element == "headerReference" else "footer"
+        name = f"{kind}{n}.xml"
+        parts.append(header_part(name, content))
+        refs = ((element, "default", name),)
+        if kind == "footer":
+            parts.append(header_part(f"header{n}.xml", page_para()))
+            refs = (("headerReference", "default", f"header{n}.xml"),) + refs
+        sections.append(([run(f"Case {n:02d}: {label}")], section(refs=refs, **options)))
+    return Doc(
+        "E-header-cut",
+        "Where Word cuts a header or footer taller than the room for it: lines of exact 1 and "
+        "2 pt, a header 72 pt from the edge, a Letter and an A5 page, and a footer under an "
+        "empty header; each case is a section of its own",
+        sectioned(sections),
+        headers=tuple(parts),
+        last_section=sections[-1][1],
+    )
+
+
+def para_shading_borders_sides() -> Doc:
+    # E-para-shading-borders: with a box border the fill reaches the lines; with a left
+    # border only it keeps its border-less extent; the space between two shaded paragraphs
+    # is shaded.
+    text = "shaded text that runs over several lines of one paragraph, " * 5
+    apart = page_para(run("not shaded"))
+    after_12 = spacing(after=12, line=("exact", 12))
+    before_12 = spacing(before=12, line=("exact", 12))
+    body = "".join([
+        page_para(run("Case 01: left and right borders, 4 pt from the text: ") + run(text),
+                  shading=SHADE, borders=paragraph_borders(4, ("left", "right"))) + apart,
+        page_para(run("Case 02: top and bottom borders, 4 pt from the text: ") + run(text),
+                  shading=SHADE, borders=paragraph_borders(4, ("top", "bottom"))) + apart,
+        page_para(run("Case 03: a left border only, 0 pt from the text: ") + run(text),
+                  shading=SHADE, borders=paragraph_borders(0, ("left",))) + apart,
+        page_para(run("Case 04: a shaded paragraph with 12 pt after: ") + run(text),
+                  shading=SHADE, space=after_12),
+        page_para(run("Case 04: then an unshaded one with 12 pt before"), space=before_12)
+        + apart,
+        page_para(run("Case 05: an unshaded paragraph with 12 pt after"), space=after_12),
+        page_para(run("Case 05: then a shaded one with 12 pt before: ") + run(text),
+                  shading=SHADE, space=before_12),
+    ])
+    return Doc(
+        "E-para-shading-borders-sides",
+        "Paragraph shading with left and right borders only, top and bottom borders only, "
+        "and a left border 0 pt from the text, and the space between a shaded and an "
+        "unshaded paragraph, each way round: how far the fill reaches",
+        body,
+    )
+
+
+# Page numbers whose letters repeat 20, 30, 31, 40, 50 and 64 times (520, 780, 781, 1040,
+# 1300, 1664), between 53, which Word shows as letters, and 1665, which it does not; and
+# Roman numerals past 4999.
+LETTER_STARTS = [520, 780, 781, 1040, 1300, 1664, 5000, 10000]
+
+
+def number_formats_letters() -> Doc:
+    sections = []
+    for n, start in enumerate(LETTER_STARTS, 1):
+        contents = [run(f"Case {n:02d}: page numbers restarted at {start}")]
+        contents += [run(f"PAGE \\* {switch}: ") + field(f"PAGE \\* {switch}")
+                     for switch in ("Arabic", "ALPHABETIC", "alphabetic", "ROMAN", "roman")]
+        sections.append((contents, section(page_start=start)))
+    return Doc(
+        "E-number-formats-letters",
+        "PAGE fields as letters and Roman numerals at page numbers 520, 780, 781, 1040, 1300 "
+        "and 1664, whose letters repeat 20 to 64 times, and at 5000 and 10000, past 4999",
+        sectioned(sections),
+        last_section=sections[-1][1],
+    )
+
+
+# Every half point from 8 to 14 pt.
+SCRIPT_STEPS = [8 + k / 2 for k in range(13)]
+
+
+def superscript_steps() -> Doc:
+    # E-superscript-sizes: the rise and the drop fit no simple formula at 8 to 48 pt.
+    body, n = "", 0
+    for font in ("Calibri", "Liberation Sans"):
+        fonts = (f'<w:rFonts w:ascii="{font}" w:hAnsi="{font}" w:eastAsia="{font}" '
+                 f'w:cs="{font}"/>')
+        for size in SCRIPT_STEPS:
+            n += 1
+            hp = half_points(size)
+            props = fonts + f'<w:sz w:val="{hp}"/><w:szCs w:val="{hp}"/>'
+            body += labelled(
+                n, f"{font} {size:g} pt, superscript then subscript",
+                styled_run("Base", props),
+                styled_run("123", props + '<w:vertAlign w:val="superscript"/>'),
+                styled_run(" Base", props),
+                styled_run("456", props + '<w:vertAlign w:val="subscript"/>'))
+    return Doc(
+        "E-superscript-steps",
+        "The size and the baseline shift of superscript and subscript text at every half "
+        "point from 8 to 14 pt, in Calibri and in Liberation Sans",
+        body,
+    )
+
+
+def table_float_center_margins() -> Doc:
+    # E-table-float-align: a table centred by w:tblpXSpec, horizontal anchor left out, sat at
+    # the centre of the page, which equal margins could not tell from the centre between
+    # them. Here the left margin is 144 pt and the right one 36 pt; each table is placed
+    # vertically from the page, so that none covers another.
+    body = ""
+    for n, (label, anchor, y) in enumerate([
+        ("w:tblpXSpec center, no horizontal anchor", "", 2000),
+        ("w:tblpXSpec center, w:horzAnchor margin", ' w:horzAnchor="margin"', 4400),
+        ("w:tblpXSpec center, w:horzAnchor page", ' w:horzAnchor="page"', 6800),
+        ("w:tblpXSpec center, w:horzAnchor text", ' w:horzAnchor="text"', 9200),
+    ], 1):
+        spec = f'w:vertAnchor="page"{anchor} w:tblpXSpec="center" w:tblpY="{y}"'
+        body += para(run(f"Case {n:02d}: a table with {label}, {y // 20} pt from the top of "
+                         "the page"))
+        body += floating_table(spec) + para()
+    last = section(sides=(2880, 720))
+    return Doc(
+        "E-table-float-center-margins",
+        "Floating tables centred by w:tblpXSpec on a page whose left margin is 144 pt and "
+        "right margin 36 pt, with no horizontal anchor and anchored to the margin, the page "
+        "and the text: whether Word centres them between the margins or on the page",
+        body,
+        last_section=last,
+    )
+
+
+def table_style_size_pair(defaults: int, normal: int) -> Doc:
+    # E-table-style-defaults-size-14 and E-table-style-size-*-14 left two rules for when
+    # Normal's size overrides a table style's in mode 14: its 11 or 12 pt is ignored unless
+    # smaller than the defaults, or its size is ignored when it equals the defaults or is
+    # 12 pt. Defaults 13 with Normal 12 (the first keeps 12, the second 14) and defaults 10
+    # with Normal 11 (the first keeps 14, the second 11) tell them apart.
+    big = table_style(
+        "Big", [],
+        whole='<w:pPr><w:jc w:val="center"/></w:pPr>'
+        '<w:rPr><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr>',
+    )
+    hp = half_points(normal)
+    body = table_case(
+        1, f"a table in the style Big (14 pt, centred); document defaults {defaults} pt, "
+        f"Normal {normal} pt and left-aligned",
+        styled_table("Big", named_cells(2, 2), widths=[TEXT_W // 2] * 2),
+    ) + para(run("Case 02: a paragraph after the table, in Normal"))
+    return Doc(
+        f"E-table-style-defaults-size-{defaults}-{normal}-14",
+        f"Whether a Normal style of {normal} pt overrides the 14 pt of a table style when the "
+        f"document defaults are {defaults} pt, in compatibility mode 14",
+        body,
+        styles=big,
+        normal_props='<w:pPr><w:jc w:val="left"/></w:pPr>'
+        f'<w:rPr><w:sz w:val="{hp}"/><w:szCs w:val="{hp}"/></w:rPr>',
+        run_default_size=defaults,
+        mode=14,
+    )
+
+
+# Spaces after five underlined words in Calibri 11 pt, and where they end, for a paragraph
+# indented 72 pt from the right margin (2.49 pt a space; 75 end 11 pt before the margin).
+TRAILING_SPACES_INDENT = [
+    (46, "11 pt before the right indent"),
+    (65, "36 pt past the right indent, 36 pt before the margin"),
+    (84, "11 pt past the right margin"),
+    (120, "101 pt past the right margin, 29 pt past the edge of the page"),
+]
+
+
+def underline_trailspace_indent() -> Doc:
+    # E-underline-trailspace-margin: with ulTrailSpace, the underline of trailing spaces on a
+    # left-aligned line stops at the right margin. Here the paragraph has a right indent of
+    # 72 pt: does it stop at the indent or at the margin?
+    single = underline_props("single")
+    body = ""
+    for n, (count, where) in enumerate(TRAILING_SPACES_INDENT, 1):
+        body += para(run(f"Case {n:02d}: right indent 72 pt; 5 underlined words, {count} "
+                         f"spaces and an underlined word; the spaces end {where}:"))
+        body += para(styled_run(" ".join(["underlined"] * 5) + " " * count + "underlined",
+                                single), ind={"right": 1440})
+    return Doc(
+        "E-underline-trailspace-indent",
+        "Underlined trailing spaces in paragraphs with a right indent of 72 pt, ending before "
+        "the indent, between it and the margin, past the margin and past the edge of the "
+        "page, with the w:compat setting ulTrailSpace: whether the underline stops at the "
+        "indent or at the margin",
+        body,
+        compat_flags=("ulTrailSpace",),
+    )
+
+
 def documents() -> list[Doc]:
     return [
         line_fonts(),
@@ -3858,6 +4468,24 @@ def documents() -> list[Doc]:
         *rows_across_pages(),
         exact_height_overflow(),
         vml_pictures(),
+        symbol_font(),
+        table_split_borders(),
+        table_autofit_shares(),
+        table_autofit_beside(15),
+        table_autofit_beside(14),
+        table_autofit_beside(14, "doNotAutofitConstrainedTables"),
+        table_autofit_grow_15(),
+        *header_repeat_limits(),
+        exact_height_valign(),
+        nested_empty_paragraph_14(),
+        header_cut(),
+        para_shading_borders_sides(),
+        number_formats_letters(),
+        superscript_steps(),
+        table_float_center_margins(),
+        table_style_size_pair(13, 12),
+        table_style_size_pair(10, 11),
+        underline_trailspace_indent(),
     ]
 
 
@@ -4018,7 +4646,13 @@ def settings_xml(doc: Doc) -> str:
 
 
 def font_table_xml(fonts: list[str]) -> str:
-    entries = "".join(f'<w:font w:name="{attr(f)}"/>' for f in fonts)
+    # The symbol font has the symbol character set (w:charset 02), as Word writes it for
+    # Symbol and Wingdings.
+    entries = "".join(
+        f'<w:font w:name="{attr(f)}"><w:charset w:val="02"/></w:font>' if f == SYMBOL_FONT
+        else f'<w:font w:name="{attr(f)}"/>'
+        for f in fonts
+    )
     return f'<w:fonts xmlns:w="{W_NS}">{entries}</w:fonts>'
 
 

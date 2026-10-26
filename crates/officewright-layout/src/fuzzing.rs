@@ -1394,15 +1394,26 @@ pub fn check_pages(book: &FontBook, document: &Document, max_pages: usize) -> Re
                         .lines
                         .len()
                     }
-                    crate::pages::Content::Table(table, labels) => crate::tables::Prepared::new(
-                        document,
-                        table,
-                        labels,
-                        width,
-                        &flowed.location,
-                        &mut fonts,
-                    )
-                    .band_count(),
+                    crate::pages::Content::Table(table, labels) => {
+                        let mut leaders = crate::display::LeaderBudget::default();
+                        let mut measured = crate::tables::Measured::new();
+                        let mut context = crate::tables::Context {
+                            document,
+                            fonts: &mut fonts,
+                            shaper: &mut shaper,
+                            leaders: &mut leaders,
+                            values: None,
+                            measured: &mut measured,
+                        };
+                        crate::tables::Prepared::new(
+                            table,
+                            labels,
+                            width,
+                            &flowed.location,
+                            &mut context,
+                        )
+                        .band_count()
+                    }
                 };
             }
             if bound(2 * lines) > max_pages {

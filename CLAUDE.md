@@ -51,7 +51,8 @@ crates/
                         shapes with HarfRust, breaks lines first fit by UAX #14 (unicode-linebreak) with
                         Word's rules on top, and flows paragraphs onto the pages of each section with Word's
                         keep and widow rules, headers, footers, page numbers, list labels (counted per
-                        list definition, as Word counts) and tables (the grid's widths, merged cells,
+                        list definition, as Word counts) and tables (columns fitted to their content
+                        as Word fits them, or the grid's widths for fixed layout, merged cells,
                         borders by Word's conflict rules, shading, nesting; a row is not split across
                         pages, nor are header rows repeated, yet), and draws floating pictures where
                         they are anchored (stacked behind or in front of the text, which does not wrap
@@ -96,17 +97,21 @@ tests/corpus/reference/ ground truth from PDFs of Microsoft Word/Excel/PowerPoin
                         as a 110 dpi grey PNG and geometry.json (lines, words, page breaks); the PDFs are not
                         committed, their SHA-256 and the app version are in SOURCES.md
 tests/corpus/resaved/   the copy Word saved of each document before exporting its reference PDF
-tests/corpus-tools/     tests of make-rule-docs.py and corpus-import.py, and that every test font is credited
-                        with its SHA-256 (Python), and of make-reference.ps1
+tests/corpus-tools/     tests of make-rule-docs.py and corpus-import.py, that every test font is credited
+                        with its SHA-256, and that the symbol font is what make-symbol-font.py writes (Python),
+                        and of make-reference.ps1
                         without Word (Windows PowerShell, Windows only); poppler/ checks corpus-import.py's
                         font embedding with the real qpdf and poppler (Linux, macOS)
 tests/scripts/          tests of scripts/check-added-files.sh in a throwaway git repository, and of
                         scripts/nightly.sh's parts with a fake cargo (Python)
 tests/fonts/            unmodified OFL test fonts with their license files, listed in THIRD-PARTY-NOTICES.md;
                         outside every crate, so never published
-tests/fonts-word/       the same for faces Word had installed when it rendered references, in a build tests/fonts
-                        does not hold: the TrueType Noto Sans (noto-truetype/; tests/fonts/noto/ is its CFF build);
-                        only the corpus runner of check.sh reads them, so the crates' tests do not see them
+tests/fonts-word/       OFL fonts installed for Word when it renders references, with their license files, listed
+                        in THIRD-PARTY-NOTICES.md: the TrueType Noto Sans, unmodified (noto-truetype/;
+                        tests/fonts/noto/ is its CFF build), and the symbol font Officewright Test Symbol
+                        (test-symbol/), its Regular face with a Windows symbol character map, written by
+                        scripts/make-symbol-font.py; no crate's tests read them, the corpus runner of check.sh
+                        lays documents out with them
 tools/corpus-runner/    workspace member, publish = false: runs the library over a corpus, writes a JSON report
 tools/ooxml-validate/   small .NET tool: validates generated OOXML with Open XML SDK's OpenXmlValidator (MIT)
 corpus-ext/             gitignored: large external corpora downloaded by scripts/fetch-corpus.sh
@@ -125,6 +130,7 @@ scripts/nightly.sh      long-running checks (see below)
 scripts/check-test-fonts.sh  compares tests/fonts and tests/fonts-word with the upstream sources
                         THIRD-PARTY-NOTICES.md names
 scripts/make-rule-docs.py  writes tests/corpus/word-rules/ (stored ZIP, fixed dates: same bytes everywhere)
+scripts/make-symbol-font.py  writes the symbol font of tests/fonts-word/test-symbol/ from the TrueType Noto Sans
 scripts/import-public-docs.py  cleans the listed public documents into tests/corpus/business/
 scripts/make-business-docs.py  writes tests/corpus/generated/ the same way, with open-font twins
 scripts/windows/make-reference.ps1  renders the reference PDFs with Word on the maintainer's Windows machine
@@ -306,7 +312,7 @@ gh pr merge <n> --squash --auto --match-head-commit <the head commit checked>
 where the head commit checked is the PR's head that the first condition compared with the commit the last review names (for a Dependabot PR, which gets no review and is queued only with its checks green, the head whose update was checked), so that nothing pushed since is queued. The command may be run before the PR's checks have finished on that head: it turns on auto-merge, and GitHub puts the PR into the queue only once the required checks pass. Auto-merge does not keep the head it was turned on for (a push leaves it on, for the new head), and what a push does to a queued PR is not documented, so nothing is pushed to the branch (a fix, or a merge of main) while the PR may still be merged. The author reads the PR's state with
 
 ```sh
-gh api graphql -f query='{repository(owner:"officewright",name:"officewright"){pullRequest(number:<n>){state isInMergeQueue autoMergeRequest{enabledAt} timelineItems(last:1,itemTypes:[ADDED_TO_MERGE_QUEUE_EVENT,REMOVED_FROM_MERGE_QUEUE_EVENT]){nodes{__typename ... on RemovedFromMergeQueueEvent{reason actor{login}}}}}}}'
+gh api graphql -f query='{repository(owner:"officewright",name:"officewright"){pullRequest(number:<n>){state isInMergeQueue autoMergeRequest{enabledAt} timelineItems(last:1,itemTypes:[ADDED_TO_MERGE_QUEUE_EVENT,REMOVED_FROM_MERGE_QUEUE_EVENT,AUTO_MERGE_ENABLED_EVENT]){nodes{__typename ... on RemovedFromMergeQueueEvent{reason actor{login}}}}}}}'
 ```
 
 takes a queued PR (`isInMergeQueue` true), which gh cannot take out of the queue, out first with
@@ -315,7 +321,7 @@ takes a queued PR (`isInMergeQueue` true), which gh cannot take out of the queue
 gh api graphql -f query='mutation($id:ID!){dequeuePullRequest(input:{id:$id}){mergeQueueEntry{state}}}' -f id="$(gh pr view <n> --json id --jq .id)"
 ```
 
-then turns auto-merge off with `gh pr merge <n> --disable-auto`, reads the state again, and pushes only when it shows `isInMergeQueue` false and `autoMergeRequest` null; once the merge conditions hold for the new head, it runs the command again with that head. The author follows the PR with the same query until its state is `MERGED`. An open PR whose last queue event is a removal by `github-merge-queue` with a reason other than `merged` was dropped by the queue (above); an open PR whose checks have passed, with auto-merge on but not in the queue, gets `--disable-auto` and the command again.
+then turns auto-merge off with `gh pr merge <n> --disable-auto`, reads the state again, and pushes only when it shows `state` `OPEN`, `isInMergeQueue` false and `autoMergeRequest` null (a fix for a PR that is already merged goes into a new PR); once the merge conditions hold for the new head, it runs the command again with that head. The author follows the PR with the same query until its state is `MERGED`. An open PR whose last event in the query is a removal by `github-merge-queue` with a reason other than `merged` was dropped by the queue (above); one put back since shows `AddedToMergeQueueEvent` last, or `AutoMergeEnabledEvent` while its checks still run; an open PR whose checks have passed, with auto-merge on but not in the queue, gets `--disable-auto` and the command again.
 
 A PR that contains anything on the list "Always ask the maintainer first" is merged only with the maintainer's consent, which the author quotes in the PR with its date (the sessions and the maintainer post from the same account, so a quote from the chat is what records it). After each merge the author sends the maintainer a short report; the maintainer runs the "How to check by hand" steps when they choose.
 
@@ -349,7 +355,7 @@ scripts/check-added-files.sh: no tracked Python bytecode, no file naming a home 
   nightly.sh's parts in tests/scripts
 tests/corpus-tools (Python unittest): committed rule documents equal make-rule-docs.py output; corpus-import.py refusals;
   every file in tests/fonts and tests/fonts-word is listed with its SHA-256 in THIRD-PARTY-NOTICES.md, and
-  check-test-fonts.sh's pins are its
+  check-test-fonts.sh's pins are its; the symbol font is what make-symbol-font.py writes
 tests/corpus-tools/poppler (Linux, macOS): fonts corpus-import.py embeds are what poppler draws
 tests/corpus-tools/test_make_reference.ps1 (Windows): a Word step that hangs is stopped, checked and never waited on forever
 scripts/install-capi.sh target/capi --debug, copy the header, git diff --exit-code crates/officewright-ffi/include/officewright.h
@@ -369,12 +375,13 @@ PDF output of officewright text-to-pdf (tests/pdf-output): qpdf --check without 
   unfiltered by poppler, the committed fuzz seeds equal images.py's output; the example embed_report counts a font the
   subsetter does not support apart from a damaged one (Linux, macOS)
 corpus-runner over tests/corpus (committed corpus), every document rendered with the fonts of tests/fonts and, first,
-  tests/fonts-word/noto-truetype (the TrueType Noto Sans, the build Word had for the references that use it),
+  tests/fonts-word/noto-truetype (the TrueType Noto Sans, the build Word had for the references that use it) and
+  tests/fonts-word/test-symbol (the symbol font),
   compared with tests/corpus/baseline.json: statuses and the scores against Word's references (Linux), statuses only
   (macOS, Windows)
 ```
 
-`scripts/nightly.sh` (scheduled CI; under an hour in parallel jobs, about six hours as one run): Miri on `officewright-ffi`, `fetch-corpus.sh --check all` (every pinned commit is still fetchable and every archive still has its pinned size; downloads nothing), the files of `tests/fonts` and `tests/fonts-word` compared byte for byte with the upstream sources THIRD-PARTY-NOTICES.md names (`scripts/check-test-fonts.sh`), fuzzing (30 min per target, each seeded with files of the format it reads, listed in `seeds()` in nightly.sh; 30 s per input, an allocation of 1 GiB or more fails the input, and the fuzzer may grow to 2.5 GiB, since it also holds its corpus and AddressSanitizer's quarantine and overhead; each target's crashing inputs uploaded as a CI artifact of its job; from Milestone 3), corpus-runner over the Word documents of `corpus-ext/` (Apache POI and LibreOffice, fetched by the run; each child under the 1 GiB limit; compared with `tools/corpus-runner/baseline-ext.json`), report uploaded as a CI artifact. `nightly.yml` runs `nightly.sh checks` (all but the fuzzing) in one job and `nightly.sh fuzz <target>` in a job of its own for each target that `nightly.sh fuzz-targets` lists, so no job nears GitHub's limit of 6 hours; with no arguments the script runs all of it, the targets one after another. The full `fetch-corpus.sh all` from scratch, which downloads every source and verifies every SHA-256, runs weekly.
+`scripts/nightly.sh` (scheduled CI; under an hour in parallel jobs, about six hours as one run): Miri on `officewright-ffi`, `fetch-corpus.sh --check all` (every pinned commit is still fetchable and every archive still has its pinned size; downloads nothing), the files of `tests/fonts` and `tests/fonts-word` compared byte for byte with the upstream sources THIRD-PARTY-NOTICES.md names, the symbol font with what `make-symbol-font.py` writes from upstream's Noto Sans (`scripts/check-test-fonts.sh`), fuzzing (30 min per target, each seeded with files of the format it reads, listed in `seeds()` in nightly.sh; 30 s per input, an allocation of 1 GiB or more fails the input, and the fuzzer may grow to 2.5 GiB, since it also holds its corpus and AddressSanitizer's quarantine and overhead; each target's crashing inputs uploaded as a CI artifact of its job; from Milestone 3), corpus-runner over the Word documents of `corpus-ext/` (Apache POI and LibreOffice, fetched by the run; each child under the 1 GiB limit; compared with `tools/corpus-runner/baseline-ext.json`), report uploaded as a CI artifact. `nightly.yml` runs `nightly.sh checks` (all but the fuzzing) in one job and `nightly.sh fuzz <target>` in a job of its own for each target that `nightly.sh fuzz-targets` lists, so no job nears GitHub's limit of 6 hours; with no arguments the script runs all of it, the targets one after another. The full `fetch-corpus.sh all` from scratch, which downloads every source and verifies every SHA-256, runs weekly.
 
 `.githooks/pre-commit` runs `scripts/check-added-files.sh --staged`, fmt, clippy and test. Enable once per clone: `git config core.hooksPath .githooks`. CI (`.github/workflows/ci.yml`, on pull requests, pushes to main and the merge queue's `merge_group` runs, the only ones that save no Rust cache) runs `check.sh` on Linux, Windows (Git Bash with the MSVC environment from `ilammy/msvc-dev-cmd`) and macOS plus an MSRV job on Rust 1.85 (`cargo test`, with poppler and qpdf for the corpus runner's tests); `nightly.yml` runs `nightly.sh` on Linux, its checks and each fuzz target in parallel jobs; `weekly.yml` runs the full corpus fetch on Linux. Actions are pinned by commit SHA and tools by version, except qpdf and poppler for the PDF output check and the MSRV job's corpus runner tests: they come from the runner's package manager (apt on Ubuntu 26.04, Homebrew on macOS), which keeps no installable old versions across runner image updates, so each CI step that installs them prints the versions it got.
 
