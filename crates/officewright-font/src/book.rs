@@ -2290,6 +2290,49 @@ mod tests {
         symlink(data.join("lib"), &lib).unwrap();
         book.add_dir(&fonts).unwrap();
         assert_eq!(book.skipped().len(), 1, "{:?}", book.skipped());
+        // Read once it is a font, it leaves the list.
+        fs::write(data.join("lib/bad.ttf"), TestFont::new("Test Sans").build()).unwrap();
+        assert_eq!(book.add_dir(&fonts).unwrap(), 1);
+        assert!(book.skipped().is_empty(), "{:?}", book.skipped());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_moved_folder_that_cannot_be_read_keeps_its_entries() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let set_mode =
+            |path: &Path, mode| fs::set_permissions(path, fs::Permissions::from_mode(mode));
+        let dir = TempDir::new("moved-unreadable");
+        let (root, data) = (dir.0.join("root"), dir.0.join("data"));
+        let fonts = root.join("fonts");
+        fs::create_dir_all(&fonts).unwrap();
+        fs::create_dir(&data).unwrap();
+        fs::write(fonts.join("bad.ttf"), b"not a font").unwrap();
+        let mut book = FontBook::new();
+        book.add_dir(&root).unwrap();
+        // Moved and linked back, the folder can be searched but not read: its file is
+        // there, and nothing has read it.
+        fs::rename(&fonts, data.join("fonts")).unwrap();
+        symlink(data.join("fonts"), &fonts).unwrap();
+        set_mode(&data.join("fonts"), 0o311).unwrap();
+        let readable = fs::read_dir(&fonts).is_ok();
+        book.add_dir(&root).unwrap();
+        let listed: Vec<Option<PathBuf>> = book
+            .skipped()
+            .iter()
+            .map(|skipped| skipped.path().map(Path::to_owned))
+            .collect();
+        set_mode(&data.join("fonts"), 0o755).unwrap();
+        // Root reads every directory, so this has to run as an ordinary user.
+        assert!(
+            !readable,
+            "run the tests as a user who cannot read mode 311"
+        );
+        assert_eq!(listed, [Some(fonts.join("bad.ttf")), Some(fonts.clone())]);
+        // Read again, the file is listed once, under its new place.
+        book.add_dir(&root).unwrap();
+        assert_eq!(book.skipped().len(), 1, "{:?}", book.skipped());
     }
 
     #[test]
