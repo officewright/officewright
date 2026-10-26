@@ -323,7 +323,9 @@ impl<'a> VmlPicture<'a> {
 
     /// Whether it has a border, which the layout does not draw yet: a `w10:bordertop`,
     /// `w10:borderleft`, `w10:borderbottom` or `w10:borderright` (ECMA-376 Part 4,
-    /// §19.3.2.2 to §19.3.2.5) whose `type` is not `none`.
+    /// §19.3.2.2 to §19.3.2.5) whose `type` is not `none`. One without a `type` counts:
+    /// no source says whether Word draws it, and a border left out without an entry in
+    /// the layout's report would be the worse error.
     // reason: only the translation into the layout IR asks for it.
     #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
     pub(crate) fn has_border(self) -> bool {

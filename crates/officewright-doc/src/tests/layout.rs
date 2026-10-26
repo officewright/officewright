@@ -4029,6 +4029,18 @@ fn lists_a_vml_picture_s_outline_colour_adjustments_and_text_once() {
         )])
         .is_empty()
     );
+    // One without a type counts, as our reading (from the re-check of #401): no source
+    // says whether Word draws it, and leaving it out unlisted would be the worse error.
+    assert_eq!(
+        listed(&[vml_picture(
+            "rIdPng",
+            size,
+            "",
+            "",
+            r#"<w10:bordertop width="4"/>"#
+        )]),
+        [border]
+    );
     // Each is listed once of its own: a picture with a shadow and text lists both.
     assert_eq!(
         listed(&[vml_picture(
