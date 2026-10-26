@@ -511,7 +511,7 @@
     "tests/corpus/business/form-gsa-reseller-form.docx": {
       "line_agreement": 1.0,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.8334,
+      "ssim_mean": 0.8362,
       "ssim_min": 0.7233,
       "text_score": 1.0
     },

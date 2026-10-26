@@ -163,18 +163,60 @@ impl<'d, 'l> Prepared<'d, 'l> {
 
     /// What each grid column needs (design 8.2): the minimum and the maximum width of the
     /// content of the cells that lie in it alone, with their start and end margins, and
-    /// their preferred widths; then what the cells that span several columns need beyond
-    /// those ([`autofit::spread`]). A cell merged into the one above, or one that hides its
-    /// mark and has no content, needs nothing.
+    /// their preferred widths, the largest of each (a hypothesis for preferred widths that
+    /// differ from row to row); then what the cells that span several columns need beyond
+    /// those ([`autofit::Needs::spread`]), and so the room a row leaves before or after
+    /// its cells (`w:wBefore`, `w:wAfter`) when its width is in points. Hypotheses until a
+    /// Word render: a cell merged into the one above, or one that hides its mark and has
+    /// no content, needs nothing; a column no cell and no such room lies in keeps the
+    /// grid's width.
     fn needs(&self, context: &mut Context<'d, '_, '_>) -> Vec<Column> {
-        let mut columns = vec![Column::default(); self.table.grid().len()];
+        let grid = self.table.grid();
+        let mut columns = vec![Column::default(); grid.len()];
         let mut spans = Vec::new();
+        // Where the columns that rows cover start and end, for which columns none does.
+        let mut covered = vec![0_i64; grid.len() + 1];
+        let mut cover = |range: &Range<usize>| {
+            if range.start < range.end && range.end <= grid.len() {
+                if let Some(at) = covered.get_mut(range.start) {
+                    *at += 1;
+                }
+                if let Some(at) = covered.get_mut(range.end) {
+                    *at -= 1;
+                }
+            }
+        };
         let mut labels = Labels {
             list: self.labels,
             next: 0,
         };
         for (row, placed_row) in self.rows.iter().enumerate() {
+            if let Some(ir_row) = self.table.rows().get(row) {
+                let before = usize::from(ir_row.grid_before()).min(grid.len());
+                let end = placed_row
+                    .last()
+                    .map_or(before, |placed| placed.columns.end);
+                let after = end
+                    .saturating_add(usize::from(ir_row.grid_after()))
+                    .min(grid.len());
+                for (range, width) in [
+                    (0..before, ir_row.width_before()),
+                    (end..after, ir_row.width_after()),
+                ] {
+                    if let PreferredWidth::Points(points) = width {
+                        cover(&range);
+                        spans.push((
+                            range,
+                            Column {
+                                preferred: Some(points.0.clamp(0.0, MAX_TABLE)),
+                                ..Column::default()
+                            },
+                        ));
+                    }
+                }
+            }
             for placed in placed_row {
+                cover(&placed.columns);
                 let Some(cell) = self.cell(row, placed.cell) else {
                     continue;
                 };
@@ -221,23 +263,38 @@ impl<'d, 'l> Prepared<'d, 'l> {
                 }
             }
         }
-        for (range, need) in spans {
-            autofit::spread(&mut columns, range, need);
+        let mut depth = 0;
+        for ((column, width), change) in columns.iter_mut().zip(grid).zip(&covered) {
+            depth += change;
+            if depth == 0 {
+                column.preferred = Some(width.0.clamp(0.0, MAX_COLUMN));
+            }
         }
-        columns
+        let mut needs = autofit::Needs::new(columns);
+        for (range, need) in spans {
+            needs.spread(range, need);
+        }
+        needs.into_columns()
     }
 
     /// The narrowest and the widest the table is laid out, from the outer edge of its
     /// start border to that of its end border in Word 2013's mode: what a cell that holds
     /// it needs for it. Word's render of case 7 of `E-table-autofit-15`: the outer column
     /// is the inner grid, the inner borders and the outer cell's margins. In earlier
-    /// modes the grid alone, a hypothesis.
+    /// modes the grid alone, a hypothesis. A table that fits its columns to their content
+    /// and has a width in points wants that width, never less than its minima (a
+    /// hypothesis: no render nests one); one with a width in percent of a cell, its
+    /// content.
     fn widths(&self) -> (f64, f64) {
         let outer = self.outer();
         let (min, max) = if self.table.props().layout() == TableLayout::Autofit {
-            self.needs.iter().fold((0.0, 0.0), |(min, max), column| {
+            let (min, wanted) = self.needs.iter().fold((0.0, 0.0), |(min, max), column| {
                 (min + column.min, max + column.wanted())
-            })
+            });
+            match self.table.props().width() {
+                PreferredWidth::Points(points) => (min, points.0.clamp(0.0, MAX_TABLE).max(min)),
+                _ => (min, wanted),
+            }
         } else {
             let total = self.lines.last().copied().unwrap_or(0.0)
                 - self.lines.first().copied().unwrap_or(0.0);
@@ -557,6 +614,11 @@ impl<'d, 'l> Prepared<'d, 'l> {
         let outer = self.outer();
         let room = self.room(width, outer);
         let mut widths: Vec<f64> = if props.layout() == TableLayout::Autofit {
+            // An explicit width is fitted as case 2 fits 100 % of the room: what the columns
+            // want, preferred widths included, scaled to it, or below their minima cut to
+            // it. Hypotheses until a Word render, as the renders have only 100 % with auto
+            // cells: an explicit width is kept past the room, and minima are cut to it, not
+            // kept.
             let target = match props.width() {
                 PreferredWidth::Points(points) => Target::Exact(points.0.clamp(0.0, MAX_TABLE)),
                 PreferredWidth::Percent(percent) => {
@@ -2653,5 +2715,44 @@ mod tests {
         let style = flagged.add_run_style(run_style());
         let (lines_x, _) = laid(&flagged, &table(style), (30.0, &[]));
         assert!(at(&lines_x, &[0.0, 15.0, 30.0]), "{lines_x:?}");
+    }
+
+    #[test]
+    fn room_before_a_row_s_cells_and_a_nested_table_s_width_count() {
+        let (document, style) = document(CompatMode::Word2013);
+        // Review of #415: a row that leaves 100 pt before its cell (`w:wBefore`), whose grid
+        // column no cell lies in; and a column no cell and no such room lies in keeps the
+        // grid's width.
+        let before = |width: PreferredWidth| {
+            Table::default()
+                .with_grid([Pt(80.0), Pt(100.0)])
+                .with_rows(vec![
+                    row(vec![cell(vec![lines(style, 1, "A")])])
+                        .with_grid_before(1)
+                        .with_width_before(width),
+                ])
+        };
+        let (lines_x, _) = laid(
+            &document,
+            &before(PreferredWidth::Points(Pt(100.0))),
+            (400.0, &[]),
+        );
+        assert!(at(&lines_x, &[0.0, 100.0, 116.8]), "{lines_x:?}");
+        let (lines_x, _) = laid(&document, &before(PreferredWidth::Auto), (400.0, &[]));
+        assert!(at(&lines_x, &[0.0, 80.0, 96.8]), "{lines_x:?}");
+        // A nested table 300 pt wide that fits its columns to their content wants its
+        // width, which its outer column then holds: 300 + 10.8.
+        let inner = Table::default()
+            .with_grid([Pt(100.0)])
+            .with_props(TableProps::default().with_width(PreferredWidth::Points(Pt(300.0))))
+            .with_rows(vec![row(vec![cell(vec![lines(style, 1, "A")])])]);
+        let outer = Table::default()
+            .with_grid([Pt(100.0)])
+            .with_rows(vec![row(vec![cell(vec![
+                inner.into(),
+                Paragraph::new(style).into(),
+            ])])]);
+        let (lines_x, _) = laid(&document, &outer, (400.0, &[]));
+        assert!(at(&lines_x, &[0.0, 310.8]), "{lines_x:?}");
     }
 }

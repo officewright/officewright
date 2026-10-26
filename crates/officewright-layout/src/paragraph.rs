@@ -368,7 +368,41 @@ mod tests {
             .with_start(Pt(30.0))
             .with_first_line(Pt(-30.0));
         assert_eq!(measure(text("A AAAA"), hanging), (54.0, 54.0));
+        // Spaces at the start are on the first line, with its indent.
+        let first_line = Indent::default().with_first_line(Pt(20.0));
+        assert_eq!(measure(text("  AAAA"), first_line).0, 44.0);
         // Nothing at all takes no room.
         assert_eq!(measure(Vec::new(), Indent::default()), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_word_that_ends_at_a_soft_hyphen_is_measured_with_its_hyphen() {
+        use crate::fonts::Fonts;
+        use crate::ir::{Inline, RunFonts, RunStyle};
+        use crate::testing::{book, minimal, with_hyphen, with_soft_hyphen};
+        // Review of #415: a column at its minimum holds the hyphen too. In this font the
+        // hyphen is 6 pt, as is `Á`: `ÁÁÁ` and its hyphen make 24 pt.
+        let book = book(vec![with_soft_hyphen(with_hyphen(minimal()))]);
+        let mut document = Document::default();
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        let paragraph = Paragraph::new(style).with_inlines([
+            Inline::text("ÁÁÁ", style),
+            Inline::soft_hyphen(style),
+            Inline::text("ÁÁ", style),
+        ]);
+        let mut fonts = Fonts::new(&book);
+        let mut shaper = Shaper::new();
+        let (min, max) = content_widths(
+            &document,
+            (&paragraph, None),
+            (&mut fonts, &mut shaper),
+            &Location::default(),
+            None,
+        );
+        assert_eq!((min.0, max.0), (24.0, 30.0));
     }
 }

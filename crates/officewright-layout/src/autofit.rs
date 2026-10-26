@@ -114,7 +114,13 @@ fn by_percent(columns: &[Column], target: Target) -> Vec<f64> {
         .iter()
         .map(|column| {
             column.percent.map(|percent| {
-                let share = percent.clamp(0.0, left);
+                // A share that is no finite number takes nothing, so that what is left
+                // stays one.
+                let share = if percent.is_finite() {
+                    percent.clamp(0.0, left)
+                } else {
+                    0.0
+                };
                 left -= share;
                 share / 100.0
             })
@@ -162,37 +168,105 @@ fn by_percent(columns: &[Column], target: Target) -> Vec<f64> {
         .collect()
 }
 
-/// Adds to `columns` what a cell over the columns `range` needs beyond what they have:
-/// its minimum, its maximum and its preferred width each go to the last of them (Word's
-/// render of case 8: a span of 300 pt over cells of 50 and 100 pt makes columns of 50 and
-/// 250; a hypothesis among the rules that fit it, until a Word render of a span over three
-/// columns).
-pub(crate) fn spread(columns: &mut [Column], range: std::ops::Range<usize>, cell: Column) {
-    let Some(spanned) = columns.get(range.clone()) else {
-        return;
-    };
-    let has: Column = spanned
-        .iter()
-        .fold(Column::default(), |sum, column| Column {
-            min: sum.min + column.min,
-            max: sum.max + column.max,
-            preferred: Some(sum.preferred.unwrap_or(0.0) + column.wanted()),
-            percent: None,
-        });
-    let Some(last) = range
-        .end
-        .checked_sub(1)
-        .and_then(|last| columns.get_mut(last))
-    else {
-        return;
-    };
-    last.min += (cell.min - has.min).max(0.0);
-    last.max += (cell.max - has.max).max(0.0);
-    if let Some(preferred) = cell.preferred {
-        let more = preferred - has.preferred.unwrap_or(0.0);
-        if more > 0.0 {
-            last.preferred = Some(last.wanted() + more);
+/// What the columns of a table need, as cells that span several of them add to it
+/// ([`Needs::spread`]), with the sums of their minima, maxima and wants over any range of
+/// them at hand: each spanning cell takes time in the logarithm of the columns, however many
+/// it spans, so that a table of many rows of wide spans takes time in proportion to its
+/// cells.
+pub(crate) struct Needs {
+    columns: Vec<Column>,
+    min: Sums,
+    max: Sums,
+    wanted: Sums,
+}
+
+impl Needs {
+    /// The needs of `columns`, as the cells that lie in one column alone set them.
+    pub(crate) fn new(columns: Vec<Column>) -> Self {
+        let sums = |value: fn(&Column) -> f64| Sums::of(columns.iter().map(value));
+        Self {
+            min: sums(|column| column.min),
+            max: sums(|column| column.max),
+            wanted: sums(Column::wanted),
+            columns,
         }
+    }
+
+    /// Adds what a cell over the columns `range` needs beyond what they have: its minimum,
+    /// its maximum and its preferred width each go to the last of them (Word's render of
+    /// case 8: a span of 300 pt over cells of 50 and 100 pt makes columns of 50 and 250; a
+    /// hypothesis among the rules that fit it, until a Word render of a span over three
+    /// columns). A range past the columns adds nothing.
+    pub(crate) fn spread(&mut self, range: std::ops::Range<usize>, cell: Column) {
+        if range.is_empty() || range.end > self.columns.len() {
+            return;
+        }
+        let has_min = self.min.range(range.clone());
+        let has_max = self.max.range(range.clone());
+        let has_wanted = self.wanted.range(range.clone());
+        let last = range.end - 1;
+        let Some(column) = self.columns.get_mut(last) else {
+            return;
+        };
+        let before = *column;
+        column.min += (cell.min - has_min).max(0.0);
+        column.max += (cell.max - has_max).max(0.0);
+        if let Some(preferred) = cell.preferred {
+            let more = preferred - has_wanted;
+            if more > 0.0 {
+                // What the column wanted before the span raised its minimum: the span's
+                // minimum and its preferred width are needs of one cell, not one on top of
+                // the other.
+                column.preferred = Some(before.wanted() + more);
+            }
+        }
+        let after = *column;
+        self.min.add(last, after.min - before.min);
+        self.max.add(last, after.max - before.max);
+        self.wanted.add(last, after.wanted() - before.wanted());
+    }
+
+    /// The columns' needs.
+    pub(crate) fn into_columns(self) -> Vec<Column> {
+        self.columns
+    }
+}
+
+/// Sums of values over ranges, which change one at a time (a Fenwick tree).
+struct Sums(Vec<f64>);
+
+impl Sums {
+    fn of(values: impl ExactSizeIterator<Item = f64>) -> Self {
+        let mut sums = Self(vec![0.0; values.len()]);
+        for (index, value) in values.enumerate() {
+            sums.add(index, value);
+        }
+        sums
+    }
+
+    /// Adds `delta` to value `index`.
+    fn add(&mut self, index: usize, delta: f64) {
+        let mut at = index + 1;
+        while let Some(sum) = self.0.get_mut(at - 1) {
+            *sum += delta;
+            at += at & at.wrapping_neg();
+        }
+    }
+
+    /// The sum of the first `end` values.
+    fn prefix(&self, end: usize) -> f64 {
+        let mut total = 0.0;
+        let mut at = end.min(self.0.len());
+        while at > 0 {
+            total += self.0.get(at - 1).copied().unwrap_or(0.0);
+            at -= at & at.wrapping_neg();
+        }
+        total
+    }
+
+    /// The sum of the values in `range`.
+    fn range(&self, range: std::ops::Range<usize>) -> f64 {
+        self.prefix(range.end) - self.prefix(range.start)
     }
 }
 
@@ -326,46 +400,168 @@ mod tests {
 
     #[test]
     fn a_spanning_cell_gives_what_its_columns_lack_to_the_last_of_them() {
+        let spread = |columns: Vec<Column>, spans: &[(std::ops::Range<usize>, Column)]| {
+            let mut needs = Needs::new(columns);
+            for (range, cell) in spans {
+                needs.spread(range.clone(), *cell);
+            }
+            needs.into_columns()
+        };
         // Case 8: a span of 300 pt over cells of 50 and 100 pt.
-        let mut columns = [
-            Column {
-                preferred: Some(50.0),
-                ..Column::default()
-            },
-            Column {
-                preferred: Some(100.0),
-                ..Column::default()
-            },
-        ];
-        spread(
-            &mut columns,
-            0..2,
-            Column {
-                preferred: Some(300.0),
-                ..Column::default()
-            },
+        let preferred = |width| Column {
+            preferred: Some(width),
+            ..Column::default()
+        };
+        let columns = spread(
+            vec![preferred(50.0), preferred(100.0)],
+            &[(0..2, preferred(300.0))],
+        );
+        assert_eq!(widths(&columns, Target::Auto(450.8), false), [50.0, 250.0]);
+        // Review of #415: a span with both a minimum and a preferred width wider than its
+        // columns' is one cell's needs, the preferred width counted from what the last
+        // column wanted before the span raised its minimum.
+        let columns = spread(
+            vec![
+                Column {
+                    min: 10.0,
+                    max: 10.0,
+                    preferred: Some(50.0),
+                    percent: None,
+                },
+                Column {
+                    min: 5.0,
+                    max: 5.0,
+                    preferred: Some(100.0),
+                    percent: None,
+                },
+            ],
+            &[(
+                0..2,
+                Column {
+                    min: 200.0,
+                    preferred: Some(300.0),
+                    ..Column::default()
+                },
+            )],
         );
         assert_eq!(widths(&columns, Target::Auto(450.8), false), [50.0, 250.0]);
         // A span's word wider than its columns' widest makes the last one wider.
-        let mut columns = [Column {
+        let narrow = Column {
             min: 20.0,
             max: 30.0,
             ..Column::default()
-        }; 2];
-        spread(
-            &mut columns,
-            0..2,
-            Column {
-                min: 100.0,
-                max: 100.0,
-                ..Column::default()
-            },
+        };
+        let wide = Column {
+            min: 100.0,
+            max: 100.0,
+            ..Column::default()
+        };
+        let columns = spread(vec![narrow; 2], &[(0..2, wide)]);
+        assert_eq!((columns[1].min, columns[1].max), (80.0, 70.0));
+        // A range past the columns, or empty, changes nothing.
+        let columns = spread(vec![narrow; 2], &[(1..5, wide), (1..1, wide)]);
+        assert_eq!(columns, vec![narrow; 2]);
+    }
+
+    #[test]
+    fn spans_add_up_as_their_columns_change_one_after_another() {
+        // Overlapping spans, each seeing what the ones before it gave: the sums over ranges
+        // agree with adding the columns up one by one.
+        let naive = |columns: &mut Vec<Column>, range: std::ops::Range<usize>, cell: Column| {
+            let has = |f: fn(&Column) -> f64, columns: &[Column]| -> f64 {
+                columns[range.clone()].iter().map(f).sum()
+            };
+            let (min, max, wanted) = (
+                has(|c| c.min, columns),
+                has(|c| c.max, columns),
+                has(Column::wanted, columns),
+            );
+            let last = &mut columns[range.end - 1];
+            let before = *last;
+            last.min += (cell.min - min).max(0.0);
+            last.max += (cell.max - max).max(0.0);
+            if let Some(preferred) = cell.preferred {
+                if preferred - wanted > 0.0 {
+                    last.preferred = Some(before.wanted() + preferred - wanted);
+                }
+            }
+        };
+        let start: Vec<Column> = (0..12)
+            .map(|i| Column {
+                min: f64::from(i % 4) * 3.0,
+                max: f64::from(i % 5) * 7.0 + 1.0,
+                preferred: (i % 3 == 0).then_some(f64::from(i) * 4.0),
+                percent: None,
+            })
+            .collect();
+        let spans: Vec<(std::ops::Range<usize>, Column)> = (0..30)
+            .map(|i: usize| {
+                let start = (i * 7) % 11;
+                let end = (start + 1 + (i * 5) % 6).min(12);
+                let width = (i * 13 % 40) as f64;
+                (
+                    start..end,
+                    Column {
+                        min: width,
+                        max: width * 2.0,
+                        preferred: (i % 2 == 0).then_some(width * 3.0),
+                        percent: None,
+                    },
+                )
+            })
+            .collect();
+        let mut expected = start.clone();
+        let mut needs = Needs::new(start);
+        for (range, cell) in spans {
+            naive(&mut expected, range.clone(), cell);
+            needs.spread(range, cell);
+        }
+        let columns = needs.into_columns();
+        for (a, b) in columns.iter().zip(&expected) {
+            assert!(
+                (a.min - b.min).abs() < 1e-9 && (a.max - b.max).abs() < 1e-9,
+                "{a:?} {b:?}"
+            );
+            assert!((a.wanted() - b.wanted()).abs() < 1e-9, "{a:?} {b:?}");
+        }
+    }
+
+    #[test]
+    fn many_wide_spans_take_time_in_proportion_to_them() {
+        // Review of #415: 20,000 rows each with a cell over all 20,000 columns. Adding up
+        // the columns of each span one by one takes 400 million steps; the sums over ranges
+        // take a few for each.
+        let count = 20_000;
+        let start = std::time::Instant::now();
+        let mut needs = Needs::new(vec![Column::default(); count]);
+        for i in 0..count {
+            needs.spread(
+                0..count,
+                Column {
+                    min: i as f64,
+                    max: i as f64,
+                    ..Column::default()
+                },
+            );
+        }
+        let columns = needs.into_columns();
+        assert_eq!(columns[count - 1].min, (count - 1) as f64);
+        assert!(start.elapsed().as_secs_f64() < 2.0, "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn a_share_that_is_no_number_takes_nothing() {
+        let column = |percent| Column {
+            min: 10.0,
+            max: 10.0,
+            preferred: None,
+            percent: Some(percent),
+        };
+        let shares = widths(
+            &[column(f64::NAN), column(50.0)],
+            Target::Exact(100.0),
+            false,
         );
-        assert_eq!(columns[1].min, 80.0);
-        assert_eq!(columns[1].max, 70.0);
-        // A range past the columns changes nothing.
-        let before = columns;
-        spread(&mut columns, 1..5, Column::default());
-        assert_eq!(columns, before);
+        assert_eq!(shares, [10.0, 50.0]);
     }
 }

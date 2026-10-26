@@ -545,30 +545,23 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
 
     /// The narrowest column the paragraph fits in without a word broken between its
     /// characters: its widest stretch between two places a line may end, the spaces that
-    /// end it left out, with the indents of the line it starts, to the end indent. Tabs
-    /// take no room here, nor does the hyphen of a soft hyphen. Word's minimum width of a
-    /// cell's content (design 8.2): its widest word, as Word's renders of
-    /// `E-table-autofit-*` show.
-    pub(crate) fn min_width(&self) -> Pt {
+    /// end it left out, with the indents of the line it starts, to the end indent, and the
+    /// hyphen it ends in at a soft hyphen. Word's minimum width of a cell's content
+    /// (design 8.2): its widest word, as Word's renders of `E-table-autofit-*` show.
+    /// Hypotheses until a Word render: tabs take no room here, and a list label and the
+    /// paragraph's indents count as on a line.
+    pub(crate) fn min_width(&mut self) -> Pt {
         let end_indent = self.paragraph.props().indent().end().0;
         let mut widest: f64 = 0.0;
         let mut first = true;
         let (mut stretch, mut spaces) = (0.0, 0.0);
-        let mut close = |stretch: &mut f64, spaces: &mut f64, first: &mut bool| {
-            if *stretch > 0.0 {
-                let (left, _) = self.edges(*first);
-                widest = widest.max(left.0 + *stretch + end_indent);
-            }
-            *stretch = 0.0;
-            *spaces = 0.0;
-            *first = false;
-        };
-        for unit in &self.units {
+        for index in 0..self.units.len() {
+            let Some(unit) = self.units.get(index).cloned() else {
+                break;
+            };
+            let mut ends = self.breaks.at(unit.range.end).is_some();
             match &unit.kind {
-                UnitKind::Break { .. } => {
-                    close(&mut stretch, &mut spaces, &mut first);
-                    continue;
-                }
+                UnitKind::Break { .. } => ends = true,
                 UnitKind::Tab { .. } => {}
                 UnitKind::Glyphs { text, .. } if is_space(self.itemized, text) => {
                     spaces += unit.width.0;
@@ -578,11 +571,29 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                     spaces = 0.0;
                 }
             }
-            if self.breaks.at(unit.range.end).is_some() {
-                close(&mut stretch, &mut spaces, &mut first);
+            if ends {
+                if stretch > 0.0 {
+                    let hyphen = if self.ends_in_soft_hyphen(index) {
+                        self.hyphen_width(index).0
+                    } else {
+                        0.0
+                    };
+                    let (left, _) = self.edges(first);
+                    widest = widest.max(left.0 + stretch + hyphen + end_indent);
+                }
+                // A line ends here, unless only spaces or nothing came before: those start
+                // no line of their own.
+                if stretch > 0.0 || matches!(unit.kind, UnitKind::Break { .. }) {
+                    first = false;
+                }
+                stretch = 0.0;
+                spaces = 0.0;
             }
         }
-        close(&mut stretch, &mut spaces, &mut first);
+        if stretch > 0.0 {
+            let (left, _) = self.edges(first);
+            widest = widest.max(left.0 + stretch + end_indent);
+        }
         Pt(widest)
     }
 
