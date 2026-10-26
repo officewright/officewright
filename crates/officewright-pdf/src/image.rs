@@ -667,7 +667,7 @@ enum Resume {
     Marker(usize),
 }
 
-/// The next marker of `data` from byte `from`, as libjpeg looks for it: past any bytes
+/// The next marker of `data` from byte `at`, as libjpeg looks for it: past any bytes
 /// before it, stuffed zeros among them, and the 0xFF bytes that pad it. Returns where its
 /// run of 0xFF starts and its code's byte, or `None` at the end of `data`.
 fn next_marker(data: &[u8], mut at: usize) -> Option<(usize, usize)> {
@@ -700,8 +700,8 @@ fn next_marker(data: &[u8], mut at: usize) -> Option<(usize, usize)> {
 /// - any other marker ends the scan: it is left unread at every restart point still to
 ///   come, and then read as any marker between segments is.
 ///
-/// So a marker libjpeg does not know is skipped in the coded data while a restart marker
-/// is still to come, and refused after the scan's last one.
+/// So a marker of 0x02 to 0xBF is skipped in the coded data while a restart marker is
+/// still to come, and refused after the scan's last one.
 fn at_restart(
     data: &[u8],
     mut start: usize,
@@ -3377,6 +3377,122 @@ pub(crate) mod tests {
             .0
             + 1;
         [&data[..at], inserted, &data[at..]].concat()
+    }
+
+    /// The headers and the three scans of a sequential file of three components, each
+    /// sampled 1 × 1 and coded in a scan of its own, 8 pixels wide and `8 × (n + 1)` high,
+    /// with a restart interval of 1: each scan's coded data is `3F`, then `FF Dk 3F` for
+    /// each of its `n` restart markers, numbered 0 to 7 in turn.
+    fn striped(n: u16) -> (Vec<u8>, Vec<Vec<u8>>) {
+        let segment = |code: u8, body: &[u8]| {
+            let length = u16::try_from(body.len() + 2).unwrap().to_be_bytes();
+            [&[0xFF, code][..], &length, body].concat()
+        };
+        let one = [&[1][..], &[0; 15], &[0]].concat();
+        let height = (8 * (n + 1)).to_be_bytes();
+        let frame = [
+            &[8][..],
+            &height,
+            &[0, 8, 3, 1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0],
+        ]
+        .concat();
+        let head = [
+            &b"\xFF\xD8"[..],
+            &segment(0xDB, &[&[0][..], &[1; 64]].concat()),
+            &segment(0xC0, &frame),
+            &segment(0xC4, &[&[0x00][..], &one].concat()),
+            &segment(0xC4, &[&[0x10][..], &one].concat()),
+            &segment(0xDD, &[0, 1]),
+        ]
+        .concat();
+        let scans = (1..=3)
+            .map(|id| {
+                let mut scan = segment(0xDA, &[1, id, 0, 0, 0x3F, 0]);
+                scan.push(0x3F);
+                for k in 0..n {
+                    let code = 0xD0 + u8::try_from(k % 8).unwrap();
+                    scan.extend_from_slice(&[0xFF, code, 0x3F]);
+                }
+                scan
+            })
+            .collect();
+        (head, scans)
+    }
+
+    #[test]
+    fn takes_restart_markers_by_their_numbers_as_libjpeg_does() {
+        // Each case decided as `qpdf --check` decides it (#411).
+        let reserved = b"\xFF\x02\x00\x04ab";
+        let at_reserved = |data: &[u8]| data.windows(6).position(|w| w == reserved).unwrap();
+        let file = |head: &[u8], scans: &[Vec<u8>]| {
+            let mut data = head.to_vec();
+            for scan in scans {
+                data.extend_from_slice(scan);
+            }
+            data.extend_from_slice(b"\xFF\xD9");
+            data
+        };
+        let whole = |data: Vec<u8>| {
+            let image = Image::from_bytes(data).unwrap_or_else(|err| panic!("{err}"));
+            matches!(image.inner.encoding, Encoding::Jpeg { end: None, .. })
+        };
+        let refused_at_reserved = |data: Vec<u8>| {
+            let at = at_reserved(&data);
+            let err = error(data);
+            err.starts_with(&format!(
+                "image data is damaged: the JPEG file has marker FF02 at byte {at}, which"
+            ))
+        };
+        // The numbers go round after 7: undamaged scans of 9 and 17 restart markers are
+        // read whole, and a marker after the first scan's last one is refused.
+        for n in [9, 17] {
+            let (head, scans) = striped(n);
+            assert!(whole(file(&head, &scans)), "{n}");
+        }
+        let (head, mut scans) = striped(9);
+        scans[0].extend_from_slice(reserved);
+        assert!(refused_at_reserved(file(&head, &scans)));
+        // In the first scan of three restart markers, one of them changed.
+        let (head, scans) = striped(3);
+        let changed = |old: &[u8], new: &[u8]| {
+            let at = scans[0].windows(old.len()).position(|w| w == old).unwrap();
+            let first = [&scans[0][..at], new, &scans[0][at + old.len()..]].concat();
+            file(&head, &[first, scans[1].clone(), scans[2].clone()])
+        };
+        // RST2 for RST0, two further on: left unread at two restart points and taken at
+        // the third, so none is left for the marker after it.
+        let two_ahead = changed(
+            b"\x3F\xFF\xD0\x3F\xFF\xD1",
+            &[&b"\x3F\xFF\xD2\x3F"[..], reserved, b"\xFF\xD1"].concat(),
+        );
+        assert!(refused_at_reserved(two_ahead));
+        // RST7 for RST1, two back: skipped, and the RST4 after it taken for RST1, so the
+        // marker before RST2 is skipped.
+        let two_back = changed(
+            b"\x3F\xFF\xD1\x3F\xFF\xD2",
+            &[&b"\x3F\xFF\xD7\x3F\xFF\xD4\x3F"[..], reserved, b"\xFF\xD2"].concat(),
+        );
+        assert!(whole(two_back));
+        // RST5 or RST7 for RST2, three further on or three back: taken for RST2, the last.
+        for code in [0xD5, 0xD7] {
+            let taken = changed(
+                b"\x3F\xFF\xD2\x3F",
+                &[&[0x3F, 0xFF, code, 0x3F][..], reserved].concat(),
+            );
+            assert!(refused_at_reserved(taken), "{code:02X}");
+        }
+        // TEM, 0x01, is skipped like a marker of 0x02 to 0xBF.
+        let tem = changed(b"\x3F\xFF\xD1", b"\x3F\xFF\x01\xFF\x05\x00\x04ab\xFF\xD1");
+        assert!(whole(tem));
+        // A file that ends while libjpeg looks for a restart marker ends the check, which
+        // refuses nothing where the file ends early.
+        let at = scans[0]
+            .windows(3)
+            .position(|w| w == b"\x3F\xFF\xD1")
+            .unwrap()
+            + 1;
+        let ended = [&head[..], &scans[0][..at], reserved].concat();
+        assert!(whole(ended));
     }
 
     #[test]
