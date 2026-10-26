@@ -113,10 +113,11 @@ pub struct Document {
     /// `w:background` and unknown extensions, kept for writing, each with whether it comes
     /// after the body (#111).
     pub(crate) root_elements: Vec<(xml::Span, bool)>,
-    /// The elements of `w:footnotes` and `w:endnotes` other than notes, such as unknown
-    /// extensions, kept for writing (#388), each with whether its part holds the endnotes
-    /// and its place: the number of stories read before it, so that it comes before the
-    /// part's note that is the next story, or after the part's last note.
+    /// The elements of `w:footnotes` and `w:endnotes` that are not read as notes, such as
+    /// unknown extensions, misplaced elements and notes without a valid id, kept for
+    /// writing (#388), each with whether its part holds the endnotes and its place: the
+    /// number of stories read before it, so that it comes before the part's note that is
+    /// the next story, or after the part's last note.
     pub(crate) note_root_elements: Vec<(xml::Span, bool, u32)>,
     /// The headers, footers, footnotes and endnotes.
     pub(crate) stories: Vec<StoryData>,

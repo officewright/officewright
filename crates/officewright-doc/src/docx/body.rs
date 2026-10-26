@@ -762,7 +762,8 @@ impl Reading<'_, '_, '_> {
     }
 
     /// Begins a note (`w:footnote`, `w:endnote`): its blocks are read like a body's. One
-    /// without a valid id is kept without being read, as nothing can refer to it.
+    /// without a valid id is kept without being read, with its place among the notes as
+    /// any other element of the part's root (#388), as nothing can refer to it.
     fn open_note(
         &mut self,
         reader: &mut Reader<'_>,
@@ -775,7 +776,9 @@ impl Reading<'_, '_, '_> {
         let Some(id) = id else {
             let value = self.w_attribute(&tag, "id").unwrap_or_default().to_owned();
             self.invalid(&tag, "id", &value);
-            return self.c.capture(reader, mce, tag, None).map(drop);
+            let span = self.c.capture(reader, mce, tag, None)?;
+            self.keep_at_root(span);
+            return Ok(());
         };
         let note_type = match self.w_attribute(&tag, "type") {
             None => NoteType::Normal,
