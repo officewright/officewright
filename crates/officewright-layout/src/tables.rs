@@ -105,6 +105,9 @@ pub(crate) struct Prepared<'d, 'l> {
     borders_inside: bool,
     /// What each grid column needs, for a table that fits its columns to its content.
     needs: Vec<Column>,
+    /// Whether columns whose minima do not fit keep them (`growAutofit` in Word 2010's
+    /// mode and earlier).
+    grow: bool,
     rows: Vec<Vec<Placed>>,
     bands: Vec<Range<usize>>,
     /// The borders drawn along the grid line above each row, and last below the last
@@ -142,6 +145,10 @@ impl<'d, 'l> Prepared<'d, 'l> {
             lines: Vec::new(),
             borders_inside: settings.compat_mode() >= CompatMode::Word2013,
             needs: Vec::new(),
+            // `growAutofit` is one of Word 2010's options, which Word 2013's mode leaves
+            // out.
+            grow: settings.compat_mode() < CompatMode::Word2013
+                && settings.has_compat_flag(&CompatFlag::GrowAutofit),
             horizontal: Vec::new(),
             thickness: Vec::new(),
             vertical: Vec::new(),
@@ -154,10 +161,7 @@ impl<'d, 'l> Prepared<'d, 'l> {
         if table.props().layout() == TableLayout::Autofit {
             prepared.needs = prepared.needs(context);
         }
-        // `growAutofit` is one of Word 2010's options, which Word 2013's mode leaves out.
-        let grow = settings.compat_mode() < CompatMode::Word2013
-            && settings.has_compat_flag(&CompatFlag::GrowAutofit);
-        prepared.lines = prepared.grid_lines(width.0, columns, grow, context.fonts);
+        prepared.lines = prepared.grid_lines(width.0, columns, context.fonts);
         prepared
     }
 
@@ -238,8 +242,12 @@ impl<'d, 'l> Prepared<'d, 'l> {
                 let margins = self.margins(cell);
                 let sides = margins.start().0 + margins.end().0;
                 // A cell that keeps its content on one line (`w:noWrap`) needs its widest
-                // line where the table fits its columns: a hypothesis until a Word render.
-                let min = if cell.no_wrap() { max } else { min };
+                // line where the table fits its columns, when its preferred width is auto or
+                // in percent: one in points ignores it ([MS-DOC] CellRangeNoWrap, ECMA-376
+                // Part 1, §17.4.30). A hypothesis for Word until a render.
+                let keeps_one_line =
+                    cell.no_wrap() && !matches!(cell.width(), PreferredWidth::Points(_));
+                let min = if keeps_one_line { max } else { min };
                 let need = Column {
                     min: min + sides,
                     max: max + sides,
@@ -293,7 +301,9 @@ impl<'d, 'l> Prepared<'d, 'l> {
         let (min, max) = if self.table.props().layout() == TableLayout::Autofit {
             match self.table.props().width() {
                 PreferredWidth::Points(points) => {
-                    let width = points.0.clamp(0.0, MAX_TABLE);
+                    // As `grid_lines` fits it, `growAutofit` included.
+                    let target = Target::Exact(points.0.clamp(0.0, MAX_TABLE));
+                    let width = autofit::widths(&self.needs, target, self.grow).iter().sum();
                     (width, width)
                 }
                 _ => autofit::natural(&self.needs, MAX_TABLE),
@@ -605,14 +615,8 @@ impl<'d, 'l> Prepared<'d, 'l> {
     /// alignment and indent say. A table of fixed layout takes the grid's widths, scaled to
     /// an explicit width; one that fits its columns to their content fits them to the room
     /// it may take or to its explicit width ([`autofit::widths`]), keeping its columns at
-    /// their minima past it when `grow` holds.
-    fn grid_lines(
-        &self,
-        width: f64,
-        columns: usize,
-        grow: bool,
-        fonts: &mut Fonts<'_>,
-    ) -> Vec<f64> {
+    /// their minima past it with `growAutofit`.
+    fn grid_lines(&self, width: f64, columns: usize, fonts: &mut Fonts<'_>) -> Vec<f64> {
         let props = self.table.props();
         let outer = self.outer();
         let room = self.room(width, outer);
@@ -629,7 +633,7 @@ impl<'d, 'l> Prepared<'d, 'l> {
                 }
                 PreferredWidth::Auto => Target::Auto(room.clamp(0.0, MAX_TABLE)),
             };
-            autofit::widths(&self.needs, target, grow)
+            autofit::widths(&self.needs, target, self.grow)
         } else {
             let mut widths: Vec<f64> = (0..columns)
                 .map(|column| self.table.grid().get(column).map_or(0.0, |width| width.0))
@@ -2878,5 +2882,63 @@ mod tests {
         let (_, bands) = laid(&document, &table, (400.0, &[]));
         let rows: Vec<f64> = glyphs(&bands[0]).iter().map(|(_, y, _)| *y).collect();
         assert_eq!(rows.len(), 1, "{rows:?}");
+    }
+
+    #[test]
+    fn grown_nested_tables_hidden_cells_and_no_wrap_in_points_count_as_laid_out() {
+        // Re-check of #415: in Word 2010's mode with `growAutofit`, a nested table of 40 pt
+        // whose two words need 81.6 pt keeps its minima, and is measured so: its outer
+        // column holds it with the outer cell's margins.
+        let mut grown = Document::new(
+            DocumentSettings::default()
+                .with_compat_mode(CompatMode::Word2010)
+                .with_compat_flags([CompatFlag::GrowAutofit]),
+        );
+        let style = grown.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        let nested: Block = Table::default()
+            .with_grid(vec![Pt(20.0); 2])
+            .with_props(TableProps::default().with_width(PreferredWidth::Points(Pt(40.0))))
+            .with_rows(vec![row(vec![
+                cell(vec![lines(style, 1, "AAAAA")]),
+                cell(vec![lines(style, 1, "AAAAA")]),
+            ])])
+            .into();
+        let outer = Table::default()
+            .with_grid(vec![Pt(100.0); 2])
+            .with_rows(vec![row(vec![
+                cell(vec![nested, Paragraph::new(style).into()]),
+                cell(vec![lines(style, 1, &"A ".repeat(40))]),
+            ])]);
+        let (lines_x, _) = laid(&grown, &outer, (400.0, &[]));
+        assert!(lines_x[1] - lines_x[0] >= 92.4 - 1e-9, "{lines_x:?}");
+        let (document, style) = document(CompatMode::Word2013);
+        // A cell that hides its mark and has no content needs nothing, its preferred width
+        // neither.
+        let hidden = Table::default().with_grid([Pt(100.0)]).with_rows(vec![
+            row(vec![cell(vec![lines(style, 1, "A")])]),
+            row(vec![
+                Cell::default()
+                    .with_hide_mark(true)
+                    .with_width(PreferredWidth::Points(Pt(200.0)))
+                    .with_blocks([Paragraph::new(style).into()]),
+            ]),
+        ]);
+        let (lines_x, _) = laid(&document, &hidden, (400.0, &[]));
+        assert!(at(&lines_x, &[0.0, 16.8]), "{lines_x:?}");
+        // `w:noWrap` with a preferred width in points is ignored: the cell takes its 20 pt.
+        let fixed_no_wrap = Table::default()
+            .with_grid(vec![Pt(100.0); 2])
+            .with_rows(vec![row(vec![
+                cell(vec![lines(style, 1, "A A A")])
+                    .with_no_wrap(true)
+                    .with_width(PreferredWidth::Points(Pt(20.0))),
+                cell(vec![lines(style, 1, "A")]),
+            ])]);
+        let (lines_x, _) = laid(&document, &fixed_no_wrap, (400.0, &[]));
+        assert!(at(&lines_x, &[0.0, 20.0, 36.8]), "{lines_x:?}");
     }
 }

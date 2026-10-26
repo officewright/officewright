@@ -130,8 +130,9 @@ fn scaled(widths: &[f64], total: f64) -> Vec<f64> {
 /// the shares make 100 % (Word's render of case 5: 40 % three times makes 40, 40 and 20);
 /// the others share what is left in proportion to what they want (a hypothesis, as no
 /// render mixes them). An auto table is as wide as its columns' shares need to hold what
-/// each wants, at most the width it may take. Returns what each column then wants, and the
-/// table's width.
+/// each wants, and as the columns' minima, at most the width it may take; shares that make
+/// less than 100 % then widen their columns to fill it (a hypothesis too). Returns what
+/// each column then wants, and the table's width.
 fn by_percent(columns: &[Column], target: Target) -> (Vec<f64>, f64) {
     let mut left = 100.0_f64;
     let shares: Vec<Option<f64>> = columns
@@ -174,7 +175,10 @@ fn by_percent(columns: &[Column], target: Target) -> (Vec<f64>, f64) {
             } else {
                 0.0
             };
-            by_shares.max(by_rest).min(room)
+            // Never narrower than the columns' minima where the room allows: a column
+            // without a share beside shares that make 100 % still needs its own.
+            let min: f64 = columns.iter().map(|column| column.min).sum();
+            by_shares.max(by_rest).max(min).min(room)
         }
     };
     let spare = (width * (1.0 - taken)).max(0.0);
@@ -458,6 +462,29 @@ mod tests {
             },
         ];
         assert_eq!(widths(&mixed, Target::Exact(200.0), false), [100.0, 100.0]);
+        // Re-check of #415: shares that make 100 % beside a column without one, whose word
+        // needs 70.8 pt: the table is as wide as the minima, and nothing is cut.
+        let half = Column {
+            min: 16.8,
+            max: 16.8,
+            preferred: None,
+            percent: Some(50.0),
+        };
+        let long = Column {
+            min: 70.8,
+            max: 70.8,
+            ..Column::default()
+        };
+        let fitted = widths(&[half, half, long], Target::Auto(400.0), false);
+        assert!(close(&fitted, &[16.8, 16.8, 70.8]), "{fitted:?}");
+        // Shares that make less than 100 % widen their columns to fill the table their
+        // widest share needs: 16.8 / 0.25.
+        let quarter = Column {
+            percent: Some(25.0),
+            ..half
+        };
+        let fitted = widths(&[quarter, quarter], Target::Auto(400.0), false);
+        assert!(close(&fitted, &[33.6, 33.6]), "{fitted:?}");
         // As wide as the shares need, laid out with room to spare: 30 / 0.5.
         assert_eq!(natural(&mixed, 1000.0), (20.0, 60.0));
         let (min, max) = natural(&word(), 1000.0);

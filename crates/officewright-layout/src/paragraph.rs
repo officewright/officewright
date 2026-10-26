@@ -399,6 +399,15 @@ mod tests {
                 "{indent:?} below {min}"
             );
         }
+        // A paragraph that starts with a line break puts its word on the second line, from
+        // the start indent: 30 + 24 with the hanging first line.
+        let after_break = || {
+            vec![
+                Inline::line_break(BreakClear::None, style),
+                Inline::text("AAAA", style),
+            ]
+        };
+        assert_eq!(measure(after_break(), hanging).0, 54.0);
         // The widest line counts its own indent: the first line indented 20 pt, the second
         // not.
         let two = vec![
