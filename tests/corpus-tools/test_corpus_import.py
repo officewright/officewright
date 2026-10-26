@@ -268,6 +268,9 @@ class Import(unittest.TestCase):
         """qpdf --update-from-json as Ubuntu 26.04's AppArmor profile for qpdf confines it,
         opening only .pdf, .json and .qdf files: records the update with the data of each
         new stream."""
+        for path in (pdf, update, copy):
+            if path.suffix.lower() not in (".pdf", ".json", ".qdf"):
+                raise importer.Refused(f"qpdf: open {path}: Permission denied")
         update = json.loads(update.read_text(encoding="utf-8"))
         data = {}
         for key, value in update["qpdf"][1].items():
