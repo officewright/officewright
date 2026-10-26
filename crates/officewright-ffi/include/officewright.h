@@ -739,14 +739,16 @@ enum OwStatus ow_font_book_skipped_count(const struct OwFontBook *book, size_t *
  * font collection: the file is too short`. The string is UTF-8 and owned by the book:
  * it stays valid until an `ow_font_book_add_*` call changes the list of skipped entries
  * (one that skips another file, or reads a skipped one after all) or the book is freed.
- * A call that changes nothing, such as a failed one, leaves the strings valid.
+ * A call that changes nothing, such as a failed one, leaves the strings valid. The
+ * entries are in no particular order: when an entry leaves the list, the last one takes
+ * its place.
  *
  * Fails with `OW_STATUS_INVALID_ARGUMENT` if `index` is not below the count
  * `ow_font_book_skipped_count` gives.
  *
  * # Safety
  *
- * `book` must be NULL or a live handle not modified by another thread during the call;
+ * `book` must be NULL or a live handle not used by another thread during the call;
  * `out_message` must be NULL or valid for writing a pointer.
  */
 enum OwStatus ow_font_book_skipped(const struct OwFontBook *book,

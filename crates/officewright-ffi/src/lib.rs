@@ -27,7 +27,9 @@ use std::sync::Arc;
 
 use officewright_core::Error;
 use officewright_doc::{LayoutReport, RenderOptions, ReportKind};
-use officewright_font::{FontBook, FontOrigin, FontRequest, FontResolver, ResolutionKind};
+use officewright_font::{
+    FontBook, FontOrigin, FontRequest, FontResolver, ResolutionKind, SkippedFont,
+};
 use officewright_pdf::{Compression, Document, EmbeddingNote, Font, PageSize, Pt, StandardFont};
 
 /// Version of the C ABI described by `officewright.h`, bumped on every breaking
@@ -131,24 +133,54 @@ pub const OW_FONT_NOTE_DEFAULT_INSTANCE: i32 = 4;
 /// Used by one thread at a time; may be moved between threads.
 pub struct OwFontBook {
     book: FontBook,
-    /// The messages of the skipped fonts, for `ow_font_book_skipped`.
-    skipped: Vec<CString>,
+    /// The messages of the skipped entries asked for, for `ow_font_book_skipped`, each with
+    /// the entry it was made from. A message is made when it is first asked for and kept
+    /// while its entry does not change, so that a call costs nothing for entries no one
+    /// reads.
+    messages: RefCell<Vec<Option<(SkippedFont, CString)>>>,
 }
 
 impl OwFontBook {
-    /// Renews the messages if the book's list of skipped entries changed. An unchanged
-    /// list keeps its strings, which `ow_font_book_skipped` promises callers; a call that
-    /// fails usually changes nothing.
+    /// Forgets the messages past the end of the list, after a call that may have
+    /// shortened it.
     fn refresh(&mut self) {
-        let skipped: Vec<CString> = self
-            .book
-            .skipped()
-            .iter()
-            .map(|skipped| c_string(skipped.to_string()))
-            .collect();
-        if skipped != self.skipped {
-            self.skipped = skipped;
+        let len = self.book.skipped().len();
+        self.messages.get_mut().truncate(len);
+    }
+
+    /// The message of skipped entry `index`, or `None` past the end of the list. It stays
+    /// valid until the entry at `index` changes and its message is asked for again, or the
+    /// list is shortened past it, which only an `ow_font_book_add_*` call can do. An entry
+    /// whose message reads the same keeps the string, so that a call that changes nothing,
+    /// such as a rescan that lists the same paths with the same errors, keeps it valid.
+    fn message(&self, index: usize) -> Result<Option<*const c_char>, Failure> {
+        let Some(entry) = self.book.skipped().get(index) else {
+            return Ok(None);
+        };
+        let mut messages = self.messages.try_borrow_mut().map_err(|_| Failure {
+            status: OwStatus::InvalidArgument,
+            message: "the font book is in use by another call".to_owned(),
+        })?;
+        if messages.len() <= index {
+            messages.resize_with(index + 1, || None);
         }
+        let Some(slot) = messages.get_mut(index) else {
+            return Ok(None);
+        };
+        match slot {
+            // The same entry: its error is the same allocation, which the cached copy
+            // keeps alive, so no other entry can have it.
+            Some((made_from, _)) if ptr::eq(made_from.error(), entry.error()) => {}
+            Some((made_from, text)) => {
+                let fresh = c_string(entry.to_string());
+                if fresh != *text {
+                    *text = fresh;
+                }
+                *made_from = entry.clone();
+            }
+            None => *slot = Some((entry.clone(), c_string(entry.to_string()))),
+        }
+        Ok(slot.as_ref().map(|(_, text)| text.as_ptr()))
     }
 }
 
@@ -753,7 +785,7 @@ pub unsafe extern "C" fn ow_font_book_new(out_book: *mut *mut OwFontBook) -> OwS
         unsafe { put(out_book, "out_book", ptr::null_mut()) }?;
         let book = OwFontBook {
             book: FontBook::new(),
-            skipped: Vec::new(),
+            messages: RefCell::new(Vec::new()),
         };
         let book = Box::into_raw(Box::new(book));
         // SAFETY: as above.
@@ -1007,7 +1039,7 @@ pub unsafe extern "C" fn ow_font_book_skipped_count(
         // SAFETY: the caller passes NULL or a live handle.
         let book = unsafe { book_ref(book) }?;
         // SAFETY: as above.
-        unsafe { put(out_count, "out_count", book.skipped.len()) }
+        unsafe { put(out_count, "out_count", book.book.skipped().len()) }
     })
 }
 
@@ -1016,14 +1048,16 @@ pub unsafe extern "C" fn ow_font_book_skipped_count(
 /// font collection: the file is too short`. The string is UTF-8 and owned by the book:
 /// it stays valid until an `ow_font_book_add_*` call changes the list of skipped entries
 /// (one that skips another file, or reads a skipped one after all) or the book is freed.
-/// A call that changes nothing, such as a failed one, leaves the strings valid.
+/// A call that changes nothing, such as a failed one, leaves the strings valid. The
+/// entries are in no particular order: when an entry leaves the list, the last one takes
+/// its place.
 ///
 /// Fails with `OW_STATUS_INVALID_ARGUMENT` if `index` is not below the count
 /// `ow_font_book_skipped_count` gives.
 ///
 /// # Safety
 ///
-/// `book` must be NULL or a live handle not modified by another thread during the call;
+/// `book` must be NULL or a live handle not used by another thread during the call;
 /// `out_message` must be NULL or valid for writing a pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ow_font_book_skipped(
@@ -1036,15 +1070,15 @@ pub unsafe extern "C" fn ow_font_book_skipped(
         unsafe { put(out_message, "out_message", ptr::null()) }?;
         // SAFETY: the caller passes NULL or a live handle.
         let book = unsafe { book_ref(book) }?;
-        let message = book.skipped.get(index).ok_or_else(|| Failure {
+        let message = book.message(index)?.ok_or_else(|| Failure {
             status: OwStatus::InvalidArgument,
             message: format!(
                 "skipped index {index} is out of range for a font book with {} skipped",
-                book.skipped.len()
+                book.book.skipped().len()
             ),
         })?;
         // SAFETY: as above. The message lives until the book changes.
-        unsafe { put(out_message, "out_message", message.as_ptr()) }
+        unsafe { put(out_message, "out_message", message) }
     })
 }
 
@@ -3613,6 +3647,60 @@ mod tests {
                 OwStatus::Ok
             );
             assert_eq!(CStr::from_ptr(kept).to_str().unwrap(), text);
+            ow_font_book_free(book);
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn keeps_a_skipped_message_while_it_reads_the_same() {
+        let dir =
+            std::env::temp_dir().join(format!("officewright-ffi-messages-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let (first, second) = (dir.join("a.ttf"), dir.join("b.ttf"));
+        fs::write(&first, b"not a font").unwrap();
+        fs::write(&second, b"not a font").unwrap();
+        let c_dir = c(dir.to_str().unwrap());
+        let book = new_book();
+        let mut added = 7;
+        let mut count = 7;
+        let mut message: *const c_char = placeholder();
+        // SAFETY: a live handle, NUL-terminated paths and valid out-pointers; each message
+        // is read while the book keeps it, as the asserts check.
+        unsafe {
+            assert_eq!(
+                ow_font_book_add_dir(book, c_dir.as_ptr(), &mut added),
+                OwStatus::Ok
+            );
+            assert_eq!(ow_font_book_skipped(book, 1, &mut message), OwStatus::Ok);
+            let kept = message;
+            let text = CStr::from_ptr(kept).to_str().unwrap().to_owned();
+            assert!(text.starts_with(&second.display().to_string()), "{text}");
+            // Rewritten, the second file is read again and listed anew with the same
+            // message: the string stays.
+            fs::write(&second, b"not a fon").unwrap();
+            assert_eq!(
+                ow_font_book_add_dir(book, c_dir.as_ptr(), &mut added),
+                OwStatus::Ok
+            );
+            assert_eq!(ow_font_book_skipped(book, 1, &mut message), OwStatus::Ok);
+            assert_eq!(message, kept);
+            assert_eq!(CStr::from_ptr(kept).to_str().unwrap(), text);
+            // A font now, the first leaves the list, and the second takes its place.
+            fs::write(&first, fs::read(minimal_font_path()).unwrap()).unwrap();
+            assert_eq!(
+                ow_font_book_add_dir(book, c_dir.as_ptr(), &mut added),
+                OwStatus::Ok
+            );
+            assert_eq!(added, 1);
+            assert_eq!(ow_font_book_skipped_count(book, &mut count), OwStatus::Ok);
+            assert_eq!(count, 1);
+            assert_eq!(ow_font_book_skipped(book, 0, &mut message), OwStatus::Ok);
+            assert_eq!(CStr::from_ptr(message).to_str().unwrap(), text);
+            assert_eq!(
+                ow_font_book_skipped(book, 1, &mut message),
+                OwStatus::InvalidArgument
+            );
             ow_font_book_free(book);
         }
         fs::remove_dir_all(&dir).unwrap();

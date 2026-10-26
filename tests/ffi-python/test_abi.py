@@ -7,6 +7,7 @@ import ctypes
 import os
 import re
 import tempfile
+import time
 import unittest
 import zlib
 from ctypes import POINTER, byref, c_char_p, c_double, c_int, c_size_t, c_uint8, c_uint32, c_void_p
@@ -57,6 +58,7 @@ NOTO_SANS = FONTS / "noto" / "NotoSans-Regular.otf"
 REPOSITORY = FONTS.parent.parent
 HELLO_DOCX = REPOSITORY / "crates" / "officewright-doc" / "tests" / "data" / "hello.docx"
 PAGES_DOCX = REPOSITORY / "tests" / "corpus" / "word-rules" / "E-space-before-top.docx"
+MINIMAL_FONT = REPOSITORY / "crates" / "officewright-font" / "tests" / "data" / "minimal.ttf"
 
 lib = ctypes.CDLL(os.environ["OW_LIB"])
 
@@ -556,6 +558,77 @@ class AbiTest(unittest.TestCase):
             faces = c_size_t()
             self.check(lib.ow_font_book_face_count(book, byref(faces)))
             self.assertEqual(faces.value, 1)
+
+    def test_adds_listed_files_one_by_one_in_linear_time(self):
+        # Files that were not fonts when a scan listed them, each added by
+        # ow_font_book_add_file once it is one: each call drops one entry, and costs no
+        # more for the entries left. At most 24 times what an eighth of them take, where
+        # linear work takes about 8 times and work that grows with the square of their
+        # number about 64; the shortest of several runs, a floor of 50 ms, and a failure
+        # only when a second measurement agrees.
+        font = MINIMAL_FONT.read_bytes()
+
+        def took(n):
+            with tempfile.TemporaryDirectory() as directory:
+                paths = [Path(directory) / f"bad{i:06}.ttf" for i in range(n)]
+                for path in paths:
+                    path.write_bytes(b"not a font")
+                book = self.new_book()
+                added = c_size_t()
+                self.check(lib.ow_font_book_add_dir(book, directory.encode(), byref(added)))
+                count = c_size_t()
+                self.check(lib.ow_font_book_skipped_count(book, byref(count)))
+                self.assertEqual(count.value, n)
+                for path in paths:
+                    path.write_bytes(font)
+                start = time.perf_counter()
+                for path in paths:
+                    self.check(lib.ow_font_book_add_file(book, str(path).encode(), byref(added)))
+                elapsed = time.perf_counter() - start
+                self.check(lib.ow_font_book_skipped_count(book, byref(count)))
+                self.assertEqual(count.value, 0)
+                return elapsed
+
+        n = 4000
+        measured = []
+        for _ in range(2):
+            small = max(min(took(n // 8) for _ in range(3)), 0.05)
+            full = min(took(n) for _ in range(2))
+            if full < 24 * small:
+                return
+            measured.append((full, small))
+        self.fail(f"{measured}: the shortest times for {n} and for {n // 8}")
+
+    def test_keeps_a_skipped_message_while_it_reads_the_same(self):
+        book = self.new_book()
+        added = c_size_t()
+        with tempfile.TemporaryDirectory() as directory:
+            first, second = Path(directory) / "a.ttf", Path(directory) / "b.ttf"
+            first.write_bytes(b"not a font")
+            second.write_bytes(b"not a font")
+            self.check(lib.ow_font_book_add_dir(book, directory.encode(), byref(added)))
+            message = c_char_p()
+            pointers = []
+            for index in (0, 1):
+                self.check(lib.ow_font_book_skipped(book, index, byref(message)))
+                pointers.append(ctypes.cast(message, c_void_p).value)
+            # Rewritten, the second file is read again and listed anew with the same
+            # message: the string stays the same.
+            second.write_bytes(b"not a fon")
+            self.check(lib.ow_font_book_add_dir(book, directory.encode(), byref(added)))
+            self.check(lib.ow_font_book_skipped(book, 1, byref(message)))
+            self.assertEqual(ctypes.cast(message, c_void_p).value, pointers[1])
+            self.assertTrue(message.value.decode("utf-8").startswith(f"{second}: "))
+            # A font now, the first leaves the list, and the second takes its place.
+            first.write_bytes(MINIMAL_FONT.read_bytes())
+            self.check(lib.ow_font_book_add_dir(book, directory.encode(), byref(added)))
+            self.assertEqual(added.value, 1)
+            count = c_size_t()
+            self.check(lib.ow_font_book_skipped_count(book, byref(count)))
+            self.assertEqual(count.value, 1)
+            self.check(lib.ow_font_book_skipped(book, 0, byref(message)))
+            self.assertTrue(message.value.decode("utf-8").startswith(f"{second}: "))
+            self.check(lib.ow_font_book_skipped(book, 1, byref(message)), INVALID_ARGUMENT)
 
     def test_adds_a_font_under_another_family_name(self):
         # As Word renames the subsets it embeds: the face answers to the name given and to
