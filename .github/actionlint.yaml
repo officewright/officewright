@@ -1,0 +1,6 @@
+# actionlint 1.7.12, the latest release and the version ci.yml pins, does not know the
+# GitHub-hosted runner label ubuntu-26.04 (rhysd/actionlint#683). Declaring it here lets
+# actionlint accept it; delete this file once a release knows the label.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04
