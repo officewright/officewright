@@ -2041,27 +2041,14 @@ mod tests {
         assert_eq!((before, after), (2, 2));
     }
 
-    #[cfg(unix)]
-    /// Fails unless scanning takes time in proportion to `n`: `setup(n)` makes a book and
-    /// the folders to scan with `add_dir`, one after another, in a folder of its own. It
-    /// takes at most 24 times what `n / 8` takes, where linear work takes about 8 times and
-    /// work that grows with the square of `n` about 64 times. Each size is timed as the
-    /// shortest of several runs, since load on the machine only ever adds time, and a test
-    /// fails only when a second measurement agrees; a floor of 50 ms keeps the timer's
-    /// resolution out of it.
-    fn rescans_in_linear_time(
-        setup: impl Fn(usize) -> (FontBook, Vec<PathBuf>, TempDir),
-        n: usize,
-    ) {
-        use std::time::{Duration, Instant};
-        let time = |count: usize| {
-            let (mut book, roots, _dir) = setup(count);
-            let start = Instant::now();
-            for root in &roots {
-                book.add_dir(root).unwrap();
-            }
-            start.elapsed()
-        };
+    /// Fails unless `time(n)`, the time some work on `n` entries takes, is in proportion
+    /// to `n`: at most 24 times what `n / 8` entries take, where linear work takes about 8
+    /// times and work that grows with the square of `n` about 64 times. Each size is timed
+    /// as the shortest of several runs, since load on the machine only ever adds time, and
+    /// a test fails only when a second measurement agrees; a floor of 50 ms keeps the
+    /// timer's resolution out of it.
+    fn in_linear_time(time: impl Fn(usize) -> std::time::Duration, n: usize) {
+        use std::time::Duration;
         let mut measured = Vec::new();
         for _ in 0..2 {
             let small = (0..3)
@@ -2076,6 +2063,75 @@ mod tests {
             measured.push((full, small));
         }
         panic!("{measured:?}: the shortest times for {n} and for {}", n / 8);
+    }
+
+    #[cfg(unix)]
+    /// Fails unless scanning takes time in proportion to `n`, as [`in_linear_time`]
+    /// measures it: `setup(n)` makes a book and the folders to scan with `add_dir`, one
+    /// after another, in a folder of its own.
+    fn rescans_in_linear_time(
+        setup: impl Fn(usize) -> (FontBook, Vec<PathBuf>, TempDir),
+        n: usize,
+    ) {
+        in_linear_time(
+            |count| {
+                let (mut book, roots, _dir) = setup(count);
+                let start = std::time::Instant::now();
+                for root in &roots {
+                    book.add_dir(root).unwrap();
+                }
+                start.elapsed()
+            },
+            n,
+        );
+    }
+
+    #[test]
+    fn drops_skipped_entries_in_linear_time() {
+        // Dropping entries from the front moves each entry kept once, when the list is
+        // compacted.
+        let key = |i: usize| PathBuf::from(format!("fonts/bad{i:06}.ttf"));
+        in_linear_time(
+            |n| {
+                let mut list = SkippedList::default();
+                for i in 0..n {
+                    list.push(SkippedFont {
+                        path: None,
+                        error: Arc::new(Error::Read {
+                            path: key(i),
+                            source: io::ErrorKind::NotFound.into(),
+                        }),
+                        key: Some(key(i)),
+                    });
+                }
+                let start = std::time::Instant::now();
+                for i in 0..n {
+                    list.drop_key(&key(i));
+                }
+                list.compact();
+                assert!(list.entries.is_empty());
+                start.elapsed()
+            },
+            100_000,
+        );
+    }
+
+    #[test]
+    fn keeps_one_unreadable_directory_behind_each_location() {
+        let mut dirs = UnreadableDirs::default();
+        let (listed, first, second) = (Path::new("a/sub"), Path::new("b"), Path::new("c"));
+        dirs.insert(listed.to_owned(), first.to_owned());
+        // Repointed: only the directory it leads to now has it behind.
+        dirs.insert(listed.to_owned(), second.to_owned());
+        assert!(dirs.take_behind(first).is_empty());
+        assert!(dirs.contains(listed));
+        assert_eq!(dirs.take_behind(second), HashSet::from([listed.to_owned()]));
+        assert!(!dirs.contains(listed));
+        // Removed: no directory has it behind.
+        dirs.insert(listed.to_owned(), first.to_owned());
+        dirs.remove(listed);
+        assert!(dirs.take_behind(first).is_empty());
+        assert!(dirs.behind.is_empty() && dirs.targets.is_empty());
     }
 
     #[test]
