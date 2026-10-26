@@ -3270,7 +3270,7 @@ class Packages(unittest.TestCase):
                                   ("page", "page", "center", "6800"),
                                   ("text", "page", "center", "9200")])
 
-        # E-table-style-defaults-size-12-12-14 and -10-11-14: the sizes the name gives.
+        # E-table-style-defaults-size-13-12-14 and -10-11-14: the sizes the name gives.
         for defaults_pt, normal_pt in ((13, 12), (10, 11)):
             name = f"E-table-style-defaults-size-{defaults_pt}-{normal_pt}-14"
             doc, parts, body = load(name)
