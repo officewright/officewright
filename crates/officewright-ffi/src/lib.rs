@@ -351,6 +351,10 @@ pub unsafe extern "C" fn ow_pdf_document_add_page(
 /// size outside 0.01 to 32767 pt, or a position outside -32767 to 32767 pt. On failure
 /// the page is unchanged.
 ///
+/// A font from `ow_pdf_font_resolve` draws the styles its face lacks on top of it:
+/// synthetic italic slanted by a third about the baseline, synthetic bold filled and
+/// stroked with a stroke a thirtieth of `font_size_pt` wide.
+///
 /// # Safety
 ///
 /// `doc` must be NULL or a live handle not used by another thread during the call;
