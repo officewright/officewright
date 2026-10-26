@@ -12,8 +12,10 @@ use super::drawing::{
     Anchor, AnchorHorizontalAlign, AnchorVerticalAlign, Crop, HorizontalReference, Image, Offsets,
     VerticalReference, WrapKind,
 };
+use super::drawing::{attribute, value};
 use super::xml::{Element, Span};
 use super::{Document, Names};
+use crate::docx::properties::Report;
 
 /// The largest length a VML picture may have, in points: that of ST_Coordinate, which
 /// bounds every length of a DrawingML picture, so that both reach the layout alike.
@@ -164,18 +166,18 @@ impl<'a> VmlPicture<'a> {
 
     /// The declarations of its `style`.
     fn style(self) -> Style<'a> {
-        Style(self.shape.attribute(&[None], "style").unwrap_or_default())
+        style(self.shape)
     }
 
     /// Its width (`width` of its `style`); none when the style gives none, or one that
     /// is negative or not a length Word takes.
     pub fn width(self) -> Option<Pt> {
-        self.style().size("width")
+        self.style().read("width", size, &mut |_, _, _| {})
     }
 
     /// Its height (`height` of its `style`), as [`width`](Self::width) says.
     pub fn height(self) -> Option<Pt> {
-        self.style().size("height")
+        self.style().read("height", size, &mut |_, _, _| {})
     }
 
     /// Whether it is hidden (`visibility:hidden` in its `style`), which Word does not
@@ -187,51 +189,24 @@ impl<'a> VmlPicture<'a> {
     /// The part of the image shown (`v:imagedata`'s `cropleft`, `croptop`, `cropright`
     /// and `cropbottom`); none for all of it.
     pub fn crop(self) -> Option<Crop> {
-        let names = &self.document.names;
-        let data = image_data(self.shape, names)?;
-        let side = |name| data.attribute(&[None], name).and_then(fraction);
-        let sides = [
-            side("cropleft"),
-            side("croptop"),
-            side("cropright"),
-            side("cropbottom"),
-        ];
-        if sides.iter().all(Option::is_none) {
-            return None;
-        }
-        let [left, top, right, bottom] = sides.map(|side| side.unwrap_or(0.0));
-        Some(Crop {
-            left,
-            top,
-            right,
-            bottom,
-        })
+        crop(self.shape, &self.document.names, &mut |_, _, _| {})
     }
 
     /// The rotation clockwise, in degrees (`rotation` of its `style`).
     pub fn rotation(self) -> f64 {
-        self.style().get("rotation").and_then(angle).unwrap_or(0.0)
+        self.style()
+            .read("rotation", angle, &mut |_, _, _| {})
+            .unwrap_or(0.0)
     }
 
     /// Whether it is mirrored left to right (`flip` of its `style` holds `x`).
     pub fn flip_horizontal(self) -> bool {
-        self.flip().0
+        flip(self.style(), &mut |_, _, _| {}).0
     }
 
     /// Whether it is mirrored top to bottom (`flip` of its `style` holds `y`).
     pub fn flip_vertical(self) -> bool {
-        self.flip().1
-    }
-
-    /// The axes `flip` mirrors: Word takes `x`, `y`, `x y` and `y x` (MS-OI29500, Part 4,
-    /// §19.1.2.1(c)), and nothing for any other value.
-    fn flip(self) -> (bool, bool) {
-        match self.style().get("flip") {
-            Some("x") => (true, false),
-            Some("y") => (false, true),
-            Some("x y" | "y x") => (true, true),
-            _ => (false, false),
-        }
+        flip(self.style(), &mut |_, _, _| {}).1
     }
 
     /// Whether it draws an outline, which the layout does not draw yet: `v:stroke`'s `on`,
@@ -242,39 +217,12 @@ impl<'a> VmlPicture<'a> {
     // reason: only the translation into the layout IR asks for it.
     #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
     pub(crate) fn has_outline(self) -> bool {
-        let names = &self.document.names;
-        let stroke = self
-            .shape
-            .children_through_alternates(names.mc)
-            .find(|child| child.is(&names.v, "stroke"))
-            .and_then(|stroke| stroke.attribute(&[None], "on"))
-            .and_then(true_false);
-        if let Some(on) = stroke {
-            return on;
-        }
-        if let Some(stroked) = self
-            .shape
-            .attribute(&[None], "stroked")
-            .and_then(true_false)
-        {
-            return stroked;
-        }
-        let Some(kind) = self.shape.attribute(&[None], "type") else {
-            return true;
-        };
-        let id = kind.strip_prefix('#').unwrap_or(kind);
-        let shape_type = self
-            .pict
-            .children_through_alternates(names.mc)
-            .filter(|child| child.is(&names.v, "shapetype"))
-            .find(|child| child.attribute(&[None], "id") == Some(id));
-        match shape_type {
-            Some(shape_type) => shape_type
-                .attribute(&[None], "stroked")
-                .and_then(true_false)
-                .unwrap_or(true),
-            None => false,
-        }
+        has_outline(
+            self.shape,
+            self.pict,
+            &self.document.names,
+            &mut |_, _, _| {},
+        )
     }
 
     /// Whether its `v:imagedata` changes the image's colours, which the layout does not
@@ -284,24 +232,7 @@ impl<'a> VmlPicture<'a> {
     // reason: only the translation into the layout IR asks for it.
     #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
     pub(crate) fn has_color_adjustments(self) -> bool {
-        let Some(data) = image_data(self.shape, &self.document.names) else {
-            return false;
-        };
-        let attribute = |name| data.attribute(&[None], name);
-        let differs = |name, none: f64| {
-            attribute(name)
-                .and_then(fraction)
-                .is_some_and(|value| value != none)
-        };
-        differs("gain", 1.0)
-            || differs("blacklevel", 0.0)
-            || differs("gamma", 1.0)
-            || ["grayscale", "bilevel"]
-                .into_iter()
-                .any(|name| attribute(name).and_then(true_false) == Some(true))
-            || ["chromakey", "embosscolor", "recolortarget"]
-                .into_iter()
-                .any(|name| attribute(name).is_some())
+        has_color_adjustments(self.shape, &self.document.names, &mut |_, _, _| {})
     }
 
     /// Whether it casts a shadow (`v:shadow` with `on` true, which a shadow needs to show),
@@ -310,15 +241,7 @@ impl<'a> VmlPicture<'a> {
     // reason: only the translation into the layout IR asks for it.
     #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
     pub(crate) fn has_shadow(self) -> bool {
-        let names = &self.document.names;
-        self.shape
-            .children_through_alternates(names.mc)
-            .filter(|child| child.is(&names.v, "shadow"))
-            .any(|shadow| match shadow.attribute(&[None], "on") {
-                Some("") => true,
-                Some(on) => true_false(on) == Some(true),
-                None => false,
-            })
+        has_shadow(self.shape, &self.document.names, &mut |_, _, _| {})
     }
 
     /// Whether it has a border, which the layout does not draw yet: a `w10:bordertop`,
@@ -366,71 +289,237 @@ impl<'a> VmlPicture<'a> {
     /// says, `mso-wrap-distance-left` and `-right` from it, 9 pt when not written, as
     /// Word takes them (§19.1.2.1(o)), and `-top` and `-bottom`, 0 when not written.
     pub fn anchor(self) -> Option<Anchor> {
-        let style = self.style();
-        if style.get("position") != Some("absolute") {
-            return None;
-        }
-        let names = &self.document.names;
-        let horizontal_align = style
-            .get("mso-position-horizontal")
-            .and_then(AnchorHorizontalAlign::from_vml);
-        let vertical_align = style
-            .get("mso-position-vertical")
-            .and_then(AnchorVerticalAlign::from_vml);
-        // Word ignores the offsets when the picture is aligned (§19.1.2.1(t, dddd)).
-        let offset = |margin, edge| {
-            let sum = style.length(margin).unwrap_or_default().0
-                + style.length(edge).unwrap_or_default().0;
-            Pt(sum.clamp(-MAX_LENGTH, MAX_LENGTH))
-        };
-        let horizontal_offset = horizontal_align
-            .is_none()
-            .then(|| offset("margin-left", "left"));
-        let vertical_offset = vertical_align
-            .is_none()
-            .then(|| offset("margin-top", "top"));
-        let z_index = style
-            .get("z-index")
-            .and_then(|value| value.parse::<i32>().ok())
-            .unwrap_or(0);
-        let flag = |name| {
-            self.shape
-                .attribute(&names.o, name)
-                .and_then(true_false)
-                .unwrap_or(true)
-        };
-        let distance = |name, default| style.size(name).unwrap_or(Pt(default));
-        let wrap_element = self
-            .shape
-            .children_through_alternates(names.mc)
-            .find(|child| child.is(&names.w10, "wrap"));
-        let wrap_attribute = |name| wrap_element.and_then(|wrap| wrap.attribute(&[None], name));
-        let wrap = wrap_attribute("type").and_then(WrapKind::from_vml);
-        Some(Anchor {
-            horizontal_reference: style
-                .get("mso-position-horizontal-relative")
-                .and_then(HorizontalReference::from_vml)
-                .or_else(|| wrap_attribute("anchorx").and_then(HorizontalReference::from_wrap)),
-            horizontal_align,
-            horizontal_offset,
-            vertical_reference: style
-                .get("mso-position-vertical-relative")
-                .and_then(VerticalReference::from_vml)
-                .or_else(|| wrap_attribute("anchory").and_then(VerticalReference::from_wrap)),
-            vertical_align,
-            vertical_offset,
-            wrap,
-            behind_text: z_index < 0,
-            layout_in_cell: flag("allowincell"),
-            allow_overlap: flag("allowoverlap"),
-            z_order: z_order(z_index),
-            distances: Offsets {
-                left: distance("mso-wrap-distance-left", 9.0),
-                top: distance("mso-wrap-distance-top", 0.0),
-                right: distance("mso-wrap-distance-right", 9.0),
-                bottom: distance("mso-wrap-distance-bottom", 0.0),
+        anchor(self.shape, &self.document.names, &mut |_, _, _| {})
+    }
+}
+
+/// Reports the values of a VML drawing's picture (`w:pict`) that its readers do not take,
+/// as the document opens; the readers read them again when asked for, as not written.
+/// Every value of the picture that a reader reads is read here once, also one the
+/// picture does not use, such as the offset of an aligned position; those that place a
+/// floating picture, only when it floats.
+pub(crate) fn check(pict: Element<'_>, names: &Names, report: Report<'_>) {
+    let Some(shape) = picture(pict, names) else {
+        return;
+    };
+    let style = style(shape);
+    style.read("width", size, report);
+    style.read("height", size, report);
+    crop(shape, names, report);
+    style.read("rotation", angle, report);
+    flip(style, report);
+    has_outline(shape, pict, names, report);
+    has_color_adjustments(shape, names, report);
+    has_shadow(shape, names, report);
+    anchor(shape, names, report);
+}
+
+/// The declarations of a shape's `style`.
+fn style(shape: Element<'_>) -> Style<'_> {
+    Style(shape.attribute(&[None], "style").unwrap_or_default())
+}
+
+/// The part of its image a picture shows (`v:imagedata`'s `cropleft`, `croptop`,
+/// `cropright` and `cropbottom`); none for all of it.
+fn crop(shape: Element<'_>, names: &Names, report: Report<'_>) -> Option<Crop> {
+    let data = image_data(shape, names)?;
+    let mut side = |name| value(data, names, name, fraction, report);
+    let sides = [
+        side("cropleft"),
+        side("croptop"),
+        side("cropright"),
+        side("cropbottom"),
+    ];
+    if sides.iter().all(Option::is_none) {
+        return None;
+    }
+    let [left, top, right, bottom] = sides.map(|side| side.unwrap_or(0.0));
+    Some(Crop {
+        left,
+        top,
+        right,
+        bottom,
+    })
+}
+
+/// The axes `flip` mirrors: Word takes `x`, `y`, `x y` and `y x` (MS-OI29500, Part 4,
+/// §19.1.2.1(c)), and nothing for any other value.
+fn flip(style: Style<'_>, report: Report<'_>) -> (bool, bool) {
+    style
+        .read(
+            "flip",
+            |value| match value {
+                "x" => Some((true, false)),
+                "y" => Some((false, true)),
+                "x y" | "y x" => Some((true, true)),
+                _ => None,
             },
+            report,
+        )
+        .unwrap_or((false, false))
+}
+
+/// Whether a picture draws an outline ([`VmlPicture::has_outline`]). Each value is read,
+/// so that each one not taken is reported.
+fn has_outline(shape: Element<'_>, pict: Element<'_>, names: &Names, report: Report<'_>) -> bool {
+    let stroke = shape
+        .children_through_alternates(names.mc)
+        .find(|child| child.is(&names.v, "stroke"))
+        .and_then(|stroke| value(stroke, names, "on", true_false, report));
+    let stroked = value(shape, names, "stroked", true_false, report);
+    let kind = shape.attribute(&[None], "type");
+    let id = kind.map(|kind| kind.strip_prefix('#').unwrap_or(kind));
+    let type_stroked = id
+        .and_then(|id| {
+            pict.children_through_alternates(names.mc)
+                .filter(|child| child.is(&names.v, "shapetype"))
+                .find(|child| child.attribute(&[None], "id") == Some(id))
         })
+        .map(|shape_type| value(shape_type, names, "stroked", true_false, report).unwrap_or(true));
+    stroke
+        .or(stroked)
+        .unwrap_or_else(|| kind.is_none() || type_stroked.unwrap_or(false))
+}
+
+/// Whether a picture's `v:imagedata` changes the image's colours
+/// ([`VmlPicture::has_color_adjustments`]). Each value is read, so that each one not
+/// taken is reported.
+fn has_color_adjustments(shape: Element<'_>, names: &Names, report: Report<'_>) -> bool {
+    let Some(data) = image_data(shape, names) else {
+        return false;
+    };
+    let mut differs = |name, none: f64| {
+        value(data, names, name, fraction, report).is_some_and(|value| value != none)
+    };
+    let adjusted = differs("gain", 1.0) | differs("blacklevel", 0.0) | differs("gamma", 1.0);
+    let mut on = |name| value(data, names, name, true_false, report) == Some(true);
+    let drawn = on("grayscale") | on("bilevel");
+    adjusted
+        || drawn
+        || ["chromakey", "embosscolor", "recolortarget"]
+            .into_iter()
+            .any(|name| data.attribute(&[None], name).is_some())
+}
+
+/// Whether a picture casts a shadow ([`VmlPicture::has_shadow`]). Each `v:shadow` is
+/// read, so that each value not taken is reported.
+fn has_shadow(shape: Element<'_>, names: &Names, report: Report<'_>) -> bool {
+    shape
+        .children_through_alternates(names.mc)
+        .filter(|child| child.is(&names.v, "shadow"))
+        .fold(false, |shadow, element| {
+            // A blank on is true; an absent one is false.
+            let on = value(
+                element,
+                names,
+                "on",
+                |on| {
+                    if on.is_empty() {
+                        Some(true)
+                    } else {
+                        true_false(on)
+                    }
+                },
+                report,
+            );
+            on == Some(true) || shadow
+        })
+}
+
+/// Where a floating picture is and how text wraps around it ([`VmlPicture::anchor`]).
+fn anchor(shape: Element<'_>, names: &Names, report: Report<'_>) -> Option<Anchor> {
+    let style = style(shape);
+    if style.get("position") != Some("absolute") {
+        return None;
+    }
+    let horizontal_align = style
+        .read(
+            "mso-position-horizontal",
+            |value| alignment(value, AnchorHorizontalAlign::from_vml),
+            report,
+        )
+        .flatten();
+    let vertical_align = style
+        .read(
+            "mso-position-vertical",
+            |value| alignment(value, AnchorVerticalAlign::from_vml),
+            report,
+        )
+        .flatten();
+    let mut offset = |margin, edge| {
+        let sum = style.read(margin, length, report).unwrap_or_default().0
+            + style.read(edge, length, report).unwrap_or_default().0;
+        Pt(sum.clamp(-MAX_LENGTH, MAX_LENGTH))
+    };
+    let horizontal_offset = offset("margin-left", "left");
+    let vertical_offset = offset("margin-top", "top");
+    let z_index = style
+        .read("z-index", |value| value.parse::<i32>().ok(), report)
+        .unwrap_or(0);
+    let mut flag =
+        |name| attribute(shape, names, (&names.o, "o:"), name, true_false, report).unwrap_or(true);
+    let layout_in_cell = flag("allowincell");
+    let allow_overlap = flag("allowoverlap");
+    let mut distance = |name, default| style.read(name, size, report).unwrap_or(Pt(default));
+    let distances = Offsets {
+        left: distance("mso-wrap-distance-left", 9.0),
+        top: distance("mso-wrap-distance-top", 0.0),
+        right: distance("mso-wrap-distance-right", 9.0),
+        bottom: distance("mso-wrap-distance-bottom", 0.0),
+    };
+    let wrap_element = shape
+        .children_through_alternates(names.mc)
+        .find(|child| child.is(&names.w10, "wrap"));
+    let wrap = wrap_element.and_then(|wrap| value(wrap, names, "type", WrapKind::from_vml, report));
+    let anchor_x = wrap_element.and_then(|wrap| {
+        value(
+            wrap,
+            names,
+            "anchorx",
+            HorizontalReference::from_wrap,
+            report,
+        )
+    });
+    let anchor_y = wrap_element
+        .and_then(|wrap| value(wrap, names, "anchory", VerticalReference::from_wrap, report));
+    let horizontal_reference = style
+        .read(
+            "mso-position-horizontal-relative",
+            HorizontalReference::from_vml,
+            report,
+        )
+        .or(anchor_x);
+    let vertical_reference = style
+        .read(
+            "mso-position-vertical-relative",
+            VerticalReference::from_vml,
+            report,
+        )
+        .or(anchor_y);
+    // Word ignores the offsets when the picture is aligned (§19.1.2.1(t, dddd)).
+    Some(Anchor {
+        horizontal_reference,
+        horizontal_align,
+        horizontal_offset: horizontal_align.is_none().then_some(horizontal_offset),
+        vertical_reference,
+        vertical_align,
+        vertical_offset: vertical_align.is_none().then_some(vertical_offset),
+        wrap,
+        behind_text: z_index < 0,
+        layout_in_cell,
+        allow_overlap,
+        z_order: z_order(z_index),
+        distances,
+    })
+}
+
+/// An alignment of `mso-position-horizontal` or `mso-position-vertical`: none for
+/// `absolute`, which places the picture by its offset (MS-OI29500, Part 4,
+/// §19.1.2.19(e)).
+fn alignment<A>(value: &str, from_vml: fn(&str) -> Option<A>) -> Option<Option<A>> {
+    match value {
+        "absolute" => Some(None),
+        _ => from_vml(value).map(Some),
     }
 }
 
@@ -496,16 +585,27 @@ impl<'a> Style<'a> {
             .next_back()
     }
 
-    /// A property's value as a length.
-    fn length(self, name: &str) -> Option<Pt> {
-        self.get(name).and_then(length)
+    /// A property's value as `read` takes it; one it does not take is reported, as the
+    /// declaration of `v:shape`'s `style` that gives it, and read as not written.
+    fn read<T>(
+        self,
+        name: &str,
+        read: impl FnOnce(&'a str) -> Option<T>,
+        report: Report<'_>,
+    ) -> Option<T> {
+        let value = self.get(name)?;
+        let taken = read(value);
+        if taken.is_none() {
+            report("v:shape", "style", &format!("{name}:{value}"));
+        }
+        taken
     }
+}
 
-    /// A property's value as a length that is not negative, as Word requires of sizes
-    /// and wrap distances (MS-OI29500, Part 4, §19.1.2.1(mm)).
-    fn size(self, name: &str) -> Option<Pt> {
-        self.length(name).filter(|length| length.0 >= 0.0)
-    }
+/// A length that is not negative, as Word requires of sizes and wrap distances
+/// (MS-OI29500, Part 4, §19.1.2.1(mm)).
+fn size(value: &str) -> Option<Pt> {
+    length(value).filter(|length| length.0 >= 0.0)
 }
 
 /// A length of a VML style, in points: a number and one of the units Word takes, `pt`,
@@ -653,8 +753,7 @@ impl VerticalReference {
 }
 
 impl AnchorHorizontalAlign {
-    /// The value of `mso-position-horizontal`; none for `absolute`, which places the
-    /// picture by its offset (MS-OI29500, Part 4, §19.1.2.19(e)).
+    /// A value of `mso-position-horizontal` other than `absolute` ([`alignment`]).
     fn from_vml(value: &str) -> Option<Self> {
         Some(match value {
             "left" => Self::Left,
@@ -668,8 +767,7 @@ impl AnchorHorizontalAlign {
 }
 
 impl AnchorVerticalAlign {
-    /// The value of `mso-position-vertical`, as [`AnchorHorizontalAlign::from_vml`]
-    /// says.
+    /// A value of `mso-position-vertical` other than `absolute` ([`alignment`]).
     fn from_vml(value: &str) -> Option<Self> {
         Some(match value {
             "top" => Self::Top,
@@ -725,10 +823,10 @@ mod tests {
     #[test]
     fn reads_the_last_declaration_of_a_property() {
         let style = Style(" width : 10pt;HEIGHT:5pt;width:20pt; ;junk;rotation");
-        assert_eq!(style.length("width"), Some(Pt(20.0)));
-        assert_eq!(style.length("height"), Some(Pt(5.0)));
+        assert_eq!(style.get("width").and_then(length), Some(Pt(20.0)));
+        assert_eq!(style.get("height").and_then(length), Some(Pt(5.0)));
         assert_eq!(style.get("rotation"), None);
-        assert_eq!(Style("width:-1pt").size("width"), None);
+        assert_eq!(Style("width:-1pt").get("width").and_then(size), None);
     }
 
     #[test]

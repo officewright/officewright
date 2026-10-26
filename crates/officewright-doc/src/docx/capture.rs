@@ -449,10 +449,16 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
         self.diagnostics.omit(omitted);
         for (element, attribute, value) in invalid {
             self.diagnose(offset, DiagnosticKind::InvalidValue, || {
-                format!(
-                    "{element_prefix}{element} {attribute_prefix}{attribute}=\"{}\" is not valid; it is ignored",
-                    super::shorten(&value)
-                )
+                let value = super::shorten(&value);
+                if attribute.is_empty() {
+                    format!(
+                        "the text \"{value}\" of {element_prefix}{element} is not valid; it is ignored"
+                    )
+                } else {
+                    format!(
+                        "{element_prefix}{element} {attribute_prefix}{attribute}=\"{value}\" is not valid; it is ignored"
+                    )
+                }
             });
         }
     }

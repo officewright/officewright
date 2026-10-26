@@ -239,10 +239,18 @@ fn reads_pictures_in_the_line_and_floating() {
         })
         .unwrap();
     assert!(std::ptr::eq(shown.bytes(), image.bytes()));
-    assert!(
-        document.diagnostics().is_empty(),
-        "{:?}",
-        document.diagnostics()
+    // The floating picture's negative distance, which is read as none, is reported; no
+    // other value is.
+    let messages: Vec<String> = document
+        .diagnostics()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        messages,
+        [
+            "/word/document.xml, line 1, column 1376: wp:anchor distR=\"-5\" is not valid; it is ignored"
+        ]
     );
 }
 
@@ -544,6 +552,125 @@ fn reads_a_position_offset_with_whitespace_around_it_until_word_shows_otherwise(
     let anchor = drawings(&document)[0].anchor().unwrap();
     assert_eq!(anchor.horizontal_offset(), Some(Pt(1.0)));
     assert_eq!(anchor.vertical_offset(), Some(Pt(2.0)));
+}
+
+/// The diagnostics of a document, without the place each names.
+pub(super) fn reported(document: &Document) -> Vec<String> {
+    document
+        .diagnostics()
+        .iter()
+        .map(|diagnostic| {
+            let message = diagnostic.message();
+            assert!(
+                message.starts_with("/word/document.xml, line "),
+                "{message}"
+            );
+            message
+                .split_once(": ")
+                .map_or(message, |(_, what)| what)
+                .to_owned()
+        })
+        .collect()
+}
+
+#[test]
+fn reports_each_value_of_a_picture_that_its_readers_do_not_take() {
+    // #243: a value the readers refuse is read as not written, and reported as the
+    // document opens, once, even where the picture does not use it (wp:simplePos with
+    // simplePos off, the offset of an aligned position).
+    let children = "<wp:simplePos x=\"wide\" y=\"0\"/><wp:positionH relativeFrom=\"leftEdge\"><wp:align>middle</wp:align><wp:posOffset>12700</wp:posOffset></wp:positionH><wp:positionV relativeFrom=\"page\"><wp:posOffset>\n12 700</wp:posOffset></wp:positionV><wp:extent cx=\"-12700\" cy=\" 12700\"/><wp:effectExtent l=\"x\" t=\"0\" r=\"0\" b=\"0\"/><wp:wrapNone/>";
+    let graphic = format!(
+        r#"<a:graphic xmlns:a="{A}"><a:graphicData uri="{PICTURE_URI}"><pic:pic xmlns:pic="{PIC}"><pic:nvPicPr><pic:cNvPr id="0" name="p"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdPng"><a:lum bright="half"/><a:alphaModFix amt="all"/><a:hsl hue="x" sat="0" lum="0"/></a:blip><a:srcRect l="10.5" t="0"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm rot="90.5" flipH="yes" flipV="TRUE"><a:off x="0" y="0"/><a:ext cx="12700" cy="12700"/></a:xfrm><a:prstGeom prst="rect"/><a:scene3d><a:camera prst="orthographicFront"><a:rot lat="0.5" lon="0" rev="0"/></a:camera><a:lightRig rig="threePt" dir="t"/></a:scene3d><a:sp3d extrusionH="deep" contourW="0"/></pic:spPr></pic:pic></a:graphicData></a:graphic>"#
+    );
+    let anchor = format!(
+        r#"<w:p><w:r><w:drawing><wp:anchor xmlns:wp="{WP}" distT="-1" distB=" 0" distL="1em" distR="0" simplePos="maybe" relativeHeight="-1" behindDoc=" 1 " locked="0" layoutInCell="yes" allowOverlap="2">{children}<wp:docPr id="1" name="p"/>{graphic}</wp:anchor></w:drawing></w:r></w:p>"#
+    );
+    let document = with_images(&anchor);
+    assert_eq!(
+        reported(&document),
+        [
+            r#"wp:extent cx="-12700" is not valid; it is ignored"#,
+            r#"wp:extent cy=" 12700" is not valid; it is ignored"#,
+            r#"wp:effectExtent l="x" is not valid; it is ignored"#,
+            r#"wp:anchor behindDoc=" 1 " is not valid; it is ignored"#,
+            r#"wp:anchor layoutInCell="yes" is not valid; it is ignored"#,
+            r#"wp:anchor allowOverlap="2" is not valid; it is ignored"#,
+            r#"wp:anchor relativeHeight="-1" is not valid; it is ignored"#,
+            r#"wp:anchor distL="1em" is not valid; it is ignored"#,
+            r#"wp:anchor distT="-1" is not valid; it is ignored"#,
+            r#"wp:anchor distB=" 0" is not valid; it is ignored"#,
+            r#"wp:anchor simplePos="maybe" is not valid; it is ignored"#,
+            r#"wp:positionH relativeFrom="leftEdge" is not valid; it is ignored"#,
+            r#"the text "middle" of wp:align is not valid; it is ignored"#,
+            r#"the text "12 700" of wp:posOffset is not valid; it is ignored"#,
+            r#"wp:simplePos x="wide" is not valid; it is ignored"#,
+            r#"a:srcRect l="10.5" is not valid; it is ignored"#,
+            r#"a:lum bright="half" is not valid; it is ignored"#,
+            r#"a:alphaModFix amt="all" is not valid; it is ignored"#,
+            r#"a:hsl hue="x" is not valid; it is ignored"#,
+            r#"a:rot lat="0.5" is not valid; it is ignored"#,
+            r#"a:sp3d extrusionH="deep" is not valid; it is ignored"#,
+            r#"a:xfrm rot="90.5" is not valid; it is ignored"#,
+            r#"a:xfrm flipH="yes" is not valid; it is ignored"#,
+            r#"a:xfrm flipV="TRUE" is not valid; it is ignored"#,
+        ]
+    );
+    // Each is read as not written.
+    let drawing = drawings(&document)[0];
+    assert_eq!((drawing.width(), drawing.height()), (None, None));
+    assert_eq!(drawing.effect_extent(), Offsets::default());
+    let anchor = drawing.anchor().unwrap();
+    assert!(!anchor.behind_text() && anchor.layout_in_cell() && anchor.allow_overlap());
+    assert_eq!(anchor.z_order(), 0);
+    assert_eq!(anchor.distances(), Offsets::default());
+    assert_eq!(anchor.horizontal_reference(), None);
+    assert_eq!(anchor.horizontal_align(), None);
+    assert_eq!(anchor.horizontal_offset(), Some(Pt(1.0)));
+    assert_eq!(anchor.vertical_offset(), None);
+    let picture = drawing.picture().unwrap();
+    assert_eq!(picture.crop(), Some(Crop::default()));
+    assert_eq!(picture.rotation(), 0.0);
+    assert!(!picture.flip_horizontal() && !picture.flip_vertical());
+    assert!(!picture.has_color_effects() && !picture.has_effects());
+}
+
+#[test]
+fn reports_the_values_after_one_that_decides_what_a_picture_has() {
+    // A value that already decides whether the picture has effects, or where an aligned
+    // position puts it, does not stop the values after it from being read and reported.
+    let graphic = format!(
+        r#"<a:graphic xmlns:a="{A}"><a:graphicData uri="{PICTURE_URI}"><pic:pic xmlns:pic="{PIC}"><pic:nvPicPr><pic:cNvPr id="0" name="p"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdPng"><a:grayscl/><a:lum bright="1" contrast="x"/></a:blip><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:prstGeom prst="rect"/><a:effectLst><a:glow rad="1"/></a:effectLst><a:sp3d extrusionH="x"/></pic:spPr></pic:pic></a:graphicData></a:graphic>"#
+    );
+    let anchor = format!(
+        r#"<w:p><w:r><w:drawing><wp:anchor xmlns:wp="{WP}" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:align>center</wp:align><wp:posOffset>x</wp:posOffset></wp:positionH><wp:positionV relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="12700" cy="12700"/><wp:wrapNone/><wp:docPr id="1" name="p"/>{graphic}</wp:anchor></w:drawing></w:r></w:p>"#
+    );
+    let document = with_images(&anchor);
+    assert_eq!(
+        reported(&document),
+        [
+            r#"the text "x" of wp:posOffset is not valid; it is ignored"#,
+            r#"a:lum contrast="x" is not valid; it is ignored"#,
+            r#"a:sp3d extrusionH="x" is not valid; it is ignored"#,
+        ]
+    );
+    let picture = drawings(&document)[0].picture().unwrap();
+    assert!(picture.has_color_effects() && picture.has_effects());
+}
+
+#[test]
+fn reports_no_value_of_a_picture_that_its_readers_take() {
+    // Every value written as Word writes it, in either form where there are two.
+    let document = with_images(&format!(
+        "<w:p>{}{}{}</w:p>",
+        inline_picture("rIdPng"),
+        anchored(
+            "rIdPng",
+            r#"simplePos="true" distT="0" distB="1in" distL="0" distR="0""#,
+            r#"<wp:simplePos x="12700" y="-1pt"/><wp:positionH relativeFrom="column"><wp:align>center</wp:align></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>-12700</wp:posOffset></wp:positionV><wp:extent cx="12700" cy="0"/><wp:effectExtent l="-12700" t="0" r="0" b="0"/><wp:wrapNone/>"#,
+        ),
+        bare_floating_picture("rIdPng"),
+    ));
+    assert_eq!(reported(&document), Vec::<String>::new());
 }
 
 #[test]
