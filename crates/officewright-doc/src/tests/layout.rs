@@ -3844,7 +3844,7 @@ fn translates_vml_pictures_as_pictures_are() {
     assert_eq!(floating.wrap(), ir::Wrap::Square);
     assert!(floating.behind_text());
     assert!(!floating.layout_in_cell() && floating.allow_overlap());
-    assert_eq!(floating.z_order(), 2_147_483_648 - 251_658_240);
+    assert_eq!(floating.z_order(), 251_658_240);
     assert_eq!(
         floating.distances(),
         ir::Insets::default()
@@ -3966,6 +3966,100 @@ fn lists_a_vml_picture_s_outline_colour_adjustments_and_text_once() {
             "<v:textbox><w:txbxContent><w:p/></w:txbxContent></v:textbox>"
         )]),
         [text]
+    );
+    // A shape type that does not say whether it is stroked is, by VML's default (from the
+    // review of #401).
+    assert_eq!(
+        listed(&[pict(&format!(
+            r##"<v:shapetype id="t1" coordsize="21600,21600"/><v:shape type="#t1" style="{size}"><v:imagedata r:id="rIdPng"/></v:shape>"##
+        ))]),
+        [outline]
+    );
+    // A shadow is drawn only when it is on.
+    let shadow = "a VML picture's shadow (v:shadow) is not drawn, here and wherever else the document has one";
+    assert_eq!(
+        listed(&[vml_picture(
+            "rIdPng",
+            size,
+            "",
+            "",
+            r#"<v:shadow on="t" color="black"/>"#
+        )]),
+        [shadow]
+    );
+    for off in [r#"<v:shadow on="f"/>"#, r#"<v:shadow color="black"/>"#] {
+        assert!(
+            listed(&[vml_picture("rIdPng", size, "", "", off)]).is_empty(),
+            "{off}"
+        );
+    }
+}
+
+#[test]
+fn translates_a_vml_text_box_whose_image_data_names_no_image_into_nothing() {
+    // From the review of #401: the footer of LibreOffice's tdf131594.docx holds a text box
+    // with a v:imagedata that names no image, where Word shows only the text box's page
+    // number; it was drawn as an empty picture frame of 144 by 144 pt.
+    use super::drawing::with_images;
+    use super::vml::pict;
+    let body = format!(
+        "<w:p>{}</w:p>",
+        pict(
+            r##"<v:shape type="#_x0000_t202" style="position:absolute;margin-left:0;margin-top:0;width:144pt;height:144pt;z-index:251659264;mso-position-horizontal:center;mso-position-horizontal-relative:margin;mso-position-vertical-relative:text" filled="f" stroked="f"><v:imagedata o:title=""/><v:textbox><w:txbxContent><w:p/></w:txbxContent></v:textbox></v:shape>"##
+        )
+    );
+    let translation = translate(&with_images(&body));
+    assert!(paragraphs(&translation)[0].inlines().is_empty());
+    let left_out: Vec<&str> = translation
+        .left_out()
+        .iter()
+        .map(ReportEntry::message)
+        .collect();
+    assert_eq!(
+        left_out,
+        ["a VML drawing that shows no picture (a shape, text box or group) is left out (w:pict)"]
+    );
+}
+
+#[test]
+fn lists_the_shapes_of_a_vml_drawing_besides_its_picture() {
+    // From the review of #401: a second picture or a rectangle next to the picture was
+    // left out without an entry.
+    use super::drawing::with_images;
+    use super::vml::pict;
+    let picture = |id: &str| {
+        format!(
+            r#"<v:shape style="width:1pt;height:1pt" stroked="f"><v:imagedata r:id="{id}"/></v:shape>"#
+        )
+    };
+    let listed = |content: String| -> Vec<String> {
+        let translation = translate(&with_images(&format!("<w:p>{}</w:p>", pict(&content))));
+        assert_eq!(paragraphs(&translation)[0].inlines().len(), 1, "{content}");
+        translation
+            .left_out()
+            .iter()
+            .map(|entry| entry.message().to_owned())
+            .collect()
+    };
+    let others = "a VML drawing's shapes other than its first picture are left out (w:pict)";
+    assert_eq!(
+        listed(format!("{}{}", picture("rIdPng"), picture("rIdJpeg"))),
+        [others]
+    );
+    assert_eq!(
+        listed(format!(
+            r#"<v:rect style="width:5pt;height:5pt"/>{}"#,
+            picture("rIdPng")
+        )),
+        [others]
+    );
+    // A shape type only defines shapes; an embedded object is shown by its picture.
+    assert!(
+        listed(format!(
+            r#"<v:shapetype id="t75" stroked="f"/>{}<o:OLEObject Type="Embed" ProgID="Package" ShapeID="_x0000_i1025" DrawAspect="Content" ObjectID="_1"/>"#,
+            picture("rIdPng")
+        ))
+        .is_empty()
     );
 }
 

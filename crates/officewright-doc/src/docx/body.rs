@@ -21,7 +21,8 @@ use officewright_opc::xml::{Event, Input, NsId, Reader, StartTag};
 use super::capture::{Budget, Capture};
 use super::styles::{Properties, check_properties};
 use super::{
-    A, A_STRICT, PIC, PIC_STRICT, R, R_STRICT, W, W_STRICT, WP, WP_STRICT, section, shorten,
+    A, A_STRICT, O, PIC, PIC_STRICT, R, R_STRICT, V, W, W_STRICT, W10, WP, WP_STRICT, section,
+    shorten,
 };
 use crate::diagnostic::{DiagnosticKind, Diagnostics};
 use crate::model::Names;
@@ -181,10 +182,11 @@ pub(super) fn read(
     let mut mce = Processor::new(&mut reader);
     let w = [reader.intern(W), reader.intern(W_STRICT)];
     let r = [reader.intern(R), reader.intern(R_STRICT)];
-    // DrawingML too, which the picture reader reads inside w:drawing, so that what lies
-    // below w:drawing goes through Markup Compatibility as the rest of the body does
-    // (#312).
-    let drawing = [A, A_STRICT, WP, WP_STRICT, PIC, PIC_STRICT].map(|uri| reader.intern(uri));
+    // DrawingML and VML too, which the picture readers read inside w:drawing and w:pict,
+    // so that what lies below those goes through Markup Compatibility as the rest of the
+    // body does (#312).
+    let drawing =
+        [A, A_STRICT, WP, WP_STRICT, PIC, PIC_STRICT, V, O, W10].map(|uri| reader.intern(uri));
     for namespace in w.iter().chain(&r).chain(&drawing) {
         mce.understand(*namespace);
     }

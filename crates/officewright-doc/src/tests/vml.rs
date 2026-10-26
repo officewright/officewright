@@ -1,6 +1,6 @@
 //! VML drawings: pictures in the line and floating, and their images.
 
-use super::drawing::{inline_picture, with_images};
+use super::drawing::{images_package, inline_picture, with_images};
 use super::*;
 
 /// The namespaces a `w:pict` of the tests declares.
@@ -128,7 +128,9 @@ fn reads_vml_pictures_in_the_line_and_floating() {
     assert_eq!(anchor.wrap(), Some(WrapKind::Square));
     assert!(anchor.behind_text());
     assert!(!anchor.layout_in_cell() && anchor.allow_overlap());
-    assert_eq!(anchor.z_order(), 2_147_483_648 - 251_658_240);
+    // The relativeHeight Word writes for a picture behind the text whose VML has this
+    // z-index (z-index plus 503,316,480).
+    assert_eq!(anchor.z_order(), 251_658_240);
     let distances = anchor.distances();
     assert_eq!(
         (
@@ -382,11 +384,19 @@ fn reads_a_vml_picture_s_sizes_turns_and_flips_only_as_word_writes_them() {
 #[test]
 fn shows_no_picture_for_vml_shapes_without_an_image_and_reads_missing_images() {
     let body = format!(
-        "<w:p>{}{}{}{}{}{}</w:p>",
+        "<w:p>{}{}{}{}{}{}{}</w:p>",
         // A text box, as Word writes one.
         pict(
             r#"<v:shape id="Text Box 2" style="position:absolute;width:80pt;height:14pt;z-index:251660288"><v:textbox><w:txbxContent><w:p><w:r><w:t>Boxed</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape>"#
         ),
+        // A text box with a v:imagedata that names no image, as the footer of
+        // LibreOffice's tdf131594.docx has (from the review of #401): Word shows no
+        // picture there.
+        pict(
+            r##"<v:shape type="#_x0000_t202" style="position:absolute;width:144pt;height:144pt;z-index:251659264" filled="f" stroked="f"><v:imagedata o:title=""/><v:textbox><w:txbxContent><w:p/></w:txbxContent></v:textbox></v:shape>"##
+        ),
+        // Word takes r:id only in a document: o:relid is SpreadsheetML's.
+        pict(r#"<v:shape style="width:1pt;height:1pt"><v:imagedata o:relid="rIdPng"/></v:shape>"#),
         pict(r#"<v:line from="0,0" to="10pt,0"/>"#),
         // A picture in a group is the group's, not the drawing's.
         pict(
@@ -394,19 +404,19 @@ fn shows_no_picture_for_vml_shapes_without_an_image_and_reads_missing_images() {
         ),
         vml_picture("rIdGone", "width:1pt;height:1pt", "", "", ""),
         vml_picture("rIdNone", "width:1pt;height:1pt", "", "", ""),
-        // Word takes r:id only in a document: o:relid is SpreadsheetML's.
-        pict(r#"<v:shape style="width:1pt;height:1pt"><v:imagedata o:relid="rIdPng"/></v:shape>"#),
     );
     let document = with_images(&body);
     let drawings = vml_drawings(&document);
-    assert_eq!(drawings.len(), 6);
+    assert_eq!(drawings.len(), 7);
     assert!(
-        drawings[..3]
+        drawings[..5]
             .iter()
             .all(|drawing| drawing.picture().is_none())
     );
     assert!(drawings[0].to_xml().contains("<w:t>Boxed</w:t>"));
-    for drawing in &drawings[3..] {
+    // A picture whose image the package lacks, or whose relationship the part lacks,
+    // keeps its frame.
+    for drawing in &drawings[5..] {
         let picture = drawing.picture().unwrap();
         assert!(picture.image().is_none());
         assert_eq!(picture.width(), Some(Pt(1.0)));
@@ -444,5 +454,69 @@ fn reads_an_image_once_for_vml_and_drawingml_pictures_alike() {
     assert!(
         xml.contains("xmlns:v=\"urn:schemas-microsoft-com:vml\""),
         "{xml}"
+    );
+}
+
+#[test]
+fn reads_vml_drawings_through_markup_compatibility() {
+    // From the review of #401: what lies below w:pict goes through Markup Compatibility,
+    // VML's namespaces understood as DrawingML's are (#312).
+    let picture = inline_vml_picture("rIdPng");
+    let floating = floating_vml_picture("rIdPng");
+    let locked = picture.replacen(
+        "<v:path ",
+        r#"<o:lock v:ext="edit" aspectratio="t"/><v:path "#,
+        1,
+    );
+    for (picture, from, to) in [
+        (
+            &picture,
+            "<v:shapetype ",
+            r#"<v:shapetype mc:MustUnderstand="w14" "#,
+        ),
+        (
+            &picture,
+            "<v:shape ",
+            r#"<v:shape mc:MustUnderstand="w14" "#,
+        ),
+        (
+            &picture,
+            "<v:imagedata ",
+            r#"<v:imagedata mc:MustUnderstand="w14" "#,
+        ),
+        (
+            &floating,
+            "<w10:wrap ",
+            r#"<w10:wrap mc:MustUnderstand="w14" "#,
+        ),
+        (&locked, "<o:lock ", r#"<o:lock mc:MustUnderstand="w14" "#),
+    ] {
+        let body = format!("<w:p>{}</w:p>", picture.replacen(from, to, 1));
+        match Document::from_bytes(images_package(&body)) {
+            Err(Error::Unsupported(message)) => {
+                assert!(message.contains("mc:MustUnderstand"), "{to}: {message}")
+            }
+            other => panic!("{to} gave {other:?}"),
+        }
+    }
+    // A choice that requires VML is taken, one that requires a namespace not understood
+    // is not.
+    let alternate = |requires: &str| {
+        pict(&format!(
+            r#"<mc:AlternateContent><mc:Choice Requires="{requires}"><v:shape style="width:1pt;height:1pt"><v:imagedata r:id="rIdPng"/></v:shape></mc:Choice><mc:Fallback><v:shape style="width:2pt;height:2pt"><v:imagedata r:id="rIdJpeg"/></v:shape></mc:Fallback></mc:AlternateContent>"#
+        ))
+    };
+    let shown = |requires: &str| {
+        let document = with_images(&format!("<w:p>{}</w:p>", alternate(requires)));
+        let picture = vml_drawings(&document)[0].picture().unwrap();
+        (
+            picture.width(),
+            picture.image().map(|image| image.content_type().to_owned()),
+        )
+    };
+    assert_eq!(shown("v"), (Some(Pt(1.0)), Some("image/png".to_owned())));
+    assert_eq!(
+        shown("w14"),
+        (Some(Pt(2.0)), Some("application/octet-stream".to_owned()))
     );
 }

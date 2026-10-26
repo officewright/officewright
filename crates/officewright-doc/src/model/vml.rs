@@ -19,9 +19,9 @@ use super::{Document, Names};
 /// bounds every length of a DrawingML picture, so that both reach the layout alike.
 const MAX_LENGTH: f64 = 27_273_042_316_900.0 / 12_700.0;
 
-/// A VML drawing in a run (`w:pict`). A picture (a `v:shape` with a `v:imagedata`) is
-/// read, in the line or floating; other shapes, text boxes, WordArt and groups show as
-/// no picture, and [`to_xml`](Self::to_xml) gives them as written.
+/// A VML drawing in a run (`w:pict`). A picture (a `v:shape` whose `v:imagedata` names
+/// its image) is read, in the line or floating; other shapes, text boxes, WordArt and
+/// groups show as no picture, and [`to_xml`](Self::to_xml) gives them as written.
 ///
 /// ```
 /// # fn main() -> officewright_doc::Result<()> {
@@ -82,8 +82,8 @@ impl<'a> VmlDrawing<'a> {
         self.document.element(self.element).to_xml()
     }
 
-    /// The picture it shows: its first `v:shape` with a `v:imagedata`, if it has one. A
-    /// group shows none, even when a picture is among its parts.
+    /// The picture it shows: its first `v:shape` whose `v:imagedata` names an image by
+    /// `r:id`, if it has one. A group shows none, even when a picture is among its parts.
     pub fn picture(self) -> Option<VmlPicture<'a>> {
         let names = &self.document.names;
         let pict = self.document.element(self.element);
@@ -95,10 +95,31 @@ impl<'a> VmlDrawing<'a> {
             image: self.image,
         })
     }
+
+    /// Whether it has VML shapes besides its picture, which the layout leaves out: a line,
+    /// a rectangle, a text box, a group or a second picture (MS-OI29500, Part 4,
+    /// §14.3.2.2(a), lists what Word allows in a `w:pict`). A shape type
+    /// (`v:shapetype`) only defines shapes, and an embedded object or a control
+    /// (`o:OLEObject`, `w:control`) is shown by its picture.
+    // reason: only the translation into the layout IR asks for it.
+    #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
+    pub(crate) fn has_other_shapes(self) -> bool {
+        let names = &self.document.names;
+        self.document
+            .element(self.element)
+            .children_through_alternates(names.mc)
+            .filter(|child| {
+                child
+                    .local_in(&names.v)
+                    .is_some_and(|local| local != "shapetype")
+            })
+            .nth(1)
+            .is_some()
+    }
 }
 
-/// A VML picture (a `v:shape` with a `v:imagedata`): an image, cropped, turned and
-/// mirrored, in the line or floating.
+/// A VML picture (a `v:shape` whose `v:imagedata` names its image): an image, cropped,
+/// turned and mirrored, in the line or floating.
 #[derive(Clone, Copy)]
 pub struct VmlPicture<'a> {
     document: &'a Document,
@@ -283,6 +304,18 @@ impl<'a> VmlPicture<'a> {
                 .any(|name| attribute(name).is_some())
     }
 
+    /// Whether it casts a shadow (`v:shadow` with `on` true, which a shadow needs to show),
+    /// which the layout does not draw yet.
+    // reason: only the translation into the layout IR asks for it.
+    #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
+    pub(crate) fn has_shadow(self) -> bool {
+        let names = &self.document.names;
+        self.shape
+            .children_through_alternates(names.mc)
+            .filter(|child| child.is(&names.v, "shadow"))
+            .any(|shadow| shadow.attribute(&[None], "on").and_then(true_false) == Some(true))
+    }
+
     /// Whether it holds text (`v:textbox`), which the layout does not draw yet.
     // reason: only the translation into the layout IR asks for it.
     #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
@@ -371,24 +404,35 @@ impl<'a> VmlPicture<'a> {
     }
 }
 
-/// The order of a picture among those on its side of the text, from its `z-index`, which
-/// Word keeps only by its sign and order (MS-OI29500, Part 4, §19.1.2.1(ee)): an index of
-/// 0 or more as it is, and a negative one, behind the text, shifted up by 2^31 so that a
-/// more negative one is further back, as in CSS.
+/// How far below a picture's `relativeHeight` Word writes the `z-index` of its VML when the
+/// picture is behind the text.
+const BEHIND_TEXT_Z_SHIFT: i64 = 503_316_480;
+
+/// The order of a picture among the floating objects of its side of the text, on the
+/// scale of DrawingML's `relativeHeight`, from its `z-index`. MS-OI29500, Part 4,
+/// §19.1.2.1(ee), says only that Office keeps the order and sign of `z-index`; where Word
+/// writes a picture twice, DrawingML with a VML fallback, the `z-index` of one in front
+/// of the text is its `relativeHeight` and that of one behind the text its
+/// `relativeHeight` less [`BEHIND_TEXT_Z_SHIFT`] (every such pair of the committed corpus,
+/// 15 in front and 18 behind). So the order is taken back the same way, and VML and
+/// DrawingML pictures stack together; an index below that shift is at the back.
 fn z_order(z_index: i32) -> u32 {
-    if z_index >= 0 {
-        z_index.unsigned_abs()
+    let height = if z_index >= 0 {
+        i64::from(z_index)
     } else {
-        // i32::MIN shifts to 0 and -1 to i32::MAX, within u32.
-        u32::try_from(i64::from(z_index) - i64::from(i32::MIN)).unwrap_or(0)
-    }
+        i64::from(z_index) + BEHIND_TEXT_Z_SHIFT
+    };
+    u32::try_from(height.max(0)).unwrap_or(0)
 }
 
-/// The picture of a `w:pict`: its first `v:shape` with a `v:imagedata`.
+/// The picture of a `w:pict`: its first `v:shape` whose `v:imagedata` names an image by
+/// `r:id`, the only way Word takes one in a document (MS-OI29500, Part 4,
+/// §19.1.2.11(q)). A shape whose `v:imagedata` names none, as a text box Word writes may
+/// have, shows no picture.
 pub(crate) fn picture<'a>(pict: Element<'a>, names: &Names) -> Option<Element<'a>> {
     pict.children_through_alternates(names.mc)
         .filter(|child| child.is(&names.v, "shape"))
-        .find(|shape| image_data(*shape, names).is_some())
+        .find(|shape| embedded_image(*shape, names).is_some())
 }
 
 /// The relationship of the image a VML picture shows: its `v:imagedata`'s `r:id`.
@@ -650,10 +694,19 @@ mod tests {
 
     #[test]
     fn orders_pictures_by_z_index_on_each_side_of_the_text() {
+        // In front of the text, the relativeHeight Word writes is the z-index.
         assert_eq!(z_order(0), 0);
         assert_eq!(z_order(251_659_264), 251_659_264);
-        assert_eq!(z_order(i32::MIN), 0);
-        assert_eq!(z_order(-1), i32::MAX.unsigned_abs());
+        assert_eq!(z_order(i32::MAX), i32::MAX.unsigned_abs());
+        // Behind the text, it is the z-index plus 503,316,480: form-cfpb-credit-form-c3-es
+        // writes relativeHeight 487587840 and z-index -15728640 for one picture.
+        assert_eq!(z_order(-15_728_640), 487_587_840);
+        assert_eq!(z_order(-251_658_240), 251_658_240);
+        assert_eq!(z_order(-1), 503_316_479);
         assert!(z_order(-15_778_816) < z_order(-15_728_640));
+        // An index below the shift is at the back.
+        assert_eq!(z_order(-503_316_480), 0);
+        assert_eq!(z_order(-503_316_481), 0);
+        assert_eq!(z_order(i32::MIN), 0);
     }
 }

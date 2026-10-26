@@ -93,6 +93,11 @@ impl<'a> Translator<'a> {
             });
             return None;
         };
+        if drawing.has_other_shapes() {
+            self.leave_out(ReportKind::FeatureUnsupported, || {
+                "a VML drawing's shapes other than its first picture are left out (w:pict)".into()
+            });
+        }
         if picture.is_hidden() {
             return None;
         }
@@ -114,6 +119,12 @@ impl<'a> Translator<'a> {
             self.report_once(
                 Once::VmlPictureColor,
                 "a VML picture's colour adjustments (v:imagedata, such as gain, blacklevel or grayscale) are not applied, here and wherever else the document has them",
+            );
+        }
+        if !self.reported(Once::VmlPictureShadow) && picture.has_shadow() {
+            self.report_once(
+                Once::VmlPictureShadow,
+                "a VML picture's shadow (v:shadow) is not drawn, here and wherever else the document has one",
             );
         }
         if !self.reported(Once::VmlPictureText) && picture.has_text() {
