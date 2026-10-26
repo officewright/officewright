@@ -1,10 +1,12 @@
 //! Tables in a column: the geometry of their grid, their cells laid out as stacks of
 //! paragraphs and nested tables, their borders and their shading (design §8).
 //!
-//! Rows tied together by a vertically merged cell form a band, which a page takes whole:
-//! a row is never split (plan PR 13), and a merged cell is never cut. A table of fixed
-//! layout takes the grid's column widths, scaled to an explicit table width; one that fits
-//! its columns to their content measures its cells and fits them (`autofit`).
+//! Rows tied together by a vertically merged cell form a band, which a page takes whole.
+//! A band of one row is cut between the lines of its cells where a page ends inside it,
+//! and nested tables in them between their bands, as Word cuts them; header rows start
+//! every page the table goes on to. A table of fixed layout takes the grid's column
+//! widths, scaled to an explicit table width; one that fits its columns to their content
+//! measures its cells and fits them (`autofit`).
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -16,14 +18,18 @@ use crate::display::{self, DisplayItem, LeaderBudget, LineItem, LineStyle, Paint
 use crate::fonts::Fonts;
 use crate::ir::{
     Block, Border, BorderSide, BorderStyle, Cell, CellMargins, CellVerticalAlign, ColorValue,
-    CompatFlag, CompatMode, Document, Paragraph, PreferredWidth, RowHeight, Table, TableAlignment,
-    TableBorders, TableLayout, TextDirection, VerticalMerge,
+    CompatFlag, CompatMode, Document, Paragraph, PreferredWidth, Row, RowHeight, Table,
+    TableAlignment, TableBorders, TableLayout, TextDirection, VerticalMerge,
 };
 use crate::itemize::{FieldValues, Item};
 use crate::lists::Label;
-use crate::paragraph;
+use crate::paragraph::{self, ParagraphLayout};
 use crate::report::{Location, ReportKind, Step};
 use crate::shape::Shaper;
+
+/// How far a piece of a table may reach past the room it is given and still fit: what
+/// sums of positions in points lose.
+const EPSILON: f64 = 1e-6;
 
 /// The widest a grid column is laid out: Word's widest page, 22 inches. A wider one is
 /// laid out that wide, and reported.
@@ -55,7 +61,7 @@ pub(crate) type Measured = HashMap<usize, (f64, f64)>;
 
 /// What a stack of blocks, or a band of a table, draws: its height and its display
 /// items, from its top left corner.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Drawn {
     pub(crate) height: Pt,
     pub(crate) items: Vec<DisplayItem>,
@@ -342,26 +348,108 @@ impl<'d, 'l> Prepared<'d, 'l> {
         self.row_labels.last().copied().unwrap_or(0)
     }
 
-    /// Lays out band `band`: its height, with the borders above its first row and, for
-    /// the table's last band, below its last; and what it draws, from the band's top at
-    /// the column's start edge.
+    /// How many bands at the top of the table hold header rows only: those Word repeats
+    /// at the top of every page the table goes on to (`w:tblHeader`).
+    pub(crate) fn header_bands(&self) -> usize {
+        self.bands
+            .iter()
+            .take_while(|rows| {
+                (rows.start..rows.end)
+                    .all(|row| self.table.rows().get(row).is_some_and(Row::header))
+            })
+            .count()
+    }
+
+    /// Whether a row of band `band` stays on one page (`w:cantSplit`).
+    pub(crate) fn cant_split(&self, band: usize) -> bool {
+        self.bands.get(band).is_some_and(|rows| {
+            rows.clone()
+                .any(|row| self.table.rows().get(row).is_some_and(Row::cant_split))
+        })
+    }
+
+    /// Whether band `band` is rows that a vertically merged cell ties together.
+    pub(crate) fn ties_rows(&self, band: usize) -> bool {
+        self.bands.get(band).is_some_and(|rows| rows.len() > 1)
+    }
+
+    /// The header rows: those of the header bands.
+    pub(crate) fn header_rows(&self) -> &'d [Row] {
+        let end = self
+            .bands
+            .get(self.header_bands().wrapping_sub(1))
+            .map_or(0, |rows| rows.end);
+        self.table.rows().get(..end).unwrap_or(&[])
+    }
+
+    /// Lays out the header bands whole, one under the other: each band, and the height
+    /// they take with the border below the last.
+    pub(crate) fn header(&self, context: &mut Context<'d, '_, '_>) -> (Vec<Drawn>, f64) {
+        let count = self.header_bands();
+        let bands: Vec<Drawn> = (0..count).map(|band| self.band(band, context)).collect();
+        let below = self
+            .bands
+            .get(count.wrapping_sub(1))
+            .map_or(0.0, |rows| self.thickness(rows.end));
+        let height = bands.iter().map(|band| band.height.0).sum::<f64>() + below;
+        (bands, height)
+    }
+
+    /// The most pieces the table may be cut into, besides its header rows repeated: one
+    /// for each band, and one for each unit of the content of its cells, since every piece
+    /// but a band's last takes at least one.
+    #[cfg(feature = "fuzzing")]
+    pub(crate) fn pieces_bound(&self, context: &mut Context<'d, '_, '_>) -> usize {
+        (0..self.bands.len())
+            .map(|band| {
+                let laid = self.lay_out(band, context);
+                let units: usize = laid
+                    .cells
+                    .iter()
+                    .flatten()
+                    .flatten()
+                    .map(|cell| cell.content.units.len())
+                    .sum();
+                units + 1
+            })
+            .sum()
+    }
+
+    /// Lays out band `band` whole: its height, with the borders above its first row and,
+    /// for the table's last band, below its last; and what it draws, from the band's top
+    /// at the column's start edge.
     pub(crate) fn band(&self, band: usize, context: &mut Context<'d, '_, '_>) -> Drawn {
-        let Some(rows) = self.bands.get(band).cloned() else {
-            return Drawn::default();
-        };
-        let last = rows.end == self.rows.len();
-        let thickness = |line: usize| self.thickness(line);
-        // Each cell's content, laid out at its width, by row and place in the row.
+        let mut laid = self.lay_out(band, context);
+        self.piece(&mut laid, None, (true, false), context)
+            .map_or_else(Drawn::default, |piece| piece.drawn)
+    }
+
+    /// Lays out every band, one under the other.
+    pub(crate) fn whole(&self, context: &mut Context<'d, '_, '_>) -> Drawn {
+        let mut drawn = Drawn::default();
+        for band in 0..self.bands.len() {
+            let mut next = self.band(band, context);
+            shift(&mut next.items, 0.0, drawn.height.0);
+            drawn.height = Pt(drawn.height.0 + next.height.0);
+            drawn.items.extend(next.items);
+        }
+        drawn
+    }
+
+    /// Lays out the content of the cells of band `band`, each at its width, for
+    /// [`piece`](Self::piece) to put on pages.
+    pub(crate) fn lay_out(&self, band: usize, context: &mut Context<'d, '_, '_>) -> LaidBand<'d> {
+        let rows = self.bands.get(band).cloned().unwrap_or(0..0);
         let mut labels = Labels {
             list: self.labels,
             next: self.row_labels.get(rows.start).copied().unwrap_or(0),
         };
-        let mut contents: Vec<Vec<Option<(Drawn, CellMargins)>>> = Vec::new();
+        let mut cells = Vec::new();
         for row in rows.clone() {
-            let mut cells = Vec::new();
+            let mut laid = Vec::new();
             for placed in self.rows.get(row).into_iter().flatten() {
                 let cell = self.cell(row, placed.cell);
-                let laid = match (cell, placed.merge) {
+                laid.push(match (cell, placed.merge) {
                     (Some(cell), Merge::Single | Merge::Spans(_)) => {
                         let margins = self.margins(cell);
                         let width = self.content_width(placed, &margins);
@@ -381,9 +469,9 @@ impl<'d, 'l> Prepared<'d, 'l> {
                                 display::fill_color(&shading, context.fonts, &location)
                             })
                             .or_else(|| self.table_background(context.fonts));
-                        let drawn = if hidden_mark(cell) {
+                        let content = if hidden_mark(cell) {
                             skip_labels(cell.blocks(), &mut labels);
-                            Drawn::default()
+                            Stacked::default()
                         } else {
                             stack(
                                 cell.blocks(),
@@ -393,7 +481,11 @@ impl<'d, 'l> Prepared<'d, 'l> {
                                 context,
                             )
                         };
-                        Some((drawn, margins))
+                        Some(LaidCell {
+                            content,
+                            margins,
+                            next: 0,
+                        })
                     }
                     (Some(cell), Merge::Continues) => {
                         // A cell merged into the one above draws nothing of its own, but
@@ -413,13 +505,185 @@ impl<'d, 'l> Prepared<'d, 'l> {
                         None
                     }
                     (None, _) => None,
-                };
-                cells.push(laid);
+                });
             }
-            contents.push(cells);
+            cells.push(laid);
         }
-        // Each row's height below its top border: its tallest cell of its own, as its
-        // height rule says.
+        LaidBand {
+            rows,
+            cells,
+            put: None,
+        }
+    }
+
+    /// Puts on a page what of `laid` fits in `room` below its top, the border below it
+    /// included, which Word leaves room for (Word's renders of `E-table-header-repeat.docx`
+    /// and `E-table-row-split.docx`): the rest of the band whole, or, where `split`
+    /// allows it and the band is a row of its own of no exact height, the lines of each
+    /// cell that fit, each cell cut on its own. `None` when nothing fits, unless `fresh`:
+    /// on a page that holds nothing else, a band that does not fit is put all the same,
+    /// whole or, where it may split, cut after at least one line of each cell. `room`
+    /// `None` puts the band whole.
+    ///
+    /// A piece that ends its band has the border below it only where the band ends the
+    /// table; one that does not is closed by the line its row's bottom border draws, and
+    /// the rest goes on below that row's top border (`E-table-row-split.docx`, where every
+    /// border is alike: hypotheses for which borders Word draws there). Hypotheses until
+    /// a Word render: a cell's margins are kept above and below each piece of it, the
+    /// pieces of a split row are aligned at their top whatever the cell's vertical
+    /// alignment, its height rule's least height is filled by its last piece as far as
+    /// its page leaves room, and a row of an exact height is never split.
+    pub(crate) fn piece(
+        &self,
+        laid: &mut LaidBand<'d>,
+        room: Option<f64>,
+        (fresh, split): (bool, bool),
+        context: &mut Context<'d, '_, '_>,
+    ) -> Option<Piece> {
+        let rows = laid.rows.clone();
+        let below = self.thickness(rows.end);
+        let row_height = self.table.rows().get(rows.start).map(Row::height);
+        if laid.put.is_none() {
+            let heights = self.heights(laid, context);
+            let whole: f64 = rows
+                .clone()
+                .zip(&heights)
+                .map(|(row, height)| self.thickness(row) + height)
+                .sum();
+            let fits = room.is_none_or(|room| whole + below <= room + EPSILON);
+            let splits =
+                split && rows.len() == 1 && !matches!(row_height, Some(RowHeight::Exact(_)));
+            if fits || !splits {
+                if !fits && !fresh {
+                    return None;
+                }
+                return Some(Piece {
+                    drawn: self.paint_band(laid, &heights, context),
+                    done: true,
+                });
+            }
+        }
+        // A row of its own, cut where the lines of its cells allow.
+        let room = room.unwrap_or(f64::INFINITY);
+        let above = self.thickness(rows.start);
+        let cells = laid.cells.first_mut()?;
+        let mut takes: Vec<usize> = Vec::with_capacity(cells.len());
+        let mut fallback: Vec<usize> = Vec::with_capacity(cells.len());
+        for cell in cells.iter().flatten() {
+            let margins = cell.margins.top().0 + cell.margins.bottom().0;
+            let (take, any) = cell.content.fit(cell.next, room - above - below - margins);
+            takes.push(take);
+            fallback.push(any);
+        }
+        let left = |cell: &LaidCell<'_>| {
+            cell.content.units.len() - cell.next.min(cell.content.units.len())
+        };
+        let progress = takes.iter().any(|&take| take > 0);
+        if !progress {
+            if !fresh {
+                return None;
+            }
+            // Nothing moves it further: at least one line of each cell.
+            for ((take, any), cell) in takes.iter_mut().zip(&fallback).zip(cells.iter().flatten()) {
+                *take = (*any).max(1).min(left(cell));
+            }
+        }
+        let done = cells
+            .iter()
+            .flatten()
+            .zip(&takes)
+            .all(|(cell, take)| *take == left(cell));
+        if done && laid.put.is_none() {
+            // Only its least height keeps it from the room left.
+            if !fresh {
+                return None;
+            }
+            let heights = self.heights(laid, context);
+            return Some(Piece {
+                drawn: self.paint_band(laid, &heights, context),
+                done: true,
+            });
+        }
+        let mut height: f64 = 0.0;
+        let mut contents = Vec::with_capacity(takes.len());
+        for (cell, take) in cells.iter_mut().flatten().zip(&takes) {
+            let units = cell.next..cell.next + take;
+            cell.next = units.end;
+            let drawn = cell.content.paint(units, context);
+            height = height.max(cell.margins.top().0 + drawn.height.0 + cell.margins.bottom().0);
+            contents.push(drawn);
+        }
+        let put = laid.put.unwrap_or(0.0);
+        if done {
+            if let Some(RowHeight::AtLeast(least)) = row_height {
+                height = height.max((least.0 - put).min(room - above - below));
+            }
+        }
+        laid.put = Some(put + height);
+        let closed = !done || rows.end == self.rows.len();
+        let bottom = above + height + if closed { below } else { 0.0 };
+        let mut items = Vec::new();
+        self.paint_table_shading((above + height, bottom), closed, &mut items, context.fonts);
+        let row = rows.start;
+        let placed_cells = self.rows.get(row).into_iter().flatten();
+        let laid_cells = laid.cells.first().into_iter().flatten();
+        let mut contents = contents.into_iter();
+        for (placed, cell) in placed_cells.zip(laid_cells) {
+            let Some(cell) = cell else {
+                continue;
+            };
+            let Some(mut drawn) = contents.next() else {
+                break;
+            };
+            let (left, right) = self.cell_edges(placed);
+            self.paint_cell_shading(
+                row,
+                placed,
+                (left, right),
+                (0.0, above + height),
+                &mut items,
+                context.fonts,
+            );
+            shift(
+                &mut drawn.items,
+                left + cell.margins.start().0,
+                above + cell.margins.top().0,
+            );
+            items.extend(drawn.items);
+        }
+        self.paint_borders((rows, &[0.0, above + height], bottom, closed), &mut items);
+        Some(Piece {
+            drawn: Drawn {
+                height: Pt(bottom),
+                items,
+            },
+            done,
+        })
+    }
+
+    /// The line below band `band`, which closes it where a page ends under it: its
+    /// height, the thickest border along it, and what it draws from its top, the vertical
+    /// borders of the band's last row run through it.
+    pub(crate) fn closing(&self, band: usize, fonts: &mut Fonts<'_>) -> Drawn {
+        let Some(rows) = self.bands.get(band).cloned() else {
+            return Drawn::default();
+        };
+        let height = self.thickness(rows.end);
+        let mut items = Vec::new();
+        self.paint_table_shading((0.0, height), true, &mut items, fonts);
+        self.paint_horizontal(rows.end, 0.0, &mut items);
+        self.paint_vertical(rows.end.saturating_sub(1), (0.0, height), &mut items);
+        Drawn {
+            height: Pt(height),
+            items,
+        }
+    }
+
+    /// The height of each row of `laid` laid out whole, below its top border: its tallest
+    /// cell of its own, as its height rule says, and a merged cell taller than its rows
+    /// making the last of them taller.
+    fn heights(&self, laid: &LaidBand<'d>, context: &mut Context<'d, '_, '_>) -> Vec<f64> {
+        let rows = laid.rows.clone();
         let mut heights: Vec<f64> = Vec::new();
         for (offset, row) in rows.clone().enumerate() {
             let content = self
@@ -427,17 +691,19 @@ impl<'d, 'l> Prepared<'d, 'l> {
                 .get(row)
                 .into_iter()
                 .flatten()
-                .zip(contents.get(offset).into_iter().flatten())
+                .zip(laid.cells.get(offset).into_iter().flatten())
                 .filter(|(placed, _)| placed.merge == Merge::Single)
                 .filter_map(|(_, laid)| laid.as_ref())
-                .map(|(drawn, margins)| margins.top().0 + drawn.height.0 + margins.bottom().0)
+                .map(LaidCell::height)
                 .fold(0.0, f64::max);
-            let height = match self.table.rows().get(row).map(|row| row.height()) {
+            let height = match self.table.rows().get(row).map(Row::height) {
                 Some(RowHeight::AtLeast(least)) => content.max(least.0),
-                // Word adds the row's largest bottom margin to an exact height
-                // (MS-OI29500 2.1.180 d).
+                // The height runs from the top of the row's top border to the top of the
+                // next row's (Word's render of `E-table-row-exact-height.docx`), and Word
+                // adds the row's largest bottom margin (MS-OI29500 2.1.180 d).
                 Some(RowHeight::Exact(exact)) => {
-                    let height = exact.0 + self.largest_bottom_margin(row);
+                    let height =
+                        (exact.0 - self.thickness(row)).max(0.0) + self.largest_bottom_margin(row);
                     if content > height + 1e-6 {
                         context.fonts.report_once(
                             ReportKind::FeatureUnsupported,
@@ -456,11 +722,11 @@ impl<'d, 'l> Prepared<'d, 'l> {
         // (`E-table-merged-exact.docx`).
         for (offset, row) in rows.clone().enumerate() {
             let row_cells = self.rows.get(row).into_iter().flatten();
-            for (placed, laid) in row_cells.zip(contents.get(offset).into_iter().flatten()) {
-                let (Merge::Spans(count), Some((drawn, margins))) = (placed.merge, laid) else {
+            for (placed, laid) in row_cells.zip(laid.cells.get(offset).into_iter().flatten()) {
+                let (Merge::Spans(count), Some(laid)) = (placed.merge, laid) else {
                     continue;
                 };
-                let needed = margins.top().0 + drawn.height.0 + margins.bottom().0;
+                let needed = laid.height();
                 let spanned = offset..(offset + count).min(heights.len());
                 let available: f64 = heights
                     .get(spanned.clone())
@@ -470,7 +736,7 @@ impl<'d, 'l> Prepared<'d, 'l> {
                     + spanned
                         .clone()
                         .skip(1)
-                        .map(|inner| thickness(rows.start + inner))
+                        .map(|inner| self.thickness(rows.start + inner))
                         .sum::<f64>();
                 if needed > available {
                     if let Some(height) = spanned.last().and_then(|last| heights.get_mut(last)) {
@@ -479,26 +745,36 @@ impl<'d, 'l> Prepared<'d, 'l> {
                 }
             }
         }
+        heights
+    }
+
+    /// Paints `laid` whole, its rows `heights` high: the borders above its rows and, for
+    /// the table's last band, below its last; each cell's content aligned in the room its
+    /// rows leave it.
+    fn paint_band(
+        &self,
+        laid: &mut LaidBand<'d>,
+        heights: &[f64],
+        context: &mut Context<'d, '_, '_>,
+    ) -> Drawn {
+        let rows = laid.rows.clone();
+        let last = rows.end == self.rows.len();
         // The top of each row, from the band's top, and the band's bottom.
         let mut tops = Vec::new();
         let mut y = 0.0;
         for (offset, row) in rows.clone().enumerate() {
             tops.push(y);
-            y += thickness(row) + heights.get(offset).copied().unwrap_or(0.0);
+            y += self.thickness(row) + heights.get(offset).copied().unwrap_or(0.0);
         }
-        let bottom = y + if last {
-            thickness(self.rows.len())
-        } else {
-            0.0
-        };
+        let bottom = y + if last { self.thickness(rows.end) } else { 0.0 };
         tops.push(y);
         let mut items = Vec::new();
         self.paint_table_shading((y, bottom), last, &mut items, context.fonts);
         // Shading, then content, cell by cell.
         for (offset, row) in rows.clone().enumerate() {
             let row_cells = self.rows.get(row).into_iter().flatten();
-            for (placed, laid) in row_cells.zip(contents.get_mut(offset).into_iter().flatten()) {
-                let Some((drawn, margins)) = laid.take() else {
+            for (placed, cell) in row_cells.zip(laid.cells.get_mut(offset).into_iter().flatten()) {
+                let Some(cell) = cell else {
                     continue;
                 };
                 let span = match placed.merge {
@@ -509,28 +785,21 @@ impl<'d, 'l> Prepared<'d, 'l> {
                 let top = tops.get(offset).copied().unwrap_or(0.0);
                 let below = tops.get(end).copied().unwrap_or(y);
                 let (left, right) = self.cell_edges(placed);
-                if let Some(color) = self
-                    .cell(row, placed.cell)
-                    .and_then(Cell::shading)
-                    .and_then(|shading| {
-                        display::fill_color(&shading, context.fonts, &self.location)
-                    })
-                {
-                    if right > left && below > top {
-                        items.push(DisplayItem::Rect {
-                            at: Point {
-                                x: Pt(left),
-                                y: Pt(top),
-                            },
-                            width: Pt(right - left),
-                            height: Pt(below - top),
-                            color,
-                        });
-                    }
-                }
+                self.paint_cell_shading(
+                    row,
+                    placed,
+                    (left, right),
+                    (top, below),
+                    &mut items,
+                    context.fonts,
+                );
+                let units = cell.next..cell.content.units.len();
+                cell.next = units.end;
+                let drawn = cell.content.paint(units, context);
                 // The content below the row's top border and the cell's top margin,
                 // aligned in the room the row leaves it.
-                let content_top = top + thickness(row) + margins.top().0;
+                let margins = &cell.margins;
+                let content_top = top + self.thickness(row) + margins.top().0;
                 let room = below - content_top - margins.bottom().0;
                 let align = self
                     .cell(row, placed.cell)
@@ -547,23 +816,41 @@ impl<'d, 'l> Prepared<'d, 'l> {
                 items.extend(content);
             }
         }
-        self.paint_borders((rows.clone(), &tops, bottom), &mut items);
+        self.paint_borders((rows, &tops, bottom, last), &mut items);
         Drawn {
             height: Pt(bottom),
             items,
         }
     }
 
-    /// Lays out every band, one under the other.
-    pub(crate) fn whole(&self, context: &mut Context<'d, '_, '_>) -> Drawn {
-        let mut drawn = Drawn::default();
-        for band in 0..self.bands.len() {
-            let mut next = self.band(band, context);
-            shift(&mut next.items, 0.0, drawn.height.0);
-            drawn.height = Pt(drawn.height.0 + next.height.0);
-            drawn.items.extend(next.items);
+    /// The shading of the cell `placed` of row `row`, between `x` and from `y.0` to
+    /// `y.1`.
+    fn paint_cell_shading(
+        &self,
+        row: usize,
+        placed: &Placed,
+        (left, right): (f64, f64),
+        (top, below): (f64, f64),
+        items: &mut Vec<DisplayItem>,
+        fonts: &mut Fonts<'_>,
+    ) {
+        let color = self
+            .cell(row, placed.cell)
+            .and_then(Cell::shading)
+            .and_then(|shading| display::fill_color(&shading, fonts, &self.location));
+        if let Some(color) = color {
+            if right > left && below > top {
+                items.push(DisplayItem::Rect {
+                    at: Point {
+                        x: Pt(left),
+                        y: Pt(top),
+                    },
+                    width: Pt(right - left),
+                    height: Pt(below - top),
+                    color,
+                });
+            }
         }
-        drawn
     }
 
     /// The room the borders along grid line `line` take: above row `line`, or below the
@@ -788,40 +1075,49 @@ impl<'d, 'l> Prepared<'d, 'l> {
     }
 
     /// The borders of `rows`, whose tops are `tops` from the band's top (one more for
-    /// the bottom of the last), and the table's bottom border when the band ends it at
-    /// `bottom`.
+    /// the bottom of the last), and, when `closed`, the line below the last row, through
+    /// which the vertical borders of that row run to `bottom`: the table's bottom border
+    /// where the band ends it, or the line that closes it at the end of a page.
     fn paint_borders(
         &self,
-        (rows, tops, bottom): (Range<usize>, &[f64], f64),
+        (rows, tops, bottom, closed): (Range<usize>, &[f64], f64, bool),
         items: &mut Vec<DisplayItem>,
     ) {
-        let x = |line: usize| self.lines.get(line).copied().unwrap_or(0.0);
-        let horizontal = |line: usize, top: f64, items: &mut Vec<DisplayItem>| {
-            let segments = self.horizontal.get(line).map_or(&[][..], Vec::as_slice);
-            let y = top + self.thickness(line) / 2.0;
-            for segment in segments {
-                let (from, to) = (x(segment.columns.start), x(segment.columns.end));
-                border_line(&segment.border, (from, y), (to, y), items);
-            }
-        };
         for (offset, row) in rows.clone().enumerate() {
             let top = tops.get(offset).copied().unwrap_or(0.0);
-            horizontal(row, top, items);
+            self.paint_horizontal(row, top, items);
         }
-        if rows.end == self.rows.len() {
+        if closed {
             let top = tops.last().copied().unwrap_or(0.0);
-            horizontal(rows.end, top, items);
+            self.paint_horizontal(rows.end, top, items);
         }
         for (offset, row) in rows.clone().enumerate() {
             let top = tops.get(offset).copied().unwrap_or(0.0);
-            let below = if row + 1 == self.rows.len() {
+            let below = if closed && row + 1 == rows.end {
                 bottom
             } else {
                 tops.get(offset + 1).copied().unwrap_or(bottom)
             };
-            for (line, border) in self.vertical.get(row).into_iter().flatten() {
-                border_line(border, (x(*line), top), (x(*line), below), items);
-            }
+            self.paint_vertical(row, (top, below), items);
+        }
+    }
+
+    /// The borders along grid line `line`, the line's top at `top`.
+    fn paint_horizontal(&self, line: usize, top: f64, items: &mut Vec<DisplayItem>) {
+        let x = |line: usize| self.lines.get(line).copied().unwrap_or(0.0);
+        let segments = self.horizontal.get(line).map_or(&[][..], Vec::as_slice);
+        let y = top + self.thickness(line) / 2.0;
+        for segment in segments {
+            let (from, to) = (x(segment.columns.start), x(segment.columns.end));
+            border_line(&segment.border, (from, y), (to, y), items);
+        }
+    }
+
+    /// The borders beside row `row`, from `y.0` down to `y.1`.
+    fn paint_vertical(&self, row: usize, (top, below): (f64, f64), items: &mut Vec<DisplayItem>) {
+        for (line, border) in self.vertical.get(row).into_iter().flatten() {
+            let x = self.lines.get(*line).copied().unwrap_or(0.0);
+            border_line(border, (x, top), (x, below), items);
         }
     }
 
@@ -991,30 +1287,299 @@ impl Labels<'_> {
     }
 }
 
-/// Lays out `blocks` one under the other, `width` wide, on `background`, as a header
-/// stacks its paragraphs: the space above the first, between each two, and below the
-/// last, all in its height.
+/// A band laid out: its cells' content, which a page takes whole or, a row that may
+/// split, piece by piece ([`Prepared::piece`]).
+pub(crate) struct LaidBand<'d> {
+    rows: Range<usize>,
+    /// Each cell's content, by row and place in the row: `None` for a cell merged into
+    /// the one above, and for a place without a cell.
+    cells: Vec<Vec<Option<LaidCell<'d>>>>,
+    /// The height of the pieces of its row already put on pages, below their top
+    /// borders; `None` while none is.
+    put: Option<f64>,
+}
+
+/// A cell's content laid out, with its margins, and the first of its units no page has
+/// taken yet.
+struct LaidCell<'d> {
+    content: Stacked<'d>,
+    margins: CellMargins,
+    next: usize,
+}
+
+impl LaidBand<'_> {
+    /// Whether a piece of it is on a page.
+    pub(crate) fn started(&self) -> bool {
+        self.put.is_some()
+    }
+}
+
+impl LaidCell<'_> {
+    /// The height the cell takes whole, with its margins.
+    fn height(&self) -> f64 {
+        self.margins.top().0 + self.content.height + self.margins.bottom().0
+    }
+}
+
+/// A piece of a band, put on a page.
+pub(crate) struct Piece {
+    /// What it draws from its top at the column's start edge, and its height: with the
+    /// border above it, and the border below it when it ends the table or its band goes
+    /// on on the next page.
+    pub(crate) drawn: Drawn,
+    /// Whether it ends its band.
+    pub(crate) done: bool,
+}
+
+/// The content of a cell laid out: its paragraphs and nested tables one under the
+/// other, painted whole or in pieces, a page taking whole units of it: a line of a
+/// paragraph or a band of a nested table.
+#[derive(Default)]
+struct Stacked<'d> {
+    /// Its height whole: the space above its first paragraph, between each two blocks
+    /// and below its last paragraph included.
+    height: f64,
+    /// What is behind it, the cell's shading or the table's, which decides the automatic
+    /// text colour.
+    background: Option<Color>,
+    parts: Vec<Part<'d>>,
+    units: Vec<Unit>,
+}
+
+/// A block of a cell's content laid out.
+enum Part<'d> {
+    /// A paragraph, painted when a page takes its lines.
+    Paragraph {
+        paragraph: &'d Paragraph,
+        layout: ParagraphLayout,
+        location: Location,
+    },
+    /// A nested table: what each of its bands draws, and the line below each, which
+    /// closes it where a page ends under it.
+    Table {
+        bands: Vec<Drawn>,
+        closings: Vec<Drawn>,
+        /// Whether it has header rows, which a page it goes on to does not repeat.
+        header: bool,
+        location: Location,
+    },
+}
+
+/// A line of a paragraph or a band of a nested table, which a page takes whole.
+#[derive(Clone, Copy, Debug)]
+struct Unit {
+    /// The part it is of, and its line or band there.
+    part: usize,
+    index: usize,
+    /// Its top from the top of the content, and its height.
+    top: f64,
+    height: f64,
+    /// Whether a page may end above it: not inside a nested table's band, and not where
+    /// the widow control of its paragraph keeps lines together.
+    breaks: bool,
+}
+
+impl<'d> Stacked<'d> {
+    /// Where the piece that starts with unit `from` starts: the content's top for its
+    /// first unit, so that the space above its first paragraph comes with it, and
+    /// otherwise the unit's top, leaving out the space above it.
+    fn start(&self, from: usize) -> f64 {
+        if from == 0 {
+            0.0
+        } else {
+            self.units.get(from).map_or(self.height, |unit| unit.top)
+        }
+    }
+
+    /// Where the piece that ends before unit `to` ends: the content's bottom after its
+    /// last unit, so that the space below its last paragraph comes with it, and
+    /// otherwise the bottom of unit `to - 1` and of the line that closes a nested table
+    /// cut after it.
+    fn end(&self, to: usize) -> f64 {
+        if to >= self.units.len() {
+            return self.height;
+        }
+        let Some(unit) = to.checked_sub(1).and_then(|last| self.units.get(last)) else {
+            return 0.0;
+        };
+        unit.top + unit.height + self.closing(unit).map_or(0.0, |closing| closing.height.0)
+    }
+
+    /// The line that closes the nested table of `unit` when a page ends below it: none
+    /// after the table's last band, whose height has the table's bottom border.
+    fn closing(&self, unit: &Unit) -> Option<&Drawn> {
+        match self.parts.get(unit.part)? {
+            Part::Table {
+                bands, closings, ..
+            } if unit.index + 1 < bands.len() => closings.get(unit.index),
+            _ => None,
+        }
+    }
+
+    /// The height of the piece of units `from..to`.
+    fn extent(&self, from: usize, to: usize) -> f64 {
+        if to <= from {
+            return 0.0;
+        }
+        self.end(to) - self.start(from)
+    }
+
+    /// How many units from `from` on fit in `room`: as many as a page may end after, and
+    /// as many as fit whatever the breaks allow.
+    fn fit(&self, from: usize, room: f64) -> (usize, usize) {
+        let start = self.start(from);
+        let (mut allowed, mut any) = (from, from);
+        for to in from + 1..=self.units.len() {
+            let Some(unit) = self.units.get(to - 1) else {
+                break;
+            };
+            if unit.top + unit.height - start > room + EPSILON {
+                break;
+            }
+            if self.extent(from, to) <= room + EPSILON {
+                any = to;
+                if self.units.get(to).is_none_or(|next| next.breaks) {
+                    allowed = to;
+                }
+            }
+        }
+        (allowed - from, any - from)
+    }
+
+    /// Paints units `units`: the paragraphs' lines and the nested tables' bands among
+    /// them, from the piece's top, and the line that closes a nested table cut after its
+    /// last.
+    fn paint(&mut self, units: Range<usize>, context: &mut Context<'d, '_, '_>) -> Drawn {
+        let start = self.start(units.start);
+        let height = self.extent(units.start, units.end);
+        let mut items = Vec::new();
+        let mut at = units.start;
+        while at < units.end {
+            let Some(first) = self.units.get(at).copied() else {
+                break;
+            };
+            let mut end = at + 1;
+            while end < units.end
+                && self
+                    .units
+                    .get(end)
+                    .is_some_and(|unit| unit.part == first.part)
+            {
+                end += 1;
+            }
+            let last = self.units.get(end - 1).copied().unwrap_or(first);
+            let closing = (end == units.end)
+                .then(|| self.closing(&last))
+                .flatten()
+                .map(|closing| closing.items.clone());
+            match self.parts.get_mut(first.part) {
+                Some(Part::Paragraph {
+                    paragraph,
+                    layout,
+                    location,
+                }) => {
+                    let lines = first.index..last.index + 1;
+                    let origin = Point {
+                        x: Pt(0.0),
+                        y: Pt(first.top - start),
+                    };
+                    let mut painting = Painting {
+                        document: context.document,
+                        paragraph,
+                        layout: &*layout,
+                        fonts: context.fonts,
+                        location: &*location,
+                        background: self.background,
+                        leaders: context.leaders,
+                        // A cell does not place floating objects yet: reported by `stack`.
+                        page: None,
+                        floats: Vec::new(),
+                        // Hypothesis: in a cell, as no reference shows it, a bar tab reaches
+                        // only through the lines.
+                        bar_reach: (0.0, 0.0),
+                    };
+                    painting.paint_shading(lines.clone(), origin, &mut items);
+                    painting.paint(lines, origin, &mut items);
+                }
+                Some(Part::Table {
+                    bands,
+                    header,
+                    location,
+                    ..
+                }) => {
+                    for unit in self.units.get(at..end).unwrap_or(&[]) {
+                        if let Some(band) = bands.get_mut(unit.index) {
+                            let mut drawn = std::mem::take(&mut band.items);
+                            shift(&mut drawn, 0.0, unit.top - start);
+                            items.extend(drawn);
+                        }
+                    }
+                    if let Some(mut closing) = closing {
+                        shift(&mut closing, 0.0, last.top + last.height - start);
+                        items.extend(closing);
+                        if *header {
+                            context.fonts.report_once(
+                                ReportKind::FeatureUnsupported,
+                                location,
+                                "header rows of a table in a table cell are not repeated on \
+                                 the page it goes on to"
+                                    .to_owned(),
+                            );
+                        }
+                    }
+                }
+                None => {}
+            }
+            at = end;
+        }
+        Drawn {
+            height: Pt(height),
+            items,
+        }
+    }
+}
+
+/// Lays out `blocks`, a cell's content, one under the other, `width` wide, on
+/// `background`, as a header stacks its paragraphs: the space above the first, between
+/// each two, and below the last, all in its height; each nested table band by band.
+/// The empty paragraph that ends a cell after a nested table takes no room (Word's
+/// renders of `E-table-autofit-15.docx` and `E-table-row-split-nested.docx`, in Word
+/// 2013's mode; a hypothesis for earlier modes).
 fn stack<'d>(
     blocks: &'d [Block],
     (width, background): (Pt, Option<Color>),
     labels: &mut Labels<'_>,
     location: &mut Location,
     context: &mut Context<'d, '_, '_>,
-) -> Drawn {
+) -> Stacked<'d> {
     let document = context.document;
+    let mut stacked = Stacked {
+        background,
+        ..Stacked::default()
+    };
     let mut height = 0.0;
-    let mut items = Vec::new();
     let mut above: Option<&Paragraph> = None;
     for (index, block) in blocks.iter().enumerate() {
         location.push(Step::Index(index));
         match block {
             Block::Paragraph(paragraph) => {
+                let label = labels.take();
+                let after_table = index
+                    .checked_sub(1)
+                    .is_some_and(|before| matches!(blocks.get(before), Some(Block::Table(_))));
+                if after_table
+                    && index + 1 == blocks.len()
+                    && label.is_none()
+                    && paragraph.inlines().is_empty()
+                {
+                    location.pop();
+                    continue;
+                }
                 let props = paragraph.props();
                 height += match above {
                     Some(above) => paragraph::space_between(document, above.props(), props).0,
                     None => paragraph::space_before(document, props).0,
                 };
-                let label = labels.take();
                 let layout = paragraph::lay_out_with(
                     document,
                     (paragraph, label),
@@ -1024,28 +1589,6 @@ fn stack<'d>(
                     context.values,
                 );
                 report_borders(paragraph, location, context.fonts);
-                let origin = Point {
-                    x: Pt(0.0),
-                    y: Pt(height),
-                };
-                let mut painting = Painting {
-                    document,
-                    paragraph,
-                    layout: &layout,
-                    fonts: context.fonts,
-                    location,
-                    background,
-                    leaders: context.leaders,
-                    // A cell does not place floating objects yet: reported below.
-                    page: None,
-                    floats: Vec::new(),
-                    // Hypothesis: in a cell, as no reference shows it, a bar tab reaches only
-                    // through the lines.
-                    bar_reach: (0.0, 0.0),
-                };
-                let lines = 0..layout.lines.len();
-                painting.paint_shading(lines.clone(), origin, &mut items);
-                painting.paint(lines, origin, &mut items);
                 let floating = layout
                     .itemized
                     .items
@@ -1058,7 +1601,26 @@ fn stack<'d>(
                         "floating pictures in table cells are not drawn yet".to_owned(),
                     );
                 }
-                height += layout.height().0;
+                // Widow control keeps two lines on each side of a page's end, as in the
+                // body: Word moves a row of two lines whole (its render of
+                // `E-table-autofit-15.docx`, case 11).
+                let widow = props.widow_control();
+                let count = layout.lines.len();
+                for (line, laid) in layout.lines.iter().enumerate() {
+                    stacked.units.push(Unit {
+                        part: stacked.parts.len(),
+                        index: line,
+                        top: height,
+                        height: laid.height.0,
+                        breaks: line == 0 || !widow || (line >= 2 && count - line >= 2),
+                    });
+                    height += laid.height.0;
+                }
+                stacked.parts.push(Part::Paragraph {
+                    paragraph,
+                    layout,
+                    location: location.clone(),
+                });
                 above = Some(paragraph);
             }
             Block::Table(table) => {
@@ -1067,11 +1629,28 @@ fn stack<'d>(
                 }
                 let rest = labels.list.get(labels.next..).unwrap_or(&[]);
                 let nested = Prepared::new(table, rest, width, location, context);
-                let mut drawn = nested.whole(context);
+                let mut bands = Vec::new();
+                let mut closings = Vec::new();
+                for band in 0..nested.band_count() {
+                    let drawn = nested.band(band, context);
+                    closings.push(nested.closing(band, context.fonts));
+                    stacked.units.push(Unit {
+                        part: stacked.parts.len(),
+                        index: band,
+                        top: height,
+                        height: drawn.height.0,
+                        breaks: true,
+                    });
+                    height += drawn.height.0;
+                    bands.push(drawn);
+                }
                 labels.next += nested.paragraphs();
-                shift(&mut drawn.items, 0.0, height);
-                height += drawn.height.0;
-                items.extend(drawn.items);
+                stacked.parts.push(Part::Table {
+                    bands,
+                    closings,
+                    header: has_header_rows(table),
+                    location: location.clone(),
+                });
             }
         }
         location.pop();
@@ -1079,10 +1658,8 @@ fn stack<'d>(
     if let Some(last) = above {
         height += paragraph::space_after(document, last.props()).0;
     }
-    Drawn {
-        height: Pt(height),
-        items,
-    }
+    stacked.height = height;
+    stacked
 }
 
 /// The narrowest and the widest `blocks`, the content of a cell, are laid out: those of
@@ -2100,6 +2677,49 @@ mod tests {
             _ => None,
         });
         assert_eq!(fill, Some((0.0, 0.0, 100.0, 60.0)));
+        // Word's render of `E-table-row-exact-height.docx`: an exact height runs from the
+        // top of the row's top border to the top of the next row's.
+        let bordered = Table::default()
+            .with_grid([Pt(100.0)])
+            .with_props(fixed_props().with_borders(borders(1.5)))
+            .with_rows(vec![
+                row(vec![cell(vec![lines(style, 1, "A")])]),
+                row(vec![cell(vec![lines(style, 3, "A")])]).with_height(RowHeight::Exact(Pt(30.0))),
+                row(vec![cell(vec![lines(style, 1, "A")])]),
+            ]);
+        let (_, bands) = laid(&document, &bordered, (400.0, &[]));
+        let heights: Vec<f64> = bands.iter().map(|band| band.height.0).collect();
+        assert_eq!(heights, [21.5, 30.0, 23.0]);
+    }
+
+    #[test]
+    fn the_empty_paragraph_that_ends_a_cell_after_a_nested_table_takes_no_room() {
+        // Word's renders of `E-table-autofit-15.docx` (case 7) and
+        // `E-table-row-split-nested.docx`: the cell is as high as its nested table. A
+        // paragraph with text there, or one before the table, takes its line.
+        let (document, style) = document(CompatMode::Word2013);
+        let nested = || -> Block {
+            Table::default()
+                .with_grid([Pt(50.0)])
+                .with_props(fixed_props())
+                .with_rows(vec![row(vec![cell(vec![lines(style, 2, "A")])])])
+                .into()
+        };
+        let height = |blocks: Vec<Block>| -> f64 {
+            let table = Table::default()
+                .with_grid([Pt(100.0)])
+                .with_props(fixed_props())
+                .with_rows(vec![row(vec![cell(blocks)])]);
+            let (_, bands) = laid(&document, &table, (400.0, &[]));
+            bands.iter().map(|band| band.height.0).sum()
+        };
+        let empty = || -> Block { Paragraph::new(style).into() };
+        let line = height(vec![empty()]);
+        assert!(line > 0.0);
+        assert_eq!(height(vec![nested(), empty()]), 40.0);
+        assert_eq!(height(vec![nested(), lines(style, 1, "A")]), 60.0);
+        assert_eq!(height(vec![empty(), nested()]), 40.0 + line);
+        assert_eq!(height(vec![nested(), empty(), empty()]), 40.0 + 2.0 * line);
     }
 
     #[test]

@@ -336,8 +336,8 @@ pub enum RowHeight {
     /// As high as the content, but at least this. Word reads a height without a rule
     /// this way (MS-OI29500 2.1.180 a).
     AtLeast(Pt),
-    /// This height plus the largest bottom margin of the row's cells (MS-OI29500 2.1.180
-    /// d); content that does not fit is cut off.
+    /// This height, from the top of the row's top border, plus the largest bottom margin
+    /// of the row's cells (MS-OI29500 2.1.180 d); content that does not fit is cut off.
     Exact(Pt),
 }
 
