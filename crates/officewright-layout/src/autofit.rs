@@ -477,6 +477,16 @@ mod tests {
         };
         let fitted = widths(&[half, half, long], Target::Auto(400.0), false);
         assert!(close(&fitted, &[16.8, 16.8, 70.8]), "{fitted:?}");
+        // Minima past the room are cut to it, not kept past it, unless with `growAutofit`.
+        let fitted = widths(&[half, half, long], Target::Auto(50.0), false);
+        assert!(
+            (fitted.iter().sum::<f64>() - 50.0).abs() < 1e-9,
+            "{fitted:?}"
+        );
+        assert_eq!(
+            widths(&[half, half, long], Target::Auto(50.0), true),
+            [16.8, 16.8, 70.8]
+        );
         // Shares that make less than 100 % widen their columns to fill the table their
         // widest share needs: 16.8 / 0.25.
         let quarter = Column {

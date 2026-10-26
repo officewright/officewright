@@ -243,8 +243,9 @@ impl<'d, 'l> Prepared<'d, 'l> {
                 let sides = margins.start().0 + margins.end().0;
                 // A cell that keeps its content on one line (`w:noWrap`) needs its widest
                 // line where the table fits its columns, when its preferred width is auto or
-                // in percent: one in points ignores it ([MS-DOC] CellRangeNoWrap, ECMA-376
-                // Part 1, §17.4.30). A hypothesis for Word until a render.
+                // in percent: one in points ignores it, as [MS-DOC] CellRangeNoWrap says
+                // (ECMA-376 Part 1, §17.4.30, has such a cell at least as wide as its width
+                // instead). A hypothesis for Word until a render.
                 let keeps_one_line =
                     cell.no_wrap() && !matches!(cell.width(), PreferredWidth::Points(_));
                 let min = if keeps_one_line { max } else { min };
@@ -294,8 +295,9 @@ impl<'d, 'l> Prepared<'d, 'l> {
     /// is the inner grid, the inner borders and the outer cell's margins. In earlier
     /// modes the grid alone, a hypothesis. A table that fits its columns to their content
     /// is measured as it is laid out: one with a width in points takes that width,
-    /// whatever the room, and one with shares of a width in percent as wide as its shares
-    /// need ([`autofit::natural`]); hypotheses, as no render nests one.
+    /// whatever the room, or its minima where `growAutofit` keeps them wider, and one with
+    /// shares of a width in percent as wide as its shares need ([`autofit::natural`]);
+    /// hypotheses, as no render nests one.
     fn widths(&self) -> (f64, f64) {
         let outer = self.outer();
         let (min, max) = if self.table.props().layout() == TableLayout::Autofit {
@@ -2929,6 +2931,19 @@ mod tests {
         ]);
         let (lines_x, _) = laid(&document, &hidden, (400.0, &[]));
         assert!(at(&lines_x, &[0.0, 16.8]), "{lines_x:?}");
+        // `w:noWrap` with a preferred width in percent keeps the text on one line, the
+        // cell's share widened to hold it: 33.8 pt of the 55 pt table.
+        let shared_no_wrap = Table::default()
+            .with_grid(vec![Pt(100.0); 2])
+            .with_props(TableProps::default().with_width(PreferredWidth::Points(Pt(55.0))))
+            .with_rows(vec![row(vec![
+                cell(vec![lines(style, 1, "A A A")])
+                    .with_no_wrap(true)
+                    .with_width(PreferredWidth::Percent(10.0)),
+                cell(vec![lines(style, 1, "A")]),
+            ])]);
+        let (lines_x, _) = laid(&document, &shared_no_wrap, (400.0, &[]));
+        assert!(lines_x[1] - lines_x[0] >= 33.8 - 1e-9, "{lines_x:?}");
         // `w:noWrap` with a preferred width in points is ignored: the cell takes its 20 pt.
         let fixed_no_wrap = Table::default()
             .with_grid(vec![Pt(100.0); 2])
