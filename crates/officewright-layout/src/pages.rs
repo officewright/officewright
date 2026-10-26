@@ -16,7 +16,7 @@ use crate::error::{Error, Result};
 use crate::fonts::Fonts;
 use crate::ir::{
     Block, CompatFlag, CompatMode, Document, FieldKind, Inline, MAX_TABLE_DEPTH, PageSetup,
-    PageVerticalAlign, Paragraph, ParagraphProps, Section, SectionStart, Table,
+    PageVerticalAlign, Paragraph, ParagraphProps, Row, Section, SectionStart, Table,
 };
 use crate::itemize::{self, FieldValues};
 use crate::lines::{LineEnd, PieceKind};
@@ -670,6 +670,29 @@ struct Checkpoint {
     frame_laid_budget: usize,
     /// Whether nothing was on the page yet.
     at_top: bool,
+}
+
+/// A table's header rows as they are repeated on the pages it goes on to: whether they
+/// have a `PAGE` field, so that they are laid out again for every page, what laying them
+/// out costs by [`layout_cost`], and their last layout, each band and the height of all.
+struct Repeats {
+    page_field: bool,
+    cost: usize,
+    laid: Option<(Vec<Drawn>, f64)>,
+}
+
+impl Repeats {
+    /// For the header rows `rows` of a table of `document`.
+    fn new(document: &Document, rows: &[Row]) -> Self {
+        let cells = || rows.iter().flat_map(|row| row.cells());
+        Self {
+            page_field: cells().any(|cell| field_kinds(cell.blocks(), 0).0),
+            cost: cells()
+                .map(|cell| layout_cost(document, cell.blocks()).saturating_add(1))
+                .fold(rows.len(), usize::saturating_add),
+            laid: None,
+        }
+    }
 }
 
 /// Where a paragraph's lines, or a table's pieces, went.
@@ -1422,6 +1445,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         let prepared = Prepared::new(table, labels, width, &flowed.location, &mut context);
         let count = prepared.band_count();
         let header = prepared.header_bands();
+        let mut repeats = Repeats::new(self.document, prepared.header_rows());
         let mut first_page = None;
         let mut pieces = 0;
         let mut band = 0;
@@ -1485,7 +1509,12 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 }
                 self.close_table_page(closing.take());
                 self.new_page(flowed.section, &setup)?;
-                repeated = self.repeat_header(index, (&prepared, band, header), &mut pieces)?;
+                repeated = self.repeat_header(
+                    index,
+                    (&prepared, band, header),
+                    &mut repeats,
+                    &mut pieces,
+                )?;
                 continue;
             };
             if piece.drawn.height.0 > room + EPSILON {
@@ -1523,7 +1552,12 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             } else {
                 closing = None;
                 self.new_page(flowed.section, &setup)?;
-                repeated = self.repeat_header(index, (&prepared, band, header), &mut pieces)?;
+                repeated = self.repeat_header(
+                    index,
+                    (&prepared, band, header),
+                    &mut repeats,
+                    &mut pieces,
+                )?;
             }
         }
         if count == 0 {
@@ -1547,37 +1581,78 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
 
     /// Puts the header bands `0..header` of `prepared`, table `index` of the flow, at
     /// the top of the page it goes on to before band `band`, as its pieces from `pieces`
-    /// on, unless they alone take more than the page's body; returns whether it did.
+    /// on, unless they alone take more than the page's body; returns whether it did. Like a
+    /// page header, they are drawn on every page, so they take from what headers and
+    /// footers may draw and lay out on all pages together, and past it they are not
+    /// repeated; they are laid out again only for a `PAGE` field, and otherwise drawn as
+    /// `repeats` has them from the first time.
     fn repeat_header(
         &mut self,
         index: usize,
         (prepared, band, header): (&Prepared<'d, '_>, usize, usize),
+        repeats: &mut Repeats,
         pieces: &mut usize,
     ) -> Result<bool> {
         if header == 0 || band < header {
             return Ok(false);
         }
         let body = self.body()?;
-        let section = self.pages.last().map_or(0, |page| page.section);
-        let values = self.field_values(section);
-        let mut measured = tables::Measured::new();
-        let mut context = Context {
-            document: self.document,
-            fonts: &mut *self.fonts,
-            shaper: &mut *self.shaper,
-            leaders: &mut self.leaders,
-            values: Some(&values),
-            measured: &mut measured,
+        let (bands, height) = match repeats.laid.as_ref().filter(|_| !repeats.page_field) {
+            Some(laid) => laid.clone(),
+            None => {
+                if self.frame_laid_budget == 0 {
+                    self.report_header_rows_left_out();
+                    return Ok(false);
+                }
+                self.frame_laid_budget = self.frame_laid_budget.saturating_sub(repeats.cost);
+                let section = self.pages.last().map_or(0, |page| page.section);
+                let values = self.field_values(section);
+                let mut measured = tables::Measured::new();
+                let mut context = Context {
+                    document: self.document,
+                    fonts: &mut *self.fonts,
+                    shaper: &mut *self.shaper,
+                    leaders: &mut self.leaders,
+                    values: Some(&values),
+                    measured: &mut measured,
+                };
+                let laid = prepared.header(&mut context);
+                repeats.laid = Some(laid.clone());
+                laid
+            }
         };
-        let (bands, height) = prepared.header(&mut context);
         if height > body.bottom.0 - body.top.0 + EPSILON {
             return Ok(false);
         }
+        let cost: usize = bands
+            .iter()
+            .flat_map(|band| &band.items)
+            .map(drawn)
+            .fold(0, usize::saturating_add);
+        if cost > self.frame_budget {
+            self.report_header_rows_left_out();
+            return Ok(false);
+        }
+        self.frame_budget -= cost;
         for drawn in bands {
             self.put_band(index, *pieces, drawn, self.cursor);
             *pieces += 1;
         }
         Ok(true)
+    }
+
+    /// Reports, once, that header rows are not repeated past what headers and footers may
+    /// draw or lay out on all pages together.
+    fn report_header_rows_left_out(&mut self) {
+        self.fonts.report_once(
+            ReportKind::Overflow,
+            &Location::default(),
+            format!(
+                "table header rows are not repeated past {MAX_FRAME_DRAWN} glyphs, characters, \
+                 shapes and pieces painted, or {MAX_FRAME_LAID} characters and pieces laid out, \
+                 by headers, footers and repeated header rows on all pages together"
+            ),
+        );
     }
 
     /// Reports, once, that a chain of paragraphs kept with the next one is split.
@@ -2589,6 +2664,69 @@ mod tests {
                 .any(|message| message.starts_with("paragraphs kept with the next one")),
             "{report:?}"
         );
+    }
+
+    #[test]
+    fn repeated_header_rows_show_their_page_within_what_page_headers_may_draw() {
+        // Header rows are drawn on every page as a page header is: a `PAGE` field in one
+        // shows the number of each page it is repeated on. Twenty rows after a header row
+        // with a `PAGE` field: "1" on page 1, "2" on page 2, "3" on page 3.
+        let numbered = |budgets: (usize, usize)| {
+            let document = document(|style| {
+                let header = Row::default().with_header(true).with_cells(vec![
+                    Cell::default().with_blocks([Paragraph::new(style)
+                        .with_props(spacing(0.0, 0.0))
+                        .with_inlines([Inline::Field(crate::ir::Field::new(
+                            FieldKind::Page,
+                            style,
+                        ))])
+                        .into()]),
+                ]);
+                let mut rows = vec![header];
+                rows.extend((0..20).map(|_| row_of(style, &[1], false)));
+                one_section(vec![table_with(rows, 0.0).into()])
+            });
+            let book = book(vec![minimal()]);
+            let mut fonts = Fonts::new(&book);
+            let mut shaper = Shaper::new();
+            let laid = paginate_with(&document, &mut fonts, &mut shaper, 100, budgets, Vec::new)
+                .expect("pages");
+            let firsts: Vec<Option<String>> = laid
+                .sink
+                .iter()
+                .map(|page| {
+                    page.items.iter().find_map(|item| match item {
+                        DisplayItem::Glyphs(run) => {
+                            Some(run.clusters.iter().map(|c| c.text.as_str()).collect())
+                        }
+                        _ => None,
+                    })
+                })
+                .collect();
+            (firsts, messages(&fonts.into_report()))
+        };
+        let left_out = "table header rows are not repeated past";
+        let (firsts, report) = numbered((MAX_FRAME_DRAWN, MAX_FRAME_LAID));
+        let shown = |texts: [&str; 3]| texts.map(|text| Some(text.to_owned())).to_vec();
+        assert_eq!(firsts, shown(["1", "2", "3"]));
+        assert!(
+            !report.iter().any(|message| message.starts_with(left_out)),
+            "{report:?}"
+        );
+        // Past what headers and footers may draw, or lay out, they are not repeated, and
+        // that is reported: with nothing to draw, not on page 2; with one character to lay
+        // out, which their layout for page 2 uses up, not on page 3.
+        for (budgets, expected) in [
+            ((0, MAX_FRAME_LAID), ["1", "A", "A"]),
+            ((MAX_FRAME_DRAWN, 1), ["1", "2", "A"]),
+        ] {
+            let (firsts, report) = numbered(budgets);
+            assert_eq!(firsts, shown(expected));
+            assert!(
+                report.iter().any(|message| message.starts_with(left_out)),
+                "{report:?}"
+            );
+        }
     }
 
     #[test]

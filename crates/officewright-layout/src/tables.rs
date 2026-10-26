@@ -61,7 +61,7 @@ pub(crate) type Measured = HashMap<usize, (f64, f64)>;
 
 /// What a stack of blocks, or a band of a table, draws: its height and its display
 /// items, from its top left corner.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Drawn {
     pub(crate) height: Pt,
     pub(crate) items: Vec<DisplayItem>,
@@ -371,6 +371,15 @@ impl<'d, 'l> Prepared<'d, 'l> {
     /// Whether band `band` is rows that a vertically merged cell ties together.
     pub(crate) fn ties_rows(&self, band: usize) -> bool {
         self.bands.get(band).is_some_and(|rows| rows.len() > 1)
+    }
+
+    /// The header rows: those of the header bands.
+    pub(crate) fn header_rows(&self) -> &'d [Row] {
+        let end = self
+            .bands
+            .get(self.header_bands().wrapping_sub(1))
+            .map_or(0, |rows| rows.end);
+        self.table.rows().get(..end).unwrap_or(&[])
     }
 
     /// Lays out the header bands whole, one under the other: each band, and the height
