@@ -96,8 +96,9 @@ tests/corpus/reference/ ground truth from PDFs of Microsoft Word/Excel/PowerPoin
                         as a 110 dpi grey PNG and geometry.json (lines, words, page breaks); the PDFs are not
                         committed, their SHA-256 and the app version are in SOURCES.md
 tests/corpus/resaved/   the copy Word saved of each document before exporting its reference PDF
-tests/corpus-tools/     tests of make-rule-docs.py and corpus-import.py, and that every test font is credited
-                        with its SHA-256 (Python), and of make-reference.ps1
+tests/corpus-tools/     tests of make-rule-docs.py and corpus-import.py, that every test font is credited
+                        with its SHA-256, and that the symbol font is what make-symbol-font.py writes (Python),
+                        and of make-reference.ps1
                         without Word (Windows PowerShell, Windows only); poppler/ checks corpus-import.py's
                         font embedding with the real qpdf and poppler (Linux, macOS)
 tests/scripts/          tests of scripts/check-added-files.sh in a throwaway git repository, and of
@@ -105,8 +106,10 @@ tests/scripts/          tests of scripts/check-added-files.sh in a throwaway git
 tests/fonts/            unmodified OFL test fonts with their license files, listed in THIRD-PARTY-NOTICES.md;
                         outside every crate, so never published
 tests/fonts-word/       the same for faces Word had installed when it rendered references, in a build tests/fonts
-                        does not hold: the TrueType Noto Sans (noto-truetype/; tests/fonts/noto/ is its CFF build);
-                        only the corpus runner of check.sh reads them, so the crates' tests do not see them
+                        does not hold: the TrueType Noto Sans (noto-truetype/; tests/fonts/noto/ is its CFF build)
+                        and the symbol font Officewright Test Symbol (test-symbol/), its Regular face with a Windows
+                        symbol character map, written by scripts/make-symbol-font.py; only the corpus runner of
+                        check.sh reads them, so the crates' tests do not see them
 tools/corpus-runner/    workspace member, publish = false: runs the library over a corpus, writes a JSON report
 tools/ooxml-validate/   small .NET tool: validates generated OOXML with Open XML SDK's OpenXmlValidator (MIT)
 corpus-ext/             gitignored: large external corpora downloaded by scripts/fetch-corpus.sh
@@ -125,6 +128,7 @@ scripts/nightly.sh      long-running checks (see below)
 scripts/check-test-fonts.sh  compares tests/fonts and tests/fonts-word with the upstream sources
                         THIRD-PARTY-NOTICES.md names
 scripts/make-rule-docs.py  writes tests/corpus/word-rules/ (stored ZIP, fixed dates: same bytes everywhere)
+scripts/make-symbol-font.py  writes the symbol font of tests/fonts-word/test-symbol/ from the TrueType Noto Sans
 scripts/import-public-docs.py  cleans the listed public documents into tests/corpus/business/
 scripts/make-business-docs.py  writes tests/corpus/generated/ the same way, with open-font twins
 scripts/windows/make-reference.ps1  renders the reference PDFs with Word on the maintainer's Windows machine
@@ -349,7 +353,7 @@ scripts/check-added-files.sh: no tracked Python bytecode, no file naming a home 
   nightly.sh's parts in tests/scripts
 tests/corpus-tools (Python unittest): committed rule documents equal make-rule-docs.py output; corpus-import.py refusals;
   every file in tests/fonts and tests/fonts-word is listed with its SHA-256 in THIRD-PARTY-NOTICES.md, and
-  check-test-fonts.sh's pins are its
+  check-test-fonts.sh's pins are its; the symbol font is what make-symbol-font.py writes
 tests/corpus-tools/poppler (Linux, macOS): fonts corpus-import.py embeds are what poppler draws
 tests/corpus-tools/test_make_reference.ps1 (Windows): a Word step that hangs is stopped, checked and never waited on forever
 scripts/install-capi.sh target/capi --debug, copy the header, git diff --exit-code crates/officewright-ffi/include/officewright.h
@@ -369,12 +373,13 @@ PDF output of officewright text-to-pdf (tests/pdf-output): qpdf --check without 
   unfiltered by poppler, the committed fuzz seeds equal images.py's output; the example embed_report counts a font the
   subsetter does not support apart from a damaged one (Linux, macOS)
 corpus-runner over tests/corpus (committed corpus), every document rendered with the fonts of tests/fonts and, first,
-  tests/fonts-word/noto-truetype (the TrueType Noto Sans, the build Word had for the references that use it),
+  tests/fonts-word/noto-truetype (the TrueType Noto Sans, the build Word had for the references that use it) and
+  tests/fonts-word/test-symbol (the symbol font),
   compared with tests/corpus/baseline.json: statuses and the scores against Word's references (Linux), statuses only
   (macOS, Windows)
 ```
 
-`scripts/nightly.sh` (scheduled CI; under an hour in parallel jobs, about six hours as one run): Miri on `officewright-ffi`, `fetch-corpus.sh --check all` (every pinned commit is still fetchable and every archive still has its pinned size; downloads nothing), the files of `tests/fonts` and `tests/fonts-word` compared byte for byte with the upstream sources THIRD-PARTY-NOTICES.md names (`scripts/check-test-fonts.sh`), fuzzing (30 min per target, each seeded with files of the format it reads, listed in `seeds()` in nightly.sh; 30 s per input, an allocation of 1 GiB or more fails the input, and the fuzzer may grow to 2.5 GiB, since it also holds its corpus and AddressSanitizer's quarantine and overhead; each target's crashing inputs uploaded as a CI artifact of its job; from Milestone 3), corpus-runner over the Word documents of `corpus-ext/` (Apache POI and LibreOffice, fetched by the run; each child under the 1 GiB limit; compared with `tools/corpus-runner/baseline-ext.json`), report uploaded as a CI artifact. `nightly.yml` runs `nightly.sh checks` (all but the fuzzing) in one job and `nightly.sh fuzz <target>` in a job of its own for each target that `nightly.sh fuzz-targets` lists, so no job nears GitHub's limit of 6 hours; with no arguments the script runs all of it, the targets one after another. The full `fetch-corpus.sh all` from scratch, which downloads every source and verifies every SHA-256, runs weekly.
+`scripts/nightly.sh` (scheduled CI; under an hour in parallel jobs, about six hours as one run): Miri on `officewright-ffi`, `fetch-corpus.sh --check all` (every pinned commit is still fetchable and every archive still has its pinned size; downloads nothing), the files of `tests/fonts` and `tests/fonts-word` compared byte for byte with the upstream sources THIRD-PARTY-NOTICES.md names, the symbol font with what `make-symbol-font.py` writes from upstream's Noto Sans (`scripts/check-test-fonts.sh`), fuzzing (30 min per target, each seeded with files of the format it reads, listed in `seeds()` in nightly.sh; 30 s per input, an allocation of 1 GiB or more fails the input, and the fuzzer may grow to 2.5 GiB, since it also holds its corpus and AddressSanitizer's quarantine and overhead; each target's crashing inputs uploaded as a CI artifact of its job; from Milestone 3), corpus-runner over the Word documents of `corpus-ext/` (Apache POI and LibreOffice, fetched by the run; each child under the 1 GiB limit; compared with `tools/corpus-runner/baseline-ext.json`), report uploaded as a CI artifact. `nightly.yml` runs `nightly.sh checks` (all but the fuzzing) in one job and `nightly.sh fuzz <target>` in a job of its own for each target that `nightly.sh fuzz-targets` lists, so no job nears GitHub's limit of 6 hours; with no arguments the script runs all of it, the targets one after another. The full `fetch-corpus.sh all` from scratch, which downloads every source and verifies every SHA-256, runs weekly.
 
 `.githooks/pre-commit` runs `scripts/check-added-files.sh --staged`, fmt, clippy and test. Enable once per clone: `git config core.hooksPath .githooks`. CI (`.github/workflows/ci.yml`, on pull requests, pushes to main and the merge queue's `merge_group` runs, the only ones that save no Rust cache) runs `check.sh` on Linux, Windows (Git Bash with the MSVC environment from `ilammy/msvc-dev-cmd`) and macOS plus an MSRV job on Rust 1.85 (`cargo test`, with poppler and qpdf for the corpus runner's tests); `nightly.yml` runs `nightly.sh` on Linux, its checks and each fuzz target in parallel jobs; `weekly.yml` runs the full corpus fetch on Linux. Actions are pinned by commit SHA and tools by version, except qpdf and poppler for the PDF output check and the MSRV job's corpus runner tests: they come from the runner's package manager (apt on `ubuntu-latest`, Homebrew on macOS), which keeps no installable old versions across runner image updates, so each CI step that installs them prints the versions it got.
 

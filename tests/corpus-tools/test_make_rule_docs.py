@@ -255,6 +255,9 @@ class Packages(unittest.TestCase):
             for name in ("word/document.xml", "word/styles.xml"):
                 for fonts in part(parts, name).iter(f"{W}rFonts"):
                     for attribute, value in fonts.attrib.items():
+                        # w:hint names a slot, not a font.
+                        if attribute == f"{W}hint":
+                            continue
                         # A theme attribute names the theme's font for its slot.
                         if attribute.endswith("Theme"):
                             value = rules.THEME_FONTS[rules.THEME_SLOTS[value]]
@@ -3019,6 +3022,88 @@ class Packages(unittest.TestCase):
             self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"), target)
         self.assertEqual(struct.unpack(">II", parts["word/media/image1.png"][16:24]), (96, 48))
         self.assertIn(b'Extension="png"', parts["[Content_Types].xml"])
+
+    def test_symbol_font_cases_have_the_markup_their_labels_name(self):
+        # The font is the family scripts/make-symbol-font.py names, which Word has installed.
+        self.assertEqual(rules.SYMBOL_FONT, load("make-symbol-font").FAMILY)
+        doc = next(doc for doc in self.docs if doc.name == "E-symbol-font")
+        parts = dict(rules.parts(doc))
+        body = ElementTree.fromstring(parts["word/document.xml"]).find(f"{W}body")
+        symbol, other = rules.SYMBOL_FONT, "Liberation Sans"
+        every = {slot: symbol for slot in ("ascii", "hAnsi", "eastAsia", "cs")}
+
+        def fonts(r):
+            found = r.find(f"{W}rPr/{W}rFonts")
+            return {} if found is None else {k[len(W):]: v for k, v in found.attrib.items()}
+
+        cases = {}
+        for p in body.iter(f"{W}p"):
+            runs = p.findall(f"{W}r")
+            label = "".join(t.text or "" for t in runs[0].iter(f"{W}t")) if runs else ""
+            if label.startswith("Case "):
+                self.assertEqual(fonts(runs[0])["ascii"], other, label)
+                cases[int(label[5:7])] = (p, runs[1:])
+        self.assertEqual(sorted(cases), list(range(1, 22)))
+
+        def sample(n):
+            """The text and fonts of each run of case n after its label."""
+            return [("".join(t.text or "" for t in r.iter(f"{W}t")), fonts(r))
+                    for r in cases[n][1]]
+
+        def codes(value):
+            return "".join(chr(0xF000 + ord(c)) for c in value)
+
+        letters = "ABC xyz 0123 !?&"
+        self.assertEqual(sample(1), [(letters, every)])
+        self.assertEqual(sample(2), [(codes(letters), every)])
+        self.assertEqual(sample(3)[0][0], letters)
+        self.assertEqual(sample(3)[0][1]["ascii"], "Noto Sans")
+        for n, chars in ((4, ["F041", "F062", "F033"]), (5, ["0041", "0062", "0033"])):
+            syms = [r.find(f"{W}sym") for r in cases[n][1]]
+            self.assertEqual([s.get(f"{W}font") for s in syms], [symbol] * 3, n)
+            self.assertEqual([s.get(f"{W}char") for s in syms], chars, n)
+        self.assertEqual(sample(6), [("Äéß·", every)])
+        self.assertTrue(all(ord(c) > 0xFF or c == " " for c in sample(7)[0][0]))
+        alone = {"ascii": other, "hAnsi": other, "eastAsia": other, "cs": other}
+        for n, value, slots in (
+            (8, "ABC", {"ascii": symbol}),
+            (9, "ABC", {"hAnsi": symbol}),
+            (10, codes("ABC"), {"ascii": symbol}),
+            (11, codes("ABC"), {"hAnsi": symbol}),
+            (12, codes("ABC"), {"eastAsia": symbol, "hint": "eastAsia"}),
+        ):
+            self.assertEqual(sample(n), [(value, {**alone, **slots})], n)
+        for n, toggle in ((13, "caps"), (14, "smallCaps")):
+            self.assertEqual(sample(n), [("abc", every)], n)
+            self.assertIsNotNone(cases[n][1][0].find(f"{W}rPr/{W}{toggle}"), n)
+        bold, italic = cases[15][1]
+        self.assertIsNotNone(bold.find(f"{W}rPr/{W}b"))
+        self.assertIsNotNone(italic.find(f"{W}rPr/{W}i"))
+        self.assertEqual(sample(16), [("A B  C D", every)])
+        sym = cases[17][1][0]
+        self.assertEqual(sym.find(f"{W}sym").get(f"{W}char"), "F0B7")
+        self.assertEqual(fonts(sym)["ascii"], other)
+        self.assertEqual(sym.find(f"{W}rPr/{W}sz").get(f"{W}val"), "40")
+        # Cases 18 and 19 are list items whose bullet is in the symbol font.
+        numbering = ElementTree.fromstring(parts["word/numbering.xml"])
+        abstract = {a.get(f"{W}abstractNumId"): a for a in numbering.iter(f"{W}abstractNum")}
+        instances = {n.get(f"{W}numId"): n.find(f"{W}abstractNumId").get(f"{W}val")
+                     for n in numbering.iter(f"{W}num")}
+        for n, bullet in ((18, ""), (19, "·")):
+            num_id = cases[n][0].find(f"{W}pPr/{W}numPr/{W}numId").get(f"{W}val")
+            lvl = abstract[instances[num_id]].find(f"{W}lvl")
+            self.assertEqual(lvl.find(f"{W}numFmt").get(f"{W}val"), "bullet", n)
+            self.assertEqual(lvl.find(f"{W}lvlText").get(f"{W}val"), bullet, n)
+            self.assertEqual(lvl.find(f"{W}rPr/{W}rFonts").get(f"{W}ascii"), symbol, n)
+        # Cases 20 and 21: the next paragraph is shaded, five lines in the symbol font.
+        paragraphs = list(body.iter(f"{W}p"))
+        for n, size in ((20, "22"), (21, "40")):
+            shaded = paragraphs[paragraphs.index(cases[n][0]) + 1]
+            self.assertIsNotNone(shaded.find(f"{W}pPr/{W}shd"), n)
+            (r,) = shaded.findall(f"{W}r")
+            self.assertEqual(fonts(r), every, n)
+            self.assertEqual(r.find(f"{W}rPr/{W}sz").get(f"{W}val"), size, n)
+            self.assertEqual(len(r.findall(f"{W}br")), 4, n)
 
     def test_pictures_are_typed_png_parts_that_resolve(self):
         # Every VML picture of every document is Word's picture frame (the shape type defined

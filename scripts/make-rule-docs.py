@@ -3743,6 +3743,119 @@ def list_level_linked_defaults() -> Doc:
     )
 
 
+# A symbol font: Noto Sans Regular with a Windows symbol character map (U+F020 to U+F0FF),
+# written by scripts/make-symbol-font.py into tests/fonts-word/test-symbol/ and installed for
+# the user when Word renders the reference. Word treats a character U+0020 to U+00FF in such
+# a font as the code U+F000 above it; the cases show that, which slot of w:rFonts Word takes
+# for the codes U+F020 to U+F0FF, and what it does with characters the font has no code for.
+SYMBOL_FONT = "Officewright Test Symbol"
+
+
+def symbol_codes(value: str) -> str:
+    """The characters of value as the codes of a symbol font, U+F000 above each."""
+    return "".join(chr(0xF000 + ord(c)) for c in value)
+
+
+def slot_run(value: str, slots: dict[str, str], toggles: str = "", size: float = 11) -> str:
+    """A run whose w:rFonts gives the fonts of slots (ascii, hAnsi, eastAsia, cs, hint) and
+    Liberation Sans in the other three slots."""
+    fonts = {slot: "Liberation Sans" for slot in ("ascii", "hAnsi", "eastAsia", "cs")}
+    fonts.update(slots)
+    attrs = " ".join(f'w:{slot}="{attr(font)}"' for slot, font in fonts.items())
+    hp = half_points(size)
+    return (
+        f'<w:r><w:rPr><w:rFonts {attrs}/>{toggles}<w:sz w:val="{hp}"/><w:szCs w:val="{hp}"/>'
+        f"</w:rPr>{text(value)}</w:r>"
+    )
+
+
+def sym(code: str, font: str = SYMBOL_FONT, rpr_xml: str = "") -> str:
+    """A w:sym of font with the hexadecimal code, in a run of its own."""
+    return f'<w:r>{rpr_xml}<w:sym w:font="{attr(font)}" w:char="{code}"/></w:r>'
+
+
+def symbol_font() -> Doc:
+    letters = "ABC xyz 0123 !?&"
+    every = {"ascii": SYMBOL_FONT, "hAnsi": SYMBOL_FONT, "eastAsia": SYMBOL_FONT,
+             "cs": SYMBOL_FONT}
+    bullet_label = (
+        f'<w:rFonts w:ascii="{SYMBOL_FONT}" w:hAnsi="{SYMBOL_FONT}" w:hint="default"/>'
+    )
+    numbering = (
+        abstract_num(0, "5C3A0040", [
+            level(0, "bullet", symbol_codes("·"), left=720, hanging=360,
+                  label=bullet_label)])
+        + abstract_num(1, "5C3A0041", [
+            level(0, "bullet", "·", left=720, hanging=360, label=bullet_label)])
+        + num(1, 0)
+        + num(2, 1)
+    )
+    size_20 = '<w:sz w:val="40"/><w:szCs w:val="40"/>'
+    cases = [
+        ("ASCII letters, digits and punctuation in the symbol font, in all four slots",
+         slot_run(letters, every)),
+        ("the same characters as the codes U+F041 and so on, U+F000 above each",
+         slot_run(symbol_codes(letters), every)),
+        ("the same characters in Noto Sans, whose glyphs the symbol font has",
+         run(letters, "Noto Sans")),
+        ("w:sym of the symbol font with the codes F041, F062 and F033",
+         sym("F041") + sym("F062") + sym("F033")),
+        ("w:sym of the symbol font with the codes 0041, 0062 and 0033",
+         sym("0041") + sym("0062") + sym("0033")),
+        ("Latin-1 characters U+00C4, U+00E9, U+00DF and U+00B7 in the symbol font",
+         slot_run("Äéß·", every)),
+        ("characters the symbol font has no code for: Cyrillic, Greek and the euro sign",
+         slot_run("Жж Ωω €", every)),
+        ("ASCII letters with the symbol font in w:ascii only",
+         slot_run("ABC", {"ascii": SYMBOL_FONT})),
+        ("ASCII letters with the symbol font in w:hAnsi only",
+         slot_run("ABC", {"hAnsi": SYMBOL_FONT})),
+        ("the codes U+F041 to U+F043 with the symbol font in w:ascii only",
+         slot_run(symbol_codes("ABC"), {"ascii": SYMBOL_FONT})),
+        ("the codes U+F041 to U+F043 with the symbol font in w:hAnsi only",
+         slot_run(symbol_codes("ABC"), {"hAnsi": SYMBOL_FONT})),
+        ("the codes U+F041 to U+F043 with the symbol font in w:eastAsia only, hint eastAsia",
+         slot_run(symbol_codes("ABC"), {"eastAsia": SYMBOL_FONT, "hint": "eastAsia"})),
+        ("lower-case letters in the symbol font with w:caps",
+         slot_run("abc", every, "<w:caps/>")),
+        ("lower-case letters in the symbol font with w:smallCaps",
+         slot_run("abc", every, "<w:smallCaps/>")),
+        ("bold, then italic, in the symbol font, which has neither face",
+         slot_run("ABC", every, "<w:b/><w:bCs/>") + slot_run(" ABC", every, "<w:i/><w:iCs/>")),
+        ("spaces and a no-break space between letters in the symbol font",
+         slot_run("A B  C D", every)),
+        ("a w:sym of the symbol font, code F0B7, in a run of Liberation Sans 20 pt",
+         sym("F0B7", rpr_xml=f'<w:rPr><w:rFonts w:ascii="Liberation Sans" '
+             f'w:hAnsi="Liberation Sans"/>{size_20}</w:rPr>')),
+    ]
+    body = ""
+    for n, (label, sample) in enumerate(cases, 1):
+        body += para(run(f"Case {n:02d}: {label}: ", "Liberation Sans") + sample)
+    n = len(cases)
+    for i, (label, instance) in enumerate((
+        ("a list item whose bullet is the code U+F0B7 in the symbol font", 1),
+        ("a list item whose bullet is U+00B7 in the symbol font", 2),
+    ), n + 1):
+        body += para(run(f"Case {i:02d}: {label}", "Liberation Sans"), list_item=(instance, 0))
+    n += 2
+    for i, size in enumerate((11, 20), n + 1):
+        body += para(run(f"Case {i:02d}: five lines in the symbol font at {size} pt, shaded:",
+                         "Liberation Sans"))
+        body += para(lines([f"{size} pt line {k}: Hamburgefonts gjpqy" for k in range(1, 6)],
+                           SYMBOL_FONT, size), shading=GREY)
+    return Doc(
+        "E-symbol-font",
+        "Text in a symbol font (Officewright Test Symbol, Noto Sans Regular with a Windows "
+        "symbol character map, written by scripts/make-symbol-font.py and installed for the "
+        "user): ASCII and Latin-1 characters and their codes U+F000 above them, w:sym with "
+        "and without F000, characters the font has no code for, the font in one slot of "
+        "w:rFonts only, capitals, small capitals, bold and italic it has no face for, spaces, "
+        "list bullets, and the height of its lines at 11 and 20 pt; one paragraph per case",
+        body,
+        numbering=numbering,
+    )
+
+
 def documents() -> list[Doc]:
     return [
         line_fonts(),
@@ -3858,6 +3971,7 @@ def documents() -> list[Doc]:
         *rows_across_pages(),
         exact_height_overflow(),
         vml_pictures(),
+        symbol_font(),
     ]
 
 
