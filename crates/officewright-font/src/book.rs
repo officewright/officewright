@@ -395,71 +395,43 @@ impl UnreadableDirs {
     }
 }
 
-/// The skipped paths in the order they were listed, with the place of each entry listed
-/// under a key, so that a scan replaces and drops entries without searching the list. Each
-/// entry has a number, increasing in the order of the list, and a key leads to its entry's
-/// number, so that removing entries moves no key. An entry dropped is only marked;
-/// [`compact`](Self::compact), which every public method of [`FontBook`] that drops entries
-/// calls before it returns, removes the marked ones at once.
+/// The skipped paths, with the place of each entry listed under a key, so that a scan
+/// replaces and drops entries without searching the list. An entry dropped gives its place
+/// to the last one, so that dropping moves one entry.
 #[derive(Clone, Debug, Default)]
 struct SkippedList {
     entries: Vec<SkippedFont>,
-    /// The number of each entry, in the order of `entries`.
-    numbers: Vec<u64>,
-    /// The number the next entry takes.
-    next: u64,
-    /// The number of each keyed entry still listed.
-    places: HashMap<PathBuf, u64>,
-    /// The numbers of the entries marked as dropped.
-    dropped: Vec<u64>,
+    /// The place in `entries` of each keyed entry.
+    places: HashMap<PathBuf, usize>,
 }
 
 impl SkippedList {
     fn push(&mut self, entry: SkippedFont) {
         if let Some(key) = &entry.key {
-            self.places.insert(key.clone(), self.next);
+            self.places.insert(key.clone(), self.entries.len());
         }
         self.entries.push(entry);
-        self.numbers.push(self.next);
-        self.next += 1;
     }
 
     /// The entry listed under `key`.
     fn get_mut(&mut self, key: &Path) -> Option<&mut SkippedFont> {
-        let number = self.places.get(key)?;
-        let place = self.numbers.binary_search(number).ok()?;
+        let place = *self.places.get(key)?;
         self.entries.get_mut(place)
     }
 
-    /// Marks the entry listed under `key` as dropped.
+    /// Drops the entry listed under `key`; the last entry takes its place.
     fn drop_key(&mut self, key: &Path) {
-        if let Some(number) = self.places.remove(key) {
-            self.dropped.push(number);
-        }
-    }
-
-    /// Removes the entries marked as dropped, keeping the order of the others.
-    fn compact(&mut self) {
-        if self.dropped.is_empty() {
+        let Some(place) = self.places.remove(key) else {
+            return;
+        };
+        if place >= self.entries.len() {
             return;
         }
-        let mut dropped = std::mem::take(&mut self.dropped);
-        dropped.sort_unstable();
-        let mut dropped = dropped.into_iter().peekable();
-        let mut kept = 0;
-        for place in 0..self.entries.len() {
-            let number = self.numbers.get(place).copied();
-            if number.is_some() && dropped.peek().copied() == number {
-                dropped.next();
-                continue;
-            }
-            // Only dropped entries lie between `kept` and `place`.
-            self.entries.swap(kept, place);
-            self.numbers.swap(kept, place);
-            kept += 1;
+        self.entries.swap_remove(place);
+        let moved = self.entries.get(place).and_then(|entry| entry.key.as_ref());
+        if let Some(slot) = moved.and_then(|key| self.places.get_mut(key)) {
+            *slot = place;
         }
-        self.entries.truncate(kept);
-        self.numbers.truncate(kept);
     }
 }
 
@@ -723,7 +695,8 @@ impl FontBook {
     }
 
     /// The directories, files and faces that could not be read or indexed, each path
-    /// with the error of its latest attempt.
+    /// with the error of its latest attempt. The list is in no particular order: when an
+    /// entry leaves it, the last entry takes its place.
     pub fn skipped(&self) -> &[SkippedFont] {
         &self.skipped.entries
     }
@@ -767,7 +740,6 @@ impl FontBook {
                 self.forget_failure(&location);
             }
         }
-        self.skipped.compact();
         result
     }
 
@@ -799,9 +771,9 @@ impl FontBook {
     }
 
     /// Lists a path that a directory scan could not add, with the error of this attempt.
-    /// A path that was already unreachable keeps its place in the list and the path it
-    /// was first reached by, so reaching it through another alias of its directory does
-    /// not change the entry; anything else listed for it before is replaced.
+    /// A path that was already unreachable keeps its entry and the path it was first
+    /// reached by, so reaching it through another alias of its directory does not change
+    /// the entry; anything else listed for it before is replaced.
     fn list_failure(&mut self, key: PathBuf, failure: Failure, path: PathBuf, mut error: Error) {
         // A directory behind the path is remembered again by the caller if it is one.
         self.unreadable_dirs.remove(&key);
@@ -1026,7 +998,6 @@ impl FontBook {
             }
             stack.extend(subdirs.into_iter().rev());
         }
-        self.skipped.compact();
         added
     }
 }
@@ -1770,7 +1741,8 @@ mod tests {
         let mut book = FontBook::new();
         book.add_dir(&fonts).unwrap();
         let before = book.skipped().len();
-        // The first leaves the list, and the scan after it updates the other two.
+        // The first leaves the list, the last takes its place, and the scan after it
+        // updates both.
         fs::write(dir.0.join("a-target.ttf"), b"not a font").unwrap();
         book.add_dir(&fonts).unwrap();
         book.add_dir(&fonts).unwrap();
@@ -1792,8 +1764,8 @@ mod tests {
         assert_eq!(
             listed,
             [
-                (fonts.join("z.ttf"), io::ErrorKind::NotFound),
                 (locked.clone(), io::ErrorKind::PermissionDenied),
+                (fonts.join("z.ttf"), io::ErrorKind::NotFound),
             ]
         );
     }
@@ -1845,8 +1817,7 @@ mod tests {
 
     #[test]
     fn drops_skipped_entries_in_linear_time() {
-        // Dropping entries from the front moves each entry kept once, when the list is
-        // compacted.
+        // Dropping an entry from the front moves one entry, the last.
         let key = |i: usize| PathBuf::from(format!("fonts/bad{i:06}.ttf"));
         in_linear_time(
             |n| {
@@ -1855,7 +1826,6 @@ mod tests {
                 for i in 0..n {
                     list.drop_key(&key(i));
                 }
-                list.compact();
                 assert!(list.entries.is_empty());
                 start.elapsed()
             },
@@ -1897,20 +1867,106 @@ mod tests {
     }
 
     #[test]
-    fn compacts_a_list_with_nothing_dropped_in_linear_time() {
-        // Every scan compacts the list before it returns, most of them with nothing
-        // dropped.
-        let key = |i: usize| PathBuf::from(format!("fonts/bad{i:06}.ttf"));
+    fn gives_the_place_of_a_dropped_entry_to_the_last() {
+        let key = |i: usize| PathBuf::from(format!("fonts/{i}.ttf"));
+        let keys = |list: &SkippedList| -> Vec<PathBuf> {
+            list.entries
+                .iter()
+                .filter_map(|entry| entry.key.clone())
+                .collect()
+        };
+        let mut list = listed(4, key);
+        list.drop_key(&key(1));
+        assert_eq!(keys(&list), [key(0), key(3), key(2)]);
+        // Each entry is still found under its key, the one that moved too.
+        for i in [0, 2, 3] {
+            assert_eq!(
+                list.get_mut(&key(i)).and_then(|e| e.key.clone()),
+                Some(key(i))
+            );
+        }
+        assert!(list.get_mut(&key(1)).is_none());
+        // The last entry dropped, nothing moves; a key dropped twice drops nothing more.
+        list.drop_key(&key(2));
+        list.drop_key(&key(2));
+        assert_eq!(keys(&list), [key(0), key(3)]);
+        list.drop_key(&key(0));
+        assert_eq!(keys(&list), [key(3)]);
+        assert_eq!(
+            list.get_mut(&key(3)).and_then(|e| e.key.clone()),
+            Some(key(3))
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn adds_listed_files_one_by_one_in_linear_time() {
+        use std::os::unix::fs::symlink;
+
+        // Links that did not resolve when a scan listed them, each added by `add_file` once
+        // its target is a font: each call drops one entry.
         in_linear_time(
             |n| {
-                let mut list = listed(n, key);
+                let dir = TempDir::new(&format!("linear-add-file-{n}"));
+                let (fonts, target) = (dir.0.join("fonts"), dir.0.join("target.ttf"));
+                fs::create_dir(&fonts).unwrap();
+                let links: Vec<PathBuf> = (0..n)
+                    .map(|i| {
+                        let link = fonts.join(format!("link{i:06}.ttf"));
+                        symlink(&target, &link).unwrap();
+                        link
+                    })
+                    .collect();
+                let mut book = FontBook::new();
+                book.add_dir(&fonts).unwrap();
+                assert_eq!(book.skipped().len(), n);
+                fs::write(&target, TestFont::new("Test Sans").build()).unwrap();
                 let start = std::time::Instant::now();
-                for _ in 0..n {
-                    list.compact();
+                for link in &links {
+                    book.add_file(link).unwrap();
                 }
-                start.elapsed()
+                let took = start.elapsed();
+                assert!(book.skipped().is_empty());
+                took
             },
-            40_000,
+            8_000,
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rescans_folders_one_by_one_in_linear_time() {
+        // Folders of a file that is not a font, all listed; once each file is a font, each
+        // folder is scanned again: each call drops one entry.
+        in_linear_time(
+            |n| {
+                let dir = TempDir::new(&format!("linear-rescan-each-{n}"));
+                let roots: Vec<PathBuf> = (0..n)
+                    .map(|i| {
+                        let folder = dir.0.join(format!("job{i:06}"));
+                        fs::create_dir(&folder).unwrap();
+                        fs::write(folder.join("bad.ttf"), b"not a font").unwrap();
+                        folder
+                    })
+                    .collect();
+                let mut book = FontBook::new();
+                for root in &roots {
+                    book.add_dir(root).unwrap();
+                }
+                assert_eq!(book.skipped().len(), n);
+                let font = TestFont::new("Test Sans").build();
+                for root in &roots {
+                    fs::write(root.join("bad.ttf"), &font).unwrap();
+                }
+                let start = std::time::Instant::now();
+                for root in &roots {
+                    book.add_dir(root).unwrap();
+                }
+                let took = start.elapsed();
+                assert!(book.skipped().is_empty());
+                took
+            },
+            4_000,
         );
     }
 
@@ -1930,8 +1986,8 @@ mod tests {
         let mut book = FontBook::new();
         book.add_dir(&fonts).unwrap();
         assert_eq!(book.skipped().len(), 3);
-        // The first leaves the list; the others keep the path they were listed under,
-        // whichever path reaches them next.
+        // The first leaves the list, and the last takes its place; both keep the path
+        // they were listed under, whichever path reaches them next.
         fs::write(targets.join("a.ttf"), TestFont::new("Test Sans").build()).unwrap();
         assert_eq!(book.add_dir(&fonts).unwrap(), 1);
         book.add_dir(dir.0.join("alias")).unwrap();
@@ -1939,8 +1995,8 @@ mod tests {
         assert_eq!(
             listed,
             [
-                Some(fonts.join("b.ttf").as_path()),
-                Some(fonts.join("c.ttf").as_path())
+                Some(fonts.join("c.ttf").as_path()),
+                Some(fonts.join("b.ttf").as_path())
             ]
         );
     }
