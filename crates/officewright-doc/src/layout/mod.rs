@@ -293,6 +293,7 @@ enum Once {
     VmlPictureColor = 1 << 30,
     VmlPictureText = 1 << 31,
     VmlPictureShadow = 1 << 32,
+    VmlPictureBorder = 1 << 33,
 }
 
 impl<'a> Translator<'a> {

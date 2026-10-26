@@ -562,13 +562,15 @@ fn takes_a_floating_vml_picture_s_bases_from_its_wrap_when_its_style_names_none(
             Some(VerticalReference::Margin)
         )
     );
-    assert_eq!(
-        references("", r#"<w10:wrap anchorx="char" anchory="line"/>"#),
-        (
-            Some(HorizontalReference::Character),
-            Some(VerticalReference::Line)
-        )
-    );
+    // Office does not take char or line there (MS-OI29500, Part 4, §19.3.3.3(a),
+    // §19.3.3.4(a), from the review of #401), nor the style's margin areas: the bases are
+    // then text's, the default.
+    for wrap in [
+        r#"<w10:wrap anchorx="char" anchory="line"/>"#,
+        r#"<w10:wrap anchorx="left-margin-area" anchory="top-margin-area"/>"#,
+    ] {
+        assert_eq!(references("", wrap), (None, None), "{wrap}");
+    }
     assert_eq!(
         references("", r#"<w10:wrap anchorx="text" anchory="text"/>"#),
         (
@@ -590,4 +592,27 @@ fn takes_a_floating_vml_picture_s_bases_from_its_wrap_when_its_style_names_none(
     );
     assert_eq!(references("", "<w10:wrap/>"), (None, None));
     assert_eq!(references("", ""), (None, None));
+}
+
+#[test]
+fn holds_offsets_that_add_up_past_a_coordinate_s_range_within_it() {
+    // From the review of #401: margin-left and left are each within ST_Coordinate's
+    // range, and so is the offset they add up to.
+    let document = with_images(&format!(
+        "<w:p>{}</w:p>",
+        vml_picture(
+            "rIdPng",
+            "position:absolute;width:1pt;height:1pt;margin-left:2147483647pt;left:1pt;margin-top:-2147483647pt;top:-1pt",
+            "",
+            "",
+            ""
+        )
+    ));
+    let anchor = vml_drawings(&document)[0]
+        .picture()
+        .unwrap()
+        .anchor()
+        .unwrap();
+    assert_eq!(anchor.horizontal_offset(), Some(Pt(2_147_483_647.0)));
+    assert_eq!(anchor.vertical_offset(), Some(Pt(-2_147_483_647.0)));
 }

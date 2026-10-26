@@ -127,6 +127,12 @@ impl<'a> Translator<'a> {
                 "a VML picture's shadow (v:shadow) is not drawn, here and wherever else the document has one",
             );
         }
+        if !self.reported(Once::VmlPictureBorder) && picture.has_border() {
+            self.report_once(
+                Once::VmlPictureBorder,
+                "a VML picture's border (w10:bordertop and the others) is not drawn, here and wherever else the document has one",
+            );
+        }
         if !self.reported(Once::VmlPictureText) && picture.has_text() {
             self.report_once(
                 Once::VmlPictureText,

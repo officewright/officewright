@@ -321,6 +321,23 @@ impl<'a> VmlPicture<'a> {
             })
     }
 
+    /// Whether it has a border, which the layout does not draw yet: a `w10:bordertop`,
+    /// `w10:borderleft`, `w10:borderbottom` or `w10:borderright` (ECMA-376 Part 4,
+    /// §19.3.2.2 to §19.3.2.5) whose `type` is not `none`.
+    // reason: only the translation into the layout IR asks for it.
+    #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
+    pub(crate) fn has_border(self) -> bool {
+        let names = &self.document.names;
+        self.shape
+            .children_through_alternates(names.mc)
+            .any(|child| {
+                ["bordertop", "borderleft", "borderbottom", "borderright"]
+                    .into_iter()
+                    .any(|name| child.is(&names.w10, name))
+                    && child.attribute(&[None], "type") != Some("none")
+            })
+    }
+
     /// Whether it holds text (`v:textbox`), which the layout does not draw yet.
     // reason: only the translation into the layout IR asks for it.
     #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
@@ -339,7 +356,9 @@ impl<'a> VmlPicture<'a> {
     /// offset from it, as Word combines them (MS-OI29500, Part 4, §19.1.2.1(hh, dddd));
     /// down, the same with `mso-position-vertical`, `mso-position-vertical-relative`,
     /// `margin-top` and `top`. Where the style names no base, `w10:wrap`'s `anchorx` and
-    /// `anchory` do, as Word 2007 wrote it, `text` when not written (§19.3.2.6(a)). A
+    /// `anchory` do, as Word 2007 wrote it, `text` when not written (§19.3.2.6(a)); Office
+    /// takes `margin`, `page` and `text` there, not `char` or `line` (§19.3.3.3(a),
+    /// §19.3.3.4(a)). A
     /// negative `z-index` puts it behind the text, and the value orders it among the
     /// floating objects of its side. Text wraps as its `w10:wrap`
     /// says, `mso-wrap-distance-left` and `-right` from it, 9 pt when not written, as
@@ -385,19 +404,17 @@ impl<'a> VmlPicture<'a> {
             .find(|child| child.is(&names.w10, "wrap"));
         let wrap_attribute = |name| wrap_element.and_then(|wrap| wrap.attribute(&[None], name));
         let wrap = wrap_attribute("type").and_then(WrapKind::from_vml);
-        // anchorx and anchory take values of ST_HorizontalAnchor and ST_VerticalAnchor
-        // (margin, page, text, and char or line), which name the bases as the style does.
         Some(Anchor {
             horizontal_reference: style
                 .get("mso-position-horizontal-relative")
                 .and_then(HorizontalReference::from_vml)
-                .or_else(|| wrap_attribute("anchorx").and_then(HorizontalReference::from_vml)),
+                .or_else(|| wrap_attribute("anchorx").and_then(HorizontalReference::from_wrap)),
             horizontal_align,
             horizontal_offset,
             vertical_reference: style
                 .get("mso-position-vertical-relative")
                 .and_then(VerticalReference::from_vml)
-                .or_else(|| wrap_attribute("anchory").and_then(VerticalReference::from_vml)),
+                .or_else(|| wrap_attribute("anchory").and_then(VerticalReference::from_wrap)),
             vertical_align,
             vertical_offset,
             wrap,
@@ -591,6 +608,17 @@ impl HorizontalReference {
             _ => return None,
         })
     }
+
+    /// The value of `w10:wrap`'s `anchorx` (ST_HorizontalAnchor): Office takes `margin`,
+    /// `page` and `text`, not `char` (MS-OI29500, Part 4, §19.3.3.3(a)).
+    fn from_wrap(value: &str) -> Option<Self> {
+        Some(match value {
+            "margin" => Self::Margin,
+            "page" => Self::Page,
+            "text" => Self::Column,
+            _ => return None,
+        })
+    }
 }
 
 impl VerticalReference {
@@ -606,6 +634,17 @@ impl VerticalReference {
             "bottom-margin-area" | "bottom-margin" => Self::BottomMargin,
             "inner-margin-area" => Self::InsideMargin,
             "outer-margin-area" => Self::OutsideMargin,
+            _ => return None,
+        })
+    }
+
+    /// The value of `w10:wrap`'s `anchory` (ST_VerticalAnchor): Office takes `margin`,
+    /// `page` and `text`, not `line` (MS-OI29500, Part 4, §19.3.3.4(a)).
+    fn from_wrap(value: &str) -> Option<Self> {
+        Some(match value {
+            "margin" => Self::Margin,
+            "page" => Self::Page,
+            "text" => Self::Paragraph,
             _ => return None,
         })
     }
@@ -642,7 +681,7 @@ impl AnchorVerticalAlign {
 }
 
 impl WrapKind {
-    /// The `type` of `w10:wrap` (ECMA-376 Part 4, §19.3.2.1, ST_WrapType).
+    /// The `type` of `w10:wrap` (ECMA-376 Part 4, §19.3.2.6), of ST_WrapType (§19.3.3).
     fn from_vml(value: &str) -> Option<Self> {
         Some(match value {
             "none" => Self::None,

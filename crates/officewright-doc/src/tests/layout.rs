@@ -3990,6 +3990,10 @@ fn lists_a_vml_picture_s_outline_colour_adjustments_and_text_once() {
         )]),
         [shadow]
     );
+    // Listed once for the document, as every entry here (from the review of #401: the
+    // shadow's is the one bit above the 32 of the others).
+    let shadowed = vml_picture("rIdPng", size, "", "", r#"<v:shadow on="t"/>"#);
+    assert_eq!(listed(&[shadowed.clone(), shadowed]), [shadow]);
     // Office takes a blank on for true, an absent one for false (MS-OI29500, Part 4,
     // §19.1.2.18).
     assert_eq!(
@@ -4002,6 +4006,29 @@ fn lists_a_vml_picture_s_outline_colour_adjustments_and_text_once() {
             "{off}"
         );
     }
+    // A border on any side, other than none (ECMA-376 Part 4, §19.3.2.2 to §19.3.2.5;
+    // from the review of #401).
+    let border = "a VML picture's border (w10:bordertop and the others) is not drawn, here and wherever else the document has one";
+    for side in ["bordertop", "borderleft", "borderbottom", "borderright"] {
+        let bordered = vml_picture(
+            "rIdPng",
+            size,
+            "",
+            "",
+            &format!(r#"<w10:{side} type="single" width="4"/>"#),
+        );
+        assert_eq!(listed(&[bordered.clone(), bordered]), [border], "{side}");
+    }
+    assert!(
+        listed(&[vml_picture(
+            "rIdPng",
+            size,
+            "",
+            "",
+            r#"<w10:bordertop type="none"/>"#
+        )])
+        .is_empty()
+    );
     // Each is listed once of its own: a picture with a shadow and text lists both.
     assert_eq!(
         listed(&[vml_picture(
@@ -4012,6 +4039,17 @@ fn lists_a_vml_picture_s_outline_colour_adjustments_and_text_once() {
             r#"<v:shadow on="t"/><v:textbox><w:txbxContent><w:p/></w:txbxContent></v:textbox>"#
         )]),
         [shadow, text]
+    );
+    // A picture with all of them lists each, so no two share their mark of being listed.
+    assert_eq!(
+        listed(&[vml_picture(
+            "rIdPng",
+            size,
+            r#"stroked="t""#,
+            r#"gain="2""#,
+            r#"<v:shadow on="t"/><w10:bordertop type="single"/><v:textbox><w:txbxContent><w:p/></w:txbxContent></v:textbox>"#
+        )]),
+        [outline, colour, shadow, border, text]
     );
 }
 
