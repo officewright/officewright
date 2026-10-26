@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, BufReader, Cursor};
 use std::path::{Path, PathBuf};
@@ -317,10 +317,8 @@ impl fmt::Display for SkippedFont {
 /// changes, so a font that was still being copied during one scan is found by the next.
 /// Links, font files that could not be resolved and directories that could not be read
 /// are tried on every scan. Each skipped path is listed once, with the error of its
-/// latest attempt, and leaves the list when it is read. A directory or file whose folder is
-/// replaced by a link to where it went is listed under its new place once a scan reaches it
-/// through that link. A path that is removed stays listed; a process that wants a fresh
-/// list starts a new book.
+/// latest attempt, and leaves the list when it is read. A path that is removed stays
+/// listed; a process that wants a fresh list starts a new book.
 ///
 /// ```
 /// use officewright_font::{FontBook, FontRequest, FontResolver};
@@ -344,9 +342,6 @@ pub struct FontBook {
     /// canonical paths of files that could not be indexed, and the canonical directory
     /// and name of font files and directories that could not be resolved or read.
     failed: HashMap<PathBuf, Failure>,
-    /// The keys of `failed` in order, where every path under a folder follows the folder,
-    /// so that a scan finds those under a path it reached without going over them all.
-    keys: BTreeSet<PathBuf>,
     /// The canonical directory behind each location in `failed` of a directory that could
     /// not be read, so that reading that directory by any path drops them all.
     unreadable_dirs: UnreadableDirs,
@@ -826,7 +821,6 @@ impl FontBook {
             error: Arc::new(error),
             key: Some(key.clone()),
         });
-        self.keys.insert(key.clone());
         self.failed.insert(key, failure);
     }
 
@@ -834,7 +828,6 @@ impl FontBook {
     fn forget_failure(&mut self, key: &Path) {
         self.unreadable_dirs.remove(key);
         if self.failed.remove(key).is_some() {
-            self.keys.remove(key);
             self.skipped.drop_key(key);
         }
     }
@@ -906,70 +899,11 @@ impl FontBook {
         Ok(added)
     }
 
-    /// Drops what is listed under a place that a folder replaced by a link has moved:
-    /// for each path this scan reached, `reached`, that leads to another place now, the
-    /// entries under that path that the scan has listed again under their new place, or
-    /// has read there. An entry of a folder the scan did not read there, or that is gone
-    /// from it, stays, as a removed path does. Only the entries under those paths are
-    /// looked at, however many the book lists.
-    fn forget_moved(&mut self, reached: &[(PathBuf, PathBuf)], visited: &HashMap<PathBuf, bool>) {
-        let mut stale = Vec::new();
-        for (from, to) in reached {
-            let under = self
-                .keys
-                .range(from.clone()..)
-                .take_while(|key| key.starts_with(from));
-            for key in under {
-                let Ok(rest) = key.strip_prefix(from) else {
-                    continue;
-                };
-                let now = if rest.as_os_str().is_empty() {
-                    to.clone()
-                } else {
-                    to.join(rest)
-                };
-                if self.reached_at(&now, visited) {
-                    stale.push(key.clone());
-                }
-            }
-        }
-        for key in stale {
-            self.forget_failure(&key);
-        }
-    }
-
-    /// Whether this scan, with the directories it read `visited`, has listed the path `now`,
-    /// added it, or read it: a directory by reading it, anything else by reading its
-    /// directory.
-    fn reached_at(&self, now: &Path, visited: &HashMap<PathBuf, bool>) -> bool {
-        if self.failed.contains_key(now) || self.files.contains(now) {
-            return true;
-        }
-        match fs::metadata(now) {
-            Ok(metadata) if metadata.is_dir() => {
-                fs::canonicalize(now).is_ok_and(|canonical| visited.get(&canonical) == Some(&true))
-            }
-            _ => {
-                now.parent()
-                    .is_some_and(|dir| visited.get(dir) == Some(&true))
-                    && fs::symlink_metadata(now).is_ok()
-            }
-        }
-    }
-
     /// Adds the fonts under `root`; unreadable files and directories are skipped.
     fn scan_dir(&mut self, root: &Path, origin: FontOrigin) -> usize {
         let mut added = 0;
         // Whether each directory reached in this scan could be read.
         let mut visited: HashMap<PathBuf, bool> = HashMap::new();
-        // The paths this scan reached that lead elsewhere now, with where they lead: what
-        // is listed under them may have moved ([`forget_moved`](Self::forget_moved)).
-        let mut reached: Vec<(PathBuf, PathBuf)> = Vec::new();
-        if let (Ok(lexical), Ok(canonical)) = (std::path::absolute(root), fs::canonicalize(root)) {
-            if lexical != canonical {
-                reached.push((lexical, canonical));
-            }
-        }
         // Each directory with its location, under which it is listed if it cannot be
         // read, as a font file that cannot be resolved is: the entry, not what it leads
         // to, so that replacing it with a link to another directory drops the entry. A
@@ -981,9 +915,6 @@ impl FontBook {
                 continue;
             };
             let dir_location = dir_location.unwrap_or_else(|| canonical_dir.clone());
-            if dir_location != canonical_dir {
-                reached.push((dir_location.clone(), canonical_dir.clone()));
-            }
             // A directory reached again is not read again, but what is listed for this
             // entry follows where it leads now: nothing once that directory was read, and
             // that directory if it could not be read.
@@ -1079,22 +1010,6 @@ impl FontBook {
                 {
                     self.forget_failure(&location);
                 }
-                // A link, or a file whose place is now a link: what was listed under the
-                // link's place, or under where the link points, may now be listed under the
-                // file's place.
-                if canonical != location {
-                    reached.push((location.clone(), canonical.clone()));
-                    if let Ok(target) = fs::read_link(&path) {
-                        let target = path
-                            .parent()
-                            .map_or(target.clone(), |dir| dir.join(&target));
-                        if let Ok(target) = std::path::absolute(target) {
-                            if target != canonical {
-                                reached.push((target, canonical.clone()));
-                            }
-                        }
-                    }
-                }
                 // Sockets, FIFOs and devices are not fonts, whatever their names.
                 if !metadata.is_file() {
                     continue;
@@ -1111,7 +1026,6 @@ impl FontBook {
             }
             stack.extend(subdirs.into_iter().rev());
         }
-        self.forget_moved(&reached, &visited);
         self.skipped.compact();
         added
     }
@@ -1839,111 +1753,6 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn an_unreadable_directory_follows_its_folder_replaced_by_a_link() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
-
-        let set_mode =
-            |path: &Path, mode| fs::set_permissions(path, fs::Permissions::from_mode(mode));
-        let dir = TempDir::new("moved-folder");
-        let (home, data) = (dir.0.join("home"), dir.0.join("data"));
-        fs::create_dir_all(home.join("fonts/sub")).unwrap();
-        fs::create_dir(&data).unwrap();
-        let (fonts, sub) = (home.join("fonts"), home.join("fonts/sub"));
-        set_mode(&sub, 0o000).unwrap();
-        let readable = fs::read_dir(&sub).is_ok();
-        let mut book = FontBook::new();
-        book.add_dir(&fonts).unwrap();
-        let first = book.skipped().len();
-        // The folder moves away, and a link to it takes its place.
-        fs::rename(&fonts, data.join("fonts")).unwrap();
-        symlink(data.join("fonts"), &fonts).unwrap();
-        book.add_dir(&fonts).unwrap();
-        let listed: Vec<Option<PathBuf>> = book
-            .skipped()
-            .iter()
-            .map(|skipped| skipped.path().map(Path::to_owned))
-            .collect();
-        set_mode(&data.join("fonts/sub"), 0o755).unwrap();
-        // Root reads every directory, so this has to run as an ordinary user.
-        assert!(
-            !readable,
-            "run the tests as a user who cannot read mode 000"
-        );
-        assert_eq!(first, 1);
-        // Listed once, under the path of the scan that found it in its new place.
-        assert_eq!(listed, [Some(sub.clone())]);
-        // Read through the link, and as a root of its own, it leaves the list.
-        book.add_dir(&fonts).unwrap();
-        book.add_dir(&sub).unwrap();
-        assert!(book.skipped().is_empty(), "{:?}", book.skipped());
-    }
-
-    #[test]
-    #[cfg(any(unix, windows))]
-    fn a_damaged_font_follows_its_folder_replaced_by_a_link() {
-        let dir = TempDir::new("moved-damaged");
-        let (fonts, data) = (dir.0.join("fonts"), dir.0.join("data"));
-        fs::create_dir(&fonts).unwrap();
-        fs::create_dir(&data).unwrap();
-        fs::write(fonts.join("bad.ttf"), b"not a font").unwrap();
-        let listed = |book: &FontBook| -> Vec<PathBuf> {
-            book.skipped()
-                .iter()
-                .filter_map(|skipped| skipped.path().map(Path::to_owned))
-                .collect()
-        };
-        let mut book = FontBook::new();
-        book.add_dir(&fonts).unwrap();
-        assert_eq!(listed(&book), [fonts.join("bad.ttf")]);
-        fs::rename(&fonts, data.join("fonts")).unwrap();
-        dir_link(&data.join("fonts"), &fonts);
-        book.add_dir(&fonts).unwrap();
-        assert_eq!(listed(&book), [fonts.join("bad.ttf")]);
-        // A folder that is gone keeps what is listed in it.
-        let other = dir.0.join("other");
-        fs::create_dir(&other).unwrap();
-        fs::write(other.join("bad.ttf"), b"not a font either").unwrap();
-        let mut book = FontBook::new();
-        book.add_dir(&other).unwrap();
-        fs::rename(&other, dir.0.join("gone")).unwrap();
-        book.add_dir(&data).unwrap();
-        assert_eq!(
-            listed(&book),
-            [other.join("bad.ttf"), data.join("fonts/bad.ttf")]
-        );
-        // So does one replaced by a link to a folder without the path.
-        let empty = dir.0.join("empty");
-        fs::create_dir(&empty).unwrap();
-        dir_link(&empty, &other);
-        book.add_dir(&other).unwrap();
-        assert_eq!(
-            listed(&book),
-            [other.join("bad.ttf"), data.join("fonts/bad.ttf")]
-        );
-    }
-
-    #[test]
-    #[cfg(any(unix, windows))]
-    fn a_damaged_font_follows_a_subfolder_replaced_by_a_link() {
-        // The scan's root stays where it is; a folder in it is moved and linked back.
-        let dir = TempDir::new("moved-subfolder");
-        let (home, data) = (dir.0.join("home"), dir.0.join("data"));
-        let fonts = home.join("fonts");
-        fs::create_dir_all(&fonts).unwrap();
-        fs::create_dir(&data).unwrap();
-        fs::write(fonts.join("bad.ttf"), b"not a font").unwrap();
-        let mut book = FontBook::new();
-        book.add_dir(&home).unwrap();
-        assert_eq!(book.skipped().len(), 1);
-        fs::rename(&fonts, data.join("fonts")).unwrap();
-        dir_link(&data.join("fonts"), &fonts);
-        book.add_dir(&home).unwrap();
-        let listed: Vec<Option<&Path>> = book.skipped().iter().map(SkippedFont::path).collect();
-        assert_eq!(listed, [Some(fonts.join("bad.ttf").as_path())]);
-    }
-
-    #[test]
-    #[cfg(unix)]
     fn a_rescan_updates_each_entry_after_one_left_the_list() {
         use std::os::unix::fs::{PermissionsExt, symlink};
 
@@ -1987,58 +1796,6 @@ mod tests {
                 (locked.clone(), io::ErrorKind::PermissionDenied),
             ]
         );
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn an_unresolvable_font_file_follows_its_folder_replaced_by_a_link() {
-        use std::os::unix::fs::symlink;
-
-        let dir = TempDir::new("moved-dangling");
-        let (fonts, data) = (dir.0.join("fonts"), dir.0.join("data"));
-        fs::create_dir(&fonts).unwrap();
-        fs::create_dir(&data).unwrap();
-        symlink(dir.0.join("missing.ttf"), fonts.join("dead.ttf")).unwrap();
-        let mut book = FontBook::new();
-        book.add_dir(&fonts).unwrap();
-        assert_eq!(book.skipped().len(), 1);
-        fs::rename(&fonts, data.join("fonts")).unwrap();
-        symlink(data.join("fonts"), &fonts).unwrap();
-        book.add_dir(&fonts).unwrap();
-        let listed: Vec<Option<&Path>> = book.skipped().iter().map(SkippedFont::path).collect();
-        assert_eq!(listed, [Some(fonts.join("dead.ttf").as_path())]);
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn a_scan_keeps_what_is_listed_in_a_moved_folder_it_does_not_read() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
-
-        let set_mode =
-            |path: &Path, mode| fs::set_permissions(path, fs::Permissions::from_mode(mode));
-        let dir = TempDir::new("moved-unscanned");
-        let (fonts, data, other) = (dir.0.join("fonts"), dir.0.join("data"), dir.0.join("other"));
-        fs::create_dir_all(fonts.join("sub")).unwrap();
-        fs::create_dir(&data).unwrap();
-        fs::create_dir(&other).unwrap();
-        fs::write(fonts.join("bad.ttf"), b"not a font").unwrap();
-        set_mode(&fonts.join("sub"), 0o000).unwrap();
-        let readable = fs::read_dir(fonts.join("sub")).is_ok();
-        let mut book = FontBook::new();
-        book.add_dir(&fonts).unwrap();
-        let before = book.skipped().len();
-        fs::rename(&fonts, data.join("fonts")).unwrap();
-        symlink(data.join("fonts"), &fonts).unwrap();
-        // A scan of another folder does not read the moved one: both entries stay.
-        book.add_dir(&other).unwrap();
-        let after = book.skipped().len();
-        set_mode(&data.join("fonts/sub"), 0o755).unwrap();
-        // Root reads every directory, so this has to run as an ordinary user.
-        assert!(
-            !readable,
-            "run the tests as a user who cannot read mode 000"
-        );
-        assert_eq!((before, after), (2, 2));
     }
 
     /// Fails unless `time(n)`, the time some work on `n` entries takes, is in proportion
@@ -2136,29 +1893,6 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn rescans_a_moved_folder_of_damaged_fonts_in_linear_time() {
-        rescans_in_linear_time(
-            |n| {
-                let dir = TempDir::new(&format!("linear-moved-{n}"));
-                let (fonts, data) = (dir.0.join("fonts"), dir.0.join("data"));
-                fs::create_dir(&fonts).unwrap();
-                fs::create_dir(&data).unwrap();
-                for i in 0..n {
-                    fs::write(fonts.join(format!("bad{i:06}.ttf")), b"not a font").unwrap();
-                }
-                let mut book = FontBook::new();
-                book.add_dir(&fonts).unwrap();
-                assert_eq!(book.skipped().len(), n);
-                fs::rename(&fonts, data.join("fonts")).unwrap();
-                dir_link(&data.join("fonts"), &fonts);
-                (book, vec![fonts], dir)
-            },
-            8_000,
-        );
-    }
-
-    #[test]
-    #[cfg(unix)]
     fn rescans_unresolvable_font_files_in_linear_time() {
         rescans_in_linear_time(
             |n| {
@@ -2206,133 +1940,6 @@ mod tests {
             },
             12_000,
         );
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn adds_many_folders_in_linear_time() {
-        // A long-lived book given one folder after another, each with a file that is not a
-        // font: each scan looks only at what it reached.
-        rescans_in_linear_time(
-            |n| {
-                let dir = TempDir::new(&format!("linear-folders-{n}"));
-                let roots: Vec<PathBuf> = (0..n)
-                    .map(|i| {
-                        let folder = dir.0.join(format!("job{i:06}"));
-                        fs::create_dir(&folder).unwrap();
-                        fs::write(folder.join("bad.ttf"), b"not a font").unwrap();
-                        folder
-                    })
-                    .collect();
-                (FontBook::new(), roots, dir)
-            },
-            2_000,
-        );
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn an_unreadable_root_follows_its_parent_replaced_by_a_link() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
-
-        let set_mode =
-            |path: &Path, mode| fs::set_permissions(path, fs::Permissions::from_mode(mode));
-        let dir = TempDir::new("moved-root-parent");
-        let (home, data) = (dir.0.join("home"), dir.0.join("data"));
-        let fonts = home.join("fonts");
-        fs::create_dir_all(&fonts).unwrap();
-        fs::create_dir(&data).unwrap();
-        set_mode(&fonts, 0o000).unwrap();
-        let readable = fs::read_dir(&fonts).is_ok();
-        // A root of `add_system_fonts`, which lists a root it cannot read.
-        let mut book = FontBook::new();
-        book.scan_dir(&fonts, FontOrigin::System);
-        let before = book.skipped().len();
-        // The folder above the root moves away, and a link to it takes its place.
-        fs::rename(&home, data.join("home")).unwrap();
-        symlink(data.join("home"), &home).unwrap();
-        book.scan_dir(&fonts, FontOrigin::System);
-        let listed: Vec<Option<PathBuf>> = book
-            .skipped()
-            .iter()
-            .map(|skipped| skipped.path().map(Path::to_owned))
-            .collect();
-        set_mode(&data.join("home/fonts"), 0o755).unwrap();
-        // Root reads every directory, so this has to run as an ordinary user.
-        assert!(
-            !readable,
-            "run the tests as a user who cannot read mode 000"
-        );
-        assert_eq!(before, 1);
-        assert_eq!(listed, [Some(fonts.clone())]);
-        // Read now, it leaves the list.
-        book.scan_dir(&fonts, FontOrigin::System);
-        assert!(book.skipped().is_empty(), "{:?}", book.skipped());
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn a_damaged_font_behind_a_link_follows_its_folder_replaced_by_a_link() {
-        use std::os::unix::fs::symlink;
-
-        let dir = TempDir::new("moved-link-target");
-        let (fonts, lib, data) = (dir.0.join("fonts"), dir.0.join("lib"), dir.0.join("data"));
-        for folder in [&fonts, &lib, &data] {
-            fs::create_dir(folder).unwrap();
-        }
-        fs::write(lib.join("bad.ttf"), b"not a font").unwrap();
-        symlink(lib.join("bad.ttf"), fonts.join("link.ttf")).unwrap();
-        let mut book = FontBook::new();
-        book.add_dir(&fonts).unwrap();
-        assert_eq!(book.skipped().len(), 1);
-        // The folder the link points into moves away, and a link to it takes its place.
-        fs::rename(&lib, data.join("lib")).unwrap();
-        symlink(data.join("lib"), &lib).unwrap();
-        book.add_dir(&fonts).unwrap();
-        assert_eq!(book.skipped().len(), 1, "{:?}", book.skipped());
-        // Read once it is a font, it leaves the list.
-        fs::write(data.join("lib/bad.ttf"), TestFont::new("Test Sans").build()).unwrap();
-        assert_eq!(book.add_dir(&fonts).unwrap(), 1);
-        assert!(book.skipped().is_empty(), "{:?}", book.skipped());
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn a_moved_folder_that_cannot_be_read_keeps_its_entries() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
-
-        let set_mode =
-            |path: &Path, mode| fs::set_permissions(path, fs::Permissions::from_mode(mode));
-        let dir = TempDir::new("moved-unreadable");
-        let (root, data) = (dir.0.join("root"), dir.0.join("data"));
-        let fonts = root.join("fonts");
-        fs::create_dir_all(&fonts).unwrap();
-        fs::create_dir(&data).unwrap();
-        fs::write(fonts.join("bad.ttf"), b"not a font").unwrap();
-        let mut book = FontBook::new();
-        book.add_dir(&root).unwrap();
-        // Moved and linked back, the folder can be searched but not read: its file is
-        // there, and nothing has read it.
-        fs::rename(&fonts, data.join("fonts")).unwrap();
-        symlink(data.join("fonts"), &fonts).unwrap();
-        set_mode(&data.join("fonts"), 0o311).unwrap();
-        let readable = fs::read_dir(&fonts).is_ok();
-        book.add_dir(&root).unwrap();
-        let listed: Vec<Option<PathBuf>> = book
-            .skipped()
-            .iter()
-            .map(|skipped| skipped.path().map(Path::to_owned))
-            .collect();
-        set_mode(&data.join("fonts"), 0o755).unwrap();
-        // Root reads every directory, so this has to run as an ordinary user.
-        assert!(
-            !readable,
-            "run the tests as a user who cannot read mode 311"
-        );
-        assert_eq!(listed, [Some(fonts.join("bad.ttf")), Some(fonts.clone())]);
-        // Read again, the file is listed once, under its new place.
-        book.add_dir(&root).unwrap();
-        assert_eq!(book.skipped().len(), 1, "{:?}", book.skipped());
     }
 
     #[test]
