@@ -1,6 +1,6 @@
 //! VML drawings: pictures in the line and floating, and their images.
 
-use super::drawing::{images_package, inline_picture, with_images};
+use super::drawing::{images_package, inline_picture, reported, with_images};
 use super::*;
 
 /// The namespaces a `w:pict` of the tests declares.
@@ -615,4 +615,126 @@ fn holds_offsets_that_add_up_past_a_coordinate_s_range_within_it() {
         .unwrap();
     assert_eq!(anchor.horizontal_offset(), Some(Pt(2_147_483_647.0)));
     assert_eq!(anchor.vertical_offset(), Some(Pt(-2_147_483_647.0)));
+}
+
+#[test]
+fn reports_each_value_of_a_vml_picture_that_its_readers_do_not_take() {
+    // #243: as a DrawingML picture's, a value the readers refuse is read as not written,
+    // and reported as the document opens, once; a style's is reported by its declaration.
+    let picture = vml_picture(
+        "rIdPng",
+        "position:absolute;width:-1pt;height:2em;rotation:90deg;flip:z;margin-left:1;left:auto;margin-top:6pt;top:x;z-index:1.5;mso-position-horizontal:middle;mso-position-horizontal-relative:paragraph;mso-position-vertical:absolute;mso-position-vertical-relative:text;mso-wrap-distance-left:-1pt;mso-wrap-distance-top:x",
+        r#"o:allowincell="yes" o:allowoverlap="t" stroked="maybe""#,
+        r#"cropleft="12%" croptop="0.1" gain="lots" blacklevel="0" grayscale="yes""#,
+        r#"<v:stroke on="1"/><v:shadow on="x"/><w10:wrap type="around" anchorx="side" anchory="page"/>"#,
+    );
+    let document = with_images(&format!("<w:p>{picture}</w:p>"));
+    assert_eq!(
+        reported(&document),
+        [
+            r#"v:shape style="width:-1pt" is not valid; it is ignored"#,
+            r#"v:shape style="height:2em" is not valid; it is ignored"#,
+            r#"v:imagedata cropleft="12%" is not valid; it is ignored"#,
+            r#"v:shape style="rotation:90deg" is not valid; it is ignored"#,
+            r#"v:shape style="flip:z" is not valid; it is ignored"#,
+            r#"v:stroke on="1" is not valid; it is ignored"#,
+            r#"v:shape stroked="maybe" is not valid; it is ignored"#,
+            r#"v:imagedata gain="lots" is not valid; it is ignored"#,
+            r#"v:imagedata grayscale="yes" is not valid; it is ignored"#,
+            r#"v:shadow on="x" is not valid; it is ignored"#,
+            r#"v:shape style="mso-position-horizontal:middle" is not valid; it is ignored"#,
+            r#"v:shape style="margin-left:1" is not valid; it is ignored"#,
+            r#"v:shape style="left:auto" is not valid; it is ignored"#,
+            r#"v:shape style="top:x" is not valid; it is ignored"#,
+            r#"v:shape style="z-index:1.5" is not valid; it is ignored"#,
+            r#"v:shape o:allowincell="yes" is not valid; it is ignored"#,
+            r#"v:shape style="mso-wrap-distance-left:-1pt" is not valid; it is ignored"#,
+            r#"v:shape style="mso-wrap-distance-top:x" is not valid; it is ignored"#,
+            r#"w10:wrap type="around" is not valid; it is ignored"#,
+            r#"w10:wrap anchorx="side" is not valid; it is ignored"#,
+            r#"v:shape style="mso-position-horizontal-relative:paragraph" is not valid; it is ignored"#,
+        ]
+    );
+    // Each is read as not written.
+    let picture = vml_drawings(&document)[0].picture().unwrap();
+    assert_eq!((picture.width(), picture.height()), (None, None));
+    assert_eq!(picture.rotation(), 0.0);
+    assert!(!picture.flip_horizontal() && !picture.flip_vertical());
+    assert_eq!(picture.crop().unwrap().left(), 0.0);
+    // With v:stroke's on and stroked not taken, the shape type's stroked="f" counts.
+    assert!(!picture.has_outline());
+    assert!(!picture.has_color_adjustments() && !picture.has_shadow());
+    let anchor = picture.anchor().unwrap();
+    assert_eq!(anchor.horizontal_align(), None);
+    assert_eq!(anchor.horizontal_offset(), Some(Pt(0.0)));
+    assert_eq!(anchor.vertical_offset(), Some(Pt(6.0)));
+    assert_eq!(anchor.z_order(), 0);
+    assert!(anchor.layout_in_cell());
+    assert_eq!(anchor.distances().left(), Pt(9.0));
+    assert_eq!(anchor.distances().top(), Pt(0.0));
+    assert_eq!(anchor.wrap(), None);
+    assert_eq!(anchor.horizontal_reference(), None);
+    assert_eq!(
+        anchor.vertical_reference(),
+        Some(VerticalReference::Paragraph)
+    );
+}
+
+#[test]
+fn reports_the_values_after_one_that_decides_what_a_vml_picture_has() {
+    // A value that already decides whether the picture has an outline, adjusted colours
+    // or a shadow, or where it is, does not stop the values after it from being read
+    // and reported: the offset of an aligned picture, anchorx where the style names a
+    // base.
+    let picture = vml_picture(
+        "rIdPng",
+        "position:absolute;width:1pt;height:1pt;mso-position-horizontal:center;margin-left:x;mso-position-horizontal-relative:margin",
+        r#"stroked="x""#,
+        r#"gain="0.5" blacklevel="x" grayscale="t" bilevel="x""#,
+        r#"<v:stroke on="t"/><v:shadow on="t"/><v:shadow on="x"/><w10:wrap anchorx="x"/>"#,
+    );
+    let document = with_images(&format!("<w:p>{picture}</w:p>"));
+    assert_eq!(
+        reported(&document),
+        [
+            r#"v:shape stroked="x" is not valid; it is ignored"#,
+            r#"v:imagedata blacklevel="x" is not valid; it is ignored"#,
+            r#"v:imagedata bilevel="x" is not valid; it is ignored"#,
+            r#"v:shadow on="x" is not valid; it is ignored"#,
+            r#"v:shape style="margin-left:x" is not valid; it is ignored"#,
+            r#"w10:wrap anchorx="x" is not valid; it is ignored"#,
+        ]
+    );
+    let picture = vml_drawings(&document)[0].picture().unwrap();
+    assert!(picture.has_outline() && picture.has_color_adjustments() && picture.has_shadow());
+    let anchor = picture.anchor().unwrap();
+    assert_eq!(
+        anchor.horizontal_align(),
+        Some(AnchorHorizontalAlign::Center)
+    );
+    assert_eq!(
+        anchor.horizontal_reference(),
+        Some(HorizontalReference::Margin)
+    );
+}
+
+#[test]
+fn reports_no_value_of_a_vml_picture_that_its_readers_take() {
+    // Every value written as Word writes it; the values that place a floating picture
+    // are not read for one in the line, and a declaration the readers do not know is
+    // not theirs to report.
+    let document = with_images(&format!(
+        "<w:p>{}{}{}{}</w:p>",
+        inline_vml_picture("rIdPng"),
+        floating_vml_picture("rIdPng"),
+        bare_floating_vml_picture("rIdPng"),
+        vml_picture(
+            "rIdPng",
+            "width:1pt;height:1pt;margin-left:x;z-index:x;mso-fit-shape-to-text:t;flip:y x",
+            r#"o:allowincell="x""#,
+            r#"gain="65536f" blacklevel=".5" grayscale="t" bilevel="false""#,
+            r#"<v:stroke on="true"/><v:shadow on=""/><w10:wrap type="x"/>"#,
+        ),
+    ));
+    assert_eq!(reported(&document), Vec::<String>::new());
 }
