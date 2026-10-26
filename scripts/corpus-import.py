@@ -55,6 +55,7 @@ PDF that does not embed every font, qpdf 11 or later.
 from __future__ import annotations
 
 import argparse
+import base64
 import difflib
 import hashlib
 import json
@@ -1602,9 +1603,11 @@ def drawn_font(name: str, index: dict[str, list[FontFace]]) -> DrawnFont:
     return DrawnFont(name, face, data, substitute)
 
 
-def embedding_update(objects: dict, fonts: dict[str, Path], cff: dict[str, bool]) -> dict:
+def embedding_update(objects: dict, fonts: dict[str, bytes], cff: dict[str, bool]) -> dict:
     """A qpdf JSON update that embeds each font file into the font descriptors that name
-    the font and embed nothing; fonts maps the PDF font name to the file to embed."""
+    the font and embed nothing; fonts maps the PDF font name to the bytes of the file to
+    embed. The bytes go into the update itself, so qpdf opens no other file: Ubuntu 26.04's
+    AppArmor profile for qpdf lets it open only .pdf, .json and .qdf files."""
     header, body = objects["qpdf"]
     next_id = header["maxobjectid"]
     update = {}
@@ -1618,12 +1621,13 @@ def embedding_update(objects: dict, fonts: dict[str, Path], cff: dict[str, bool]
         ):
             continue
         next_id += 1
-        path = fonts[name]
+        data = fonts[name]
         if cff[name]:
             stream, entry = {"/Subtype": "/OpenType"}, "/FontFile3"
         else:
-            stream, entry = {"/Length1": path.stat().st_size}, "/FontFile2"
-        update[f"obj:{next_id} 0 R"] = {"stream": {"dict": stream, "datafile": str(path)}}
+            stream, entry = {"/Length1": len(data)}, "/FontFile2"
+        encoded = base64.b64encode(data).decode("ascii")
+        update[f"obj:{next_id} 0 R"] = {"stream": {"dict": stream, "data": encoded}}
         update[key] = {"value": {**descriptor, entry: f"{next_id} 0 R"}}
     return {
         "qpdf": [
@@ -1640,15 +1644,13 @@ def embedding_update(objects: dict, fonts: dict[str, Path], cff: dict[str, bool]
 
 def with_fonts_embedded(pdf: Path, drawn: list[DrawnFont], directory: Path, tools: Tools) -> Path:
     """A copy of the PDF in the directory with the drawn fonts embedded."""
-    files, cff = {}, {}
-    for number, font in enumerate(drawn):
-        path = directory / f"font-{number}.bin"
-        path.write_bytes(font.data)
-        files[font.name] = path
+    fonts, cff = {}, {}
+    for font in drawn:
+        fonts[font.name] = font.data
         cff[font.name] = font.face.cff
     try:
         objects = json.loads(tools.objects(pdf))
-        update = embedding_update(objects, files, cff)
+        update = embedding_update(objects, fonts, cff)
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
         raise Refused(f"{pdf.name}: cannot read qpdf's JSON: {error}") from error
     update_path = directory / "embed.json"
