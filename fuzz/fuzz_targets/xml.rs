@@ -72,19 +72,49 @@ fuzz_target!(|data: &[u8]| {
             // roxmltree takes an attribute p:xmlns for a declaration of the default
             // namespace; Namespaces in XML 1.0, section 3, makes only xmlns and xmlns:p
             // declarations, so officewright reads it as an attribute.
-            let prefixed_xmlns = ours.iter().any(|node| match node {
-                Node::Start { attributes, .. } => attributes
-                    .iter()
-                    .any(|(namespace, local, _)| !namespace.is_empty() && local == "xmlns"),
-                _ => false,
+            let prefixed_xmlns = ours.iter().any(|node| {
+                matches!(node, Node::Start { attributes, .. } if attributes.iter().any(is_prefixed_xmlns))
             });
-            if !prefixed_xmlns {
+            if prefixed_xmlns {
+                // roxmltree gives the unprefixed elements in the scope of such an attribute
+                // the namespace it names, so the comparison leaves out the namespaces of
+                // the elements there and drops the attribute from officewright's side.
+                // Attributes keep their namespaces, which roxmltree resolves without the
+                // default namespace, and so do elements outside the scope; names, values,
+                // text, comments and processing instructions still compare (#102: the
+                // whole comparison was skipped before).
+                let scope = prefixed_xmlns_scope(&ours);
+                assert_eq!(
+                    without_scoped_namespaces(ours, &scope, true),
+                    without_scoped_namespaces(nodes, &scope, false)
+                );
+            } else {
                 assert_eq!(ours, nodes);
             }
         }
         // Namespaces in XML 1.0, section 3: the prefix xml is bound by definition, so
         // `<xml:a/>` is namespace-well-formed; roxmltree reports an unknown prefix.
         (Ok(_), Err(roxmltree::Error::UnknownNamespace(prefix, _))) if prefix == "xml" => {}
+        // roxmltree takes an attribute p:xmlns for a declaration of the default namespace,
+        // which may not name the XML or the xmlns namespace (Namespaces in XML 1.0,
+        // section 3); for officewright it is an attribute, whose value may be any text.
+        // The error must point at such an attribute and name its value.
+        (
+            Ok(ours),
+            Err(
+                err @ (roxmltree::Error::UnexpectedXmlUri(at)
+                | roxmltree::Error::UnexpectedXmlnsUri(at)),
+            ),
+        ) if prefixed_xmlns_at(input.as_str(), at)
+            && ours.iter().any(|node| {
+                let uri = match err {
+                    roxmltree::Error::UnexpectedXmlUri(_) => RESERVED_URIS[0],
+                    _ => RESERVED_URIS[1],
+                };
+                matches!(node, Node::Start { attributes, .. } if attributes.iter().any(|attribute| {
+                    is_prefixed_xmlns(attribute) && attribute.2 == uri
+                }))
+            }) => {}
         (Ok(ours), Err(err)) => {
             panic!("roxmltree rejects ({err}) what officewright reads as {ours:?}")
         }
@@ -125,12 +155,34 @@ fn rejected_on_purpose(text: &str, err: &Error) -> bool {
     // The Unique Att Spec constraint covers namespace declarations too, and Namespaces
     // in XML 1.0, section 6.3, attributes with the same expanded name; roxmltree reads
     // two xmlns, two xmlns:p, and p:xmlns next to q:xmlns for one namespace.
+    // The message cuts the name to 64 characters, so the attributes of the start tag the
+    // error points at are looked up by the name it shows.
     let duplicate = message
         .strip_prefix("duplicate attribute ")
         .and_then(|rest| rest.split_once(" in <"))
         .map(|(name, _)| name);
-    if duplicate.is_some_and(|name| {
-        name == "xmlns" || name.starts_with("xmlns:") || name.ends_with(":xmlns")
+    if duplicate.is_some_and(|shown| {
+        let names = attribute_names(text, *line, *column);
+        let shown: Vec<&str> = names
+            .iter()
+            .copied()
+            .filter(|name| short(name) == shown)
+            .collect();
+        // Declarations roxmltree reads twice.
+        shown
+            .iter()
+            .any(|name| *name == "xmlns" || name.starts_with("xmlns:"))
+            // A p:xmlns, which roxmltree takes for a declaration of the default namespace,
+            // so it is only a duplicate when the tag has its name twice, or when roxmltree
+            // finds the attributes duplicates once they are no longer named xmlns.
+            || (shown.iter().any(|name| name.ends_with(":xmlns"))
+                && (shown
+                    .iter()
+                    .any(|name| names.iter().filter(|other| *other == name).count() > 1)
+                    || matches!(
+                        Document::parse_with_options(&text.replace(":xmlns", ":xmlnz"), options()),
+                        Err(roxmltree::Error::DuplicatedAttribute(..))
+                    )))
     }) {
         return true;
     }
@@ -305,6 +357,94 @@ fn read(input: &Input<'_>, limits: &Limits) -> Result<Vec<Node>, Error> {
         }
     }
     Ok(nodes)
+}
+
+/// The namespaces of XML (bound to the prefix xml) and of namespace declarations.
+const RESERVED_URIS: [&str; 2] = [
+    "http://www.w3.org/XML/1998/namespace",
+    "http://www.w3.org/2000/xmlns/",
+];
+
+/// Whether an attribute is a `p:xmlns`: one named xmlns with a namespace.
+fn is_prefixed_xmlns((namespace, local, _): &(String, String, String)) -> bool {
+    !namespace.is_empty() && local == "xmlns"
+}
+
+/// Whether the text at roxmltree's position `at` starts with an attribute `p:xmlns`, not
+/// the declaration `xmlns:xmlns`.
+fn prefixed_xmlns_at(text: &str, at: roxmltree::TextPos) -> bool {
+    let Some(rest) =
+        offset(text, u64::from(at.row), u64::from(at.col)).and_then(|start| text.get(start..))
+    else {
+        return false;
+    };
+    let name = rest
+        .split([' ', '\t', '\r', '\n', '='])
+        .next()
+        .unwrap_or_default();
+    name.split_once(':')
+        .is_some_and(|(prefix, local)| !prefix.is_empty() && prefix != "xmlns" && local == "xmlns")
+}
+
+/// For each of officewright's `nodes`, whether it is the start of an element in the scope
+/// of an attribute `p:xmlns`: one that has such an attribute, or whose ancestor has.
+fn prefixed_xmlns_scope(nodes: &[Node]) -> Vec<bool> {
+    let mut open = Vec::new();
+    nodes
+        .iter()
+        .map(|node| match node {
+            Node::Start { attributes, .. } => {
+                let inside = open.last().copied().unwrap_or(false)
+                    || attributes.iter().any(is_prefixed_xmlns);
+                open.push(inside);
+                inside
+            }
+            Node::End => {
+                open.pop();
+                false
+            }
+            _ => false,
+        })
+        .collect()
+}
+
+/// `nodes` without the namespaces of the elements whose starts `scope` marks, and without
+/// the attributes `p:xmlns` when `drop_prefixed_xmlns`, for a document in which roxmltree
+/// reads such an attribute as a declaration of the default namespace. Both parsers give
+/// the same nodes in the same order but for that, so officewright's scope marks
+/// roxmltree's nodes too; where they differ otherwise, the comparison fails anyway.
+fn without_scoped_namespaces(
+    nodes: Vec<Node>,
+    scope: &[bool],
+    drop_prefixed_xmlns: bool,
+) -> Vec<Node> {
+    nodes
+        .into_iter()
+        .enumerate()
+        .map(|(n, node)| match node {
+            Node::Start {
+                namespace,
+                local,
+                attributes,
+            } => {
+                let attributes: Vec<_> = attributes
+                    .into_iter()
+                    .filter(|attribute| !(drop_prefixed_xmlns && is_prefixed_xmlns(attribute)))
+                    .collect();
+                let namespace = if scope.get(n).copied().unwrap_or(false) {
+                    String::new()
+                } else {
+                    namespace
+                };
+                Node::Start {
+                    namespace,
+                    local,
+                    attributes,
+                }
+            }
+            other => other,
+        })
+        .collect()
 }
 
 /// Walks roxmltree's tree; only called when officewright read the document, so its depth
