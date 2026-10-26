@@ -368,9 +368,45 @@ mod tests {
             .with_start(Pt(30.0))
             .with_first_line(Pt(-30.0));
         assert_eq!(measure(text("A AAAA"), hanging), (54.0, 54.0));
-        // Spaces at the start are on the first line, with its indent.
-        let first_line = Indent::default().with_first_line(Pt(20.0));
-        assert_eq!(measure(text("  AAAA"), first_line).0, 44.0);
+        // Review of #415: spaces at the start (5 pt) stay on the first line, and the word
+        // after them goes to the next line if it does not fit there; its minimum is the
+        // narrower of the two, the narrowest width at which the line breaker keeps it
+        // whole, and half a point less breaks it. A first line that hangs 30 pt out keeps
+        // the word: 5 + 24; one indented 20 pt sends it on: 24.
+        let lines_at = |indent: Indent, width: f64| {
+            let paragraph = Paragraph::new(style)
+                .with_props(ParagraphProps::default().with_indent(indent))
+                .with_inlines(text("  AAAA"));
+            let mut fonts = Fonts::new(&book);
+            let mut shaper = Shaper::new();
+            lay_out(
+                &document,
+                &paragraph,
+                Pt(width),
+                &mut fonts,
+                &mut shaper,
+                &Location::default(),
+            )
+            .lines
+            .len()
+        };
+        let indented = Indent::default().with_first_line(Pt(20.0));
+        for (indent, min, lines) in [(hanging, 29.0, 1), (indented, 24.0, 2)] {
+            assert_eq!(measure(text("  AAAA"), indent).0, min, "{indent:?}");
+            assert_eq!(lines_at(indent, min), lines, "{indent:?} at {min}");
+            assert!(
+                lines_at(indent, min - 0.5) > lines,
+                "{indent:?} below {min}"
+            );
+        }
+        // The widest line counts its own indent: the first line indented 20 pt, the second
+        // not.
+        let two = vec![
+            Inline::text("AA", style),
+            Inline::line_break(BreakClear::None, style),
+            Inline::text("AAAA", style),
+        ];
+        assert_eq!(measure(two, indented).1, 32.0);
         // Nothing at all takes no room.
         assert_eq!(measure(Vec::new(), Indent::default()), (0.0, 0.0));
     }

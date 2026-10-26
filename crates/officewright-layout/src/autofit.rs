@@ -54,11 +54,30 @@ pub(crate) enum Target {
 /// The widths of `columns` fitted to `target`. `grow` keeps the columns at their minima
 /// when those do not fit, instead of cutting them to the width (`growAutofit`).
 pub(crate) fn widths(columns: &[Column], target: Target, grow: bool) -> Vec<f64> {
+    let mins: Vec<f64> = columns.iter().map(|column| column.min).collect();
     if columns.iter().any(|column| column.percent.is_some()) {
-        return by_percent(columns, target);
+        // The shares stand in for what the columns want, fitted to the table's width as
+        // any other wants are: a column raised to its minimum takes it from the others,
+        // and minima that do not fit are cut, or kept with `grow`.
+        let (shares, width) = by_percent(columns, target);
+        return fit(&mins, &shares, Target::Exact(width), grow);
     }
     let wanted: Vec<f64> = columns.iter().map(Column::wanted).collect();
-    let mins: Vec<f64> = columns.iter().map(|column| column.min).collect();
+    fit(&mins, &wanted, target, grow)
+}
+
+/// The narrowest and the widest the columns are laid out together when they may take as
+/// much room as they want: their minima, and what [`widths`] gives them in `room`, as
+/// wide as a table may be.
+pub(crate) fn natural(columns: &[Column], room: f64) -> (f64, f64) {
+    let min: f64 = columns.iter().map(|column| column.min).sum();
+    let max: f64 = widths(columns, Target::Auto(room), false).iter().sum();
+    (min, max.max(min))
+}
+
+/// Widths of columns that want `wanted`, never less than `mins`, fitted to `target`.
+fn fit(mins: &[f64], wanted: &[f64], target: Target, grow: bool) -> Vec<f64> {
+    let wanted: Vec<f64> = wanted.iter().zip(mins).map(|(w, m)| w.max(*m)).collect();
     let (sum_min, sum_wanted) = (mins.iter().sum::<f64>(), wanted.iter().sum::<f64>());
     let room = match target {
         Target::Auto(room) => {
@@ -87,7 +106,11 @@ pub(crate) fn widths(columns: &[Column], target: Target, grow: bool) -> Vec<f64>
             .map(|(min, wanted)| min + (wanted - min) * share)
             .collect();
     }
-    if grow { mins } else { scaled(&mins, room) }
+    if grow {
+        mins.to_vec()
+    } else {
+        scaled(mins, room)
+    }
 }
 
 /// `widths` scaled to make `total` together; shared equally when they make nothing.
@@ -107,8 +130,9 @@ fn scaled(widths: &[f64], total: f64) -> Vec<f64> {
 /// the shares make 100 % (Word's render of case 5: 40 % three times makes 40, 40 and 20);
 /// the others share what is left in proportion to what they want (a hypothesis, as no
 /// render mixes them). An auto table is as wide as its columns' shares need to hold what
-/// each wants, at most the width it may take; every column is then raised to its minimum.
-fn by_percent(columns: &[Column], target: Target) -> Vec<f64> {
+/// each wants, at most the width it may take. Returns what each column then wants, and the
+/// table's width.
+fn by_percent(columns: &[Column], target: Target) -> (Vec<f64>, f64) {
     let mut left = 100.0_f64;
     let shares: Vec<Option<f64>> = columns
         .iter()
@@ -154,18 +178,16 @@ fn by_percent(columns: &[Column], target: Target) -> Vec<f64> {
         }
     };
     let spare = (width * (1.0 - taken)).max(0.0);
-    columns
+    let wanted = columns
         .iter()
         .zip(&shares)
-        .map(|(column, share)| {
-            let width = match share {
-                Some(share) => share * width,
-                None if rest > 0.0 => column.wanted() * spare / rest,
-                None => 0.0,
-            };
-            width.max(column.min)
+        .map(|(column, share)| match share {
+            Some(share) => share * width,
+            None if rest > 0.0 => column.wanted() * spare / rest,
+            None => 0.0,
         })
-        .collect()
+        .collect();
+    (wanted, width)
 }
 
 /// What the columns of a table need, as cells that span several of them add to it
@@ -196,7 +218,8 @@ impl Needs {
     /// its maximum and its preferred width each go to the last of them (Word's render of
     /// case 8: a span of 300 pt over cells of 50 and 100 pt makes columns of 50 and 250; a
     /// hypothesis among the rules that fit it, until a Word render of a span over three
-    /// columns). A range past the columns adds nothing.
+    /// columns). A spanning cell's preferred width in percent is not used, a hypothesis
+    /// too. A range past the columns adds nothing.
     pub(crate) fn spread(&mut self, range: std::ops::Range<usize>, cell: Column) {
         if range.is_empty() || range.end > self.columns.len() {
             return;
@@ -399,6 +422,49 @@ mod tests {
     }
 
     #[test]
+    fn shares_raised_to_their_minima_take_the_room_from_the_others() {
+        // Review of #415: a 100 % table of three 33 % cells, one with a word of 255.75 pt
+        // with its margins: the table stays 450.8 pt wide, the other columns giving way.
+        let share = |min: f64| Column {
+            min,
+            max: min,
+            preferred: None,
+            percent: Some(33.0),
+        };
+        let columns = [share(255.75), share(22.99), share(22.99)];
+        let fitted = widths(&columns, Target::Exact(450.8), false);
+        assert!(
+            (fitted.iter().sum::<f64>() - 450.8).abs() < 1e-9,
+            "{fitted:?}"
+        );
+        assert!(fitted[0] >= 255.75 && fitted[1] >= 22.99, "{fitted:?}");
+        // Minima past the width are cut to it, or with `growAutofit` kept (case 11).
+        let long = [share(249.75), share(249.75), share(249.75)];
+        let cut = widths(&long, Target::Exact(450.8), false);
+        assert!(close(&cut, &[150.27; 3]), "{cut:?}");
+        assert_eq!(widths(&long, Target::Exact(450.8), true), [249.75; 3]);
+        // A column without a share takes what is left, in proportion to what it wants.
+        let mixed = [
+            Column {
+                min: 10.0,
+                max: 10.0,
+                preferred: None,
+                percent: Some(50.0),
+            },
+            Column {
+                min: 10.0,
+                max: 30.0,
+                ..Column::default()
+            },
+        ];
+        assert_eq!(widths(&mixed, Target::Exact(200.0), false), [100.0, 100.0]);
+        // As wide as the shares need, laid out with room to spare: 30 / 0.5.
+        assert_eq!(natural(&mixed, 1000.0), (20.0, 60.0));
+        let (min, max) = natural(&word(), 1000.0);
+        assert!(close(&[min, max], &[107.98, 263.0]), "{min} {max}");
+    }
+
+    #[test]
     fn a_spanning_cell_gives_what_its_columns_lack_to_the_last_of_them() {
         let spread = |columns: Vec<Column>, spans: &[(std::ops::Range<usize>, Column)]| {
             let mut needs = Needs::new(columns);
@@ -557,11 +623,13 @@ mod tests {
             preferred: None,
             percent: Some(percent),
         };
+        // The column of no share wants only its minimum, the other its 50 %: the table of
+        // 100 pt shares itself between them as 10 to 50.
         let shares = widths(
             &[column(f64::NAN), column(50.0)],
             Target::Exact(100.0),
             false,
         );
-        assert_eq!(shares, [10.0, 50.0]);
+        assert!(close(&shares, &[100.0 / 6.0, 500.0 / 6.0]), "{shares:?}");
     }
 }

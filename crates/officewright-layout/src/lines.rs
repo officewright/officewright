@@ -548,12 +548,17 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
     /// end it left out, with the indents of the line it starts, to the end indent, and the
     /// hyphen it ends in at a soft hyphen. Word's minimum width of a cell's content
     /// (design 8.2): its widest word, as Word's renders of `E-table-autofit-*` show.
-    /// Hypotheses until a Word render: tabs take no room here, and a list label and the
-    /// paragraph's indents count as on a line.
+    /// Spaces at the paragraph's start stay on its first line, which then ends before the
+    /// word after them if that does not fit there, as the line breaker ends it: that word
+    /// needs the narrower of the first line with the spaces and the next line. Hypotheses
+    /// until a Word render: tabs take no room here, and a list label and the paragraph's
+    /// indents count as on a line.
     pub(crate) fn min_width(&mut self) -> Pt {
         let end_indent = self.paragraph.props().indent().end().0;
         let mut widest: f64 = 0.0;
         let mut first = true;
+        // The spaces before anything else on the first line.
+        let mut leading = 0.0;
         let (mut stretch, mut spaces) = (0.0, 0.0);
         for index in 0..self.units.len() {
             let Some(unit) = self.units.get(index).cloned() else {
@@ -578,12 +583,11 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                     } else {
                         0.0
                     };
-                    let (left, _) = self.edges(first);
-                    widest = widest.max(left.0 + stretch + hyphen + end_indent);
-                }
-                // A line ends here, unless only spaces or nothing came before: those start
-                // no line of their own.
-                if stretch > 0.0 || matches!(unit.kind, UnitKind::Break { .. }) {
+                    widest = widest.max(self.stretch_width(stretch + hyphen, first, leading));
+                    first = false;
+                } else if first && !matches!(unit.kind, UnitKind::Break { .. }) {
+                    leading += spaces;
+                } else {
                     first = false;
                 }
                 stretch = 0.0;
@@ -591,10 +595,27 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             }
         }
         if stretch > 0.0 {
-            let (left, _) = self.edges(first);
-            widest = widest.max(left.0 + stretch + end_indent);
+            widest = widest.max(self.stretch_width(stretch, first, leading));
         }
-        Pt(widest)
+        Pt(widest + end_indent)
+    }
+
+    /// The room a stretch `width` wide between two places a line may end takes from the
+    /// column's start edge: on a later line from its indent; on the first line from its
+    /// indent after the `leading` spaces before it, or, when spaces came before it, on the
+    /// next line, whichever is narrower.
+    fn stretch_width(&self, width: f64, first: bool, leading: f64) -> f64 {
+        let (later, _) = self.edges(false);
+        if !first {
+            return later.0 + width;
+        }
+        let (start, _) = self.edges(true);
+        let on_first = start.0 + leading + width;
+        if leading > 0.0 {
+            on_first.min(later.0 + width)
+        } else {
+            on_first
+        }
     }
 
     /// The width the paragraph takes with no line wrapped, in a column as wide as the

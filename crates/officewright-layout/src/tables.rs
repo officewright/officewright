@@ -237,6 +237,9 @@ impl<'d, 'l> Prepared<'d, 'l> {
                 let (min, max) = block_widths(cell.blocks(), &mut labels, &mut location, context);
                 let margins = self.margins(cell);
                 let sides = margins.start().0 + margins.end().0;
+                // A cell that keeps its content on one line (`w:noWrap`) needs its widest
+                // line where the table fits its columns: a hypothesis until a Word render.
+                let min = if cell.no_wrap() { max } else { min };
                 let need = Column {
                     min: min + sides,
                     max: max + sides,
@@ -282,18 +285,18 @@ impl<'d, 'l> Prepared<'d, 'l> {
     /// it needs for it. Word's render of case 7 of `E-table-autofit-15`: the outer column
     /// is the inner grid, the inner borders and the outer cell's margins. In earlier
     /// modes the grid alone, a hypothesis. A table that fits its columns to their content
-    /// and has a width in points wants that width, never less than its minima (a
-    /// hypothesis: no render nests one); one with a width in percent of a cell, its
-    /// content.
+    /// is measured as it is laid out: one with a width in points takes that width,
+    /// whatever the room, and one with shares of a width in percent as wide as its shares
+    /// need ([`autofit::natural`]); hypotheses, as no render nests one.
     fn widths(&self) -> (f64, f64) {
         let outer = self.outer();
         let (min, max) = if self.table.props().layout() == TableLayout::Autofit {
-            let (min, wanted) = self.needs.iter().fold((0.0, 0.0), |(min, max), column| {
-                (min + column.min, max + column.wanted())
-            });
             match self.table.props().width() {
-                PreferredWidth::Points(points) => (min, points.0.clamp(0.0, MAX_TABLE).max(min)),
-                _ => (min, wanted),
+                PreferredWidth::Points(points) => {
+                    let width = points.0.clamp(0.0, MAX_TABLE);
+                    (width, width)
+                }
+                _ => autofit::natural(&self.needs, MAX_TABLE),
             }
         } else {
             let total = self.lines.last().copied().unwrap_or(0.0)
@@ -2754,5 +2757,126 @@ mod tests {
             ])])]);
         let (lines_x, _) = laid(&document, &outer, (400.0, &[]));
         assert!(at(&lines_x, &[0.0, 310.8]), "{lines_x:?}");
+    }
+
+    #[test]
+    fn nested_tables_are_measured_as_they_are_laid_out() {
+        let (document, style) = document(CompatMode::Word2013);
+        let nested = |props: TableProps, cells: Vec<Cell>| -> Block {
+            Table::default()
+                .with_grid(vec![Pt(100.0); cells.len()])
+                .with_props(props)
+                .with_rows(vec![row(cells)])
+                .into()
+        };
+        let holder = |inner: Block, other: &str| {
+            Table::default()
+                .with_grid(vec![Pt(100.0); 2])
+                .with_rows(vec![row(vec![
+                    cell(vec![inner, Paragraph::new(style).into()]),
+                    cell(vec![lines(style, 1, other)]),
+                ])])
+        };
+        // Review of #415: a nested table 300 pt wide is laid out that wide whatever the
+        // room, so its column never gives up any of its 310.8 pt to the next one, which
+        // wants more than the room leaves.
+        let points = nested(
+            TableProps::default().with_width(PreferredWidth::Points(Pt(300.0))),
+            vec![cell(vec![lines(style, 1, "A")])],
+        );
+        let (lines_x, _) = laid(&document, &holder(points, &"A ".repeat(40)), (400.0, &[]));
+        assert!(at(&lines_x[..2], &[0.0, 310.8]), "{lines_x:?}");
+        // A nested table of two 50 % cells is as wide as its shares need, 67.6 pt, and its
+        // column holds it with the outer cell's margins.
+        let shares = nested(
+            TableProps::default(),
+            vec![
+                cell(vec![lines(style, 1, "A")]).with_width(PreferredWidth::Percent(50.0)),
+                cell(vec![lines(style, 1, "A A A")]).with_width(PreferredWidth::Percent(50.0)),
+            ],
+        );
+        let (lines_x, _) = laid(&document, &holder(shares, "A"), (400.0, &[]));
+        assert!(at(&lines_x[..2], &[0.0, 78.4]), "{lines_x:?}");
+        // Two different nested tables in one row are each measured as themselves.
+        let one = nested(
+            TableProps::default(),
+            vec![cell(vec![lines(style, 1, "A")])],
+        );
+        let three = nested(
+            TableProps::default(),
+            vec![cell(vec![lines(style, 1, "A A A")])],
+        );
+        let both = Table::default()
+            .with_grid(vec![Pt(100.0); 2])
+            .with_rows(vec![row(vec![
+                cell(vec![one, Paragraph::new(style).into()]),
+                cell(vec![three, Paragraph::new(style).into()]),
+            ])]);
+        let (lines_x, _) = laid(&document, &both, (400.0, &[]));
+        assert!(at(&lines_x, &[0.0, 27.6, 72.2]), "{lines_x:?}");
+    }
+
+    #[test]
+    fn a_width_in_points_no_wrap_and_the_largest_preferred_width_count() {
+        let (document, style) = document(CompatMode::Word2013);
+        // A table of 300 pt that fits its content is 300 pt wide.
+        let fixed_width = Table::default()
+            .with_grid(vec![Pt(100.0); 2])
+            .with_props(TableProps::default().with_width(PreferredWidth::Points(Pt(300.0))))
+            .with_rows(vec![row(vec![
+                cell(vec![lines(style, 1, "A")]),
+                cell(vec![lines(style, 1, "A")]),
+            ])]);
+        let (lines_x, _) = laid(&document, &fixed_width, (400.0, &[]));
+        assert!(at(&lines_x, &[0.0, 150.0, 300.0]), "{lines_x:?}");
+        // A cell that keeps its text on one line needs its widest line, 33.8 pt; the
+        // other column takes the rest of 55 pt.
+        let no_wrap = Table::default()
+            .with_grid(vec![Pt(100.0); 2])
+            .with_rows(vec![row(vec![
+                cell(vec![lines(style, 1, "A A A")]).with_no_wrap(true),
+                cell(vec![lines(style, 1, "A A A")]),
+            ])]);
+        let (lines_x, _) = laid(&document, &no_wrap, (55.0, &[]));
+        assert!(at(&lines_x, &[0.0, 33.8, 55.0]), "{lines_x:?}");
+        // Of the preferred widths of a column's cells, the largest counts, neither the
+        // first nor the last.
+        let preferred_row = |width: f64| {
+            row(vec![
+                cell(vec![lines(style, 1, "A")]).with_width(PreferredWidth::Points(Pt(width))),
+            ])
+        };
+        let preferred = Table::default().with_grid([Pt(100.0)]).with_rows(vec![
+            preferred_row(50.0),
+            preferred_row(72.0),
+            preferred_row(60.0),
+        ]);
+        let (lines_x, _) = laid(&document, &preferred, (400.0, &[]));
+        assert!(at(&lines_x, &[0.0, 72.0]), "{lines_x:?}");
+        // Room before a row's cells narrower than the grid's column sets that column.
+        let before = Table::default()
+            .with_grid([Pt(80.0), Pt(100.0)])
+            .with_rows(vec![
+                row(vec![cell(vec![lines(style, 1, "A")])])
+                    .with_grid_before(1)
+                    .with_width_before(PreferredWidth::Points(Pt(50.0))),
+            ]);
+        let (lines_x, _) = laid(&document, &before, (400.0, &[]));
+        assert!(at(&lines_x, &[0.0, 50.0, 66.8]), "{lines_x:?}");
+    }
+
+    #[test]
+    fn a_cell_s_text_runs_between_its_margins_whatever_its_borders() {
+        // Word's renders of E-table-autofit-*: in Word 2013's mode a cell's text takes its
+        // column less its margins, however thick its borders. Five `A` of 30 pt fit a
+        // column of 40.8 pt with 6 pt borders on one line.
+        let (document, style) = document(CompatMode::Word2013);
+        let table = Table::default()
+            .with_grid([Pt(40.8)])
+            .with_props(fixed_props().with_borders(borders(6.0)))
+            .with_rows(vec![row(vec![cell(vec![lines(style, 1, "AAAAA")])])]);
+        let (_, bands) = laid(&document, &table, (400.0, &[]));
+        let rows: Vec<f64> = glyphs(&bands[0]).iter().map(|(_, y, _)| *y).collect();
+        assert_eq!(rows.len(), 1, "{rows:?}");
     }
 }
