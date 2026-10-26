@@ -21,7 +21,7 @@ use crate::ir::{
 use crate::lists::Label;
 use crate::numbers::number_text;
 use crate::report::{Location, ReportKind};
-use crate::shape::{Features, ShapeRequest, ShapedRun, Shaper, combining_class};
+use crate::shape::{Features, ShapeRequest, ShapedRun, Shaper, ShapingFace, combining_class};
 use crate::slot::{Slot, slot};
 use crate::symbol::SymbolFont;
 
@@ -950,8 +950,7 @@ pub(crate) fn shape_runs(
         let request = request(run, &style);
         let text = itemized.text.get(run.range.clone()).unwrap_or_default();
         let result = shaper.shape(&face, text, &request);
-        let name = face.face().names().family().unwrap_or("a font").to_owned();
-        report_shaping(fonts, &result, &name, location);
+        report_shaped(fonts, &face, &result, location);
         shaped.push(Some(result));
     }
     shaped
@@ -965,6 +964,17 @@ pub(crate) fn request(run: &TextRun, style: &RunStyle) -> ShapeRequest {
         script: Some(run.script).filter(|code| code != b"Zyyy"),
         language: run.language.clone(),
     }
+}
+
+/// Reports what [`report_shaping`] reports of `result`, text shaped in `face`.
+pub(crate) fn report_shaped(
+    fonts: &mut Fonts<'_>,
+    face: &ShapingFace,
+    result: &ShapedRun,
+    location: &Location,
+) {
+    let name = face.face().names().family().unwrap_or("a font").to_owned();
+    report_shaping(fonts, result, &name, location);
 }
 
 /// Reports, once per face, a run shaped without the face's layout tables or with glyphs

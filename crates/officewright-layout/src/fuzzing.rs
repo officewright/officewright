@@ -750,8 +750,15 @@ pub fn lay_out(
                         let hyphen = matches!(piece.kind, PieceKind::Hyphen { .. });
                         let glyphs = piece.glyphs(itemized);
                         for (index, glyph) in glyphs.iter().enumerate() {
+                            // A cluster's text goes with its first glyph, whose search for
+                            // the next cluster passes over its own glyphs once (#403).
                             let cluster = if hyphen {
                                 "-".to_owned()
+                            } else if glyphs
+                                .get(index.wrapping_sub(1))
+                                .is_some_and(|before| before.cluster == glyph.cluster)
+                            {
+                                String::new()
                             } else {
                                 let end = glyphs
                                     .iter()
@@ -761,18 +768,11 @@ pub fn lay_out(
                                         || piece_text_end(&piece.kind),
                                         |next| next.cluster,
                                     );
-                                if glyphs
-                                    .get(index.wrapping_sub(1))
-                                    .is_some_and(|before| before.cluster == glyph.cluster)
-                                {
-                                    String::new()
-                                } else {
-                                    itemized
-                                        .text
-                                        .get(glyph.cluster..end)
-                                        .unwrap_or_default()
-                                        .to_owned()
-                                }
+                                itemized
+                                    .text
+                                    .get(glyph.cluster..end)
+                                    .unwrap_or_default()
+                                    .to_owned()
                             };
                             text.push_str(&cluster);
                             if cluster.chars().all(char::is_whitespace) && !cluster.is_empty() {
@@ -1555,4 +1555,30 @@ pub fn check_pages(book: &FontBook, document: &Document, max_pages: usize) -> Re
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{Paragraph, RunFonts};
+    use crate::testing::{book, minimal, with_multiplied_a};
+
+    #[test]
+    fn a_cluster_of_many_glyphs_gives_its_text_once() {
+        // In this font each `A` is a cluster of 32 glyphs: the line's text, and its word,
+        // hold each `A` once.
+        let book = book(vec![with_multiplied_a(minimal(), 32)]);
+        let mut document = Document::default();
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        let paragraph = Paragraph::new(style).with_inlines([Inline::text("AA", style)]);
+        let laid = lay_out(&book, &document, &paragraph, 1000.0);
+        let line = laid.lines().first().expect("a line");
+        assert_eq!(line.text(), "AA");
+        let words: Vec<&str> = line.words().iter().map(Word::text).collect();
+        assert_eq!(words, ["AA"]);
+    }
 }

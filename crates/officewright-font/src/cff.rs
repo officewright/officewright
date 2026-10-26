@@ -481,16 +481,16 @@ const MAX_LOCAL_SUBRS: usize = 1 << 18;
 const MAX_FD_SELECT_RANGES: usize = 2048;
 
 /// Fails if the subsetter would panic on the `CFF ` table it takes from `font` (its file
-/// `data`) when it keeps `glyphs`, or would spend more on it than the library allows:
+/// `data`) when it keeps `kept`, or would spend more on it than the library allows:
 /// when the table is CID-keyed with more Font DICTs than it takes, Private DICTs past
 /// [`MAX_PRIVATE_BYTES`] or an FDSelect of more than [`MAX_FD_SELECT_RANGES`] ranges;
 /// when a DICT it writes back has a real number too large for it; when its Font DICTs have
 /// more than [`MAX_LOCAL_SUBRS`] local subroutines in all; when a glyph it decompiles
 /// declares more stem hints than it can count; or if decompiling the glyphs takes more
 /// than `limit`. Where the subsetter fails on the table before it writes or
-/// decompiles anything, the table is left to it. The subsetter decompiles `.notdef` and
-/// then the kept glyphs in order, and stops at the first it cannot read; so does this
-/// check, leaving that error to the subsetter.
+/// decompiles anything, the table is left to it. The subsetter decompiles the glyphs in
+/// the order it numbers them, `kept` (`.notdef` first, then each glyph once), and stops
+/// at the first it cannot read; so does this check, leaving that error to the subsetter.
 ///
 /// Returns how many operands, operators and hint mask bytes decompiling the glyphs reads:
 /// 0 without a `CFF ` table the subsetter takes.
@@ -498,7 +498,7 @@ pub(crate) fn check(
     font: &FontRef<'_>,
     data: &[u8],
     face: u32,
-    glyphs: &[u16],
+    kept: &[u16],
     limit: Limit,
 ) -> Result<u32> {
     let Some(cff) = subsetter_table(font, data, b"CFF ") else {
@@ -552,11 +552,8 @@ pub(crate) fn check(
             )),
         });
     }
-    let mut kept = glyphs.to_vec();
-    kept.sort_unstable();
-    kept.dedup();
     let mut steps = limit.steps;
-    for glyph in std::iter::once(0).chain(kept.into_iter().filter(|&glyph| glyph != 0)) {
+    for &glyph in kept {
         match programs.walk(glyph, &mut steps) {
             Ok(()) => {}
             Err(Stop::Limit) => {
@@ -2396,13 +2393,21 @@ mod tests {
     /// Whether subsetter 0.2.6 itself panics on the test font with `cff` as its outlines,
     /// kept to `glyphs`.
     fn subsetter_panics(cff: Vec<u8>, glyphs: &[u16]) -> bool {
+        panics_with(
+            cff,
+            &subsetter::GlyphRemapper::new_from_glyphs_sorted(glyphs),
+        )
+    }
+
+    /// Whether subsetter 0.2.6 itself panics on the test font with `cff` as its outlines,
+    /// kept to the glyphs of `remapper`.
+    fn panics_with(cff: Vec<u8>, remapper: &subsetter::GlyphRemapper) -> bool {
         let font = crate::testing::TestFont::new("Test Sans")
             .with_table(b"CFF ", cff)
             .without_table(b"glyf")
             .without_table(b"loca")
             .build();
-        let remapper = subsetter::GlyphRemapper::new_from_glyphs_sorted(glyphs);
-        std::panic::catch_unwind(|| subsetter::subset(&font, 0, &remapper)).is_err()
+        std::panic::catch_unwind(|| subsetter::subset(&font, 0, remapper)).is_err()
     }
 
     #[test]
@@ -2589,7 +2594,11 @@ mod tests {
             steps: limit,
             budget: false,
         };
-        check(&font_ref, &font, 0, glyphs, limit).map(|_| ())
+        // In the order the subsetter takes them, as `FontFace::subset` passes them.
+        let kept: Vec<u16> = subsetter::GlyphRemapper::new_from_glyphs_sorted(glyphs)
+            .remapped_gids()
+            .collect();
+        check(&font_ref, &font, 0, &kept, limit).map(|_| ())
     }
 
     /// The message of a refusal by [`check`] for its limit.
@@ -2675,7 +2684,7 @@ mod tests {
                 .without_table(b"loca")
                 .build();
             let font_ref = FontRef::new(&font).unwrap();
-            check(&font_ref, &font, 0, &[1], Limit::within(u64::MAX)).map(|_| ())
+            check(&font_ref, &font, 0, &[0, 1], Limit::within(u64::MAX)).map(|_| ())
         };
         assert_eq!(
             over_limit(check(vec![34, 29, 34, 29, 14])),
@@ -2823,6 +2832,21 @@ mod tests {
         crate::font::FontFace::from_bytes(font, 0)
             .unwrap()
             .subset(glyphs.iter().map(|&glyph| crate::font::GlyphId::new(glyph)))
+    }
+
+    /// [`subset_glyphs`] with the glyphs numbered in the order given.
+    fn subset_glyphs_in_order(cff: Vec<u8>, glyphs: &[u16]) -> Result<crate::subset::Subset> {
+        let font = crate::testing::TestFont::new("Test Sans")
+            .with_table(b"CFF ", cff)
+            .without_table(b"glyf")
+            .without_table(b"loca")
+            .build();
+        crate::font::FontFace::from_bytes(font, 0)
+            .unwrap()
+            .subset_in_order_within(
+                glyphs.iter().map(|&glyph| crate::font::GlyphId::new(glyph)),
+                &mut crate::SubsetBudget::new(u64::MAX),
+            )
     }
 
     /// The message of a refusal by [`check`] for damage.
@@ -3484,7 +3508,15 @@ mod tests {
             Err(Error::MalformedTable { .. })
         ));
         if cfg!(debug_assertions) {
-            assert!(subsetter_panics(cff, &[2, 1]));
+            assert!(subsetter_panics(cff.clone(), &[2, 1]));
+        }
+        // Numbered in the order given, glyph 2 comes first, and the walk stops there as the
+        // subsetter's does, leaving its error to it.
+        let refused = subset_glyphs_in_order(cff.clone(), &[2, 1]).unwrap_err();
+        assert!(matches!(refused, Error::Subset { .. }), "{refused}");
+        if cfg!(debug_assertions) {
+            let remapper = subsetter::GlyphRemapper::new_from_glyphs(&[2, 1]);
+            assert!(!panics_with(cff, &remapper));
         }
         // `.notdef`, which every subset keeps, is walked first: it overflows before
         // glyph 1, which the subsetter cannot read, is reached.

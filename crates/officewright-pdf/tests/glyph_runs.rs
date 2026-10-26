@@ -337,6 +337,20 @@ fn splits_arrays_and_strings_at_the_limits_readers_handle() -> TestResult {
 }
 
 #[test]
+fn notdef_keeps_cid_0_wherever_it_is_drawn() -> TestResult {
+    let font = Font::from_bytes(minimal()?, 0)?;
+    let mut run = GlyphRun::new(&font, Pt(10.0), Pt(72.0), Pt(700.0));
+    // .notdef first, as a layout draws it for a character no font has.
+    run.push_cluster("\u{FFFF}", [glyph(GlyphId::NOTDEF, 0.0, 0.0)]);
+    run.push_cluster("A", [glyph(A, 6.0, 0.0)]);
+    let pdf = pdf_of(&[run])?;
+    // Every subset keeps .notdef as glyph 0, so the A is CID 1 and has its own width.
+    assert!(content(&pdf)?.contains("<0000"), "{pdf}");
+    assert_eq!(widths(&pdf)?.get(&1), Some(&600.0), "{pdf}");
+    Ok(())
+}
+
+#[test]
 fn writes_the_run_state_inside_its_own_graphics_state() -> TestResult {
     let font = Font::from_bytes(minimal()?, 0)?;
     let mut plain = GlyphRun::new(&font, Pt(10.0), Pt(72.0), Pt(700.0));
@@ -352,17 +366,18 @@ fn writes_the_run_state_inside_its_own_graphics_state() -> TestResult {
     let pdf = pdf_of(&[plain, styled])?;
     // The plain run's cluster has two glyphs, so it has replacement text, and its
     // glyphs follow each other with no adjustment: 600/1000 em at 10 pt is 6 pt.
-    // Glyph 1, the space, is CID 1 of the subset, and the A CID 2. The styled run's A is
+    // The subset numbers the glyphs in the order they are first shown in: the A is CID 1,
+    // and the space, glyph 1 of the font, CID 2. The styled run's A is
     // 600 × 12.5 × 1.5 / 1000 = 11.25 pt wide, so the next A, 0.75 pt further on, needs an
     // adjustment of -0.75 × 1000 / 18.75 = -40 thousandths of the em, and the space, 3.25
     // pt back, one of 173.3333.
     assert_eq!(
         content(&pdf)?,
         "q\n0 0 0 rg\nBT\n/F1 10 Tf\n\
-         /Span << /ActualText <FEFF00410041> >> BDC\n1 0 0 1 72 700 Tm\n[<00020002>] TJ\nEMC\n\
+         /Span << /ActualText <FEFF00410041> >> BDC\n1 0 0 1 72 700 Tm\n[<00010001>] TJ\nEMC\n\
          ET\nQ\n\
          q\n1 0 0.2 rg\n1 0 0.2 RG\n0.5 w\nBT\n/F1 12.5 Tf\n150 Tz\n2 Tr\n\
-         1 0 0.25 1 72 680 Tm\n[<0002>] TJ\n3 Ts\n[-40 <0002> 173.3333 <0001>] TJ\nET\nQ\n",
+         1 0 0.25 1 72 680 Tm\n[<0001>] TJ\n3 Ts\n[-40 <0001> 173.3333 <0002>] TJ\nET\nQ\n",
         "{pdf}"
     );
     assert!(pdf.starts_with("%PDF-1.5\n"));
@@ -381,10 +396,10 @@ fn a_ligature_maps_to_all_its_characters() -> TestResult {
     run.push_cluster("fi", [glyph(fi, 0.0, 0.0)]);
     run.push_cluster("n", [glyph(n, advance, 0.0)]);
     let pdf = pdf_of(&[run])?;
-    // The subset numbers the glyphs in their order in the font, where the ligature
-    // comes after n.
+    // The subset numbers the glyphs in the order they are first shown in: the ligature,
+    // which comes after n in the font, first.
     assert!(
-        pdf.contains("2 beginbfchar\n<0001> <006E>\n<0002> <00660069>\nendbfchar"),
+        pdf.contains("2 beginbfchar\n<0001> <00660069>\n<0002> <006E>\nendbfchar"),
         "{pdf}"
     );
     // ToUnicode alone gives the text: no replacement text, so PDF 1.4.
@@ -417,7 +432,7 @@ fn text_a_glyph_cannot_map_gets_replacement_text() -> TestResult {
             .collect()
     };
     let cmap = format!(
-        "2 beginbfchar\n<0002> <0041>\n<0004> <{}>\nendbfchar",
+        "2 beginbfchar\n<0001> <0041>\n<0004> <{}>\nendbfchar",
         utf16(&long)
     );
     // The space and the acute show no text alone, so they have no entry.

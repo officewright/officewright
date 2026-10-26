@@ -293,20 +293,33 @@ The maintainer does not review Rust code. Correctness rests on the automated gat
 ### 4. Merge
 The author puts their own PR into the merge queue when all hold:
 - the last independent review says "No blockers." and names the commit it reviewed; the head may differ from that commit only by changes that step 3 sends to no re-check; anything else goes back to the reviewer, and so does a Copilot finding dismissed after that review, until a later comment of the reviewer accepts the dismissal;
-- all required CI checks are green on the PR's head. The branch is not brought up to date with main by hand: the queue runs the checks on the PR merged with main and the PRs ahead of it, and merges it only when they pass. Main is merged into the branch only on a conflict with main, one in the text or one that shows only with main, such as a check that fails on the PR merged with main (the PR's own CI, which runs on its merge with main as of its last push, the queue's run, or `check.sh` run locally on that merge) and whose fix needs main; or after a failure that main has too showed on the PR's own CI, once main is fixed, since running its jobs again tests the same old merge. The author follows a queued PR until it is merged or dropped. When the queue drops it, the author finds why: a failure that is not the PR's own and may pass on another run (a flaky test, the queue's time-out) is answered by putting it into the queue again; one that main has too (a new advisory, a yanked crate, a lint of a new stable Rust) is fixed on main first, through an issue for the area that owns it, and the PR queued again after that fix; anything else is fixed, the fix going back to the reviewer when step 3 says so, and the PR is put into the queue again;
+- all required CI checks are green on the PR's head, or not finished yet on it when the author turns on auto-merge (below), which puts the PR into the queue only once they pass. The branch is not brought up to date with main by hand: the queue runs the checks on the PR merged with main and the PRs ahead of it, and merges it only when they pass. Main is merged into the branch only on a conflict with main, one in the text or one that shows only with main, such as a check that fails on the PR merged with main (the PR's own CI, which runs on its merge with main as of its last push, the queue's run, or `check.sh` run locally on that merge) and whose fix needs main; or after a failure that main has too showed on the PR's own CI, once main is fixed, since running its jobs again tests the same old merge. The author follows a queued PR until it is merged or dropped. When the queue drops it, the author finds why: a failure that is not the PR's own and may pass on another run (a flaky test, the queue's time-out) is answered by putting it into the queue again; one that main has too (a new advisory, a yanked crate, a lint of a new stable Rust) is fixed on main first, through an issue for the area that owns it, and the PR queued again after that fix; anything else is fixed, the fix going back to the reviewer when step 3 says so, and the PR is put into the queue again;
 - corpus numbers are not below the baseline;
 - Copilot's review has arrived (or the PR says why there is none), and every finding in Copilot's reviews of the PR has a reply (step 3).
 
-The repository does not allow auto-merge, so `gh pr merge` refuses to queue a PR; the author queues it through the API, with the head commit on which the conditions were checked (the head the green CI names, which the first condition compared with the commit the last review names), so that the queue refuses the PR if anything was pushed since:
+The author queues the PR with
 
 ```sh
-gh api graphql -f query='mutation($id:ID!,$oid:GitObjectID!){enqueuePullRequest(input:{pullRequestId:$id,expectedHeadOid:$oid}){mergeQueueEntry{state position}}}' \
-  -f id="$(gh pr view <n> --json id --jq .id)" -f oid=<the head commit checked>
+gh pr merge <n> --squash --auto --match-head-commit <the head commit checked>
 ```
+
+where the head commit checked is the PR's head that the first condition compared with the commit the last review names (for a Dependabot PR, which gets no review and is queued only with its checks green, the head whose update was checked), so that nothing pushed since is queued. The command may be run before the PR's checks have finished on that head: it turns on auto-merge, and GitHub puts the PR into the queue only once the required checks pass. Auto-merge does not keep the head it was turned on for (a push leaves it on, for the new head), and what a push does to a queued PR is not documented, so nothing is pushed to the branch (a fix, or a merge of main) while the PR may still be merged. The author reads the PR's state with
+
+```sh
+gh api graphql -f query='{repository(owner:"officewright",name:"officewright"){pullRequest(number:<n>){state isInMergeQueue autoMergeRequest{enabledAt} timelineItems(last:1,itemTypes:[ADDED_TO_MERGE_QUEUE_EVENT,REMOVED_FROM_MERGE_QUEUE_EVENT]){nodes{__typename ... on RemovedFromMergeQueueEvent{reason actor{login}}}}}}}'
+```
+
+takes a queued PR (`isInMergeQueue` true), which gh cannot take out of the queue, out first with
+
+```sh
+gh api graphql -f query='mutation($id:ID!){dequeuePullRequest(input:{id:$id}){mergeQueueEntry{state}}}' -f id="$(gh pr view <n> --json id --jq .id)"
+```
+
+then turns auto-merge off with `gh pr merge <n> --disable-auto`, reads the state again, and pushes only when it shows `isInMergeQueue` false and `autoMergeRequest` null; once the merge conditions hold for the new head, it runs the command again with that head. The author follows the PR with the same query until its state is `MERGED`. An open PR whose last queue event is a removal by `github-merge-queue` with a reason other than `merged` was dropped by the queue (above); an open PR whose checks have passed, with auto-merge on but not in the queue, gets `--disable-auto` and the command again.
 
 A PR that contains anything on the list "Always ask the maintainer first" is merged only with the maintainer's consent, which the author quotes in the PR with its date (the sessions and the maintainer post from the same account, so a quote from the chat is what records it). After each merge the author sends the maintainer a short report; the maintainer runs the "How to check by hand" steps when they choose.
 
-The queue squash-merges each PR into a commit of its own: the PR title, which must be a Conventional Commit, becomes its subject with ` (#<n>)`, and the PR description its body. So the description is final before the PR goes into the queue, and carries no line of Claude authorship (Git workflow).
+The queue squash-merges each PR into a commit of its own: the PR title, which must be a Conventional Commit, becomes its subject with ` (#<n>)`, and the PR description its body. So the description is final when the author runs the command, and carries no line of Claude authorship (Git workflow).
 
 ### Always ask the maintainer first
 The agent must not decide these alone:

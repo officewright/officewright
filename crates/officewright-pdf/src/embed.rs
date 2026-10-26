@@ -2,13 +2,14 @@
 //! CIDFont (ISO 32000-1, 9.7) with the Identity-H encoding: text is a string of
 //! two-byte glyph IDs of the embedded subset.
 
-use std::collections::BTreeMap;
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 
 use officewright_font::{GlyphId, Subset, SubsetBudget};
 
 use crate::document::number;
-use crate::font::{Embedded, Lookup};
+use crate::font::Embedded;
 use crate::glyphs::MAX_STRING_BYTES;
 use crate::stream::stream_object;
 use crate::{Compression, Error, Result};
@@ -17,17 +18,43 @@ use crate::{Compression, Error, Result};
 /// font descriptor, the font program and the ToUnicode CMap.
 pub(crate) const EXTRA_OBJECTS: usize = 4;
 
-/// The glyphs a document shows in an embedded font, each with the text its ToUnicode
-/// entry gives: the first text it was shown alone for, if any.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct Usage {
+/// The glyphs a document shows in an embedded font, each with its CID and the text its
+/// ToUnicode entry gives: the first text it was shown alone for, if any.
+///
+/// A glyph's CID is its ID in the subset, which is made only when the file is written.
+/// The subset numbers the glyphs in the order they were given CIDs here, each the first
+/// time it is shown ([`FontFace::subset_in_order_within`]), so that a page's content can
+/// be encoded before the glyphs of later pages are known. A whole font keeps its glyph
+/// IDs.
+///
+/// [`FontFace::subset_in_order_within`]: officewright_font::FontFace::subset_in_order_within
+#[derive(Clone, Debug)]
+pub(crate) struct Codes {
+    /// The license forbids subsetting: the CIDs are the glyph IDs.
+    whole: bool,
+    /// The glyphs given CIDs, in their order: CID `n` is `order[n - 1]`; CID 0 is
+    /// `.notdef`.
+    order: Vec<u16>,
+    cids: HashMap<u16, u16>,
+    /// The glyphs shown, each with the text of its ToUnicode entry.
     glyphs: BTreeMap<u16, Option<String>>,
 }
 
-impl Usage {
+impl Codes {
+    /// No glyphs shown yet in a font whose license forbids subsetting if `whole`.
+    pub(crate) fn new(whole: bool) -> Self {
+        Self {
+            whole,
+            order: Vec::new(),
+            cids: HashMap::new(),
+            glyphs: BTreeMap::new(),
+        }
+    }
+
     /// Records that `glyph` was shown alone for `text`, which becomes its ToUnicode entry
     /// unless it has one already.
     pub(crate) fn add(&mut self, glyph: u16, text: &str) {
+        self.number(glyph);
         let entry = self.glyphs.entry(glyph).or_default();
         if entry.is_none() {
             *entry = Some(text.to_owned());
@@ -37,12 +64,45 @@ impl Usage {
     /// Records that `glyph` was shown together with other glyphs for some text, which
     /// gives it no ToUnicode entry.
     pub(crate) fn add_unmapped(&mut self, glyph: u16) {
+        self.number(glyph);
         self.glyphs.entry(glyph).or_default();
+    }
+
+    /// Gives `glyph` the next CID, unless it has one.
+    fn number(&mut self, glyph: u16) {
+        if self.whole || glyph == 0 {
+            return;
+        }
+        if let Entry::Vacant(entry) = self.cids.entry(glyph) {
+            self.order.push(glyph);
+            // A face has at most 65,535 glyphs, so at most 65,534 besides `.notdef`.
+            entry.insert(u16::try_from(self.order.len()).unwrap_or(u16::MAX));
+        }
+    }
+
+    /// The CID of `glyph`, which has been recorded: 0 for one that has not.
+    pub(crate) fn cid(&self, glyph: u16) -> u16 {
+        if self.whole {
+            glyph
+        } else {
+            self.cids.get(&glyph).copied().unwrap_or(0)
+        }
     }
 
     /// The text of the ToUnicode entry of `glyph`.
     pub(crate) fn text(&self, glyph: u16) -> Option<&str> {
         self.glyphs.get(&glyph).and_then(Option::as_deref)
+    }
+
+    /// The glyphs shown with their CIDs, in the order of the CIDs.
+    fn by_cid(&self) -> Vec<(u16, u16)> {
+        let mut shown: Vec<(u16, u16)> = self
+            .glyphs
+            .keys()
+            .map(|&glyph| (self.cid(glyph), glyph))
+            .collect();
+        shown.sort_unstable();
+        shown
     }
 }
 
@@ -50,7 +110,7 @@ impl Usage {
 #[derive(Debug)]
 pub(crate) struct Prepared<'a> {
     font: &'a Embedded,
-    usage: Usage,
+    codes: &'a Codes,
     subset: Subset,
     /// The CIDFont's `/BaseFont`: the PostScript name, after a subset tag unless the
     /// whole font is embedded.
@@ -58,26 +118,28 @@ pub(crate) struct Prepared<'a> {
 }
 
 impl<'a> Prepared<'a> {
-    /// Subsets `font` to the glyphs in `usage`, or to all of them if its license
-    /// forbids subsetting, within `budget`.
+    /// Subsets `font` to the glyphs in `codes`, numbered as their CIDs, or to all of them
+    /// if its license forbids subsetting, within `budget`.
     ///
     /// # Errors
     ///
     /// [`Error::Embed`] if subsetting finds the font damaged, or past a limit of the
     /// library or of `budget`.
-    pub(crate) fn new(font: &'a Embedded, usage: Usage, budget: &mut SubsetBudget) -> Result<Self> {
+    pub(crate) fn new(
+        font: &'a Embedded,
+        codes: &'a Codes,
+        budget: &mut SubsetBudget,
+    ) -> Result<Self> {
         let face = &font.face;
-        let glyphs: Vec<GlyphId> = if font.whole {
-            (0..face.glyph_count()).map(GlyphId::new).collect()
+        let subset = if font.whole {
+            face.subset_within((0..face.glyph_count()).map(GlyphId::new), budget)
         } else {
-            usage.glyphs.keys().copied().map(GlyphId::new).collect()
-        };
-        let subset = face
-            .subset_within(glyphs, budget)
-            .map_err(|source| Error::Embed {
-                font: font.name.clone(),
-                source,
-            })?;
+            face.subset_in_order_within(codes.order.iter().copied().map(GlyphId::new), budget)
+        }
+        .map_err(|source| Error::Embed {
+            font: font.name.clone(),
+            source,
+        })?;
         // A subset's name starts with a tag of six capital letters and a plus sign
         // (ISO 32000-1, 9.6.4); a whole font keeps its name.
         let base_font = if font.whole {
@@ -87,76 +149,10 @@ impl<'a> Prepared<'a> {
         };
         Ok(Self {
             font,
-            usage,
+            codes,
             subset,
             base_font,
         })
-    }
-
-    /// The glyphs shown and their text.
-    pub(crate) fn usage(&self) -> &Usage {
-        &self.usage
-    }
-
-    /// The glyph's ID in the subset, which is its CID.
-    pub(crate) fn cid(&self, glyph: u16) -> u16 {
-        // The subset keeps every glyph it was made from, so .notdef is never written.
-        self.subset
-            .glyph_id(GlyphId::new(glyph))
-            .map_or(0, GlyphId::to_u16)
-    }
-
-    /// Writes `text` to a content stream as hex strings of CIDs with `Tj` operators, and
-    /// returns whether it needed replacement text.
-    ///
-    /// Where two characters share a glyph, its ToUnicode entry gives the one shown
-    /// first; the other is shown in a marked-content span whose `/ActualText` gives
-    /// the character (ISO 32000-1, 14.9.4), so text extraction returns the text as
-    /// written. Such a span is a PDF 1.5 feature.
-    ///
-    /// Long text is shown with several strings, each within the 32767 bytes readers
-    /// have to handle in PDF 1.5 (ISO 32000-1, Annex C); one `Tj` after another moves
-    /// on as one would.
-    pub(crate) fn show(&self, out: &mut Vec<u8>, lookup: &Lookup<'_>, text: &str) -> Result<bool> {
-        let mut runs: Vec<(bool, Vec<(u16, char)>)> = Vec::new();
-        for (offset, ch) in text.char_indices() {
-            let glyph = lookup.glyph(ch, offset)?.id;
-            let mapped = self.usage.text(glyph) == Some(&*ch.encode_utf8(&mut [0; 4]));
-            let cid = self.cid(glyph);
-            match runs.last_mut() {
-                Some((last, run)) if *last == mapped => run.push((cid, ch)),
-                _ => runs.push((mapped, vec![(cid, ch)])),
-            }
-        }
-        if runs.is_empty() {
-            out.extend_from_slice(b"<> Tj");
-        }
-        let pieces = runs
-            .iter()
-            .flat_map(|(mapped, run)| pieces(run).map(move |piece| (*mapped, piece)));
-        for (i, (mapped, piece)) in pieces.enumerate() {
-            if i > 0 {
-                out.push(b'\n');
-            }
-            let mut cids = String::from("<");
-            for (cid, _) in piece {
-                let _ = write!(cids, "{cid:04X}");
-            }
-            cids.push('>');
-            if mapped {
-                out.extend_from_slice(format!("{cids} Tj").as_bytes());
-            } else {
-                let actual: String = piece.iter().map(|&(_, ch)| ch).collect();
-                out.extend_from_slice(
-                    format!(
-                        "/Span << /ActualText {} >> BDC {cids} Tj EMC",
-                        text_string(&actual)
-                    )
-                    .as_bytes(),
-                );
-            }
-        }
-        Ok(runs.iter().any(|(mapped, _)| !mapped))
     }
 
     /// The font dictionary, a Type 0 font, whose other objects start at `first`.
@@ -227,31 +223,14 @@ impl<'a> Prepared<'a> {
 
     /// Converts font units to 1/1000 em, the unit of glyph space.
     fn scale(&self, units: f64) -> f64 {
-        units * 1000.0 / f64::from(self.font.face.units_per_em())
-    }
-
-    /// The advance width of `glyph` in 1/1000 em, as the `/W` array gives it.
-    pub(crate) fn width(&self, glyph: u16) -> f64 {
-        let width = number(self.advance(glyph));
-        width.parse().unwrap_or_else(|_| self.advance(glyph))
-    }
-
-    /// The advance width of `glyph` in 1/1000 em.
-    fn advance(&self, glyph: u16) -> f64 {
-        let advance = self
-            .font
-            .face
-            .advance_width(GlyphId::new(glyph))
-            .unwrap_or(0);
-        self.scale(f64::from(advance))
+        scale(self.font, units)
     }
 
     /// The `/W` array: the width of each glyph shown, in runs of consecutive CIDs.
     fn widths(&self) -> String {
         let mut runs: Vec<(u16, Vec<String>)> = Vec::new();
-        for &glyph in self.usage.glyphs.keys() {
-            let cid = self.cid(glyph);
-            let width = number(self.advance(glyph));
+        for (cid, glyph) in self.codes.by_cid() {
+            let width = number(advance(self.font, glyph));
             match runs.last_mut() {
                 Some((start, widths)) if usize::from(*start) + widths.len() == usize::from(cid) => {
                     widths.push(width);
@@ -313,10 +292,10 @@ impl<'a> Prepared<'a> {
              1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n",
         );
         let entries: Vec<(u16, &str)> = self
-            .usage
-            .glyphs
-            .iter()
-            .filter_map(|(&glyph, text)| Some((self.cid(glyph), text.as_deref()?)))
+            .codes
+            .by_cid()
+            .into_iter()
+            .filter_map(|(cid, glyph)| Some((cid, self.codes.text(glyph)?)))
             .collect();
         // A bfchar section holds at most 100 entries (Adobe Technical Note 5411, 1.4.1).
         for chunk in entries.chunks(100) {
@@ -335,6 +314,79 @@ impl<'a> Prepared<'a> {
     }
 }
 
+/// Converts font units of `font` to 1/1000 em, the unit of glyph space.
+fn scale(font: &Embedded, units: f64) -> f64 {
+    units * 1000.0 / f64::from(font.face.units_per_em())
+}
+
+/// The advance width of `glyph` of `font` in 1/1000 em, as the `/W` array gives it.
+pub(crate) fn width(font: &Embedded, glyph: u16) -> f64 {
+    let width = number(advance(font, glyph));
+    width.parse().unwrap_or_else(|_| advance(font, glyph))
+}
+
+/// The advance width of `glyph` of `font` in 1/1000 em.
+fn advance(font: &Embedded, glyph: u16) -> f64 {
+    let advance = font.face.advance_width(GlyphId::new(glyph)).unwrap_or(0);
+    scale(font, f64::from(advance))
+}
+
+/// Writes the text that `add_text` drew, whose characters show `glyphs`, to a content
+/// stream as hex strings of CIDs with `Tj` operators, recording its glyphs in `codes`
+/// first, and returns whether it needed replacement text.
+///
+/// Where two characters share a glyph, its ToUnicode entry gives the one shown first; the
+/// other is shown in a marked-content span whose `/ActualText` gives the character
+/// (ISO 32000-1, 14.9.4), so text extraction returns the text as written. Such a span is
+/// a PDF 1.5 feature.
+///
+/// Long text is shown with several strings, each within the 32767 bytes readers have to
+/// handle in PDF 1.5 (ISO 32000-1, Annex C); one `Tj` after another moves on as one
+/// would.
+pub(crate) fn show(out: &mut Vec<u8>, codes: &mut Codes, text: &str, glyphs: &[u16]) -> bool {
+    for (&glyph, ch) in glyphs.iter().zip(text.chars()) {
+        codes.add(glyph, ch.encode_utf8(&mut [0; 4]));
+    }
+    let mut runs: Vec<(bool, Vec<(u16, char)>)> = Vec::new();
+    for (&glyph, ch) in glyphs.iter().zip(text.chars()) {
+        let mapped = codes.text(glyph) == Some(&*ch.encode_utf8(&mut [0; 4]));
+        let cid = codes.cid(glyph);
+        match runs.last_mut() {
+            Some((last, run)) if *last == mapped => run.push((cid, ch)),
+            _ => runs.push((mapped, vec![(cid, ch)])),
+        }
+    }
+    if runs.is_empty() {
+        out.extend_from_slice(b"<> Tj");
+    }
+    let pieces = runs
+        .iter()
+        .flat_map(|(mapped, run)| pieces(run).map(move |piece| (*mapped, piece)));
+    for (i, (mapped, piece)) in pieces.enumerate() {
+        if i > 0 {
+            out.push(b'\n');
+        }
+        let mut cids = String::from("<");
+        for (cid, _) in piece {
+            let _ = write!(cids, "{cid:04X}");
+        }
+        cids.push('>');
+        if mapped {
+            out.extend_from_slice(format!("{cids} Tj").as_bytes());
+        } else {
+            let actual: String = piece.iter().map(|&(_, ch)| ch).collect();
+            out.extend_from_slice(
+                format!(
+                    "/Span << /ActualText {} >> BDC {cids} Tj EMC",
+                    text_string(&actual)
+                )
+                .as_bytes(),
+            );
+        }
+    }
+    runs.iter().any(|(mapped, _)| !mapped)
+}
+
 /// A PDF text string for `text` in UTF-16BE with a byte order mark, as a hexadecimal
 /// string (ISO 32000-1, 7.9.2.2).
 pub(crate) fn text_string(text: &str) -> String {
@@ -346,7 +398,7 @@ pub(crate) fn text_string(text: &str) -> String {
     out
 }
 
-/// The most UTF-16 code units of text in a piece of a run that [`Prepared::show`] writes
+/// The most UTF-16 code units of text in a piece of a run that [`show`] writes
 /// with one string. Its replacement text, two bytes a unit after a two-byte byte order
 /// mark, then fits in a string, and so do its CIDs, two bytes for each character, which
 /// has one or two units.
