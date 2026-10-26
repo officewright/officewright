@@ -1850,17 +1850,7 @@ mod tests {
         let key = |i: usize| PathBuf::from(format!("fonts/bad{i:06}.ttf"));
         in_linear_time(
             |n| {
-                let mut list = SkippedList::default();
-                for i in 0..n {
-                    list.push(SkippedFont {
-                        path: None,
-                        error: Arc::new(Error::Read {
-                            path: key(i),
-                            source: io::ErrorKind::NotFound.into(),
-                        }),
-                        key: Some(key(i)),
-                    });
-                }
+                let mut list = listed(n, key);
                 let start = std::time::Instant::now();
                 for i in 0..n {
                     list.drop_key(&key(i));
@@ -1870,6 +1860,88 @@ mod tests {
                 start.elapsed()
             },
             100_000,
+        );
+    }
+
+    /// A list of `n` entries, each under the key `key(i)`.
+    fn listed(n: usize, key: impl Fn(usize) -> PathBuf) -> SkippedList {
+        let mut list = SkippedList::default();
+        for i in 0..n {
+            list.push(SkippedFont {
+                path: None,
+                error: Arc::new(Error::Read {
+                    path: key(i),
+                    source: io::ErrorKind::NotFound.into(),
+                }),
+                key: Some(key(i)),
+            });
+        }
+        list
+    }
+
+    #[test]
+    fn finds_skipped_entries_in_linear_time() {
+        // A rescan looks up the entry of every path still unreachable.
+        let key = |i: usize| PathBuf::from(format!("fonts/bad{i:06}.ttf"));
+        in_linear_time(
+            |n| {
+                let mut list = listed(n, key);
+                let start = std::time::Instant::now();
+                for i in 0..n {
+                    assert!(list.get_mut(&key(i)).is_some());
+                }
+                start.elapsed()
+            },
+            40_000,
+        );
+    }
+
+    #[test]
+    fn compacts_a_list_with_nothing_dropped_in_linear_time() {
+        // Every scan compacts the list before it returns, most of them with nothing
+        // dropped.
+        let key = |i: usize| PathBuf::from(format!("fonts/bad{i:06}.ttf"));
+        in_linear_time(
+            |n| {
+                let mut list = listed(n, key);
+                let start = std::time::Instant::now();
+                for _ in 0..n {
+                    list.compact();
+                }
+                start.elapsed()
+            },
+            40_000,
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_scan_through_another_path_updates_the_entries_after_one_that_left() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new("updated-through-alias");
+        let (fonts, targets) = (dir.0.join("fonts"), dir.0.join("t"));
+        fs::create_dir(&fonts).unwrap();
+        fs::create_dir(&targets).unwrap();
+        for name in ["a.ttf", "b.ttf", "c.ttf"] {
+            symlink(targets.join(name), fonts.join(name)).unwrap();
+        }
+        symlink(&fonts, dir.0.join("alias")).unwrap();
+        let mut book = FontBook::new();
+        book.add_dir(&fonts).unwrap();
+        assert_eq!(book.skipped().len(), 3);
+        // The first leaves the list; the others keep the path they were listed under,
+        // whichever path reaches them next.
+        fs::write(targets.join("a.ttf"), TestFont::new("Test Sans").build()).unwrap();
+        assert_eq!(book.add_dir(&fonts).unwrap(), 1);
+        book.add_dir(dir.0.join("alias")).unwrap();
+        let listed: Vec<Option<&Path>> = book.skipped().iter().map(SkippedFont::path).collect();
+        assert_eq!(
+            listed,
+            [
+                Some(fonts.join("b.ttf").as_path()),
+                Some(fonts.join("c.ttf").as_path())
+            ]
         );
     }
 
