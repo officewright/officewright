@@ -4,6 +4,7 @@ The poppler tools are replaced by fixed output, so the checks run where poppler 
 installed (Windows) and do not depend on its version.
 """
 
+import base64
 import dataclasses
 import hashlib
 import importlib.util
@@ -264,13 +265,22 @@ class Import(unittest.TestCase):
         return self.copy_fonts if pdf.name == "embedded.pdf" else self.pdffonts
 
     def update(self, pdf, update, copy):
-        """qpdf --update-from-json: records the update with the data of each new stream."""
+        """qpdf --update-from-json as Ubuntu 26.04's AppArmor profile for qpdf confines it,
+        opening only .pdf, .json and .qdf files: records the update with the data of each
+        new stream."""
         update = json.loads(update.read_text(encoding="utf-8"))
-        data = {
-            key: Path(value["stream"]["datafile"]).read_bytes()
-            for key, value in update["qpdf"][1].items()
-            if "stream" in value
-        }
+        data = {}
+        for key, value in update["qpdf"][1].items():
+            stream = value.get("stream")
+            if stream is None:
+                continue
+            if "datafile" in stream:
+                path = Path(stream["datafile"])
+                if path.suffix.lower() not in (".pdf", ".json", ".qdf"):
+                    raise importer.Refused(f"qpdf: open {path}: Permission denied")
+                data[key] = path.read_bytes()
+            else:
+                data[key] = base64.b64decode(stream["data"])
         self.updates.append((pdf.name, update, data))
         copy.write_bytes(pdf.read_bytes())
 
