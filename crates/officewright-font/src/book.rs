@@ -349,7 +349,55 @@ pub struct FontBook {
     keys: BTreeSet<PathBuf>,
     /// The canonical directory behind each location in `failed` of a directory that could
     /// not be read, so that reading that directory by any path drops them all.
-    unreadable_dirs: HashMap<PathBuf, PathBuf>,
+    unreadable_dirs: UnreadableDirs,
+}
+
+/// The canonical directory behind each listed location of a directory that could not be
+/// read, kept both ways, so that reading a directory finds the locations behind it without
+/// going over the others.
+#[derive(Clone, Debug, Default)]
+struct UnreadableDirs {
+    /// The directory behind each location.
+    targets: HashMap<PathBuf, PathBuf>,
+    /// The locations behind each directory.
+    behind: HashMap<PathBuf, HashSet<PathBuf>>,
+}
+
+impl UnreadableDirs {
+    fn contains(&self, listed: &Path) -> bool {
+        self.targets.contains_key(listed)
+    }
+
+    /// Remembers `target` as the directory behind `listed`, in place of any other.
+    fn insert(&mut self, listed: PathBuf, target: PathBuf) {
+        self.remove(&listed);
+        self.behind
+            .entry(target.clone())
+            .or_default()
+            .insert(listed.clone());
+        self.targets.insert(listed, target);
+    }
+
+    fn remove(&mut self, listed: &Path) {
+        let Some(target) = self.targets.remove(listed) else {
+            return;
+        };
+        if let Some(behind) = self.behind.get_mut(&target) {
+            behind.remove(listed);
+            if behind.is_empty() {
+                self.behind.remove(&target);
+            }
+        }
+    }
+
+    /// Forgets the locations behind `target`, and returns them.
+    fn take_behind(&mut self, target: &Path) -> HashSet<PathBuf> {
+        let behind = self.behind.remove(target).unwrap_or_default();
+        for listed in &behind {
+            self.targets.remove(listed);
+        }
+        behind
+    }
 }
 
 /// The skipped paths in the order they were listed, with the place of each entry listed
@@ -942,7 +990,7 @@ impl FontBook {
             if let Some(&read) = visited.get(&canonical_dir) {
                 if read {
                     self.forget_failure(&dir_location);
-                } else if self.unreadable_dirs.contains_key(&dir_location) {
+                } else if self.unreadable_dirs.contains(&dir_location) {
                     self.unreadable_dirs.insert(dir_location, canonical_dir);
                 }
                 continue;
@@ -954,12 +1002,7 @@ impl FontBook {
                 Ok(entries) => {
                     visited.insert(canonical_dir.clone(), true);
                     self.forget_failure(&dir_location);
-                    let behind: Vec<PathBuf> = self
-                        .unreadable_dirs
-                        .iter()
-                        .filter(|(_, target)| **target == canonical_dir)
-                        .map(|(listed, _)| listed.clone())
-                        .collect();
+                    let behind = self.unreadable_dirs.take_behind(&canonical_dir);
                     // An entry leads where it leads now, not where it led when it was
                     // listed: one repointed since to another directory that cannot be read
                     // stays listed, behind that directory. One that leads here, to a
@@ -2076,6 +2119,36 @@ mod tests {
                 (book, vec![fonts], dir)
             },
             8_000,
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rescans_readable_and_unreadable_folders_in_linear_time() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Each folder read looks up the unreadable ones behind it, not all of them.
+        rescans_in_linear_time(
+            |n| {
+                let dir = TempDir::new(&format!("linear-unreadable-{n}"));
+                for i in 0..n / 2 {
+                    fs::create_dir(dir.0.join(format!("open{i:06}"))).unwrap();
+                    let locked = dir.0.join(format!("shut{i:06}"));
+                    fs::create_dir(&locked).unwrap();
+                    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+                }
+                let mut book = FontBook::new();
+                book.add_dir(&dir.0).unwrap();
+                // Root reads every directory, so this has to run as an ordinary user.
+                assert_eq!(
+                    book.skipped().len(),
+                    n / 2,
+                    "run the tests as a user who cannot read mode 000"
+                );
+                let root = dir.0.clone();
+                (book, vec![root], dir)
+            },
+            12_000,
         );
     }
 
