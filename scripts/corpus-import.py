@@ -29,7 +29,8 @@ tests/corpus/reference/<group>/<name>/ go instead
     breaks (the w:lastRenderedPageBreak marks of the re-saved copy), the fonts the PDF
     references without embedding them, and what Word changed when it saved the copy: the
     w:compat settings it dropped and added, the style and numbering properties it dropped,
-    added and changed, and the paragraphs whose style it changed;
+    added and changed, and the paragraphs whose style it changed; every value on a line of
+    its own, without indentation (geometry_text);
   - formatting.json, from make-reference.ps1 format 3 on: the formatting Word computes for
     every paragraph of every story, with its runs of formatting when Word gave them, and the
     body paragraphs' style ids and names taken from the re-saved copy.
@@ -1259,6 +1260,13 @@ def formatting_bytes(result: dict) -> bytes:
     return (json.dumps(result, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
 
 
+def geometry_text(geometry: dict) -> str:
+    """The text of geometry.json: every value on a line of its own, as indented JSON, but with
+    no indentation, which would make the file nearly twice as large. officewright-layout's
+    tests read the lines of text and the boxes after them line by line."""
+    return json.dumps(geometry, indent=0, separators=(",", ": "), ensure_ascii=False) + "\n"
+
+
 def within_size(result: dict, note: str) -> tuple[bytes, str]:
     """The committed bytes; runs are dropped from a document that would pass the limit."""
     data = formatting_bytes(result)
@@ -1984,8 +1992,7 @@ def import_results(
         reference.mkdir(parents=True)
         for number, png in enumerate(rasters[item.record["file"]], 1):
             (reference / f"page-{number:03}.png").write_bytes(png)
-        geometry = json.dumps(item.geometry, indent=1, ensure_ascii=False) + "\n"
-        (reference / "geometry.json").write_text(geometry, encoding="utf-8")
+        (reference / "geometry.json").write_text(geometry_text(item.geometry), encoding="utf-8")
         if item.formatting is not None:
             (reference / "formatting.json").write_bytes(item.formatting)
         resaved = corpus / "resaved" / group / f"{base}.docx"

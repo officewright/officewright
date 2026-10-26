@@ -65,7 +65,10 @@ class References(unittest.TestCase):
         for folder in folders():
             group, name = folder.parent.name, folder.name
             with self.subTest(document=f"{group}/{name}"):
-                geometry = json.loads((folder / "geometry.json").read_text(encoding="utf-8"))
+                text = (folder / "geometry.json").read_text(encoding="utf-8")
+                geometry = json.loads(text)
+                # The form corpus-import.py writes: a text line of a page per line.
+                self.assertEqual(text, importer.geometry_text(geometry))
                 self.assertEqual(geometry["format"], 1)
                 self.assertEqual(geometry["document"], f"{group}/{name}.docx")
                 self.assertTrue((CORPUS / group / f"{name}.docx").is_file())
