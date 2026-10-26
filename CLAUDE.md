@@ -55,9 +55,12 @@ crates/
                         as Word fits them, or the grid's widths for fixed layout, merged cells,
                         borders by Word's conflict rules, shading, nesting, rows cut across pages
                         between the lines of their cells and header rows repeated as Word does them;
-                        content taller than a row of exact height is not cut off yet), and draws
-                        floating pictures where they are anchored (stacked behind or in front of the
-                        text, which does not wrap around them yet), behind private modules;
+                        not yet: rows tied by a vertically merged cell are not cut, nor a nested
+                        table's rows inside their lines, a nested table's header rows are not
+                        repeated, and content taller than a row of exact height is not cut off),
+                        and draws floating pictures where they are anchored (stacked behind or in
+                        front of the text, which does not wrap around them yet), behind private
+                        modules;
                         feature `pdf` renders a document into PDF with officewright-pdf (`render_pdf`,
                         hidden in the docs like the IR it takes, and `RenderOptions`);
                         feature `fuzzing` opens entry points for the fuzz targets, examples and the tests

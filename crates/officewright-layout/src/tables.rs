@@ -31,6 +31,11 @@ use crate::shape::Shaper;
 /// sums of positions in points lose.
 const EPSILON: f64 = 1e-6;
 
+/// The most cells a row of Word's has ([MS-DOC] 2.9.321 TDefTableOperand: at most 63
+/// columns). A row cut over pages draws all its cells again on every page it reaches, so
+/// a row of more is not cut: its cost would grow with its cells times its pages.
+const WORD_MAX_CELLS: usize = 63;
+
 /// The widest a grid column is laid out: Word's widest page, 22 inches. A wider one is
 /// laid out that wide, and reported.
 const MAX_COLUMN: f64 = 1584.0;
@@ -373,6 +378,29 @@ impl<'d, 'l> Prepared<'d, 'l> {
         self.bands.get(band).is_some_and(|rows| rows.len() > 1)
     }
 
+    /// Whether band `band` is a row of more cells than Word holds ([`WORD_MAX_CELLS`]).
+    pub(crate) fn wide(&self, band: usize) -> bool {
+        self.bands
+            .get(band)
+            .and_then(|rows| self.rows.get(rows.start))
+            .is_some_and(|cells| cells.len() > WORD_MAX_CELLS)
+    }
+
+    /// Whether a page may cut band `band` between lines: a row of its own, of no exact
+    /// height and of no more cells than Word holds.
+    fn cuts(&self, band: &Range<usize>) -> bool {
+        let exact = matches!(
+            self.table.rows().get(band.start).map(Row::height),
+            Some(RowHeight::Exact(_))
+        );
+        band.len() == 1
+            && !exact
+            && self
+                .rows
+                .get(band.start)
+                .is_some_and(|cells| cells.len() <= WORD_MAX_CELLS)
+    }
+
     /// The header rows: those of the header bands.
     pub(crate) fn header_rows(&self) -> &'d [Row] {
         let end = self
@@ -532,7 +560,9 @@ impl<'d, 'l> Prepared<'d, 'l> {
     /// a Word render: a cell's margins are kept above and below each piece of it, the
     /// pieces of a split row are aligned at their top whatever the cell's vertical
     /// alignment, its height rule's least height is filled by its last piece as far as
-    /// its page leaves room, and a row of an exact height is never split.
+    /// its page leaves room, cells are cut each on its own, and a row of an exact height
+    /// is never split. A row of more cells than Word holds is not cut either
+    /// ([`WORD_MAX_CELLS`]).
     pub(crate) fn piece(
         &self,
         laid: &mut LaidBand<'d>,
@@ -551,8 +581,7 @@ impl<'d, 'l> Prepared<'d, 'l> {
                 .map(|(row, height)| self.thickness(row) + height)
                 .sum();
             let fits = room.is_none_or(|room| whole + below <= room + EPSILON);
-            let splits =
-                split && rows.len() == 1 && !matches!(row_height, Some(RowHeight::Exact(_)));
+            let splits = split && self.cuts(&rows);
             if fits || !splits {
                 if !fits && !fresh {
                     return None;
@@ -606,10 +635,11 @@ impl<'d, 'l> Prepared<'d, 'l> {
         }
         let mut height: f64 = 0.0;
         let mut contents = Vec::with_capacity(takes.len());
+        let continued = laid.put.is_some();
         for (cell, take) in cells.iter_mut().flatten().zip(&takes) {
             let units = cell.next..cell.next + take;
             cell.next = units.end;
-            let drawn = cell.content.paint(units, context);
+            let drawn = cell.content.paint(units, continued, context);
             height = height.max(cell.margins.top().0 + drawn.height.0 + cell.margins.bottom().0);
             contents.push(drawn);
         }
@@ -795,7 +825,7 @@ impl<'d, 'l> Prepared<'d, 'l> {
                 );
                 let units = cell.next..cell.content.units.len();
                 cell.next = units.end;
-                let drawn = cell.content.paint(units, context);
+                let drawn = cell.content.paint(units, false, context);
                 // The content below the row's top border and the cell's top margin,
                 // aligned in the room the row leaves it.
                 let margins = &cell.margins;
@@ -1348,20 +1378,23 @@ struct Stacked<'d> {
 
 /// A block of a cell's content laid out.
 enum Part<'d> {
-    /// A paragraph, painted when a page takes its lines.
+    /// A paragraph, painted when a page takes its lines; with whether it has a `PAGE`
+    /// field.
     Paragraph {
         paragraph: &'d Paragraph,
         layout: ParagraphLayout,
         location: Location,
+        page_field: bool,
     },
     /// A nested table: what each of its bands draws, and the line below each, which
-    /// closes it where a page ends under it.
+    /// closes it where a page ends under it; with whether it has a `PAGE` field.
     Table {
         bands: Vec<Drawn>,
         closings: Vec<Drawn>,
         /// Whether it has header rows, which a page it goes on to does not repeat.
         header: bool,
         location: Location,
+        page_field: bool,
     },
 }
 
@@ -1448,8 +1481,15 @@ impl<'d> Stacked<'d> {
 
     /// Paints units `units`: the paragraphs' lines and the nested tables' bands among
     /// them, from the piece's top, and the line that closes a nested table cut after its
-    /// last.
-    fn paint(&mut self, units: Range<usize>, context: &mut Context<'d, '_, '_>) -> Drawn {
+    /// last. The content is laid out with the field values of the page its row starts on,
+    /// so that a `PAGE` field in a piece `continued` on a later page shows that page's
+    /// number; reported.
+    fn paint(
+        &mut self,
+        units: Range<usize>,
+        continued: bool,
+        context: &mut Context<'d, '_, '_>,
+    ) -> Drawn {
         let start = self.start(units.start);
         let height = self.extent(units.start, units.end);
         let mut items = Vec::new();
@@ -1472,11 +1512,35 @@ impl<'d> Stacked<'d> {
                 .then(|| self.closing(&last))
                 .flatten()
                 .map(|closing| closing.items.clone());
+            if continued {
+                if let Some(
+                    Part::Paragraph {
+                        location,
+                        page_field: true,
+                        ..
+                    }
+                    | Part::Table {
+                        location,
+                        page_field: true,
+                        ..
+                    },
+                ) = self.parts.get(first.part)
+                {
+                    context.fonts.report_once(
+                        ReportKind::FeatureUnsupported,
+                        location,
+                        "a PAGE field in a table row cut over pages shows the number of the \
+                         page the row starts on"
+                            .to_owned(),
+                    );
+                }
+            }
             match self.parts.get_mut(first.part) {
                 Some(Part::Paragraph {
                     paragraph,
                     layout,
                     location,
+                    ..
                 }) => {
                     let lines = first.index..last.index + 1;
                     let origin = Point {
@@ -1603,16 +1667,21 @@ fn stack<'d>(
                 }
                 // Widow control keeps two lines on each side of a page's end, as in the
                 // body: Word moves a row of two lines whole (its render of
-                // `E-table-autofit-15.docx`, case 11).
+                // `E-table-autofit-15.docx`, case 11). Keeping a paragraph's lines together
+                // (`w:keepLines`) keeps them on one page as in the body too: a hypothesis
+                // until a Word render.
                 let widow = props.widow_control();
+                let together = props.keep_lines();
                 let count = layout.lines.len();
                 for (line, laid) in layout.lines.iter().enumerate() {
+                    let breaks =
+                        line == 0 || (!together && (!widow || (line >= 2 && count - line >= 2)));
                     stacked.units.push(Unit {
                         part: stacked.parts.len(),
                         index: line,
                         top: height,
                         height: laid.height.0,
-                        breaks: line == 0 || !widow || (line >= 2 && count - line >= 2),
+                        breaks,
                     });
                     height += laid.height.0;
                 }
@@ -1620,6 +1689,7 @@ fn stack<'d>(
                     paragraph,
                     layout,
                     location: location.clone(),
+                    page_field: has_page_field(blocks.get(index..=index).unwrap_or(&[])),
                 });
                 above = Some(paragraph);
             }
@@ -1650,6 +1720,7 @@ fn stack<'d>(
                     closings,
                     header: has_header_rows(table),
                     location: location.clone(),
+                    page_field: has_page_field(blocks.get(index..=index).unwrap_or(&[])),
                 });
             }
         }
@@ -1706,6 +1777,11 @@ fn block_widths<'d>(
         location.pop();
     }
     widths
+}
+
+/// Whether `blocks` have a `PAGE` field, nested tables' included.
+fn has_page_field(blocks: &[Block]) -> bool {
+    crate::pages::field_kinds(blocks, 0).0
 }
 
 /// The larger of `a` and `b`, or whichever there is.
