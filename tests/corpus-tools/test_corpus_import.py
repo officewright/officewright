@@ -959,7 +959,8 @@ class RenderedPageBreaks(unittest.TestCase):
 
     @staticmethod
     def p(text: str, mark: bool = False) -> str:
-        # Word writes a mark at a paragraph's start as the first child of its first run.
+        # Word writes a mark at a paragraph's start in its first run, after the run's
+        # properties.
         before = "<w:lastRenderedPageBreak/>" if mark else ""
         return f"<w:p><w:r><w:rPr><w:b/></w:rPr>{before}<w:t>{text}</w:t></w:r></w:p>"
 
@@ -1037,6 +1038,28 @@ class RenderedPageBreaks(unittest.TestCase):
                  + "</w:tbl>")
         self.assertEqual(self.breaks(table), [(1, "starts")])
 
+    def test_a_row_start_after_what_a_paragraph_does_not_show_stays_the_start(self):
+        # Word writes its _Hlk bookmarks before the run that holds a row's start mark
+        # (form-ec-state-aid-notification-de); a proofing error, a hyperlink or a tracked
+        # insertion around the run show nothing before it either. The second cell's
+        # crossing into the next page counts.
+        mark = "<w:r><w:rPr><w:b/></w:rPr><w:lastRenderedPageBreak/><w:t>Name</w:t></w:r>"
+        for first in (f'<w:p><w:bookmarkStart w:id="3" w:name="_Hlk1"/>{mark}</w:p>',
+                      f'<w:p><w:proofErr w:type="spellStart"/>{mark}</w:p>',
+                      f'<w:p><w:hyperlink w:anchor="x">{mark}</w:hyperlink></w:p>',
+                      f'<w:p><w:ins w:id="1" w:author="A">{mark}</w:ins></w:p>'):
+            with self.subTest(first=first):
+                table = ("<w:tbl>" + self.row(self.cell(first), self.cell(self.mid("ab", "cd")))
+                         + "</w:tbl>")
+                self.assertEqual(self.breaks(table), [(0, "Name"), (1, "cd")])
+
+    def test_a_row_start_in_a_later_cell_after_an_empty_one_stays_the_start(self):
+        table = ("<w:tbl>"
+                 + self.row(self.cell("<w:p/>"), self.cell(self.p("Name", True)),
+                            self.cell(self.mid("ab", "cd")))
+                 + "</w:tbl>")
+        self.assertEqual(self.breaks(table), [(1, "Name"), (2, "cd")])
+
     def test_a_mark_after_what_a_paragraph_shows_is_not_a_repeat(self):
         # The row starts a page; the second cell's first paragraph shows a picture, a line
         # break, a symbol or a field on that page before the mark, and its caption on the
@@ -1052,11 +1075,20 @@ class RenderedPageBreaks(unittest.TestCase):
                 self.assertEqual(self.breaks(table), [(0, "Name"), (1, "caption")])
 
     def test_a_page_that_several_cells_cross_counts_once(self):
-        # Every cell that crosses a page marks it, and the cell after the first that does
-        # repeats it at its start; the page counts once, at the first cell's mark.
+        # Three cells cross one page, each marked where it does and, after the first, at its
+        # start too; the page counts once, at the first cell's mark.
         table = ("<w:tbl>"
                  + self.row(self.cell(self.mid("a1", "a2")),
                             self.cell(self.p("b1", True), self.mid("b1", "b2")),
+                            self.cell(self.p("c1", True), self.mid("c1", "c2")))
+                 + "</w:tbl>")
+        self.assertEqual(self.breaks(table), [(0, "a2")])
+
+    def test_a_page_counts_once_across_a_cell_that_does_not_cross_it(self):
+        # The second cell is short: it repeats the first cell's page at its start, and the
+        # third cell's crossing is the same page.
+        table = ("<w:tbl>"
+                 + self.row(self.cell(self.mid("a1", "a2")), self.cell(self.p("b1", True)),
                             self.cell(self.mid("c1", "c2")))
                  + "</w:tbl>")
         self.assertEqual(self.breaks(table), [(0, "a2")])
