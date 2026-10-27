@@ -36,7 +36,7 @@ pdf = ["dep:officewright-pdf"]
 [dependencies]
 # Pinned exactly: HarfRust is 0.x, and the layout follows its API behind one private
 # module.
-harfrust = { version = "=0.14.0", default-features = false, features = ["std"] }
+harfrust = { version = "=0.15.0", default-features = false, features = ["std"] }
 officewright-core.workspace = true
 officewright-font.workspace = true
 # Our own PDF writer, for rendering; it depends on neither this crate nor officewright-doc.
