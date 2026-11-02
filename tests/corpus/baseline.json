@@ -1327,8 +1327,8 @@
     "tests/corpus/word-rules/E-table-autofit-15.docx": {
       "line_agreement": 1.0,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.9612,
-      "ssim_min": 0.947,
+      "ssim_mean": 0.9742,
+      "ssim_min": 0.9731,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-autofit-constrained-14.docx": {
