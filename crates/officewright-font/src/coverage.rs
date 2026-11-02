@@ -18,77 +18,60 @@ pub(crate) struct Allowance {
 /// The highest code point.
 const LAST: u32 = char::MAX as u32;
 
+/// A glyph count past every glyph ID, for reading which characters a subtable maps to
+/// any glyph but 0.
+const ANY_GLYPH: u64 = 1 << 32;
+
+/// The kind [`chosen_subtable`] gives a Windows symbol subtable.
+const SYMBOL: u8 = 3;
+
 impl Coverage {
     /// Nothing at all.
     pub(crate) const NOTHING: Self = Self(Vec::new());
 
-    /// The characters the `cmap` table in `data` maps to a glyph from 1 to
-    /// `glyph_count - 1`, through the subtable
-    /// [`FontFace::char_map`](crate::FontFace::char_map) uses, as its lookups map them.
+    /// The characters a face maps to a glyph from 1 to `glyph_count - 1`, as
+    /// [`FontFace::char_map`](crate::FontFace::char_map) maps them, which is how Skrifa's
+    /// `Charmap` maps them: through the subtable it uses of the `DMAP` table in `dmap`
+    /// (ISO/IEC 14496-22:2026) first, and through the one of the `cmap` table in `cmap` for
+    /// the characters that `DMAP` subtable maps to no glyph or to glyph 0. A `DMAP` table
+    /// that cannot be read is passed over, as `Charmap` passes it over. A symbol subtable
+    /// of `DMAP` also takes U+0000 to U+00FF from `cmap` where it maps the same characters
+    /// at U+F000 to U+F0FF, for `Charmap` looks them up there too; those do not count as
+    /// covered, as for a symbol `cmap`.
     ///
     /// The work is a step per segment or group, plus one per glyph-array entry of a
-    /// format 4 subtable, so it grows with the table rather than with the characters it
-    /// maps; it is taken from `allowance`. `None` if the table cannot be read, if its
-    /// subtable is damaged in a way that makes a lookup disagree with its segments or
-    /// groups (out of order or overlapping), or if it would go past `allowance`. A format
-    /// 4 subtable never covers U+FFFF, and groups past U+10FFFF cover nothing.
-    pub(crate) fn of_cmap(
-        data: &[u8],
+    /// format 4 subtable, so it grows with the tables rather than with the characters they
+    /// map; it is taken from `allowance`, twice for `DMAP`. `None` if `cmap` cannot be
+    /// read, if a subtable used is damaged in a way that makes a lookup disagree with its
+    /// segments or groups (out of order or overlapping), or if it would go past
+    /// `allowance`. A format 4 subtable never covers U+FFFF, and groups past U+10FFFF
+    /// cover nothing.
+    pub(crate) fn of_tables(
+        cmap: &[u8],
+        dmap: Option<&[u8]>,
         glyph_count: u16,
         allowance: &mut Allowance,
     ) -> Option<Self> {
-        let cmap = Cmap::read(FontData::new(data)).ok()?;
-        let Some(subtable) = chosen_subtable(&cmap) else {
-            return Some(Self::NOTHING);
-        };
+        let cmap = Cmap::read(FontData::new(cmap)).ok()?;
         let glyphs = u64::from(glyph_count);
-        let mut ranges = Ranges {
-            ranges: Vec::new(),
-            max: allowance.ranges,
+        let max = allowance.ranges;
+        let mut covered = match chosen_subtable(&cmap) {
+            Some((_, subtable)) => mapped(subtable, glyphs, allowance, max)?,
+            None => Vec::new(),
         };
-        match subtable {
-            CmapSubtable::Format4(table) => format4(&table, glyphs, allowance, &mut ranges)?,
-            CmapSubtable::Format12(table) => {
-                let mut previous = None;
-                for group in table.groups() {
-                    allowance.steps = allowance.steps.checked_sub(1)?;
-                    let Some((start, end)) = in_order(
-                        &mut previous,
-                        group.start_char_code(),
-                        group.end_char_code(),
-                    )?
-                    else {
-                        continue;
-                    };
-                    // Glyphs follow the code points, modulo 2^32 as the lookup computes them.
-                    let base = u64::from(group.start_glyph_id());
-                    for (from, to) in valid_offsets(base, 1 << 32, glyphs, u64::from(end - start)) {
-                        ranges.push(start, from, to)?;
-                    }
+        // `DMAP` has the layout of `cmap`.
+        if let Some(dmap) = dmap.and_then(|data| Cmap::read(FontData::new(data)).ok()) {
+            if let Some((kind, subtable)) = chosen_subtable(&dmap) {
+                let valid = mapped(subtable.clone(), glyphs, allowance, max)?;
+                let mut taken = mapped(subtable, ANY_GLYPH, allowance, max)?;
+                if kind == SYMBOL {
+                    taken = union(&taken, &symbol_alias(&taken));
                 }
+                covered = union(&valid, &subtract(&covered, &taken));
             }
-            CmapSubtable::Format13(table) => {
-                let mut previous = None;
-                for group in table.groups() {
-                    allowance.steps = allowance.steps.checked_sub(1)?;
-                    let Some((start, end)) = in_order(
-                        &mut previous,
-                        group.start_char_code(),
-                        group.end_char_code(),
-                    )?
-                    else {
-                        continue;
-                    };
-                    // Every code point of the group maps to the same glyph.
-                    if (1..glyphs).contains(&u64::from(group.glyph_id())) {
-                        ranges.push(start, 0, u64::from(end - start))?;
-                    }
-                }
-            }
-            _ => return Some(Self::NOTHING),
         }
-        allowance.ranges -= ranges.ranges.len();
-        Some(Self(ranges.ranges))
+        allowance.ranges = allowance.ranges.checked_sub(covered.len())?;
+        Some(Self(covered))
     }
 
     /// Whether the face maps `ch`.
@@ -109,19 +92,77 @@ impl Coverage {
     }
 }
 
-/// The subtable `skrifa`'s `Charmap` chooses, and so [`FontFace::char_map`]: the encoding
-/// records are searched from the last; a Windows symbol subtable wins over every other,
-/// a subtable for the whole of Unicode over one for its Basic Multilingual Plane, and
-/// among subtables of the same kind the last. Only formats 4, 12 and 13 are read.
+/// The characters `subtable` maps to a glyph from 1 to `glyphs - 1`, as sorted ranges
+/// that neither overlap nor touch, at most `max` of them; `None` as for
+/// [`Coverage::of_tables`].
+fn mapped(
+    subtable: CmapSubtable<'_>,
+    glyphs: u64,
+    allowance: &mut Allowance,
+    max: usize,
+) -> Option<Vec<(u32, u32)>> {
+    let mut ranges = Ranges {
+        ranges: Vec::new(),
+        max,
+    };
+    match subtable {
+        CmapSubtable::Format4(table) => format4(&table, glyphs, allowance, &mut ranges)?,
+        CmapSubtable::Format12(table) => {
+            let mut previous = None;
+            for group in table.groups() {
+                allowance.steps = allowance.steps.checked_sub(1)?;
+                let Some((start, end)) = in_order(
+                    &mut previous,
+                    group.start_char_code(),
+                    group.end_char_code(),
+                )?
+                else {
+                    continue;
+                };
+                // Glyphs follow the code points, modulo 2^32 as the lookup computes them.
+                let base = u64::from(group.start_glyph_id());
+                for (from, to) in valid_offsets(base, 1 << 32, glyphs, u64::from(end - start)) {
+                    ranges.push(start, from, to)?;
+                }
+            }
+        }
+        CmapSubtable::Format13(table) => {
+            let mut previous = None;
+            for group in table.groups() {
+                allowance.steps = allowance.steps.checked_sub(1)?;
+                let Some((start, end)) = in_order(
+                    &mut previous,
+                    group.start_char_code(),
+                    group.end_char_code(),
+                )?
+                else {
+                    continue;
+                };
+                // Every code point of the group maps to the same glyph.
+                if (1..glyphs).contains(&u64::from(group.glyph_id())) {
+                    ranges.push(start, 0, u64::from(end - start))?;
+                }
+            }
+        }
+        _ => return Some(Vec::new()),
+    }
+    Some(ranges.ranges)
+}
+
+/// The subtable `skrifa`'s `Charmap` chooses of a `cmap` or `DMAP` table, and so
+/// [`FontFace::char_map`], with its kind: the encoding records are searched from the last;
+/// a Windows symbol subtable ([`SYMBOL`]) wins over every other, a subtable for the whole
+/// of Unicode over one for its Basic Multilingual Plane, and among subtables of the same
+/// kind the last. Only formats 4, 12 and 13 are read.
 ///
 /// [`FontFace::char_map`]: crate::FontFace::char_map
-fn chosen_subtable<'a>(cmap: &Cmap<'a>) -> Option<CmapSubtable<'a>> {
+fn chosen_subtable<'a>(cmap: &Cmap<'a>) -> Option<(u8, CmapSubtable<'a>)> {
     let mut chosen: Option<(u8, CmapSubtable<'a>)> = None;
     for record in cmap.encoding_records().iter().rev() {
         let kind = match (record.platform_id(), record.encoding_id()) {
             // Unicode variation sequences: not a map of code points.
             (PlatformId::Unicode, 5) => continue,
-            (PlatformId::Windows, 0) => 3,
+            (PlatformId::Windows, 0) => SYMBOL,
             (PlatformId::Windows, 10) | (PlatformId::Unicode, 4 | 6) => 2,
             (PlatformId::ISO, _) | (PlatformId::Unicode, _) | (PlatformId::Windows, 1) => 1,
             _ => continue,
@@ -137,7 +178,7 @@ fn chosen_subtable<'a>(cmap: &Cmap<'a>) -> Option<CmapSubtable<'a>> {
             chosen = Some((kind, subtable));
         }
     }
-    chosen.map(|(_, subtable)| subtable)
+    chosen
 }
 
 /// The code points of a format 4 subtable.
@@ -182,10 +223,13 @@ fn format4(
             continue;
         }
         // The glyph comes from the glyph ID array, at a place that grows with the code
-        // point, so the segment ends where the array does.
+        // point: one before the array maps nothing, and the segment ends where the array
+        // does.
         for code_point in start..=end {
             let past = usize::try_from(code_point - start).ok()?;
-            let at = (offset / 2 + past).saturating_sub(segments - segment);
+            let Some(at) = (offset / 2 + past).checked_sub(segments - segment) else {
+                continue;
+            };
             let Some(glyph) = array.get(at) else {
                 break;
             };
@@ -222,7 +266,7 @@ fn valid_offsets(
 ) -> impl Iterator<Item = (u64, u64)> {
     // The offset at which the glyph is 1, and the number of valid glyphs from there.
     let first = (modulus + 1 - base % modulus) % modulus;
-    let count = glyphs.saturating_sub(1);
+    let count = glyphs.min(modulus).saturating_sub(1);
     let (head, tail) = if count == 0 {
         (None, None)
     } else if first + count <= modulus {
@@ -237,6 +281,67 @@ fn valid_offsets(
         .into_iter()
         .flatten()
         .filter_map(move |(from, to)| (from <= last).then_some((from, to.min(last))))
+}
+
+/// The characters U+0000 to U+00FF whose U+F000 to U+F0FF counterparts are in `ranges`:
+/// where `Charmap` also looks a character up in a symbol subtable.
+fn symbol_alias(ranges: &[(u32, u32)]) -> Vec<(u32, u32)> {
+    ranges
+        .iter()
+        .filter_map(|&(start, end)| {
+            let (start, end) = (start.max(0xF000), end.min(0xF0FF));
+            (start <= end).then(|| (start - 0xF000, end - 0xF000))
+        })
+        .collect()
+}
+
+/// The characters of `a` or `b`, both sorted ranges that neither overlap nor touch, as
+/// such ranges.
+fn union(a: &[(u32, u32)], b: &[(u32, u32)]) -> Vec<(u32, u32)> {
+    let mut all = [a, b].concat();
+    all.sort_unstable();
+    let mut merged: Vec<(u32, u32)> = Vec::with_capacity(all.len());
+    for (start, end) in all {
+        match merged.last_mut() {
+            Some((_, last)) if start <= last.saturating_add(1) => *last = (*last).max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    merged
+}
+
+/// The characters of `a` that are not in `b`, both sorted ranges that neither overlap
+/// nor touch, as such ranges.
+fn subtract(a: &[(u32, u32)], b: &[(u32, u32)]) -> Vec<(u32, u32)> {
+    let mut left = Vec::with_capacity(a.len());
+    let mut cuts = b.iter().copied().peekable();
+    for &(start, end) in a {
+        // The part of the range not looked at yet starts at `from`.
+        let mut from = Some(start);
+        while let Some(at) = from {
+            match cuts.peek() {
+                // A cut that ends before it cuts nothing more of `a`.
+                Some(&(_, cut_end)) if cut_end < at => {
+                    cuts.next();
+                }
+                Some(&(cut_start, cut_end)) if cut_start <= end => {
+                    if cut_start > at {
+                        left.push((at, cut_start - 1));
+                    }
+                    from = cut_end.checked_add(1).filter(|&next| next <= end);
+                    // A cut that reaches past this range may cut the next one too.
+                    if from.is_some() {
+                        cuts.next();
+                    }
+                }
+                _ => {
+                    left.push((at, end));
+                    from = None;
+                }
+            }
+        }
+    }
+    left
 }
 
 /// Ranges of code points being collected, in order, up to `max` of them.
@@ -311,6 +416,46 @@ mod tests {
     }
 
     #[test]
+    fn combines_ranges() {
+        let a = [(0x10, 0x1F), (0x30, 0x3F), (0x50, 0x50), (0x60, LAST)];
+        let b = [
+            (0x0, 0x10),
+            (0x18, 0x31),
+            (0x3F, 0x3F),
+            (0x52, 0x5F),
+            (0x70, 0x7F),
+        ];
+        assert_eq!(
+            subtract(&a, &b),
+            [
+                (0x11, 0x17),
+                (0x32, 0x3E),
+                (0x50, 0x50),
+                (0x60, 0x6F),
+                (0x80, LAST)
+            ]
+        );
+        // A cut that reaches over two ranges cuts both.
+        assert_eq!(subtract(&[(1, 3), (5, 7)], &[(2, 6)]), [(1, 1), (7, 7)]);
+        assert_eq!(subtract(&[(1, 3)], &[(0, LAST)]), []);
+        assert_eq!(subtract(&a, &[]), a);
+        assert_eq!(subtract(&[], &b), []);
+        // Ranges that touch are merged.
+        assert_eq!(
+            union(
+                &[(0x10, 0x1F), (0x40, 0x4F)],
+                &[(0x20, 0x2F), (0x45, 0x50), (0x60, 0x60)]
+            ),
+            [(0x10, 0x2F), (0x40, 0x50), (0x60, 0x60)]
+        );
+        assert_eq!(union(&[], &[(1, 1)]), [(1, 1)]);
+        assert_eq!(
+            symbol_alias(&[(0x41, 0x42), (0xEFF0, 0xF041), (0xF0F0, 0xF200)]),
+            [(0x0, 0x41), (0xF0, 0xFF)]
+        );
+    }
+
+    #[test]
     fn segments_and_groups_must_be_in_order() {
         let mut previous = None;
         assert_eq!(
@@ -338,7 +483,7 @@ mod tests {
             steps: 100,
             ranges: 100,
         };
-        let coverage = Coverage::of_cmap(&cmap, 20, &mut allowance).unwrap();
+        let coverage = Coverage::of_tables(&cmap, None, 20, &mut allowance).unwrap();
         assert_eq!(coverage.0, [(0xFFF0, 0xFFFE)]);
     }
 
@@ -349,18 +494,18 @@ mod tests {
             steps: 100,
             ranges: 100,
         };
-        let coverage = Coverage::of_cmap(&cmap, 5, &mut spare).unwrap();
+        let coverage = Coverage::of_tables(&cmap, None, 5, &mut spare).unwrap();
         assert_eq!(coverage.0, [(0x41, 0x41), (0x43, 0x43)]);
         assert_eq!((spare.steps, spare.ranges), (98, 98));
         let mut short = Allowance {
             steps: 1,
             ranges: 10,
         };
-        assert_eq!(Coverage::of_cmap(&cmap, 5, &mut short), None);
+        assert_eq!(Coverage::of_tables(&cmap, None, 5, &mut short), None);
         let mut narrow = Allowance {
             steps: 10,
             ranges: 1,
         };
-        assert_eq!(Coverage::of_cmap(&cmap, 5, &mut narrow), None);
+        assert_eq!(Coverage::of_tables(&cmap, None, 5, &mut narrow), None);
     }
 }
