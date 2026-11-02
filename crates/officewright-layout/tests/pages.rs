@@ -72,6 +72,58 @@ fn in_table(block: Block) -> Block {
         .into()
 }
 
+/// A table with `block` in each of its cells, as `random_document` makes them, `next`
+/// drawing at random: up to two header rows and up to four more, of up to three cells,
+/// some rows that stay on one page, some of an exact or a least height, some cells with a
+/// nested table of `block` too, and borders up to 6 pt wide, so that rows are cut over
+/// pages, nested tables with them, and header rows are repeated.
+fn random_table(block: &Block, next: &mut impl FnMut(u64) -> u64) -> Block {
+    use officewright_layout::ir::RowHeight;
+
+    let line = BorderSide::Line(Border::default().with_width(Pt(next(7) as f64)));
+    let borders = TableBorders::default()
+        .with_top(line)
+        .with_start(line)
+        .with_bottom(line)
+        .with_end(line)
+        .with_inside_horizontal(line)
+        .with_inside_vertical(line);
+    let header = next(3);
+    let columns = 1 + next(3) as usize;
+    let rows: Vec<Row> = (0..header + 1 + next(4))
+        .map(|row| {
+            let height = match next(5) {
+                0 => RowHeight::Exact(Pt(5.0 + next(60) as f64)),
+                1 => RowHeight::AtLeast(Pt(next(400) as f64)),
+                _ => RowHeight::Auto,
+            };
+            let cells: Vec<Cell> = (0..columns)
+                .map(|_| {
+                    let mut blocks = vec![block.clone()];
+                    if next(5) == 0 {
+                        blocks.push(in_table(block.clone()));
+                    }
+                    Cell::default().with_blocks(blocks)
+                })
+                .collect();
+            Row::default()
+                .with_header(row < header)
+                .with_cant_split(next(4) == 0)
+                .with_height(height)
+                .with_cells(cells)
+        })
+        .collect();
+    Table::default()
+        .with_grid(vec![Pt(150.0); columns])
+        .with_props(
+            TableProps::default()
+                .with_layout(TableLayout::Fixed)
+                .with_borders(borders),
+        )
+        .with_rows(rows)
+        .into()
+}
+
 /// `E-space-before-top.docx` (scripts/make-rule-docs.py) in the IR, and the first words
 /// of its paragraphs in reading order; `None` for the paragraphs that hold only a page
 /// break, which never start a page.
@@ -250,7 +302,7 @@ fn the_pages_of_space_before_top_keep_what_the_layout_relies_on() -> TestResult 
 /// A document built from `seed`: up to three sections of random starts, page heights and
 /// numbering, each of up to five random paragraphs (`random_paragraph`) kept with the
 /// next, kept together, with or without widow control, with page breaks before, a `PAGE`
-/// field, some of them in tables; headers and footers of random paragraphs and page
+/// field, some of them in tables (`in_table`, `random_table`); headers and footers of random paragraphs and page
 /// fields, a title page and even-page headers some of the time. The `PAGE` fields send
 /// paragraphs that land on another page through their layout again, which `check_pages`
 /// checks as any other layout; what number they draw, the unit tests of `pages.rs` check.
@@ -301,7 +353,11 @@ fn random_document(seed: u64) -> Document {
                 inlines.insert(at.min(inlines.len()), field);
             }
             let block: Block = paragraph.with_props(props).with_inlines(inlines).into();
-            blocks.push(if next(5) == 0 { in_table(block) } else { block });
+            blocks.push(match next(6) {
+                0 => in_table(block),
+                1 => random_table(&block, &mut next),
+                _ => block,
+            });
         }
         let height = 10.0 + next(300) as f64;
         let setup = PageSetup::new(PageSize::new(Pt(width + 20.0), Pt(height + 20.0)))
@@ -385,6 +441,39 @@ fn every_document_on_pages_keeps_what_the_painter_relies_on() -> TestResult {
         fuzzing::check_pages(&book, &document, 512)
             .map_err(|problem| format!("seed {seed}: {problem}"))?;
     }
+    Ok(())
+}
+
+#[test]
+fn a_table_cut_over_more_pages_than_allowed_counts_by_its_pieces() -> TestResult {
+    // The page check lets a document past `max_pages` through only when its lines could
+    // take that many pages. A table of one row whose cell holds 100 lines is cut over 13
+    // pages of eight lines: past 5 pages, it counts by the lines of its cells, not as one
+    // band.
+    let book = book()?;
+    let mut document = Document::default();
+    let style = document.add_run_style(
+        RunStyle::default()
+            .with_fonts(RunFonts::new("Calibri"))
+            .with_size(Pt(10.0)),
+    );
+    let cell = Cell::default().with_blocks(
+        (0..100)
+            .map(|_| paragraph(style, exact(0.0), vec![Inline::text("A", style)]))
+            .collect::<Vec<_>>(),
+    );
+    let table = Table::default()
+        .with_grid([Pt(100.0)])
+        .with_rows(vec![Row::default().with_cells(vec![cell])]);
+    let setup = PageSetup::new(PageSize::new(Pt(200.0), Pt(180.0))).with_margins(
+        Margins::default()
+            .with_top(Pt(10.0))
+            .with_bottom(Pt(10.0))
+            .with_left(Pt(10.0))
+            .with_right(Pt(10.0)),
+    );
+    document.add_section(Section::new(setup).with_blocks(vec![table.into()]));
+    fuzzing::check_pages(&book, &document, 5)?;
     Ok(())
 }
 

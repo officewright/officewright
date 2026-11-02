@@ -16,7 +16,7 @@ use crate::error::{Error, Result};
 use crate::fonts::Fonts;
 use crate::ir::{
     Block, CompatFlag, CompatMode, Document, FieldKind, Inline, MAX_TABLE_DEPTH, PageSetup,
-    PageVerticalAlign, Paragraph, ParagraphProps, Section, SectionStart, Table,
+    PageVerticalAlign, Paragraph, ParagraphProps, Row, Section, SectionStart, Table,
 };
 use crate::itemize::{self, FieldValues};
 use crate::lines::{LineEnd, PieceKind};
@@ -69,19 +69,21 @@ pub(crate) struct Body {
     pub(crate) bottom: Pt,
 }
 
-/// Lines of a paragraph, or bands of a table, on a page.
+/// Lines of a paragraph, or a piece of a table, on a page.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Fragment {
     /// The paragraph or table, by its place in the flow: every paragraph and table of
     /// the body in reading order.
     pub(crate) paragraph: usize,
-    /// Its lines, or for a table its bands: rows that a vertically merged cell ties
-    /// together.
+    /// Its lines, or for a table its piece: the pieces of a table are counted in the
+    /// order they are put on pages, its header rows repeated included.
     pub(crate) lines: Range<usize>,
     /// The top of its first line.
     pub(crate) top: Pt,
     /// The height of its lines.
     pub(crate) height: Pt,
+    /// Whether it is a table's header rows repeated at the top of a page.
+    pub(crate) repeated: bool,
 }
 
 /// What an item of the flow is.
@@ -245,7 +247,7 @@ impl<'a> Walk<'a, '_> {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Paginated {
     pub(crate) pages: Vec<Page>,
-    /// The number of lines of every paragraph of the flow, and of bands of every table.
+    /// The number of lines of every paragraph of the flow, and of pieces of every table.
     pub(crate) lines: Vec<usize>,
 }
 
@@ -269,7 +271,7 @@ impl PageSink for Vec<Page> {
 struct Laid<S> {
     /// The sink of the last layout pass, which has taken every page.
     sink: S,
-    /// The number of lines of every paragraph of the flow, and of bands of every table.
+    /// The number of lines of every paragraph of the flow, and of pieces of every table.
     lines: Vec<usize>,
     /// The most pages held at once before they went to the sink, and the most paragraph
     /// layouts.
@@ -281,6 +283,12 @@ struct Laid<S> {
     /// The pieces of lines painting headers and footers walked in the last pass.
     #[cfg_attr(not(test), allow(dead_code))] // reason: read by the tests of that bound only
     frames_walked: usize,
+    /// How many times header rows to repeat were laid out, and copied onto a page, in
+    /// the last pass.
+    #[cfg_attr(not(test), allow(dead_code))] // reason: read by the tests of that bound only
+    headers_laid: usize,
+    #[cfg_attr(not(test), allow(dead_code))] // reason: read by the tests of that bound only
+    headers_copied: usize,
 }
 
 /// Lays out the body of every section of `document` on pages, at most `max_pages` of
@@ -296,7 +304,7 @@ pub(crate) fn paginate(
         fonts,
         shaper,
         max_pages,
-        (MAX_FRAME_DRAWN, MAX_FRAME_LAID),
+        (MAX_FRAME_DRAWN, MAX_FRAME_LAID, tables::MAX_TABLE_REDRAWN),
         Vec::new,
     )?;
     Ok(Paginated {
@@ -321,7 +329,7 @@ pub(crate) fn paginate_into<S: PageSink>(
         fonts,
         shaper,
         max_pages,
-        (MAX_FRAME_DRAWN, MAX_FRAME_LAID),
+        (MAX_FRAME_DRAWN, MAX_FRAME_LAID, tables::MAX_TABLE_REDRAWN),
         sink,
     )
     .map(|laid| laid.sink)
@@ -335,7 +343,7 @@ fn paginate_with<S: PageSink>(
     fonts: &mut Fonts<'_>,
     shaper: &mut Shaper,
     max_pages: usize,
-    (max_frame_drawn, max_frame_laid): (usize, usize),
+    (max_frame_drawn, max_frame_laid, max_table_redrawn): (usize, usize, usize),
     mut sink: impl FnMut() -> S,
 ) -> Result<Laid<S>> {
     let flow = flow(document, fonts)?;
@@ -363,11 +371,14 @@ fn paginate_with<S: PageSink>(
             most_layouts: 0,
             frames_laid: 0,
             frames_walked: 0,
+            headers_laid: 0,
+            headers_copied: 0,
             cursor: 0.0,
             above: None,
             next_number: 1,
             leaders: LeaderBudget::default(),
             frame_budget: max_frame_drawn,
+            table_budget: max_table_redrawn,
             frame_laid_budget: max_frame_laid,
             totals: totals.clone(),
             frames: HashMap::new(),
@@ -395,6 +406,8 @@ fn paginate_with<S: PageSink>(
                 most_held: (pager.most_held, pager.most_layouts),
                 frames_laid: pager.frames_laid,
                 frames_walked: pager.frames_walked,
+                headers_laid: pager.headers_laid,
+                headers_copied: pager.headers_copied,
             });
         }
         totals = found;
@@ -530,7 +543,7 @@ fn paragraph_field_kinds(paragraph: &Paragraph) -> (bool, bool) {
 
 /// Whether `blocks` have a `PAGE` field, and whether they have a page count
 /// (`NUMPAGES`, `SECTIONPAGES`), at any depth of tables.
-fn field_kinds(blocks: &[Block], depth: usize) -> (bool, bool) {
+pub(crate) fn field_kinds(blocks: &[Block], depth: usize) -> (bool, bool) {
     let mut kinds = (false, false);
     for block in blocks {
         match block {
@@ -672,7 +685,41 @@ struct Checkpoint {
     at_top: bool,
 }
 
-/// Where a paragraph's lines, or a table's bands, went.
+/// A table's header rows as they are repeated on the pages it goes on to: whether they
+/// have a `PAGE` field, their layout, made once, and whether one of them was cut over
+/// pages, so that they take more than a page's body and are never repeated. Their height,
+/// the room they leave and what drawing them costs are checked before they are copied
+/// onto a page, so that header rows that are not repeated cost nothing more on the pages
+/// after.
+struct Repeats {
+    page_field: bool,
+    laid: Option<LaidHeader>,
+    cut: bool,
+}
+
+/// Header rows laid out: each band, the height of all with the border below the last,
+/// and what drawing them costs by [`drawn`].
+struct LaidHeader {
+    bands: Vec<Drawn>,
+    height: f64,
+    drawn: usize,
+}
+
+impl Repeats {
+    /// For the header rows `rows` of a table.
+    fn new(rows: &[Row]) -> Self {
+        Self {
+            page_field: rows
+                .iter()
+                .flat_map(|row| row.cells())
+                .any(|cell| field_kinds(cell.blocks(), 0).0),
+            laid: None,
+            cut: false,
+        }
+    }
+}
+
+/// Where a paragraph's lines, or a table's pieces, went.
 #[derive(Clone, Copy)]
 struct Placed {
     first_page: usize,
@@ -706,6 +753,9 @@ struct Pager<'d, 'f, 'b, S> {
     /// walked.
     frames_laid: usize,
     frames_walked: usize,
+    /// How many times header rows to repeat were laid out, and copied onto a page.
+    headers_laid: usize,
+    headers_copied: usize,
     /// The top of what comes next on the current page: under the last line placed,
     /// without the space below it.
     cursor: f64,
@@ -720,6 +770,11 @@ struct Pager<'d, 'f, 'b, S> {
     /// may still lay out by [`layout_cost`], what [`paginate_with`] is given at first.
     frame_budget: usize,
     frame_laid_budget: usize,
+    /// What table rows may still draw again on later pages, [`tables::MAX_TABLE_REDRAWN`]
+    /// at first: repeated header rows, and the shading and borders of cut rows. It is not
+    /// kept at checkpoints: nothing goes back past a table's first piece, before which a
+    /// table draws nothing again.
+    table_budget: usize,
     /// The page counts of the pass before, for `NUMPAGES` and `SECTIONPAGES`.
     totals: Totals,
     /// The last layout of each header and footer, by section, side and kind: kept while
@@ -742,7 +797,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         // may be placed again: from where a chain kept with the next paragraph starts while
         // the chain can still move, or from the item placed next. Those before are dropped
         // (`dropped` of them), their number of lines kept, as tables keep their number of
-        // bands.
+        // pieces.
         let mut layouts: Vec<Option<(ParagraphLayout, u32)>> = Vec::new();
         layouts.resize_with(flow.len(), || None);
         let mut dropped = 0;
@@ -792,8 +847,8 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             let (paragraph, label) = match &flowed.content {
                 Content::Paragraph(paragraph, label) => (*paragraph, label.as_ref()),
                 Content::Table(table, labels) => {
-                    // A table, band by band. It ends a chain kept with the next paragraph,
-                    // which moves to the next page, once, when the table's first band is
+                    // A table, piece by piece. It ends a chain kept with the next paragraph,
+                    // which moves to the next page, once, when the table's first piece is
                     // not on the page where the chain's last paragraph ends; and it is kept
                     // with nothing itself yet.
                     let boundary = broke_page || section_here;
@@ -809,7 +864,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                         )
                     });
                     let decided = ends.map(|(_, movable, previous)| (movable, previous));
-                    let (first_page, bands) = match (
+                    let (first_page, pieces) = match (
                         self.place_table((flow, index), (table, labels), decided)?,
                         ends,
                     ) {
@@ -832,7 +887,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                         (None, None) => (self.page_count().saturating_sub(1), 0),
                     };
                     if let Some(count) = line_counts.get_mut(index) {
-                        *count = bands;
+                        *count = pieces;
                     }
                     let here = Placed {
                         first_page,
@@ -1376,16 +1431,28 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 lines,
                 top: Pt(top),
                 height: Pt(height),
+                repeated: false,
             });
         }
         self.cursor = top + height;
         self.above = Some(index);
     }
 
-    /// Places table `index` of the flow, `flowed`, band by band: a band goes to the next
-    /// page when it does not fit, unless it starts the page, and it is laid out with the
-    /// field values of the page it goes on. Returns the page of its first band and its
-    /// number of bands.
+    /// Places table `index` of the flow, `flowed`, piece by piece: each band whole, or a
+    /// row cut between the lines of its cells where it does not fit (`Prepared::piece`),
+    /// each laid out with the field values of the page it starts on. Where the table goes
+    /// on to the next page, the page it leaves is closed by the line below its last piece
+    /// there, and the next starts with its header rows again, unless they alone take more
+    /// than the page's body (Word's renders of `E-table-row-split.docx`,
+    /// `E-table-header-repeat.docx` and `E-table-header-repeat-tall.docx`). A row that
+    /// stays on one page (`w:cantSplit`), and each header row, splits only on a page that
+    /// holds nothing else, or only header rows repeated where it takes more than a page
+    /// (a hypothesis until a Word render for the latter, as is that a page holding only
+    /// the table's own first header rows does not count so, and a row moves off it); the
+    /// header rows start the table on a page together, else on the next. Hypothesis until
+    /// a Word render: header rows that fit at the foot of a page where nothing of the row
+    /// after them does stay there, and are repeated at the top of the next. Returns the
+    /// page of its first piece and its number of pieces.
     fn place_table(
         &mut self,
         (flow, index): (&[Flowed<'d>], usize),
@@ -1415,73 +1482,143 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         };
         let prepared = Prepared::new(table, labels, width, &flowed.location, &mut context);
         let count = prepared.band_count();
+        let header = prepared.header_bands();
+        let mut repeats = Repeats::new(prepared.header_rows());
         let mut first_page = None;
-        for band in 0..count {
-            loop {
-                let empty = self.page_is_empty();
-                let body = self.body()?;
-                // The space below the paragraph above (design 8.6: a table has no
-                // spacing of its own).
-                let above = self
-                    .above
-                    .filter(|_| !empty && band == 0)
-                    .and_then(|above| flow.get(above))
-                    .and_then(Flowed::paragraph);
-                let gap = above.map_or(0.0, |above| {
-                    paragraph::space_after(self.document, above.props()).0
-                });
-                let values = self.field_values(flowed.section);
-                let mut measured = tables::Measured::new();
-                let mut context = Context {
-                    document: self.document,
-                    fonts: &mut *self.fonts,
-                    shaper: &mut *self.shaper,
-                    leaders: &mut self.leaders,
-                    values: Some(&values),
-                    measured: &mut measured,
+        let mut pieces = 0;
+        let mut band = 0;
+        let mut laid = None;
+        // The line below the table's last piece on the page, drawn when the next piece
+        // goes on to another page.
+        let mut closing = None;
+        // Whether the page holds nothing but the table's header rows repeated.
+        let mut repeated = false;
+        while band < count {
+            let empty = repeated || self.page_is_empty();
+            let body = self.body()?;
+            // The space below the paragraph above (design 8.6: a table has no
+            // spacing of its own).
+            let above = self
+                .above
+                .filter(|_| !empty && pieces == 0)
+                .and_then(|above| flow.get(above))
+                .and_then(Flowed::paragraph);
+            let gap = above.map_or(0.0, |above| {
+                paragraph::space_after(self.document, above.props()).0
+            });
+            let top = self.cursor + gap;
+            let room = body.bottom.0 - top;
+            let block = if pieces == 0 && header > 0 && !empty {
+                Some(self.lay_out_header(&prepared, &mut repeats, flowed.section))
+            } else {
+                None
+            };
+            let values = self.field_values(flowed.section);
+            let mut measured = tables::Measured::new();
+            let mut context = Context {
+                document: self.document,
+                fonts: &mut *self.fonts,
+                shaper: &mut *self.shaper,
+                leaders: &mut self.leaders,
+                values: Some(&values),
+                measured: &mut measured,
+            };
+            let keep = band < header || prepared.cant_split(band);
+            let piece = if block.is_some_and(|block| block > room + EPSILON) {
+                None
+            } else {
+                let current = laid.get_or_insert_with(|| prepared.lay_out(band, &mut context));
+                let budget = &mut self.table_budget;
+                prepared.piece(
+                    current,
+                    (Some(room), budget),
+                    (empty, empty || !keep),
+                    &mut context,
+                )
+            };
+            let Some(piece) = piece else {
+                let uncut = if prepared.ties_rows(band) {
+                    Some(
+                        "rows that a vertically merged cell ties together are not split \
+                         across pages",
+                    )
+                } else if prepared.wide(band) {
+                    Some(
+                        "table rows of more than 63 cells, more than Word holds, or next to one, \
+                         are not split across pages",
+                    )
+                } else {
+                    None
                 };
-                let drawn = prepared.band(band, &mut context);
-                let top = self.cursor + gap;
-                let fits = top + drawn.height.0 <= body.bottom.0 + EPSILON;
-                if fits || empty {
-                    if !fits {
-                        self.fonts.report_once(
-                            ReportKind::Overflow,
-                            &flowed.location,
-                            "table rows are taller than the body of their page".to_owned(),
-                        );
-                    }
-                    let here = self.page_count().saturating_sub(1);
-                    if band == 0 {
-                        if let Some((movable, previous)) = ends {
-                            if previous.is_some_and(|previous| previous != here) {
-                                if movable {
-                                    // The chain before the table moves; the run places it
-                                    // and the table again.
-                                    return Ok(None);
-                                }
-                                self.report_split_chain(&flowed.location);
-                            }
-                        }
-                        // Nothing goes back past the table's first band: the pages before
-                        // it go on.
-                        self.keep_from = usize::MAX;
-                        self.release()?;
-                    }
-                    let first = *first_page.get_or_insert(here);
-                    if here != first && tables::has_header_rows(table) {
-                        self.fonts.report_once(
-                            ReportKind::FeatureUnsupported,
-                            &flowed.location,
-                            "table header rows are not repeated on the pages their table \
-                             continues on"
-                                .to_owned(),
-                        );
-                    }
-                    self.put_band(index, band, drawn, top);
-                    break;
+                if let Some(note) = uncut.filter(|_| block.is_none() && !keep) {
+                    self.fonts.report_once(
+                        ReportKind::FeatureUnsupported,
+                        &flowed.location,
+                        note.to_owned(),
+                    );
                 }
+                // Laid out again with the field values of the next page, unless a piece
+                // of it is on this one.
+                if laid
+                    .as_ref()
+                    .is_some_and(|laid: &tables::LaidBand<'_>| !laid.started())
+                {
+                    laid = None;
+                }
+                self.close_table_page(closing.take());
                 self.new_page(flowed.section, &setup)?;
+                repeated = self.repeat_header(
+                    index,
+                    (&prepared, band, header),
+                    (&mut repeats, &mut laid),
+                    &mut pieces,
+                )?;
+                continue;
+            };
+            if piece.drawn.height.0 > room + EPSILON {
+                self.fonts.report_once(
+                    ReportKind::Overflow,
+                    &flowed.location,
+                    "table rows are taller than the body of their page".to_owned(),
+                );
+            }
+            let here = self.page_count().saturating_sub(1);
+            if pieces == 0 {
+                if let Some((movable, previous)) = ends {
+                    if previous.is_some_and(|previous| previous != here) {
+                        if movable {
+                            // The chain before the table moves; the run places it and the
+                            // table again.
+                            return Ok(None);
+                        }
+                        self.report_split_chain(&flowed.location);
+                    }
+                }
+                // Nothing goes back past the table's first piece: the pages before it go
+                // on.
+                self.keep_from = usize::MAX;
+                self.release()?;
+            }
+            first_page.get_or_insert(here);
+            self.put_band(index, pieces, piece.drawn, top, false);
+            pieces += 1;
+            repeated = false;
+            // A header row cut over pages, which happens only on a page of its own, takes
+            // more than a page's body.
+            repeats.cut |= band < header && !piece.done;
+            if piece.done {
+                closing = (band + 1 < count).then(|| prepared.closing(band, self.fonts));
+                band += 1;
+                laid = None;
+            } else {
+                closing = None;
+                self.new_page(flowed.section, &setup)?;
+                repeated = self.repeat_header(
+                    index,
+                    (&prepared, band, header),
+                    (&mut repeats, &mut laid),
+                    &mut pieces,
+                )?;
             }
         }
         if count == 0 {
@@ -1489,8 +1626,158 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         }
         Ok(Some((
             first_page.unwrap_or_else(|| self.page_count().saturating_sub(1)),
-            count,
+            pieces,
         )))
+    }
+
+    /// Draws `closing`, the line below a table's last piece on the page, under it.
+    fn close_table_page(&mut self, closing: Option<Drawn>) {
+        let (Some(closing), Some(page)) = (closing, self.pages.last_mut()) else {
+            return;
+        };
+        let mut items = closing.items;
+        tables::shift(&mut items, page.body.left.0, self.cursor);
+        page.items.extend(items);
+    }
+
+    /// Lays out the header rows of `prepared` with the field values of the current page
+    /// of section `section`, into `repeats`; returns their height.
+    fn lay_out_header(
+        &mut self,
+        prepared: &Prepared<'d, '_>,
+        repeats: &mut Repeats,
+        section: usize,
+    ) -> f64 {
+        let values = self.field_values(section);
+        let mut measured = tables::Measured::new();
+        let mut context = Context {
+            document: self.document,
+            fonts: &mut *self.fonts,
+            shaper: &mut *self.shaper,
+            leaders: &mut self.leaders,
+            values: Some(&values),
+            measured: &mut measured,
+        };
+        let (bands, height) = prepared.header(&mut context);
+        self.headers_laid += 1;
+        let drawn = bands
+            .iter()
+            .flat_map(|band| &band.items)
+            .map(drawn)
+            .fold(0, usize::saturating_add);
+        repeats.laid = Some(LaidHeader {
+            bands,
+            height,
+            drawn,
+        });
+        height
+    }
+
+    /// Puts the header bands `0..header` of `prepared`, table `index` of the flow, at
+    /// the top of the page it goes on to before band `band`, laid out in `laid` when it is
+    /// not yet, as its pieces from `pieces` on; returns whether it did. They are laid out
+    /// once, so that a `PAGE` field in them shows the number of the page they were laid
+    /// out for (reported), and drawn on every page within what table rows may draw again.
+    /// They are not repeated on a page they alone take more than, nor on one where they
+    /// leave no room for the least of the band after them (reported): a hypothesis until a
+    /// Word render, as such a page would hold them and a row running off it.
+    fn repeat_header(
+        &mut self,
+        index: usize,
+        (prepared, band, header): (&Prepared<'d, '_>, usize, usize),
+        (repeats, laid): (&mut Repeats, &mut Option<tables::LaidBand<'d>>),
+        pieces: &mut usize,
+    ) -> Result<bool> {
+        if header == 0 || band < header || repeats.cut {
+            return Ok(false);
+        }
+        let body = self.body()?;
+        let room = body.bottom.0 - body.top.0 + EPSILON;
+        let section = self.pages.last().map_or(0, |page| page.section);
+        if repeats.laid.is_none() {
+            self.lay_out_header(prepared, repeats, section);
+        }
+        let height = repeats.laid.as_ref().map_or(0.0, |laid| laid.height);
+        if height > room {
+            return Ok(false);
+        }
+        let values = self.field_values(section);
+        let mut measured = tables::Measured::new();
+        let mut context = Context {
+            document: self.document,
+            fonts: &mut *self.fonts,
+            shaper: &mut *self.shaper,
+            leaders: &mut self.leaders,
+            values: Some(&values),
+            measured: &mut measured,
+        };
+        let next = laid.get_or_insert_with(|| prepared.lay_out(band, &mut context));
+        // The border below them is the one above the band after them: counted once. A row
+        // that stays on one page, and fits a page alone, is kept whole: below the header
+        // rows, or on the page without them (a hypothesis until a Word render).
+        let above = height - prepared.header_below();
+        let whole = (prepared.cant_split(band) && !next.started())
+            .then(|| prepared.whole_height(next, &mut context))
+            .filter(|&whole| whole <= room);
+        let least = match whole {
+            Some(whole) => whole,
+            None => prepared.least(next, &mut context),
+        };
+        if above + least > room {
+            self.fonts.report_once(
+                ReportKind::FeatureUnsupported,
+                prepared.location(),
+                "table header rows are not repeated on a page where they leave no room for \
+                 the row after them"
+                    .to_owned(),
+            );
+            return Ok(false);
+        }
+        let Some(bands) = self.copy_header(repeats) else {
+            self.report_header_rows_left_out();
+            return Ok(false);
+        };
+        if repeats.page_field {
+            self.fonts.report_once(
+                ReportKind::FeatureUnsupported,
+                prepared.location(),
+                "a PAGE field in table header rows repeated on later pages shows the number \
+                 of the page they were first laid out for"
+                    .to_owned(),
+            );
+        }
+        for drawn in bands {
+            self.put_band(index, *pieces, drawn, self.cursor, true);
+            *pieces += 1;
+        }
+        Ok(true)
+    }
+
+    /// A copy of the header rows of `repeats` for a page, taken from what table rows may
+    /// still draw again; `None` past it.
+    fn copy_header(&mut self, repeats: &Repeats) -> Option<Vec<Drawn>> {
+        let laid = repeats.laid.as_ref()?;
+        if laid.drawn > self.table_budget {
+            self.table_budget = 0;
+            return None;
+        }
+        self.table_budget -= laid.drawn;
+        self.headers_copied += 1;
+        Some(laid.bands.clone())
+    }
+
+    /// Reports, once, that header rows are not repeated past what table rows may draw
+    /// again on later pages.
+    fn report_header_rows_left_out(&mut self) {
+        self.fonts.report_once(
+            ReportKind::Overflow,
+            &Location::default(),
+            format!(
+                "table header rows are not repeated past {} shapes and glyphs that table rows \
+                 draw again on later pages",
+                tables::MAX_TABLE_REDRAWN
+            ),
+        );
     }
 
     /// Reports, once, that a chain of paragraphs kept with the next one is split.
@@ -1504,9 +1791,9 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         );
     }
 
-    /// Puts band `band` of table `index`, `drawn`, on the current page with its top at
-    /// `top`.
-    fn put_band(&mut self, index: usize, band: usize, drawn: Drawn, top: f64) {
+    /// Puts piece `piece` of table `index`, `drawn`, on the current page with its top at
+    /// `top`; `repeated` when it is header rows repeated.
+    fn put_band(&mut self, index: usize, piece: usize, drawn: Drawn, top: f64, repeated: bool) {
         let Some(page) = self.pages.last_mut() else {
             return;
         };
@@ -1515,9 +1802,10 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         page.items.extend(items);
         page.fragments.push(Fragment {
             paragraph: index,
-            lines: band..band + 1,
+            lines: piece..piece + 1,
             top: Pt(top),
             height: drawn.height,
+            repeated,
         });
         self.cursor = top + drawn.height.0;
         self.above = Some(index);
@@ -2263,7 +2551,7 @@ mod tests {
     use super::*;
     use crate::ir::{
         BreakClear, Cell, HeaderFooterSet, Inline, LineSpacing, Margins, ParagraphProps, Row,
-        RunFonts, RunStyle, RunStyleId, Spacing, Table, VerticalMerge,
+        RowHeight, RunFonts, RunStyle, RunStyleId, Spacing, Table, VerticalMerge,
     };
     use crate::report::LayoutReport;
     use crate::testing::{book, minimal};
@@ -2338,7 +2626,7 @@ mod tests {
             &mut fonts,
             &mut shaper,
             1000,
-            (MAX_FRAME_DRAWN, MAX_FRAME_LAID),
+            (MAX_FRAME_DRAWN, MAX_FRAME_LAID, tables::MAX_TABLE_REDRAWN),
             Vec::new,
         )
         .expect("pages");
@@ -2398,7 +2686,7 @@ mod tests {
             )])
         });
         assert_eq!(held(&one_kept), ((1..=50).collect(), (2, 1)));
-        // A table of 400 rows of one line goes on its 50 pages the same way: its bands are
+        // A table of 400 rows of one line goes on its 50 pages the same way: its pieces are
         // placed like lines.
         let table = document(|style| {
             let row = || {
@@ -2443,13 +2731,14 @@ mod tests {
     /// first row a header row with `header`.
     fn table_of(style: RunStyleId, rows: usize, header: bool) -> Block {
         let row = |n: usize| {
-            Row::default()
-                .with_header(header && n == 0)
-                .with_cells(vec![Cell::default().with_blocks([lines(
-                    style,
-                    1,
-                    spacing(0.0, 0.0),
-                )])])
+            let header = header && n == 0;
+            let text = if header { "H" } else { "A" };
+            Row::default().with_header(header).with_cells(vec![
+                Cell::default().with_blocks([Paragraph::new(style)
+                    .with_props(spacing(0.0, 0.0))
+                    .with_inlines([Inline::text(text, style)])
+                    .into()]),
+            ])
         };
         Table::default()
             .with_grid([Pt(100.0)])
@@ -2478,15 +2767,18 @@ mod tests {
         let moved = pages(&moved);
         assert_eq!(moved[0].len(), 7);
         assert_eq!(moved[1], [(7, 0..1, 20.0), (8, 0..1, 40.0)]);
-        // A heading at the top of a page cannot move: the table's first row of eight lines
-        // goes to the next page without it, and the split is reported.
+        // A heading at the top of a page cannot move: the table's first row of eight lines,
+        // which stays on one page, goes to the next page without it, and the split is
+        // reported.
         let split = document(|style| {
             let cell = Cell::default().with_blocks([lines(style, 8, spacing(0.0, 0.0))]);
             one_section(vec![
                 lines(style, 1, spacing(0.0, 0.0).with_keep_next(true)),
                 Table::default()
                     .with_grid([Pt(100.0)])
-                    .with_rows(vec![Row::default().with_cells(vec![cell])])
+                    .with_rows(vec![
+                        Row::default().with_cant_split(true).with_cells(vec![cell]),
+                    ])
                     .into(),
             ])
         });
@@ -2501,20 +2793,1009 @@ mod tests {
     }
 
     #[test]
-    fn header_rows_that_are_not_repeated_are_reported() {
-        // A table with a header row that goes on to page 2, where Word repeats the header
-        // row: not done yet, and reported. One that ends on its first page, and one without
-        // header rows, report nothing.
-        let note = |rows: usize, header: bool| {
-            let document = document(|style| one_section(vec![table_of(style, rows, header)]));
-            let (_, report) = laid(&document, 100);
+    fn repeated_header_rows_are_laid_out_once_and_drawn_within_what_page_headers_may_draw() {
+        // Header rows are laid out once to be repeated, so that a `PAGE` field in them
+        // shows the number of the page they were laid out for, and that is reported.
+        // Twenty rows after a header row with a `PAGE` field: "1" on page 1, as the table
+        // starts there, then "2" on pages 2 and 3.
+        let numbered = |budgets: (usize, usize, usize)| {
+            let document = document(|style| {
+                let header = Row::default().with_header(true).with_cells(vec![
+                    Cell::default().with_blocks([Paragraph::new(style)
+                        .with_props(spacing(0.0, 0.0))
+                        .with_inlines([Inline::Field(crate::ir::Field::new(
+                            FieldKind::Page,
+                            style,
+                        ))])
+                        .into()]),
+                ]);
+                let mut rows = vec![header];
+                rows.extend((0..20).map(|_| row_of(style, &[1], false)));
+                one_section(vec![table_with(rows, 0.0).into()])
+            });
+            let book = book(vec![minimal()]);
+            let mut fonts = Fonts::new(&book);
+            let mut shaper = Shaper::new();
+            let laid = paginate_with(&document, &mut fonts, &mut shaper, 100, budgets, Vec::new)
+                .expect("pages");
+            let firsts: Vec<Option<String>> = laid
+                .sink
+                .iter()
+                .map(|page| {
+                    page.items.iter().find_map(|item| match item {
+                        DisplayItem::Glyphs(run) => {
+                            Some(run.clusters.iter().map(|c| c.text.as_str()).collect())
+                        }
+                        _ => None,
+                    })
+                })
+                .collect();
+            (firsts, messages(&fonts.into_report()))
+        };
+        let left_out = "table header rows are not repeated past";
+        let field = "a PAGE field in table header rows repeated";
+        let has = |report: &[String], start: &str| {
+            report.iter().any(|message| message.starts_with(start))
+        };
+        let shown = |texts: [&str; 3]| texts.map(|text| Some(text.to_owned())).to_vec();
+        let all = (MAX_FRAME_DRAWN, MAX_FRAME_LAID, tables::MAX_TABLE_REDRAWN);
+        let (firsts, report) = numbered(all);
+        assert_eq!(firsts, shown(["1", "2", "2"]));
+        assert!(has(&report, field) && !has(&report, left_out), "{report:?}");
+        // They draw within a budget of their own, not that of page headers and footers:
+        // with none for those, they are repeated all the same.
+        let (firsts, _) = numbered((0, MAX_FRAME_LAID, tables::MAX_TABLE_REDRAWN));
+        assert_eq!(firsts, shown(["1", "2", "2"]));
+        // Past what table rows may draw again, they are not repeated, and that is
+        // reported: with nothing to draw, not on page 2.
+        let (firsts, report) = numbered((MAX_FRAME_DRAWN, MAX_FRAME_LAID, 0));
+        assert_eq!(firsts, shown(["1", "A", "A"]));
+        assert!(has(&report, left_out), "{report:?}");
+    }
+
+    #[test]
+    fn header_rows_are_repeated_only_on_pages_where_they_leave_room() {
+        // Header rows are repeated on a page only where they leave room for the least of
+        // the row after them; on a page where they do not, they are left out, and that is
+        // reported. Each case: the pages' fragments and the copies of the header rows.
+        let laid = |rows: &dyn Fn(RunStyleId) -> Vec<Row>| {
+            let document = document(|style| one_section(vec![table_with(rows(style), 0.0).into()]));
+            let book = book(vec![minimal()]);
+            let mut fonts = Fonts::new(&book);
+            let mut shaper = Shaper::new();
+            let laid = paginate_with(
+                &document,
+                &mut fonts,
+                &mut shaper,
+                100,
+                (MAX_FRAME_DRAWN, MAX_FRAME_LAID, tables::MAX_TABLE_REDRAWN),
+                Vec::new,
+            )
+            .expect("pages");
+            let counts: Vec<usize> = laid.sink.iter().map(|page| page.fragments.len()).collect();
+            let noted = messages(&fonts.into_report())
+                .iter()
+                .any(|message| message.starts_with("table header rows are not repeated on a page"));
+            (counts, laid.headers_copied, noted)
+        };
+        // A header row of eight lines fills a page: not repeated above the ten rows of a
+        // line after it, eight on page 2 and two on page 3.
+        let full = laid(&|style| {
+            let mut rows = vec![row_of(style, &[8], false).with_header(true)];
+            rows.extend((0..10).map(|_| row_of(style, &[1], false)));
+            rows
+        });
+        assert_eq!(full, (vec![1, 8, 2], 0, true));
+        // A header row of a line, ten rows, a row of an exact height taller than a page,
+        // and twenty rows: the header row is left off the page of the tall row only, and
+        // comes back on the pages after it.
+        let back = laid(&|style| {
+            let mut rows = vec![row_of(style, &[1], false).with_header(true)];
+            rows.extend((0..10).map(|_| row_of(style, &[1], false)));
+            rows.push(row_of(style, &[1], false).with_height(RowHeight::Exact(Pt(300.0))));
+            rows.extend((0..20).map(|_| row_of(style, &[1], false)));
+            rows
+        });
+        assert_eq!(back, (vec![8, 4, 1, 8, 8, 7], 4, true));
+        // A row of ten lines cut below a header row of a line: the header row and seven
+        // lines on page 1, and again above the three lines left on page 2, which need the
+        // room of their first line only.
+        let cut = laid(&|style| {
+            vec![
+                row_of(style, &[1], false).with_header(true),
+                row_of(style, &[10], false),
+            ]
+        });
+        assert_eq!(cut, (vec![2, 2], 1, false));
+        // A row of seven lines, then one of ten not yet started on page 2: the header row
+        // is repeated above the first lines of each.
+        let unstarted = laid(&|style| {
+            vec![
+                row_of(style, &[1], false).with_header(true),
+                row_of(style, &[7], false),
+                row_of(style, &[10], false),
+            ]
+        });
+        assert_eq!(unstarted, (vec![2, 2, 2], 2, false));
+        // A paragraph kept on one page (`w:keepLines`) of twenty lines, taller than a
+        // page, is cut all the same on pages that hold nothing else, also below the header
+        // row repeated there: so the header row is repeated on each of them.
+        let kept = laid(&|style| {
+            let cell = Cell::default().with_blocks([lines(
+                style,
+                20,
+                spacing(0.0, 0.0)
+                    .with_widow_control(false)
+                    .with_keep_lines(true),
+            )]);
+            vec![
+                row_of(style, &[1], false).with_header(true),
+                Row::default().with_cells(vec![cell]),
+            ]
+        });
+        assert_eq!(kept, (vec![1, 2, 2, 2], 3, false));
+        // A row of two cells, one a line of 150 pt, the other five lines, after a page of
+        // a header row and seven rows: the header row is repeated on page 2 above the five
+        // lines, the tall line waiting for page 3, where it goes alone.
+        let tall_line = |style, height: f64| {
+            Paragraph::new(style)
+                .with_props(
+                    ParagraphProps::default()
+                        .with_spacing(Spacing::default().with_line(LineSpacing::Exact(Pt(height)))),
+                )
+                .with_inlines([Inline::text("A", style)])
+                .into()
+        };
+        let waiting = laid(&|style| {
+            let mut rows = vec![row_of(style, &[1], false).with_header(true)];
+            rows.extend((0..7).map(|_| row_of(style, &[1], false)));
+            rows.push(Row::default().with_cells(vec![
+                Cell::default().with_blocks([tall_line(style, 150.0)]),
+                Cell::default().with_blocks([lines(
+                    style,
+                    5,
+                    spacing(0.0, 0.0).with_widow_control(false),
+                )]),
+            ]));
+            rows
+        });
+        assert_eq!(waiting, (vec![8, 2, 1], 1, true));
+        // A header row of seven lines above a row of four: each page has room for the
+        // header row and one line, so the header row is repeated on each.
+        let one_line = laid(&|style| {
+            vec![
+                row_of(style, &[7], false).with_header(true),
+                row_of(style, &[4], false),
+            ]
+        });
+        assert_eq!(one_line, (vec![2, 2, 2, 2], 3, false));
+        // A cell of a line of 100 pt and then ten lines, below a header row of four lines:
+        // the tall line goes alone with three lines on page 2, and the header row comes
+        // back above the lines after it, measured from where the cell goes on.
+        let from_where = laid(&|style| {
+            vec![
+                row_of(style, &[4], false).with_header(true),
+                Row::default().with_cells(vec![Cell::default().with_blocks(vec![
+                    tall_line(style, 100.0),
+                    lines(style, 10, spacing(0.0, 0.0).with_widow_control(false)),
+                ])]),
+            ]
+        });
+        assert_eq!(from_where, (vec![1, 1, 2, 2], 2, true));
+        // A cell's margins count: a line with a top margin of 10 pt does not fit below a
+        // header row of seven lines, so the header row is left off.
+        let margins = laid(&|style| {
+            use crate::ir::CellMargins;
+
+            let cell = Cell::default()
+                .with_margins(Some(CellMargins::default().with_top(Pt(10.0))))
+                .with_blocks([lines(style, 1, spacing(0.0, 0.0))]);
+            vec![
+                row_of(style, &[7], false).with_header(true),
+                Row::default().with_cells(vec![cell]),
+            ]
+        });
+        assert_eq!(margins, (vec![1, 1], 0, true));
+        // Where no cell can end a page before its paragraph's end, the first line of each
+        // decides: a paragraph of three lines kept on one page, below a header row of
+        // seven lines, is cut a line a page below the header row repeated.
+        let kept_lines = |style, count| -> Block {
+            lines(
+                style,
+                count,
+                spacing(0.0, 0.0)
+                    .with_widow_control(false)
+                    .with_keep_lines(true),
+            )
+        };
+        let a_line = laid(&|style| {
+            vec![
+                row_of(style, &[7], false).with_header(true),
+                Row::default()
+                    .with_cells(vec![Cell::default().with_blocks([kept_lines(style, 3)])]),
+            ]
+        });
+        assert_eq!(a_line, (vec![1, 2, 2, 2], 3, false));
+        // Measured from where the cell goes on: a line of 100 pt, then ten lines kept on one
+        // page, below a header row of four lines. The tall line goes alone on page 2, and
+        // the header row comes back above the kept lines, four, four and two a page.
+        let goes_on = laid(&|style| {
+            vec![
+                row_of(style, &[4], false).with_header(true),
+                Row::default().with_cells(vec![
+                    Cell::default()
+                        .with_blocks(vec![tall_line(style, 100.0), kept_lines(style, 10)]),
+                ]),
+            ]
+        });
+        assert_eq!(goes_on, (vec![1, 1, 2, 2, 2], 3, true));
+        // A cell that waits takes its margins: a row of two cells, a line, and a line with
+        // margins of 11 pt above and below, after a page of a header row of seven lines and
+        // a row. Below the header row the second cell would run off, so the header row is
+        // left off page 2, which holds the row whole; without header rows, the row is not
+        // cut where that cell's margins do not fit, and goes whole to page 2.
+        let margined = |style| {
+            use crate::ir::CellMargins;
+
+            let wide = CellMargins::default()
+                .with_top(Pt(11.0))
+                .with_bottom(Pt(11.0));
+            Row::default().with_cells(vec![
+                Cell::default().with_blocks([lines(style, 1, spacing(0.0, 0.0))]),
+                Cell::default().with_margins(Some(wide)).with_blocks([lines(
+                    style,
+                    1,
+                    spacing(0.0, 0.0),
+                )]),
+            ])
+        };
+        let waits = laid(&|style| {
+            vec![
+                row_of(style, &[7], false).with_header(true),
+                row_of(style, &[1], false),
+                margined(style),
+            ]
+        });
+        assert_eq!(waits, (vec![2, 1], 0, true));
+        let no_header = laid(&|style| {
+            let mut rows: Vec<Row> = (0..7).map(|_| row_of(style, &[1], false)).collect();
+            rows.push(margined(style));
+            rows
+        });
+        assert_eq!(no_header, (vec![7, 1], 0, false));
+        // A row that stays on one page (`w:cantSplit`), of a line of 150 pt and five lines,
+        // fits a page alone but not below the header row: the header row is left off page 2,
+        // which holds the row whole.
+        let kept_whole = laid(&|style| {
+            let mut rows = vec![row_of(style, &[1], false).with_header(true)];
+            rows.extend((0..7).map(|_| row_of(style, &[1], false)));
+            rows.push(Row::default().with_cant_split(true).with_cells(vec![
+                Cell::default().with_blocks([tall_line(style, 150.0)]),
+                Cell::default().with_blocks([lines(style, 5, spacing(0.0, 0.0))]),
+            ]));
+            rows
+        });
+        assert_eq!(kept_whole, (vec![8, 1], 0, true));
+        // One taller than a page, of ten lines, is cut below the header row repeated: seven
+        // lines on page 2, three on page 3.
+        let kept_tall = laid(&|style| {
+            let mut rows = vec![row_of(style, &[1], false).with_header(true)];
+            rows.extend((0..7).map(|_| row_of(style, &[1], false)));
+            rows.push(row_of(style, &[10], false).with_cant_split(true));
+            rows
+        });
+        assert_eq!(kept_tall, (vec![8, 2, 2], 2, false));
+        // A cell that has ended still takes its margins on the pages its row goes on to: a
+        // line with margins of 50 pt above and below, beside thirty lines, after a page of
+        // a header row of seven lines and a row. The header row is left off every page of
+        // the row, as it and the ended cell's margins leave no room for a line.
+        let ended = laid(&|style| {
+            use crate::ir::CellMargins;
+
+            let wide = CellMargins::default()
+                .with_top(Pt(50.0))
+                .with_bottom(Pt(50.0));
+            vec![
+                row_of(style, &[7], false).with_header(true),
+                row_of(style, &[1], false),
+                Row::default().with_cells(vec![
+                    Cell::default().with_margins(Some(wide)).with_blocks([lines(
+                        style,
+                        1,
+                        spacing(0.0, 0.0),
+                    )]),
+                    Cell::default().with_blocks([lines(
+                        style,
+                        30,
+                        spacing(0.0, 0.0).with_widow_control(false),
+                    )]),
+                ]),
+            ]
+        });
+        assert_eq!(ended, (vec![2, 1, 1, 1, 1], 0, true));
+        // Each cell's first piece is measured from where it goes on, down to where a page
+        // may end there: two cells, a line of 100 pt then ten lines, and a line of 100 pt
+        // then one of 120 pt, below a header row of four lines.
+        let pieces = laid(&|style| {
+            vec![
+                row_of(style, &[4], false).with_header(true),
+                Row::default().with_cells(vec![
+                    Cell::default().with_blocks(vec![
+                        tall_line(style, 100.0),
+                        lines(style, 10, spacing(0.0, 0.0).with_widow_control(false)),
+                    ]),
+                    Cell::default()
+                        .with_blocks(vec![tall_line(style, 100.0), tall_line(style, 120.0)]),
+                ]),
+            ]
+        });
+        assert_eq!(pieces, (vec![1, 1, 2, 2, 1], 2, true));
+        // Three lines kept together beside a line of 30 pt, below a header row of seven
+        // lines: neither cell's first piece fits below it, so the row goes whole to page 2.
+        let together = laid(&|style| {
+            vec![
+                row_of(style, &[7], false).with_header(true),
+                Row::default().with_cells(vec![
+                    Cell::default().with_blocks([kept_lines(style, 3)]),
+                    Cell::default().with_blocks([tall_line(style, 30.0)]),
+                ]),
+            ]
+        });
+        assert_eq!(together, (vec![1, 1], 0, true));
+    }
+
+    #[test]
+    fn a_least_height_is_filled_as_far_as_the_page_leaves_room() {
+        // A row of a line at least 150 pt high after a page of a header row and seven rows:
+        // on page 2 below the header row it is 140 pt high, all the room left; alone on a
+        // page, a row at least 200 pt high is 160 pt, the page's body. Neither runs off.
+        let heights = |rows: &dyn Fn(RunStyleId) -> Vec<Row>, border: f64| {
+            let document =
+                document(|style| one_section(vec![table_with(rows(style), border).into()]));
+            let (on_pages, report) = laid(&document, 100);
+            let heights: Vec<Vec<f64>> = on_pages
+                .expect("pages")
+                .pages
+                .iter()
+                .map(|page| page.fragments.iter().map(|f| f.height.0).collect())
+                .collect();
+            let off = messages(&report)
+                .iter()
+                .any(|message| message.starts_with("table rows are taller than the body"));
+            (heights, off)
+        };
+        let least = |style, height: f64| {
+            row_of(style, &[1], false).with_height(RowHeight::AtLeast(Pt(height)))
+        };
+        let (pages, off) = heights(
+            &|style| {
+                let mut rows = vec![row_of(style, &[1], false).with_header(true)];
+                rows.extend((0..7).map(|_| row_of(style, &[1], false)));
+                rows.push(least(style, 150.0));
+                rows.extend((0..3).map(|_| row_of(style, &[1], false)));
+                rows
+            },
+            0.0,
+        );
+        assert_eq!(pages.get(1), Some(&vec![20.0, 140.0]));
+        assert!(!off);
+        let (pages, off) = heights(&|style| vec![least(style, 200.0)], 0.0);
+        assert_eq!((pages, off), (vec![vec![160.0]], false));
+        // With 2 pt borders, the filled row leaves room for the line that closes the page:
+        // the header row 22 pt, the row 136 pt with its border above, the closing 2 pt.
+        let (pages, _) = heights(
+            &|style| {
+                let mut rows = vec![row_of(style, &[1], false).with_header(true)];
+                rows.extend((0..6).map(|_| row_of(style, &[1], false)));
+                rows.push(least(style, 150.0));
+                rows.extend((0..3).map(|_| row_of(style, &[1], false)));
+                rows
+            },
+            2.0,
+        );
+        assert_eq!(pages.get(1), Some(&vec![22.0, 136.0]));
+        // On a page that holds something else, the row is not filled: it moves.
+        let after_line = document(|style| {
+            one_section(vec![
+                lines(style, 1, spacing(0.0, 0.0)),
+                table_with(vec![least(style, 150.0)], 0.0).into(),
+            ])
+        });
+        assert_eq!(pages_of(&after_line), [vec![20.0], vec![150.0]]);
+        // The border between header rows and the row after them is counted once: with
+        // 2 pt borders, a header row (22 pt) and a row of a line of 133 pt (137 pt with its
+        // borders) fill page 2 to 159 pt.
+        let (pages, _) = heights(
+            &|style| {
+                let tall = Row::default().with_cells(vec![
+                    Cell::default().with_blocks([Paragraph::new(style)
+                        .with_props(ParagraphProps::default().with_spacing(
+                            Spacing::default().with_line(LineSpacing::Exact(Pt(133.0))),
+                        ))
+                        .with_inlines([Inline::text("A", style)])
+                        .into()]),
+                ]);
+                let mut rows = vec![row_of(style, &[1], false).with_header(true)];
+                rows.extend((0..6).map(|_| row_of(style, &[1], false)));
+                rows.push(tall);
+                rows
+            },
+            2.0,
+        );
+        assert_eq!(pages.get(1).map(Vec::len), Some(2));
+        // A line of 135 pt does not fit there: the header row is left off page 2.
+        let (pages, _) = heights(
+            &|style| {
+                let tall = Row::default().with_cells(vec![
+                    Cell::default().with_blocks([Paragraph::new(style)
+                        .with_props(ParagraphProps::default().with_spacing(
+                            Spacing::default().with_line(LineSpacing::Exact(Pt(135.0))),
+                        ))
+                        .with_inlines([Inline::text("A", style)])
+                        .into()]),
+                ]);
+                let mut rows = vec![row_of(style, &[1], false).with_header(true)];
+                rows.extend((0..6).map(|_| row_of(style, &[1], false)));
+                rows.push(tall);
+                rows
+            },
+            2.0,
+        );
+        assert_eq!(pages.get(1).map(Vec::len), Some(1));
+        // The border below the header rows is the line between them and the next row, not
+        // the table's top border: with a top border of 6 pt and others of 2 pt, a header row
+        // (28 pt with the line below it) and a row of a line of 132 pt (136 pt) do not fit.
+        let top_border = document(|style| {
+            use crate::ir::{Border, BorderSide, TableBorders, TableLayout, TableProps};
+
+            let line = |width: f64| BorderSide::Line(Border::default().with_width(Pt(width)));
+            let borders = TableBorders::default()
+                .with_top(line(6.0))
+                .with_start(line(2.0))
+                .with_bottom(line(2.0))
+                .with_end(line(2.0))
+                .with_inside_horizontal(line(2.0))
+                .with_inside_vertical(line(2.0));
+            let tall =
+                Row::default().with_cells(vec![
+                    Cell::default().with_blocks([Paragraph::new(style)
+                        .with_props(ParagraphProps::default().with_spacing(
+                            Spacing::default().with_line(LineSpacing::Exact(Pt(132.0))),
+                        ))
+                        .with_inlines([Inline::text("A", style)])
+                        .into()]),
+                ]);
+            let mut rows = vec![row_of(style, &[1], false).with_header(true)];
+            rows.extend((0..6).map(|_| row_of(style, &[1], false)));
+            rows.push(tall);
+            let table = Table::default()
+                .with_grid([Pt(100.0)])
+                .with_props(
+                    TableProps::default()
+                        .with_layout(TableLayout::Fixed)
+                        .with_borders(borders),
+                )
+                .with_rows(rows);
+            one_section(vec![table.into()])
+        });
+        assert_eq!(pages_of(&top_border).get(1).map(Vec::len), Some(1));
+    }
+
+    /// The heights of the fragments of each page of `document`.
+    fn pages_of(document: &Document) -> Vec<Vec<f64>> {
+        let (on_pages, _) = laid(document, 100);
+        on_pages
+            .expect("pages")
+            .pages
+            .iter()
+            .map(|page| page.fragments.iter().map(|f| f.height.0).collect())
+            .collect()
+    }
+
+    #[test]
+    fn a_cut_row_draws_its_borders_again_within_what_table_rows_may_draw_again() {
+        // A row cut over pages draws its borders again on every page, within what table
+        // rows may draw again on later pages; past it, its later pieces are drawn without
+        // them, and that is reported. A row of twenty lines with 2 pt borders.
+        let drawn = |budget: usize| {
+            let document = document(|style| {
+                one_section(vec![
+                    table_with(vec![row_of(style, &[20], false)], 2.0).into(),
+                ])
+            });
+            let book = book(vec![minimal()]);
+            let mut fonts = Fonts::new(&book);
+            let mut shaper = Shaper::new();
+            let laid = paginate_with(
+                &document,
+                &mut fonts,
+                &mut shaper,
+                100,
+                (MAX_FRAME_DRAWN, MAX_FRAME_LAID, budget),
+                Vec::new,
+            )
+            .expect("pages");
+            let lines: Vec<usize> = laid
+                .sink
+                .iter()
+                .map(|page| {
+                    page.items
+                        .iter()
+                        .filter(|item| matches!(item, DisplayItem::Line(_)))
+                        .count()
+                })
+                .collect();
+            let noted = messages(&fonts.into_report()).iter().any(|message| {
+                message.starts_with("the shading and borders of table rows cut over pages")
+            });
+            (lines, noted)
+        };
+        // Each piece: the border above, the line below, and the two vertical borders.
+        assert_eq!(drawn(tables::MAX_TABLE_REDRAWN), (vec![4, 4, 4], false));
+        // With room for one page's borders again: page 2 has them, page 3 not.
+        assert_eq!(drawn(4), (vec![4, 4, 0], true));
+    }
+
+    #[test]
+    fn a_nested_table_is_cut_between_its_rows_inside_the_row_it_is_in() {
+        // Word's render of `E-table-row-split-nested.docx`: the outer row is cut where its
+        // content is, the nested table between its rows; each level is closed by a border
+        // on page 1, the outer outermost, and opened by one on page 2. The empty paragraph
+        // after the nested table, which ends the cell, takes no room. 2 pt borders, a line
+        // and a nested table of ten rows of a line: the line and six rows on page 1.
+        let document = document(|style| {
+            let nested = table_with((0..10).map(|_| row_of(style, &[1], false)).collect(), 2.0);
+            let cell = Cell::default().with_blocks(vec![
+                lines(style, 1, spacing(0.0, 0.0)),
+                nested.into(),
+                Paragraph::new(style).with_props(spacing(0.0, 0.0)).into(),
+            ]);
+            one_section(vec![
+                table_with(vec![Row::default().with_cells(vec![cell])], 2.0).into(),
+            ])
+        });
+        let (on_pages, report) = laid(&document, 100);
+        let on_pages = on_pages.expect("pages");
+        let horizontal = |page: &Page| -> Vec<f64> {
+            let mut lines: Vec<f64> = page
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    DisplayItem::Line(line) if line.from.y == line.to.y => Some(line.from.y.0),
+                    _ => None,
+                })
+                .collect();
+            lines.sort_by(f64::total_cmp);
+            lines
+        };
+        assert_eq!(on_pages.pages.len(), 2);
+        assert_eq!(
+            horizontal(&on_pages.pages[0]),
+            [21.0, 43.0, 65.0, 87.0, 109.0, 131.0, 153.0, 175.0, 177.0]
+        );
+        assert_eq!(baselines(&on_pages.pages[0], 1000.0).0.len(), 7);
+        assert_eq!(
+            horizontal(&on_pages.pages[1]),
+            [21.0, 23.0, 45.0, 67.0, 89.0, 111.0, 113.0]
+        );
+        assert!(messages(&report).is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn what_is_not_cut_as_word_cuts_it_is_reported() {
+        // Rows that a vertically merged cell of two lines ties together go to the next page
+        // whole.
+        let merged = document(|style| {
+            let cell = |merge, count| {
+                Cell::default()
+                    .with_vertical_merge(merge)
+                    .with_blocks([lines(style, count, spacing(0.0, 0.0))])
+            };
+            let rows = vec![
+                Row::default().with_cells(vec![cell(VerticalMerge::Restart, 2)]),
+                Row::default().with_cells(vec![cell(VerticalMerge::Continue, 0)]),
+            ];
+            let mut blocks: Vec<Block> =
+                (0..7).map(|_| lines(style, 1, spacing(0.0, 0.0))).collect();
+            blocks.push(table_with(rows, 0.0).into());
+            blocks.push(table_with(vec![row_of(style, &[1], false)], 0.0).into());
+            one_section(blocks)
+        });
+        let (_, report) = laid(&merged, 100);
+        assert!(
             messages(&report)
                 .iter()
-                .any(|message| message.starts_with("table header rows are not repeated"))
+                .any(|message| message.starts_with("rows that a vertically merged cell ties")),
+            "{report:?}"
+        );
+        // A nested table with a header row, cut over two pages, does not repeat it.
+        let nested = document(|style| {
+            let mut rows = vec![row_of(style, &[1], false).with_header(true)];
+            rows.extend((0..10).map(|_| row_of(style, &[1], false)));
+            let cell = Cell::default().with_blocks(vec![
+                table_with(rows, 0.0).into(),
+                Paragraph::new(style).into(),
+            ]);
+            one_section(vec![
+                table_with(vec![Row::default().with_cells(vec![cell])], 0.0).into(),
+            ])
+        });
+        let (on_pages, report) = laid(&nested, 100);
+        assert_eq!(on_pages.expect("pages").pages.len(), 2);
+        assert!(
+            messages(&report)
+                .iter()
+                .any(|message| message.starts_with("header rows of a table in a table cell")),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn rows_of_an_exact_height_or_of_more_cells_than_word_holds_move_whole() {
+        // A row of an exact height of three lines does not fit in the two lines left after
+        // six: it goes to page 2 whole.
+        let exact = document(|style| {
+            let mut blocks: Vec<Block> =
+                (0..6).map(|_| lines(style, 1, spacing(0.0, 0.0))).collect();
+            let row = row_of(style, &[3], false).with_height(RowHeight::Exact(Pt(60.0)));
+            blocks.push(table_with(vec![row], 0.0).into());
+            one_section(blocks)
+        });
+        assert_eq!(pages(&exact)[1], [(6, 0..1, 20.0)]);
+        // A row is cut with 63 cells, Word's most; one of 64 goes to page 2 whole, and
+        // that is reported, since it would draw its cells again on every page.
+        let wide = |cells: usize| {
+            let document = document(|style| {
+                let mut blocks: Vec<Block> =
+                    (0..6).map(|_| lines(style, 1, spacing(0.0, 0.0))).collect();
+                let row = row_of(style, &vec![3; cells], false);
+                blocks.push(table_with(vec![row], 0.0).into());
+                one_section(blocks)
+            });
+            let (on_pages, report) = laid(&document, 100);
+            let first = on_pages.expect("pages").pages[0].fragments.len();
+            let noted = messages(&report)
+                .iter()
+                .any(|message| message.starts_with("table rows of more than 63 cells"));
+            (first, noted)
         };
-        assert!(note(12, true));
-        assert!(!note(4, true));
-        assert!(!note(12, false));
+        assert_eq!(wide(63), (7, false));
+        assert_eq!(wide(64), (6, true));
+        // Nor is a row of one cell under a row whose cells alternate a bottom border and
+        // none, when the line between them has more segments than two rows of Word's make
+        // (127): 300 cells give 150; 63 give 32, and the row is cut.
+        let beside = |cells: usize| {
+            use crate::ir::{Border, BorderSide, CellBorders};
+
+            let document = document(|style| {
+                let mut blocks: Vec<Block> =
+                    (0..5).map(|_| lines(style, 1, spacing(0.0, 0.0))).collect();
+                let line = BorderSide::Line(Border::default().with_width(Pt(1.0)));
+                let above = Row::default().with_cells(
+                    (0..cells)
+                        .map(|index| {
+                            let bottom = if index % 2 == 0 {
+                                line
+                            } else {
+                                BorderSide::None
+                            };
+                            Cell::default()
+                                .with_borders(CellBorders::default().with_bottom(bottom))
+                                .with_blocks([lines(style, 1, spacing(0.0, 0.0))])
+                        })
+                        .collect::<Vec<_>>(),
+                );
+                let rows = vec![above, row_of(style, &[3], false)];
+                blocks.push(table_with(rows, 0.0).into());
+                one_section(blocks)
+            });
+            let (on_pages, report) = laid(&document, 100);
+            let first = on_pages.expect("pages").pages[0].fragments.len();
+            let noted = messages(&report)
+                .iter()
+                .any(|message| message.starts_with("table rows of more than 63 cells"));
+            (first, noted)
+        };
+        assert_eq!(beside(63), (7, false));
+        assert_eq!(beside(300), (6, true));
+        // The same with the row of many cells below the row of one cell, whose top borders
+        // alternate.
+        let below = |cells: usize| {
+            use crate::ir::{Border, BorderSide, CellBorders};
+
+            let document = document(|style| {
+                let mut blocks: Vec<Block> =
+                    (0..6).map(|_| lines(style, 1, spacing(0.0, 0.0))).collect();
+                let line = BorderSide::Line(Border::default().with_width(Pt(1.0)));
+                let after = Row::default().with_cells(
+                    (0..cells)
+                        .map(|index| {
+                            let top = if index % 2 == 0 {
+                                line
+                            } else {
+                                BorderSide::None
+                            };
+                            Cell::default()
+                                .with_borders(CellBorders::default().with_top(top))
+                                .with_blocks([lines(style, 1, spacing(0.0, 0.0))])
+                        })
+                        .collect::<Vec<_>>(),
+                );
+                let rows = vec![row_of(style, &[3], false), after];
+                blocks.push(table_with(rows, 0.0).into());
+                one_section(blocks)
+            });
+            let (on_pages, report) = laid(&document, 100);
+            let first = on_pages.expect("pages").pages[0].fragments.len();
+            let noted = messages(&report)
+                .iter()
+                .any(|message| message.starts_with("table rows of more than 63 cells"));
+            (first, noted)
+        };
+        assert_eq!(below(63), (7, false));
+        assert_eq!(below(300), (6, true));
+    }
+
+    #[test]
+    fn a_cell_keeps_lines_together_as_the_body_does_and_moved_rows_show_their_page() {
+        // A paragraph kept on one page (`w:keepLines`) is not cut in a cell: five lines
+        // after six go to page 2 whole.
+        let kept = document(|style| {
+            let mut blocks: Vec<Block> =
+                (0..6).map(|_| lines(style, 1, spacing(0.0, 0.0))).collect();
+            let cell = Cell::default().with_blocks([lines(
+                style,
+                5,
+                spacing(0.0, 0.0)
+                    .with_widow_control(false)
+                    .with_keep_lines(true),
+            )]);
+            let row = Row::default().with_cells(vec![cell]);
+            blocks.push(table_with(vec![row], 0.0).into());
+            one_section(blocks)
+        });
+        assert_eq!(pages(&kept)[1], [(6, 0..1, 20.0)]);
+        // A row that goes to the next page whole is laid out with that page's field values:
+        // a `PAGE` field after seven lines shows "2".
+        let numbered = |cut: bool| {
+            let document = document(|style| {
+                let mut blocks: Vec<Block> =
+                    (0..7).map(|_| lines(style, 1, spacing(0.0, 0.0))).collect();
+                let field = Paragraph::new(style)
+                    .with_props(spacing(0.0, 0.0))
+                    .with_inlines([Inline::Field(crate::ir::Field::new(FieldKind::Page, style))])
+                    .into();
+                // Cut: two lines first, of which one fits on page 1, the field on page 2.
+                let count = if cut { 2 } else { 1 };
+                let cell = Cell::default().with_blocks(vec![
+                    lines(style, count, spacing(0.0, 0.0).with_widow_control(false)),
+                    field,
+                ]);
+                let row = Row::default().with_cant_split(!cut).with_cells(vec![cell]);
+                blocks.push(table_with(vec![row], 0.0).into());
+                one_section(blocks)
+            });
+            let (on_pages, report) = laid(&document, 100);
+            let texts: Vec<String> = on_pages.expect("pages").pages[1]
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    DisplayItem::Glyphs(run) => {
+                        Some(run.clusters.iter().map(|c| c.text.as_str()).collect())
+                    }
+                    _ => None,
+                })
+                .collect();
+            let noted = messages(&report)
+                .iter()
+                .any(|message| message.starts_with("a PAGE field in a table row cut"));
+            (texts.last().cloned(), noted)
+        };
+        assert_eq!(numbered(false), (Some("2".to_owned()), false));
+        // A row cut over pages keeps the values of the page it starts on: reported.
+        assert_eq!(numbered(true), (Some("1".to_owned()), true));
+    }
+
+    #[test]
+    fn lines_kept_together_that_take_more_than_a_page_fill_the_pages_they_go_on() {
+        // A paragraph kept on one page (`w:keepLines`) of twenty lines cannot be: on the
+        // pages it goes on to it takes as many lines as fit, eight, then four, beside a
+        // cell of three lines that page 1 takes.
+        let document = document(|style| {
+            let kept = Cell::default().with_blocks([lines(
+                style,
+                20,
+                spacing(0.0, 0.0)
+                    .with_widow_control(false)
+                    .with_keep_lines(true),
+            )]);
+            let short = Cell::default().with_blocks([lines(style, 3, spacing(0.0, 0.0))]);
+            let row = Row::default().with_cells(vec![kept, short]);
+            one_section(vec![table_with(vec![row], 0.0).into()])
+        });
+        let (on_pages, _) = laid(&document, 100);
+        let per_page: Vec<usize> = on_pages
+            .expect("pages")
+            .pages
+            .iter()
+            .map(|page| baselines(page, 120.0).0.len())
+            .collect();
+        assert_eq!(per_page, [0, 8, 8, 4]);
+    }
+
+    #[test]
+    fn lines_kept_together_beside_a_long_cell_are_not_walked_on_the_pages_they_wait() {
+        // A paragraph kept on one page (`w:keepLines`), taller than a page, waits in its
+        // cell while the cell beside it goes on over 50 pages: a page that cannot end
+        // among its lines tries one end of it, not each of the 3200 lines that would fit.
+        // Four such cells and a cell of 400 lines: a few ends a page, not thousands.
+        let document = document(|style| {
+            let tiny = ParagraphProps::default()
+                .with_widow_control(false)
+                .with_keep_lines(true)
+                .with_spacing(Spacing::default().with_line(LineSpacing::Exact(Pt(0.05))));
+            let kept = || Cell::default().with_blocks([lines(style, 4000, tiny.clone())]);
+            let long = Cell::default().with_blocks(
+                (0..400)
+                    .map(|_| lines(style, 1, spacing(0.0, 0.0)))
+                    .collect::<Vec<_>>(),
+            );
+            let row = Row::default().with_cells(vec![kept(), kept(), kept(), kept(), long]);
+            one_section(vec![table_with(vec![row], 0.0).into()])
+        });
+        tables::FIT_TRIES.with(|tries| tries.set(0));
+        let (on_pages, _) = laid(&document, 1000);
+        let pages = on_pages.expect("pages").pages.len();
+        let tries = tables::FIT_TRIES.with(std::cell::Cell::get);
+        assert!(pages >= 50, "{pages} pages");
+        assert!(
+            tries < 10 * (pages + 400),
+            "{tries} ends tried on {pages} pages"
+        );
+    }
+
+    #[test]
+    fn header_rows_tied_to_a_body_row_are_not_repeated() {
+        // A header row merged vertically with the row below, which is no header row, makes
+        // a band that is not all header rows: Word repeats only header rows, so nothing is
+        // repeated on page 2. The merged cell's line, then ten rows: eight on page 1, three
+        // on page 2.
+        let document = document(|style| {
+            let cell = |merge| {
+                Cell::default()
+                    .with_vertical_merge(merge)
+                    .with_blocks([lines(style, 1, spacing(0.0, 0.0))])
+            };
+            let mut rows = vec![
+                Row::default()
+                    .with_header(true)
+                    .with_cells(vec![cell(VerticalMerge::Restart)]),
+                Row::default().with_cells(vec![cell(VerticalMerge::Continue)]),
+            ];
+            rows.extend((0..10).map(|_| row_of(style, &[1], false)));
+            one_section(vec![table_with(rows, 0.0).into()])
+        });
+        let counts: Vec<usize> = pages(&document).iter().map(Vec::len).collect();
+        assert_eq!(counts, [8, 3]);
+    }
+
+    #[test]
+    fn header_rows_that_are_not_repeated_cost_nothing_on_the_pages_after() {
+        // Header rows are laid out to be repeated once, however many pages they are
+        // repeated on, and copied onto each of those pages only. Header rows too tall for
+        // a page are not copied, nor laid out again for every page, even with a `PAGE`
+        // field: once one of them was cut over pages they are not laid out at all, and
+        // otherwise once. Each case: the header rows, then 40 rows of a line.
+        let repeated = |header: &dyn Fn(RunStyleId) -> Vec<Row>, after_line: bool| {
+            let document = document(|style| {
+                let mut rows = header(style);
+                rows.extend((0..40).map(|_| row_of(style, &[1], false)));
+                let mut blocks = Vec::new();
+                if after_line {
+                    blocks.push(lines(style, 1, spacing(0.0, 0.0)));
+                }
+                blocks.push(table_with(rows, 0.0).into());
+                one_section(blocks)
+            });
+            let book = book(vec![minimal()]);
+            let mut fonts = Fonts::new(&book);
+            let mut shaper = Shaper::new();
+            let laid = paginate_with(
+                &document,
+                &mut fonts,
+                &mut shaper,
+                100,
+                (MAX_FRAME_DRAWN, MAX_FRAME_LAID, tables::MAX_TABLE_REDRAWN),
+                Vec::new,
+            )
+            .expect("pages");
+            (laid.sink.len(), laid.headers_laid, laid.headers_copied)
+        };
+        let header = |count: usize| {
+            move |style: RunStyleId| vec![row_of(style, &[count], false).with_header(true)]
+        };
+        // A header row of a line, repeated on five pages.
+        assert_eq!(repeated(&header(1), false), (6, 1, 5));
+        // Laid out once more for the table's start below a line, whether its rows start
+        // the table together: that layout is the one repeated.
+        assert_eq!(repeated(&header(1), true), (6, 1, 5));
+        // A header row of ten lines, cut over pages one and two.
+        assert_eq!(repeated(&header(10), false), (7, 0, 0));
+        // Two header rows of five lines, each kept whole, ten lines together: never
+        // repeated, laid out once to know, with or without a `PAGE` field.
+        let two = |field: bool| {
+            move |style: RunStyleId| {
+                let mut blocks = vec![lines(style, 5, spacing(0.0, 0.0))];
+                if field {
+                    blocks = vec![
+                        lines(style, 4, spacing(0.0, 0.0)),
+                        Paragraph::new(style)
+                            .with_props(spacing(0.0, 0.0))
+                            .with_inlines([Inline::Field(crate::ir::Field::new(
+                                FieldKind::Page,
+                                style,
+                            ))])
+                            .into(),
+                    ];
+                }
+                (0..2)
+                    .map(|_| {
+                        Row::default()
+                            .with_header(true)
+                            .with_cells(vec![Cell::default().with_blocks(blocks.clone())])
+                    })
+                    .collect()
+            }
+        };
+        assert_eq!(repeated(&two(false), false), (7, 1, 0));
+        assert_eq!(repeated(&two(true), false), (7, 1, 0));
+    }
+
+    #[test]
+    fn header_rows_start_every_page_their_table_goes_on_to() {
+        // Word's render of `E-table-header-repeat.docx`: the header rows are repeated at
+        // the top of the next page. Twelve rows of a line, the first a header row: the
+        // header and seven rows on page 1, the header again and the last four on page 2.
+        let repeated = document(|style| one_section(vec![table_of(style, 12, true)]));
+        let pieces: Vec<Vec<(Range<usize>, f64)>> = pages(&repeated)
+            .into_iter()
+            .map(|page| {
+                page.into_iter()
+                    .map(|(_, lines, top)| (lines, top))
+                    .collect()
+            })
+            .collect();
+        let tops = |from: usize, count: usize| -> Vec<(Range<usize>, f64)> {
+            (0..count)
+                .map(|n| (from + n..from + n + 1, 20.0 + 20.0 * n as f64))
+                .collect()
+        };
+        assert_eq!(pieces, [tops(0, 8), tops(8, 5)]);
+        let (on_pages, _) = laid(&repeated, 100);
+        let first = on_pages.expect("pages").pages[1]
+            .items
+            .iter()
+            .find_map(|item| match item {
+                DisplayItem::Glyphs(run) => Some(run.clusters.first()?.text.clone()),
+                _ => None,
+            });
+        assert_eq!(first.as_deref(), Some("H"));
+        // Word's render of `E-table-header-repeat-tall.docx`: header rows that alone take
+        // more than a page are not repeated, and they start the table on a page together,
+        // or on the next, each kept whole. Two header rows of five lines after a line:
+        // page 1 holds the line only, page 2 the first header row, page 3 the second and
+        // three rows, page 4 the last eight, no header row again.
+        let tall = document(|style| {
+            let header = |count| row_of(style, &[count], false).with_header(true);
+            let mut rows = vec![header(5), header(5)];
+            rows.extend((0..11).map(|_| row_of(style, &[1], false)));
+            one_section(vec![
+                lines(style, 1, spacing(0.0, 0.0)),
+                table_with(rows, 0.0).into(),
+            ])
+        });
+        let counts: Vec<usize> = pages(&tall).iter().map(Vec::len).collect();
+        assert_eq!(counts, [1, 1, 4, 8]);
     }
 
     #[test]
@@ -3193,7 +4474,7 @@ mod tests {
             &mut fonts,
             &mut shaper,
             100,
-            (4, MAX_FRAME_LAID),
+            (4, MAX_FRAME_LAID, tables::MAX_TABLE_REDRAWN),
             Vec::new,
         )
         .expect("pages");
@@ -3245,7 +4526,7 @@ mod tests {
             &mut fonts,
             &mut shaper,
             100,
-            (3, MAX_FRAME_LAID),
+            (3, MAX_FRAME_LAID, tables::MAX_TABLE_REDRAWN),
             Vec::new,
         )
         .expect("pages");
@@ -3851,38 +5132,140 @@ mod tests {
         assert_eq!(pages(&document)[1], [(3, 0..1, 20.0)]);
     }
 
-    #[test]
-    fn a_table_row_that_does_not_fit_goes_to_the_next_page_whole() {
-        // Rows are not split yet (plan PR 13): a row of three lines after six lines of a
-        // body of eight goes whole to page 2, and a row taller than a body takes a page of
-        // its own and is reported.
-        let row_of = |style, count| -> Block {
-            let cell = Cell::default().with_blocks([lines(style, count, spacing(0.0, 0.0))]);
-            Table::default()
-                .with_grid([Pt(100.0)])
-                .with_rows(vec![Row::default().with_cells(vec![cell])])
-                .into()
+    /// One row of a cell of `count` lines of `A` for each of `cells`, with widow
+    /// control as `widow` says.
+    fn row_of(style: RunStyleId, cells: &[usize], widow: bool) -> Row {
+        Row::default().with_cells(
+            cells
+                .iter()
+                .map(|&count| {
+                    Cell::default().with_blocks([lines(
+                        style,
+                        count,
+                        spacing(0.0, 0.0).with_widow_control(widow),
+                    )])
+                })
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// A table of fixed layout of `rows`, its columns 100 pt wide, with borders `border`
+    /// pt wide around and between its cells, or none for 0.
+    fn table_with(rows: Vec<Row>, border: f64) -> Table {
+        use crate::ir::{Border, BorderSide, TableBorders, TableLayout, TableProps};
+
+        let columns = rows.iter().map(|row| row.cells().len()).max().unwrap_or(1);
+        let line = BorderSide::Line(Border::default().with_width(Pt(border)));
+        let borders = if border > 0.0 {
+            TableBorders::default()
+                .with_top(line)
+                .with_start(line)
+                .with_bottom(line)
+                .with_end(line)
+                .with_inside_horizontal(line)
+                .with_inside_vertical(line)
+        } else {
+            TableBorders::default()
         };
-        let moved = document(|style| {
+        Table::default()
+            .with_grid(vec![Pt(100.0); columns])
+            .with_props(
+                TableProps::default()
+                    .with_layout(TableLayout::Fixed)
+                    .with_borders(borders),
+            )
+            .with_rows(rows)
+    }
+
+    /// The baselines of the glyphs of `page` left of `x`, and of those right of it.
+    fn baselines(page: &Page, x: f64) -> (Vec<f64>, Vec<f64>) {
+        let mut sides = (Vec::new(), Vec::new());
+        for item in &page.items {
+            if let DisplayItem::Glyphs(run) = item {
+                if run.origin.x.0 < x {
+                    sides.0.push(run.origin.y.0);
+                } else {
+                    sides.1.push(run.origin.y.0);
+                }
+            }
+        }
+        sides
+    }
+
+    #[test]
+    fn a_row_is_cut_between_the_lines_of_its_cells_where_a_page_ends() {
+        // Word's render of `E-table-row-split.docx`: a row that does not fit is split
+        // between lines, each cell where its own lines end; the rest goes on at the top
+        // of the next page. After six lines, a row of a cell of five lines and one of one
+        // line: two lines of the first and the second's line on page 1, three lines on
+        // page 2.
+        let split = document(|style| {
             let mut blocks: Vec<Block> =
                 (0..6).map(|_| lines(style, 1, spacing(0.0, 0.0))).collect();
-            blocks.push(row_of(style, 3));
+            blocks.push(table_with(vec![row_of(style, &[5, 1], false)], 0.0).into());
             one_section(blocks)
         });
-        let moved = pages(&moved);
-        assert_eq!(moved[0].last(), Some(&(5, 0..1, 120.0)));
-        assert_eq!(moved[1], [(6, 0..1, 20.0)]);
-        let tall = document(|style| {
-            one_section(vec![lines(style, 1, spacing(0.0, 0.0)), row_of(style, 9)])
+        let (on_pages, report) = laid(&split, 100);
+        let on_pages = on_pages.expect("pages");
+        let tops = |page: &Page| -> Vec<(usize, Range<usize>, f64, f64)> {
+            page.fragments
+                .iter()
+                .map(|f| (f.paragraph, f.lines.clone(), f.top.0, f.height.0))
+                .collect()
+        };
+        assert_eq!(
+            tops(&on_pages.pages[0]).last(),
+            Some(&(6, 0..1, 140.0, 40.0))
+        );
+        assert_eq!(tops(&on_pages.pages[1]), [(6, 1..2, 20.0, 60.0)]);
+        let first = baselines(&on_pages.pages[0], 120.0);
+        let second = baselines(&on_pages.pages[1], 120.0);
+        assert_eq!((first.0.len() - 6, first.1.len()), (2, 1));
+        assert_eq!((second.0.len(), second.1.len()), (3, 0));
+        assert!(messages(&report).is_empty(), "{report:?}");
+        // Widow control keeps two lines on each side of the page's end, as in the body
+        // (Word moves a row of two lines whole, `E-table-autofit-15.docx` case 11): a
+        // cell of three lines with two lines of room goes whole to page 2.
+        let kept = document(|style| {
+            let mut blocks: Vec<Block> =
+                (0..6).map(|_| lines(style, 1, spacing(0.0, 0.0))).collect();
+            blocks.push(table_with(vec![row_of(style, &[3], true)], 0.0).into());
+            one_section(blocks)
         });
-        let (laid, report) = laid(&tall, 100);
-        let pages: Vec<usize> = laid
+        assert_eq!(pages(&kept)[1], [(6, 0..1, 20.0)]);
+        // A row taller than a page is cut on every page it reaches, without a report;
+        // its least height is filled by its last piece.
+        let tall = document(|style| {
+            let row = row_of(style, &[20], false).with_height(RowHeight::AtLeast(Pt(450.0)));
+            one_section(vec![
+                lines(style, 1, spacing(0.0, 0.0)),
+                table_with(vec![row], 0.0).into(),
+            ])
+        });
+        let (on_pages, report) = laid(&tall, 100);
+        let heights: Vec<Vec<f64>> = on_pages
             .expect("pages")
             .pages
             .iter()
-            .map(|page| page.fragments.len())
+            .map(|page| page.fragments.iter().map(|f| f.height.0).collect())
             .collect();
-        assert_eq!(pages, [1, 1]);
+        assert_eq!(heights, [vec![20.0, 140.0], vec![160.0], vec![150.0]]);
+        assert!(messages(&report).is_empty(), "{report:?}");
+        // A line taller than a page is put all the same, and reported.
+        let huge = document(|style| {
+            let cell = Cell::default().with_blocks([Paragraph::new(style)
+                .with_props(
+                    ParagraphProps::default()
+                        .with_spacing(Spacing::default().with_line(LineSpacing::Exact(Pt(300.0)))),
+                )
+                .with_inlines([Inline::text("A", style)])
+                .into()]);
+            one_section(vec![
+                table_with(vec![Row::default().with_cells(vec![cell])], 0.0).into(),
+            ])
+        });
+        let (laid, report) = laid(&huge, 100);
+        assert_eq!(laid.expect("pages").pages.len(), 1);
         assert!(
             report
                 .entries()
@@ -3891,6 +5274,89 @@ mod tests {
                     && entry.message().contains("table rows")),
             "{report:?}"
         );
+    }
+
+    #[test]
+    fn a_row_that_stays_on_one_page_moves_whole_and_splits_only_on_a_page_of_its_own() {
+        // Word's renders of `E-table-row-cant-split.docx` and
+        // `E-table-row-cant-split-tall.docx`: a `w:cantSplit` row that does not fit goes
+        // whole to the next page; one taller than a page goes to the next page all the
+        // same, and splits there like any row.
+        let row = |style, count| row_of(style, &[count], false).with_cant_split(true);
+        let moved = document(|style| {
+            let mut blocks: Vec<Block> =
+                (0..6).map(|_| lines(style, 1, spacing(0.0, 0.0))).collect();
+            blocks.push(table_with(vec![row(style, 3)], 0.0).into());
+            one_section(blocks)
+        });
+        assert_eq!(pages(&moved)[1], [(6, 0..1, 20.0)]);
+        let tall = document(|style| {
+            one_section(vec![
+                lines(style, 1, spacing(0.0, 0.0)),
+                table_with(vec![row(style, 10)], 0.0).into(),
+            ])
+        });
+        assert_eq!(
+            pages(&tall),
+            [
+                vec![(0, 0..1, 20.0)],
+                vec![(1, 0..1, 20.0)],
+                vec![(1, 1..2, 20.0)]
+            ]
+        );
+    }
+
+    #[test]
+    fn a_page_a_table_leaves_is_closed_by_a_border_that_must_fit_too() {
+        // Word's renders of `E-table-header-repeat.docx` and `E-table-row-split.docx`:
+        // the border below a row counts when fitting it, the page the table leaves is
+        // closed by a horizontal border, and the next starts with one. 6 pt borders, rows
+        // of one 20 pt line, 26 pt with the border above: five rows and the border below
+        // the fifth fit in the 160 pt body, a sixth would fit only without it.
+        let rows = document(|style| {
+            let rows = (0..8).map(|_| row_of(style, &[1], false)).collect();
+            one_section(vec![table_with(rows, 6.0).into()])
+        });
+        let (on_pages, _) = laid(&rows, 100);
+        let on_pages = on_pages.expect("pages");
+        let horizontal = |page: &Page| -> Vec<f64> {
+            page.items
+                .iter()
+                .filter_map(|item| match item {
+                    DisplayItem::Line(line) if line.from.y == line.to.y => Some(line.from.y.0),
+                    _ => None,
+                })
+                .collect()
+        };
+        let lowest = |page: &Page| -> f64 {
+            page.items
+                .iter()
+                .filter_map(|item| match item {
+                    DisplayItem::Line(line) if line.from.x == line.to.x => Some(line.to.y.0),
+                    _ => None,
+                })
+                .fold(0.0, f64::max)
+        };
+        assert_eq!(on_pages.pages[0].fragments.len(), 5);
+        assert_eq!(
+            horizontal(&on_pages.pages[0]),
+            [23.0, 49.0, 75.0, 101.0, 127.0, 153.0]
+        );
+        assert_eq!(lowest(&on_pages.pages[0]), 156.0);
+        assert_eq!(horizontal(&on_pages.pages[1]), [23.0, 49.0, 75.0, 101.0]);
+        // A row cut over two pages, before the table's last row: the border below it
+        // closes page 1 after seven of its ten lines, the vertical borders running through
+        // it, and the rest starts below the border above it, on page 2, then the last row.
+        let split = document(|style| {
+            let rows = vec![row_of(style, &[10], false), row_of(style, &[1], false)];
+            one_section(vec![table_with(rows, 6.0).into()])
+        });
+        let (on_pages, _) = laid(&split, 100);
+        let on_pages = on_pages.expect("pages");
+        assert_eq!(horizontal(&on_pages.pages[0]), [23.0, 169.0]);
+        assert_eq!(lowest(&on_pages.pages[0]), 172.0);
+        assert_eq!(horizontal(&on_pages.pages[1]), [23.0, 89.0, 115.0]);
+        assert_eq!(baselines(&on_pages.pages[0], 1000.0).0.len(), 7);
     }
 
     #[test]
@@ -5169,7 +6635,7 @@ mod tests {
                 &mut fonts,
                 &mut shaper,
                 1000,
-                (11, MAX_FRAME_LAID),
+                (11, MAX_FRAME_LAID, tables::MAX_TABLE_REDRAWN),
                 Vec::new,
             )
             .expect("pages");
@@ -5202,7 +6668,10 @@ mod tests {
 
     /// `document` laid out with budgets of `bounds` for what headers and footers draw and
     /// lay out, and the messages of the report.
-    fn laid_within(document: &Document, bounds: (usize, usize)) -> (Laid<Vec<Page>>, Vec<String>) {
+    fn laid_within(
+        document: &Document,
+        bounds: (usize, usize, usize),
+    ) -> (Laid<Vec<Page>>, Vec<String>) {
         let book = book(vec![minimal()]);
         let mut fonts = Fonts::new(&book);
         let mut shaper = Shaper::new();
@@ -5240,7 +6709,10 @@ mod tests {
             })
         };
         let left_out = |report: &[String]| report.iter().any(|m| m.contains("left out past"));
-        let (laid, report) = laid_within(&document(true), (10, MAX_FRAME_LAID));
+        let (laid, report) = laid_within(
+            &document(true),
+            (10, MAX_FRAME_LAID, tables::MAX_TABLE_REDRAWN),
+        );
         let framed = laid
             .sink
             .iter()
@@ -5248,7 +6720,10 @@ mod tests {
             .count();
         assert_eq!(framed, 5);
         assert!(left_out(&report), "{report:?}");
-        let (_, report) = laid_within(&document(false), (10, MAX_FRAME_LAID));
+        let (_, report) = laid_within(
+            &document(false),
+            (10, MAX_FRAME_LAID, tables::MAX_TABLE_REDRAWN),
+        );
         assert!(!left_out(&report), "{report:?}");
     }
 
@@ -5277,7 +6752,10 @@ mod tests {
                     .with_blocks(blocks),
             ]
         });
-        let (laid, report) = laid_within(&document, (MAX_FRAME_DRAWN, 5000));
+        let (laid, report) = laid_within(
+            &document,
+            (MAX_FRAME_DRAWN, 5000, tables::MAX_TABLE_REDRAWN),
+        );
         let numbered = laid
             .sink
             .iter()
@@ -5333,7 +6811,10 @@ mod tests {
                     .with_headers(HeaderFooterSet::default().with_primary([header.into()]))
                     .with_blocks(blocks),
             );
-            let (laid, report) = laid_within(&document, (MAX_FRAME_DRAWN, 5000));
+            let (laid, report) = laid_within(
+                &document,
+                (MAX_FRAME_DRAWN, 5000, tables::MAX_TABLE_REDRAWN),
+            );
             assert!(
                 !report.iter().any(|m| m.contains("left out past")),
                 "{report:?}"
@@ -5389,7 +6870,10 @@ mod tests {
                     .with_headers(HeaderFooterSet::default().with_primary([header.into()]))
                     .with_blocks(blocks),
             );
-            let (laid, report) = laid_within(&document, (MAX_FRAME_DRAWN, 5000));
+            let (laid, report) = laid_within(
+                &document,
+                (MAX_FRAME_DRAWN, 5000, tables::MAX_TABLE_REDRAWN),
+            );
             let count = laid
                 .sink
                 .iter()
@@ -5429,7 +6913,10 @@ mod tests {
                     .with_blocks(blocks),
             ]
         });
-        let (laid, report) = laid_within(&document, (MAX_FRAME_DRAWN, 5000));
+        let (laid, report) = laid_within(
+            &document,
+            (MAX_FRAME_DRAWN, 5000, tables::MAX_TABLE_REDRAWN),
+        );
         let numbered = laid
             .sink
             .iter()
@@ -5485,7 +6972,7 @@ mod tests {
                 )
                 .with_blocks(blocks),
         );
-        let (laid, _) = laid_within(&document, (MAX_FRAME_DRAWN, 6));
+        let (laid, _) = laid_within(&document, (MAX_FRAME_DRAWN, 6, tables::MAX_TABLE_REDRAWN));
         assert!(texts(&laid.sink[1]).iter().any(|text| text == "E"));
     }
 
@@ -5511,7 +6998,10 @@ mod tests {
                     .with_blocks(blocks),
             ]
         });
-        let (laid, report) = laid_within(&document, (MAX_FRAME_DRAWN, 5000));
+        let (laid, report) = laid_within(
+            &document,
+            (MAX_FRAME_DRAWN, 5000, tables::MAX_TABLE_REDRAWN),
+        );
         assert_eq!(laid.sink.len(), 100);
         let numbered = laid
             .sink
@@ -5565,10 +7055,16 @@ mod tests {
                 .filter_map(|page| texts(page).first().cloned())
                 .collect()
         };
-        assert_eq!(first((6, MAX_FRAME_LAID)), ["1", "2", "3", "A"]);
+        assert_eq!(
+            first((6, MAX_FRAME_LAID, tables::MAX_TABLE_REDRAWN)),
+            ["1", "2", "3", "A"]
+        );
         // The same with what headers may lay out as the bound: three layouts of the
         // header's paragraph and field (2 each). The page made again gets that back too.
-        assert_eq!(first((MAX_FRAME_DRAWN, 6)), ["1", "2", "3", "A"]);
+        assert_eq!(
+            first((MAX_FRAME_DRAWN, 6, tables::MAX_TABLE_REDRAWN)),
+            ["1", "2", "3", "A"]
+        );
     }
 
     #[test]
@@ -5587,7 +7083,8 @@ mod tests {
                         .with_blocks(blocks),
                 ]
             });
-            let (laid, report) = laid_within(&document, (5000, MAX_FRAME_LAID));
+            let (laid, report) =
+                laid_within(&document, (5000, MAX_FRAME_LAID, tables::MAX_TABLE_REDRAWN));
             assert_eq!(laid.sink.len(), 100);
             assert!(
                 report.iter().any(|m| m.contains("left out past")),
@@ -5705,7 +7202,7 @@ mod tests {
             &mut fonts,
             &mut shaper,
             100,
-            (11, MAX_FRAME_LAID),
+            (11, MAX_FRAME_LAID, tables::MAX_TABLE_REDRAWN),
             Vec::new,
         )
         .expect("pages");
@@ -5737,7 +7234,7 @@ mod tests {
             &mut fonts,
             &mut shaper,
             100,
-            (4, MAX_FRAME_LAID),
+            (4, MAX_FRAME_LAID, tables::MAX_TABLE_REDRAWN),
             Vec::new,
         )
         .expect("pages");

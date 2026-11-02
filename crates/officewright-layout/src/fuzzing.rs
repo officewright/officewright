@@ -1354,11 +1354,15 @@ pub fn paginate(
 /// layout relies on:
 /// - there is a page, and no more than one a line, besides a blank page and a page
 ///   without lines for each section and the page of an empty document; a document past
-///   `max_pages` is an error only when its lines, counted paragraph by paragraph, could
-///   not take that many;
-/// - every paragraph has a line, and every line is on exactly one page, in reading order;
+///   `max_pages` is an error only when its lines, counted paragraph by paragraph and for a
+///   table as the most pieces it may be cut into, could not take that many;
+/// - every paragraph has a line, and every line is on exactly one page, in reading order,
+///   a table's lines being the pieces it is put on pages in;
 /// - lines are inside the body of their page, but for a single line that nothing could
-///   move further, and lines on a page do not overlap;
+///   move further, at the top of its page or below its table's header rows repeated
+///   there, and lines on a page do not overlap;
+/// - a table's header rows are repeated only at the top of a page, and only above more of
+///   that table;
 /// - each paragraph is on a page with its section's setup, and the first paragraph of a
 ///   section that starts on a new page starts its page, a page of that section;
 /// - page numbers grow by one within a section, and what pages draw is at finite places.
@@ -1412,7 +1416,7 @@ pub fn check_pages(book: &FontBook, document: &Document, max_pages: usize) -> Re
                             &flowed.location,
                             &mut context,
                         )
-                        .band_count()
+                        .pieces_bound(&mut context)
                     }
                 };
             }
@@ -1455,6 +1459,21 @@ pub fn check_pages(book: &FontBook, document: &Document, max_pages: usize) -> Re
         }
     };
     for (number, page) in laid.pages.iter().enumerate() {
+        // Repeated header rows start the page, and more of their table follows them.
+        let repeated = page.fragments.iter().take_while(|f| f.repeated).count();
+        let misplaced = page.fragments.iter().skip(repeated).any(|f| f.repeated);
+        let alone = repeated > 0
+            && page.fragments.get(repeated).is_none_or(|after| {
+                page.fragments
+                    .first()
+                    .is_some_and(|first| first.paragraph != after.paragraph)
+            });
+        if misplaced || alone {
+            return Err(format!(
+                "page {number}: header rows repeated other than at its top above more of \
+                 their table"
+            ));
+        }
         let mut bottom = f64::NEG_INFINITY;
         for (position, fragment) in page.fragments.iter().enumerate() {
             skip_empty(&mut next);
@@ -1512,7 +1531,13 @@ pub fn check_pages(book: &FontBook, document: &Document, max_pages: usize) -> Re
                     page.section, flowed.section
                 ));
             }
-            let forced = position == 0 && fragment.lines.len() == 1;
+            // At the top of the page, or below the header rows its table repeats there.
+            let forced = fragment.lines.len() == 1
+                && page.fragments.get(..position).is_some_and(|above| {
+                    above
+                        .iter()
+                        .all(|f| f.repeated && f.paragraph == fragment.paragraph)
+                });
             if top < page.body.top.0 - 1e-6 || (end > page.body.bottom.0 + 1e-6 && !forced) {
                 return Err(format!(
                     "page {number}: lines from {top} to {end} outside the body from {} to {}",
