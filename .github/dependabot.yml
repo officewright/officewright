@@ -15,15 +15,13 @@ updates:
     schedule:
       interval: weekly
     groups:
-      # HarfRust and Skrifa both build on read-fonts (with font-types); updated apart, they
-      # would need two versions of it, which `cargo deny` refuses. A group takes the
-      # dependencies that match it first, so this one comes before `cargo`.
+      # HarfRust and Skrifa both build on read-fonts; updated apart, they would need two
+      # versions of it, which `cargo deny` refuses. A group takes the dependencies that match
+      # it first, so this one comes before `cargo`.
       read-fonts:
         patterns:
           - harfrust
           - skrifa
-          - read-fonts
-          - font-types
       cargo:
         update-types:
           - minor
