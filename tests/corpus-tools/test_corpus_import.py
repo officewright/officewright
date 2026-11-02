@@ -1414,6 +1414,35 @@ class RenderedPageBreaks(unittest.TestCase):
                          [*head, *header_row, *next_row, footer, "5"]]
                 self.assertEqual(self.breaks(table, pages), expected)
 
+    def test_the_page_after_is_read_past_its_page_number_and_its_own_header(self):
+        # The footer of two lines begins like the next row, which starts the page after.
+        footer = "U.S. Department of Health & Human Services - 200 Independence Avenue, S.W."
+        table = ("<w:tbl>"
+                 + self.row(self.cell(self.p("Helpful Instructions"),
+                                      self.mid("signed by each participating GSA Schedule ",
+                                               "contractor"),
+                                      self.p("Identify each member")))
+                 + self.row(self.cell(self.p("U.S. Department of Health and Human Services",
+                                             True)),
+                            self.cell(self.p("Signature")))
+                 + "</w:tbl>")
+        expected = [(1, "contractor"), (3, "U.S. Department of Health and ")]
+        row = ["U.S. Department of Health and Human Services", "Signature"]
+        cases = {
+            # A header that holds only the page number, and the title at the foot.
+            "a page number on top": (["3", "4", "5"], ["Teaming Agreement"] * 3),
+            # Odd and even headers: the crossing's page has the even one.
+            "odd and even headers": (["Teaming Agreement", "Draft for review",
+                                      "Teaming Agreement"], ["3", "4", "5"]),
+        }
+        for case, (top, foot) in cases.items():
+            with self.subTest(case=case):
+                pages = [[top[0], "Helpful Instructions",
+                          "signed by each participating GSA Schedule", footer, foot[0]],
+                         [top[1], "contractor", "Identify each member", footer, foot[1]],
+                         [top[2], *row, footer, foot[2]]]
+                self.assertEqual(self.breaks(table, pages), expected)
+
     def test_a_line_that_starts_one_page_and_ends_another_is_no_footer(self):
         # The next row goes on at the end of the crossing's page, and its text also begins
         # page 1: no other page ends with it, so it is no running footer, and the repeat goes.
