@@ -59,10 +59,11 @@ kind; text is shaped with
 HarfRust, or without kerning and ligatures from a font whose layout tables it cannot
 use; lines break and paragraphs are spaced, kept together and kept from widows as in
 Word; each section gets its page size and margins, headers, footers and page numbers.
-List items get their numbers and bullets, counted as Word counts them, and tables are laid
-out on the grid of column widths the document stores, with merged cells, borders and
-shading. It draws inline PNG and JPEG pictures and floating ones where they are anchored,
-and underlines, strikethrough, highlight and shading.
+List items get their numbers and bullets, counted as Word counts them. Tables get their
+columns fitted to their content as Word fits them (the grid's widths in fixed layout),
+merged cells, borders and shading, and their rows are cut across pages with the header
+rows repeated. It draws inline PNG and JPEG pictures and floating ones where they are
+anchored, and underlines, strikethrough, highlight and shading.
 Much of what it shows otherwise than Word would, such as a substituted font or something
 not laid out yet, it reports: the command line prints it as notes, and the C library and
 Rust return it as a report.
@@ -88,10 +89,12 @@ The main things not laid out yet:
 - right-to-left text (Arabic, Hebrew) in its reading order, and vertical text;
 - links, which keep their look but cannot be clicked, and automatic hyphenation;
 - cropped, rotated or mirrored pictures, which are drawn whole and upright, pictures in
-  formats other than PNG and JPEG, which are drawn as grey boxes, and the outlines and
-  colour adjustments of pictures;
+  formats other than PNG and JPEG, such as the WMF and EMF previews most embedded objects
+  are shown by, which are drawn as grey boxes, and the outlines and colour adjustments of
+  pictures;
 - fields other than page numbers and page counts, which show the result stored in the
-  document.
+  document, and page numbers in table header rows repeated on later pages or in a table
+  row cut across pages, which show the number of one page.
 
 Of this list, the report names everything but links
 ([#303](https://github.com/officewright/officewright/issues/303)) and the rows of a table
