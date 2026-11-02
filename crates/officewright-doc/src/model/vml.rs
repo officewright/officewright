@@ -316,7 +316,7 @@ pub(crate) fn check(pict: Element<'_>, names: &Names, report: Report<'_>) {
 
 /// The declarations of a shape's `style`.
 fn style(shape: Element<'_>) -> Style<'_> {
-    Style(shape.attribute(&[None], "style").unwrap_or_default())
+    Style::new(shape.attribute(&[None], "style").unwrap_or_default())
 }
 
 /// The part of its image a picture shows (`v:imagedata`'s `cropleft`, `croptop`,
@@ -568,21 +568,63 @@ fn image_data<'a>(shape: Element<'a>, names: &Names) -> Option<Element<'a>> {
         .find(|child| child.is(&names.v, "imagedata"))
 }
 
-/// The declarations of a VML `style` attribute: `name:value` pairs separated by `;`.
+/// The properties of a VML `style` that the readers read.
+const PROPERTIES: [&str; 19] = [
+    "width",
+    "height",
+    "visibility",
+    "rotation",
+    "flip",
+    "position",
+    "mso-position-horizontal",
+    "mso-position-horizontal-relative",
+    "mso-position-vertical",
+    "mso-position-vertical-relative",
+    "margin-left",
+    "left",
+    "margin-top",
+    "top",
+    "z-index",
+    "mso-wrap-distance-left",
+    "mso-wrap-distance-top",
+    "mso-wrap-distance-right",
+    "mso-wrap-distance-bottom",
+];
+
+/// The declarations of a VML `style` attribute (`name:value` pairs separated by `;`) that
+/// the readers read: the value of each property of [`PROPERTIES`], read in one pass over
+/// the attribute however many are asked for.
 #[derive(Clone, Copy)]
-struct Style<'a>(&'a str);
+struct Style<'a>([Option<&'a str>; PROPERTIES.len()]);
 
 impl<'a> Style<'a> {
-    /// The value of a property, without the whitespace around it. Word takes the last
-    /// of a property written more than once (MS-OI29500, Part 4, §19.1.2.1(ggg)); CSS
-    /// names are not case-sensitive.
-    fn get(self, name: &str) -> Option<&'a str> {
-        self.0
+    /// The declarations of `style`, each value without the whitespace around it. Word
+    /// takes the last of a property written more than once (MS-OI29500, Part 4,
+    /// §19.1.2.1(ggg)); CSS names are not case-sensitive.
+    fn new(style: &'a str) -> Self {
+        let mut values = [None; PROPERTIES.len()];
+        for (key, value) in style
             .split(';')
             .filter_map(|declaration| declaration.split_once(':'))
-            .filter(|(key, _)| key.trim().eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.trim())
-            .next_back()
+        {
+            let key = key.trim();
+            let slot = PROPERTIES
+                .iter()
+                .position(|name| key.eq_ignore_ascii_case(name))
+                .and_then(|index| values.get_mut(index));
+            if let Some(slot) = slot {
+                *slot = Some(value.trim());
+            }
+        }
+        Self(values)
+    }
+
+    /// The value of a property of [`PROPERTIES`]; none for one not written, and for a
+    /// name not among them.
+    fn get(self, name: &str) -> Option<&'a str> {
+        let index = PROPERTIES.iter().position(|property| *property == name);
+        debug_assert!(index.is_some(), "{name} is not among the properties read");
+        self.0.get(index?).copied().flatten()
     }
 
     /// A property's value as `read` takes it; one it does not take is reported, as the
@@ -596,6 +638,7 @@ impl<'a> Style<'a> {
         let value = self.get(name)?;
         let taken = read(value);
         if taken.is_none() {
+            let value = crate::docx::shorten(value);
             report("v:shape", "style", &format!("{name}:{value}"));
         }
         taken
@@ -822,11 +865,11 @@ mod tests {
 
     #[test]
     fn reads_the_last_declaration_of_a_property() {
-        let style = Style(" width : 10pt;HEIGHT:5pt;width:20pt; ;junk;rotation");
+        let style = Style::new(" width : 10pt;HEIGHT:5pt;width:20pt; ;junk;rotation");
         assert_eq!(style.get("width").and_then(length), Some(Pt(20.0)));
         assert_eq!(style.get("height").and_then(length), Some(Pt(5.0)));
         assert_eq!(style.get("rotation"), None);
-        assert_eq!(Style("width:-1pt").get("width").and_then(size), None);
+        assert_eq!(Style::new("width:-1pt").get("width").and_then(size), None);
     }
 
     #[test]
