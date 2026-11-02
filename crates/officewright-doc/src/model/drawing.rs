@@ -8,6 +8,7 @@ use officewright_core::Pt;
 use super::properties::xml_enum;
 use super::xml::{Element, Span};
 use super::{Document, ImageData, Names};
+use crate::docx::properties::Report;
 
 /// EMUs (English Metric Units) to a point.
 const EMU_PER_POINT: f64 = 12_700.0;
@@ -79,22 +80,6 @@ impl<'a> Drawing<'a> {
         frame(self.document.element(self.element), &self.document.names)
     }
 
-    /// The children of an element of the drawing, through `mc:AlternateContent`.
-    fn children(self, element: Element<'a>) -> impl Iterator<Item = Element<'a>> + 'a {
-        element.children_through_alternates(self.document.names.mc)
-    }
-
-    /// The first child of `element` of this name in `namespaces`.
-    fn child(
-        self,
-        element: Element<'a>,
-        namespaces: &[Option<super::xml::Sym>],
-        name: &str,
-    ) -> Option<Element<'a>> {
-        self.children(element)
-            .find(|child| child.is(namespaces, name))
-    }
-
     /// Whether the drawing sits in the line of text (`wp:inline`), not floating.
     pub fn is_inline(self) -> bool {
         self.frame()
@@ -103,37 +88,20 @@ impl<'a> Drawing<'a> {
 
     /// The width of its frame (`wp:extent`'s `cx`).
     pub fn width(self) -> Option<Pt> {
-        self.extent("cx")
+        extent(self.frame()?, &self.document.names, "cx", &mut |_, _, _| {})
     }
 
     /// The height of its frame (`wp:extent`'s `cy`).
     pub fn height(self) -> Option<Pt> {
-        self.extent("cy")
-    }
-
-    fn extent(self, attribute: &str) -> Option<Pt> {
-        let extent = self.child(self.frame()?, &self.document.names.wp, "extent")?;
-        coordinate(extent.attribute(&[None], attribute)?).filter(|length| length.0 >= 0.0)
+        extent(self.frame()?, &self.document.names, "cy", &mut |_, _, _| {})
     }
 
     /// How far effects such as shadows reach beyond the frame on each side
     /// (`wp:effectExtent`); 0 on each side not written.
     pub fn effect_extent(self) -> Offsets {
-        let element = self
-            .frame()
-            .and_then(|frame| self.child(frame, &self.document.names.wp, "effectExtent"));
-        let side = |name| {
-            element
-                .and_then(|element| element.attribute(&[None], name))
-                .and_then(coordinate)
-                .unwrap_or_default()
-        };
-        Offsets {
-            left: side("l"),
-            top: side("t"),
-            right: side("r"),
-            bottom: side("b"),
-        }
+        self.frame().map_or_else(Offsets::default, |frame| {
+            effect_extent(frame, &self.document.names, &mut |_, _, _| {})
+        })
     }
 
     /// The picture it shows (`pic:pic` in its `a:graphicData`), if it shows one; a
@@ -152,92 +120,7 @@ impl<'a> Drawing<'a> {
     pub fn anchor(self) -> Option<Anchor> {
         let names = &self.document.names;
         let frame = self.frame().filter(|frame| frame.is(&names.wp, "anchor"))?;
-        let flag = |name| frame.attribute(&[None], name).and_then(boolean);
-        // ST_WrapDistance is unsigned: a negative one is not one.
-        let distance = |name| {
-            frame
-                .attribute(&[None], name)
-                .and_then(coordinate)
-                .filter(|length| length.0 >= 0.0)
-                .unwrap_or_default()
-        };
-        let mut anchor = Anchor {
-            horizontal_reference: None,
-            horizontal_align: None,
-            horizontal_offset: None,
-            vertical_reference: None,
-            vertical_align: None,
-            vertical_offset: None,
-            wrap: None,
-            behind_text: flag("behindDoc").unwrap_or(false),
-            layout_in_cell: flag("layoutInCell").unwrap_or(true),
-            allow_overlap: flag("allowOverlap").unwrap_or(true),
-            z_order: frame
-                .attribute(&[None], "relativeHeight")
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(0),
-            distances: Offsets {
-                left: distance("distL"),
-                top: distance("distT"),
-                right: distance("distR"),
-                bottom: distance("distB"),
-            },
-        };
-        for child in self.children(frame) {
-            let Some(local) = child.local_in(&names.wp) else {
-                continue;
-            };
-            let relative = child.attribute(&[None], "relativeFrom");
-            let align = self
-                .child(child, &names.wp, "align")
-                .map(|align| align.text().trim().to_owned());
-            let offset = self
-                .child(child, &names.wp, "posOffset")
-                // Element text, unlike the attributes, is still read with its whitespace
-                // trimmed: tdf123163-1.docx of LibreOffice's tests writes a line feed
-                // before its offsets, and whether Word places those pictures is not known
-                // yet (#243).
-                .and_then(|offset| coordinate(offset.text().trim()));
-            match local {
-                "positionH" => {
-                    anchor.horizontal_reference = relative.and_then(HorizontalReference::from_xml);
-                    anchor.horizontal_align =
-                        align.as_deref().and_then(AnchorHorizontalAlign::from_xml);
-                    anchor.horizontal_offset = offset;
-                }
-                "positionV" => {
-                    anchor.vertical_reference = relative.and_then(VerticalReference::from_xml);
-                    anchor.vertical_align =
-                        align.as_deref().and_then(AnchorVerticalAlign::from_xml);
-                    anchor.vertical_offset = offset;
-                }
-                "wrapNone" => anchor.wrap = Some(WrapKind::None),
-                "wrapSquare" => anchor.wrap = Some(WrapKind::Square),
-                "wrapTight" => anchor.wrap = Some(WrapKind::Tight),
-                "wrapThrough" => anchor.wrap = Some(WrapKind::Through),
-                "wrapTopAndBottom" => anchor.wrap = Some(WrapKind::TopAndBottom),
-                _ => {}
-            }
-        }
-        // With simplePos on, the position is wp:simplePos, from the page's top left
-        // corner, in place of wp:positionH and wp:positionV (§20.4.2.3).
-        if flag("simplePos") == Some(true) {
-            let simple = self.child(frame, &names.wp, "simplePos");
-            let at = |name| {
-                simple
-                    .and_then(|simple| simple.attribute(&[None], name))
-                    .and_then(coordinate)
-            };
-            if let (Some(x), Some(y)) = (at("x"), at("y")) {
-                anchor.horizontal_reference = Some(HorizontalReference::Page);
-                anchor.horizontal_align = None;
-                anchor.horizontal_offset = Some(x);
-                anchor.vertical_reference = Some(VerticalReference::Page);
-                anchor.vertical_align = None;
-                anchor.vertical_offset = Some(y);
-            }
-        }
-        Some(anchor)
+        Some(anchor(frame, names, &mut |_, _, _| {}))
     }
 }
 
@@ -282,21 +165,7 @@ impl<'a> Picture<'a> {
 
     /// The part of the image shown (`a:srcRect` of `pic:blipFill`); none for all of it.
     pub fn crop(self) -> Option<Crop> {
-        let names = &self.document.names;
-        let rect = self
-            .child(&names.pic, "blipFill")
-            .and_then(|fill| child(fill, names, &names.a, "srcRect"))?;
-        let side = |name| {
-            rect.attribute(&[None], name)
-                .and_then(percentage)
-                .unwrap_or(0.0)
-        };
-        Some(Crop {
-            left: side("l"),
-            top: side("t"),
-            right: side("r"),
-            bottom: side("b"),
-        })
+        crop(self.element, &self.document.names, &mut |_, _, _| {})
     }
 
     fn child(self, namespaces: &[Option<super::xml::Sym>], name: &str) -> Option<Element<'a>> {
@@ -327,13 +196,7 @@ impl<'a> Picture<'a> {
     // reason: only the translation into the layout IR asks for it.
     #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
     pub(crate) fn has_color_effects(self) -> bool {
-        let names = &self.document.names;
-        self.child(&names.pic, "blipFill")
-            .and_then(|fill| child(fill, names, &names.a, "blip"))
-            .is_some_and(|blip| {
-                blip.children_through_alternates(names.mc)
-                    .any(|effect| changes_image(effect, names))
-            })
+        has_color_effects(self.element, &self.document.names, &mut |_, _, _| {})
     }
 
     /// Whether it has a shadow, a reflection, a glow, soft edges or a 3-D effect (an
@@ -343,42 +206,7 @@ impl<'a> Picture<'a> {
     // reason: only the translation into the layout IR asks for it.
     #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
     pub(crate) fn has_effects(self) -> bool {
-        let names = &self.document.names;
-        let Some(shape) = self.child(&names.pic, "spPr") else {
-            return false;
-        };
-        let nonzero = |element: Element<'_>, name| {
-            element
-                .attribute(&[None], name)
-                .is_some_and(|value| coordinate(value).is_some_and(|length| length.0 != 0.0))
-        };
-        shape
-            .children_through_alternates(names.mc)
-            .any(|part| match part.local_in(&names.a) {
-                // Word writes an empty a:effectLst for a picture without effects.
-                Some("effectLst") => part.children_through_alternates(names.mc).next().is_some(),
-                Some("effectDag") => part.children_through_alternates(names.mc).next().is_some(),
-                // A camera in front of the picture, not turned, shows it as it is. Office
-                // writes one with a rotation of zeros into the effect styles of themes.
-                Some("scene3d") => child(part, names, &names.a, "camera").is_some_and(|camera| {
-                    camera.attribute(&[None], "prst") != Some("orthographicFront")
-                        || child(camera, names, &names.a, "rot").is_some_and(|rotation| {
-                            ["lat", "lon", "rev"].into_iter().any(|name| {
-                                rotation
-                                    .attribute(&[None], name)
-                                    .and_then(|angle| angle.parse::<i64>().ok())
-                                    .is_some_and(|angle| angle != 0)
-                            })
-                        })
-                }),
-                Some("sp3d") => {
-                    child(part, names, &names.a, "bevelT").is_some()
-                        || child(part, names, &names.a, "bevelB").is_some()
-                        || nonzero(part, "extrusionH")
-                        || nonzero(part, "contourW")
-                }
-                _ => false,
-            })
+        has_effects(self.element, &self.document.names, &mut |_, _, _| {})
     }
 
     /// Whether it is cut to a shape other than its rectangle: an `a:prstGeom` of
@@ -399,34 +227,29 @@ impl<'a> Picture<'a> {
         })
     }
 
-    fn transform(self) -> Option<Element<'a>> {
-        let names = &self.document.names;
-        child(self.child(&names.pic, "spPr")?, names, &names.a, "xfrm")
-    }
-
     /// The rotation clockwise, in degrees (`a:xfrm`'s `rot`, 60,000 to a degree).
     pub fn rotation(self) -> f64 {
-        self.transform()
-            .and_then(|xfrm| xfrm.attribute(&[None], "rot"))
-            .and_then(|value| value.parse::<i32>().ok())
-            .map_or(0.0, |value| f64::from(value) / 60_000.0)
+        rotation(self.element, &self.document.names, &mut |_, _, _| {})
     }
 
     /// Whether it is mirrored left to right (`flipH`).
     pub fn flip_horizontal(self) -> bool {
-        self.flip("flipH")
+        flip(
+            self.element,
+            &self.document.names,
+            "flipH",
+            &mut |_, _, _| {},
+        )
     }
 
     /// Whether it is mirrored top to bottom (`flipV`).
     pub fn flip_vertical(self) -> bool {
-        self.flip("flipV")
-    }
-
-    fn flip(self, name: &str) -> bool {
-        self.transform()
-            .and_then(|xfrm| xfrm.attribute(&[None], name))
-            .and_then(boolean)
-            .unwrap_or(false)
+        flip(
+            self.element,
+            &self.document.names,
+            "flipV",
+            &mut |_, _, _| {},
+        )
     }
 }
 
@@ -710,6 +533,352 @@ pub(crate) fn embedded_image<'a>(picture: Element<'a>, names: &Names) -> Option<
     child(fill, names, &names.a, "blip")?.attribute(&names.r, "embed")
 }
 
+/// Reports the values of a drawing (`w:drawing`) that its readers do not take, as the
+/// document opens; the readers read them again when asked for, as not written. Every
+/// value of the frame and the picture that a reader reads is read here once, also one
+/// the drawing does not use, such as the offset of an aligned position or `wp:simplePos`
+/// with `simplePos` off; those that place a floating drawing, only when it floats.
+pub(crate) fn check(drawing: Element<'_>, names: &Names, report: Report<'_>) {
+    let Some(frame) = frame(drawing, names) else {
+        return;
+    };
+    extent(frame, names, "cx", report);
+    extent(frame, names, "cy", report);
+    effect_extent(frame, names, report);
+    if frame.is(&names.wp, "anchor") {
+        anchor(frame, names, report);
+    }
+    if let Some(picture) = picture(drawing, names) {
+        crop(picture, names, report);
+        has_color_effects(picture, names, report);
+        has_effects(picture, names, report);
+        rotation(picture, names, report);
+        flip(picture, names, "flipH", report);
+        flip(picture, names, "flipV", report);
+    }
+}
+
+/// The value of `element`'s unqualified attribute `name` as `read` takes it; one it does
+/// not take is reported and read as not written.
+pub(super) fn value<'a, T>(
+    element: Element<'a>,
+    names: &Names,
+    name: &str,
+    read: impl FnOnce(&'a str) -> Option<T>,
+    report: Report<'_>,
+) -> Option<T> {
+    attribute(element, names, (&[None], ""), name, read, report)
+}
+
+/// The value of `element`'s attribute `name` in `namespaces`, which messages give the
+/// prefix of, as `read` takes it; one it does not take is reported and read as not
+/// written.
+pub(super) fn attribute<'a, T>(
+    element: Element<'a>,
+    names: &Names,
+    (namespaces, prefix): (&[Option<super::xml::Sym>], &str),
+    name: &str,
+    read: impl FnOnce(&'a str) -> Option<T>,
+    report: Report<'_>,
+) -> Option<T> {
+    let value = element.attribute(namespaces, name)?;
+    let taken = read(value);
+    if taken.is_none() {
+        report(
+            &qualified_name(element, names),
+            &format!("{prefix}{name}"),
+            value,
+        );
+    }
+    taken
+}
+
+/// The text of `element`, without the whitespace around it, as `read` takes it; text it
+/// does not take is reported and read as not written.
+fn text<T>(
+    element: Element<'_>,
+    names: &Names,
+    read: impl FnOnce(&str) -> Option<T>,
+    report: Report<'_>,
+) -> Option<T> {
+    let text = element.text();
+    let text = text.trim();
+    let taken = read(text);
+    if taken.is_none() {
+        report(&qualified_name(element, names), "", text);
+    }
+    taken
+}
+
+/// The name of an element of a drawing, with the prefix messages give its namespace.
+pub(super) fn qualified_name(element: Element<'_>, names: &Names) -> String {
+    let prefix = [
+        ("wp:", &names.wp[..]),
+        ("a:", &names.a[..]),
+        ("pic:", &names.pic[..]),
+        ("v:", &names.v[..]),
+        ("o:", &names.o[..]),
+        ("w10:", &names.w10[..]),
+    ]
+    .into_iter()
+    .find_map(|(prefix, namespaces)| element.local_in(namespaces).map(|_| prefix))
+    .unwrap_or_default();
+    format!("{prefix}{}", element.local_name())
+}
+
+/// A side of a frame (`wp:extent`'s `cx` or `cy`), which is not negative.
+fn extent(frame: Element<'_>, names: &Names, attribute: &str, report: Report<'_>) -> Option<Pt> {
+    let extent = child(frame, names, &names.wp, "extent")?;
+    value(
+        extent,
+        names,
+        attribute,
+        |value| coordinate(value).filter(|length| length.0 >= 0.0),
+        report,
+    )
+}
+
+/// How far effects reach beyond a frame on each side (`wp:effectExtent`); 0 on each side
+/// not written.
+fn effect_extent(frame: Element<'_>, names: &Names, report: Report<'_>) -> Offsets {
+    let Some(element) = child(frame, names, &names.wp, "effectExtent") else {
+        return Offsets::default();
+    };
+    let mut side = |name| value(element, names, name, coordinate, report).unwrap_or_default();
+    Offsets {
+        left: side("l"),
+        top: side("t"),
+        right: side("r"),
+        bottom: side("b"),
+    }
+}
+
+/// Where a floating frame (`wp:anchor`) is and how text wraps around it.
+fn anchor(frame: Element<'_>, names: &Names, report: Report<'_>) -> Anchor {
+    let mut anchor = Anchor {
+        horizontal_reference: None,
+        horizontal_align: None,
+        horizontal_offset: None,
+        vertical_reference: None,
+        vertical_align: None,
+        vertical_offset: None,
+        wrap: None,
+        behind_text: value(frame, names, "behindDoc", boolean, report).unwrap_or(false),
+        layout_in_cell: value(frame, names, "layoutInCell", boolean, report).unwrap_or(true),
+        allow_overlap: value(frame, names, "allowOverlap", boolean, report).unwrap_or(true),
+        z_order: value(
+            frame,
+            names,
+            "relativeHeight",
+            |value| value.parse().ok(),
+            report,
+        )
+        .unwrap_or(0),
+        distances: Offsets {
+            left: wrap_distance(frame, names, "distL", report),
+            top: wrap_distance(frame, names, "distT", report),
+            right: wrap_distance(frame, names, "distR", report),
+            bottom: wrap_distance(frame, names, "distB", report),
+        },
+    };
+    let simple_position = value(frame, names, "simplePos", boolean, report);
+    for child in frame.children_through_alternates(names.mc) {
+        match child.local_in(&names.wp) {
+            Some("positionH") => {
+                (
+                    anchor.horizontal_reference,
+                    anchor.horizontal_align,
+                    anchor.horizontal_offset,
+                ) = position(
+                    child,
+                    names,
+                    HorizontalReference::from_xml,
+                    AnchorHorizontalAlign::from_xml,
+                    report,
+                );
+            }
+            Some("positionV") => {
+                (
+                    anchor.vertical_reference,
+                    anchor.vertical_align,
+                    anchor.vertical_offset,
+                ) = position(
+                    child,
+                    names,
+                    VerticalReference::from_xml,
+                    AnchorVerticalAlign::from_xml,
+                    report,
+                );
+            }
+            Some("wrapNone") => anchor.wrap = Some(WrapKind::None),
+            Some("wrapSquare") => anchor.wrap = Some(WrapKind::Square),
+            Some("wrapTight") => anchor.wrap = Some(WrapKind::Tight),
+            Some("wrapThrough") => anchor.wrap = Some(WrapKind::Through),
+            Some("wrapTopAndBottom") => anchor.wrap = Some(WrapKind::TopAndBottom),
+            _ => {}
+        }
+    }
+    // With simplePos on, the position is wp:simplePos, from the page's top left corner,
+    // in place of wp:positionH and wp:positionV (§20.4.2.3).
+    let simple = child(frame, names, &names.wp, "simplePos");
+    let x = simple.and_then(|simple| value(simple, names, "x", coordinate, report));
+    let y = simple.and_then(|simple| value(simple, names, "y", coordinate, report));
+    if let (Some(true), Some(x), Some(y)) = (simple_position, x, y) {
+        anchor.horizontal_reference = Some(HorizontalReference::Page);
+        anchor.horizontal_align = None;
+        anchor.horizontal_offset = Some(x);
+        anchor.vertical_reference = Some(VerticalReference::Page);
+        anchor.vertical_align = None;
+        anchor.vertical_offset = Some(y);
+    }
+    anchor
+}
+
+/// A distance a floating frame keeps from wrapping text (`distL` and the others); none
+/// when not written or not taken. ST_WrapDistance is unsigned: a negative one is not one.
+fn wrap_distance(frame: Element<'_>, names: &Names, name: &str, report: Report<'_>) -> Pt {
+    value(
+        frame,
+        names,
+        name,
+        |value| coordinate(value).filter(|length| length.0 >= 0.0),
+        report,
+    )
+    .unwrap_or_default()
+}
+
+/// The base, alignment and offset of a position (`wp:positionH` or `wp:positionV`).
+fn position<R, A>(
+    position: Element<'_>,
+    names: &Names,
+    reference: impl FnOnce(&str) -> Option<R>,
+    align: impl FnOnce(&str) -> Option<A>,
+    report: Report<'_>,
+) -> (Option<R>, Option<A>, Option<Pt>) {
+    let reference = value(position, names, "relativeFrom", reference, report);
+    let align = child(position, names, &names.wp, "align")
+        .and_then(|element| text(element, names, align, report));
+    // Element text, unlike the attributes, is still read with its whitespace trimmed:
+    // tdf123163-1.docx of LibreOffice's tests writes a line feed before its offsets, and
+    // whether Word places those pictures is not known yet (#243).
+    let offset = child(position, names, &names.wp, "posOffset")
+        .and_then(|element| text(element, names, coordinate, report));
+    (reference, align, offset)
+}
+
+/// The part of its image a picture shows (`a:srcRect` of `pic:blipFill`); none for all
+/// of it.
+fn crop(picture: Element<'_>, names: &Names, report: Report<'_>) -> Option<Crop> {
+    let rect = child(picture, names, &names.pic, "blipFill")
+        .and_then(|fill| child(fill, names, &names.a, "srcRect"))?;
+    let mut side = |name| value(rect, names, name, percentage, report).unwrap_or(0.0);
+    Some(Crop {
+        left: side("l"),
+        top: side("t"),
+        right: side("r"),
+        bottom: side("b"),
+    })
+}
+
+/// Whether an effect of a picture's `a:blip` changes its image ([`changes_image`]). Every
+/// effect is read, so that each value not taken is reported.
+fn has_color_effects(picture: Element<'_>, names: &Names, report: Report<'_>) -> bool {
+    child(picture, names, &names.pic, "blipFill")
+        .and_then(|fill| child(fill, names, &names.a, "blip"))
+        .is_some_and(|blip| {
+            blip.children_through_alternates(names.mc)
+                .fold(false, |changes, effect| {
+                    changes_image(effect, names, report) | changes
+                })
+        })
+}
+
+/// Whether a picture's `pic:spPr` has an effect the layout does not draw
+/// ([`is_effect`]). Every part is read, so that each value not taken is reported.
+fn has_effects(picture: Element<'_>, names: &Names, report: Report<'_>) -> bool {
+    child(picture, names, &names.pic, "spPr").is_some_and(|shape| {
+        shape
+            .children_through_alternates(names.mc)
+            .fold(false, |effects, part| {
+                is_effect(part, names, report) | effects
+            })
+    })
+}
+
+/// Whether a part of a picture's `pic:spPr` is a shadow, a reflection, a glow, soft
+/// edges or a 3-D effect: an `a:effectLst` or `a:effectDag` that lists one, an
+/// `a:scene3d` that turns the picture, an `a:sp3d` that gives it a bevel, depth or
+/// contour.
+fn is_effect(part: Element<'_>, names: &Names, report: Report<'_>) -> bool {
+    match part.local_in(&names.a) {
+        // Word writes an empty a:effectLst for a picture without effects.
+        Some("effectLst" | "effectDag") => {
+            part.children_through_alternates(names.mc).next().is_some()
+        }
+        // A camera in front of the picture, not turned, shows it as it is. Office writes
+        // one with a rotation of zeros into the effect styles of themes.
+        Some("scene3d") => child(part, names, &names.a, "camera").is_some_and(|camera| {
+            let turned = child(camera, names, &names.a, "rot").is_some_and(|rotation| {
+                ["lat", "lon", "rev"]
+                    .into_iter()
+                    .fold(false, |turned, name| {
+                        value(
+                            rotation,
+                            names,
+                            name,
+                            |angle| angle.parse::<i64>().ok(),
+                            report,
+                        )
+                        .is_some_and(|angle| angle != 0)
+                            | turned
+                    })
+            });
+            camera.attribute(&[None], "prst") != Some("orthographicFront") || turned
+        }),
+        Some("sp3d") => {
+            let depth = value(part, names, "extrusionH", coordinate, report);
+            let contour = value(part, names, "contourW", coordinate, report);
+            child(part, names, &names.a, "bevelT").is_some()
+                || child(part, names, &names.a, "bevelB").is_some()
+                || depth.is_some_and(|length| length.0 != 0.0)
+                || contour.is_some_and(|length| length.0 != 0.0)
+        }
+        _ => false,
+    }
+}
+
+/// A picture's transform (`a:xfrm` of `pic:spPr`).
+fn transform<'a>(picture: Element<'a>, names: &Names) -> Option<Element<'a>> {
+    child(
+        child(picture, names, &names.pic, "spPr")?,
+        names,
+        &names.a,
+        "xfrm",
+    )
+}
+
+/// A picture's rotation clockwise, in degrees (`a:xfrm`'s `rot`, 60,000 to a degree).
+fn rotation(picture: Element<'_>, names: &Names, report: Report<'_>) -> f64 {
+    transform(picture, names)
+        .and_then(|xfrm| {
+            value(
+                xfrm,
+                names,
+                "rot",
+                |value| value.parse::<i32>().ok(),
+                report,
+            )
+        })
+        .map_or(0.0, |value| f64::from(value) / 60_000.0)
+}
+
+/// Whether a picture is mirrored (`a:xfrm`'s `flipH` or `flipV`).
+fn flip(picture: Element<'_>, names: &Names, name: &str, report: Report<'_>) -> bool {
+    transform(picture, names)
+        .and_then(|xfrm| value(xfrm, names, name, boolean, report))
+        .unwrap_or(false)
+}
+
 /// A length of DrawingML (ST_Coordinate and the like), in points: a count of EMUs, or in
 /// Strict a number with a unit (ST_UniversalMeasure: `mm`, `cm`, `in`, `pt`, `pc`,
 /// `pi`). None for one beyond ST_Coordinate's range, such as a number of hundreds of
@@ -772,21 +941,16 @@ fn percentage(value: &str) -> Option<f64> {
 /// `a:alphaModFix` at 100 % and `a:hsl` without a change of hue, saturation or
 /// luminance, as Word writes some of them (fdo43573-2-min.docx of LibreOffice's tests
 /// has `<a:lum/>`).
-fn changes_image(effect: Element<'_>, names: &Names) -> bool {
-    let value = |name, default| {
-        effect
-            .attribute(&[None], name)
-            .and_then(percentage)
-            .unwrap_or(default)
+fn changes_image(effect: Element<'_>, names: &Names, report: Report<'_>) -> bool {
+    let mut differs = |name, none| {
+        value(effect, names, name, percentage, report).is_some_and(|value| value != none)
     };
     match effect.local_in(&names.a) {
         None | Some("extLst") => false,
-        Some("lum") => value("bright", 0.0) != 0.0 || value("contrast", 0.0) != 0.0,
-        Some("alphaModFix") => value("amt", 1.0) != 1.0,
+        Some("lum") => differs("bright", 0.0) | differs("contrast", 0.0),
+        Some("alphaModFix") => differs("amt", 1.0),
         // The hue is an angle, not a share; only whether it is 0 counts here.
-        Some("hsl") => ["hue", "sat", "lum"]
-            .into_iter()
-            .any(|name| value(name, 0.0) != 0.0),
+        Some("hsl") => differs("hue", 0.0) | differs("sat", 0.0) | differs("lum", 0.0),
         Some(_) => true,
     }
 }

@@ -1126,7 +1126,8 @@ impl Reading<'_, '_, '_> {
     /// the package: the part the picture's `r:embed` names among the relationships of the
     /// part being read, read once however many pictures show it. An image the package
     /// does not have is reported, and the picture shows none; one outside the package
-    /// (`r:link`, or an external relationship) is never loaded.
+    /// (`r:link`, or an external relationship) is never loaded. Each value of the drawing
+    /// that its readers do not take is reported too; they read it as not written.
     fn drawing(
         &mut self,
         reader: &mut Reader<'_>,
@@ -1138,6 +1139,11 @@ impl Reading<'_, '_, '_> {
         let element = self
             .c
             .capture(reader, mce, tag, Some(Disposition::Understood))?;
+        let names = &self.names;
+        self.c
+            .check_in(["", ""], element, offset, |drawing, report| {
+                drawing::check(drawing, names, report);
+            });
         let document = &*self.c.document;
         let embed = drawing::picture(document.element(element), &document.names)
             .and_then(|picture| drawing::embedded_image(picture, &document.names))
@@ -1152,7 +1158,8 @@ impl Reading<'_, '_, '_> {
     /// A VML drawing (`w:pict`), kept whole, with the image its picture shows read as
     /// [`drawing`](Self::drawing) reads a drawing's: the part `v:imagedata`'s `r:id`
     /// names, the only relationship Word takes for it in a document (MS-OI29500, Part 4,
-    /// §19.1.2.11(p, q)).
+    /// §19.1.2.11(p, q)). Each value of its picture that the readers do not take is
+    /// reported as a drawing's is.
     fn vml_drawing(
         &mut self,
         reader: &mut Reader<'_>,
@@ -1164,6 +1171,10 @@ impl Reading<'_, '_, '_> {
         let element = self
             .c
             .capture(reader, mce, tag, Some(Disposition::Understood))?;
+        let names = &self.names;
+        self.c.check_in(["", ""], element, offset, |pict, report| {
+            vml::check(pict, names, report);
+        });
         let document = &*self.c.document;
         let embed = vml::picture(document.element(element), &document.names)
             .and_then(|shape| vml::embedded_image(shape, &document.names))

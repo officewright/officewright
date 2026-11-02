@@ -13,7 +13,8 @@ use crate::model::xml::Element;
 use crate::units::{half_points_measure, twips_measure};
 
 /// Called for each attribute whose value is not valid: the element's local name, the
-/// attribute's, and the value. The property is read as not set.
+/// attribute's, and the value. The property is read as not set. An empty attribute name
+/// stands for the element's text.
 pub(crate) type Report<'r> = &'r mut dyn FnMut(&str, &str, &str);
 
 /// An integer attribute of a text effect, or `default` when it is not written or not an
