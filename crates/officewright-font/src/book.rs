@@ -313,11 +313,13 @@ impl fmt::Display for SkippedFont {
 /// A book can scan the same directories again, for example after fonts were installed:
 /// [`add_dir`](Self::add_dir) and [`add_system_fonts`](Self::add_system_fonts) add the
 /// fonts that appeared since. A file that was added is not read again, even if it
-/// changed. On Unix that holds by whatever path the file is reached, as long as it keeps
-/// its device, inode, size and modification time, so a file whose folder is moved within
-/// its file system and replaced by a link, or a second hard link to it, is not read again
-/// either; elsewhere a file is known by its canonical path. A file that was skipped is read again once its size or modification time
-/// changes, so a font that was still being copied during one scan is found by the next.
+/// changed. On Unix that also holds by another path, as long as the path the file was
+/// added by still leads to it: a file whose folder is moved within its file system and
+/// replaced by a link to where it went, or a second hard link, is not read again. A file
+/// renamed, or a new file that reuses the inode of a removed one, is read. Elsewhere a
+/// file is known by its canonical path. A file that was skipped is read again once its size or
+/// modification time changes, so a font that was still being copied during one scan is
+/// found by the next.
 /// Links, font files that could not be resolved and directories that could not be read
 /// are tried on every scan. Each skipped path is listed once, with the error of its
 /// latest attempt, and leaves the list when it is read. A path whose folder, or one above
@@ -343,10 +345,11 @@ pub struct FontBook {
     /// Canonical paths of the files already added, so a font reachable through
     /// several directories or links is indexed once.
     files: HashSet<PathBuf>,
-    /// What tells the files already added apart however they are reached ([`FileId`]), so
-    /// that a file whose canonical path changed, such as one whose folder was replaced by
-    /// a link to where it went, is not indexed again.
-    file_ids: HashSet<FileId>,
+    /// The canonical path each file was added by, under what tells it apart however it
+    /// is reached ([`FileId`]), so that a file whose canonical path changed, such as one
+    /// whose folder was replaced by a link to where it went, is not indexed again while
+    /// that path still leads to it.
+    file_ids: HashMap<FileId, PathBuf>,
     /// The paths a directory scan could not add, each listed once in `skipped`: the
     /// canonical paths of files that could not be indexed, and the canonical directory
     /// and name of font files and directories that could not be resolved or read.
@@ -802,8 +805,20 @@ impl FontBook {
         metadata: &fs::Metadata,
         origin: FontOrigin,
     ) -> Result<usize> {
+        if self.files.contains(&canonical) {
+            return Ok(0);
+        }
         let id = FileId::of(metadata);
-        if self.files.contains(&canonical) || id.is_some_and(|id| self.file_ids.contains(&id)) {
+        // The same file under another canonical path, while the one it was added by still
+        // leads to it: known from now on by this path too, and read already, so what was
+        // listed under this path is out of date. A path it was added by that leads
+        // elsewhere now, or nowhere, means the file was renamed or replaced: it is read.
+        let added_by = id.and_then(|id| self.file_ids.get(&id));
+        if added_by
+            .is_some_and(|added_by| fs::metadata(added_by).is_ok_and(|now| FileId::of(&now) == id))
+        {
+            self.forget_failure(&canonical);
+            self.files.insert(canonical);
             return Ok(0);
         }
         // Opening a FIFO or device would block or read forever.
@@ -817,10 +832,10 @@ impl FontBook {
         };
         if result.is_ok() {
             self.forget_failure(&canonical);
-            self.files.insert(canonical);
             if let Some(id) = id {
-                self.file_ids.insert(id);
+                self.file_ids.insert(id, canonical.clone());
             }
+            self.files.insert(canonical);
         }
         result
     }
@@ -1076,17 +1091,15 @@ impl FontBook {
     }
 }
 
-/// What tells a file from another however it is reached. On Unix: its device and inode, so
+/// What tells a file from another however it is reached: on Unix its device and inode, so
 /// that a file moved within its file system, or reached through another hard link, is the
-/// same file; and its size and modification time, so that a new file that reuses the inode
-/// of a removed one is not. Elsewhere there is none in the standard library, and a file is
-/// known by its canonical path only.
+/// same file. A removed file's inode may be reused by a new one, so the book takes a match
+/// only while the path the file was added by still leads to it. Elsewhere there is none in
+/// the standard library, and a file is known by its canonical path only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct FileId {
     device: u64,
     inode: u64,
-    len: u64,
-    modified: Option<SystemTime>,
 }
 
 impl FileId {
@@ -1097,8 +1110,6 @@ impl FileId {
         Some(Self {
             device: metadata.dev(),
             inode: metadata.ino(),
-            len: metadata.len(),
-            modified: metadata.modified().ok(),
         })
     }
 
@@ -2717,8 +2728,16 @@ mod tests {
         assert_eq!(book.add_dir(&data).unwrap(), 0);
         assert_eq!(book.add_file(fonts.join("sans.ttf")).unwrap(), 0);
         assert_eq!(book.len(), 2);
-        // Files of other inodes are read: a new one at the path the font was at, beside the
-        // hard link that keeps the old inode, and another.
+        // Rewritten in place, the font is not read again, by the moved path either.
+        fs::write(
+            data.join("fonts/sans.ttf"),
+            TestFont::new("Test Sans").build(),
+        )
+        .unwrap();
+        assert_eq!(book.add_dir(&fonts).unwrap(), 0);
+        assert_eq!(book.len(), 2);
+        // A new file at a path the book knows is not read, as on main: a file that was
+        // added is not read again, even if it changed. Another new file is read.
         fs::remove_file(data.join("fonts/sans.ttf")).unwrap();
         fs::write(
             data.join("fonts/sans.ttf"),
@@ -2726,29 +2745,61 @@ mod tests {
         )
         .unwrap();
         fs::write(data.join("other.ttf"), TestFont::new("Test Other").build()).unwrap();
-        assert_eq!(book.add_dir(&data).unwrap(), 2);
+        assert_eq!(book.add_dir(&data).unwrap(), 1);
     }
 
     #[test]
     #[cfg(unix)]
-    fn a_file_rewritten_in_place_is_another_file() {
-        // Its inode stays, but its size and modification time tell it from the file that
-        // was there, as they tell a new file that reuses a removed one's inode.
-        let dir = TempDir::new("file-id");
-        let path = dir.0.join("sans.ttf");
-        fs::write(&path, b"one").unwrap();
-        let metadata = fs::metadata(&path).unwrap();
-        let before = FileId::of(&metadata).unwrap();
-        write_with_time(
-            &path,
-            b"three",
-            metadata.modified().unwrap() + std::time::Duration::from_secs(2),
+    fn a_renamed_or_replaced_font_is_read() {
+        // On main as here: a font renamed in its folder, or a new font in place of a
+        // removed one, which may reuse its inode, is read and found.
+        let dir = TempDir::new("renamed-font");
+        let fonts = dir.0.join("fonts");
+        fs::create_dir(&fonts).unwrap();
+        let sans = TestFont::new("Test Sans").build();
+        fs::write(fonts.join("a.ttf"), &sans).unwrap();
+        let mut book = FontBook::new();
+        assert_eq!(book.add_dir(&fonts).unwrap(), 1);
+        fs::rename(fonts.join("a.ttf"), fonts.join("b.ttf")).unwrap();
+        assert_eq!(book.add_dir(&fonts).unwrap(), 1);
+        let renamed = book.len() - 1;
+        assert!(book.load(FaceId(renamed)).is_ok());
+        // The same size and modification time, as a copy that keeps them has.
+        let modified = fs::metadata(fonts.join("b.ttf"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        fs::remove_file(fonts.join("b.ttf")).unwrap();
+        let mono = TestFont::new("Test Mono").build();
+        assert_eq!(mono.len(), sans.len());
+        write_with_time(&fonts.join("c.ttf"), &mono, modified);
+        assert_eq!(book.add_dir(&fonts).unwrap(), 1);
+        assert_eq!(
+            resolved(&book, FontRequest::new("Test Mono")).0.as_deref(),
+            Some("Test Mono")
         );
-        let after = FileId::of(&fs::metadata(&path).unwrap()).unwrap();
-        assert_eq!((before.device, before.inode), (after.device, after.inode));
-        assert_ne!(before, after);
-        // Nothing changed, the same file.
-        assert_eq!(FileId::of(&fs::metadata(&path).unwrap()), Some(after));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_skipped_path_that_becomes_a_hard_link_to_an_added_font_leaves_the_list() {
+        // As `ln -f good.ttf bad.ttf` does: the font is read already, by its first path.
+        let dir = TempDir::new("hard-link-over-skipped");
+        let fonts = dir.0.join("fonts");
+        fs::create_dir(&fonts).unwrap();
+        fs::write(fonts.join("bad.ttf"), b"not a font").unwrap();
+        fs::write(fonts.join("good.ttf"), TestFont::new("Test Sans").build()).unwrap();
+        let mut book = FontBook::new();
+        assert_eq!(book.add_dir(&fonts).unwrap(), 1);
+        assert_eq!(book.skipped().len(), 1);
+        fs::remove_file(fonts.join("bad.ttf")).unwrap();
+        fs::hard_link(fonts.join("good.ttf"), fonts.join("bad.ttf")).unwrap();
+        assert_eq!(book.add_dir(&fonts).unwrap(), 0);
+        assert!(
+            book.skipped().is_empty(),
+            "{:?}",
+            listed_under(&book, &dir.0)
+        );
     }
 
     #[test]
