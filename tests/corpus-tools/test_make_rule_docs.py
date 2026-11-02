@@ -3528,31 +3528,486 @@ class Packages(unittest.TestCase):
             ("Case 05", None, None, None, "240"), ("Case 05", "D9D9D9", None, "240", None),
         ])
 
-    def test_pictures_are_typed_png_parts_that_resolve(self):
-        # Every VML picture of every document is Word's picture frame (the shape type defined
-        # once, before its first use), names a picture relationship to a part of the package,
-        # and that part is a well-formed PNG whose rows all use filter 0.
+    def test_drawing_namespaces_are_declared_where_they_are_used(self):
+        # A part declares wp, wps and mc only when it uses them (mc also for mc:Ignorable),
+        # and an mc:Choice requires only prefixes its part declares on its root.
+        for doc in self.docs:
+            for name, data in rules.parts(doc):
+                if not name.endswith(".xml") or b"<w:" not in data:
+                    continue
+                xml = data.decode()
+                root = xml[xml.index("<w:"):xml.index(">", xml.index("<w:"))]
+                for prefix in ("wp", "wps", "mc"):
+                    used = f"<{prefix}:" in xml or f" {prefix}:Ignorable=" in root
+                    self.assertEqual(f"xmlns:{prefix}=" in root, used,
+                                     f"{doc.name}: {name}: {prefix}")
+                for required in re.findall(r'<mc:Choice Requires="([^"]*)"', xml):
+                    for prefix in required.split():
+                        self.assertIn(f"xmlns:{prefix}=", root, f"{doc.name}: {name}")
+
+    def test_drawing_revision_and_form_field_ids_are_unique(self):
+        # Word refuses a document whose drawings share a docPr id; revisions and the ranges
+        # of moves have ids of their own, a move's two ranges share a name, and no two legacy
+        # form fields have one name.
+        wp = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}"
+        for doc in self.docs:
+            parts = dict(rules.parts(doc))
+            roots = [ElementTree.fromstring(data) for name, data in parts.items()
+                     if re.fullmatch(r"word/(document|header\d+|footer\d+)\.xml", name)]
+            drawings = [e.get("id") for root in roots for e in root.iter(f"{wp}docPr")]
+            self.assertEqual(len(drawings), len(set(drawings)), doc.name)
+            revisions = [e.get(f"{W}id") for root in roots for e in root.iter()
+                         if e.tag[len(W):] in ("del", "ins", "moveFrom", "moveTo",
+                                               "moveFromRangeStart", "moveToRangeStart")]
+            self.assertEqual(len(revisions), len(set(revisions)), doc.name)
+            moves = {}
+            for root in roots:
+                for kind in ("moveFrom", "moveTo"):
+                    for e in root.iter(f"{W}{kind}RangeStart"):
+                        moves.setdefault(e.get(f"{W}name"), []).append(kind)
+            for name, kinds in moves.items():
+                self.assertEqual(sorted(kinds), ["moveFrom", "moveTo"], f"{doc.name}: {name}")
+            forms = [name.get(f"{W}val") for root in roots for data in root.iter(f"{W}ffData")
+                     for name in data.iter(f"{W}name")]
+            self.assertEqual(len(forms), len(set(forms)), doc.name)
+
+    def test_batch_9_documents_have_the_markup_their_labels_name(self):
+        by_name = {doc.name: doc for doc in self.docs}
+        a = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+        wp = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}"
+        wps = "{http://schemas.microsoft.com/office/word/2010/wordprocessingShape}"
         v = "{urn:schemas-microsoft-com:vml}"
+        emu = 12700
+
+        def load(name):
+            doc = by_name[name]
+            parts = dict(rules.parts(doc))
+            return doc, parts, ElementTree.fromstring(parts["word/document.xml"]).find(f"{W}body")
+
+        def texts(element):
+            return "".join(t.text or "" for t in element.iter(f"{W}t"))
+
+        def labels(body):
+            return [texts(p) for p in body.findall(f"{W}p") if texts(p).startswith("Case ")]
+
+        def boxes(element):
+            return list(element.iter(f"{wps}wsp"))
+
+        def insets(shape):
+            body_pr = shape.find(f"{wps}bodyPr")
+            return tuple(body_pr.get(f"{side}Ins") for side in "ltrb")
+
+        def size(element):
+            ext = element.find(f".//{wp}extent")
+            return int(ext.get("cx")) / emu, int(ext.get("cy")) / emu
+
+        def box_paragraphs(shape):
+            return shape.findall(f"{wps}txbx/{W}txbxContent/{W}p")
+
+        def twips(p, path, name):
+            found = p.find(f"{W}pPr/{path}")
+            return None if found is None else found.get(f"{W}{name}")
+
+        # E-textbox-insets: four inline boxes of 216 x 90 pt with the insets their labels
+        # name, in EMUs.
+        _, _, body = load("E-textbox-insets")
+        shapes = boxes(body)
+        self.assertEqual([insets(s) for s in shapes], [
+            (None,) * 4, ("0",) * 4, (str(18 * emu),) * 4,
+            (str(36 * emu), str(12 * emu), "0", "0")])
+        self.assertEqual({size(d) for d in body.iter(f"{wp}inline")}, {(216, 90)})
+        self.assertEqual(len(labels(body)), 4)
+        for shape in shapes:
+            self.assertEqual(shape.find(f"{wps}cNvSpPr").get("txBox"), "1")
+            line = shape.find(f"{wps}spPr/{a}ln")
+            self.assertEqual(line.get("w"), "6350")
+
+        # E-textbox-anchor: top, centre and bottom, with one line and with six.
+        _, _, body = load("E-textbox-anchor")
+        shapes = boxes(body)
+        self.assertEqual([s.find(f"{wps}bodyPr").get("anchor") for s in shapes],
+                         ["t", "ctr", "b"] * 2)
+        self.assertEqual([len(box_paragraphs(s)) for s in shapes], [1] * 3 + [6] * 3)
+        # Six lines of Calibri 11 pt (13.43 pt each) are taller than the box.
+        self.assertEqual({size(d) for d in body.iter(f"{wp}inline")}, {(216, 48)})
+        self.assertGreater(6 * 13.43, size(body.find(f".//{wp}inline"))[1])
+        for label, shape in zip(labels(body), shapes):
+            self.assertIn(f"anchor {shape.find(f'{wps}bodyPr').get('anchor')} ", label)
+
+        # E-textbox-spacing: 12 pt before the first paragraph and after the last only where
+        # the label says so, at each anchor, insets of 0.
+        _, _, body = load("E-textbox-spacing")
+        shapes = boxes(body)
+        self.assertEqual([s.find(f"{wps}bodyPr").get("anchor") for s in shapes],
+                         ["t", "t", "b", "b", "ctr", "ctr"])
+        self.assertEqual({insets(s) for s in shapes}, {("0",) * 4})
+        spaced = [(twips(box_paragraphs(s)[0], f"{W}spacing", "before"),
+                   twips(box_paragraphs(s)[-1], f"{W}spacing", "after")) for s in shapes]
+        self.assertEqual(spaced, [(None, None), ("240", None), (None, None), (None, "240"),
+                                  (None, None), ("240", "240")])
+
+        # E-textbox-autofit: spAutoFit on the boxes written too short and too tall.
+        _, _, body = load("E-textbox-autofit")
+        shapes = boxes(body)
+        fits = [s.find(f"{wps}bodyPr")[0].tag[len(a):] for s in shapes]
+        self.assertEqual(fits, ["spAutoFit", "spAutoFit", "noAutofit", "spAutoFit"])
+        self.assertEqual([size(d)[1] for d in body.iter(f"{wp}inline")], [20, 120, 20, 20])
+        self.assertEqual([len(box_paragraphs(s)) for s in shapes], [4, 1, 4, 1])
+        last = box_paragraphs(shapes[3])[0]
+        self.assertEqual((twips(last, f"{W}spacing", "before"),
+                          twips(last, f"{W}spacing", "after")), ("240", "240"))
+
+        # E-textbox-fill-outline: three dark fills without an outline, outlines of 6 pt
+        # without an alignment and aligned inside, and one of 0.5 pt; no w:color on the text.
+        _, _, body = load("E-textbox-fill-outline")
+        shapes = boxes(body)
+        fills = [s.find(f"{wps}spPr/{a}solidFill/{a}srgbClr") for s in shapes]
+        self.assertEqual([f.get("val") if f is not None else None for f in fills],
+                         ["404040", "7F7F7F", "002060", None, None, None])
+        lines = [s.find(f"{wps}spPr/{a}ln") for s in shapes]
+        self.assertEqual([(ln.get("w"), ln.get("algn"), ln.find(f"{a}noFill") is not None)
+                          for ln in lines],
+                         [(None, None, True)] * 3 + [("76200", None, False),
+                                                     ("76200", "in", False),
+                                                     ("6350", None, False)])
+        self.assertEqual(list(body.iter(f"{W}color")), [])
+
+        # E-textbox-lists: one list (numId 1) in the body, in a box of the body and in a box
+        # of the header.
+        _, parts, body = load("E-textbox-lists")
+        (box,) = boxes(body)
+        in_box = [texts(p) for p in box_paragraphs(box)
+                  if p.find(f"{W}pPr/{W}numPr/{W}numId").get(f"{W}val") == "1"]
+        self.assertEqual(in_box, ["Box item, first", "Box item, second"])
+        in_body = [texts(p) for p in body.findall(f"{W}p")
+                   if p.find(f"{W}pPr/{W}numPr/{W}numId") is not None]
+        self.assertEqual(len(in_body), 5)
+        header = ElementTree.fromstring(parts["word/header1.xml"])
+        (header_box,) = boxes(header)
+        self.assertEqual(
+            [p.find(f"{W}pPr/{W}numPr/{W}numId").get(f"{W}val")
+             for p in box_paragraphs(header_box)], ["1"])
+        numbering = ElementTree.fromstring(parts["word/numbering.xml"])
+        self.assertEqual([n.get(f"{W}numId") for n in numbering.iter(f"{W}num")], ["1"])
+
+        # E-textbox-footer-page: the footer's box holds a PAGE field; three pages.
+        _, parts, body = load("E-textbox-footer-page")
+        footer = ElementTree.fromstring(parts["word/footer1.xml"])
+        (box,) = boxes(footer)
+        self.assertEqual([f.get(f"{W}instr") for f in box.iter(f"{W}fldSimple")], [" PAGE "])
+        breaks = [b for b in body.iter(f"{W}br") if b.get(f"{W}type") == "page"]
+        self.assertEqual(len(breaks), 2)
+
+        # E-textbox-inline-floating: two inline boxes in lines of text, and two floating ones
+        # placed from the margin and from the page, not wrapped.
+        _, _, body = load("E-textbox-inline-floating")
+        self.assertEqual([size(d) for d in body.iter(f"{wp}inline")], [(72, 18), (72, 48)])
+        anchors = list(body.iter(f"{wp}anchor"))
+        placed = [(d.find(f"{wp}positionH").get("relativeFrom"),
+                   int(d.find(f"{wp}positionH/{wp}posOffset").text) / emu,
+                   d.find(f"{wp}positionV").get("relativeFrom"),
+                   int(d.find(f"{wp}positionV/{wp}posOffset").text) / emu) for d in anchors]
+        self.assertEqual(placed, [("margin", 144, "margin", 360), ("page", 300, "page", 600)])
+        self.assertEqual([d.find(f"{wp}wrapNone") is not None for d in anchors], [True, True])
+        inline_paragraphs = [p for p in body.findall(f"{W}p") if p.find(f".//{wp}inline")
+                             is not None]
+        for p in inline_paragraphs:
+            self.assertTrue(texts(p).endswith(" after."), texts(p))
+
+        # E-textbox-vml: VML text boxes with the insets and anchors their labels name.
+        _, _, body = load("E-textbox-vml")
+        shapes = list(body.iter(f"{v}shape"))
+        self.assertEqual([s.find(f"{v}textbox").get("inset") for s in shapes],
+                         [None, "18pt,18pt,18pt,18pt", "0,0,0,0", "0,0,0,0", None])
+        styles = [s.get("style") for s in shapes]
+        self.assertEqual(["v-text-anchor:middle" in s for s in styles],
+                         [False, False, True, False, False])
+        self.assertEqual(["v-text-anchor:bottom" in s for s in styles],
+                         [False, False, False, True, False])
+        self.assertEqual(["position:absolute" in s for s in styles], [False] * 4 + [True])
+        self.assertIn("margin-left:144pt", styles[4])
+
+        # E-textbox-bar-tab: the same paragraph with a bar tab at 72 pt and 12 pt before
+        # and after, in a box 288 pt wide and in the body, 288 pt wide too.
+        _, _, body = load("E-textbox-bar-tab")
+        (box,) = boxes(body)
+        (inside,) = box_paragraphs(box)
+        outside = [p for p in body.findall(f"{W}p") if p.find(f"{W}pPr/{W}tabs") is not None]
+        self.assertEqual(len(outside), 1)
+        for p in (inside, outside[0]):
+            stop = p.find(f"{W}pPr/{W}tabs/{W}tab")
+            self.assertEqual((stop.get(f"{W}val"), stop.get(f"{W}pos")), ("bar", "1440"))
+            self.assertEqual((twips(p, f"{W}spacing", "before"),
+                              twips(p, f"{W}spacing", "after")), ("240", "240"))
+        self.assertEqual(texts(inside), texts(outside[0]))
+        self.assertEqual(rules.TEXT_W - int(twips(outside[0], f"{W}ind", "right")), 288 * 20)
+        self.assertEqual(size(body.find(f".//{wp}inline"))[0], 288)
+
+        # E-shape-colors: shapes without text; RGB and accent1 the same colour, shaded and
+        # tinted 50 %, a fill from the theme through wps:style, and outlines of 6 pt.
+        doc, parts, body = load("E-shape-colors")
+        theme = ElementTree.fromstring(parts["word/theme/theme1.xml"])
+        self.assertEqual(theme.find(f".//{a}accent1/{a}srgbClr").get("val"), "4F81BD")
+        self.assertEqual(theme.find(f".//{a}accent2/{a}srgbClr").get("val"), "CC6633")
+        first_fill = theme.find(f".//{a}fillStyleLst")[0]
+        self.assertEqual(first_fill.find(f"{a}schemeClr").get("val"), "phClr")
+        shapes = boxes(body)
+        self.assertEqual([s.find(f"{wps}txbx") for s in shapes], [None] * 9)
+
+        def colour(element):
+            if element is None:
+                return None
+            (color,) = list(element)
+            transforms = tuple((t.tag[len(a):], t.get("val")) for t in color)
+            return color.tag[len(a):], color.get("val"), transforms
+
+        shade, tint = (("shade", "50000"),), (("tint", "50000"),)
+        rgb, accent = ("srgbClr", "4F81BD"), ("schemeClr", "accent1")
+        self.assertEqual([colour(s.find(f"{wps}spPr/{a}solidFill")) for s in shapes], [
+            (*rgb, ()), (*rgb, shade), (*accent, ()), (*accent, shade), (*rgb, tint),
+            (*accent, tint), None, None, None])
+        self.assertEqual(colour(shapes[6].find(f"{wps}style/{a}fillRef")), (*accent, shade))
+        self.assertEqual(shapes[6].find(f"{wps}style/{a}fillRef").get("idx"), "1")
+        self.assertIsNone(shapes[6].find(f"{wps}spPr/{a}noFill"))
+        self.assertEqual([colour(s.find(f"{wps}spPr/{a}ln/{a}solidFill")) for s in shapes[7:]],
+                         [(*rgb, shade), (*accent, shade)])
+        self.assertEqual([s.find(f"{wps}spPr/{a}ln").get("w") for s in shapes[7:]],
+                         ["76200"] * 2)
+        for s in shapes[:7]:
+            self.assertIsNotNone(s.find(f"{wps}spPr/{a}ln/{a}noFill"))
+        self.assertEqual({size(d) for d in body.iter(f"{wp}inline")}, {(100, 40)})
+
+        # E-paragraph-units-sizes: the sizes of the style, mark and text that each label
+        # names, beside indents and spacing in units and in points.
+        doc, parts, body = load("E-paragraph-units-sizes")
+        styles = ElementTree.fromstring(parts["word/styles.xml"])
+        (size14,) = [s for s in styles.iter(f"{W}style") if s.get(f"{W}styleId") == "Size14"]
+        self.assertEqual(size14.find(f"{W}rPr/{W}sz").get(f"{W}val"), "28")
+        cases = [p for p in body.findall(f"{W}p") if texts(p).startswith("Case ")]
+
+        def half(element):
+            return None if element is None else int(element.get(f"{W}val")) / 2
+
+        written = [(twips(p, f"{W}pStyle", "val"), half(p.find(f"{W}pPr/{W}rPr/{W}sz")),
+                    {half(r.find(f"{W}rPr/{W}sz")) for r in p.findall(f"{W}r")}) for p in cases]
+        self.assertEqual(written, [("Size14", 11, {10}), (None, 14, {10}), (None, 10, {14}),
+                                   ("Size14", None, {None}), ("Size14", 11, {10}),
+                                   (None, 14, {10})])
+        for p in cases[:4]:
+            self.assertEqual({k: twips(p, f"{W}ind", k) for k in
+                              ("left", "leftChars", "hanging", "hangingChars")},
+                             {"left": "1440", "leftChars": "300", "hanging": "360",
+                              "hangingChars": "100"})
+        for p in cases[4:]:
+            self.assertEqual((twips(p, f"{W}spacing", "before"),
+                              twips(p, f"{W}spacing", "beforeLines")), ("120", "100"))
+
+        # E-paragraph-units-line-grid and -char-grid: the grid each names, in the section.
+        for name, grid in (("E-paragraph-units-line-grid", {"type": "lines",
+                                                            "linePitch": "480"}),
+                           ("E-paragraph-units-char-grid", {"type": "linesAndChars",
+                                                            "linePitch": "360",
+                                                            "charSpace": "40960"})):
+            _, _, body = load(name)
+            (doc_grid,) = body.iter(f"{W}docGrid")
+            self.assertEqual({k[len(W):]: val for k, val in doc_grid.attrib.items()}, grid)
+        _, _, body = load("E-paragraph-units-line-grid")
+        cases = [p for p in body.findall(f"{W}p") if texts(p).startswith("Case ")]
+        self.assertEqual([(twips(p, f"{W}spacing", "before"),
+                           twips(p, f"{W}spacing", "beforeLines"),
+                           twips(p, f"{W}spacing", "after"),
+                           twips(p, f"{W}spacing", "afterLines")) for p in cases],
+                         [("120", "100", None, None), ("120", "50", None, None),
+                          ("120", None, None, None), (None, None, "120", "100")])
+        _, _, body = load("E-paragraph-units-char-grid")
+        cases = [p for p in body.findall(f"{W}p") if texts(p).startswith("Case ")]
+        self.assertEqual([{k: twips(p, f"{W}ind", k) for k in
+                           ("left", "leftChars", "hanging", "hangingChars")} for p in cases],
+                         [{"left": "1440", "leftChars": "200", "hanging": None,
+                           "hangingChars": None},
+                          {"left": "1440", "leftChars": None, "hanging": "360",
+                           "hangingChars": "100"},
+                          {"left": "1440", "leftChars": None, "hanging": None,
+                           "hangingChars": None}])
+
+        # E-hidden-pictures: the pictures of cases 2 to 6 are in hidden runs, that of case 1
+        # is not, and the paragraph of case 6 is hidden with its mark.
+        _, parts, body = load("E-hidden-pictures")
+        picture_runs = [r for r in body.iter(f"{W}r")
+                        if r.find(f"{W}drawing") is not None or r.find(f"{W}pict") is not None]
+        self.assertEqual([r.find(f"{W}rPr/{W}vanish") is not None for r in picture_runs],
+                         [False, True, True, True, True, True])
+        def floats(r):
+            shape = r.find(f".//{v}shape")
+            return (r.find(f".//{wp}anchor") is not None
+                    or shape is not None and "position:absolute" in shape.get("style"))
+
+        self.assertEqual([floats(r) for r in picture_runs],
+                         [False, False, False, True, True, False])
+        hidden_marks = [p for p in body.findall(f"{W}p")
+                        if p.find(f"{W}pPr/{W}rPr/{W}vanish") is not None]
+        self.assertEqual(len(hidden_marks), 1)
+        self.assertIn(picture_runs[5], list(hidden_marks[0]))
+
+        # E-table-row-exact-cut: row 2 of exact height, a cell with margins, a paragraph
+        # indented past the cell, and a nested table with a picture taller than the row.
+        _, _, body = load("E-table-row-exact-cut")
+        tables = body.findall(f"{W}tbl")
+        self.assertEqual(len(tables), 3)
+        rows = [t.findall(f"{W}tr")[1] for t in tables]
+        self.assertEqual([(r.find(f"{W}trPr/{W}trHeight").get(f"{W}val"),
+                           r.find(f"{W}trPr/{W}trHeight").get(f"{W}hRule")) for r in rows],
+                         [("800", "exact"), ("600", "exact"), ("800", "exact")])
+        first = [r.find(f"{W}tc") for r in rows]
+        margins = first[0].find(f"{W}tcPr/{W}tcMar")
+        self.assertEqual([(m.tag[len(W):], m.get(f"{W}w")) for m in margins],
+                         [("top", "200"), ("bottom", "200")])
+        ind = first[1].find(f"{W}p/{W}pPr/{W}ind")
+        self.assertEqual((ind.get(f"{W}left"), ind.get(f"{W}right")), ("-400", "-400"))
+        (inner,) = first[2].findall(f"{W}tbl")
+        (picture,) = inner.iter(f"{v}shape")
+        self.assertIn("height:90pt", picture.get("style"))
+        height = int(rows[2].find(f"{W}trPr/{W}trHeight").get(f"{W}val")) / 20
+        self.assertGreater(90, height)
+
+        # The row-break documents: each case on pages of its own, its label, 40 filler lines
+        # of exact 12 pt and a table whose first row crosses into the next page.
+        def crossing_cases(name):
+            _, parts, body = load(name)
+            children = list(body)
+            tables = body.findall(f"{W}tbl")
+            for case, table in enumerate(tables, 1):
+                at = children.index(table)
+                label, filler = children[at - 41], children[at - 40:at]
+                self.assertTrue(texts(label).startswith(f"Case {case:02d}: "), name)
+                self.assertEqual(label.find(f"{W}pPr/{W}pageBreakBefore") is not None,
+                                 case > 1, name)
+                self.assertEqual([texts(p) for p in filler],
+                                 [f"Filler {k:02d}" for k in range(1, 41)], name)
+                row = [tr for tr in table.findall(f"{W}tr")
+                       if tr.find(f"{W}trPr/{W}tblHeader") is None][0]
+                tallest = max(len(tc.findall(f"{W}p")) for tc in row.findall(f"{W}tc"))
+                # 58 lines of 12 pt fill a page: the row starts on it and crosses it.
+                self.assertLess(1 + 40 + 1, rules.LINES_PER_PAGE, name)
+                self.assertGreater(1 + 40 + tallest, rules.LINES_PER_PAGE, name)
+                for p in table.iter(f"{W}p"):
+                    rule = p.find(f"{W}pPr/{W}spacing")
+                    self.assertEqual((rule.get(f"{W}line"), rule.get(f"{W}lineRule")),
+                                     ("240", "exact"), name)
+            return parts, body, tables
+
+        def starts(table):
+            """The first paragraph of the crossing row's second cell and of the next row."""
+            rows = table.findall(f"{W}tr")
+            return rows[0].findall(f"{W}tc")[1].find(f"{W}p"), rows[1].find(f"{W}tc/{W}p")
+
+        _, body, tables = crossing_cases("E-row-break-fields")
+        self.assertEqual(len(tables), 4)
+        for table, kind in zip(tables, ("IF", "FORMCHECKBOX", "FORMDROPDOWN", "FORMTEXT")):
+            for p in starts(table):
+                (first_run, second) = list(p.findall(f"{W}r"))[:2]
+                self.assertEqual(first_run.find(f"{W}fldChar").get(f"{W}fldCharType"), "begin")
+                self.assertEqual(second.find(f"{W}instrText").text.split()[0], kind)
+                begins = [c for c in p.iter(f"{W}fldChar")
+                          if c.get(f"{W}fldCharType") == "begin"]
+                self.assertEqual(len(begins), 2 if kind == "IF" else 1)
+                data = begins[0].find(f"{W}ffData")
+                self.assertEqual(data is None, kind == "IF")
+        _, body, tables = crossing_cases("E-row-break-hidden")
+        self.assertEqual(len(tables), 3)
+        hidden = [starts(t) for t in tables]
+        for p in hidden[0]:
+            self.assertEqual(p.find(f"{W}r/{W}rPr/{W}rStyle").get(f"{W}val"), "HiddenChar")
+        for p in hidden[1]:
+            self.assertEqual(p.find(f"{W}pPr/{W}pStyle").get(f"{W}val"), "HiddenPara")
+        for p in hidden[2]:
+            self.assertIsNotNone(p.find(f"{W}r/{W}rPr/{W}vanish"))
+        _, body, tables = crossing_cases("E-row-break-revisions")
+        self.assertEqual(len(tables), 3)
+        for table, kind in zip(tables, ("del", "moveFromRangeStart", "ins")):
+            for p in starts(table):
+                content = [e for e in p if e.tag != f"{W}pPr"]
+                self.assertEqual(content[0].tag, f"{W}{kind}")
+        crossing = [p for p in body.findall(f"{W}p") if "Paragraph line 01" in texts(p)]
+        (crossing,) = crossing
+        order = [e.tag[len(W):] for e in crossing if e.tag != f"{W}pPr"]
+        self.assertEqual(order[order.index("del"):order.index("del") + 4],
+                         ["del", "moveFromRangeStart", "moveFrom", "moveFromRangeEnd"])
+        self.assertEqual(texts(crossing).count("Paragraph line"), 30)
+        authors = {e.get(f"{W}author") for e in body.iter() if e.get(f"{W}author")}
+        self.assertEqual(authors, {"Officewright"})
+
+        parts, body, tables = crossing_cases("E-row-break-numbers")
+        self.assertEqual(len(tables), 3)
+        settings = parts["word/settings.xml"].decode()
+        self.assertLess(settings.index("<w:defaultTabStop"),
+                        settings.index("<w:evenAndOddHeaders/>"))
+        self.assertLess(settings.index("<w:evenAndOddHeaders/>"),
+                        settings.index("<w:characterSpacingControl"))
+        refs = {r.get(f"{W}type"): r for r in body.iter(f"{W}headerReference")}
+        self.assertEqual(sorted(refs), ["default", "even"])
+        even = ElementTree.fromstring(parts["word/header2.xml"])
+        self.assertEqual(texts(even), "1")
+        self.assertEqual([f.get(f"{W}instr") for f in even.iter(f"{W}fldSimple")], [" PAGE "])
+        rows = [[tr for tr in t.findall(f"{W}tr") if tr.find(f"{W}trPr/{W}tblHeader") is None]
+                for t in tables]
+        self.assertEqual([texts(r[1].find(f"{W}tc")) for r in rows], ["2", "4", "6"])
+        header_rows = [tr for tr in tables[1].findall(f"{W}tr")
+                       if tr.find(f"{W}trPr/{W}tblHeader") is not None]
+        self.assertEqual([[texts(tc) for tc in tr.findall(f"{W}tc")] for tr in header_rows],
+                         [["#", "Item", "Note"]])
+        self.assertEqual([len(tc.findall(f"{W}p")) for tc in rows[2][0].findall(f"{W}tc")],
+                         [20, 1, 20])
+        for name in ("E-row-break-fields", "E-row-break-hidden", "E-row-break-revisions"):
+            self.assertNotIn("<w:evenAndOddHeaders/>",
+                             dict(rules.parts(by_name[name]))["word/settings.xml"].decode())
+
+    def test_emus_are_whole(self):
+        self.assertEqual(rules.emu(0.5), 6350)
+        with self.assertRaisesRegex(ValueError, "not a whole number of EMUs"):
+            rules.emu(0.00001)
+
+    def test_pictures_are_typed_png_parts_that_resolve(self):
+        # Every VML picture of every document is Word's picture frame, and every VML text box
+        # Word's text box shape type (each shape type defined once, before its first use);
+        # every VML and DrawingML picture names a picture relationship to a part of the
+        # package, and that part is a well-formed PNG whose rows all use filter 0.
+        v = "{urn:schemas-microsoft-com:vml}"
+        a = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
         r_ns = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
-        seen = 0
+        kinds = {"_x0000_t75": (f"{v}imagedata", rules.PICTURE_FRAME),
+                 "_x0000_t202": (f"{v}textbox", rules.TEXT_BOX_TYPE)}
+        seen = drawn = 0
         for doc in self.docs:
             parts = dict(rules.parts(doc))
             document = ElementTree.fromstring(parts["word/document.xml"])
             shapes = list(document.iter(f"{v}shape"))
-            if not shapes:
+            blips = list(document.iter(f"{a}blip"))
+            types = list(document.iter(f"{v}shapetype"))
+            order = list(document.iter())
+            for shape_type in types:
+                child, markup = kinds[shape_type.get("id")]
+                users = [s for s in shapes if s.get("type") == f"#{shape_type.get('id')}"]
+                self.assertTrue(users, doc.name)
+                self.assertLess(order.index(shape_type), order.index(users[0]), doc.name)
+                self.assertIn(markup.encode(), parts["word/document.xml"], doc.name)
+                for shape in users:
+                    self.assertIsNotNone(shape.find(child), doc.name)
+            self.assertEqual(len(types), len({t.get("id") for t in types}), doc.name)
+            self.assertEqual({s.get("type") for s in shapes},
+                             {f"#{t.get('id')}" for t in types}, doc.name)
+            pictures = [s.find(f"{v}imagedata").get(f"{r_ns}id") for s in shapes
+                        if s.find(f"{v}imagedata") is not None]
+            drawn += bool(blips)
+            pictures += [blip.get(f"{r_ns}embed") for blip in blips]
+            if not pictures:
                 self.assertEqual(doc.media, (), doc.name)
                 continue
             seen += 1
-            types = list(document.iter(f"{v}shapetype"))
-            self.assertEqual([t.get("id") for t in types], ["_x0000_t75"], doc.name)
-            self.assertIn(rules.PICTURE_FRAME.encode(), parts["word/document.xml"], doc.name)
-            order = list(document.iter())
-            self.assertLess(order.index(types[0]), order.index(shapes[0]), doc.name)
             rels = {rel.get("Id"): rel for rel in ElementTree.fromstring(
                 parts["word/_rels/document.xml.rels"])}
-            for shape in shapes:
-                self.assertEqual(shape.get("type"), "#_x0000_t75", doc.name)
-                rel = rels[shape.find(f"{v}imagedata").get(f"{r_ns}id")]
+            for picture in pictures:
+                rel = rels[picture]
                 self.assertEqual(rel.get("Type"), f"{rules.REL}/image", doc.name)
                 png = parts[f"word/{rel.get('Target')}"]
                 self.assertTrue(png.startswith(b"\x89PNG\r\n\x1a\n"), doc.name)
@@ -3572,14 +4027,21 @@ class Packages(unittest.TestCase):
                 pixels = zlib.decompress(idat)
                 self.assertEqual(len(pixels), (width + 1) * height, doc.name)
                 self.assertEqual(set(pixels[::width + 1]), {0}, doc.name)
-        self.assertGreaterEqual(seen, 6)
-        # The shape type is Word's picture frame, as a copy Word re-saved writes it.
-        resaved = (SCRIPTS.parent / "tests/corpus/resaved/business"
-                   / "contract-ec-data-processing-clauses-bg.docx")
-        with zipfile.ZipFile(resaved) as archive:
-            written = archive.read("word/document.xml").decode()
-        frame = re.search(r'<v:shapetype id="_x0000_t75".*?</v:shapetype>', written, re.S)
-        self.assertEqual(rules.PICTURE_FRAME, frame.group(0))
+        self.assertGreaterEqual(seen, 7)
+        self.assertGreaterEqual(drawn, 1)
+        # The shape types are Word's picture frame and text box, as copies Word re-saved
+        # write them.
+        for folder, name, kind, markup in (
+            ("business", "contract-ec-data-processing-clauses-bg", "_x0000_t75",
+             rules.PICTURE_FRAME),
+            ("business", "letter-cfpb-validation-notice", "_x0000_t202", rules.TEXT_BOX_TYPE),
+        ):
+            resaved = SCRIPTS.parent / f"tests/corpus/resaved/{folder}/{name}.docx"
+            with zipfile.ZipFile(resaved) as archive:
+                written = archive.read("word/document.xml").decode()
+            found = re.search(rf'<v:shapetype [^>]*id="{kind}".*?</v:shapetype>', written, re.S)
+            # Word adds a w14:anchorId to the shape type of a shape it also wrote in DrawingML.
+            self.assertEqual(markup, re.sub(r' w14:anchorId="[^"]*"', "", found.group(0)))
         # The pixels are stored, not compressed, so the bytes are the same on every zlib.
         self.assertEqual(rules.stored_zlib(b"abc"), b"\x78\x01\x01\x03\x00\xfc\xffabc"
                          + struct.pack(">I", zlib.adler32(b"abc")))
