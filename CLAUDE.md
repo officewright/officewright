@@ -83,9 +83,10 @@ tests/pdf-output/       checks text-to-pdf output, in Helvetica and with Liberat
                         (CFF) from tests/fonts embedded, the page of glyph runs and vector graphics that
                         officewright-pdf's example `primitives` draws in both fonts, and the JPEG and PNG files
                         images.py makes (also the fuzz seeds in fuzz/seeds/png and jpeg) drawn by the example
-                        `images`, with qpdf, pdftotext, pdffonts, pdfimages and pdftoppm, and what the example
-                        `embed_report` counts for fonts it cannot embed (Linux, macOS; Windows has no official
-                        poppler build, and the golden snapshot proves the bytes are the same)
+                        `images`, the synthetic italic and bold the example `synthetic` draws for a family
+                        resolved without those faces, with qpdf, pdftotext, pdffonts, pdfimages and pdftoppm,
+                        and what the example `embed_report` counts for fonts it cannot embed (Linux, macOS;
+                        Windows has no official poppler build, and the golden snapshot proves the bytes are the same)
 tests/corpus/           small curated real documents (committed) + SOURCES.md + baseline.json
 tests/corpus/word-rules/  documents written by scripts/make-rule-docs.py, one undocumented Word rule each
 tests/corpus/poi/        unmodified Apache POI test documents (Apache-2.0) with POI's LICENSE and NOTICE
@@ -294,7 +295,6 @@ The maintainer does not review Rust code. Correctness rests on the automated gat
 ### 3. Fixes
 - Every blocker is fixed. Every should-fix is fixed or answered in the PR. The reviewer re-checks the fix of a blocker, and every other fix that changes what the code does, whether it answers a should-fix, a nit or a Copilot finding; the re-check covers only those fixes and the diff since the commit the reviewer last reviewed, not the whole PR again. Repeat until the reviewer's last comment says "No blockers.". A change of what the code returns, writes, reports or refuses, of the time or memory it takes, of a test's expected value or of a baseline changes what the code does. The author decides whether a fix does, and says so in its reply ("fixed in <commit>; changes no behaviour, no re-check"); a reviewer who disagrees says so in the PR, and the fix goes back to it. These get no re-check, as long as they delete or loosen no test (a doc example is a test), change no expected value, accept no snapshot, change no baseline and add no `#[allow]`: a fix that changes nothing the code does and neither the public API nor the C ABI, such as the rename of a private item; edits of comments, of doc comments outside their examples, of Markdown files and of the PR description; and new tests and fixes to tests. Merges of main that needed no conflict resolution in the PR's own files get none either. Changes that the PR itself makes to the following are always re-checked, whatever they are: CLAUDE.md, `CONTRIBUTING.md`, `SECURITY.md`, `LICENSE`, `CLA.md`, `COMMERCIAL.md`, `THIRD-PARTY-NOTICES.md`, `tests/corpus/SOURCES.md`, README's "Clean room" and "License" sections and its "not affiliated" disclaimer, `.github/pull_request_template.md`, error messages, scripts and configuration files.
 - GitHub Copilot's review comments: the author marks the PR ready for review, which is when Copilot reviews it, waits for that review and answers every finding in it before asking for the independent review, and any that come later as they arrive. When no Copilot review has come 30 minutes after the PR became ready for review (marked ready, or opened ready), the author says so in the PR and goes on. Every finding gets a reply: "fixed in <commit>", with the fix made as the Definition of done requires (a bug fix with a regression test that fails without it), or a short reason why not: wrong, already handled, or out of scope with a link to the issue that tracks it. Inline findings are answered in their thread; the low-confidence ones Copilot folds into the review body, which have no thread, in one PR comment quoting each. A fix, or a finding dismissed after the reviewer's last comment, goes to the reviewer like any other change; the first item of this step names the changes that need not. Whether a Copilot finding is a blocker is for the independent reviewer to decide; Copilot's own wording never makes it one.
-- Temporary exception until 2026-11-01, because Copilot has no review quota until then: once the PR is ready for review, the author does not wait for a Copilot review, writes one line in the PR, "Copilot review unavailable until 2026-11-01 (quota)", and asks for the independent review at once; that line is the reason step 4 asks for when there is no Copilot review. A Copilot review that arrives anyway is answered as above. A PR that carries the line keeps it after that date and needs no Copilot review. On 2026-11-01 the `maintenance` session deletes this item, and the Copilot steps apply again.
 
 ### 4. Merge
 The author puts their own PR into the merge queue when all hold:
@@ -372,8 +372,9 @@ PDF output of officewright text-to-pdf (tests/pdf-output): qpdf --check without 
   pdftoppm renders the subset exactly as the whole font and the shapes, colours and clips where the page puts them;
   the example images' page: pdfimages lists every JPEG and PNG as passed through or decoded with a soft mask, pdftoppm
   shows their colours and transparency, a PNG with every filter type renders the same decoded by officewright as
-  unfiltered by poppler, the committed fuzz seeds equal images.py's output; the example embed_report counts a font the
-  subsetter does not support apart from a damaged one (Linux, macOS)
+  unfiltered by poppler, the committed fuzz seeds equal images.py's output; the example synthetic's page: qpdf --check,
+  pdftotext reads every line, pdftoppm shows synthetic italic slanted by a third and synthetic bold bolder; the example
+  embed_report counts a font the subsetter does not support apart from a damaged one (Linux, macOS)
 corpus-runner over tests/corpus (committed corpus), every document rendered with the fonts of tests/fonts and, first,
   tests/fonts-word/noto-truetype (the TrueType Noto Sans, the build Word had for the references that use it) and
   tests/fonts-word/test-symbol (the symbol font),

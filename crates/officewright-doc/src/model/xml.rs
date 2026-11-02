@@ -6,6 +6,7 @@
 //! never recurses, however deep they nest. Names and namespaces are interned: an element
 //! costs a few machine words, not an allocation per name.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
@@ -239,15 +240,22 @@ impl<'d> Element<'d> {
         })
     }
 
-    /// The text directly in the element, not in its children.
-    pub(crate) fn text(self) -> String {
-        let mut text = String::new();
+    /// The text directly in the element, not in its children: borrowed when it is one
+    /// piece, as the text of a value is, so that reading it copies nothing.
+    pub(crate) fn text(self) -> Cow<'d, str> {
+        let mut text = Cow::Borrowed("");
         let mut depth = 0usize;
         for token in self.tokens.iter().skip(1) {
             match token {
                 Token::Start { .. } => depth += 1,
                 Token::End => depth = depth.saturating_sub(1),
-                Token::Text(part) if depth == 0 => text.push_str(part),
+                Token::Text(part) if depth == 0 => {
+                    if text.is_empty() {
+                        text = Cow::Borrowed(part);
+                    } else {
+                        text.to_mut().push_str(part);
+                    }
+                }
                 Token::Text(_)
                 | Token::Comment(_)
                 | Token::ProcessingInstruction { .. }
@@ -591,5 +599,62 @@ fn escape(out: &mut String, text: &str, attribute: bool) {
             '\n' if attribute => out.push_str("&#10;"),
             c => out.push(c),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn borrows_the_text_of_an_element_in_one_piece() {
+        // From the review of #435: the text of a value, read as the document opens, is
+        // borrowed, so that a long one is not copied; text in pieces is put together.
+        let mut strings = Strings::default();
+        let name = XmlName {
+            namespace: None,
+            qname: strings.intern("p"),
+        };
+        let start = || Token::Start {
+            name,
+            attributes: Box::new([]),
+            in_place: false,
+        };
+        let text = |tokens: &[Token]| -> String {
+            let text = Span::new(0, tokens.len()).of(tokens, &strings).text();
+            assert_eq!(
+                matches!(text, Cow::Borrowed(_)),
+                tokens
+                    .iter()
+                    .filter(|token| matches!(token, Token::Text(_)))
+                    .count()
+                    < 2,
+                "{text:?}"
+            );
+            text.into_owned()
+        };
+        assert_eq!(
+            text(&[start(), Token::Text("12700".into()), Token::End]),
+            "12700"
+        );
+        assert_eq!(text(&[start(), Token::End]), "");
+        let pieces = [
+            start(),
+            Token::Text("12".into()),
+            Token::Comment("c".into()),
+            Token::Text("700".into()),
+            Token::End,
+        ];
+        assert_eq!(text(&pieces), "12700");
+        // The text of a child is not the element's.
+        let child = [
+            start(),
+            Token::Text("a".into()),
+            start(),
+            Token::Text("b".into()),
+            Token::End,
+            Token::End,
+        ];
+        assert_eq!(Span::new(0, child.len()).of(&child, &strings).text(), "a");
     }
 }

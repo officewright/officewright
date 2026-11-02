@@ -12,8 +12,8 @@ pub struct Diagnostic {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DiagnosticKind {
-    /// An attribute has a value officewright does not understand; the attribute is read
-    /// as absent.
+    /// An attribute, a declaration of a VML `style` or the text of an element has a value
+    /// officewright does not understand; it is read as absent.
     InvalidValue,
     /// Content where the document format has none, such as text between paragraphs; it
     /// is ignored.
