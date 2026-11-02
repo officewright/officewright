@@ -2,8 +2,10 @@
 //! tests/fonts, as the layout does: the first bytes describe up to four run styles (fonts,
 //! among them missing ones and the symbol fonts Symbol and Wingdings; bold, italic,
 //! capitals, small capitals, complex script, right to left, the East Asian hint, kerning;
-//! size), the rest are pieces of text, floating pictures (anchored to any reference, by
-//! any offset or alignment, behind or in front, in any place of the stack), symbols, tabs,
+//! size), the rest are pieces of text, floating pictures and text boxes (anchored to any
+//! reference, by any offset or alignment, behind or in front, in any place of the stack; a
+//! box holds a paragraph of the piece's text, with insets and an anchor down the box the
+//! piece gives), symbols, tabs,
 //! soft hyphens, and page and column breaks in those styles. The paragraph must keep what
 //! the layout relies on (`check_paragraph`), and break into lines that hold its text in
 //! order, in a column, with
@@ -30,11 +32,11 @@ use officewright_layout::ir::{
     Alignment, AnchorHorizontalAlign, AnchorVerticalAlign, AnchoredObject, Border, BorderSide,
     Cell, Document, DocumentSettings, Field, FieldKind, FontHint, HeaderFooterSet,
     HorizontalAnchor, HorizontalPlacement, HorizontalReference, ImageData, ImageFormat, ImageId,
-    Indent, Inline, Level, LevelAlignment, LevelTextPart, LineSpacing, ListDefinition,
+    Indent, Inline, Insets, Level, LevelAlignment, LevelTextPart, LineSpacing, ListDefinition,
     ListInstance, ListItem, Margins, NumberFormat, ObjectContent, PageSetup, Paragraph,
-    ParagraphProps, Picture, Row, RunFonts, RunStyle, Section, SectionStart, Size, Spacing, Suffix,
-    TabKind, TabStop, Table, TableBorders, TableProps, VerticalAnchor, VerticalPlacement,
-    VerticalReference, Wrap,
+    ParagraphProps, Picture, Row, RunFonts, RunStyle, RunStyleId, Section, SectionStart, Size,
+    Spacing, Suffix, TabKind, TabStop, Table, TableBorders, TableProps, TextBox, TextBoxAnchor,
+    VerticalAnchor, VerticalPlacement, VerticalReference, Wrap,
 };
 
 const FAMILIES: [&str; 8] = [
@@ -48,8 +50,9 @@ const FAMILIES: [&str; 8] = [
     "",
 ];
 
-/// A floating picture of `image` whose place, size, layer and wrapping `bytes` give.
-fn floating(image: ImageId, bytes: &[u8]) -> Inline {
+/// A floating picture of `image`, or a text box of a paragraph in `style`, whose place,
+/// size, layer and wrapping `bytes` give, and for a box its insets, its anchor and its text.
+fn floating(image: ImageId, bytes: &[u8], style: RunStyleId) -> Inline {
     let byte = |index: usize| bytes.get(index).copied().unwrap_or(0);
     let offset = |index: usize| f64::from(i16::from_le_bytes([byte(index), byte(index + 1)])) / 4.0;
     let across = [
@@ -103,9 +106,35 @@ fn floating(image: ImageId, bytes: &[u8]) -> Inline {
     } else {
         Wrap::None
     };
+    let content = if byte(6) & 16 != 0 {
+        let text = String::from_utf8_lossy(bytes.get(12..).unwrap_or_default());
+        let inset = |index: usize| Pt(f64::from(byte(index)) / 4.0);
+        ObjectContent::text_box(
+            TextBox::new()
+                .with_blocks([Paragraph::new(style)
+                    .with_inlines([Inline::text(text, style)])
+                    .into()])
+                .with_insets(
+                    Insets::default()
+                        .with_left(inset(10))
+                        .with_top(inset(11))
+                        .with_right(inset(10))
+                        .with_bottom(inset(11)),
+                )
+                .with_anchor(
+                    [
+                        TextBoxAnchor::Top,
+                        TextBoxAnchor::Center,
+                        TextBoxAnchor::Bottom,
+                    ][usize::from(byte(6) >> 5) % 3],
+                ),
+        )
+    } else {
+        ObjectContent::Picture(Picture::new(image))
+    };
     Inline::anchored(
         AnchoredObject::new(
-            ObjectContent::Picture(Picture::new(image)),
+            content,
             Size::new(Pt(f64::from(byte(7))), Pt(f64::from(byte(8)))),
             HorizontalAnchor::default()
                 .with_relative_to(across)
@@ -193,7 +222,7 @@ fuzz_target!(|data: &[u8]| {
         let style = styles.get(usize::from(head & 3)).copied().unwrap_or(first);
         let text = String::from_utf8_lossy(body);
         inlines.push(match head >> 2 & 3 {
-            1 if head & 0x80 != 0 => floating(image, body),
+            1 if head & 0x80 != 0 => floating(image, body, style),
             0 | 1 => Inline::text(text, style),
             2 => Inline::symbol(
                 FAMILIES[usize::from(head >> 4) % FAMILIES.len()],
