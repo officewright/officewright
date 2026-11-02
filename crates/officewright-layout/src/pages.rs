@@ -1717,11 +1717,11 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         // rows, or on the page without them (a hypothesis until a Word render).
         let above = height - prepared.header_below();
         let whole = (prepared.cant_split(band) && !next.started())
-            .then(|| prepared.whole_height(next, &mut context))
+            .then(|| prepared.whole_height(next))
             .filter(|&whole| whole <= room);
         let least = match whole {
             Some(whole) => whole,
-            None => prepared.least(next, &mut context),
+            None => prepared.least(next),
         };
         if above + least > room {
             self.fonts.report_once(

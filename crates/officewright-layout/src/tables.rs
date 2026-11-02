@@ -611,7 +611,7 @@ impl<'d, 'l> Prepared<'d, 'l> {
         let below = self.thickness(rows.end);
         let row_height = self.table.rows().get(rows.start).map(Row::height);
         if laid.put.is_none() {
-            let heights = self.heights(laid, context);
+            let heights = self.heights(laid);
             let whole: f64 = rows
                 .clone()
                 .zip(&heights)
@@ -673,7 +673,7 @@ impl<'d, 'l> Prepared<'d, 'l> {
                 .flatten()
                 .map(LaidCell::height)
                 .fold(0.0, f64::max);
-            let mut heights = self.heights(laid, context);
+            let mut heights = self.heights(laid);
             if let Some(height) = heights.first_mut() {
                 *height = height.min((room - above - below).max(content));
             }
@@ -784,13 +784,9 @@ impl<'d, 'l> Prepared<'d, 'l> {
     }
 
     /// The height of `laid` laid out whole, the borders above and below it included.
-    pub(crate) fn whole_height(
-        &self,
-        laid: &LaidBand<'d>,
-        context: &mut Context<'d, '_, '_>,
-    ) -> f64 {
+    pub(crate) fn whole_height(&self, laid: &LaidBand<'d>) -> f64 {
         let rows = laid.rows.clone();
-        let heights = self.heights(laid, context);
+        let heights = self.heights(laid);
         let whole: f64 = rows
             .clone()
             .zip(&heights)
@@ -804,11 +800,11 @@ impl<'d, 'l> Prepared<'d, 'l> {
     /// first piece of a cell down to where a page may end, which such a page takes while
     /// the other cells wait with their margins, or else the first line of each cell, which
     /// it takes at least ([`Self::piece`]).
-    pub(crate) fn least(&self, laid: &LaidBand<'d>, context: &mut Context<'d, '_, '_>) -> f64 {
+    pub(crate) fn least(&self, laid: &LaidBand<'d>) -> f64 {
         let rows = laid.rows.clone();
         let below = self.thickness(rows.end);
         if laid.put.is_none() && !self.cuts(&rows) {
-            return self.whole_height(laid, context);
+            return self.whole_height(laid);
         }
         let cells = || laid.cells.first().into_iter().flatten().flatten();
         let margins = |cell: &LaidCell<'_>| cell.margins.top().0 + cell.margins.bottom().0;
@@ -841,7 +837,7 @@ impl<'d, 'l> Prepared<'d, 'l> {
     /// The height of each row of `laid` laid out whole, below its top border: its tallest
     /// cell of its own, as its height rule says, and a merged cell taller than its rows
     /// making the last of them taller.
-    fn heights(&self, laid: &LaidBand<'d>, context: &mut Context<'d, '_, '_>) -> Vec<f64> {
+    fn heights(&self, laid: &LaidBand<'d>) -> Vec<f64> {
         let rows = laid.rows.clone();
         let mut heights: Vec<f64> = Vec::new();
         for (offset, row) in rows.clone().enumerate() {
@@ -861,16 +857,7 @@ impl<'d, 'l> Prepared<'d, 'l> {
                 // next row's (Word's render of `E-table-row-exact-height.docx`), and Word
                 // adds the row's largest bottom margin (MS-OI29500 2.1.180 d).
                 Some(RowHeight::Exact(exact)) => {
-                    let height =
-                        (exact.0 - self.thickness(row)).max(0.0) + self.largest_bottom_margin(row);
-                    if content > height + 1e-6 {
-                        context.fonts.report_once(
-                            ReportKind::FeatureUnsupported,
-                            &self.location,
-                            "content taller than an exact row height is not cut off".to_owned(),
-                        );
-                    }
-                    height
+                    (exact.0 - self.thickness(row)).max(0.0) + self.largest_bottom_margin(row)
                 }
                 _ => content,
             };
@@ -909,7 +896,7 @@ impl<'d, 'l> Prepared<'d, 'l> {
 
     /// Paints `laid` whole, its rows `heights` high: the borders above its rows and, for
     /// the table's last band, below its last; each cell's content aligned in the room its
-    /// rows leave it.
+    /// rows leave it, and its text cut off where it is taller.
     fn paint_band(
         &self,
         laid: &mut LaidBand<'d>,
@@ -972,7 +959,39 @@ impl<'d, 'l> Prepared<'d, 'l> {
                 let x = left + margins.start().0;
                 let mut content = drawn.items;
                 shift(&mut content, x, content_top + down);
-                items.extend(content);
+                if drawn.height.0 > room + EPSILON {
+                    // Taller than its row of exact height: its text is cut off at the cell's
+                    // box, from below the row's top border to the top of the next row's, and
+                    // its pictures are drawn whole, over what follows (Word's render of
+                    // `E-table-row-exact-height.docx`, whose cells have no top or bottom
+                    // margin). Hypotheses until a Word render: the box takes in the cell's
+                    // bottom margin, it is cut across at the cell's grid lines, and the
+                    // pictures of a nested table are drawn whole too.
+                    let clip_top = top + self.thickness(row);
+                    let (pictures, rest): (Vec<_>, Vec<_>) = content
+                        .into_iter()
+                        .partition(|item| matches!(item, DisplayItem::Image(_)));
+                    items.push(DisplayItem::PushClip {
+                        at: Point {
+                            x: Pt(left),
+                            y: Pt(clip_top),
+                        },
+                        width: Pt(right - left),
+                        height: Pt((below - clip_top).max(0.0)),
+                    });
+                    items.extend(rest);
+                    items.push(DisplayItem::PopClip);
+                    items.extend(pictures);
+                    context.fonts.report_once(
+                        ReportKind::Overflow,
+                        &self.location,
+                        "text taller than its table row of exact height is cut off at the \
+                         row's bottom, as Word cuts it, and pictures there are drawn whole"
+                            .to_owned(),
+                    );
+                } else {
+                    items.extend(content);
+                }
             }
         }
         self.paint_borders((rows, &tops, bottom, last), &mut items);
@@ -2385,6 +2404,8 @@ pub(crate) fn shift(items: &mut [DisplayItem], dx: f64, dy: f64) {
                 moved(&mut line.to);
             }
             DisplayItem::Image(image) => moved(&mut image.at),
+            DisplayItem::PushClip { at, .. } => moved(at),
+            DisplayItem::PopClip => {}
         }
     }
 }
@@ -2939,6 +2960,77 @@ mod tests {
     }
 
     #[test]
+    fn text_taller_than_its_row_of_exact_height_is_cut_off_and_pictures_are_not() {
+        use crate::ir::{ImageData, ImageFormat, InlineObject, ObjectContent, Picture, Size};
+
+        // Word's render of `E-table-row-exact-height.docx`: the text of a cell is cut off at
+        // the bottom of its row, a picture is drawn whole, over what follows.
+        let (mut document, style) = document(CompatMode::Word2013);
+        let image = document.add_image(ImageData::new(ImageFormat::Png, &b"\x89PNG"[..]));
+        let picture = Inline::Object(InlineObject::new(
+            ObjectContent::Picture(Picture::new(image)),
+            Size::new(Pt(30.0), Pt(60.0)),
+        ));
+        let tall: Block = Paragraph::new(style).with_inlines([picture]).into();
+        let table = |height: f64| {
+            Table::default()
+                .with_grid([Pt(100.0), Pt(100.0)])
+                .with_props(fixed_props().with_borders(borders(1.5)))
+                .with_rows(vec![
+                    row(vec![
+                        cell(vec![lines(style, 1, "A")]),
+                        cell(vec![lines(style, 1, "B")]),
+                    ]),
+                    row(vec![
+                        cell(vec![lines(style, 3, "C"), tall.clone()]),
+                        cell(vec![lines(style, 1, "D")]),
+                    ])
+                    .with_height(RowHeight::Exact(Pt(height))),
+                ])
+        };
+        // What each item of the row's band draws, and the clip it is drawn in.
+        let clipped = |height: f64| {
+            let (_, bands) = laid(&document, &table(height), (400.0, &[]));
+            let mut clip = None;
+            let mut drawn = Vec::new();
+            for item in &bands[1].items {
+                match item {
+                    DisplayItem::PushClip { at, width, height } => {
+                        clip = Some((at.x.0, at.y.0, width.0, height.0));
+                    }
+                    DisplayItem::PopClip => clip = None,
+                    DisplayItem::Glyphs(run) => drawn.push((
+                        run.clusters
+                            .iter()
+                            .map(|c| c.text.as_str())
+                            .collect::<String>(),
+                        clip,
+                    )),
+                    DisplayItem::Image(_) => drawn.push(("picture".to_owned(), clip)),
+                    _ => {}
+                }
+            }
+            drawn
+        };
+        // The cell's box, between its grid lines and below the row's top border: 30 pt
+        // from its top, less the border.
+        let cut = Some((0.75, 1.5, 100.0, 28.5));
+        let text = |text: &str, clip| (text.to_owned(), clip);
+        assert_eq!(
+            clipped(30.0),
+            [
+                text("C", cut),
+                text("C", cut),
+                text("C", cut),
+                text("picture", None),
+                text("D", None),
+            ]
+        );
+        // Where the content fits, nothing is clipped.
+        assert!(clipped(200.0).iter().all(|(_, clip)| clip.is_none()));
+    }
+
+    #[test]
     fn the_empty_paragraph_that_ends_a_cell_after_a_nested_table_takes_no_room() {
         // Word's renders of `E-table-autofit-15.docx` (case 7) and
         // `E-table-row-split-nested.docx`: the cell is as high as its nested table. A
@@ -3207,7 +3299,7 @@ mod tests {
                     .with_height(RowHeight::Exact(Pt(height))),
             ])
         };
-        let note = "content taller than an exact row height";
+        let note = "text taller than its table row of exact height is cut off";
         assert!(has(&reported(&document, &exact(30.0), 400.0), note));
         assert!(!has(&reported(&document, &exact(40.0), 400.0), note));
         // A continuing cell with content draws none of it.

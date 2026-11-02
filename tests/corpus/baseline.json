@@ -1404,8 +1404,8 @@
     },
     "tests/corpus/word-rules/E-table-row-exact-height.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9752,
-      "ssim_min": 0.9752,
+      "ssim_mean": 0.983,
+      "ssim_min": 0.983,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-row-split-nested.docx": {

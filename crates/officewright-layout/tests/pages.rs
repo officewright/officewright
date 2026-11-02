@@ -445,6 +445,66 @@ fn every_document_on_pages_keeps_what_the_painter_relies_on() -> TestResult {
 }
 
 #[test]
+fn text_taller_than_its_row_of_exact_height_is_drawn_inside_a_clip() -> TestResult {
+    // A row exactly 30 pt high whose cell holds three lines of 20 pt: they are drawn inside
+    // a clip to the cell's box, which ends before the row after it.
+    let book = book()?;
+    let mut document = Document::default();
+    let style = document.add_run_style(
+        RunStyle::default()
+            .with_fonts(RunFonts::new("Calibri"))
+            .with_size(Pt(10.0)),
+    );
+    let line = |text: &str| paragraph(style, exact(0.0), vec![Inline::text(text, style)]);
+    let table = Table::default().with_grid([Pt(100.0)]).with_rows(vec![
+        Row::default()
+            .with_cells(vec![Cell::default().with_blocks(vec![
+                line("Cut"),
+                line("Cut"),
+                line("Cut"),
+            ])])
+            .with_height(officewright_layout::ir::RowHeight::Exact(Pt(30.0))),
+        Row::default().with_cells(vec![Cell::default().with_blocks(vec![line("Next")])]),
+    ]);
+    document.add_section(Section::new(a4()).with_blocks(vec![table.into()]));
+    fuzzing::check_pages(&book, &document, 5)?;
+    let laid = fuzzing::paginate(&book, &document, 5)?;
+    let page = laid.pages().first().ok_or("no page")?;
+    let kinds: Vec<&str> = page
+        .text()
+        .lines()
+        .filter_map(|line| {
+            if line.starts_with("clip @") {
+                Some("clip")
+            } else if line == "end clip" {
+                Some("end")
+            } else if line.starts_with("glyphs ") && line.contains("\"Cut\"") {
+                Some("Cut")
+            } else if line.starts_with("glyphs ") && line.contains("\"Next\"") {
+                Some("Next")
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        ["clip", "Cut", "Cut", "Cut", "end", "Next"],
+        "{}",
+        page.text()
+    );
+    // The clip is where the row is on the page: from the body's top, 72 pt down, 30 pt
+    // high.
+    let clip = page
+        .text()
+        .lines()
+        .find(|line| line.starts_with("clip @"))
+        .ok_or("no clip")?;
+    assert!(clip.contains(",1440 ") && clip.ends_with("x600"), "{clip}");
+    Ok(())
+}
+
+#[test]
 fn a_table_cut_over_more_pages_than_allowed_counts_by_its_pieces() -> TestResult {
     // The page check lets a document past `max_pages` through only when its lines could
     // take that many pages. A table of one row whose cell holds 100 lines is cut over 13
