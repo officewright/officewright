@@ -26,10 +26,10 @@ tests/corpus/reference/<group>/<name>/ go instead
     resolution and colour model the SSIM comparison uses;
   - geometry.json: page sizes and the position of every line and word (pdftotext
     -bbox-layout, in points from the top left of the page), the page count, Word's own page
-    breaks (the w:lastRenderedPageBreak marks of the re-saved copy, each page a table row
-    crosses counted once), the fonts the PDF references without embedding them, and what
-    Word changed when it saved the copy: the w:compat settings it dropped and added, the
-    style and numbering properties it dropped, added and changed, and the paragraphs whose
+    breaks (the w:lastRenderedPageBreak marks of the re-saved copy, without those Word repeats
+    in the later cells of a table row), the fonts the PDF references without embedding them,
+    and what Word changed when it saved the copy: the w:compat settings it dropped and added,
+    the style and numbering properties it dropped, added and changed, and the paragraphs whose
     style it changed; every value on a line of its own, without indentation (geometry_text);
   - formatting.json, from make-reference.ps1 format 3 on: the formatting Word computes for
     every paragraph of every story, with its runs of formatting when Word gave them, and the
@@ -859,22 +859,27 @@ def page_geometry(bbox: str) -> list[dict]:
     return pages
 
 
-# What a paragraph holds that shows nothing: properties, and markers of ranges (bookmarks such
-# as the _Hlk ones Word writes before a mark, proofing errors, comments, permissions, moves).
+# What a paragraph holds that shows nothing on the reference's pages: properties; markers of
+# ranges (bookmarks such as the _Hlk ones Word writes before a mark, proofing errors,
+# comments, permissions, moves); a field's code (its result shows, in the runs after the
+# separator); and text deleted or moved away, since make-reference.ps1 exports the content
+# without markup.
 UNSHOWN = {
     "pPr", "rPr", "sdtPr", "sdtEndPr", "smartTagPr", "customXmlPr",
     "bookmarkStart", "bookmarkEnd", "proofErr", "commentRangeStart", "commentRangeEnd",
     "permStart", "permEnd", "moveFromRangeStart", "moveFromRangeEnd", "moveToRangeStart",
-    "moveToRangeEnd",
+    "moveToRangeEnd", "fldChar", "instrText", "del", "moveFrom",
 }
-# What wraps runs: what it holds counts as the paragraph's own.
-WRAPPERS = {"r", "hyperlink", "ins", "smartTag", "sdt", "sdtContent", "customXml", "fldSimple",
-            "dir", "bdo"}
+# What wraps runs: what it holds counts as the paragraph's own, inserted and moved text too.
+WRAPPERS = {"r", "hyperlink", "ins", "moveTo", "smartTag", "sdt", "sdtContent", "customXml",
+            "fldSimple", "dir", "bdo"}
 
 
 def leads(paragraph: ElementTree.Element, mark: ElementTree.Element) -> bool:
-    """Whether the mark comes before everything the paragraph shows: only properties and
-    markers of ranges precede it (UNSHOWN), within runs and what wraps them (WRAPPERS)."""
+    """Whether the mark comes before everything the paragraph shows on the reference's
+    pages: only what UNSHOWN names precedes it (properties, markers of ranges, a field's
+    code, deleted or moved-away text), within runs and what WRAPPERS names. A field's result
+    and what a run shows otherwise (text, a tab, a break, a picture, a symbol) come first."""
 
     def walk(element: ElementTree.Element) -> bool | None:
         for child in element:
@@ -895,7 +900,7 @@ def leads(paragraph: ElementTree.Element, mark: ElementTree.Element) -> bool:
 
 def row_repeats(root: ElementTree.Element) -> set[int]:
     """The ids of the w:lastRenderedPageBreak marks that repeat a page a table row has
-    already marked, so that each page a row crosses counts once (#410).
+    already marked, so that within a row each page counts once (#410).
 
     Word's re-saved copies of the row references show three kinds of mark in a row. A row
     that starts a page is marked at the start of its first cell (E-table-row-cant-split). A
@@ -904,12 +909,17 @@ def row_repeats(root: ElementTree.Element) -> set[int]:
     E-table-row-cant-split-tall, "Outer b" in E-table-row-split-nested).
 
     So a mark that leads a cell's first paragraph starts no page of its own, since every
-    cell starts on the row's first page: the first such mark of a row is the row's start
-    and stays, and one after an earlier cell's mark repeats a page. Of the other marks, the
-    n-th of each cell is the row's n-th page after its first, kept in the first cell that
-    has it; no reference shows two cells crossing one page, and the rule counts such a page
-    once whichever cells mark it. Nested rows come first, so that the marks they leave out
-    do not count for the cell around them.
+    cell starts on the row's first page: the first such mark of a row stays, and one after
+    an earlier cell's mark repeats a page. Of the other marks, the n-th of each cell is the
+    row's n-th page after its first, kept in the first cell that has it; no reference shows
+    two cells crossing one page, and the rule counts such a page once whichever cells mark
+    it. Nested rows come first, so that the marks they leave out do not count for the cell
+    around them.
+
+    When the last cell of a row crosses a page, Word marks the start of the next row too,
+    though that row goes on on the same page (paragraph 71 of contract-hhs-teaming-agreement).
+    That mark stays: the marks alone do not tell it from a next row that starts a page of its
+    own (#410).
     """
     parents = {child: parent for parent in root.iter() for child in parent}
 
@@ -944,7 +954,7 @@ def row_repeats(root: ElementTree.Element) -> set[int]:
 
 def rendered_page_breaks(parts: dict[str, bytes]) -> list[dict]:
     """Word's page breaks: the w:lastRenderedPageBreak marks of a saved document, but for
-    those row_repeats leaves out, so that each page a table row crosses counts once.
+    the repeats within a table row that row_repeats leaves out.
 
     Paragraphs are counted in document order from 0, table cells included; the offset is
     the number of characters of the paragraph's text before the mark.
