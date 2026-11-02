@@ -319,8 +319,8 @@ impl fmt::Display for SkippedFont {
 /// are tried on every scan. Each skipped path is listed once, with the error of its
 /// latest attempt, and leaves the list when it is read. A path whose folder, or one above
 /// it, is replaced by a link to where it went is still the same path: a scan that reaches
-/// it lists it once, under where it is now. A path that is removed stays listed; a process
-/// that wants a fresh list starts a new book.
+/// it lists it once, under where it is now. A path a scan does not reach, such as one that
+/// was removed, stays listed; a process that wants a fresh list starts a new book.
 ///
 /// ```
 /// use officewright_font::{FontBook, FontRequest, FontResolver};
@@ -2524,6 +2524,122 @@ mod tests {
             "{:?}",
             listed_under(&book, &dir.0)
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_moved_path_listed_under_its_new_place_first_is_listed_once() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        // A scan of the new place lists the entries first, under their paths there; a
+        // scan through the old path then finds them listed, and drops the old entries.
+        let dir = TempDir::new("moved-new-place-first");
+        let (home, data) = (dir.0.join("home"), dir.0.join("data"));
+        fs::create_dir_all(home.join("fonts/sub")).unwrap();
+        fs::create_dir_all(home.join("lib")).unwrap();
+        fs::create_dir(&data).unwrap();
+        fs::write(home.join("lib/bad.ttf"), b"not a font").unwrap();
+        symlink(home.join("lib/bad.ttf"), home.join("fonts/link.ttf")).unwrap();
+        fs::set_permissions(home.join("fonts/sub"), fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = fs::read_dir(home.join("fonts/sub")).is_ok();
+        let mut book = FontBook::new();
+        book.add_dir(home.join("fonts")).unwrap();
+        move_and_link(&home, &data.join("home"));
+        book.add_dir(data.join("home/fonts")).unwrap();
+        book.add_dir(home.join("fonts")).unwrap();
+        let listed = listed_under(&book, &dir.0);
+        fs::set_permissions(
+            data.join("home/fonts/sub"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        // Root reads every directory, so this has to run as an ordinary user.
+        assert!(
+            !readable,
+            "run the tests as a user who cannot read mode 000"
+        );
+        // Each listed once, under the path of the scan that listed it first.
+        assert_eq!(listed, ["data/home/fonts/sub", "data/home/fonts/link.ttf"]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn add_file_of_a_moved_path_that_fails_keeps_its_entry() {
+        let dir = TempDir::new("moved-add-file-fails");
+        let (fonts, data) = (dir.0.join("fonts"), dir.0.join("data"));
+        fs::create_dir(&fonts).unwrap();
+        fs::create_dir(&data).unwrap();
+        fs::write(fonts.join("bad.ttf"), b"not a font").unwrap();
+        let mut book = FontBook::new();
+        book.add_dir(&fonts).unwrap();
+        move_and_link(&fonts, &data.join("fonts"));
+        // Still not a font: the path stays listed.
+        assert!(book.add_file(fonts.join("bad.ttf")).is_err());
+        assert_eq!(listed_under(&book, &dir.0), ["fonts/bad.ttf"]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_path_that_left_the_list_and_came_back_elsewhere_keeps_that_entry() {
+        use std::os::unix::fs::symlink;
+
+        // An entry that left the list leaves no path behind for a later scan to drop
+        // another entry by.
+        let dir = TempDir::new("left-and-back");
+        let (d, d2, fonts) = (dir.0.join("d"), dir.0.join("d2"), dir.0.join("fonts"));
+        fs::create_dir(&d).unwrap();
+        fs::create_dir(&d2).unwrap();
+        symlink(&d, &fonts).unwrap();
+        symlink(dir.0.join("missing.ttf"), d.join("dead.ttf")).unwrap();
+        symlink(dir.0.join("missing3.ttf"), d2.join("dead.ttf")).unwrap();
+        let mut book = FontBook::new();
+        book.add_dir(&fonts).unwrap();
+        assert_eq!(listed_under(&book, &dir.0), ["fonts/dead.ttf"]);
+        // The link resolves to a font: the entry leaves the list.
+        fs::write(
+            dir.0.join("missing.ttf"),
+            TestFont::new("Test Sans").build(),
+        )
+        .unwrap();
+        assert_eq!(book.add_dir(&fonts).unwrap(), 1);
+        assert!(book.skipped().is_empty());
+        // It dangles again, and a scan of `d` lists it under its own path.
+        fs::remove_file(d.join("dead.ttf")).unwrap();
+        symlink(dir.0.join("missing2.ttf"), d.join("dead.ttf")).unwrap();
+        book.add_dir(&d).unwrap();
+        assert_eq!(listed_under(&book, &dir.0), ["d/dead.ttf"]);
+        // `fonts` now leads to `d2`: `d/dead.ttf`, still dangling, stays.
+        fs::remove_file(&fonts).unwrap();
+        symlink(&d2, &fonts).unwrap();
+        book.add_dir(&fonts).unwrap();
+        assert_eq!(
+            listed_under(&book, &dir.0),
+            ["d/dead.ttf", "fonts/dead.ttf"]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_link_to_a_skipped_file_reads_it_again_only_once_it_changes() {
+        use std::os::unix::fs::symlink;
+
+        // As a scan reads a file it listed, so it reads one it reaches through a link.
+        let dir = TempDir::new("link-unchanged");
+        let (fonts, lib) = (dir.0.join("fonts"), dir.0.join("lib"));
+        fs::create_dir(&fonts).unwrap();
+        fs::create_dir(&lib).unwrap();
+        let font = TestFont::new("Test Sans").build();
+        let path = lib.join("sans.ttf");
+        fs::write(&path, vec![0; font.len()]).unwrap();
+        symlink(&path, fonts.join("link.ttf")).unwrap();
+        let mut book = FontBook::new();
+        book.add_dir(&fonts).unwrap();
+        assert_eq!(book.skipped().len(), 1);
+        // A font now, of the same size and modification time: not read again.
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        write_with_time(&path, &font, modified);
+        assert_eq!(book.add_dir(&fonts).unwrap(), 0);
+        assert_eq!(book.skipped().len(), 1);
     }
 
     #[test]
