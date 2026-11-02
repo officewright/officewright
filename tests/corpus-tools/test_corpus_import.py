@@ -1289,9 +1289,96 @@ class RenderedPageBreaks(unittest.TestCase):
                                       self.p("Identify each member")))
                  + self.row(self.cell(self.p("Schedule Contractors Input", True)))
                  + "</w:tbl>")
-        pages = [["Helpful Instructions", "Identify each member", "Schedule Contractors Input"]]
+        pages = [["x"],
+                 ["Helpful Instructions", "Identify each member", "Schedule Contractors Input"]]
         self.assertEqual(self.breaks(table, pages),
                          [(0, "Helpful Instructions"), (2, "Schedule Contractors Input")])
+
+    def test_copies_of_the_block_on_two_later_pages_leave_a_real_break(self):
+        # The crossing shows on two pairs of pages: nothing is shown, and the mark stays.
+        again = ("<w:tbl>"
+                 + self.row(self.cell(self.p("Helpful Instructions"),
+                                      self.p("signed by each participating GSA Schedule "
+                                             "contractor"),
+                                      self.p("Identify each member")))
+                 + self.row(self.cell(self.p("Schedule Contractors Input: {{Fill-in}}")))
+                 + "</w:tbl>")
+        copy = ["Helpful Instructions", "signed by each participating GSA Schedule",
+                "contractor", "Identify each member", "Schedule Contractors Input: {{Fill-in}}"]
+        pages = [["Helpful Instructions", "signed by each participating GSA Schedule"],
+                 ["contractor", "Identify each member"],
+                 ["Schedule Contractors Input", "a row that cannot split"],
+                 copy, copy]
+        self.assertEqual(self.breaks(self.NEXT_ROW + again + again, pages), self.BOTH)
+
+    def test_a_footer_like_the_next_row_leaves_a_real_break(self):
+        # The cell ends at the bottom of its page, and the running footer that pdftotext
+        # reads next begins like the next row, which starts the page after.
+        table = ("<w:tbl>"
+                 + self.row(self.cell(self.p("Helpful Instructions"),
+                                      self.mid("signed by each participating GSA Schedule ",
+                                               "contractor"),
+                                      self.p("Identify each member")))
+                 + self.row(self.cell(self.p("Confidential", True),
+                                      self.p("The parties keep this agreement secret")))
+                 + "</w:tbl>")
+        pages = [["Helpful Instructions", "signed by each participating GSA Schedule",
+                  "Confidential 3 of 7"],
+                 ["contractor", "Identify each member", "Confidential 4 of 7"],
+                 ["Confidential", "The parties keep this agreement secret", "Confidential 5 of 7"]]
+        self.assertEqual(self.breaks(table, pages), [(1, "contractor"), (3, "Confidential")])
+
+    def test_a_next_row_without_words_keeps_its_mark(self):
+        # A line of rules is no text to find: whatever line follows the cell's text, the mark
+        # stays.
+        table = self.NEXT_ROW.replace("Schedule Contractors Input", "______________")
+        for after in (["4 of 7"], ["a line of the page"]):
+            with self.subTest(after=after):
+                pages = [["Helpful Instructions", "signed by each participating GSA Schedule",
+                          "3 of 7"],
+                         ["contractor", "Identify each member", *after],
+                         ["______________", "5 of 7"]]
+                self.assertEqual(self.breaks(table, pages),
+                                 [(1, "contractor"), (3, "______________")])
+
+    def test_a_crossing_without_words_after_it_keeps_the_next_row_s_mark(self):
+        # The cell crosses at the end of its text: no line can start with what follows.
+        table = ("<w:tbl>"
+                 + self.row(self.cell(self.p("Helpful Instructions"),
+                                      self.mid("signed by each participating GSA Schedule", "")))
+                 + self.row(self.cell(self.p("Schedule Contractors Input", True)))
+                 + "</w:tbl>")
+        pages = [["Helpful Instructions", "signed by each participating GSA Schedule"],
+                 ["x", "Schedule Contractors Input"]]
+        self.assertEqual(self.breaks(table, pages), [(1, ""), (2, "Schedule Contractors Input")])
+
+    def test_a_crossing_shown_on_two_pairs_of_pages_shows_nothing(self):
+        # The first pair shows the next row right after the cell, but a later copy of the
+        # block crosses a page the same way: the evidence is not the cell's alone, and the
+        # mark stays.
+        again = ("<w:tbl>"
+                 + self.row(self.cell(self.p("Helpful Instructions"),
+                                      self.p("signed by each participating GSA Schedule "
+                                             "contractor"),
+                                      self.p("Identify each member")))
+                 + "</w:tbl>")
+        pages = [["Helpful Instructions", "signed by each participating GSA Schedule"],
+                 ["contractor", "Identify each member", "Schedule Contractors Input"],
+                 ["Helpful Instructions", "signed by each participating GSA Schedule"],
+                 ["contractor", "Identify each member"]]
+        self.assertEqual(self.breaks(self.NEXT_ROW + again, pages), self.BOTH)
+
+    def test_a_crossing_without_words_before_it_keeps_the_next_row_s_mark(self):
+        # The cell crosses at the start of its text, after an empty paragraph: no page can
+        # show what ended the page before.
+        table = ("<w:tbl>"
+                 + self.row(self.cell("<w:p/>", self.p("contractor", True),
+                                      self.p("Identify each member")))
+                 + self.row(self.cell(self.p("Schedule Contractors Input", True)))
+                 + "</w:tbl>")
+        pages = [["x"], ["contractor", "Identify each member", "Schedule Contractors Input"]]
+        self.assertEqual(self.breaks(table, pages),
+                         [(1, "contractor"), (3, "Schedule Contractors Input")])
 
     def test_words_are_compared_without_case_labels_or_punctuation(self):
         self.assertEqual(importer.words(" ○ Identify Each,  member. "),
@@ -1315,7 +1402,8 @@ class RenderedPageBreaks(unittest.TestCase):
         # ends: the next row's mark stays.
         again = ("<w:tbl>"
                  + self.row(self.cell(self.p("Helpful Instructions"),
-                                      self.p("signed by each participating GSA Schedule contractor"),
+                                      self.p("signed by each participating GSA Schedule "
+                                             "contractor"),
                                       self.p("Identify each member")))
                  + self.row(self.cell(self.p("Schedule Contractors Input: {{Fill-in}}")))
                  + "</w:tbl>")
