@@ -390,6 +390,8 @@ impl Painter<'_, '_, '_> {
                 Drawn::Image(image, at) => {
                     pdf_page.draw_image(image, at.0, at.1, at.2, at.3)?;
                 }
+                Drawn::PushClip(path) => pdf_page.push_clip(path)?,
+                Drawn::PopClip => pdf_page.pop_clip()?,
             }
         }
         Ok(())
@@ -398,7 +400,9 @@ impl Painter<'_, '_, '_> {
     /// What `items` draw on a page `width` by `height`, in the PDF's space, and within
     /// what a PDF holds: what lies wholly off the page is left out, since none of it
     /// would show; rectangles and grey boxes are cut to the page, and lines and runs of
-    /// glyphs to the page and a margin around it.
+    /// glyphs to the page and a margin around it. Clips nest as deep as the display list
+    /// nests them: the PDF sets one at a time, the part of the page they all leave, and
+    /// what is drawn where they leave none of it is left out.
     fn drawn(&mut self, width: Pt, height: Pt, items: &[DisplayItem]) -> Vec<Drawn> {
         let page = Area {
             width: width.0,
@@ -408,8 +412,39 @@ impl Painter<'_, '_, '_> {
         // PDF's from its bottom left corner, y up.
         let flip = move |y: Pt| Pt(height.0 - y.0);
         let mut drawn = Vec::new();
+        // The clips in effect, the innermost last: each the part of the page that it and
+        // the clips around it leave, `None` where they leave none.
+        let mut clips: Vec<Option<Bounds>> = Vec::new();
         for item in items {
+            let shown = clips.last().is_none_or(Option::is_some);
             match item {
+                DisplayItem::PushClip { at, width, height } => {
+                    let bottom = flip(Pt(at.y.0 + height.0));
+                    let mut clip = page.clip(at.x.0, bottom.0, width.0, height.0);
+                    if let Some(outer) = clips.last() {
+                        clip = clip
+                            .zip(*outer)
+                            .and_then(|(clip, outer)| overlap(clip, outer));
+                    }
+                    if clips.last().is_some_and(Option::is_some) {
+                        drawn.push(Drawn::PopClip);
+                    }
+                    if let Some((x, y, w, h)) = clip {
+                        drawn.push(Drawn::PushClip(pdf::GraphicsPath::rect(x, y, w, h)));
+                    }
+                    clips.push(clip);
+                }
+                DisplayItem::PopClip => {
+                    if let Some(clip) = clips.pop() {
+                        if clip.is_some() {
+                            drawn.push(Drawn::PopClip);
+                        }
+                        if let Some(Some((x, y, w, h))) = clips.last().copied() {
+                            drawn.push(Drawn::PushClip(pdf::GraphicsPath::rect(x, y, w, h)));
+                        }
+                    }
+                }
+                _ if !shown => {}
                 DisplayItem::Glyphs(run) => {
                     drawn.extend(self.glyphs(run, flip, page).into_iter().map(Drawn::Glyphs));
                 }
@@ -690,6 +725,22 @@ enum Drawn {
     Stroke(pdf::GraphicsPath, pdf::Stroke),
     /// An image, with its box: left, bottom, width and height.
     Image(pdf::Image, (Pt, Pt, Pt, Pt)),
+    /// Keeps what follows, up to the next `PopClip`, to a path.
+    PushClip(pdf::GraphicsPath),
+    PopClip,
+}
+
+/// A box on the page: left, bottom, width and height.
+type Bounds = (Pt, Pt, Pt, Pt);
+
+/// The part of box `a` inside box `b`; `None` when none of it is.
+fn overlap(a: Bounds, b: Bounds) -> Option<Bounds> {
+    let (x0, y0) = (a.0.0.max(b.0.0), a.1.0.max(b.1.0));
+    let (x1, y1) = (
+        (a.0.0 + a.2.0).min(b.0.0 + b.2.0),
+        (a.1.0 + a.3.0).min(b.1.0 + b.3.0),
+    );
+    (x1 > x0 && y1 > y0).then_some((Pt(x0), Pt(y0), Pt(x1 - x0), Pt(y1 - y0)))
 }
 
 /// A page, `width` by `height` points: what is drawn on it is kept to it, since nothing
@@ -1134,6 +1185,98 @@ mod tests {
             .iter()
             .map(|entry| entry.message().to_owned())
             .collect()
+    }
+
+    #[test]
+    fn clips_nest_and_the_pdf_sets_the_part_of_the_page_they_all_leave() {
+        let fill = || DisplayItem::Rect {
+            at: Point {
+                x: Pt(0.0),
+                y: Pt(0.0),
+            },
+            width: Pt(100.0),
+            height: Pt(200.0),
+            color: Color::rgb(1, 2, 3),
+        };
+        let clip = |x: f64, y: f64, width: f64, height: f64| DisplayItem::PushClip {
+            at: Point { x: Pt(x), y: Pt(y) },
+            width: Pt(width),
+            height: Pt(height),
+        };
+        let items = [
+            // 20 pt down to 120 pt down: 80 to 180 pt up.
+            clip(10.0, 20.0, 50.0, 100.0),
+            fill(),
+            // Inside it, and past the page: what both leave of the page.
+            clip(30.0, 50.0, 100.0, 20.0),
+            fill(),
+            DisplayItem::PopClip,
+            // Wholly off the page: what it holds is left out.
+            clip(500.0, 500.0, 10.0, 10.0),
+            fill(),
+            DisplayItem::PopClip,
+            DisplayItem::PopClip,
+            // The end of no clip changes nothing.
+            DisplayItem::PopClip,
+            fill(),
+        ];
+        let (drawn, _) = painted(&Document::default(), crate::testing::minimal(), &items);
+        let rect = |x: f64, y: f64, width: f64, height: f64| {
+            Some(pdf::GraphicsPath::rect(Pt(x), Pt(y), Pt(width), Pt(height)))
+        };
+        let steps: Vec<(&str, Option<pdf::GraphicsPath>)> = drawn
+            .iter()
+            .map(|item| match item {
+                Drawn::PushClip(path) => ("clip", Some(path.clone())),
+                Drawn::PopClip => ("end", None),
+                Drawn::Fill(path, _) => ("fill", Some(path.clone())),
+                _ => ("other", None),
+            })
+            .collect();
+        let (outer, page) = (rect(10.0, 80.0, 50.0, 100.0), rect(0.0, 0.0, 100.0, 200.0));
+        assert_eq!(
+            steps,
+            [
+                ("clip", outer.clone()),
+                ("fill", page.clone()),
+                ("end", None),
+                ("clip", rect(30.0, 130.0, 30.0, 20.0)),
+                ("fill", page.clone()),
+                ("end", None),
+                ("clip", outer.clone()),
+                ("end", None),
+                ("clip", outer),
+                ("end", None),
+                ("fill", page),
+            ]
+        );
+        // The PDF sets one clip at a time, each in a graphics state of its own.
+        let book = crate::testing::book(vec![crate::testing::minimal()]);
+        let mut fonts = Fonts::new(&book);
+        let document = Document::default();
+        let mut painter = Painter {
+            document: &document,
+            fonts: &mut fonts,
+            pdf_fonts: HashMap::new(),
+            images: HashMap::new(),
+            pdf: pdf::Document::new(),
+            notes: Notes::default(),
+        };
+        painter.paint(Pt(100.0), Pt(200.0), &items).expect("a page");
+        painter.pdf.set_compression(pdf::Compression::None);
+        let text = String::from_utf8_lossy(&painter.pdf.to_bytes().expect("a PDF")).into_owned();
+        let operators: Vec<&str> = text
+            .lines()
+            .filter_map(|line| match line {
+                "q" | "Q" | "f" => Some(line),
+                "W n" => Some("W"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            operators.join(" "),
+            "q W q f Q Q q W q f Q Q q W Q q W Q q f Q"
+        );
     }
 
     #[test]

@@ -89,6 +89,15 @@ pub(crate) enum DisplayItem {
     },
     Line(LineItem),
     Image(ImageItem),
+    /// Keeps what follows, up to the `PopClip` that ends it, to a rectangle, from its top
+    /// left corner. Clips nest: each `PopClip` ends the last one not yet ended.
+    PushClip {
+        at: Point,
+        width: Pt,
+        height: Pt,
+    },
+    /// Ends the clip of the last `PushClip` not yet ended.
+    PopClip,
 }
 
 /// Glyphs of one face, size and look, on one baseline.

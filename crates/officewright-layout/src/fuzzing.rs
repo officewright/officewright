@@ -1007,7 +1007,8 @@ impl Painted {
     ///   the run's origin on its baseline;
     /// - `rect @X,Y WxH #RRGGBB`;
     /// - `line X,Y X,Y WIDTH STYLE #RRGGBB`;
-    /// - `image N @X,Y WxH [rotated DEGREES] [flipped-horizontally] [flipped-vertically]`.
+    /// - `image N @X,Y WxH [rotated DEGREES] [flipped-horizontally] [flipped-vertically]`;
+    /// - `clip @X,Y WxH` and `end clip`, around what the clip keeps to its rectangle.
     pub fn text(&self) -> &str {
         &self.text
     }
@@ -1147,6 +1148,15 @@ fn display_text(items: &[crate::display::DisplayItem], fonts: &mut Fonts<'_>) ->
                     twips(image.height)
                 )
             }
+            DisplayItem::PushClip { at, width, height } => writeln!(
+                text,
+                "clip @{},{} {}x{}",
+                twips(at.x),
+                twips(at.y),
+                twips(*width),
+                twips(*height)
+            ),
+            DisplayItem::PopClip => writeln!(text, "end clip"),
         };
     }
     text
@@ -1365,7 +1375,8 @@ pub fn paginate(
 ///   that table;
 /// - each paragraph is on a page with its section's setup, and the first paragraph of a
 ///   section that starts on a new page starts its page, a page of that section;
-/// - page numbers grow by one within a section, and what pages draw is at finite places.
+/// - page numbers grow by one within a section, and what pages draw is at finite places;
+/// - each clip a page starts ends on that page, and nothing ends a clip it did not start.
 pub fn check_pages(book: &FontBook, document: &Document, max_pages: usize) -> Result<(), String> {
     use crate::display::DisplayItem;
     use crate::ir::SectionStart;
@@ -1557,6 +1568,12 @@ pub fn check_pages(book: &FontBook, document: &Document, max_pages: usize) -> Re
                 ));
             }
         }
+        if !clips_balanced(&page.items) {
+            return Err(format!(
+                "page {number}: a clip it starts does not end on it, or one ends that it \
+                 did not start"
+            ));
+        }
         for item in &page.items {
             let finite = match item {
                 DisplayItem::Glyphs(run) => {
@@ -1577,6 +1594,13 @@ pub fn check_pages(book: &FontBook, document: &Document, max_pages: usize) -> Re
                         && line.to.y.0.is_finite()
                 }
                 DisplayItem::Image(image) => image.at.x.0.is_finite() && image.at.y.0.is_finite(),
+                DisplayItem::PushClip { at, width, height } => {
+                    at.x.0.is_finite()
+                        && at.y.0.is_finite()
+                        && width.0.is_finite()
+                        && height.0.is_finite()
+                }
+                DisplayItem::PopClip => true,
             };
             if !finite {
                 return Err(format!("page {number}: {item:?} is not at a finite place"));
@@ -1593,11 +1617,54 @@ pub fn check_pages(book: &FontBook, document: &Document, max_pages: usize) -> Re
     Ok(())
 }
 
+/// Whether each clip that `items` start ends among them, and no clip ends that they did not
+/// start.
+fn clips_balanced(items: &[crate::display::DisplayItem]) -> bool {
+    use crate::display::DisplayItem;
+
+    let mut open = 0usize;
+    for item in items {
+        match item {
+            DisplayItem::PushClip { .. } => open += 1,
+            DisplayItem::PopClip => match open.checked_sub(1) {
+                Some(left) => open = left,
+                None => return false,
+            },
+            _ => {}
+        }
+    }
+    open == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ir::{Paragraph, RunFonts};
     use crate::testing::{book, minimal, with_multiplied_a};
+
+    #[test]
+    fn clips_are_balanced_where_each_ends_among_the_items_that_start_it() {
+        use crate::display::{DisplayItem, Point};
+
+        let push = DisplayItem::PushClip {
+            at: Point {
+                x: Pt(0.0),
+                y: Pt(0.0),
+            },
+            width: Pt(1.0),
+            height: Pt(1.0),
+        };
+        let pop = DisplayItem::PopClip;
+        assert!(clips_balanced(&[]));
+        assert!(clips_balanced(&[
+            push.clone(),
+            push.clone(),
+            pop.clone(),
+            pop.clone()
+        ]));
+        assert!(!clips_balanced(&[push.clone(), push.clone(), pop.clone()]));
+        assert!(!clips_balanced(&[pop.clone(), push, pop]));
+    }
 
     #[test]
     fn a_cluster_of_many_glyphs_gives_its_text_once() {

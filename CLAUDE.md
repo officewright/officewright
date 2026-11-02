@@ -54,12 +54,13 @@ crates/
                         list definition, as Word counts) and tables (columns fitted to their content
                         as Word fits them, or the grid's widths for fixed layout, merged cells,
                         borders by Word's conflict rules, shading, nesting, rows cut across pages
-                        between the lines of their cells and header rows repeated as Word does them;
+                        between the lines of their cells and header rows repeated as Word does them,
+                        and text taller than a row of exact height cut off at the row's bottom, its
+                        pictures drawn whole, as Word draws them;
                         not yet: rows tied by a vertically merged cell are not cut, nor a nested
                         table's rows inside their lines, a nested table's header rows are not
-                        repeated, a PAGE field in repeated header rows or in a row cut over pages
-                        shows the number of one page only, and content taller than a row of exact
-                        height is not cut off),
+                        repeated, and a PAGE field in repeated header rows or in a row cut over
+                        pages shows the number of one page only),
                         and draws floating pictures where they are anchored (stacked behind or in
                         front of the text, which does not wrap around them yet), behind private
                         modules;
