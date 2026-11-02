@@ -975,9 +975,14 @@ class RenderedPageBreaks(unittest.TestCase):
     def row(self, *cells: str) -> str:
         return f"<w:tr>{''.join(cells)}</w:tr>"
 
-    def breaks(self, body: str) -> list[tuple[int, str]]:
+    def breaks(self, body: str, pages: list[list[str]] | None = None) -> list[tuple[int, str]]:
+        # pages: the text of each line of each page of a reference, when it has some.
+        reference = None
+        if pages is not None:
+            reference = [{"number": n, "lines": [{"text": text} for text in lines]}
+                         for n, lines in enumerate(pages, 1)]
         return [(b["paragraph"], b["text_after"])
-                for b in importer.rendered_page_breaks(self.document(body))]
+                for b in importer.rendered_page_breaks(self.document(body), reference)]
 
     def test_the_cell_after_one_that_crosses_a_page_repeats_it_at_its_start(self):
         # E-table-row-split: the first cell crosses the page before "Long 18"; Word marks
@@ -1172,20 +1177,91 @@ class RenderedPageBreaks(unittest.TestCase):
                  + "</w:tbl>")
         self.assertEqual(self.breaks(table), [(0, "Name")])
 
-    def test_a_mark_at_the_next_row_s_start_stays(self):
-        # contract-hhs-teaming-agreement: a one-cell row crosses into page 4 at "contractor",
-        # and Word marks the next row's start too, though it goes on on page 4. The marks
-        # alone do not tell it from a next row that starts a page of its own, so it stays
-        # (#410).
+    # contract-hhs-teaming-agreement: a one-cell row crosses into page 4 at "contractor", and
+    # Word marks the next row's start too, though it goes on on page 4 (#410).
+    NEXT_ROW = ("<w:tbl>"
+                "<w:tr><w:tc>"
+                "<w:p><w:r><w:t>Helpful Instructions</w:t></w:r></w:p>"
+                "<w:p><w:r><w:t>signed by each participating GSA Schedule </w:t>"
+                "<w:lastRenderedPageBreak/><w:t>contractor</w:t></w:r></w:p>"
+                "<w:p><w:r><w:t>Identify each member</w:t></w:r></w:p>"
+                "</w:tc></w:tr>"
+                "<w:tr><w:tc>"
+                "<w:p><w:r><w:lastRenderedPageBreak/>"
+                "<w:t>Schedule Contractors Input</w:t></w:r></w:p>"
+                "</w:tc></w:tr>"
+                "</w:tbl>")
+    BOTH = [(1, "contractor"), (3, "Schedule Contractors Input")]
+
+    def test_a_mark_at_the_next_row_s_start_stays_without_the_reference(self):
+        # The marks alone do not tell it from a next row that starts a page of its own.
+        self.assertEqual(self.breaks(self.NEXT_ROW), self.BOTH)
+
+    def test_the_reference_shows_the_next_row_s_mark_repeats_the_page(self):
+        # On the page that "contractor" starts, the next row's text follows the end of the
+        # text before it, line after line (the list label "○" shows on the page only).
+        pages = [["Helpful Instructions", "signed by each participating GSA Schedule", "3 of 7"],
+                 ["contractor", "○ Identify each member", "Schedule Contractors Input", "4 of 7"]]
+        self.assertEqual(self.breaks(self.NEXT_ROW, pages), [(1, "contractor")])
+
+    def test_the_reference_shows_the_next_row_starts_a_page(self):
+        pages = [["Helpful Instructions", "signed by each participating GSA Schedule"],
+                 ["contractor", "○ Identify each member"],
+                 ["Schedule Contractors Input"]]
+        self.assertEqual(self.breaks(self.NEXT_ROW, pages), self.BOTH)
+
+    def test_the_lines_must_follow_on_the_page_the_crossing_starts(self):
+        # The pair of lines on a page without the crossing's text, or above it, or with a
+        # line between them, or with other text before the next row's: the mark stays.
+        for pages in ([["Helpful Instructions", "signed by each participating GSA Schedule"],
+                       ["contractor"],
+                       ["Identify each member", "Schedule Contractors Input"]],
+                      [["Identify each member", "Schedule Contractors Input", "contractor"]],
+                      [["contractor", "Identify each member", "a line between",
+                        "Schedule Contractors Input"]],
+                      [["contractor", "Identify each member",
+                        "Not the Schedule Contractors Input"]],
+                      [["contractor", "Identify each", "Schedule Contractors Input"]]):
+            with self.subTest(pages=pages):
+                self.assertEqual(self.breaks(self.NEXT_ROW, pages), self.BOTH)
+
+    def test_the_last_crossing_of_the_cell_names_the_page(self):
+        # The row's last cell crosses two pages; the next row goes on on the second.
         table = ("<w:tbl>"
-                 + self.row(self.cell(self.p("Helpful Instructions"),
-                                      self.mid("signed by each participating GSA Schedule ",
-                                               "contractor"),
+                 + self.row(self.cell(self.mid("one ", "two"), self.mid("three ", "four"),
                                       self.p("Identify each member")))
                  + self.row(self.cell(self.p("Schedule Contractors Input", True)))
                  + "</w:tbl>")
-        self.assertEqual(self.breaks(table),
-                         [(1, "contractor"), (3, "Schedule Contractors Input")])
+        pages = [["one"], ["two three"], ["four", "Identify each member",
+                                          "Schedule Contractors Input"]]
+        self.assertEqual(self.breaks(table, pages), [(0, "two"), (1, "four")])
+
+    def test_a_row_that_only_starts_a_page_crosses_none(self):
+        # The row before starts a page at its first cell's start and crosses none: the next
+        # row's mark is no repeat of a crossing, whatever its page shows.
+        table = ("<w:tbl>"
+                 + self.row(self.cell(self.p("Helpful Instructions", True),
+                                      self.p("Identify each member")))
+                 + self.row(self.cell(self.p("Schedule Contractors Input", True)))
+                 + "</w:tbl>")
+        pages = [["Helpful Instructions", "Identify each member", "Schedule Contractors Input"]]
+        self.assertEqual(self.breaks(table, pages),
+                         [(0, "Helpful Instructions"), (2, "Schedule Contractors Input")])
+
+    def test_words_are_compared_without_case_labels_or_punctuation(self):
+        self.assertEqual(importer.words(" ○ Identify Each,  member. "),
+                         ["identify", "each", "member"])
+        self.assertEqual(importer.words("ﬁle １２"), ["file", "12"])
+
+    def test_without_text_before_the_next_row_its_mark_stays(self):
+        # The last cell of the row before crosses a page in a paragraph without text: no
+        # line can show where the crossing starts or what the next row follows.
+        table = ("<w:tbl>"
+                 + self.row(self.cell("<w:p/>", "<w:p><w:r><w:lastRenderedPageBreak/></w:r></w:p>"))
+                 + self.row(self.cell(self.p("Schedule Contractors Input", True)))
+                 + "</w:tbl>")
+        pages = [[], ["Schedule Contractors Input"]]
+        self.assertEqual(self.breaks(table, pages), [(1, ""), (2, "Schedule Contractors Input")])
 
     def test_a_page_that_several_cells_cross_counts_once(self):
         # Three cells cross one page, each marked where it does and, after the first, at its

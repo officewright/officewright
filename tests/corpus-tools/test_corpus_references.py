@@ -297,7 +297,8 @@ class References(unittest.TestCase):
             resaved, _ = self.resaved(folder)
             with self.subTest(document=f"{folder.parent.name}/{folder.name}"):
                 geometry = json.loads((folder / "geometry.json").read_text(encoding="utf-8"))
-                expected = importer.rendered_page_breaks(importer.read_parts(resaved))
+                parts = importer.read_parts(resaved)
+                expected = importer.rendered_page_breaks(parts, geometry["pages"])
                 self.assertEqual(geometry["page_breaks"], expected)
 
     def test_every_re_saved_copy_belongs_to_a_reference(self):
