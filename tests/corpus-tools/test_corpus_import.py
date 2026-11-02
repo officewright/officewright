@@ -946,6 +946,293 @@ class Import(unittest.TestCase):
                 self.assertIn("file must be the name of a .docx file", self.refused())
 
 
+class RenderedPageBreaks(unittest.TestCase):
+    """Within a table row each page counts once among Word's page breaks (#410). The first
+    tests give the marks of Word's re-saved copies of E-table-row-split,
+    E-table-row-cant-split-tall, E-table-row-split-nested and E-table-row-cant-split."""
+
+    @staticmethod
+    def document(body: str) -> dict:
+        w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        xml = f'<w:document xmlns:w="{w}"><w:body>{body}</w:body></w:document>'
+        return {"word/document.xml": xml.encode()}
+
+    @staticmethod
+    def p(text: str, mark: bool = False) -> str:
+        # Word writes a mark at a paragraph's start in its first run, after the run's
+        # properties.
+        before = "<w:lastRenderedPageBreak/>" if mark else ""
+        return f"<w:p><w:r><w:rPr><w:b/></w:rPr>{before}<w:t>{text}</w:t></w:r></w:p>"
+
+    @staticmethod
+    def mid(before: str, after: str) -> str:
+        return (f"<w:p><w:r><w:t>{before}</w:t><w:lastRenderedPageBreak/>"
+                f"<w:t>{after}</w:t></w:r></w:p>")
+
+    def cell(self, *paragraphs: str) -> str:
+        return f"<w:tc>{''.join(paragraphs)}</w:tc>"
+
+    def row(self, *cells: str) -> str:
+        return f"<w:tr>{''.join(cells)}</w:tr>"
+
+    def breaks(self, body: str) -> list[tuple[int, str]]:
+        return [(b["paragraph"], b["text_after"])
+                for b in importer.rendered_page_breaks(self.document(body))]
+
+    def test_the_cell_after_one_that_crosses_a_page_repeats_it_at_its_start(self):
+        # E-table-row-split: the first cell crosses the page before "Long 18"; Word marks
+        # "r3c2" at its start, though its text is on the page before, and not "r3c3".
+        table = ("<w:tbl>"
+                 + self.row(self.cell(self.p("Long 17"), self.p("Long 18", True)),
+                            self.cell(self.p("r3c2", True)), self.cell(self.p("r3c3")))
+                 + self.row(self.cell(self.p("r4c1")), self.cell(self.p("r4c2")))
+                 + "</w:tbl>")
+        self.assertEqual(self.breaks(self.p("before") + table + self.p("after")),
+                         [(2, "Long 18")])
+
+    def test_a_row_that_starts_a_page_and_crosses_another(self):
+        # E-table-row-cant-split-tall: the row starts a page at "Long 01" and crosses the
+        # next at "Long 52", and "r3c2" repeats the second.
+        table = ("<w:tbl>"
+                 + self.row(self.cell(self.p("Long 01", True), self.p("Long 52", True)),
+                            self.cell(self.p("r3c2", True)), self.cell(self.p("r3c3")))
+                 + "</w:tbl>")
+        self.assertEqual(self.breaks(table), [(0, "Long 01"), (1, "Long 52")])
+
+    def test_a_row_that_only_starts_a_page_keeps_its_mark(self):
+        # E-table-row-cant-split: Word marks the first cell alone.
+        table = ("<w:tbl>"
+                 + self.row(self.cell(self.p("Long 01", True)), self.cell(self.p("r3c2")))
+                 + "</w:tbl>")
+        self.assertEqual(self.breaks(table), [(0, "Long 01")])
+
+    def test_a_nested_table_counts_once_at_each_level(self):
+        # E-table-row-split-nested: the nested row "Inner 13" starts the page, and the outer
+        # cell after the one holding the nested table repeats it at its start.
+        inner = ("<w:tbl>"
+                 + self.row(self.cell(self.p("Inner 12a")), self.cell(self.p("Inner 12b")))
+                 + self.row(self.cell(self.p("Inner 13a", True)), self.cell(self.p("Inner 13b")))
+                 + "</w:tbl>")
+        outer = ("<w:tbl>"
+                 + self.row(self.cell(self.p("Outer cell"), inner, self.p("")),
+                            self.cell(self.p("Outer b", True)))
+                 + "</w:tbl>")
+        self.assertEqual(self.breaks(outer), [(3, "Inner 13a")])
+
+    def test_a_later_cell_that_crosses_a_page_the_row_starts_on_counts(self):
+        # The row starts a page; only its second cell crosses into the next one, within its
+        # first paragraph or at the start of its second.
+        for second, crossing in ((self.cell(self.mid("ab", "cd")), (1, "cd")),
+                                 (self.cell(self.p("first"), self.p("second", True)),
+                                  (2, "second"))):
+            with self.subTest(second=second):
+                table = ("<w:tbl>" + self.row(self.cell(self.p("Name", True)), second)
+                         + "</w:tbl>")
+                self.assertEqual(self.breaks(table), [(0, "Name"), crossing])
+
+    def test_a_mark_at_a_later_cell_s_start_with_none_before_it_stays(self):
+        # Only a mark after an earlier cell's repeats a page; one with none before it is
+        # kept, as every mark outside a table is.
+        table = ("<w:tbl>"
+                 + self.row(self.cell(self.p("short")), self.cell(self.p("starts", True)))
+                 + "</w:tbl>")
+        self.assertEqual(self.breaks(table), [(1, "starts")])
+
+    # A row's start mark in a paragraph whose content before it shows nothing: one case for
+    # each name of corpus-import.py's UNSHOWN and WRAPPERS, which share cases where one
+    # element holds the other.
+    MARK = "<w:r><w:rPr><w:b/></w:rPr><w:lastRenderedPageBreak/><w:t>Name</w:t></w:r>"
+    FIELD_CODE = ('<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+                  "<w:r><w:instrText> PAGE </w:instrText></w:r>"
+                  '<w:r><w:fldChar w:fldCharType="separate"/></w:r>')
+    SDT = ('<w:sdt><w:sdtPr><w:alias w:val="x"/></w:sdtPr><w:sdtEndPr><w:rPr/></w:sdtEndPr>'
+           f"<w:sdtContent>{MARK}</w:sdtContent></w:sdt>")
+    SMART_TAG = f'<w:smartTag w:uri="u" w:element="e"><w:smartTagPr/>{MARK}</w:smartTag>'
+    CUSTOM_XML = f'<w:customXml w:element="e"><w:customXmlPr/>{MARK}</w:customXml>'
+    COMMENT_END = ('<w:commentRangeEnd w:id="1"/><w:r><w:rPr><w:rStyle w:val="CommentReference"/>'
+                   '</w:rPr><w:commentReference w:id="1"/></w:r>')
+    UNSHOWN_BEFORE = {
+        "pPr": f'<w:pPr><w:spacing w:after="0"/></w:pPr>{MARK}',
+        "rPr": MARK,
+        "sdtPr": SDT, "sdtEndPr": SDT, "smartTagPr": SMART_TAG, "customXmlPr": CUSTOM_XML,
+        # Word's _Hlk bookmark before a row's start (form-ec-state-aid-notification-de).
+        "bookmarkStart": f'<w:bookmarkStart w:id="3" w:name="_Hlk1"/>{MARK}',
+        "bookmarkEnd": f'<w:bookmarkEnd w:id="2"/>{MARK}',
+        "proofErr": f'<w:proofErr w:type="spellStart"/>{MARK}',
+        "commentRangeStart": f'<w:commentRangeStart w:id="1"/>{MARK}',
+        # Word writes the comment's reference mark right after its range.
+        "commentRangeEnd": COMMENT_END + MARK,
+        "commentReference": COMMENT_END + MARK,
+        "permStart": f'<w:permStart w:id="1" w:edGrp="everyone"/>{MARK}',
+        "permEnd": f'<w:permEnd w:id="1"/>{MARK}',
+        "moveFromRangeStart": f'<w:moveFromRangeStart w:id="1" w:name="m"/>{MARK}',
+        "moveFromRangeEnd": f'<w:moveFromRangeEnd w:id="1"/>{MARK}',
+        "moveToRangeStart": f'<w:moveToRangeStart w:id="2" w:name="m"/>{MARK}',
+        "moveToRangeEnd": f'<w:moveToRangeEnd w:id="2"/>{MARK}',
+        # The mark at the field's result: its code shows nothing.
+        "fldChar": FIELD_CODE + MARK + '<w:r><w:fldChar w:fldCharType="end"/></w:r>',
+        "instrText": FIELD_CODE + MARK + '<w:r><w:fldChar w:fldCharType="end"/></w:r>',
+        # Deleted and moved-away text: the reference is exported without markup.
+        "del": f'<w:del w:id="1" w:author="A"><w:r><w:delText>old</w:delText></w:r></w:del>{MARK}',
+        "moveFrom": f'<w:moveFrom w:id="1" w:author="A"><w:r><w:t>old</w:t></w:r></w:moveFrom>{MARK}',
+    }
+    WRAPPED = {
+        "r": MARK,
+        "hyperlink": f'<w:hyperlink w:anchor="x">{MARK}</w:hyperlink>',
+        "ins": f'<w:ins w:id="1" w:author="A">{MARK}</w:ins>',
+        "moveTo": f'<w:moveTo w:id="1" w:author="A">{MARK}</w:moveTo>',
+        "smartTag": SMART_TAG, "sdt": SDT, "sdtContent": SDT, "customXml": CUSTOM_XML,
+        "fldSimple": f'<w:fldSimple w:instr=" PAGE ">{MARK}</w:fldSimple>',
+        "dir": f'<w:dir w:val="rtl">{MARK}</w:dir>',
+        "bdo": f'<w:bdo w:val="rtl">{MARK}</w:bdo>',
+    }
+
+    def test_each_kind_of_unshown_content_and_wrapper_has_a_case(self):
+        self.assertEqual(set(self.UNSHOWN_BEFORE), importer.UNSHOWN)
+        self.assertEqual(set(self.WRAPPED), importer.WRAPPERS)
+
+    def test_a_row_start_after_what_a_paragraph_does_not_show_stays_the_start(self):
+        # The second cell's crossing into the next page counts.
+        for name, content in (*self.UNSHOWN_BEFORE.items(), *self.WRAPPED.items()):
+            with self.subTest(name=name):
+                table = ("<w:tbl>"
+                         + self.row(self.cell(f"<w:p>{content}</w:p>"),
+                                    self.cell(self.mid("ab", "cd")))
+                         + "</w:tbl>")
+                self.assertEqual(self.breaks(table), [(0, "Name"), (1, "cd")])
+
+    def test_hidden_text_before_a_row_start_shows_nothing(self):
+        # Text the run's own w:vanish hides precedes the row's start mark: the second cell's
+        # crossing counts. With w:vanish off, the text shows, the mark crosses a page, and
+        # the second cell's crossing is the same page.
+        for value, expected in (("", [(0, "Name"), (1, "cd")]),
+                                (' w:val="true"', [(0, "Name"), (1, "cd")]),
+                                (' w:val="1"', [(0, "Name"), (1, "cd")]),
+                                (' w:val="on"', [(0, "Name"), (1, "cd")]),
+                                (' w:val="0"', [(0, "Name")]),
+                                (' w:val="false"', [(0, "Name")]),
+                                (' w:val="off"', [(0, "Name")])):
+            with self.subTest(value=value):
+                first = (f"<w:p><w:r><w:rPr><w:vanish{value}/></w:rPr><w:t>hidden</w:t></w:r>"
+                         f"{self.MARK}</w:p>")
+                table = ("<w:tbl>" + self.row(self.cell(first), self.cell(self.mid("ab", "cd")))
+                         + "</w:tbl>")
+                self.assertEqual(self.breaks(table), expected)
+
+    def test_a_row_start_inside_hidden_text_stays_the_start(self):
+        # The mark sits inside a hidden run, after its hidden text.
+        first = ("<w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>x</w:t><w:lastRenderedPageBreak/>"
+                 "<w:t>Name</w:t></w:r></w:p>")
+        table = ("<w:tbl>" + self.row(self.cell(first), self.cell(self.mid("ab", "cd")))
+                 + "</w:tbl>")
+        self.assertEqual(self.breaks(table), [(0, "Name"), (1, "cd")])
+
+    def test_a_run_once_hidden_by_a_tracked_change_shows(self):
+        # Only the run's own w:vanish hides it, not the one its tracked change of properties
+        # (w:rPrChange) records: its text shows, the mark crosses a page, and the second
+        # cell's crossing is the same page.
+        first = ('<w:p><w:r><w:rPr><w:rPrChange w:id="1" w:author="A"><w:rPr><w:vanish/></w:rPr>'
+                 "</w:rPrChange></w:rPr><w:t>shown</w:t></w:r>" + self.MARK + "</w:p>")
+        table = ("<w:tbl>" + self.row(self.cell(first), self.cell(self.mid("ab", "cd")))
+                 + "</w:tbl>")
+        self.assertEqual(self.breaks(table), [(0, "Name")])
+
+    def test_a_row_start_in_a_later_cell_after_an_empty_one_stays_the_start(self):
+        table = ("<w:tbl>"
+                 + self.row(self.cell("<w:p/>"), self.cell(self.p("Name", True)),
+                            self.cell(self.mid("ab", "cd")))
+                 + "</w:tbl>")
+        self.assertEqual(self.breaks(table), [(1, "Name"), (2, "cd")])
+
+    def test_a_mark_after_what_a_paragraph_shows_is_not_a_repeat(self):
+        # The row starts a page; the second cell's first paragraph shows a picture, a line
+        # break, a symbol or a field's result on that page before the mark, and its caption
+        # on the next page.
+        field = (self.FIELD_CODE + "<w:r><w:t>7</w:t></w:r>"
+                 + '<w:r><w:fldChar w:fldCharType="end"/></w:r>')
+        shown = ("<w:r><w:drawing/></w:r>", "<w:r><w:br/></w:r>",
+                 '<w:r><w:sym w:font="Symbol" w:char="F041"/></w:r>', field)
+        for item in shown:
+            with self.subTest(item=item):
+                second = f"<w:p>{item}<w:r><w:lastRenderedPageBreak/><w:t>caption</w:t></w:r></w:p>"
+                table = ("<w:tbl>" + self.row(self.cell(self.p("Name", True)),
+                                              self.cell(second)) + "</w:tbl>")
+                self.assertEqual(self.breaks(table), [(0, "Name"), (1, "caption")])
+
+    def test_a_later_cell_whose_first_paragraph_shows_nothing_crosses_at_its_second(self):
+        table = ("<w:tbl>"
+                 + self.row(self.cell(self.p("Name", True)),
+                            self.cell("<w:p/>", self.p("second", True)))
+                 + "</w:tbl>")
+        self.assertEqual(self.breaks(table), [(0, "Name"), (2, "second")])
+
+    def test_a_row_s_second_leading_mark_repeats_its_first(self):
+        table = ("<w:tbl>"
+                 + self.row(self.cell(self.p("Name", True)), self.cell(self.p("Value", True)))
+                 + "</w:tbl>")
+        self.assertEqual(self.breaks(table), [(0, "Name")])
+
+    def test_a_mark_at_the_next_row_s_start_stays(self):
+        # contract-hhs-teaming-agreement: a one-cell row crosses into page 4 at "contractor",
+        # and Word marks the next row's start too, though it goes on on page 4. The marks
+        # alone do not tell it from a next row that starts a page of its own, so it stays
+        # (#410).
+        table = ("<w:tbl>"
+                 + self.row(self.cell(self.p("Helpful Instructions"),
+                                      self.mid("signed by each participating GSA Schedule ",
+                                               "contractor"),
+                                      self.p("Identify each member")))
+                 + self.row(self.cell(self.p("Schedule Contractors Input", True)))
+                 + "</w:tbl>")
+        self.assertEqual(self.breaks(table),
+                         [(1, "contractor"), (3, "Schedule Contractors Input")])
+
+    def test_a_page_that_several_cells_cross_counts_once(self):
+        # Three cells cross one page, each marked where it does and, after the first, at its
+        # start too; the page counts once, at the first cell's mark.
+        table = ("<w:tbl>"
+                 + self.row(self.cell(self.mid("a1", "a2")),
+                            self.cell(self.p("b1", True), self.mid("b1", "b2")),
+                            self.cell(self.p("c1", True), self.mid("c1", "c2")))
+                 + "</w:tbl>")
+        self.assertEqual(self.breaks(table), [(0, "a2")])
+
+    def test_a_page_counts_once_across_a_cell_that_does_not_cross_it(self):
+        # The second cell is short: it repeats the first cell's page at its start, and the
+        # third cell's crossing is the same page.
+        table = ("<w:tbl>"
+                 + self.row(self.cell(self.mid("a1", "a2")), self.cell(self.p("b1", True)),
+                            self.cell(self.mid("c1", "c2")))
+                 + "</w:tbl>")
+        self.assertEqual(self.breaks(table), [(0, "a2")])
+
+    def test_a_later_cell_that_crosses_more_pages_keeps_the_further_ones(self):
+        table = ("<w:tbl>"
+                 + self.row(self.cell(self.mid("a1", "a2")),
+                            self.cell(self.p("b1", True), self.mid("b1", "b2"),
+                                      self.mid("b2", "b3")))
+                 + "</w:tbl>")
+        self.assertEqual(self.breaks(table), [(0, "a2"), (3, "b3")])
+
+    def test_a_nested_row_s_repeats_do_not_count_for_the_cell_around_it(self):
+        # The nested row's second cell repeats its first cell's page, so the outer first
+        # cell crosses one page; the outer second cell crosses two, and its second stays.
+        inner = ("<w:tbl>"
+                 + self.row(self.cell(self.mid("x1", "x2")),
+                            self.cell(self.p("y1", True), self.mid("y1", "y2")))
+                 + "</w:tbl>")
+        outer = ("<w:tbl>"
+                 + self.row(self.cell(self.p("Outer"), inner),
+                            self.cell(self.p("z1", True), self.mid("z1", "z2"),
+                                      self.mid("z2", "z3")))
+                 + "</w:tbl>")
+        self.assertEqual(self.breaks(outer), [(1, "x2"), (6, "z3")])
+
+    def test_marks_outside_tables_all_count(self):
+        body = self.p("one", True) + self.mid("ab", "cd") + self.p("two", True)
+        self.assertEqual(self.breaks(body), [(0, "one"), (1, "cd"), (2, "two")])
+
+
 class GeometryText(unittest.TestCase):
     GEOMETRY = {
         "format": 1,
