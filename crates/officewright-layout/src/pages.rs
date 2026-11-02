@@ -489,7 +489,8 @@ fn drawn(item: &DisplayItem) -> usize {
 }
 
 /// Whether a `PAGE` field of `layout`, paragraph `index` of the flow, shows text in a line
-/// after those on `first`, the page its first lines are on.
+/// after those on `first`, the page its first lines are on: one of its text, or one of a
+/// text box it shows, which is where the object that shows the box is.
 fn field_past_first_page(layout: &ParagraphLayout, first: Option<&Page>, index: usize) -> bool {
     let on_first = first
         .and_then(|page| page.fragments.iter().find(|f| f.paragraph == index))
@@ -510,19 +511,34 @@ fn field_past_first_page(layout: &ParagraphLayout, first: Option<&Page>, index: 
         })
         .max()
         .unwrap_or(0);
-    layout
+    let shows = |fields: &[Range<usize>]| fields.iter().any(|field| !field.is_empty());
+    let in_text = layout
         .itemized
         .page_fields
         .iter()
-        .any(|field| !field.is_empty() && field.start >= first_end)
+        .any(|field| !field.is_empty() && field.start >= first_end);
+    in_text
+        || layout
+            .boxes
+            .iter()
+            .filter(|laid| {
+                laid.paragraphs
+                    .iter()
+                    .any(|(_, inner, _)| shows(&inner.itemized.page_fields))
+            })
+            .any(|laid| {
+                layout.lines.iter().skip(on_first).any(|line| {
+                    line.pieces.iter().any(|piece| {
+                        matches!(piece.kind, PieceKind::Object { item, .. } if item == laid.item)
+                    })
+                })
+            })
 }
 
-/// Whether `flowed` has a `PAGE` field, whose value depends on the page it lands on.
+/// Whether `paragraph` has a `PAGE` field, whose value depends on the page it lands on: in
+/// its text, or in a text box it shows.
 fn has_page_field(paragraph: &Paragraph) -> bool {
-    paragraph
-        .inlines()
-        .iter()
-        .any(|inline| matches!(inline, Inline::Field(field) if *field.kind() == FieldKind::Page))
+    paragraph_field_kinds(paragraph).0
 }
 
 /// Whether `paragraph` has a `PAGE` field, and whether it has a page count (`NUMPAGES`,
@@ -535,7 +551,8 @@ fn paragraph_field_kinds(paragraph: &Paragraph) -> (bool, bool) {
 
 /// Adds to `kinds` whether `inlines` have a `PAGE` field and a page count, with those of
 /// the paragraphs of the text boxes they show when `boxes` holds: those are laid out with
-/// the paragraph that holds the box, and no box is laid out in a box.
+/// the paragraph that holds the box, and no box is laid out in a box. The result of a field
+/// the layout does not compute is laid out, so the boxes it shows count too.
 fn inline_field_kinds(inlines: &[Inline], boxes: bool, kinds: &mut (bool, bool)) {
     for inline in inlines {
         if let Inline::Field(field) = inline {
@@ -543,6 +560,9 @@ fn inline_field_kinds(inlines: &[Inline], boxes: bool, kinds: &mut (bool, bool))
                 FieldKind::Page => kinds.0 = true,
                 FieldKind::NumPages | FieldKind::SectionPages => kinds.1 = true,
                 _ => {}
+            }
+            if !itemize::computed(field.kind()) {
+                inline_field_kinds(field.result(), boxes, kinds);
             }
         } else if let Some((text_box, _)) = paragraph::text_box(inline).filter(|_| boxes) {
             for block in text_box.blocks() {
@@ -2512,9 +2532,10 @@ fn inline_cost(document: &Document, inline: &Inline, boxes: bool) -> usize {
             Some((text_box, _)) => text_box
                 .blocks()
                 .iter()
-                .filter_map(|block| match block {
-                    Block::Paragraph(inner) => Some(paragraph_cost(document, inner, false)),
-                    Block::Table(_) => None,
+                .map(|block| match block {
+                    Block::Paragraph(inner) => paragraph_cost(document, inner, false),
+                    // Not laid out, but passed over each time the box is.
+                    Block::Table(_) => 1,
                 })
                 .fold(1, usize::saturating_add),
             None => 1,
@@ -7956,6 +7977,100 @@ mod tests {
     }
 
     #[test]
+    fn a_page_field_in_a_text_box_of_the_body_shows_the_page_its_paragraph_is_on() {
+        use crate::ir::FieldKind;
+        // Seven lines, then a paragraph of three that is kept together: it moves to page
+        // 2, and so does the box its first line holds.
+        let boxed = |style| {
+            floating_box(
+                text_box(vec![fields(style, vec![FieldKind::Page])]),
+                (60.0, 30.0),
+                (200.0, 30.0),
+            )
+        };
+        let document = |props: ParagraphProps, first: bool| {
+            document(move |style| {
+                let mut blocks: Vec<Block> =
+                    (0..7).map(|_| lines(style, 1, spacing(0.0, 0.0))).collect();
+                let mut inlines = vec![Inline::text("A", style)];
+                for _ in 0..2 {
+                    inlines.push(Inline::line_break(BreakClear::None, style));
+                    inlines.push(Inline::text("A", style));
+                }
+                // The box in the first line, or in the second.
+                inlines.insert(if first { 0 } else { 2 }, boxed(style));
+                blocks.push(
+                    Paragraph::new(style)
+                        .with_props(props.clone())
+                        .with_inlines(inlines)
+                        .into(),
+                );
+                vec![Section::new(setup()).with_blocks(blocks)]
+            })
+        };
+        let numbers = |document: &Document| {
+            let (laid, report) = laid(document, 10);
+            let numbers: Vec<Vec<String>> = laid
+                .expect("pages")
+                .pages
+                .iter()
+                .map(|page| texts(page).into_iter().filter(|text| text != "A").collect())
+                .collect();
+            (numbers, messages(&report))
+        };
+        let kept = spacing(0.0, 0.0).with_keep_lines(true);
+        let (shown, _) = numbers(&document(kept, true));
+        assert_eq!(shown, [vec![], vec!["2".to_owned()]]);
+        // Split over the pages, its first line on page 1 and the box in its second, on page
+        // 2: the box shows the number of the page the paragraph starts on, as the field of
+        // its text does, and that is reported.
+        let split = spacing(0.0, 0.0).with_widow_control(false);
+        let note = "a PAGE field of a paragraph split over pages";
+        let (shown, report) = numbers(&document(split.clone(), false));
+        assert_eq!(shown, [vec![], vec!["1".to_owned()]]);
+        assert!(report.iter().any(|m| m.starts_with(note)), "{report:?}");
+        // With the box in its first line, on page 1, there is nothing to report.
+        let (shown, report) = numbers(&document(split, true));
+        assert_eq!(shown, [vec!["1".to_owned()], vec![]]);
+        assert!(!report.iter().any(|m| m.starts_with(note)), "{report:?}");
+    }
+
+    #[test]
+    fn a_page_field_in_a_text_box_in_a_field_result_shows_each_page_s_number() {
+        use crate::ir::{Field, FieldKind};
+        // A box in the result of a field the layout does not compute, in a footer: the
+        // result is laid out, and the footer for each page.
+        let document = document(|style| {
+            let boxed = floating_box(
+                text_box(vec![fields(style, vec![FieldKind::Page])]),
+                (60.0, 30.0),
+                (100.0, 165.0),
+            );
+            let field =
+                Field::new(FieldKind::Other("QUOTE".into()), style).with_result(vec![boxed]);
+            let footer = holding(style, vec![Inline::Field(field)]);
+            vec![
+                Section::new(close_frames())
+                    .with_footers(HeaderFooterSet::default().with_primary(vec![footer]))
+                    .with_blocks(vec![
+                        lines(style, 1, spacing(0.0, 0.0)),
+                        lines(style, 1, spacing(0.0, 0.0).with_page_break_before(true)),
+                        lines(style, 1, spacing(0.0, 0.0).with_page_break_before(true)),
+                    ]),
+            ]
+        });
+        assert!(document.validate().is_ok());
+        let (laid, _) = laid(&document, 10);
+        let numbers: Vec<Vec<String>> = laid
+            .expect("pages")
+            .pages
+            .iter()
+            .map(|page| texts(page).into_iter().filter(|text| text != "A").collect())
+            .collect();
+        assert_eq!(numbers, [["1"], ["2"], ["3"]]);
+    }
+
+    #[test]
     fn a_text_box_s_lists_count_from_its_start_and_its_tables_and_floats_are_reported() {
         use crate::ir::{Level, LevelTextPart, ListDefinition, ListInstance, ListItem};
         let mut document = Document::default();
@@ -8105,6 +8220,44 @@ mod tests {
             &document(&tabs(40)),
             (20, MAX_FRAME_LAID, tables::MAX_TABLE_REDRAWN),
         );
+        assert!(left_out(&messages), "{messages:?}");
+    }
+
+    #[test]
+    fn the_tables_of_a_header_s_text_box_count_towards_what_headers_lay_out() {
+        // A box's tables are not laid out, but each is passed over every time the box is,
+        // so each counts 1. The header's paragraph costs 1, the box 1, and its paragraph 1
+        // and its text 1: with 16 tables, 20, which uses up a bound of 20.
+        let document = |count: usize| {
+            document(move |style| {
+                let table = || -> Block {
+                    Table::default()
+                        .with_grid([Pt(10.0)])
+                        .with_rows(vec![Row::default().with_cells(vec![Cell::default()])])
+                        .into()
+                };
+                let mut blocks = vec![lines(style, 1, spacing(0.0, 0.0))];
+                blocks.extend((0..count).map(|_| table()));
+                let header = holding(
+                    style,
+                    vec![floating_box(text_box(blocks), (200.0, 15.0), (20.0, 2.0))],
+                );
+                vec![
+                    Section::new(close_frames())
+                        .with_headers(HeaderFooterSet::default().with_primary(vec![header]))
+                        .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+                ]
+            })
+        };
+        let left_out = |messages: &[String]| {
+            messages
+                .iter()
+                .any(|message| message.starts_with("headers and footers are left out past"))
+        };
+        let bounds = (MAX_FRAME_DRAWN, 20, tables::MAX_TABLE_REDRAWN);
+        let (_, messages) = laid_within(&document(15), bounds);
+        assert!(!left_out(&messages), "{messages:?}");
+        let (_, messages) = laid_within(&document(16), bounds);
         assert!(left_out(&messages), "{messages:?}");
     }
 }

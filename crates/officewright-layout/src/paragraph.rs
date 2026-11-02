@@ -214,13 +214,19 @@ fn lay_out_box(
     let mut paragraphs = Vec::new();
     let mut height = 0.0;
     let mut above: Option<&Paragraph> = None;
+    if text_box
+        .blocks()
+        .iter()
+        .any(|block| matches!(block, Block::Table(_)))
+    {
+        fonts.report_once(
+            ReportKind::FeatureUnsupported,
+            location,
+            "tables in text boxes are not drawn yet".to_owned(),
+        );
+    }
     for (index, block) in text_box.blocks().iter().enumerate() {
         let Block::Paragraph(inner) = block else {
-            fonts.report_once(
-                ReportKind::FeatureUnsupported,
-                location,
-                "tables in text boxes are not drawn yet".to_owned(),
-            );
             continue;
         };
         height += match above {
