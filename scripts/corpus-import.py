@@ -1012,15 +1012,20 @@ def page_words(page: dict) -> tuple[list[str], list[int]]:
     return found, starts
 
 
-def running_lines(pages: list[dict]) -> set[tuple[str, ...]]:
-    """The first and last lines that recur on more than one page, as running headers and
-    footers do, compared by their words without numbers (page numbers differ)."""
+def line_key(line: dict) -> tuple[str, ...]:
+    """A line's words without numbers, so that the lines of a running header or footer
+    compare equal whatever page number they carry."""
+    return tuple(w for w in words(line.get("text", "")) if not w.isdigit())
+
+
+def running_lines(pages: list[dict], end: int) -> set[tuple[str, ...]]:
+    """The first lines (end 0) or last lines (end -1) of the pages that recur as such on
+    more than one page, as running headers and footers do (line_key)."""
     seen: dict[tuple[str, ...], set[int]] = {}
     for number, page in enumerate(pages):
         lines = page.get("lines", [])
-        for line in {0, len(lines) - 1} if lines else set():
-            key = tuple(w for w in words(lines[line].get("text", "")) if not w.isdigit())
-            seen.setdefault(key, set()).add(number)
+        if lines:
+            seen.setdefault(line_key(lines[end]), set()).add(number)
     return {key for key, numbers in seen.items() if key and len(numbers) > 1}
 
 
@@ -1032,8 +1037,10 @@ def follows_on_crossed_page(pages: list[dict], ended: str, crossing: str, after:
     end of the text `ended`, and a line of the second starts with the text `crossing`; a form
     that repeats its blocks shows it on more than one pair, and then nothing is shown. On
     that second page a line must start with the text `after` right after the lines that end
-    with the end of `crossing`, below the crossing, and not be a running header or footer
-    (running_lines)."""
+    with the end of `crossing`, below the crossing, and not be the page's last line when the
+    last lines of other pages repeat it, as a running footer's do. And the page after must
+    not start with the text `after`, its running header aside: when it does, the next row
+    may start there, and the line found is not the next row's."""
     ended_key = words(ended)[-KEY_WORDS:]
     head_key = words(crossing)[:KEY_WORDS]
     tail_key = words(crossing)[-KEY_WORDS:]
@@ -1041,7 +1048,7 @@ def follows_on_crossed_page(pages: list[dict], ended: str, crossing: str, after:
     if not (ended_key and head_key and after_key):
         return False
     shown = []
-    for before_page, page in zip(pages, pages[1:]):
+    for number, (before_page, page) in enumerate(zip(pages, pages[1:]), 1):
         earlier, earlier_starts = page_words(before_page)
         line_ends = earlier_starts[1:] + [len(earlier)]
         found, starts = page_words(page)
@@ -1049,16 +1056,22 @@ def follows_on_crossed_page(pages: list[dict], ended: str, crossing: str, after:
         if crossed and any(
             earlier[max(0, end - len(ended_key)) : end] == ended_key for end in line_ends
         ):
-            shown.append((page, found, starts, crossed[0]))
+            shown.append((number, found, starts, crossed[0]))
     if len(shown) != 1:
         return False
-    page, found, starts, crossed = shown[0]
-    running = running_lines(pages)
-    last = len(starts) - 1
+    number, found, starts, crossed = shown[0]
+    lines = pages[number].get("lines", [])
+    if number + 1 < len(pages):
+        headers = running_lines(pages, 0)
+        later = list(pages[number + 1].get("lines", []))
+        while later and line_key(later[0]) in headers:
+            later = later[1:]
+        if later and words(later[0].get("text", ""))[: len(after_key)] == after_key:
+            return False
+    footers = running_lines(pages, -1)
     for line, start in enumerate(starts):
-        text = page.get("lines", [])[line].get("text", "")
         # A first line cannot lie below the crossing; a last one may be a running footer.
-        if line == last and tuple(w for w in words(text) if not w.isdigit()) in running:
+        if line == len(starts) - 1 and line_key(lines[line]) in footers:
             continue
         if (
             crossed < start
@@ -1082,8 +1095,9 @@ def next_row_repeats(
     that starts a page of its own, so the reference's pages decide: the mark repeats the
     page when exactly one pair of pages shows the last cell crossing, a line of one page
     ending with the cell's words before its last crossing and a line of the next starting
-    with its words after it, and further down that next page, not as a running header or
-    footer, the next row's text starts the line right after the cell's
+    with its words after it; further down that next page the next row's text starts the
+    line right after the cell's, a line that is no running footer; and the page after does
+    not start with the next row's text, where the next row may start instead
     (follows_on_crossed_page). Every other such mark stays.
     """
     parents = {child: parent for parent in root.iter() for child in parent}

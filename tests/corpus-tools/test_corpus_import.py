@@ -1322,11 +1322,62 @@ class RenderedPageBreaks(unittest.TestCase):
                  + self.row(self.cell(self.p("Confidential", True),
                                       self.p("The parties keep this agreement secret")))
                  + "</w:tbl>")
-        pages = [["Helpful Instructions", "signed by each participating GSA Schedule",
-                  "Confidential 3 of 7"],
-                 ["contractor", "Identify each member", "Confidential 4 of 7"],
-                 ["Confidential", "The parties keep this agreement secret", "Confidential 5 of 7"]]
-        self.assertEqual(self.breaks(table, pages), [(1, "contractor"), (3, "Confidential")])
+        # The page after may start with the next row or, read first, with a line of its own.
+        for first in ([], ["Draft"]):
+            with self.subTest(first=first):
+                pages = [["Helpful Instructions", "signed by each participating GSA Schedule",
+                          "Confidential 3 of 7"],
+                         ["contractor", "Identify each member", "Confidential 4 of 7"],
+                         [*first, "Confidential", "The parties keep this agreement secret",
+                          "Confidential 5 of 7"]]
+                self.assertEqual(self.breaks(table, pages),
+                                 [(1, "contractor"), (3, "Confidential")])
+
+    def test_a_footer_of_two_lines_like_the_next_row_leaves_a_real_break(self):
+        # pdftotext reads the footer's text and its page number as two lines, as on the pages
+        # of contract-hhs-sow-usability-testing; the next row, which starts the page after,
+        # begins like the footer's text.
+        footer = "U.S. Department of Health & Human Services - 200 Independence Avenue, S.W."
+        table = ("<w:tbl>"
+                 + self.row(self.cell(self.p("Helpful Instructions"),
+                                      self.mid("signed by each participating GSA Schedule ",
+                                               "contractor"),
+                                      self.p("Identify each member")))
+                 + self.row(self.cell(self.p("U.S. Department of Health and Human Services",
+                                             True),
+                                      self.p("Signature")))
+                 + "</w:tbl>")
+        pages = [["Helpful Instructions", "signed by each participating GSA Schedule", footer,
+                  "3"],
+                 ["contractor", "Identify each member", footer, "4"],
+                 ["U.S. Department of Health and Human Services", "Signature", footer, "5"]]
+        expected = [(1, "contractor"), (3, "U.S. Department of Health and ")]
+        self.assertEqual(self.breaks(table), expected)
+        self.assertEqual(self.breaks(table, pages), expected)
+
+    def test_a_page_number_like_the_next_row_s_number_leaves_a_real_break(self):
+        table = ("<w:tbl>"
+                 + self.row(self.cell(self.p("Helpful Instructions"),
+                                      self.mid("signed by each participating GSA Schedule ",
+                                               "contractor"),
+                                      self.p("Identify each member")))
+                 + self.row(self.cell(self.p("4", True)), self.cell(self.p("Fourth item")))
+                 + "</w:tbl>")
+        pages = [["Helpful Instructions", "signed by each participating GSA Schedule", "3"],
+                 ["contractor", "Identify each member", "4"],
+                 ["4 Fourth item", "5"]]
+        expected = [(1, "contractor"), (3, "4")]
+        self.assertEqual(self.breaks(table), expected)
+        self.assertEqual(self.breaks(table, pages), expected)
+
+    def test_a_next_row_that_starts_the_page_after_its_header_keeps_its_mark(self):
+        # The page after starts with a running header, then the next row: the next row may
+        # start that page, so the line like it on the crossing's page is not taken for it.
+        pages = [["Agreement", "Helpful Instructions", "signed by each participating GSA Schedule"],
+                 ["Agreement", "contractor", "Identify each member",
+                  "Schedule Contractors Input"],
+                 ["Agreement", "Schedule Contractors Input", "More text"]]
+        self.assertEqual(self.breaks(self.NEXT_ROW, pages), self.BOTH)
 
     def test_a_next_row_without_words_keeps_its_mark(self):
         # A line of rules is no text to find: whatever line follows the cell's text, the mark
