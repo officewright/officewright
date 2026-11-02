@@ -42,7 +42,11 @@ impl ParagraphLayout {
 
     /// The text box that item `item` shows, laid out.
     pub(crate) fn text_box(&self, item: usize) -> Option<&BoxLayout> {
-        self.boxes.iter().find(|laid| laid.item == item)
+        let index = self
+            .boxes
+            .binary_search_by_key(&item, |laid| laid.item)
+            .ok()?;
+        self.boxes.get(index)
     }
 }
 

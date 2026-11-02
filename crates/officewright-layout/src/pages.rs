@@ -511,28 +511,40 @@ fn field_past_first_page(layout: &ParagraphLayout, first: Option<&Page>, index: 
         })
         .max()
         .unwrap_or(0);
-    let shows = |fields: &[Range<usize>]| fields.iter().any(|field| !field.is_empty());
-    let in_text = layout
+    if layout
         .itemized
         .page_fields
         .iter()
-        .any(|field| !field.is_empty() && field.start >= first_end);
-    in_text
-        || layout
-            .boxes
-            .iter()
-            .filter(|laid| {
-                laid.paragraphs
-                    .iter()
-                    .any(|(_, inner, _)| shows(&inner.itemized.page_fields))
-            })
-            .any(|laid| {
-                layout.lines.iter().skip(on_first).any(|line| {
-                    line.pieces.iter().any(|piece| {
-                        matches!(piece.kind, PieceKind::Object { item, .. } if item == laid.item)
-                    })
-                })
-            })
+        .any(|field| !field.is_empty() && field.start >= first_end)
+    {
+        return true;
+    }
+    let shows = |fields: &[Range<usize>]| fields.iter().any(|field| !field.is_empty());
+    let mut boxed = layout
+        .boxes
+        .iter()
+        .filter(|laid| {
+            laid.paragraphs
+                .iter()
+                .any(|(_, inner, _)| shows(&inner.itemized.page_fields))
+        })
+        .peekable();
+    if boxed.peek().is_none() {
+        return false;
+    }
+    // The objects of the later lines, once, so that the check takes time in proportion to
+    // the pieces and the boxes.
+    let later: HashSet<usize> = layout
+        .lines
+        .iter()
+        .skip(on_first)
+        .flat_map(|line| &line.pieces)
+        .filter_map(|piece| match piece.kind {
+            PieceKind::Object { item, .. } => Some(item),
+            _ => None,
+        })
+        .collect();
+    boxed.any(|laid| later.contains(&laid.item))
 }
 
 /// Whether `paragraph` has a `PAGE` field, whose value depends on the page it lands on: in
@@ -8047,14 +8059,18 @@ mod tests {
         use crate::ir::FieldKind;
         // Seven lines, then a paragraph of three that is kept together: it moves to page
         // 2, and so does the box its first line holds.
-        let boxed = |style| {
-            floating_box(
-                text_box(vec![fields(style, vec![FieldKind::Page])]),
-                (60.0, 30.0),
-                (200.0, 30.0),
-            )
+        // A box with a `PAGE` field, or one with text alone.
+        let boxed = |style, page: bool| {
+            let content = if page {
+                fields(style, vec![FieldKind::Page])
+            } else {
+                text_paragraph(style, "Á", spacing(0.0, 0.0))
+            };
+            floating_box(text_box(vec![content]), (60.0, 30.0), (200.0, 30.0))
         };
-        let document = |props: ParagraphProps, first: bool| {
+        // `boxes`: in the first line or the second, with a `PAGE` field or not.
+        let document = |props: ParagraphProps, boxes: &[(bool, bool)]| {
+            let boxes = boxes.to_vec();
             document(move |style| {
                 let mut blocks: Vec<Block> =
                     (0..7).map(|_| lines(style, 1, spacing(0.0, 0.0))).collect();
@@ -8063,8 +8079,10 @@ mod tests {
                     inlines.push(Inline::line_break(BreakClear::None, style));
                     inlines.push(Inline::text("A", style));
                 }
-                // The box in the first line, or in the second.
-                inlines.insert(if first { 0 } else { 2 }, boxed(style));
+                // The second line's first, so that the first line's index stays.
+                for &(first, page) in boxes.iter().rev() {
+                    inlines.insert(if first { 0 } else { 2 }, boxed(style, page));
+                }
                 blocks.push(
                     Paragraph::new(style)
                         .with_props(props.clone())
@@ -8085,19 +8103,23 @@ mod tests {
             (numbers, messages(&report))
         };
         let kept = spacing(0.0, 0.0).with_keep_lines(true);
-        let (shown, _) = numbers(&document(kept, true));
+        let (shown, _) = numbers(&document(kept, &[(true, true)]));
         assert_eq!(shown, [vec![], vec!["2".to_owned()]]);
         // Split over the pages, its first line on page 1 and the box in its second, on page
         // 2: the box shows the number of the page the paragraph starts on, as the field of
         // its text does, and that is reported.
         let split = spacing(0.0, 0.0).with_widow_control(false);
         let note = "a PAGE field of a paragraph split over pages";
-        let (shown, report) = numbers(&document(split.clone(), false));
+        let (shown, report) = numbers(&document(split.clone(), &[(false, true)]));
         assert_eq!(shown, [vec![], vec!["1".to_owned()]]);
         assert!(report.iter().any(|m| m.starts_with(note)), "{report:?}");
         // With the box in its first line, on page 1, there is nothing to report.
-        let (shown, report) = numbers(&document(split, true));
+        let (shown, report) = numbers(&document(split.clone(), &[(true, true)]));
         assert_eq!(shown, [vec!["1".to_owned()], vec![]]);
+        assert!(!report.iter().any(|m| m.starts_with(note)), "{report:?}");
+        // Nor when the box in its second line has no `PAGE` field.
+        let (shown, report) = numbers(&document(split, &[(true, true), (false, false)]));
+        assert_eq!(shown, [vec!["1".to_owned()], vec!["Á".to_owned()]]);
         assert!(!report.iter().any(|m| m.starts_with(note)), "{report:?}");
     }
 
