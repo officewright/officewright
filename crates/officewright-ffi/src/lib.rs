@@ -3728,11 +3728,21 @@ mod tests {
                 OwStatus::Ok
             );
         }
-        // The handle as an address, so that the threads can share it: nothing modifies the
-        // book while they read it, which is all that ow_font_book_skipped asks.
-        let address = book as usize;
+        /// The handle, for the threads to share.
+        #[derive(Clone, Copy)]
+        struct Shared(*const OwFontBook);
+        impl Shared {
+            fn book(self) -> *const OwFontBook {
+                self.0
+            }
+        }
+        // SAFETY: the threads only read the book through ow_font_book_skipped, which asks no
+        // more than that no thread modifies the book during the call, and the book outlives
+        // them.
+        unsafe impl Send for Shared {}
+        let shared = Shared(book);
         let read = move || {
-            let book = address as *const OwFontBook;
+            let book = shared.book();
             (0..2)
                 .map(|index| {
                     let mut message: *const c_char = ptr::null();
