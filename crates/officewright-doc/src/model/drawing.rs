@@ -60,14 +60,22 @@ pub struct Drawing<'a> {
     document: &'a Document,
     element: Span,
     image: Option<u32>,
+    /// Whether its text box was read.
+    text_boxes: bool,
 }
 
 impl<'a> Drawing<'a> {
-    pub(crate) fn new(document: &'a Document, element: Span, image: Option<u32>) -> Self {
+    pub(crate) fn new(
+        document: &'a Document,
+        element: Span,
+        image: Option<u32>,
+        text_boxes: bool,
+    ) -> Self {
         Self {
             document,
             element,
             image,
+            text_boxes,
         }
     }
 
@@ -130,6 +138,9 @@ impl<'a> Drawing<'a> {
     /// `a:graphicData`), if it shows one; none for one in a text box or a note, which
     /// Word allows nowhere there and the document leaves out as it opens.
     pub fn text_box(self) -> Option<TextBox<'a>> {
+        if !self.text_boxes {
+            return None;
+        }
         TextBox::in_drawing(self.document, self.document.element(self.element))
     }
 }

@@ -21,8 +21,8 @@ use officewright_opc::xml::{Event, Input, NsId, Reader, StartTag};
 use super::capture::{Budget, Capture, Captured, Paused};
 use super::styles::{Properties, check_properties};
 use super::{
-    A, A_STRICT, O, PIC, PIC_STRICT, R, R_STRICT, V, W, W_STRICT, W10, WP, WP_STRICT, WPS, section,
-    shorten,
+    A, A_STRICT, O, PIC, PIC_STRICT, R, R_STRICT, V, W, W_STRICT, W10, WNE, WP, WP_STRICT, WPS,
+    section, shorten,
 };
 use crate::diagnostic::{DiagnosticKind, Diagnostics};
 use crate::model::Names;
@@ -155,6 +155,9 @@ struct Reading<'d, 'p, 't> {
     names: Names,
     /// The reader's ids of the namespaces read into the model.
     w: [NsId; 2],
+    /// The namespaces of the content of a text box (`w:txbxContent`, and in Strict
+    /// documents `wne:txbxContent`).
+    text_box_names: [NsId; 3],
     r: [NsId; 2],
     mc: NsId,
     body: Vec<u32>,
@@ -211,8 +214,10 @@ pub(super) fn read(
     // DrawingML and VML too, which the picture readers read inside w:drawing, w:pict and
     // w:object, so that what lies below those goes through Markup Compatibility as the
     // rest of the body does (#312).
-    let drawing =
-        [A, A_STRICT, WP, WP_STRICT, PIC, PIC_STRICT, V, O, W10, WPS].map(|uri| reader.intern(uri));
+    let drawing = [
+        A, A_STRICT, WP, WP_STRICT, PIC, PIC_STRICT, V, O, W10, WPS, WNE,
+    ]
+    .map(|uri| reader.intern(uri));
     for namespace in w.iter().chain(&r).chain(&drawing) {
         mce.understand(*namespace);
     }
@@ -225,6 +230,7 @@ pub(super) fn read(
         note: None,
         names,
         w,
+        text_box_names: [w[0], w[1], reader.intern(WNE)],
         r,
         mc,
         body: Vec::new(),
@@ -1195,19 +1201,23 @@ impl Reading<'_, '_, '_> {
                 .c
                 .capture(reader, mce, tag, Some(Disposition::Understood))?;
             let document = &*self.c.document;
-            let left_out = text_box::contents(document.element(element), &document.names)
-                .next()
-                .is_some();
+            let left_out = !object
+                && text_box::contents(document.element(element), &document.names)
+                    .next()
+                    .is_some();
             if let Some(within) = within.filter(|_| left_out) {
                 self.c
                     .diagnose(offset, DiagnosticKind::UnexpectedContent, || {
                         format!("a text box in {within} is left out, as Word allows none there")
                     });
             }
-            return self.finish_shape(run, kind, offset, element);
+            return self.finish_shape(run, kind, offset, element, false);
         }
-        match self.c.capture_shape(reader, mce, tag, self.w)? {
-            Captured::Whole(element) => self.finish_shape(run, kind, offset, element),
+        match self
+            .c
+            .capture_shape(reader, mce, tag, self.text_box_names)?
+        {
+            Captured::Whole(element) => self.finish_shape(run, kind, offset, element, true),
             Captured::Paused(paused) => self.open_text_box(run, kind, offset, paused),
         }
     }
@@ -1271,8 +1281,8 @@ impl Reading<'_, '_, '_> {
         else {
             return Ok(());
         };
-        match self.c.resume(reader, mce, paused, self.w)? {
-            Captured::Whole(element) => self.finish_shape(run, kind, offset, element),
+        match self.c.resume(reader, mce, paused, self.text_box_names)? {
+            Captured::Whole(element) => self.finish_shape(run, kind, offset, element, true),
             Captured::Paused(paused) => self.open_text_box(run, kind, offset, paused),
         }
     }
@@ -1284,14 +1294,21 @@ impl Reading<'_, '_, '_> {
     /// §19.1.2.11(p, q)), read once however many pictures show it. An image the package
     /// does not have is reported, and the picture shows none; one outside the package
     /// (`r:link`, or an external relationship) is never loaded. Each value of the shape
-    /// that its readers do not take is reported too; they read it as not written.
+    /// that its readers do not take is reported too; they read it as not written. The
+    /// content of a text box that none of its text boxes shows, as that of a second
+    /// `v:textbox` of a shape, is reported as left out (`text_boxes`: whether its text
+    /// boxes were read).
     fn finish_shape(
         &mut self,
         run: u32,
         kind: ShapeKind,
         offset: usize,
         element: Span,
+        text_boxes: bool,
     ) -> Result<()> {
+        if text_boxes {
+            self.report_unseen_text_boxes(element, offset);
+        }
         let names = &self.names;
         let document = &*self.c.document;
         let embed = match kind {
@@ -1318,11 +1335,47 @@ impl Reading<'_, '_, '_> {
             None => None,
         };
         let item = match kind {
-            ShapeKind::Drawing => RunItem::Drawing { element, image },
-            ShapeKind::Vml(VmlKind::Drawing) => RunItem::VmlDrawing { element, image },
+            ShapeKind::Drawing => RunItem::Drawing {
+                element,
+                image,
+                text_boxes,
+            },
+            ShapeKind::Vml(VmlKind::Drawing) => RunItem::VmlDrawing {
+                element,
+                image,
+                text_boxes,
+            },
             ShapeKind::Vml(VmlKind::Object) => RunItem::Object { element, image },
         };
         self.push_item(run, item)
+    }
+
+    /// Reports each text box content read in the shape of `element` that none of its text
+    /// boxes shows, which is left out.
+    fn report_unseen_text_boxes(&mut self, element: Span, offset: usize) {
+        let document = &*self.c.document;
+        let shape = document.element(element);
+        let first = document
+            .text_boxes
+            .partition_point(|story| story.content < shape.index());
+        let read = document
+            .text_boxes
+            .get(first..)
+            .unwrap_or_default()
+            .iter()
+            .take_while(|story| story.content < shape.end())
+            .count();
+        if read == 0 {
+            return;
+        }
+        let shown = text_box::contents(shape, &document.names).count();
+        for _ in shown..read {
+            self.c
+                .diagnose(offset, DiagnosticKind::UnexpectedContent, || {
+                    "text box content (w:txbxContent) that no text box of its shape shows is left out"
+                        .into()
+                });
+        }
     }
 
     /// The image the relationship `id` of the part leads to, read the first time a

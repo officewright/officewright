@@ -70,14 +70,22 @@ pub struct VmlDrawing<'a> {
     document: &'a Document,
     element: Span,
     image: Option<u32>,
+    /// Whether its text boxes were read.
+    text_boxes: bool,
 }
 
 impl<'a> VmlDrawing<'a> {
-    pub(crate) fn new(document: &'a Document, element: Span, image: Option<u32>) -> Self {
+    pub(crate) fn new(
+        document: &'a Document,
+        element: Span,
+        image: Option<u32>,
+        text_boxes: bool,
+    ) -> Self {
         Self {
             document,
             element,
             image,
+            text_boxes,
         }
     }
 
@@ -92,7 +100,8 @@ impl<'a> VmlDrawing<'a> {
     /// document order; none in a text box or a note, which Word allows nowhere there and
     /// the document leaves out as it opens.
     pub fn text_boxes(self) -> impl Iterator<Item = TextBox<'a>> + 'a {
-        TextBox::in_vml(self.document, self.document.element(self.element))
+        let read = self.text_boxes;
+        TextBox::in_vml(self.document, self.document.element(self.element)).filter(move |_| read)
     }
 
     /// The picture it shows: its first `v:shape` or `v:rect` whose `v:imagedata` names an

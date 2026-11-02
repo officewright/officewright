@@ -169,6 +169,9 @@ pub(crate) struct Names {
     pub(crate) w14: Option<xml::Sym>,
     /// Word 2010's shapes in DrawingML (`wps:wsp`), text boxes among them.
     pub(crate) wps: Option<xml::Sym>,
+    /// Word 2006's namespace, of the content of text boxes in Strict documents
+    /// (`wne:txbxContent`).
+    pub(crate) wne: Option<xml::Sym>,
 }
 
 /// What a WordprocessingML package holds, from the content type of its main part.
@@ -600,16 +603,19 @@ pub(crate) enum RunItem {
     Separator,
     ContinuationSeparator,
     /// A `w:drawing` kept whole, and the image its picture shows, read when the part
-    /// that holds it was.
+    /// that holds it was; and whether its text box was read, as it is but in a text box
+    /// or a note, where Word allows none.
     Drawing {
         element: Span,
         image: Option<u32>,
+        text_boxes: bool,
     },
     /// A `w:pict` kept whole, and the image its VML picture shows, read when the part
-    /// that holds it was.
+    /// that holds it was; and whether its text boxes were read, as for a drawing.
     VmlDrawing {
         element: Span,
         image: Option<u32>,
+        text_boxes: bool,
     },
     /// A `w:object` kept whole, and the image its preview shows, read when the part that
     /// holds it was.

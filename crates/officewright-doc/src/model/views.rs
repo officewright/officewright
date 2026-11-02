@@ -618,12 +618,16 @@ impl<'a> RunContent<'a> {
             RunItem::NoteNumber => Self::NoteNumber,
             RunItem::Separator => Self::Separator,
             RunItem::ContinuationSeparator => Self::ContinuationSeparator,
-            RunItem::Drawing { element, image } => {
-                Self::Drawing(Drawing::new(document, *element, *image))
-            }
-            RunItem::VmlDrawing { element, image } => {
-                Self::VmlDrawing(VmlDrawing::new(document, *element, *image))
-            }
+            RunItem::Drawing {
+                element,
+                image,
+                text_boxes,
+            } => Self::Drawing(Drawing::new(document, *element, *image, *text_boxes)),
+            RunItem::VmlDrawing {
+                element,
+                image,
+                text_boxes,
+            } => Self::VmlDrawing(VmlDrawing::new(document, *element, *image, *text_boxes)),
             RunItem::Object { element, image } => {
                 Self::Object(EmbeddedObject::new(document, *element, *image))
             }

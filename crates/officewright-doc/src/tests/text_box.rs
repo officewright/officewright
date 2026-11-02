@@ -193,21 +193,29 @@ fn reads_text_boxes_in_headers_and_table_cells() {
 #[test]
 fn leaves_out_a_text_box_in_a_text_box_or_a_note_and_reports_it() {
     // MS-OI29500, Part 4, §14.9.1.1(a): Word allows no text box content there.
-    let inner = format!("<w:p><w:r>{}</w:r></w:p>", drawing(&txbx(&p("Inner"))));
+    // An embedded object, whose VML is not read for text boxes anywhere, is not reported
+    // in a text box either; and a box of no content of its own is left out in a note.
+    let inner = format!(
+        r#"<w:p><w:r>{}</w:r></w:p><w:p><w:r><w:object {SHAPES}>{}</w:object></w:r></w:p>"#,
+        drawing(&txbx(&p("Inner"))),
+        vml_box("width:1pt;height:1pt", "", &p("Object"))
+    );
     let body = format!(
         "<w:p><w:r>{}</w:r></w:p>{}",
         drawing(&txbx(&format!("{}{inner}", p("Outer")))),
         p("Body"),
     );
     let footnotes = format!(
-        r#"<w:footnotes xmlns:w="{W}"><w:footnote w:id="1"><w:p><w:r>{}</w:r></w:p></w:footnote></w:footnotes>"#,
+        r#"<w:footnotes xmlns:w="{W}"><w:footnote w:id="1"><w:p><w:r>{}</w:r><w:r>{}</w:r><w:r>{}</w:r></w:p></w:footnote></w:footnotes>"#,
         pict(&vml_box("width:10pt;height:10pt", "", &p("In a note"))),
+        drawing(r#"<wps:linkedTxbx id="1" seq="1"/><wps:bodyPr/>"#),
+        pict(r#"<v:shape style="width:10pt;height:10pt"><v:textbox/></v:shape>"#),
     );
     let document = with_parts(&body, &[("footnotes", "footnotes.xml", footnotes)]);
     let texts_of_body: Vec<String> = paragraphs(&document).iter().map(|p| p.text()).collect();
     assert_eq!(texts_of_body, ["", "Body"]);
     let outer = drawings(&document)[0].text_box().unwrap();
-    assert_eq!(texts(outer), ["Outer", ""]);
+    assert_eq!(texts(outer), ["Outer", "", ""]);
     let Some(Block::Paragraph(holder)) = outer.blocks().nth(1) else {
         panic!("no paragraph");
     };
@@ -225,6 +233,15 @@ fn leaves_out_a_text_box_in_a_text_box_or_a_note_and_reports_it() {
     };
     assert_eq!(in_note.text_boxes().count(), 0);
     assert!(in_note.to_xml().contains("In a note"));
+    let items = contents(paragraph);
+    let RunContent::Drawing(linked) = items[1] else {
+        panic!("no linked box in the note");
+    };
+    assert!(linked.text_box().is_none());
+    let RunContent::VmlDrawing(empty) = items[2] else {
+        panic!("no empty box in the note");
+    };
+    assert_eq!(empty.text_boxes().count(), 0);
     let messages: Vec<&str> = document
         .diagnostics()
         .iter()
@@ -577,4 +594,108 @@ fn keeps_a_text_box_in_a_shape_not_read_with_the_shape() {
         "{:?}",
         document.diagnostics()
     );
+}
+
+#[test]
+fn finds_the_text_boxes_of_deeply_nested_groups_in_linear_time() {
+    // From the review of #459: the children of each group were walked again for every
+    // group around it, as the document opened and on every call: 32,000 nested groups
+    // took 35 s to open.
+    let n = 20_000;
+    let body = |n: usize| {
+        format!(
+            "<w:p><w:r>{}</w:r></w:p>",
+            pict(&format!(
+                "{}{}{}",
+                r#"<v:group style="width:10pt;height:10pt">"#.repeat(n),
+                vml_box("width:1;height:1", "", &p("Deep")),
+                "</v:group>".repeat(n)
+            ))
+        )
+    };
+    let document = super::open_in_linear_time(body, n);
+    crate::model::xml::STEPS.set(0);
+    let boxes = vml_text_boxes(&document);
+    let steps = crate::model::xml::STEPS.get();
+    assert_eq!(boxes.len(), 1);
+    assert_eq!(texts(boxes[0]), ["Deep"]);
+    // Each group is a start and an end tag.
+    let tokens = 2 * n;
+    assert!(steps <= 2 * tokens, "{steps} steps for {tokens} tokens");
+}
+
+#[test]
+fn reads_the_text_boxes_of_strict_documents() {
+    // From the review of #459: a Strict document writes a text box's content in Word
+    // 2006's namespace ([MS-ODRAWXML] 2.13.3.2; MS-OI29500, Part 4, §14.9.1.1(b)), and it
+    // read as empty.
+    let content = r#"<wne:txbxContent><w:p><w:r><w:t>Strict</w:t></w:r></w:p></wne:txbxContent>"#;
+    let xml = format!(
+        r#"<w:document xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main" xmlns:wp="http://purl.oclc.org/ooxml/drawingml/wordprocessingDrawing" xmlns:a="http://purl.oclc.org/ooxml/drawingml/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:wne="http://schemas.microsoft.com/office/word/2006/wordml" xmlns:v="urn:schemas-microsoft-com:vml" conformance="strict"><w:body><w:p><w:r><w:drawing><wp:inline><wp:extent cx="12700" cy="12700"/><wp:docPr id="1" name="Text Box 1"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:txbx>{content}</wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r><w:r><w:pict><v:shape style="width:1pt;height:1pt"><v:textbox>{content}</v:textbox></v:shape></w:pict></w:r></w:p></w:body></w:document>"#
+    );
+    let document = Document::from_bytes(super::package(super::DOCUMENT, &xml, &[])).unwrap();
+    let text_box = drawings(&document)[0].text_box().unwrap();
+    assert_eq!(texts(text_box), ["Strict"]);
+    assert!(!drawings(&document)[0].to_xml().contains("Strict"));
+    let vml = vml_text_boxes(&document);
+    assert_eq!(vml.len(), 1);
+    assert_eq!(texts(vml[0]), ["Strict"]);
+    assert_eq!(paragraphs(&document)[0].text(), "");
+    assert!(
+        document.diagnostics().is_empty(),
+        "{:?}",
+        document.diagnostics()
+    );
+}
+
+#[test]
+fn reports_text_box_content_that_no_text_box_shows() {
+    // From the review of #459: Office takes the first v:textbox of a shape (MS-OI29500,
+    // Part 4, §19.1.2.22(j)); the content of a second, and one that is no text box's, was
+    // left out of the model's views and of the shape kept as written, unreported.
+    let stray = format!(
+        r#"<w:drawing {SHAPES}><wp:inline><wp:extent cx="1" cy="1"/><wp:docPr id="1" name="Odd"/><a:graphic><a:graphicData uri="urn:odd"><w:txbxContent>{}</w:txbxContent></a:graphicData></a:graphic></wp:inline></w:drawing>"#,
+        p("Stray")
+    );
+    let body = format!(
+        r#"<w:p><w:r>{}</w:r><w:r>{}</w:r></w:p>"#,
+        // Only a shape of VML has a text box, not an element of Office's extensions.
+        pict(&format!(
+            r#"<v:shape style="width:1pt;height:1pt"><v:textbox><w:txbxContent>{}</w:txbxContent></v:textbox><v:textbox><w:txbxContent>{}</w:txbxContent></v:textbox></v:shape><o:lock><v:textbox><w:txbxContent>{}</w:txbxContent></v:textbox></o:lock>"#,
+            p("First"),
+            p("Second"),
+            p("Locked")
+        )),
+        stray,
+    );
+    let document = open(&body);
+    let boxes = vml_text_boxes(&document);
+    assert_eq!(boxes.len(), 1);
+    assert_eq!(texts(boxes[0]), ["First"]);
+    assert_eq!(
+        reported(&document),
+        [
+            "text box content (w:txbxContent) that no text box of its shape shows is left out",
+            "text box content (w:txbxContent) that no text box of its shape shows is left out",
+            "text box content (w:txbxContent) that no text box of its shape shows is left out",
+        ]
+    );
+}
+
+#[test]
+fn reading_a_text_box_ends_markup_compatibility_s_scope_of_its_content_first() {
+    // From the review of #459: what the shape declares around its text box no longer holds
+    // after it. Here wps:txbx makes x:wrap ignorable with its content processed; after
+    // it, x:wrap is kept as written, and so is the wps:bodyPr in it.
+    let body = format!(
+        r#"<w:p><w:r>{}</w:r></w:p>"#,
+        drawing(&format!(
+            r#"<wps:txbx xmlns:x="urn:x" mc:Ignorable="x" mc:ProcessContent="x:wrap"><w:txbxContent>{}</w:txbxContent></wps:txbx><x:wrap xmlns:x="urn:x"><wps:bodyPr anchor="b"/></x:wrap>"#,
+            p("Box")
+        ))
+    );
+    let document = open(&body);
+    let text_box = drawings(&document)[0].text_box().unwrap();
+    assert_eq!(texts(text_box), ["Box"]);
+    assert_eq!(text_box.vertical_anchor(), TextBoxAnchor::Top);
 }

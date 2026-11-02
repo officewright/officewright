@@ -217,7 +217,7 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
         reader: &mut Reader<'_>,
         mce: &mut Processor,
         tag: StartTag<'_>,
-        text_boxes: [NsId; 2],
+        text_boxes: [NsId; 3],
     ) -> Result<Captured> {
         let capturing = self.begin(reader, &tag, Some(Disposition::Understood))?;
         self.step(reader, mce, capturing, text_boxes)
@@ -230,7 +230,7 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
         reader: &mut Reader<'_>,
         mce: &mut Processor,
         paused: Paused,
-        text_boxes: [NsId; 2],
+        text_boxes: [NsId; 3],
     ) -> Result<Captured> {
         let mut capturing = paused.capturing;
         self.document.tokens.push(Token::End);
@@ -244,7 +244,7 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
         reader: &mut Reader<'_>,
         mce: &mut Processor,
         mut capturing: Capturing,
-        text_boxes: [NsId; 2],
+        text_boxes: [NsId; 3],
     ) -> Result<Captured> {
         Ok(
             match self.proceed(reader, mce, &mut capturing, Some(text_boxes))? {
@@ -296,7 +296,7 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
         reader: &mut Reader<'_>,
         mce: &mut Processor,
         capturing: &mut Capturing,
-        text_boxes: Option<[NsId; 2]>,
+        text_boxes: Option<[NsId; 3]>,
     ) -> Result<Option<usize>> {
         let part = self.part;
         let opc = |err: officewright_opc::Error| Error::from(err.in_part(part));

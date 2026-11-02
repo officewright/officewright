@@ -162,8 +162,9 @@ impl<'a> TextBox<'a> {
         )
     }
 
-    /// Whether text taller than the box is cut at its bottom (`wps:bodyPr`'s
-    /// `vertOverflow` `clip` or `ellipsis`), rather than running on past it.
+    /// Whether the box asks for text taller than it to be cut at its bottom (`wps:bodyPr`'s
+    /// `vertOverflow` `clip` or `ellipsis`), rather than run on past it as `overflow`, the
+    /// default, has it.
     pub fn clips_overflow(self) -> bool {
         clips_overflow(
             self.shape,
@@ -304,29 +305,20 @@ fn drawing_shape<'a>(drawing: Element<'a>, names: &Names) -> Option<Element<'a>>
 
 /// The shapes of a VML drawing that are text boxes, with their `v:textbox` (Office takes
 /// at most one, MS-OI29500, Part 4, §19.1.2.22(j): the first), those of its groups
-/// (`v:group`) included, in document order.
+/// (`v:group`) included, in document order: found in one pass over the drawing, however
+/// deep its groups nest.
 fn vml_shapes<'a>(pict: Element<'a>, names: &Names) -> Vec<(Element<'a>, Element<'a>)> {
-    let mut shapes = Vec::new();
-    // The groups still to look into, each with the shapes of it not looked at yet, so
-    // that groups in groups are walked without recursion.
-    let mut open = vec![pict.children_through_alternates(names.mc)];
-    while let Some(children) = open.last_mut() {
-        let Some(child) = children.next() else {
-            open.pop();
-            continue;
-        };
-        if child.is(&names.v, "group") {
-            open.push(child.children_through_alternates(names.mc));
-        } else if child.local_in(&names.v).is_some() {
-            let text_box = child
+    let group = |namespace, local: &str| local == "group" && names.v.contains(&namespace);
+    pict.descendants_through_alternates(names.mc, group)
+        .into_iter()
+        .filter(|shape| shape.local_in(&names.v).is_some())
+        .filter_map(|shape| {
+            let text_box = shape
                 .children_through_alternates(names.mc)
-                .find(|part| part.is(&names.v, "textbox"));
-            if let Some(text_box) = text_box {
-                shapes.push((child, text_box));
-            }
-        }
-    }
-    shapes
+                .find(|part| part.is(&names.v, "textbox"))?;
+            Some((shape, text_box))
+        })
+        .collect()
 }
 
 /// The content of a text box (`w:txbxContent`), if it has one.
@@ -335,7 +327,12 @@ fn content<'a>(shape: Element<'a>, vml: Option<Element<'a>>, names: &Names) -> O
         Some(text_box) => text_box,
         None => child(shape, names, &[names.wps], "txbx")?,
     };
-    child(holder, names, &names.w, "txbxContent")
+    child(
+        holder,
+        names,
+        &[names.w[0], names.w[1], names.wne],
+        "txbxContent",
+    )
 }
 
 /// A shape's `wps:bodyPr`.
