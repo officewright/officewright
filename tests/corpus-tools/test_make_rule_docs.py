@@ -194,7 +194,6 @@ class Check(unittest.TestCase):
             ["tests/corpus/SOURCES.md has no row for word-rules/E-line-exact.docx"],
         )
 
-
     def test_a_stale_sources_row_is_reported(self):
         # The description of a document changed in the script, its row in SOURCES.md did not.
         row = self.sources_row("E-line-exact.docx")
