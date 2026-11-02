@@ -318,8 +318,8 @@ impl FontFace {
         }
     }
 
-    /// Whether the face has a character map (`cmap` table) with a Unicode or symbol
-    /// subtable.
+    /// Whether the face has a character map (a `DMAP` or `cmap` table) with a Unicode or
+    /// symbol subtable.
     pub fn has_char_map(&self) -> bool {
         self.0.face.has_char_map
     }
