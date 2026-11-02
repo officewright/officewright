@@ -851,6 +851,11 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                 }
             }
             index += 1;
+            // A floating object takes no room in the text: the place to break at it is the
+            // one after the unit before it, weighed there (#476).
+            if unit.range.is_empty() {
+                continue;
+            }
             let at = unit.range.end;
             match self.breaks.at(at) {
                 Some(Opportunity::Allowed) if index < self.units.len() => {
@@ -860,13 +865,25 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                     }
                 }
                 Some(Opportunity::Mandatory) if index < self.units.len() => {
-                    return Fit {
-                        end: index,
-                        end_kind: LineEnd::Break,
-                        hyphen: false,
-                        overflow,
-                        hanging_tab,
-                    };
+                    // The floating objects at the break stay on the line it ends, as Word
+                    // gives them no line of their own (#476); after them, the paragraph
+                    // may end.
+                    while self
+                        .units
+                        .get(index)
+                        .is_some_and(|next| next.range.is_empty())
+                    {
+                        index += 1;
+                    }
+                    if index < self.units.len() {
+                        return Fit {
+                            end: index,
+                            end_kind: LineEnd::Break,
+                            hyphen: false,
+                            overflow,
+                            hanging_tab,
+                        };
+                    }
                 }
                 _ => {}
             }

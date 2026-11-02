@@ -4363,6 +4363,84 @@ mod tests {
         ))
     }
 
+    #[test]
+    fn a_floating_object_takes_no_line_of_its_own() {
+        use crate::ir::{
+            HorizontalPlacement, HorizontalReference, VerticalPlacement, VerticalReference,
+        };
+        // Issue #476: a paragraph of `A` and `B`, `b` a line break, `g` a page break and `p`
+        // a floating picture, then a paragraph `Z`, in exact lines of 20 pt: baselines at
+        // 36, 56 and 76 down. A picture at the end, or right after a break, adds no line,
+        // as Word adds none (`letter-dol-cobra-election-notice`, body paragraph 78).
+        // The texts drawn, by page, text and baseline.
+        type Texts<'a> = &'a [(usize, &'a str, f64)];
+        let cases: [(&str, Texts<'_>); 8] = [
+            ("Ap", &[(0, "A", 36.0), (0, "Z", 56.0)]),
+            ("App", &[(0, "A", 36.0), (0, "Z", 56.0)]),
+            ("AbpB", &[(0, "A", 36.0), (0, "B", 56.0), (0, "Z", 76.0)]),
+            ("AbppB", &[(0, "A", 36.0), (0, "B", 56.0), (0, "Z", 76.0)]),
+            ("AbBp", &[(0, "A", 36.0), (0, "B", 56.0), (0, "Z", 76.0)]),
+            ("AgpB", &[(0, "A", 36.0), (1, "B", 36.0), (1, "Z", 56.0)]),
+            ("pA", &[(0, "A", 36.0), (0, "Z", 56.0)]),
+            ("ApB", &[(0, "A", 36.0), (0, "B", 36.0), (0, "Z", 56.0)]),
+        ];
+        for (paragraph, expected) in cases {
+            let mut document = Document::default();
+            let style = document.add_run_style(
+                RunStyle::default()
+                    .with_fonts(RunFonts::new("Officewright Test"))
+                    .with_size(Pt(10.0)),
+            );
+            let mut inlines = Vec::new();
+            for code in paragraph.chars() {
+                inlines.push(match code {
+                    'b' => Inline::line_break(BreakClear::None, style),
+                    'g' => Inline::page_break(style),
+                    'p' => anchored_picture(
+                        &mut document,
+                        (
+                            HorizontalReference::Page,
+                            HorizontalPlacement::Offset(Pt(200.0)),
+                        ),
+                        (
+                            VerticalReference::Paragraph,
+                            VerticalPlacement::Offset(Pt(0.0)),
+                        ),
+                    ),
+                    text => Inline::text(text.to_string(), style),
+                });
+            }
+            document.add_section(Section::new(setup()).with_blocks(vec![
+                holding(style, inlines),
+                text_paragraph(style, "Z", spacing(0.0, 0.0)),
+            ]));
+            let (laid, _) = laid(&document, 10);
+            let pages = laid.expect("pages").pages;
+            let drawn: Vec<(usize, String, f64)> = pages
+                .iter()
+                .enumerate()
+                .flat_map(|(number, page)| {
+                    drawing(page).into_iter().filter_map(move |item| {
+                        let mut words = item.split(' ');
+                        (words.next() == Some("text")).then(|| {
+                            let text = words.next().unwrap_or_default().to_owned();
+                            let y = words
+                                .nth(1)
+                                .and_then(|y| y.parse().ok())
+                                .unwrap_or(f64::NAN);
+                            (number, text, y)
+                        })
+                    })
+                })
+                .collect();
+            let expected: Vec<(usize, String, f64)> = expected
+                .iter()
+                .map(|(page, text, y)| (*page, (*text).to_owned(), *y))
+                .collect();
+            assert_eq!(drawn, expected, "{paragraph}");
+        }
+    }
+
     /// Where the pictures `page` draws are, in drawing order.
     fn picture_places(page: &Page) -> Vec<(f64, f64)> {
         page.items
