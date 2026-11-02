@@ -8,10 +8,10 @@
 // then only the tests and the `fuzzing` module call the shaper.
 #![cfg_attr(not(any(test, feature = "fuzzing")), allow(dead_code))]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use harfrust::{
     Buffer, BufferFlags, Direction, Feature, Language, Script, ShapeOptions, ShapePlan, ShaperFont,
@@ -31,6 +31,11 @@ pub(crate) struct ShapingFace {
     /// `None` when HarfRust cannot read the face; its runs are shaped from the character
     /// map and the advances alone.
     font: Option<harfrust::Font>,
+    /// Whether HarfRust shaped a run of the face into more glyphs than the layout keeps,
+    /// or ran out of room for one ([`MAX_GLYPHS_PER_CHARACTER`]): its later runs are then
+    /// shaped from the character map, without HarfRust. The face is loaded once for a
+    /// layout and its copies share the mark, so every shaper of the layout sees it.
+    refused: Arc<AtomicBool>,
 }
 
 impl ShapingFace {
@@ -54,7 +59,18 @@ impl ShapingFace {
             id: NEXT.fetch_add(1, Ordering::Relaxed),
             face,
             font,
+            refused: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Whether the face's runs are shaped from the character map from now on.
+    fn refused(&self) -> bool {
+        self.refused.load(Ordering::Relaxed)
+    }
+
+    /// Shapes the face's later runs from the character map.
+    fn refuse(&self) {
+        self.refused.store(true, Ordering::Relaxed);
     }
 
     /// `face` as if HarfRust could not read it, for the tests of what the layout then does.
@@ -137,14 +153,14 @@ impl Features {
 }
 
 /// The most glyphs a run keeps for its characters, on average; a run the font shapes into
-/// more is shaped nominally, and that is reported. HarfRust keeps up to 256 glyphs a
-/// character, and at least 65,536 for a run, so a font whose layout tables multiply
-/// glyphs could turn one character into tens of thousands, which every line and page they
-/// are on would then hold (#403). No writing system needs more than a few glyphs a
-/// character. The bound limits what the layout keeps, not the time HarfRust takes to
-/// shape the run before it is refused; once a run of a face is refused, the face's later
-/// runs are shaped nominally without HarfRust, so that only one run of it takes that
-/// time (#405).
+/// more is shaped nominally, and that is reported. HarfRust keeps up
+/// to 256 glyphs a character, and at least 65,536 for a run, so a font whose layout tables
+/// multiply glyphs could turn one character into tens of thousands, which every line and
+/// page they are on would then hold (#403). No writing system needs more than a few glyphs
+/// a character. The bound limits what the layout keeps, not the time HarfRust takes to
+/// shape the run before it is refused. Once a run of a face is refused, or has one cluster
+/// of more glyphs than that for its characters, the face's later runs are shaped nominally
+/// without HarfRust, so that only one run of it takes that time in a layout (#405).
 const MAX_GLYPHS_PER_CHARACTER: usize = 32;
 
 /// The scripts in which kerning and the optional ligatures follow the run: those that
@@ -238,10 +254,6 @@ pub(crate) struct Shaper {
     /// About how many bytes the cache holds at most; when a run would pass it, the cache
     /// starts empty again.
     capacity: usize,
-    /// The faces of which HarfRust shaped a run into more glyphs than the layout keeps, or
-    /// ran out of room for one ([`MAX_GLYPHS_PER_CHARACTER`]): their later runs are shaped
-    /// nominally, without HarfRust.
-    refused: HashSet<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -265,7 +277,6 @@ impl Shaper {
             plans: Plans::default(),
             cached_bytes: 0,
             capacity,
-            refused: HashSet::new(),
         }
     }
 
@@ -281,16 +292,15 @@ impl Shaper {
             request: request.clone(),
             text: text.to_owned(),
         };
-        if let Some(run) = self.cache.get(&key) {
+        // A run kept before its face was refused is shaped again, nominally.
+        if let Some(run) = self
+            .cache
+            .get(&key)
+            .filter(|run| run.nominal || !face.refused())
+        {
             return Arc::clone(run);
         }
-        let run = Arc::new(shape(
-            face,
-            text,
-            request,
-            &mut self.plans,
-            &mut self.refused,
-        ));
+        let run = Arc::new(shape(face, text, request, &mut self.plans));
         let bytes = cost(&key, &run);
         if self.cached_bytes.saturating_add(bytes) > self.capacity {
             self.cache.clear();
@@ -307,15 +317,16 @@ impl Shaper {
 impl Shaper {
     /// The bytes of `text` at which a cluster starts when HarfRust shapes it in `face`,
     /// in order: a mark, a joiner or the rest of an Indic syllable is in the cluster of
-    /// the character before it. `None` when HarfRust cannot read the face, which then
-    /// knows no clusters. The run is not cached.
+    /// the character before it. `None` when HarfRust cannot read the face, or its runs are
+    /// shaped nominally (`MAX_GLYPHS_PER_CHARACTER`): then no clusters are known. The run is
+    /// not cached.
     pub(crate) fn cluster_starts(
         &mut self,
         face: &ShapingFace,
         text: &str,
         request: &ShapeRequest,
     ) -> Option<Vec<usize>> {
-        let run = shape(face, text, request, &mut self.plans, &mut self.refused);
+        let run = shape(face, text, request, &mut self.plans);
         if run.nominal {
             return None;
         }
@@ -386,16 +397,16 @@ impl Plans {
     }
 }
 
-/// Shapes without the cache of runs, nominally for a face in `refused`, and adds to it a face
-/// the run of which HarfRust shapes into more glyphs than the layout keeps.
-fn shape(
-    face: &ShapingFace,
-    text: &str,
-    request: &ShapeRequest,
-    plans: &mut Plans,
-    refused: &mut HashSet<u64>,
-) -> ShapedRun {
-    let Some(font) = face.font.as_ref().filter(|_| !refused.contains(&face.id)) else {
+#[cfg(test)]
+thread_local! {
+    /// How many runs this thread has given HarfRust to shape, for the tests.
+    pub(crate) static HARFRUST_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Shapes without the cache of runs: nominally for a face that is refused, and refusing a
+/// face the run of which HarfRust shapes into more glyphs than the layout keeps.
+fn shape(face: &ShapingFace, text: &str, request: &ShapeRequest, plans: &mut Plans) -> ShapedRun {
+    let Some(font) = face.font.as_ref().filter(|_| !face.refused()) else {
         return shape_nominal(&face.face, text);
     };
     let mut buffer = Buffer::new();
@@ -427,6 +438,8 @@ fn shape(
     };
     let plan = plans.plan(key, font, language.as_ref(), &features);
     let options = ShapeOptions::new().features(&features).plan(Some(&plan));
+    #[cfg(test)]
+    HARFRUST_CALLS.with(|calls| calls.set(calls.get() + 1));
     if harfrust::shape(&shaper, &mut buffer, options).is_err() {
         // HarfRust refuses a buffer only for reasons this code rules out (no direction,
         // a plan for another script); shaping nominally keeps the text all the same.
@@ -436,7 +449,7 @@ fn shape(
         // The font made HarfRust run out of room: more than 256 glyphs per character or
         // more than 4096 lookup steps per character (at least 65536 of each). The buffer
         // then holds a half-substituted state, so the run is shaped nominally.
-        refused.insert(face.id);
+        face.refuse();
         return shape_nominal(&face.face, text);
     }
     if buffer.len()
@@ -445,8 +458,14 @@ fn shape(
             .count()
             .saturating_mul(MAX_GLYPHS_PER_CHARACTER)
     {
-        refused.insert(face.id);
+        face.refuse();
         return shape_nominal(&face.face, text);
+    }
+    // One cluster past the bound: the run is kept, as it is within the bound on average,
+    // but HarfRust has done that work for it, so the face's later runs are shaped without
+    // HarfRust.
+    if crowded_cluster(buffer.glyph_infos(), text) {
+        face.refuse();
     }
     let raw = buffer
         .glyph_infos()
@@ -466,6 +485,27 @@ fn shape(
         nominal: false,
         replaced,
     }
+}
+
+/// Whether a cluster of `infos`, shaped from `text`, has more glyphs than
+/// [`MAX_GLYPHS_PER_CHARACTER`] for each of its characters: one character among many can
+/// turn into tens of thousands of glyphs while the run stays under the bound on average.
+fn crowded_cluster(infos: &[harfrust::GlyphInfo], text: &str) -> bool {
+    let mut clusters: Vec<usize> = infos.iter().map(|info| info.cluster as usize).collect();
+    clusters.sort_unstable();
+    let mut rest = clusters.as_slice();
+    while let Some(&start) = rest.first() {
+        let count = rest.iter().take_while(|&&cluster| cluster == start).count();
+        rest = rest.get(count..).unwrap_or_default();
+        let end = rest.first().copied().unwrap_or(text.len());
+        let characters = text
+            .get(start..end)
+            .map_or(1, |part| part.chars().count().max(1));
+        if count > characters.saturating_mul(MAX_GLYPHS_PER_CHARACTER) {
+            return true;
+        }
+    }
+    false
 }
 
 /// A glyph as HarfRust returns it, before it is checked against the face.
@@ -567,17 +607,12 @@ mod tests {
             [(2, 0, 600), (1, 1, 250), (4, 2, 600), (0, 4, 500)]
         );
 
-        let without_layout = ShapingFace {
-            id: 0,
-            face: face.clone(),
-            font: None,
-        };
+        let without_layout = ShapingFace::unreadable(face.clone());
         let shaped = shape(
             &without_layout,
             "A",
             &ShapeRequest::default(),
             &mut Plans::default(),
-            &mut HashSet::new(),
         );
         assert!(shaped.is_nominal());
         let with_layout = ShapingFace::new(face);
@@ -586,7 +621,6 @@ mod tests {
             "A \u{C1}",
             &ShapeRequest::default(),
             &mut Plans::default(),
-            &mut HashSet::new(),
         );
         assert!(!shaped.is_nominal());
         assert_eq!(ids(&shaped), [(2, 0, 600), (1, 1, 250), (4, 2, 600)]);
@@ -607,35 +641,21 @@ mod tests {
             "A",
             &ShapeRequest::default(),
             &mut Plans::default(),
-            &mut HashSet::new(),
         );
         assert!(run.is_nominal());
         assert_eq!(ids(&run), [(2, 0, 600)]);
         // Up to the bound, the font's glyphs are kept: 32 of `A`, and 64 for two.
         let face = multiplied(32);
-        let run = shape(
-            &face,
-            "A",
-            &ShapeRequest::default(),
-            &mut Plans::default(),
-            &mut HashSet::new(),
-        );
+        let run = shape(&face, "A", &ShapeRequest::default(), &mut Plans::default());
         assert!(!run.is_nominal());
         assert_eq!(run.glyphs().len(), 32);
-        let run = shape(
-            &face,
-            "AA",
-            &ShapeRequest::default(),
-            &mut Plans::default(),
-            &mut HashSet::new(),
-        );
+        let run = shape(&face, "AA", &ShapeRequest::default(), &mut Plans::default());
         assert_eq!(run.glyphs().len(), 64);
         let run = shape(
             &multiplied(33),
             "A",
             &ShapeRequest::default(),
             &mut Plans::default(),
-            &mut HashSet::new(),
         );
         assert!(run.is_nominal());
         // Characters are counted, not bytes: `AÁ` is three bytes, and 65 glyphs are more
@@ -645,7 +665,6 @@ mod tests {
             "AÁ",
             &ShapeRequest::default(),
             &mut Plans::default(),
-            &mut HashSet::new(),
         );
         assert!(run.is_nominal());
     }
@@ -659,27 +678,41 @@ mod tests {
             ShapingFace::new(FontFace::from_bytes(data, 0).expect("the test font"))
         };
         let request = ShapeRequest::default();
-        // `A` turns into 64 glyphs: alone, more than the layout keeps; among nine spaces,
-        // 73 glyphs for ten characters, which it keeps.
+        let spaces = "   ";
+        // A face of its own has its spaces shaped by HarfRust.
+        assert!(
+            !Shaper::new()
+                .shape(&multiplied(64), spaces, &request)
+                .is_nominal()
+        );
+        // `A` turns into 64 glyphs: alone, more than the layout keeps.
         let face = multiplied(64);
-        let among = "A         ";
-        assert!(!Shaper::new().shape(&face, among, &request).is_nominal());
         let mut shaper = Shaper::new();
         assert!(shaper.shape(&face, "A", &request).is_nominal());
-        let later = shaper.shape(&face, among, &request);
+        let later = shaper.shape(&face, spaces, &request);
         assert!(later.is_nominal());
-        assert_eq!(later.glyphs().len(), 10);
-        // Its clusters are not known either, and another face is shaped as before.
-        assert_eq!(shaper.cluster_starts(&face, among, &request), None);
+        assert_eq!(later.glyphs().len(), 3);
+        // Its clusters are not known either, to any shaper, and another face is shaped as
+        // before.
+        assert_eq!(Shaper::new().cluster_starts(&face, spaces, &request), None);
         let other = ShapingFace::new(minimal());
-        assert!(!shaper.shape(&other, among, &request).is_nominal());
+        assert!(!shaper.shape(&other, spaces, &request).is_nominal());
+        // Among nine spaces, 73 glyphs for ten characters: the run is kept, but its `A` is
+        // one cluster of 64 glyphs, so the face's later runs are nominal.
+        let face = multiplied(64);
+        let among = shaper.shape(&face, "A         ", &request);
+        assert!(!among.is_nominal());
+        assert_eq!(among.glyphs().len(), 73);
+        assert!(shaper.shape(&face, spaces, &request).is_nominal());
         // A run HarfRust runs out of room for: `AAA` in 90,000 glyphs, past the 65,536 it
-        // holds for a short run. Spaces are then shaped nominally too.
+        // holds for a short run.
         let face = multiplied(30_000);
-        let spaces = "   ";
-        assert!(!Shaper::new().shape(&face, spaces, &request).is_nominal());
-        let mut shaper = Shaper::new();
         assert!(shaper.shape(&face, "AAA", &request).is_nominal());
+        assert!(shaper.shape(&face, spaces, &request).is_nominal());
+        // A run cached before its face was refused is shaped again, nominally.
+        let face = multiplied(64);
+        assert!(!shaper.shape(&face, spaces, &request).is_nominal());
+        assert!(shaper.shape(&face, "A", &request).is_nominal());
         assert!(shaper.shape(&face, spaces, &request).is_nominal());
     }
 
@@ -718,16 +751,7 @@ mod tests {
                 request: request.clone(),
                 text: text.to_owned(),
             };
-            cost(
-                &key,
-                &shape(
-                    &face,
-                    text,
-                    &request,
-                    &mut Plans::default(),
-                    &mut HashSet::new(),
-                ),
-            )
+            cost(&key, &shape(&face, text, &request, &mut Plans::default()))
         };
         // Room for "AA" and "AAA" exactly.
         let mut shaper = Shaper::with_capacity(entry("AA") + entry("AAA"));
@@ -761,16 +785,7 @@ mod tests {
                 request: request.clone(),
                 text: text.to_owned(),
             };
-            cost(
-                &key,
-                &shape(
-                    &face,
-                    text,
-                    &request,
-                    &mut Plans::default(),
-                    &mut HashSet::new(),
-                ),
-            )
+            cost(&key, &shape(&face, text, &request, &mut Plans::default()))
         };
         let glyph = std::mem::size_of::<ShapedGlyph>();
         // Two more characters: two more glyphs and two more bytes of text.
@@ -955,15 +970,8 @@ mod tests {
             );
             ShapingFace::new(FontFace::from_bytes(data, 0).expect("the test font"))
         };
-        let shaped = |face: &ShapingFace| {
-            shape(
-                face,
-                "A",
-                &ShapeRequest::default(),
-                &mut Plans::default(),
-                &mut HashSet::new(),
-            )
-        };
+        let shaped =
+            |face: &ShapingFace| shape(face, "A", &ShapeRequest::default(), &mut Plans::default());
         let damaged = shaped(&font(40_000));
         assert!(damaged.is_nominal());
         assert_eq!(ids(&damaged), [(2, 0, 600)]);
