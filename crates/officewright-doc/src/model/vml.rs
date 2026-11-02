@@ -494,7 +494,10 @@ fn has_outline(shape: Element<'_>, pict: Element<'_>, names: &Names, report: Rep
                 .filter(|child| child.is(&names.v, "shapetype"))
                 .find(|child| child.attribute(&[None], "id") == Some(id))
         })
-        .map(|shape_type| value(shape_type, names, "stroked", true_false, report).unwrap_or(true));
+        // Its values are reported where it is defined (`text_box::check_shape_types`).
+        .map(|shape_type| {
+            value(shape_type, names, "stroked", true_false, &mut |_, _, _| {}).unwrap_or(true)
+        });
     stroke
         .or(stroked)
         .unwrap_or_else(|| kind.is_none() || type_stroked.unwrap_or(false))

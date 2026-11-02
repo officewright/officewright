@@ -29,18 +29,68 @@ pub(crate) fn drawing_color(
     placeholder: Option<Paint>,
     report: Report<'_>,
 ) -> Option<Paint> {
-    let element = parent.children_through_alternates(names.mc).find(|child| {
+    color_of(parent, names, document, placeholder, usize::MAX, report).0
+}
+
+/// The colour of `parent` as [`drawing_color`] reads it, with at most `max_transforms` of
+/// its transforms applied, and whether it has more, which are left out. Its transforms are
+/// read, and reported when not taken, also when its colour names nothing.
+pub(crate) fn color_of(
+    parent: Element<'_>,
+    names: &Names,
+    document: Option<&Document>,
+    placeholder: Option<Paint>,
+    max_transforms: usize,
+    report: Report<'_>,
+) -> (Option<Paint>, bool) {
+    match color_element(parent, names) {
+        Some(element) => color_of_element(
+            element,
+            names,
+            document,
+            placeholder,
+            max_transforms,
+            report,
+        ),
+        None => (None, false),
+    }
+}
+
+/// The colour element of `parent` (`a:srgbClr` and the others): its first.
+pub(crate) fn color_element<'a>(parent: Element<'a>, names: &Names) -> Option<Element<'a>> {
+    parent.children_through_alternates(names.mc).find(|child| {
         matches!(
             child.local_in(&names.a),
             Some("srgbClr" | "scrgbClr" | "hslClr" | "sysClr" | "schemeClr" | "prstClr")
         )
-    })?;
-    let mut paint = base(element, names, document, placeholder, report)?;
+    })
+}
+
+/// A colour element as [`color_of`] reads the colour of its parent.
+pub(crate) fn color_of_element(
+    element: Element<'_>,
+    names: &Names,
+    document: Option<&Document>,
+    placeholder: Option<Paint>,
+    max_transforms: usize,
+    report: Report<'_>,
+) -> (Option<Paint>, bool) {
+    let base = base(element, names, document, placeholder, report);
+    let mut paint = base.unwrap_or(Paint {
+        rgb: (0, 0, 0),
+        opacity: 1.0,
+    });
     let mut rgb = [paint.rgb.0, paint.rgb.1, paint.rgb.2].map(|c| f64::from(c) / 255.0);
+    let (mut applied, mut cut) = (0usize, false);
     for transform in element.children_through_alternates(names.mc) {
         let Some(local) = transform.local_in(&names.a) else {
             continue;
         };
+        if applied == max_transforms {
+            cut = true;
+            break;
+        }
+        applied += 1;
         if matches!(local, "comp" | "inv" | "gray") {
             rgb = match local {
                 "inv" => rgb.map(|c| 1.0 - c),
@@ -66,26 +116,14 @@ pub(crate) fn drawing_color(
             "alpha" => paint.opacity = amount,
             "alphaMod" => paint.opacity *= amount,
             "alphaOff" => paint.opacity += amount,
-            "shade" | "tint" if element.local_name() == "schemeClr" => {
-                // A colour of the scheme is shaded and tinted in its luminance, as the theme
-                // colours of WordprocessingML are (MS-OI29500 §17.3.2.6), its channels
-                // truncated. Word's VML fallbacks of such colours have these values, or
-                // within one: POI's shapes-with-text.docx, 156082 shaded 15 % is 030E13;
-                // LibreOffice's fdo65295.docx, 4F81BD shaded 50 % is 243F60 (here 244061).
-                // What Word draws for them no render shows yet (#468).
-                let (hue, saturation, luminance) = to_hsl(rgb);
-                let luminance = if local == "shade" {
-                    luminance * amount
-                } else {
-                    luminance * amount + (1.0 - amount)
-                };
-                rgb = from_hsl((hue, saturation, luminance.clamp(0.0, 1.0)))
-                    .map(|c| (c.clamp(0.0, 1.0) * 255.0).floor() / 255.0);
-            }
             "shade" | "tint" => {
-                // Any other colour in linear light: Word's VML fallbacks of a:srgbClr with
-                // a:shade have these values (LibreOffice's fdo74401.docx: 4F81BD shaded
-                // 50 % is 385D8A).
+                // In linear light, as Word's VML fallbacks of shapes have such colours
+                // (LibreOffice's fdo74401.docx: 4F81BD shaded 50 % is 385D8A), also the
+                // stops it gives a gradient of a colour of the scheme with several
+                // transforms (fdo73247.docx: 936545, D49366, FDAF7B). A colour of the scheme
+                // with one shade or tint has its old index there (`#243f60 [1604]`) and a
+                // value in its luminance, as Word's older colour model has it; what Word
+                // draws for those no render shows yet (#468).
                 rgb = rgb.map(|c| {
                     let linear = to_linear(c);
                     from_linear(if local == "shade" {
@@ -119,10 +157,13 @@ pub(crate) fn drawing_color(
             _ => {}
         }
     }
+    if base.is_none() {
+        return (None, cut);
+    }
     let [r, g, b] = rgb.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
     paint.rgb = (r, g, b);
     paint.opacity = paint.opacity.clamp(0.0, 1.0);
-    Some(paint)
+    (Some(paint), cut)
 }
 
 /// A colour element without its transforms.
@@ -343,7 +384,8 @@ const RECOLORING: [&str; 9] = [
 
 /// A colour of VML: `#` and six or three hexadecimal digits (MS-OI29500 2.1.1893(d)),
 /// `rgb(` and three numbers to 255 (b), a colour's name, a colour of the system (a, f) or
-/// of the shape (g), or one of those changed by an instruction (h); each followed or not
+/// of the shape (g), or one of those changed by an instruction after it (h), applied to a
+/// colour the document gives; each followed or not
 /// by the index of a colour of the scheme in brackets, as Word writes it
 /// (`#4f81bd [3204]`), which the value before it already resolves.
 pub(crate) fn vml_color(value: &str) -> Option<VmlColor> {
@@ -351,6 +393,23 @@ pub(crate) fn vml_color(value: &str) -> Option<VmlColor> {
         .split_once('[')
         .map_or(value, |(color, _)| color)
         .trim();
+    if let Some((base, instruction)) = value.to_ascii_lowercase().rsplit_once(' ') {
+        let (name, amount) = match instruction.split_once('(') {
+            Some((name, rest)) => (name.trim(), Some(rest.strip_suffix(')')?.trim())),
+            None => (instruction.trim(), None),
+        };
+        if RECOLORING.contains(&name) {
+            let amount = match amount {
+                Some(amount) => Some(amount.parse::<u8>().ok()?),
+                None => None,
+            };
+            return match vml_color(base.trim())? {
+                VmlColor::Rgb(rgb) => recolor(rgb, name, amount).map(VmlColor::Rgb),
+                VmlColor::None => None,
+                VmlColor::Elsewhere => Some(VmlColor::Elsewhere),
+            };
+        }
+    }
     if let Some(digits) = value.strip_prefix('#') {
         let rgb = match digits.len() {
             6 => hex(digits),
@@ -379,14 +438,6 @@ pub(crate) fn vml_color(value: &str) -> Option<VmlColor> {
     {
         return index.trim().parse::<u8>().ok().map(|_| VmlColor::Elsewhere);
     }
-    if let Some((base, instruction)) = lower.split_once(' ') {
-        let name = instruction
-            .split_once('(')
-            .map_or(instruction, |(name, _)| name)
-            .trim();
-        let known_base = vml_color(base).is_some_and(|base| base != VmlColor::None);
-        return (known_base && RECOLORING.contains(&name)).then_some(VmlColor::Elsewhere);
-    }
     if lower == "none" {
         return Some(VmlColor::None);
     }
@@ -397,6 +448,31 @@ pub(crate) fn vml_color(value: &str) -> Option<VmlColor> {
         .iter()
         .find(|(preset, _)| preset.eq_ignore_ascii_case(&lower))
         .map(|&(_, rgb)| VmlColor::Rgb(rgb))
+}
+
+/// A colour changed by an instruction of VML, with its amount from 0 to 255 where it takes
+/// one (MS-OI29500 2.1.1893(h)). Of the two readings of `invert128` the notes give, (h)'s,
+/// which keeps each channel within 0 to 255.
+fn recolor((r, g, b): (u8, u8, u8), instruction: &str, amount: Option<u8>) -> Option<(u8, u8, u8)> {
+    let channels = [r, g, b].map(u32::from);
+    let amount = amount.map(u32::from);
+    let changed = match (instruction, amount) {
+        ("darken", Some(a)) => channels.map(|c| c * a / 256),
+        ("lighten", Some(a)) => channels.map(|c| 255 - (255 - c) * a / 256),
+        ("add", Some(a)) => channels.map(|c| (c + a).min(255)),
+        ("subtract", Some(a)) => channels.map(|c| c.saturating_sub(a)),
+        ("reversesubtract", Some(a)) => channels.map(|c| a.saturating_sub(c)),
+        ("blackwhite", Some(a)) => channels.map(|c| if c < a { 0 } else { 255 }),
+        ("invert", None) => channels.map(|c| 255 - c),
+        ("invert128", None) => channels.map(|c| if c < 128 { c + 128 } else { c - 128 }),
+        ("grayscale", None) => {
+            let [r, g, b] = channels;
+            [(30 * r + 59 * g + 11 * b) / 100; 3]
+        }
+        _ => return None,
+    };
+    let [r, g, b] = changed.map(|c| u8::try_from(c).unwrap_or(u8::MAX));
+    Some((r, g, b))
 }
 
 /// A preset colour of DrawingML (ST_PresetColorVal).

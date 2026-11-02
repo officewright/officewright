@@ -6,9 +6,10 @@
 
 use officewright_core::Pt;
 
-use super::color::{Paint, VmlColor, drawing_color, vml_color};
+use super::color::{Paint, VmlColor, color_element, color_of_element, drawing_color, vml_color};
 use super::drawing::{Offsets, boolean, child, coordinate, value};
 use super::properties::xml_enum;
+use super::theme::{StyleFill, StyleLine};
 use super::views::{Block, blocks};
 use super::vml::{self, Style};
 use super::xml::Element;
@@ -75,8 +76,6 @@ const TEXT_BOX_STYLE: [&str; 5] = [
 #[derive(Clone, Copy, Debug)]
 pub struct TextBox<'a> {
     document: &'a Document,
-    /// The `w:drawing` or the `w:pict` it is in.
-    holder: Element<'a>,
     /// The `wps:wsp`, or the VML shape.
     shape: Element<'a>,
     /// For a VML shape, its `v:textbox`.
@@ -89,7 +88,7 @@ impl<'a> TextBox<'a> {
     /// read.
     pub(crate) fn in_drawing(document: &'a Document, drawing: Element<'a>) -> Option<Self> {
         let shape = drawing_shape(drawing, &document.names)?;
-        Self::new(document, drawing, shape, None)
+        Self::new(document, shape, None)
     }
 
     /// The text boxes of a VML drawing (`w:pict`) whose content was read, those of the
@@ -100,17 +99,12 @@ impl<'a> TextBox<'a> {
     ) -> impl Iterator<Item = Self> + 'a {
         vml_shapes(pict, &document.names)
             .into_iter()
-            .filter_map(move |(shape, text_box)| Self::new(document, pict, shape, Some(text_box)))
+            .filter_map(move |(shape, text_box)| Self::new(document, shape, Some(text_box)))
     }
 
     /// The text box of a shape; none when it has content that was not read, as a text
     /// box in another has.
-    fn new(
-        document: &'a Document,
-        holder: Element<'a>,
-        shape: Element<'a>,
-        vml: Option<Element<'a>>,
-    ) -> Option<Self> {
+    fn new(document: &'a Document, shape: Element<'a>, vml: Option<Element<'a>>) -> Option<Self> {
         let blocks = match content(shape, vml, &document.names) {
             Some(content) => {
                 let stories = &document.text_boxes;
@@ -124,7 +118,6 @@ impl<'a> TextBox<'a> {
         };
         Some(Self {
             document,
-            holder,
             shape,
             vml,
             blocks,
@@ -233,7 +226,7 @@ impl<'a> TextBox<'a> {
         let document = Some(self.document);
         let names = &self.document.names;
         match self.vml {
-            Some(_) => vml_fill(self.shape, self.holder, names, &mut |_, _, _| {}),
+            Some(_) => vml_fill(self.shape, self.shape_type(), names, &mut |_, _, _| {}),
             None => drawing_fill(self.shape, names, document, &mut |_, _, _| {}),
         }
     }
@@ -246,9 +239,18 @@ impl<'a> TextBox<'a> {
         let document = Some(self.document);
         let names = &self.document.names;
         match self.vml {
-            Some(_) => vml_outline(self.shape, self.holder, names, &mut |_, _, _| {}),
+            Some(_) => vml_outline(self.shape, self.shape_type(), names, &mut |_, _, _| {}),
             None => drawing_outline(self.shape, names, document, &mut |_, _, _| {}),
         }
+    }
+
+    /// The shape type its VML shape names (`type`), as the document registers shape types
+    /// while it is read: the first of each id.
+    fn shape_type(self) -> Option<Element<'a>> {
+        let id = self.shape.attribute(&[None], "type")?;
+        let id = id.strip_prefix('#').unwrap_or(id);
+        let span = self.document.vml_shape_types.get(id)?;
+        Some(self.document.element(*span))
     }
 
     /// Whether it is in a chain of linked boxes, whose text runs on from one box to the
@@ -424,9 +426,11 @@ impl LineDash {
     }
 
     /// VML's `dashstyle` (ECMA-376 Part 4, §19.1.2.21), whose names stand for those of
-    /// DrawingML: `short` for `sys`, `long` for `lg`. Numbers give dashes of their own.
+    /// DrawingML: `short` for `sys`, `long` for `lg`. Numbers give dashes of their own. Word
+    /// writes the names in either case (`longDashDot` in LibreOffice's
+    /// LineStyle_DashType.docx, which Word 16 saved).
     fn from_vml(value: &str) -> Option<Self> {
-        Some(match value {
+        Some(match value.to_ascii_lowercase().as_str() {
             "solid" => Self::Solid,
             "shortdash" => Self::SystemDash,
             "shortdot" => Self::SystemDot,
@@ -483,8 +487,8 @@ pub(crate) fn check(holder: Element<'_>, names: &Names, report: Report<'_>) {
         columns(shape, vml, names, report);
         match vml {
             Some(_) => {
-                vml_fill(shape, holder, names, report);
-                vml_outline(shape, holder, names, report);
+                vml_fill(shape, None, names, report);
+                vml_outline(shape, None, names, report);
             }
             None => {
                 drawing_fill(shape, names, None, report);
@@ -843,35 +847,162 @@ fn fill_element<'a>(parent: Element<'a>, names: &Names, fills: &[&str]) -> Optio
     })
 }
 
-/// What a shape's style (`wps:style`) takes from the theme's format scheme by its reference
-/// `name` (`a:fillRef`, `a:lnRef`, ST_StyleMatrixColumnIndex): the entry of the list
-/// `lists.0` it names from 1 on, or of `lists.1` from 1001 on, and the colour of the
-/// reference, which the entry's placeholder colour stands for. None for 0, no fill or
-/// line, and without `document`, as when the values are checked while it is read.
-fn style_reference<'a>(
-    shape: Element<'a>,
+/// How many transforms a colour of the theme's format scheme has applied at most. Every
+/// box whose style names it applies them again, so that a theme of many transforms would
+/// cost time in proportion to it for each box; Office writes a few. Those after are left
+/// out and reported as the theme is read.
+pub(crate) const MAX_SCHEME_TRANSFORMS: usize = 64;
+
+/// The index of a shape's style's reference (`wps:style`'s `a:fillRef` or `a:lnRef`,
+/// ST_StyleMatrixColumnIndex), and its colour, which the placeholder colour of the entry it
+/// names stands for.
+fn reference(
+    shape: Element<'_>,
     names: &Names,
-    document: Option<&'a Document>,
+    document: Option<&Document>,
     name: &str,
-    lists: (&str, Option<&str>),
     report: Report<'_>,
-) -> Option<(Element<'a>, Option<Paint>)> {
+) -> Option<(u32, Option<Paint>)> {
     let style = child(shape, names, &[names.wps], "style")?;
     let reference = child(style, names, &names.a, name)?;
     let index = value(reference, names, "idx", |v| v.parse::<u32>().ok(), report)?;
     let placeholder = drawing_color(reference, names, document, None, report);
-    let (list, at) = match (index, lists.1) {
-        (0, _) => return None,
-        (1001.., Some(background)) => (background, index - 1001),
-        _ => (lists.0, index - 1),
+    Some((index, placeholder))
+}
+
+/// The fill of the theme's format scheme that a shape's style names (`a:fillRef`): of
+/// `a:fillStyleLst` from 1, of `a:bgFillStyleLst` from 1001; none for 0 and 1000, no fill
+/// (§20.1.4.2.10), and without `document`, as when the values are checked while it is
+/// read.
+fn style_fill(
+    shape: Element<'_>,
+    names: &Names,
+    document: Option<&Document>,
+    report: Report<'_>,
+) -> Option<(StyleFill, Option<Paint>)> {
+    let (index, placeholder) = reference(shape, names, document, "fillRef", report)?;
+    let scheme = &document?.theme.as_ref()?.format_scheme;
+    let at = |list: &[StyleFill], first: u32| {
+        list.get(usize::try_from(index.checked_sub(first)?).ok()?)
+            .copied()
     };
-    let document = document?;
-    let scheme = document.element(document.theme.as_ref()?.format_scheme?);
-    let entry = child(scheme, names, &names.a, list)?
-        .children_through_alternates(names.mc)
-        .filter(|entry| entry.local_in(&names.a).is_some())
-        .nth(usize::try_from(at).ok()?)?;
+    let entry = match index {
+        0 | 1000 => return None,
+        1001.. => at(&scheme.background_fills, 1001),
+        _ => at(&scheme.fills, 1),
+    }?;
     Some((entry, placeholder))
+}
+
+/// The line of the theme's format scheme that a shape's style names (`a:lnRef`): of
+/// `a:lnStyleLst` from 1; none for 0, and without `document`.
+fn style_line(
+    shape: Element<'_>,
+    names: &Names,
+    document: Option<&Document>,
+    report: Report<'_>,
+) -> Option<(StyleLine, Option<Paint>)> {
+    let (index, placeholder) = reference(shape, names, document, "lnRef", report)?;
+    let scheme = &document?.theme.as_ref()?.format_scheme;
+    let entry = scheme
+        .lines
+        .get(usize::try_from(index.checked_sub(1)?).ok()?)
+        .copied()?;
+    Some((entry, placeholder))
+}
+
+/// The kind of a fill element (`a:solidFill` and the others) and its colour element: that of
+/// an `a:solidFill`, of a gradient's first stop, or of a pattern's foreground. None for no
+/// fill, and for a group's fill in a shape of no group read.
+fn fill_parts<'a>(fill: Element<'a>, names: &Names) -> Option<(FillKind, Option<Element<'a>>)> {
+    let (kind, colored) = match fill.local_name() {
+        "solidFill" => (FillKind::Solid, Some(fill)),
+        "gradFill" => (
+            FillKind::Gradient,
+            child(fill, names, &names.a, "gsLst")
+                .and_then(|stops| child(stops, names, &names.a, "gs")),
+        ),
+        "pattFill" => (FillKind::Pattern, child(fill, names, &names.a, "fgClr")),
+        "blipFill" => (FillKind::Picture, None),
+        _ => return None,
+    };
+    Some((
+        kind,
+        colored.and_then(|parent| color_element(parent, names)),
+    ))
+}
+
+/// A fill of this kind and colour element, with at most `max_transforms` transforms of its
+/// colour applied.
+fn paint_fill(
+    kind: FillKind,
+    color: Option<Element<'_>>,
+    names: &Names,
+    document: Option<&Document>,
+    (placeholder, max_transforms): (Option<Paint>, usize),
+    report: Report<'_>,
+) -> ShapeFill {
+    let paint = color.and_then(|color| {
+        color_of_element(color, names, document, placeholder, max_transforms, report).0
+    });
+    ShapeFill {
+        kind,
+        color: paint.map(|paint| paint.rgb),
+        opacity: paint.map_or(1.0, |paint| paint.opacity),
+    }
+}
+
+/// An entry of a theme's fills (`a:fillStyleLst`, `a:bgFillStyleLst`) as the theme is
+/// read: its values not taken are reported, and whether its colour has more transforms
+/// than [`MAX_SCHEME_TRANSFORMS`] is given.
+pub(crate) fn style_fill_entry(
+    entry: Element<'_>,
+    names: &Names,
+    report: Report<'_>,
+) -> (StyleFill, bool) {
+    let Some((kind, color)) = fill_parts(entry, names) else {
+        return (
+            StyleFill {
+                kind: None,
+                color: None,
+            },
+            false,
+        );
+    };
+    let over = color.is_some_and(|color| {
+        color_of_element(color, names, None, None, MAX_SCHEME_TRANSFORMS, report).1
+    });
+    let fill = StyleFill {
+        kind: Some(kind),
+        color: color.map(Element::span),
+    };
+    (fill, over)
+}
+
+/// An entry of a theme's lines (`a:lnStyleLst`, an `a:ln`) as the theme is read, as
+/// [`style_fill_entry`] reads a fill.
+pub(crate) fn style_line_entry(
+    entry: Element<'_>,
+    names: &Names,
+    report: Report<'_>,
+) -> (StyleLine, bool) {
+    let width = value(entry, names, "w", line_width_emus, report);
+    let compound = value(entry, names, "cmpd", CompoundLine::from_xml, report);
+    let dash = line_dash(entry, names, report);
+    let (fill, over) = match fill_element(entry, names, &LINE_FILLS) {
+        Some(fill) => {
+            let (fill, over) = style_fill_entry(fill, names, report);
+            (Some(fill), over)
+        }
+        None => (None, false),
+    };
+    let line = StyleLine {
+        width,
+        compound,
+        dash,
+        fill,
+    };
+    (line, over)
 }
 
 fn drawing_fill(
@@ -882,36 +1013,32 @@ fn drawing_fill(
 ) -> Option<ShapeFill> {
     let own = child(shape, names, &[names.wps], "spPr")
         .and_then(|properties| fill_element(properties, names, &FILLS));
-    let (fill, placeholder) = match own {
-        Some(fill) => (fill, None),
-        None => style_reference(
-            shape,
-            names,
-            document,
-            "fillRef",
-            ("fillStyleLst", Some("bgFillStyleLst")),
-            report,
-        )?,
-    };
-    let (kind, colored) = match fill.local_name() {
-        "solidFill" => (FillKind::Solid, Some(fill)),
-        "gradFill" => (
-            FillKind::Gradient,
-            child(fill, names, &names.a, "gsLst")
-                .and_then(|stops| child(stops, names, &names.a, "gs")),
-        ),
-        "pattFill" => (FillKind::Pattern, child(fill, names, &names.a, "fgClr")),
-        "blipFill" => (FillKind::Picture, None),
-        // No fill, and a group's fill in a shape of no group read.
-        _ => return None,
-    };
-    let paint =
-        colored.and_then(|element| drawing_color(element, names, document, placeholder, report));
-    Some(ShapeFill {
-        kind,
-        color: paint.map(|paint| paint.rgb),
-        opacity: paint.map_or(1.0, |paint| paint.opacity),
-    })
+    match own {
+        Some(fill) => {
+            let (kind, color) = fill_parts(fill, names)?;
+            Some(paint_fill(
+                kind,
+                color,
+                names,
+                document,
+                (None, usize::MAX),
+                report,
+            ))
+        }
+        None => {
+            let (entry, placeholder) = style_fill(shape, names, document, report)?;
+            let document = document?;
+            let color = entry.color.map(|color| document.element(color));
+            Some(paint_fill(
+                entry.kind?,
+                color,
+                names,
+                Some(document),
+                (placeholder, MAX_SCHEME_TRANSFORMS),
+                report,
+            ))
+        }
+    }
 }
 
 fn drawing_outline(
@@ -922,41 +1049,45 @@ fn drawing_outline(
 ) -> Option<ShapeOutline> {
     let own = child(shape, names, &[names.wps], "spPr")
         .and_then(|properties| child(properties, names, &names.a, "ln"));
-    let style = style_reference(
-        shape,
-        names,
-        document,
-        "lnRef",
-        ("lnStyleLst", None),
-        report,
-    );
-    let (mut width, mut compound, mut dash, mut fill) = (None, None, None, None);
+    let style = style_line(shape, names, document, report);
     // Each value from the shape's own line, else from its style's.
-    for (line, placeholder) in [own.map(|line| (line, None)), style].into_iter().flatten() {
-        if width.is_none() {
-            width = value(line, names, "w", line_width, report);
+    let own_width = own.and_then(|line| value(line, names, "w", line_width_emus, report));
+    let own_compound =
+        own.and_then(|line| value(line, names, "cmpd", CompoundLine::from_xml, report));
+    let own_dash = own.and_then(|line| line_dash(line, names, report));
+    let width = own_width.or(style.and_then(|(line, _)| line.width));
+    let compound = own_compound.or(style.and_then(|(line, _)| line.compound));
+    let dash = own_dash.or(style.and_then(|(line, _)| line.dash));
+    let paint = match own.and_then(|line| fill_element(line, names, &LINE_FILLS)) {
+        Some(fill) => match fill.local_name() {
+            "noFill" => return None,
+            "solidFill" => drawing_color(fill, names, document, None, report),
+            _ => None,
+        },
+        None => {
+            let (line, placeholder) = style?;
+            let fill = line.fill?;
+            match fill.kind? {
+                FillKind::Solid => {
+                    let color = fill.color.and_then(|color| Some(document?.element(color)));
+                    color.and_then(|color| {
+                        color_of_element(
+                            color,
+                            names,
+                            document,
+                            placeholder,
+                            MAX_SCHEME_TRANSFORMS,
+                            report,
+                        )
+                        .0
+                    })
+                }
+                _ => None,
+            }
         }
-        if compound.is_none() {
-            compound = value(line, names, "cmpd", CompoundLine::from_xml, report);
-        }
-        if dash.is_none() {
-            dash = match child(line, names, &names.a, "prstDash") {
-                Some(preset) => value(preset, names, "val", LineDash::from_xml, report),
-                None => child(line, names, &names.a, "custDash").map(|_| LineDash::Custom),
-            };
-        }
-        if fill.is_none() {
-            fill = fill_element(line, names, &LINE_FILLS).map(|fill| (fill, placeholder));
-        }
-    }
-    let (fill, placeholder) = fill?;
-    let paint = match fill.local_name() {
-        "noFill" => return None,
-        "solidFill" => drawing_color(fill, names, document, placeholder, report),
-        _ => None,
     };
     Some(ShapeOutline {
-        width: width.unwrap_or(Pt(0.0)),
+        width: width.map_or(Pt(0.0), |emus| Pt(f64::from(emus) / 12_700.0)),
         color: paint.map(|paint| paint.rgb),
         opacity: paint.map_or(1.0, |paint| paint.opacity),
         dash: dash.unwrap_or(LineDash::Solid),
@@ -964,13 +1095,17 @@ fn drawing_outline(
     })
 }
 
-/// The width of a line of DrawingML (ST_LineWidth): EMUs from 0 to 20,116,800.
-fn line_width(value: &str) -> Option<Pt> {
-    let emus = value
-        .parse::<u32>()
-        .ok()
-        .filter(|emus| *emus <= 20_116_800)?;
-    Some(Pt(f64::from(emus) / 12_700.0))
+/// The dashes of a line: its `a:prstDash`, or dashes of its own (`a:custDash`).
+fn line_dash(line: Element<'_>, names: &Names, report: Report<'_>) -> Option<LineDash> {
+    match child(line, names, &names.a, "prstDash") {
+        Some(preset) => value(preset, names, "val", LineDash::from_xml, report),
+        None => child(line, names, &names.a, "custDash").map(|_| LineDash::Custom),
+    }
+}
+
+/// The width of a line of DrawingML (ST_LineWidth), in EMUs from 0 to 20,116,800.
+fn line_width_emus(value: &str) -> Option<u32> {
+    value.parse::<u32>().ok().filter(|emus| *emus <= 20_116_800)
 }
 
 /// The width of a VML line: a length, or a number of EMUs without a unit, from 0 to
@@ -983,6 +1118,15 @@ fn stroke_weight(value: &str) -> Option<Pt> {
     (width.0 <= 20_116_800.0 / 12_700.0).then_some(width)
 }
 
+/// The colour of the first stop of a VML gradient's `colors`: stops separated by `;`, each
+/// a position and a colour.
+fn first_stop(colors: &str) -> Option<VmlColor> {
+    let stop = colors.split(';').next()?.trim();
+    let (position, color) = stop.split_once(char::is_whitespace)?;
+    vml::fraction(position.trim())?;
+    vml_color(color.trim())
+}
+
 /// A VML shape's first child of this local name.
 fn vml_child<'a>(shape: Element<'a>, names: &Names, local: &str) -> Option<Element<'a>> {
     shape
@@ -990,23 +1134,35 @@ fn vml_child<'a>(shape: Element<'a>, names: &Names, local: &str) -> Option<Eleme
         .find(|child| child.is(&names.v, local))
 }
 
-/// The shape type (`v:shapetype`) a VML shape's `type` names in its drawing, whose values
-/// stand for those the shape does not write.
-fn shape_type<'a>(shape: Element<'a>, pict: Element<'a>, names: &Names) -> Option<Element<'a>> {
-    let id = shape.attribute(&[None], "type")?;
-    let id = id.strip_prefix('#').unwrap_or(id);
-    pict.children_through_alternates(names.mc)
+/// Reports the values of the shape types (`v:shapetype`) of a VML drawing or embedded
+/// object that their shapes take and the readers do not: where each is defined, once
+/// however many shapes name it.
+pub(crate) fn check_shape_types(holder: Element<'_>, names: &Names, report: Report<'_>) {
+    for shape_type in holder
+        .children_through_alternates(names.mc)
         .filter(|child| child.is(&names.v, "shapetype"))
-        .find(|child| child.attribute(&[None], "id") == Some(id))
+    {
+        check_shape_type(shape_type, names, report);
+    }
+}
+
+/// The values of a shape type that its shapes take.
+fn check_shape_type(shape_type: Element<'_>, names: &Names, report: Report<'_>) {
+    value(shape_type, names, "filled", vml::true_false, report);
+    value(shape_type, names, "fillcolor", vml_color, report);
+    value(shape_type, names, "stroked", vml::true_false, report);
+    value(shape_type, names, "strokecolor", vml_color, report);
+    value(shape_type, names, "strokeweight", stroke_weight, report);
 }
 
 /// A value of a VML shape: from its child (`v:fill`, `v:stroke`) as `child_name`, else the
 /// shape's `name`, else its shape type's `name`. The child's and the shape's are read
-/// whether or not they are used, so that each not taken is reported.
+/// whether or not they are used, so that each not taken is reported; the shape type's
+/// are reported where it is defined ([`check_shape_type`]).
 fn vml_value<T>(
     (part, child_name): (Option<Element<'_>>, &str),
     shape: Element<'_>,
-    pict: Element<'_>,
+    shape_type: Option<Element<'_>>,
     names: &Names,
     name: &str,
     read: impl Fn(&str) -> Option<T>,
@@ -1015,14 +1171,13 @@ fn vml_value<T>(
     let from_part = part.and_then(|part| value(part, names, child_name, &read, report));
     let from_shape = value(shape, names, name, &read, report);
     from_part.or(from_shape).or_else(|| {
-        shape_type(shape, pict, names)
-            .and_then(|shape_type| value(shape_type, names, name, &read, report))
+        shape_type.and_then(|shape_type| value(shape_type, names, name, &read, &mut |_, _, _| {}))
     })
 }
 
 fn vml_fill(
     shape: Element<'_>,
-    pict: Element<'_>,
+    shape_type: Option<Element<'_>>,
     names: &Names,
     report: Report<'_>,
 ) -> Option<ShapeFill> {
@@ -1030,7 +1185,7 @@ fn vml_fill(
     let on = vml_value(
         (fill, "on"),
         shape,
-        pict,
+        shape_type,
         names,
         "filled",
         vml::true_false,
@@ -1039,7 +1194,7 @@ fn vml_fill(
     let color = vml_value(
         (fill, "color"),
         shape,
-        pict,
+        shape_type,
         names,
         "fillcolor",
         vml_color,
@@ -1066,7 +1221,11 @@ fn vml_fill(
         return None;
     }
     let kind = kind.unwrap_or(FillKind::Solid);
-    let rgb = match color {
+    // A gradient's first stop, where it lists its stops (`colors`, `0 #936545;.5 #d49366`).
+    let first_stop = fill
+        .filter(|_| kind == FillKind::Gradient)
+        .and_then(|fill| value(fill, names, "colors", first_stop, report));
+    let rgb = match first_stop.unwrap_or(color) {
         VmlColor::Rgb(rgb) => Some(rgb),
         VmlColor::None | VmlColor::Elsewhere => None,
     };
@@ -1079,7 +1238,7 @@ fn vml_fill(
 
 fn vml_outline(
     shape: Element<'_>,
-    pict: Element<'_>,
+    shape_type: Option<Element<'_>>,
     names: &Names,
     report: Report<'_>,
 ) -> Option<ShapeOutline> {
@@ -1087,7 +1246,7 @@ fn vml_outline(
     let on = vml_value(
         (stroke, "on"),
         shape,
-        pict,
+        shape_type,
         names,
         "stroked",
         vml::true_false,
@@ -1096,7 +1255,7 @@ fn vml_outline(
     let color = vml_value(
         (stroke, "color"),
         shape,
-        pict,
+        shape_type,
         names,
         "strokecolor",
         vml_color,
@@ -1105,7 +1264,7 @@ fn vml_outline(
     let width = vml_value(
         (stroke, "weight"),
         shape,
-        pict,
+        shape_type,
         names,
         "strokeweight",
         stroke_weight,
