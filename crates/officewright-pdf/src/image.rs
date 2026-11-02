@@ -438,10 +438,11 @@ fn u32_at(data: &[u8], at: usize) -> Option<u32> {
 /// Reads the size and components of a JPEG file from its frame header (ITU T.81, B.2),
 /// and whether it has Adobe's `APP14` segment. The frame header and every scan header
 /// before the end of image are checked by the rules of T.81 that libjpeg enforces when it
-/// reads them, so that a file whose headers a viewer cannot read is refused; after the
-/// first scan, so are a second frame header or start of image, the marker of a frame that
-/// cannot go into a PDF, and a second scan where libjpeg expects none, all of which
-/// libjpeg refuses too ([`check_later_scans`]).
+/// reads them, so that a file whose headers a viewer cannot read is refused, as is a
+/// restart interval segment of any length but 4 ([`restart_interval`]); after the first
+/// scan, so are a second frame header or start of image, the marker of a frame that cannot
+/// go into a PDF, a second scan where libjpeg expects none, and such a restart interval,
+/// all of which libjpeg refuses too ([`check_later_scans`]).
 ///
 /// Not refused but cut: a sequential file whose first scan codes every component has no
 /// other scan, and libjpeg draws it from that scan whatever follows, as poppler shows; it
@@ -521,7 +522,7 @@ fn read_jpeg(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> 
             }
             0xC0..=0xC2 => frame = Some(read_frame(segment, code == 0xC2)?),
             0xEE => adobe |= segment.starts_with(b"Adobe"),
-            0xDD => interval = u16_at(segment, 0).unwrap_or(0),
+            0xDD => interval = restart_interval(segment, length, at - 2)?,
             _ => refuse_other_frame(code)?,
         }
         at += length;
@@ -742,6 +743,20 @@ fn at_restart(
     }
 }
 
+/// The restart interval a DRI segment at byte `at` gives, `segment` being the `length`
+/// bytes after its marker but the length itself. Fails for any length but 4, which
+/// libjpeg refuses wherever the segment is ("Bogus marker length"), as `qpdf --check`
+/// shows, so such a file draws nothing in a viewer that decodes with it (B.2.4.4).
+fn restart_interval(segment: &[u8], length: usize, at: usize) -> std::result::Result<u16, Problem> {
+    if length != 4 {
+        return Err(malformed(format!(
+            "the JPEG file has a DRI segment of length {length} at byte {at}, where libjpeg \
+             takes only 4"
+        )));
+    }
+    Ok(u16_at(segment, 0).unwrap_or(0))
+}
+
 /// Fails for a marker at byte `at` that libjpeg does not know, wherever it is in the file:
 /// those T.81 reserves (0x02 to 0xBF, B.1.1.3) and JPG and JPGn (0xC8, 0xF0 to 0xFD), kept
 /// for extensions. libjpeg stops at them ("Unsupported marker type", or "Unsupported JPEG
@@ -770,7 +785,8 @@ fn refuse_other_frame(code: u8) -> std::result::Result<(), Problem> {
 /// Checks the scan headers after the first, whose coded data starts at `coded`, against
 /// their `frame`, as libjpeg does when it reaches them, and refuses what libjpeg refuses
 /// there too: a second frame header or start of image, the marker of a frame that cannot
-/// go into a PDF ([`refuse_other_frame`]), and any scan at all unless `more_scans`. libjpeg
+/// go into a PDF ([`refuse_other_frame`]), a restart interval segment of any length but 4
+/// ([`restart_interval`]), and any scan at all unless `more_scans`. libjpeg
 /// expects more scans after the first only in a progressive frame, or in a sequential one
 /// whose first scan codes only some of its components; otherwise it stops at the next
 /// scan header with "Didn't expect more than one scan". That rule matched libjpeg-turbo,
@@ -856,7 +872,7 @@ fn check_later_scans(
             return Ok(());
         };
         if code == 0xDD {
-            interval = u16_at(segment, 0).unwrap_or(0);
+            interval = restart_interval(segment, length, at - 2)?;
         }
         // Only a scan header is followed by coded data, with restart markers in it.
         restarts = Restarts::new(0);
@@ -3493,6 +3509,73 @@ pub(crate) mod tests {
             + 1;
         let ended = [&head[..], &scans[0][..at], reserved].concat();
         assert!(whole(ended));
+    }
+
+    #[test]
+    fn refuses_restart_intervals_of_another_length_as_libjpeg_does() {
+        // libjpeg refuses a DRI segment of any length but 4, before the first scan, between
+        // scans and after the last ("Bogus marker length"); `qpdf --check` fails each (#422).
+        let dri = |length: u16| {
+            let mut body = vec![0u8; usize::from(length.saturating_sub(2))];
+            if let Some(low) = body.get_mut(1) {
+                *low = 1;
+            }
+            [&[0xFF, 0xDD][..], &length.to_be_bytes(), &body].concat()
+        };
+        let refused_at = |data: Vec<u8>, at: usize, length: u16| {
+            let err = error(data);
+            assert_eq!(
+                err,
+                format!(
+                    "image data is damaged: the JPEG file has a DRI segment of length {length} \
+                     at byte {at}, where libjpeg takes only 4"
+                )
+            );
+        };
+        let sequential = restarted(3, &[&[1, 2, 3]], 0, b"");
+        let first_scan = sequential
+            .windows(2)
+            .position(|w| w == b"\xFF\xDA")
+            .unwrap();
+        let three = restarted(3, &[&[1], &[2], &[3]], 0, b"");
+        let second_scan = three
+            .windows(2)
+            .skip(first_scan + 2)
+            .position(|w| w == b"\xFF\xDA")
+            .unwrap()
+            + first_scan
+            + 2;
+        let end = |data: Vec<u8>| match Image::from_bytes(data).unwrap().inner.encoding {
+            Encoding::Jpeg { end, .. } => end,
+            _ => unreachable!(),
+        };
+        for length in [0, 1, 2, 3, 5, 6, 7, 18] {
+            // Before the first scan.
+            let before = [
+                &sequential[..first_scan],
+                &dri(length),
+                &sequential[first_scan..],
+            ]
+            .concat();
+            refused_at(before, first_scan, length);
+            // Between the scans of a sequential frame that codes a component a scan.
+            let between = [&three[..second_scan], &dri(length), &three[second_scan..]].concat();
+            refused_at(between, second_scan, length);
+            // After the only scan of a sequential frame, which goes in without it.
+            let after = with_more(&sequential, &dri(length));
+            assert_eq!(end(after), Some(sequential.len() - 2), "{length}");
+        }
+        // A length of 4 is read, in each place.
+        let four = [
+            &sequential[..first_scan],
+            &dri(4),
+            &sequential[first_scan..],
+        ]
+        .concat();
+        assert_eq!(end(four), None);
+        let between = [&three[..second_scan], &dri(4), &three[second_scan..]].concat();
+        assert_eq!(end(between), None);
+        assert_eq!(end(with_more(&sequential, &dri(4))), None);
     }
 
     #[test]
