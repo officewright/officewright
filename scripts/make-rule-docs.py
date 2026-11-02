@@ -7,7 +7,8 @@ Word does. The markup is written from ECMA-376 Part 1 and [MS-DOCX]; nothing is 
 from documents made by other software.
 
     make-rule-docs.py           write every document
-    make-rule-docs.py --check   fail if a committed document is missing, stale or unknown
+    make-rule-docs.py --check   fail if a committed document is missing, stale or unknown, or
+                                SOURCES.md's word-rules rows are not the ones --list prints
     make-rule-docs.py --list    print the SOURCES.md row of every document
 
 A rule that depends on a document-wide setting (the compatibility mode, a w:compat flag)
@@ -4808,7 +4809,17 @@ def check(docs: list[Doc]) -> list[str]:
     for name in sorted(present - set(expected)):
         problems.append(f"tests/corpus/word-rules/{name} is not written by this script")
     lines = SOURCES.read_text(encoding="utf-8").splitlines()
-    rows = [number for number, line in enumerate(lines) if line.startswith("| word-rules/")]
+    # The lines of each document name, as the first cell of a table row names it, in any
+    # spelling of the cell: the rows --list prints are found, and so are rows in another form.
+    named: dict[str, list[int]] = {}
+    for number, line in enumerate(lines):
+        cells = line.lstrip().split("|")
+        if not line.lstrip().startswith("|") or len(cells) < 2:
+            continue
+        cell = cells[1].strip().strip("`").strip().removeprefix("tests/corpus/")
+        if cell.startswith("word-rules/"):
+            named.setdefault(cell.removeprefix("word-rules/"), []).append(number)
+    rows = sorted(number for numbers in named.values() for number in numbers)
     # The rows are table rows: one block of table lines, right under the table's header.
     if rows and not all(
         line.startswith("|") for line in lines[rows[0] - 1 : rows[-1] + 1]
@@ -4827,8 +4838,27 @@ def check(docs: list[Doc]) -> list[str]:
                 problems.append(f"{committed} differs from what this script writes")
             else:
                 problems.append(f"{committed} has the parts this script writes in other ZIP bytes")
-        if not any(lines[number].startswith(f"| word-rules/{name} |") for number in rows):
+        if name not in named:
             problems.append(f"tests/corpus/SOURCES.md has no row for word-rules/{name}")
+        for number in named.get(name, []):
+            if lines[number] != sources_row(doc):
+                problems.append(
+                    f"line {number + 1} of tests/corpus/SOURCES.md, a row of word-rules/{name}, "
+                    "is not the one --list prints"
+                )
+    for name, numbers in named.items():
+        where = ("line " if len(numbers) == 1 else "lines ") + ", ".join(
+            str(number + 1) for number in numbers
+        )
+        if len(numbers) > 1:
+            problems.append(
+                f"tests/corpus/SOURCES.md lists word-rules/{name} {len(numbers)} times ({where})"
+            )
+        if name not in expected:
+            problems.append(
+                f"tests/corpus/SOURCES.md has a row for word-rules/{name}, which this script "
+                f"does not write ({where})"
+            )
     return problems
 
 

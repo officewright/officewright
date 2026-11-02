@@ -105,6 +105,19 @@ class Check(unittest.TestCase):
             self.addCleanup(setattr, rules, name, original)
         self.docs = rules.documents()
 
+    def sources_row(self, name: str) -> str:
+        return next(line for line in self.sources.read_text(encoding="utf-8").splitlines()
+                    if line.startswith(f"| word-rules/{name} |"))
+
+    def replace_row(self, row: str, new: str) -> int:
+        """Replaces the row in SOURCES.md; returns the number of its line, counted from 1."""
+        lines = self.sources.read_text(encoding="utf-8").splitlines()
+        number = lines.index(row) + 1
+        self.sources.write_text(
+            self.sources.read_text(encoding="utf-8").replace(row, new), "utf-8"
+        )
+        return number
+
     def test_clean_copy_passes(self):
         self.assertEqual(rules.check(self.docs), [])
 
@@ -179,6 +192,76 @@ class Check(unittest.TestCase):
         self.assertEqual(
             rules.check(self.docs),
             ["tests/corpus/SOURCES.md has no row for word-rules/E-line-exact.docx"],
+        )
+
+    def test_a_stale_sources_row_is_reported(self):
+        # The description of a document changed in the script, its row in SOURCES.md did not.
+        row = self.sources_row("E-line-exact.docx")
+        self.assertTrue(row.endswith(" |"))
+        stale = row[:-2] + " (an older description) |"
+        number = self.replace_row(row, stale)
+        self.assertEqual(
+            rules.check(self.docs),
+            [f"line {number} of tests/corpus/SOURCES.md, a row of word-rules/E-line-exact.docx, "
+             "is not the one --list prints"],
+        )
+
+    def test_a_document_listed_twice_is_reported(self):
+        # As a merge that keeps both sides of SOURCES.md can leave it, also with the row
+        # repeated exactly.
+        row = self.sources_row("E-line-exact.docx")
+        number = self.replace_row(row, row + "\n" + row)
+        self.assertEqual(
+            rules.check(self.docs),
+            ["tests/corpus/SOURCES.md lists word-rules/E-line-exact.docx 2 times "
+             f"(lines {number}, {number + 1})"],
+        )
+
+    def test_a_stale_copy_beside_the_right_row_is_reported(self):
+        # Before the right row or after it.
+        row = self.sources_row("E-line-exact.docx")
+        stale = row[:-2] + " (an older description) |"
+        for pair, stale_line in ((stale + "\n" + row, 0), (row + "\n" + stale, 1)):
+            with self.subTest(stale_line=stale_line):
+                text = self.sources.read_text(encoding="utf-8")
+                number = self.replace_row(row, pair)
+                self.assertEqual(
+                    rules.check(self.docs),
+                    [f"line {number + stale_line} of tests/corpus/SOURCES.md, a row of "
+                     "word-rules/E-line-exact.docx, is not the one --list prints",
+                     "tests/corpus/SOURCES.md lists word-rules/E-line-exact.docx 2 times "
+                     f"(lines {number}, {number + 1})"],
+                )
+                self.sources.write_text(text, "utf-8")
+
+    def test_a_second_row_in_another_form_is_reported(self):
+        # A row whose first cell names the document in another spelling, next to the right
+        # one: without the space, padded, with the path from the repository's root, as code.
+        row = self.sources_row("E-line-exact.docx")
+        rest = row.removeprefix("| word-rules/E-line-exact.docx |")
+        for first in ("|word-rules/E-line-exact.docx |", "|  word-rules/E-line-exact.docx  |",
+                      "| tests/corpus/word-rules/E-line-exact.docx |",
+                      "| `word-rules/E-line-exact.docx` |"):
+            with self.subTest(first=first):
+                text = self.sources.read_text(encoding="utf-8")
+                number = self.replace_row(row, row + "\n" + first + rest)
+                self.assertEqual(
+                    rules.check(self.docs),
+                    [f"line {number + 1} of tests/corpus/SOURCES.md, a row of "
+                     "word-rules/E-line-exact.docx, is not the one --list prints",
+                     "tests/corpus/SOURCES.md lists word-rules/E-line-exact.docx 2 times "
+                     f"(lines {number}, {number + 1})"],
+                )
+                self.sources.write_text(text, "utf-8")
+
+    def test_a_row_for_no_document_is_reported(self):
+        row = self.sources_row("E-line-exact.docx")
+        gone = row.replace("E-line-exact.docx", "E-gone.docx")
+        number = self.replace_row(row, row + "\n" + gone)
+        self.assertEqual(
+            rules.check(self.docs),
+            ["tests/corpus/SOURCES.md has a row for word-rules/E-gone.docx, which this script "
+             f"does not write (line {number + 1})"],
         )
 
 
