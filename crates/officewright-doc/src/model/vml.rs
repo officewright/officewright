@@ -20,8 +20,9 @@ use super::{Document, Names};
 /// bounds every length of a DrawingML picture, so that both reach the layout alike.
 const MAX_LENGTH: f64 = 27_273_042_316_900.0 / 12_700.0;
 
-/// A VML drawing in a run (`w:pict`). A picture (a `v:shape` whose `v:imagedata` names
-/// its image) is read, in the line or floating; other shapes, text boxes, WordArt and
+/// A VML drawing in a run (`w:pict`). A picture (a `v:shape` or `v:rect` whose
+/// `v:imagedata` names its image) is read, in the line or floating; other shapes, text
+/// boxes, WordArt and
 /// groups show as no picture, and [`to_xml`](Self::to_xml) gives them as written.
 ///
 /// ```
@@ -83,8 +84,9 @@ impl<'a> VmlDrawing<'a> {
         self.document.element(self.element).to_xml()
     }
 
-    /// The picture it shows: its first `v:shape` whose `v:imagedata` names an image by
-    /// `r:id`, if it has one. A group shows none, even when a picture is among its parts.
+    /// The picture it shows: its first `v:shape` or `v:rect` whose `v:imagedata` names an
+    /// image by `r:id`, if it has one. A group shows none, even when a picture is among
+    /// its parts.
     pub fn picture(self) -> Option<VmlPicture<'a>> {
         let names = &self.document.names;
         let pict = self.document.element(self.element);
@@ -182,8 +184,10 @@ impl<'a> EmbeddedObject<'a> {
         self.document.element(self.element).to_xml()
     }
 
-    /// The picture Word shows for it: its first `v:shape` whose `v:imagedata` names an
-    /// image by `r:id`, if it has one, as [`VmlDrawing::picture`] finds a drawing's.
+    /// Its preview: its first `v:shape` or `v:rect` whose `v:imagedata` names an image by
+    /// `r:id`, if it has one, as [`VmlDrawing::picture`] finds a drawing's. Word shows the
+    /// object by it, unless the object holds a drawing (`w:drawing`), which Word shows in
+    /// its place (MS-OI29500, Part 1, §17.3.3.19(a)).
     pub fn preview(self) -> Option<VmlPicture<'a>> {
         let names = &self.document.names;
         let object = self.document.element(self.element);
@@ -209,7 +213,7 @@ impl<'a> EmbeddedObject<'a> {
     }
 }
 
-/// A VML picture (a `v:shape` whose `v:imagedata` names its image): an image, cropped,
+/// A VML picture (a `v:shape` or `v:rect` whose `v:imagedata` names its image): an image, cropped,
 /// turned and mirrored, in the line or floating. It is the picture of a VML drawing or
 /// the preview of an embedded object.
 #[derive(Clone, Copy)]
@@ -548,13 +552,14 @@ fn z_order(z_index: i32) -> u32 {
     u32::try_from(height.max(0)).unwrap_or(0)
 }
 
-/// The picture of a `w:pict` or `w:object`: its first `v:shape` whose `v:imagedata` names an image by
-/// `r:id`, the only way Word takes one in a document (MS-OI29500, Part 4,
-/// §19.1.2.11(q)). A shape whose `v:imagedata` names none, as a text box Word writes may
-/// have, shows no picture.
+/// The picture of a `w:pict` or `w:object`: its first `v:shape` or `v:rect` whose
+/// `v:imagedata` names an image by `r:id`, the only way Word takes one in a document
+/// (MS-OI29500, Part 4, §19.1.2.11(q)). Word writes the preview of a static metafile
+/// object as a `v:rect` (n777345.docx of LibreOffice's tests). A shape whose
+/// `v:imagedata` names none, as a text box Word writes may have, shows no picture.
 pub(crate) fn picture<'a>(pict: Element<'a>, names: &Names) -> Option<Element<'a>> {
     pict.children_through_alternates(names.mc)
-        .filter(|child| child.is(&names.v, "shape"))
+        .filter(|child| child.is(&names.v, "shape") || child.is(&names.v, "rect"))
         .find(|shape| embedded_image(*shape, names).is_some())
 }
 

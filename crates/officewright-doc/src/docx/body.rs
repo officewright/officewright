@@ -182,9 +182,9 @@ pub(super) fn read(
     let mut mce = Processor::new(&mut reader);
     let w = [reader.intern(W), reader.intern(W_STRICT)];
     let r = [reader.intern(R), reader.intern(R_STRICT)];
-    // DrawingML and VML too, which the picture readers read inside w:drawing and w:pict,
-    // so that what lies below those goes through Markup Compatibility as the rest of the
-    // body does (#312).
+    // DrawingML and VML too, which the picture readers read inside w:drawing, w:pict and
+    // w:object, so that what lies below those goes through Markup Compatibility as the
+    // rest of the body does (#312).
     let drawing =
         [A, A_STRICT, WP, WP_STRICT, PIC, PIC_STRICT, V, O, W10].map(|uri| reader.intern(uri));
     for namespace in w.iter().chain(&r).chain(&drawing) {

@@ -653,7 +653,7 @@ fn reads_the_preview_of_an_embedded_object() {
         r##"<v:shape id="_x0000_i1026" type="#_x0000_t75" style="width:20pt;height:10pt"><v:imagedata r:id="rIdJpeg" o:title=""/></v:shape><w:control r:id="rIdControl" w:name="CheckBox1" w:shapeid="_x0000_i1026"/>"##,
     );
     let body = format!(
-        "<w:p>{}{}{}{}{}</w:p>",
+        "<w:p>{}{}{}{}{}{}</w:p>",
         object_preview("rIdEmf", "width:72pt;height:36pt"),
         object_preview(
             "rIdPng",
@@ -666,10 +666,15 @@ fn reads_the_preview_of_an_embedded_object() {
         object(
             r#"<v:shape style="width:10pt;height:10pt"><v:imagedata o:relid="rIdPng"/></v:shape><o:OLEObject Type="Embed" ProgID="Package" r:id="rIdOle"/>"#
         ),
+        // Word writes the preview of a static metafile object as a v:rect (n777345.docx;
+        // from the review of #437).
+        object(
+            r#"<v:rect style="width:12pt;height:6pt"><v:imagedata r:id="rIdPng" o:title=""/></v:rect><o:OLEObject Type="Embed" ProgID="StaticMetafile" r:id="rIdOle"/>"#
+        ),
     );
     let document = with_images(&body);
     let objects = objects(&document);
-    assert_eq!(objects.len(), 5);
+    assert_eq!(objects.len(), 6);
     let inline = objects[0].preview().unwrap();
     assert_eq!(
         (inline.width(), inline.height()),
@@ -693,6 +698,12 @@ fn reads_the_preview_of_an_embedded_object() {
     // the only way Word takes one in a document (MS-OI29500, Part 4, §19.1.2.11(q)).
     assert!(objects[3].preview().is_none());
     assert!(objects[4].preview().is_none());
+    let rect = objects[5].preview().unwrap();
+    assert_eq!(
+        (rect.width(), rect.height()),
+        (Some(Pt(12.0)), Some(Pt(6.0)))
+    );
+    assert_eq!(rect.image().map(Image::bytes), Some(PNG_BYTES));
     // The object is kept as written.
     let xml = objects[0].to_xml();
     assert!(xml.starts_with("<w:object"), "{xml}");
@@ -728,4 +739,28 @@ fn reads_embedded_objects_through_markup_compatibility() {
     };
     assert_eq!(shown("v"), Some(Pt(1.0)));
     assert_eq!(shown("w14"), Some(Pt(2.0)));
+}
+
+#[test]
+fn reads_a_vml_picture_written_as_a_rectangle() {
+    // A v:rect whose v:imagedata names an image shows it as a v:shape does, in a w:pict as
+    // in a w:object (drawinglayer-pic-pos.docx and tdf127085.docx of LibreOffice's tests;
+    // from the review of #437); a rectangle without one shows none.
+    let body = format!(
+        "<w:p>{}{}</w:p>",
+        pict(
+            r#"<v:rect style="position:absolute;margin-left:5pt;width:20pt;height:10pt;z-index:1"><v:imagedata r:id="rIdPng" o:title=""/></v:rect>"#
+        ),
+        pict(r#"<v:rect style="width:20pt;height:10pt" fillcolor="red"/>"#),
+    );
+    let document = with_images(&body);
+    let drawings = vml_drawings(&document);
+    let picture = drawings[0].picture().unwrap();
+    assert_eq!(
+        (picture.width(), picture.height()),
+        (Some(Pt(20.0)), Some(Pt(10.0)))
+    );
+    assert_eq!(picture.anchor().unwrap().horizontal_offset(), Some(Pt(5.0)));
+    assert_eq!(picture.image().map(Image::bytes), Some(PNG_BYTES));
+    assert!(drawings[1].picture().is_none());
 }

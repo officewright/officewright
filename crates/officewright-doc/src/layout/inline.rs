@@ -199,6 +199,15 @@ impl<'a> Translator<'a> {
         if !format.hidden() && (shows || boxed) {
             self.report_run_features(&format, shows);
         }
+        // The IR places an object in the line on the baseline: a raise or a lowering of its
+        // run, which Word gives an equation's preview to set it on the line of text, has
+        // no place there.
+        if !format.hidden() && boxed && format.position().0 != 0.0 {
+            self.report_once(
+                Once::RaisedObject,
+                "a picture or an object in the line of a raised or lowered run (w:position) is drawn on the baseline, here and wherever else the document has one",
+            );
+        }
     }
 
     /// Lists the features of a run's formatting that the IR's run style has no place
