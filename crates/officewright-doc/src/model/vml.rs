@@ -412,7 +412,10 @@ pub(crate) fn check(pict: Element<'_>, names: &Names, report: Report<'_>) {
 
 /// The declarations of a shape's `style`.
 fn style(shape: Element<'_>) -> Style<'_> {
-    Style::new(shape.attribute(&[None], "style").unwrap_or_default())
+    Style::new(
+        shape.local_name(),
+        shape.attribute(&[None], "style").unwrap_or_default(),
+    )
 }
 
 /// The part of its image a picture shows (`v:imagedata`'s `cropleft`, `croptop`,
@@ -690,15 +693,20 @@ const PROPERTIES: [&str; 19] = [
 
 /// The declarations of a VML `style` attribute (`name:value` pairs separated by `;`) that
 /// the readers read: the value of each property of [`PROPERTIES`], read in one pass over
-/// the attribute however many are asked for.
+/// the attribute however many are asked for, and the local name of the shape it belongs
+/// to (`shape` or `rect`), which a report names.
 #[derive(Clone, Copy)]
-struct Style<'a>([Option<&'a str>; PROPERTIES.len()]);
+struct Style<'a> {
+    shape: &'a str,
+    values: [Option<&'a str>; PROPERTIES.len()],
+}
 
 impl<'a> Style<'a> {
-    /// The declarations of `style`, each value without the whitespace around it. Word
-    /// takes the last of a property written more than once (MS-OI29500, Part 4,
-    /// §19.1.2.1(ggg)); CSS names are not case-sensitive.
-    fn new(style: &'a str) -> Self {
+    /// The declarations of `style`, the attribute of the shape of local name `shape`, each
+    /// value without the whitespace around it. Word takes the last of a property written
+    /// more than once (MS-OI29500, Part 4, §19.1.2.1(ggg)); CSS names are not
+    /// case-sensitive.
+    fn new(shape: &'a str, style: &'a str) -> Self {
         let mut values = [None; PROPERTIES.len()];
         for (key, value) in style
             .split(';')
@@ -713,7 +721,7 @@ impl<'a> Style<'a> {
                 *slot = Some(value.trim());
             }
         }
-        Self(values)
+        Self { shape, values }
     }
 
     /// The value of a property of [`PROPERTIES`]; none for one not written, and for a
@@ -721,11 +729,11 @@ impl<'a> Style<'a> {
     fn get(self, name: &str) -> Option<&'a str> {
         let index = PROPERTIES.iter().position(|property| *property == name);
         debug_assert!(index.is_some(), "{name} is not among the properties read");
-        self.0.get(index?).copied().flatten()
+        self.values.get(index?).copied().flatten()
     }
 
     /// A property's value as `read` takes it; one it does not take is reported, as the
-    /// declaration of `v:shape`'s `style` that gives it, and read as not written.
+    /// declaration of the shape's `style` that gives it, and read as not written.
     fn read<T>(
         self,
         name: &str,
@@ -736,7 +744,11 @@ impl<'a> Style<'a> {
         let taken = read(value);
         if taken.is_none() {
             let value = crate::docx::shorten(value);
-            report("v:shape", "style", &format!("{name}:{value}"));
+            report(
+                &format!("v:{}", self.shape),
+                "style",
+                &format!("{name}:{value}"),
+            );
         }
         taken
     }
@@ -962,13 +974,24 @@ mod tests {
 
     #[test]
     fn reads_the_last_declaration_of_a_property() {
-        let style = Style::new(" width : 10pt;HEIGHT:5pt;width:20pt; ;junk;rotation");
+        let style = Style::new(
+            "shape",
+            " width : 10pt;HEIGHT:5pt;width:20pt; ;junk;rotation",
+        );
         assert_eq!(style.get("width").and_then(length), Some(Pt(20.0)));
         assert_eq!(style.get("height").and_then(length), Some(Pt(5.0)));
         assert_eq!(style.get("rotation"), None);
-        assert_eq!(Style::new("width:-1pt").get("width").and_then(size), None);
+        assert_eq!(
+            Style::new("shape", "width:-1pt")
+                .get("width")
+                .and_then(size),
+            None
+        );
         // Names and values lose the whitespace around them (from the re-check of #435).
-        assert_eq!(Style::new(" HEIGHT : 5pt ;").get("height"), Some("5pt"));
+        assert_eq!(
+            Style::new("shape", " HEIGHT : 5pt ;").get("height"),
+            Some("5pt")
+        );
     }
 
     #[test]

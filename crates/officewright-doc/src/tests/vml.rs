@@ -893,3 +893,27 @@ fn reports_no_value_of_a_vml_picture_that_its_readers_take() {
     ));
     assert_eq!(reported(&document), Vec::<String>::new());
 }
+
+#[test]
+fn reports_the_values_of_a_preview_and_of_a_rectangle() {
+    // From the re-check of #437: an object's preview has its values checked as the
+    // document opens, as a VML drawing's picture has, and a picture written as a v:rect
+    // is named so where its style is reported.
+    let document = with_images(&format!(
+        "<w:p>{}{}{}</w:p>",
+        object_preview("rIdPng", "width:-1pt;height:1pt"),
+        pict(
+            r#"<v:rect style="width:-2pt;height:1pt" stroked="maybe"><v:imagedata r:id="rIdPng"/></v:rect>"#
+        ),
+        object(r#"<v:rect style="width:1pt;height:x"><v:imagedata r:id="rIdPng"/></v:rect>"#),
+    ));
+    assert_eq!(
+        reported(&document),
+        [
+            r#"v:shape style="width:-1pt" is not valid; it is ignored"#,
+            r#"v:rect style="width:-2pt" is not valid; it is ignored"#,
+            r#"v:rect stroked="maybe" is not valid; it is ignored"#,
+            r#"v:rect style="height:x" is not valid; it is ignored"#,
+        ]
+    );
+}

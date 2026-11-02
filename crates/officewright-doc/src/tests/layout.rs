@@ -4455,4 +4455,15 @@ fn lists_a_picture_or_object_in_the_line_of_a_raised_or_lowered_run() {
         "position:absolute;width:30pt;height:20pt;z-index:1",
     );
     assert!(listed(&[raised(floating, -12)]).is_empty());
+    // Nor does a floating VML or DrawingML picture (from the re-check of #437).
+    assert!(listed(&[raised(super::vml::floating_vml_picture("rIdPng"), -12)]).is_empty());
+    assert!(listed(&[raised(super::drawing::floating_picture("rIdPng"), -12)]).is_empty());
+    // An object in a hidden run is drawn too, since the IR's objects carry no run style
+    // (#447), so it is listed as well.
+    let hidden = object_preview("rIdEmf", "width:30pt;height:20pt").replacen(
+        "<w:r>",
+        r#"<w:r><w:rPr><w:vanish/><w:position w:val="-12"/></w:rPr>"#,
+        1,
+    );
+    assert_eq!(listed(&[hidden]), [message]);
 }
