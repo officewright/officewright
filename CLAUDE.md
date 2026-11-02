@@ -383,7 +383,8 @@ PDF output of officewright text-to-pdf (tests/pdf-output): qpdf --check without 
   unfiltered by poppler, the committed fuzz seeds equal images.py's output; the example synthetic's page: qpdf --check,
   pdftotext reads every line, pdftoppm shows synthetic italic slanted by a third and synthetic bold bolder; the example
   embed_report counts a font the subsetter does not support apart from a damaged one (Linux, macOS)
-corpus-runner over tests/corpus (committed corpus), every document rendered with the fonts of tests/fonts and, first,
+corpus-runner over tests/corpus (committed corpus), `CORPUS_JOBS` documents at once if set (else one per core), every
+  document rendered with the fonts of tests/fonts and, first,
   tests/fonts-word/noto-truetype (the TrueType Noto Sans, the build Word had for the references that use it) and
   tests/fonts-word/test-symbol (the symbol font),
   compared with tests/corpus/baseline.json: statuses and the scores against Word's references (Linux), statuses only
