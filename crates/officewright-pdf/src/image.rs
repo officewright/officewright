@@ -521,7 +521,7 @@ fn read_jpeg(data: &[u8]) -> std::result::Result<(u32, u32, Encoding), Problem> 
             }
             0xC0..=0xC2 => frame = Some(read_frame(segment, code == 0xC2)?),
             0xEE => adobe |= segment.starts_with(b"Adobe"),
-            0xDD => interval = u16_at(segment, 0).unwrap_or(0),
+            0xDD => interval = restart_interval(segment, length, at - 2)?,
             _ => refuse_other_frame(code)?,
         }
         at += length;
@@ -742,6 +742,20 @@ fn at_restart(
     }
 }
 
+/// The restart interval a DRI segment at byte `at` gives, `segment` being the `length`
+/// bytes after its marker but the length itself. Fails for any length but 4, which
+/// libjpeg refuses wherever the segment is ("Bogus marker length"), as `qpdf --check`
+/// shows, so such a file draws nothing in a viewer that decodes with it (B.2.4.4).
+fn restart_interval(segment: &[u8], length: usize, at: usize) -> std::result::Result<u16, Problem> {
+    if length != 4 {
+        return Err(malformed(format!(
+            "the JPEG file has a DRI segment of length {length} at byte {at}, where libjpeg \
+             takes only 4"
+        )));
+    }
+    Ok(u16_at(segment, 0).unwrap_or(0))
+}
+
 /// Fails for a marker at byte `at` that libjpeg does not know, wherever it is in the file:
 /// those T.81 reserves (0x02 to 0xBF, B.1.1.3) and JPG and JPGn (0xC8, 0xF0 to 0xFD), kept
 /// for extensions. libjpeg stops at them ("Unsupported marker type", or "Unsupported JPEG
@@ -856,7 +870,7 @@ fn check_later_scans(
             return Ok(());
         };
         if code == 0xDD {
-            interval = u16_at(segment, 0).unwrap_or(0);
+            interval = restart_interval(segment, length, at - 2)?;
         }
         // Only a scan header is followed by coded data, with restart markers in it.
         restarts = Restarts::new(0);
@@ -3493,6 +3507,71 @@ pub(crate) mod tests {
             + 1;
         let ended = [&head[..], &scans[0][..at], reserved].concat();
         assert!(whole(ended));
+    }
+
+    #[test]
+    fn refuses_restart_intervals_of_another_length_as_libjpeg_does() {
+        // libjpeg refuses a DRI segment of any length but 4, before the first scan, between
+        // scans and after the last ("Bogus marker length"); `qpdf --check` fails each (#422).
+        let dri = |length: u16| {
+            let body = [0u8, 1, 0, 0, 0, 0];
+            let size = usize::from(length.saturating_sub(2));
+            [&[0xFF, 0xDD][..], &length.to_be_bytes(), &body[..size]].concat()
+        };
+        let refused_at = |data: Vec<u8>, at: usize, length: u16| {
+            let err = error(data);
+            assert_eq!(
+                err,
+                format!(
+                    "image data is damaged: the JPEG file has a DRI segment of length {length} \
+                     at byte {at}, where libjpeg takes only 4"
+                )
+            );
+        };
+        let sequential = restarted(3, &[&[1, 2, 3]], 0, b"");
+        let first_scan = sequential
+            .windows(2)
+            .position(|w| w == b"\xFF\xDA")
+            .unwrap();
+        let three = restarted(3, &[&[1], &[2], &[3]], 0, b"");
+        let second_scan = three
+            .windows(2)
+            .skip(first_scan + 2)
+            .position(|w| w == b"\xFF\xDA")
+            .unwrap()
+            + first_scan
+            + 2;
+        let end = |data: Vec<u8>| match Image::from_bytes(data).unwrap().inner.encoding {
+            Encoding::Jpeg { end, .. } => end,
+            _ => unreachable!(),
+        };
+        for length in [2, 3, 5, 6] {
+            // Before the first scan.
+            let before = [
+                &sequential[..first_scan],
+                &dri(length),
+                &sequential[first_scan..],
+            ]
+            .concat();
+            refused_at(before, first_scan, length);
+            // Between the scans of a sequential frame that codes a component a scan.
+            let between = [&three[..second_scan], &dri(length), &three[second_scan..]].concat();
+            refused_at(between, second_scan, length);
+            // After the only scan of a sequential frame, which goes in without it.
+            let after = with_more(&sequential, &dri(length));
+            assert_eq!(end(after), Some(sequential.len() - 2), "{length}");
+        }
+        // A length of 4 is read, in each place.
+        let four = [
+            &sequential[..first_scan],
+            &dri(4),
+            &sequential[first_scan..],
+        ]
+        .concat();
+        assert_eq!(end(four), None);
+        let between = [&three[..second_scan], &dri(4), &three[second_scan..]].concat();
+        assert_eq!(end(between), None);
+        assert_eq!(end(with_more(&sequential, &dri(4))), None);
     }
 
     #[test]
