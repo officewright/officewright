@@ -24,9 +24,15 @@ impl<'a> Translator<'a> {
     /// not have keeps its frame, empty, and is listed.
     pub(super) fn drawing(&mut self, drawing: Drawing<'a>) -> Option<ir::Inline> {
         let Some(picture) = drawing.picture() else {
-            self.leave_out(ReportKind::FeatureUnsupported, || {
-                "a drawing that shows no picture (a shape, chart or group) is left out".into()
-            });
+            if drawing.text_box().is_some() {
+                self.leave_out(ReportKind::FeatureUnsupported, || {
+                    "a text box is left out".into()
+                });
+            } else {
+                self.leave_out(ReportKind::FeatureUnsupported, || {
+                    "a drawing that shows no picture (a shape, chart or group) is left out".into()
+                });
+            }
             return None;
         };
         let (Some(width), Some(height)) = (drawing.width(), drawing.height()) else {
@@ -88,10 +94,16 @@ impl<'a> Translator<'a> {
     /// picture, has no size, or is hidden, which Word does not show either.
     pub(super) fn vml_drawing(&mut self, drawing: VmlDrawing<'a>) -> Option<ir::Inline> {
         let Some(picture) = drawing.picture() else {
-            self.leave_out(ReportKind::FeatureUnsupported, || {
-                "a VML drawing that shows no picture (a shape, text box or group) is left out (w:pict)"
-                    .into()
-            });
+            if drawing.text_boxes().next().is_some() {
+                self.leave_out(ReportKind::FeatureUnsupported, || {
+                    "a text box is left out (w:pict)".into()
+                });
+            } else {
+                self.leave_out(ReportKind::FeatureUnsupported, || {
+                    "a VML drawing that shows no picture (a shape, text box or group) is left out (w:pict)"
+                        .into()
+                });
+            }
             return None;
         };
         if drawing.has_other_shapes() {

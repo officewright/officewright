@@ -14,6 +14,7 @@ use super::drawing::{
     VerticalReference, WrapKind,
 };
 use super::drawing::{attribute, value};
+use super::text_box::TextBox;
 use super::xml::{Element, Span};
 use super::{Document, Names};
 use crate::docx::properties::Report;
@@ -23,9 +24,9 @@ use crate::docx::properties::Report;
 const MAX_LENGTH: f64 = 27_273_042_316_900.0 / 12_700.0;
 
 /// A VML drawing in a run (`w:pict`). A picture (a `v:shape` or `v:rect` whose
-/// `v:imagedata` names its image) is read, in the line or floating; other shapes, text
-/// boxes, WordArt and groups show as no picture, and [`to_xml`](Self::to_xml) gives them
-/// as written.
+/// `v:imagedata` names its image) is read, in the line or floating, and so are its text
+/// boxes; other shapes, WordArt and groups show as no picture, and
+/// [`to_xml`](Self::to_xml) gives them as written.
 ///
 /// ```
 /// # fn main() -> officewright_doc::Result<()> {
@@ -69,21 +70,38 @@ pub struct VmlDrawing<'a> {
     document: &'a Document,
     element: Span,
     image: Option<u32>,
+    /// Whether its text boxes were read.
+    text_boxes: bool,
 }
 
 impl<'a> VmlDrawing<'a> {
-    pub(crate) fn new(document: &'a Document, element: Span, image: Option<u32>) -> Self {
+    pub(crate) fn new(
+        document: &'a Document,
+        element: Span,
+        image: Option<u32>,
+        text_boxes: bool,
+    ) -> Self {
         Self {
             document,
             element,
             image,
+            text_boxes,
         }
     }
 
     /// The drawing as written, `w:pict` and everything in it, as XML with the namespace
-    /// declarations it needs.
+    /// declarations it needs; the content of its text boxes, which
+    /// [`text_boxes`](Self::text_boxes) gives, is an empty `w:txbxContent` there.
     pub fn to_xml(self) -> String {
         self.document.element(self.element).to_xml()
+    }
+
+    /// Its text boxes, shapes with a `v:textbox`, those in its groups included, in
+    /// document order; none in a text box or a note, which Word allows nowhere there and
+    /// the document leaves out as it opens.
+    pub fn text_boxes(self) -> impl Iterator<Item = TextBox<'a>> + 'a {
+        let read = self.text_boxes;
+        TextBox::in_vml(self.document, self.document.element(self.element)).filter(move |_| read)
     }
 
     /// The picture it shows: its first `v:shape` or `v:rect` whose `v:imagedata` names an
@@ -261,8 +279,8 @@ impl<'a> VmlPicture<'a> {
     }
 
     /// The declarations of its `style`.
-    fn style(self) -> Style<'a> {
-        style(self.shape)
+    fn style(self) -> Style<'a, { PROPERTIES.len() }> {
+        shape_style(self.shape)
     }
 
     /// Its width (`width` of its `style`); none when the style gives none, or one that
@@ -398,7 +416,7 @@ pub(crate) fn check(pict: Element<'_>, names: &Names, report: Report<'_>) {
     let Some(shape) = picture(pict, names) else {
         return;
     };
-    let style = style(shape);
+    let style = shape_style(shape);
     style.read("width", size, report);
     style.read("height", size, report);
     crop(shape, names, report);
@@ -411,10 +429,12 @@ pub(crate) fn check(pict: Element<'_>, names: &Names, report: Report<'_>) {
 }
 
 /// The declarations of a shape's `style`.
-fn style(shape: Element<'_>) -> Style<'_> {
+/// The declarations of a VML shape's `style` that the readers read.
+pub(super) fn shape_style(shape: Element<'_>) -> Style<'_, { PROPERTIES.len() }> {
     Style::new(
         shape.local_name(),
         shape.attribute(&[None], "style").unwrap_or_default(),
+        &PROPERTIES,
     )
 }
 
@@ -443,7 +463,7 @@ fn crop(shape: Element<'_>, names: &Names, report: Report<'_>) -> Option<Crop> {
 
 /// The axes `flip` mirrors: Word takes `x`, `y`, `x y` and `y x` (MS-OI29500, Part 4,
 /// §19.1.2.1(c)), and nothing for any other value.
-fn flip(style: Style<'_>, report: Report<'_>) -> (bool, bool) {
+fn flip(style: Style<'_, { PROPERTIES.len() }>, report: Report<'_>) -> (bool, bool) {
     style
         .read(
             "flip",
@@ -527,7 +547,7 @@ fn has_shadow(shape: Element<'_>, names: &Names, report: Report<'_>) -> bool {
 
 /// Where a floating picture is and how text wraps around it ([`VmlPicture::anchor`]).
 fn anchor(shape: Element<'_>, names: &Names, report: Report<'_>) -> Option<Anchor> {
-    let style = style(shape);
+    let style = shape_style(shape);
     if style.get("position") != Some("absolute") {
         return None;
     }
@@ -668,8 +688,8 @@ fn image_data<'a>(shape: Element<'a>, names: &Names) -> Option<Element<'a>> {
         .find(|child| child.is(&names.v, "imagedata"))
 }
 
-/// The properties of a VML `style` that the readers read.
-const PROPERTIES: [&str; 19] = [
+/// The properties of a VML shape's `style` that the readers read.
+const PROPERTIES: [&str; 20] = [
     "width",
     "height",
     "visibility",
@@ -689,31 +709,38 @@ const PROPERTIES: [&str; 19] = [
     "mso-wrap-distance-top",
     "mso-wrap-distance-right",
     "mso-wrap-distance-bottom",
+    "v-text-anchor",
 ];
 
 /// The declarations of a VML `style` attribute (`name:value` pairs separated by `;`) that
-/// the readers read: the value of each property of [`PROPERTIES`], read in one pass over
-/// the attribute however many are asked for, and the local name of the shape it belongs
-/// to (`shape` or `rect`), which a report names.
+/// the readers read: the value of each of its `N` properties, such as those of
+/// [`PROPERTIES`], read in one pass over the attribute however many are asked for, and
+/// the local name of the element it belongs to (`shape`, `rect`, `textbox`), which a
+/// report names.
 #[derive(Clone, Copy)]
-struct Style<'a> {
+pub(super) struct Style<'a, const N: usize> {
     shape: &'a str,
-    values: [Option<&'a str>; PROPERTIES.len()],
+    properties: &'static [&'static str; N],
+    values: [Option<&'a str>; N],
 }
 
-impl<'a> Style<'a> {
-    /// The declarations of `style`, the attribute of the shape of local name `shape`, each
-    /// value without the whitespace around it. Word takes the last of a property written
-    /// more than once (MS-OI29500, Part 4, §19.1.2.1(ggg)); CSS names are not
-    /// case-sensitive.
-    fn new(shape: &'a str, style: &'a str) -> Self {
-        let mut values = [None; PROPERTIES.len()];
+impl<'a, const N: usize> Style<'a, N> {
+    /// The declarations of `style`, the attribute of the element of local name `shape`,
+    /// that give `properties`, each value without the whitespace around it. Word takes the
+    /// last of a property written more than once (MS-OI29500, Part 4, §19.1.2.1(ggg));
+    /// CSS names are not case-sensitive.
+    pub(super) fn new(
+        shape: &'a str,
+        style: &'a str,
+        properties: &'static [&'static str; N],
+    ) -> Self {
+        let mut values = [None; N];
         for (key, value) in style
             .split(';')
             .filter_map(|declaration| declaration.split_once(':'))
         {
             let key = key.trim();
-            let slot = PROPERTIES
+            let slot = properties
                 .iter()
                 .position(|name| key.eq_ignore_ascii_case(name))
                 .and_then(|index| values.get_mut(index));
@@ -721,20 +748,27 @@ impl<'a> Style<'a> {
                 *slot = Some(value.trim());
             }
         }
-        Self { shape, values }
+        Self {
+            shape,
+            properties,
+            values,
+        }
     }
 
-    /// The value of a property of [`PROPERTIES`]; none for one not written, and for a
-    /// name not among them.
+    /// The value of one of its properties; none for one not written, and for a name not
+    /// among them.
     fn get(self, name: &str) -> Option<&'a str> {
-        let index = PROPERTIES.iter().position(|property| *property == name);
+        let index = self
+            .properties
+            .iter()
+            .position(|property| *property == name);
         debug_assert!(index.is_some(), "{name} is not among the properties read");
         self.values.get(index?).copied().flatten()
     }
 
     /// A property's value as `read` takes it; one it does not take is reported, as the
-    /// declaration of the shape's `style` that gives it, and read as not written.
-    fn read<T>(
+    /// declaration of the element's `style` that gives it, and read as not written.
+    pub(super) fn read<T>(
         self,
         name: &str,
         read: impl FnOnce(&'a str) -> Option<T>,
@@ -765,7 +799,7 @@ fn size(value: &str) -> Option<Pt> {
 /// one, as CSS allows. Word counts a pixel as a relative unit (§19.1.2.1(ddd)): it is
 /// taken as 0.75 pt, a pixel at 96 dpi. None for a percentage, `em`, `auto`, any other
 /// value, and one beyond [`MAX_LENGTH`].
-fn length(value: &str) -> Option<Pt> {
+pub(super) fn length(value: &str) -> Option<Pt> {
     let at = value.len().saturating_sub(2);
     let (number, unit) = match (value.get(..at), value.get(at..)) {
         (Some(number), Some(unit)) if unit.bytes().all(|b| b.is_ascii_alphabetic()) => {
@@ -823,7 +857,7 @@ fn fraction(value: &str) -> Option<f64> {
 
 /// An angle in degrees: a decimal, or a count of 1/65,536 degree with `fd`
 /// (ST_Fraction's third form).
-fn angle(value: &str) -> Option<f64> {
+pub(super) fn angle(value: &str) -> Option<f64> {
     match value.strip_suffix("fd") {
         Some(count) => fixed(count),
         None => css_number(value),
@@ -837,7 +871,7 @@ fn fixed(count: &str) -> Option<f64> {
 }
 
 /// A boolean of VML (ST_TrueFalse): `t`, `true`, `f` or `false`.
-fn true_false(value: &str) -> Option<bool> {
+pub(super) fn true_false(value: &str) -> Option<bool> {
     match value {
         "t" | "true" => Some(true),
         "f" | "false" => Some(false),
@@ -977,19 +1011,20 @@ mod tests {
         let style = Style::new(
             "shape",
             " width : 10pt;HEIGHT:5pt;width:20pt; ;junk;rotation",
+            &PROPERTIES,
         );
         assert_eq!(style.get("width").and_then(length), Some(Pt(20.0)));
         assert_eq!(style.get("height").and_then(length), Some(Pt(5.0)));
         assert_eq!(style.get("rotation"), None);
         assert_eq!(
-            Style::new("shape", "width:-1pt")
+            Style::new("shape", "width:-1pt", &PROPERTIES)
                 .get("width")
                 .and_then(size),
             None
         );
         // Names and values lose the whitespace around them (from the re-check of #435).
         assert_eq!(
-            Style::new("shape", " HEIGHT : 5pt ;").get("height"),
+            Style::new("shape", " HEIGHT : 5pt ;", &PROPERTIES).get("height"),
             Some("5pt")
         );
     }

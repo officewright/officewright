@@ -11,7 +11,7 @@
 use std::collections::HashSet;
 
 use libfuzzer_sys::fuzz_target;
-use officewright_doc::{Block, HeaderFooterKind, Inline, Limits, LoadOptions, RunContent};
+use officewright_doc::{Block, HeaderFooterKind, Inline, Limits, LoadOptions, RunContent, TextBox};
 use officewright_opc::xml::Input;
 
 fuzz_target!(|data: &[u8]| {
@@ -139,9 +139,17 @@ fuzz_target!(|data: &[u8]| {
                                             let _ =
                                                 picture.image().map(|image| image.bytes().len());
                                         }
+                                        if let Some(text_box) = drawing.text_box() {
+                                            read_text_box(text_box);
+                                            blocks.extend(text_box.blocks());
+                                        }
                                     }
                                     RunContent::VmlDrawing(drawing) => {
                                         write_back.check(|| drawing.to_xml());
+                                        for text_box in drawing.text_boxes() {
+                                            read_text_box(text_box);
+                                            blocks.extend(text_box.blocks());
+                                        }
                                         if let Some(picture) = drawing.picture() {
                                             let _ = (picture.width(), picture.height());
                                             let _ = (picture.crop(), picture.rotation());
@@ -267,4 +275,17 @@ fn check(xml: &str) {
         .unwrap_or_else(|err| panic!("{err}: {xml}"))
         .is_some()
     {}
+}
+
+/// Reads every property of a text box, whose blocks are walked like the body's: a text box
+/// in a text box is left out as the document opens, so each is walked once.
+fn read_text_box(text_box: TextBox<'_>) {
+    let _ = (text_box.insets(), text_box.vertical_anchor());
+    let _ = (text_box.grows_to_fit(), text_box.clips_overflow());
+    let _ = (text_box.rotation(), text_box.text_direction());
+    let _ = (
+        text_box.is_word_art(),
+        text_box.columns(),
+        text_box.is_linked(),
+    );
 }

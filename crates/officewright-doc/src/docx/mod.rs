@@ -49,6 +49,12 @@ const PIC_STRICT: &str = "http://purl.oclc.org/ooxml/drawingml/picture";
 const V: &str = "urn:schemas-microsoft-com:vml";
 const O: &str = "urn:schemas-microsoft-com:office:office";
 const W10: &str = "urn:schemas-microsoft-com:office:word";
+/// Word 2010's shapes in DrawingML (`wps:wsp`, [MS-ODRAWXML] 2.3.3), text boxes among
+/// them; Strict has no other name for it.
+const WPS: &str = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape";
+/// Word 2006's namespace, of the content of text boxes in Strict documents
+/// (`wne:txbxContent`, [MS-ODRAWXML] 2.13.3.2; MS-OI29500, Part 4, §14.9.1.1(b)).
+const WNE: &str = "http://schemas.microsoft.com/office/word/2006/wordml";
 
 /// The relationship type of the main part, Transitional and Strict.
 const OFFICE_DOCUMENT: [&str; 2] = [
@@ -69,6 +75,8 @@ impl Names {
             w10: [Some(strings.intern(W10))],
             mc: Some(strings.intern(officewright_opc::mce::NAMESPACE)),
             w14: Some(strings.intern(W14)),
+            wps: Some(strings.intern(WPS)),
+            wne: Some(strings.intern(WNE)),
         }
     }
 }

@@ -122,6 +122,7 @@ impl Span {
                 .get(self.start as usize..self.end as usize)
                 .unwrap_or_default(),
             strings,
+            index: self.start as usize,
         }
     }
 
@@ -157,6 +158,8 @@ impl Span {
 pub(crate) struct Element<'d> {
     tokens: &'d [Token],
     strings: &'d Strings,
+    /// Where it starts among the tokens of its document.
+    index: usize,
 }
 
 impl<'d> Element<'d> {
@@ -175,6 +178,16 @@ impl<'d> Element<'d> {
             self.tokens.first(),
             Some(Token::Start { in_place: true, .. })
         )
+    }
+
+    /// Where it starts among the tokens of its document.
+    pub(crate) fn index(self) -> usize {
+        self.index
+    }
+
+    /// Where it ends among the tokens of its document: past its end tag.
+    pub(crate) fn end(self) -> usize {
+        self.index + self.tokens.len()
     }
 
     /// The namespace URI, empty for none.
@@ -231,13 +244,89 @@ impl<'d> Element<'d> {
         self,
         mc: Option<Sym>,
     ) -> impl Iterator<Item = Element<'d>> + 'd {
-        let (tokens, strings) = (self.tokens, self.strings);
+        let (tokens, strings, index) = (self.tokens, self.strings, self.index);
         Alternates::new(self, mc, false).filter_map(move |range| {
             Some(Element {
+                index: index + range.start,
                 tokens: tokens.get(range)?,
                 strings,
             })
         })
+    }
+
+    /// The children of the element, as [`children_through_alternates`] reads them, and
+    /// the children of every such child of a namespace and local name `descend` takes,
+    /// in its place, however deep those nest; in document order. One pass over the
+    /// element's tokens: a walk that looked at the children of each child in turn would
+    /// look at the tokens of the deepest once for every level above them.
+    ///
+    /// [`children_through_alternates`]: Self::children_through_alternates
+    pub(crate) fn descendants_through_alternates(
+        self,
+        mc: Option<Sym>,
+        descend: impl Fn(Option<Sym>, &str) -> bool,
+    ) -> Vec<Element<'d>> {
+        /// What an open element is to the walk.
+        #[derive(Clone, Copy, PartialEq)]
+        enum Role {
+            /// Its children are taken, or descended into.
+            Container,
+            /// An `mc:AlternateContent`: its children are branches.
+            Alternate,
+            /// Read in place: its children belong to the element around it (a branch
+            /// taken, or an ignorable element whose content is processed).
+            InPlace,
+            /// A child taken, which starts here.
+            Taken(usize),
+            /// Not looked into.
+            Skipped,
+        }
+        let mut found = Vec::new();
+        let mut open = vec![Role::Container];
+        for (i, token) in self.tokens.iter().enumerate().skip(1) {
+            #[cfg(test)]
+            STEPS.set(STEPS.get() + 1);
+            match token {
+                Token::Start { name, in_place, .. } => {
+                    let role = match open.last() {
+                        Some(Role::Alternate) if *in_place => Role::InPlace,
+                        Some(Role::Container | Role::InPlace) => {
+                            let local_name = local(self.strings.get(name.qname));
+                            if mc.is_some()
+                                && name.namespace == mc
+                                && local_name == "AlternateContent"
+                            {
+                                Role::Alternate
+                            } else if *in_place {
+                                Role::InPlace
+                            } else if descend(name.namespace, local_name) {
+                                Role::Container
+                            } else {
+                                Role::Taken(i)
+                            }
+                        }
+                        _ => Role::Skipped,
+                    };
+                    open.push(role);
+                }
+                Token::End => {
+                    if let Some(Role::Taken(start)) = open.pop() {
+                        if let Some(tokens) = self.tokens.get(start..=i) {
+                            found.push(Element {
+                                tokens,
+                                strings: self.strings,
+                                index: self.index + start,
+                            });
+                        }
+                    }
+                }
+                Token::Text(_)
+                | Token::Comment(_)
+                | Token::ProcessingInstruction { .. }
+                | Token::Declarations(_) => {}
+            }
+        }
+        found
     }
 
     /// The text directly in the element, not in its children: borrowed when it is one

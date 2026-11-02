@@ -99,6 +99,44 @@ enum Role {
     Kept,
 }
 
+/// An element [`Capture::capture`] is reading: where its fragment starts, and what
+/// Markup Compatibility makes of what is open in it.
+#[derive(Debug)]
+struct Capturing {
+    start: usize,
+    mc: NsId,
+    /// The depth of each open `mc:AlternateContent`, and whether a branch of it has been
+    /// taken.
+    alternates: Vec<(usize, bool)>,
+    /// What Markup Compatibility makes of each open element, the element read first.
+    roles: Vec<Role>,
+    depth: usize,
+}
+
+impl Capturing {
+    /// The fragment read, once its element has ended.
+    fn span(&self, capture: &Capture<'_, '_, '_>) -> Span {
+        Span::new(self.start, capture.document.tokens.len())
+    }
+}
+
+/// What [`Capture::capture_shape`] and [`Capture::resume`] read.
+#[derive(Debug)]
+pub(super) enum Captured {
+    /// The element, to its end.
+    Whole(Span),
+    /// The element as far as the start tag of a text box's content.
+    Paused(Paused),
+}
+
+/// A capture paused at the start of a text box's content (`w:txbxContent`).
+#[derive(Debug)]
+pub(super) struct Paused {
+    capturing: Capturing,
+    /// Where the `w:txbxContent` starts among the document's tokens.
+    pub(super) content: usize,
+}
+
 /// The state of reading one part into a document.
 pub(super) struct Capture<'d, 'p, 't> {
     pub(super) document: &'d mut Document,
@@ -164,32 +202,113 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
         tag: StartTag<'_>,
         read: Option<Disposition>,
     ) -> Result<Span> {
+        let mut capturing = self.begin(reader, &tag, read)?;
+        self.proceed(reader, mce, &mut capturing, None)?;
+        Ok(capturing.span(self))
+    }
+
+    /// Reads an element as [`capture`](Self::capture) does, but pauses at each
+    /// `w:txbxContent` in it that is read, in one of the namespaces `text_boxes` gives,
+    /// once its start tag is kept: the caller reads the text box's content into the
+    /// model, then [`resume`](Self::resume)s once its end tag is read and ended in
+    /// `mce`. Its element keeps the `w:txbxContent`, empty.
+    pub(super) fn capture_shape(
+        &mut self,
+        reader: &mut Reader<'_>,
+        mce: &mut Processor,
+        tag: StartTag<'_>,
+        text_boxes: [NsId; 3],
+    ) -> Result<Captured> {
+        let capturing = self.begin(reader, &tag, Some(Disposition::Understood))?;
+        self.step(reader, mce, capturing, text_boxes)
+    }
+
+    /// Goes on with a capture paused at a `w:txbxContent`, whose end tag the caller read
+    /// and ended in `mce`.
+    pub(super) fn resume(
+        &mut self,
+        reader: &mut Reader<'_>,
+        mce: &mut Processor,
+        paused: Paused,
+        text_boxes: [NsId; 3],
+    ) -> Result<Captured> {
+        let mut capturing = paused.capturing;
+        self.document.tokens.push(Token::End);
+        capturing.roles.pop();
+        capturing.depth -= 1;
+        self.step(reader, mce, capturing, text_boxes)
+    }
+
+    fn step(
+        &mut self,
+        reader: &mut Reader<'_>,
+        mce: &mut Processor,
+        mut capturing: Capturing,
+        text_boxes: [NsId; 3],
+    ) -> Result<Captured> {
+        Ok(
+            match self.proceed(reader, mce, &mut capturing, Some(text_boxes))? {
+                Some(content) => Captured::Paused(Paused { capturing, content }),
+                None => Captured::Whole(capturing.span(self)),
+            },
+        )
+    }
+
+    /// Keeps the start tag of the element to read, as the first token of its fragment.
+    fn begin(
+        &mut self,
+        reader: &mut Reader<'_>,
+        tag: &StartTag<'_>,
+        read: Option<Disposition>,
+    ) -> Result<Capturing> {
         self.spend(1)?;
         let start = self.document.tokens.len();
         let mc = *self
             .mc
             .get_or_insert_with(|| reader.intern(officewright_opc::mce::NAMESPACE));
-        // The depth of each open mc:AlternateContent, and whether a branch of it has
-        // been taken.
-        let mut alternates: Vec<(usize, bool)> = Vec::new();
-        // What Markup Compatibility makes of each open element. The caller started the
-        // element itself; it is ended after the loop, not at its end tag.
+        let mut alternates = Vec::new();
         let alternate = tag.name().is(mc, "AlternateContent");
         if alternate {
             alternates.push((1, false));
         }
-        let mut roles = vec![match read {
+        let roles = vec![match read {
             Some(Disposition::Understood | Disposition::ProcessContent) if alternate => {
                 Role::Alternate
             }
             Some(Disposition::Understood | Disposition::ProcessContent) => Role::Read,
             _ => Role::Started,
         }];
+        self.push_start(reader, tag, read == Some(Disposition::ProcessContent))?;
+        Ok(Capturing {
+            start,
+            mc,
+            alternates,
+            roles,
+            depth: 1,
+        })
+    }
+
+    /// Reads the events of a capture until the end of its element, which it ends in
+    /// `mce`, or until the start of a `w:txbxContent` read, in one of the namespaces
+    /// `text_boxes` gives: then it gives where that element starts among the tokens.
+    fn proceed(
+        &mut self,
+        reader: &mut Reader<'_>,
+        mce: &mut Processor,
+        capturing: &mut Capturing,
+        text_boxes: Option<[NsId; 3]>,
+    ) -> Result<Option<usize>> {
         let part = self.part;
         let opc = |err: officewright_opc::Error| Error::from(err.in_part(part));
-        self.push_start(reader, &tag, read == Some(Disposition::ProcessContent))?;
-        let mut depth = 1usize;
-        while depth > 0 {
+        let Capturing {
+            mc,
+            alternates,
+            roles,
+            depth,
+            ..
+        } = capturing;
+        let mc = *mc;
+        while *depth > 0 {
             let event = reader
                 .read_event()
                 .map_err(|err| Error::from(err.in_part(self.part)))?;
@@ -208,7 +327,7 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
                     };
                     let mut taken = false;
                     if let Some((at, branch_taken)) = alternates.last_mut() {
-                        if *at == depth && !*branch_taken {
+                        if *at == *depth && !*branch_taken {
                             let selectable = || match mce.is_selectable(reader, &tag) {
                                 Ok(selectable) => Ok(selectable),
                                 Err(err) if processed => Err(opc(err)),
@@ -220,7 +339,7 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
                         }
                     }
                     let content = disposition == Some(Disposition::ProcessContent);
-                    roles.push(match parent {
+                    let role = match parent {
                         Role::Alternate if taken => Role::Read,
                         Role::Alternate => Role::Started,
                         Role::Read if name.is(mc, "AlternateContent") => Role::Alternate,
@@ -231,12 +350,22 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
                             _ => Role::Started,
                         },
                         Role::Started | Role::Kept => Role::Kept,
-                    });
-                    depth += 1;
+                    };
+                    roles.push(role);
+                    *depth += 1;
                     if name.is(mc, "AlternateContent") {
-                        alternates.push((depth, false));
+                        alternates.push((*depth, false));
                     }
+                    let at = self.document.tokens.len();
                     self.push_start(reader, &tag, taken || (parent == Role::Read && content))?;
+                    let text_box = text_boxes.is_some_and(|namespaces| {
+                        namespaces
+                            .iter()
+                            .any(|&namespace| name.is(namespace, "txbxContent"))
+                    });
+                    if text_box && role == Role::Read {
+                        return Ok(Some(at));
+                    }
                 }
                 Some(Event::End(_)) => {
                     self.document.tokens.push(Token::End);
@@ -244,10 +373,10 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
                     if !roles.is_empty() && role.is_some_and(|role| role != Role::Kept) {
                         mce.end();
                     }
-                    if alternates.last().is_some_and(|(at, _)| *at == depth) {
+                    if alternates.last().is_some_and(|(at, _)| *at == *depth) {
                         alternates.pop();
                     }
-                    depth -= 1;
+                    *depth -= 1;
                 }
                 Some(Event::Text(text)) => self.document.tokens.push(Token::Text(text.into())),
                 Some(Event::Comment(text)) => {
@@ -263,8 +392,9 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
                 None => break,
             }
         }
+        // The caller started the element itself; it is ended here, not at its end tag.
         mce.end();
-        Ok(Span::new(start, self.document.tokens.len()))
+        Ok(None)
     }
 
     /// Pushes a start tag as a token, its names interned in the document, and its

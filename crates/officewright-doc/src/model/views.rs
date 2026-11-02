@@ -618,12 +618,16 @@ impl<'a> RunContent<'a> {
             RunItem::NoteNumber => Self::NoteNumber,
             RunItem::Separator => Self::Separator,
             RunItem::ContinuationSeparator => Self::ContinuationSeparator,
-            RunItem::Drawing { element, image } => {
-                Self::Drawing(Drawing::new(document, *element, *image))
-            }
-            RunItem::VmlDrawing { element, image } => {
-                Self::VmlDrawing(VmlDrawing::new(document, *element, *image))
-            }
+            RunItem::Drawing {
+                element,
+                image,
+                text_boxes,
+            } => Self::Drawing(Drawing::new(document, *element, *image, *text_boxes)),
+            RunItem::VmlDrawing {
+                element,
+                image,
+                text_boxes,
+            } => Self::VmlDrawing(VmlDrawing::new(document, *element, *image, *text_boxes)),
             RunItem::Object { element, image } => {
                 Self::Object(EmbeddedObject::new(document, *element, *image))
             }
@@ -815,7 +819,10 @@ impl<'a> Opaque<'a> {
     }
 }
 
-fn blocks<'a>(document: &'a Document, children: &'a [u32]) -> impl Iterator<Item = Block<'a>> + 'a {
+pub(super) fn blocks<'a>(
+    document: &'a Document,
+    children: &'a [u32],
+) -> impl Iterator<Item = Block<'a>> + 'a {
     through_wrappers(document, children).filter_map(move |index| {
         let node = document.node(index)?;
         Some(match &node.kind {

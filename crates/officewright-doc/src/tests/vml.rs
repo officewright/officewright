@@ -413,7 +413,17 @@ fn shows_no_picture_for_vml_shapes_without_an_image_and_reads_missing_images() {
             .iter()
             .all(|drawing| drawing.picture().is_none())
     );
-    assert!(drawings[0].to_xml().contains("<w:t>Boxed</w:t>"));
+    // A text box's content is read into the model, out of the shape it is in.
+    let text_box = drawings[0].text_boxes().next().unwrap();
+    let texts: Vec<String> = text_box
+        .blocks()
+        .map(|block| match block {
+            Block::Paragraph(paragraph) => paragraph.text(),
+            other => panic!("not a paragraph: {other:?}"),
+        })
+        .collect();
+    assert_eq!(texts, ["Boxed"]);
+    assert!(!drawings[0].to_xml().contains("Boxed"));
     // A picture whose image the package lacks, or whose relationship the part lacks,
     // keeps its frame.
     for drawing in &drawings[5..] {
