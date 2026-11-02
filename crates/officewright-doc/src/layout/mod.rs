@@ -19,6 +19,7 @@ mod table;
 
 use std::collections::HashMap;
 
+use officewright_core::Pt;
 use officewright_layout::ir;
 use officewright_layout::{LayoutReport, Location, ReportEntry, ReportKind};
 
@@ -103,8 +104,8 @@ impl Document {
     /// Not translated yet, and listed: the table properties of a table style's conditional
     /// formats and a row's table property exceptions, drawings that show no picture
     /// (shapes, charts, text boxes, groups, in DrawingML or VML) and other objects,
-    /// equations, and indents and spacing given in
-    /// character or line units, which keep their value in points.
+    /// equations, and spacing given in line units on a document grid, which keeps its
+    /// value in points.
     ///
     /// Also listed is what the IR has no place for yet: a row's own alignment and cell
     /// spacing where they differ from the table's, a row's hidden end mark, a cell's
@@ -205,6 +206,9 @@ struct Translator<'a> {
     /// [`paragraph::SHARED_PER_FINGERPRINT`] for each: paragraphs with equal properties
     /// share one (#275).
     paragraph_props: paragraph::SharedProps,
+    /// What a line of spacing in line units is in the section being translated: 12 pt
+    /// without a document grid, none on one, where the units keep their value in points.
+    line_unit: Option<Pt>,
     lists: list::Lists,
     /// A key per paragraph style, by its place among the styles, for contextual spacing.
     style_keys: HashMap<usize, ir::StyleKey>,
@@ -306,6 +310,7 @@ impl<'a> Translator<'a> {
             ir: ir::Document::default(),
             run_styles: style::RunStyles::default(),
             paragraph_props: paragraph::SharedProps::default(),
+            line_unit: Some(Pt(12.0)),
             lists: list::Lists::default(),
             style_keys: HashMap::new(),
             left_out: Vec::new(),

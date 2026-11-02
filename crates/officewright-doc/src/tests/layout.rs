@@ -101,6 +101,72 @@ fn shares_paragraph_properties_and_font_names_between_items_that_repeat_them() {
     assert!(std::ptr::eq(ascii, &**names[0]));
 }
 
+#[test]
+fn keeps_line_units_in_points_on_a_document_grid_and_bounds_units() {
+    // What a line is on a document grid no render shows yet: there the points count,
+    // and that is listed. Characters are converted on a grid as off it.
+    let body = r#"<w:p><w:pPr><w:spacing w:before="240" w:beforeLines="100"/><w:ind w:leftChars="100"/></w:pPr></w:p><w:sectPr><w:docGrid w:type="lines" w:linePitch="360"/></w:sectPr>"#;
+    let translation = translate(&with_parts(body, &[]));
+    let props = paragraphs(&translation)[0].props();
+    assert_eq!(props.spacing().before(), Pt(12.0));
+    assert_eq!(props.indent().start(), Pt(11.0));
+    let left_out: Vec<String> = translation
+        .left_out()
+        .iter()
+        .map(|entry| entry.message().to_owned())
+        .collect();
+    assert!(
+        left_out.contains(
+            &"spacing in line units on a document grid keeps its value in points".to_owned()
+        ),
+        "{left_out:?}"
+    );
+    // The points, not the lines, count there: 15 pt beside a line (from the review of #448).
+    let fifteen = body.replace(r#"w:before="240""#, r#"w:before="300""#);
+    let translation = translate(&with_parts(&fifteen, &[]));
+    assert_eq!(
+        paragraphs(&translation)[0].props().spacing().before(),
+        Pt(15.0)
+    );
+    // The end indent in characters and the spacing after in lines are converted as the
+    // others are, and a section without a grid after one with a grid has lines of 12 pt
+    // again (from the review of #448).
+    let body = r#"<w:p><w:pPr><w:sectPr><w:docGrid w:type="lines" w:linePitch="360"/></w:sectPr></w:pPr></w:p><w:p><w:pPr><w:spacing w:after="0" w:afterLines="50" w:beforeLines="100"/><w:ind w:right="0" w:rightChars="200"/></w:pPr></w:p><w:sectPr/>"#;
+    let translation = translate(&with_parts(body, &[]));
+    let ir::Block::Paragraph(second) = &translation.document().sections()[1].blocks()[0] else {
+        panic!("a paragraph");
+    };
+    let props = second.props();
+    assert_eq!(props.spacing().before(), Pt(12.0));
+    assert_eq!(props.spacing().after(), Pt(6.0));
+    assert_eq!(props.indent().end(), Pt(22.0));
+    // Values in units from a file stay within what lengths in points may be, and space
+    // is never negative: the IR validates.
+    let body = r#"<w:p><w:pPr><w:spacing w:beforeLines="-500" w:afterLines="9223372036854775807"/><w:ind w:leftChars="9223372036854775807" w:hangingChars="9223372036854775807"/></w:pPr></w:p>"#;
+    let translation = translate(&with_parts(body, &[]));
+    translation.document().validate().unwrap();
+    let props = paragraphs(&translation)[0].props();
+    assert_eq!(props.spacing().before(), Pt(0.0));
+    let bound = f64::from(i32::MAX) / 20.0;
+    assert!(props.spacing().after().0 <= bound);
+    assert!(props.indent().start().0 <= bound);
+    assert!(props.indent().first_line().0 >= -bound);
+    // A character is the paragraph mark's size: two of a 16 pt mark are 32 pt, the first
+    // line of a Chinese paragraph (contract-zh and notice-zh). The grid Word writes into
+    // every document, of the default type, is no grid: a line is 12 pt there.
+    let body = r#"<w:p><w:pPr><w:spacing w:beforeLines="100"/><w:ind w:firstLineChars="200"/><w:rPr><w:sz w:val="32"/></w:rPr></w:pPr></w:p><w:sectPr><w:docGrid w:linePitch="360"/></w:sectPr>"#;
+    let translation = translate(&with_parts(body, &[]));
+    let props = paragraphs(&translation)[0].props();
+    assert_eq!(props.indent().first_line(), Pt(32.0));
+    assert_eq!(props.spacing().before(), Pt(12.0));
+    let typed = body.replace(r#"<w:docGrid "#, r#"<w:docGrid w:type="default" "#);
+    let translation = translate(&with_parts(&typed, &[]));
+    assert_eq!(
+        paragraphs(&translation)[0].props().spacing().before(),
+        Pt(12.0)
+    );
+}
+
 /// An inline, briefly; fields with their results.
 fn describe(inline: &ir::Inline) -> String {
     match inline {
@@ -451,7 +517,6 @@ fn lists_what_it_leaves_out() {
             "sections[0].blocks[0].inlines: an absolute position tab is left out (w:ptab)",
             "sections[0].blocks[0].inlines: an equation is left out",
             "sections[0].blocks[2]: a block-level w:altChunk is left out",
-            "sections[0].blocks[2]: indents or spacing in character or line units keep their value in points",
         ]
     );
     assert!(
@@ -1780,11 +1845,10 @@ fn translates_the_rest_of_paragraph_formatting() {
         .collect();
     assert_eq!(
         left_out,
-        [
-            "sections[0].blocks[1]: the alignment lowKashida is laid out as justified",
-            "sections[0].blocks[2]: indents or spacing in character or line units keep their value in points",
-        ]
+        ["sections[0].blocks[1]: the alignment lowKashida is laid out as justified",]
     );
+    // A hanging indent of one character: the mark's size, 11 pt here.
+    assert_eq!(found[2].props().indent().first_line(), Pt(-11.0));
     // Without the settings part, Word's default tab stop.
     assert_eq!(
         translation.document().settings().default_tab_stop(),
