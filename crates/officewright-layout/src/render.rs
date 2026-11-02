@@ -1215,6 +1215,10 @@ mod tests {
             clip(500.0, 500.0, 10.0, 10.0),
             fill(),
             DisplayItem::PopClip,
+            // On the page, but outside the clip around it: left out too.
+            clip(70.0, 20.0, 20.0, 20.0),
+            fill(),
+            DisplayItem::PopClip,
             DisplayItem::PopClip,
             // The end of no clip changes nothing.
             DisplayItem::PopClip,
@@ -1242,6 +1246,8 @@ mod tests {
                 ("end", None),
                 ("clip", rect(30.0, 130.0, 30.0, 20.0)),
                 ("fill", page.clone()),
+                ("end", None),
+                ("clip", outer.clone()),
                 ("end", None),
                 ("clip", outer.clone()),
                 ("end", None),
@@ -1275,7 +1281,7 @@ mod tests {
             .collect();
         assert_eq!(
             operators.join(" "),
-            "q W q f Q Q q W q f Q Q q W Q q W Q q f Q"
+            "q W q f Q Q q W q f Q Q q W Q q W Q q W Q q f Q"
         );
     }
 
