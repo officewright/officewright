@@ -25,7 +25,7 @@ esac
 if [ -n "${CORPUS_JOBS:-}" ]; then
 	[[ $CORPUS_JOBS =~ ^[123456789][0123456789]{0,3}$ ]] ||
 		fail "CORPUS_JOBS must be a whole number from 1 to 9999, not '$CORPUS_JOBS'"
-	echo "check.sh: the corpus runner lays out $CORPUS_JOBS documents at a time"
+	echo "check.sh: the corpus runner lays out documents $CORPUS_JOBS at a time (CORPUS_JOBS)"
 fi
 
 # Every tool is checked up front, so a fresh machine sees the whole list at once.

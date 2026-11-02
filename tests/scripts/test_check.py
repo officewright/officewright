@@ -36,6 +36,9 @@ class CorpusJobs(unittest.TestCase):
 
     def run_script(self, jobs):
         env = {**os.environ, "PATH": str(self.tree / "bin") + os.pathsep + os.environ["PATH"]}
+        # In this locale a range such as 0-9 also matches digits of other scripts, which the
+        # script must refuse; where the locale is missing, bash only warns.
+        env["LC_ALL"] = "en_US.UTF-8"
         env.pop("CORPUS_JOBS", None)
         if jobs is not None:
             env["CORPUS_JOBS"] = jobs
@@ -63,7 +66,7 @@ class CorpusJobs(unittest.TestCase):
             with self.subTest(jobs=jobs):
                 status, out, err = self.run_script(jobs)
                 self.assertIn(
-                    f"check.sh: the corpus runner lays out {jobs} documents at a time", out
+                    f"check.sh: the corpus runner lays out documents {jobs} at a time", out
                 )
                 self.assertNotIn(REFUSED, err)
                 # It goes on to the tools, and stops there for the fake cargo.
