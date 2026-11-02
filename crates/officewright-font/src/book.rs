@@ -312,15 +312,19 @@ impl fmt::Display for SkippedFont {
 ///
 /// A book can scan the same directories again, for example after fonts were installed:
 /// [`add_dir`](Self::add_dir) and [`add_system_fonts`](Self::add_system_fonts) add the
-/// fonts that appeared since. A file that was added is not read again, even if it
-/// changed. A file that was skipped is read again once its size or modification time
-/// changes, so a font that was still being copied during one scan is found by the next.
-/// Links, font files that could not be resolved and directories that could not be read
-/// are tried on every scan. Each skipped path is listed once, with the error of its
-/// latest attempt, and leaves the list when it is read. A path whose folder, or one above
-/// it, is replaced by a link to where it went is still the same path: a scan that reaches
-/// it lists it once, under where it is now. A path a scan does not reach, such as one that
-/// was removed, stays listed; a process that wants a fresh list starts a new book.
+/// fonts that appeared since. A file is known by its canonical path: one that was added is
+/// not read again by that path, even if it changed. Reached by another canonical path, as
+/// a file whose folder was moved and replaced by a link to where it went, or a second hard
+/// link, it is read again, and its faces are in the book once more; so is a damaged face of
+/// a collection in [`skipped`](Self::skipped). A file that was skipped is read again once
+/// its size or modification time changes, so a font that was still being copied during one
+/// scan is found by the next. Links, font files that could not be resolved and directories
+/// that could not be read are tried on every scan. Each other skipped path is listed once,
+/// with the error of its latest attempt, and leaves the list when it is read. A path whose
+/// folder, or one above it, is replaced by a link to where it went is still the same path:
+/// a scan that reaches it lists it once, under where it is now. A path a scan does not
+/// reach, such as one that was removed, stays listed; a process that wants a fresh list
+/// starts a new book.
 ///
 /// ```
 /// use officewright_font::{FontBook, FontRequest, FontResolver};
