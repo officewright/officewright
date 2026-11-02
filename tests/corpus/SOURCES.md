@@ -154,6 +154,7 @@ writes.
 | word-rules/E-table-style-defaults-size-13-12-14.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Whether a Normal style of 12 pt overrides the 14 pt of a table style when the document defaults are 13 pt, in compatibility mode 14 |
 | word-rules/E-table-style-defaults-size-10-11-14.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Whether a Normal style of 11 pt overrides the 14 pt of a table style when the document defaults are 10 pt, in compatibility mode 14 |
 | word-rules/E-underline-trailspace-indent.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Underlined trailing spaces in paragraphs with a right indent of 72 pt, ending before the indent, between it and the margin, past the margin and past the edge of the page, with the w:compat setting ulTrailSpace: whether the underline stops at the indent or at the margin |
+| word-rules/E-dmap-font.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Whether Word reads a font's DMAP table (ISO/IEC 14496-22:2026) before cmap: A, B, U+E000 and Z in Officewright Test DMAP, whose DMAP swaps A and B and gives U+E000 the glyph of Z, beside the same text in Noto Sans |
 
 ## Apache POI test documents (`poi/`)
 

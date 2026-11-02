@@ -93,8 +93,9 @@ measured by `scripts/corpus-import.py`.
 Fonts in `tests/fonts/` and `tests/fonts-word/`, at the repository root and so outside
 every crate. None of the library's crates or their tests read those of `tests/fonts-word/`:
 the corpus runner (`tools/corpus-runner`, run by `scripts/check.sh`) lays documents out with
-them, and `scripts/make-symbol-font.py` and `tests/corpus-tools/test_symbol_font.py` read the
-symbol font and the face it is made from.
+them, `scripts/make-symbol-font.py` and `tests/corpus-tools/test_symbol_font.py` read the
+symbol font and the face it is made from, and `scripts/make-dmap-font.py` and
+`tests/corpus-tools/test_dmap_font.py` the DMAP font and that face.
 Those of `tests/fonts/` are read by the corpus runner and by
 `crates/officewright-font/tests/third_party_fonts.rs`,
 `crates/officewright-font/tests/metric_compatible.rs`,
@@ -106,12 +107,13 @@ checks in `tests/pdf-output` and `tests/corpus-tools/poppler/test_font_embedding
 they seed the fuzz targets in `fuzz/`. `tests/corpus-tools/test_test_fonts.py` checks
 that every file in both folders is listed below with its SHA-256, and that every file
 listed is there; `scripts/check-test-fonts.sh`, run at night, that each is byte for byte
-the file of the source given for it, or for the symbol font what
-`scripts/make-symbol-font.py` writes from that source. The tests embed the fonts, reduced
-to some of their glyphs, in PDF files they write to temporary directories; those files are
-not committed or published. Each font but the symbol font, Officewright Test Symbol, is
+the file of the source given for it, or for the symbol font and the DMAP font what
+`scripts/make-symbol-font.py` and `scripts/make-dmap-font.py` write from that source. The
+tests embed the fonts, reduced to some of their glyphs, in PDF files they write to
+temporary directories; those files are not committed or published. Each font but the
+symbol font, Officewright Test Symbol, and the DMAP font, Officewright Test DMAP, is
 unmodified, and each sits next to the license file it was distributed with, byte for byte;
-the symbol font is a modified version of Noto Sans, described in its section.
+those two are modified versions of Noto Sans, described in its section.
 
 ### Liberation Sans, Serif and Mono
 
@@ -227,6 +229,28 @@ the symbol font is a modified version of Noto Sans, described in its section.
   the same bytes on every machine: `tests/corpus-tools/test_symbol_font.py` checks the
   committed font against it, and `scripts/check-test-fonts.sh` against what it writes from
   upstream's `NotoSans-Regular.ttf`.
+- Files of the DMAP font, a modified version of the TrueType Regular face:
+  `tests/fonts-word/test-dmap/OfficewrightTestDMAP-Regular.ttf`
+  (SHA-256 `929e1699ee199f1a926e6b6096cbb81b2af69516f3aa31000975e70d632327c9`), written by
+  `scripts/make-dmap-font.py` from `tests/fonts-word/noto-truetype/NotoSans-Regular.ttf`,
+  and `tests/fonts-word/test-dmap/LICENSE`
+  (SHA-256 `f2095b08bed08b23a6fe26112fcd679a2bee3f002eef077eb05d215ed1051bd8`), the file
+  `fonts/LICENSE` of the same repository at the same commit. Changes: a DMAP table
+  (ISO/IEC 14496-22:2026, the layout of cmap) with one subtable, Windows Unicode (3, 1) of
+  format 4, that maps U+0041 to the glyph Noto Sans maps U+0042 to, U+0042 to that of
+  U+0041, and U+E000, which Noto Sans does not map, to that of U+005A; the family is named
+  Officewright Test DMAP, and the names keep Noto Sans's copyright, version, trademark,
+  designer and license notices; the digital signature (DSIG) is left out. Every other table
+  is Noto Sans's, byte for byte, its cmap included, but for the head table's checksum of the
+  whole font (checkSumAdjustment). It is distributed under the SIL Open Font License 1.1, as
+  the license requires of a modified version.
+- Why the DMAP font: a reader that knows DMAP looks a character up in it before cmap, and no
+  font of `tests/fonts` has one, so only a font whose DMAP and cmap disagree shows whether
+  Word reads it (#458). Word renders the reference of `E-dmap-font` with this font installed
+  for the user, and the corpus runner of `scripts/check.sh` lays that document out with
+  this folder. `make-dmap-font.py` writes the same bytes on every machine:
+  `tests/corpus-tools/test_dmap_font.py` checks the committed font against it, and
+  `scripts/check-test-fonts.sh` against what it writes from upstream's `NotoSans-Regular.ttf`.
 
 ## Apache POI test documents
 

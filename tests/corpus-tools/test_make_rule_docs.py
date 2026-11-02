@@ -3528,6 +3528,30 @@ class Packages(unittest.TestCase):
             ("Case 05", None, None, None, "240"), ("Case 05", "D9D9D9", None, "240", None),
         ])
 
+    def test_dmap_font_cases_have_the_markup_their_labels_name(self):
+        doc = next(doc for doc in self.docs if doc.name == "E-dmap-font")
+        parts = dict(rules.parts(doc))
+        body = ElementTree.fromstring(parts["word/document.xml"]).find(f"{W}body")
+        samples = [r for r in body.iter(f"{W}r") if r.find(f"{W}rPr/{W}rFonts") is not None]
+        written = []
+        for r in samples:
+            fonts = r.find(f"{W}rPr/{W}rFonts")
+            slots = {fonts.get(f"{W}{slot}") for slot in ("ascii", "hAnsi", "eastAsia", "cs")}
+            (font,) = slots
+            written.append((font, r.find(f"{W}rPr/{W}sz").get(f"{W}val"),
+                            "".join(t.text for t in r.iter(f"{W}t"))))
+        self.assertEqual(written, [("Officewright Test DMAP", "48", "AB\ue000Z"),
+                                   ("Noto Sans", "48", "AB\ue000Z"),
+                                   ("Officewright Test DMAP", "48", "AB")])
+        labels = [p for p in body.findall(f"{W}p")
+                  if "".join(t.text for t in p.iter(f"{W}t")).startswith("Case ")]
+        self.assertEqual(len(labels), 3)
+        # The font table names both fonts, the DMAP font without a character set of its own.
+        table = ElementTree.fromstring(parts["word/fontTable.xml"])
+        entries = {f.get(f"{W}name"): f for f in table.iter(f"{W}font")}
+        self.assertIn("Noto Sans", entries)
+        self.assertEqual(list(entries["Officewright Test DMAP"]), [])
+
     def test_pictures_are_typed_png_parts_that_resolve(self):
         # Every VML picture of every document is Word's picture frame (the shape type defined
         # once, before its first use), names a picture relationship to a part of the package,
