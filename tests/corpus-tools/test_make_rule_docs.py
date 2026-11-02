@@ -3532,20 +3532,34 @@ class Packages(unittest.TestCase):
         doc = next(doc for doc in self.docs if doc.name == "E-dmap-font")
         parts = dict(rules.parts(doc))
         body = ElementTree.fromstring(parts["word/document.xml"]).find(f"{W}body")
-        samples = [r for r in body.iter(f"{W}r") if r.find(f"{W}rPr/{W}rFonts") is not None]
+
+        def texts(element):
+            return "".join(t.text or "" for t in element.iter(f"{W}t"))
+
+        # Each label, then the paragraph of its sample: one run in one font in all four slots.
+        paragraphs = body.findall(f"{W}p")
+        cases = [(texts(p), paragraphs[k + 1]) for k, p in enumerate(paragraphs)
+                 if texts(p).startswith("Case ")]
+        self.assertEqual(len(cases), 3)
+        # What a label says of its sample's characters, and the text that is.
+        characters = {"A, B, U+E000 and Z": "AB\ue000Z", "the same characters": "AB\ue000Z",
+                      "A and B alone": "AB"}
         written = []
-        for r in samples:
+        for label, sample in cases:
+            (r,) = sample.findall(f"{W}r")
             fonts = r.find(f"{W}rPr/{W}rFonts")
-            slots = {fonts.get(f"{W}{slot}") for slot in ("ascii", "hAnsi", "eastAsia", "cs")}
-            (font,) = slots
-            written.append((font, r.find(f"{W}rPr/{W}sz").get(f"{W}val"),
-                            "".join(t.text for t in r.iter(f"{W}t"))))
-        self.assertEqual(written, [("Officewright Test DMAP", "48", "AB\ue000Z"),
-                                   ("Noto Sans", "48", "AB\ue000Z"),
-                                   ("Officewright Test DMAP", "48", "AB")])
-        labels = [p for p in body.findall(f"{W}p")
-                  if "".join(t.text for t in p.iter(f"{W}t")).startswith("Case ")]
-        self.assertEqual(len(labels), 3)
+            (font,) = {fonts.get(f"{W}{slot}") for slot in ("ascii", "hAnsi", "eastAsia", "cs")}
+            size = int(r.find(f"{W}rPr/{W}sz").get(f"{W}val")) / 2
+            self.assertIn(f" in {font}, ", label)
+            self.assertIn(f"{size:g} pt", label)
+            if font == rules.DMAP_FONT:
+                self.assertIn("in all four slots", label)
+            (claim,) = [k for k in characters if label.split(": ", 1)[1].startswith(k)]
+            self.assertEqual(texts(r), characters[claim], label)
+            written.append((font, size, texts(r)))
+        self.assertEqual(written, [("Officewright Test DMAP", 24, "AB\ue000Z"),
+                                   ("Noto Sans", 24, "AB\ue000Z"),
+                                   ("Officewright Test DMAP", 24, "AB")])
         # The font table names both fonts, the DMAP font without a character set of its own.
         table = ElementTree.fromstring(parts["word/fontTable.xml"])
         entries = {f.get(f"{W}name"): f for f in table.iter(f"{W}font")}

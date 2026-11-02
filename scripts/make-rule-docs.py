@@ -4367,7 +4367,8 @@ def dmap_font() -> Doc:
          run(DMAP_SAMPLE, font=DMAP_FONT, size=24)),
         ("the same characters in Noto Sans, 24 pt (to compare)",
          run(DMAP_SAMPLE, font="Noto Sans", size=24)),
-        ("A and B alone in Officewright Test DMAP, 24 pt", run("AB", font=DMAP_FONT, size=24)),
+        ("A and B alone in Officewright Test DMAP, 24 pt, in all four slots",
+         run("AB", font=DMAP_FONT, size=24)),
     ]
     body = "".join(para(run(f"Case {n:02d}: {label}"), space=spacing(before=12))
                    + para(sample) for n, (label, sample) in enumerate(cases, 1))

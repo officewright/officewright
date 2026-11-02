@@ -13,9 +13,10 @@ of format 4, maps:
 - U+E000, which cmap does not map, to the glyph cmap gives Z, so through DMAP the font
   draws it as Z, and through cmap alone it has no glyph for it.
 
-It has names of its own, and every other table is Noto Sans's, byte for byte, but for the
-checksum of the whole font in the head table. The SIL Open Font License 1.1 of Noto Sans
-covers it, and its license file is that of Noto Sans.
+It has names of its own, and its OS/2 table names no vendor (NONE), as the symbol font's
+does; every other table is Noto Sans's, byte for byte, but for the checksum of the whole
+font in the head table. The SIL Open Font License 1.1 of Noto Sans covers it, and its
+license file is that of Noto Sans.
 
     make-dmap-font.py                     write the font
     make-dmap-font.py --check             fail if the committed font is not what this writes
@@ -147,6 +148,11 @@ def dmap_font(source: bytes) -> bytes:
         raise FontError("the source has a DMAP table already")
     found[b"DMAP"] = dmap_table(found[b"cmap"])
     found[b"name"] = dmap_names(found[b"name"])
+    # The vendor (achVendID) of a font Noto Sans's vendor did not make.
+    os2 = found[b"OS/2"]
+    if len(os2) < 62:
+        raise FontError("the OS/2 table is too short for a vendor")
+    found[b"OS/2"] = os2[:58] + b"NONE" + os2[62:]
     found.pop(b"DSIG", None)
     return symbol.sfnt(found)
 

@@ -2,7 +2,7 @@
 the TrueType Noto Sans Regular, and it is the DMAP font THIRD-PARTY-NOTICES.md describes: read
 here without the script's code, its DMAP table maps A to the glyph of B, B to that of A and
 U+E000 to that of Z and nothing else, its cmap is Noto Sans's, its names are those of a font
-named Officewright Test DMAP, and every other table is Noto Sans's."""
+named Officewright Test DMAP, its OS/2 names no vendor, and every other table is Noto Sans's."""
 
 import importlib.util
 import struct
@@ -82,6 +82,11 @@ class TestDmapFont(unittest.TestCase):
                 # Only checkSumAdjustment differs.
                 self.assertEqual(table[:8] + table[12:], self.source_tables[tag][:8]
                                  + self.source_tables[tag][12:])
+            elif tag == b"OS/2":
+                # Only the vendor differs.
+                self.assertEqual(table[58:62], b"NONE")
+                self.assertEqual(table[:58] + table[62:], self.source_tables[tag][:58]
+                                 + self.source_tables[tag][62:])
             elif tag not in (b"DMAP", b"name"):
                 self.assertEqual(table, self.source_tables[tag], tag)
 
@@ -126,6 +131,13 @@ class TestDmapFont(unittest.TestCase):
         signed = script.symbol.tables(self.source)
         signed[b"DSIG"] = struct.pack(">IHH", 1, 0, 0)
         self.assertNotIn(b"DSIG", tables(script.dmap_font(script.symbol.sfnt(signed))))
+
+    def test_refuses_an_os2_table_too_short_for_a_vendor(self):
+        script = load()
+        short = script.symbol.tables(self.source)
+        short[b"OS/2"] = short[b"OS/2"][:60]
+        with self.assertRaisesRegex(script.FontError, "OS/2 table is too short for a vendor"):
+            script.dmap_font(script.symbol.sfnt(short))
 
     def test_refuses_a_cmap_that_maps_u_e000(self):
         # A format 4 subtable (3, 1) with segments for A to B, Z, U+E000 and U+FFFF.

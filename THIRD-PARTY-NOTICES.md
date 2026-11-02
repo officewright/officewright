@@ -231,7 +231,7 @@ those two are modified versions of Noto Sans, described in its section.
   upstream's `NotoSans-Regular.ttf`.
 - Files of the DMAP font, a modified version of the TrueType Regular face:
   `tests/fonts-word/test-dmap/OfficewrightTestDMAP-Regular.ttf`
-  (SHA-256 `929e1699ee199f1a926e6b6096cbb81b2af69516f3aa31000975e70d632327c9`), written by
+  (SHA-256 `385a77763ad84030e434ce7b84e039d21378c52f897cf14099ee68713b422175`), written by
   `scripts/make-dmap-font.py` from `tests/fonts-word/noto-truetype/NotoSans-Regular.ttf`,
   and `tests/fonts-word/test-dmap/LICENSE`
   (SHA-256 `f2095b08bed08b23a6fe26112fcd679a2bee3f002eef077eb05d215ed1051bd8`), the file
@@ -240,9 +240,9 @@ those two are modified versions of Noto Sans, described in its section.
   format 4, that maps U+0041 to the glyph Noto Sans maps U+0042 to, U+0042 to that of
   U+0041, and U+E000, which Noto Sans does not map, to that of U+005A; the family is named
   Officewright Test DMAP, and the names keep Noto Sans's copyright, version, trademark,
-  designer and license notices; the digital signature (DSIG) is left out. Every other table
-  is Noto Sans's, byte for byte, its cmap included, but for the head table's checksum of the
-  whole font (checkSumAdjustment). It is distributed under the SIL Open Font License 1.1, as
+  designer and license notices; the OS/2 table names vendor NONE; the digital signature
+  (DSIG) is left out. Every other table is Noto Sans's, byte for byte, its cmap included, but
+  for the head table's checksum of the whole font (checkSumAdjustment). It is distributed under the SIL Open Font License 1.1, as
   the license requires of a modified version.
 - Why the DMAP font: a reader that knows DMAP looks a character up in it before cmap, and no
   font of `tests/fonts` has one, so only a font whose DMAP and cmap disagree shows whether
