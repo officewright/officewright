@@ -7900,6 +7900,72 @@ mod tests {
     }
 
     #[test]
+    fn a_text_box_s_paragraphs_keep_the_space_between_them_and_draw_their_shading() {
+        use crate::ir::{ColorValue, Shading};
+        use officewright_core::Color;
+        // Two paragraphs, 6 pt after the first: the second's baseline is 20 + 6 below the
+        // first's (61). The second is shaded behind its line, from `SHADING_OUTSET` (1.5 pt)
+        // before the box's left inset to as far past its right one, as in the body.
+        let shaded = spacing(0.0, 0.0).with_shading(Some(
+            Shading::default().with_fill(ColorValue::Rgb(Color::rgb(0, 0, 200))),
+        ));
+        let document = document(|style| {
+            let text_box = text_box(vec![
+                lines(style, 1, spacing(0.0, 6.0)),
+                text_paragraph(style, "Á", shaded.clone()),
+            ]);
+            one_section(vec![holding(
+                style,
+                vec![floating_box(text_box, (100.0, 60.0), (50.0, 40.0))],
+            )])
+        });
+        let (laid, _) = laid(&document, 10);
+        let drawn = drawing(&laid.expect("pages").pages[0]);
+        assert_eq!(
+            drawn,
+            ["text A 60 61", "rect 58.5 71 83 20", "text Á 60 87"],
+            "{drawn:?}"
+        );
+    }
+
+    #[test]
+    fn a_list_label_a_text_box_cannot_write_is_reported() {
+        use crate::ir::{
+            Level, LevelTextPart, ListDefinition, ListInstance, ListItem, NumberFormat,
+        };
+        // A list only the box holds, in a format the layout does not write.
+        let mut document = Document::default();
+        let style = document
+            .add_run_style(RunStyle::default().with_fonts(RunFonts::new("Officewright Test")));
+        let level = Level::default()
+            .with_format(NumberFormat::Other("hebrew1".into()))
+            .with_text([LevelTextPart::Placeholder(0)])
+            .with_start(1);
+        let list = document.add_list(ListDefinition::default().with_levels([level]));
+        let instance = document.add_list_instance(ListInstance::new(list));
+        let item: Block = Paragraph::new(style)
+            .with_list(Some(ListItem::new(instance, 0, style)))
+            .with_inlines([Inline::text("A", style)])
+            .into();
+        document.add_section(Section::new(setup()).with_blocks(vec![holding(
+            style,
+            vec![floating_box(
+                text_box(vec![item]),
+                (100.0, 100.0),
+                (150.0, 20.0),
+            )],
+        )]));
+        let (_, report) = laid(&document, 10);
+        let messages = messages(&report);
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.starts_with("list numbers in a format")),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
     fn a_text_box_s_text_wraps_inside_its_insets() {
         // A box 40 pt wide is 20 pt wide inside its insets: `A A` (14.5 pt) fits on a line,
         // with the space after it, and `A A A` does not.
@@ -8163,6 +8229,49 @@ mod tests {
         assert!(document.validate().is_err());
         let (laid, _) = laid(&document, 10);
         assert_eq!(texts(&laid.expect("pages").pages[0]), ["Á"]);
+    }
+
+    #[test]
+    fn a_text_box_in_a_text_box_counts_neither_in_what_headers_lay_out_nor_in_their_fields() {
+        use crate::ir::{FieldKind, InlineObject, ObjectContent, Size};
+        // `validate` refuses a box in a box, and the layout lays none out: in a header, the
+        // inner box's text costs nothing, and its `PAGE` field does not make the header be
+        // laid out again for each page.
+        let document = |inner: &dyn Fn(RunStyleId) -> Block| {
+            document(|style| {
+                let nested = Inline::Object(InlineObject::new(
+                    ObjectContent::text_box(text_box(vec![inner(style)])),
+                    Size::new(Pt(30.0), Pt(10.0)),
+                ));
+                let outer = text_box(vec![holding(style, vec![nested, Inline::text("A", style)])]);
+                let header = holding(style, vec![floating_box(outer, (200.0, 15.0), (20.0, 2.0))]);
+                vec![
+                    Section::new(close_frames())
+                        .with_headers(HeaderFooterSet::default().with_primary(vec![header]))
+                        .with_blocks(vec![
+                            lines(style, 1, spacing(0.0, 0.0)),
+                            lines(style, 1, spacing(0.0, 0.0).with_page_break_before(true)),
+                            lines(style, 1, spacing(0.0, 0.0).with_page_break_before(true)),
+                        ]),
+                ]
+            })
+        };
+        let left_out = |messages: &[String]| {
+            messages
+                .iter()
+                .any(|message| message.starts_with("headers and footers are left out past"))
+        };
+        // The header costs 5: its paragraph, the box, and the box's paragraph, the inner
+        // object and its text. The inner box's 100 characters do not count.
+        let nested = document(&|style| text_paragraph(style, &"A".repeat(100), spacing(0.0, 0.0)));
+        assert!(nested.validate().is_err());
+        let (_, messages) = laid_within(&nested, (MAX_FRAME_DRAWN, 8, tables::MAX_TABLE_REDRAWN));
+        assert!(!left_out(&messages), "{messages:?}");
+        // Laid out once for the three pages, it costs 5 of 8; laid out for each page, it
+        // would use the bound up before the third.
+        let paged = document(&|style| fields(style, vec![FieldKind::Page]));
+        let (_, messages) = laid_within(&paged, (MAX_FRAME_DRAWN, 8, tables::MAX_TABLE_REDRAWN));
+        assert!(!left_out(&messages), "{messages:?}");
     }
 
     #[test]
