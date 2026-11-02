@@ -32,9 +32,17 @@ use crate::shape::Shaper;
 const EPSILON: f64 = 1e-6;
 
 /// The most cells a row of Word's has ([MS-DOC] 2.9.321 TDefTableOperand: at most 63
-/// columns). A row cut over pages draws all its cells again on every page it reaches, so
-/// a row of more is not cut: its cost would grow with its cells times its pages.
+/// columns). A row cut over pages draws all its cells again on every page it reaches, and
+/// the grid lines above and below it, whose segments the rows beside it make, so a row of
+/// more cells, or next to one, is not cut: its cost would grow with its cells times its
+/// pages.
 const WORD_MAX_CELLS: usize = 63;
+
+#[cfg(test)]
+thread_local! {
+    /// How many ends [`Stacked::fit`] tried on this thread: for the tests of its cost.
+    pub(crate) static FIT_TRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// The widest a grid column is laid out: Word's widest page, 22 inches. A wider one is
 /// laid out that wide, and reported.
@@ -378,27 +386,39 @@ impl<'d, 'l> Prepared<'d, 'l> {
         self.bands.get(band).is_some_and(|rows| rows.len() > 1)
     }
 
-    /// Whether band `band` is a row of more cells than Word holds ([`WORD_MAX_CELLS`]).
+    /// Whether band `band` is a row that draws more on every page it is cut over than a
+    /// row of Word's could ([`Self::within_word`]).
     pub(crate) fn wide(&self, band: usize) -> bool {
         self.bands
             .get(band)
-            .and_then(|rows| self.rows.get(rows.start))
-            .is_some_and(|cells| cells.len() > WORD_MAX_CELLS)
+            .is_some_and(|rows| rows.len() == 1 && !self.within_word(rows.start))
+    }
+
+    /// Whether row `row` draws on every page it is cut over no more than a row of Word's
+    /// could: no more cells than Word holds ([`WORD_MAX_CELLS`]), and grid lines above
+    /// and below it of no more segments than two such rows make.
+    fn within_word(&self, row: usize) -> bool {
+        let segments = |line: usize| self.horizontal.get(line).map_or(0, Vec::len);
+        self.rows
+            .get(row)
+            .is_some_and(|cells| cells.len() <= WORD_MAX_CELLS)
+            && segments(row) <= 2 * WORD_MAX_CELLS + 1
+            && segments(row + 1) <= 2 * WORD_MAX_CELLS + 1
     }
 
     /// Whether a page may cut band `band` between lines: a row of its own, of no exact
-    /// height and of no more cells than Word holds.
+    /// height, that draws no more on every page than a row of Word's could.
     fn cuts(&self, band: &Range<usize>) -> bool {
         let exact = matches!(
             self.table.rows().get(band.start).map(Row::height),
             Some(RowHeight::Exact(_))
         );
-        band.len() == 1
-            && !exact
-            && self
-                .rows
-                .get(band.start)
-                .is_some_and(|cells| cells.len() <= WORD_MAX_CELLS)
+        band.len() == 1 && !exact && self.within_word(band.start)
+    }
+
+    /// Where the table is, for the report.
+    pub(crate) fn location(&self) -> &Location {
+        &self.location
     }
 
     /// The header rows: those of the header bands.
@@ -561,8 +581,8 @@ impl<'d, 'l> Prepared<'d, 'l> {
     /// pieces of a split row are aligned at their top whatever the cell's vertical
     /// alignment, its height rule's least height is filled by its last piece as far as
     /// its page leaves room, cells are cut each on its own, and a row of an exact height
-    /// is never split. A row of more cells than Word holds is not cut either
-    /// ([`WORD_MAX_CELLS`]).
+    /// is never split. A row of more cells than Word holds, or next to one, is not cut
+    /// either ([`WORD_MAX_CELLS`]).
     pub(crate) fn piece(
         &self,
         laid: &mut LaidBand<'d>,
@@ -596,14 +616,14 @@ impl<'d, 'l> Prepared<'d, 'l> {
         let room = room.unwrap_or(f64::INFINITY);
         let above = self.thickness(rows.start);
         let cells = laid.cells.first_mut()?;
-        let mut takes: Vec<usize> = Vec::with_capacity(cells.len());
-        let mut fallback: Vec<usize> = Vec::with_capacity(cells.len());
-        for cell in cells.iter().flatten() {
-            let margins = cell.margins.top().0 + cell.margins.bottom().0;
-            let (take, any) = cell.content.fit(cell.next, room - above - below - margins);
-            takes.push(take);
-            fallback.push(any);
-        }
+        let space = |cell: &LaidCell<'_>| {
+            room - above - below - cell.margins.top().0 - cell.margins.bottom().0
+        };
+        let mut takes: Vec<usize> = cells
+            .iter()
+            .flatten()
+            .map(|cell| cell.content.fit(cell.next, space(cell)))
+            .collect();
         let left = |cell: &LaidCell<'_>| {
             cell.content.units.len() - cell.next.min(cell.content.units.len())
         };
@@ -612,9 +632,10 @@ impl<'d, 'l> Prepared<'d, 'l> {
             if !fresh {
                 return None;
             }
-            // Nothing moves it further: at least one line of each cell.
-            for ((take, any), cell) in takes.iter_mut().zip(&fallback).zip(cells.iter().flatten()) {
-                *take = (*any).max(1).min(left(cell));
+            // Nothing moves it further: what fits of each cell, at least one line.
+            for (take, cell) in takes.iter_mut().zip(cells.iter().flatten()) {
+                let any = cell.content.fit_any(cell.next, space(cell));
+                *take = any.max(1).min(left(cell));
             }
         }
         let done = cells
@@ -1374,6 +1395,9 @@ struct Stacked<'d> {
     background: Option<Color>,
     parts: Vec<Part<'d>>,
     units: Vec<Unit>,
+    /// For each unit, the next unit a page may end above, or the number of units: where
+    /// [`Stacked::fit`] looks for the piece's end, past units a page may not end among.
+    next_break: Vec<usize>,
 }
 
 /// A block of a cell's content laid out.
@@ -1457,11 +1481,40 @@ impl<'d> Stacked<'d> {
         self.end(to) - self.start(from)
     }
 
-    /// How many units from `from` on fit in `room`: as many as a page may end after, and
-    /// as many as fit whatever the breaks allow.
-    fn fit(&self, from: usize, room: f64) -> (usize, usize) {
+    /// How many units from `from` on fit in `room`, a page ending after them where it
+    /// may. The ends are tried from one place a page may end to the next, so that the
+    /// lines of a paragraph kept together, which a page takes all or none of, are not
+    /// walked again on every page that takes none of them.
+    fn fit(&self, from: usize, room: f64) -> usize {
+        let count = self.units.len();
         let start = self.start(from);
-        let (mut allowed, mut any) = (from, from);
+        let mut allowed = from;
+        let mut to = self.next_break.get(from).copied().unwrap_or(count);
+        while to > from {
+            #[cfg(test)]
+            FIT_TRIES.with(|tries| tries.set(tries.get() + 1));
+            let Some(unit) = to.checked_sub(1).and_then(|last| self.units.get(last)) else {
+                break;
+            };
+            if unit.top + unit.height - start > room + EPSILON {
+                break;
+            }
+            if self.extent(from, to) <= room + EPSILON {
+                allowed = to;
+            }
+            if to >= count {
+                break;
+            }
+            to = self.next_break.get(to).copied().unwrap_or(count);
+        }
+        allowed - from
+    }
+
+    /// How many units from `from` on fit in `room`, wherever a page may end: what a page
+    /// that holds nothing else takes when [`Stacked::fit`] finds no end.
+    fn fit_any(&self, from: usize, room: f64) -> usize {
+        let start = self.start(from);
+        let mut any = from;
         for to in from + 1..=self.units.len() {
             let Some(unit) = self.units.get(to - 1) else {
                 break;
@@ -1471,12 +1524,9 @@ impl<'d> Stacked<'d> {
             }
             if self.extent(from, to) <= room + EPSILON {
                 any = to;
-                if self.units.get(to).is_none_or(|next| next.breaks) {
-                    allowed = to;
-                }
             }
         }
-        (allowed - from, any - from)
+        any - from
     }
 
     /// Paints units `units`: the paragraphs' lines and the nested tables' bands among
@@ -1730,6 +1780,18 @@ fn stack<'d>(
         height += paragraph::space_after(document, last.props()).0;
     }
     stacked.height = height;
+    // Where a page may end next, from each unit on.
+    let count = stacked.units.len();
+    let mut next = count;
+    stacked.next_break = vec![count; count];
+    for index in (0..count).rev() {
+        if let Some(slot) = stacked.next_break.get_mut(index) {
+            *slot = next;
+        }
+        if stacked.units.get(index).is_some_and(|unit| unit.breaks) {
+            next = index;
+        }
+    }
     stacked
 }
 

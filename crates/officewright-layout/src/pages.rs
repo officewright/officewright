@@ -283,9 +283,12 @@ struct Laid<S> {
     /// The pieces of lines painting headers and footers walked in the last pass.
     #[cfg_attr(not(test), allow(dead_code))] // reason: read by the tests of that bound only
     frames_walked: usize,
-    /// How many times header rows to repeat were laid out in the last pass.
+    /// How many times header rows to repeat were laid out, and copied onto a page, in
+    /// the last pass.
     #[cfg_attr(not(test), allow(dead_code))] // reason: read by the tests of that bound only
     headers_laid: usize,
+    #[cfg_attr(not(test), allow(dead_code))] // reason: read by the tests of that bound only
+    headers_copied: usize,
 }
 
 /// Lays out the body of every section of `document` on pages, at most `max_pages` of
@@ -369,6 +372,7 @@ fn paginate_with<S: PageSink>(
             frames_laid: 0,
             frames_walked: 0,
             headers_laid: 0,
+            headers_copied: 0,
             cursor: 0.0,
             above: None,
             next_number: 1,
@@ -402,6 +406,7 @@ fn paginate_with<S: PageSink>(
                 frames_laid: pager.frames_laid,
                 frames_walked: pager.frames_walked,
                 headers_laid: pager.headers_laid,
+                headers_copied: pager.headers_copied,
             });
         }
         totals = found;
@@ -680,16 +685,16 @@ struct Checkpoint {
 }
 
 /// A table's header rows as they are repeated on the pages it goes on to: whether they
-/// have a `PAGE` field, so that they are laid out again for every page, what laying them
-/// out costs by [`layout_cost`], their last layout, and whether one of them was cut over
-/// pages, so that they take more than a page's body and are never repeated. Their height
-/// and what drawing them costs are checked before they are copied onto a page, so that
-/// header rows that are not repeated cost nothing more on the pages after.
+/// have a `PAGE` field, their layout, made once, and whether they are no longer repeated:
+/// one of them was cut over pages, so that they take more than a page's body, or what
+/// followed them on a page did not fit below them. Their height and what drawing them
+/// costs are checked before they are copied onto a page, so that header rows that are not
+/// repeated cost nothing more on the pages after.
 struct Repeats {
     page_field: bool,
-    cost: usize,
     laid: Option<LaidHeader>,
     cut: bool,
+    crowded: bool,
 }
 
 /// Header rows laid out: each band, the height of all with the border below the last,
@@ -701,16 +706,16 @@ struct LaidHeader {
 }
 
 impl Repeats {
-    /// For the header rows `rows` of a table of `document`.
-    fn new(document: &Document, rows: &[Row]) -> Self {
-        let cells = || rows.iter().flat_map(|row| row.cells());
+    /// For the header rows `rows` of a table.
+    fn new(rows: &[Row]) -> Self {
         Self {
-            page_field: cells().any(|cell| field_kinds(cell.blocks(), 0).0),
-            cost: cells()
-                .map(|cell| layout_cost(document, cell.blocks()).saturating_add(1))
-                .fold(rows.len(), usize::saturating_add),
+            page_field: rows
+                .iter()
+                .flat_map(|row| row.cells())
+                .any(|cell| field_kinds(cell.blocks(), 0).0),
             laid: None,
             cut: false,
+            crowded: false,
         }
     }
 }
@@ -749,8 +754,9 @@ struct Pager<'d, 'f, 'b, S> {
     /// walked.
     frames_laid: usize,
     frames_walked: usize,
-    /// How many times header rows to repeat were laid out.
+    /// How many times header rows to repeat were laid out, and copied onto a page.
     headers_laid: usize,
+    headers_copied: usize,
     /// The top of what comes next on the current page: under the last line placed,
     /// without the space below it.
     cursor: f64,
@@ -1470,7 +1476,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         let prepared = Prepared::new(table, labels, width, &flowed.location, &mut context);
         let count = prepared.band_count();
         let header = prepared.header_bands();
-        let mut repeats = Repeats::new(self.document, prepared.header_rows());
+        let mut repeats = Repeats::new(prepared.header_rows());
         let mut first_page = None;
         let mut pieces = 0;
         let mut band = 0;
@@ -1525,8 +1531,8 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                     )
                 } else if prepared.wide(band) {
                     Some(
-                        "table rows of more than 63 cells, more than Word holds, are not split \
-                         across pages",
+                        "table rows of more than 63 cells, more than Word holds, or next to one, \
+                         are not split across pages",
                     )
                 } else {
                     None
@@ -1562,6 +1568,10 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                     &flowed.location,
                     "table rows are taller than the body of their page".to_owned(),
                 );
+                // Header rows that leave no room for what follows them are not repeated
+                // again. Hypothesis until a Word render: a page of header rows and a row
+                // that runs off it, on every page, is no layout of Word's.
+                repeats.crowded |= repeated;
             }
             let here = self.page_count().saturating_sub(1);
             if pieces == 0 {
@@ -1656,11 +1666,11 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
 
     /// Puts the header bands `0..header` of `prepared`, table `index` of the flow, at
     /// the top of the page it goes on to before band `band`, as its pieces from `pieces`
-    /// on, unless they alone take more than the page's body; returns whether it did. Like a
-    /// page header, they are drawn on every page, so they take from what headers and
-    /// footers may draw and lay out on all pages together, and past it they are not
-    /// repeated; they are laid out again only for a `PAGE` field, and otherwise drawn as
-    /// `repeats` has them.
+    /// on, unless they alone take more than the page's body; returns whether it did. They
+    /// are laid out once, so that a `PAGE` field in them shows the number of the page
+    /// they were laid out for (reported), and, like a page header, drawn on every page:
+    /// they take from what headers and footers may draw on all pages together, and past it
+    /// they are not repeated.
     fn repeat_header(
         &mut self,
         index: usize,
@@ -1668,17 +1678,12 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         repeats: &mut Repeats,
         pieces: &mut usize,
     ) -> Result<bool> {
-        if header == 0 || band < header || repeats.cut {
+        if header == 0 || band < header || repeats.cut || repeats.crowded {
             return Ok(false);
         }
         let body = self.body()?;
-        let section = self.pages.last().map_or(0, |page| page.section);
-        if repeats.page_field || repeats.laid.is_none() {
-            if self.frame_laid_budget == 0 {
-                self.report_header_rows_left_out();
-                return Ok(false);
-            }
-            self.frame_laid_budget = self.frame_laid_budget.saturating_sub(repeats.cost);
+        if repeats.laid.is_none() {
+            let section = self.pages.last().map_or(0, |page| page.section);
             self.lay_out_header(prepared, repeats, section);
         }
         let Some(laid) = repeats.laid.as_ref() else {
@@ -1692,7 +1697,18 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             return Ok(false);
         }
         self.frame_budget -= laid.drawn;
-        for drawn in laid.bands.clone() {
+        let bands = laid.bands.clone();
+        self.headers_copied += 1;
+        if repeats.page_field {
+            self.fonts.report_once(
+                ReportKind::FeatureUnsupported,
+                prepared.location(),
+                "a PAGE field in table header rows repeated on later pages shows the number \
+                 of the page they were first laid out for"
+                    .to_owned(),
+            );
+        }
+        for drawn in bands {
             self.put_band(index, *pieces, drawn, self.cursor, true);
             *pieces += 1;
         }
@@ -1700,15 +1716,15 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
     }
 
     /// Reports, once, that header rows are not repeated past what headers and footers may
-    /// draw or lay out on all pages together.
+    /// draw on all pages together.
     fn report_header_rows_left_out(&mut self) {
         self.fonts.report_once(
             ReportKind::Overflow,
             &Location::default(),
             format!(
                 "table header rows are not repeated past {MAX_FRAME_DRAWN} glyphs, characters, \
-                 shapes and pieces painted, or {MAX_FRAME_LAID} characters and pieces laid out, \
-                 by headers, footers and repeated header rows on all pages together"
+                 shapes and pieces painted by headers, footers and repeated header rows on all \
+                 pages together"
             ),
         );
     }
@@ -2726,10 +2742,11 @@ mod tests {
     }
 
     #[test]
-    fn repeated_header_rows_show_their_page_within_what_page_headers_may_draw() {
-        // Header rows are drawn on every page as a page header is: a `PAGE` field in one
-        // shows the number of each page it is repeated on. Twenty rows after a header row
-        // with a `PAGE` field: "1" on page 1, "2" on page 2, "3" on page 3.
+    fn repeated_header_rows_are_laid_out_once_and_drawn_within_what_page_headers_may_draw() {
+        // Header rows are laid out once to be repeated, so that a `PAGE` field in them
+        // shows the number of the page they were laid out for, and that is reported.
+        // Twenty rows after a header row with a `PAGE` field: "1" on page 1, as the table
+        // starts there, then "2" on pages 2 and 3.
         let numbered = |budgets: (usize, usize)| {
             let document = document(|style| {
                 let header = Row::default().with_header(true).with_cells(vec![
@@ -2765,27 +2782,46 @@ mod tests {
             (firsts, messages(&fonts.into_report()))
         };
         let left_out = "table header rows are not repeated past";
+        let field = "a PAGE field in table header rows repeated";
+        let has = |report: &[String], start: &str| {
+            report.iter().any(|message| message.starts_with(start))
+        };
         let (firsts, report) = numbered((MAX_FRAME_DRAWN, MAX_FRAME_LAID));
         let shown = |texts: [&str; 3]| texts.map(|text| Some(text.to_owned())).to_vec();
-        assert_eq!(firsts, shown(["1", "2", "3"]));
-        assert!(
-            !report.iter().any(|message| message.starts_with(left_out)),
-            "{report:?}"
-        );
-        // Past what headers and footers may draw, or lay out, they are not repeated, and
-        // that is reported: with nothing to draw, not on page 2; with one character to lay
-        // out, which their layout for page 2 uses up, not on page 3.
-        for (budgets, expected) in [
-            ((0, MAX_FRAME_LAID), ["1", "A", "A"]),
-            ((MAX_FRAME_DRAWN, 1), ["1", "2", "A"]),
-        ] {
-            let (firsts, report) = numbered(budgets);
-            assert_eq!(firsts, shown(expected));
-            assert!(
-                report.iter().any(|message| message.starts_with(left_out)),
-                "{report:?}"
-            );
-        }
+        assert_eq!(firsts, shown(["1", "2", "2"]));
+        assert!(has(&report, field) && !has(&report, left_out), "{report:?}");
+        // Past what headers and footers may draw, they are not repeated, and that is
+        // reported: with nothing to draw, not on page 2.
+        let (firsts, report) = numbered((0, MAX_FRAME_LAID));
+        assert_eq!(firsts, shown(["1", "A", "A"]));
+        assert!(has(&report, left_out), "{report:?}");
+    }
+
+    #[test]
+    fn header_rows_that_leave_no_room_are_not_repeated_again() {
+        // A header row of eight lines fills a page: repeated on page 2, it leaves no room
+        // for the row after it, which runs off the page; from then on it is not repeated.
+        // Ten rows of a line after it: the header row on page 1, both again on page 2,
+        // eight rows on page 3, the last on page 4, the header row copied once.
+        let document = document(|style| {
+            let mut rows = vec![row_of(style, &[8], false).with_header(true)];
+            rows.extend((0..10).map(|_| row_of(style, &[1], false)));
+            one_section(vec![table_with(rows, 0.0).into()])
+        });
+        let book = book(vec![minimal()]);
+        let mut fonts = Fonts::new(&book);
+        let mut shaper = Shaper::new();
+        let laid = paginate_with(
+            &document,
+            &mut fonts,
+            &mut shaper,
+            100,
+            (MAX_FRAME_DRAWN, MAX_FRAME_LAID),
+            Vec::new,
+        )
+        .expect("pages");
+        let counts: Vec<usize> = laid.sink.iter().map(|page| page.fragments.len()).collect();
+        assert_eq!((counts, laid.headers_copied), (vec![1, 2, 8, 1], 1));
     }
 
     #[test]
@@ -2913,6 +2949,43 @@ mod tests {
         };
         assert_eq!(wide(63), (7, false));
         assert_eq!(wide(64), (6, true));
+        // Nor is a row of one cell under a row whose cells alternate a bottom border and
+        // none, when the line between them has more segments than two rows of Word's make
+        // (127): 300 cells give 150; 63 give 32, and the row is cut.
+        let beside = |cells: usize| {
+            use crate::ir::{Border, BorderSide, CellBorders};
+
+            let document = document(|style| {
+                let mut blocks: Vec<Block> =
+                    (0..5).map(|_| lines(style, 1, spacing(0.0, 0.0))).collect();
+                let line = BorderSide::Line(Border::default().with_width(Pt(1.0)));
+                let above = Row::default().with_cells(
+                    (0..cells)
+                        .map(|index| {
+                            let bottom = if index % 2 == 0 {
+                                line
+                            } else {
+                                BorderSide::None
+                            };
+                            Cell::default()
+                                .with_borders(CellBorders::default().with_bottom(bottom))
+                                .with_blocks([lines(style, 1, spacing(0.0, 0.0))])
+                        })
+                        .collect::<Vec<_>>(),
+                );
+                let rows = vec![above, row_of(style, &[3], false)];
+                blocks.push(table_with(rows, 0.0).into());
+                one_section(blocks)
+            });
+            let (on_pages, report) = laid(&document, 100);
+            let first = on_pages.expect("pages").pages[0].fragments.len();
+            let noted = messages(&report)
+                .iter()
+                .any(|message| message.starts_with("table rows of more than 63 cells"));
+            (first, noted)
+        };
+        assert_eq!(beside(63), (7, false));
+        assert_eq!(beside(300), (6, true));
     }
 
     #[test]
@@ -2976,6 +3049,37 @@ mod tests {
     }
 
     #[test]
+    fn lines_kept_together_beside_a_long_cell_are_not_walked_on_the_pages_they_wait() {
+        // A paragraph kept on one page (`w:keepLines`), taller than a page, waits in its
+        // cell while the cell beside it goes on over 50 pages: a page that cannot end
+        // among its lines tries one end of it, not each of the 3200 lines that would fit.
+        // Four such cells and a cell of 400 lines: a few ends a page, not thousands.
+        let document = document(|style| {
+            let tiny = ParagraphProps::default()
+                .with_widow_control(false)
+                .with_keep_lines(true)
+                .with_spacing(Spacing::default().with_line(LineSpacing::Exact(Pt(0.05))));
+            let kept = || Cell::default().with_blocks([lines(style, 4000, tiny.clone())]);
+            let long = Cell::default().with_blocks(
+                (0..400)
+                    .map(|_| lines(style, 1, spacing(0.0, 0.0)))
+                    .collect::<Vec<_>>(),
+            );
+            let row = Row::default().with_cells(vec![kept(), kept(), kept(), kept(), long]);
+            one_section(vec![table_with(vec![row], 0.0).into()])
+        });
+        tables::FIT_TRIES.with(|tries| tries.set(0));
+        let (on_pages, _) = laid(&document, 1000);
+        let pages = on_pages.expect("pages").pages.len();
+        let tries = tables::FIT_TRIES.with(std::cell::Cell::get);
+        assert!(pages >= 50, "{pages} pages");
+        assert!(
+            tries < 10 * (pages + 400),
+            "{tries} ends tried on {pages} pages"
+        );
+    }
+
+    #[test]
     fn header_rows_tied_to_a_body_row_are_not_repeated() {
         // A header row merged vertically with the row below, which is no header row, makes
         // a band that is not all header rows: Word repeats only header rows, so nothing is
@@ -3002,44 +3106,21 @@ mod tests {
 
     #[test]
     fn header_rows_that_are_not_repeated_cost_nothing_on_the_pages_after() {
-        // A header row taller than a page is never repeated: the pages its table goes on
-        // to do not lay it out or copy it again. Its time is a few times that of the same
-        // row as a body row, not that of a row copied onto each of its 250 pages.
-        let time = |header: bool| {
-            let document = document(|style| {
-                let text = "A ".repeat(20_000);
-                let tall = Row::default().with_header(header).with_cells(vec![
-                    Cell::default().with_blocks([Paragraph::new(style)
-                        .with_props(spacing(0.0, 0.0))
-                        .with_inlines([Inline::text(text.as_str(), style)])
-                        .into()]),
-                ]);
-                let mut rows = vec![tall];
-                rows.extend((0..2000).map(|_| row_of(style, &[1], false)));
-                one_section(vec![table_with(rows, 0.0).into()])
-            });
-            (0..3)
-                .map(|_| {
-                    let start = std::time::Instant::now();
-                    let (on_pages, _) = laid(&document, 1000);
-                    assert!(on_pages.is_ok());
-                    start.elapsed().as_secs_f64()
-                })
-                .fold(f64::INFINITY, f64::min)
-        };
-        let (body, header) = (time(false), time(true));
-        assert!(
-            header < 3.0 * body + 0.05,
-            "as a header row: {header} s, as a body row: {body} s"
-        );
         // Header rows are laid out to be repeated once, however many pages they are
-        // repeated on, and not at all once one was cut over pages, which makes them taller
-        // than a page: ten rows of a line under a header row of a line, or of ten.
-        let header_laid = |lines: usize| {
+        // repeated on, and copied onto each of those pages only. Header rows too tall for
+        // a page are not copied, nor laid out again for every page, even with a `PAGE`
+        // field: once one of them was cut over pages they are not laid out at all, and
+        // otherwise once. Each case: the header rows, then 40 rows of a line.
+        let repeated = |header: &dyn Fn(RunStyleId) -> Vec<Row>, after_line: bool| {
             let document = document(|style| {
-                let mut rows = vec![row_of(style, &[lines], false).with_header(true)];
+                let mut rows = header(style);
                 rows.extend((0..40).map(|_| row_of(style, &[1], false)));
-                one_section(vec![table_with(rows, 0.0).into()])
+                let mut blocks = Vec::new();
+                if after_line {
+                    blocks.push(lines(style, 1, spacing(0.0, 0.0)));
+                }
+                blocks.push(table_with(rows, 0.0).into());
+                one_section(blocks)
             });
             let book = book(vec![minimal()]);
             let mut fonts = Fonts::new(&book);
@@ -3053,10 +3134,46 @@ mod tests {
                 Vec::new,
             )
             .expect("pages");
-            (laid.sink.len(), laid.headers_laid)
+            (laid.sink.len(), laid.headers_laid, laid.headers_copied)
         };
-        assert_eq!(header_laid(1), (6, 1));
-        assert_eq!(header_laid(10), (7, 0));
+        let header = |count: usize| {
+            move |style: RunStyleId| vec![row_of(style, &[count], false).with_header(true)]
+        };
+        // A header row of a line, repeated on five pages.
+        assert_eq!(repeated(&header(1), false), (6, 1, 5));
+        // Laid out once more for the table's start below a line, whether its rows start
+        // the table together: that layout is the one repeated.
+        assert_eq!(repeated(&header(1), true), (6, 1, 5));
+        // A header row of ten lines, cut over pages one and two.
+        assert_eq!(repeated(&header(10), false), (7, 0, 0));
+        // Two header rows of five lines, each kept whole, ten lines together: never
+        // repeated, laid out once to know, with or without a `PAGE` field.
+        let two = |field: bool| {
+            move |style: RunStyleId| {
+                let mut blocks = vec![lines(style, 5, spacing(0.0, 0.0))];
+                if field {
+                    blocks = vec![
+                        lines(style, 4, spacing(0.0, 0.0)),
+                        Paragraph::new(style)
+                            .with_props(spacing(0.0, 0.0))
+                            .with_inlines([Inline::Field(crate::ir::Field::new(
+                                FieldKind::Page,
+                                style,
+                            ))])
+                            .into(),
+                    ];
+                }
+                (0..2)
+                    .map(|_| {
+                        Row::default()
+                            .with_header(true)
+                            .with_cells(vec![Cell::default().with_blocks(blocks.clone())])
+                    })
+                    .collect()
+            }
+        };
+        assert_eq!(repeated(&two(false), false), (7, 1, 0));
+        assert_eq!(repeated(&two(true), false), (7, 1, 0));
     }
 
     #[test]
