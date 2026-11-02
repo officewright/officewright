@@ -18,6 +18,16 @@ case $host in
 *) fail "unsupported host $host" ;;
 esac
 
+# CORPUS_JOBS, if set, is how many documents the corpus runner lays out at once; else as
+# many as the cores it may use. A machine busy with other work sets fewer, so that no
+# document passes the runner's time-out for want of a core. The digits are spelled out,
+# since a range such as 0-9 can match other digits in some locales.
+if [ -n "${CORPUS_JOBS:-}" ]; then
+	[[ $CORPUS_JOBS =~ ^[123456789][0123456789]{0,3}$ ]] ||
+		fail "CORPUS_JOBS must be a whole number from 1 to 9999, not '$CORPUS_JOBS'"
+	echo "check.sh: the corpus runner lays out documents $CORPUS_JOBS at a time (CORPUS_JOBS)"
+fi
+
 # Every tool is checked up front, so a fresh machine sees the whole list at once.
 missing=
 need() { # command, install hint
@@ -176,6 +186,9 @@ if [ "$os" = linux ]; then
 	corpus_options+=(--references tests/corpus/reference)
 else
 	corpus_options+=(--statuses-only)
+fi
+if [ -n "${CORPUS_JOBS:-}" ]; then
+	corpus_options+=(--jobs "$CORPUS_JOBS")
 fi
 cargo run --quiet -p corpus-runner -- run --baseline tests/corpus/baseline.json \
 	--expected tools/corpus-runner/expected-errors.tsv "${corpus_options[@]}" tests/corpus
