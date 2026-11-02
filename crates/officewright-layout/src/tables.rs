@@ -44,6 +44,14 @@ thread_local! {
     pub(crate) static FIT_TRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// The most that table rows draw again on later pages, on all pages together, as page
+/// headers' budget counts it: the cells' shading and borders of the pieces of rows cut
+/// over pages after their first, and the header rows repeated. A cut row draws its cells
+/// again on every page it reaches, so a short row of many lines would otherwise draw that
+/// many times over; past it a cut row's later pieces are drawn without their cells'
+/// shading and borders, and header rows are not repeated, which is reported.
+pub(crate) const MAX_TABLE_REDRAWN: usize = 1 << 20;
+
 /// The widest a grid column is laid out: Word's widest page, 22 inches. A wider one is
 /// laid out that wide, and reported.
 const MAX_COLUMN: f64 = 1584.0;
@@ -468,7 +476,8 @@ impl<'d, 'l> Prepared<'d, 'l> {
     /// at the column's start edge.
     pub(crate) fn band(&self, band: usize, context: &mut Context<'d, '_, '_>) -> Drawn {
         let mut laid = self.lay_out(band, context);
-        self.piece(&mut laid, None, (true, false), context)
+        let mut redraw = usize::MAX;
+        self.piece(&mut laid, (None, &mut redraw), (true, false), context)
             .map_or_else(Drawn::default, |piece| piece.drawn)
     }
 
@@ -586,7 +595,7 @@ impl<'d, 'l> Prepared<'d, 'l> {
     pub(crate) fn piece(
         &self,
         laid: &mut LaidBand<'d>,
-        room: Option<f64>,
+        (room, redraw): (Option<f64>, &mut usize),
         (fresh, split): (bool, bool),
         context: &mut Context<'d, '_, '_>,
     ) -> Option<Piece> {
@@ -673,8 +682,11 @@ impl<'d, 'l> Prepared<'d, 'l> {
         laid.put = Some(put + height);
         let closed = !done || rows.end == self.rows.len();
         let bottom = above + height + if closed { below } else { 0.0 };
-        let mut items = Vec::new();
-        self.paint_table_shading((above + height, bottom), closed, &mut items, context.fonts);
+        // The cells' shading behind their content, and their borders over it.
+        let mut behind = Vec::new();
+        let mut content = Vec::new();
+        let mut lines = Vec::new();
+        self.paint_table_shading((above + height, bottom), closed, &mut behind, context.fonts);
         let row = rows.start;
         let placed_cells = self.rows.get(row).into_iter().flatten();
         let laid_cells = laid.cells.first().into_iter().flatten();
@@ -692,7 +704,7 @@ impl<'d, 'l> Prepared<'d, 'l> {
                 placed,
                 (left, right),
                 (0.0, above + height),
-                &mut items,
+                &mut behind,
                 context.fonts,
             );
             shift(
@@ -700,9 +712,31 @@ impl<'d, 'l> Prepared<'d, 'l> {
                 left + cell.margins.start().0,
                 above + cell.margins.top().0,
             );
-            items.extend(drawn.items);
+            content.extend(drawn.items);
         }
-        self.paint_borders((rows, &[0.0, above + height], bottom, closed), &mut items);
+        self.paint_borders((rows, &[0.0, above + height], bottom, closed), &mut lines);
+        // A later piece draws the cells' shading and borders again, within `redraw`.
+        let cost = behind.len() + lines.len();
+        let decorated = !continued || cost <= *redraw;
+        if continued {
+            *redraw = if decorated { *redraw - cost } else { 0 };
+        }
+        if !decorated {
+            context.fonts.report_once(
+                ReportKind::Overflow,
+                &self.location,
+                format!(
+                    "the shading and borders of table rows cut over pages are not drawn again \
+                     past {MAX_TABLE_REDRAWN} shapes and glyphs that table rows draw again on \
+                     later pages"
+                ),
+            );
+            behind.clear();
+            lines.clear();
+        }
+        let mut items = behind;
+        items.extend(content);
+        items.extend(lines);
         Some(Piece {
             drawn: Drawn {
                 height: Pt(bottom),
@@ -728,6 +762,40 @@ impl<'d, 'l> Prepared<'d, 'l> {
             height: Pt(height),
             items,
         }
+    }
+
+    /// The least a piece of `laid` takes on a page that holds nothing else, the borders
+    /// above and below it included: the band whole where a page may not cut it, else the
+    /// lines of each cell down to the first place a page may end below them.
+    pub(crate) fn least(&self, laid: &LaidBand<'d>, context: &mut Context<'d, '_, '_>) -> f64 {
+        let rows = laid.rows.clone();
+        let below = self.thickness(rows.end);
+        if laid.put.is_none() && !self.cuts(&rows) {
+            let heights = self.heights(laid, context);
+            let whole: f64 = rows
+                .clone()
+                .zip(&heights)
+                .map(|(row, height)| self.thickness(row) + height)
+                .sum();
+            return whole + below;
+        }
+        let content = laid
+            .cells
+            .first()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|cell| {
+                let units = &cell.content;
+                let end = units
+                    .next_break
+                    .get(cell.next)
+                    .copied()
+                    .unwrap_or(units.units.len());
+                cell.margins.top().0 + units.extent(cell.next, end) + cell.margins.bottom().0
+            })
+            .fold(0.0, f64::max);
+        self.thickness(rows.start) + content + below
     }
 
     /// The height of each row of `laid` laid out whole, below its top border: its tallest

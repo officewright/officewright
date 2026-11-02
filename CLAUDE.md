@@ -57,7 +57,9 @@ crates/
                         between the lines of their cells and header rows repeated as Word does them;
                         not yet: rows tied by a vertically merged cell are not cut, nor a nested
                         table's rows inside their lines, a nested table's header rows are not
-                        repeated, and content taller than a row of exact height is not cut off),
+                        repeated, a PAGE field in repeated header rows or in a row cut over pages
+                        shows the number of one page only, and content taller than a row of exact
+                        height is not cut off),
                         and draws floating pictures where they are anchored (stacked behind or in
                         front of the text, which does not wrap around them yet), behind private
                         modules;
