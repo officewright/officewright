@@ -128,7 +128,24 @@ fn keeps_line_units_in_points_on_a_document_grid_and_bounds_units() {
     translation.document().validate().unwrap();
     let props = paragraphs(&translation)[0].props();
     assert_eq!(props.spacing().before(), Pt(0.0));
-    assert!(props.spacing().after().0 <= f64::from(i32::MAX) / 20.0);
+    let bound = f64::from(i32::MAX) / 20.0;
+    assert!(props.spacing().after().0 <= bound);
+    assert!(props.indent().start().0 <= bound);
+    assert!(props.indent().first_line().0 >= -bound);
+    // A character is the paragraph mark's size: two of a 16 pt mark are 32 pt, the first
+    // line of a Chinese paragraph (contract-zh and notice-zh). The grid Word writes into
+    // every document, of the default type, is no grid: a line is 12 pt there.
+    let body = r#"<w:p><w:pPr><w:spacing w:beforeLines="100"/><w:ind w:firstLineChars="200"/><w:rPr><w:sz w:val="32"/></w:rPr></w:pPr></w:p><w:sectPr><w:docGrid w:linePitch="360"/></w:sectPr>"#;
+    let translation = translate(&with_parts(body, &[]));
+    let props = paragraphs(&translation)[0].props();
+    assert_eq!(props.indent().first_line(), Pt(32.0));
+    assert_eq!(props.spacing().before(), Pt(12.0));
+    let typed = body.replace(r#"<w:docGrid "#, r#"<w:docGrid w:type="default" "#);
+    let translation = translate(&with_parts(&typed, &[]));
+    assert_eq!(
+        paragraphs(&translation)[0].props().spacing().before(),
+        Pt(12.0)
+    );
 }
 
 /// An inline, briefly; fields with their results.
