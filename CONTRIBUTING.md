@@ -47,6 +47,10 @@ you push. If a tool is missing, it lists every missing tool with an install comm
 - For `scripts/nightly.sh`: a nightly toolchain with Miri
   (`rustup toolchain install nightly --component miri`).
 
+On a machine busy with other work, `CORPUS_JOBS=2 scripts/check.sh` has the corpus
+runner lay out two documents at a time instead of one per core, so that none of them runs
+past the runner's time-out of 30 s per document.
+
 Enable the pre-commit hook (format, clippy, tests) once per clone:
 
 ```sh
