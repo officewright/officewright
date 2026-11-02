@@ -681,8 +681,6 @@ struct Checkpoint {
     /// they could still lay out.
     frame_budget: usize,
     frame_laid_budget: usize,
-    /// What table rows could still draw again on later pages.
-    table_budget: usize,
     /// Whether nothing was on the page yet.
     at_top: bool,
 }
@@ -773,7 +771,9 @@ struct Pager<'d, 'f, 'b, S> {
     frame_budget: usize,
     frame_laid_budget: usize,
     /// What table rows may still draw again on later pages, [`tables::MAX_TABLE_REDRAWN`]
-    /// at first: repeated header rows, and the shading and borders of cut rows.
+    /// at first: repeated header rows, and the shading and borders of cut rows. It is not
+    /// kept at checkpoints: nothing goes back past a table's first piece, before which a
+    /// table draws nothing again.
     table_budget: usize,
     /// The page counts of the pass before, for `NUMPAGES` and `SECTIONPAGES`.
     totals: Totals,
@@ -1446,8 +1446,9 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
     /// than the page's body (Word's renders of `E-table-row-split.docx`,
     /// `E-table-header-repeat.docx` and `E-table-header-repeat-tall.docx`). A row that
     /// stays on one page (`w:cantSplit`), and each header row, splits only on a page that
-    /// holds nothing else; the header rows start the table on a page together, else on
-    /// the next. Hypothesis until a Word render: header rows that fit at the foot of a page
+    /// holds nothing else, or only header rows repeated (a hypothesis until a Word render
+    /// for the latter); the header rows start the table on a page together, else on the
+    /// next. Hypothesis until a Word render: header rows that fit at the foot of a page
     /// where nothing of the row after them does stay there, and are repeated at the top of
     /// the next. Returns the page of its first piece and its number of pieces.
     fn place_table(
@@ -2383,7 +2384,6 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             leaders: self.leaders,
             frame_budget: self.frame_budget,
             frame_laid_budget: self.frame_laid_budget,
-            table_budget: self.table_budget,
             at_top: self.page_is_empty(),
         }
     }
@@ -2408,7 +2408,6 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         self.above = checkpoint.above;
         self.frame_budget = checkpoint.frame_budget;
         self.frame_laid_budget = checkpoint.frame_laid_budget;
-        self.table_budget = checkpoint.table_budget;
         self.next_number = checkpoint.next_number;
         self.leaders = checkpoint.leaders;
     }
@@ -2895,6 +2894,33 @@ mod tests {
             ]
         });
         assert_eq!(cut, (vec![2, 2], 1, false));
+        // A row of seven lines, then one of ten not yet started on page 2: the header row
+        // is repeated above the first lines of each.
+        let unstarted = laid(&|style| {
+            vec![
+                row_of(style, &[1], false).with_header(true),
+                row_of(style, &[7], false),
+                row_of(style, &[10], false),
+            ]
+        });
+        assert_eq!(unstarted, (vec![2, 2, 2], 2, false));
+        // A paragraph kept on one page (`w:keepLines`) of twenty lines, taller than a
+        // page, is cut all the same on pages that hold nothing else, also below the header
+        // row repeated there: so the header row is repeated on each of them.
+        let kept = laid(&|style| {
+            let cell = Cell::default().with_blocks([lines(
+                style,
+                20,
+                spacing(0.0, 0.0)
+                    .with_widow_control(false)
+                    .with_keep_lines(true),
+            )]);
+            vec![
+                row_of(style, &[1], false).with_header(true),
+                Row::default().with_cells(vec![cell]),
+            ]
+        });
+        assert_eq!(kept, (vec![1, 2, 2, 2], 3, false));
     }
 
     #[test]

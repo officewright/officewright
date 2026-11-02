@@ -766,7 +766,7 @@ impl<'d, 'l> Prepared<'d, 'l> {
 
     /// The least a piece of `laid` takes on a page that holds nothing else, the borders
     /// above and below it included: the band whole where a page may not cut it, else the
-    /// lines of each cell down to the first place a page may end below them.
+    /// first line of each cell, which such a page takes at least ([`Self::piece`]).
     pub(crate) fn least(&self, laid: &LaidBand<'d>, context: &mut Context<'d, '_, '_>) -> f64 {
         let rows = laid.rows.clone();
         let below = self.thickness(rows.end);
@@ -787,11 +787,7 @@ impl<'d, 'l> Prepared<'d, 'l> {
             .flatten()
             .map(|cell| {
                 let units = &cell.content;
-                let end = units
-                    .next_break
-                    .get(cell.next)
-                    .copied()
-                    .unwrap_or(units.units.len());
+                let end = (cell.next + 1).min(units.units.len());
                 cell.margins.top().0 + units.extent(cell.next, end) + cell.margins.bottom().0
             })
             .fold(0.0, f64::max);
