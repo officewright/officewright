@@ -3572,7 +3572,7 @@ class Packages(unittest.TestCase):
             f"{wps}bodyPr": ([{f"{a}prstTxWarp"},
                               {f"{a}noAutofit", f"{a}normAutofit", f"{a}spAutoFit"}], []),
             f"{pic}pic": ([{f"{pic}nvPicPr"}, {f"{pic}blipFill"}, {f"{pic}spPr"}], [0, 1, 2]),
-            f"{pic}nvPicPr": ([{f"{pic}cNvPr"}, {f"{pic}cNvPicPr"}, {f"{pic}nvPr"}], [0, 1]),
+            f"{pic}nvPicPr": ([{f"{pic}cNvPr"}, {f"{pic}cNvPicPr"}], [0, 1]),
             f"{pic}blipFill": ([{f"{a}blip"}, {f"{a}srcRect"}, {f"{a}tile", f"{a}stretch"}],
                                []),
             f"{a}xfrm": ([{f"{a}off"}, {f"{a}ext"}], []),
@@ -3598,6 +3598,38 @@ class Packages(unittest.TestCase):
                     for k in required:
                         self.assertIn(k, places, f"{where} lacks {order[k]}")
         self.assertEqual(seen, set(sequences))
+
+    def test_box_case_labels_stay_with_their_boxes(self):
+        # A label whose drawing follows in one of the next two paragraphs is kept on the page
+        # of that paragraph (w:keepNext), and so is a paragraph between them, so that no
+        # label ends a page without its box.
+        wp = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}"
+        v = "{urn:schemas-microsoft-com:vml}"
+
+        def drawn(p):
+            return any(p.find(f".//{tag}") is not None
+                       for tag in (f"{wp}inline", f"{wp}anchor", f"{v}shape"))
+
+        seen = 0
+        for doc in self.docs:
+            # The floating boxes of E-textbox-inline-floating are placed from the margin and
+            # the page, wherever their anchors fall.
+            if not doc.name.startswith(("E-textbox-", "E-shape-colors")) or (
+                doc.name == "E-textbox-inline-floating"
+            ):
+                continue
+            body = ElementTree.fromstring(dict(rules.parts(doc))["word/document.xml"])
+            paragraphs = body.find(f"{W}body").findall(f"{W}p")
+            for k, p in enumerate(paragraphs):
+                label = "".join(t.text or "" for t in p.findall(f"{W}r/{W}t"))
+                following = paragraphs[k + 1:k + 3]
+                if not label.startswith("Case ") or drawn(p) or not any(map(drawn, following)):
+                    continue
+                seen += 1
+                held = next(n for n, q in enumerate(following) if drawn(q))
+                for kept in [p] + following[:held]:
+                    self.assertIsNotNone(kept.find(f"{W}pPr/{W}keepNext"), f"{doc.name}: {label}")
+        self.assertGreater(seen, 30)
 
     def test_drawing_revision_and_form_field_ids_are_unique(self):
         # Word refuses a document whose drawings share a docPr id; revisions and the ranges
@@ -3811,6 +3843,11 @@ class Packages(unittest.TestCase):
         self.assertEqual([len(box_paragraphs(boxes(d)[0])) for d in anchors], [1] * 4)
         children = body.findall(f"{W}p")
         holders = [p for p in children if p.find(f".//{wp}anchor") is not None]
+        # The label and the empty paragraph stay on the page of the box (w:keepNext).
+        for holder in holders:
+            at = children.index(holder)
+            for kept in children[at - 2:at]:
+                self.assertIsNotNone(kept.find(f"{W}pPr/{W}keepNext"))
         self.assertEqual([twips(p, f"{W}spacing", "before") for p in holders],
                          ["80", "80", "80", "0"])
         # Before each, an empty paragraph without space after, so that the space before
