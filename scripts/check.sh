@@ -20,9 +20,12 @@ esac
 
 # CORPUS_JOBS, if set, is how many documents the corpus runner lays out at once; else as
 # many as the cores it may use. A machine busy with other work sets fewer, so that no
-# document passes the runner's time-out for want of a core.
-if [ -n "${CORPUS_JOBS:-}" ] && ! [[ $CORPUS_JOBS =~ ^[1-9][0-9]*$ ]]; then
-	fail "CORPUS_JOBS must be a whole number from 1, not '$CORPUS_JOBS'"
+# document passes the runner's time-out for want of a core. The digits are spelled out,
+# since a range such as 0-9 can match other digits in some locales.
+if [ -n "${CORPUS_JOBS:-}" ]; then
+	[[ $CORPUS_JOBS =~ ^[123456789][0123456789]{0,3}$ ]] ||
+		fail "CORPUS_JOBS must be a whole number from 1 to 9999, not '$CORPUS_JOBS'"
+	echo "check.sh: the corpus runner lays out $CORPUS_JOBS documents at a time"
 fi
 
 # Every tool is checked up front, so a fresh machine sees the whole list at once.

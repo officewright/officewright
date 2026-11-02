@@ -34,6 +34,8 @@ This policy is not negotiable. A contribution that breaks it will be reverted.
 
 `scripts/check.sh` is the quality gate CI runs on every pull request. Run it before
 you push. If a tool is missing, it lists every missing tool with an install command.
+On a machine busy with other work, `CORPUS_JOBS=2 scripts/check.sh` lays out two corpus
+documents at a time instead of one per core, so that none of them runs past the time-out.
 
 - Rust stable with `rustfmt` and `clippy` (MSRV is 1.85).
 - `cargo-deny`, `cargo-machete`, `cargo-c`, `typos-cli`, `taplo-cli`: prebuilt
