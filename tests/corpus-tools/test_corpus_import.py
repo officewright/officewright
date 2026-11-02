@@ -947,8 +947,8 @@ class Import(unittest.TestCase):
 
 
 class RenderedPageBreaks(unittest.TestCase):
-    """Each page a table row crosses counts once among Word's page breaks (#410). The
-    first tests give the marks of Word's re-saved copies of E-table-row-split,
+    """Within a table row each page counts once among Word's page breaks (#410). The first
+    tests give the marks of Word's re-saved copies of E-table-row-split,
     E-table-row-cant-split-tall, E-table-row-split-nested and E-table-row-cant-split."""
 
     @staticmethod
@@ -1049,6 +1049,8 @@ class RenderedPageBreaks(unittest.TestCase):
            f"<w:sdtContent>{MARK}</w:sdtContent></w:sdt>")
     SMART_TAG = f'<w:smartTag w:uri="u" w:element="e"><w:smartTagPr/>{MARK}</w:smartTag>'
     CUSTOM_XML = f'<w:customXml w:element="e"><w:customXmlPr/>{MARK}</w:customXml>'
+    COMMENT_END = ('<w:commentRangeEnd w:id="1"/><w:r><w:rPr><w:rStyle w:val="CommentReference"/>'
+                   '</w:rPr><w:commentReference w:id="1"/></w:r>')
     UNSHOWN_BEFORE = {
         "pPr": f'<w:pPr><w:spacing w:after="0"/></w:pPr>{MARK}',
         "rPr": MARK,
@@ -1058,7 +1060,9 @@ class RenderedPageBreaks(unittest.TestCase):
         "bookmarkEnd": f'<w:bookmarkEnd w:id="2"/>{MARK}',
         "proofErr": f'<w:proofErr w:type="spellStart"/>{MARK}',
         "commentRangeStart": f'<w:commentRangeStart w:id="1"/>{MARK}',
-        "commentRangeEnd": f'<w:commentRangeEnd w:id="1"/>{MARK}',
+        # Word writes the comment's reference mark right after its range.
+        "commentRangeEnd": COMMENT_END + MARK,
+        "commentReference": COMMENT_END + MARK,
         "permStart": f'<w:permStart w:id="1" w:edGrp="everyone"/>{MARK}',
         "permEnd": f'<w:permEnd w:id="1"/>{MARK}',
         "moveFromRangeStart": f'<w:moveFromRangeStart w:id="1" w:name="m"/>{MARK}',
@@ -1096,6 +1100,24 @@ class RenderedPageBreaks(unittest.TestCase):
                                     self.cell(self.mid("ab", "cd")))
                          + "</w:tbl>")
                 self.assertEqual(self.breaks(table), [(0, "Name"), (1, "cd")])
+
+    def test_hidden_text_before_a_row_start_shows_nothing(self):
+        # Text the run's own w:vanish hides precedes the row's start mark: the second cell's
+        # crossing counts. With w:vanish off, the text shows, the mark crosses a page, and
+        # the second cell's crossing is the same page.
+        for value, expected in (("", [(0, "Name"), (1, "cd")]),
+                                (' w:val="true"', [(0, "Name"), (1, "cd")]),
+                                (' w:val="1"', [(0, "Name"), (1, "cd")]),
+                                (' w:val="on"', [(0, "Name"), (1, "cd")]),
+                                (' w:val="0"', [(0, "Name")]),
+                                (' w:val="false"', [(0, "Name")]),
+                                (' w:val="off"', [(0, "Name")])):
+            with self.subTest(value=value):
+                first = (f"<w:p><w:r><w:rPr><w:vanish{value}/></w:rPr><w:t>hidden</w:t></w:r>"
+                         f"{self.MARK}</w:p>")
+                table = ("<w:tbl>" + self.row(self.cell(first), self.cell(self.mid("ab", "cd")))
+                         + "</w:tbl>")
+                self.assertEqual(self.breaks(table), expected)
 
     def test_a_row_start_in_a_later_cell_after_an_empty_one_stays_the_start(self):
         table = ("<w:tbl>"

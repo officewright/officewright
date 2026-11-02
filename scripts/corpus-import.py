@@ -859,27 +859,35 @@ def page_geometry(bbox: str) -> list[dict]:
     return pages
 
 
-# What a paragraph holds that shows nothing on the reference's pages: properties; markers of
-# ranges (bookmarks such as the _Hlk ones Word writes before a mark, proofing errors,
-# comments, permissions, moves); a field's code (its result shows, in the runs after the
-# separator); and text deleted or moved away, since make-reference.ps1 exports the content
-# without markup.
+# The elements a paragraph holds that show nothing on the reference's pages, which
+# make-reference.ps1 exports without markup: properties; markers of ranges (bookmarks such as
+# the _Hlk ones Word writes before a mark, proofing errors, comments and the reference mark
+# Word writes after a comment's range, permissions, moves); the fldChar and instrText of a
+# field's code; and text deleted or moved away. Only these elements are taken for unshown: a
+# field nested in another field's code counts as shown, and so does a legacy form field's box,
+# though it has no result runs (#410).
 UNSHOWN = {
     "pPr", "rPr", "sdtPr", "sdtEndPr", "smartTagPr", "customXmlPr",
     "bookmarkStart", "bookmarkEnd", "proofErr", "commentRangeStart", "commentRangeEnd",
-    "permStart", "permEnd", "moveFromRangeStart", "moveFromRangeEnd", "moveToRangeStart",
-    "moveToRangeEnd", "fldChar", "instrText", "del", "moveFrom",
+    "commentReference", "permStart", "permEnd", "moveFromRangeStart", "moveFromRangeEnd",
+    "moveToRangeStart", "moveToRangeEnd", "fldChar", "instrText", "del", "moveFrom",
 }
 # What wraps runs: what it holds counts as the paragraph's own, inserted and moved text too.
 WRAPPERS = {"r", "hyperlink", "ins", "moveTo", "smartTag", "sdt", "sdtContent", "customXml",
             "fldSimple", "dir", "bdo"}
 
 
+def hidden_run(run: ElementTree.Element) -> bool:
+    """Whether the run's own formatting hides it (w:vanish in its w:rPr)."""
+    vanish = run.find(f"{W}rPr/{W}vanish")
+    return vanish is not None and vanish.get(f"{W}val", "true") not in ("0", "false", "off")
+
+
 def leads(paragraph: ElementTree.Element, mark: ElementTree.Element) -> bool:
     """Whether the mark comes before everything the paragraph shows on the reference's
-    pages: only what UNSHOWN names precedes it (properties, markers of ranges, a field's
-    code, deleted or moved-away text), within runs and what WRAPPERS names. A field's result
-    and what a run shows otherwise (text, a tab, a break, a picture, a symbol) come first."""
+    pages: only what UNSHOWN names and runs of hidden text (their own w:vanish) precede it,
+    within runs and what WRAPPERS names. Anything else a run holds (text, a tab, a break, a
+    picture, a symbol, a field's result) shows."""
 
     def walk(element: ElementTree.Element) -> bool | None:
         for child in element:
@@ -887,6 +895,10 @@ def leads(paragraph: ElementTree.Element, mark: ElementTree.Element) -> bool:
                 return True
             name = local_name(child.tag)
             if name in UNSHOWN:
+                continue
+            if name == "r" and hidden_run(child):
+                if any(element is mark for element in child.iter()):
+                    return True
                 continue
             if name not in WRAPPERS:
                 return False
