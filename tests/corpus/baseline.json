@@ -844,9 +844,9 @@
     },
     "tests/corpus/generated/notice-zh.docx": {
       "line_agreement": 0.2857,
-      "ssim_mean": 0.8727,
-      "ssim_min": 0.8727,
-      "text_score": 0.9044
+      "ssim_mean": 0.8734,
+      "ssim_min": 0.8734,
+      "text_score": 0.8964
     },
     "tests/corpus/generated/quote-zh.docx": {
       "line_agreement": 0.4419,
@@ -1148,8 +1148,8 @@
     },
     "tests/corpus/word-rules/E-paragraph-units.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9349,
-      "ssim_min": 0.9349,
+      "ssim_mean": 0.9789,
+      "ssim_min": 0.9789,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-section-continuous-headers.docx": {

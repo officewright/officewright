@@ -1,6 +1,6 @@
 //! VML drawings: pictures in the line and floating, and their images.
 
-use super::drawing::{images_package, inline_picture, with_images};
+use super::drawing::{images_package, inline_picture, reported, with_images};
 use super::*;
 
 /// The namespaces a `w:pict` of the tests declares.
@@ -615,4 +615,305 @@ fn holds_offsets_that_add_up_past_a_coordinate_s_range_within_it() {
         .unwrap();
     assert_eq!(anchor.horizontal_offset(), Some(Pt(2_147_483_647.0)));
     assert_eq!(anchor.vertical_offset(), Some(Pt(-2_147_483_647.0)));
+}
+
+/// A run with an embedded object of `content`, with the original size Word writes.
+pub(super) fn object(content: &str) -> String {
+    format!(
+        r#"<w:r><w:object {VML_NAMESPACES} w:dxaOrig="1440" w:dyaOrig="720">{content}</w:object></w:r>"#
+    )
+}
+
+/// A run with an embedded object as Word writes one: a preview of the image of
+/// relationship `id` with this `style`, after a shape type and before the object's data.
+pub(super) fn object_preview(id: &str, style: &str) -> String {
+    object(&format!(
+        r##"<v:shapetype id="_x0000_t75" coordsize="21600,21600" o:spt="75" filled="f" stroked="f"><v:path o:connecttype="rect"/></v:shapetype><v:shape id="_x0000_i1025" type="#_x0000_t75" style="{style}" o:ole=""><v:imagedata r:id="{id}" o:title=""/></v:shape><o:OLEObject Type="Embed" ProgID="Equation.3" ShapeID="_x0000_i1025" DrawAspect="Content" ObjectID="_1000000001" r:id="rIdOle"/>"##
+    ))
+}
+
+/// The embedded objects of the body's runs, in order.
+fn objects(document: &Document) -> Vec<EmbeddedObject<'_>> {
+    super::format::paragraphs(document)
+        .into_iter()
+        .flat_map(|paragraph| paragraph.runs())
+        .flat_map(|run| run.content())
+        .filter_map(|item| match item {
+            RunContent::Object(object) => Some(object),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn reads_the_preview_of_an_embedded_object() {
+    // Word shows an embedded object (w:object) by its preview, a VML picture beside the
+    // object's data or control; most previews in the corpora are metafiles.
+    let control = object(
+        r##"<v:shape id="_x0000_i1026" type="#_x0000_t75" style="width:20pt;height:10pt"><v:imagedata r:id="rIdJpeg" o:title=""/></v:shape><w:control r:id="rIdControl" w:name="CheckBox1" w:shapeid="_x0000_i1026"/>"##,
+    );
+    let body = format!(
+        "<w:p>{}{}{}{}{}{}</w:p>",
+        object_preview("rIdEmf", "width:72pt;height:36pt"),
+        object_preview(
+            "rIdPng",
+            "position:absolute;margin-left:10pt;margin-top:20pt;width:30pt;height:40pt;z-index:1;mso-position-horizontal-relative:page;mso-position-vertical-relative:page"
+        ),
+        control,
+        object(
+            r#"<v:rect style="width:10pt;height:10pt"/><o:OLEObject Type="Embed" ProgID="Package" r:id="rIdOle"/>"#
+        ),
+        object(
+            r#"<v:shape style="width:10pt;height:10pt"><v:imagedata o:relid="rIdPng"/></v:shape><o:OLEObject Type="Embed" ProgID="Package" r:id="rIdOle"/>"#
+        ),
+        // Word writes the preview of a static metafile object as a v:rect (n777345.docx;
+        // from the review of #437).
+        object(
+            r#"<v:rect style="width:12pt;height:6pt"><v:imagedata r:id="rIdPng" o:title=""/></v:rect><o:OLEObject Type="Embed" ProgID="StaticMetafile" r:id="rIdOle"/>"#
+        ),
+    );
+    let document = with_images(&body);
+    let objects = objects(&document);
+    assert_eq!(objects.len(), 6);
+    let inline = objects[0].preview().unwrap();
+    assert_eq!(
+        (inline.width(), inline.height()),
+        (Some(Pt(72.0)), Some(Pt(36.0)))
+    );
+    assert!(inline.anchor().is_none());
+    assert_eq!(inline.image().map(Image::content_type), Some("image/x-emf"));
+    // A preview may float, as any VML picture.
+    let anchor = objects[1].preview().unwrap().anchor().unwrap();
+    assert_eq!(
+        anchor.horizontal_reference(),
+        Some(HorizontalReference::Page)
+    );
+    assert_eq!(anchor.horizontal_offset(), Some(Pt(10.0)));
+    assert_eq!(anchor.vertical_offset(), Some(Pt(20.0)));
+    // A control's, whose image the object reads as well.
+    let control = objects[2].preview().unwrap();
+    assert_eq!(control.width(), Some(Pt(20.0)));
+    assert_eq!(control.image().map(Image::bytes), Some(JPEG_BYTES));
+    // A rectangle is no preview, nor is a shape whose image data names no image by r:id,
+    // the only way Word takes one in a document (MS-OI29500, Part 4, §19.1.2.11(q)).
+    assert!(objects[3].preview().is_none());
+    assert!(objects[4].preview().is_none());
+    let rect = objects[5].preview().unwrap();
+    assert_eq!(
+        (rect.width(), rect.height()),
+        (Some(Pt(12.0)), Some(Pt(6.0)))
+    );
+    assert_eq!(rect.image().map(Image::bytes), Some(PNG_BYTES));
+    // The object is kept as written.
+    let xml = objects[0].to_xml();
+    assert!(xml.starts_with("<w:object"), "{xml}");
+    assert!(
+        xml.contains("o:OLEObject") && xml.contains("Equation.3"),
+        "{xml}"
+    );
+    assert!(
+        document.diagnostics().is_empty(),
+        "{:?}",
+        document.diagnostics()
+    );
+}
+
+#[test]
+fn reads_embedded_objects_through_markup_compatibility() {
+    // What lies below w:object goes through Markup Compatibility as what lies below
+    // w:pict does: VML's namespaces are understood, others are not.
+    let preview = object_preview("rIdPng", "width:1pt;height:1pt");
+    let refused = preview.replacen("<v:shape ", r#"<v:shape mc:MustUnderstand="w14" "#, 1);
+    match Document::from_bytes(images_package(&format!("<w:p>{refused}</w:p>"))) {
+        Err(Error::Unsupported(message)) => assert!(message.contains("mc:MustUnderstand")),
+        other => panic!("{other:?}"),
+    }
+    let shown = |requires: &str| {
+        let document = with_images(&format!(
+            "<w:p>{}</w:p>",
+            object(&format!(
+                r#"<mc:AlternateContent><mc:Choice Requires="{requires}"><v:shape style="width:1pt;height:1pt"><v:imagedata r:id="rIdPng"/></v:shape></mc:Choice><mc:Fallback><v:shape style="width:2pt;height:2pt"><v:imagedata r:id="rIdJpeg"/></v:shape></mc:Fallback></mc:AlternateContent>"#
+            ))
+        ));
+        objects(&document)[0].preview().unwrap().width()
+    };
+    assert_eq!(shown("v"), Some(Pt(1.0)));
+    assert_eq!(shown("w14"), Some(Pt(2.0)));
+}
+
+#[test]
+fn reads_a_vml_picture_written_as_a_rectangle() {
+    // A v:rect whose v:imagedata names an image shows it as a v:shape does, in a w:pict as
+    // in a w:object (drawinglayer-pic-pos.docx and tdf127085.docx of LibreOffice's tests;
+    // from the review of #437); a rectangle without one shows none.
+    let body = format!(
+        "<w:p>{}{}</w:p>",
+        pict(
+            r#"<v:rect style="position:absolute;margin-left:5pt;width:20pt;height:10pt;z-index:1"><v:imagedata r:id="rIdPng" o:title=""/></v:rect>"#
+        ),
+        pict(r#"<v:rect style="width:20pt;height:10pt" fillcolor="red"/>"#),
+    );
+    let document = with_images(&body);
+    let drawings = vml_drawings(&document);
+    let picture = drawings[0].picture().unwrap();
+    assert_eq!(
+        (picture.width(), picture.height()),
+        (Some(Pt(20.0)), Some(Pt(10.0)))
+    );
+    assert_eq!(picture.anchor().unwrap().horizontal_offset(), Some(Pt(5.0)));
+    assert_eq!(picture.image().map(Image::bytes), Some(PNG_BYTES));
+    assert!(drawings[1].picture().is_none());
+}
+
+#[test]
+fn reports_each_value_of_a_vml_picture_that_its_readers_do_not_take() {
+    // #243: as a DrawingML picture's, a value the readers refuse is read as not written,
+    // and reported as the document opens, once; a style's is reported by its declaration.
+    let picture = vml_picture(
+        "rIdPng",
+        "position:absolute;width:-1pt;height:2em;rotation:90deg;flip:z;margin-left:1;left:auto;margin-top:6pt;top:x;z-index:1.5;mso-position-horizontal:middle;mso-position-horizontal-relative:paragraph;mso-position-vertical:absolute;mso-position-vertical-relative:text;mso-wrap-distance-left:-1pt;mso-wrap-distance-top:x",
+        r#"o:allowincell="yes" o:allowoverlap="t" stroked="maybe""#,
+        r#"cropleft="12%" croptop="0.1" gain="lots" blacklevel="0" grayscale="yes""#,
+        r#"<v:stroke on="1"/><v:shadow on="x"/><w10:wrap type="around" anchorx="side" anchory="page"/>"#,
+    );
+    let document = with_images(&format!("<w:p>{picture}</w:p>"));
+    assert_eq!(
+        reported(&document),
+        [
+            r#"v:shape style="width:-1pt" is not valid; it is ignored"#,
+            r#"v:shape style="height:2em" is not valid; it is ignored"#,
+            r#"v:imagedata cropleft="12%" is not valid; it is ignored"#,
+            r#"v:shape style="rotation:90deg" is not valid; it is ignored"#,
+            r#"v:shape style="flip:z" is not valid; it is ignored"#,
+            r#"v:stroke on="1" is not valid; it is ignored"#,
+            r#"v:shape stroked="maybe" is not valid; it is ignored"#,
+            r#"v:imagedata gain="lots" is not valid; it is ignored"#,
+            r#"v:imagedata grayscale="yes" is not valid; it is ignored"#,
+            r#"v:shadow on="x" is not valid; it is ignored"#,
+            r#"v:shape style="mso-position-horizontal:middle" is not valid; it is ignored"#,
+            r#"v:shape style="margin-left:1" is not valid; it is ignored"#,
+            r#"v:shape style="left:auto" is not valid; it is ignored"#,
+            r#"v:shape style="top:x" is not valid; it is ignored"#,
+            r#"v:shape style="z-index:1.5" is not valid; it is ignored"#,
+            r#"v:shape o:allowincell="yes" is not valid; it is ignored"#,
+            r#"v:shape style="mso-wrap-distance-left:-1pt" is not valid; it is ignored"#,
+            r#"v:shape style="mso-wrap-distance-top:x" is not valid; it is ignored"#,
+            r#"w10:wrap type="around" is not valid; it is ignored"#,
+            r#"w10:wrap anchorx="side" is not valid; it is ignored"#,
+            r#"v:shape style="mso-position-horizontal-relative:paragraph" is not valid; it is ignored"#,
+        ]
+    );
+    // Each is read as not written.
+    let picture = vml_drawings(&document)[0].picture().unwrap();
+    assert_eq!((picture.width(), picture.height()), (None, None));
+    assert_eq!(picture.rotation(), 0.0);
+    assert!(!picture.flip_horizontal() && !picture.flip_vertical());
+    assert_eq!(picture.crop().unwrap().left(), 0.0);
+    // With v:stroke's on and stroked not taken, the shape type's stroked="f" counts.
+    assert!(!picture.has_outline());
+    assert!(!picture.has_color_adjustments() && !picture.has_shadow());
+    let anchor = picture.anchor().unwrap();
+    assert_eq!(anchor.horizontal_align(), None);
+    assert_eq!(anchor.horizontal_offset(), Some(Pt(0.0)));
+    assert_eq!(anchor.vertical_offset(), Some(Pt(6.0)));
+    assert_eq!(anchor.z_order(), 0);
+    assert!(anchor.layout_in_cell());
+    assert_eq!(anchor.distances().left(), Pt(9.0));
+    assert_eq!(anchor.distances().top(), Pt(0.0));
+    assert_eq!(anchor.wrap(), None);
+    assert_eq!(anchor.horizontal_reference(), None);
+    assert_eq!(
+        anchor.vertical_reference(),
+        Some(VerticalReference::Paragraph)
+    );
+}
+
+#[test]
+fn reports_the_values_after_one_that_decides_what_a_vml_picture_has() {
+    // A value that already decides whether the picture has an outline, adjusted colours
+    // or a shadow, or where it is, does not stop the values after it from being read
+    // and reported: the offsets of an aligned picture, anchorx and anchory where the
+    // style names a base on each axis; and a shape type's stroked is read too (from the
+    // review of #435).
+    let picture = vml_picture(
+        "rIdPng",
+        "position:absolute;width:1pt;height:1pt;mso-position-horizontal:center;margin-left:x;mso-position-horizontal-relative:margin;mso-position-vertical:center;margin-top:x;mso-position-vertical-relative:margin",
+        r#"stroked="x""#,
+        r#"gain="0.5" blacklevel="x" grayscale="t" bilevel="x""#,
+        r#"<v:stroke on="t"/><v:shadow on="t"/><v:shadow on="x"/><w10:wrap anchorx="x" anchory="x"/>"#,
+    );
+    let typed = pict(
+        r##"<v:shapetype id="t1" stroked="maybe"/><v:shape type="#t1" stroked="f" style="width:1pt;height:1pt"><v:imagedata r:id="rIdPng"/></v:shape>"##,
+    );
+    let document = with_images(&format!("<w:p>{picture}{typed}</w:p>"));
+    assert_eq!(
+        reported(&document),
+        [
+            r#"v:shape stroked="x" is not valid; it is ignored"#,
+            r#"v:imagedata blacklevel="x" is not valid; it is ignored"#,
+            r#"v:imagedata bilevel="x" is not valid; it is ignored"#,
+            r#"v:shadow on="x" is not valid; it is ignored"#,
+            r#"v:shape style="margin-left:x" is not valid; it is ignored"#,
+            r#"v:shape style="margin-top:x" is not valid; it is ignored"#,
+            r#"w10:wrap anchorx="x" is not valid; it is ignored"#,
+            r#"w10:wrap anchory="x" is not valid; it is ignored"#,
+            r#"v:shapetype stroked="maybe" is not valid; it is ignored"#,
+        ]
+    );
+    let picture = vml_drawings(&document)[0].picture().unwrap();
+    assert!(picture.has_outline() && picture.has_color_adjustments() && picture.has_shadow());
+    let anchor = picture.anchor().unwrap();
+    assert_eq!(
+        anchor.horizontal_align(),
+        Some(AnchorHorizontalAlign::Center)
+    );
+    assert_eq!(
+        anchor.horizontal_reference(),
+        Some(HorizontalReference::Margin)
+    );
+}
+
+#[test]
+fn reports_no_value_of_a_vml_picture_that_its_readers_take() {
+    // Every value written as Word writes it; the values that place a floating picture
+    // are not read for one in the line, and a declaration the readers do not know is
+    // not theirs to report.
+    let document = with_images(&format!(
+        "<w:p>{}{}{}{}</w:p>",
+        inline_vml_picture("rIdPng"),
+        floating_vml_picture("rIdPng"),
+        bare_floating_vml_picture("rIdPng"),
+        vml_picture(
+            "rIdPng",
+            "width:1pt;height:1pt;margin-left:x;z-index:x;mso-fit-shape-to-text:t;flip:y x",
+            r#"o:allowincell="x""#,
+            r#"gain="65536f" blacklevel=".5" grayscale="t" bilevel="false""#,
+            r#"<v:stroke on="true"/><v:shadow on=""/><w10:wrap type="x"/>"#,
+        ),
+    ));
+    assert_eq!(reported(&document), Vec::<String>::new());
+}
+
+#[test]
+fn reports_the_values_of_a_preview_and_of_a_rectangle() {
+    // From the re-check of #437: an object's preview has its values checked as the
+    // document opens, as a VML drawing's picture has, and a picture written as a v:rect
+    // is named so where its style is reported.
+    let document = with_images(&format!(
+        "<w:p>{}{}{}</w:p>",
+        object_preview("rIdPng", "width:-1pt;height:1pt"),
+        pict(
+            r#"<v:rect style="width:-2pt;height:1pt" stroked="maybe"><v:imagedata r:id="rIdPng"/></v:rect>"#
+        ),
+        object(r#"<v:rect style="width:1pt;height:x"><v:imagedata r:id="rIdPng"/></v:rect>"#),
+    ));
+    assert_eq!(
+        reported(&document),
+        [
+            r#"v:shape style="width:-1pt" is not valid; it is ignored"#,
+            r#"v:rect style="width:-2pt" is not valid; it is ignored"#,
+            r#"v:rect stroked="maybe" is not valid; it is ignored"#,
+            r#"v:rect style="height:x" is not valid; it is ignored"#,
+        ]
+    );
 }

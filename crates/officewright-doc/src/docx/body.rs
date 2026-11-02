@@ -182,9 +182,9 @@ pub(super) fn read(
     let mut mce = Processor::new(&mut reader);
     let w = [reader.intern(W), reader.intern(W_STRICT)];
     let r = [reader.intern(R), reader.intern(R_STRICT)];
-    // DrawingML and VML too, which the picture readers read inside w:drawing and w:pict,
-    // so that what lies below those goes through Markup Compatibility as the rest of the
-    // body does (#312).
+    // DrawingML and VML too, which the picture readers read inside w:drawing, w:pict and
+    // w:object, so that what lies below those goes through Markup Compatibility as the
+    // rest of the body does (#312).
     let drawing =
         [A, A_STRICT, WP, WP_STRICT, PIC, PIC_STRICT, V, O, W10].map(|uri| reader.intern(uri));
     for namespace in w.iter().chain(&r).chain(&drawing) {
@@ -541,7 +541,8 @@ impl Reading<'_, '_, '_> {
             "softHyphen" => RunItem::SoftHyphen,
             "lastRenderedPageBreak" => RunItem::LastRenderedPageBreak,
             "drawing" => return self.drawing(reader, mce, tag, run),
-            "pict" => return self.vml_drawing(reader, mce, tag, run),
+            "pict" => return self.vml_drawing(reader, mce, tag, run, VmlKind::Drawing),
+            "object" => return self.vml_drawing(reader, mce, tag, run, VmlKind::Object),
             "footnoteRef" | "endnoteRef" => RunItem::NoteNumber,
             "separator" => RunItem::Separator,
             "continuationSeparator" => RunItem::ContinuationSeparator,
@@ -1126,7 +1127,8 @@ impl Reading<'_, '_, '_> {
     /// the package: the part the picture's `r:embed` names among the relationships of the
     /// part being read, read once however many pictures show it. An image the package
     /// does not have is reported, and the picture shows none; one outside the package
-    /// (`r:link`, or an external relationship) is never loaded.
+    /// (`r:link`, or an external relationship) is never loaded. Each value of the drawing
+    /// that its readers do not take is reported too; they read it as not written.
     fn drawing(
         &mut self,
         reader: &mut Reader<'_>,
@@ -1138,6 +1140,11 @@ impl Reading<'_, '_, '_> {
         let element = self
             .c
             .capture(reader, mce, tag, Some(Disposition::Understood))?;
+        let names = &self.names;
+        self.c
+            .check_in(["", ""], element, offset, |drawing, report| {
+                drawing::check(drawing, names, report);
+            });
         let document = &*self.c.document;
         let embed = drawing::picture(document.element(element), &document.names)
             .and_then(|picture| drawing::embedded_image(picture, &document.names))
@@ -1149,21 +1156,27 @@ impl Reading<'_, '_, '_> {
         self.push_item(run, RunItem::Drawing { element, image })
     }
 
-    /// A VML drawing (`w:pict`), kept whole, with the image its picture shows read as
-    /// [`drawing`](Self::drawing) reads a drawing's: the part `v:imagedata`'s `r:id`
-    /// names, the only relationship Word takes for it in a document (MS-OI29500, Part 4,
-    /// §19.1.2.11(p, q)).
+    /// A VML drawing (`w:pict`) or an embedded object (`w:object`), kept whole, with the
+    /// image of its picture or preview read as [`drawing`](Self::drawing) reads a
+    /// drawing's: the part `v:imagedata`'s `r:id` names, the only relationship Word takes
+    /// for it in a document (MS-OI29500, Part 4, §19.1.2.11(p, q)). Each value of its
+    /// picture or preview that the readers do not take is reported as a drawing's is.
     fn vml_drawing(
         &mut self,
         reader: &mut Reader<'_>,
         mce: &mut Processor,
         tag: StartTag<'_>,
         run: u32,
+        kind: VmlKind,
     ) -> Result<()> {
         let offset = tag.offset();
         let element = self
             .c
             .capture(reader, mce, tag, Some(Disposition::Understood))?;
+        let names = &self.names;
+        self.c.check_in(["", ""], element, offset, |pict, report| {
+            vml::check(pict, names, report);
+        });
         let document = &*self.c.document;
         let embed = vml::picture(document.element(element), &document.names)
             .and_then(|shape| vml::embedded_image(shape, &document.names))
@@ -1172,7 +1185,11 @@ impl Reading<'_, '_, '_> {
             Some(id) => self.image(&id, offset)?,
             None => None,
         };
-        self.push_item(run, RunItem::VmlDrawing { element, image })
+        let item = match kind {
+            VmlKind::Drawing => RunItem::VmlDrawing { element, image },
+            VmlKind::Object => RunItem::Object { element, image },
+        };
+        self.push_item(run, item)
     }
 
     /// The image the relationship `id` of the part leads to, read the first time a
@@ -1283,6 +1300,14 @@ impl Reading<'_, '_, '_> {
     fn malformed(&self, reader: &Reader<'_>, tag: &StartTag<'_>, message: String) -> Error {
         Error::from(reader.error(tag.offset(), message).in_part(self.c.part))
     }
+}
+
+/// Which element of a run holds VML: a drawing (`w:pict`) or an embedded object
+/// (`w:object`).
+#[derive(Clone, Copy, Debug)]
+enum VmlKind {
+    Drawing,
+    Object,
 }
 
 /// Where the children of the innermost element go.

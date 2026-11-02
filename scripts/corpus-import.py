@@ -26,11 +26,11 @@ tests/corpus/reference/<group>/<name>/ go instead
     resolution and colour model the SSIM comparison uses;
   - geometry.json: page sizes and the position of every line and word (pdftotext
     -bbox-layout, in points from the top left of the page), the page count, Word's own page
-    breaks (the w:lastRenderedPageBreak marks of the re-saved copy), the fonts the PDF
-    references without embedding them, and what Word changed when it saved the copy: the
-    w:compat settings it dropped and added, the style and numbering properties it dropped,
-    added and changed, and the paragraphs whose style it changed; every value on a line of
-    its own, without indentation (geometry_text);
+    breaks (the w:lastRenderedPageBreak marks of the re-saved copy, without those Word repeats
+    in the later cells of a table row), the fonts the PDF references without embedding them,
+    and what Word changed when it saved the copy: the w:compat settings it dropped and added,
+    the style and numbering properties it dropped, added and changed, and the paragraphs whose
+    style it changed; every value on a line of its own, without indentation (geometry_text);
   - formatting.json, from make-reference.ps1 format 3 on: the formatting Word computes for
     every paragraph of every story, with its runs of formatting when Word gave them, and the
     body paragraphs' style ids and names taken from the re-saved copy.
@@ -859,13 +859,122 @@ def page_geometry(bbox: str) -> list[dict]:
     return pages
 
 
+# The elements a paragraph holds that show nothing on the reference's pages, which
+# make-reference.ps1 exports without markup: properties; markers of ranges (bookmarks such as
+# the _Hlk ones Word writes before a mark, proofing errors, comments and the reference mark
+# Word writes after a comment's range, permissions, moves); the fldChar and instrText of a
+# field's code; and text deleted or moved away. leads also skips the runs their own w:vanish
+# hides, which Word prints only with its "Print hidden text" option, off by default. Nothing
+# else is taken for unshown, and a field is read by these names only: a field nested in
+# another field's code counts as shown, and a legacy form field's box, which has no result
+# runs, counts as unshown (#410).
+UNSHOWN = {
+    "pPr", "rPr", "sdtPr", "sdtEndPr", "smartTagPr", "customXmlPr",
+    "bookmarkStart", "bookmarkEnd", "proofErr", "commentRangeStart", "commentRangeEnd",
+    "commentReference", "permStart", "permEnd", "moveFromRangeStart", "moveFromRangeEnd",
+    "moveToRangeStart", "moveToRangeEnd", "fldChar", "instrText", "del", "moveFrom",
+}
+# What wraps runs: what it holds counts as the paragraph's own, inserted and moved text too.
+WRAPPERS = {"r", "hyperlink", "ins", "moveTo", "smartTag", "sdt", "sdtContent", "customXml",
+            "fldSimple", "dir", "bdo"}
+
+
+def hidden_run(run: ElementTree.Element) -> bool:
+    """Whether the run's own formatting hides it (w:vanish in its w:rPr)."""
+    vanish = run.find(f"{W}rPr/{W}vanish")
+    return vanish is not None and vanish.get(f"{W}val", "true") not in ("0", "false", "off")
+
+
+def leads(paragraph: ElementTree.Element, mark: ElementTree.Element) -> bool:
+    """Whether the mark comes before everything the paragraph shows on the reference's
+    pages: only what UNSHOWN names and runs of hidden text (their own w:vanish) precede it,
+    within runs and what WRAPPERS names. Anything else a run holds (text, a tab, a break, a
+    picture, a symbol, a field's result) shows."""
+
+    def walk(element: ElementTree.Element) -> bool | None:
+        for child in element:
+            if child is mark:
+                return True
+            name = local_name(child.tag)
+            if name in UNSHOWN:
+                continue
+            if name == "r" and hidden_run(child):
+                if any(element is mark for element in child.iter()):
+                    return True
+                continue
+            if name not in WRAPPERS:
+                return False
+            found = walk(child)
+            if found is not None:
+                return found
+        return None
+
+    return walk(paragraph) is True
+
+
+def row_repeats(root: ElementTree.Element) -> set[int]:
+    """The ids of the w:lastRenderedPageBreak marks that repeat a page a table row has
+    already marked, so that within a row each page counts once (#410).
+
+    Word's re-saved copies of the row references show three kinds of mark in a row. A row
+    that starts a page is marked at the start of its first cell (E-table-row-cant-split). A
+    cell that crosses a page is marked where it does. And the cell right after it is marked
+    at its start, though its text is on the page before ("r3c2" in E-table-row-split and
+    E-table-row-cant-split-tall, "Outer b" in E-table-row-split-nested).
+
+    So a mark that leads a cell's first paragraph starts no page of its own, since every
+    cell starts on the row's first page: the first such mark of a row stays, and one after
+    an earlier cell's mark repeats a page. Of the other marks, the n-th of each cell is the
+    row's n-th page after its first, kept in the first cell that has it; no reference shows
+    two cells crossing one page, and the rule counts such a page once whichever cells mark
+    it. Nested rows come first, so that the marks they leave out do not count for the cell
+    around them.
+
+    When the last cell of a row crosses a page, Word marks the start of the next row too,
+    though that row goes on on the same page (paragraph 71 of contract-hhs-teaming-agreement).
+    That mark stays: the marks alone do not tell it from a next row that starts a page of its
+    own (#410).
+    """
+    parents = {child: parent for parent in root.iter() for child in parent}
+
+    def rows_above(element: ElementTree.Element) -> list[ElementTree.Element]:
+        rows = []
+        while element in parents:
+            element = parents[element]
+            if element.tag == f"{W}tr":
+                rows.append(element)
+        return rows
+
+    repeats: set[int] = set()
+    rows = sorted(root.iter(f"{W}tr"), key=lambda row: len(rows_above(row)), reverse=True)
+    for row in rows:
+        reached = 0  # pages after its first that the row's earlier cells mark
+        marked = False  # whether an earlier cell holds a mark
+        for cell in (c for c in row.iter(f"{W}tc") if rows_above(c)[0] is row):
+            marks = [m for m in cell.iter(f"{W}lastRenderedPageBreak") if id(m) not in repeats]
+            first = next(cell.iter(f"{W}p"), None)
+            if marks and first is not None and leads(first, marks[0]):
+                if marked:
+                    repeats.add(id(marks[0]))
+                marked = True
+                marks = marks[1:]
+            for page, mark in enumerate(marks):
+                if page < reached:
+                    repeats.add(id(mark))
+            reached = max(reached, len(marks))
+            marked = marked or bool(marks)
+    return repeats
+
+
 def rendered_page_breaks(parts: dict[str, bytes]) -> list[dict]:
-    """Word's page breaks: the w:lastRenderedPageBreak marks of a saved document.
+    """Word's page breaks: the w:lastRenderedPageBreak marks of a saved document, but for
+    the repeats within a table row that row_repeats leaves out.
 
     Paragraphs are counted in document order from 0, table cells included; the offset is
     the number of characters of the paragraph's text before the mark.
     """
     root = ElementTree.fromstring(parts["word/document.xml"])
+    repeats = row_repeats(root)
     breaks = []
     for index, paragraph in enumerate(root.iter(f"{W}p")):
         text = ""
@@ -876,7 +985,7 @@ def rendered_page_breaks(parts: dict[str, bytes]) -> list[dict]:
                 text += element.text or ""
             elif name == "tab":
                 text += "\t"
-            elif name == "lastRenderedPageBreak":
+            elif name == "lastRenderedPageBreak" and id(element) not in repeats:
                 marks.append(len(text))
         for offset in marks:
             breaks.append(

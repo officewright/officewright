@@ -440,7 +440,8 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
             self.document.element(span),
             &mut |element, attribute, value| {
                 if invalid.len() < room {
-                    invalid.push((element.into(), attribute.into(), value.into()));
+                    // The message shows a value only so far: a long one is not kept whole.
+                    invalid.push((element.into(), attribute.into(), super::shorten(value)));
                 } else {
                     omitted += 1;
                 }
@@ -449,10 +450,15 @@ impl<'d, 'p, 't> Capture<'d, 'p, 't> {
         self.diagnostics.omit(omitted);
         for (element, attribute, value) in invalid {
             self.diagnose(offset, DiagnosticKind::InvalidValue, || {
-                format!(
-                    "{element_prefix}{element} {attribute_prefix}{attribute}=\"{}\" is not valid; it is ignored",
-                    super::shorten(&value)
-                )
+                if attribute.is_empty() {
+                    format!(
+                        "the text \"{value}\" of {element_prefix}{element} is not valid; it is ignored"
+                    )
+                } else {
+                    format!(
+                        "{element_prefix}{element} {attribute_prefix}{attribute}=\"{value}\" is not valid; it is ignored"
+                    )
+                }
             });
         }
     }
