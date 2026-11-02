@@ -128,7 +128,7 @@ ir_struct! {
         /// The room between the frame and the text on each side (`wps:bodyPr`'s `lIns`,
         /// `tIns`, `rIns` and `bIns`, `v:textbox`'s `inset`). The default is DrawingML's
         /// for attributes the document leaves out: 7.2 pt at the left and right, 3.6 pt at
-        /// the top and bottom (ECMA-376 Part 1, §20.1.2.1.1).
+        /// the top and bottom (ECMA-376 Part 1, §21.1.2.1.1).
         copy insets: Insets = Insets {
             left: Pt(7.2),
             top: Pt(3.6),
@@ -136,7 +136,8 @@ ir_struct! {
             bottom: Pt(3.6),
         } => with_insets, check insets_non_negative;
         /// Where the text is down the box when it is shorter than the box
-        /// (`wps:bodyPr`'s `anchor`, `v:textbox`'s `v-text-anchor` in its style).
+        /// (`wps:bodyPr`'s `anchor`; in VML, `v-text-anchor` in the style of the
+        /// `v:textbox` or, where Word writes it, of its shape).
         copy anchor: TextBoxAnchor = TextBoxAnchor::Top => with_anchor;
         /// The colour the box is filled with, behind its text; `None` for none.
         copy fill: Option<Color> = None => with_fill;
@@ -156,7 +157,9 @@ impl TextBox {
 
 /// Where the text of a text box is down the box (ST_TextAnchoringType, without `just` and
 /// `dist`, which the producer passes as `Center` and `Top`). Text taller than the box
-/// starts at its top and runs on past its bottom.
+/// starts at its top and runs on past its bottom. Hypotheses until Word renders rule
+/// documents for them: centred text has half the room the text leaves in the box above it,
+/// and bottom text all of it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum TextBoxAnchor {
