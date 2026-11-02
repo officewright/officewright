@@ -1449,9 +1449,10 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
     /// holds nothing else, or only header rows repeated where it takes more than a page
     /// (a hypothesis until a Word render for the latter, as is that a page holding only
     /// the table's own first header rows does not count so, and a row moves off it); the
-    /// header rows start the table on a page together, else on the next. Hypothesis until a Word render: header rows that fit at the foot of a page
-    /// where nothing of the row after them does stay there, and are repeated at the top of
-    /// the next. Returns the page of its first piece and its number of pieces.
+    /// header rows start the table on a page together, else on the next. Hypothesis until
+    /// a Word render: header rows that fit at the foot of a page where nothing of the row
+    /// after them does stay there, and are repeated at the top of the next. Returns the
+    /// page of its first piece and its number of pieces.
     fn place_table(
         &mut self,
         (flow, index): (&[Flowed<'d>], usize),
@@ -3075,6 +3076,43 @@ mod tests {
             rows
         });
         assert_eq!(kept_whole, (vec![8, 1], 0, true));
+        // One taller than a page, of ten lines, is cut below the header row repeated: seven
+        // lines on page 2, three on page 3.
+        let kept_tall = laid(&|style| {
+            let mut rows = vec![row_of(style, &[1], false).with_header(true)];
+            rows.extend((0..7).map(|_| row_of(style, &[1], false)));
+            rows.push(row_of(style, &[10], false).with_cant_split(true));
+            rows
+        });
+        assert_eq!(kept_tall, (vec![8, 2, 2], 2, false));
+        // A cell that has ended still takes its margins on the pages its row goes on to: a
+        // line with margins of 50 pt above and below, beside thirty lines, after a page of
+        // a header row of seven lines and a row. The header row is left off every page of
+        // the row, as it and the ended cell's margins leave no room for a line.
+        let ended = laid(&|style| {
+            use crate::ir::CellMargins;
+
+            let wide = CellMargins::default()
+                .with_top(Pt(50.0))
+                .with_bottom(Pt(50.0));
+            vec![
+                row_of(style, &[7], false).with_header(true),
+                row_of(style, &[1], false),
+                Row::default().with_cells(vec![
+                    Cell::default().with_margins(Some(wide)).with_blocks([lines(
+                        style,
+                        1,
+                        spacing(0.0, 0.0),
+                    )]),
+                    Cell::default().with_blocks([lines(
+                        style,
+                        30,
+                        spacing(0.0, 0.0).with_widow_control(false),
+                    )]),
+                ]),
+            ]
+        });
+        assert_eq!(ended, (vec![2, 1, 1, 1, 1], 0, true));
         // Each cell's first piece is measured from where it goes on, down to where a page
         // may end there: two cells, a line of 100 pt then ten lines, and a line of 100 pt
         // then one of 120 pt, below a header row of four lines.
