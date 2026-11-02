@@ -809,7 +809,8 @@ impl Builder<'_, '_, '_> {
 impl Builder<'_, '_, '_> {
     /// The bytes of the drawn text at which HarfRust starts a cluster when it shapes
     /// the characters `range` of `pending`, which have one look, in their face, script
-    /// and language; `None` without a face HarfRust can read.
+    /// and language; `None` without a face HarfRust can read, or for a face whose runs are
+    /// shaped nominally.
     fn cluster_starts(
         &mut self,
         pending: &[Placed],
