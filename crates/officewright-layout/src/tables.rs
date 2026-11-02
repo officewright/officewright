@@ -644,7 +644,9 @@ impl<'d, 'l> Prepared<'d, 'l> {
         let left = |cell: &LaidCell<'_>| {
             cell.content.units.len() - cell.next.min(cell.content.units.len())
         };
-        let progress = takes.iter().any(|&take| take > 0);
+        // A cell that waits still takes its margins: nothing goes on where they do not fit.
+        let roomy = cells.iter().flatten().all(|cell| space(cell) >= -EPSILON);
+        let progress = roomy && takes.iter().any(|&take| take > 0);
         if !progress {
             if !fresh {
                 return None;
@@ -781,22 +783,32 @@ impl<'d, 'l> Prepared<'d, 'l> {
         }
     }
 
+    /// The height of `laid` laid out whole, the borders above and below it included.
+    pub(crate) fn whole_height(
+        &self,
+        laid: &LaidBand<'d>,
+        context: &mut Context<'d, '_, '_>,
+    ) -> f64 {
+        let rows = laid.rows.clone();
+        let heights = self.heights(laid, context);
+        let whole: f64 = rows
+            .clone()
+            .zip(&heights)
+            .map(|(row, height)| self.thickness(row) + height)
+            .sum();
+        whole + self.thickness(rows.end)
+    }
+
     /// The least a piece of `laid` takes on a page that holds nothing else, the borders
     /// above and below it included: the band whole where a page may not cut it, else the
     /// first piece of a cell down to where a page may end, which such a page takes while
-    /// the other cells wait, or else the first line of each cell, which it takes at least
-    /// ([`Self::piece`]).
+    /// the other cells wait with their margins, or else the first line of each cell, which
+    /// it takes at least ([`Self::piece`]).
     pub(crate) fn least(&self, laid: &LaidBand<'d>, context: &mut Context<'d, '_, '_>) -> f64 {
         let rows = laid.rows.clone();
         let below = self.thickness(rows.end);
         if laid.put.is_none() && !self.cuts(&rows) {
-            let heights = self.heights(laid, context);
-            let whole: f64 = rows
-                .clone()
-                .zip(&heights)
-                .map(|(row, height)| self.thickness(row) + height)
-                .sum();
-            return whole + below;
+            return self.whole_height(laid, context);
         }
         let cells = || laid.cells.first().into_iter().flatten().flatten();
         let margins = |cell: &LaidCell<'_>| cell.margins.top().0 + cell.margins.bottom().0;
@@ -813,7 +825,9 @@ impl<'d, 'l> Prepared<'d, 'l> {
                     .unwrap_or(count(cell));
                 margins(cell) + cell.content.extent(cell.next, end)
             })
-            .fold(f64::INFINITY, f64::min);
+            .fold(f64::INFINITY, f64::min)
+            // The other cells wait, with their margins.
+            .max(cells().map(margins).fold(0.0, f64::max));
         // The first line of each cell.
         let lines = cells()
             .map(|cell| {
