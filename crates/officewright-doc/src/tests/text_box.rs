@@ -699,3 +699,45 @@ fn reading_a_text_box_ends_markup_compatibility_s_scope_of_its_content_first() {
     assert_eq!(texts(text_box), ["Box"]);
     assert_eq!(text_box.vertical_anchor(), TextBoxAnchor::Top);
 }
+
+#[test]
+fn finds_the_text_boxes_of_vml_drawings_through_markup_compatibility() {
+    // From the re-check of #459: the walk over a drawing's shapes reads mc:AlternateContent,
+    // the branch taken and an element read in place as the model's other walks do.
+    let alternate = |taken: &str, not_taken: &str| {
+        format!(
+            r#"<mc:AlternateContent><mc:Choice Requires="v">{}</mc:Choice><mc:Fallback>{}</mc:Fallback></mc:AlternateContent>"#,
+            vml_box("width:1pt;height:1pt", "", &p(taken)),
+            vml_box("width:1pt;height:1pt", "", &p(not_taken)),
+        )
+    };
+    let in_place = |text: &str| {
+        format!(
+            "<x:wrap>{}</x:wrap>",
+            vml_box("width:1pt;height:1pt", "", &p(text))
+        )
+    };
+    let body = format!(
+        r#"<w:p><w:r><w:pict {SHAPES} xmlns:x="urn:x" mc:Ignorable="x" mc:ProcessContent="x:wrap">{}{}<v:group style="width:1pt;height:1pt">{}{}</v:group></w:pict></w:r></w:p>"#,
+        alternate("Choice", "Fallback"),
+        in_place("Wrapped"),
+        alternate("Grouped choice", "Grouped fallback"),
+        in_place("Grouped and wrapped"),
+    );
+    let document = open(&body);
+    let boxes: Vec<Vec<String>> = vml_text_boxes(&document).into_iter().map(texts).collect();
+    assert_eq!(
+        boxes,
+        [
+            ["Choice"],
+            ["Wrapped"],
+            ["Grouped choice"],
+            ["Grouped and wrapped"]
+        ]
+    );
+    assert!(
+        document.diagnostics().is_empty(),
+        "{:?}",
+        document.diagnostics()
+    );
+}
