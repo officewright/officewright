@@ -3551,7 +3551,7 @@ class Packages(unittest.TestCase):
             (font,) = {fonts.get(f"{W}{slot}") for slot in ("ascii", "hAnsi", "eastAsia", "cs")}
             size = int(r.find(f"{W}rPr/{W}sz").get(f"{W}val")) / 2
             self.assertIn(f" in {font}, ", label)
-            self.assertIn(f"{size:g} pt", label)
+            self.assertIn(f", {size:g} pt", label)
             if font == rules.DMAP_FONT:
                 self.assertIn("in all four slots", label)
             (claim,) = [k for k in characters if label.split(": ", 1)[1].startswith(k)]

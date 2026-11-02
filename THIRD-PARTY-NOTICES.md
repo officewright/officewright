@@ -242,8 +242,8 @@ those two are modified versions of Noto Sans, described in its section.
   Officewright Test DMAP, and the names keep Noto Sans's copyright, version, trademark,
   designer and license notices; the OS/2 table names vendor NONE; the digital signature
   (DSIG) is left out. Every other table is Noto Sans's, byte for byte, its cmap included, but
-  for the head table's checksum of the whole font (checkSumAdjustment). It is distributed under the SIL Open Font License 1.1, as
-  the license requires of a modified version.
+  for the head table's checksum of the whole font (checkSumAdjustment). It is distributed
+  under the SIL Open Font License 1.1, as the license requires of a modified version.
 - Why the DMAP font: a reader that knows DMAP looks a character up in it before cmap, and no
   font of `tests/fonts` has one, so only a font whose DMAP and cmap disagree shows whether
   Word reads it (#458). Word renders the reference of `E-dmap-font` with this font installed
