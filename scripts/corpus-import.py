@@ -986,7 +986,8 @@ def paragraph_text(paragraph: ElementTree.Element) -> tuple[str, dict[int, int]]
 
 def words(text: str) -> list[str]:
     """The words of a text as the reference's lines are compared with it: in NFKC, case
-    folded, of letters and digits only, so that list labels and punctuation drop out."""
+    folded, of letters and digits only, so that bullets and punctuation drop out; a numbered
+    list label such as "1." or "a)" stays a word of the line, so such a line never matches."""
     found = []
     for word in text.split():
         word = "".join(c for c in unicodedata.normalize("NFKC", word).casefold() if c.isalnum())
