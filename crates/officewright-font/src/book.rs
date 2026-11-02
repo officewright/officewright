@@ -313,7 +313,10 @@ impl fmt::Display for SkippedFont {
 /// A book can scan the same directories again, for example after fonts were installed:
 /// [`add_dir`](Self::add_dir) and [`add_system_fonts`](Self::add_system_fonts) add the
 /// fonts that appeared since. A file that was added is not read again, even if it
-/// changed. A file that was skipped is read again once its size or modification time
+/// changed. On Unix that holds by whatever path the file is reached, as long as it keeps
+/// its device, inode, size and modification time, so a file whose folder is moved within
+/// its file system and replaced by a link, or a second hard link to it, is not read again
+/// either; elsewhere a file is known by its canonical path. A file that was skipped is read again once its size or modification time
 /// changes, so a font that was still being copied during one scan is found by the next.
 /// Links, font files that could not be resolved and directories that could not be read
 /// are tried on every scan. Each skipped path is listed once, with the error of its
@@ -340,6 +343,10 @@ pub struct FontBook {
     /// Canonical paths of the files already added, so a font reachable through
     /// several directories or links is indexed once.
     files: HashSet<PathBuf>,
+    /// What tells the files already added apart however they are reached ([`FileId`]), so
+    /// that a file whose canonical path changed, such as one whose folder was replaced by
+    /// a link to where it went, is not indexed again.
+    file_ids: HashSet<FileId>,
     /// The paths a directory scan could not add, each listed once in `skipped`: the
     /// canonical paths of files that could not be indexed, and the canonical directory
     /// and name of font files and directories that could not be resolved or read.
@@ -795,7 +802,8 @@ impl FontBook {
         metadata: &fs::Metadata,
         origin: FontOrigin,
     ) -> Result<usize> {
-        if self.files.contains(&canonical) {
+        let id = FileId::of(metadata);
+        if self.files.contains(&canonical) || id.is_some_and(|id| self.file_ids.contains(&id)) {
             return Ok(0);
         }
         // Opening a FIFO or device would block or read forever.
@@ -810,6 +818,9 @@ impl FontBook {
         if result.is_ok() {
             self.forget_failure(&canonical);
             self.files.insert(canonical);
+            if let Some(id) = id {
+                self.file_ids.insert(id);
+            }
         }
         result
     }
@@ -1062,6 +1073,39 @@ impl FontBook {
             stack.extend(subdirs.into_iter().rev());
         }
         added
+    }
+}
+
+/// What tells a file from another however it is reached. On Unix: its device and inode, so
+/// that a file moved within its file system, or reached through another hard link, is the
+/// same file; and its size and modification time, so that a new file that reuses the inode
+/// of a removed one is not. Elsewhere there is none in the standard library, and a file is
+/// known by its canonical path only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct FileId {
+    device: u64,
+    inode: u64,
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+impl FileId {
+    /// The identity of the file whose metadata, links followed, is `metadata`.
+    #[cfg(unix)]
+    fn of(metadata: &fs::Metadata) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt;
+        Some(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+        })
+    }
+
+    /// No identity beyond the canonical path where the standard library gives none.
+    #[cfg(not(unix))]
+    fn of(_metadata: &fs::Metadata) -> Option<Self> {
+        None
     }
 }
 
@@ -2643,6 +2687,97 @@ mod tests {
         write_with_time(&path, &font, modified);
         assert_eq!(book.add_dir(&fonts).unwrap(), 0);
         assert_eq!(book.skipped().len(), 1);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn files_whose_folder_was_replaced_by_a_link_are_not_indexed_again() {
+        // A font and a collection of a good and a damaged face (#420).
+        let dir = TempDir::new("moved-added");
+        let (fonts, data) = (dir.0.join("fonts"), dir.0.join("data"));
+        fs::create_dir(&fonts).unwrap();
+        fs::create_dir(&data).unwrap();
+        fs::write(fonts.join("sans.ttf"), TestFont::new("Test Sans").build()).unwrap();
+        let mut ttc = testing::collection(&[
+            TestFont::new("Test Serif").build(),
+            TestFont::new("Test Mono").build(),
+        ]);
+        // Point the second face past the end of the file.
+        ttc[16..20].fill(0xFF);
+        fs::write(fonts.join("pair.ttc"), ttc).unwrap();
+        let mut book = FontBook::new();
+        assert_eq!(book.add_dir(&fonts).unwrap(), 2);
+        assert_eq!(book.skipped().len(), 1);
+        move_and_link(&fonts, &data.join("fonts"));
+        assert_eq!(book.add_dir(&fonts).unwrap(), 0);
+        assert_eq!(book.len(), 2);
+        assert_eq!(book.skipped().len(), 1, "{:?}", listed_under(&book, &dir.0));
+        // So with a second hard link to the font, and add_file through the moved path.
+        fs::hard_link(data.join("fonts/sans.ttf"), data.join("twin.ttf")).unwrap();
+        assert_eq!(book.add_dir(&data).unwrap(), 0);
+        assert_eq!(book.add_file(fonts.join("sans.ttf")).unwrap(), 0);
+        assert_eq!(book.len(), 2);
+        // Files of other inodes are read: a new one at the path the font was at, beside the
+        // hard link that keeps the old inode, and another.
+        fs::remove_file(data.join("fonts/sans.ttf")).unwrap();
+        fs::write(
+            data.join("fonts/sans.ttf"),
+            TestFont::new("Test Sans").build(),
+        )
+        .unwrap();
+        fs::write(data.join("other.ttf"), TestFont::new("Test Other").build()).unwrap();
+        assert_eq!(book.add_dir(&data).unwrap(), 2);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_file_rewritten_in_place_is_another_file() {
+        // Its inode stays, but its size and modification time tell it from the file that
+        // was there, as they tell a new file that reuses a removed one's inode.
+        let dir = TempDir::new("file-id");
+        let path = dir.0.join("sans.ttf");
+        fs::write(&path, b"one").unwrap();
+        let metadata = fs::metadata(&path).unwrap();
+        let before = FileId::of(&metadata).unwrap();
+        write_with_time(
+            &path,
+            b"three",
+            metadata.modified().unwrap() + std::time::Duration::from_secs(2),
+        );
+        let after = FileId::of(&fs::metadata(&path).unwrap()).unwrap();
+        assert_eq!((before.device, before.inode), (after.device, after.inode));
+        assert_ne!(before, after);
+        // Nothing changed, the same file.
+        assert_eq!(FileId::of(&fs::metadata(&path).unwrap()), Some(after));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_unreadable_directory_behind_a_repointed_link_is_listed_once() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        // `fonts` leads to `d1`, then to `d2`, each with an unreadable `sub` (#419).
+        let lock = |path: &Path| fs::set_permissions(path, fs::Permissions::from_mode(0o000));
+        let dir = TempDir::new("repointed-unreadable");
+        let (d1, d2, fonts) = (dir.0.join("d1"), dir.0.join("d2"), dir.0.join("fonts"));
+        fs::create_dir_all(d1.join("sub")).unwrap();
+        fs::create_dir_all(d2.join("sub")).unwrap();
+        lock(&d1.join("sub")).unwrap();
+        lock(&d2.join("sub")).unwrap();
+        let readable = fs::read_dir(d1.join("sub")).is_ok();
+        symlink(&d1, &fonts).unwrap();
+        let mut book = FontBook::new();
+        book.add_dir(&fonts).unwrap();
+        fs::remove_file(&fonts).unwrap();
+        symlink(&d2, &fonts).unwrap();
+        book.add_dir(&fonts).unwrap();
+        let listed = listed_under(&book, &dir.0);
+        // Root reads every directory, so this has to run as an ordinary user.
+        assert!(
+            !readable,
+            "run the tests as a user who cannot read mode 000"
+        );
+        assert_eq!(listed, ["fonts/sub"]);
     }
 
     #[test]
