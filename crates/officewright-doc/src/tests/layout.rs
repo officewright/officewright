@@ -4193,7 +4193,7 @@ fn lists_the_shapes_of_a_vml_drawing_besides_its_picture() {
 #[test]
 fn lists_a_border_around_a_vml_picture_in_the_line_only() {
     use super::drawing::with_images;
-    use super::vml::{bare_floating_vml_picture, inline_vml_picture};
+    use super::vml::{bare_floating_vml_picture, inline_vml_picture, object_preview};
     let bordered = |picture: String| {
         let body = format!(
             r#"<w:p>{}</w:p>"#,
@@ -4215,6 +4215,20 @@ fn lists_a_border_around_a_vml_picture_in_the_line_only() {
         "{inline:?}"
     );
     let floating = bordered(bare_floating_vml_picture("rIdPng"));
+    assert!(
+        !floating.iter().any(|message| message.contains("border")),
+        "{floating:?}"
+    );
+    // So for the preview of an embedded object.
+    let inline = bordered(object_preview("rIdPng", "width:1pt;height:1pt"));
+    assert!(
+        inline.iter().any(|message| message.contains("border")),
+        "{inline:?}"
+    );
+    let floating = bordered(object_preview(
+        "rIdPng",
+        "position:absolute;width:1pt;height:1pt",
+    ));
     assert!(
         !floating.iter().any(|message| message.contains("border")),
         "{floating:?}"
@@ -4335,4 +4349,121 @@ fn reads_each_cell_s_properties_once() {
     assert_eq!(rows[0].cells().len(), 1);
     assert_eq!(rows[0].cells()[0].grid_span(), 2);
     assert!(rows[1].cells()[1].shading().is_some());
+}
+
+#[test]
+fn translates_the_preview_of_an_embedded_object_as_a_picture() {
+    // Word shows an embedded object by its preview picture, in the line or floating; an
+    // object without one, or one that holds a drawing, which Word shows in its place
+    // (MS-OI29500, Part 1, §17.3.3.19(a)), is left out and listed.
+    use super::drawing::with_images;
+    use super::vml::{object, object_preview};
+    let body = format!(
+        "<w:p>{}{}{}{}{}</w:p>",
+        object_preview("rIdEmf", "width:72pt;height:36pt"),
+        object_preview(
+            "rIdPng",
+            "position:absolute;margin-left:10pt;margin-top:20pt;width:30pt;height:40pt;z-index:1;mso-position-horizontal-relative:page;mso-position-vertical-relative:page"
+        ),
+        object(r#"<o:OLEObject Type="Embed" ProgID="Package" r:id="rIdOle"/>"#),
+        object(
+            r#"<v:shape style="width:5pt;height:5pt"><v:imagedata r:id="rIdPng"/></v:shape><w:drawing/>"#
+        ),
+        // The drawing through Markup Compatibility, as the reader takes its fallback (from
+        // the review of #437).
+        object(
+            r#"<v:shape style="width:5pt;height:5pt"><v:imagedata r:id="rIdPng"/></v:shape><mc:AlternateContent><mc:Choice Requires="w14"><w:r/></mc:Choice><mc:Fallback><w:drawing/></mc:Fallback></mc:AlternateContent>"#
+        ),
+    );
+    let translation = translate(&with_images(&body));
+    let ir = translation.document();
+    let inlines = paragraphs(&translation)[0].inlines();
+    assert_eq!(inlines.len(), 2);
+    let ir::Inline::Object(inline) = &inlines[0] else {
+        panic!("a preview in the line");
+    };
+    assert_eq!(inline.size(), ir::Size::new(Pt(72.0), Pt(36.0)));
+    let ir::ObjectContent::Picture(picture) = inline.content() else {
+        panic!("a picture");
+    };
+    // A metafile, which the layout shows as a placeholder of the preview's size.
+    assert_eq!(
+        ir.image(picture.image()).unwrap().format(),
+        &ir::ImageFormat::Other("emf".into())
+    );
+    let ir::Inline::Anchored(floating) = &inlines[1] else {
+        panic!("a floating preview");
+    };
+    assert_eq!(floating.size(), ir::Size::new(Pt(30.0), Pt(40.0)));
+    assert_eq!(floating.z_order(), 1);
+    let listed: Vec<String> = translation
+        .left_out()
+        .iter()
+        .map(|entry| entry.message().to_owned())
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            "an embedded object without a preview picture is left out (w:object)",
+            "an embedded object shown by a drawing (w:drawing in w:object) is left out",
+            "an embedded object shown by a drawing (w:drawing in w:object) is left out",
+        ]
+    );
+}
+
+#[test]
+fn lists_a_picture_or_object_in_the_line_of_a_raised_or_lowered_run() {
+    // From the review of #437: the IR places an object in the line on the baseline, so a
+    // raise or a lowering of its run (w:position), which Word gives an equation's preview,
+    // is listed once; a run that is not moved, an object that floats, and a moved run that
+    // holds only text or a tab, which its style raises, are not (from the re-check).
+    use super::drawing::{inline_picture, with_images};
+    use super::vml::object_preview;
+    let raised = |run: String, half_points: i32| {
+        run.replacen(
+            "<w:r>",
+            &format!(r#"<w:r><w:rPr><w:position w:val="{half_points}"/></w:rPr>"#),
+            1,
+        )
+    };
+    let listed = |runs: &[String]| -> Vec<String> {
+        translate(&with_images(&format!("<w:p>{}</w:p>", runs.concat())))
+            .left_out()
+            .iter()
+            .map(|entry| entry.message().to_owned())
+            .filter(|message| message.contains("w:position"))
+            .collect()
+    };
+    let message = "a picture or an object in the line of a raised or lowered run (w:position) is drawn on the baseline, here and wherever else the document has one";
+    let equation = object_preview("rIdEmf", "width:30pt;height:20pt");
+    assert_eq!(listed(&[raised(equation.clone(), -12)]), [message]);
+    assert_eq!(listed(&[raised(equation.clone(), 6)]), [message]);
+    assert_eq!(
+        listed(&[raised(equation.clone(), -12), raised(equation.clone(), 6)]),
+        [message]
+    );
+    let text_and_tab = r#"<w:r><w:t>a</w:t><w:tab/><w:t>b</w:t></w:r>"#.to_owned();
+    assert!(listed(&[raised(text_and_tab, 2)]).is_empty());
+    assert_eq!(listed(&[raised(inline_picture("rIdPng"), 4)]), [message]);
+    assert_eq!(
+        listed(&[raised(super::vml::inline_vml_picture("rIdPng"), -4)]),
+        [message]
+    );
+    assert!(listed(&[raised(equation.clone(), 0), equation]).is_empty());
+    let floating = object_preview(
+        "rIdPng",
+        "position:absolute;width:30pt;height:20pt;z-index:1",
+    );
+    assert!(listed(&[raised(floating, -12)]).is_empty());
+    // Nor does a floating VML or DrawingML picture (from the re-check of #437).
+    assert!(listed(&[raised(super::vml::floating_vml_picture("rIdPng"), -12)]).is_empty());
+    assert!(listed(&[raised(super::drawing::floating_picture("rIdPng"), -12)]).is_empty());
+    // An object in a hidden run is drawn too, since the IR's objects carry no run style
+    // (#447), so it is listed as well.
+    let hidden = object_preview("rIdEmf", "width:30pt;height:20pt").replacen(
+        "<w:r>",
+        r#"<w:r><w:rPr><w:vanish/><w:position w:val="-12"/></w:rPr>"#,
+        1,
+    );
+    assert_eq!(listed(&[hidden]), [message]);
 }

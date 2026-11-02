@@ -67,7 +67,7 @@ pub use views::{
     Inline, Note, Opaque, Paragraph, Revision, RevisionKind, Run, RunContent, Section, SimpleField,
     Table, TableCell, TableRow,
 };
-pub use vml::{VmlDrawing, VmlPicture};
+pub use vml::{EmbeddedObject, VmlDrawing, VmlPicture};
 use xml::{Element, Span, Strings, Token};
 
 use crate::Diagnostic;
@@ -593,6 +593,12 @@ pub(crate) enum RunItem {
     /// A `w:pict` kept whole, and the image its VML picture shows, read when the part
     /// that holds it was.
     VmlDrawing {
+        element: Span,
+        image: Option<u32>,
+    },
+    /// A `w:object` kept whole, and the image its preview shows, read when the part that
+    /// holds it was.
+    Object {
         element: Span,
         image: Option<u32>,
     },

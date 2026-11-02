@@ -1,6 +1,7 @@
-//! Drawings, DrawingML (`w:drawing`) and VML (`w:pict`), as IR objects: a picture in the
-//! line or floating, with its image added to the IR once however many pictures show it.
-//! Drawings that show no picture (shapes, charts, text boxes, groups) are listed.
+//! Drawings, DrawingML (`w:drawing`) and VML (`w:pict`), and the previews of embedded
+//! objects (`w:object`) as IR objects: a picture in the line or floating, with its image
+//! added to the IR once however many pictures show it. Drawings that show no picture
+//! (shapes, charts, text boxes, groups) and objects without a preview are listed.
 
 use officewright_core::Pt;
 use officewright_layout::ReportKind;
@@ -8,8 +9,8 @@ use officewright_layout::ir;
 
 use super::{Once, Translator};
 use crate::model::{
-    Anchor, AnchorHorizontalAlign, AnchorVerticalAlign, Crop, Drawing, HorizontalReference, Image,
-    Offsets, VerticalReference, VmlDrawing, WrapKind,
+    Anchor, AnchorHorizontalAlign, AnchorVerticalAlign, Crop, Drawing, EmbeddedObject,
+    HorizontalReference, Image, Offsets, VerticalReference, VmlDrawing, VmlPicture, WrapKind,
 };
 
 /// The PNG file signature.
@@ -98,6 +99,31 @@ impl<'a> Translator<'a> {
                 "a VML drawing's shapes other than its first picture are left out (w:pict)".into()
             });
         }
+        self.vml_picture(picture)
+    }
+
+    /// An embedded object as its preview picture, in the line or anchored there, as
+    /// [`vml_drawing`](Self::vml_drawing) makes one of a VML drawing's picture; none,
+    /// listed, when it has no preview or holds a drawing, which Word shows in its place.
+    pub(super) fn embedded_object(&mut self, object: EmbeddedObject<'a>) -> Option<ir::Inline> {
+        if object.has_drawing() {
+            self.leave_out(ReportKind::FeatureUnsupported, || {
+                "an embedded object shown by a drawing (w:drawing in w:object) is left out".into()
+            });
+            return None;
+        }
+        let Some(preview) = object.preview() else {
+            self.leave_out(ReportKind::FeatureUnsupported, || {
+                "an embedded object without a preview picture is left out (w:object)".into()
+            });
+            return None;
+        };
+        self.vml_picture(preview)
+    }
+
+    /// A VML picture as an IR object in the line or anchored there; none when it has no
+    /// size, or is hidden, which Word does not show either.
+    fn vml_picture(&mut self, picture: VmlPicture<'a>) -> Option<ir::Inline> {
         if picture.is_hidden() {
             return None;
         }

@@ -1,5 +1,6 @@
-//! VML drawings in runs (`w:pict`, ECMA-376 Part 4, §14.3.2.2 and §19): the picture one
-//! shows, in the line or floating, read from the kept XML when asked for.
+//! VML drawings in runs (`w:pict`, ECMA-376 Part 4, §14.3.2.2 and §19) and the preview
+//! pictures of embedded objects (`w:object`, Part 1, §17.3.3.19): the picture one shows,
+//! in the line or floating, read from the kept XML when asked for.
 //!
 //! VML places a shape with the CSS-like declarations of its `style` attribute, which
 //! ECMA-376 leaves partly open; Word's reading of them is in MS-OI29500's notes on
@@ -21,9 +22,10 @@ use crate::docx::properties::Report;
 /// bounds every length of a DrawingML picture, so that both reach the layout alike.
 const MAX_LENGTH: f64 = 27_273_042_316_900.0 / 12_700.0;
 
-/// A VML drawing in a run (`w:pict`). A picture (a `v:shape` whose `v:imagedata` names
-/// its image) is read, in the line or floating; other shapes, text boxes, WordArt and
-/// groups show as no picture, and [`to_xml`](Self::to_xml) gives them as written.
+/// A VML drawing in a run (`w:pict`). A picture (a `v:shape` or `v:rect` whose
+/// `v:imagedata` names its image) is read, in the line or floating; other shapes, text
+/// boxes, WordArt and groups show as no picture, and [`to_xml`](Self::to_xml) gives them
+/// as written.
 ///
 /// ```
 /// # fn main() -> officewright_doc::Result<()> {
@@ -84,8 +86,9 @@ impl<'a> VmlDrawing<'a> {
         self.document.element(self.element).to_xml()
     }
 
-    /// The picture it shows: its first `v:shape` whose `v:imagedata` names an image by
-    /// `r:id`, if it has one. A group shows none, even when a picture is among its parts.
+    /// The picture it shows: its first `v:shape` or `v:rect` whose `v:imagedata` names an
+    /// image by `r:id`, if it has one. A group shows none, even when a picture is among
+    /// its parts.
     pub fn picture(self) -> Option<VmlPicture<'a>> {
         let names = &self.document.names;
         let pict = self.document.element(self.element);
@@ -120,12 +123,105 @@ impl<'a> VmlDrawing<'a> {
     }
 }
 
-/// A VML picture (a `v:shape` whose `v:imagedata` names its image): an image, cropped,
-/// turned and mirrored, in the line or floating.
+/// An embedded object in a run (`w:object`, ECMA-376 Part 1, §17.3.3.19): content of
+/// another application, such as an equation, a spreadsheet or a package, which Word shows
+/// by its preview, a VML picture beside the object's data (`o:OLEObject`) or control
+/// (`w:control`). The preview is read, in the line or floating;
+/// [`to_xml`](Self::to_xml) gives the object as written.
+///
+/// ```
+/// # fn main() -> officewright_doc::Result<()> {
+/// use officewright_core::Pt;
+/// use officewright_doc::{Block, Document, RunContent};
+///
+/// let document = Document::open("tests/data/object-preview.docx")?;
+/// let mut previews = Vec::new();
+/// for section in document.sections() {
+///     for block in section.blocks() {
+///         let Block::Paragraph(paragraph) = block else {
+///             continue;
+///         };
+///         for item in paragraph.runs().flat_map(|run| run.content()) {
+///             let RunContent::Object(object) = item else {
+///                 continue;
+///             };
+///             // Word shows the object by its preview; the object's data is there as XML.
+///             let Some(preview) = object.preview() else {
+///                 continue;
+///             };
+///             previews.push((
+///                 preview.width(),
+///                 preview.height(),
+///                 preview.image().map(|image| image.content_type().to_owned()),
+///             ));
+///         }
+///     }
+/// }
+/// assert_eq!(
+///     previews,
+///     [(Some(Pt(72.0)), Some(Pt(36.0)), Some("image/png".to_owned()))]
+/// );
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone, Copy, Debug)]
+pub struct EmbeddedObject<'a> {
+    document: &'a Document,
+    element: Span,
+    image: Option<u32>,
+}
+
+impl<'a> EmbeddedObject<'a> {
+    pub(crate) fn new(document: &'a Document, element: Span, image: Option<u32>) -> Self {
+        Self {
+            document,
+            element,
+            image,
+        }
+    }
+
+    /// The object as written, `w:object` and everything in it, as XML with the namespace
+    /// declarations it needs.
+    pub fn to_xml(self) -> String {
+        self.document.element(self.element).to_xml()
+    }
+
+    /// Its preview: its first `v:shape` or `v:rect` whose `v:imagedata` names an image by
+    /// `r:id`, if it has one, as [`VmlDrawing::picture`] finds a drawing's. Word shows the
+    /// object by it, unless the object holds a drawing (`w:drawing`), which Word shows in
+    /// its place (MS-OI29500, Part 1, §17.3.3.19(a)).
+    pub fn preview(self) -> Option<VmlPicture<'a>> {
+        let names = &self.document.names;
+        let object = self.document.element(self.element);
+        let shape = picture(object, names)?;
+        Some(VmlPicture {
+            document: self.document,
+            pict: object,
+            shape,
+            image: self.image,
+        })
+    }
+
+    /// Whether it holds a drawing (`w:drawing`), which Word shows in place of the object,
+    /// ignoring the object (MS-OI29500, Part 1, §17.3.3.19(a)); the layout leaves it out.
+    // reason: only the translation into the layout IR asks for it.
+    #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
+    pub(crate) fn has_drawing(self) -> bool {
+        let names = &self.document.names;
+        self.document
+            .element(self.element)
+            .children_through_alternates(names.mc)
+            .any(|child| child.is(&names.w, "drawing"))
+    }
+}
+
+/// A VML picture (a `v:shape` or `v:rect` whose `v:imagedata` names its image): an image, cropped,
+/// turned and mirrored, in the line or floating. It is the picture of a VML drawing or
+/// the preview of an embedded object.
 #[derive(Clone, Copy)]
 pub struct VmlPicture<'a> {
     document: &'a Document,
-    /// The `w:pict` that holds it.
+    /// The `w:pict` or `w:object` that holds it.
     pict: Element<'a>,
     shape: Element<'a>,
     image: Option<u32>,
@@ -316,7 +412,10 @@ pub(crate) fn check(pict: Element<'_>, names: &Names, report: Report<'_>) {
 
 /// The declarations of a shape's `style`.
 fn style(shape: Element<'_>) -> Style<'_> {
-    Style::new(shape.attribute(&[None], "style").unwrap_or_default())
+    Style::new(
+        shape.local_name(),
+        shape.attribute(&[None], "style").unwrap_or_default(),
+    )
 }
 
 /// The part of its image a picture shows (`v:imagedata`'s `cropleft`, `croptop`,
@@ -545,13 +644,14 @@ fn z_order(z_index: i32) -> u32 {
     u32::try_from(height.max(0)).unwrap_or(0)
 }
 
-/// The picture of a `w:pict`: its first `v:shape` whose `v:imagedata` names an image by
-/// `r:id`, the only way Word takes one in a document (MS-OI29500, Part 4,
-/// §19.1.2.11(q)). A shape whose `v:imagedata` names none, as a text box Word writes may
-/// have, shows no picture.
+/// The picture of a `w:pict` or `w:object`: its first `v:shape` or `v:rect` whose
+/// `v:imagedata` names an image by `r:id`, the only way Word takes one in a document
+/// (MS-OI29500, Part 4, §19.1.2.11(q)). Word writes the preview of a static metafile
+/// object as a `v:rect` (n777345.docx of LibreOffice's tests). A shape whose
+/// `v:imagedata` names none, as a text box Word writes may have, shows no picture.
 pub(crate) fn picture<'a>(pict: Element<'a>, names: &Names) -> Option<Element<'a>> {
     pict.children_through_alternates(names.mc)
-        .filter(|child| child.is(&names.v, "shape"))
+        .filter(|child| child.is(&names.v, "shape") || child.is(&names.v, "rect"))
         .find(|shape| embedded_image(*shape, names).is_some())
 }
 
@@ -593,15 +693,20 @@ const PROPERTIES: [&str; 19] = [
 
 /// The declarations of a VML `style` attribute (`name:value` pairs separated by `;`) that
 /// the readers read: the value of each property of [`PROPERTIES`], read in one pass over
-/// the attribute however many are asked for.
+/// the attribute however many are asked for, and the local name of the shape it belongs
+/// to (`shape` or `rect`), which a report names.
 #[derive(Clone, Copy)]
-struct Style<'a>([Option<&'a str>; PROPERTIES.len()]);
+struct Style<'a> {
+    shape: &'a str,
+    values: [Option<&'a str>; PROPERTIES.len()],
+}
 
 impl<'a> Style<'a> {
-    /// The declarations of `style`, each value without the whitespace around it. Word
-    /// takes the last of a property written more than once (MS-OI29500, Part 4,
-    /// §19.1.2.1(ggg)); CSS names are not case-sensitive.
-    fn new(style: &'a str) -> Self {
+    /// The declarations of `style`, the attribute of the shape of local name `shape`, each
+    /// value without the whitespace around it. Word takes the last of a property written
+    /// more than once (MS-OI29500, Part 4, §19.1.2.1(ggg)); CSS names are not
+    /// case-sensitive.
+    fn new(shape: &'a str, style: &'a str) -> Self {
         let mut values = [None; PROPERTIES.len()];
         for (key, value) in style
             .split(';')
@@ -616,7 +721,7 @@ impl<'a> Style<'a> {
                 *slot = Some(value.trim());
             }
         }
-        Self(values)
+        Self { shape, values }
     }
 
     /// The value of a property of [`PROPERTIES`]; none for one not written, and for a
@@ -624,11 +729,11 @@ impl<'a> Style<'a> {
     fn get(self, name: &str) -> Option<&'a str> {
         let index = PROPERTIES.iter().position(|property| *property == name);
         debug_assert!(index.is_some(), "{name} is not among the properties read");
-        self.0.get(index?).copied().flatten()
+        self.values.get(index?).copied().flatten()
     }
 
     /// A property's value as `read` takes it; one it does not take is reported, as the
-    /// declaration of `v:shape`'s `style` that gives it, and read as not written.
+    /// declaration of the shape's `style` that gives it, and read as not written.
     fn read<T>(
         self,
         name: &str,
@@ -639,7 +744,11 @@ impl<'a> Style<'a> {
         let taken = read(value);
         if taken.is_none() {
             let value = crate::docx::shorten(value);
-            report("v:shape", "style", &format!("{name}:{value}"));
+            report(
+                &format!("v:{}", self.shape),
+                "style",
+                &format!("{name}:{value}"),
+            );
         }
         taken
     }
@@ -865,13 +974,24 @@ mod tests {
 
     #[test]
     fn reads_the_last_declaration_of_a_property() {
-        let style = Style::new(" width : 10pt;HEIGHT:5pt;width:20pt; ;junk;rotation");
+        let style = Style::new(
+            "shape",
+            " width : 10pt;HEIGHT:5pt;width:20pt; ;junk;rotation",
+        );
         assert_eq!(style.get("width").and_then(length), Some(Pt(20.0)));
         assert_eq!(style.get("height").and_then(length), Some(Pt(5.0)));
         assert_eq!(style.get("rotation"), None);
-        assert_eq!(Style::new("width:-1pt").get("width").and_then(size), None);
+        assert_eq!(
+            Style::new("shape", "width:-1pt")
+                .get("width")
+                .and_then(size),
+            None
+        );
         // Names and values lose the whitespace around them (from the re-check of #435).
-        assert_eq!(Style::new(" HEIGHT : 5pt ;").get("height"), Some("5pt"));
+        assert_eq!(
+            Style::new("shape", " HEIGHT : 5pt ;").get("height"),
+            Some("5pt")
+        );
     }
 
     #[test]
