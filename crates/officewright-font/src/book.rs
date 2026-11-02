@@ -1966,7 +1966,7 @@ mod tests {
                 assert!(book.skipped().is_empty());
                 took
             },
-            4_000,
+            8_000,
         );
     }
 

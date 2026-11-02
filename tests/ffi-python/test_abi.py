@@ -589,7 +589,7 @@ class AbiTest(unittest.TestCase):
                 self.assertEqual(count.value, 0)
                 return elapsed
 
-        n = 4000
+        n = 8000
         measured = []
         for _ in range(2):
             small = max(min(took(n // 8) for _ in range(3)), 0.05)
