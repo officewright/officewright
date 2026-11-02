@@ -3545,6 +3545,56 @@ class Packages(unittest.TestCase):
                     for prefix in required.split():
                         self.assertIn(f"xmlns:{prefix}=", root, f"{doc.name}: {name}")
 
+    def test_drawing_markup_follows_the_schema_order(self):
+        # The sequences of ECMA-376 Part 1 for wp:inline (§20.4.2.8), wp:anchor (§20.4.2.3),
+        # the shape properties (§20.1.2.2.35), bodyPr (§21.1.2.1.1) and pic:pic (§20.2.2.5),
+        # and of [MS-ODRAWXML] 2.3.4 for wps:wsp: every child at its place in the sequence,
+        # once, and the required ones there. Word refuses a document that breaks them.
+        a = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+        wp = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}"
+        wps = "{http://schemas.microsoft.com/office/word/2010/wordprocessingShape}"
+        pic = "{http://schemas.openxmlformats.org/drawingml/2006/picture}"
+        wrap = {f"{wp}{k}" for k in ("wrapNone", "wrapSquare", "wrapTight", "wrapThrough",
+                                      "wrapTopAndBottom")}
+        fill = {f"{a}{k}" for k in ("noFill", "solidFill", "gradFill", "blipFill", "pattFill",
+                                     "grpFill")}
+        shape_properties = ([{f"{a}xfrm"}, {f"{a}prstGeom"}, fill, {f"{a}ln"}], [])
+        sequences = {
+            f"{wp}inline": ([{f"{wp}extent"}, {f"{wp}effectExtent"}, {f"{wp}docPr"},
+                             {f"{wp}cNvGraphicFramePr"}, {f"{a}graphic"}], [0, 2, 4]),
+            f"{wp}anchor": ([{f"{wp}simplePos"}, {f"{wp}positionH"}, {f"{wp}positionV"},
+                             {f"{wp}extent"}, {f"{wp}effectExtent"}, wrap, {f"{wp}docPr"},
+                             {f"{wp}cNvGraphicFramePr"}, {f"{a}graphic"}], [0, 1, 2, 3, 5, 6, 8]),
+            f"{wps}wsp": ([{f"{wps}cNvPr"}, {f"{wps}cNvSpPr"}, {f"{wps}spPr"}, {f"{wps}style"},
+                           {f"{wps}txbx"}, {f"{wps}bodyPr"}], [1, 2, 5]),
+            f"{wps}spPr": shape_properties,
+            f"{pic}spPr": shape_properties,
+            f"{wps}bodyPr": ([{f"{a}prstTxWarp"},
+                              {f"{a}noAutofit", f"{a}normAutofit", f"{a}spAutoFit"}], []),
+            f"{pic}pic": ([{f"{pic}nvPicPr"}, {f"{pic}blipFill"}, {f"{pic}spPr"}], [0, 1, 2]),
+        }
+        seen = set()
+        for doc in self.docs:
+            parts = dict(rules.parts(doc))
+            for name, data in parts.items():
+                if not re.fullmatch(r"word/(document|header\d+|footer\d+)\.xml", name):
+                    continue
+                for element in ElementTree.fromstring(data).iter():
+                    if element.tag not in sequences:
+                        continue
+                    seen.add(element.tag)
+                    order, required = sequences[element.tag]
+                    places = []
+                    for child in element:
+                        place = [k for k, tags in enumerate(order) if child.tag in tags]
+                        self.assertEqual(len(place), 1, f"{doc.name}: {child.tag} in {element.tag}")
+                        places.append(place[0])
+                    where = f"{doc.name}: {element.tag}"
+                    self.assertEqual(places, sorted(set(places)), where)
+                    for k in required:
+                        self.assertIn(k, places, f"{where} lacks {order[k]}")
+        self.assertEqual(seen, set(sequences))
+
     def test_drawing_revision_and_form_field_ids_are_unique(self):
         # Word refuses a document whose drawings share a docPr id; revisions and the ranges
         # of moves have ids of their own, a move's two ranges share a name, and no two legacy
@@ -3639,12 +3689,14 @@ class Packages(unittest.TestCase):
         _, _, body = load("E-textbox-spacing")
         shapes = boxes(body)
         self.assertEqual([s.find(f"{wps}bodyPr").get("anchor") for s in shapes],
-                         ["t", "t", "b", "b", "ctr", "ctr"])
+                         ["t", "t", "b", "b", "ctr", "ctr", "ctr"])
         self.assertEqual({insets(s) for s in shapes}, {("0",) * 4})
         spaced = [(twips(box_paragraphs(s)[0], f"{W}spacing", "before"),
                    twips(box_paragraphs(s)[-1], f"{W}spacing", "after")) for s in shapes]
+        # At the centre, space before alone and after alone: both kept and both dropped
+        # would put the text of one box with both at the same place.
         self.assertEqual(spaced, [(None, None), ("240", None), (None, None), (None, "240"),
-                                  (None, None), ("240", "240")])
+                                  (None, None), ("240", None), (None, "240")])
 
         # E-textbox-autofit: spAutoFit on the boxes written too short and too tall.
         _, _, body = load("E-textbox-autofit")
@@ -3714,18 +3766,48 @@ class Packages(unittest.TestCase):
         for p in inline_paragraphs:
             self.assertTrue(texts(p).endswith(" after."), texts(p))
 
-        # E-textbox-vml: VML text boxes with the insets and anchors their labels name.
+        # E-textbox-vml: four floating VML text boxes with the insets and anchors their
+        # labels name, each in the paragraph of its anchor, and an inline one; every one
+        # tall enough for its text inside the insets.
         _, _, body = load("E-textbox-vml")
         shapes = list(body.iter(f"{v}shape"))
         self.assertEqual([s.find(f"{v}textbox").get("inset") for s in shapes],
                          [None, "18pt,18pt,18pt,18pt", "0,0,0,0", "0,0,0,0", None])
-        styles = [s.get("style") for s in shapes]
-        self.assertEqual(["v-text-anchor:middle" in s for s in styles],
-                         [False, False, True, False, False])
-        self.assertEqual(["v-text-anchor:bottom" in s for s in styles],
-                         [False, False, False, True, False])
-        self.assertEqual(["position:absolute" in s for s in styles], [False] * 4 + [True])
-        self.assertIn("margin-left:144pt", styles[4])
+        styles = [dict(item.split(":", 1) for item in s.get("style").split(";"))
+                  for s in shapes]
+        self.assertEqual([s.get("v-text-anchor") for s in styles],
+                         [None, None, "middle", "bottom", None])
+        self.assertEqual([s.get("position") for s in styles], ["absolute"] * 4 + [None])
+        self.assertEqual({(s["width"], s["height"]) for s in styles}, {("216pt", "90pt")})
+        for style in styles[:4]:
+            self.assertEqual((style["margin-left"], style["margin-top"],
+                              style["mso-position-horizontal-relative"]),
+                             ("144pt", "0", "margin"))
+        for n, shape in enumerate(shapes[:4], 1):
+            holder = next(p for p in body.findall(f"{W}p") if shape in list(p.iter(f"{v}shape")))
+            self.assertTrue(texts(holder).endswith(f"The anchor of case {n:02d}."), n)
+        # Three lines of 13.43 pt fit inside the insets of 18 pt.
+        self.assertLess(3 * 13.43 + 36, float(styles[1]["height"].removesuffix("pt")))
+
+        # E-textbox-from-paragraph: one line in a box of 144 x 36 pt, top and bottom insets
+        # of 0, anchored at the centre, top and bottom, placed at the top of a paragraph
+        # with 4 pt before, and once with none.
+        _, _, body = load("E-textbox-from-paragraph")
+        anchors = list(body.iter(f"{wp}anchor"))
+        self.assertEqual([boxes(d)[0].find(f"{wps}bodyPr").get("anchor") for d in anchors],
+                         ["ctr", "t", "b", "ctr"])
+        self.assertEqual({insets(boxes(d)[0]) for d in anchors},
+                         {(str(emu * 72 // 10), "0", str(emu * 72 // 10), "0")})
+        self.assertEqual({(d.find(f"{wp}positionV").get("relativeFrom"),
+                           d.find(f"{wp}positionV/{wp}posOffset").text,
+                           d.find(f"{wp}positionH").get("relativeFrom"),
+                           d.find(f"{wp}positionH/{wp}posOffset").text) for d in anchors},
+                         {("paragraph", "0", "margin", str(144 * emu))})
+        self.assertEqual({size(d) for d in anchors}, {(144, 36)})
+        self.assertEqual([len(box_paragraphs(boxes(d)[0])) for d in anchors], [1] * 4)
+        holders = [p for p in body.findall(f"{W}p") if p.find(f".//{wp}anchor") is not None]
+        self.assertEqual([twips(p, f"{W}spacing", "before") for p in holders],
+                         ["80", "80", "80", "0"])
 
         # E-textbox-bar-tab: the same paragraph with a bar tab at 72 pt and 12 pt before
         # and after, in a box 288 pt wide and in the body, 288 pt wide too.

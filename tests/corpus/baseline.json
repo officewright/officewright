@@ -446,6 +446,7 @@
     "tests/corpus/word-rules/E-textbox-bar-tab.docx": "opened",
     "tests/corpus/word-rules/E-textbox-fill-outline.docx": "opened",
     "tests/corpus/word-rules/E-textbox-footer-page.docx": "opened",
+    "tests/corpus/word-rules/E-textbox-from-paragraph.docx": "opened",
     "tests/corpus/word-rules/E-textbox-inline-floating.docx": "opened",
     "tests/corpus/word-rules/E-textbox-insets.docx": "opened",
     "tests/corpus/word-rules/E-textbox-lists.docx": "opened",

@@ -4574,7 +4574,8 @@ def textbox_spacing() -> Doc:
         ("anchor bottom, 12 pt after the last paragraph", plain_first + last, "b"),
         ("anchor centre, no space before or after (to compare)", plain_first + plain_last,
          "ctr"),
-        ("anchor centre, 12 pt before the first and after the last", first + last, "ctr"),
+        ("anchor centre, 12 pt before the first paragraph", first + plain_last, "ctr"),
+        ("anchor centre, 12 pt after the last paragraph", plain_first + last, "ctr"),
     ]
     return Doc(
         "E-textbox-spacing",
@@ -4713,10 +4714,45 @@ def textbox_inline_floating() -> Doc:
     )
     return Doc(
         "E-textbox-inline-floating",
-        "Where Word puts inline text boxes in a line of text, one lower and one taller than "
-        "the line, and floating ones placed from the margin and from the page, without "
-        "wrapping; each box with a 0.5 pt outline",
+        "Where Word puts inline text boxes of 18 and 48 pt in a line of 11 pt text, and "
+        "floating ones placed from the margin and from the page, without wrapping; each box "
+        "with a 0.5 pt outline",
         body,
+    )
+
+
+def textbox_from_paragraph() -> Doc:
+    # #465, from the review of #467: in letter-cfpb-validation-notice a centred box placed
+    # from a paragraph with space before is about 2 pt from where centring puts it; these
+    # cases tell whether centring or the paragraph's top for positioning is off.
+    one_line = para(run("One line"))
+
+    def placed(n: int, anchor: str) -> str:
+        return shape_run(anchored_drawing(n, 144, 36, wps_shape(
+            144, 36, one_line, anchor=anchor, insets=(7.2, 0, 7.2, 0)),
+            across=("margin", 144), down=("paragraph", 0)))
+
+    cases = [
+        ("anchor centre, from a paragraph with 4 pt before", "ctr", 4),
+        ("anchor top, from a paragraph with 4 pt before (to compare)", "t", 4),
+        ("anchor bottom, from a paragraph with 4 pt before (to compare)", "b", 4),
+        ("anchor centre, from a paragraph with no space before (to compare)", "ctr", 0),
+    ]
+    # 12 pt below each label keep it clear of the box, whichever top of the paragraph Word
+    # places it from.
+    body = "".join(
+        para(run(f"Case {n:02d}: {label}"), space=spacing(before=12, after=12))
+        + para(placed(n, anchor) + run(f"The anchor of case {n:02d}."),
+               space=spacing(before=before, after=48))
+        for n, (label, anchor, before) in enumerate(cases, 1)
+    )
+    return Doc(
+        "E-textbox-from-paragraph",
+        "Where Word puts the one line of a text box of 144 x 36 pt, with top and bottom "
+        "insets of 0, anchored at the centre, top and bottom and placed 0 pt below the top "
+        "of a paragraph with 4 pt space before, and with none; floating, 144 pt from the "
+        "left margin, a 0.5 pt outline",
+        body + para(run("End of the document.")),
     )
 
 
@@ -4741,25 +4777,32 @@ def vml_box(shape_id: str, style: str, content: str, inset: str | None = None,
 
 def textbox_vml() -> Doc:
     content = para(run(WRAPPING_BOX_TEXT))
-    size = "width:216pt;height:54pt"
+    size = "width:216pt;height:90pt"
+    # Floating, as older documents write them: 144 pt from the left margin, at the top of
+    # the paragraph that holds the case's anchor.
+    floating = ("position:absolute;margin-left:144pt;margin-top:0;" + size
+                + ";z-index:{z};mso-position-horizontal-relative:margin")
     cases = [
-        ("no inset written (the defaults of VML)", vml_box("t1", size, content, first=True)),
-        ("an inset of 18 pt on every side", vml_box("t2", size, content,
-                                                    "18pt,18pt,18pt,18pt")),
-        ("an inset of 0, v-text-anchor middle", vml_box(
-            "t3", size + ";v-text-anchor:middle", para(run("One line")), "0,0,0,0")),
-        ("an inset of 0, v-text-anchor bottom", vml_box(
-            "t4", size + ";v-text-anchor:bottom", para(run("One line")), "0,0,0,0")),
-        ("floating, 144 pt from the left margin and 12 pt below the paragraph's top", vml_box(
-            "t5", "position:absolute;margin-left:144pt;margin-top:12pt;" + size
-            + ";z-index:1;mso-position-horizontal-relative:margin", content)),
+        ("floating, no inset written (the defaults of VML)",
+         vml_box("t1", floating.format(z=1), content, first=True)),
+        ("floating, an inset of 18 pt on every side",
+         vml_box("t2", floating.format(z=2), content, "18pt,18pt,18pt,18pt")),
+        ("floating, an inset of 0, v-text-anchor middle", vml_box(
+            "t3", floating.format(z=3) + ";v-text-anchor:middle", para(run("One line")),
+            "0,0,0,0")),
+        ("floating, an inset of 0, v-text-anchor bottom", vml_box(
+            "t4", floating.format(z=4) + ";v-text-anchor:bottom", para(run("One line")),
+            "0,0,0,0")),
     ]
+    anchored = [(label, box + run(f"The anchor of case {n:02d}."))
+                for n, (label, box) in enumerate(cases, 1)]
+    inline = [("inline, no inset written (to compare)", vml_box("t5", size, content))]
     return Doc(
         "E-textbox-vml",
         "Where Word puts the text of VML text boxes (w:pict, v:textbox), as older documents "
-        "write them: the default inset, an inset of 18 pt, v-text-anchor middle and bottom, "
-        "and a floating box; 216 x 54 pt with a 0.5 pt outline",
-        box_cases(cases, after=72) + para(run("End of the document.")),
+        "write them, floating: the default inset, an inset of 18 pt, v-text-anchor middle "
+        "and bottom; and an inline one; 216 x 90 pt with a 0.5 pt outline",
+        box_cases(anchored + inline, after=96) + para(run("End of the document.")),
     )
 
 
@@ -5370,6 +5413,7 @@ def documents() -> list[Doc]:
         textbox_lists(),
         textbox_footer_page(),
         textbox_inline_floating(),
+        textbox_from_paragraph(),
         textbox_vml(),
         textbox_bar_tab(),
         shape_colors(),
