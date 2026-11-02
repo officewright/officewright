@@ -8,8 +8,9 @@ use skrifa::raw::{FontData, FontRead};
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Coverage(Vec<(u32, u32)>);
 
-/// What reading character maps may still cost: a step for each segment, group and
-/// glyph-array entry looked at, and the ranges kept.
+/// What reading character maps may still cost: a step for each segment and group looked
+/// at and for each code point of a format 4 segment that reads the glyph ID array, and the
+/// ranges kept.
 pub(crate) struct Allowance {
     pub(crate) steps: u64,
     pub(crate) ranges: usize,
@@ -37,16 +38,16 @@ impl Coverage {
     /// that cannot be read is passed over, as `Charmap` passes it over. A symbol subtable
     /// of `DMAP` also takes U+0000 to U+00FF from `cmap` where it maps the same characters
     /// at U+F000 to U+F0FF, for `Charmap` looks them up there too; those do not count as
-    /// covered, as for a symbol `cmap`. Neither table covers U+FFFF through a format 4
-    /// subtable, whose lookup of it may land on any closing segment.
+    /// covered, as for a symbol `cmap`. A format 4 subtable never covers U+FFFF, whose
+    /// lookup may land on any closing segment, and a format 4 `DMAP` subtable keeps
+    /// `cmap`'s U+FFFF from counting too. Groups past U+10FFFF cover nothing.
     ///
     /// The work is a step per segment or group, plus one per code point of a format 4
     /// segment that reads the glyph ID array, so it grows with the tables rather than with
-    /// the characters they map; it is taken from `allowance`, twice for `DMAP`. `None` if `cmap` cannot be
-    /// read, if a subtable used is damaged in a way that makes a lookup disagree with its
-    /// segments or groups (out of order or overlapping), or if it would go past
-    /// `allowance`. A format 4 subtable never covers U+FFFF, and groups past U+10FFFF
-    /// cover nothing.
+    /// the characters they map; it is taken from `allowance`, twice for `DMAP`. `None` if
+    /// `cmap` cannot be read, if a subtable used is damaged in a way that makes a lookup
+    /// disagree with its segments or groups (out of order or overlapping), or if it would
+    /// go past `allowance`.
     pub(crate) fn of_tables(
         cmap: &[u8],
         dmap: Option<&[u8]>,
@@ -497,6 +498,30 @@ mod tests {
         };
         let coverage = Coverage::of_tables(&cmap, None, 20, &mut allowance).unwrap();
         assert_eq!(coverage.0, [(0xFFF0, 0xFFFE)]);
+    }
+
+    #[test]
+    fn charges_a_step_for_every_code_point_that_reads_the_glyph_array() {
+        // A would read before the glyph ID array and maps nothing; B to D read its
+        // entries, glyphs 1 to 3.
+        let cmap = crate::testing::cmap_of(&[(
+            3,
+            1,
+            crate::testing::format4(&[(0x41, 0x44, 0, 2)], &[1, 2, 3]),
+        )]);
+        // Two segments, the closing one included, and four code points.
+        let mut exact = Allowance {
+            steps: 6,
+            ranges: 10,
+        };
+        let coverage = Coverage::of_tables(&cmap, None, 5, &mut exact).unwrap();
+        assert_eq!(coverage.0, [(0x42, 0x44)]);
+        assert_eq!(exact.steps, 0);
+        let mut short = Allowance {
+            steps: 5,
+            ranges: 10,
+        };
+        assert_eq!(Coverage::of_tables(&cmap, None, 5, &mut short), None);
     }
 
     #[test]

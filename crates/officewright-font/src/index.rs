@@ -70,7 +70,8 @@ const MAX_CMAP: u32 = 16 << 20;
 pub(crate) struct CoverageLimits {
     /// Bytes read, table directories included.
     pub(crate) read: u64,
-    /// Segments, groups and glyph-array entries looked at; see [`Coverage::of_tables`].
+    /// Segments and groups looked at, and code points of format 4 segments that read the
+    /// glyph ID array; see [`Coverage::of_tables`].
     pub(crate) steps: u64,
     /// Ranges of code points kept.
     pub(crate) ranges: usize,

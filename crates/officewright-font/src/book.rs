@@ -670,20 +670,20 @@ impl FontBook {
     /// [`FontFace::glyph_id`] also finds, as Windows does, do not count, so a symbol font
     /// never stands in for Latin text. A face with a subtable whose segments or groups are
     /// out of order or overlap, so that a lookup cannot be trusted, covers nothing; a
-    /// repeated closing segment of a format 4 subtable does not count as overlap. A face
-    /// with a format 4 subtable in either table never covers U+FFFF, a noncharacter. And a
-    /// face without a `cmap` table covers nothing, even if its `DMAP` table maps
-    /// characters.
+    /// repeated closing segment of a format 4 subtable does not count as overlap. A format
+    /// 4 subtable never covers U+FFFF, a noncharacter, and a format 4 `DMAP` subtable
+    /// keeps `cmap`'s U+FFFF from counting too. And a face without a `cmap` table covers
+    /// nothing, even if its `DMAP` table maps characters.
     ///
     /// Adding fonts does not read their character maps. The first query reads, for every
     /// face added from the same file or buffer, its table directory, its `cmap` and
     /// `DMAP` tables and the start of its `maxp` table, and keeps what each face maps as
     /// ranges of characters, so later queries cost a lookup per face; the clones of the
     /// book share it. Faces that share their tables, as those of a collection usually
-    /// do, are read once. The work grows with the size of the tables, not with the number of
-    /// characters they map, and is bounded per file like the index: the bytes it reads,
-    /// about four million segments, groups and glyph-array entries, and 65,536 ranges,
-    /// for all its faces together, which real fonts stay far below. A face past those
+    /// do, are read once. The work grows with the size of the tables, not with the number
+    /// of characters they map, and is bounded per file like the index: the bytes it reads,
+    /// about four million segments, groups and code points that read a glyph array, and
+    /// 65,536 ranges, for all its faces together, which real fonts stay far below. A face past those
     /// bounds, a face whose file can no longer be read, and a face whose `cmap` is damaged
     /// or missing cover nothing, and are not read again.
     ///
