@@ -438,10 +438,11 @@ fn u32_at(data: &[u8], at: usize) -> Option<u32> {
 /// Reads the size and components of a JPEG file from its frame header (ITU T.81, B.2),
 /// and whether it has Adobe's `APP14` segment. The frame header and every scan header
 /// before the end of image are checked by the rules of T.81 that libjpeg enforces when it
-/// reads them, so that a file whose headers a viewer cannot read is refused; after the
-/// first scan, so are a second frame header or start of image, the marker of a frame that
-/// cannot go into a PDF, and a second scan where libjpeg expects none, all of which
-/// libjpeg refuses too ([`check_later_scans`]).
+/// reads them, so that a file whose headers a viewer cannot read is refused, as is a
+/// restart interval segment of any length but 4 ([`restart_interval`]); after the first
+/// scan, so are a second frame header or start of image, the marker of a frame that cannot
+/// go into a PDF, a second scan where libjpeg expects none, and such a restart interval,
+/// all of which libjpeg refuses too ([`check_later_scans`]).
 ///
 /// Not refused but cut: a sequential file whose first scan codes every component has no
 /// other scan, and libjpeg draws it from that scan whatever follows, as poppler shows; it
@@ -784,7 +785,8 @@ fn refuse_other_frame(code: u8) -> std::result::Result<(), Problem> {
 /// Checks the scan headers after the first, whose coded data starts at `coded`, against
 /// their `frame`, as libjpeg does when it reaches them, and refuses what libjpeg refuses
 /// there too: a second frame header or start of image, the marker of a frame that cannot
-/// go into a PDF ([`refuse_other_frame`]), and any scan at all unless `more_scans`. libjpeg
+/// go into a PDF ([`refuse_other_frame`]), a restart interval segment of any length but 4
+/// ([`restart_interval`]), and any scan at all unless `more_scans`. libjpeg
 /// expects more scans after the first only in a progressive frame, or in a sequential one
 /// whose first scan codes only some of its components; otherwise it stops at the next
 /// scan header with "Didn't expect more than one scan". That rule matched libjpeg-turbo,
@@ -3514,9 +3516,11 @@ pub(crate) mod tests {
         // libjpeg refuses a DRI segment of any length but 4, before the first scan, between
         // scans and after the last ("Bogus marker length"); `qpdf --check` fails each (#422).
         let dri = |length: u16| {
-            let body = [0u8, 1, 0, 0, 0, 0];
-            let size = usize::from(length.saturating_sub(2));
-            [&[0xFF, 0xDD][..], &length.to_be_bytes(), &body[..size]].concat()
+            let mut body = vec![0u8; usize::from(length.saturating_sub(2))];
+            if let Some(low) = body.get_mut(1) {
+                *low = 1;
+            }
+            [&[0xFF, 0xDD][..], &length.to_be_bytes(), &body].concat()
         };
         let refused_at = |data: Vec<u8>, at: usize, length: u16| {
             let err = error(data);
@@ -3545,7 +3549,7 @@ pub(crate) mod tests {
             Encoding::Jpeg { end, .. } => end,
             _ => unreachable!(),
         };
-        for length in [2, 3, 5, 6] {
+        for length in [0, 1, 2, 3, 5, 6, 7, 18] {
             // Before the first scan.
             let before = [
                 &sequential[..first_scan],
