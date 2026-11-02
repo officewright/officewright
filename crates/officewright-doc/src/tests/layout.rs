@@ -4415,7 +4415,8 @@ fn translates_the_preview_of_an_embedded_object_as_a_picture() {
 fn lists_a_picture_or_object_in_the_line_of_a_raised_or_lowered_run() {
     // From the review of #437: the IR places an object in the line on the baseline, so a
     // raise or a lowering of its run (w:position), which Word gives an equation's preview,
-    // is listed once; a run that is not moved, and an object that floats, are not.
+    // is listed once; a run that is not moved, an object that floats, and a moved run that
+    // holds only text or a tab, which its style raises, are not (from the re-check).
     use super::drawing::{inline_picture, with_images};
     use super::vml::object_preview;
     let raised = |run: String, half_points: i32| {
@@ -4435,11 +4436,19 @@ fn lists_a_picture_or_object_in_the_line_of_a_raised_or_lowered_run() {
     };
     let message = "a picture or an object in the line of a raised or lowered run (w:position) is drawn on the baseline, here and wherever else the document has one";
     let equation = object_preview("rIdEmf", "width:30pt;height:20pt");
+    assert_eq!(listed(&[raised(equation.clone(), -12)]), [message]);
+    assert_eq!(listed(&[raised(equation.clone(), 6)]), [message]);
     assert_eq!(
         listed(&[raised(equation.clone(), -12), raised(equation.clone(), 6)]),
         [message]
     );
+    let text_and_tab = r#"<w:r><w:t>a</w:t><w:tab/><w:t>b</w:t></w:r>"#.to_owned();
+    assert!(listed(&[raised(text_and_tab, 2)]).is_empty());
     assert_eq!(listed(&[raised(inline_picture("rIdPng"), 4)]), [message]);
+    assert_eq!(
+        listed(&[raised(super::vml::inline_vml_picture("rIdPng"), -4)]),
+        [message]
+    );
     assert!(listed(&[raised(equation.clone(), 0), equation]).is_empty());
     let floating = object_preview(
         "rIdPng",

@@ -22,8 +22,8 @@ const MAX_LENGTH: f64 = 27_273_042_316_900.0 / 12_700.0;
 
 /// A VML drawing in a run (`w:pict`). A picture (a `v:shape` or `v:rect` whose
 /// `v:imagedata` names its image) is read, in the line or floating; other shapes, text
-/// boxes, WordArt and
-/// groups show as no picture, and [`to_xml`](Self::to_xml) gives them as written.
+/// boxes, WordArt and groups show as no picture, and [`to_xml`](Self::to_xml) gives them
+/// as written.
 ///
 /// ```
 /// # fn main() -> officewright_doc::Result<()> {

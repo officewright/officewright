@@ -122,7 +122,8 @@ impl Document {
     /// of figures and stylistic sets other than the font's default; borders around text, in
     /// a run that is not hidden and shows text, a tab or a picture in the line; a picture's
     /// outline, its colour effects, its shadow, reflection, glow, soft edges and 3-D
-    /// effects, and a shape it is cut to; and a paragraph mark, a table row or a table cell
+    /// effects, and a shape it is cut to; a picture or an object in the line of a raised or
+    /// lowered run; and a paragraph mark, a table row or a table cell
     /// deleted as a tracked change, which the IR keeps, and a paragraph mark moved away. A
     /// deleted mark is listed only where a paragraph or a table follows, in the same cell
     /// or story or in the next section: the last paragraph of a cell or a story is joined

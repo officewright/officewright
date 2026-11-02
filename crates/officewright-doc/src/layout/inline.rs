@@ -84,6 +84,8 @@ impl<'a> Translator<'a> {
         // Whether the run shows text, which its features would change, and whether it
         // holds a tab or a picture in the line, which a border around it would surround.
         let (mut shows, mut boxed) = (false, false);
+        // Whether a picture or an object is in the line, which the IR places on the baseline.
+        let mut in_line_object = false;
         for item in run.content() {
             match item {
                 RunContent::Text(text) => {
@@ -151,18 +153,21 @@ impl<'a> Translator<'a> {
                 RunContent::Drawing(drawing) => {
                     if let Some(object) = self.drawing(drawing) {
                         boxed |= drawing.is_inline();
+                        in_line_object |= drawing.is_inline();
                         content.push(object);
                     }
                 }
                 RunContent::VmlDrawing(drawing) => {
                     if let Some(object) = self.vml_drawing(drawing) {
                         boxed |= matches!(object, ir::Inline::Object(_));
+                        in_line_object |= matches!(object, ir::Inline::Object(_));
                         content.push(object);
                     }
                 }
                 RunContent::Object(embedded) => {
                     if let Some(object) = self.embedded_object(embedded) {
                         boxed |= matches!(object, ir::Inline::Object(_));
+                        in_line_object |= matches!(object, ir::Inline::Object(_));
                         content.push(object);
                     }
                 }
@@ -201,8 +206,8 @@ impl<'a> Translator<'a> {
         }
         // The IR places an object in the line on the baseline: a raise or a lowering of its
         // run, which Word gives an equation's preview to set it on the line of text, has
-        // no place there.
-        if !format.hidden() && boxed && format.position().0 != 0.0 {
+        // no place there (#446). A tab is raised with its run's style, as text is.
+        if in_line_object && format.position().0 != 0.0 {
             self.report_once(
                 Once::RaisedObject,
                 "a picture or an object in the line of a raised or lowered run (w:position) is drawn on the baseline, here and wherever else the document has one",
