@@ -863,9 +863,11 @@ def page_geometry(bbox: str) -> list[dict]:
 # make-reference.ps1 exports without markup: properties; markers of ranges (bookmarks such as
 # the _Hlk ones Word writes before a mark, proofing errors, comments and the reference mark
 # Word writes after a comment's range, permissions, moves); the fldChar and instrText of a
-# field's code; and text deleted or moved away. Only these elements are taken for unshown: a
-# field nested in another field's code counts as shown, and so does a legacy form field's box,
-# though it has no result runs (#410).
+# field's code; and text deleted or moved away. leads also skips the runs their own w:vanish
+# hides, which Word prints only with its "Print hidden text" option, off by default. Nothing
+# else is taken for unshown, and a field is read by these names only: a field nested in
+# another field's code counts as shown, and a legacy form field's box, which has no result
+# runs, counts as unshown (#410).
 UNSHOWN = {
     "pPr", "rPr", "sdtPr", "sdtEndPr", "smartTagPr", "customXmlPr",
     "bookmarkStart", "bookmarkEnd", "proofErr", "commentRangeStart", "commentRangeEnd",

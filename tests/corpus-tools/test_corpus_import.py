@@ -1119,6 +1119,24 @@ class RenderedPageBreaks(unittest.TestCase):
                          + "</w:tbl>")
                 self.assertEqual(self.breaks(table), expected)
 
+    def test_a_row_start_inside_hidden_text_stays_the_start(self):
+        # The mark sits inside a hidden run, after its hidden text.
+        first = ("<w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>x</w:t><w:lastRenderedPageBreak/>"
+                 "<w:t>Name</w:t></w:r></w:p>")
+        table = ("<w:tbl>" + self.row(self.cell(first), self.cell(self.mid("ab", "cd")))
+                 + "</w:tbl>")
+        self.assertEqual(self.breaks(table), [(0, "Name"), (1, "cd")])
+
+    def test_a_run_once_hidden_by_a_tracked_change_shows(self):
+        # Only the run's own w:vanish hides it, not the one its tracked change of properties
+        # (w:rPrChange) records: its text shows, the mark crosses a page, and the second
+        # cell's crossing is the same page.
+        first = ('<w:p><w:r><w:rPr><w:rPrChange w:id="1" w:author="A"><w:rPr><w:vanish/></w:rPr>'
+                 "</w:rPrChange></w:rPr><w:t>shown</w:t></w:r>" + self.MARK + "</w:p>")
+        table = ("<w:tbl>" + self.row(self.cell(first), self.cell(self.mid("ab", "cd")))
+                 + "</w:tbl>")
+        self.assertEqual(self.breaks(table), [(0, "Name")])
+
     def test_a_row_start_in_a_later_cell_after_an_empty_one_stays_the_start(self):
         table = ("<w:tbl>"
                  + self.row(self.cell("<w:p/>"), self.cell(self.p("Name", True)),
