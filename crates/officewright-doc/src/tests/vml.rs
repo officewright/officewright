@@ -684,16 +684,20 @@ fn reports_each_value_of_a_vml_picture_that_its_readers_do_not_take() {
 fn reports_the_values_after_one_that_decides_what_a_vml_picture_has() {
     // A value that already decides whether the picture has an outline, adjusted colours
     // or a shadow, or where it is, does not stop the values after it from being read
-    // and reported: the offset of an aligned picture, anchorx where the style names a
-    // base.
+    // and reported: the offsets of an aligned picture, anchorx and anchory where the
+    // style names a base on each axis; and a shape type's stroked is read too (from the
+    // review of #435).
     let picture = vml_picture(
         "rIdPng",
-        "position:absolute;width:1pt;height:1pt;mso-position-horizontal:center;margin-left:x;mso-position-horizontal-relative:margin",
+        "position:absolute;width:1pt;height:1pt;mso-position-horizontal:center;margin-left:x;mso-position-horizontal-relative:margin;mso-position-vertical:center;margin-top:x;mso-position-vertical-relative:margin",
         r#"stroked="x""#,
         r#"gain="0.5" blacklevel="x" grayscale="t" bilevel="x""#,
-        r#"<v:stroke on="t"/><v:shadow on="t"/><v:shadow on="x"/><w10:wrap anchorx="x"/>"#,
+        r#"<v:stroke on="t"/><v:shadow on="t"/><v:shadow on="x"/><w10:wrap anchorx="x" anchory="x"/>"#,
     );
-    let document = with_images(&format!("<w:p>{picture}</w:p>"));
+    let typed = pict(
+        r##"<v:shapetype id="t1" stroked="maybe"/><v:shape type="#t1" style="width:1pt;height:1pt"><v:imagedata r:id="rIdPng"/></v:shape>"##,
+    );
+    let document = with_images(&format!("<w:p>{picture}{typed}</w:p>"));
     assert_eq!(
         reported(&document),
         [
@@ -702,7 +706,10 @@ fn reports_the_values_after_one_that_decides_what_a_vml_picture_has() {
             r#"v:imagedata bilevel="x" is not valid; it is ignored"#,
             r#"v:shadow on="x" is not valid; it is ignored"#,
             r#"v:shape style="margin-left:x" is not valid; it is ignored"#,
+            r#"v:shape style="margin-top:x" is not valid; it is ignored"#,
             r#"w10:wrap anchorx="x" is not valid; it is ignored"#,
+            r#"w10:wrap anchory="x" is not valid; it is ignored"#,
+            r#"v:shapetype stroked="maybe" is not valid; it is ignored"#,
         ]
     );
     let picture = vml_drawings(&document)[0].picture().unwrap();

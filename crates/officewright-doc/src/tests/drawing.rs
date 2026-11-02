@@ -637,9 +637,11 @@ fn reports_each_value_of_a_picture_that_its_readers_do_not_take() {
 #[test]
 fn reports_the_values_after_one_that_decides_what_a_picture_has() {
     // A value that already decides whether the picture has effects, or where an aligned
-    // position puts it, does not stop the values after it from being read and reported.
+    // position puts it, does not stop the values after it from being read and reported:
+    // a contrast after a brightness, a saturation after a hue, a camera's longitude after
+    // a latitude that turns it, a depth beside a bevel (from the review of #435).
     let graphic = format!(
-        r#"<a:graphic xmlns:a="{A}"><a:graphicData uri="{PICTURE_URI}"><pic:pic xmlns:pic="{PIC}"><pic:nvPicPr><pic:cNvPr id="0" name="p"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdPng"><a:grayscl/><a:lum bright="1" contrast="x"/></a:blip><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:prstGeom prst="rect"/><a:effectLst><a:glow rad="1"/></a:effectLst><a:sp3d extrusionH="x"/></pic:spPr></pic:pic></a:graphicData></a:graphic>"#
+        r#"<a:graphic xmlns:a="{A}"><a:graphicData uri="{PICTURE_URI}"><pic:pic xmlns:pic="{PIC}"><pic:nvPicPr><pic:cNvPr id="0" name="p"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdPng"><a:grayscl/><a:lum bright="1" contrast="x"/><a:hsl hue="1" sat="x" lum="0"/></a:blip><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:prstGeom prst="rect"/><a:effectLst><a:glow rad="1"/></a:effectLst><a:scene3d><a:camera prst="orthographicFront"><a:rot lat="60000" lon="x" rev="0"/></a:camera><a:lightRig rig="threePt" dir="t"/></a:scene3d><a:sp3d extrusionH="x"><a:bevelT/></a:sp3d></pic:spPr></pic:pic></a:graphicData></a:graphic>"#
     );
     let anchor = format!(
         r#"<w:p><w:r><w:drawing><wp:anchor xmlns:wp="{WP}" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:align>center</wp:align><wp:posOffset>x</wp:posOffset></wp:positionH><wp:positionV relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="12700" cy="12700"/><wp:wrapNone/><wp:docPr id="1" name="p"/>{graphic}</wp:anchor></w:drawing></w:r></w:p>"#
@@ -650,6 +652,8 @@ fn reports_the_values_after_one_that_decides_what_a_picture_has() {
         [
             r#"the text "x" of wp:posOffset is not valid; it is ignored"#,
             r#"a:lum contrast="x" is not valid; it is ignored"#,
+            r#"a:hsl sat="x" is not valid; it is ignored"#,
+            r#"a:rot lon="x" is not valid; it is ignored"#,
             r#"a:sp3d extrusionH="x" is not valid; it is ignored"#,
         ]
     );
@@ -659,10 +663,13 @@ fn reports_the_values_after_one_that_decides_what_a_picture_has() {
 
 #[test]
 fn reports_no_value_of_a_picture_that_its_readers_take() {
-    // Every value written as Word writes it, in either form where there are two.
+    // Every value written as Word writes it, in either form where there are two; the
+    // distances of a frame in the line are not read, so not reported either (from the
+    // review of #435).
     let document = with_images(&format!(
-        "<w:p>{}{}{}</w:p>",
+        "<w:p>{}{}{}{}</w:p>",
         inline_picture("rIdPng"),
+        inline_picture("rIdPng").replacen(r#"distT="0""#, r#"distT="-1""#, 1),
         anchored(
             "rIdPng",
             r#"simplePos="true" distT="0" distB="1in" distL="0" distR="0""#,
