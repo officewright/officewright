@@ -1191,6 +1191,15 @@ STORIES = {
     "primary-header", "even-pages-footer", "primary-footer", "first-page-header",
     "first-page-footer",
 }
+# make-reference.ps1's story for each kind of header and footer reference of a section.
+HEADER_FOOTER_STORIES = {
+    ("headerReference", "default"): "primary-header",
+    ("headerReference", "first"): "first-page-header",
+    ("headerReference", "even"): "even-pages-header",
+    ("footerReference", "default"): "primary-footer",
+    ("footerReference", "first"): "first-page-footer",
+    ("footerReference", "even"): "even-pages-footer",
+}
 LINE_RULES = {"single", "one-and-a-half", "double", "at-least", "exactly", "multiple"}
 ALIGNMENTS = {
     "left", "center", "right", "justify", "distribute", "justify-medium", "justify-high",
@@ -1295,6 +1304,38 @@ def checked_font(font: object, where: str) -> dict:
         out["theme_color"] = theme_colour
         out["tint_shade"] = tint_shade
     return out
+
+
+def is_on(element: ElementTree.Element | None) -> bool:
+    """Whether an on/off property (ST_OnOff) is there and not turned off."""
+    return element is not None and element.get(f"{W}val", "true") not in ("0", "false", "off")
+
+
+def header_footer_stories(parts: dict[str, bytes]) -> set[str]:
+    """The header and footer stories of a package that Word shows, by make-reference.ps1's
+    names: one for each kind of reference a section makes, a first-page one only in a section
+    with w:titlePg, and an even-pages one only when the settings ask for w:evenAndOddHeaders."""
+    main = main_document(parts)
+    if main is None:
+        return set()
+    settings = document_part(parts, "settings")
+    even = settings is not None and is_on(
+        ElementTree.fromstring(settings).find(f"{W}evenAndOddHeaders")
+    )
+    stories = set()
+    for section in ElementTree.fromstring(main).iter(f"{W}sectPr"):
+        title = is_on(section.find(f"{W}titlePg"))
+        for reference in section:
+            kind = (reference.tag.removeprefix(W), reference.get(f"{W}type", "default"))
+            story = HEADER_FOOTER_STORIES.get(kind)
+            if story is None:
+                continue
+            if story.startswith("first-page") and not title:
+                continue
+            if story.startswith("even-pages") and not even:
+                continue
+            stories.add(story)
+    return stories
 
 
 def read_formatting(data: bytes) -> dict:
@@ -2220,6 +2261,14 @@ def checked_formatting(
         or export["complete"] != record["formatting_complete"]
     ):
         raise Refused(f"{record['file']}: {path.name} does not match its record")
+    # A complete export holds every header and footer the re-saved copy shows; one that
+    # lacks some was read by a make-reference.ps1 that missed those only later sections have.
+    missing = sorted(header_footer_stories(resaved_parts) - {s["story"] for s in export["stories"]})
+    if export["complete"] and missing:
+        raise Refused(
+            f"{record['file']}: {path.name} has no {', '.join(missing)} story, which the "
+            "re-saved copy has; read the formatting again (make-reference.ps1 -FormattingOnly)"
+        )
     made_with = (
         f"Microsoft Word {record['word_version']}, build {record['word_build']}, "
         f"make-reference.ps1 format {record['script_version']}"

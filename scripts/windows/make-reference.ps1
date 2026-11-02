@@ -658,6 +658,23 @@ function Get-RunReaderFault($Range) {
     return "expected 5 bold=False, 3 bold=True, ...; read $($runs.Count) runs: $($read -join ', ')"
 }
 
+function Read-Story($Range, [string] $Name, [DateTime] $Deadline, $Themes, $Progress, $Visited) {
+    # The records of a story's paragraphs, each also added to $Visited with its paragraph,
+    # and whether every paragraph was read before $Deadline.
+    $records = New-Object System.Collections.ArrayList
+    $complete = $true
+    $index = 0
+    foreach ($paragraph in $Range.Paragraphs) {
+        if ([DateTime]::UtcNow -gt $Deadline) { $complete = $false; break }
+        $Progress.Step = "reading the formatting of paragraph $index of the $Name story"
+        $record = Get-ParagraphRecord $paragraph $index $Themes
+        [void]$records.Add($record)
+        [void]$Visited.Add(@($paragraph, $record))
+        $index++
+    }
+    return New-Object PSObject -Property @{ Records = $records.ToArray(); Complete = $complete }
+}
+
 function Export-Formatting($Document, [int] $BudgetSeconds, $Themes, $Progress, [bool] $RunReaderOk = $true) {
     # Every paragraph of every story with the formatting Word computes for it. Then, in a
     # second pass, its runs of formatting, kept only if that pass takes no longer than the
@@ -674,22 +691,44 @@ function Export-Formatting($Document, [int] $BudgetSeconds, $Themes, $Progress, 
         while ($null -ne $range) {
             $name = Get-StoryName ([int]$range.StoryType)
             if ($null -eq $name) { break }
-            $records = New-Object System.Collections.ArrayList
-            $index = 0
-            foreach ($paragraph in $range.Paragraphs) {
-                if ([DateTime]::UtcNow -gt $deadline) { $complete = $false; break }
-                $Progress.Step = "reading the formatting of paragraph $index of the $name story"
-                $record = Get-ParagraphRecord $paragraph $index $Themes
-                [void]$records.Add($record)
-                [void]$visited.Add(@($paragraph, $record))
-                $index++
-            }
-            [void]$stories.Add([ordered]@{ story = $name; instance = $instance; paragraphs = $records.ToArray() })
+            $read = Read-Story $range $name $deadline $Themes $Progress $visited
+            [void]$stories.Add([ordered]@{ story = $name; instance = $instance; paragraphs = $read.Records })
+            $complete = $read.Complete
             if (-not $complete) { break }
             $range = $range.NextStoryRange
             $instance++
         }
         if (-not $complete) { break }
+    }
+    # StoryRanges holds a type of header or footer only when the first section has one
+    # (#464). A type it does not hold is read through the sections: each section's header or
+    # footer of that type that exists and is not linked to the previous section's, in the
+    # order of the sections.
+    $chained = @{}
+    foreach ($story in $stories) { $chained[$story.story] = $true }
+    $instances = @{}
+    if ($complete) {
+        foreach ($section in $Document.Sections) {
+            # wdHeaderFooterPrimary, wdHeaderFooterFirstPage, wdHeaderFooterEvenPages.
+            foreach ($kind in 1, 2, 3) {
+                foreach ($headerFooter in @($section.Headers.Item($kind), $section.Footers.Item($kind))) {
+                    if (-not $headerFooter.Exists) { continue }
+                    if ($section.Index -gt 1 -and $headerFooter.LinkToPrevious) { continue }
+                    $range = $headerFooter.Range
+                    $name = Get-StoryName ([int]$range.StoryType)
+                    if ($null -eq $name -or $chained.ContainsKey($name)) { continue }
+                    $instance = 0
+                    if ($instances.ContainsKey($name)) { $instance = $instances[$name] }
+                    $instances[$name] = $instance + 1
+                    $read = Read-Story $range $name $deadline $Themes $Progress $visited
+                    [void]$stories.Add([ordered]@{ story = $name; instance = $instance; paragraphs = $read.Records })
+                    $complete = $read.Complete
+                    if (-not $complete) { break }
+                }
+                if (-not $complete) { break }
+            }
+            if (-not $complete) { break }
+        }
     }
     $paragraphSeconds = $clock.Elapsed.TotalSeconds
     # A floor of five seconds keeps small documents from losing their runs to timer noise.
@@ -805,7 +844,7 @@ function Get-FormattingFunctions {
     $names = @(
         'ConvertTo-PointValue', 'ConvertTo-Flag', 'ConvertTo-HexColor', 'Get-ThemeColorName', 'Get-AlignmentName',
         'Get-LineRuleName', 'Get-StoryName', 'Get-TextExcerpt', 'Get-ThemeKind', 'Get-FontRecord',
-        'Get-ParagraphRecord', 'Get-RunRecords', 'Get-RunReaderFault', 'Export-Formatting'
+        'Get-ParagraphRecord', 'Get-RunRecords', 'Get-RunReaderFault', 'Read-Story', 'Export-Formatting'
     )
     return ($names | ForEach-Object {
             "function $_ {`n$((Get-Item "function:$_").ScriptBlock.ToString())`n}"
