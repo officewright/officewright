@@ -1839,7 +1839,7 @@ fn stack<'d>(
                     context.fonts.report_once(
                         ReportKind::FeatureUnsupported,
                         location,
-                        "floating pictures in table cells are not drawn yet".to_owned(),
+                        "floating objects in table cells are not drawn yet".to_owned(),
                     );
                 }
                 // Widow control keeps two lines on each side of a page's end, as in the
@@ -2358,7 +2358,12 @@ fn weight(border: &Border) -> f64 {
 /// Adds the line of `border` from `from` to `to`, centred on them. Lines of several
 /// strokes are drawn as one, as thick as the border. Hypothesis until a Word reference
 /// (`E-table-borders-geometry.docx`): where the strokes of a double border go.
-fn border_line(border: &Border, from: (f64, f64), to: (f64, f64), items: &mut Vec<DisplayItem>) {
+pub(crate) fn border_line(
+    border: &Border,
+    from: (f64, f64),
+    to: (f64, f64),
+    items: &mut Vec<DisplayItem>,
+) {
     let style = match border.style() {
         BorderStyle::Dotted => LineStyle::Dotted,
         BorderStyle::Dashed | BorderStyle::DashSmallGap => LineStyle::Dashed,
@@ -3348,7 +3353,7 @@ mod tests {
         assert!(
             messages
                 .iter()
-                .any(|message| message.starts_with("floating pictures in table cells")),
+                .any(|message| message.starts_with("floating objects in table cells")),
             "{messages:?}"
         );
         let (_, bands) = laid(&document, &table, (400.0, &[]));
