@@ -69,17 +69,17 @@ Rust return it as a report.
 
 The main things not laid out yet:
 
-- in tables: fitting the columns to their content (the widths the document stores stand
-  in), splitting a row across pages, repeating header rows on the next page, spacing
-  between cells, floating tables (laid out in the text where they are anchored),
-  right-to-left tables, vertical text in cells, the content of a cell merged into the one
-  above, and cutting off content taller than an exact row height;
+- in tables: spacing between cells, floating tables (laid out in the text where they are
+  anchored), right-to-left tables, vertical text in cells, the content of a cell merged
+  into the one above, and, across pages, rows that a vertically merged cell ties together
+  and the rows of a table in a table cell, which move whole to the next page (the header
+  rows of such a table are not repeated);
 - list numbers in formats such as Hebrew letters or Chinese counting, which are written in
   decimal, and picture bullets, for which the level's text stands in;
 - footnotes and endnotes, and the marks that refer to them;
 - text wrapping around floating pictures (it runs over or under them), floating pictures
-  in table cells, and shapes, text boxes, charts, SmartArt, VML drawings, embedded objects
-  and equations;
+  in table cells, and shapes, text boxes, charts, SmartArt, VML shapes other than
+  pictures, and equations;
 - text in several columns (laid out in one column), paragraph and page borders, and line
   numbers;
 - the document grid, which sets the line height of many Chinese and Japanese documents;
@@ -94,13 +94,13 @@ The main things not laid out yet:
   document.
 
 Of this list, the report names everything but links
-([#303](https://github.com/officewright/officewright/issues/303)) and table rows that
-move whole to the next page. It also names smaller differences that the list leaves out,
-such as absolute position tabs. Comments are left out and tracked changes are shown as
-accepted, as in Word's PDF of a document without markup, except that deleted paragraph
-marks, table rows and table cells stay, so a deleted paragraph leaves an empty line; the
-report names those. DOC and RTF files, and files that need a password to open, cannot be
-opened yet.
+([#303](https://github.com/officewright/officewright/issues/303)) and the rows of a table
+in a table cell that move whole to the next page. It also names smaller differences that
+the list leaves out, such as absolute position tabs. Comments are left out and tracked
+changes are shown as accepted, as in Word's PDF of a document without markup, except that
+deleted paragraph marks, table rows and table cells stay, so a deleted paragraph leaves an
+empty line; the report names those. DOC and RTF files, and files that need a password to
+open, cannot be opened yet.
 
 From the command line:
 
@@ -113,7 +113,7 @@ target/release/officewright docx-to-pdf --font-dir ./fonts --report notes.json c
 It prints notes such as these:
 
 ```text
-note: sections[0].headers.primary[0]: tables that fit their columns to their content are laid out with the column widths the document stores
+note: sections[0].headers.primary[1]: paragraph borders are not drawn yet
 note: document: "Calibri" → "Carlito" (metric-compatible substitute)
 ```
 
