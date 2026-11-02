@@ -2534,22 +2534,22 @@ mod tests {
         // A scan of the new place lists the entries first, under their paths there; a
         // scan through the old path then finds them listed, and drops the old entries.
         let dir = TempDir::new("moved-new-place-first");
-        let (home, data) = (dir.0.join("home"), dir.0.join("data"));
-        fs::create_dir_all(home.join("fonts/sub")).unwrap();
-        fs::create_dir_all(home.join("lib")).unwrap();
+        let (share, data) = (dir.0.join("share"), dir.0.join("data"));
+        fs::create_dir_all(share.join("fonts/sub")).unwrap();
+        fs::create_dir_all(share.join("lib")).unwrap();
         fs::create_dir(&data).unwrap();
-        fs::write(home.join("lib/bad.ttf"), b"not a font").unwrap();
-        symlink(home.join("lib/bad.ttf"), home.join("fonts/link.ttf")).unwrap();
-        fs::set_permissions(home.join("fonts/sub"), fs::Permissions::from_mode(0o000)).unwrap();
-        let readable = fs::read_dir(home.join("fonts/sub")).is_ok();
+        fs::write(share.join("lib/bad.ttf"), b"not a font").unwrap();
+        symlink(share.join("lib/bad.ttf"), share.join("fonts/link.ttf")).unwrap();
+        fs::set_permissions(share.join("fonts/sub"), fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = fs::read_dir(share.join("fonts/sub")).is_ok();
         let mut book = FontBook::new();
-        book.add_dir(home.join("fonts")).unwrap();
-        move_and_link(&home, &data.join("home"));
-        book.add_dir(data.join("home/fonts")).unwrap();
-        book.add_dir(home.join("fonts")).unwrap();
+        book.add_dir(share.join("fonts")).unwrap();
+        move_and_link(&share, &data.join("share"));
+        book.add_dir(data.join("share/fonts")).unwrap();
+        book.add_dir(share.join("fonts")).unwrap();
         let listed = listed_under(&book, &dir.0);
         fs::set_permissions(
-            data.join("home/fonts/sub"),
+            data.join("share/fonts/sub"),
             fs::Permissions::from_mode(0o755),
         )
         .unwrap();
@@ -2559,7 +2559,10 @@ mod tests {
             "run the tests as a user who cannot read mode 000"
         );
         // Each listed once, under the path of the scan that listed it first.
-        assert_eq!(listed, ["data/home/fonts/sub", "data/home/fonts/link.ttf"]);
+        assert_eq!(
+            listed,
+            ["data/share/fonts/sub", "data/share/fonts/link.ttf"]
+        );
     }
 
     #[test]
