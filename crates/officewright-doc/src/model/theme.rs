@@ -33,6 +33,41 @@ pub struct Theme {
     pub(crate) name: Option<Box<str>>,
     pub(crate) colors: Option<ColorScheme>,
     pub(crate) fonts: Option<FontScheme>,
+    /// The fills and lines of its format scheme (`a:fmtScheme`), which the styles of shapes
+    /// refer to by number (`a:fillRef`, `a:lnRef`).
+    pub(crate) format_scheme: FormatScheme,
+}
+
+/// The fills and lines of a theme's format scheme (`a:fmtScheme`), each entry read once as
+/// the theme is, so that a style's reference finds what it names at once, however long
+/// the lists and however large the entries.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FormatScheme {
+    /// `a:fillStyleLst`, which references from 1 name.
+    pub(crate) fills: Vec<StyleFill>,
+    /// `a:lnStyleLst`.
+    pub(crate) lines: Vec<StyleLine>,
+    /// `a:bgFillStyleLst`, which references from 1001 name.
+    pub(crate) background_fills: Vec<StyleFill>,
+}
+
+/// A fill of a theme's format scheme: its kind, none for no fill, and its colour element
+/// (that of its `a:solidFill`, of its gradient's first stop, or of its pattern's
+/// foreground), kept with the document's tokens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StyleFill {
+    pub(crate) kind: Option<super::text_box::FillKind>,
+    pub(crate) color: Option<super::xml::Span>,
+}
+
+/// A line of a theme's format scheme (`a:ln`): the values it writes, its width in EMUs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StyleLine {
+    pub(crate) width: Option<u32>,
+    pub(crate) compound: Option<super::text_box::CompoundLine>,
+    pub(crate) dash: Option<super::text_box::LineDash>,
+    /// Its fill, if it writes one.
+    pub(crate) fill: Option<StyleFill>,
 }
 
 impl Theme {

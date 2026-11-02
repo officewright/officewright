@@ -190,6 +190,11 @@ impl<'d> Element<'d> {
         self.index + self.tokens.len()
     }
 
+    /// Its tokens among those of its document.
+    pub(crate) fn span(self) -> Span {
+        Span::new(self.index, self.index + self.tokens.len())
+    }
+
     /// The namespace URI, empty for none.
     pub(crate) fn namespace(self) -> &'d str {
         self.start()
