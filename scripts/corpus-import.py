@@ -27,10 +27,11 @@ tests/corpus/reference/<group>/<name>/ go instead
   - geometry.json: page sizes and the position of every line and word (pdftotext
     -bbox-layout, in points from the top left of the page), the page count, Word's own page
     breaks (the w:lastRenderedPageBreak marks of the re-saved copy, without those Word repeats
-    in the later cells of a table row), the fonts the PDF references without embedding them,
-    and what Word changed when it saved the copy: the w:compat settings it dropped and added,
-    the style and numbering properties it dropped, added and changed, and the paragraphs whose
-    style it changed; every value on a line of its own, without indentation (geometry_text);
+    in the later cells of a table row or, as the reference's pages show, at the start of the
+    next row), the fonts the PDF references without embedding them, and what Word changed
+    when it saved the copy: the w:compat settings it dropped and added, the style and
+    numbering properties it dropped, added and changed, and the paragraphs whose style it
+    changed; every value on a line of its own, without indentation (geometry_text);
   - formatting.json, from make-reference.ps1 format 3 on: the formatting Word computes for
     every paragraph of every story, with its runs of formatting when Word gave them, and the
     body paragraphs' style ids and names taken from the re-saved copy.
@@ -67,6 +68,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import zipfile
 import zlib
 from dataclasses import dataclass
@@ -932,8 +934,8 @@ def row_repeats(root: ElementTree.Element) -> set[int]:
 
     When the last cell of a row crosses a page, Word marks the start of the next row too,
     though that row goes on on the same page (paragraph 71 of contract-hhs-teaming-agreement).
-    That mark stays: the marks alone do not tell it from a next row that starts a page of its
-    own (#410).
+    The marks alone do not tell that mark from a next row that starts a page of its own, so
+    row_repeats leaves it, and next_row_repeats decides it by the reference's pages.
     """
     parents = {child: parent for parent in root.iter() for child in parent}
 
@@ -966,27 +968,210 @@ def row_repeats(root: ElementTree.Element) -> set[int]:
     return repeats
 
 
-def rendered_page_breaks(parts: dict[str, bytes]) -> list[dict]:
+def paragraph_text(paragraph: ElementTree.Element) -> tuple[str, dict[int, int]]:
+    """A paragraph's text (its w:t and w:tab) and, by id, how many of its characters come
+    before each of its w:lastRenderedPageBreak marks."""
+    text = ""
+    offsets = {}
+    for element in paragraph.iter():
+        name = local_name(element.tag)
+        if name == "t":
+            text += element.text or ""
+        elif name == "tab":
+            text += "\t"
+        elif name == "lastRenderedPageBreak":
+            offsets[id(element)] = len(text)
+    return text, offsets
+
+
+def words(text: str) -> list[str]:
+    """The words of a text as the reference's lines are compared with it: in NFKC, case
+    folded, of letters and digits only, so that bullets and punctuation drop out; a numbered
+    list label such as "1." or "a)" stays a word of its line, so a line whose label falls
+    among the words compared does not match."""
+    found = []
+    for word in text.split():
+        word = "".join(c for c in unicodedata.normalize("NFKC", word).casefold() if c.isalnum())
+        if word:
+            found.append(word)
+    return found
+
+
+# How many words of a text its lines on a page are found by.
+KEY_WORDS = 4
+
+
+def page_words(page: dict) -> tuple[list[str], list[int]]:
+    """The words of a page of the reference in reading order, and where each line's words
+    begin among them."""
+    found: list[str] = []
+    starts = []
+    for line in page.get("lines", []):
+        starts.append(len(found))
+        found += words(line.get("text", ""))
+    return found, starts
+
+
+def line_key(line: dict) -> tuple[str, ...]:
+    """A line's words without numbers, so that the lines of a running header or footer
+    compare equal whatever page number they carry."""
+    return tuple(w for w in words(line.get("text", "")) if not w.isdigit())
+
+
+def running_lines(pages: list[dict], end: int) -> set[tuple[str, ...]]:
+    """The first lines (end 0) or last lines (end -1) of the pages that recur as such on
+    more than one page, as running headers and footers do (line_key)."""
+    seen: dict[tuple[str, ...], set[int]] = {}
+    for number, page in enumerate(pages):
+        lines = page.get("lines", [])
+        if lines:
+            seen.setdefault(line_key(lines[end]), set()).add(number)
+    return {key for key, numbers in seen.items() if key and len(numbers) > 1}
+
+
+def follows_on_crossed_page(pages: list[dict], ended: str, crossing: str, after: str) -> bool:
+    """Whether the reference shows a cell crossing from one page to the next and, on that
+    next page, the next row's text right after the cell's.
+
+    The crossing must show on exactly one pair of pages: a line of the first ends with the
+    end of the text `ended`, and a line of the second starts with the text `crossing`; a form
+    that repeats its blocks shows it on more than one pair, and then nothing is shown. On
+    that second page a line must start with the text `after` right after the lines that end
+    with the end of `crossing`, below the crossing, and not be the page's last line when the
+    last line of another page repeats it, as a running footer's does. And the page after
+    must not start with the text `after`, past the lines that top it (the first lines that
+    recur on other pages, and the lines that lie above the crossing on its page, such as a
+    repeated header row): when it does, the next row may start there, and the line found
+    is not the next row's."""
+    ended_key = words(ended)[-KEY_WORDS:]
+    head_key = words(crossing)[:KEY_WORDS]
+    tail_key = words(crossing)[-KEY_WORDS:]
+    after_key = words(after)[:KEY_WORDS]
+    if not (ended_key and head_key and after_key):
+        return False
+    shown = []
+    for number, (before_page, page) in enumerate(zip(pages, pages[1:]), 1):
+        earlier, earlier_starts = page_words(before_page)
+        line_ends = earlier_starts[1:] + [len(earlier)]
+        found, starts = page_words(page)
+        crossed = [s for s in starts if found[s : s + len(head_key)] == head_key]
+        if crossed and any(
+            earlier[max(0, end - len(ended_key)) : end] == ended_key for end in line_ends
+        ):
+            shown.append((number, found, starts, crossed[0]))
+    if len(shown) != 1:
+        return False
+    number, found, starts, crossed = shown[0]
+    lines = pages[number].get("lines", [])
+    if number + 1 < len(pages):
+        # What tops a page of the table: running headers, and the lines above the crossing
+        # on its page, such as header rows that repeat on every page.
+        headers = running_lines(pages, 0) | {
+            line_key(line) for line, start in zip(lines, starts) if start < crossed
+        }
+        later = list(pages[number + 1].get("lines", []))
+        while later and line_key(later[0]) in headers:
+            later = later[1:]
+        if page_words({"lines": later})[0][: len(after_key)] == after_key:
+            return False
+    footers = running_lines(pages, -1)
+    for line, start in enumerate(starts):
+        # A first line cannot lie below the crossing; a last one may be a running footer.
+        if line == len(starts) - 1 and line_key(lines[line]) in footers:
+            continue
+        if (
+            crossed < start
+            and found[max(0, start - len(tail_key)) : start] == tail_key
+            and found[start : start + len(after_key)] == after_key
+        ):
+            return True
+    return False
+
+
+def next_row_repeats(
+    root: ElementTree.Element, repeats: set[int], pages: list[dict]
+) -> set[int]:
+    """The ids of the w:lastRenderedPageBreak marks at the start of a table row that repeat
+    the page its row before crosses in its last cell (#410).
+
+    Word marks the start of the cell right after a cell that crosses a page, in document
+    order. After the last cell of a row, that is the next row's first cell, though the next
+    row goes on on the same page: paragraph 71 of business/contract-hhs-teaming-agreement
+    goes on the sixth line of page 4. The marks alone do not tell that repeat from a next row
+    that starts a page of its own, so the reference's pages decide: the mark repeats the
+    page when exactly one pair of pages shows the last cell crossing, a line of one page
+    ending with the cell's words before its last crossing and a line of the next starting
+    with its words after it; further down that next page the next row's text starts the
+    line right after the cell's, a line that is not the page's last when another page's
+    last line repeats it; and the page after does not start with the next row's text past
+    the lines that top it, where the next row may start instead (follows_on_crossed_page).
+    Every other such mark stays.
+    """
+    parents = {child: parent for parent in root.iter() for child in parent}
+
+    def nearest(element: ElementTree.Element, tag: str) -> ElementTree.Element | None:
+        while element in parents:
+            element = parents[element]
+            if element.tag == tag:
+                return element
+        return None
+
+    found: set[int] = set()
+    for table in root.iter(f"{W}tbl"):
+        rows = [row for row in table.iter(f"{W}tr") if nearest(row, f"{W}tbl") is table]
+        for previous, row in zip(rows, rows[1:]):
+            last = [c for c in previous.iter(f"{W}tc") if nearest(c, f"{W}tr") is previous]
+            first = next((c for c in row.iter(f"{W}tc") if nearest(c, f"{W}tr") is row), None)
+            if not last or first is None:
+                continue
+            start = next(first.iter(f"{W}p"), None)
+            marks = [m for m in first.iter(f"{W}lastRenderedPageBreak") if id(m) not in repeats]
+            if start is None or not marks or not leads(start, marks[0]):
+                continue
+            # The marks where the previous row's last cell crosses a page. A mark that starts
+            # the cell, the row's own start, has no text before it, so no page can show it.
+            paragraphs = list(last[-1].iter(f"{W}p"))
+            crossings = [
+                (paragraph, mark)
+                for paragraph in paragraphs
+                for mark in paragraph.iter(f"{W}lastRenderedPageBreak")
+                if id(mark) not in repeats
+            ]
+            if not crossings:
+                continue
+            # The cell's text cut at its crossings: the piece on the page before its last
+            # crossing, and the piece from there to the cell's end.
+            crossing_ids = {id(mark) for _, mark in crossings}
+            cell_text = []
+            for paragraph in paragraphs:
+                text, offsets = paragraph_text(paragraph)
+                cuts = sorted(offset for mark, offset in offsets.items() if mark in crossing_ids)
+                cell_text.append("\x00".join(text[a:b] for a, b in zip([0, *cuts], [*cuts, None])))
+            pieces = "\n".join(cell_text).split("\x00")
+            start_text, start_offsets = paragraph_text(start)
+            after = start_text[start_offsets[id(marks[0])] :]
+            if follows_on_crossed_page(pages, pieces[-2], pieces[-1], after):
+                found.add(id(marks[0]))
+    return found
+
+
+def rendered_page_breaks(parts: dict[str, bytes], pages: list[dict] | None = None) -> list[dict]:
     """Word's page breaks: the w:lastRenderedPageBreak marks of a saved document, but for
-    the repeats within a table row that row_repeats leaves out.
+    the repeats within a table row that row_repeats leaves out and, given the pages of its
+    reference (geometry.json's "pages"), the repeats at the start of the next row that
+    next_row_repeats finds there.
 
     Paragraphs are counted in document order from 0, table cells included; the offset is
     the number of characters of the paragraph's text before the mark.
     """
     root = ElementTree.fromstring(parts["word/document.xml"])
     repeats = row_repeats(root)
+    if pages is not None:
+        repeats |= next_row_repeats(root, repeats, pages)
     breaks = []
     for index, paragraph in enumerate(root.iter(f"{W}p")):
-        text = ""
-        marks = []
-        for element in paragraph.iter():
-            name = local_name(element.tag)
-            if name == "t":
-                text += element.text or ""
-            elif name == "tab":
-                text += "\t"
-            elif name == "lastRenderedPageBreak" and id(element) not in repeats:
-                marks.append(len(text))
+        text, offsets = paragraph_text(paragraph)
+        marks = [offset for mark, offset in offsets.items() if mark not in repeats]
         for offset in marks:
             breaks.append(
                 {
@@ -1952,7 +2137,6 @@ def check_result(
         styles_changed = style_changes(original_parts, resaved_parts)
         numbering_changed = numbering_changes(original_parts, resaved_parts)
         paragraph_styles = paragraph_style_changes(original_parts, resaved_parts)
-        page_breaks = rendered_page_breaks(resaved_parts)
     except (zipfile.BadZipFile, ElementTree.ParseError, ValueError, KeyError) as error:
         raise Refused(f"{record['file']}: cannot read a package: {error}") from error
     problems += pdf_privacy_problems(info, tools.xmp(pdf), pdf.read_bytes())
@@ -1977,6 +2161,10 @@ def check_result(
         raise Refused(f"{record['file']}: cannot read pdftotext's output: {error}") from error
     if len(geometry_pages) != pages:
         raise Refused(f"{record['file']}: pdftotext found {len(geometry_pages)} pages, not {pages}")
+    try:
+        page_breaks = rendered_page_breaks(resaved_parts, geometry_pages)
+    except (ElementTree.ParseError, KeyError) as error:
+        raise Refused(f"{record['file']}: cannot read a package: {error}") from error
     missing_embeds = not_embedded(tools.fonts(pdf))
     try:
         drawn = [drawn_font(name, fonts or {}) for name in missing_embeds]
