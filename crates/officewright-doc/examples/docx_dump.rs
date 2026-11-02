@@ -9,7 +9,7 @@
 //! With one file it prints the theme's fonts, the compatibility mode, the sections with
 //! their page setup,
 //! columns and headers and footers, their blocks, the headers and footers in effect, and
-//! the footnotes and endnotes. With
+//! the footnotes and endnotes, and the text boxes of drawings with their content. With
 //! `--runs` it also prints:
 //! - the style, alignment and list of each paragraph, with the list's label template, and
 //!   its formatting in effect, and the formatting of its list label;
@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 
 use officewright_doc::{
     Block, CharacterFormat, ColorValue, Document, Drawing, Error, Formats, HeaderFooterKind,
-    Inline, Numbering, ParagraphFormat, Run, RunContent,
+    Inline, Numbering, ParagraphFormat, Run, RunContent, TextBox, TextBoxDirection,
 };
 
 fn main() -> ExitCode {
@@ -209,8 +209,20 @@ fn print_block<'a>(
             }
             println!("{indent}paragraph {:?}{note}", paragraph.text());
             for item in paragraph.runs().flat_map(|run| run.content()) {
-                if let RunContent::Drawing(drawing) = item {
-                    println!("{indent}  {}", describe_drawing(drawing));
+                let text_boxes: Vec<TextBox<'_>> = match item {
+                    RunContent::Drawing(drawing) => {
+                        println!("{indent}  {}", describe_drawing(drawing));
+                        drawing.text_box().into_iter().collect()
+                    }
+                    RunContent::VmlDrawing(drawing) => drawing.text_boxes().collect(),
+                    _ => Vec::new(),
+                };
+                // A text box holds no text box, so this recursion ends here.
+                for text_box in text_boxes {
+                    println!("{indent}  {}", describe_text_box(text_box));
+                    for block in text_box.blocks() {
+                        print_block(numbering, formats, block, depth + 2, runs);
+                    }
                 }
             }
             if runs {
@@ -479,6 +491,41 @@ fn in_effect(format: &CharacterFormat) -> String {
     out
 }
 
+/// A text box, briefly: its insets, the anchoring of its text, and what it holds that the
+/// layout does not draw plainly.
+fn describe_text_box(text_box: TextBox<'_>) -> String {
+    let insets = text_box.insets();
+    let mut out = format!(
+        "text box, insets {}/{}/{}/{} pt, text at {:?}",
+        insets.left().0,
+        insets.top().0,
+        insets.right().0,
+        insets.bottom().0,
+        text_box.vertical_anchor()
+    );
+    let flags = [
+        ("grows to fit", text_box.grows_to_fit()),
+        ("clips its overflow", text_box.clips_overflow()),
+        ("WordArt", text_box.is_word_art()),
+        ("linked", text_box.is_linked()),
+    ];
+    for (name, on) in flags {
+        if on {
+            out.push_str(&format!(", {name}"));
+        }
+    }
+    if text_box.rotation() != 0.0 {
+        out.push_str(&format!(", turned {} degrees", text_box.rotation()));
+    }
+    if text_box.text_direction() != TextBoxDirection::Horizontal {
+        out.push_str(&format!(", text {:?}", text_box.text_direction()));
+    }
+    if text_box.columns() > 1 {
+        out.push_str(&format!(", {} columns", text_box.columns()));
+    }
+    out
+}
+
 /// A drawing, briefly: its size, where it is and what it shows.
 fn describe_drawing(drawing: Drawing<'_>) -> String {
     let size = match (drawing.width(), drawing.height()) {
@@ -504,6 +551,7 @@ fn describe_drawing(drawing: Drawing<'_>) -> String {
         ),
     };
     let shows = match drawing.picture() {
+        None if drawing.text_box().is_some() => "a text box".to_owned(),
         None => "no picture".to_owned(),
         Some(picture) => match picture.image() {
             Some(image) => format!(

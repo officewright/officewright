@@ -122,6 +122,7 @@ impl Span {
                 .get(self.start as usize..self.end as usize)
                 .unwrap_or_default(),
             strings,
+            index: self.start as usize,
         }
     }
 
@@ -157,6 +158,8 @@ impl Span {
 pub(crate) struct Element<'d> {
     tokens: &'d [Token],
     strings: &'d Strings,
+    /// Where it starts among the tokens of its document.
+    index: usize,
 }
 
 impl<'d> Element<'d> {
@@ -175,6 +178,11 @@ impl<'d> Element<'d> {
             self.tokens.first(),
             Some(Token::Start { in_place: true, .. })
         )
+    }
+
+    /// Where it starts among the tokens of its document.
+    pub(crate) fn index(self) -> usize {
+        self.index
     }
 
     /// The namespace URI, empty for none.
@@ -231,9 +239,10 @@ impl<'d> Element<'d> {
         self,
         mc: Option<Sym>,
     ) -> impl Iterator<Item = Element<'d>> + 'd {
-        let (tokens, strings) = (self.tokens, self.strings);
+        let (tokens, strings, index) = (self.tokens, self.strings, self.index);
         Alternates::new(self, mc, false).filter_map(move |range| {
             Some(Element {
+                index: index + range.start,
                 tokens: tokens.get(range)?,
                 strings,
             })

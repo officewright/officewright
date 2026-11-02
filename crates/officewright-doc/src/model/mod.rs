@@ -12,6 +12,7 @@ pub(crate) mod settings;
 pub(crate) mod styles;
 pub(crate) mod table_properties;
 mod text;
+pub(crate) mod text_box;
 pub(crate) mod theme;
 mod views;
 pub(crate) mod vml;
@@ -60,6 +61,7 @@ pub use table_properties::{
     TableOverlap, TablePosition, TableProperties, TableRowProperties, TableWidth, TextDirection,
     VerticalAlignment, VerticalJustification,
 };
+pub use text_box::{TextBox, TextBoxAnchor, TextBoxDirection};
 pub use theme::{ColorScheme, FontCollection, FontScheme, SchemeColor, SystemColor, Theme};
 pub(crate) use views::kind_index;
 pub use views::{
@@ -130,6 +132,8 @@ pub struct Document {
     pub(crate) endnotes: HashMap<i64, u32>,
     /// The images pictures show.
     pub(crate) images: Vec<ImageData>,
+    /// The content of each text box read, in document order.
+    pub(crate) text_boxes: Vec<TextBoxData>,
     /// Each image part read so far, by its name: where its image is among `images`, or
     /// none when it could not be read, so that it is read and reported once.
     pub(crate) image_parts: HashMap<Box<str>, Option<u32>>,
@@ -163,6 +167,8 @@ pub(crate) struct Names {
     pub(crate) mc: Option<xml::Sym>,
     /// Word 2010's extensions, such as `w14:ligatures`.
     pub(crate) w14: Option<xml::Sym>,
+    /// Word 2010's shapes in DrawingML (`wps:wsp`), text boxes among them.
+    pub(crate) wps: Option<xml::Sym>,
 }
 
 /// What a WordprocessingML package holds, from the content type of its main part.
@@ -240,6 +246,7 @@ impl Document {
             endnotes: HashMap::new(),
             images: Vec::new(),
             image_parts: HashMap::new(),
+            text_boxes: Vec::new(),
             kind: DocumentKind::Document,
             conformance: Conformance::Transitional,
             diagnostics: Vec::new(),
@@ -470,6 +477,14 @@ pub(crate) struct SectionData {
 #[derive(Debug)]
 pub(crate) struct StoryData {
     pub(crate) kind: StoryKind,
+    pub(crate) blocks: Vec<u32>,
+}
+
+/// The content of a text box (`w:txbxContent`), a story of its own: its blocks, and where
+/// its element is among the document's tokens, kept in the shape that holds it, empty.
+#[derive(Debug)]
+pub(crate) struct TextBoxData {
+    pub(crate) content: usize,
     pub(crate) blocks: Vec<u32>,
 }
 

@@ -68,9 +68,9 @@ pub use model::{
     Spacing, Style, StyleKind, Styles, SystemColor, TabKind, TabLeader, TabStop, Table,
     TableBorders, TableCell, TableCellProperties, TableId, TableJustification, TableLayout,
     TableLook, TableOverlap, TablePosition, TableProperties, TableRow, TableRowProperties,
-    TableStyleCondition, TableWidth, TextDirection, Theme, ThemeColor, ThemeFont, Underline,
-    UnderlineStyle, VerticalAlignment, VerticalJustification, VerticalPosition, VerticalReference,
-    VmlDrawing, VmlPicture, WrapKind,
+    TableStyleCondition, TableWidth, TextBox, TextBoxAnchor, TextBoxDirection, TextDirection,
+    Theme, ThemeColor, ThemeFont, Underline, UnderlineStyle, VerticalAlignment,
+    VerticalJustification, VerticalPosition, VerticalReference, VmlDrawing, VmlPicture, WrapKind,
 };
 // What `Document::save_pdf` and the like report, the options they take, and how the
 // streams of the PDF are compressed (`RenderOptions::with_compression`).

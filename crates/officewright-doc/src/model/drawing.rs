@@ -6,6 +6,7 @@ use std::sync::Arc;
 use officewright_core::Pt;
 
 use super::properties::xml_enum;
+use super::text_box::TextBox;
 use super::xml::{Element, Span};
 use super::{Document, ImageData, Names};
 use crate::docx::properties::Report;
@@ -17,8 +18,9 @@ const EMU_PER_POINT: f64 = 12_700.0;
 const COORDINATES: std::ops::RangeInclusive<f64> = -27_273_042_329_600.0..=27_273_042_316_900.0;
 
 /// A drawing in a run (`w:drawing`): a frame in the line (`wp:inline`) or floating
-/// (`wp:anchor`), and what it shows. Pictures are read; shapes, charts and other graphics
-/// show as no picture, and [`to_xml`](Self::to_xml) gives them as written.
+/// (`wp:anchor`), and what it shows. Pictures and text boxes are read; other shapes,
+/// charts and other graphics show as neither, and [`to_xml`](Self::to_xml) gives them as
+/// written.
 ///
 /// ```
 /// # fn main() -> officewright_doc::Result<()> {
@@ -70,7 +72,8 @@ impl<'a> Drawing<'a> {
     }
 
     /// The drawing as written, `w:drawing` and everything in it, as XML with the
-    /// namespace declarations it needs.
+    /// namespace declarations it needs; the content of its text box, which
+    /// [`text_box`](Self::text_box) gives, is an empty `w:txbxContent` there.
     pub fn to_xml(self) -> String {
         self.document.element(self.element).to_xml()
     }
@@ -121,6 +124,13 @@ impl<'a> Drawing<'a> {
         let names = &self.document.names;
         let frame = self.frame().filter(|frame| frame.is(&names.wp, "anchor"))?;
         Some(anchor(frame, names, &mut |_, _, _| {}))
+    }
+
+    /// The text box it shows (`wps:wsp` with `wps:txbx` or `wps:linkedTxbx` in its
+    /// `a:graphicData`), if it shows one; none for one in a text box or a note, which
+    /// Word allows nowhere there and the document leaves out as it opens.
+    pub fn text_box(self) -> Option<TextBox<'a>> {
+        TextBox::in_drawing(self.document, self.document.element(self.element))
     }
 }
 
@@ -502,7 +512,7 @@ pub enum WrapKind {
 
 /// The first child of `element` of this name in `namespaces`, through
 /// `mc:AlternateContent`.
-fn child<'a>(
+pub(super) fn child<'a>(
     element: Element<'a>,
     names: &Names,
     namespaces: &[Option<super::xml::Sym>],
@@ -525,6 +535,14 @@ pub(crate) fn picture<'a>(drawing: Element<'a>, names: &Names) -> Option<Element
     let graphic = child(frame(drawing, names)?, names, &names.a, "graphic")?;
     let data = child(graphic, names, &names.a, "graphicData")?;
     child(data, names, &names.pic, "pic")
+}
+
+/// The shape of a `w:drawing`, if it shows one: the `wps:wsp` of its frame's
+/// `a:graphicData`.
+pub(super) fn shape<'a>(drawing: Element<'a>, names: &Names) -> Option<Element<'a>> {
+    let graphic = child(frame(drawing, names)?, names, &names.a, "graphic")?;
+    let data = child(graphic, names, &names.a, "graphicData")?;
+    child(data, names, &[names.wps], "wsp")
 }
 
 /// The relationship of the image a picture shows: its `a:blip`'s `r:embed`.
@@ -616,6 +634,7 @@ pub(super) fn qualified_name(element: Element<'_>, names: &Names) -> String {
         ("wp:", &names.wp[..]),
         ("a:", &names.a[..]),
         ("pic:", &names.pic[..]),
+        ("wps:", &[names.wps][..]),
         ("v:", &names.v[..]),
         ("o:", &names.o[..]),
         ("w10:", &names.w10[..]),
@@ -887,7 +906,7 @@ fn flip(picture: Element<'_>, names: &Names, name: &str, report: Report<'_>) -> 
 /// Attribute values are not trimmed: Office takes atomic values only with their
 /// whitespace already normalized (MS-OI29500 2.1.1(a), #243). So for [`percentage`] and
 /// [`boolean`].
-fn coordinate(value: &str) -> Option<Pt> {
+pub(super) fn coordinate(value: &str) -> Option<Pt> {
     let emus = match value.parse::<i64>() {
         Ok(emus) => emus as f64,
         Err(_) => {
@@ -956,7 +975,7 @@ fn changes_image(effect: Element<'_>, names: &Names, report: Report<'_>) -> bool
 }
 
 /// A boolean attribute of DrawingML (`xsd:boolean`).
-fn boolean(value: &str) -> Option<bool> {
+pub(super) fn boolean(value: &str) -> Option<bool> {
     match value {
         "1" | "true" => Some(true),
         "0" | "false" => Some(false),

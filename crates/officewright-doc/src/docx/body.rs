@@ -18,21 +18,22 @@ use officewright_opc::Part;
 use officewright_opc::mce::{Disposition, Processor};
 use officewright_opc::xml::{Event, Input, NsId, Reader, StartTag};
 
-use super::capture::{Budget, Capture};
+use super::capture::{Budget, Capture, Captured, Paused};
 use super::styles::{Properties, check_properties};
 use super::{
-    A, A_STRICT, O, PIC, PIC_STRICT, R, R_STRICT, V, W, W_STRICT, W10, WP, WP_STRICT, section,
+    A, A_STRICT, O, PIC, PIC_STRICT, R, R_STRICT, V, W, W_STRICT, W10, WP, WP_STRICT, WPS, section,
     shorten,
 };
 use crate::diagnostic::{DiagnosticKind, Diagnostics};
 use crate::model::Names;
 use crate::model::drawing;
+use crate::model::text_box;
 use crate::model::vml;
 use crate::model::xml::{Span, Sym};
 use crate::model::{
     Break, BreakClear, BreakKind, Conformance, ControlLevel, Document, FieldCharKind,
     HyperlinkData, ImageData, Kind, Node, NoteType, RevisionData, RevisionKind, RunItem,
-    SectionData, SectionProperties, StoryData, StoryKind,
+    SectionData, SectionProperties, StoryData, StoryKind, TextBoxData,
 };
 use crate::units::twips_measure;
 use crate::{Error, Limits, Result};
@@ -106,6 +107,25 @@ enum Frame {
         kind: TextKind,
         text: String,
     },
+    /// A drawing, VML drawing or embedded object of `run`, read as far as the content of
+    /// a text box, which the frame above it reads into a story.
+    Shape {
+        run: u32,
+        kind: ShapeKind,
+        offset: usize,
+        paused: Paused,
+    },
+}
+
+/// The text box whose content is being read.
+#[derive(Debug)]
+struct OpenTextBox {
+    /// Where its story is among the document's text boxes.
+    story: usize,
+    /// The frame that reads its content.
+    frame: usize,
+    /// The blocks of the story it is in, which it continues once it ends.
+    outer: Vec<u32>,
 }
 
 /// A block-level content control or custom XML element open in the body.
@@ -164,6 +184,12 @@ struct Reading<'d, 'p, 't> {
     /// Whether the main part's `w:body` has started: elements kept under `w:document` from
     /// then on come after it.
     body_read: bool,
+    /// The text box whose content is being read, at most one: Word allows no text box in
+    /// another.
+    text_box: Option<OpenTextBox>,
+    /// Whether a text box's content has just ended, so that the shape that holds it is
+    /// read on.
+    shape_to_resume: bool,
 }
 
 pub(super) fn read(
@@ -186,7 +212,7 @@ pub(super) fn read(
     // w:object, so that what lies below those goes through Markup Compatibility as the
     // rest of the body does (#312).
     let drawing =
-        [A, A_STRICT, WP, WP_STRICT, PIC, PIC_STRICT, V, O, W10].map(|uri| reader.intern(uri));
+        [A, A_STRICT, WP, WP_STRICT, PIC, PIC_STRICT, V, O, W10, WPS].map(|uri| reader.intern(uri));
     for namespace in w.iter().chain(&r).chain(&drawing) {
         mce.understand(*namespace);
     }
@@ -213,6 +239,8 @@ pub(super) fn read(
         link_targets: HashMap::new(),
         images: HashMap::new(),
         body_read: false,
+        text_box: None,
+        shape_to_resume: false,
     };
     reading
         .run(&mut reader, &mut mce)
@@ -241,6 +269,9 @@ impl Reading<'_, '_, '_> {
                 Event::End(_) => {
                     self.end()?;
                     mce.end();
+                    if std::mem::take(&mut self.shape_to_resume) {
+                        self.resume_shape(reader, mce)?;
+                    }
                 }
                 Event::Text(text) => match self.stack.last_mut() {
                     Some(Frame::Text { text: buffer, .. }) => buffer.push_str(&text),
@@ -437,7 +468,11 @@ impl Reading<'_, '_, '_> {
                 },
                 Level::Row,
             ),
-            (Level::Block, "sectPr") if parent == Parent::Body && self.story == Story::Document => {
+            (Level::Block, "sectPr")
+                if parent == Parent::Body
+                    && self.story == Story::Document
+                    && self.text_box.is_none() =>
+            {
                 let place = self.c.place(tag.offset());
                 let span = self
                     .c
@@ -540,9 +575,9 @@ impl Reading<'_, '_, '_> {
             "noBreakHyphen" => RunItem::NoBreakHyphen,
             "softHyphen" => RunItem::SoftHyphen,
             "lastRenderedPageBreak" => RunItem::LastRenderedPageBreak,
-            "drawing" => return self.drawing(reader, mce, tag, run),
-            "pict" => return self.vml_drawing(reader, mce, tag, run, VmlKind::Drawing),
-            "object" => return self.vml_drawing(reader, mce, tag, run, VmlKind::Object),
+            "drawing" => return self.shape(reader, mce, tag, run, ShapeKind::Drawing),
+            "pict" => return self.shape(reader, mce, tag, run, ShapeKind::Vml(VmlKind::Drawing)),
+            "object" => return self.shape(reader, mce, tag, run, ShapeKind::Vml(VmlKind::Object)),
             "footnoteRef" | "endnoteRef" => RunItem::NoteNumber,
             "separator" => RunItem::Separator,
             "continuationSeparator" => RunItem::ContinuationSeparator,
@@ -668,6 +703,11 @@ impl Reading<'_, '_, '_> {
             }
             Some(Frame::ContentControl { node, .. }) => self.drop_if_empty(node),
             _ => {}
+        }
+        let depth = self.stack.len();
+        if let Some(open) = self.text_box.take_if(|open| open.frame == depth) {
+            self.close_text_box(open);
+            self.shape_to_resume = true;
         }
         if self
             .note
@@ -881,9 +921,10 @@ impl Reading<'_, '_, '_> {
                 level: *level,
             },
             Some(Frame::Text { .. }) => Context::Text,
-            Some(Frame::Root | Frame::Alternate { .. } | Frame::Transparent) | None => {
-                Context::Root
-            }
+            Some(
+                Frame::Root | Frame::Alternate { .. } | Frame::Transparent | Frame::Shape { .. },
+            )
+            | None => Context::Root,
         }
     }
 
@@ -1012,7 +1053,8 @@ impl Reading<'_, '_, '_> {
     /// section until a rule document shows what Word makes of it.
     fn section_break(&mut self, paragraph: u32, p_pr: Span, offset: usize) {
         // Only the body has sections.
-        if self.tables_open > 0 || self.story != Story::Document {
+        // A text box has no sections either.
+        if self.tables_open > 0 || self.story != Story::Document || self.text_box.is_some() {
             return;
         }
         let place = self.c.place(offset);
@@ -1123,71 +1165,162 @@ impl Reading<'_, '_, '_> {
         }
     }
 
-    /// A drawing (`w:drawing`), kept whole, with the image its picture shows read from
-    /// the package: the part the picture's `r:embed` names among the relationships of the
-    /// part being read, read once however many pictures show it. An image the package
-    /// does not have is reported, and the picture shows none; one outside the package
-    /// (`r:link`, or an external relationship) is never loaded. Each value of the drawing
-    /// that its readers do not take is reported too; they read it as not written.
-    fn drawing(
+    /// A drawing (`w:drawing`), a VML drawing (`w:pict`) or an embedded object
+    /// (`w:object`), kept whole but for the content of the text boxes (`w:txbxContent`)
+    /// of a drawing or a VML drawing, which is read into the model as stories of their
+    /// own, each in its place. Word allows no text box in another, nor in a note
+    /// (MS-OI29500, Part 4, §14.9.1.1(a)): one there is kept with its shape, read no
+    /// further, and reported.
+    fn shape(
         &mut self,
         reader: &mut Reader<'_>,
         mce: &mut Processor,
         tag: StartTag<'_>,
         run: u32,
+        kind: ShapeKind,
     ) -> Result<()> {
         let offset = tag.offset();
-        let element = self
-            .c
-            .capture(reader, mce, tag, Some(Disposition::Understood))?;
-        let names = &self.names;
-        self.c
-            .check_in(["", ""], element, offset, |drawing, report| {
-                drawing::check(drawing, names, report);
-            });
-        let document = &*self.c.document;
-        let embed = drawing::picture(document.element(element), &document.names)
-            .and_then(|picture| drawing::embedded_image(picture, &document.names))
-            .map(str::to_owned);
-        let image = match embed {
-            Some(id) => self.image(&id, offset)?,
-            None => None,
+        let within = if self.text_box.is_some() {
+            Some("another text box")
+        } else if self.note.is_some() {
+            Some("a note")
+        } else {
+            None
         };
-        self.push_item(run, RunItem::Drawing { element, image })
+        // An embedded object is shown by its preview picture, and its text boxes are not
+        // read either.
+        let object = matches!(kind, ShapeKind::Vml(VmlKind::Object));
+        if within.is_some() || object {
+            let element = self
+                .c
+                .capture(reader, mce, tag, Some(Disposition::Understood))?;
+            let document = &*self.c.document;
+            let left_out = text_box::contents(document.element(element), &document.names)
+                .next()
+                .is_some();
+            if let Some(within) = within.filter(|_| left_out) {
+                self.c
+                    .diagnose(offset, DiagnosticKind::UnexpectedContent, || {
+                        format!("a text box in {within} is left out, as Word allows none there")
+                    });
+            }
+            return self.finish_shape(run, kind, offset, element);
+        }
+        match self.c.capture_shape(reader, mce, tag, self.w)? {
+            Captured::Whole(element) => self.finish_shape(run, kind, offset, element),
+            Captured::Paused(paused) => self.open_text_box(run, kind, offset, paused),
+        }
     }
 
-    /// A VML drawing (`w:pict`) or an embedded object (`w:object`), kept whole, with the
-    /// image of its picture or preview read as [`drawing`](Self::drawing) reads a
-    /// drawing's: the part `v:imagedata`'s `r:id` names, the only relationship Word takes
-    /// for it in a document (MS-OI29500, Part 4, §19.1.2.11(p, q)). Each value of its
-    /// picture or preview that the readers do not take is reported as a drawing's is.
-    fn vml_drawing(
+    /// Begins the content of a text box of a shape whose capture paused at it: its blocks
+    /// are read like a body's, into a story of their own.
+    fn open_text_box(
         &mut self,
-        reader: &mut Reader<'_>,
-        mce: &mut Processor,
-        tag: StartTag<'_>,
         run: u32,
-        kind: VmlKind,
+        kind: ShapeKind,
+        offset: usize,
+        paused: Paused,
     ) -> Result<()> {
-        let offset = tag.offset();
-        let element = self
-            .c
-            .capture(reader, mce, tag, Some(Disposition::Understood))?;
-        let names = &self.names;
-        self.c.check_in(["", ""], element, offset, |pict, report| {
-            vml::check(pict, names, report);
+        self.c.spend(1)?;
+        let document = &mut *self.c.document;
+        let story = document.text_boxes.len();
+        document.text_boxes.push(TextBoxData {
+            content: paused.content,
+            blocks: Vec::new(),
         });
+        self.push(Frame::Shape {
+            run,
+            kind,
+            offset,
+            paused,
+        });
+        self.push(Frame::Container {
+            parent: Parent::Body,
+            level: Level::Block,
+        });
+        let outer = std::mem::take(&mut self.body);
+        self.text_box = Some(OpenTextBox {
+            story,
+            frame: self.stack.len() - 1,
+            outer,
+        });
+        Ok(())
+    }
+
+    /// Ends the content of a text box: its blocks become its story, and the story it is in
+    /// goes on.
+    fn close_text_box(&mut self, open: OpenTextBox) {
+        let blocks = std::mem::replace(&mut self.body, open.outer);
+        if let Some(data) = self.c.document.text_boxes.get_mut(open.story) {
+            data.blocks = blocks;
+        }
+    }
+
+    /// Reads on the shape whose text box's content has just ended.
+    fn resume_shape(&mut self, reader: &mut Reader<'_>, mce: &mut Processor) -> Result<()> {
+        if !matches!(self.stack.last(), Some(Frame::Shape { .. })) {
+            return Ok(());
+        }
+        self.defining.pop();
+        let Some(Frame::Shape {
+            run,
+            kind,
+            offset,
+            paused,
+        }) = self.stack.pop()
+        else {
+            return Ok(());
+        };
+        match self.c.resume(reader, mce, paused, self.w)? {
+            Captured::Whole(element) => self.finish_shape(run, kind, offset, element),
+            Captured::Paused(paused) => self.open_text_box(run, kind, offset, paused),
+        }
+    }
+
+    /// Adds a shape read to its run, with the image its picture or preview shows read from
+    /// the package: the part that names among the relationships of the part being read
+    /// the picture's `r:embed` in a drawing, or `v:imagedata`'s `r:id` in VML, the only
+    /// relationship Word takes for it in a document (MS-OI29500, Part 4,
+    /// §19.1.2.11(p, q)), read once however many pictures show it. An image the package
+    /// does not have is reported, and the picture shows none; one outside the package
+    /// (`r:link`, or an external relationship) is never loaded. Each value of the shape
+    /// that its readers do not take is reported too; they read it as not written.
+    fn finish_shape(
+        &mut self,
+        run: u32,
+        kind: ShapeKind,
+        offset: usize,
+        element: Span,
+    ) -> Result<()> {
+        let names = &self.names;
         let document = &*self.c.document;
-        let embed = vml::picture(document.element(element), &document.names)
-            .and_then(|shape| vml::embedded_image(shape, &document.names))
-            .map(str::to_owned);
+        let embed = match kind {
+            ShapeKind::Drawing => drawing::picture(document.element(element), &document.names)
+                .and_then(|picture| drawing::embedded_image(picture, &document.names)),
+            ShapeKind::Vml(_) => vml::picture(document.element(element), &document.names)
+                .and_then(|shape| vml::embedded_image(shape, &document.names)),
+        }
+        .map(str::to_owned);
+        self.c
+            .check_in(["", ""], element, offset, |element, report| match kind {
+                ShapeKind::Drawing => {
+                    drawing::check(element, names, report);
+                    text_box::check(element, names, report);
+                }
+                ShapeKind::Vml(VmlKind::Drawing) => {
+                    vml::check(element, names, report);
+                    text_box::check(element, names, report);
+                }
+                ShapeKind::Vml(VmlKind::Object) => vml::check(element, names, report),
+            });
         let image = match embed {
             Some(id) => self.image(&id, offset)?,
             None => None,
         };
         let item = match kind {
-            VmlKind::Drawing => RunItem::VmlDrawing { element, image },
-            VmlKind::Object => RunItem::Object { element, image },
+            ShapeKind::Drawing => RunItem::Drawing { element, image },
+            ShapeKind::Vml(VmlKind::Drawing) => RunItem::VmlDrawing { element, image },
+            ShapeKind::Vml(VmlKind::Object) => RunItem::Object { element, image },
         };
         self.push_item(run, item)
     }
@@ -1308,6 +1441,13 @@ impl Reading<'_, '_, '_> {
 enum VmlKind {
     Drawing,
     Object,
+}
+
+/// Which element of a run holds a shape: a drawing (`w:drawing`) or one of VML.
+#[derive(Clone, Copy, Debug)]
+enum ShapeKind {
+    Drawing,
+    Vml(VmlKind),
 }
 
 /// Where the children of the innermost element go.

@@ -4187,6 +4187,37 @@ fn translates_vml_pictures_whose_values_are_out_of_range_into_valid_ir() {
 }
 
 #[test]
+fn lists_text_boxes_apart_from_other_shapes() {
+    // Until the IR takes text boxes, a text box is listed as one, in DrawingML and in
+    // VML, and other shapes as before.
+    use super::text_box::{SHAPES, drawing, p, pict, txbx};
+    let body = format!(
+        r#"<w:p><w:r><mc:AlternateContent><mc:Choice Requires="wps" {SHAPES}>{}</mc:Choice><mc:Fallback>{}</mc:Fallback></mc:AlternateContent></w:r><w:r>{}</w:r><w:r>{}</w:r></w:p>"#,
+        drawing(&format!("{}<wps:bodyPr/>", txbx(&p("Boxed")))),
+        pict(r#"<v:rect style="width:10pt;height:10pt"/>"#),
+        drawing("<wps:spPr/><wps:bodyPr/>"),
+        pict(&format!(
+            r#"<v:shape style="width:10pt;height:10pt"><v:textbox><w:txbxContent>{}</w:txbxContent></v:textbox></v:shape>"#,
+            p("Boxed")
+        )),
+    );
+    let translation = translate(&open(&body));
+    let left_out: Vec<&str> = translation
+        .left_out()
+        .iter()
+        .map(ReportEntry::message)
+        .collect();
+    assert_eq!(
+        left_out,
+        [
+            "a text box is left out",
+            "a drawing that shows no picture (a shape, chart or group) is left out",
+            "a text box is left out (w:pict)",
+        ]
+    );
+}
+
+#[test]
 fn translates_a_vml_text_box_whose_image_data_names_no_image_into_nothing() {
     // From the review of #401: the footer of LibreOffice's tdf131594.docx holds a text box
     // with a v:imagedata that names no image, where Word shows only the text box's page
@@ -4206,10 +4237,7 @@ fn translates_a_vml_text_box_whose_image_data_names_no_image_into_nothing() {
         .iter()
         .map(ReportEntry::message)
         .collect();
-    assert_eq!(
-        left_out,
-        ["a VML drawing that shows no picture (a shape, text box or group) is left out (w:pict)"]
-    );
+    assert_eq!(left_out, ["a text box is left out (w:pict)"]);
 }
 
 #[test]

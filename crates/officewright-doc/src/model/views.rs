@@ -815,7 +815,10 @@ impl<'a> Opaque<'a> {
     }
 }
 
-fn blocks<'a>(document: &'a Document, children: &'a [u32]) -> impl Iterator<Item = Block<'a>> + 'a {
+pub(super) fn blocks<'a>(
+    document: &'a Document,
+    children: &'a [u32],
+) -> impl Iterator<Item = Block<'a>> + 'a {
     through_wrappers(document, children).filter_map(move |index| {
         let node = document.node(index)?;
         Some(match &node.kind {
