@@ -999,28 +999,42 @@ def words(text: str) -> list[str]:
 KEY_WORDS = 4
 
 
-def follows_on_crossed_page(pages: list[dict], crossing: str, before: str, after: str) -> bool:
-    """Whether a page of the reference has a line that starts with the text `crossing`, and
-    further down a line that starts with the text `after`, right after the lines that end
-    with the text `before`."""
-    crossing_key = words(crossing)[:KEY_WORDS]
-    before_key = words(before)[-KEY_WORDS:]
+def page_words(page: dict) -> tuple[list[str], list[int]]:
+    """The words of a page of the reference in reading order, and where each line's words
+    begin among them."""
+    found: list[str] = []
+    starts = []
+    for line in page.get("lines", []):
+        starts.append(len(found))
+        found += words(line.get("text", ""))
+    return found, starts
+
+
+def follows_on_crossed_page(pages: list[dict], ended: str, crossing: str, after: str) -> bool:
+    """Whether the reference shows a cell crossing from one page to the next and, on that
+    next page, the next row's text right after the cell's: a line of a page ends with the
+    end of the text `ended`, a line of the next page starts with the text `crossing`, and
+    further down that page a line starts with the text `after`, right after the lines that
+    end with the end of `crossing`."""
+    ended_key = words(ended)[-KEY_WORDS:]
+    head_key = words(crossing)[:KEY_WORDS]
+    tail_key = words(crossing)[-KEY_WORDS:]
     after_key = words(after)[:KEY_WORDS]
-    if not (crossing_key and before_key and after_key):
+    if not (ended_key and head_key and after_key):
         return False
-    for page in pages:
-        page_words: list[str] = []
-        starts = []  # where each line's words begin in page_words
-        for line in page.get("lines", []):
-            starts.append(len(page_words))
-            page_words += words(line.get("text", ""))
-        crossed = [s for s in starts if page_words[s : s + len(crossing_key)] == crossing_key]
+    for before_page, page in zip(pages, pages[1:]):
+        earlier, earlier_starts = page_words(before_page)
+        line_ends = earlier_starts[1:] + [len(earlier)]
+        if not any(earlier[max(0, end - len(ended_key)) : end] == ended_key for end in line_ends):
+            continue
+        found, starts = page_words(page)
+        crossed = [s for s in starts if found[s : s + len(head_key)] == head_key]
         for start in starts:
             if (
                 crossed
                 and crossed[0] < start
-                and page_words[max(0, start - len(before_key)) : start] == before_key
-                and page_words[start : start + len(after_key)] == after_key
+                and found[max(0, start - len(tail_key)) : start] == tail_key
+                and found[start : start + len(after_key)] == after_key
             ):
                 return True
     return False
@@ -1037,9 +1051,10 @@ def next_row_repeats(
     row goes on on the same page: paragraph 71 of business/contract-hhs-teaming-agreement
     goes on the sixth line of page 4. The marks alone do not tell that repeat from a next row
     that starts a page of its own, so the reference's pages decide: the mark repeats the
-    page when, on the page whose text starts where the last cell crosses, the next row's
-    text follows the text before it line after line (follows_on_crossed_page). Every other
-    such mark stays.
+    page when the pages show the last cell crossing there, a line of one page ending with
+    the cell's words before its last crossing and a line of the next starting with its words
+    after it, and further down that next page the next row's text right after the cell's
+    (follows_on_crossed_page). Every other such mark stays.
     """
     parents = {child: parent for parent in root.iter() for child in parent}
 
@@ -1062,26 +1077,29 @@ def next_row_repeats(
             marks = [m for m in first.iter(f"{W}lastRenderedPageBreak") if id(m) not in repeats]
             if start is None or not marks or not leads(start, marks[0]):
                 continue
-            # The marks where the previous row's last cell crosses a page: not one that
-            # starts the cell, which is the row's own start.
+            # The marks where the previous row's last cell crosses a page. A mark that starts
+            # the cell, the row's own start, has no text before it, so no page can show it.
             paragraphs = list(last[-1].iter(f"{W}p"))
             crossings = [
                 (paragraph, mark)
                 for paragraph in paragraphs
                 for mark in paragraph.iter(f"{W}lastRenderedPageBreak")
                 if id(mark) not in repeats
-                and not (paragraph is paragraphs[0] and leads(paragraph, mark))
             ]
-            texts = [paragraph_text(paragraph)[0] for paragraph in paragraphs]
-            before = next((text for text in reversed(texts) if words(text)), "")
             if not crossings:
                 continue
-            paragraph, mark = crossings[-1]
-            text, offsets = paragraph_text(paragraph)
-            crossing = text[offsets[id(mark)] :]
+            # The cell's text cut at its crossings: the piece on the page before its last
+            # crossing, and the piece from there to the cell's end.
+            crossing_ids = {id(mark) for _, mark in crossings}
+            cell_text = []
+            for paragraph in paragraphs:
+                text, offsets = paragraph_text(paragraph)
+                cuts = sorted(offset for mark, offset in offsets.items() if mark in crossing_ids)
+                cell_text.append("\x00".join(text[a:b] for a, b in zip([0, *cuts], [*cuts, None])))
+            pieces = "\n".join(cell_text).split("\x00")
             start_text, start_offsets = paragraph_text(start)
             after = start_text[start_offsets[id(marks[0])] :]
-            if follows_on_crossed_page(pages, crossing, before, after):
+            if follows_on_crossed_page(pages, pieces[-2], pieces[-1], after):
                 found.add(id(marks[0]))
     return found
 

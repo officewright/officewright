@@ -156,6 +156,23 @@ BBOX = """\
 """
 
 
+def bbox_of(pages: list[list[str]]) -> str:
+    """pdftotext -bbox-layout output with the given lines of text on each page."""
+    out = ['<?xml version="1.0" encoding="UTF-8"?>',
+           '<html xmlns="http://www.w3.org/1999/xhtml"><head><title></title></head><body><doc>']
+    for lines in pages:
+        out.append('<page width="595.320000" height="841.920000"><flow><block>')
+        for number, text in enumerate(lines):
+            y = 80 + 14 * number
+            out.append(f'<line xMin="72" yMin="{y}" xMax="300" yMax="{y + 11}">')
+            for word in text.split():
+                out.append(f'<word xMin="72" yMin="{y}" xMax="90" yMax="{y + 11}">{word}</word>')
+            out.append("</line>")
+        out.append("</block></flow></page>")
+    out.append("</doc></body></html>")
+    return "\n".join(out)
+
+
 def pixels_of(page, width=4, height=2):
     """Distinct grey values per pixel, so a test sees any reordering."""
     return bytes((10 * page + index) % 256 for index in range(width * height))
@@ -400,6 +417,22 @@ class Import(unittest.TestCase):
         self.assertEqual((third["paragraph"], third["offset"]), (2, len(line)))
         self.assertEqual(third["text_before"], line[-30:])
         self.assertTrue(third["text_after"].startswith("Cambria 11 pt, line 02"))
+
+    def test_the_reference_s_pages_decide_the_next_row_s_mark(self):
+        # The re-saved copy has a row whose last cell crosses from page 1 to page 2, and a
+        # next row marked at its start; page 2 shows the next row right after the cell.
+        doc = rules.documents()[0]
+        record = self.add_result(doc)
+        table = RenderedPageBreaks.NEXT_ROW.encode()
+        self.change_resaved(record, {"word/document.xml": [(b"<w:body>", b"<w:body>" + table)]})
+        self.bbox = bbox_of([["Helpful Instructions", "signed by each participating GSA Schedule"],
+                             ["contractor", "Identify each member", "Schedule Contractors Input"],
+                             []])
+        self.run_import()
+        geometry = json.loads((self.corpus / "reference" / "word-rules" / doc.name
+                               / "geometry.json").read_text(encoding="utf-8"))
+        self.assertEqual([(b["paragraph"], b["text_after"]) for b in geometry["page_breaks"]],
+                         [(1, "contractor")])
 
     def test_importing_again_replaces_rows_and_old_pages(self):
         self.run_import()
@@ -1211,19 +1244,31 @@ class RenderedPageBreaks(unittest.TestCase):
         self.assertEqual(self.breaks(self.NEXT_ROW, pages), self.BOTH)
 
     def test_the_lines_must_follow_on_the_page_the_crossing_starts(self):
-        # The pair of lines on a page without the crossing's text, or above it, or with a
-        # line between them, or with other text before the next row's: the mark stays.
-        for pages in ([["Helpful Instructions", "signed by each participating GSA Schedule"],
-                       ["contractor"],
-                       ["Identify each member", "Schedule Contractors Input"]],
-                      [["Identify each member", "Schedule Contractors Input", "contractor"]],
-                      [["contractor", "Identify each member", "a line between",
-                        "Schedule Contractors Input"]],
-                      [["contractor", "Identify each member",
-                        "Not the Schedule Contractors Input"]],
-                      [["contractor", "Identify each", "Schedule Contractors Input"]]):
-            with self.subTest(pages=pages):
-                self.assertEqual(self.breaks(self.NEXT_ROW, pages), self.BOTH)
+        # The page before ends with the words before the crossing, and the crossing's page
+        # lacks one piece of the evidence each time: the mark stays.
+        before = ["Helpful Instructions", "signed by each participating GSA Schedule"]
+        cases = {
+            "no line starts with the crossing's text":
+                ["Identify each member", "Schedule Contractors Input"],
+            "the crossing's text starts a line only below the pair":
+                ["x contractor Identify each member", "Schedule Contractors Input",
+                 "contractor Identify each member"],
+            "a line between the cell's text and the next row's":
+                ["contractor", "Identify each member", "a line between",
+                 "Schedule Contractors Input"],
+            "other text before the next row's":
+                ["contractor", "Identify each member", "Not the Schedule Contractors Input"],
+            "too little of the cell's text before the next row's":
+                ["contractor", "Identify each", "Schedule Contractors Input"],
+        }
+        for case, page in cases.items():
+            with self.subTest(case=case):
+                self.assertEqual(self.breaks(self.NEXT_ROW, [before, page]), self.BOTH)
+        # The words before the crossing in the middle of a line of the page before, not at
+        # its end.
+        pages = [["Helpful Instructions", "signed by each participating GSA Schedule and more"],
+                 ["contractor", "Identify each member", "Schedule Contractors Input"]]
+        self.assertEqual(self.breaks(self.NEXT_ROW, pages), self.BOTH)
 
     def test_the_last_crossing_of_the_cell_names_the_page(self):
         # The row's last cell crosses two pages; the next row goes on on the second.
@@ -1260,8 +1305,73 @@ class RenderedPageBreaks(unittest.TestCase):
                  + self.row(self.cell("<w:p/>", "<w:p><w:r><w:lastRenderedPageBreak/></w:r></w:p>"))
                  + self.row(self.cell(self.p("Schedule Contractors Input", True)))
                  + "</w:tbl>")
-        pages = [[], ["Schedule Contractors Input"]]
+        pages = [[], ["Header", "Schedule Contractors Input"]]
         self.assertEqual(self.breaks(table, pages), [(1, ""), (2, "Schedule Contractors Input")])
+
+    def test_a_repeated_block_on_another_page_leaves_a_real_break(self):
+        # A form repeats the block: the next row after the crossing starts page 3 (it cannot
+        # split), and a later copy of the block lies wholly on page 4. Page 4 shows the
+        # copy's lines in the same order, but it is not the page after the one the crossing
+        # ends: the next row's mark stays.
+        again = ("<w:tbl>"
+                 + self.row(self.cell(self.p("Helpful Instructions"),
+                                      self.p("signed by each participating GSA Schedule contractor"),
+                                      self.p("Identify each member")))
+                 + self.row(self.cell(self.p("Schedule Contractors Input: {{Fill-in}}")))
+                 + "</w:tbl>")
+        pages = [["Helpful Instructions", "signed by each participating GSA Schedule"],
+                 ["contractor", "Identify each member"],
+                 ["Schedule Contractors Input", "a row that cannot split"],
+                 ["Helpful Instructions", "signed by each participating GSA Schedule",
+                  "contractor", "Identify each member", "Schedule Contractors Input: {{Fill-in}}"]]
+        self.assertEqual(self.breaks(self.NEXT_ROW + again, pages), self.BOTH)
+
+    def test_the_page_before_must_end_where_the_crossing_starts(self):
+        # The crossing's page follows a page whose lines do not end with the words before
+        # the crossing: the mark stays.
+        pages = [["Helpful Instructions", "signed by each participating"],
+                 ["contractor", "○ Identify each member", "Schedule Contractors Input"]]
+        self.assertEqual(self.breaks(self.NEXT_ROW, pages), self.BOTH)
+
+    def test_the_last_of_several_cells_crosses(self):
+        # The row before has two cells; its last one crosses the page.
+        table = ("<w:tbl>"
+                 + self.row(self.cell(self.p("Name")),
+                            self.cell(self.p("Helpful Instructions"),
+                                      self.mid("signed by each participating GSA Schedule ",
+                                               "contractor"),
+                                      self.p("Identify each member")))
+                 + self.row(self.cell(self.p("Schedule Contractors Input", True)),
+                            self.cell(self.p("Value")))
+                 + "</w:tbl>")
+        pages = [["Name Helpful Instructions", "signed by each participating GSA Schedule"],
+                 ["contractor", "Identify each member", "Schedule Contractors Input Value"]]
+        self.assertEqual(self.breaks(table, pages), [(2, "contractor")])
+
+    def test_the_cell_s_text_ends_at_its_last_paragraph_with_text(self):
+        # An empty paragraph closes the cell; the crossing is in the cell's last paragraph
+        # with text, and one word follows the mark.
+        table = ("<w:tbl>"
+                 + self.row(self.cell(self.p("Helpful Instructions"),
+                                      self.mid("signed by each participating GSA Schedule ",
+                                               "contractor"),
+                                      "<w:p/>"))
+                 + self.row(self.cell(self.p("Schedule Contractors Input", True)))
+                 + "</w:tbl>")
+        pages = [["Helpful Instructions", "signed by each participating GSA Schedule"],
+                 ["contractor", "Schedule Contractors Input"]]
+        self.assertEqual(self.breaks(table, pages), [(1, "contractor")])
+
+    def test_texts_are_matched_by_up_to_four_words(self):
+        # Only the last word of the text before the next row matches the page: the mark
+        # stays. The cell's text before the crossing begins two pages before it, and its
+        # last four words end the page before: the mark goes.
+        pages = [["Helpful Instructions", "signed by each participating GSA Schedule"],
+                 ["contractor", "Name a member", "Schedule Contractors Input"]]
+        self.assertEqual(self.breaks(self.NEXT_ROW, pages), self.BOTH)
+        pages = [["Helpful Instructions"], ["signed by each participating GSA Schedule"],
+                 ["contractor", "Identify each member", "Schedule Contractors Input"]]
+        self.assertEqual(self.breaks(self.NEXT_ROW, pages), [(1, "contractor")])
 
     def test_a_page_that_several_cells_cross_counts_once(self):
         # Three cells cross one page, each marked where it does and, after the first, at its
