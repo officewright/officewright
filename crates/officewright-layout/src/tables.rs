@@ -438,6 +438,14 @@ impl<'d, 'l> Prepared<'d, 'l> {
         self.table.rows().get(..end).unwrap_or(&[])
     }
 
+    /// The border below the header bands, which the band after them draws above itself
+    /// where they are repeated.
+    pub(crate) fn header_below(&self) -> f64 {
+        self.bands
+            .get(self.header_bands().wrapping_sub(1))
+            .map_or(0.0, |rows| self.thickness(rows.end))
+    }
+
     /// Lays out the header bands whole, one under the other: each band, and the height
     /// they take with the border below the last.
     pub(crate) fn header(&self, context: &mut Context<'d, '_, '_>) -> (Vec<Drawn>, f64) {
@@ -653,11 +661,20 @@ impl<'d, 'l> Prepared<'d, 'l> {
             .zip(&takes)
             .all(|(cell, take)| *take == left(cell));
         if done && laid.put.is_none() {
-            // Only its least height keeps it from the room left.
+            // Only its least height keeps it from the room left: on a page that holds
+            // nothing else, that is filled as far as the page leaves room.
             if !fresh {
                 return None;
             }
-            let heights = self.heights(laid, context);
+            let content = cells
+                .iter()
+                .flatten()
+                .map(LaidCell::height)
+                .fold(0.0, f64::max);
+            let mut heights = self.heights(laid, context);
+            if let Some(height) = heights.first_mut() {
+                *height = height.min((room - above - below).max(content));
+            }
             return Some(Piece {
                 drawn: self.paint_band(laid, &heights, context),
                 done: true,
@@ -766,7 +783,9 @@ impl<'d, 'l> Prepared<'d, 'l> {
 
     /// The least a piece of `laid` takes on a page that holds nothing else, the borders
     /// above and below it included: the band whole where a page may not cut it, else the
-    /// first line of each cell, which such a page takes at least ([`Self::piece`]).
+    /// first piece of a cell down to where a page may end, which such a page takes while
+    /// the other cells wait, or else the first line of each cell, which it takes at least
+    /// ([`Self::piece`]).
     pub(crate) fn least(&self, laid: &LaidBand<'d>, context: &mut Context<'d, '_, '_>) -> f64 {
         let rows = laid.rows.clone();
         let below = self.thickness(rows.end);
@@ -779,19 +798,30 @@ impl<'d, 'l> Prepared<'d, 'l> {
                 .sum();
             return whole + below;
         }
-        let content = laid
-            .cells
-            .first()
-            .into_iter()
-            .flatten()
-            .flatten()
+        let cells = || laid.cells.first().into_iter().flatten().flatten();
+        let margins = |cell: &LaidCell<'_>| cell.margins.top().0 + cell.margins.bottom().0;
+        let count = |cell: &LaidCell<'_>| cell.content.units.len();
+        // The first piece of a cell with lines left, down to where a page may end.
+        let piece = cells()
+            .filter(|cell| cell.next < count(cell))
             .map(|cell| {
-                let units = &cell.content;
-                let end = (cell.next + 1).min(units.units.len());
-                cell.margins.top().0 + units.extent(cell.next, end) + cell.margins.bottom().0
+                let end = cell
+                    .content
+                    .next_break
+                    .get(cell.next)
+                    .copied()
+                    .unwrap_or(count(cell));
+                margins(cell) + cell.content.extent(cell.next, end)
+            })
+            .fold(f64::INFINITY, f64::min);
+        // The first line of each cell.
+        let lines = cells()
+            .map(|cell| {
+                let end = (cell.next + 1).min(count(cell));
+                margins(cell) + cell.content.extent(cell.next, end)
             })
             .fold(0.0, f64::max);
-        self.thickness(rows.start) + content + below
+        self.thickness(rows.start) + piece.min(lines) + below
     }
 
     /// The height of each row of `laid` laid out whole, below its top border: its tallest
