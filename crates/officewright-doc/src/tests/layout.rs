@@ -121,6 +121,25 @@ fn keeps_line_units_in_points_on_a_document_grid_and_bounds_units() {
         ),
         "{left_out:?}"
     );
+    // The points, not the lines, count there: 15 pt beside a line (from the review of #448).
+    let fifteen = body.replace(r#"w:before="240""#, r#"w:before="300""#);
+    let translation = translate(&with_parts(&fifteen, &[]));
+    assert_eq!(
+        paragraphs(&translation)[0].props().spacing().before(),
+        Pt(15.0)
+    );
+    // The end indent in characters and the spacing after in lines are converted as the
+    // others are, and a section without a grid after one with a grid has lines of 12 pt
+    // again (from the review of #448).
+    let body = r#"<w:p><w:pPr><w:sectPr><w:docGrid w:type="lines" w:linePitch="360"/></w:sectPr></w:pPr></w:p><w:p><w:pPr><w:spacing w:after="0" w:afterLines="50" w:beforeLines="100"/><w:ind w:right="0" w:rightChars="200"/></w:pPr></w:p><w:sectPr/>"#;
+    let translation = translate(&with_parts(body, &[]));
+    let ir::Block::Paragraph(second) = &translation.document().sections()[1].blocks()[0] else {
+        panic!("a paragraph");
+    };
+    let props = second.props();
+    assert_eq!(props.spacing().before(), Pt(12.0));
+    assert_eq!(props.spacing().after(), Pt(6.0));
+    assert_eq!(props.indent().end(), Pt(22.0));
     // Values in units from a file stay within what lengths in points may be, and space
     // is never negative: the IR validates.
     let body = r#"<w:p><w:pPr><w:spacing w:beforeLines="-500" w:afterLines="9223372036854775807"/><w:ind w:leftChars="9223372036854775807" w:hangingChars="9223372036854775807"/></w:pPr></w:p>"#;

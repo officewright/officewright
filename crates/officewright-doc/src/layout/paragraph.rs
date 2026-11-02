@@ -201,8 +201,9 @@ fn fingerprint(props: &ir::ParagraphProps) -> u64 {
 /// paragraph mark's size, and spacing in line units hundredths of 12 pt without a document
 /// grid, as Word's render of word-rules/E-paragraph-units.docx shows for 11 pt text (a
 /// character of 11 pt, a line of 12 pt). Which size a character takes when the mark's
-/// differs from Normal's, and what a line is on a document grid, no render shows yet: on a
-/// grid, spacing in line units keeps its value in points, and that is listed.
+/// differs from the text's or Normal's, and what a line is on a document grid, no render
+/// shows yet (#452): on a grid, spacing in line units keeps its value in points, and that
+/// is listed.
 fn props(t: &mut Translator<'_>, format: &ParagraphFormat, mark_size: Pt) -> ir::ParagraphProps {
     // As far as lengths in points go (`units::measure`); hundredths come from the file.
     let bound = f64::from(i32::MAX) / 20.0;
