@@ -911,25 +911,56 @@ mod tests {
     }
 
     #[test]
+    fn faces_that_share_cmap_but_not_dmap_count_apart() {
+        // Face 1 shares face 0's `cmap` and `maxp`, but its `DMAP` maps A to a glyph past
+        // the font, which hides `cmap`'s A.
+        let dmap = testing::cmap_format4(&[(0x41, 0x41, 4000_u16.wrapping_sub(0x41))]);
+        let plain = TestFont::new("Test Sans").build();
+        let hidden = TestFont::new("Test Sans").with_table(b"DMAP", dmap).build();
+        let mut ttc = testing::collection(&[plain, hidden]);
+        share_table(&mut ttc, b"cmap", 0, 1);
+        share_table(&mut ttc, b"maxp", 0, 1);
+        assert_eq!(covers_a(&ttc, &[0, 1]), [true, false]);
+        assert_eq!(covers_a(&ttc, &[1, 0]), [false, true]);
+    }
+
+    /// `font` with its `tag` table moved to the end of the file, followed by zeros up to
+    /// `len` bytes, all of them in the file.
+    fn moved(mut font: Vec<u8>, tag: &[u8; 4], len: u32) -> Vec<u8> {
+        let at = record(&font, tag);
+        let offset = u32::from_be_bytes(font[at + 8..at + 12].try_into().unwrap()) as usize;
+        let old_len = u32::from_be_bytes(font[at + 12..at + 16].try_into().unwrap()) as usize;
+        let table = font[offset..offset + old_len].to_vec();
+        let new_offset = u32::try_from(font.len()).unwrap();
+        font[at + 8..at + 12].copy_from_slice(&new_offset.to_be_bytes());
+        font[at + 12..at + 16].copy_from_slice(&len.to_be_bytes());
+        font.extend_from_slice(&table);
+        font.resize(new_offset as usize + len as usize, 0);
+        font
+    }
+
+    #[test]
     fn coverage_refuses_huge_character_maps() {
-        // The cmap moved to the end of the file, followed by zeros up to `len` bytes, all
-        // of them in the file.
-        let moved = |len: u32| {
-            let mut font = TestFont::new("Test Sans").build();
-            let at = record(&font, b"cmap");
-            let offset = u32::from_be_bytes(font[at + 8..at + 12].try_into().unwrap()) as usize;
-            let old_len = u32::from_be_bytes(font[at + 12..at + 16].try_into().unwrap()) as usize;
-            let cmap = font[offset..offset + old_len].to_vec();
-            let new_offset = u32::try_from(font.len()).unwrap();
-            font[at + 8..at + 12].copy_from_slice(&new_offset.to_be_bytes());
-            font[at + 12..at + 16].copy_from_slice(&len.to_be_bytes());
-            font.extend_from_slice(&cmap);
-            font.resize(new_offset as usize + len as usize, 0);
-            font
+        let font = || TestFont::new("Test Sans").build();
+        assert_eq!(covers_a(&moved(font(), b"cmap", 4096), &[0]), [true]);
+        assert_eq!(covers_a(&moved(font(), b"cmap", MAX_CMAP), &[0]), [true]);
+        assert_eq!(
+            covers_a(&moved(font(), b"cmap", MAX_CMAP + 1), &[0]),
+            [false]
+        );
+        // The same for `DMAP`, which maps only B here, so A is `cmap`'s.
+        let dmap = testing::cmap_format4(&[(0x42, 0x42, 2_u16.wrapping_sub(0x42))]);
+        let font = || {
+            TestFont::new("Test Sans")
+                .with_table(b"DMAP", dmap.clone())
+                .build()
         };
-        assert_eq!(covers_a(&moved(4096), &[0]), [true]);
-        assert_eq!(covers_a(&moved(MAX_CMAP), &[0]), [true]);
-        assert_eq!(covers_a(&moved(MAX_CMAP + 1), &[0]), [false]);
+        assert_eq!(covers_a(&moved(font(), b"DMAP", 4096), &[0]), [true]);
+        assert_eq!(covers_a(&moved(font(), b"DMAP", MAX_CMAP), &[0]), [true]);
+        assert_eq!(
+            covers_a(&moved(font(), b"DMAP", MAX_CMAP + 1), &[0]),
+            [false]
+        );
     }
 
     fn cause(err: &Error) -> String {

@@ -37,11 +37,12 @@ impl Coverage {
     /// that cannot be read is passed over, as `Charmap` passes it over. A symbol subtable
     /// of `DMAP` also takes U+0000 to U+00FF from `cmap` where it maps the same characters
     /// at U+F000 to U+F0FF, for `Charmap` looks them up there too; those do not count as
-    /// covered, as for a symbol `cmap`.
+    /// covered, as for a symbol `cmap`. Neither table covers U+FFFF through a format 4
+    /// subtable, whose lookup of it may land on any closing segment.
     ///
-    /// The work is a step per segment or group, plus one per glyph-array entry of a
-    /// format 4 subtable, so it grows with the tables rather than with the characters they
-    /// map; it is taken from `allowance`, twice for `DMAP`. `None` if `cmap` cannot be
+    /// The work is a step per segment or group, plus one per code point of a format 4
+    /// segment that reads the glyph ID array, so it grows with the tables rather than with
+    /// the characters they map; it is taken from `allowance`, twice for `DMAP`. `None` if `cmap` cannot be
     /// read, if a subtable used is damaged in a way that makes a lookup disagree with its
     /// segments or groups (out of order or overlapping), or if it would go past
     /// `allowance`. A format 4 subtable never covers U+FFFF, and groups past U+10FFFF
@@ -62,10 +63,16 @@ impl Coverage {
         // `DMAP` has the layout of `cmap`.
         if let Some(dmap) = dmap.and_then(|data| Cmap::read(FontData::new(data)).ok()) {
             if let Some((kind, subtable)) = chosen_subtable(&dmap) {
+                let format4 = matches!(subtable, CmapSubtable::Format4(_));
                 let valid = mapped(subtable.clone(), glyphs, allowance, max)?;
                 let mut taken = mapped(subtable, ANY_GLYPH, allowance, max)?;
                 if kind == SYMBOL {
                     taken = union(&taken, &symbol_alias(&taken));
+                }
+                // Whether the lookup of U+FFFF finds a glyph, or leaves it to `cmap`,
+                // depends on the closing segment it lands on.
+                if format4 {
+                    taken = union(&taken, &[(0xFFFF, 0xFFFF)]);
                 }
                 covered = union(&valid, &subtract(&covered, &taken));
             }
@@ -226,6 +233,7 @@ fn format4(
         // point: one before the array maps nothing, and the segment ends where the array
         // does.
         for code_point in start..=end {
+            allowance.steps = allowance.steps.checked_sub(1)?;
             let past = usize::try_from(code_point - start).ok()?;
             let Some(at) = (offset / 2 + past).checked_sub(segments - segment) else {
                 continue;
@@ -233,7 +241,6 @@ fn format4(
             let Some(glyph) = array.get(at) else {
                 break;
             };
-            allowance.steps = allowance.steps.checked_sub(1)?;
             let glyph = u64::from(glyph.get());
             if glyph != 0 && (1..glyphs).contains(&((glyph + delta) % (1 << 16))) {
                 ranges.push(code_point, 0, 0)?;
@@ -391,6 +398,11 @@ mod tests {
         assert_eq!(offsets(u64::from(u32::MAX), 1 << 32, 3, 10), [(2, 3)]);
         // A font with only glyph 0 maps nothing.
         assert_eq!(offsets(0, 1 << 16, 1, 100), []);
+        // A glyph count past the modulus counts every glyph but 0: offset 65534 gives 0.
+        assert_eq!(
+            offsets(2, 1 << 16, ANY_GLYPH, 1 << 16),
+            [(0, 65533), (65535, 65535)]
+        );
     }
 
     #[test]

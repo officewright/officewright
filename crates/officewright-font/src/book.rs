@@ -665,13 +665,15 @@ impl FontBook {
     /// than 0 and inside the font, through the subtable it uses of the face's `DMAP` table
     /// (ISO/IEC 14496-22:2026) first, and of its `cmap` table for the characters that one
     /// maps to no glyph: exactly the characters [`CharMap::map`](crate::CharMap::map)
-    /// maps, with three exceptions. A symbol font covers the characters its subtable
+    /// maps, with these exceptions. A symbol font covers the characters its subtable
     /// lists, normally U+F020 to U+F0FF; the U+0020 to U+00FF that
     /// [`FontFace::glyph_id`] also finds, as Windows does, do not count, so a symbol font
     /// never stands in for Latin text. A face with a subtable whose segments or groups are
     /// out of order or overlap, so that a lookup cannot be trusted, covers nothing; a
-    /// repeated closing segment of a format 4 subtable does not count as overlap. And a
-    /// format 4 subtable never covers U+FFFF, a noncharacter.
+    /// repeated closing segment of a format 4 subtable does not count as overlap. A face
+    /// with a format 4 subtable in either table never covers U+FFFF, a noncharacter. And a
+    /// face without a `cmap` table covers nothing, even if its `DMAP` table maps
+    /// characters.
     ///
     /// Adding fonts does not read their character maps. The first query reads, for every
     /// face added from the same file or buffer, its table directory, its `cmap` and
@@ -3003,6 +3005,34 @@ mod tests {
                 _ => assert!(covered('A') && covered('D') && !covered('E')),
             }
         }
+
+        // A format 4 `DMAP` whose lookup of U+FFFF lands on a segment that maps it past the
+        // font, before the closing one: `cmap`, which maps it, is not consulted.
+        let cmap_12 = cmap_of(&[(
+            3,
+            10,
+            groups_subtable(12, &[(0x41, 0x44, 1), (0xFFFF, 0xFFFF, 2)]),
+        )]);
+        let dmap = cmap_of(&[(
+            3,
+            1,
+            format4(
+                &[
+                    (0x41, 0x41, d(0x41, 1), 0),
+                    (0xFFFF, 0xFFFF, d(0xFFFF, 4000), 0),
+                ],
+                &[],
+            ),
+        )]);
+        let mut book = FontBook::new();
+        let font = TestFont::new("Test Map")
+            .with_table(b"cmap", cmap_12)
+            .with_table(b"DMAP", dmap);
+        book.add_bytes(font.build(), FontOrigin::User).unwrap();
+        let face = book.load(FaceId(0)).unwrap();
+        assert!(face.glyph_id('\u{FFFF}').is_none());
+        assert!(book.faces_covering('\u{FFFF}').is_empty());
+        assert!(!book.faces_covering('D').is_empty());
 
         // A `DMAP` subtable whose segments overlap cannot be trusted: the face covers
         // nothing, though `cmap` maps A to D.
