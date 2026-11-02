@@ -748,7 +748,7 @@ enum OwStatus ow_font_book_skipped_count(const struct OwFontBook *book, size_t *
  *
  * # Safety
  *
- * `book` must be NULL or a live handle not used by another thread during the call;
+ * `book` must be NULL or a live handle not modified by another thread during the call;
  * `out_message` must be NULL or valid for writing a pointer.
  */
 enum OwStatus ow_font_book_skipped(const struct OwFontBook *book,

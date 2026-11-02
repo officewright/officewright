@@ -23,7 +23,7 @@ use std::ffi::{CStr, CString, c_char};
 use std::panic::{self, AssertUnwindSafe};
 use std::ptr;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use officewright_core::Error;
 use officewright_doc::{LayoutReport, RenderOptions, ReportKind};
@@ -136,8 +136,8 @@ pub struct OwFontBook {
     /// The messages of the skipped entries asked for, for `ow_font_book_skipped`, each with
     /// the entry it was made from. A message is made when it is first asked for and kept
     /// while its entry does not change, so that a call costs nothing for entries no one
-    /// reads.
-    messages: RefCell<Vec<Option<(SkippedFont, CString)>>>,
+    /// reads. Behind a lock, since threads may ask for messages of one book at once.
+    messages: Mutex<Vec<Option<(SkippedFont, CString)>>>,
 }
 
 impl OwFontBook {
@@ -145,28 +145,25 @@ impl OwFontBook {
     /// shortened it.
     fn refresh(&mut self) {
         let len = self.book.skipped().len();
-        self.messages.get_mut().truncate(len);
+        self.messages
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .truncate(len);
     }
 
     /// The message of skipped entry `index`, or `None` past the end of the list. It stays
     /// valid until the entry at `index` changes and its message is asked for again, or the
     /// list is shortened past it, which only an `ow_font_book_add_*` call can do. An entry
     /// whose message reads the same keeps the string, so that a call that changes nothing,
-    /// such as a rescan that lists the same paths with the same errors, keeps it valid.
-    fn message(&self, index: usize) -> Result<Option<*const c_char>, Failure> {
-        let Some(entry) = self.book.skipped().get(index) else {
-            return Ok(None);
-        };
-        let mut messages = self.messages.try_borrow_mut().map_err(|_| Failure {
-            status: OwStatus::InvalidArgument,
-            message: "the font book is in use by another call".to_owned(),
-        })?;
+    /// such as a rescan that finds every listed path as it was, keeps it valid.
+    fn message(&self, index: usize) -> Option<*const c_char> {
+        let entry = self.book.skipped().get(index)?;
+        // A lock poisoned by a panic holds whole strings: a panic never leaves one half made.
+        let mut messages = self.messages.lock().unwrap_or_else(PoisonError::into_inner);
         if messages.len() <= index {
             messages.resize_with(index + 1, || None);
         }
-        let Some(slot) = messages.get_mut(index) else {
-            return Ok(None);
-        };
+        let slot = messages.get_mut(index)?;
         match slot {
             // The same entry: its error is the same allocation, which the cached copy
             // keeps alive, so no other entry can have it.
@@ -180,7 +177,7 @@ impl OwFontBook {
             }
             None => *slot = Some((entry.clone(), c_string(entry.to_string()))),
         }
-        Ok(slot.as_ref().map(|(_, text)| text.as_ptr()))
+        slot.as_ref().map(|(_, text)| text.as_ptr())
     }
 }
 
@@ -785,7 +782,7 @@ pub unsafe extern "C" fn ow_font_book_new(out_book: *mut *mut OwFontBook) -> OwS
         unsafe { put(out_book, "out_book", ptr::null_mut()) }?;
         let book = OwFontBook {
             book: FontBook::new(),
-            messages: RefCell::new(Vec::new()),
+            messages: Mutex::new(Vec::new()),
         };
         let book = Box::into_raw(Box::new(book));
         // SAFETY: as above.
@@ -1057,7 +1054,7 @@ pub unsafe extern "C" fn ow_font_book_skipped_count(
 ///
 /// # Safety
 ///
-/// `book` must be NULL or a live handle not used by another thread during the call;
+/// `book` must be NULL or a live handle not modified by another thread during the call;
 /// `out_message` must be NULL or valid for writing a pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ow_font_book_skipped(
@@ -1070,7 +1067,7 @@ pub unsafe extern "C" fn ow_font_book_skipped(
         unsafe { put(out_message, "out_message", ptr::null()) }?;
         // SAFETY: the caller passes NULL or a live handle.
         let book = unsafe { book_ref(book) }?;
-        let message = book.message(index)?.ok_or_else(|| Failure {
+        let message = book.message(index).ok_or_else(|| Failure {
             status: OwStatus::InvalidArgument,
             message: format!(
                 "skipped index {index} is out of range for a font book with {} skipped",
@@ -3672,6 +3669,12 @@ mod tests {
                 ow_font_book_add_dir(book, c_dir.as_ptr(), &mut added),
                 OwStatus::Ok
             );
+            assert_eq!(ow_font_book_skipped(book, 0, &mut message), OwStatus::Ok);
+            let first_text = CStr::from_ptr(message).to_str().unwrap().to_owned();
+            assert!(
+                first_text.starts_with(&first.display().to_string()),
+                "{first_text}"
+            );
             assert_eq!(ow_font_book_skipped(book, 1, &mut message), OwStatus::Ok);
             let kept = message;
             let text = CStr::from_ptr(kept).to_str().unwrap().to_owned();
@@ -3686,7 +3689,8 @@ mod tests {
             assert_eq!(ow_font_book_skipped(book, 1, &mut message), OwStatus::Ok);
             assert_eq!(message, kept);
             assert_eq!(CStr::from_ptr(kept).to_str().unwrap(), text);
-            // A font now, the first leaves the list, and the second takes its place.
+            // A font now, the first leaves the list, and the second takes its place: index
+            // 0 gives the second's message in place of the first's.
             fs::write(&first, fs::read(minimal_font_path()).unwrap()).unwrap();
             assert_eq!(
                 ow_font_book_add_dir(book, c_dir.as_ptr(), &mut added),
@@ -3703,6 +3707,53 @@ mod tests {
             );
             ow_font_book_free(book);
         }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn gives_skipped_messages_to_threads_at_once() {
+        let dir =
+            std::env::temp_dir().join(format!("officewright-ffi-threads-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        for name in ["a.ttf", "b.ttf"] {
+            fs::write(dir.join(name), b"not a font").unwrap();
+        }
+        let c_dir = c(dir.to_str().unwrap());
+        let book = new_book();
+        let mut added = 7;
+        // SAFETY: a live handle, a NUL-terminated path and a valid out-pointer.
+        unsafe {
+            assert_eq!(
+                ow_font_book_add_dir(book, c_dir.as_ptr(), &mut added),
+                OwStatus::Ok
+            );
+        }
+        // The handle as an address, so that the threads can share it: nothing modifies the
+        // book while they read it, which is all that ow_font_book_skipped asks.
+        let address = book as usize;
+        let read = move || {
+            let book = address as *const OwFontBook;
+            (0..2)
+                .map(|index| {
+                    let mut message: *const c_char = ptr::null();
+                    // SAFETY: a live handle not modified during the call, and a valid
+                    // out-pointer; the message is read while the book keeps it.
+                    unsafe {
+                        assert_eq!(
+                            ow_font_book_skipped(book, index, &mut message),
+                            OwStatus::Ok
+                        );
+                        CStr::from_ptr(message).to_str().unwrap().to_owned()
+                    }
+                })
+                .collect::<Vec<String>>()
+        };
+        let threads: Vec<_> = (0..2).map(|_| std::thread::spawn(read)).collect();
+        let answers: Vec<Vec<String>> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        assert_eq!(answers[0], answers[1]);
+        assert_eq!(answers[0].len(), 2);
+        // SAFETY: the live handle, freed once, after the threads are done with it.
+        unsafe { ow_font_book_free(book) };
         fs::remove_dir_all(&dir).unwrap();
     }
 
