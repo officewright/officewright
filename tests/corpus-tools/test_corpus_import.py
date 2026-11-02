@@ -1379,6 +1379,60 @@ class RenderedPageBreaks(unittest.TestCase):
                  ["Agreement", "Schedule Contractors Input", "More text"]]
         self.assertEqual(self.breaks(self.NEXT_ROW, pages), self.BOTH)
 
+    def test_a_next_row_below_other_lines_of_the_page_after_keeps_its_mark(self):
+        # The footer of two lines begins like the next row, which starts the page after;
+        # pdftotext reads that row's words there after other lines, or over short lines.
+        footer = "U.S. Department of Health & Human Services - 200 Independence Avenue, S.W."
+        table = ("<w:tbl>"
+                 + self.row(self.cell(self.p("Helpful Instructions"),
+                                      self.mid("signed by each participating GSA Schedule ",
+                                               "contractor"),
+                                      self.p("Identify each member")))
+                 + self.row(self.cell(self.p("U.S. Department of Health and Human Services",
+                                             True)),
+                            self.cell(self.p("Signature")))
+                 + "</w:tbl>")
+        expected = [(1, "contractor"), (3, "U.S. Department of Health and ")]
+        self.assertEqual(self.breaks(table), expected)
+        row = ["U.S. Department of Health and Human Services", "Signature"]
+        cases = {
+            # The first cell narrower than the row's first four words.
+            "a wrapped first line": ([], [], ["U.S. Department", "of Health and",
+                                              "Human Services", "Signature"]),
+            # A header row repeated on each page of the table, one line per cell as on
+            # page 2 of word-rules/E-table-header-repeat.
+            "a repeated header row": ([], ["Party", "Role"], row),
+            # A running header of two lines.
+            "a header of two lines": (["Teaming Agreement", "Draft for review"], [], row),
+        }
+        for case, (head, header_row, next_row) in cases.items():
+            with self.subTest(case=case):
+                pages = [[*head, "Helpful Instructions",
+                          "signed by each participating GSA Schedule", footer, "3"],
+                         [*head, *header_row, "contractor", "Identify each member", footer,
+                          "4"],
+                         [*head, *header_row, *next_row, footer, "5"]]
+                self.assertEqual(self.breaks(table, pages), expected)
+
+    def test_a_line_that_starts_one_page_and_ends_another_is_no_footer(self):
+        # The next row goes on at the end of the crossing's page, and its text also begins
+        # page 1: no other page ends with it, so it is no running footer, and the repeat goes.
+        body = self.p("Schedule Contractors Input") + self.NEXT_ROW + self.p("More", True)
+        pages = [["Schedule Contractors Input", "Helpful Instructions",
+                  "signed by each participating GSA Schedule"],
+                 ["contractor", "Identify each member", "Schedule Contractors Input"],
+                 ["More"]]
+        self.assertEqual(self.breaks(body),
+                         [(2, "contractor"), (4, "Schedule Contractors Input"), (5, "More")])
+        self.assertEqual(self.breaks(body, pages), [(2, "contractor"), (5, "More")])
+
+    def test_the_page_after_must_start_with_all_of_the_next_row_s_key(self):
+        # The page after starts with the next row's first word only: the repeat goes.
+        pages = [["Helpful Instructions", "signed by each participating GSA Schedule"],
+                 ["contractor", "Identify each member", "Schedule Contractors Input"],
+                 ["Schedule of payments", "More text"]]
+        self.assertEqual(self.breaks(self.NEXT_ROW, pages), [(1, "contractor")])
+
     def test_a_next_row_without_words_keeps_its_mark(self):
         # A line of rules is no text to find: whatever line follows the cell's text, the mark
         # stays.
